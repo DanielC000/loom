@@ -7953,26 +7953,43 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   // own header doc, sessions/service.ts). CORRECTED (card be260976): `verdictPayload` is NO LONGER always
   // empty for it — mergeBatch now mints+settles its own `pending_gate_ops` tombstone directly (closing a
   // separate defect: `gate_status(opId)` used to return `"never_existed"` for a settled batch op), so a
-  // real `verdictPayload` exists here too. It stays a non-factor for THIS field specifically only because
-  // `deriveBatchGateVerdict` (service.ts) deliberately OMITS `emitCompareReduced`/`emitCompareIdenticalCount`/
-  // `emitCompareTestFiles` from what it writes — a deliberate choice (see that function's own doc) to keep
-  // this fallback the single source of truth for batch rows rather than risk two producers disagreeing.
-  // Its own `build_gate` event stamps a genuine DECIDABLE tri-state directly in `detail` instead (mirrors
-  // confirmWorkerMerge's own `emitCompareStructuredFields`, gated on `gateRan && !notApplicable` — never
-  // the true-only-else-absent shape the paragraph above warns about), so recovering it from `detail` is
-  // safe ONLY for this one kind: every non-batched row's own `detail.emitCompareReduced` stays legacy
-  // true-only (never an honest `false`), so falling back to it there would silently fabricate a tri-state
-  // the producer never actually computed.
+  // real `verdictPayload` exists here too. `deriveBatchGateVerdict` (service.ts) still deliberately OMITS
+  // `emitCompareReduced`/`emitCompareIdenticalCount`/`emitCompareTestFiles` from what it writes — a
+  // deliberate choice (see that function's own doc) to keep the SAME `detail.batched === true` fallback
+  // this whole block already uses for `emitCompareReduced` the single source of truth for all three batch
+  // fields, rather than risk two producers disagreeing. Its own `build_gate` event stamps a genuine
+  // DECIDABLE tri-state directly in `detail` instead (mirrors confirmWorkerMerge's own
+  // `emitCompareStructuredFields`, gated on `gateRan && !notApplicable` — never the true-only-else-absent
+  // shape the paragraph above warns about), so recovering it from `detail` is safe ONLY for this one kind:
+  // every non-batched row's own `detail.emitCompareReduced` stays legacy true-only (never an honest
+  // `false`), so falling back to it there would silently fabricate a tri-state the producer never
+  // actually computed.
   const emitCompareReduced = typeof verdictPayload.emitCompareReduced === "boolean"
     ? verdictPayload.emitCompareReduced
     : (detail.batched === true && typeof detail.emitCompareReduced === "boolean") ? detail.emitCompareReduced : null;
-  // Both gated on `emitCompareReduced === true` (never merely "present in the payload") — the producer
-  // only ever stamps these two alongside a `true` reduced flag, so this mirrors that pairing defensively
-  // rather than trusting an already-redundant payload shape.
-  const emitCompareIdenticalCount = emitCompareReduced === true && typeof verdictPayload.emitCompareIdenticalCount === "number"
-    ? verdictPayload.emitCompareIdenticalCount : null;
-  const emitCompareTestFiles = emitCompareReduced === true && Array.isArray(verdictPayload.emitCompareTestFiles)
-    ? verdictPayload.emitCompareTestFiles as string[] : null;
+  // Code Review, card d422e279 CORRECTION: these two used to fall back to `verdictPayload` ONLY, on the
+  // premise that `emitCompareReduced`'s own `detail` fallback (immediately above) was "a non-factor for
+  // THIS field specifically" — true only because a batch could never actually decide `eligible:true` at
+  // all (the repoPath/HEAD bug card d422e279 fixed made `computeEmitCompareGate` structurally unable to
+  // ever see a batch's real diff — see that fix's own doc, sessions/service.ts). Now that a batch CAN
+  // reduce, these two need the SAME `detail.batched === true` fallback `emitCompareReduced` already has,
+  // for the identical reason (a non-batched row's own legacy `detail` shape was never produced with these
+  // in mind) — without it, the first genuinely-reduced batch row read `emitCompareReduced:true` with BOTH
+  // of these left `null`, violating GateHistoryRow's own documented pairing invariant (shared/types.ts:
+  // "present together or both null, never one without the other") on the exact instrument this card was
+  // diagnosed from. Both still gated on `emitCompareReduced === true` (never merely "present in the
+  // payload") — the producer only ever stamps these two alongside a `true` reduced flag, so this mirrors
+  // that pairing defensively rather than trusting an already-redundant payload shape.
+  const emitCompareIdenticalCount = emitCompareReduced === true
+    ? (typeof verdictPayload.emitCompareIdenticalCount === "number"
+      ? verdictPayload.emitCompareIdenticalCount
+      : (detail.batched === true && typeof detail.emitCompareIdenticalCount === "number") ? detail.emitCompareIdenticalCount : null)
+    : null;
+  const emitCompareTestFiles = emitCompareReduced === true
+    ? (Array.isArray(verdictPayload.emitCompareTestFiles)
+      ? verdictPayload.emitCompareTestFiles as string[]
+      : (detail.batched === true && Array.isArray(detail.emitCompareTestFiles)) ? detail.emitCompareTestFiles as string[] : null)
+    : null;
   // Card 10fd660b: project the BATCHED-merge shape the Gates page had no way to see. A `merge_batch`
   // run carries `branch:null`/`taskId:null` HONESTLY (no single branch exists) and its subject session
   // is the MANAGER, so the JOIN above yields `branch:null` + a bare agent-name `workerLabel` — a shape

@@ -59,7 +59,7 @@ import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-wa
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, formatWeakerPassWarning, formatTransientRetryWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, formatWeakerPassWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
 import { gateSpillPath, pruneGateSpills } from "../orchestration/gate-spill.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
@@ -537,6 +537,12 @@ type MergeBatchResult = {
    *  branches landed on the strength of one isolated retry, not just which file(s) were retried. A batch
    *  retry is a STRONGER claim than a solo one for exactly this reason. */
   retryWarning?: string;
+  /** Card d422e279: mirrors `BatchGateResult.reducedGateWarning`'s own doc (git/batch-merge.ts) — present
+   *  only when this batch's gate actually substituted the reduced command, so a manager reading either the
+   *  sync return or the async settle nudge sees the SAME surfacing obligation a solo reduced merge already
+   *  carries (notHermeticExcluded/inertPathsSkipped/changedAssetPaths/isolation caveat), scoped to every
+   *  branch this batch landed rather than a single one. */
+  reducedGateWarning?: string;
 };
 
 type ConfirmMergeResult = {
@@ -16436,51 +16442,16 @@ export class SessionService {
     // gate ran here (gateRan:true), it just ran `pnpm build` + the static guards instead of the full
     // ~668-test suite, because every changed compiled file was proven transpile-identical (comments/
     // whitespace only). Surfaced unconditionally, same reasoning as `inertSkipWarning`: a silent skip is
-    // indistinguishable from a gate that never ran.
-    // Card 17cd1f30: a NOT_HERMETIC-excluded file must be NAMED here, not just counted — a bare count would
-    // gate a branch while quietly verifying nothing for those specific files, leaving a reviewer with no
-    // way to tell WHICH changed test(s) went unrun without re-deriving it themselves. Not a regression in
-    // coverage introduced by the reduction: the full gate never runs a NOT_HERMETIC file either (see
-    // EmitCompareGateResult.notHermeticExcluded's own doc), so this is declaring an existing gap, not a
-    // new one — but it must never read as a silent, ordinary green.
-    // Card 8ee4f11e: a skipped-as-inert path (e.g. `docs/**`) must be NAMED here too, same reasoning as the
-    // NOT_HERMETIC clause just above — before this card, a mixed diff (a transpile-identical compiled file
-    // PLUS an inert path) reported only the compiled-file count, leaving the inert path unaccounted for and
-    // indistinguishable from a silently dropped one (see EmitCompareGateResult.inertPathsSkipped's own doc).
-    // Card cf4aa7d1: `emitCompareIdenticalCount` is `changedTsFiles.length + changedScriptFiles.length`
-    // (git/worktrees.ts, `computeEmitCompareGate` — card 82662e98 folded the .mjs-script population into
-    // this SAME count; see EmitCompareGateResult.identicalFileCount's own doc for why one field, not two)
-    // — the transpile-identity check only ever iterates those two lists, so a test-only diff (no compiled
-    // `.ts` or `packages/daemon/scripts/**` file changed at all) leaves it at 0 WITHOUT the check ever
-    // running. The old leading clause ("0 compiled file(s) proven transpile-identical") rendered that skip
-    // as a measured zero — the same null-vs-0 conflation this codebase polices everywhere else (see
-    // `gate-history.mjs`'s own "(1) changed-test-files arm ... VACUOUS" fixture, which already documents
-    // this exact ambiguity for the STRUCTURED field; this clause now says the same thing in the
-    // human-readable one). `emitCompareIdenticalCount > 0` is only ever true when the check ran AND every
-    // changed compiled/script file passed it (any failure returns `notReducible` before `eligible:true`,
-    // so a partial/failed check can never reach here) — so the two clauses below are exhaustive and
-    // unambiguous. Wording is deliberately "file(s)", not "compiled file(s)" (card 82662e98) — a script
-    // proven inert here was never compiled, so the old wording would have been actively wrong for it.
-    const emitCompareCompiledClause = emitCompareIdenticalCount > 0
-      ? `${emitCompareIdenticalCount} file(s) proven transpile/parse-identical (card 2154b6ad, 82662e98)`
-      : "no compiled .ts or scripts/** file changed in this diff — transpile-identity check not applicable (card cf4aa7d1)";
-    // Card cf4aa7d1: a reduced gate that ran a changed test file DIRECTLY (`--only=<file>`) is an ISOLATION
-    // run — structurally incapable of catching a regression whose defect class only manifests in the full
-    // suite (order-dependence, shared-state coupling). This is true of ANY count of directly-run test
-    // files, not just one: three files run via `--only=` still never exercise the rest of the suite around
-    // them, so the caveat is gated on `emitCompareTestFiles.length > 0`, never narrowed to the single-file
-    // shape. Purely additive reporting — no change to the reduction's own eligibility/classification logic.
-    const emitCompareIsolationCaveat = emitCompareTestFiles.length
-      ? ` ⚠️ ${emitCompareTestFiles.length === 1 ? "this changed test file was" : `these ${emitCompareTestFiles.length} changed test files were`} run in ISOLATION (\`test:daemon --only=\`); if ${emitCompareTestFiles.length === 1 ? "its" : "their"} defect class is order-dependent (passes standalone, fails only in the full suite), this green is not evidence either way (card cf4aa7d1).`
-      : "";
-    // Card 3fbd95e0: a changed packages/daemon/assets/** path never blocks eligibility, but it widens the
-    // run to ASSET_READING_TEST_REPO_PATHS in full (see that array's own doc, git/worktrees.ts) — named
-    // here so a reduced gate never reads as silently having verified nothing for the changed asset(s).
-    const emitCompareAssetClause = emitCompareAssetPaths.length
-      ? `; ${emitCompareAssetPaths.length} asset path(s) changed under packages/daemon/assets/** (${emitCompareAssetPaths.join(", ")}) — ran the ${ASSET_READING_TEST_REPO_PATHS.length} certified asset-reading test(s) too (card 3fbd95e0)`
-      : "";
+    // indistinguishable from a gate that never ran. Card d422e279 (Code Review blocker [2]): the actual
+    // TEXT is now built by the SHARED `formatReducedGateWarning` (gate-runner.ts) — see that function's own
+    // doc for why (this exact hand-rolled duplicate had already diverged from the batch path's own copy,
+    // silently under-reporting what a reduced batch gate actually ran). Omitting `batchLandedCount` here
+    // renders byte-identical to the pre-extraction text.
     const emitCompareWarning = emitCompareSkip
-      ? `merge gate reduced: ${emitCompareCompiledClause} — ran build + static guards only${emitCompareTestFiles.length ? ` + ${emitCompareTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite${emitCompareNotHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${emitCompareNotHermeticExcluded.join(", ")}` : ""}${emitCompareInertPathsSkipped.length ? `; also skipped as proven inert (docs/, card db9b0130): ${emitCompareInertPathsSkipped.join(", ")}` : ""}${emitCompareAssetClause}${emitCompareIsolationCaveat}`
+      ? formatReducedGateWarning(
+        { identicalFileCount: emitCompareIdenticalCount, changedTestFiles: emitCompareTestFiles, notHermeticExcluded: emitCompareNotHermeticExcluded, inertPathsSkipped: emitCompareInertPathsSkipped, changedAssetPaths: emitCompareAssetPaths },
+        ASSET_READING_TEST_REPO_PATHS.length,
+      )
       : undefined;
     // Card e1ac691b — see composerIntegrityWarning's own doc: computed HERE (inside the async operation
     // confirmWorkerMergeTracked's pendingOps.attach() wraps), so it's baked into this result once, at the
@@ -16634,13 +16605,37 @@ export class SessionService {
    *  - every OTHER candidate (dropped by assembly, over the batch cap, stranded, or — on a red gate/forfeit
    *    — the WHOLE batch) falls back to today's unchanged {@link confirmWorkerMergeTracked}, one at a time.
    *
-   * Deliberately simpler than confirmWorkerMergeTracked's own gate call: no single-file retry, no
-   * transient-kill auto-retry, no reduced-gate command swap-in. Those stay exactly as they are on the
-   * (still fully exercised) per-branch fallback path — a batch gate is one straightforward run of the
-   * assembled tree. `computeEmitCompareGate` IS still called here, but ONLY to RECORD eligibility on the
-   * batch's own `build_gate` event (card dbc6f660's "measured interaction" note) — never to swap in a
-   * reduced command; the Lead's follow-up measurement found reduction-aware batch SELECTION doesn't pay at
-   * this K, so the assembler stays dumb: whatever is ready, up to the cap, unconditionally.
+   * Deliberately simpler than confirmWorkerMergeTracked's own gate call in one respect only: no
+   * transient-kill auto-retry (that stays exactly as it is on the (still fully exercised) per-branch
+   * fallback path). `computeEmitCompareGate` runs here on the ALREADY-ASSEMBLED, frozen batch worktree —
+   * `gateBaseMainSha..HEAD`, i.e. the UNION of every landed branch's own changes — reusing the SAME
+   * predicate `confirmWorkerMergeTracked` already reuses for a solo merge, never a second one. When that
+   * union proves eligible, `buildReducedGateCommand`'s smaller command is substituted for the real
+   * `gateCommand`, exactly as the solo path already does for one branch (card d422e279). This is a
+   * DIFFERENT decision from card dbc6f660's own "keep the assembler dumb" ruling: that one is about batch
+   * SELECTION — whether an individually-reduced-eligible branch should be excluded from a batch, which the
+   * Lead's measurement found doesn't pay at this K (a reduced branch riding an already-full batch costs
+   * nothing marginal) — and says nothing about a batch whose EVERY constituent branch is reduction-eligible,
+   * where the assembled tree's own diff still proves inert and running the full ~15-20min suite buys zero
+   * additional verification over the reduced command (observed in production: a K=2 batch of two test-only
+   * branches ran full for over 11 minutes past the reduced band). `chosen` membership stays exactly as dumb
+   * as dbc6f660 decided — only the ONE resulting gate run's OWN command can now reduce. Card 67030bb9's
+   * bounded single/multi-file retry (below) applies to whichever command actually ran, reduced or full —
+   * the same generic failure-classification path the solo side already exercises after ITS OWN reduced
+   * runs, so no new retry design is needed here.
+   *
+   * 🔴 A SECOND, DEEPER DEFECT THIS SAME CARD FIXED (see the `computeEmitCompareGate` call site's own
+   * comment below for the full mechanism): the call used to pass CANONICAL `finalRepoPath` as the
+   * predicate's `repoPath` while asking it to resolve the literal ref `"HEAD"` — which then meant
+   * CANONICAL's own checked-out HEAD, not the batch worktree's, and (since canonical hadn't advanced past
+   * `gateBaseMainSha` yet at that point) always diffed `gateBaseMainSha..gateBaseMainSha` — an EMPTY diff,
+   * unconditionally, regardless of what the batch actually changed. This — not merely "a batch's union is
+   * unlikely to qualify" — is the real reason every historical batched `gate_history` row read
+   * `emitCompareReduced:null`: the predicate was structurally unable to ever decide a batch, full stop.
+   * Confirmed directly against a real fixture batch before this fix landed. Passing `worktreePath` as
+   * BOTH the `repoPath` and `worktreePath` arguments fixes it — a linked worktree shares its parent's
+   * object database, so `gateBaseMainSha` still resolves fine; only the "HEAD" ref now means what it
+   * should.
    *
    * DEDUPE/ATTACH (card f944d4e4, following `46ebdf20`'s DoD-3 finding): a client-side timeout on this call
    * (it awaits the whole batch synchronously) used to have no cheap re-poll — a re-fire minted a fresh
@@ -16819,15 +16814,39 @@ export class SessionService {
             // real (it skips calling `runGate` entirely on a `landed.length === 0` batch) — set BEFORE
             // anything below can throw, so a real gate attempt is never misclassified as `false`.
             batchGateRan = true;
-            // Diagnostic-only reduction eligibility (see this method's own header doc) — never acted on.
+            // Reduction eligibility on the ASSEMBLED tree (card d422e279 — see this method's own header
+            // doc for why this is a different question from dbc6f660's "keep the assembler dumb" ruling).
             // NAMED `batchEmitCompare`, deliberately NOT the bare name confirmWorkerMerge's own classification
             // local uses: emit-compare-branch-capture-order-guard.mjs scans this file for exactly one line
             // assigning that bare name from computeEmitCompareGate (the single-branch call site, whose own
             // pre-wait branch-head-capture ordering it protects) — a second, differently-named local here avoids
             // a false collision with that guard; it protects an unrelated invariant this batch path has no
             // equivalent of (this call classifies the ALREADY-ASSEMBLED, frozen batch worktree, not a live
-            // branch that can move during a queue wait).
-            const batchEmitCompare = await computeEmitCompareGate(finalRepoPath, worktreePath, gateBaseMainSha, "HEAD", { timeoutMs: this.gitOpMs }).catch(() => undefined);
+            // branch that can move during a queue wait, so — unlike the solo path's `reunionAtAdmission` —
+            // no admission-time re-derivation is needed here: nothing else writes to this private worktree
+            // during the queue wait).
+            // Card d422e279 CORRECTION: the ref this call resolves ("HEAD") must be evaluated FROM the
+            // batch worktree, not canonical `finalRepoPath` — a batch worktree carries no named branch a
+            // caller outside it could resolve "HEAD" as (unlike the solo path's call, which passes an
+            // actual branch NAME as `ref` and can therefore safely evaluate it from canonical: a worktree
+            // branch is an ordinary ref, visible repo-wide). Passing `finalRepoPath` here made "HEAD"
+            // resolve to CANONICAL's own checked-out ref instead — since canonical main had not yet moved
+            // past `gateBaseMainSha` at this point, that read `gateBaseMainSha..gateBaseMainSha`, an empty
+            // diff, EVERY time, regardless of what the batch actually changed (this is the real reason
+            // every historical batched `gate_history` row read `emitCompareReduced:null`, not merely "a
+            // union is unlikely to qualify" as originally diagnosed — confirmed by a real fixture run
+            // before this fix: a two-branch, test-only-added batch still reported "empty diff" here). The
+            // worktree shares canonical's OWN object database (an ordinary git-worktree property), so
+            // `worktreePath` resolves `gateBaseMainSha` (a real, shared ancestor) exactly as well as
+            // `finalRepoPath` did — only the ref resolution changes.
+            const batchEmitCompare = await computeEmitCompareGate(worktreePath, worktreePath, gateBaseMainSha, "HEAD", { timeoutMs: this.gitOpMs }).catch(() => undefined);
+            // Card d422e279: substitute the SAME smaller command a solo reduced merge runs
+            // (`buildReducedGateCommand`) when the WHOLE assembled batch proves eligible — never a
+            // batch-specific predicate or command builder. `batchReduced` gates BOTH this substitution and
+            // the reader-facing warning built after the gate settles (below), so the two can never disagree
+            // about whether this run was reduced.
+            const batchReduced = batchEmitCompare?.eligible === true;
+            const effectiveGate = batchReduced ? buildReducedGateCommand(batchEmitCompare!.changedTestFiles, batchEmitCompare!.changedAssetPaths) : gate!;
             // Card 10fd660b: `taskId`/`branch` stay null (a batch genuinely has neither) — `batchBranches` is what
             // lets the Gates page's active lane render this as a batch rather than an anonymous merge. It is the
             // REQUESTED set; the landed count only exists once `runGate` is called back with it, so that half is
@@ -16873,7 +16892,7 @@ export class SessionService {
                 gateStartedAt = startedAt;
                 concurrentAtStart = this.gateSemaphore.snapshot().active;
                 getConcurrentGatesMax = getMaxConcurrentGates;
-                const gr = await runGateSeq(gate!, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), undefined, undefined, hooks, gateSpillPath(opId));
+                const gr = await runGateSeq(effectiveGate, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), undefined, undefined, hooks, gateSpillPath(opId));
                 if (gr.passed) holdRepoGuardOnExit();
                 return gr;
               }, "high");
@@ -17054,7 +17073,16 @@ export class SessionService {
               // resolves, strictly after this event already fired; see `mergeBatch`'s own post-`runBatchedMerge`
               // handling for where that phase is recorded instead.
               worktreeCutMs, assemblyMs, admissionWaitMs: gateStartedAt - opMintedAtMs,
-              ...(emitCompareDecidable ? { emitCompareReduced: batchEmitCompare!.eligible, ...(batchEmitCompare!.eligible ? { emitCompareTestFiles: batchEmitCompare!.changedTestFiles } : {}) } : {}),
+              // Code Review, card d422e279: `emitCompareIdenticalCount` is now stamped alongside
+              // `emitCompareTestFiles` — both paired 1:1 with `emitCompareReduced:true`, matching
+              // `GateHistoryRow.emitCompareIdenticalCount`'s own documented invariant (shared/types.ts:
+              // "present together or both null, never one without the other"). Before this fix, a
+              // genuinely-reduced batch row read `emitCompareReduced:true` with BOTH fields null — an
+              // unclassifiable row violating that invariant — because `db.ts`'s own `detail.batched===true`
+              // fallback (`toGateHistoryRow`) only ever recovered `emitCompareReduced`, never these two,
+              // and this stamp itself never carried the count. See db.ts's own fallback for the reader
+              // side of this fix.
+              ...(emitCompareDecidable ? { emitCompareReduced: batchEmitCompare!.eligible, ...(batchEmitCompare!.eligible ? { emitCompareTestFiles: batchEmitCompare!.changedTestFiles, emitCompareIdenticalCount: batchEmitCompare!.identicalFileCount } : {}) } : {}),
               // Card 67030bb9: mirrors confirmWorkerMerge's own `build_gate` retry-observability pair.
               ...(retriedFile ? { retriedFile, retryPassed } : {}),
               // Code Review, card 67030bb9 finding [3]: mirrors the solo path's own `retryDeclineReason`
@@ -17062,8 +17090,25 @@ export class SessionService {
               // identified, above, or declined, here, never both on the same op).
               ...(retryDeclineReason ? { retryDeclineReason } : {}),
             });
+            // Card d422e279: the SAME surfacing obligation `EmitCompareGateResult`'s own doc mandates for a
+            // solo reduced merge (git/worktrees.ts) — a silent drop of notHermeticExcluded/inertPathsSkipped/
+            // changedAssetPaths would gate branches while quietly verifying nothing for those files,
+            // indistinguishable from a clean run. Worded for a batch: this green covers EVERY landed branch,
+            // not one, so the isolation caveat (card cf4aa7d1) is scaled to `landedCount` rather than a
+            // single-branch count. Built only when `batchReduced` — mirrors the solo path's own
+            // `emitCompareWarning`, which is likewise `undefined` on every non-reduced run.
+            // Code Review, card d422e279 blocker [2]: this used to be a hand-written second copy of the
+            // solo path's own warning text, and had ALREADY diverged (its asset clause dropped the
+            // changed-path list and the "ran the certified tests too" statement — wrong about what
+            // executed, not merely less detailed). Now built by the SAME `formatReducedGateWarning`
+            // (gate-runner.ts) the solo path calls, with `batchLandedCount` passed so the wording (and the
+            // isolation caveat's singular/plural, driven by `changedTestFiles.length`, never hardcoded)
+            // scales to every landed branch — see that function's own doc.
+            const reducedGateWarning = batchReduced
+              ? formatReducedGateWarning(batchEmitCompare!, ASSET_READING_TEST_REPO_PATHS.length, landedCount)
+              : undefined;
             return {
-              passed: r.passed, emitCompareReduced: !!batchEmitCompare?.eligible, reason: r.passed ? undefined : (r.outputTail ?? "batch gate failed"), detail: { steps: r.steps },
+              passed: r.passed, emitCompareReduced: !!batchEmitCompare?.eligible, ...(reducedGateWarning ? { reducedGateWarning } : {}), reason: r.passed ? undefined : (r.outputTail ?? "batch gate failed"), detail: { steps: r.steps },
               // Card 67030bb9: threaded through `BatchGateResult` so `runBatchedMerge`'s caller (this batch's
               // OWN async-settle nudge, below) can render `formatWeakerPassWarning` with the batch's branch
               // count — see that call site for why this matters more here than on the solo path.
@@ -17148,6 +17193,10 @@ export class SessionService {
               retriedFile: result.gateDetail.retriedFile, retryPassed: result.gateDetail.retryPassed,
               retryWarning: formatWeakerPassWarning(result.gateDetail.retriedFile, result.gateDetail.outputTail, landed.length),
             } : {}),
+            // Card d422e279: mirrors the `retryWarning` threading immediately above — see
+            // `BatchGateResult.reducedGateWarning`'s own doc (git/batch-merge.ts) for what this carries and
+            // why it's surfaced on the green path only.
+            ...(result.gateDetail?.reducedGateWarning ? { reducedGateWarning: result.gateDetail.reducedGateWarning } : {}),
           };
         } finally {
           if (batchWorktreePath) await removeWorktree(finalRepoPath, batchWorktreePath, { timeoutMs: this.gitOpMs }).catch(() => {});
@@ -17185,7 +17234,10 @@ export class SessionService {
             // header doc) — a retry-assisted batch landing must carry the SAME weaker-pass note the sync
             // return already surfaces via `MergeBatchResult.retryWarning`, or a manager who missed the sync
             // return (this is exactly the async/pending path) would never see it at all.
-            (outcome.value.retryWarning ? ` ${outcome.value.retryWarning}` : "")
+            (outcome.value.retryWarning ? ` ${outcome.value.retryWarning}` : "") +
+            // Card d422e279: same reasoning as retryWarning immediately above, for a reduced batch gate's
+            // own surfacing obligation (`MergeBatchResult.reducedGateWarning`'s own doc).
+            (outcome.value.reducedGateWarning ? ` ${outcome.value.reducedGateWarning}` : "")
           : `[loom:merge-batch-failed] merge_batch [op ${opId}] landed nothing via the batch path (${outcome.value.reason ?? "see fallback"}) — ${outcome.value.fallback.length} candidate(s) routed to an individual worker_merge_confirm instead (each already notified separately).`;
         try {
           this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId), { sender: "system", taskId: null, kind: "warning" });

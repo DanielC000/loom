@@ -673,11 +673,42 @@ export async function fastForwardCanonicalMain(
  *  real integration wires `runGate` to whatever this daemon already uses for a real gate run. */
 export interface BatchGateResult {
   passed: boolean;
-  /** DoD's "measured interaction" note: batching unions K branches' changed paths, so a batch is far less
-   *  likely to qualify for a reduced gate than a single un-batched merge — recorded here for the follow-up
-   *  telemetry card (4f7f6854) to tell an absorbed-free gate from a genuinely-saved one, never ACTED on
-   *  (no reduction-aware batch selection — see this file's own header doc). */
+  /** Card dbc6f660's "measured interaction" note, CORRECTED by card d422e279 (Code Review fold-in [7]):
+   *  the ORIGINAL claim here — "batching unions K branches' changed paths, so a batch is far less likely
+   *  to qualify for a reduced gate than a single un-batched merge" — cited no evidence beyond every
+   *  historical batched `gate_history` row reading `emitCompareReduced:null`. That artifact was ITSELF the
+   *  repoPath/HEAD bug card d422e279 fixed (`computeEmitCompareGate` structurally could never decide a
+   *  batch at all — see that fix's own doc, sessions/service.ts), not a real measurement of how often a
+   *  batch's union is genuinely reducible. Retracted as a measured claim; carry no expectation about
+   *  frequency either way until it is actually measured post-fix.
+   *
+   *  dbc6f660 itself only ever measured (and ruled out) reduction-aware batch SELECTION — excluding an
+   *  individually-reduced-eligible branch from a batch, which the Lead's own measurement found doesn't pay
+   *  at this K (a reduced branch riding an already-full batch costs nothing marginal). It never measured or
+   *  decided the DIFFERENT question this field answers: whether the ONE gate command a batch actually runs
+   *  should itself reduce when the ASSEMBLED tree's own union of changes proves eligible. `chosen` batch
+   *  MEMBERSHIP stays exactly as dumb as dbc6f660 decided — this field, and the substitution it reflects,
+   *  changes only what the resulting ONE gate run executes, never which branches are admitted to it.
+   *
+   *  RECORD-ONLY (Code Review fold-in [6]): `true` means the caller's `runGate` closure (sessions/
+   *  service.ts's `mergeBatchTracked`) ALREADY substituted `buildReducedGateCommand`'s smaller command,
+   *  reusing the SAME predicate (`computeEmitCompareGate`) the solo path already reuses — but that
+   *  substitution is decided from the closure's OWN local `batchEligible`/`batchReduced` variables BEFORE
+   *  this struct is ever returned, never by a caller reading this field back. As of this card, nothing
+   *  reads `BatchGateResult.emitCompareReduced` (the pre-existing deadness predates this card — `gate_history`
+   *  is populated independently, from the SAME local variables, via the batch's own `evtBatch("build_gate",
+   *  ...)` call). It exists purely as a diagnostic echo on the return value, mirroring the shape a caller of
+   *  this interface would reasonably expect to find the verdict on. */
   emitCompareReduced?: boolean;
+  /** Card d422e279: present ONLY when `emitCompareReduced` is `true` — the SAME surfacing obligation
+   *  `EmitCompareGateResult`'s own doc (git/worktrees.ts) mandates for a solo reduced merge
+   *  (notHermeticExcluded/inertPathsSkipped/changedAssetPaths/isolation caveat), worded for a batch: this
+   *  green is a claim about EVERY branch the batch landed, not just one, so the isolation caveat (card
+   *  cf4aa7d1 — files run via `test:daemon --only=`, never exercising the rest of the suite around them)
+   *  covers the whole landed set at once, not a single branch. The caller threads this onto
+   *  `MergeBatchResult.reducedGateWarning`, mirroring how `retryWarning` is already threaded from this
+   *  same interface. */
+  reducedGateWarning?: string;
   reason?: string;
   detail?: Record<string, unknown>;
   /** Card 67030bb9: whether this batch's gate retried a small set of files in isolation before reaching
