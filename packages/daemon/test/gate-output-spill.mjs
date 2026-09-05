@@ -3,7 +3,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // today (`gate_status.outputTail`) is a bounded ~4KB (or content-selected ~16KB on a failure) ring, cut
 // mid-line, with no second copy anywhere. This proves the fix: `runGateStep`/`runGateSequential`'s new
 // `spillFile` param streams every captured byte to a file, independent of the bounded ring — and that the
-// retention sweep (`pruneGateSpills`) actually bounds the count of retained files.
+// retention sweep (`pruneGateSpills`) actually bounds BOTH the count and the TOTAL BYTES of retained
+// files (the primary worst-case-disk-usage bound, per manager review — see gate-spill.ts's own doc).
 //
 // REAL spawn (real `node` children), no daemon/DB — drives orchestration/gate-runner.js +
 // orchestration/gate-spill.js directly. Every spill file in this suite is written under a throwaway
@@ -17,6 +18,11 @@ import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 const { runGateStep, runGateSequential } = await import("../dist/orchestration/gate-runner.js");
 const { gateSpillPath, pruneGateSpills, GATE_SPILL_DIR, GATE_SPILL_MAX_BYTES } = await import("../dist/orchestration/gate-spill.js");
+
+// The default `GATE_SPILL_MAX_TOTAL_BYTES` (200MB) makes a from-scratch fixture proving it trip
+// impractically slow to write — (F2) below passes an explicit SMALL override instead (the param this
+// module exists to make injectable), never the real default. `GATE_SPILL_MAX_BYTES` (the PER-FILE cap) is
+// unaffected either way.
 
 let failures = 0;
 const check = (label, cond, diagnostic) => {
@@ -166,6 +172,61 @@ const outDir = mkdtempManaged("loom-gs-out-");
   check("(F) a non-existent spill dir is a silent no-op, never a throw", threw === false);
 }
 
+// ── (F2) Manager-review follow-up: the PRIMARY retention bound is TOTAL BYTES, not just file count — a
+//     100 * 10MB = 1GB worst case is unacceptable on a shipped end-user machine, so the byte cap must
+//     actually trip BEFORE the count cap would, given files that individually stay small. Uses an explicit
+//     small override (never the real 200MB default — see the module-level comment above) so this stays a
+//     fast, hermetic test. ────────────────────────────────────────────────────────────────────────────────
+{
+  const bytesDir = path.join(outDir, "retention-bytes");
+  fs.mkdirSync(bytesDir, { recursive: true });
+  const SMALL_CAP_BYTES = 1000;
+  const now = Date.now();
+  // 5 files, 300 bytes each (well under the file-COUNT cap of, say, 10) — but 3+ of them together exceed
+  // the 1000-byte TOTAL cap. Newest-first: e (newest) ... a (oldest).
+  const names = ["a.log", "b.log", "c.log", "d.log", "e.log"];
+  names.forEach((name, i) => {
+    const p = path.join(bytesDir, name);
+    fs.writeFileSync(p, "x".repeat(300));
+    const t = new Date(now - (names.length - i) * 60_000); // index 0 (a) oldest, last (e) newest
+    fs.utimesSync(p, t, t);
+  });
+
+  pruneGateSpills(bytesDir, 10, SMALL_CAP_BYTES); // count cap (10) alone would keep all 5 — proves bytes, not count, is what trips here
+  const remaining = fs.readdirSync(bytesDir).sort();
+  check("(F2) THE FIX: the byte cap trips even though the file-count cap (10) is nowhere close to being hit",
+    remaining.length < names.length,
+    () => `remaining=${JSON.stringify(remaining)}`);
+  const remainingBytes = remaining.reduce((sum, n) => sum + fs.statSync(path.join(bytesDir, n)).size, 0);
+  check("(F2) the SURVIVING files' combined size respects the byte cap",
+    remainingBytes <= SMALL_CAP_BYTES,
+    () => `remainingBytes=${remainingBytes}, cap=${SMALL_CAP_BYTES}`);
+  check("(F2) the NEWEST file (e.log) survives", remaining.includes("e.log"));
+  check("(F2) the OLDEST file (a.log) was pruned", !remaining.includes("a.log"));
+  check("(F2) NO GAPS: an older file never survives ahead of a newer one just because it individually 'fits' — eviction is a monotonic newest-first cutoff, not best-fit",
+    (() => {
+      // Every surviving file's own index in `names` must be >= every PRUNED file's index (survivors are a
+      // contiguous newest-first suffix, not a scattered subset).
+      const survivedIdx = remaining.filter((n) => names.includes(n)).map((n) => names.indexOf(n));
+      const prunedIdx = names.map((n, i) => i).filter((i) => !remaining.includes(names[i]));
+      return survivedIdx.every((s) => prunedIdx.every((p) => s > p));
+    })());
+
+  // POSITIVE CONTROL for the count cap STILL working when bytes are NOT the binding constraint: a huge
+  // byte budget (bytes never binds) but a tight count cap (2) must still prune down to 2.
+  const countDir = path.join(outDir, "retention-count-still-works");
+  fs.mkdirSync(countDir, { recursive: true });
+  ["p.log", "q.log", "r.log"].forEach((name, i) => {
+    const p = path.join(countDir, name);
+    fs.writeFileSync(p, "x");
+    const t = new Date(now - (3 - i) * 60_000);
+    fs.utimesSync(p, t, t);
+  });
+  pruneGateSpills(countDir, 2, 1024 * 1024 * 1024); // 1GB byte budget — never binds for 3 one-byte files
+  check("(F2) POSITIVE CONTROL: the count cap alone still prunes correctly when the byte cap is nowhere close",
+    fs.readdirSync(countDir).length === 2);
+}
+
 // ── (G) gateSpillPath is a pure derivation — no fs access, so exercising it never touches real LOOM_HOME. ──
 {
   const p1 = gateSpillPath("11111111-1111-1111-1111-111111111111");
@@ -176,6 +237,6 @@ const outDir = mkdtempManaged("loom-gs-out-");
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a settled gate's full child output is recoverable by opId via a bounded, count-retained file spill: unset by default (byte-identical to pre-card behavior), recovers content the bounded outputTail ring genuinely evicts, capped against a pathological run, shared correctly across a multi-step gate command, wired into BOTH gate-runner settle paths (done() and the separate onTimeout resolve), and its retention sweep prunes by mtime, scoped to *.log, without ever throwing on a missing dir."
+  ? "\n✅ ALL PASS — a settled gate's full child output is recoverable by opId via a bounded, count-AND-bytes-retained file spill: unset by default (byte-identical to pre-card behavior), recovers content the bounded outputTail ring genuinely evicts, capped against a pathological run, shared correctly across a multi-step gate command, wired into BOTH gate-runner settle paths (done() and the separate onTimeout resolve), and its retention sweep prunes by mtime, scoped to *.log, respects a DIRECT total-bytes ceiling (not just file count) with no gaps in the newest-first cutoff, and never throws on a missing dir."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

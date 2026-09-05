@@ -4444,7 +4444,23 @@ export class SessionService {
    * Omitted (every manager call site), behavior is an unscoped table scan that CAN honestly return
    * `never_existed`, unchanged from before this card.
    */
-  gateStatus(opId: string, scopeSessionId?: string, scopeProjectId?: string): {
+  /**
+   * Card a16c580b, manager-review follow-up: `redactOutputFileForProject` is DISTINCT from `scopeProjectId`
+   * above and never touches its FILTERING behavior — `scopeProjectId` narrows the SQL candidate set itself
+   * (the worker path's hard scope), while this one only decides whether to STRIP `outputFile` from an
+   * otherwise-full settled result. It exists because the UNSCOPED manager call site (registerGateStatus's
+   * `scopeSessionId`/`scopeProjectId` both omitted — see mcp/orchestration.ts) can resolve ANY project's
+   * settled op by opId at all, including its `outputTail` (pre-existing, unaffected by this card) — adding
+   * `outputFile` there would hand a manager on one project a ready absolute host path into ANOTHER
+   * project's full gate output with zero extra effort, the exact cross-project exposure `gate_queue`'s own
+   * `redacted:true` fields exist to prevent for that sibling tool. This param is that same redaction,
+   * scoped to just the ONE field this card adds: when given and it doesn't match the settled row's own
+   * `projectId`, `outputFile` is omitted from the response; every other field (including the pre-existing
+   * `outputTail`) is untouched. `undefined` (the worker call site's own passthrough) means "no redaction to
+   * apply" — correct there because the worker's hard `scopeProjectId` filter already makes a foreign
+   * project's row unreachable before this ever runs.
+   */
+  gateStatus(opId: string, scopeSessionId?: string, scopeProjectId?: string, redactOutputFileForProject?: string): {
     state: "queued" | "running" | "pending" | "settled" | "evicted-dead-owner" | "orphaned-by-restart" | "never_existed" | "unknown" | "ambiguous";
     gateType: GateType | null; elapsedMs: number | null;
     /** How long since the run's CURRENT step last showed a liveness event (started, or produced a
@@ -4658,6 +4674,16 @@ export class SessionService {
       // they spread through for "pass"/"fail" today and are simply absent for "cancelled"/"error"/a "gate"
       // row, never fabricated.
       const payload = t.record.verdictPayload;
+      // Card a16c580b, manager-review follow-up: cross-project REDACTION for `outputFile` specifically —
+      // see `redactOutputFileForProject`'s own doc above for why this is separate from `scopeProjectId`'s
+      // FILTERING. `undefined` (the worker call site) means "nothing to redact" — that path's hard filter
+      // already made a foreign project's row unreachable before this line runs.
+      // Fail-safe on an ambiguous `projectId:null` (a legacy pre-project_id-column row) — REDACT rather
+      // than expose. Unreachable in practice for `outputFile` specifically (this field postdates that
+      // column by construction, so a row carrying one always also carries a real projectId), but stated
+      // this way rather than assumed, since a mint-time regression that resets projectId to null MUST fail
+      // toward hiding a path, not revealing one.
+      const outputFileRedacted = redactOutputFileForProject !== undefined && t.record.projectId !== redactOutputFileForProject;
       const settleTimingFields = {
         ...(payload?.settledAt !== undefined ? { settledAt: payload.settledAt } : {}),
         ...(payload?.totalDurationMs !== undefined ? { totalDurationMs: payload.totalDurationMs } : {}),
@@ -4681,7 +4707,7 @@ export class SessionService {
           ...(payload?.headWarning !== undefined ? { headWarning: payload.headWarning } : {}),
           ...(payload?.steps !== undefined ? { steps: payload.steps } : {}),
           ...(payload?.outputTail !== undefined ? { outputTail: payload.outputTail } : {}),
-          ...(payload?.outputFile !== undefined ? { outputFile: payload.outputFile } : {}),
+          ...(payload?.outputFile !== undefined && !outputFileRedacted ? { outputFile: payload.outputFile } : {}),
           ...(payload?.gateDetail !== undefined ? { gateDetail: payload.gateDetail } : {}),
           ...(payload?.proximity !== undefined ? { proximity: payload.proximity } : {}),
           // Card 6dcb9cd3: `!== undefined` (not truthy) — a `null` here IS the measured negative

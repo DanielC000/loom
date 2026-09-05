@@ -208,7 +208,7 @@ const STALE_REPORT_TURN_THRESHOLD = 3;
  * tombstone is written to disk before `deploy` returns (survives a restart the in-process cache couldn't),
  * and `pending_gate_ops` is a permanent table (never evicted by count, unlike the removed 500-entry Set).
  */
-function registerGateStatus(server: McpServer, sessions: SessionService, scopeSessionId?: string, getScopeProjectId?: () => string | undefined): void {
+function registerGateStatus(server: McpServer, sessions: SessionService, scopeSessionId?: string, getScopeProjectId?: () => string | undefined, getRedactOutputFileForProject?: () => string | undefined): void {
   const forWorker = scopeSessionId != null;
   const description = forWorker
     ? "Read-only status for YOUR OWN gate run, by the `opId` a `run_gate` {status:\"pending\"} " +
@@ -357,6 +357,10 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"never_existed\"|\"unknown\"|\"ambiguous\", gateType, elapsedMs, " +
       "idleMs, extended?, error?, note?, admittedAt?, settledAt?, totalDurationMs?, outcome?, proximity?, steps?, " +
       "outputTail?, outputFile?, gateDetail?, gateCap?, concurrentGates?, concurrentGatesMax?, emitCompareReduced?, " +
+      "this tool is UNSCOPED for a manager — a real opId from ANY project on this daemon resolves here, not " +
+      "just your own. `outputFile` (card a16c580b) is REDACTED (omitted) for an op belonging to a DIFFERENT " +
+      "project than yours, mirroring `gate_queue`'s own cross-project redaction — `outputTail` is NOT " +
+      "redacted (a pre-existing exposure this card did not introduce or close). " +
       "emitCompareIdenticalCount?, emitCompareTestFiles?, emitCompareNotHermeticExcluded?, commitSubject?, " +
       "retriedFile?, retryPassed?, retryWarning?, transientRetried?, transientRetryWarning?}. `queued`/`running` " +
       "mean it's still LIVE — and while it is, this reply's `note` (card 45390f74) carries an explicit " +
@@ -603,7 +607,7 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
         // fake with no `getSession`; reading it eagerly at registration time crashed those (companion-loop
         // .mjs's role:"worker" server build). Deferring to call time matches how every other db read in
         // this router already works, and costs nothing extra on the real path (a session row read).
-        const result = sessions.gateStatus(opId, scopeSessionId, getScopeProjectId?.());
+        const result = sessions.gateStatus(opId, scopeSessionId, getScopeProjectId?.(), getRedactOutputFileForProject?.());
         // Card bed91595: `deploy` now writes a real `pending_gate_ops` tombstone (see
         // `SessionService.deployOwnProject`), so `sessions.gateStatus` above already resolves a real
         // deploy opId through the ordinary tombstone fallback — never `never_existed`. No reclassification
@@ -4124,7 +4128,13 @@ export class OrchestrationMcpRouter {
         }
       },
     );
-    registerGateStatus(server, sessions);
+    // Card a16c580b: this call site is UNSCOPED (`scopeSessionId`/`getScopeProjectId` both omitted) —
+    // a manager can resolve ANY project's settled op by opId (see `gate_status`'s own header doc for why
+    // that's a real, pre-existing gap this card did not create). `getRedactOutputFileForProject` redacts
+    // ONLY the new `outputFile` field for a foreign project's row — see
+    // `SessionService.gateStatus`'s own `redactOutputFileForProject` doc for the full reasoning and why
+    // this is deliberately narrower than fixing the pre-existing `outputTail` cross-project exposure too.
+    registerGateStatus(server, sessions, undefined, undefined, () => db.getSession(managerSessionId)?.projectId);
     registerGateQueue(server, sessions, db, managerSessionId);
     registerGateIntent(server, sessions, managerSessionId);
 

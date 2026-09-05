@@ -43,24 +43,45 @@ export function gateSpillPath(opId: string): string {
  */
 export const GATE_SPILL_MAX_BYTES = 10 * 1024 * 1024;
 
-/** How many settled ops' full-output spills to retain, across the WHOLE daemon (every project sharing it
- *  — gates run "constantly" per CLAUDE.md, so this is a global, not per-project, budget). Prune-on-write,
- *  oldest by mtime evicted first — the same `rotateBackups` (orchestration/db-backup.ts) shape this
- *  mirrors. Chosen so the worst case (every retained file at the `GATE_SPILL_MAX_BYTES` ceiling) stays a
- *  bounded, small multiple of that ceiling (100 * 10MB = 1GB worst case) rather than growing unboundedly
- *  as gates keep running — in practice most spills are far smaller than the ceiling, so real usage is
- *  much lower. A silent overwrite-in-place (reusing the newest N paths) was rejected: it would recreate
- *  the exact "which op's diagnostic survives" gap this card exists to close, just at a different N.
+/**
+ * PRIMARY retention bound — a DIRECT ceiling on the metric that actually matters (real disk bytes under
+ * `LOOM_HOME`, on a shipped end-user machine, not just this daemon's own dev box). Manager review, card
+ * a16c580b follow-up: the first cut of this file bounded retention by COUNT alone (`GATE_SPILL_RETAIN_COUNT`
+ * below) and argued the worst case — every one of 100 retained files sitting at the 10MB `GATE_SPILL_MAX_BYTES`
+ * ceiling — was acceptable because real spills are "far smaller in practice". That argument is exactly the
+ * one every unbounded-growth incident starts with: it makes the worst case a PRODUCT of two independent
+ * maximums (count × per-file cap) that must both be hit simultaneously to manifest, rather than a bound on
+ * the thing itself. This constant removes that gap structurally: `pruneGateSpills` now also sums real bytes
+ * newest-first and stops retaining the moment the running total would exceed this, so 1GB (100 * 10MB) is no
+ * longer merely unlikely — it is unreachable. 200MB is a deliberately generous but genuinely bounded ceiling
+ * for a local dev-tool diagnostic cache (comparable in order of magnitude to a browser/IDE cache budget), and
+ * is the number to defend or shrink going forward — `GATE_SPILL_RETAIN_COUNT` is now a SECONDARY bound only
+ * (guards against a large NUMBER of small files, a shape this byte cap alone wouldn't catch).
+ */
+export const GATE_SPILL_MAX_TOTAL_BYTES = 200 * 1024 * 1024;
+
+/** SECONDARY retention bound (see {@link GATE_SPILL_MAX_TOTAL_BYTES}'s own doc for why it, not this, is now
+ *  primary) — caps the raw FILE COUNT, independent of size, so a very large number of small spills can't
+ *  accumulate indefinitely just because their combined bytes stay under the primary cap. Prune-on-write,
+ *  oldest by mtime evicted first — the same `rotateBackups` (orchestration/db-backup.ts) shape this mirrors.
+ *  A silent overwrite-in-place (reusing the newest N paths) was rejected: it would recreate the exact "which
+ *  op's diagnostic survives" gap this card exists to close, just at a different N.
  */
 export const GATE_SPILL_RETAIN_COUNT = 100;
 
 /**
- * Keep the newest `keep` spill files under `dir`; prune older ones by mtime. ONLY ever touches `*.log`
- * files directly in `dir` — mirrors `rotateBackups`'s own scoping discipline (never touches an unrelated
- * file that happens to live alongside). Best-effort: a prune failure is logged and swallowed — losing an
- * old diagnostic to a failed prune is acceptable; losing gate execution to a prune bug is not.
+ * Keep the newest spill files under `dir` — oldest by mtime evicted first — until BOTH the file-count
+ * (`keep`) and total-bytes (`maxTotalBytes`) budgets are satisfied; whichever bound is hit FIRST determines
+ * how many survive. ONLY ever touches `*.log` files directly in `dir` — mirrors `rotateBackups`'s own
+ * scoping discipline (never touches an unrelated file that happens to live alongside). Best-effort: a prune
+ * failure is logged and swallowed — losing an old diagnostic to a failed prune is acceptable; losing gate
+ * execution to a prune bug is not.
  */
-export function pruneGateSpills(dir: string = GATE_SPILL_DIR, keep: number = GATE_SPILL_RETAIN_COUNT): void {
+export function pruneGateSpills(
+  dir: string = GATE_SPILL_DIR,
+  keep: number = GATE_SPILL_RETAIN_COUNT,
+  maxTotalBytes: number = GATE_SPILL_MAX_TOTAL_BYTES,
+): void {
   try {
     if (keep <= 0) return;
     if (!fs.existsSync(dir)) return;
@@ -70,12 +91,33 @@ export function pruneGateSpills(dir: string = GATE_SPILL_DIR, keep: number = GAT
       .map((e) => {
         const full = path.join(dir, e.name);
         let mtime = 0;
-        try { mtime = fs.statSync(full).mtimeMs; } catch { /* unreadable → sorts oldest, pruned first */ }
-        return { full, mtime };
+        let size = 0;
+        try {
+          const st = fs.statSync(full);
+          mtime = st.mtimeMs;
+          size = st.size;
+        } catch { /* unreadable → sorts oldest, pruned first; size 0 never falsely trips the byte cap for it */ }
+        return { full, mtime, size };
       })
       .sort((a, b) => b.mtime - a.mtime); // newest first
-    for (const stale of entries.slice(keep)) {
-      try { fs.rmSync(stale.full, { force: true }); } catch { /* best-effort */ }
+    // Once EITHER bound trips, every OLDER entry from that point on is pruned too — never selectively kept
+    // because an individual older file happens to be small enough to "fit" a remaining byte budget. Newest-
+    // first eviction must stay monotonic (no gaps), matching `rotateBackups`'s own `entries.slice(keep)`
+    // shape; a "best fit" policy would let an older file outlive a newer one, which is never the intent.
+    let runningBytes = 0;
+    let cutoffReached = false;
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i]!;
+      if (!cutoffReached) {
+        const wouldExceedCount = i >= keep;
+        const wouldExceedBytes = maxTotalBytes > 0 && runningBytes + entry.size > maxTotalBytes;
+        if (wouldExceedCount || wouldExceedBytes) cutoffReached = true;
+      }
+      if (cutoffReached) {
+        try { fs.rmSync(entry.full, { force: true }); } catch { /* best-effort */ }
+      } else {
+        runningBytes += entry.size;
+      }
     }
   } catch (err) {
     console.warn(`[gate-spill] rotation failed (continuing): ${(err as Error).message}`);
