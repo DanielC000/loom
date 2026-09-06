@@ -2925,15 +2925,38 @@ export class SessionService {
     // has no human at its TUI to answer, so it stalls (the owner had to manually worker_set_mode('auto')
     // twice before this fix). Pin a WORKER's boot-cycle target to `auto` INDEPENDENT of the shared
     // `config.permission.startupModeCycles` knob, so a project-level cycles customization (made for
-    // manager/other-role reasons) can never silently leave a worker un-cycled. Every OTHER role keeps
-    // config's startupModeCycles verbatim — byte-identical to before this change. A manager can still pin
+    // manager/other-role reasons) can never silently leave a worker un-cycled. A manager can still pin
     // a specific worker to the rare edits-only `acceptEdits` mode after spawn via `worker_set_mode`.
+    //
+    // ASSISTANT gets the SAME pin (card 5603f40f, out of ac90ca8e's investigation): a companion's "human"
+    // reaches it over a CHAT channel via `chat_reply`, so its stdin is never a live TUI human either — the
+    // identical structural property `disallowedToolsForRole` already recognizes it shares with worker (both
+    // get HUMAN_PROMPT_TOOLS disallowed for exactly this reason). Before this pin there was no single true
+    // answer to "what mode does a companion run in" — it was whatever `startupModeCycles` resolved to,
+    // movable by a knob set for a manager's sake with no role guard. Was leaving assistant off the original
+    // 2026-07-20 pin deliberate or an oversight? The record doesn't settle it: that fix's own comment and
+    // commit discuss worker only, yet the assistant role already existed (since 2026-07-01) and was ALREADY
+    // classified alongside worker in `disallowedToolsForRole` for the same "no live human at stdin" property
+    // — suggestive of an oversight, not proof of one, since card 760cd01d itself isn't readable from here
+    // and a stated worker-only reason there can't be ruled out.
+    // Target choice: `auto` PRESERVES today's effective default (the shared config default is cycles=2 →
+    // auto already), so this closes the side-effect/coupling channel WITHOUT changing behavior on an
+    // unmodified project. It is NOT a ruling that `auto` — the broadest auto-approve mode — is the right
+    // posture for an untrusted-chat-facing role; nobody has made that ruling. A stricter default, if ever
+    // wanted, is a separate, deliberate decision.
+    // KNOWN GAP (card e98877b1, deliberately NOT fixed here): this pin flows through `resumePermission`
+    // below, which falls back to bare `config.permission` when the agent row backing a session has been
+    // deleted — on that fallback the pin (worker's too, pre-existing) is silently DROPPED and resume reverts
+    // to the shared knob. Same defect shape card 3388be4d fixed one field over (the transcript-root deny);
+    // left open here since it also touches the pre-existing worker pin and this file has concurrent editors.
+    //
+    // Every OTHER role keeps config's startupModeCycles verbatim — byte-identical to before this change.
     // Card 3388be4d: the role-scoped transcript-root deny (formerly applied here, card ac90ca8e /
     // 44fa586a) now lives at the single `PtyHost.createPty` spawn chokepoint (`withTranscriptRootDenyForSpawn`),
     // keyed off `opts.role` — the session's PINNED role, threaded on every spawn path regardless of
     // whether this method's own `agent`/`resolveAgentSpawn` re-resolution ever runs (it fixes the
     // agent-row-missing resume/fork fallback that used to drop the deny). Nothing to do here any more.
-    const permission = role === "worker"
+    const permission = role === "worker" || role === "assistant"
       ? { ...baselinePermission, startupModeCycles: cyclesToReachFromAcceptEdits("auto") }
       : baselinePermission;
     // Same `|| undefined` empties-to-undefined coercion today's start paths use on the agent prompt.
@@ -3754,9 +3777,11 @@ export class SessionService {
       // resumed session matches a fresh one exactly. `startupModeCycles` itself is moot on this path:
       // host.ts prefers `resumeModeTarget` when set (`??`), so pin it 0 here defensively rather than
       // relying on that precedence. Read off `resumePermission` (resolveAgentSpawn's ROLE-AWARE result),
-      // not the bare `config.permission` — a worker's startupModeCycles is pinned to reach `auto`
-      // independent of the project's own knob (see resolveAgentSpawn), and this must match so a resumed
-      // worker converges to the exact same target its fresh spawn did.
+      // not the bare `config.permission` — a worker's or an assistant's startupModeCycles is pinned to
+      // reach `auto` independent of the project's own knob (see resolveAgentSpawn), and this must match so
+      // a resumed session converges to the exact same target its fresh spawn did. (Gap: this fallback
+      // reverts to bare `config.permission` — dropping the pin — when the agent row is missing; card
+      // e98877b1, see resolveAgentSpawn's own comment.)
       permission: { ...resumePermission, startupModeCycles: 0 },
       resumeModeTarget: modeAfterCyclesFromAcceptEdits(resumePermission.startupModeCycles ?? 0),
       geometry: config.pty,
