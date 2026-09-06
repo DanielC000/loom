@@ -27,9 +27,6 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Db } from "../dist/db.js";
-import { OrchestrationMcpRouter } from "../dist/mcp/orchestration.js";
-import { engineTranscriptPath, TRANSCRIPT_AGGREGATE_CHAR_BUDGET } from "../dist/sessions/transcript.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
@@ -37,10 +34,20 @@ import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-// --- sandbox HOME so engineTranscriptPath's ~/.claude/projects/... never touches the real one ---
+// --- sandbox HOME so engineTranscriptPath's ~/.claude/projects/... never touches the real one, AND so
+// sessionScratchDir's ~/.loom/tmp/scratch/... spill files land in a throwaway LOOM_HOME (card 6a3f34fb —
+// this test used to leak `worker_transcript` spill files into the REAL LOOM_HOME because the dist imports
+// below ran as STATIC imports, hoisted before these env vars were ever set). Set BEFORE importing dist
+// (paths.ts reads LOOM_HOME at import) — mirrors transcript-turns-spill.mjs's harness. ---
 const sandboxHome = mkdtempManaged("loom-wtp-home-");
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+process.env.LOOM_HOME = path.join(sandboxHome, ".loom");
+fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+
+const { Db } = await import("../dist/db.js");
+const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { engineTranscriptPath, TRANSCRIPT_AGGREGATE_CHAR_BUDGET } = await import("../dist/sessions/transcript.js");
 
 // --- hermetic Db (own temp file) ---
 const dbFile = path.join(os.tmpdir(), `loom-wtp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);

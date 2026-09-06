@@ -18,13 +18,25 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { Db } from "../dist/db.js";
-import { OrchestrationMcpRouter } from "../dist/mcp/orchestration.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+
+// --- sandbox HOME so engineTranscriptPath's ~/.claude/projects/... never touches the real one, AND so
+// sessionScratchDir's ~/.loom/tmp/scratch/... spill files (worker_transcript is called below) can never
+// land in the REAL LOOM_HOME (card 6a3f34fb sweep finding — this test calls worker_transcript but never
+// isolated LOOM_HOME). Set BEFORE importing dist (paths.ts reads LOOM_HOME at import). ---
+const sandboxHome = mkdtempManaged("loom-lineage-home-");
+process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
+process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+process.env.LOOM_HOME = path.join(sandboxHome, ".loom");
+fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+
+const { Db } = await import("../dist/db.js");
+const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 
 // --- hermetic Db (own temp file) ---
 const dbFile = path.join(os.tmpdir(), `loom-lineage-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
@@ -154,4 +166,4 @@ for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force:
 console.log(failures === 0
   ? "\n✅ ALL PASS — worker_status/worker_transcript scope reads by recycle LINEAGE (a successor manager can see a predecessor's already-exited worker), a write op on a lineage-owned worker self-heals its stale parent link and succeeds, and a genuinely unrelated manager is still denied reads."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);
