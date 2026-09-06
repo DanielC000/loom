@@ -11,6 +11,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   - sessionEnv STILL overrides — load-bearing: proves a project's deliberate env override is NOT
 //     regressed by the three new vars (they're set BEFORE the sessionEnv merge).
 //
+// Also proves card 5d8888b6: EVERY spawn env (this is the generic, non-browser-specific seam — a plain
+// worker/manager/companion spawn goes through exactly this function) carries PYTHONIOENCODING=utf-8 +
+// PYTHONUTF8=1, and a project's deliberate override still wins (same before-sessionEnv-merge pattern as
+// the git-safety vars). THIS is the arm that discriminates the fix — a browser-testing-only test could
+// never have caught a gate that was never there for PYTHONIOENCODING/PYTHONUTF8 in the first place.
+//
 // Run: 1) build (turbo builds shared first), 2) node test/spawn-env.mjs
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -75,7 +81,16 @@ check("LOOM_WORKTREE tracks a DIFFERENT spawn cwd (not hardcoded)", buildSpawnEn
 // a deliberate sessionEnv override still wins, exactly like the git-safety vars.
 check("a sessionEnv LOOM_WORKTREE override STILL wins", buildSpawnEnv(processEnv, { ...sessionEnv, LOOM_WORKTREE: "/overridden" }, spawnCwd).LOOM_WORKTREE === "/overridden");
 
+// --- PYTHONIOENCODING/PYTHONUTF8 (card 5d8888b6): every session's spawn env, not just a browser one ---
+// (this test builds a plain env with no browser/Playwright involvement at all — the discriminating arm).
+check("PYTHONIOENCODING === 'utf-8' (every child Python decodes/encodes UTF-8, not the host's legacy code page)", env.PYTHONIOENCODING === "utf-8");
+check("PYTHONUTF8 === '1' (belt-and-suspenders: forces UTF-8 mode even if PYTHONIOENCODING is stripped somewhere downstream)", env.PYTHONUTF8 === "1");
+// a sessionEnv override still wins, exactly like the git-safety vars and LOOM_WORKTREE.
+const pyOverridden = buildSpawnEnv(processEnv, { ...sessionEnv, PYTHONIOENCODING: "cp1252", PYTHONUTF8: "0" }, spawnCwd);
+check("a sessionEnv PYTHONIOENCODING override STILL wins", pyOverridden.PYTHONIOENCODING === "cp1252");
+check("a sessionEnv PYTHONUTF8 override STILL wins", pyOverridden.PYTHONUTF8 === "0");
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — buildSpawnEnv carries GIT_PAGER/PAGER=cat + GIT_TERMINAL_PROMPT=0 (closes the git-wedges-the-worker-pty class) + LOOM_WORKTREE=spawnCwd (card 600bca4c's cwd-anchor mitigation), preserves the CLAUDE_*/CLAUDECODE scrub + undefined-skip, and a project sessionEnv override still wins for all of them (no capability regression)."
+  ? "\n✅ ALL PASS — buildSpawnEnv carries GIT_PAGER/PAGER=cat + GIT_TERMINAL_PROMPT=0 (closes the git-wedges-the-worker-pty class) + LOOM_WORKTREE=spawnCwd (card 600bca4c's cwd-anchor mitigation) + PYTHONIOENCODING=utf-8/PYTHONUTF8=1 (card 5d8888b6), preserves the CLAUDE_*/CLAUDECODE scrub + undefined-skip, and a project sessionEnv override still wins for all of them (no capability regression)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

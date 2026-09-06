@@ -1735,7 +1735,7 @@ const RECENT_OWNER_TURNS_WINDOW = 5;
  * — `checkFile` allows it (cwd is one of its two roots) rather than denying it. This is baked into
  * playwright-core's bundled classes; no `Config` field or CLI flag redirects it, so it is NOT something
  * Loom's spawn config can fix — omit the filename (auto-names into `outputDir`) or pass an absolute path
- * under `LOOM_SCRATCH_DIR` (see `browserScratchEnv` below) to actually land in scratch. `outputDir` also
+ * under `LOOM_SCRATCH_DIR` (see `scratchDirEnv` below) to actually land in scratch. `outputDir` also
  * governs the DEFAULT (implicit,
  * no-filename) artifact for every snapshot-bearing tool response, not just an explicit screenshot — the
  * MCP's default `snapshot.mode` writes the page's ARIA snapshot to `page-{timestamp}.yml` in `outputDir`
@@ -4422,6 +4422,14 @@ export function preflightWindowsCommandLine(
  * for a worker `spawnCwd` is the worktree root; for a manager/companion/plain session it's just that
  * session's own cwd (repo/project root). Set before the sessionEnv merge, like the git-safety vars, so a
  * deliberate override still wins.
+ *
+ * Also carries `PYTHONIOENCODING=utf-8` + `PYTHONUTF8=1` (card 5d8888b6) — the standard, safe way to make
+ * every child Python interpreter (e.g. one an agent invokes ad hoc, or the shared markitdown venv) decode/
+ * encode as UTF-8 regardless of the host's locale, instead of Windows' default legacy code page (`cp1252`
+ * and similar), which raises `UnicodeEncodeError` on ordinary Loom data (arrows, emoji, box-drawing —
+ * verified first-hand on this project's own board JSON). This is a GLOBAL interpreter-behavior change for
+ * every Python child this spawn's env reaches, not a narrow tweak — set before the sessionEnv merge, like
+ * every other var here, so a project that needs a different Python encoding can still override it.
  */
 export function buildSpawnEnv(
   processEnv: Record<string, string | undefined>,
@@ -4439,27 +4447,27 @@ export function buildSpawnEnv(
   env.PAGER = "cat";
   env.GIT_TERMINAL_PROMPT = "0";
   env.LOOM_WORKTREE = spawnCwd;
+  env.PYTHONIOENCODING = "utf-8";
+  env.PYTHONUTF8 = "1";
   Object.assign(env, sessionEnv);
   return env;
 }
 
 /**
- * The `LOOM_SCRATCH_DIR` env addition for a browser-testing spawn — `@playwright/mcp`'s `checkFile`
- * guard only allows a write inside `--output-dir` (which `buildMcpServers` always points at
- * `sessionScratchDir`) or the subprocess's inherited cwd, so a browser-capable agent needs to be TOLD
- * that path to stage a `browser_file_upload` source file or persist an explicit-path screenshot inside
- * an allowed root — its generic harness scratchpad is neither.
+ * The `LOOM_SCRATCH_DIR` env addition — an out-of-tree, per-session scratch root, told to EVERY session
+ * (card 5d8888b6; widened from the original browser-testing-only gate). For a browser-testing spawn,
+ * `@playwright/mcp`'s `checkFile` guard only allows a write inside `--output-dir` (which
+ * `buildMcpServers` always points at `sessionScratchDir`) or the subprocess's inherited cwd, so that
+ * agent needs to be TOLD this exact path to stage a `browser_file_upload` source file or persist an
+ * explicit-path screenshot inside an allowed root. Every other agent benefits too — anything wanting a
+ * repo-external place to stage a throwaway file (e.g. the shared Python venv / document-conversion
+ * tooling) previously had no such pointer outside a browser-testing spawn.
  *
- * Gated on `mcpServers.playwright` itself (the ACTUAL mount decision), not a raw `browserTesting` flag,
- * so this can never disagree with whether the Playwright MCP mounted — a resolution failure (see
- * `playwrightMcpServer`) leaves both the MCP and this var absent. Returns `{}` for every other spawn
- * (fully additive — byte-identical env when off).
+ * `sessionId`-only now (the `mcpServers` gate is gone) — unconditional, so this is additive-widening,
+ * never narrowing: a browser-testing spawn still gets exactly the same value it always did.
  */
-export function browserScratchEnv(
-  mcpServers: Record<string, unknown>,
-  sessionId: string,
-): Record<string, string> {
-  return mcpServers.playwright ? { LOOM_SCRATCH_DIR: sessionScratchDir(sessionId) } : {};
+export function scratchDirEnv(sessionId: string): Record<string, string> {
+  return { LOOM_SCRATCH_DIR: sessionScratchDir(sessionId) };
 }
 
 /**
@@ -5890,14 +5898,16 @@ export class PtyHost {
     if (env.LOOM_OBSIDIAN_AUTOSTART === "1" && !env.LOOM_OBSIDIAN_PREFLIGHT) {
       env.LOOM_OBSIDIAN_PREFLIGHT = ENSURE_OBSIDIAN_SCRIPT;
     }
-    // LOOM_SCRATCH_DIR: tell a browser-testing agent WHERE its Playwright tools' own write boundary is.
-    // See browserScratchEnv for the gating rationale. Ensure the dir actually EXISTS (best-effort) so the
-    // agent can Write a file into it immediately (e.g. to stage a browser_file_upload source).
-    const scratchEnv = browserScratchEnv(mcpServers, opts.sessionId);
-    if (scratchEnv.LOOM_SCRATCH_DIR) {
-      try { fs.mkdirSync(scratchEnv.LOOM_SCRATCH_DIR, { recursive: true }); } catch { /* best-effort; never block spawn */ }
-      Object.assign(env, scratchEnv);
-    }
+    // LOOM_SCRATCH_DIR: tell EVERY session where its out-of-tree scratch root is (card 5d8888b6 — see
+    // scratchDirEnv's doc for why this is no longer browser-only). Eagerly mkdir it, best-effort, for
+    // every session: cheap/no-op if it already exists, and simpler than threading lazy on-demand
+    // creation through every consumer (a browser-testing spawn already did this unconditionally; this
+    // just makes every OTHER spawn match that same eager-creation shape rather than inventing a second
+    // one). Never blocks spawn on failure.
+    const scratchEnv = scratchDirEnv(opts.sessionId);
+    const scratchDir = sessionScratchDir(opts.sessionId);
+    try { fs.mkdirSync(scratchDir, { recursive: true }); } catch { /* best-effort; never block spawn */ }
+    Object.assign(env, scratchEnv);
 
     // Belt-and-suspenders (agent-tooling P4): redact any capability secret out of the LOGGED argv even
     // though mcpConfigPath should already keep it off `args` itself when present — never log raw secret
