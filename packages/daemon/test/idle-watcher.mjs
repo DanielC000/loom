@@ -1356,6 +1356,180 @@ const DROPPED_BOARD = {
   cleanup(e);
 }
 
+// ===== (23) card 275ac184 — `board_quiet_cause`: the quiet-board CAUSE PARTITION + RELEASE SET =====
+// Emitted at the SAME `nothingElseActionable` skip covered by (1c)/(1j)/(18) above — VISIBILITY only, no
+// predicate/nudge/gating change (every check above this section still passes byte-identical). These
+// tests read the durable event itself (db.listEvents), not e.enqueued (no nudge fires on this path).
+// Priority order for `causeCounts` (recovered verbatim from the prior Code Reviewer's report):
+// ownerRequest → ownerHeld → managerReview → managerDeferred → deadEndLane → leadOwnerFlow (request FIRST
+// — the OPPOSITE of an intuitive "most specific cause wins" order). `releasable` is a SEPARATE
+// computation (isSoleBlockerPendingRequest) that ignores the label entirely and asks "is the Request the
+// ONE AND ONLY block", so a card can be labeled `ownerRequest` (counted in `ownerBlocked`) while still
+// correctly excluded from `releasable` because it's ALSO held/deferred.
+const quietEvents = (e, id) => e.db.listEvents(id).filter((ev) => ev.kind === "board_quiet_cause");
+const CAUSE_KEYS = ["ownerRequest", "ownerHeld", "managerReview", "managerDeferred", "deadEndLane", "leadOwnerFlow", "unknown"];
+// Every OTHER cause key besides `expectedKey` reads 0 — the exhaustiveness assertion for a single-cause board.
+const otherCausesAreZero = (cc, expectedKey) => CAUSE_KEYS.filter((k) => k !== expectedKey).every((k) => (cc?.[k] ?? 0) === 0);
+{
+  // (23a) a held-only board (mirrors (1c)) → causeCounts.ownerHeld===1, every other cause 0,
+  // ownerBlocked=1/selfParked=0 → classification=starved-on-owner, releasable empty (no pending Request).
+  const e = makeEnv();
+  seedManager(e, "mgr-quiet-held");
+  seedTitled(e, "todo", "owner-gated decision", true, false);
+  e.watcher.tick(NOW);
+  const evs = quietEvents(e, "mgr-quiet-held");
+  check("(23a) fires exactly one board_quiet_cause event", evs.length === 1);
+  const d = evs[0]?.detail ?? {};
+  check("(23a) reason=nothing-actionable, totalNonTerminal=1", d.reason === "nothing-actionable" && d.totalNonTerminal === 1);
+  check("(23a) causeCounts.ownerHeld=1, every other cause 0", d.causeCounts?.ownerHeld === 1 && otherCausesAreZero(d.causeCounts, "ownerHeld"));
+  check("(23a) ownerBlocked=1, selfParked=0, classification=starved-on-owner",
+    d.ownerBlocked === 1 && d.selfParked === 0 && d.classification === "starved-on-owner");
+  check("(23a) questionIds and releasable are both empty (no pending Request involved)",
+    (d.questionIds ?? []).length === 0 && (d.releasable ?? []).length === 0);
+  cleanup(e);
+}
+{
+  // (23b) a DOCUMENTED-deferral-only board (mirrors the (1j) negative control) → causeCounts.managerDeferred===1,
+  // selfParked=1/ownerBlocked=0 → classification=self-parked.
+  const e = makeEnv();
+  seedManager(e, "mgr-quiet-deferred");
+  seedDeferred(e, "todo", { title: "owner-gated, upstream release wait", deferredReason: "waiting on upstream v2 release" });
+  e.watcher.tick(NOW);
+  const d = quietEvents(e, "mgr-quiet-deferred")[0]?.detail ?? {};
+  check("(23b) causeCounts.managerDeferred=1, every other cause 0",
+    d.causeCounts?.managerDeferred === 1 && otherCausesAreZero(d.causeCounts, "managerDeferred"));
+  check("(23b) ownerBlocked=0, selfParked=1, classification=self-parked",
+    d.ownerBlocked === 0 && d.selfParked === 1 && d.classification === "self-parked");
+  check("(23b) questionIds and releasable are both empty", (d.questionIds ?? []).length === 0 && (d.releasable ?? []).length === 0);
+  cleanup(e);
+}
+{
+  // (23c) a PENDING-request-only board (mirrors the (1j) pending-request negative control, but WITHOUT the
+  // ALSO-deferred flag this time) → causeCounts.ownerRequest===1 AND the release set names exactly this
+  // card, since the Request is its SOLE block.
+  const e = makeEnv();
+  seedManager(e, "mgr-quiet-request");
+  seedTitled(e, "todo", "pending-request card", false, false);
+  const cardId = e.db.listTasks(e.projId)[0].id;
+  const qid = seedQuestion(e, "mgr-quiet-request", cardId, "pending");
+  e.watcher.tick(NOW);
+  const d = quietEvents(e, "mgr-quiet-request")[0]?.detail ?? {};
+  check("(23c) causeCounts.ownerRequest=1, every other cause 0",
+    d.causeCounts?.ownerRequest === 1 && otherCausesAreZero(d.causeCounts, "ownerRequest"));
+  check("(23c) ownerBlocked=1, selfParked=0, classification=starved-on-owner",
+    d.ownerBlocked === 1 && d.selfParked === 0 && d.classification === "starved-on-owner");
+  check("(23c) questionIds names this exact Request", (d.questionIds ?? []).length === 1 && d.questionIds[0] === qid);
+  check("(23c) the release set names this exact Request → this exact card (answering it releases 1 card)",
+    (d.releasable ?? []).length === 1 && d.releasable[0].questionId === qid && d.releasable[0].taskIds.length === 1 && d.releasable[0].taskIds[0] === cardId);
+  cleanup(e);
+}
+{
+  // (23d) THE LOAD-BEARING TEST: a card that is BOTH held AND request-blocked. Per the recovered priority
+  // order, `ownerRequest` is checked FIRST — so this card is labeled ownerRequest (NOT ownerHeld), and
+  // BOTH count toward `ownerBlocked` either way (an owner-facing block is present, full stop). The real
+  // assertion is the RELEASE SET: it must be EMPTY — answering the Request would NOT actually release
+  // this card (still held) — exactly the "answering releases ZERO cards" finding the card exists to make
+  // visible, computed independently of which label the card got.
+  const e = makeEnv();
+  seedManager(e, "mgr-quiet-held-and-request");
+  seedTitled(e, "todo", "held AND request-blocked", true, false);
+  const cardId = e.db.listTasks(e.projId)[0].id;
+  const qid = seedQuestion(e, "mgr-quiet-held-and-request", cardId, "pending");
+  e.watcher.tick(NOW);
+  const d = quietEvents(e, "mgr-quiet-held-and-request")[0]?.detail ?? {};
+  check("(23d) ownerRequest wins the LABEL (checked first), not ownerHeld",
+    d.causeCounts?.ownerRequest === 1 && d.causeCounts?.ownerHeld === 0);
+  check("(23d) still counts as ownerBlocked=1 (an owner-facing block IS present)", d.ownerBlocked === 1 && d.classification === "starved-on-owner");
+  check("(23d) questionIds still names the Request (it IS linked to an ownerRequest-caused card)",
+    (d.questionIds ?? []).length === 1 && d.questionIds[0] === qid);
+  check("(23d) but the release set is EMPTY — answering the Request would not release this held card", (d.releasable ?? []).length === 0);
+  cleanup(e);
+}
+{
+  // (23e) a legacy 8-char task_id-PREFIX-linked pending Request (mirrors (21)) is still correctly resolved
+  // into both questionIds and the release set — the batched query does its own prefix matching,
+  // independent of the existing hasPendingQuestion closure used to build the cause partition.
+  const e = makeEnv();
+  seedManager(e, "mgr-quiet-legacy-prefix");
+  const taskId = randomUUID();
+  e.db.insertTask({ id: taskId, projectId: e.projId, title: "legacy-prefix task", body: "", columnKey: "todo", position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+  const qid = seedQuestion(e, "mgr-quiet-legacy-prefix", taskId.slice(0, 8), "pending");
+  e.watcher.tick(NOW);
+  const d = quietEvents(e, "mgr-quiet-legacy-prefix")[0]?.detail ?? {};
+  check("(23e) causeCounts.ownerRequest=1 via the legacy prefix match", d.causeCounts?.ownerRequest === 1);
+  check("(23e) the release set resolves the legacy prefix to the real task id",
+    (d.releasable ?? []).length === 1 && d.releasable[0].questionId === qid && d.releasable[0].taskIds[0] === taskId);
+  cleanup(e);
+}
+{
+  // (23f) the "own-pending-request" reason (truly empty board, session's OWN unlinked Request, mirrors
+  // (18a)) → totalNonTerminal=0, every cause 0, classification=session-blocked, questionIds/releasable
+  // both empty (the manager's own Request carries no taskId, so it has no card to release).
+  const e = makeEnv();
+  seedManager(e, "mgr-quiet-own-request");
+  seedQuestion(e, "mgr-quiet-own-request", null, "pending");
+  e.watcher.tick(NOW);
+  const d = quietEvents(e, "mgr-quiet-own-request")[0]?.detail ?? {};
+  check("(23f) reason=own-pending-request, totalNonTerminal=0, classification=session-blocked",
+    d.reason === "own-pending-request" && d.totalNonTerminal === 0 && d.classification === "session-blocked");
+  check("(23f) every cause is 0, ownerBlocked=0, selfParked=0",
+    CAUSE_KEYS.every((k) => (d.causeCounts?.[k] ?? 0) === 0) && d.ownerBlocked === 0 && d.selfParked === 0);
+  check("(23f) questionIds and releasable are both empty", (d.questionIds ?? []).length === 0 && (d.releasable ?? []).length === 0);
+  cleanup(e);
+}
+{
+  // (23f2) THE MIXED CASE, matching the card's own fleet-wide finding: a board with ONE held card and ONE
+  // separately-deferred card (no requests at all) → ownerBlocked>0 AND selfParked>0 → classification=mixed.
+  const e = makeEnv();
+  seedManager(e, "mgr-quiet-mixed");
+  seedTitled(e, "todo", "held card", true, false);
+  seedDeferred(e, "todo", { title: "deferred card", deferredReason: "waiting on release" });
+  e.watcher.tick(NOW);
+  const d = quietEvents(e, "mgr-quiet-mixed")[0]?.detail ?? {};
+  check("(23f2) ownerBlocked=1 (the held card), selfParked=1 (the deferred card), classification=mixed",
+    d.ownerBlocked === 1 && d.selfParked === 1 && d.classification === "mixed");
+  cleanup(e);
+}
+{
+  // (23g) EXACTLY-ONCE per quiet episode: a second tick with the SAME quiet board does NOT re-fire.
+  const e = makeEnv();
+  seedManager(e, "mgr-quiet-once");
+  seedTitled(e, "todo", "owner-gated decision", true, false);
+  e.watcher.tick(NOW);
+  e.watcher.tick(NOW);
+  check("(23g) a second tick of the SAME quiet board does not emit a second event", quietEvents(e, "mgr-quiet-once").length === 1);
+  cleanup(e);
+}
+{
+  // (23h) a NEW episode (the manager goes busy, then returns to the SAME quiet reason) DOES re-fire — the
+  // exactly-once guarantee is per-EPISODE, never a permanent one-shot for the session's whole lifetime.
+  // setBusy stamps last_activity to the REAL wall clock (not this file's fixed NOW), so the later ticks
+  // pass an explicit LATER `now` guaranteed to postdate that real stamp — otherwise idleForMin would go
+  // negative against the fixed NOW and the manager would never look idle again within this test.
+  const e = makeEnv();
+  const LATER = new Date("2027-01-01T00:00:00.000Z");
+  seedManager(e, "mgr-quiet-episode");
+  seedTitled(e, "todo", "owner-gated decision", true, false);
+  e.watcher.tick(NOW);
+  check("(23h) episode 1 fires one event", quietEvents(e, "mgr-quiet-episode").length === 1);
+  e.db.setBusy("mgr-quiet-episode", true);
+  e.watcher.tick(LATER); // busy → skips before the quiet check, breaking the episode
+  e.db.setBusy("mgr-quiet-episode", false);
+  e.watcher.tick(LATER); // idle again (relative to LATER) with the SAME quiet cause → a NEW episode
+  check("(23h) a second, distinct quiet episode fires a second event", quietEvents(e, "mgr-quiet-episode").length === 2);
+  cleanup(e);
+}
+{
+  // (23i) a genuinely-actionable board (mirrors baseline (1b)) never emits this event at all — it's scoped
+  // strictly to the `nothingElseActionable` skip, never fired alongside an ordinary nudge.
+  const e = makeEnv();
+  seedManager(e, "mgr-quiet-none");
+  seedTodo(e, 3);
+  e.watcher.tick(NOW);
+  check("(23i) an actionable board emits NO board_quiet_cause event", quietEvents(e, "mgr-quiet-none").length === 0);
+  cleanup(e);
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — IdleWatcher nudges an idle, watching, unpaused, under-cap, context-roomy MANAGER (with no live BUSY worker) exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-BUSY-worker / human-paused / recently-nudged / disabled(0) / recycle-pending; a live IDLE worker no longer shields the manager (board card b9d479b0) and the nudge copy reflects that honestly; ESCALATES ONCE at the unanswered cap (one idle_escalated event + policy→suppressed, no re-emit on a later tick); honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); the zod orchestrationOverride now accepts the four idle config keys (strictness intact); the NEW idle-WORKER periodic coverage re-nudges a live/idle/unreported/stale worker on its own cadence while staying silent when disabled, under the window, already-reported, human-paused, or recently re-nudged; a PLATFORM (Lead) session (card 98b3725c) gets the SAME full-trigger/silent/escalate coverage a manager does, alongside a manager in the same project/tick without interference; a platform-role session now gets its OWN idle-nudge copy (no orchestration-loop/pick-up-next/N-actionable framing) and discounts parked-lane (decision-gated/owner-flow) cards from its actionable count, while the manager's copy and parked-lane counting stay byte-identical (card f98f3e43); and a session's OWN open (pending) owner question_ask — regardless of taskId — suppresses ITS idle nudge ONLY when there's no other actionable work (card cb56cf80, narrowed to SESSION-scoped + no-other-actionable-work by card 8e87f3b5), resuming normally once answered, when there's no pending own-Request, when other actionable work exists despite the pending Request, or for a fresh non-recycle successor that never filed the Request itself — without being fooled by an unrelated agent/session's pending Request."
   : `\n❌ ${failures} FAILURE(S).`);

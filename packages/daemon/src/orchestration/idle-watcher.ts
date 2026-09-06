@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolveConfig, contextWindowForModel, columnKeyForRole } from "@loom/shared";
-import type { OrchestrationEventKind } from "@loom/shared";
+import type { OrchestrationEventKind, Task } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
 import type { QueueSource, TurnRoute, QueuedMessageKind } from "../pty/host.js";
@@ -485,7 +485,13 @@ export class IdleWatcher {
         // cards exist but none of them are actionable" — name the two apart rather than folding both into
         // one generic "nothing-actionable".
         const reason = nonTerminal.length === 0 && hasOwnPendingRequest ? "own-pending-request" : "nothing-actionable";
+        // Card 275ac184: capture whether this is a fresh episode BEFORE logSkipIfChanged overwrites the
+        // tracker (it doesn't return that itself) — the board_quiet_cause event fires exactly once per
+        // quiet EPISODE, on the transition INTO this reason, never once per tick for a board that stays
+        // quiet for the same reason across many ticks.
+        const isNewQuietEpisode = this.lastSkipReason.get(m.id) !== reason;
         this.logSkipIfChanged(m.id, reason);
+        if (isNewQuietEpisode) this.emitQuietBoardCauseEvent(m.id, m.projectId, nowIso, reason, nonTerminal, reviewKey, excludedColumnKeys, parkedKey, isPlatform, hasPendingQuestion);
         continue;
       }
       const openTodos = openCards.length;
@@ -573,6 +579,139 @@ export class IdleWatcher {
     this.tickIdleWorkers(nowMs, nowIso);
     this.tickAnsweredStuckQuestions(nowMs);
     this.tickStaleRequests(nowMs, nowIso);
+  }
+
+  /**
+   * Card 275ac184's DOCUMENTED priority order for the cause PARTITION (causeCounts) below — recovered
+   * verbatim from the prior Code Reviewer's report (the lead's own correction after locating that session):
+   * first match wins, so a card matching more than one predicate is attributed to exactly ONE cause.
+   * `ownerRequest` (a pending owner Request) is checked FIRST — a card that is ALSO held/deferred/excluded/
+   * parked is still labeled `ownerRequest`, never its other condition. This partition answers "is an
+   * owner-facing block present on this card AT ALL", not "which block would you fix first" — that's why
+   * `ownerRequest` outranks everything else, the OPPOSITE of what you'd want for the RELEASE computation
+   * below (which needs the narrower "is this the ONLY block" question, computed separately by
+   * `isSoleBlockerPendingRequest`, never inferred from this label). `ownerHeld` (the owner's explicit
+   * brake) is next, then `managerReview` (structurally unreachable here — a review-lane card would have
+   * kept the `nothingElseActionable` skip from firing at all, since `hasReviewCards` guards it — kept in
+   * the chain only to document the FULL priority order this partition is defined over), then
+   * `managerDeferred` (the manager's own sequencing marker), then the two structural lanes
+   * (`deadEndLane` — an `excludeFromIdleWatchdog` column — and `leadOwnerFlow` — a platform Lead's own
+   * decision-gated "parked" lane).
+   * "unknown" is a defensive fallback that should be UNREACHABLE whenever this is called from the
+   * `nothingElseActionable` skip site (openCards.length===0 there already proves every non-terminal card
+   * matches at least one of the six predicates above) — a non-zero unknown count is a genuine bug signal,
+   * never a real "cause", and is reported as its own bucket rather than silently folded into another one.
+   */
+  private causeForQuietTask(
+    t: Task,
+    reviewKey: string | undefined,
+    excludedColumnKeys: ReadonlySet<string>,
+    parkedKey: string | undefined,
+    isPlatform: boolean,
+    hasPendingQuestion: (taskId: string) => boolean,
+  ): "ownerRequest" | "ownerHeld" | "managerReview" | "managerDeferred" | "deadEndLane" | "leadOwnerFlow" | "unknown" {
+    if (hasPendingQuestion(t.id)) return "ownerRequest";
+    if (t.held === true) return "ownerHeld";
+    if (t.columnKey === reviewKey) return "managerReview";
+    if (t.deferred === true && t.deferredStuck !== true) return "managerDeferred";
+    if (excludedColumnKeys.has(t.columnKey)) return "deadEndLane";
+    if (isPlatform && t.columnKey === parkedKey) return "leadOwnerFlow";
+    return "unknown";
+  }
+
+  /**
+   * The RELEASE computation — deliberately INDEPENDENT of causeForQuietTask's priority-ordered LABEL
+   * above. A card can be labeled `ownerRequest` there (request checked first) while ALSO being held or
+   * deferred — this asks the narrower, honest question the label alone can't answer: is the pending
+   * Request the card's ONE AND ONLY blocking condition, such that answering it TODAY would actually make
+   * the card actionable? This is the mechanism behind the card's own fleet-wide finding — "answering all
+   * N pending Requests here would release ZERO cards" — a card that's ALSO deferred stays blocked no
+   * matter what the Request's answer is.
+   */
+  private isSoleBlockerPendingRequest(
+    t: Task,
+    excludedColumnKeys: ReadonlySet<string>,
+    parkedKey: string | undefined,
+    isPlatform: boolean,
+    hasPendingQuestion: (taskId: string) => boolean,
+  ): boolean {
+    return hasPendingQuestion(t.id)
+      && t.held !== true
+      && (t.deferred !== true || t.deferredStuck === true)
+      && !excludedColumnKeys.has(t.columnKey)
+      && !(isPlatform && t.columnKey === parkedKey);
+  }
+
+  /**
+   * Card 275ac184 — emits the `board_quiet_cause` event exactly once per quiet episode (caller already
+   * gated on the reason having just CHANGED into "nothing-actionable"/"own-pending-request"). Builds the
+   * mutually-exclusive `causeCounts` partition (causeForQuietTask above) over every non-terminal card, the
+   * `ownerBlocked`/`selfParked` roll-ups + coarse `classification`, and the RELEASE SET (isSoleBlockerPendingRequest
+   * above): for each pending Request linked to a non-terminal card, the card id(s) it would ACTUALLY
+   * release if answered today. `db.listPendingQuestionsWithTaskId` is ONE batched query for the whole
+   * project (never a per-card round trip) — the legacy 8-char task-id-PREFIX matching mirrors
+   * listQuestionsForTask/listPendingQuestionTaskIds exactly (see that method's own doc).
+   */
+  private emitQuietBoardCauseEvent(
+    managerId: string,
+    projectId: string,
+    nowIso: string,
+    reason: "nothing-actionable" | "own-pending-request",
+    nonTerminal: Task[],
+    reviewKey: string | undefined,
+    excludedColumnKeys: ReadonlySet<string>,
+    parkedKey: string | undefined,
+    isPlatform: boolean,
+    hasPendingQuestion: (taskId: string) => boolean,
+  ): void {
+    const { db } = this.deps;
+    const causeCounts = {
+      ownerRequest: 0, ownerHeld: 0, managerReview: 0, managerDeferred: 0, deadEndLane: 0, leadOwnerFlow: 0, unknown: 0,
+    };
+    const soleBlockerTaskIds = new Set<string>();
+    for (const t of nonTerminal) {
+      const cause = this.causeForQuietTask(t, reviewKey, excludedColumnKeys, parkedKey, isPlatform, hasPendingQuestion);
+      causeCounts[cause]++;
+      if (this.isSoleBlockerPendingRequest(t, excludedColumnKeys, parkedKey, isPlatform, hasPendingQuestion)) soleBlockerTaskIds.add(t.id);
+    }
+    const ownerBlocked = causeCounts.ownerRequest + causeCounts.ownerHeld;
+    const selfParked = causeCounts.managerReview + causeCounts.managerDeferred + causeCounts.deadEndLane + causeCounts.leadOwnerFlow;
+    const classification: "starved-on-owner" | "self-parked" | "mixed" | "session-blocked" | "none" =
+      reason === "own-pending-request" ? "session-blocked"
+      : ownerBlocked > 0 && selfParked === 0 ? "starved-on-owner"
+      : selfParked > 0 && ownerBlocked === 0 ? "self-parked"
+      : ownerBlocked > 0 && selfParked > 0 ? "mixed"
+      : "none"; // defensive — unreachable: reason==="nothing-actionable" implies nonTerminal.length>0, and
+                // openCards.length===0 there already proves ownerBlocked+selfParked>0 (every card matched)
+
+    const releaseByQuestion = new Map<string, string[]>();
+    const questionIds = new Set<string>();
+    if (causeCounts.ownerRequest > 0) {
+      const nonTerminalIds = new Set(nonTerminal.map((t) => t.id));
+      for (const row of db.listPendingQuestionsWithTaskId(projectId)) {
+        const matchedTaskIds = row.taskId.length === 8
+          ? nonTerminal.filter((t) => t.id.startsWith(`${row.taskId}-`)).map((t) => t.id)
+          : nonTerminalIds.has(row.taskId) ? [row.taskId] : [];
+        if (matchedTaskIds.length === 0) continue; // this Request isn't linked to a card on THIS board's non-terminal set
+        questionIds.add(row.id);
+        const releasedTaskIds = matchedTaskIds.filter((id) => soleBlockerTaskIds.has(id));
+        if (releasedTaskIds.length > 0) releaseByQuestion.set(row.id, [...(releaseByQuestion.get(row.id) ?? []), ...releasedTaskIds]);
+      }
+    }
+    if (causeCounts.unknown > 0) {
+      // eslint-disable-next-line no-console
+      console.log(`[idle-watcher] board_quiet_cause for ${managerId}: ${causeCounts.unknown} card(s) matched NO known cause — investigate`);
+    }
+    db.appendEvent({
+      id: randomUUID(), ts: nowIso, managerSessionId: managerId, kind: "board_quiet_cause",
+      detail: {
+        reason, totalNonTerminal: nonTerminal.length, causeCounts, ownerBlocked, selfParked, classification,
+        questionIds: [...questionIds],
+        releasable: [...releaseByQuestion.entries()].map(([questionId, taskIds]) => ({ questionId, taskIds })),
+      },
+    });
+    // eslint-disable-next-line no-console
+    console.log(`[idle-watcher] board_quiet_cause ${managerId} reason=${reason} classification=${classification} causeCounts=${JSON.stringify(causeCounts)} releasable=${releaseByQuestion.size}`);
   }
 
   /**

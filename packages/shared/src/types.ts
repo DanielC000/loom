@@ -1311,6 +1311,60 @@ export type OrchestrationEventKind =
   // consumed/cancelled Request simply drops out of the stale-scan's `state = 'pending'` filter — no
   // separate clear event exists (mirrors `context_escalated`'s "no context_report to clear it" shape).
   | "request_escalated"
+  // Card 275ac184 — STARVED-ON-OWNER vs. CONVERGED are structurally indistinguishable from outside: the
+  // idle watchdog's existing `nothingElseActionable` skip (idle-watcher.ts, ~:482) correctly suppresses a
+  // manager/Lead when every non-terminal card is non-actionable (a pending owner Request / held / in
+  // review / deferred(non-stuck) / an `excludeFromIdleWatchdog` lane / a platform-parked-lane card) — but a
+  // board silenced entirely by owner Requests and a board that has genuinely converged both emit the SAME
+  // silence today. This event adds VISIBILITY ONLY at that EXISTING skip — no predicate, nudge, or gating
+  // decision changes (re-adding nudge pressure for owner-gated cards is the exact thing card `8e87f3b5`
+  // removed on purpose). Filed under the MANAGER/PLATFORM session (managerSessionId = m.id); `detail`
+  // carries { reason: "nothing-actionable" | "own-pending-request", totalNonTerminal, causeCounts: {
+  // ownerRequest, ownerHeld, managerReview, managerDeferred, deadEndLane, leadOwnerFlow, unknown },
+  // ownerBlocked, selfParked, classification: "starved-on-owner" | "self-parked" | "mixed" |
+  // "session-blocked", questionIds, releasable: [{ questionId, taskIds }] }.
+  //
+  // `causeCounts` is a MUTUALLY EXCLUSIVE, EXHAUSTIVE partition of every non-terminal card at fire time,
+  // assigned by a DOCUMENTED priority order (first match wins, see `IdleWatcher.causeForQuietTask`):
+  // ownerRequest → ownerHeld → managerReview → managerDeferred → deadEndLane → leadOwnerFlow. `ownerRequest`
+  // is checked FIRST — a card that is BOTH held/deferred AND request-blocked is labeled `ownerRequest`, not
+  // its other condition — because this partition answers "does an owner-facing block apply here AT ALL",
+  // not "which block would you fix first". `managerReview` is structurally always 0 at this call site (a
+  // review-lane card would have kept the skip from firing at all — `hasReviewCards` guards it) but is kept
+  // in the enumeration for a complete, self-documenting priority chain. `causeCounts.unknown` should always
+  // read 0 — a non-zero value means some non-terminal card matched NONE of the six predicates despite the
+  // skip firing, a genuine bug signal, never a real cause. `ownerBlocked` = ownerRequest + ownerHeld (an
+  // owner-facing block is present, whatever else also applies); `selfParked` = managerReview +
+  // managerDeferred + deadEndLane + leadOwnerFlow (the manager/Lead's own sequencing, with no owner block
+  // present). `classification` is the coarse read: `starved-on-owner` (ownerBlocked>0, selfParked===0),
+  // `self-parked` (selfParked>0, ownerBlocked===0), `mixed` (both >0 — real boards are usually this shape,
+  // per the card's own fleet measurement, and for `mixed` the counts matter more than the single label),
+  // `session-blocked` (reason === "own-pending-request": a truly empty board parked only on the session's
+  // OWN unlinked Request).
+  //
+  // `releasable` is a SEPARATE computation from `causeCounts` — never inferred from the `ownerRequest`
+  // label, which (by design, see above) also fires for a card that's ALSO held/deferred/excluded/parked.
+  // For each PENDING Request linked to a non-terminal card, `releasable` names that card ONLY when the
+  // Request is the card's ONE AND ONLY blocking condition (not held, not deferred(non-stuck), not in an
+  // excluded/parked lane) — i.e. answering it TODAY would actually make the card actionable.
+  // `questionIds` is the broader set: every pending Request linked to ANY `ownerRequest`-caused card,
+  // whether or not answering it would actually release anything — the render surface uses
+  // `questionIds.length` vs. the total cards named across `releasable` to say "answering your N Requests
+  // releases M cards", which can honestly be M=0 (the fleet-wide finding that motivated this card: a
+  // Request whose card is ALSO deferred is correctly counted in `questionIds` but excluded from
+  // `releasable`). `taskIds` is almost always one card, but a single Request can carry a legacy 8-char
+  // task-id PREFIX (pre commit a3f1319f) matching more than one.
+  //
+  // Emitted EXACTLY ONCE per quiet EPISODE via the existing `lastSkipReason` change-tracker
+  // (idle-watcher.ts) — re-fires only once the reason changes away from and back to one of the two `reason`
+  // values (a real episode boundary), never once per tick while the board stays quiet for the same reason.
+  // No corresponding "cleared" event exists (mirrors `context_escalated`'s "no context_report to clear it"
+  // shape) — a reader (see `attention.ts`) shows the latest one per LIVE manager/platform session; it stops
+  // being fetched once that session exits. NEVER a replacement for the existing `[idle-watcher] skip …
+  // reason=…` console log (idle-watcher.ts's `logSkipIfChanged`) — that log is deliberately contentless
+  // (card `cdd10965` DoD-3, a shared multi-tenant host log: session id + a bare reason code only, never a
+  // count or a card id) and must stay that way; this event is the carrier for the counts/ids instead.
+  | "board_quiet_cause"
   // A `held` card was CLEARED (card 9b0373c0, Platform-Audit bb23d15a) — the un-brake audit trail. Emitted
   // from the ONE agent-facing choke point (`updateProjectTask`, mcp/tasks.ts — shared by `tasks_update` AND
   // the Lead's cross-project `project_task_update`) on an agent clearing its OWN agent-set hold (a
@@ -1582,7 +1636,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   set_worker_mode: true,
   flush_worker_composer: true, poll_fired: true, poll_fire_failed: true, poll_baseline_seeded: true,
   poll_id_guard_tripped: true, event_trigger_fired: true, event_trigger_throttled: true,
-  end_me_refused: true, end_me_complete: true, question_asked: true, request_escalated: true, task_held_cleared: true,
+  end_me_refused: true, end_me_complete: true, question_asked: true, request_escalated: true, board_quiet_cause: true, task_held_cleared: true,
   session_rate_limited: true, rate_limit_resumed: true, rate_limit_recovered: true,
   rate_limit_bailed: true, usage_latch_armed: true, usage_latch_cleared: true,
   worker_spawn_usage_blocked: true, companion_alert_pushed: true, companion_alert_deferred: true,

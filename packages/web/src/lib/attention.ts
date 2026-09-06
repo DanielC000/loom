@@ -188,6 +188,17 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     if (e.kind === "context_escalated") latestContext.set(e.managerSessionId, e);
   }
 
+  // Quiet-board cause (card 275ac184, IdleWatcher's `nothingElseActionable` skip): a manager/Lead
+  // suppressed because every non-terminal card is non-actionable (held/deferred/excluded-lane/
+  // platform-parked/pending-request) reads identically whether it's genuinely converged or starved on
+  // the owner — this surfaces WHY, and whether answering the pending Request(s) involved would actually
+  // release anything. No "cleared" event exists (mirrors context_escalated's own shape) — the latest one
+  // per LIVE manager simply surfaces until that session exits or a newer episode's event replaces it.
+  const latestQuiet = new Map<string, OrchestrationEvent>();
+  for (const e of sortedEvents) {
+    if (e.kind === "board_quiet_cause") latestQuiet.set(e.managerSessionId, e);
+  }
+
   const items: AttentionItem[] = [];
   // A blocked human is the wave's tightest bottleneck, so a pending DECISION reads first. Only PENDING
   // questions surface here (an answered one is waiting on the MANAGER's pickup, not the human).
@@ -260,6 +271,37 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     items.push({
       key: `ce-${e.id}`, tone: "red", kind: "CONTEXT OVERFLOW", sessionId: e.managerSessionId,
       text: `manager ${e.managerSessionId.slice(0, 8)} — ignored ${detail.unanswered ?? "?"} recycle nudges at ~${detail.pct ?? "?"}% context; will overflow without a handoff`,
+    });
+  }
+  for (const e of latestQuiet.values()) {
+    const detail = (e.detail ?? {}) as {
+      reason?: string; totalNonTerminal?: number; causeCounts?: Record<string, number>;
+      questionIds?: string[]; releasable?: { questionId: string; taskIds: string[] }[];
+    };
+    const cc = detail.causeCounts ?? {};
+    const releasable = detail.releasable ?? [];
+    const releasedCardCount = releasable.reduce((n, r) => n + r.taskIds.length, 0);
+    const questionCount = (detail.questionIds ?? []).length;
+    // Self-parked (the manager's own sequencing — no owner block present) and owner-blocked (a pending
+    // Request and/or a held card) are reported as SEPARATE phrases, mirroring `causeCounts`' own
+    // ownerBlocked/selfParked split — never collapsed into one generic count, since the coupling this
+    // card exists to surface (does answering the owner side actually release anything) only makes sense
+    // read against the owner phrase specifically.
+    const selfParts = [
+      (cc.managerDeferred ?? 0) > 0 ? `${cc.managerDeferred} deferred` : null,
+      (cc.deadEndLane ?? 0) > 0 ? `${cc.deadEndLane} dead-end-lane` : null,
+      (cc.leadOwnerFlow ?? 0) > 0 ? `${cc.leadOwnerFlow} parked` : null,
+    ].filter((s): s is string => s !== null);
+    const selfPhrase = selfParts.length > 0 ? `${selfParts.join(", ")} (manager)` : "";
+    const ownerHasAny = (cc.ownerHeld ?? 0) > 0 || (cc.ownerRequest ?? 0) > 0;
+    const ownerPhrase = ownerHasAny ? `${cc.ownerHeld ?? 0} held + ${cc.ownerRequest ?? 0} request-blocked (owner)` : "";
+    const causePhrase = [selfPhrase, ownerPhrase].filter((s) => s.length > 0).join(", ") || "0 cards";
+    const text = detail.reason === "own-pending-request"
+      ? `manager ${e.managerSessionId.slice(0, 8)} — quiet: blocked entirely on its own pending Request, nothing else to do`
+      : `manager ${e.managerSessionId.slice(0, 8)} — quiet: ${causePhrase}` +
+        (questionCount > 0 ? `; answering ${questionCount} pending Request(s) releases ${releasedCardCount} card(s)` : "");
+    items.push({
+      key: `bq-${e.id}`, tone: "amber", kind: "QUIET BOARD", sessionId: e.managerSessionId, text,
     });
   }
   // Defense-in-depth: only a LIVE session is actionably rate-limited. The durable fix clears

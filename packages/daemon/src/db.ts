@@ -7280,6 +7280,22 @@ export class Db {
     return new Set(rows.map((r) => r.task_id));
   }
   /**
+   * The RELEASE-SET sibling of listPendingQuestionTaskIds (card 275ac184): that one only proves "does
+   * task X have SOME pending question", never WHICH one — a caller building a taskId→questionId[] map (to
+   * name "answering THIS Request releases THAT card") needs the actual ids, not just a Set membership
+   * check. ONE query for the whole project (batched, like listPendingQuestionTaskIds) — never a per-card
+   * listQuestionsForTask round trip (the exact N+1 card a193398f removed). Returns raw `taskId` values as
+   * stored — may be a full task id OR a legacy 8-char PREFIX from before commit a3f1319f; the caller
+   * matches a candidate task id against these the SAME way listQuestionsForTask/listPendingQuestionTaskIds
+   * do (`taskId === row.taskId || (row.taskId.length === 8 && taskId.startsWith(row.taskId + "-"))`).
+   */
+  listPendingQuestionsWithTaskId(projectId: string): { id: string; taskId: string }[] {
+    const rows = this.db.prepare(
+      "SELECT id, task_id FROM questions WHERE project_id = ? AND state = 'pending' AND task_id IS NOT NULL",
+    ).all(projectId) as { id: string; task_id: string }[];
+    return rows.map((r) => ({ id: r.id, taskId: r.task_id }));
+  }
+  /**
    * Every request (any state), newest-first — the backing read for the Platform Auditor's cross-project
    * `requests_list` (card 59489267) AND the manager's own project-scoped `requests_list` (card 988bb585
    * follow-up): the audit-scope sibling of `listQuestionsForTask` (one-task-scoped). Deliberately
