@@ -160,8 +160,11 @@ try {
   {
     const SID = "sess-devserver-teardown";
     const root = spawnRealRoot();
-    grandchildPid = await readGrandchildPid(root);
+    // Attach the exit forwarding BEFORE the await below (card ff329c0b): `root.on("exit", ...)` is a
+    // one-shot event, so wiring it after an await risks missing it if the root already exited in the gap.
+    // wrapRealRootAsPty only needs `root`, not the grandchild pid, so hoisting costs nothing.
     nextFakePty = wrapRealRootAsPty(root);
+    grandchildPid = await readGrandchildPid(root);
     host.spawn({ sessionId: SID, cwd: tmpHome, permission: PERM, geometry: GEO, sessionEnv: {} });
     host.deliverHook(SID, { hook_event_name: "SessionStart" });
 
