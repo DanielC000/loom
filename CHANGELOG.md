@@ -4,6 +4,41 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.29.0] — 2026-09-06
+
+**A batched-merge and fleet-visibility release, with a follow-on trust-boundary pass.** The merge gate can now land a whole batch of ready branches in one run instead of one gate per branch, the web app moves from polling to a live fleet status feed, and Project Memory and manager reliability both pick up real observability. Three more loopback endpoints — left open by 0.28.0's first pass — now require the same access credential as every other write route.
+
+### Added
+
+- **Batched merges.** `merge_batch` gates a whole set of ready branches on one repo in a single run and lands each as its own squashed commit, instead of one gate per branch. A manager reviewing a batch can see each candidate's own real (uncoerced) tip-commit subject and any non-tip commits before committing to the batch, so a bad title is still caught pre-merge.
+- **A live fleet status feed.** The web app now consumes an orchestration-status change-feed pushed over `/ws/fleet` instead of polling for gate/merge state; the Gates page attributes a batch-fallback merge back to its parent batch and always renders a real value instead of an em-dash.
+- **Deeper gate observability.** A gate run's per-file test timings now survive a killed run instead of being lost; `gate_history` can answer whether a given test file has failed before; a passing gate now reports the same per-step breakdown a failing one already did.
+- **Project Memory becomes more visible.** The Memory UI now shows a note's inbound backlinks; every note injected into a kickoff is stamped with its version and date plus a staleness warning; writing a pinned note now warns at write time if it will starve a lower-priority tier out of the kickoff budget, instead of the problem only surfacing later.
+- **A Settings panel for a manager's resume-doc rotation policy** (its size markers and commitments floor), editable by hand instead of only via a raw config patch.
+- **Full archived-session search.** Session search now covers the whole archived set, not just whatever page happened to be loaded.
+- **An emergency context-window floor.** A manager now gets force-recycled at a configurable ~90% of its context window instead of running on until it silently degrades.
+- **A long-unanswered owner Request now escalates** to a direct human alert instead of sitting in the decision inbox indefinitely.
+- **Live worker capacity is surfaced to managers.** `worker_spawn` and every `worker_list` row now carry a `{cap, live, inFlight, free}` snapshot, so a manager no longer has to hand-transcribe its own concurrency budget or provoke a rejection just to learn it's full.
+- **MCP tool calls are now logged** alongside pty writes and hooks, closing what had been the one structurally-unlogged inbound path.
+
+### Changed
+
+- **The remaining loopback trust-boundary gaps from 0.28.0 are closed.** `/internal/update` and `/internal/shutdown` (loomctl's own update/shutdown endpoints) and `/ws/companion`'s inbound path now require the same bearer credential as every other write route; the SessionStart hook relay now requires a per-session token minted at spawn instead of accepting any caller-supplied session id. **Honest scope:** under same-machine, same-user co-residency with no sandbox, a caller that deliberately reads the target session's own settings file can still recover its token — this closes the zero-effort guess-a-session-id path, not a determined one.
+- **Same-sender messages now coalesce, not just Loom's own warnings.** A run of consecutive queued messages from the same sender — a manager's direction, a worker's report, a companion's inbound turn — now lands as one turn instead of one per message, while messages from different senders still drain separately, so two senders' distinct instructions can never be mashed together. Restorable to the old always-coalesce behavior via a daemon setting.
+- **Gates run narrower and faster where it's safe to.** The reduced-gate classifier now covers `scripts/**`, root docs, and asset-only changes, and a qualifying batched merge reduces its own gate cost further.
+- **A worktree that vanishes out from under a session is now reported** to both the worker and its manager instead of surfacing later as an unexplained failure.
+
+### Fixed
+
+- **Message delivery reliability, continued.** A give-up/retry sequence can no longer land a duplicate physical write or leave a give-up unconfirmed; a replay can no longer be reported as an established loss when it wasn't one; a coalesced turn's sender and owner text are now derived from one source so a multi-sender batch can't split them; and a prompt-mismatch notice now carries the fields needed to tell a benign offset from a real one.
+- **Merge and git integrity, continued.** A batched landing now verifies its path-set the same way a solo merge does; an empty commit during a batch landing now fails closed instead of landing silently; a worktree recut now captures what a discarded dirty state actually contained; and a dirty or untracked canonical-branch collision is now caught and refused at merge admission instead of corrupting the merge.
+- **Manager and worker lifecycle notices.** A manager stuck repeating one blind turn, or repeating an identical tool call within a turn, is now detected instead of running on unnoticed; a crash-resume no longer tells an already-blocked worker to just continue; and a batch-forfeit or restart notice now names what actually happened instead of overclaiming.
+- **Board and task correctness.** `held`/`heldBy` are now returned by task list reads; a released deferral's reason is folded back into the card body instead of being lost; and a capped task-list read now signals truncation instead of silently reading as a complete answer.
+- **Companion reliability.** A Companion that emits turns with zero chat replies is now detected; a Companion armed onto an already-live session now respawns correctly instead of colliding with it; and a truncated alert now flags that it was truncated.
+- **Codescape (the optional code-graph MCP) reliability.** A live-but-slow-to-report code-graph server is no longer abandoned as dead; its port-detection race is closed; and its port-report timeout is raised to give real I/O contention enough headroom to report in.
+- **Daemon shutdown/restart safety.** A restart now waits out an in-flight merge's danger window before exiting instead of racing it; shutdown now survives a destroyed stdout/stderr instead of throwing during teardown; and a rare node-pty ConPTY kill race can no longer crash the daemon outright.
+- **Web UI polish.** The Settings project-link picker no longer overflows on a long name; `/settings` no longer overflows horizontally at narrow widths; the Gates page's long-run cue now scales to each row's own configured gate timeout instead of one fixed threshold; and a Companion's shared-viewer terminal now correctly renders read-only.
+
 ## [0.28.0] — 2026-08-07
 
 **A trust-boundary release.** Loom's loopback gateway used to treat *any* process on the machine as if it were the human at the browser — which, on a workspace whose whole purpose is running coding agents with shell access, meant an agent could reach past every "human-only" guard by curling the local API. This release closes that for writes, and closes a second path by which agent-authored text could arrive in the owner's own role slot. Alongside it: a batch of merge-gate correctness fixes and another pass on message delivery.
