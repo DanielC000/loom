@@ -971,20 +971,24 @@ export interface TaskUpdateConflict {
  * real loss", and 25% is "small enough that no genuine rewrite lands there by accident" (project memory
  * `shipping-a-detector-is-not-someone-reading-it`: a blocking precondition on the ACTION is the only
  * remedy shown to work here — a louder tool description would sit in the attention path and get read
- * past, same as it did for the manager who filed this card).
+ * past, same as it did for the manager who filed this card). Reused as-is (same two thresholds, not a
+ * second pair) by the sibling `deferredReason`-truncation guard below (card a53b24ce) — one destructive-
+ * replace shape, one set of numbers, regardless of which field it fires on.
  */
 export const MIN_SUBSTANTIAL_BODY_CHARS = 1024;
 export const MAX_SURVIVING_FRACTION = 0.25;
 
 /**
- * {@link updateProjectTask}'s rejection shape for a `body` write that would discard the large majority
- * of an existing substantial body (card 09d68835) — same "return the current record to reconcile
- * against" contract as {@link TaskUpdateConflict}, but a DISTINCT discriminant field (`truncation`, not
+ * {@link updateProjectTask}'s rejection shape for a `body` (card 09d68835) or `deferredReason` (card
+ * a53b24ce, same thresholds/mechanism, reused rather than duplicated) write that would discard the large
+ * majority of an existing substantial value — same "return the current record to reconcile against"
+ * contract as {@link TaskUpdateConflict}, but a DISTINCT discriminant field (`truncation`, not
  * `conflict`) since the two guards fire for unrelated reasons and a caller may want to tell them apart:
- * `conflict` means "someone else changed this since you last read it"; `truncation` means "the body YOU
+ * `conflict` means "someone else changed this since you last read it"; `truncation` means "the value YOU
  * are about to write looks like an accident, regardless of who last touched it". `currentLength`/
  * `proposedLength` are named in the error text too (the DoD's own requirement) but also broken out here
- * so a caller doesn't have to re-measure `current.body`/re-parse the message to get them.
+ * so a caller doesn't have to re-measure `current.body`/`current.deferredReason`/re-parse the message to
+ * get them.
  */
 export interface TaskUpdateTruncationGuard {
   error: string;
@@ -1209,6 +1213,41 @@ export async function updateProjectTask(
     const resultingReason = deferredReasonPatch !== undefined ? deferredReasonPatch : (owned.deferredReason ?? null);
     if (!resultingReason) {
       return { error: "a manual deferral (deferred:true with no deferredUntilTaskId) needs a reason — pass deferredReason explaining why it's parked and what would release it, so a future reader can tell it apart from a forgotten card" };
+    }
+  }
+  // Destructive-deferredReason-truncation guard (card a53b24ce, mirrors the body guard below — card
+  // 09d68835 — same allowTruncate override, same whole-patch-reject convention): `deferredReason` is a
+  // field-only patch (see the baseVersion gate below), so unlike `title`/`body` it gets NEITHER protection
+  // that guard offers — yet it routinely carries a card's entire decision surface (the specimen: a Lead
+  // wrote a one-word placeholder into `deferredReason` just to read the ack's `version` back, silently
+  // destroying a multi-thousand-character reason with no undo). Checked against the FINAL
+  // `deferredReasonPatch` computed above (post the `deferred:false` auto-clear override) — never the raw
+  // `patch.deferredReason` — so this guard fires ONLY on an actual REPLACE-with-a-sliver, never on:
+  //  - a bare `{deferred:false}` (or any other flag-only patch that never touches deferredReason) —
+  //    deferredReasonPatch stays `undefined`, DoD-2's regression case, byte-identical to today;
+  //  - a DELIBERATE clear — `deferredReason:null` (or empty/whitespace, already normalized to `null`
+  //    above) trims to `deferredReasonPatch === null`, and a clear is never guarded (DoD-3: "a guard you
+  //    cannot satisfy is worse than one you ignore" — same reasoning as `allowTruncate` existing at all);
+  //  - the `deferred:false` un-defer path, which force-nulls `deferredReasonPatch` regardless of what the
+  //    caller separately passed for `deferredReason` in the same patch — that combination un-defers AND
+  //    clears, never truncates, so there is nothing destructive to guard against.
+  // `owned.deferredReason` (read fresh at the top of this call, never re-derived) is the "current" side —
+  // same discipline as the body guard's `owned.body`.
+  if (deferredReasonPatch != null && !allowTruncate) {
+    const currentReason = owned.deferredReason ?? "";
+    const proposedLength = deferredReasonPatch.length;
+    if (currentReason.length >= MIN_SUBSTANTIAL_BODY_CHARS && proposedLength < currentReason.length * MAX_SURVIVING_FRACTION) {
+      return {
+        error: `this write would replace a ${currentReason.length}-character deferredReason with a ${proposedLength}-character one — ` +
+          `that discards the large majority of it, which is usually a mistake (e.g. a placeholder written just to read ` +
+          `the update ack's \`version\` back — tasks_get/tasks_list already return \`version\`, so there is never a need ` +
+          `to write one to read it). \`deferredReason\` is a full replace with no undo. If this is genuinely intentional, ` +
+          `retry with allowTruncate:true — or pass deferredReason:null to clear it deliberately, which is never guarded.`,
+        truncation: true,
+        current: owned,
+        currentLength: currentReason.length,
+        proposedLength,
+      };
     }
   }
   // deferredAt: the instant a manual deferral starts documenting itself — a fresh false→true transition,

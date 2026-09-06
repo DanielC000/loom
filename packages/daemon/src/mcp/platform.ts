@@ -2437,7 +2437,15 @@ export class PlatformMcpRouter {
           "(≥1024 characters, keeping <25% of it) is REFUSED — {error naming the current/proposed lengths, " +
           "truncation:true, current, currentLength, proposedLength} — same mechanism as the in-project " +
           "tasks_update. A short body, or a rewrite that stays a comparable size, is untouched by this. Pass " +
-          "allowTruncate:true to bypass it for a genuinely intentional large discard.\n" +
+          "allowTruncate:true to bypass it for a genuinely intentional large discard. The SAME guard (same " +
+          "thresholds, same allowTruncate override, same shape) also covers `deferredReason` (card a53b24ce) " +
+          "on BOTH the single-taskId and taskIds batch paths — a substantial existing reason replaced by a " +
+          "sliver is refused the same way, even though deferredReason is otherwise a field-only patch needing " +
+          "no baseVersion; pass deferredReason:null to clear one deliberately (never guarded) or " +
+          "allowTruncate:true for a genuinely intentional large discard. ⚠️ NEVER write a placeholder into " +
+          "deferredReason (or body) just to read a task's `version` back — project_task_get and " +
+          "project_task_update's own response already return `version` directly; there is no read-only way " +
+          "to get it that requires a write.\n" +
           "`appendBody` (card 8636f761, single-`taskId` path only) is the ADDITIVE alternative to `body`: " +
           "appends a timestamped \"## Triage note — <ts>\" section instead of replacing the whole thing — use " +
           "this for a triage verdict on an escalation card (or any card) so your note can never clobber the " +
@@ -2517,8 +2525,13 @@ export class PlatformMcpRouter {
           if (patch.title !== undefined || patch.body !== undefined || appendBody !== undefined) {
             return ok({ error: "taskIds batch move does not support title/body/appendBody — apply those one card at a time via taskId" });
           }
+          // allowTruncate threaded through here (card a53b24ce) so the deferredReason-truncation guard
+          // above — batchable, unlike body/title — isn't an unescapable dead end on this path: without
+          // this, a batch write that trips the guard on any one id could never be overridden, since this
+          // branch previously had no use for allowTruncate at all (body/title, the only OTHER thing that
+          // guard covers, are rejected outright just above).
           const results = await Promise.all(taskIds.map(async (id) => {
-            const res = spillable(await updateProjectTask(db, project.id, id, patch, actor));
+            const res = spillable(await updateProjectTask(db, project.id, id, patch, actor, undefined, allowTruncate));
             return "error" in res ? { taskId: id, error: res.error } : { taskId: id, task: res };
           }));
           return ok(results);
