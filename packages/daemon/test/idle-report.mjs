@@ -183,6 +183,117 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
   rmDb(file);
 }
 
+// ==================== (C) CLAMP — explicit `minutes` ceiling + degenerate inputs ====================
+// Card deba6ece: `opts.minutes` used to be used raw — an explicit caller-supplied value above the
+// project's default had NO ceiling (an agent could self-snooze for days/weeks with one call), and 0 /
+// negative / NaN / Infinity produced a past-dated or outright invalid `snoozeUntil` (NaN/Infinity throw
+// inside `new Date(...).toISOString()`). Proves BOTH arms of the clamp (fires over-ceiling, does NOT
+// fire on an ordinary value) plus each degenerate input's now-explicit fallback.
+{
+  const file = tmpDbFile("clamp");
+  const db = new Db(file);
+  const now = new Date().toISOString();
+  // Distinct default (77) so "fell back to the default" is unambiguous against both the ceiling (1440)
+  // and any of the degenerate/explicit values exercised below.
+  db.insertProject({
+    id: "pc", name: "PC", repoPath: "/x", vaultPath: "/x",
+    config: { orchestration: { idleDefaultSnoozeMinutes: 77 } }, createdAt: now, archivedAt: null,
+  });
+  db.insertAgent({ id: "tc", projectId: "pc", name: "t", startupPrompt: "x", position: 0 });
+  const svc = new SessionService(db, /* pty */ {}, /* control */ {});
+
+  let n = 0;
+  const freshManager = () => {
+    const id = `cmgr${++n}`;
+    db.insertSession({
+      id, projectId: "pc", agentId: "tc", engineSessionId: null, title: null, cwd: "/x",
+      processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+      lastError: null, role: "manager",
+    });
+    return id;
+  };
+  const evtFor = (id) => db.listEvents(id).find((e) => e.kind === "idle_report");
+
+  // (C1) Positive arm: an over-ceiling request (100000 min, i.e. "days/weeks" — the exact defect shape
+  // named on the card) is clamped to 1440 (24h), flagged in BOTH the return and the audit event, and the
+  // ORIGINAL request is still visible alongside the effective value (so a reader can tell "asked for
+  // 100000, got 1440" from "asked for 1440").
+  {
+    const id = freshManager();
+    const before = Date.now();
+    const r = svc.recordIdleReport(id, "waiting", { minutes: 100000 });
+    const after = Date.now();
+    check("(C1) over-ceiling minutes → snoozeClamped:true", r.snoozeClamped === true);
+    check("(C1) over-ceiling minutes → effective snoozeMinutes clamped to 1440", r.snoozeMinutes === 1440);
+    check("(C1) over-ceiling minutes → requested value preserved on the return", r.snoozeMinutesRequested === 100000);
+    const ms = new Date(r.snoozeUntil).getTime();
+    check("(C1) over-ceiling minutes → snoozeUntil ≈ now + 1440m (NOT +100000m)",
+      ms >= before + 1440 * 60_000 && ms <= after + 1440 * 60_000);
+    const evt = evtFor(id);
+    check("(C1) audit event preserves BOTH the raw requested minutes and the effective/clamped value",
+      evt?.detail?.minutes === 100000 && evt?.detail?.snoozeMinutes === 1440 && evt?.detail?.snoozeClamped === true);
+  }
+
+  // (C2) Negative arm: an ordinary explicit value (60, well under the 1440 ceiling and different from
+  // the project default 77) passes through UNCHANGED — the clamp must not fire on a normal request.
+  {
+    const id = freshManager();
+    const before = Date.now();
+    const r = svc.recordIdleReport(id, "waiting", { minutes: 60 });
+    const after = Date.now();
+    check("(C2) ordinary minutes(60) → snoozeClamped:false", r.snoozeClamped === false);
+    check("(C2) ordinary minutes(60) → effective snoozeMinutes unchanged", r.snoozeMinutes === 60);
+    const ms = new Date(r.snoozeUntil).getTime();
+    check("(C2) ordinary minutes(60) → snoozeUntil ≈ now + 60m",
+      ms >= before + 60 * 60_000 && ms <= after + 60 * 60_000);
+    const evt = evtFor(id);
+    check("(C2) audit event: requested === effective, not clamped",
+      evt?.detail?.minutes === 60 && evt?.detail?.snoozeMinutes === 60 && evt?.detail?.snoozeClamped === false);
+  }
+
+  // (C3) Boundary: exactly the ceiling (1440) is NOT clamped (only strictly-above fires).
+  {
+    const id = freshManager();
+    const r = svc.recordIdleReport(id, "waiting", { minutes: 1440 });
+    check("(C3) minutes === ceiling (1440) → NOT clamped", r.snoozeClamped === false && r.snoozeMinutes === 1440);
+  }
+
+  // (C4) Degenerate inputs: 0 / negative / NaN / Infinity each fall back to the project default (77) —
+  // never a past-dated snoozeUntil, never a thrown RangeError from an invalid Date.
+  for (const bad of [0, -50, NaN, Infinity]) {
+    const id = freshManager();
+    const before = Date.now();
+    let r, threw = false;
+    try { r = svc.recordIdleReport(id, "waiting", { minutes: bad }); } catch { threw = true; }
+    const after = Date.now();
+    check(`(C4) minutes=${bad} → does not throw`, threw === false);
+    if (!threw) {
+      check(`(C4) minutes=${bad} → falls back to project default (77), not clamped`,
+        r.snoozeMinutes === 77 && r.snoozeClamped === false);
+      const ms = new Date(r.snoozeUntil).getTime();
+      check(`(C4) minutes=${bad} → snoozeUntil ≈ now + 77m (not in the past, not NaN)`,
+        Number.isFinite(ms) && ms >= before + 77 * 60_000 && ms <= after + 77 * 60_000);
+    }
+  }
+
+  // (C5) Default path (DoD-4): omitting `minutes` entirely is BYTE-IDENTICAL to before this card — still
+  // resolves straight to the project's idleDefaultSnoozeMinutes, not clamped, requested left undefined.
+  {
+    const id = freshManager();
+    const before = Date.now();
+    const r = svc.recordIdleReport(id, "waiting");
+    const after = Date.now();
+    check("(C5) omitted minutes → still falls back to idleDefaultSnoozeMinutes (77)",
+      r.snoozeMinutes === 77 && r.snoozeClamped === false && r.snoozeMinutesRequested === undefined);
+    const ms = new Date(r.snoozeUntil).getTime();
+    check("(C5) omitted minutes → snoozeUntil ≈ now + 77m",
+      ms >= before + 77 * 60_000 && ms <= after + 77 * 60_000);
+  }
+
+  db.close();
+  rmDb(file);
+}
+
 // ============================ (T) TOOL SURFACE: registration seam ============================
 {
   const file = tmpDbFile("surface");
@@ -260,6 +371,6 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — recordIdleReport maps each state to the correct P1 policy/snooze (explicit minutes vs idleDefaultSnoozeMinutes fallback) and always zeroes the unanswered counter, for BOTH manager and platform roles; idle_report is registered on the manager surface (not the worker surface) AND on the Lead's PlatformMcpRouter, and works end-to-end there."
+  ? "\n✅ ALL PASS — recordIdleReport maps each state to the correct P1 policy/snooze (explicit minutes vs idleDefaultSnoozeMinutes fallback) and always zeroes the unanswered counter, for BOTH manager and platform roles; an explicit minutes above the 1440 (24h) ceiling is clamped (and NOT for an ordinary value), 0/negative/NaN/Infinity fall back to the project default instead of a past or invalid snoozeUntil, and the default no-minutes path is unchanged; idle_report is registered on the manager surface (not the worker surface) AND on the Lead's PlatformMcpRouter, and works end-to-end there."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -13595,6 +13595,16 @@ export class SessionService {
     return { ...fresh, processState: "live" };
   }
 
+  /** Ceiling on an EXPLICIT `idle_report({state:"waiting", minutes})` snooze (card deba6ece). The idle
+   *  watchdog is the fleet's ONLY automatic backstop that escalates a silently-stuck manager to a
+   *  human — an unbounded caller-supplied `minutes` lets a single call silence it for days or weeks.
+   *  1440 (24h) matches two existing precedents already drawn in this exact config, rather than an
+   *  invented number: `staleRequestMinutes`'s own default (the boundary this project already treats as
+   *  "legitimate wait on a human" vs. "abandoned") and `wake_me`'s own documented 24h max self-schedule
+   *  delay. Only an EXPLICIT `minutes` above this is clamped — the omitted-minutes default path
+   *  (`idleDefaultSnoozeMinutes`) is untouched. */
+  private static readonly IDLE_REPORT_MAX_SNOOZE_MINUTES = 1440;
+
   /**
    * The manager/platform-surface `idle_report` handler (Asleep-at-the-Wheel watchdog, §3 state→action
    * table; platform coverage added by card 98b3725c). A manager or Lead self-reports its idle
@@ -13612,7 +13622,10 @@ export class SessionService {
     sessionId: string,
     state: "working" | "waiting" | "done",
     opts: { detail?: string; minutes?: number } = {},
-  ): { recorded: boolean; state: string; policy: IdleNudgePolicy; snoozeUntil: string | null; unanswered: number } {
+  ): {
+    recorded: boolean; state: string; policy: IdleNudgePolicy; snoozeUntil: string | null; unanswered: number;
+    snoozeMinutes?: number; snoozeMinutesRequested?: number; snoozeClamped?: boolean;
+  } {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("unknown session");
     if (session.role !== "manager" && session.role !== "platform") throw new Error("idle_report is a manager/platform-only surface");
@@ -13621,6 +13634,8 @@ export class SessionService {
 
     let policy: IdleNudgePolicy;
     let snoozeUntil: string | null = null;
+    let snoozeMinutes: number | undefined;
+    let snoozeClamped = false;
     // working → back at work: drop straight to the watching baseline (policy/snooze/unanswered all clear).
     // waiting → snooze for `minutes` (or the per-project default) — silent until then.
     // done → suppress (nothing left for this manager to do; here we just stop nudging).
@@ -13628,8 +13643,24 @@ export class SessionService {
       this.db.resetIdleNudgeState(sessionId);
       policy = "watching";
     } else if (state === "waiting") {
-      const mins = opts.minutes ?? resolveConfig(project.config).orchestration.idleDefaultSnoozeMinutes;
-      snoozeUntil = new Date(Date.now() + mins * 60_000).toISOString();
+      const requested = opts.minutes;
+      const defaultMinutes = resolveConfig(project.config).orchestration.idleDefaultSnoozeMinutes;
+      if (requested === undefined) {
+        snoozeMinutes = defaultMinutes;
+      } else if (!Number.isFinite(requested) || requested <= 0) {
+        // 0 / negative / NaN / Infinity are not a usable duration: 0 or negative would back-date
+        // `snoozeUntil` into the past (an immediately-expired-or-worse "snooze"), and NaN/Infinity make
+        // `new Date(...).toISOString()` below throw a RangeError, crashing the call outright. Treat any
+        // of these exactly like an omitted `minutes` — fall back to the project's default snooze —
+        // rather than propagating garbage into a persisted watchdog policy.
+        snoozeMinutes = defaultMinutes;
+      } else if (requested > SessionService.IDLE_REPORT_MAX_SNOOZE_MINUTES) {
+        snoozeMinutes = SessionService.IDLE_REPORT_MAX_SNOOZE_MINUTES;
+        snoozeClamped = true;
+      } else {
+        snoozeMinutes = requested;
+      }
+      snoozeUntil = new Date(Date.now() + snoozeMinutes * 60_000).toISOString();
       this.db.resetIdleNudgeState(sessionId); // zero the unanswered counter first (P1 setIdleNudgePolicy doesn't)
       this.db.setIdleNudgePolicy(sessionId, "snoozed", snoozeUntil);
       policy = "snoozed";
@@ -13643,11 +13674,17 @@ export class SessionService {
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: sessionId, kind: "idle_report",
-      detail: { state, detail: opts.detail, minutes: opts.minutes, policy, snoozeUntil },
+      // `minutes` stays the RAW requested value (unchanged shape, for any existing reader) — `snoozeMinutes`/
+      // `snoozeClamped` are the new, additive fields that let a later reader tell "asked for 600, got 60"
+      // (both present, clamped:true) from "asked for 60" (both equal, clamped:false).
+      detail: { state, detail: opts.detail, minutes: opts.minutes, snoozeMinutes, snoozeClamped, policy, snoozeUntil },
     });
 
     // resetIdleNudgeState always zeros the counter and we never re-bump it here ⇒ unanswered === 0.
-    return { recorded: true, state, policy, snoozeUntil, unanswered: 0 };
+    return {
+      recorded: true, state, policy, snoozeUntil, unanswered: 0,
+      snoozeMinutes, snoozeMinutesRequested: opts.minutes, snoozeClamped,
+    };
   }
 
   // ---------------------------------------------------------------------------------------------

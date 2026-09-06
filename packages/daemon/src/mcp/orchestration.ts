@@ -5007,7 +5007,9 @@ export class OrchestrationMcpRouter {
           "Tell Loom's idle watchdog your disposition so it stops nudging you — call it when you end a " +
           "turn with no active work. `state`: 'working' = back at it (resumes normal watching); 'waiting' " +
           "= nothing to do until something lands — optionally snooze for `minutes` (defaults to the " +
-          "per-project idle snooze); 'done' = this agent's work is complete. If you need the human, file " +
+          "per-project idle snooze); an explicit `minutes` above 1440 (24h) is CLAMPED to 1440, never " +
+          "silently — the response's `snoozeClamped`/`snoozeMinutes` tell you it fired; 'done' = this " +
+          "agent's work is complete. If you need the human, file " +
           "a Request via `question_ask` instead. Always clears your unanswered-nudge counter. Pass a " +
           "short `detail` to say why (recorded for the human). `state` is the canonical param; `status` " +
           "is accepted as an ALIAS for it — pass either one (if both, state wins).",
