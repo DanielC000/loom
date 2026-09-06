@@ -8,12 +8,18 @@
 // both queried against the actual GitHub API) is run separately and reported alongside this file's
 // result — see the worker_report for those two commands' output; a mocked fetch here can only prove
 // the RESOLUTION logic is correct, not that the real API integration behaves the same way.
-// Run: node scripts/test-ci-gate.mjs
+//
+// Card 3f04a19f: lives under packages/daemon/test/ (not scripts/) so `test-daemon.mjs`'s hermetic
+// discovery walk picks it up automatically — no wiring edit needed anywhere. `scripts/lib/ci-gate.mjs`
+// lives outside packages/daemon, but a plain relative import across that boundary already has a
+// precedent in this same directory (see codescape-privacy-guard.mjs's `../../../scripts/...` imports).
+// Run directly: node packages/daemon/test/ci-gate.mjs
+// Run through the real gate entry point, scoped to just this file: pnpm --filter @loom/daemon test:daemon -- --only=ci-gate
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { originOwnerRepo, checkCiGreenForSha } from "./lib/ci-gate.mjs";
+import { originOwnerRepo, checkCiGreenForSha } from "../../../scripts/lib/ci-gate.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
