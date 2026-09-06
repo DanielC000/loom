@@ -10162,15 +10162,40 @@ export class SessionService {
    * that already happened. Durability is reserved for the one shape that needs to survive log rotation —
    * a loss nobody can any longer verify by re-reading the log — not for every classification this file
    * makes along the way.
+   *
+   * 🔴 Card 280309d9 — THE ROW'S OWN `ts` BELOW IS THE GIVE-UP INSTANT, NOT THE WRITE INSTANT: this method
+   * runs `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` (a hard 600s) AFTER the mismatch was actually detected/written,
+   * and `ts` is stamped at THAT (fire) time, not at the write. Two independent parties both read `ts` as the
+   * write time and got every time-correlation they built on it wrong by exactly ten minutes, in the same
+   * direction — the emitting site's own console.error names the mechanism verbatim ("no confirming later
+   * generation resolved this within 600000ms"), but nothing on the DURABLE row said so before this card.
+   * `detail.writtenAt` (below) carries the true write instant so a future reader never has to re-learn this
+   * the same way — see `PtyHostEvents.onPromptMismatchUnresolved`'s own doc for where it's captured.
+   * ⛔ The 600s window and the fire condition are UNCHANGED by this card (deliberately out of scope — see
+   * `f9b1ea00`'s own reasoning for firing only once a loss is ESTABLISHED); only the row's own MEANING is
+   * newly documented, and `writtenAt` is newly ADDED — the existing `ts` field is never re-meant.
    */
-  handlePromptMismatchUnresolved(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number; messageExcerpt: string }): void {
+  handlePromptMismatchUnresolved(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number; messageExcerpt: string; writtenAt: string | null }): void {
     const s = this.db.getSession(sessionId);
     this.db.appendEvent({
+      // Card 280309d9: this `ts` is the GIVE-UP instant (this method runs `PROMPT_MISMATCH_RESOLVE_
+      // WINDOW_MS` after the mismatch was actually detected/written) — NEVER the write time. `detail.
+      // writtenAt` below carries the true write instant; do not read this row's own `ts` as when the
+      // write happened.
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
       workerSessionId: sessionId, taskId: s?.taskId ?? null,
       kind: "prompt_mismatch_unresolved", detail: {
         gen: info.gen, writtenHash: info.writtenHash, reportedHash: info.reportedHash, intendedLen: info.intendedLen,
         recognizedGen: info.recognizedGen, matchedLen: info.matchedLen, leadingRemainderLen: info.leadingRemainderLen, trailingRemainderLen: info.trailingRemainderLen,
+        // Card 280309d9: the real Enter-write instant for `gen`, or `null` if never recorded — see
+        // PtyHostEvents.onPromptMismatchUnresolved's own doc for why this exists and why it is distinct
+        // from this row's own `ts` above. `?? null` (manager correction) normalizes at THIS boundary too,
+        // not only at PtyHost's own default: a hand-built `info` object (a hermetic test double, or any
+        // future direct caller) that omits the key would otherwise carry `undefined` here, a third state
+        // the declared `string | null` contract does not admit — never surfaced as an omitted `detail` key
+        // either, unlike `messageExcerpt` below, since that would be indistinguishable from "never
+        // recorded" without actually meaning it.
+        writtenAt: info.writtenAt ?? null,
         // Card a419a7e6: OMITTED entirely (not an empty string) when the flag is off — see this method's
         // own doc for why omission, not a redacted placeholder, is the byte-identical-to-before shape.
         ...(isLogMessageContentEnabled() ? { messageExcerpt: info.messageExcerpt } : {}),

@@ -1459,6 +1459,16 @@ export type OrchestrationEventKind =
   // isLogMessageContentEnabled's own doc), OMITTED entirely otherwise, never an empty placeholder. The
   // durable audit trail for a mismatch whose own notice promised a follow-up either way but, until this
   // card, only ever delivered on the SUCCESS half of that promise.
+  // 🔴 Card 280309d9 — THIS ROW'S OWN `ts` (above, `OrchestrationEvent.ts`) IS THE GIVE-UP INSTANT, NOT
+  // THE WRITE INSTANT: `SessionService.handlePromptMismatchUnresolved` stamps `ts` at fire time, which is
+  // `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` (a hard 600s) AFTER the mismatch was actually detected/written.
+  // Two independent parties both read `ts` as the write time and got every time-correlation they built on
+  // it wrong by exactly ten minutes, in the same direction, before this was documented anywhere. `detail`
+  // now ALSO carries `writtenAt: string | null` — the real Enter-write wall-clock instant for `gen` (ISO,
+  // or `null` if that generation's write was never recorded) — added so a reader can recover the true
+  // write time BY CONSTRUCTION instead of a manual, hash-keyed join against the daemon log's own
+  // `[prompt-echo]` line. `ts` itself is UNCHANGED and keeps meaning give-up time, exactly as before —
+  // this is an ADDED field, never a re-meaning of an existing one.
   | "prompt_mismatch_unresolved"
   // Card 2d8d2e42 — `PtyHostEvents.onRepeatedToolCall` fired: a session called the same MCP tool with
   // IDENTICAL arguments (same `argsHash` already logged on the `[mcp]` line) `count` consecutive times

@@ -3966,8 +3966,19 @@ export interface PtyHostEvents {
    * an in-process call chain with exactly one implementer (SessionService.handlePromptMismatchUnresolved,
    * via index.ts), never logged or serialized on its own. The `LOOM_LOG_MESSAGE_CONTENT` gate this content
    * is subject to lives at THAT method, the one place it can become a durable, queryable row — not here.
+   *
+   * Card 280309d9 — `writtenAt` is the REAL Enter-write wall-clock instant for `gen` (`live.
+   * currentGenFirstWrittenAt` at the ORIGINAL detection's own call site — the SAME field the mismatch
+   * notice's own `writeWallClockAt` text already reads for this identical generation), an ISO string, or
+   * `null` in the defensive case that generation's write was never recorded. THIS EVENT'S OWN `ts` (stamped
+   * by the consumer, at fire time — see SessionService.handlePromptMismatchUnresolved) is NOT this instant:
+   * it is the GIVE-UP instant, `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` (a hard 600s) LATER — that gap went
+   * undocumented long enough that two independent parties both read `ts` as the write time and got every
+   * time-correlation they built on it wrong by exactly ten minutes (board card 280309d9's own finding).
+   * `writtenAt` makes the true instant recoverable BY CONSTRUCTION instead of requiring a manual, hash-keyed
+   * join against the `[prompt-echo]` log line that happens to carry it today.
    */
-  onPromptMismatchUnresolved?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number; messageExcerpt: string }): void;
+  onPromptMismatchUnresolved?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number; messageExcerpt: string; writtenAt: string | null }): void;
   /**
    * Card 38d68b8d — DoD-2 of `59757189`'s UNMATCHABLE-mismatch population (the structural TWIN of
    * `onPromptMismatchUnresolved` above, fired on the OPPOSITE `isUnmatchableMismatch` branch — see that
@@ -7019,6 +7030,17 @@ export class PtyHost {
                   // and why it's genuinely the best available evidence for this branch (always a whole-
                   // string replay, never a remainder).
                   const pendingMessageExcerpt = intended.slice(0, PROMPT_MISMATCH_EXCERPT_MAX_LEN);
+                  // Card 280309d9 — the REAL Enter-write instant for `pendingGen`, the SAME field
+                  // `writeWallClockAt` above (this identical generation's own notice text) already reads
+                  // from `live.currentGenFirstWrittenAt` — captured here, now, because by the time this
+                  // event's own `ts` is stamped (`checkPromptMismatchUnresolved`, PROMPT_MISMATCH_RESOLVE_
+                  // WINDOW_MS later) that event's `ts` is the GIVE-UP instant, not this one, and nothing
+                  // downstream could otherwise recover which instant this was without an external, manual
+                  // `[prompt-echo]` log join. `null` only in the defensive case this generation's own write
+                  // was never recorded (mirrors `writeWallClockAt`'s "an unrecorded time" case, but as a
+                  // real null here rather than a prose sentinel — this travels into a structured `detail`,
+                  // not human-facing notice text).
+                  const pendingWrittenAt = live.currentGenFirstWrittenAt !== null ? new Date(live.currentGenFirstWrittenAt).toISOString() : null;
                   // Card f9b1ea00 — Code Review HIGH (confirmed): the handle is stored on `live.
                   // pendingMismatchUnresolvedTimers` (see that field's own doc) so `spawn()`/`onExit` can
                   // clear it before a resume/recycle/restart/exit invalidates this session's own tracking —
@@ -7031,7 +7053,7 @@ export class PtyHost {
                   // resolution.
                   const timer: NodeJS.Timeout = setTimeout(() => {
                     live.pendingMismatchUnresolvedTimers.delete(timer);
-                    this.checkPromptMismatchUnresolved(sessionId, pendingGen, pendingWrittenHash, pendingReportedHash, pendingIntendedLen, pendingRecognizedGen, pendingMatchedLen, pendingMessageExcerpt);
+                    this.checkPromptMismatchUnresolved(sessionId, pendingGen, pendingWrittenHash, pendingReportedHash, pendingIntendedLen, pendingRecognizedGen, pendingMatchedLen, pendingMessageExcerpt, pendingWrittenAt);
                   }, PROMPT_MISMATCH_RESOLVE_WINDOW_MS);
                   live.pendingMismatchUnresolvedTimers.add(timer);
                 }
@@ -11597,7 +11619,14 @@ export class PtyHost {
    * as the real defect). PtyHost itself has no DB/manager lookup (same layering boundary as
    * `onPasteLengthLoss`/`onKickoffGiveUpExhausted`), so it only ever hands off the raw facts.
    */
-  private checkPromptMismatchUnresolved(sessionId: string, gen: number, writtenHash: string, reportedHash: string, intendedLen: number, recognizedGen: number, matchedLen: number, messageExcerpt: string): void {
+  // Card 280309d9 (manager correction): `writtenAt` DEFAULTS to `null` — this is `private` (TypeScript
+  // compile-time only; `packages/daemon/test/pty-prompt-mismatch-unresolved.mjs`'s own PART 6 calls it
+  // directly, positionally, at runtime, exactly as `host.live` is read directly elsewhere in that suite)
+  // so an EXTERNAL caller omitting the 9th positional arg is a real, reachable runtime shape, not a
+  // hypothetical — without this default it would silently produce `undefined`, a THIRD state this
+  // contract (`string | null`) does not admit. The one production caller (this file's own resolve-window
+  // timer, above) always supplies it explicitly and is unaffected by the default.
+  private checkPromptMismatchUnresolved(sessionId: string, gen: number, writtenHash: string, reportedHash: string, intendedLen: number, recognizedGen: number, matchedLen: number, messageExcerpt: string, writtenAt: string | null = null): void {
     const live = this.live.get(sessionId);
     if (!live) return;
     if (live.mismatchResolvedGens.has(gen)) return;
@@ -11609,14 +11638,19 @@ export class PtyHost {
     if (live.firedMismatchUnresolvedGens.has(gen)) return;
     live.firedMismatchUnresolvedGens.add(gen);
     // eslint-disable-next-line no-console
-    console.error(`[prompt-mismatch-unresolved] ${sessionId} gen=${gen} writtenHash=${writtenHash} reportedHash=${reportedHash} intendedLen=${intendedLen} recognizedGen=${recognizedGen} matchedLen=${matchedLen} — no confirming later generation resolved this within ${PROMPT_MISMATCH_RESOLVE_WINDOW_MS}ms; treating as an established loss and failing loud (card f9b1ea00).`);
+    console.error(`[prompt-mismatch-unresolved] ${sessionId} gen=${gen} writtenHash=${writtenHash} reportedHash=${reportedHash} intendedLen=${intendedLen} recognizedGen=${recognizedGen} matchedLen=${matchedLen} writtenAt=${writtenAt ?? "unrecorded"} — no confirming later generation resolved this within ${PROMPT_MISMATCH_RESOLVE_WINDOW_MS}ms; treating as an established loss and failing loud (card f9b1ea00).`);
     // Card c23e2869 DoD-2: `recognizedGen`/`matchedLen` are `replayedEntry`'s own gen/length, captured at
     // the ORIGINAL detection's own call site (see this method's own doc) — this branch is reachable only
     // when `replayedEntry !== undefined`, a WHOLE-string match, so there is never a remainder to name here.
     // Card a419a7e6: `messageExcerpt` is passed through RAW and UNCONDITIONALLY (see
     // PtyHostEvents.onPromptMismatchUnresolved's own doc) — the content gate lives downstream, in
     // SessionService.handlePromptMismatchUnresolved, not here.
-    this.events.onPromptMismatchUnresolved?.(sessionId, { gen, writtenHash, reportedHash, intendedLen, recognizedGen, matchedLen, leadingRemainderLen: 0, trailingRemainderLen: 0, messageExcerpt });
+    // Card 280309d9: `writtenAt` is the real Enter-write instant captured at the ORIGINAL detection's own
+    // call site (mirrors recognizedGen/matchedLen above) — this event's own `ts` (stamped by the consumer,
+    // SessionService.handlePromptMismatchUnresolved) is the GIVE-UP instant, `PROMPT_MISMATCH_RESOLVE_
+    // WINDOW_MS` LATER; `writtenAt` is what lets a reader recover the true write time without an external
+    // `[prompt-echo]` log join.
+    this.events.onPromptMismatchUnresolved?.(sessionId, { gen, writtenHash, reportedHash, intendedLen, recognizedGen, matchedLen, leadingRemainderLen: 0, trailingRemainderLen: 0, messageExcerpt, writtenAt });
   }
 
   /** Card f5f6515a DoD-4: the FUSED counterpart to `getLastMismatchReplay` above — see `Live.lastMismatchFusion`'s

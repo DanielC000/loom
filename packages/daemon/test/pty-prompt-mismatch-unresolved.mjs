@@ -467,8 +467,12 @@ try {
     // Simulate what TWO independently-armed follow-up timers for the SAME (gen, writtenHash, reportedHash)
     // would each do when they fire: call the method they'd each call, with IDENTICAL args, back to back —
     // exactly the shape the card's own asymmetry (arming before isExactRepeatNotice) can produce if it
-    // arms twice for one gen.
-    const args = [sid, /* gen */ 99, "deadbeef", "cafef00d", 123, /* recognizedGen */ 1, 45, "hand-armed dedup specimen"];
+    // arms twice for one gen. Card 280309d9 (manager correction): the 9th positional arg (writtenAt) is
+    // included EXPLICITLY here — this call bypasses TypeScript's own positional-arg checking (this is
+    // plain JS at runtime calling a `private` method, same posture as `host.live` being read directly
+    // elsewhere in this suite), so nothing would have caught a missing/misordered arg here at compile time.
+    const writtenAtSpecimen = "2026-08-27T02:35:49.145Z";
+    const args = [sid, /* gen */ 99, "deadbeef", "cafef00d", 123, /* recognizedGen */ 1, 45, "hand-armed dedup specimen", writtenAtSpecimen];
     host.checkPromptMismatchUnresolved(...args);
     host.checkPromptMismatchUnresolved(...args);
 
@@ -476,11 +480,27 @@ try {
     check("29: RED-PROOF (card 340b9dbe) — two independently-armed follow-ups for the SAME gen fire the durable event AT MOST ONCE, not twice",
       evs28.length === 1);
     check("30: the ONE event that did fire carries the original gen/hashes, unaffected by the dedup", evs28[0]?.info.gen === 99 && evs28[0]?.info.writtenHash === "deadbeef" && evs28[0]?.info.reportedHash === "cafef00d");
+    // Card 280309d9: writtenAt is carried through this positional call exactly like every other arg — a
+    // widened signature that silently dropped the 9th positional value (or a caller that got the order
+    // wrong) would fail HERE, not merely compile clean elsewhere.
+    check("30b: the ONE event that did fire carries writtenAt verbatim", evs28[0]?.info.writtenAt === writtenAtSpecimen);
     check("31: sanity — a genuinely DIFFERENT gen is NOT swallowed by this gen's own dedup entry (the guard is per-gen, not global)",
       (() => {
         const before = unresolvedEvents.filter((e) => e.sessionId === sid).length;
         host.checkPromptMismatchUnresolved(sid, 100, "aaaa", "bbbb", 1, 1, 1, "different gen");
         return unresolvedEvents.filter((e) => e.sessionId === sid).length === before + 1;
+      })());
+    // Card 280309d9 (manager correction): this call OMITS the 9th positional arg entirely — exactly the
+    // shape an external, non-TypeScript-checked caller could produce (this suite itself did, until this
+    // fix, at PART 6's own original two call sites). Proves the contract fix: the method's own default
+    // parameter (`writtenAt: string | null = null`) makes an omitted arg resolve to a REAL `null`, never a
+    // silently-dropped `undefined` that would leak a third, un-contracted state into the durable event.
+    check("31b: an OMITTED 9th positional arg resolves to a real null (the default parameter), never undefined",
+      (() => {
+        const evsBefore = unresolvedEvents.filter((e) => e.sessionId === sid).length;
+        host.checkPromptMismatchUnresolved(sid, 101, "cccc", "dddd", 1, 1, 1, "omitted writtenAt");
+        const evsNow = unresolvedEvents.filter((e) => e.sessionId === sid);
+        return evsNow.length === evsBefore + 1 && evsNow[evsNow.length - 1].info.writtenAt === null;
       })());
   }
   // ===== PART 7 — card 87d2dc95: THE LAG-BY-ONE REPLAY CHAIN. Reproduces the real specimen (worker
@@ -670,6 +690,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card f9b1ea00's own gap is closed: a recognized-replay `[loom:prompt-mismatch]` that never resolves within the (env-configurable) PROMPT_MISMATCH_RESOLVE_WINDOW_MS now fires PtyHostEvents.onPromptMismatchUnresolved exactly once, naming the original detection's own gen/hashes/length (PART 1 — previously this emitted nothing at all, ever); a mismatch that DOES resolve via a later CONFIRMED composer-accumulation fusion produces NO follow-up signal (PART 2, the mandatory other-direction positive control per DoD-3 — a check firing on both is the exact false-alarm regression card 854d1632 v3 caught); a stale follow-up timer left over from a PREVIOUS spawn of the same sessionId is CLEARED before a resume/recycle/restart overwrites the map entry, so it can never fire against — or be coincidentally satisfied by — an unrelated later incarnation's own state (PART 3, Code Review HIGH, mirroring readyFallbackTimer's own established fix, card c469d54e); and a wrapper-deficit or ANSI-strip-deficit mismatch — both benign, both `replayedEntry !== undefined` by construction, both structurally UNRESOLVABLE since only a CONFIRMED fusion (which requires `replayedEntry === undefined`) can mark a gen resolved — now arms NO follow-up timer at all, where the original cut would have armed one that could never resolve and failed loud 10 minutes after Loom said nothing was lost (PART 4, Code Review CRITICAL, the arming condition moved to match exactly the notice text's own `lossClause` replay branch); and a deliberate stop/crash also clears pending timers even though a claude session's own Live entry survives its own exit with alive:false rather than being deleted, so a stale timer can never fire a false 'please resend' nudge at a session that no longer exists (PART 5, Code Review MAJOR, mirroring readyFallbackTimer's own onExit clear); and card 87d2dc95's own lag-by-one replay chain is closed on BOTH axes — a mid-chain gen is retroactively resolved the instant a LATER generation's own detection recognizes its write (no false 'established loss' alarm), a notice's own lagged confirmation mints NO further notice and arms NO further timer (the self-sustaining loop cannot iterate a second time), and a genuinely terminal, never-recognized-again generation STILL alarms, exactly once, bounding the whole chain's alarm count to ONE rather than one-per-link (PART 7); and, per manager review, the SAME loop-breaker also exempts a generation whose own intended text is the OTHER notice family — `[loom:prompt-mismatch-unresolved]` (sessions/service.ts) — closing a reachability gap the original single-tag guard left open, while a negative control proves this stays a `startsWith` prefix test, never `.includes()`: a real message that merely QUOTES a notice tag mid-string is NOT exempted and still arms its own follow-up timer normally (PART 8)."
+  ? "\n✅ ALL PASS — card f9b1ea00's own gap is closed: a recognized-replay `[loom:prompt-mismatch]` that never resolves within the (env-configurable) PROMPT_MISMATCH_RESOLVE_WINDOW_MS now fires PtyHostEvents.onPromptMismatchUnresolved exactly once, naming the original detection's own gen/hashes/length (PART 1 — previously this emitted nothing at all, ever); a mismatch that DOES resolve via a later CONFIRMED composer-accumulation fusion produces NO follow-up signal (PART 2, the mandatory other-direction positive control per DoD-3 — a check firing on both is the exact false-alarm regression card 854d1632 v3 caught); a stale follow-up timer left over from a PREVIOUS spawn of the same sessionId is CLEARED before a resume/recycle/restart overwrites the map entry, so it can never fire against — or be coincidentally satisfied by — an unrelated later incarnation's own state (PART 3, Code Review HIGH, mirroring readyFallbackTimer's own established fix, card c469d54e); and a wrapper-deficit or ANSI-strip-deficit mismatch — both benign, both `replayedEntry !== undefined` by construction, both structurally UNRESOLVABLE since only a CONFIRMED fusion (which requires `replayedEntry === undefined`) can mark a gen resolved — now arms NO follow-up timer at all, where the original cut would have armed one that could never resolve and failed loud 10 minutes after Loom said nothing was lost (PART 4, Code Review CRITICAL, the arming condition moved to match exactly the notice text's own `lossClause` replay branch); and a deliberate stop/crash also clears pending timers even though a claude session's own Live entry survives its own exit with alive:false rather than being deleted, so a stale timer can never fire a false 'please resend' nudge at a session that no longer exists (PART 5, Code Review MAJOR, mirroring readyFallbackTimer's own onExit clear); and card 87d2dc95's own lag-by-one replay chain is closed on BOTH axes — a mid-chain gen is retroactively resolved the instant a LATER generation's own detection recognizes its write (no false 'established loss' alarm), a notice's own lagged confirmation mints NO further notice and arms NO further timer (the self-sustaining loop cannot iterate a second time), and a genuinely terminal, never-recognized-again generation STILL alarms, exactly once, bounding the whole chain's alarm count to ONE rather than one-per-link (PART 7); and, per manager review, the SAME loop-breaker also exempts a generation whose own intended text is the OTHER notice family — `[loom:prompt-mismatch-unresolved]` (sessions/service.ts) — closing a reachability gap the original single-tag guard left open, while a negative control proves this stays a `startsWith` prefix test, never `.includes()`: a real message that merely QUOTES a notice tag mid-string is NOT exempted and still arms its own follow-up timer normally (PART 8). Card 280309d9: `checkPromptMismatchUnresolved`'s widened (9th, `writtenAt`) positional signature is exercised, and asserted on, by PART 6's own direct calls — both an explicit value carried through verbatim and an omitted arg resolving to a real `null` via the method's own default parameter, never a silently-dropped `undefined`."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

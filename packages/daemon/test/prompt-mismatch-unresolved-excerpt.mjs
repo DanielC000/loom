@@ -73,6 +73,10 @@ const baseInfo = {
   gen: 7, writtenHash: "deadbeef", reportedHash: "cafef00d", intendedLen: 1234,
   recognizedGen: 3, matchedLen: 999, leadingRemainderLen: 0, trailingRemainderLen: 0,
   messageExcerpt: "[loom:worker-report] the excerpt of the ORIGINAL intended text for this generation",
+  // Card 280309d9 — the true Enter-write instant, distinct from this row's own `ts` (the give-up instant,
+  // stamped PROMPT_MISMATCH_RESOLVE_WINDOW_MS later by this method). NEVER gated by LOOM_LOG_MESSAGE_CONTENT
+  // (unlike messageExcerpt) — this is a timestamp, not raw message content.
+  writtenAt: "2026-08-27T02:35:49.145Z",
 };
 
 const unresolvedEventsFor = (workerId) => db.listEventsForWorker(workerId).filter((e) => e.kind === "prompt_mismatch_unresolved");
@@ -91,6 +95,14 @@ try {
       detail.gen === baseInfo.gen && detail.writtenHash === baseInfo.writtenHash && detail.reportedHash === baseInfo.reportedHash
       && detail.intendedLen === baseInfo.intendedLen && detail.recognizedGen === baseInfo.recognizedGen
       && detail.matchedLen === baseInfo.matchedLen && detail.leadingRemainderLen === 0 && detail.trailingRemainderLen === 0);
+    // Card 280309d9 — DoD-1's own fix: `detail.writtenAt` carries the TRUE write instant, distinct from
+    // this row's own `ts` (the give-up instant). Negative control alongside it: `ts` must NOT equal
+    // `writtenAt` — proving this test would actually catch a regression that re-meant `ts` as the write
+    // time (or dropped `writtenAt` and left a reader to fall back on `ts`), not just that both are present.
+    check("3b: writtenAt is carried through, verbatim, regardless of the messageExcerpt content-gate",
+      detail.writtenAt === baseInfo.writtenAt);
+    check("3c: negative control — the row's own `ts` is NOT the write time (it is the give-up instant, ~600s later)",
+      evs[0].ts !== baseInfo.writtenAt);
   }
 
   // ===== PART 2 — POSITIVE CONTROL (flag ON): messageExcerpt is present, bounded, and verbatim. =====
@@ -150,12 +162,24 @@ try {
     check("14: sanity — neither message dropped the underlying gen/hash identity a reader needs to locate the event",
       recipientMsg.includes(`gen=${baseInfo.gen}`) && senderMsg.includes(`gen=${baseInfo.gen}`));
   }
+  // ===== PART 5 — card 280309d9's own defensive case: `writtenAt: null` (this generation's write was never
+  // recorded) is stored as a real `null`, never silently dropped (which would be indistinguishable from an
+  // omitted-by-flag field) and never coerced to a truthy placeholder a reader could misread as a real time. =====
+  {
+    const wkr5 = `${wkr}-unrecorded-write`;
+    mkSession({ id: wkr5, role: "worker", parentSessionId: mgr });
+    sessions.handlePromptMismatchUnresolved(wkr5, { ...baseInfo, writtenAt: null });
+    const evs = unresolvedEventsFor(wkr5);
+    const detail = evs[0]?.detail ?? {};
+    check("15: writtenAt: null is stored as an explicit null (present key, null value)",
+      Object.prototype.hasOwnProperty.call(detail, "writtenAt") && detail.writtenAt === null);
+  }
 } finally {
   delete process.env.LOOM_LOG_MESSAGE_CONTENT;
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card a419a7e6's decided content-gate holds both directions: with LOOM_LOG_MESSAGE_CONTENT OFF (the shipped default) the durable prompt_mismatch_unresolved row's detail carries NO messageExcerpt key at all — byte-identical to before this card — and with it ON the row carries the bounded excerpt PtyHost supplied, verbatim; the length/hash backbone is untouched by the flag in either direction, and the gate is read live (not latched) within a single process. Card 87d2dc95 DoD-4: the recipient/sender notice wording no longer asserts the causal verdict \"most likely never reached it\" nor an unconditional \"please resend it\" — both messages instead state what is KNOWN (no later generation's own confirmation was ever recognized as containing the content) while keeping the gen/hash identity a reader needs."
+  ? "\n✅ ALL PASS — card a419a7e6's decided content-gate holds both directions: with LOOM_LOG_MESSAGE_CONTENT OFF (the shipped default) the durable prompt_mismatch_unresolved row's detail carries NO messageExcerpt key at all — byte-identical to before this card — and with it ON the row carries the bounded excerpt PtyHost supplied, verbatim; the length/hash backbone is untouched by the flag in either direction, and the gate is read live (not latched) within a single process. Card 87d2dc95 DoD-4: the recipient/sender notice wording no longer asserts the causal verdict \"most likely never reached it\" nor an unconditional \"please resend it\" — both messages instead state what is KNOWN (no later generation's own confirmation was ever recognized as containing the content) while keeping the gen/hash identity a reader needs. Card 280309d9: detail.writtenAt (the true write instant) is carried through verbatim, ungated by LOOM_LOG_MESSAGE_CONTENT, is provably distinct from the row's own ts (the give-up instant), and a defensive null is stored as a real null rather than silently dropped."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
