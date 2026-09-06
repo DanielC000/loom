@@ -16,10 +16,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 // transcript-root-deny-chokepoint.mjs for the pure-function proof + a REAL (unsubclassed) createPty spawn.
 //
 // PROVES:
-//   GROUP A (role survives, correctly OUT of scope): spawnWorker→recycleWorker (role "worker", hardcoded),
-//     a manager row→recycleManager (role "manager", hardcoded), startPlatformLead→recyclePlatformLead
-//     (role "platform", hardcoded), startRun (role "run" — DoD-5's deliberate exclusion). None of these
-//     four ever lands in the deny set, and the chokepoint leaves their deny byte-identical.
+//   GROUP A (role survives correctly): spawnWorker→recycleWorker (role "worker", hardcoded — OUT of the
+//     BLANKET scope, byte-identical deny, since no projectId-bearing getOtherProjects is wired in this
+//     seam test), startRun (role "run" — DoD-5's deliberate exclusion, byte-identical), AND (card d78f8217)
+//     a manager row→recycleManager (role "manager") / startPlatformLead→recyclePlatformLead (role
+//     "platform") — these two are now correctly IN the BLANKET deny set, so their chokepoint-applied deny
+//     DOES include the rule (a change from this file's pre-d78f8217 assertions, which expected them OUT).
 //   GROUP B (THE HEADLINE REGRESSION, resume() — plus a CORRECTION for forkSession()): resume() of an
 //     assistant-role and an auditor-role session whose `agentId` points at NO row in `agents` — the exact
 //     "delete a companion's agent row, then resume it" scenario the card describes. ⚠️ VERIFIED (and
@@ -168,22 +170,22 @@ try {
   check("(recycleWorker) chokepoint deny is BYTE-IDENTICAL (worker is out of scope)", JSON.stringify(finalDeny(lastOptsFor(rw.id))) === JSON.stringify(lastOptsFor(rw.id)?.permission.deny));
   check("(recycleWorker) chokepoint deny does NOT include the transcript-root rule", !finalDeny(lastOptsFor(rw.id)).includes(ROLE_DENY));
 
-  // --- recycleManager (role "manager", hardcoded) ---
+  // --- recycleManager (role "manager", hardcoded) — card d78f8217: NOW blanket-denied ---
   host.capture.length = 0;
   const rm = await svc.recycleManager("mgrRig", "CONTINUE: pick up the fleet.");
   check("(recycleManager) opts.role === 'manager'", lastOptsFor(rm.id)?.role === "manager");
-  check("(recycleManager) chokepoint deny does NOT include the transcript-root rule", !finalDeny(lastOptsFor(rm.id)).includes(ROLE_DENY));
+  check("(recycleManager) chokepoint deny DOES include the transcript-root rule (d78f8217 blanket)", finalDeny(lastOptsFor(rm.id)).includes(ROLE_DENY));
 
-  // --- startPlatformLead → recyclePlatformLead (role "platform", hardcoded) ---
+  // --- startPlatformLead → recyclePlatformLead (role "platform", hardcoded) — card d78f8217: NOW blanket-denied ---
   host.capture.length = 0;
   const lead = svc.startPlatformLead("agentLead");
   check("(startPlatformLead) opts.role === 'platform'", lastOptsFor(lead.id)?.role === "platform");
-  check("(startPlatformLead) chokepoint deny does NOT include the transcript-root rule", !finalDeny(lastOptsFor(lead.id)).includes(ROLE_DENY));
+  check("(startPlatformLead) chokepoint deny DOES include the transcript-root rule (d78f8217 blanket)", finalDeny(lastOptsFor(lead.id)).includes(ROLE_DENY));
 
   host.capture.length = 0;
   const leadSucc = await svc.recyclePlatformLead(lead.id, "HANDOFF: platform work continues.");
   check("(recyclePlatformLead) opts.role === 'platform'", lastOptsFor(leadSucc.id)?.role === "platform");
-  check("(recyclePlatformLead) chokepoint deny does NOT include the transcript-root rule", !finalDeny(lastOptsFor(leadSucc.id)).includes(ROLE_DENY));
+  check("(recyclePlatformLead) chokepoint deny DOES include the transcript-root rule (d78f8217 blanket)", finalDeny(lastOptsFor(leadSucc.id)).includes(ROLE_DENY));
 
   // --- startRun (role "run" — DoD-5's DELIBERATE exclusion, not an accident of refactoring) ---
   host.capture.length = 0;
@@ -258,6 +260,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the four hardcoded-role respawn paths (recycleWorker/recycleManager/recyclePlatformLead/startRun) stay correctly OUT of the transcript-root deny scope; the headline regression is fixed for resume() (an assistant/auditor session whose agent row is MISSING still gets the deny at the createPty chokepoint, even though resolveAgentSpawn's own fallback drops it); and forkSession()'s OWN 'agent missing' branch is verified DEAD CODE (its own new-row insert throws a foreign-key error first) — a measured correction to the card's framing, not a live gap this file could reproduce."
+  ? "\n✅ ALL PASS — recycleWorker/startRun stay correctly OUT of the transcript-root deny scope; recycleManager/startPlatformLead/recyclePlatformLead are now correctly IN it (card d78f8217's blanket widening); the headline regression is fixed for resume() (an assistant/auditor session whose agent row is MISSING still gets the deny at the createPty chokepoint, even though resolveAgentSpawn's own fallback drops it); and forkSession()'s OWN 'agent missing' branch is verified DEAD CODE (its own new-row insert throws a foreign-key error first) — a measured correction to the card's framing, not a live gap this file could reproduce."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

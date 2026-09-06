@@ -18,7 +18,7 @@ import { RepeatedCallTracker, REPEATED_CALL_THRESHOLD } from "./repeated-call-tr
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
-import { TRANSCRIPT_ROOT_READ_DENY_RULE } from "./claude-transcript.js";
+import { TRANSCRIPT_ROOT_READ_DENY_RULE, otherProjectTranscriptDenyRules } from "./claude-transcript.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG, detectPastePlaceholderLengthLoss, PASTE_LOSS_CALIBRATED_BYTES_PER_LINE, PASTE_LOSS_EXPLAIN_WINDOW, computeWrittenLineCounts, matchEmbeddedPlaceholderToken, PASTE_TRIPWIRE_TOKEN_WINDOW, type PasteLengthLossCandidate, type WrittenLineCountEntry, type SeenPlaceholderTokenEntry } from "../orchestration/paste-tripwire.js";
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, isPtyUseConptyDllEnabled, isLogMessageContentEnabled } from "../paths.js";
@@ -4151,11 +4151,13 @@ export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedToo
 }
 
 /**
- * Card ac90ca8e (extended by 44fa586a to `auditor`/`workspace-auditor`; moved HERE — the single spawn
- * chokepoint — by card 3388be4d): closes the native-Read/Glob/Grep bypass of the MCP-mediated read gates
- * (companion `transcript_read`: owner-turn + DM-scope + project-scope; auditor/workspace-auditor
- * `repo_read_*`) by denying these roles native read access to the engine transcript root
- * (`~/.claude/projects/**`) via a role-scoped `permissions.deny` entry — see
+ * Card ac90ca8e (extended by 44fa586a to `auditor`/`workspace-auditor`, and by d78f8217 to
+ * `manager`/`platform`/`setup` BLANKET + `worker` PROJECT-SCOPED — see that card's own paragraph below;
+ * moved HERE — the single spawn chokepoint — by card 3388be4d): closes the native-Read/Glob/Grep bypass
+ * of the MCP-mediated read gates (companion `transcript_read`: owner-turn + DM-scope + project-scope;
+ * auditor/workspace-auditor `repo_read_*`; manager `worker_transcript`; platform `session_transcript`) by
+ * denying these roles native read access to the engine transcript root (`~/.claude/projects/**`) via a
+ * role-scoped `permissions.deny` entry — see
  * {@link TRANSCRIPT_ROOT_READ_DENY_RULE}'s own doc (claude-transcript.ts) for why that literal is owned
  * there, not here.
  *
@@ -4170,21 +4172,48 @@ export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedToo
  * chokepoint shape (computed from the pinned role at the single `createPty` boundary, not per-caller).
  *
  * `run` is DELIBERATELY excluded (`runs/prompt.ts` — it ingests untrusted input by design, and never
- * reached the old call site either) — 3388be4d is a MOVE of the existing rule, not a widening; adding
- * `run` (or any other role) to {@link TRANSCRIPT_ROOT_DENY_ROLES} is a separate, already-approved card
- * (`d78f8217`) deferred behind this one.
+ * reached the old call site either) — 3388be4d is a MOVE of the existing rule, not a widening; `run`'s
+ * exclusion is decided there and is NOT reopened by card d78f8217 below.
  *
  * UNIONS the rule into `.deny` rather than replacing it — a per-project `permission.deny` override
  * REPLACES the default wholesale (`shared/config.ts`), unlike `allow` (which unions), so without this
  * union-at-the-spawn-boundary step a project's own custom deny would silently strip this protection.
  * Byte-identical (same reference) for every role outside {@link TRANSCRIPT_ROOT_DENY_ROLES}, and a no-op
  * (same reference) when the rule is already present — no duplicate entries.
+ *
+ * Card d78f8217 (implementing 31613c1e's LEAD RULING, the approved split): `manager`/`platform`/`setup`
+ * join the BLANKET set here — the reviewer swept `packages/daemon/assets/**` + `.claude/skills/**` for
+ * `.claude/projects` and found ZERO hits (positive-controlled: the same pattern returns 10 hits under
+ * `src/`+`test/`), so nothing shipped depends on any of these three roles reading the transcript root
+ * natively. `worker` is DELIBERATELY NOT added here — a worker legitimately reads its OWN project's
+ * transcripts (six in-tree investigations depend on it), so the blanket rule would regress shipped
+ * behavior. It instead gets a PROJECT-SCOPED deny via the `workerProjectDenyRules` param below — see
+ * {@link otherProjectTranscriptDenyRules}'s own doc (claude-transcript.ts) for the two rule shapes and
+ * why both are needed, and 31613c1e's LEAD RULING for why the one-knob "blanket for all four" alternative
+ * was rejected (weaker exactly where exposure is highest — `platform` holds git push + `vault_write`
+ * alongside cross-project `session_transcript`).
  */
-export const TRANSCRIPT_ROOT_DENY_ROLES: ReadonlySet<SessionRole> = new Set(["assistant", "auditor", "workspace-auditor"]);
+export const TRANSCRIPT_ROOT_DENY_ROLES: ReadonlySet<SessionRole> = new Set(["assistant", "auditor", "workspace-auditor", "manager", "platform", "setup"]);
 export const TRANSCRIPT_ROOT_DENY_RULES: readonly string[] = [TRANSCRIPT_ROOT_READ_DENY_RULE];
-export function withTranscriptRootDenyForSpawn(permission: PermissionPolicy, role?: SessionRole | null): PermissionPolicy {
-  if (!role || !TRANSCRIPT_ROOT_DENY_ROLES.has(role)) return permission;
-  const missing = TRANSCRIPT_ROOT_DENY_RULES.filter((t) => !permission.deny.includes(t));
+export function withTranscriptRootDenyForSpawn(
+  permission: PermissionPolicy,
+  role?: SessionRole | null,
+  /**
+   * Card d78f8217: the `worker` role's PROJECT-SCOPED deny rules (one pair per OTHER project — see
+   * {@link otherProjectTranscriptDenyRules}), computed by the caller (createPty, from the DB) since this
+   * function stays pure/DB-free. Ignored for every role except `worker` — a non-worker role either takes
+   * the blanket rule above (if in {@link TRANSCRIPT_ROOT_DENY_ROLES}) or nothing at all, regardless of
+   * this param, so passing it for another role is inert (matches this function's existing "OUT of scope
+   * ⇒ byte-identical" contract). Undefined/empty ⇒ no rules added — byte-identical to before this param
+   * existed for every worker spawn with no other live projects.
+   */
+  workerProjectDenyRules?: readonly string[] | null,
+): PermissionPolicy {
+  const rules: string[] = [];
+  if (role && TRANSCRIPT_ROOT_DENY_ROLES.has(role)) rules.push(...TRANSCRIPT_ROOT_DENY_RULES);
+  if (role === "worker" && workerProjectDenyRules?.length) rules.push(...workerProjectDenyRules);
+  if (!rules.length) return permission;
+  const missing = rules.filter((t) => !permission.deny.includes(t));
   if (!missing.length) return permission;
   return { ...permission, deny: [...permission.deny, ...missing] };
 }
@@ -5262,6 +5291,17 @@ export class PtyHost {
    * spawn — the byte-identical default for every existing hermetic test that doesn't wire this.
    */
   private readonly getCodescapeSupervisorState: () => { port: number | null; resolveProjectId: (repoPath: string) => string | null };
+  /**
+   * Card d78f8217: read access to every OTHER live project's `{id, repoPath}`, wired in by index.ts at
+   * boot (it holds `db`; PtyHost deliberately does not — mirrors `getCapabilityCatalog`/
+   * `getIntegrationPaths` above). Called PER-SPAWN inside createPty, for the `worker` role only, to derive
+   * that spawn's PROJECT-SCOPED transcript-root deny (see `otherProjectTranscriptDenyRules` and
+   * `withTranscriptRootDenyForSpawn`'s own docs) — a project created/archived after boot is reflected on
+   * the very next worker spawn, no daemon restart needed. Defaults to a harmless no-op (`[]`, meaning
+   * "no other projects known") so a PtyHost built without this opt — every existing hermetic test —
+   * behaves byte-identically: a worker spawn gets no project-scoped deny rules at all.
+   */
+  private readonly getOtherProjects: (projectId: string) => Array<{ id: string; repoPath: string }>;
   constructor(
     private events: PtyHostEvents,
     opts?: {
@@ -5270,6 +5310,7 @@ export class PtyHost {
       resolveConnectionSecret?: (connectionId: string, projectId?: string) => string | undefined;
       getIntegrationPaths?: () => { codescape?: string };
       getCodescapeSupervisorState?: () => { port: number | null; resolveProjectId: (repoPath: string) => string | null };
+      getOtherProjects?: (projectId: string) => Array<{ id: string; repoPath: string }>;
     },
   ) {
     this.busyStaleMs = opts?.busyStaleMs ?? BUSY_STALE_MS;
@@ -5278,6 +5319,7 @@ export class PtyHost {
     this.resolveConnectionSecret = opts?.resolveConnectionSecret ?? (() => undefined);
     this.getIntegrationPaths = opts?.getIntegrationPaths ?? (() => ({}));
     this.getCodescapeSupervisorState = opts?.getCodescapeSupervisorState ?? (() => ({ port: null, resolveProjectId: () => null }));
+    this.getOtherProjects = opts?.getOtherProjects ?? (() => []);
   }
 
   spawn(opts: SpawnOpts): void {
@@ -5860,7 +5902,15 @@ export class PtyHost {
     // Card 3388be4d: role-scoped transcript-root deny, applied HERE — the single spawn chokepoint every
     // path (fresh/resume/fork/recycle/boot/run) inherits — keyed off the pinned `opts.role`, not
     // re-derived from the agent row. See withTranscriptRootDenyForSpawn's own doc for why this moved.
-    const permission = withTranscriptRootDenyForSpawn(permissionWithAllow, opts.role);
+    // Card d78f8217: for a `worker` spawn only, also derive its PROJECT-SCOPED deny rules — one pair
+    // (id-token + encoded-repoPath) per OTHER live project — from the DB via the injected
+    // `getOtherProjects` callback, keyed off this spawn's own `opts.projectId`. A projectId-less spawn
+    // (never happens for a real worker, but the type is optional) resolves to `[]`, same as the default
+    // no-op callback — no rules added, byte-identical.
+    const workerProjectDenyRules = opts.role === "worker" && opts.projectId
+      ? this.getOtherProjects(opts.projectId).flatMap((p) => otherProjectTranscriptDenyRules(p.id, p.repoPath))
+      : undefined;
+    const permission = withTranscriptRootDenyForSpawn(permissionWithAllow, opts.role, workerProjectDenyRules);
     // Card 51926260 — computed HERE (before writeSessionSettings) and reused verbatim at buildSpawnArgs
     // below: the settings.json `permissions.defaultMode` and the `--permission-mode` CLI flag must agree,
     // or the two boot-mode mechanisms could disagree about where this session actually lands. See

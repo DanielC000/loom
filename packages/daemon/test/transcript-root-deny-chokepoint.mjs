@@ -5,6 +5,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 // recycle*/startRun/boot) inherits it structurally, keyed off the session's PINNED `role`, never
 // re-derived from the (possibly-missing) agent row.
 //
+// Card d78f8217 (31613c1e's approved split) extends the BLANKET set to `manager`/`platform`/`setup`, and
+// gives `worker` a separate PROJECT-SCOPED deny (rules for every OTHER project, computed from the DB via
+// the `getOtherProjects` PtyHost constructor callback) — see host.ts's own doc for the full reasoning.
+// PART 1b below covers the pure-function shape of the worker project-scoped case; PART 2's tail covers it
+// end to end through a REAL (unsubclassed) createPty + a second PtyHost wired with `getOtherProjects`.
+//
 // THIS FILE proves the chokepoint FUNCTION in isolation (pure, deterministic, no DB/pty — mirrors
 // disallow-prompt-tools.mjs / disallow-task-tools.mjs's own style for the sibling human-prompt-disallow
 // chokepoint), PLUS drives the REAL (unsubclassed) `PtyHost.createPty()` — a real node.exe substituted for
@@ -40,17 +46,18 @@ process.env.LOOM_CLAUDE_BIN = process.execPath; // resolveExecutable passes an a
 
 const { PtyHost, withTranscriptRootDenyForSpawn, TRANSCRIPT_ROOT_DENY_ROLES, TRANSCRIPT_ROOT_DENY_RULES } =
   await import("../dist/pty/host.js");
+const { otherProjectTranscriptDenyRules } = await import("../dist/pty/claude-transcript.js");
 
 // =====================================================================================================
 // PART 1 — the pure function, in isolation (no DB, no pty, no claude)
 // =====================================================================================================
-check("TRANSCRIPT_ROOT_DENY_ROLES = exactly {assistant, auditor, workspace-auditor} (the scope fence — no widening)",
-  JSON.stringify([...TRANSCRIPT_ROOT_DENY_ROLES].sort()) === JSON.stringify(["assistant", "auditor", "workspace-auditor"]));
+check("TRANSCRIPT_ROOT_DENY_ROLES = exactly {assistant, auditor, workspace-auditor, manager, platform, setup} (the scope fence — d78f8217's approved BLANKET widening, worker EXCLUDED)",
+  JSON.stringify([...TRANSCRIPT_ROOT_DENY_ROLES].sort()) === JSON.stringify(["assistant", "auditor", "manager", "platform", "setup", "workspace-auditor"]));
 check("TRANSCRIPT_ROOT_DENY_RULES = exactly the one transcript-root rule",
   JSON.stringify(TRANSCRIPT_ROOT_DENY_RULES) === JSON.stringify([ROLE_DENY]));
 
-// --- IN scope: assistant/auditor/workspace-auditor get the rule unioned in ---
-for (const role of ["assistant", "auditor", "workspace-auditor"]) {
+// --- IN scope (BLANKET): assistant/auditor/workspace-auditor/manager/platform/setup get the rule unioned in ---
+for (const role of ["assistant", "auditor", "workspace-auditor", "manager", "platform", "setup"]) {
   const empty = withTranscriptRootDenyForSpawn({ mode: "acceptEdits", allow: [], deny: [] }, role);
   check(`role '${role}': empty deny → rule added`, empty.deny.length === 1 && empty.deny[0] === ROLE_DENY);
 
@@ -65,14 +72,48 @@ for (const role of ["assistant", "auditor", "workspace-auditor"]) {
     withTranscriptRootDenyForSpawn(alreadyPermission, role) === alreadyPermission);
 }
 
-// --- OUT of scope: every other role, including the DELIBERATE run/manager/platform/worker exclusions ---
-// (DoD-5: `run` ingests untrusted input by design and never reached the old call site either — 3388be4d
-// is a MOVE, not a widening; adding `run` is the separate, already-approved, deferred card d78f8217.)
-for (const role of ["worker", "manager", "platform", "run", "setup", null, undefined]) {
+// --- OUT of scope for the BLANKET rule: `run` (DoD-5's deliberate, un-reopened exclusion) and `worker`
+// (gets its OWN project-scoped mechanism instead — see PART 3 below), plus no-role. Note: `worker` here is
+// called with NO third argument, so it correctly stays byte-identical — see PART 3 for the case where a
+// worker DOES get project-scoped rules passed in. ---
+for (const role of ["worker", "run", null, undefined]) {
   const permission = { mode: "acceptEdits", allow: [], deny: [CUSTOM_DENY] };
   const out = withTranscriptRootDenyForSpawn(permission, role);
-  check(`role '${String(role)}': OUT of scope — deny is the SAME object reference (byte-identical, no mutation)`, out === permission);
-  check(`role '${String(role)}': OUT of scope — no rule leaked in`, !out.deny.includes(ROLE_DENY));
+  check(`role '${String(role)}': OUT of scope (blanket) — deny is the SAME object reference (byte-identical, no mutation)`, out === permission);
+  check(`role '${String(role)}': OUT of scope (blanket) — no rule leaked in`, !out.deny.includes(ROLE_DENY));
+}
+
+// =====================================================================================================
+// PART 1b — the `worker` PROJECT-SCOPED deny (card d78f8217): the third `workerProjectDenyRules` param
+// =====================================================================================================
+{
+  const otherRules = otherProjectTranscriptDenyRules("proj-other", "/repos/other");
+  check("otherProjectTranscriptDenyRules returns exactly the two documented rule shapes",
+    otherRules.length === 2 && otherRules[0] === "Read(~/.claude/projects/*-proj-other-*/**)");
+
+  // A NON-worker role ignores the third param entirely (inert — matches this function's "OUT of scope ⇒
+  // byte-identical" contract for every role not in TRANSCRIPT_ROOT_DENY_ROLES).
+  const runPermission = { mode: "acceptEdits", allow: [], deny: [] };
+  const runOut = withTranscriptRootDenyForSpawn(runPermission, "run", otherRules);
+  check("role 'run' + workerProjectDenyRules passed: still byte-identical (param is worker-only)", runOut === runPermission);
+
+  // `worker` with NO rules (undefined/empty) ⇒ byte-identical, same as before this param existed.
+  const workerBasePermission = { mode: "acceptEdits", allow: [], deny: [] };
+  const workerNoRules = withTranscriptRootDenyForSpawn(workerBasePermission, "worker");
+  check("role 'worker', no workerProjectDenyRules ⇒ byte-identical (same object reference)", workerNoRules === workerBasePermission);
+  const workerEmptyRules = withTranscriptRootDenyForSpawn(workerBasePermission, "worker", []);
+  check("role 'worker', empty workerProjectDenyRules array ⇒ byte-identical (same object reference)", workerEmptyRules === workerBasePermission);
+
+  // `worker` WITH rules ⇒ unioned in, alongside any of the project's own custom deny.
+  const workerWithRules = withTranscriptRootDenyForSpawn({ mode: "acceptEdits", allow: [], deny: [CUSTOM_DENY] }, "worker", otherRules);
+  check("role 'worker' + workerProjectDenyRules ⇒ both other-project rules ARE added", otherRules.every((r) => workerWithRules.deny.includes(r)));
+  check("role 'worker' + workerProjectDenyRules ⇒ the project's OWN custom deny survives (union)", workerWithRules.deny.includes(CUSTOM_DENY));
+  check("role 'worker' + workerProjectDenyRules ⇒ the BLANKET root rule is NOT added (worker never gets the blanket)", !workerWithRules.deny.includes(ROLE_DENY));
+  check("role 'worker' + workerProjectDenyRules ⇒ exactly 3 entries (custom + 2 other-project rules, no more)", workerWithRules.deny.length === 3);
+
+  // idempotent: calling again with the same already-present rules returns the SAME reference.
+  const workerIdempotent = withTranscriptRootDenyForSpawn(workerWithRules, "worker", otherRules);
+  check("role 'worker' + already-present workerProjectDenyRules ⇒ idempotent (same object reference)", workerIdempotent === workerWithRules);
 }
 
 // =====================================================================================================
@@ -116,12 +157,55 @@ if (process.platform !== "win32") {
     const customWritten = readWrittenDeny(sidCustom) ?? [];
     check("(real) assistant+custom-deny spawn: WRITTEN settings.json KEEPS the project's own custom entry", customWritten.includes(CUSTOM_DENY));
     check("(real) assistant+custom-deny spawn: WRITTEN settings.json ALSO carries the role-scoped rule (union)", customWritten.includes(ROLE_DENY) && customWritten.length === 2);
+
+    // (d)-(f) card d78f8217: manager/platform/setup are now BLANKET-denied too.
+    for (const [sid, role] of [["trdc-real-manager", "manager"], ["trdc-real-platform", "platform"], ["trdc-real-setup", "setup"]]) {
+      host.spawn({ sessionId: sid, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [] }, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role });
+      spawned.push(sid);
+      check(`(real) ${role} spawn: WRITTEN settings.json permissions.deny INCLUDES the transcript-root rule (d78f8217 blanket)`, (readWrittenDeny(sid) ?? []).includes(ROLE_DENY));
+    }
   } finally {
     for (const sid of spawned) { try { host.stop(sid, "hard"); } catch { /* best-effort cleanup */ } }
+  }
+
+  // (g) card d78f8217: `worker` PROJECT-SCOPED deny through a REAL createPty, via a SECOND PtyHost wired
+  // with `getOtherProjects` (the real index.ts wiring shape) — proves BOTH directions DoD-2 requires: a
+  // worker's OWN project's transcript rule is ABSENT, and every OTHER project's IS present.
+  const ALL_PROJECTS = [
+    { id: "proj-self", repoPath: "/repos/self" },
+    { id: "proj-other-a", repoPath: "/repos/other-a" },
+    { id: "proj-other-b", repoPath: "/repos/other-b" },
+  ];
+  const hostWithProjects = new PtyHost(events, { getOtherProjects: (projectId) => ALL_PROJECTS.filter((p) => p.id !== projectId) });
+  const scopedSpawned = [];
+  try {
+    const sidScopedWorker = "trdc-real-worker-scoped";
+    hostWithProjects.spawn({ sessionId: sidScopedWorker, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [] }, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role: "worker", projectId: "proj-self" });
+    scopedSpawned.push(sidScopedWorker);
+    const scopedDeny = readWrittenDeny(sidScopedWorker) ?? [];
+    const expectedOther = ["proj-other-a", "proj-other-b"].flatMap((id, i) => otherProjectTranscriptDenyRules(id, ["/repos/other-a", "/repos/other-b"][i]));
+    check("(real, project-scoped) worker's OWN project deny does NOT include a rule keyed to its own project id (positive half — DoD-2)",
+      !scopedDeny.some((r) => r.includes("proj-self")));
+    check("(real, project-scoped) worker's deny INCLUDES both other projects' rules (negative half — DoD-2)",
+      expectedOther.every((r) => scopedDeny.includes(r)));
+    check("(real, project-scoped) worker's deny does NOT include the blanket root rule (worker never gets the blanket)", !scopedDeny.includes(ROLE_DENY));
+    check("(real, project-scoped) worker's deny has exactly the 4 expected other-project entries, no more", scopedDeny.length === 4);
+
+    // A worker spawned FOR one of the "other" projects gets denied the OTHER two, but not its own.
+    const sidScopedWorkerB = "trdc-real-worker-scoped-b";
+    hostWithProjects.spawn({ sessionId: sidScopedWorkerB, cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [] }, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role: "worker", projectId: "proj-other-a" });
+    scopedSpawned.push(sidScopedWorkerB);
+    const scopedDenyB = readWrittenDeny(sidScopedWorkerB) ?? [];
+    check("(real, project-scoped) a DIFFERENT project's worker does NOT get a rule keyed to ITS OWN project id",
+      !scopedDenyB.some((r) => r.includes("proj-other-a")));
+    check("(real, project-scoped) a DIFFERENT project's worker DOES get rules for the other two projects",
+      scopedDenyB.some((r) => r.includes("proj-self")) && scopedDenyB.some((r) => r.includes("proj-other-b")));
+  } finally {
+    for (const sid of scopedSpawned) { try { hostWithProjects.stop(sid, "hard"); } catch { /* best-effort cleanup */ } }
   }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — withTranscriptRootDenyForSpawn is correct in isolation (scoped to exactly assistant/auditor/workspace-auditor, unions with a project's own custom deny, idempotent, byte-identical elsewhere), AND the REAL (unsubclassed) createPty actually writes that deny into settings.json for a real spawn — the chokepoint is genuinely wired in, not just unit-tested."
+  ? "\n✅ ALL PASS — withTranscriptRootDenyForSpawn is correct in isolation (BLANKET for assistant/auditor/workspace-auditor/manager/platform/setup, PROJECT-SCOPED for worker, unions with a project's own custom deny, idempotent, byte-identical elsewhere), AND the REAL (unsubclassed) createPty actually writes both shapes of deny into settings.json for a real spawn — the chokepoint is genuinely wired in, not just unit-tested, and the worker's project-scoping is selective (own project readable, every other project denied) not blanket."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

@@ -539,6 +539,13 @@ async function main(): Promise<void> {
     // `{port:null, resolveProjectId:()=>null}` — every existing hermetic PtyHost test that doesn't wire
     // this stays byte-identical (a null port clean-skips the mount).
     getCodescapeSupervisorState: () => ({ port: codescapeSupervisor.getPort(), resolveProjectId: (repoPath: string) => codescapeSupervisor.resolveProjectId(repoPath) }),
+    // Card d78f8217: read access to every OTHER live project's {id, repoPath}, for a worker spawn's
+    // PROJECT-SCOPED transcript-root deny (see withTranscriptRootDenyForSpawn's own doc). Read LIVE
+    // per-spawn (like getIntegrationPaths above), never boot-bound — a project created/archived after
+    // boot is reflected on the very next worker spawn. `listAllProjects()` (not `listProjects()`) so the
+    // reserved Platform/Setup homes are denied too, same inclusive posture as `mcp/tasks.ts`'s own
+    // other-projects lookup.
+    getOtherProjects: (projectId: string) => db.listAllProjects().filter((p) => p.id !== projectId).map((p) => ({ id: p.id, repoPath: p.repoPath })),
   });
 
   const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design

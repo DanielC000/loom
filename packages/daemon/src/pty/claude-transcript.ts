@@ -55,6 +55,37 @@ export function engineTranscriptPath(cwd: string, engineSessionId: string): stri
 export const TRANSCRIPT_ROOT_READ_DENY_RULE = "Read(~/.claude/projects/**)";
 
 /**
+ * Card d78f8217 (implementing 31613c1e's approved option (d)): a per-OTHER-project transcript-root deny
+ * for the `worker` role's PROJECT-SCOPED deny — as opposed to the BLANKET {@link TRANSCRIPT_ROOT_READ_DENY_RULE}
+ * applied to `assistant`/`auditor`/`workspace-auditor`/`manager`/`platform`/`setup` (host.ts's
+ * `TRANSCRIPT_ROOT_DENY_ROLES`). A worker legitimately reads its OWN project's transcripts (six in-tree
+ * investigations depend on it — see card 31613c1e's own doc), so it can't take the blanket rule; but its
+ * native reach otherwise spans every OTHER project's transcripts too, which this closes.
+ *
+ * TWO rules per other project, both MEASURED against the real `claude` binary (see host.ts's
+ * `withTranscriptRootDenyForSpawn` doc for the measurement):
+ *  - a MID-SEGMENT wildcard on the other project's id: a worktree cwd is
+ *    `WORKTREES_DIR/<projectId>/[repoKey/]<taskKey>`, and {@link encodeProjectDir} flattens every path
+ *    separator to '-', so `<projectId>` (a UUID — alphanumeric+dashes, i.e. glob-safe) sits as a
+ *    `-`-delimited token inside the encoded dir name regardless of repoKey/taskKey — `*-<id>-*` matches
+ *    it selectively without needing to know the exact repoKey/taskKey.
+ *  - the other project's own encoded repoPath: a NON-worker session for that OTHER project (its manager,
+ *    for instance) spawns with cwd = repoPath directly — no worktree, no projectId token at all (see
+ *    sessions/service.ts's `cwd: project.repoPath` spawns) — so the id-token rule alone would miss it.
+ *
+ * This is a DENY-LIST over a DB-derived set and so FAILS OPEN on anything not enumerated here — most
+ * notably a non-Loom `claude` session's transcripts elsewhere on the host. Best-effort narrowing, NEVER a
+ * structural guarantee — see card 31613c1e's LEAD RULING ("CARRY ITS LIMIT VERBATIM OR THIS BECOMES THE
+ * NEXT OVERCLAIMED CONTAINMENT DOC").
+ */
+export function otherProjectTranscriptDenyRules(otherProjectId: string, otherProjectRepoPath: string): string[] {
+  return [
+    `Read(~/.claude/projects/*-${otherProjectId}-*/**)`,
+    `Read(~/.claude/projects/${encodeProjectDir(otherProjectRepoPath)}/**)`,
+  ];
+}
+
+/**
  * Locate a session's transcript file robustly: the computed path first (fast, correct for the
  * common case), else scan `~/.claude/projects/*` for `<engineSessionId>.jsonl` — the id is a
  * globally-unique UUID, so a match is unambiguous regardless of how Claude encoded the dir. This
