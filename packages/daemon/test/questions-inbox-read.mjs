@@ -7,6 +7,8 @@
 //   D. GET /api/questions/:id returns one enriched question; 404 on an unknown id.
 //   E. the full round-trip: an answer (via the EXISTING answer route) flips pending→answered and the
 //      answered row surfaces via the reads carrying chosenOption/note.
+//   F. card 24a8b8c3: agentName is joined via the IMMUTABLE filer (filedBySessionId), not the mutable
+//      routing target (sessionId) — a recycle-style reparent must not change the displayed asker.
 // Run: 1) build the daemon, 2) node test/questions-inbox-read.mjs
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 import fs from "node:fs";
@@ -77,6 +79,29 @@ try {
   check("getQuestionInboxItem returns the enriched row", db.getQuestionInboxItem("q3").agentName === "Alpha Lead");
   check("getQuestionInboxItem returns undefined for unknown id", db.getQuestionInboxItem("nope") === undefined);
 
+  // --- F. card 24a8b8c3 FAIL-FIRST regression: a recycle-style reparent must NOT change agentName --------
+  // Before this card, `agent_name` was joined via `q.session_id` (the MUTABLE routing target
+  // `reparentQuestions` rewrites on every recycle), so a recycle silently swapped the displayed asker to
+  // the successor's agent. Uses its OWN dedicated agent/session/question (never q1/q3/sA) so it can't
+  // disturb section E's later answer-route assertions below. Simulate a recycle directly via
+  // `reparentQuestions` (the same call SessionService.recycleManager makes) and assert `agentName` still
+  // names the ORIGINAL FILER.
+  // FAIL-FIRST: against pre-fix code (agent_name joined via session_id), q5AfterRecycle.agentName would
+  // read "Gamma Lead II" (the successor's agent) instead of "Gamma Lead" (the filer's).
+  db.insertAgent({ id: "aC", projectId: "pA", name: "Gamma Lead", startupPrompt: "", position: 2 });
+  db.insertSession(mkSession("sC", "pA", "aC")); // the original filer, live
+  db.insertQuestion(mkQuestion("q5", "sC", "pA", { createdAt: at(4000) }));
+  db.insertAgent({ id: "aC2", projectId: "pA", name: "Gamma Lead II", startupPrompt: "", position: 3 });
+  db.insertSession(mkSession("sC2", "pA", "aC2")); // the recycle successor, live
+  const moved = db.reparentQuestions("sC", "sC2");
+  check("F: reparentQuestions moved sC's open rows onto the successor", moved === 1);
+  const q5AfterRecycle = db.listOpenQuestions().find((q) => q.id === "q5");
+  check("F: sessionId (the ROUTING target) is now the successor", q5AfterRecycle?.sessionId === "sC2");
+  check("F: filedBySessionId (the FILER) is UNCHANGED — still the original", q5AfterRecycle?.filedBySessionId === "sC");
+  check("🔴 FAIL-FIRST: agentName still names the ORIGINAL FILER's agent, not the successor's", q5AfterRecycle?.agentName === "Gamma Lead");
+  check("F: getQuestionInboxItem shares the identical fix", db.getQuestionInboxItem("q5")?.agentName === "Gamma Lead");
+  check("F: sessionLive still tracks the CURRENT routing target (the live successor), not the filer", q5AfterRecycle?.sessionLive === true);
+
   // --- C + D + E via the REAL HTTP routes ---------------------------------------------------------
   const pushed = [];
   const ptyStub = { enqueueStdin: (...a) => { pushed.push(a); return { delivered: false, reason: "session-dead" }; } };
@@ -86,9 +111,10 @@ try {
   const getList = await app.inject({ method: "GET", url: "/api/questions" });
   check("C: GET /api/questions → 200", getList.statusCode === 200);
   const listBody = getList.json();
-  check("C: GET /api/questions excludes consumed (3 rows)", listBody.length === 3 && listBody.every((q) => q.state !== "consumed"));
+  // 4 rows now, not 3: section F added q5 (still pending) alongside q1/q2/q3.
+  check("C: GET /api/questions excludes consumed (4 rows)", listBody.length === 4 && listBody.every((q) => q.state !== "consumed"));
   const getListAll = await app.inject({ method: "GET", url: "/api/questions?includeConsumed=true" });
-  check("C: GET /api/questions?includeConsumed=true → 4 rows", getListAll.json().length === 4);
+  check("C: GET /api/questions?includeConsumed=true → 5 rows", getListAll.json().length === 5);
 
   const getOne = await app.inject({ method: "GET", url: "/api/questions/q1" });
   check("D: GET /api/questions/:id → 200 with enriched fields", getOne.statusCode === 200 && getOne.json().projectName === "Alpha");
@@ -115,6 +141,7 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — decision-inbox reads span all projects, exclude consumed by default, enrich display fields; GET routes + answer round-trip work."
+  ? "\n✅ ALL PASS — decision-inbox reads span all projects, exclude consumed by default, enrich display fields " +
+    "(agentName from the immutable filer, surviving a recycle-style reparent); GET routes + answer round-trip work."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

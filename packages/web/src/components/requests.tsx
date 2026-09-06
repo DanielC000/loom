@@ -731,6 +731,8 @@ export function RequestHistory() {
   // A cancelled row's "when" is cancelledAt (it has no answeredAt — never answered).
   const resolvedAt = (q: QuestionInboxItem): string | null => q.state === "cancelled" ? q.cancelledAt : q.answeredAt;
   const s = search.trim().toLowerCase();
+  // `q.agentName` (card 24a8b8c3) names the IMMUTABLE FILER's agent, not whichever agent currently owns
+  // the routing target — so searching by agent name matches "who asked this", surviving any recycle.
   const rows = terminal.filter((q) =>
     (typeF === "all" || q.type === typeF) &&
     (projF === "all" || q.projectId === projF) &&

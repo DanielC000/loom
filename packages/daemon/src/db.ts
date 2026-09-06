@@ -7273,12 +7273,23 @@ export class Db {
   }
   /**
    * The web decision-inbox's GLOBAL "waiting on me" read (card 8701bdbb, child B): every question across
-   * ALL projects/sessions, enriched with the asking agent/project display names + whether the asking
-   * session is still live (for the jump/nudge affordances). By default only the human-actionable states
-   * ('pending' + 'answered'); `includeConsumed` folds in the terminal history — 'consumed' AND 'cancelled'
-   * (question_cancel/dismiss's terminal state is retained history exactly like 'consumed', never a separate
-   * bucket). Newest-first. LEFT JOINs so a question whose asking session/agent was hard-deleted still lists
-   * (name falls back to "?") rather than silently dropping — the human should still see and answer it.
+   * ALL projects/sessions, enriched with the asking agent/project display names + whether the CURRENTLY
+   * ROUTED session is still live (for the jump/nudge affordances). By default only the human-actionable
+   * states ('pending' + 'answered'); `includeConsumed` folds in the terminal history — 'consumed' AND
+   * 'cancelled' (question_cancel/dismiss's terminal state is retained history exactly like 'consumed',
+   * never a separate bucket). Newest-first. LEFT JOINs so a question whose filing/routed session or agent
+   * was hard-deleted still lists (name falls back to "?") rather than silently dropping — the human should
+   * still see and answer it.
+   *
+   * Card 24a8b8c3: `agent_name` is joined via `filed_by_session_id` (the IMMUTABLE filer), NOT
+   * `session_id` (the mutable routing target `reparentQuestions` rewrites on every recycle) — the same
+   * shape `5b22b262` fixed one layer up, in the UI's `RequestProvenance`. `session_process_state`/
+   * `session_resumability` (→ `sessionLive`/`sessionOrphaned`) stay joined off `session_id` on purpose:
+   * those legitimately describe the CURRENT seat this question is routed to, not who filed it. A legacy
+   * row with a null `filed_by_session_id` (unrecoverable — see that column's own doc) or a filer whose
+   * session/agent was since hard-deleted both naturally yield no match here, falling back to `agentName:
+   * "?"` in `toQuestionInboxItem` — never the routed session's agent, which would silently re-create the
+   * bug this card fixes.
    */
   listOpenQuestions(includeConsumed = false): QuestionInboxItem[] {
     const rows = this.db.prepare(
@@ -7286,7 +7297,8 @@ export class Db {
               s.resumability AS session_resumability
        FROM questions q
        LEFT JOIN sessions s ON q.session_id = s.id
-       LEFT JOIN agents a ON s.agent_id = a.id
+       LEFT JOIN sessions fs ON q.filed_by_session_id = fs.id
+       LEFT JOIN agents a ON fs.agent_id = a.id
        LEFT JOIN projects p ON q.project_id = p.id
        WHERE q.state IN (${includeConsumed ? "'pending','answered','consumed','cancelled'" : "'pending','answered'"})
        ORDER BY q.created_at DESC`,
@@ -7318,14 +7330,17 @@ export class Db {
   markQuestionSurfaced(id: string, signature: string, at: string): void {
     this.db.prepare("UPDATE questions SET last_surfaced_state = ?, last_surfaced_at = ? WHERE id = ?").run(signature, at, id);
   }
-  /** One question enriched with the same display fields (the answer page), any state; undefined if unknown. */
+  /** One question enriched with the same display fields (the answer page), any state; undefined if unknown.
+   *  Same `agent_name`-via-`filed_by_session_id` join as `listOpenQuestions` (card 24a8b8c3) — see that
+   *  method's doc for why. */
   getQuestionInboxItem(id: string): QuestionInboxItem | undefined {
     const r = this.db.prepare(
       `SELECT q.*, a.name AS agent_name, p.name AS project_name, s.process_state AS session_process_state,
               s.resumability AS session_resumability
        FROM questions q
        LEFT JOIN sessions s ON q.session_id = s.id
-       LEFT JOIN agents a ON s.agent_id = a.id
+       LEFT JOIN sessions fs ON q.filed_by_session_id = fs.id
+       LEFT JOIN agents a ON fs.agent_id = a.id
        LEFT JOIN projects p ON q.project_id = p.id
        WHERE q.id = ?`,
     ).get(id) as Row | undefined;
