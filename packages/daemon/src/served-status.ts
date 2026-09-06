@@ -12,6 +12,7 @@ import {
   type SkillAssetsGitStatus,
   type SkillAssetsSyncState,
 } from "./skills/assets-git-status.js";
+import { measureScratchRootBytes, SCRATCH_ROOT_WARN_BYTES } from "./sessions/scratch-gc.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -88,6 +89,18 @@ export interface ServedStatus {
   /** The three-plus-one legible verdict combining both skill signals above — see
    *  `deriveSkillAssetsSyncState`'s own doc for what each value means. */
   skillAssetsSyncState: SkillAssetsSyncState;
+  /**
+   * Card 9775559c — the shared per-session scratch root's total on-disk footprint, WARN-only (nothing is
+   * ever evicted on account of this; see `scratch-gc.ts`'s own doc for why an evicting cap was rejected).
+   * This is the design's BINDING condition satisfied: a ceiling that only ever fired into a log nobody
+   * opens was judged a passive notice with zero acted-on precedent on this project — `served_status` (this
+   * surface) and `GET /api/deploy-status` are both already read by a Lead/manager checking deploy state,
+   * so a breach is visible to a named, already-present reader instead of a line nobody opens.
+   */
+  scratchRootBytes: number;
+  /** `scratchRootBytes > SCRATCH_ROOT_WARN_BYTES` — precomputed so a reader doesn't need to import the
+   *  constant to know whether the number above is a problem. */
+  scratchRootOverCeiling: boolean;
 }
 
 /**
@@ -109,6 +122,11 @@ export function buildServedStatus(db: Db): ServedStatus {
   const liveSessionCount = db.listAllSessions().filter((s) => s.processState === "live").length;
   const storeStaleness = skillStoreStaleness();
   const assetsGitStatus = skillAssetsGitStatus();
+  // Card 9775559c — fresh, uncached read, same discipline as skillStoreStaleness/skillAssetsGitStatus
+  // above: this surface is called on-demand (an agent tool call, or a human hitting the REST route), never
+  // polled on an interval, so a real recursive disk walk per call is an acceptable, already-established
+  // trade here.
+  const scratchRootBytes = measureScratchRootBytes();
   return {
     version: loomVersion(),
     webBundle,
@@ -121,5 +139,7 @@ export function buildServedStatus(db: Db): ServedStatus {
     // Card bb76b8d8 — both fresh, uncached reads (same discipline as every other field here).
     skillAssetsGitStatus: assetsGitStatus,
     skillAssetsSyncState: deriveSkillAssetsSyncState(storeStaleness, assetsGitStatus),
+    scratchRootBytes,
+    scratchRootOverCeiling: scratchRootBytes > SCRATCH_ROOT_WARN_BYTES,
   };
 }

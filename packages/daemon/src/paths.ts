@@ -66,6 +66,13 @@ export const LOOPBACK_SECRET_PATH = path.join(LOOM_HOME, "gateway-loopback.key")
 export const SETTINGS_DIR = path.join(LOOM_HOME, "tmp", "settings");
 export const LOGS_DIR = path.join(LOOM_HOME, "logs");
 /**
+ * The shared PARENT of every per-session scratch dir below — card 9775559c pulled this out as its own
+ * constant (previously only `sessionScratchDir` inlined the join) so the boot GC sweep
+ * (`sessions/scratch-gc.ts`) and `served_status`'s total-bytes reading can name the root without
+ * re-deriving the same path string a second place.
+ */
+export const SCRATCH_ROOT_DIR = path.join(LOOM_HOME, "tmp", "scratch");
+/**
  * A repo-EXTERNAL, per-session scratch directory under LOOM_HOME (sibling of the per-session settings
  * convention `tmp/settings/<id>.json`). It is the default output base for a browser session's
  * Playwright captures (`--output-dir`), so a `browser_take_screenshot` taken with NO explicit path can
@@ -77,7 +84,7 @@ export const LOGS_DIR = path.join(LOOM_HOME, "logs");
  * lazily on first write) — a pure path derivation, safe on the synchronous spawn hot path.
  */
 export function sessionScratchDir(sessionId: string): string {
-  return path.join(LOOM_HOME, "tmp", "scratch", sessionId);
+  return path.join(SCRATCH_ROOT_DIR, sessionId);
 }
 /**
  * Per-worker git worktrees live outside the PROJECT repo (share its object store; don't clutter it) —

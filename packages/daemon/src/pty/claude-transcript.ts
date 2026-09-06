@@ -161,6 +161,10 @@ function rememberResolvedPath(engineSessionId: string, filePath: string): void {
   }
 }
 
+/** The real on-disk root every engine session's transcript lives under — the one place this literal is
+ *  constructed (see this file's own header doc on why every `~/.claude/projects/...` path lives HERE). */
+const CLAUDE_PROJECTS_ROOT = path.join(os.homedir(), ".claude", "projects");
+
 export function resolveTranscriptFile(cwd: string, engineSessionId: string): string | null {
   const direct = engineTranscriptPath(cwd, engineSessionId);
   if (fs.existsSync(direct)) return direct;
@@ -171,16 +175,40 @@ export function resolveTranscriptFile(cwd: string, engineSessionId: string): str
     resolvedPathCache.delete(engineSessionId); // stale — the file moved/vanished since caching; rescan for real
   }
 
-  const root = path.join(os.homedir(), ".claude", "projects");
   let found: string | null = null;
   try {
-    for (const dir of fs.readdirSync(root)) {
-      const f = path.join(root, dir, `${engineSessionId}.jsonl`);
+    for (const dir of fs.readdirSync(CLAUDE_PROJECTS_ROOT)) {
+      const f = path.join(CLAUDE_PROJECTS_ROOT, dir, `${engineSessionId}.jsonl`);
       if (fs.existsSync(f)) { found = f; break; }
     }
   } catch { /* projects dir missing — nothing to find */ }
   if (found !== null) rememberResolvedPath(engineSessionId, found);
   return found;
+}
+
+/**
+ * Build the FULL set of engine session ids that currently have an on-disk transcript ANYWHERE under
+ * `~/.claude/projects`, in ONE pass — for a bulk "is X still resumable" sweep across MANY sessions (card
+ * 9775559c's boot scratch-dir GC, `sessions/scratch-gc.ts`) where paying {@link resolveTranscriptFile}'s
+ * own per-session fallback-scan cost (see its doc comment) for every candidate would multiply that cost by
+ * however many candidates there are. This instead reads the root's own dir listing once, then one more
+ * `readdirSync` per project dir (measured sub-second at this repo's own dev-box scale, ~1,256 dirs) — a
+ * fundamentally cheaper shape for "check membership for N ids" than "resolve 1 id" repeated N times.
+ * `root` defaults to the real {@link CLAUDE_PROJECTS_ROOT}; a test passes a fixture dir instead. Returns an
+ * empty set (never throws) if the root doesn't exist.
+ */
+export function listAllTranscriptIds(root: string = CLAUDE_PROJECTS_ROOT): Set<string> {
+  const ids = new Set<string>();
+  let projectDirs: string[];
+  try { projectDirs = fs.readdirSync(root); } catch { return ids; }
+  for (const dir of projectDirs) {
+    let files: string[];
+    try { files = fs.readdirSync(path.join(root, dir)); } catch { continue; }
+    for (const f of files) {
+      if (f.endsWith(".jsonl")) ids.add(f.slice(0, -".jsonl".length));
+    }
+  }
+  return ids;
 }
 
 /** Whether a session is still resumable (its engine transcript file still exists). */

@@ -30,6 +30,7 @@ import { deleteAgentCore } from "./delete-agent-core.js";
 import { readRunUsage, readRunUsageFromFile, readContextStats } from "./context.js";
 import { computeRunCostUsd } from "./pricing.js";
 import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
+import { sweepUnresumableScratchDirs } from "./scratch-gc.js";
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import { composeManagerStartupPrompt, appendScheduledPrompt } from "./manager-prompt.js";
 import { composePlatformLeadStartupPrompt, composeResumeDocOperationalNotes, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
@@ -7641,6 +7642,9 @@ export class SessionService {
     // stay synchronous: it runs BEFORE app.listen(), see boot-listen-not-blocked.mjs). A wedge is simply
     // left for the next boot sweep.
     void sweepAllRunSnapshots().catch((e) => console.warn(`[boot] run snapshot sweep failed: ${(e as Error).message}`));
+    // card 9775559c: same fire-and-forget shape, for the shared per-session scratch root instead of the
+    // run-snapshot root — see scratch-gc.ts's own doc for the predicate and safety constraints.
+    void sweepUnresumableScratchDirs(this.db).catch((e) => console.warn(`[boot] scratch dir sweep failed: ${(e as Error).message}`));
     return { failed: interrupted.length };
   }
 
