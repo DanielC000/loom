@@ -876,6 +876,13 @@ export const PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG = "[loom:prompt-mismatch-unmat
  */
 const AMBIGUOUS_DISPATCH_CAP = 20;
 
+/** Card dbc7ffea: per-logicalId cap on `Live.retiredGiveUpSignatures`'s own array of retired cycles — small,
+ *  because a single message thrashing through more give-up cycles than this before either confirming or
+ *  being definitively dropped is not a real scenario this repo's give-up cadence produces (bounded by
+ *  `GIVE_UP_REQUEUE_LIMIT`); this is a defensive ceiling, not a tuned-to-expected-load number. The MAP's own
+ *  key count is bounded separately, by the existing `AMBIGUOUS_DISPATCH_CAP` (see `capRetiredGiveUpSignatures`). */
+const RETIRED_GIVEUP_SIG_CAP = 8;
+
 /**
  * A single large `pty.write` is truncated by Windows ConPTY's input buffer — observed as long
  * worker reports and pastes arriving cut off in the receiving session. Split big writes into
@@ -3201,6 +3208,76 @@ interface Live {
   // resend can only ever carry ONE member's own text, never the joined text of a batch the sender never
   // knew was coalesced. See `hasAmbiguousMatch`'s own doc for why both are tried.
   ambiguousDispatches: Map<string, { len: number; hash: string; writtenAt: number; batchId: number; memberSig: { len: number; hash: string } }>;
+  // Card dbc7ffea: logicalId → every EARLIER give-up cycle's own signature for a message whose "current"
+  // `ambiguousDispatches` slot has SINCE been superseded — retired so that slot can safely move on to a
+  // fresh signature without losing the ability to recognize an EARLIER write's confirmation arriving LATE.
+  //
+  // ⚠️ THREE PATHS feed/drain this archive — corrected here after the ORIGINAL card body mis-stated the
+  // mechanism as a single one, and after an earlier draft of this doc under-counted at two:
+  //   (1) `drainPending`'s delete-at-redrain, via `archiveAmbiguousDispatch` — the ordinary self-retry/
+  //       exhaustion case the production specimen (96c6afb8) and this card's own repro test actually
+  //       exercise. Pre-fix, a `giveUpGen`-tagged entry being redrained for its retry had its "current"
+  //       entry DELETED outright (never overwritten — by the time the redrained retry itself could give up
+  //       and call `requeueGiveUpOrigin` a SECOND time, the map was already empty for that logicalId), so a
+  //       late confirmation of the FIRST cycle's own bare write had nothing left to content-match against.
+  //   (2) `requeueGiveUpOrigin`'s own `.set()`, via the SAME `archiveAmbiguousDispatch` helper — a genuine
+  //       OVERWRITE (not merely a fresh create), for the auto-joined-resend case `capAmbiguousDispatches`'s
+  //       own doc already names (card a9e4240f): a manual resend gets joined via `hasAmbiguousMatch` to an
+  //       EXISTING still-ambiguous logicalId, and if THAT resend itself later gives up, this call runs
+  //       while the ORIGINAL dispatch's entry is still sitting there live — a different trigger
+  //       (cross-message, not self-retry) hitting the SAME "current slot only" limitation.
+  //   (3) `capAmbiguousDispatches`'s own count eviction of `ambiguousDispatches` DELETES without archiving
+  //       — deliberately: that eviction is a memory-safety BACKSTOP for a "current" entry nobody has
+  //       resolved in a very long time (see that cap's own doc), not a "supersede" event worth preserving
+  //       — archiving an entry that's already about to be evicted from an ALREADY-bounded structure would
+  //       just relocate the same unbounded-growth risk into this one instead of solving it.
+  // (1) and (2) are now covered by the SAME archive, so "every prior cycle's signature survives" holds
+  // regardless of which path superseded it. See `purgeConfirmedGiveUpRequeue`'s own doc, and project memory
+  // `card-66649a90-duplicate-write-residual-measured` for the production specimen path (1) closes.
+  //
+  // Archiving forward (never overwriting the archive itself) means EVERY prior cycle's signature for a
+  // logicalId survives, not merely the first or the immediately-prior one — this generalizes past the
+  // default GIVE_UP_REQUEUE_LIMIT=1 (two cycles) to however many a configured limit allows, PROVIDED
+  // `purgeConfirmedGiveUpRequeue`'s own batch-provenance check groups by logicalId before it ever looks at
+  // batchId (Code Review Major 2: an earlier version of that check counted DISTINCT BATCHIDS alone, which
+  // broke at limit>=2 — two of one message's OWN successive cycles can share byte-identical tagged text
+  // since the tag embeds only `rootMsgId`, never the generation, so they were wrongly read as two
+  // GENUINELY DISTINCT give-up events and declined instead of resolved; see that method's own doc for the
+  // fix). Consulted ONLY by `purgeConfirmedGiveUpRequeue`'s content-match, ADDITIONALLY to (never instead
+  // of) `ambiguousDispatches`'s own current entry — a match here can therefore only ever purge a write
+  // PROVEN by a real engine confirmation to have landed, never a merely-suspected one, which is why this
+  // cannot reopen the loss-safety guard `purgeConfirmedGiveUpRequeue`'s FIFO-fallback still separately
+  // protects (see that method's own doc; that decline branch is DELIBERATELY left untouched by this card)
+  // — verified directly by `pty-giveup-retired-signature-safety.mjs` (cross-logicalId isolation +
+  // batch-provenance discrimination spanning this exact archive) and
+  // `pty-giveup-retired-signature-autojoin-overwrite.mjs` (path (2) specifically), not merely argued.
+  // ⭐ THE INVARIANT THAT MAKES `hasAmbiguousMatch` SAFE TO LEAVE UNTOUCHED (Code Review, confirmed correct
+  // — and MORE clearly right after Major 1 below): this archive MAY contain resolved/dead chains (see
+  // `retireResolvedArchiveEntries`'s own doc for exactly how that happens); only a PROVEN engine
+  // confirmation (this method's content-match) may ever consult it. `hasAmbiguousMatch` is a GUESS (it
+  // auto-joins a fresh manual resend to a chain it merely SUSPECTS is still open) — feeding it entries the
+  // archive demonstrably cannot vouch for as still-live would be strictly worse than its own existing
+  // staleness discipline, not merely redundant with it.
+  // MEMORY-SAFETY: bounded the same way as `ambiguousDispatches` — by COUNT, never time — see
+  // `capRetiredGiveUpSignatures` (outer map, keyed by logicalId, capped at `AMBIGUOUS_DISPATCH_CAP`
+  // distinct logicalIds) and `RETIRED_GIVEUP_SIG_CAP` (each logicalId's own array of cycles, capped at 8) —
+  // worst case for a long-lived session is bounded at 20 × 8 tiny signature records (~16KB), never
+  // unbounded. An entry is removed on: a successful content-match purge (either store, see
+  // `purgeConfirmedGiveUpRequeue`), the FIFO-fallback's own purge, either count-cap above, OR (Code Review
+  // Major 1) `retireResolvedArchiveEntries` at the next genuine turn-end once a logicalId's chain is no
+  // longer in flight by ANY of those means — see that method's own doc for why a session's ordinary,
+  // no-give-up-needed confirmation of a later cycle can otherwise leave a DEAD entry here indefinitely,
+  // which is a real false-ambiguity hazard against later, unrelated collisions, not a harmless leftover.
+  // A plain session exit (crash or deliberate stop) does NOT itself discard this map — a `kind:"claude"`
+  // Live entry is never removed from `this.live` on exit, it survives with `alive:false` instead, so a
+  // dead session's archive sits frozen exactly as it was at the moment of death. It is discarded only
+  // LATER: at that same sessionId's next resume/fork/recycle (all route through `spawn()`, which
+  // unconditionally constructs a brand-new `Live` — see that method's own comments) or at a full daemon
+  // restart (neither map is ever persisted). This is not a new leak — `ambiguousDispatches` (pre-existing)
+  // already has the identical posture; this map just inherits it, bounded the same way. No cross-session
+  // risk either: both maps are strictly per-sessionId, so a dead session's frozen archive can only ever be
+  // consulted again by that SAME sessionId resuming, which wipes it fresh first.
+  retiredGiveUpSignatures: Map<string, Array<{ len: number; hash: string; writtenAt: number; batchId: number; memberSig: { len: number; hash: string } }>>;
   // Card 1bd1f045: monotonic per-session sequence number for the `[pty-write]` byte/call-sequence log —
   // bumped by `ptyWrite()` on every REAL `live.pty.write()` call (see that method's doc). THE load-bearing
   // field: it is what makes a duplicated or replayed emission visible AS SUCH (two records sharing a
@@ -5232,6 +5309,7 @@ export class PtyHost {
       giveUpConfirmQueue: [],
       currentGenFirstWrittenAt: null,
       ambiguousDispatches: new Map(),
+      retiredGiveUpSignatures: new Map(),
       activeTurnRoute: null,
       lastPromptRoute: null,
       activeTurnOwnerText: null,
@@ -5446,6 +5524,7 @@ export class PtyHost {
       giveUpConfirmQueue: [],
       currentGenFirstWrittenAt: null,
       ambiguousDispatches: new Map(),
+      retiredGiveUpSignatures: new Map(),
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
@@ -5533,6 +5612,7 @@ export class PtyHost {
       giveUpConfirmQueue: [],
       currentGenFirstWrittenAt: null,
       ambiguousDispatches: new Map(),
+      retiredGiveUpSignatures: new Map(),
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [], recentWrittenTurns: [], recentReportedTurns: [], recentWrittenLineCounts: [], recentPlaceholderTokens: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
@@ -6052,6 +6132,19 @@ export class PtyHost {
         // generation (nothing else it could possibly be confirming), which is what makes the CONFIRMED log
         // below safe. (If ambiguity DID exist, whether this hook is about the current generation or an
         // older ambiguous one is exactly the question the purge call resolves — see its own return value.)
+        // Card dbc7ffea — REVERTED (Code Review Major 3): an earlier draft widened this to also require
+        // `live.retiredGiveUpSignatures.size === 0`, reasoning the widening was "cosmetic" because
+        // `resolvedByContentMatch` below would catch the real case regardless. That reasoning was WRONG:
+        // the guard below is `hadNoAmbiguityBeforeThisHook && !resolvedByContentMatch` — an AND — so
+        // widening the first conjunct changes the outcome whenever the second is ALSO false, which is the
+        // ORDINARY case (a hook that content-matches nothing). A session that ever had so much as one
+        // give-up redrain keeps a retired entry around indefinitely (see Major 1's fix — an entry now
+        // retires once its chain is no longer in flight, but is not always immediately empty), which would
+        // suppress this line's own CONFIRMED-gen log for every ordinary, non-ambiguous confirmation in that
+        // session from then on. That log is a NAMED MEASUREMENT CORPUS (sessions/service.ts's give-up
+        // latency percentiles are framed against it) — silently biasing exactly the population being
+        // studied is a materially worse outcome than the cosmetic inaccuracy the widening was chasing.
+        // Reverted to reading `ambiguousDispatches` alone, unchanged from before this card.
         const hadNoAmbiguityBeforeThisHook = live.ambiguousDispatches.size === 0;
         const reportedPromptForPurge = typeof hook.prompt === "string" ? hook.prompt : undefined;
         const resolvedByContentMatch = this.purgeConfirmedGiveUpRequeue(sessionId, live, false, reportedPromptForPurge); // card 441499ee/09e655d5/4a0af485 — see the method doc; UserPromptSubmit purges without advancing the queue
@@ -6184,7 +6277,13 @@ export class PtyHost {
             // called separately from the same hook), so a reader can tell "the current generation's own echo
             // is byte-identical" apart from "an OLDER, ambiguous generation's echo was ALSO recognized" —
             // the second is the actual, specific premise DoD#2/#3's purge needs validated.
-            const ambiguousMatch = [...live.ambiguousDispatches.values()].some((e) => e.len === sigReported.len && e.hash === sigReported.hash);
+            //
+            // Card dbc7ffea: ALSO sweep `retiredGiveUpSignatures` — otherwise this diagnostic can report
+            // `ambiguousMatch=false` on the SAME hook that `purgeConfirmedGiveUpRequeue` (called earlier, same
+            // handler) just resolved via a retired-cycle match, which would read as a contradiction to anyone
+            // correlating this line against the `CONFIRMED ... content-matched` line just above it in the log.
+            const ambiguousMatch = [...live.ambiguousDispatches.values()].some((e) => e.len === sigReported.len && e.hash === sigReported.hash)
+              || [...live.retiredGiveUpSignatures.values()].some((sigs) => sigs.some((e) => e.len === sigReported.len && e.hash === sigReported.hash));
             // eslint-disable-next-line no-console
             console.log(`[prompt-echo] ${sessionId} gen=${live.submitGeneration} byteIdentical=${hook.prompt === live.lastPrompt} reportedLen=${hook.prompt.length} writtenLen=${(live.lastPrompt ?? "").length} reportedHash=${sigReported.hash} writtenHash=${sigWritten.hash} ambiguousMatch=${ambiguousMatch}`);
             // Card d005f55b DoD-2: snapshot the prior RECORDED reported entry BEFORE this generation's own
@@ -8532,12 +8631,26 @@ export class PtyHost {
     }
     // Card 4a0af485 Major 2: a `giveUpGen`-tagged entry actually being RE-DRAINED (its hold expired or was
     // purged elsewhere, and it's now eligible again) is a fresh, deliberate resubmission attempt — the OLD
-    // tracked ambiguity (seeded from its FIRST failed write) is moot the instant this happens. Clear it so
-    // it can never linger to wrongly `hasAmbiguousMatch`-join a LATER, unrelated same-content directive; if
-    // THIS fresh attempt also gives up, `requeueGiveUpOrigin` re-seeds it with an accurate, fresh
-    // `writtenAt`. Scoped to `giveUpGen !== undefined` only (an entry that never itself gave up, e.g. an
-    // auto-joined resend that never became ambiguous on its own, has nothing stale to clear here).
-    for (const m of drained) { if (m.giveUpGen !== undefined) live.ambiguousDispatches.delete(m.logicalId); }
+    // tracked ambiguity (seeded from its FIRST failed write) is moot the instant this happens for
+    // `hasAmbiguousMatch`'s purposes. Clear the "current" slot so it can never linger to wrongly
+    // `hasAmbiguousMatch`-join a LATER, unrelated same-content directive; if THIS fresh attempt also gives
+    // up, `requeueGiveUpOrigin` re-seeds it with an accurate, fresh `writtenAt`. Scoped to `giveUpGen !==
+    // undefined` only (an entry that never itself gave up, e.g. an auto-joined resend that never became
+    // ambiguous on its own, has nothing stale to clear here).
+    //
+    // Card dbc7ffea: BEFORE clearing it, archive the entry's own signature into `retiredGiveUpSignatures`
+    // (via the shared `archiveAmbiguousDispatch` — see its own doc) — this is ONE of TWO points in the
+    // give-up pipeline where a logicalId's "current" entry can be superseded (the other is
+    // `requeueGiveUpOrigin`'s own `.set()`, for the auto-joined-resend case — see that call site).
+    // Without this, a message that gives up MORE THAN ONCE loses all memory of every cycle but its last,
+    // and a genuine but LATE engine confirmation of an earlier cycle's own write can never content-match
+    // again — see `retiredGiveUpSignatures`'s own doc for the full mechanism and the production specimen
+    // this closes.
+    for (const m of drained) {
+      if (m.giveUpGen === undefined) continue;
+      this.archiveAmbiguousDispatch(live, m.logicalId);
+      live.ambiguousDispatches.delete(m.logicalId);
+    }
     // Card 78e4b3f2: `joinSubmittedText` frames any `giveUpGen`-tagged member — a genuine physical
     // re-delivery of a message whose first write was never confirmed — as a possible duplicate, so the
     // recipient can tell it apart from new direction. For THIS mechanism specifically (an in-session
@@ -9602,6 +9715,14 @@ export class PtyHost {
       // that needs it; `purgeConfirmedGiveUpRequeue`'s engine-echo match still keys off `submittedSig`
       // alone, unchanged.
       const memberSig = textSignature(annotatedMessageText(m, gen - 1));
+      // Card dbc7ffea: this `.set()` can genuinely OVERWRITE a still-live prior entry for the SAME
+      // logicalId, not just create a fresh one — the auto-join case `capAmbiguousDispatches`'s own doc
+      // already names (card a9e4240f): a manual resend gets joined to an EXISTING still-ambiguous
+      // logicalId via `hasAmbiguousMatch`, and if THAT resend itself later gives up, this call runs while
+      // the ORIGINAL dispatch's entry is still sitting here untouched. Archive it first (see
+      // `archiveAmbiguousDispatch`'s own doc) so a late confirmation of the ORIGINAL (pre-auto-join) write
+      // can still be recognized even after this overwrite. A no-op for the common case (no prior entry).
+      this.archiveAmbiguousDispatch(live, m.logicalId);
       live.ambiguousDispatches.set(m.logicalId, { ...submittedSig, memberSig, writtenAt: live.currentGenFirstWrittenAt ?? Date.now(), batchId: gen });
       this.capAmbiguousDispatches(live);
       const requeues = (m.giveUpRequeues ?? 0) + 1;
@@ -9652,6 +9773,42 @@ export class PtyHost {
       if (oldestKey === undefined) break;
       live.ambiguousDispatches.delete(oldestKey);
     }
+  }
+
+  /** Card dbc7ffea: mirrors `capAmbiguousDispatches`'s own count-bound discipline (see that method's doc for
+   *  why count, never time) — but bounds `retiredGiveUpSignatures`'s own KEY count (distinct logicalIds),
+   *  never the length of any one key's array (that's `RETIRED_GIVEUP_SIG_CAP`, enforced at the push site).
+   *  Oldest-by-key means "the logicalId whose OLDEST retained cycle is furthest in the past" — computed from
+   *  each key's own earliest `writtenAt`, mirroring `capAmbiguousDispatches`'s per-entry comparison. */
+  private capRetiredGiveUpSignatures(live: Live): void {
+    while (live.retiredGiveUpSignatures.size > AMBIGUOUS_DISPATCH_CAP) {
+      let oldestKey: string | undefined;
+      let oldestWrittenAt = Infinity;
+      for (const [key, entries] of live.retiredGiveUpSignatures) {
+        for (const entry of entries) {
+          if (entry.writtenAt < oldestWrittenAt) { oldestWrittenAt = entry.writtenAt; oldestKey = key; }
+        }
+      }
+      if (oldestKey === undefined) break;
+      live.retiredGiveUpSignatures.delete(oldestKey);
+    }
+  }
+
+  /** Card dbc7ffea: the ONE place a logicalId's "current" `ambiguousDispatches` entry is archived into
+   *  `retiredGiveUpSignatures` before it is superseded — shared by BOTH destructive paths that can wipe a
+   *  live entry for a logicalId: `drainPending`'s delete-at-redrain (the ordinary self-retry/exhaustion
+   *  case this card's own repro exercises) and `requeueGiveUpOrigin`'s own `.set()` overwrite (the
+   *  auto-joined-resend case `capAmbiguousDispatches`'s doc names, card a9e4240f). A single shared
+   *  implementation means the two call sites can't drift out of sync on HOW an entry is archived — only on
+   *  WHETHER/WHEN they call it. No-op when there is nothing to archive (the common case: no prior entry). */
+  private archiveAmbiguousDispatch(live: Live, logicalId: string): void {
+    const current = live.ambiguousDispatches.get(logicalId);
+    if (!current) return;
+    const retiredForId = live.retiredGiveUpSignatures.get(logicalId) ?? [];
+    retiredForId.push({ len: current.len, hash: current.hash, memberSig: current.memberSig, writtenAt: current.writtenAt, batchId: current.batchId });
+    while (retiredForId.length > RETIRED_GIVEUP_SIG_CAP) retiredForId.shift();
+    live.retiredGiveUpSignatures.set(logicalId, retiredForId);
+    this.capRetiredGiveUpSignatures(live);
   }
 
   /**
@@ -10036,46 +10193,100 @@ export class PtyHost {
     live.composerDirtyLenBelieved = Math.max(0, live.composerDirtyLenBelieved - resolved); // card c148f118: mirrors the same resolution onto the optimistic reading
   }
 
+  /**
+   * Card dbc7ffea (Code Review re-review, Major 1 follow-up): thin wrapper around the actual logic
+   * (`purgeConfirmedGiveUpRequeueCore`) so the turn-end archive sweep runs EXACTLY ONCE, unconditionally on
+   * `turnEnded`, regardless of which of Core's several internal `return` paths fired — Core has FOUR exits
+   * (the AMBIGUOUS-decline `return true`, the successful-resolve `return true`, the empty-queue
+   * `return false`, and the fallback's own final `return false`), and the sweep must run after ALL of them,
+   * not just the last one. A previous version called `retireResolvedArchiveEntries` from a single line
+   * INSIDE Core, past the empty-queue early return — so a turn-end that took any OTHER exit (including the
+   * empty-queue one, which fires whenever this session's OWN give-up budget for the queue was already
+   * consumed by a DIFFERENT generation's own confirmation — see `retireResolvedArchiveEntries`'s own doc
+   * for the reproduced scenario) never swept at all, leaving a dead archived chain able to false-collide
+   * with a later, unrelated message indefinitely. Wrapping here — rather than adding the same call at each
+   * of Core's four exits — makes it structurally impossible for a future exit path to forget it.
+   */
   private purgeConfirmedGiveUpRequeue(sessionId: string, live: Live, turnEnded: boolean, reportedPrompt?: string): boolean {
-    if (typeof reportedPrompt === "string" && reportedPrompt.length > 0 && live.ambiguousDispatches.size > 0) {
+    const resolved = this.purgeConfirmedGiveUpRequeueCore(sessionId, live, turnEnded, reportedPrompt);
+    if (turnEnded) this.retireResolvedArchiveEntries(live);
+    return resolved;
+  }
+
+  private purgeConfirmedGiveUpRequeueCore(sessionId: string, live: Live, turnEnded: boolean, reportedPrompt?: string): boolean {
+    if (typeof reportedPrompt === "string" && reportedPrompt.length > 0 && (live.ambiguousDispatches.size > 0 || live.retiredGiveUpSignatures.size > 0)) {
       const sig = textSignature(reportedPrompt);
       // Code Reviewer follow-up (card 4a0af485, Major 4): a COALESCED drain seeds MULTIPLE member
       // logicalIds with the SAME joined signature (see `requeueGiveUpOrigin`'s own doc) — a single hook can
       // therefore legitimately confirm more than one logicalId at once. Collect every match instead of
       // stopping at the first, or the other coalesced members' duplicates would survive unpurged.
-      const matchedLogicalIds: string[] = [];
+      //
+      // Card dbc7ffea: ALSO collect matches against `retiredGiveUpSignatures` — every EARLIER give-up cycle's
+      // own signature for a logicalId whose "current" slot has since moved on (see that field's own doc). A
+      // logicalId can therefore appear here via its current entry, one or more retired ones, or both; each
+      // candidate carries its OWN `batchId`/`writtenAt` so the batch-provenance discrimination just below
+      // still operates correctly regardless of which store a match came from.
+      const matches: Array<{ logicalId: string; batchId: number; writtenAt: number }> = [];
       for (const [logicalId, entry] of live.ambiguousDispatches) {
-        if (entry.len === sig.len && entry.hash === sig.hash) matchedLogicalIds.push(logicalId);
+        if (entry.len === sig.len && entry.hash === sig.hash) matches.push({ logicalId, batchId: entry.batchId, writtenAt: entry.writtenAt });
       }
-      if (matchedLogicalIds.length > 0) {
+      for (const [logicalId, retiredEntries] of live.retiredGiveUpSignatures) {
+        for (const entry of retiredEntries) {
+          if (entry.len === sig.len && entry.hash === sig.hash) matches.push({ logicalId, batchId: entry.batchId, writtenAt: entry.writtenAt });
+        }
+      }
+      if (matches.length > 0) {
+        const matchedLogicalIds = [...new Set(matches.map((m) => m.logicalId))];
         // Card bc0774c4 (see this method's own big doc block, "CARD bc0774c4 — BATCH-PROVENANCE
         // DISCRIMINATION", for the full reasoning and the rejected age-based tie-break): a content match can
         // span more than one give-up `batchId` whenever two GENUINELY DISTINCT give-up events happen to
         // share byte-identical text — resolve ONLY when every match belongs to ONE batch (the coalesced
         // case, including every single-member batch); a match spanning more than one batch is left
         // COMPLETELY untouched rather than guessed at.
-        const batchIds = new Set(matchedLogicalIds.map((id) => live.ambiguousDispatches.get(id)!.batchId));
-        if (batchIds.size > 1) {
-          // eslint-disable-next-line no-console
-          console.log(`[submit] ${sessionId} AMBIGUOUS content match: ${matchedLogicalIds.length} logicalId(s) span ${batchIds.size} distinct give-up batches sharing this signature — cannot attribute by content alone, leaving ALL untouched rather than guess (fails toward a duplicate, never a loss)`);
-          return true; // still "handled" by content — do NOT fall through to the content-BLIND FIFO-position fallback, which could purge an entry whose text doesn't even match reportedPrompt
+        //
+        // Card dbc7ffea (Code Review Major 2 fix): checking `batchIds.size` ALONE stopped being sufficient
+        // once ONE logicalId could carry MULTIPLE its-own-history batchIds (current + N retired cycles —
+        // see `retiredGiveUpSignatures`'s own doc). At `GIVE_UP_REQUEUE_LIMIT >= 2`, the possible-duplicate
+        // tag embeds only `rootMsgId`, never the generation, so two DIFFERENT cycles of the SAME message can
+        // legitimately produce byte-identical tagged text — the guard's real question ("are these two
+        // GENUINELY DISTINCT give-up EVENTS?") was being fed one message's own successive cycles and
+        // answering "yes" by mistake, declining to resolve a message that was never actually ambiguous.
+        // FIX: check the number of DISTINCT logicalIds FIRST. Exactly one logicalId, however many of its
+        // own batchIds matched, is NEVER ambiguous by construction (it's the same identity confirming
+        // itself) — resolve immediately, using the LARGEST (most recent) matched batchId so the transitive
+        // `clearComposerDirtyOnConfirm` below resolves as much of that identity's own history as it can.
+        // More than one DISTINCT logicalId is where the ORIGINAL bc0774c4 hazard actually lives — there,
+        // and only there, fall back to the batchId check: sharing ONE batchId across multiple logicalIds is
+        // the legitimate coalesced-batch case (unchanged); spanning more than one is the genuine ambiguity.
+        let resolvedBatchId: number;
+        if (matchedLogicalIds.length === 1) {
+          resolvedBatchId = Math.max(...matches.map((m) => m.batchId));
+        } else {
+          const batchIds = new Set(matches.map((m) => m.batchId));
+          if (batchIds.size > 1) {
+            // eslint-disable-next-line no-console
+            console.log(`[submit] ${sessionId} AMBIGUOUS content match: ${matchedLogicalIds.length} logicalId(s) span ${batchIds.size} distinct give-up batches sharing this signature (current+retired combined) — cannot attribute by content alone, leaving ALL untouched rather than guess (fails toward a duplicate, never a loss)`);
+            return true; // still "handled" by content — do NOT fall through to the content-BLIND FIFO-position fallback, which could purge an entry whose text doesn't even match reportedPrompt
+          }
+          resolvedBatchId = [...batchIds][0]!;
         }
         for (const logicalId of matchedLogicalIds) {
-          const entry = live.ambiguousDispatches.get(logicalId)!;
-          const latencyMs = Date.now() - entry.writtenAt;
+          const oldestWrittenAt = Math.min(...matches.filter((m) => m.logicalId === logicalId).map((m) => m.writtenAt));
+          const latencyMs = Date.now() - oldestWrittenAt;
           // eslint-disable-next-line no-console
           console.log(`[submit] ${sessionId} CONFIRMED logicalId=${logicalId} latencyMs=${latencyMs} (content-matched — resolving any still-queued duplicate copies)`);
           live.ambiguousDispatches.delete(logicalId); // Major 2: resolved — never lingers to wrongly auto-join a LATER, unrelated same-text directive
+          live.retiredGiveUpSignatures.delete(logicalId); // card dbc7ffea: the whole logical chain is resolved the instant ANY of its cycles is proven delivered — no earlier retired cycle is worth keeping past this point
           // Card 417cea0a: hand this same CONFIRMED signal to whoever's listening (sessions/service.ts) —
           // see `onGiveUpConfirmed`'s own doc for why PtyHost can't decide here whether it's news.
           this.events.onGiveUpConfirmed?.(sessionId, logicalId, latencyMs);
         }
         // Card b932558c: this batch's generation is now DECISIVELY confirmed — see clearComposerDirtyOnConfirm's
         // own doc for why this is the actual fix (the field must not stay dirty until an unrelated later
-        // submit() happens to clear it). `batchIds.size` is exactly 1 here: `matchedLogicalIds.length > 0`
-        // (the `if` this sits inside) guarantees at least one, and the `batchIds.size > 1` branch above
-        // already returned before this point for the only other case — never 0, never more than 1.
-        this.clearComposerDirtyOnConfirm(sessionId, live, [...batchIds][0]!, true);
+        // submit() happens to clear it). `resolvedBatchId` is well-defined here by construction (see its own
+        // computation above): either the single-logicalId branch (always sets it) or the multi-logicalId
+        // branch (only reaches this point once `batchIds.size === 1`, having returned already otherwise).
+        this.clearComposerDirtyOnConfirm(sessionId, live, resolvedBatchId, true);
         const matchedSet = new Set(matchedLogicalIds);
         for (let i = live.pending.length - 1; i >= 0; i--) {
           if (matchedSet.has(live.pending[i]!.logicalId)) {
@@ -10124,6 +10335,7 @@ export class PtyHost {
           // This entry's own `onDeliver` already fired at its original hand-off, before it ever gave up
           // (see the content-match branch's own comment on this) — no additional resolution needed here.
           live.ambiguousDispatches.delete(dropped!.logicalId);
+          live.retiredGiveUpSignatures.delete(dropped!.logicalId); // card dbc7ffea: same hygiene as the content-match branch — this logicalId is resolved, so no earlier retired cycle is worth keeping
         }
       }
       // Card b932558c: same fix as the content-match branch above — this generation is now confirmed by
@@ -10141,6 +10353,64 @@ export class PtyHost {
     // discards bookkeeping, never a pending entry.
     if (turnEnded) live.giveUpConfirmQueue.shift();
     return false; // this fallback path never definitively attributes to a SPECIFIC generation by content — see the method doc
+  }
+
+  /**
+   * Card dbc7ffea (Code Review Major 1 fix): a `retiredGiveUpSignatures` entry is useful ONLY while its
+   * logicalId's chain is still "in flight" — something still queued sharing that identity, or a CURRENT
+   * `ambiguousDispatches` entry still awaiting its own confirmation. Once NEITHER holds, the chain has
+   * already been resolved by SOME means.
+   *
+   * THE GAP THIS CLOSES: the ordinary, no-give-up-needed outcome — a message gives up once (archived at
+   * redrain), then its OWN retry (cycle 2) is CONFIRMED NORMALLY, with a physical write that does NOT
+   * content-match anything in either store (e.g. a fresh, TAGGED paste — the archived entry only holds the
+   * BARE cycle-1 signature). `requeueGiveUpOrigin` is never called for cycle 2 (it never itself gave up), so
+   * nothing seeds a fresh "current" entry either. NONE of this method's own delete sites (content-match,
+   * FIFO-fallback, or `capAmbiguousDispatches`'s count eviction) has anything to fire on — the archived
+   * entry survives, dead, for the rest of the session.
+   *
+   * WHY THAT IS A REAL HAZARD, NOT A HARMLESS LEFTOVER: a dead archived entry can no longer usefully purge
+   * anything of its OWN (there is nothing left queued under that logicalId — that is precisely why it is
+   * "no longer in flight"). But it CAN still produce a FALSE AMBIGUITY: a totally UNRELATED later message
+   * that happens to give up with byte-identical text now content-matches BOTH its own current entry AND
+   * this dead one, under two DIFFERENT batchIds — the bc0774c4 discrimination correctly (and safely) treats
+   * that as a genuine cross-batch collision and declines to purge EITHER, silently defeating this card's own
+   * purpose for that unrelated message (a real duplicate now lands for it) even though nothing is LOST.
+   *
+   * WHERE THIS IS OBSERVABLE: on every genuine turn-end (Stop/StopFailure, `turnEnded:true`), sweep the
+   * (small, count-capped) archive: a logicalId with no current entry AND nothing left in `live.pending`
+   * sharing it is provably done — no further physical write can ever occur for it, so retiring its archive
+   * costs nothing purge-wise and only removes the false-ambiguity liability. Deliberately NOT run on the
+   * hot per-hook content-match path itself (that path already does its own point deletion on resolution) —
+   * this is the backstop for chains that resolve WITHOUT ever being noticed there.
+   *
+   * ⚠️ CALL-SITE CONTRACT (Code Review re-review): called from `purgeConfirmedGiveUpRequeue`'s own thin
+   * wrapper, unconditionally on `turnEnded`, AFTER `purgeConfirmedGiveUpRequeueCore` returns — regardless
+   * of which of Core's four internal exits fired (an earlier version called this from a single line INSIDE
+   * Core, past the empty-queue early return, so a turn-end taking a DIFFERENT exit never swept at all —
+   * REPRODUCED: an unrelated message draining past a held entry and confirming shifts that held entry's
+   * generation off `giveUpConfirmQueue`, so its OWN later confirmation hits the early return and the sweep
+   * never runs for it).
+   *
+   * ⛔⛔ DO NOT MOVE THIS CALL UPSTREAM OF `live.enterConfirmed = true` (set in the Stop/StopFailure hook
+   * handler, BEFORE it calls `purgeConfirmedGiveUpRequeue(sessionId, live, true)`), AND DO NOT CALL IT FROM
+   * ANY OTHER "TURN-END-ISH" SITE. This predicate's safety depends on it: the one state where BOTH
+   * conjuncts below would read false while a late confirmation could still legitimately need to purge
+   * something is "drained out of pending, current entry already deleted at redrain, has not yet itself
+   * given up" — and that state can NEVER coincide with a real retire, precisely BECAUSE the only
+   * `turnEnded:true` caller sits downstream of `enterConfirmed:true`: any write still physically in flight
+   * at that instant has ALREADY been confirmed (its give-up already cancelled) by the time this runs. Move
+   * the call earlier, or trigger it from an unrelated event, and that ordering guarantee is gone — this
+   * becomes a LOSS bug (a genuinely still-unconfirmed entry's archive retired out from under it) instead of
+   * the false-ambiguity bug it fixes.
+   */
+  private retireResolvedArchiveEntries(live: Live): void {
+    if (live.retiredGiveUpSignatures.size === 0) return;
+    for (const logicalId of [...live.retiredGiveUpSignatures.keys()]) {
+      if (live.ambiguousDispatches.has(logicalId)) continue; // still an open CURRENT ambiguity — not resolved yet
+      if (live.pending.some((m) => m.logicalId === logicalId)) continue; // still genuinely queued somewhere
+      live.retiredGiveUpSignatures.delete(logicalId);
+    }
   }
 
   /**
