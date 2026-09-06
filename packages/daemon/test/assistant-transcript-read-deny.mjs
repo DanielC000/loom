@@ -1,13 +1,13 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
-// Card ac90ca8e — closes the native-Read/Glob/Grep bypass of the companion's own attested read gates
-// (transcript_read: owner-turn + DM-scope + project-scope) by DENYING the `assistant` role's native
-// Read/Glob/Grep access to the engine transcript root (`~/.claude/projects/**`) via a role-scoped
-// `permissions.deny` entry. Hermetic like spawn-allow-baseline.mjs: a REAL Db + SessionService driven
-// against a FAKE pty injected via PtyHost's createPty() seam, capturing the `permission` object threaded
-// to `pty.spawn()` — this is the SAME object `resolveAgentSpawn` computes and the real (unfaked)
-// createPty (host.ts) passes straight through, unmodified for `.deny`, into `writeSessionSettings`
-// (claude-settings.ts), so capturing it here IS capturing what would land in the real session's
-// settings.json `permissions.deny`.
+// Card ac90ca8e (extended by 44fa586a) — closes the native-Read/Glob/Grep bypass of the MCP-mediated
+// read gates (companion transcript_read: owner-turn + DM-scope + project-scope; auditor/workspace-auditor
+// repo_read_*) by DENYING `assistant`, `auditor` and `workspace-auditor` role native Read/Glob/Grep access
+// to the engine transcript root (`~/.claude/projects/**`) via a role-scoped `permissions.deny` entry.
+// Hermetic like spawn-allow-baseline.mjs: a REAL Db + SessionService driven against a FAKE pty injected
+// via PtyHost's createPty() seam, capturing the `permission` object threaded to `pty.spawn()` — this is
+// the SAME object `resolveAgentSpawn` computes and the real (unfaked) createPty (host.ts) passes straight
+// through, unmodified for `.deny`, into `writeSessionSettings` (claude-settings.ts), so capturing it here
+// IS capturing what would land in the real session's settings.json `permissions.deny`.
 //
 // The engine actually HONOURING a `Read(<glob>)`-shaped deny rule (kickoff bite-point 3) was verified
 // SEPARATELY, live, against a real installed `claude` binary (headless `-p`, scrubbed CLAUDECODE env,
@@ -15,13 +15,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1)
 // absolute-path read of a file under a `~/`-anchored denied directory was refused (blocked BEFORE the
 // file was touched, confirmed by the model's own refusal text), and the identical deny rule ALSO
 // blocked a Glob enumeration of the denied directory. See the worker_report for the full transcript.
+// That live check ran in headless `-p` mode, NOT interactive `auto` — the rule is a `settings.json`
+// permission entry and should be mode-independent, but that leg is inferred, not measured.
 //
 // PROVES:
-//   1. An ASSISTANT-role spawn's permission.deny includes the role-scoped entry — in a DEFAULT-config
-//      project AND in a project with its OWN CUSTOM permission.deny (resolveConfig REPLACES deny
-//      wholesale for a custom override — config.ts:1589 — so this must be a UNION at the spawn
-//      boundary, exactly like BASELINE_SESSION_ALLOW is for `allow`, or a project's own deny config
-//      would silently strip this protection).
+//   1. An ASSISTANT/AUDITOR/WORKSPACE-AUDITOR-role spawn's permission.deny includes the role-scoped
+//      entry — in a DEFAULT-config project AND in a project with its OWN CUSTOM permission.deny
+//      (resolveConfig REPLACES deny wholesale for a custom override — config.ts:1589 — so this must be
+//      a UNION at the spawn boundary, exactly like BASELINE_SESSION_ALLOW is for `allow`, or a project's
+//      own deny config would silently strip this protection).
 //   2. A custom project's OWN deny entry survives (union ADDS, never replaces).
 //   3. Every OTHER role (worker, plain) gets permission.deny BYTE-IDENTICAL (same array reference) to
 //      what resolveConfig alone would have produced — the role scoping is real, not a blanket add.
@@ -81,6 +83,17 @@ db.insertAgent({ id: agAssistantCustom, projectId: pCustom, name: "Companion", s
 const agWorkerCustom = randomUUID();
 db.insertAgent({ id: agWorkerCustom, projectId: pCustom, name: "Dev", startupPrompt: "", position: 1, profileId: workerProfileId });
 
+// Auditor/workspace-auditor agents: no profile needed — startAuditor/startWorkspaceAuditor lock the
+// role via an EXPLICIT caller role that always wins over any profile role (see their own doc comments).
+const agAuditorDefault = randomUUID();
+db.insertAgent({ id: agAuditorDefault, projectId: pDefault, name: "Auditor", startupPrompt: "", position: 3, profileId: null });
+const agWorkspaceAuditorDefault = randomUUID();
+db.insertAgent({ id: agWorkspaceAuditorDefault, projectId: pDefault, name: "Workspace Auditor", startupPrompt: "", position: 4, profileId: null });
+const agAuditorCustom = randomUUID();
+db.insertAgent({ id: agAuditorCustom, projectId: pCustom, name: "Auditor", startupPrompt: "", position: 2, profileId: null });
+const agWorkspaceAuditorCustom = randomUUID();
+db.insertAgent({ id: agWorkspaceAuditorCustom, projectId: pCustom, name: "Workspace Auditor", startupPrompt: "", position: 3, profileId: null });
+
 class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) {
@@ -115,6 +128,20 @@ try {
   check("(3) worker spawn (default config) permission.deny is BYTE-IDENTICAL (same value) to the resolved config",
     JSON.stringify(oWorkerDefault?.permission.deny) === JSON.stringify(defaultDeny));
 
+  const sAuditorDefault = svc.startAuditor(agAuditorDefault);
+  const oAuditorDefault = optsFor(sAuditorDefault.id);
+  check("(1) auditor spawn (default config) permission.deny INCLUDES the role-scoped transcript-root deny",
+    oAuditorDefault?.permission.deny.includes(ROLE_DENY));
+  check("(1) auditor spawn (default config) deny has exactly one entry (no duplication of the empty baseline)",
+    oAuditorDefault?.permission.deny.length === 1);
+
+  const sWorkspaceAuditorDefault = svc.startWorkspaceAuditor(agWorkspaceAuditorDefault);
+  const oWorkspaceAuditorDefault = optsFor(sWorkspaceAuditorDefault.id);
+  check("(1) workspace-auditor spawn (default config) permission.deny INCLUDES the role-scoped transcript-root deny",
+    oWorkspaceAuditorDefault?.permission.deny.includes(ROLE_DENY));
+  check("(1) workspace-auditor spawn (default config) deny has exactly one entry (no duplication of the empty baseline)",
+    oWorkspaceAuditorDefault?.permission.deny.length === 1);
+
   // ============ (2) CUSTOM-deny project: assistant gets BOTH the custom entry AND the role-scoped one ============
   const sAssistantCustom = svc.startNew(agAssistantCustom);
   const oAssistantCustom = optsFor(sAssistantCustom.id);
@@ -133,6 +160,24 @@ try {
     JSON.stringify(oWorkerCustom?.permission.deny) === JSON.stringify([CUSTOM_DENY]));
   check("(3) worker spawn (custom-deny project) permission.deny does NOT include the role-scoped entry", !oWorkerCustom?.permission.deny.includes(ROLE_DENY));
 
+  const sAuditorCustom = svc.startAuditor(agAuditorCustom);
+  const oAuditorCustom = optsFor(sAuditorCustom.id);
+  check("(1)+(2) auditor spawn (custom-deny project) INCLUDES the role-scoped transcript-root deny (union, not replaced by the project's own deny)",
+    oAuditorCustom?.permission.deny.includes(ROLE_DENY));
+  check("(2) auditor spawn (custom-deny project) KEEPS the project's own custom deny entry",
+    oAuditorCustom?.permission.deny.includes(CUSTOM_DENY));
+  check("(2) auditor spawn (custom-deny project) has exactly the two expected entries, no more",
+    oAuditorCustom?.permission.deny.length === 2);
+
+  const sWorkspaceAuditorCustom = svc.startWorkspaceAuditor(agWorkspaceAuditorCustom);
+  const oWorkspaceAuditorCustom = optsFor(sWorkspaceAuditorCustom.id);
+  check("(1)+(2) workspace-auditor spawn (custom-deny project) INCLUDES the role-scoped transcript-root deny (union, not replaced by the project's own deny)",
+    oWorkspaceAuditorCustom?.permission.deny.includes(ROLE_DENY));
+  check("(2) workspace-auditor spawn (custom-deny project) KEEPS the project's own custom deny entry",
+    oWorkspaceAuditorCustom?.permission.deny.includes(CUSTOM_DENY));
+  check("(2) workspace-auditor spawn (custom-deny project) has exactly the two expected entries, no more",
+    oWorkspaceAuditorCustom?.permission.deny.length === 2);
+
   // ============ (4) Idempotency: a project whose OWN deny already carries the exact rule gets no duplicate ============
   const pAlready = "pAlready";
   db.insertProject({ id: pAlready, name: "Already-Has-It", repoPath: pAlready, vaultPath: pAlready, config: { permission: { deny: [ROLE_DENY] } }, createdAt: now, archivedAt: null });
@@ -142,12 +187,26 @@ try {
   const oAssistantAlready = optsFor(sAssistantAlready.id);
   check("(4) assistant spawn whose project ALREADY carries the exact rule gets no duplicate (exactly one entry)",
     oAssistantAlready?.permission.deny.filter((t) => t === ROLE_DENY).length === 1);
+
+  const agAuditorAlready = randomUUID();
+  db.insertAgent({ id: agAuditorAlready, projectId: pAlready, name: "Auditor", startupPrompt: "", position: 1, profileId: null });
+  const sAuditorAlready = svc.startAuditor(agAuditorAlready);
+  const oAuditorAlready = optsFor(sAuditorAlready.id);
+  check("(4) auditor spawn whose project ALREADY carries the exact rule gets no duplicate (exactly one entry)",
+    oAuditorAlready?.permission.deny.filter((t) => t === ROLE_DENY).length === 1);
+
+  const agWorkspaceAuditorAlready = randomUUID();
+  db.insertAgent({ id: agWorkspaceAuditorAlready, projectId: pAlready, name: "Workspace Auditor", startupPrompt: "", position: 2, profileId: null });
+  const sWorkspaceAuditorAlready = svc.startWorkspaceAuditor(agWorkspaceAuditorAlready);
+  const oWorkspaceAuditorAlready = optsFor(sWorkspaceAuditorAlready.id);
+  check("(4) workspace-auditor spawn whose project ALREADY carries the exact rule gets no duplicate (exactly one entry)",
+    oWorkspaceAuditorAlready?.permission.deny.filter((t) => t === ROLE_DENY).length === 1);
 } finally {
   db.close();
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the assistant role's permission.deny gets the transcript-root Read deny UNIONED in (surviving a project's own custom deny, no duplicates), and every other role's permission.deny stays byte-identical to what resolveConfig alone produces."
+  ? "\n✅ ALL PASS — the assistant/auditor/workspace-auditor roles' permission.deny gets the transcript-root Read deny UNIONED in (surviving a project's own custom deny, no duplicates), and every other role's permission.deny stays byte-identical to what resolveConfig alone produces."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

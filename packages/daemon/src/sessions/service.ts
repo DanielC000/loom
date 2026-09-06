@@ -1996,9 +1996,12 @@ function withBaselineAllow(permission: PermissionPolicy): PermissionPolicy {
  * (card ac90ca8e triage): a Loom-driven `auto`-mode session Globbed every `.jsonl` transcript under
  * `~/.claude/projects/` (1574 files, no prompt) and read a transcript from a project it held no grant for.
  *
- * Scoped to `assistant` ONLY — a worker can reach the same bytes (also observed), but a worker is
- * manager-driven while a companion is driven by untrusted inbound chat; broadening this to every role
- * is a separate, separately-carded decision (real regression risk: workers legitimately read widely).
+ * Card 44fa586a extended this from `assistant`-only to also cover `auditor` and `workspace-auditor`:
+ * both rigs' entire *declared* read surface is MCP-mediated (`transcript_read`, `repo_read_*`), so the
+ * transcript-root path-deny costs them nothing they claim to need, while closing the same native-Read
+ * bypass for them. Every other role (worker, plain, manager, ...) is deliberately left out — a worker
+ * can reach the same bytes (also observed) but is manager-driven and legitimately reads widely;
+ * broadening further is a separate, separately-carded decision.
  *
  * The rule itself ({@link TRANSCRIPT_ROOT_READ_DENY_RULE}) is owned by the harness adapter
  * (`pty/claude-transcript.ts`), not written here — every claude-specific path literal lives there per
@@ -2006,20 +2009,21 @@ function withBaselineAllow(permission: PermissionPolicy): PermissionPolicy {
  * `engineTranscriptPath` (same module) computes, so the deny matches exactly the store every
  * companion's `transcript_read` reads from.
  */
-const ASSISTANT_ROLE_DENY: readonly string[] = [TRANSCRIPT_ROOT_READ_DENY_RULE];
+const TRANSCRIPT_ROOT_DENY_ROLES: ReadonlySet<SessionRole> = new Set(["assistant", "auditor", "workspace-auditor"]);
+const TRANSCRIPT_ROOT_DENY_RULES: readonly string[] = [TRANSCRIPT_ROOT_READ_DENY_RULE];
 
 /**
- * Return `permission` with every {@link ASSISTANT_ROLE_DENY} entry guaranteed present in `deny`, for
- * `role === "assistant"` only (every other role: same reference, byte-identical). Unlike `allow`
- * (which `resolveConfig` UNIONS onto the baseline), a per-project `permission.deny` override REPLACES
- * the default wholesale (`config.ts`: `override.permission?.deny ?? [...d.permission.deny]`) — so
- * without this union-at-the-spawn-boundary step, a project that sets its OWN `permission.deny` would
- * silently strip this protection. Applied at the SAME chokepoint `withBaselineAllow` uses, mirroring
- * its shape.
+ * Return `permission` with every {@link TRANSCRIPT_ROOT_DENY_RULES} entry guaranteed present in `deny`,
+ * for a role in {@link TRANSCRIPT_ROOT_DENY_ROLES} only (every other role: same reference,
+ * byte-identical). Unlike `allow` (which `resolveConfig` UNIONS onto the baseline), a per-project
+ * `permission.deny` override REPLACES the default wholesale (`config.ts`: `override.permission?.deny ??
+ * [...d.permission.deny]`) — so without this union-at-the-spawn-boundary step, a project that sets its
+ * OWN `permission.deny` would silently strip this protection. Applied at the SAME chokepoint
+ * `withBaselineAllow` uses, mirroring its shape.
  */
-function withAssistantRoleDeny(permission: PermissionPolicy, role: SessionRole | undefined): PermissionPolicy {
-  if (role !== "assistant") return permission;
-  const missing = ASSISTANT_ROLE_DENY.filter((t) => !permission.deny.includes(t));
+function withTranscriptRootDeny(permission: PermissionPolicy, role: SessionRole | undefined): PermissionPolicy {
+  if (!role || !TRANSCRIPT_ROOT_DENY_ROLES.has(role)) return permission;
+  const missing = TRANSCRIPT_ROOT_DENY_RULES.filter((t) => !permission.deny.includes(t));
   if (!missing.length) return permission;
   return { ...permission, deny: [...permission.deny, ...missing] };
 }
@@ -2970,9 +2974,10 @@ export class SessionService {
     const permissionBeforeRoleDeny = role === "worker"
       ? { ...baselinePermission, startupModeCycles: cyclesToReachFromAcceptEdits("auto") }
       : baselinePermission;
-    // Card ac90ca8e: role-scoped deny closing the native-Read bypass of companion read gates — see
-    // withAssistantRoleDeny's own doc. Byte-identical (same reference) for every role but "assistant".
-    const permission = withAssistantRoleDeny(permissionBeforeRoleDeny, role);
+    // Card ac90ca8e (extended by 44fa586a to auditor/workspace-auditor): role-scoped deny closing the
+    // native-Read bypass of MCP-mediated read gates — see withTranscriptRootDeny's own doc.
+    // Byte-identical (same reference) for every role outside TRANSCRIPT_ROOT_DENY_ROLES.
+    const permission = withTranscriptRootDeny(permissionBeforeRoleDeny, role);
     // Same `|| undefined` empties-to-undefined coercion today's start paths use on the agent prompt.
     const ownPrompt = resolved.startupPrompt || undefined;
     // Companion (epic Phase 1): an "assistant" session gets the server-owned base brief PREPENDED here (the
