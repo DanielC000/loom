@@ -16,13 +16,20 @@
 // unpushed commits on HEAD are invisible to CI entirely. So this checks `origin/main..HEAD` is empty
 // (nothing unpushed) and looks up the run BY head_sha, not just "most recent on the branch".
 //
+// This does NOT cover the release.yml bypass paths (workflow_dispatch, a manual `git tag -a` push,
+// LOOM_SKIP_CI_CHECK itself) — card b854b35f closes those with a SEPARATE, structural gate that runs
+// INSIDE release.yml (scripts/check-release-ci.mjs). Both scripts share the actual evidence-evaluation
+// logic via scripts/lib/ci-gate.mjs; this file keeps its own CLI shape (the unpushed-HEAD check below
+// is specific to the local, pre-push `npm version` flow and doesn't apply to release.yml, which only
+// ever runs against a commit GitHub already has).
+//
 // Escape hatch: LOOM_SKIP_CI_CHECK=1 skips this check entirely (loudly). For a genuine emergency or
 // when GitHub is unreachable — never as a routine habit; a skipped check defeats the point of it existing.
 //
 // --sha <sha> (testing only, card 06b23a41): overrides which commit gets checked, so the refusal
 // branches below can be driven through THIS file directly instead of a copy. No args (the real release
 // path, docs/releasing.md step 3) is unaffected — it still resolves `git rev-parse HEAD`.
-import { execFileSync } from "node:child_process";
+import { originOwnerRepo, checkCiGreenForSha, git } from "./lib/ci-gate.mjs";
 
 const WORKFLOW_FILE = "ci.yml";
 const REMOTE = "origin";
@@ -31,17 +38,6 @@ const REMOTE_BRANCH = "main";
 if (process.env.LOOM_SKIP_CI_CHECK === "1") {
   console.warn("⚠️  LOOM_SKIP_CI_CHECK=1 — skipping the main-CI-green check. main's Linux CI status is UNKNOWN to this release.");
   process.exit(0);
-}
-
-function git(args) {
-  return execFileSync("git", args, { encoding: "utf8" }).trim();
-}
-
-function originOwnerRepo() {
-  const url = git(["config", "--get", `remote.${REMOTE}.url`]);
-  const m = url.match(/github\.com[:/]([^/]+)\/([^/.]+?)(?:\.git)?$/);
-  if (!m) throw new Error(`could not parse owner/repo from remote.${REMOTE}.url: ${url}`);
-  return { owner: m[1], repo: m[2] };
 }
 
 function refuse(reason, detail) {
@@ -119,44 +115,17 @@ if (unpushedCount > 0) {
   );
 }
 
-const apiUrl = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${WORKFLOW_FILE}/runs?head_sha=${headSha}&per_page=1`;
-const headers = { "User-Agent": "loom-release-check", Accept: "application/vnd.github+json" };
-const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
-if (token) headers.Authorization = `Bearer ${token}`;
+const result = await checkCiGreenForSha({
+  owner,
+  repo,
+  sha: headSha,
+  workflowFile: WORKFLOW_FILE,
+  subject: `HEAD (${headSha.slice(0, 10)})`,
+  token: process.env.GITHUB_TOKEN || process.env.GH_TOKEN,
+});
 
-let res;
-try {
-  res = await fetch(apiUrl, { headers });
-} catch (err) {
-  refuse(`could not reach GitHub to check ${WORKFLOW_FILE} for HEAD (${headSha.slice(0, 10)})`, String(err.message || err));
+if (!result.ok) {
+  refuse(result.reason, result.detail);
 }
 
-if (!res.ok) {
-  refuse(`GitHub API returned ${res.status} ${res.statusText} for ${apiUrl}`);
-}
-
-const body = await res.json();
-const run = body.workflow_runs && body.workflow_runs[0];
-
-if (!run) {
-  refuse(
-    `no ${WORKFLOW_FILE} run found for HEAD (${headSha.slice(0, 10)}) yet`,
-    "CI may not have started for this commit yet — wait for it to appear, then retry."
-  );
-}
-
-if (run.status !== "completed") {
-  refuse(
-    `${WORKFLOW_FILE} for HEAD (${headSha.slice(0, 10)}) hasn't finished yet (status: ${run.status})`,
-    `This is NOT a red run — it just hasn't completed. Wait for it, then retry: ${run.html_url}`
-  );
-}
-
-if (run.conclusion !== "success") {
-  refuse(
-    `${WORKFLOW_FILE} for HEAD (${headSha.slice(0, 10)}) is RED`,
-    `conclusion: ${run.conclusion}\ncompleted: ${run.updated_at}\nrun: ${run.html_url}`
-  );
-}
-
-console.log(`✅ ${WORKFLOW_FILE} is green for HEAD (${headSha.slice(0, 10)}) — ${run.html_url}. Proceeding.`);
+console.log(`✅ ${WORKFLOW_FILE} is green for HEAD (${headSha.slice(0, 10)}) — ${result.run.html_url}. Proceeding.`);

@@ -24,6 +24,7 @@ on:
 permissions:
   contents: write # create the GitHub Release (and tag, on manual runs)
   id-token: write # npm publish --provenance (OIDC)
+  actions: read # scripts/check-release-ci.mjs reads ci.yml's run conclusion for the released sha
 
 jobs:
   release:
@@ -43,6 +44,18 @@ jobs:
           node-version: "22" # resolves to the latest 22.x (>= 22.14.0, required for OIDC trusted publishing)
           registry-url: "https://registry.npmjs.org" # scope npm to the public registry (OIDC auth, no token)
           # No package-manager cache: never cache in a release build (publish only what was just built+tested).
+
+      - name: Verify ci.yml is green for the released commit (card b854b35f)
+        # Structural gate closing the paths that route around scripts/check-main-ci.mjs's `npm version`
+        # preversion hook (workflow_dispatch, a manual `git tag -a` push, or forgetting to re-check by
+        # hand — see docs/releasing.md). Deliberately placed here, BEFORE install/build/test, so a
+        # bypassed or red commit fails in seconds instead of after ~10 minutes of wasted CI work; it
+        # only needs git + node, both already available. Does NOT re-run e2e — it reads ci.yml's own
+        # already-computed verdict for this exact sha (see the script's own header for the full
+        # reasoning and the owner constraint it honors).
+        run: node scripts/check-release-ci.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upgrade npm for OIDC trusted publishing (needs npm >= 11.5.1; Node 22 ships npm 10.x)
         # PINNED to 11.18.0 (the version that shipped 0.16.0): npm@latest is now 12.0.0, whose provenance
