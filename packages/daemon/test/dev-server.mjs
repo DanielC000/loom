@@ -963,17 +963,17 @@ const crashFixtureSrc = [
   "const heartbeatScriptPath = process.argv[4];",
   "const outFile = process.argv[5];",
   "const trackedDirs = [];",
-  // BOUNDED (card ff329c0b): this was one of TWO `spawnSync` calls to this same HELPER in this file with
-  // no `{timeout: 10_000}` — every other call to it elsewhere in this file already has one. The other is
-  // the `start` call two lines below, left as-is here (out of scope for this card — a real behavior change
-  // to the fixture that launches the tracked dev-server, filed separately): it's instead bounded
-  // INDIRECTLY, by the PARENT's own `waitUntil(..., 10_000)` on `SUPERVISOR_PID` below, which fails the
-  // check loudly rather than hanging if `start` itself never returns. THIS call had no such backstop — an
-  // exit handler that hangs blocks this process's own termination indefinitely, which in turn blocks the
-  // PARENT's `crashChild.on('exit', ...)` from ever firing (that wait had no bound of its own either — see
-  // the fix there). Bounding this one closes that specific class of hang.
+  // BOUNDED (card ff329c0b + card 66195e2c): this fixture had TWO `spawnSync` calls to this same HELPER
+  // with no `{timeout: 10_000}` — every other call to it elsewhere in this file already had one. ff329c0b
+  // bounded the exit-hook `stop` call directly below (an exit handler that hangs blocks this process's own
+  // termination indefinitely, which in turn blocks the PARENT's `crashChild.on('exit', ...)` from ever
+  // firing). 66195e2c bounded the `start` call two lines below the same way, for consistency with every
+  // other HELPER call in this file — not because it was found hanging: a stall there was already caught
+  // loudly (not silently) by the PARENT's own `waitUntil(..., 10_000)` on `SUPERVISOR_PID` below, which
+  // fails the check rather than hanging if `start` never returns. That indirect backstop still stands; the
+  // direct timeout just removes the one remaining inconsistency rather than closing a live gap.
   "process.on('exit', () => { for (const d of trackedDirs) { try { spawnSync(process.execPath, [helper, 'stop', d], { stdio: 'ignore', timeout: 10_000 }); } catch {} } });",
-  "const startResult = spawnSync(process.execPath, [helper, 'start', dir, '--', process.execPath, heartbeatScriptPath, outFile], { encoding: 'utf8' });",
+  "const startResult = spawnSync(process.execPath, [helper, 'start', dir, '--', process.execPath, heartbeatScriptPath, outFile], { encoding: 'utf8', timeout: 10_000 });",
   "trackedDirs.push(dir);",
   "const m = /\\(pid (\\d+)\\)/.exec(startResult.stdout || '');",
   "console.log('SUPERVISOR_PID=' + (m ? m[1] : 'none'));",
