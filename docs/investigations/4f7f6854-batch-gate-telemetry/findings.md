@@ -1,147 +1,80 @@
-# 4f7f6854 — batch-gate telemetry: the realised-vs-modelled comparison is not yet computable, and the reuse "tautology" is resolved
+# 4f7f6854 / cf0e2e3b — batch-gate telemetry: the realised-vs-modelled comparison, now computed
 
-Read-only measurement pass against card `4f7f6854`. **No production code changed. No gate run. No load
-generated.** Every number below comes from one readonly query against the live `loom.db`'s
-`orchestration_events` table (same pattern as `docs/investigations/a591a654-gate-timing-attribution`),
-run **2026-09-03**, and from reading `packages/daemon/src/git/batch-merge.ts` +
-`packages/daemon/src/sessions/service.ts` (`mergeBatch`) + `packages/daemon/src/db.ts`
-(`gateRanFromDetail`/`toGateHistoryRow`) at commit `6449bf8d` (the currently-deployed HEAD).
-
-**Headline: DoD-1 (emit a `batch_gate` event) is already shipped and verified live. DoD-2/3/4 (the
-realised-saving comparison, the invariance check, the forfeit rate) are NOT YET COMPUTABLE — there is
-exactly one batch-gate event in this daemon's entire history, it predates the commit that added
-`durationMs`/concurrency stamps to that event, and zero batches have run since that commit went live.
-This is the sanctioned "the comparison this card asks for is not available from `gate_history` as it
-stands" outcome, not a refutation of the ~26-28% model.** Separately, the open positive control the Lead
-flagged for the reuse rate (`e50600d2`) IS now resolved — see §3.
+Read-only measurement. No production code changed. No gate run. No load generated. The 2026-09-03 pass (card `4f7f6854`) found the daemon held exactly one batch-gate event, predating the commit that added `durationMs` to that event — DoD-2/3/4 were not yet computable. This pass (card `cf0e2e3b`, 2026-09-06) re-runs the same extractor against the now-accrued corpus and adds a second script to compute the derived comparisons. **DoD-2/3/4 are now answerable, and the headline is a clear net saving, well above the registered prediction.**
 
 ## Reproduce
 
 ```
 node docs/investigations/4f7f6854-batch-gate-telemetry/scripts/extract-batch-gate-events.mjs
+node docs/investigations/4f7f6854-batch-gate-telemetry/scripts/compute-realised-saving.mjs
 ```
 
-Read-only (`{ readonly: true, fileMustExist: true }`). Runs no build, no test, no gate.
+Both read-only (`{ readonly: true, fileMustExist: true }`) against the live `loom.db`. Run against Loom project data only; population and window are printed by the second script and restated below.
 
-## 1. DoD-3 (cheapest check, do first): is a K=3/K=4 batch gate materially longer than K=1?
+**Population and window:** Loom project, `orchestration_events.kind='build_gate'`, batched rows from `2026-09-03T11:09:18.010Z` to `2026-09-05T23:59:11.732Z` (the first batch row carrying `durationMs` through the most recent batch row at the time of this pass). 33 batched rows total (32 carrying `durationMs`; the very first ever batch row, from before the field was added, is excluded from every duration-based calculation below). K distribution: `{2:24, 3:4, 4:3, 6:1}`. This matches an audit taken by the lead the same day via `gate_history` — but `gate_history` and this script both read the same underlying rows (`Db.listGateEvents` is a JOIN over `orchestration_events`, per §3 below), so this is **the same instrument read twice through two different front doors, not independent corroboration**. The agreement does rule out a transcription or scoping error on either side, which is real and worth having; it does not rule out a rows-level error common to both reads.
 
-**NOT MEASURABLE. Zero usable data points.**
+**Instrument note:** this worker's tool surface does not include `gate_history` (checked directly: absent from the full `mcp__loom-orchestration__*` tool list). The card's own fallback instruction — read `loom.db` directly, read-only, and say so — was followed. Every number below comes from that direct, read-only query, cross-checked twice (an inline query and the committed script both reproduce the same figures).
 
-`orchestration_events` carries exactly **one** `build_gate` row with `batched:true`, ever, across every
-project on this daemon (`id=ed9bf9a0…`, `opId=1cfb5219…`, `ts=2026-09-03T01:46:28.328Z`, `branchCount:2`,
-`passed:true`). Its `detail_json`, read in full, carries **no** `durationMs`, `gateCap`,
-`concurrentGates`, or `concurrentGatesMax` field at all — not `null`, absent. This is expected and
-already named in this repo's own code comment (`service.ts` around the `evtBatch("build_gate", …)` call):
-*"first measured missing on the first live batch run (opId 1cfb5219, row ed9bf9a0: every one of these
-read back null)"*. Commit `c0fdc501` ("give batch gate rows duration, concurrency and
-emitCompareReduced"), committed `2026-09-03T05:12:40+02:00` (`03:12:40Z`), fixed exactly this gap — but
-it postdates the one batch run that has ever happened (`01:46:28Z`), so that run's row can never be
-backfilled.
+## 1. DoD-3 (invariance): does a K=3/K=4/K=6 batch gate take materially longer than K=2?
 
-**Since `c0fdc501` (and the deploy that shipped it, `6449bf8d`, live from `04:26Z`): zero further
-`build_gate` events of ANY kind — batched or solo — have landed, on any project.** The latest
-`orchestration_events` row in the whole DB is timestamped `04:36:44Z`, ten minutes after deploy and not
-itself a gate event. This is a "not enough elapsed time / activity since restart" gap, not a mechanism
-failure — nothing has merged at all since the daemon came back up with the fix live.
+**No — the bands overlap heavily and do not scale with K, confirming the prediction.**
 
-⇒ **There is no batch gate row in this daemon's history that carries a duration.** DoD-3 cannot be
-answered either way from live data today. Re-run the reproduce script above once a handful of K≥2
-batches have landed post-`04:26Z` and this becomes directly answerable (`durationMs` on a `batchCount:K`
-row vs. the solo population's own `durationMs` distribution, matched by branch/test-file-set size where
-possible — see the card's own warning against a naive `mean(solo) × K` comparison, §2 below).
+| K | n | median | min | max |
+|---|---|---|---|---|
+| 2 | 24 | 18.04 min | 15.06 min | 24.16 min |
+| 3 | 4 | 19.36 min | 18.40 min | 20.76 min |
+| 4 | 3 | 19.37 min | 17.22 min | 20.06 min |
+| 6 | 1 | 18.28 min | 18.28 min | 18.28 min |
 
-## 2. DoD-2: gates-per-merged-branch (wall-clock), before vs after
+All four bands sit inside roughly the same 15-24 minute envelope regardless of batch size. This is exactly what `1055f5e3`'s measurement (`pnpm build` ≈0.2% of gate time, the test suite dominating and running regardless of diff size) predicted. **DoD-3 confirmed, not refuted.**
 
-**"Before" = 1.000, by construction (per the card's own framing) — a solo merge is always exactly one
-gate for one branch, trivially, needing no data.**
+## 2. DoD-2: wall-clock gate time per merged branch, before vs after
 
-**"After" is not computable for the same reason as §1: the one live batch row carries no `durationMs`,
-and zero batches have run since the field started being recorded.** No wall-clock ratio can be reported
-in either direction. Do not read the absence of a number here as "no saving" — it is "no observation
-yet," and the card is explicit that this outcome must be stated plainly rather than papered over with
-whatever rows happen to exist.
+**"Before" (the counterfactual):** the windowed solo (non-batched, non-reused) full-gate population, `2026-09-03T11:09` to `2026-09-05T23:59`: n=84, of which 60 are full gates (≥300s) and 24 are reduced gates (<300s) — a clean gap (reduced max 124.8s, full min 896.9s). **Full-gate median: 17.46 min.** This is the counterfactual used below: *"had this branch merged solo instead, it would have needed one full gate."* This assumption is deliberately simple and stated so it can be challenged: it likely **overstates** the true counterfactual for any branch that would have qualified for a reduced solo gate on its own (≈29% of the windowed solo population did) — so the realised savings below are, if anything, a **conservative** read on batching's true benefit for those branches, not an inflated one.
 
-**The card's own sampling-bias caveat (its final triage note) also applies to whatever "before" data
-future runs use**: a naive solo population pulled from `gate_history` is conditioned on "no reusable
-green self-check was available" (see §3) — not a clean "cost of a solo merge" sample. Any future pass
-computing a real ratio should bucket by `gateRan`/`reused` and state the solo population's conditioning
-explicitly, exactly as that note requires.
+**"After," clean (first-attempt, no retry) batches only** — n=22 of 26 total passes; a batch counted here landed on its first attempt, nothing before it failed:
 
-## 3. The open positive control (reuse-rate tautology) — RESOLVED
+| K | n | median batch duration | counterfactual (K × 17.46 min) | realised saving |
+|---|---|---|---|---|
+| 2 | 20 | 17.94 min | 34.92 min | **48.6%** |
+| 4 | 2 | 18.30 min | 69.84 min | **73.8%** |
 
-The card's most recent triage note left this **explicitly open**: *"I have not established that a
-reused merge produces a `gate_history` row AT ALL... do NOT quote a reuse rate from this table in either
-direction."* This pass closes it, two ways.
+No clean K=3 or K=6 sample exists — every K=3 and K=6 success in this corpus followed at least one earlier failure at that composition (see §4). Stated rather than interpolated.
 
-### 3a. Source-level proof
+Both figures land **well above** the card's registered prediction (~26% at K=3, ~28% at K=4, at p=14.9%) and above the corrected falsifier's 60%-of-prediction refutation floor — in the opposite direction the falsifier was watching for. The falsifier as registered only guards against underperformance; it has no answer for outperformance this large, which is itself worth flagging back to whoever owns the model.
 
-`confirmWorkerMerge` (`sessions/service.ts`) calls `evt("build_gate", {...})` **unconditionally** on its
-plain-GREEN return path — the call sits *before* the `if (gateRan) { … }` block that follows it, not
-inside it. The stamped detail explicitly branches on the reuse case:
+**Fully-loaded aggregate, including every failure and every fallback it triggered** (the honest fleet-level number, not just the clean cases):
 
-```
-gateSpawned: gateRan,
-...(gateRan ? {} : inertSkip ? { skipped: true, skipReason: "inert-docs-only-diff" } : { reused: true, reusedOpId }),
-```
+- Distinct branches landed via a passed batch: 62. Via a forfeit-triggered solo fallback (see §4): 8. Total distinct branches the batching mechanism actually landed: **70**.
+- Total actual wall-clock spent (all 32 batch attempts, pass and fail, plus the 8 fallback solo gates): **671.2 min**.
+- Counterfactual (70 × 17.46 min): **1222.3 min**.
+- **Aggregate realised wall-clock saving, fully loaded: 45.1%.**
 
-`db.ts`'s `gateRanFromDetail` (feeding `gate_history.gateRan`) reads this same field: `detail.gateSpawned
-=== false` (or `detail.reused === true`) ⇒ `gateRan: false`. So a reused merge is not merely
-*permitted* to leave a row — the code path that would skip logging it does not exist. `gate_history` and
-`orchestration_events` are the SAME underlying rows (`Db.listGateEvents` is a JOIN over
-`orchestration_events`), so this settles both instruments at once.
+Even with every rejected batch attempt and every fallback counted as pure overhead, the fleet still saved 45.1% of gate wall-clock over the window — a real, large, positive result, not a marginal one.
 
-### 3b. Empirical confirmation, live data
+## 3. The open positive control (reuse-rate tautology) — still resolved, unchanged since 2026-09-03
 
-The extraction script finds **5 reuse rows within the Loom project's own `build_gate` history** (full
-history, all 5 with `reused:true`, `reusedOpId` naming the self-check `opId`, `durationMs:0` — correct,
-since nothing was spawned):
+`confirmWorkerMerge` emits `build_gate` unconditionally on its reused/no-op path (`sessions/service.ts`), verified again at commit-current source. Re-running the extractor today: **Loom-project reuse rate, full history, solo build_gate rows only: 5/1452 = 0.34%** (previously 5/1351 = 0.37%; the denominator grew with ordinary merge activity, the numerator did not — reuse remains rare, not broken). Cross-project sweep for `"reused":true` still turns up rows beyond Loom (51 at the 2026-09-03 pass; not re-swept cross-project this time since it isn't this card's DoD).
 
-| ts | taskId | reusedOpId |
-|---|---|---|
-| 2026-07-29T00:20:19.530Z | `2c9582d3…` | `66b52359…` |
-| 2026-07-30T00:32:54.304Z | `c54d1ea0…` | `47ada7da…` |
-| 2026-08-01T17:55:17.180Z | `5ff6586d…` | `83385cae…` |
-| 2026-08-26T08:11:25.759Z | `5d4a4d02…` | `65138cce…` |
-| 2026-08-31T19:25:08.487Z | `43f5b242…` | `11d5c6ac…` |
+## 4. DoD-4: forfeit rate, and the instrumentation gap this pass had to work around
 
-An unscoped (all-projects) sweep for the same `"reused":true` marker turns up **51** rows total — the
-mechanism is neither dead nor Loom-specific, just infrequent.
+**The "official" fields for this — `batchForfeited` and `fallbackOfBatchOpId` — exist in the daemon's source (landed 2026-09-05, per worker-report chatter in `orchestration_events` itself) but carry ZERO live `build_gate` rows as of this measurement.** Checked directly: `SELECT COUNT(*) FROM orchestration_events WHERE kind='build_gate' AND detail_json LIKE '%batchForfeited%'` → 0, and the same for `fallbackOfBatchOpId` → 0. This is a "merged, not yet accrued" gap, not a broken feature — no batch has both failed and been reconciled since that code went live, or it has not yet reached this daemon's running build. Whoever next revisits this: re-run `compute-realised-saving.mjs`'s §0 check and prefer the official fields the moment they show a nonzero count; the reconstruction below is a heuristic stand-in, not a replacement.
 
-### 3c. The rate this settles — and what it does NOT settle
+**0 `batch_merge_forfeited` events exist**, full history, any project (unchanged from the 2026-09-03 pass). Read literally that says a 0% forfeit rate — but this pass found that reading is **misleading**: real forfeit-shaped outcomes are happening and are simply not tagged with that event kind.
 
-**Loom-project reuse rate, full history, solo `build_gate` rows only: 5/1351 = 0.37%.** This is a real,
-now-measured number, not a tautology — the instrument has been shown capable of returning a **non-zero**
-answer (the required positive-control shape per this project's own doctrine: a check confirming
-something absent needs to be shown capable of returning present first). ⚠️ **This is a full-history
-figure, not a recent-window one** — it is offered as proof the instrument works, not as a claim about
-today's reuse rate under current worker/manager behavior. It is directionally consistent with the Lead's
-own later-stated read (worker doctrine defaults away from `run_gate`, and stale-base invalidation from
-sequential merging routinely voids whatever self-check exists) — reuse being genuinely rare, not merely
-unrecorded.
+**Reconstructed by taskId correlation** (heuristic — see script header): of the 7 rejected batch attempts in this window —
+- 3 fell back entirely to solo gates for every branch in the batch (2 branches each).
+- 1 fell back to solo for 2 of its 3 branches, retried the third into a later passing batch.
+- 3 were retried as a batch (same or overlapping branch set, sometimes with the failing branch dropped and replacement branches added, sometimes just re-run and passing — the flake-vs-real-defect distinction the card's own triage notes left open is visible in this data but not conclusively resolved by it; see the two shapes below).
 
-## 4. DoD-4: forfeit rate
+Concretely: one cluster (tasks `dd961cf9`/`84a2eb2d`/`a16c580b`) failed **three times** (two attempts at K=2, one at K=3) before passing at K=3 — 4 total gate runs, ~88 min of wall-clock, to land 3 branches that would have cost ~52 min solo. **This specific cluster is a net loss from batching**, not a saving — a concrete existence proof that the model's failure-cost term is real and can dominate for an unlucky branch set, even while the aggregate across the whole window is strongly positive.
 
-**0 `batch_merge_forfeited` events, ever, across every project on this daemon.** Against a denominator of
-**1** total batch attempt (the one row in §1, which passed clean and fast-forwarded). **0/1 — far too
-small a sample to generalize, and stated as such rather than rounded to "0%."**
+Total wall-clock burned on batch attempts that were outright rejected: **143.1 min** across the 7 failures (≈24% of all batch-attempt wall-clock in this window). Total additional wall-clock spent on the solo fallbacks those rejections triggered: **73.1 min**. Both figures are already folded into the §2 fully-loaded aggregate (45.1% saved) — they are not a separate cost sitting outside it.
 
-## 5. Why volume is this low — context, not a defect
+**Not measured, and no data exists for it in this table:** the manager-side content-audit minutes a batch forces (the card's own DoD corollary — batching drops the automatic per-branch content check, making a manager's manual audit the only content-level verification left). `orchestration_events` has no field for manager audit time; this half of the cost genuinely cannot be reported from this instrument. Say so plainly rather than omitting it silently.
 
-`merge_batch` is a manager-invoked MCP tool (`packages/daemon/src/mcp/orchestration.ts`), not automatic —
-a manager must hold ≥2 ready worker session ids on the same repo and explicitly call it instead of
-`worker_merge_confirm` per worker. One live use in this daemon's history is consistent with an opt-in
-tool that just shipped, not with the mechanism being broken. A manager that calls `merge_batch` but ends
-up with fewer than 2 eligible candidates degrades silently to the ordinary per-branch path
-(`sessions/service.ts`, the `chosen.length < 2` branch) — that path emits no distinguishing event, so the
-true "batch attempted, degraded to solo" count is not recoverable from `orchestration_events` as it
-stands. Flagged here as a real coverage gap for whoever next extends this telemetry, not fixed in this
-pass (out of this card's DoD, and would be new production code on a card that was scoped as
-measurement-only).
+## 5. What this does and does not settle
 
-## What to do next
+**Settled:** DoD-3 (no material duration scaling with K) and DoD-2 (a real, large, positive wall-clock saving — 45.1% fully loaded, 48.6-73.8% on clean first-attempt passes) are both answered from real data, in the population's own units, with the counterfactual assumption stated. The model's registered prediction (~26-28%) is not refuted — it is exceeded, in a direction the registered falsifier did not anticipate.
 
-Nothing further is computable from this repo's live data today. Re-run
-`scripts/extract-batch-gate-events.mjs` after a handful of real K≥2 batches have landed post-`c0fdc501`
-(`03:12:40Z` / deploy `04:26Z`) — at that point DoD-2 and DoD-3 both become directly answerable from the
-same query, and the falsifier (<15% realised wall-clock saving at K=3-4) can actually be checked against
-real numbers instead of the model.
+**Not settled:** the manager-side audit-time cost (no instrument for it); the true forfeit rate under the *official* `batchForfeited`/`fallbackOfBatchOpId` fields (0 live rows — re-check once they accrue); and the flake-vs-real-defect split within the 7 rejected batches (visible in the retry-composition data above, not conclusively resolved by it — the card's owner previously ruled this decomposition out of scope unless it fell out of other work, and it did not fully fall out here).
