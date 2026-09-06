@@ -5609,14 +5609,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // return the WHOLE per-project archived set unpaginated; Archive.tsx now accumulates TRUE offset pages
   // (React Query's useInfiniteQuery) so every row past the clamp stays reachable via "Load more", and
   // reads `total`/`limit` (the EFFECTIVE, post-clamp page size) rather than assuming its requested limit
-  // was honored verbatim.
+  // was honored verbatim. Optional `?q=` (card b9161ad2) pushes Archive.tsx's search server-side — applied
+  // BEFORE limit/offset in listArchivedSessionsPage, so a query reaches the FULL archived set rather than
+  // only whatever's already been "load more"'d. Blank/whitespace-only is treated as absent.
   app.get("/api/projects/:id/archive", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
-    const q = req.query as { limit?: string; offset?: string };
-    const limit = parsePageParam(q.limit, DEFAULT_ARCHIVE_PAGE_LIMIT);
-    const offset = parsePageParam(q.offset, 0);
-    const { rows, total, limit: effectiveLimit } = deps.db.listArchivedSessionsPage(id, limit, offset);
+    const query = req.query as { limit?: string; offset?: string; q?: string };
+    const limit = parsePageParam(query.limit, DEFAULT_ARCHIVE_PAGE_LIMIT);
+    const offset = parsePageParam(query.offset, 0);
+    const { rows, total, limit: effectiveLimit } = deps.db.listArchivedSessionsPage(id, limit, offset, query.q);
     const snapshotIds = archivedSnapshotIds(id); // ONE readdir instead of a per-row fs.existsSync stat
     // Card af87a9ff: ONE set-based query for the whole page (never per-row) resolving each row's true
     // spawn-time dispatcher; falls back to parentSessionId (today's behavior) for a row with no
@@ -5639,13 +5641,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // page to one SessionRole BEFORE the limit/offset apply (card 9f010283) — MissionControl's Run Replay
   // picker only ever shows managers, so `role=manager` spends the whole page budget on manager rows
   // instead of it being diluted by unrelated archived worker/setup/etc. rows; an unrecognized value is
-  // ignored (falls back to unfiltered) rather than erroring a god-eye read.
+  // ignored (falls back to unfiltered) rather than erroring a god-eye read. Optional `?q=` (card b9161ad2)
+  // is the same server-side search as the per-project route above, applied BEFORE limit/offset alongside
+  // `role`. Blank/whitespace-only is treated as absent.
   app.get("/api/archived-sessions", async (req) => {
-    const q = req.query as { limit?: string; offset?: string; role?: string };
-    const limit = parsePageParam(q.limit, DEFAULT_ARCHIVE_PAGE_LIMIT);
-    const offset = parsePageParam(q.offset, 0);
-    const role = q.role && (SESSION_ROLES as readonly string[]).includes(q.role) ? (q.role as SessionRole) : undefined;
-    const { rows, total, limit: effectiveLimit } = deps.db.listAllArchivedSessionsPage(limit, offset, role);
+    const query = req.query as { limit?: string; offset?: string; role?: string; q?: string };
+    const limit = parsePageParam(query.limit, DEFAULT_ARCHIVE_PAGE_LIMIT);
+    const offset = parsePageParam(query.offset, 0);
+    const role = query.role && (SESSION_ROLES as readonly string[]).includes(query.role) ? (query.role as SessionRole) : undefined;
+    const { rows, total, limit: effectiveLimit } = deps.db.listAllArchivedSessionsPage(limit, offset, role, query.q);
     // One readdir PER DISTINCT project (not per row) — a bulk-existence cache keyed by projectId, since
     // rows span many projects here (unlike the single-project route above).
     const snapshotIdsByProject = new Map<string, Set<string>>();

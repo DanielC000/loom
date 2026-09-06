@@ -1389,6 +1389,13 @@ const CONVERSATION_PREVIEW_MAX_CHARS = 120;
  */
 const MAX_ARCHIVED_PAGE = 500;
 
+/** Case-insensitive substring match, escaped for SQLite LIKE so a literal `%`/`_`/`\` in the query text
+ *  can't widen the match (mirrors deleteMetaPrefix's own escaping elsewhere in this file) — shared by the
+ *  archived-sessions server-side search filters (card b9161ad2). Pair with `ESCAPE '\\'` in the LIKE clause. */
+function likeSubstring(q: string): string {
+  return `%${q.replace(/[\\%_]/g, "\\$&")}%`;
+}
+
 /** Clamp for a bounded schedule-fire history page (listScheduleHistory) — same bound + rationale as
  *  MAX_ARCHIVED_PAGE: the history read is god-eye over every fire ever recorded, so a stray huge `limit`
  *  can't be allowed to return the whole event log in one payload. */
@@ -4876,16 +4883,36 @@ export class Db {
    * MAX_ARCHIVED_PAGE must be able to tell it was silently capped (code review finding on the first pass
    * of this card: an oversized requested limit with no way to observe the clamp made a client's own
    * "load more until done" logic dead-end forever at the cap while `total` kept claiming more existed).
+   *
+   * Optional `q` (card b9161ad2) filters server-side by a case-insensitive substring match against
+   * session id / agent name / role / task id / branch — the same fields Archive.tsx's own client-side
+   * search used to match — applied BEFORE the LIMIT/OFFSET, so a query reaches the FULL archived set for
+   * this project rather than only the pages already fetched. `total` is recomputed under the SAME filter
+   * so paging/`hasMore` stay correct while a query is active. Omitted/blank ⇒ unfiltered, byte-identical
+   * to the pre-filter behavior (the no-search COUNT below is untouched, still the original join-free query).
    */
-  listArchivedSessionsPage(projectId: string, limit: number, offset = 0): { rows: SessionListItem[]; total: number; limit: number } {
+  listArchivedSessionsPage(projectId: string, limit: number, offset = 0, q?: string | null): { rows: SessionListItem[]; total: number; limit: number } {
     const lim = Math.max(1, Math.min(limit, MAX_ARCHIVED_PAGE));
-    const total = (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE project_id = ? AND archived_at IS NOT NULL").get(projectId) as { c: number }).c;
+    const search = q?.trim();
+    // Only s.id/s.role/s.task_id/s.branch live on `sessions` itself; matching agent name needs the join,
+    // so the join is added ONLY on the search path — the no-search COUNT stays the original query.
+    const searchClause = search
+      ? " AND (s.id LIKE @q ESCAPE '\\' OR a.name LIKE @q ESCAPE '\\' OR s.role LIKE @q ESCAPE '\\' OR s.task_id LIKE @q ESCAPE '\\' OR s.branch LIKE @q ESCAPE '\\')"
+      : "";
+    const total = search
+      ? (this.db.prepare(
+          `SELECT COUNT(*) AS c FROM sessions s JOIN agents a ON s.agent_id = a.id
+           WHERE s.project_id = @projectId AND s.archived_at IS NOT NULL${searchClause}`,
+        ).get({ projectId, q: likeSubstring(search) }) as { c: number }).c
+      : (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE project_id = ? AND archived_at IS NOT NULL").get(projectId) as { c: number }).c;
+    const rowParams: Record<string, unknown> = { projectId, limit: lim, offset };
+    if (search) rowParams.q = likeSubstring(search);
     const rows = this.db.prepare(
       `SELECT s.*, p.name AS project_name, a.name AS agent_name
        FROM sessions s JOIN projects p ON s.project_id = p.id JOIN agents a ON s.agent_id = a.id
-       WHERE s.project_id = ? AND s.archived_at IS NOT NULL
-       ORDER BY s.archived_at DESC LIMIT ? OFFSET ?`,
-    ).all(projectId, lim, offset) as Row[];
+       WHERE s.project_id = @projectId AND s.archived_at IS NOT NULL${searchClause}
+       ORDER BY s.archived_at DESC LIMIT @limit OFFSET @offset`,
+    ).all(rowParams) as Row[];
     return { total, limit: lim, rows: rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string })) };
   }
   /** BOUNDED page across ALL projects, newest-archived first, plus total + the effective (clamped) limit
@@ -4896,18 +4923,40 @@ export class Db {
    * instead of the bound being diluted by unrelated worker/setup/etc. rows that share the same
    * cross-project archived_at ordering (card 9f010283 — an archived manager older than the newest 300
    * archived sessions GLOBALLY was unreachable in the picker even though far fewer than 300 managers
-   * existed). Omitted ⇒ unfiltered, byte-identical to the pre-filter behavior. */
-  listAllArchivedSessionsPage(limit: number, offset = 0, role?: SessionRole | null): { rows: SessionListItem[]; total: number; limit: number } {
+   * existed). Omitted ⇒ unfiltered, byte-identical to the pre-filter behavior.
+   *
+   * Optional `q` (card b9161ad2) is the same server-side substring filter as listArchivedSessionsPage's
+   * own `q`, plus project name (this route spans projects, so project identity is part of what a search
+   * here needs to distinguish) — applied BEFORE limit/offset alongside any `role` filter, `total`
+   * recomputed under the SAME filters. Omitted/blank ⇒ unfiltered; the no-search/no-role COUNT below stays
+   * the original join-free query, so an existing caller passing neither is byte-identical. */
+  listAllArchivedSessionsPage(limit: number, offset = 0, role?: SessionRole | null, q?: string | null): { rows: SessionListItem[]; total: number; limit: number } {
     const lim = Math.max(1, Math.min(limit, MAX_ARCHIVED_PAGE));
     const roleClause = role ? " AND s.role = @role" : "";
-    const params = role ? { role } : {};
-    const total = (this.db.prepare(`SELECT COUNT(*) AS c FROM sessions s WHERE s.archived_at IS NOT NULL${roleClause}`).get(params) as { c: number }).c;
+    const search = q?.trim();
+    // s.id/s.role/s.task_id/s.branch live on `sessions` itself; agent/project name need their joins, so
+    // the joins are added to the COUNT only on the search path — the no-search COUNT is untouched.
+    const searchClause = search
+      ? " AND (s.id LIKE @q ESCAPE '\\' OR a.name LIKE @q ESCAPE '\\' OR p.name LIKE @q ESCAPE '\\' OR s.role LIKE @q ESCAPE '\\' OR s.task_id LIKE @q ESCAPE '\\' OR s.branch LIKE @q ESCAPE '\\')"
+      : "";
+    const countParams: Record<string, unknown> = {};
+    if (role) countParams.role = role;
+    if (search) countParams.q = likeSubstring(search);
+    const total = search
+      ? (this.db.prepare(
+          `SELECT COUNT(*) AS c FROM sessions s JOIN projects p ON s.project_id = p.id JOIN agents a ON s.agent_id = a.id
+           WHERE s.archived_at IS NOT NULL${roleClause}${searchClause}`,
+        ).get(countParams) as { c: number }).c
+      : (this.db.prepare(`SELECT COUNT(*) AS c FROM sessions s WHERE s.archived_at IS NOT NULL${roleClause}`).get(countParams) as { c: number }).c;
+    const rowParams: Record<string, unknown> = { limit: lim, offset };
+    if (role) rowParams.role = role;
+    if (search) rowParams.q = likeSubstring(search);
     const rows = this.db.prepare(
       `SELECT s.*, p.name AS project_name, a.name AS agent_name
        FROM sessions s JOIN projects p ON s.project_id = p.id JOIN agents a ON s.agent_id = a.id
-       WHERE s.archived_at IS NOT NULL${roleClause}
+       WHERE s.archived_at IS NOT NULL${roleClause}${searchClause}
        ORDER BY s.archived_at DESC LIMIT @limit OFFSET @offset`,
-    ).all({ ...params, limit: lim, offset }) as Row[];
+    ).all(rowParams) as Row[];
     return { total, limit: lim, rows: rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string })) };
   }
   /**

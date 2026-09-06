@@ -497,16 +497,21 @@ export const api = {
   // archiveSession client. restore brings one back to the rail (view-only if dead); deleteArchived is
   // permanent (row(s) + snapshot). archivedSessions feeds the Archive tab — PAGINATED (default/max page
   // size live server-side; a list-rendering page grows `limit` for its own "Load more"), returning
-  // `{items, total}` rather than the full per-project archived set. ---
-  archivedSessions: (projectId: string, opts?: { limit?: number; offset?: number }) =>
-    get<ArchivedSessionsPage>(`/api/projects/${projectId}/archive?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}`),
+  // `{items, total}` rather than the full per-project archived set. Optional `q` (card b9161ad2) filters
+  // server-side (id/agent/role/task/branch) BEFORE the limit/offset apply, so a search reaches the FULL
+  // archived set rather than only whatever's already been "load more"'d — Archive.tsx sends its debounced
+  // search text here instead of filtering the loaded pages itself. ---
+  archivedSessions: (projectId: string, opts?: { limit?: number; offset?: number; q?: string }) =>
+    get<ArchivedSessionsPage>(`/api/projects/${projectId}/archive?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.q ? `&q=${encodeURIComponent(opts.q)}` : ""}`),
   // Cross-project (god-eye) archive: archived sessions across ALL projects, each enriched with
   // projectId/projectName + snapshotExists — feeds the grouped Project → Agent Archive page + Mission
   // Control/Overview/RunHistory's history views. PAGINATED, same `{items, total}` shape as above.
   // Optional `role` scopes the page server-side to one SessionRole (e.g. "manager") BEFORE the
-  // limit/offset apply, so a role-scoped caller's page budget isn't diluted by unrelated rows.
-  allArchivedSessions: (opts?: { limit?: number; offset?: number; role?: string }) =>
-    get<ArchivedSessionsPage>(`/api/archived-sessions?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.role ? `&role=${opts.role}` : ""}`),
+  // limit/offset apply, so a role-scoped caller's page budget isn't diluted by unrelated rows. Optional
+  // `q` is the same server-side search as archivedSessions above (plus project name, since this spans
+  // projects), also applied before limit/offset.
+  allArchivedSessions: (opts?: { limit?: number; offset?: number; role?: string; q?: string }) =>
+    get<ArchivedSessionsPage>(`/api/archived-sessions?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.role ? `&role=${opts.role}` : ""}${opts?.q ? `&q=${encodeURIComponent(opts.q)}` : ""}`),
   // A single archived session BY ID, cross-project — for a by-id consumer (SessionView resolving a
   // deep-linked/attention-queue session) that must not depend on that session still being on the FIRST
   // page of the bounded list above. Resolves to `null` (not a thrown error) on the expected 404 — "not

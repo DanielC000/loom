@@ -358,6 +358,115 @@ try {
     const reparentedByIdRes = await app.inject({ method: "GET", url: "/api/archived-sessions/workerReparented" });
     check("J7: GET /api/archived-sessions/:id resolves the same, single-row route",
       reparentedByIdRes.json().dispatchedBySessionId === "mgrOld");
+
+    // ===================== K. Server-side search (?q=) — card b9161ad2 =====================
+    // Archive.tsx's search used to be CLIENT-side over whatever pages happened to be loaded, so a match
+    // sitting past the loaded pages was invisible ("I know that session exists but search says nothing").
+    // This reproduces the fix: `q` is applied server-side, BEFORE limit/offset, so it reaches the FULL
+    // archived set, and `total`/paging stay correct while a query is active.
+    db.insertProject({ id: "pSearch", name: "SearchProj", repoPath: "C:/tmp/search", vaultPath: "C:/tmp/search", config: {}, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: "aSearchZephyr", projectId: "pSearch", name: "zephyrAgent", startupPrompt: "", position: 0 });
+    db.insertAgent({ id: "aSearchOther", projectId: "pSearch", name: "otherAgent", startupPrompt: "", position: 1 });
+    // search1/search3 match "zephyr" via agent name; search2/search4 don't. search1 carries a distinctive
+    // taskId, search3 is a "manager" (role match), search5/search6 probe LIKE-escaping (a literal `_` in
+    // the query must NOT act as a single-char wildcard).
+    db.insertSession(mkSession("search1", "pSearch", "aSearchZephyr", { role: "worker", taskId: "taskZZZ999", branch: "loom/abc123" }));
+    db.insertSession(mkSession("search2", "pSearch", "aSearchOther", { role: "worker", branch: "loom/xyz999" }));
+    db.insertSession(mkSession("search3", "pSearch", "aSearchZephyr", { role: "manager" }));
+    db.insertSession(mkSession("search4", "pSearch", "aSearchOther", { role: "worker", branch: "unrelated" }));
+    db.insertSession(mkSession("search5", "pSearch", "aSearchOther", { role: "worker", branch: "loom/ab_cd" }));
+    db.insertSession(mkSession("search6", "pSearch", "aSearchOther", { role: "worker", branch: "loom/abXcd" }));
+    const raw6 = new Database(dbFile);
+    const stamp6 = raw6.prepare("UPDATE sessions SET archived_at = ? WHERE id = ?");
+    // Newest-first order once stamped: search6, search5, search4, search3, search2, search1.
+    stamp6.run(at(-5_000_000), "search1");
+    stamp6.run(at(-4_500_000), "search2");
+    stamp6.run(at(-4_000_000), "search3");
+    stamp6.run(at(-3_500_000), "search4");
+    stamp6.run(at(-3_000_000), "search5");
+    stamp6.run(at(-2_500_000), "search6");
+    raw6.close();
+
+    // K1: DoD-1 — search matches across the FULL project archived set (6 rows), not just a loaded page.
+    // limit=1 forces search3 (the OTHER "zephyr" match) off the first page unless the filter itself is
+    // applied before the LIMIT.
+    const zephyrPage1 = db.listArchivedSessionsPage("pSearch", 1, 0, "zephyr");
+    check("K1: search(limit 1) returns exactly 1 row", zephyrPage1.rows.length === 1);
+    check("K1: search(limit 1) row IS a zephyr match (search3, newest of the two)", zephyrPage1.rows[0].id === "search3");
+    // K2: DoD-2 — total reflects the FILTERED count (2), not the project's full 6.
+    check("K2: search total is the FILTERED count (2), not the unfiltered project total (6)", zephyrPage1.total === 2);
+    const zephyrPage2 = db.listArchivedSessionsPage("pSearch", 1, 1, "zephyr");
+    check("K2: paging past the first filtered row reaches the SECOND match (search1)", zephyrPage2.rows[0]?.id === "search1");
+    check("K2: both filtered pages report the SAME total (2)", zephyrPage1.total === zephyrPage2.total);
+    // K2b: the actual hasMore arithmetic Archive.tsx's useInfiniteQuery runs (loaded < total ⇒ more),
+    // driven against these two filtered pages — 1 of 2 loaded ⇒ more; 2 of 2 loaded ⇒ none.
+    const loadedAfterPage1 = zephyrPage1.rows.length;
+    check("K2b: hasMore is TRUE after page 1 (1 of 2 loaded)", loadedAfterPage1 < zephyrPage1.total);
+    const loadedAfterPage2 = loadedAfterPage1 + zephyrPage2.rows.length;
+    check("K2b: hasMore is FALSE after page 2 (2 of 2 loaded)", !(loadedAfterPage2 < zephyrPage2.total));
+
+    // K3: match on role (not just id/agent/task/branch).
+    const rolePage = db.listArchivedSessionsPage("pSearch", 10, 0, "manager");
+    check("K3: search matches on role too (search3, the only manager here)",
+      rolePage.rows.length === 1 && rolePage.rows[0].id === "search3");
+    // K4: match on task id.
+    const taskPage = db.listArchivedSessionsPage("pSearch", 10, 0, "taskzzz"); // lowercase — LIKE is case-insensitive
+    check("K4: search matches on task_id, case-insensitively", taskPage.rows.length === 1 && taskPage.rows[0].id === "search1");
+    // K5: match on branch.
+    const branchPage = db.listArchivedSessionsPage("pSearch", 10, 0, "xyz999");
+    check("K5: search matches on branch", branchPage.rows.length === 1 && branchPage.rows[0].id === "search2");
+
+    // K6 (escape): a literal `_` in the query must match ONLY the literal underscore, never act as a
+    // LIKE single-char wildcard — without ESCAPE, "ab_cd" would ALSO match "abXcd" (search6).
+    const underscorePage = db.listArchivedSessionsPage("pSearch", 10, 0, "ab_cd");
+    check("K6: a literal `_` in the query is ESCAPED — matches only the literal branch (search5)",
+      underscorePage.rows.length === 1 && underscorePage.rows[0].id === "search5");
+    check("K6: ...and does NOT wildcard-match a different branch (search6, 'abXcd')",
+      !underscorePage.rows.some((s) => s.id === "search6"));
+
+    // K7: empty/whitespace `q` behaves EXACTLY as omitted — an existing no-q caller stays byte-identical.
+    const baseline = db.listArchivedSessionsPage("pSearch", 10, 0);
+    const emptyQ = db.listArchivedSessionsPage("pSearch", 10, 0, "");
+    const blankQ = db.listArchivedSessionsPage("pSearch", 10, 0, "   ");
+    check("K7: q='' is byte-identical to omitting q (same total)", emptyQ.total === baseline.total);
+    check("K7: q='' is byte-identical to omitting q (same row ids, same order)",
+      emptyQ.rows.map((s) => s.id).join(",") === baseline.rows.map((s) => s.id).join(","));
+    check("K7: whitespace-only q is treated as absent too", blankQ.total === baseline.total &&
+      blankQ.rows.map((s) => s.id).join(",") === baseline.rows.map((s) => s.id).join(","));
+
+    // K8: cross-project route (listAllArchivedSessionsPage) also matches PROJECT name, not just
+    // id/agent/role/task/branch (the per-project route has no need to, since it's already scoped to one).
+    const crossProjectNamePage = db.listAllArchivedSessionsPage(10, 0, null, "SearchProj");
+    check("K8: cross-project search matches on project name too (all 6 pSearch rows)",
+      crossProjectNamePage.total === 6 && crossProjectNamePage.rows.every((s) => s.projectId === "pSearch"));
+    const crossProjectZephyr = db.listAllArchivedSessionsPage(10, 0, null, "zephyr");
+    check("K8: cross-project search still matches agent name too, scoped correctly (2, not diluted by other projects)",
+      crossProjectZephyr.total === 2);
+
+    // K9: DoD-3 — payload stays BOUNDED under search too (the clamp isn't bypassed by adding a filter).
+    // "bulk" matches all 505 pBulk rows via BOTH id and agent name (agentBulk) — an oversized limit must
+    // still cap at MAX_ARCHIVED_PAGE (500), with total reflecting the full filtered count (505).
+    const bulkSearch = db.listAllArchivedSessionsPage(999_999, 0, null, "bulk");
+    check("K9: search + oversized limit is still capped at MAX_ARCHIVED_PAGE (500 rows, not 505)", bulkSearch.rows.length === 500);
+    check("K9: search reports the effective (clamped) limit back (500)", bulkSearch.limit === 500);
+    check("K9: search total reflects the FULL filtered set beyond the clamp (505)", bulkSearch.total === 505);
+
+    // K10 (REST): the same search, end to end, on both routes.
+    const restProjSearch = await app.inject({ method: "GET", url: "/api/projects/pSearch/archive?limit=10&q=zephyr" });
+    const restProjSearchBody = restProjSearch.json();
+    check("K10: REST GET /api/projects/:id/archive?q= filters server-side (2 zephyr matches)",
+      restProjSearchBody.total === 2 && restProjSearchBody.items.length === 2);
+    check("K10: REST per-project search items are the right two", restProjSearchBody.items.map((s) => s.id).sort().join(",") === "search1,search3");
+
+    const restCrossSearch = await app.inject({ method: "GET", url: "/api/archived-sessions?limit=10&q=SearchProj" });
+    const restCrossSearchBody = restCrossSearch.json();
+    check("K10: REST GET /api/archived-sessions?q= filters server-side across projects (6 SearchProj matches)",
+      restCrossSearchBody.total === 6);
+
+    // K11: an empty/whitespace ?q= over REST is likewise treated as absent (byte-identical to no ?q=).
+    const restNoQ = await app.inject({ method: "GET", url: "/api/projects/pSearch/archive?limit=10" });
+    const restBlankQ = await app.inject({ method: "GET", url: "/api/projects/pSearch/archive?limit=10&q=%20%20" });
+    check("K11: REST blank ?q= behaves exactly as omitted (same total)", restBlankQ.json().total === restNoQ.json().total);
   } finally {
     await app.close();
   }

@@ -39,9 +39,13 @@ export default function Archive() {
   const [query, setQuery] = useState(""); // debounced
   useEffect(() => { const t = setTimeout(() => setQuery(rawQuery), 200); return () => clearTimeout(t); }, [rawQuery]);
 
+  // Search (card b9161ad2) is applied SERVER-SIDE (`?q=`, matched against id/agent/role/task/branch)
+  // rather than filtered over whatever pages happen to be loaded — so it reaches the full archived set,
+  // not just what's been "load more"'d so far. `query` in the queryKey means a new search resets paging
+  // (a fresh page-0 fetch under the new filter) rather than re-filtering already-accumulated pages.
   const archived = useInfiniteQuery({
-    queryKey: ["archive", projectId],
-    queryFn: ({ pageParam }) => api.archivedSessions(projectId, { limit: ARCHIVE_PAGE_SIZE, offset: pageParam }),
+    queryKey: ["archive", projectId, query],
+    queryFn: ({ pageParam }) => api.archivedSessions(projectId, { limit: ARCHIVE_PAGE_SIZE, offset: pageParam, q: query || undefined }),
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) => {
       const loaded = allPages.reduce((n, p) => n + p.items.length, 0);
@@ -77,10 +81,10 @@ export default function Archive() {
   // Selection resolves from the loaded pages, so the transcript stays put even when search hides its row.
   const selected = rows.find((r) => r.id === sessionId) ?? null;
 
-  // Filter (case-insensitive across id/agent/role/task/branch) then build the manager → worker tree,
-  // newest-archived first at every level (archivedAt desc, falling back to lastActivity). Search only
-  // covers rows LOADED so far — "Load more" widens both the tree and what search can match.
-  const { nodes, matchCount } = useMemo(() => buildTree(rows, query), [rows, query]);
+  // Rows already reflect the active `q` filter (applied server-side, see the query above) — just build
+  // the manager → worker tree, newest-archived first at every level (archivedAt desc, falling back to
+  // lastActivity).
+  const nodes = useMemo(() => buildTree(rows), [rows]);
 
   const searching = query.trim().length > 0;
 
@@ -90,7 +94,7 @@ export default function Archive() {
       <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <SectionLabel style={{ margin: 0 }}>
-            Archived sessions ({searching ? `${matchCount} of ${rows.length} loaded` : `${rows.length}${hasMore ? ` of ${total}` : ""}`})
+            Archived sessions ({rows.length}{hasMore ? ` of ${total}` : ""})
           </SectionLabel>
           <span style={{ flex: 1 }} />
         </div>
@@ -100,21 +104,16 @@ export default function Archive() {
           onChange={(e) => setRawQuery(e.currentTarget.value)}
           style={{ marginBottom: 10 }}
         />
-        {searching && hasMore && (
-          <p style={{ color: color.textMuted, fontSize: 12, marginTop: -6, marginBottom: 8 }}>
-            Search only covers the {rows.length} loaded so far — “Load more” below to search further back.
-          </p>
-        )}
         <div style={{ maxHeight: "70vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 8, paddingRight: 4 }}>
           {!projectId && (
             <p style={{ color: color.textMuted, fontSize: 13 }}>No project selected.</p>
           )}
-          {projectId && rows.length === 0 && (
+          {projectId && rows.length === 0 && !searching && (
             <p style={{ color: color.textMuted, fontSize: 13 }}>
               No archived sessions in this project. Sessions are archived automatically when they exit.
             </p>
           )}
-          {rows.length > 0 && matchCount === 0 && (
+          {projectId && rows.length === 0 && searching && (
             <p style={{ color: color.textMuted, fontSize: 13 }}>No archived sessions match “{query}”.</p>
           )}
           {nodes.map((n) => (
@@ -156,23 +155,19 @@ type TreeNode = { session: ArchivedSessionListItem; children: ArchivedSessionLis
 
 const archTs = (s: ArchivedSessionListItem) => Date.parse(s.archivedAt ?? s.lastActivity ?? "") || 0;
 
-function buildTree(rows: ArchivedSessionListItem[], rawQuery: string): { nodes: TreeNode[]; matchCount: number } {
-  const q = rawQuery.trim().toLowerCase();
-  const match = (s: ArchivedSessionListItem) =>
-    !q || [s.id, s.agentName, s.role, s.taskId, s.branch]
-      .some((v) => v != null && String(v).toLowerCase().includes(q));
-  const filtered = rows.filter(match);
-  const idSet = new Set(filtered.map((s) => s.id));
-
-  // A session nests under its DISPATCHER (the manager that actually spawned it, per
-  // `dispatchedBySessionId` — falling back to `parentSessionId` only for a row the server couldn't
-  // resolve a spawn_worker event for) only when that manager is also in the (filtered) set; otherwise
-  // it surfaces at top level — that covers managers (no dispatcher) AND orphan workers (manager filtered
-  // out or never archived in this project).
+// `rows` already reflect the active search (`?q=` applied server-side, see the query above) — this just
+// nests them into a manager → worker tree. A session nests under its DISPATCHER (the manager that
+// actually spawned it, per `dispatchedBySessionId` — falling back to `parentSessionId` only for a row
+// the server couldn't resolve a spawn_worker event for) only when that manager is ALSO present in `rows`
+// (i.e. also matched the search, or no search is active); otherwise it surfaces at top level — that
+// covers managers (no dispatcher) AND orphan workers (manager didn't match, or isn't archived in this
+// project).
+function buildTree(rows: ArchivedSessionListItem[]): TreeNode[] {
+  const idSet = new Set(rows.map((s) => s.id));
   const dispatcherOf = (s: ArchivedSessionListItem) => s.dispatchedBySessionId ?? s.parentSessionId;
   const childrenByParent = new Map<string, ArchivedSessionListItem[]>();
   const topLevel: ArchivedSessionListItem[] = [];
-  for (const s of filtered) {
+  for (const s of rows) {
     const dispatcher = dispatcherOf(s);
     if (dispatcher && idSet.has(dispatcher)) {
       const arr = childrenByParent.get(dispatcher) ?? [];
@@ -192,7 +187,7 @@ function buildTree(rows: ArchivedSessionListItem[], rawQuery: string): { nodes: 
   const nodeTs = (n: TreeNode) => Math.max(archTs(n.session), ...n.children.map(archTs));
   nodes.sort((a, b) => nodeTs(b) - nodeTs(a));
 
-  return { nodes, matchCount: filtered.length };
+  return nodes;
 }
 
 // ── tree components ──────────────────────────────────────────────────────────────
