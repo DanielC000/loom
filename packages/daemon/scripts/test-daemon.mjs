@@ -1223,6 +1223,67 @@ function boundFailureMessages(failureType, lines) {
   return { failureType, messages, truncated };
 }
 
+// Card 14e733fb: Node documents process.stdout/process.stderr writes to a PIPE as SYNCHRONOUS on Windows
+// but ASYNCHRONOUS on POSIX ("process.stdout"/"process.stderr" — Synchronous vs asynchronous writes; see
+// card 776750ba's own test/fixtures/_stderr-sentinel-exit.mjs for the empirical proof). The isMain block
+// below used to print its `FAILURES:` epilogue — the ONLY surviving surface for a multi-line failure
+// detail (card 63664129) — via a `console.log` loop immediately followed by `process.exit(1)`: on a POSIX
+// gate host, `process.exit()` can tear this process down before those async writes ever reach the OS pipe,
+// silently losing exactly the diagnostic this block exists to preserve. `writeFullySync` replaces that
+// loop: it builds the whole block into one buffer and writes it via a real synchronous write(2) loop that
+// keeps writing until every byte is CONFIRMED out, never assuming one `fs.writeSync` call drained the
+// buffer. Two real gotchas a naive single call would miss (`fs.writeSync` can itself return fewer bytes
+// than requested against a pipe, and can throw EAGAIN if the fd isn't ready) — a fix that doesn't loop is
+// cosmetic (see this function's own regression test, test-daemon-failures-epilogue-flush.mjs, for the
+// BREAK/RED proof).
+//
+// OUTPUT ORDERING (manager review): writing directly to fd 1 here BYPASSES process.stdout's own pending
+// async queue on POSIX, so this epilogue can land BEFORE — or interleaved with — earlier console.log
+// output from this same run that's still buffered. Accepted as a net win: that earlier output was already
+// loss-prone (the exact defect this card fixes), and gate-runner's `failureBlockTracker` is FRONT-ANCHORED
+// on the `FAILURES:` marker, so it captures forward correctly regardless of what preceded it in the
+// stream — but it IS a real, deliberate behavioural change, not something a future reader should have to
+// discover by puzzling over scrambled CI output.
+//
+// `TEST_FORCE_WRITE_CHUNK_BYTES` is a test-only determinism knob (undefined/no-op in every real run) —
+// this host's own pipe writes are synchronous by construction (win32) or complete inside typical epilogue
+// sizes (posix), so nothing here can organically FORCE a real multi-call partial write in a hermetic test.
+// Clamping the per-call length to this many bytes makes the loop's own multi-iteration path exercised and
+// verifiable regardless of platform or payload size, without touching the code path a production run takes.
+const TEST_FORCE_WRITE_CHUNK_BYTES = process.env.LOOM_TEST_FORCE_WRITE_CHUNK_BYTES
+  ? Math.max(1, Number(process.env.LOOM_TEST_FORCE_WRITE_CHUNK_BYTES))
+  : undefined;
+// Card 14e733fb (manager review): the EAGAIN/zero-byte retry below must be bounded on ELAPSED TIME, not
+// iteration count — each spin is sub-microsecond, so a count bound is meaningless, but an UNBOUNDED spin
+// against a non-blocking fd whose reader never drains would hang the gate's own FAILURE path forever, in a
+// shared gate lane (this project has already paid once for exactly this "rare but unbounded wait" shape in
+// this file's neighbourhood — card 53175055). A spawned child's fd 1 is normally a BLOCKING pipe (so
+// `fs.writeSync` blocks rather than returning EAGAIN or 0) — this is precisely why the bound needs to exist
+// rather than the branch being removed: rare enough nobody would hit it in testing, unbounded enough to
+// wedge a gate if it ever does.
+const WRITE_FULLY_SYNC_DEADLINE_MS = 5_000;
+function writeFullySync(fd, text) {
+  const buf = Buffer.from(text, "utf-8");
+  const deadline = Date.now() + WRITE_FULLY_SYNC_DEADLINE_MS;
+  let offset = 0;
+  while (offset < buf.length) {
+    // Give up and keep whatever's already written — partial output is the PRE-EXISTING failure mode this
+    // function replaces (a lost tail), strictly better than a hang; a throw here would lose the WHOLE
+    // block instead of just the unwritten remainder.
+    if (Date.now() >= deadline) break;
+    const remaining = buf.length - offset;
+    const len = TEST_FORCE_WRITE_CHUNK_BYTES ? Math.min(remaining, TEST_FORCE_WRITE_CHUNK_BYTES) : remaining;
+    try {
+      const written = fs.writeSync(fd, buf, offset, len);
+      if (written === 0) continue; // degenerate zero-byte write — retry, bounded by the SAME deadline above
+      offset += written;
+    } catch (err) {
+      if (err.code === "EAGAIN") continue; // fd not ready yet — retry, bounded by the SAME deadline above
+      throw err;
+    }
+  }
+}
+
 // Card 237aa3a9: classify one failing (non-skipped) run's OWN captured stdout/stderr into one of four
 // honest buckets — the peer's own design input, and the half of their `failureRecords` design that
 // "demonstrably worked" (it routed them to a race instead of a regression before they even read a stack).
@@ -1858,7 +1919,6 @@ if (isMain) {
   }
 
   if (failed.length) {
-    console.log("FAILURES:");
     // Echo each failed test's FULL captured stdout/stderr (not just the last line) — the individual
     // check() failures inside a test file were otherwise invisible in the CI log, which is exactly why a
     // Linux-only failure (card 45a23c27) shipped undiagnosable from CI output alone.
@@ -1868,18 +1928,26 @@ if (isMain) {
     // per tier, or `undefined` entirely for a thrown message matching no recognized marker. See
     // GateStepResult.failingTest's own doc (gate-runner.ts) for the full constraint and its known gaps —
     // don't restate it here, it drifts.
+    //
+    // Card 14e733fb: built into ONE string and flushed via writeFullySync (see its own doc above) instead
+    // of a `console.log` loop — the loop's writes are exactly the ones a POSIX gate host could lose to
+    // process.exit() below tearing the process down before they reach the pipe. `epilogueLines.join("\n")
+    // + "\n"` reproduces the SAME bytes the old per-call console.log sequence produced (each call wrote its
+    // argument plus one trailing "\n"; join("\n") + a final "\n" is byte-identical to that).
+    const epilogueLines = ["FAILURES:"];
     for (const f of failed) {
       // Card e26f3199: on a timeout, name WHICH of the two failure modes this was — before this card, the
       // child's real exit status was discarded, so "completed successfully, 'close' was just late"
       // printed identically to "genuinely wedged, killed, never exited". They must not print the same.
       const statusLabel = f.status === "timeout" && f.timeoutDetail ? `timeout (${f.timeoutDetail})` : f.status;
-      console.log(`  - ${f.name} (exit ${statusLabel}): ${f.tail ?? ""}`);
+      epilogueLines.push(`  - ${f.name} (exit ${statusLabel}): ${f.tail ?? ""}`);
       if (f.status === "timeout") {
-        console.log(`      exit->close gap: ${f.exitToCloseGapMs != null ? `${f.exitToCloseGapMs}ms` : "n/a (child's own exit was never observed)"}`);
+        epilogueLines.push(`      exit->close gap: ${f.exitToCloseGapMs != null ? `${f.exitToCloseGapMs}ms` : "n/a (child's own exit was never observed)"}`);
       }
-      if (f.stdout?.trim()) console.log(f.stdout.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
-      if (f.stderr?.trim()) console.log(f.stderr.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
+      if (f.stdout?.trim()) epilogueLines.push(f.stdout.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
+      if (f.stderr?.trim()) epilogueLines.push(f.stderr.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
     }
+    writeFullySync(1, epilogueLines.join("\n") + "\n");
     process.exit(1);
   }
   console.log("✅ hermetic daemon suite green — never touched prod.");
