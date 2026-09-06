@@ -50,6 +50,7 @@ import { IdleWatcher } from "./orchestration/idle-watcher.js";
 import { BusyWorkerWatcher } from "./orchestration/busy-worker-watcher.js";
 import { WorktreeVanishedWatcher } from "./orchestration/worktree-vanished-watcher.js";
 import { ResumeDocWatcher } from "./orchestration/resume-doc-watcher.js";
+import { snapshotAllResumeDocsAtBoot } from "./orchestration/resume-doc-snapshot.js";
 import { CrashRecoveryWatcher, recordUnexpectedExit } from "./orchestration/crash-recovery-watcher.js";
 import { DbBackupWatcher, resolveBackupConfig, takeBackup } from "./orchestration/db-backup.js";
 import { AlertWebhookEmitter } from "./orchestration/alert-webhook.js";
@@ -106,6 +107,21 @@ async function main(): Promise<void> {
   const bootBackupCfg = resolveBackupConfig();
   if (bootBackupCfg.enabled) await takeBackup({ reason: "boot", keep: bootBackupCfg.keep });
   const db = new Db();
+  // Card 14f14d92: snapshot every project's resume doc BEFORE anything below can spawn/resume an agent
+  // that might touch it — the resume doc is load-bearing (injected into every manager spawn) and had no
+  // backup at all; `rotation-check.ts` only ever VERIFIED an archive a caller claimed to have written, it
+  // never wrote one. Best-effort + non-blocking (see resume-doc-snapshot.ts's own doc): a failure here
+  // must never gate boot.
+  try {
+    const resumeSnap = snapshotAllResumeDocsAtBoot(db);
+    if (resumeSnap.snapshotted > 0) {
+      console.log(`[boot] snapshotted ${resumeSnap.snapshotted} resume doc(s) (${resumeSnap.skipped} skipped, ${resumeSnap.errors} error(s))`);
+    } else if (resumeSnap.errors > 0) {
+      console.warn(`[boot] resume-doc snapshot: 0 snapshotted, ${resumeSnap.errors} error(s) across ${resumeSnap.projectsChecked} project(s)`);
+    }
+  } catch (err) {
+    console.warn(`[boot] resume-doc snapshot sweep failed (continuing boot): ${(err as Error).message}`);
+  }
   // Seed Loom's bundled Profiles (platform-level rig) into the profiles table, seed-if-absent
   // like the skills seed — additive, idempotent, preserves user edits. The two Platform-layer profiles
   // (Platform-lead/Platform-audit) seed only under LOOM_DEV; the core profiles always seed.

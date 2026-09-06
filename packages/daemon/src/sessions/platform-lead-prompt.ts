@@ -95,8 +95,11 @@ export function composePlatformLeadStartupPrompt(startupPrompt: string | undefin
 const SIBLING_STALENESS_MS = 48 * 60 * 60 * 1000;
 
 /** Matches every Platform Lead resume-doc filename this feature knows about: the shared base file
- *  (`PLATFORM-LEAD-RESUME.md`) and any per-lineage sibling (`PLATFORM-LEAD-RESUME-<lineageId>.md`). */
-function isResumeDocFilename(name: string): boolean {
+ *  (`PLATFORM-LEAD-RESUME.md`) and any per-lineage sibling (`PLATFORM-LEAD-RESUME-<lineageId>.md`).
+ *  Exported (card 14f14d92) so the boot-time resume-doc snapshot can enumerate every Platform Lead
+ *  resume doc living in a home dir — the SAME pattern this file already uses for staleness detection,
+ *  not a second hand-rolled regex that could silently drift from it. */
+export function isResumeDocFilename(name: string): boolean {
   return /^PLATFORM-LEAD-RESUME(-.+)?\.md$/.test(name);
 }
 
