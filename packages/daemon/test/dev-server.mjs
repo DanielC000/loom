@@ -963,7 +963,16 @@ const crashFixtureSrc = [
   "const heartbeatScriptPath = process.argv[4];",
   "const outFile = process.argv[5];",
   "const trackedDirs = [];",
-  "process.on('exit', () => { for (const d of trackedDirs) { try { spawnSync(process.execPath, [helper, 'stop', d], { stdio: 'ignore' }); } catch {} } });",
+  // BOUNDED (card ff329c0b): this was one of TWO `spawnSync` calls to this same HELPER in this file with
+  // no `{timeout: 10_000}` — every other call to it elsewhere in this file already has one. The other is
+  // the `start` call two lines below, left as-is here (out of scope for this card — a real behavior change
+  // to the fixture that launches the tracked dev-server, filed separately): it's instead bounded
+  // INDIRECTLY, by the PARENT's own `waitUntil(..., 10_000)` on `SUPERVISOR_PID` below, which fails the
+  // check loudly rather than hanging if `start` itself never returns. THIS call had no such backstop — an
+  // exit handler that hangs blocks this process's own termination indefinitely, which in turn blocks the
+  // PARENT's `crashChild.on('exit', ...)` from ever firing (that wait had no bound of its own either — see
+  // the fix there). Bounding this one closes that specific class of hang.
+  "process.on('exit', () => { for (const d of trackedDirs) { try { spawnSync(process.execPath, [helper, 'stop', d], { stdio: 'ignore', timeout: 10_000 }); } catch {} } });",
   "const startResult = spawnSync(process.execPath, [helper, 'start', dir, '--', process.execPath, heartbeatScriptPath, outFile], { encoding: 'utf8' });",
   "trackedDirs.push(dir);",
   "const m = /\\(pid (\\d+)\\)/.exec(startResult.stdout || '');",
@@ -1005,6 +1014,27 @@ try {
   crashChild.stdout.on("data", (d) => { crashStdout += d.toString(); });
   crashChild.stderr.resume(); // drain the simulated crash's own stack trace — expected, not a failure
 
+  // ROOT CAUSE (card ff329c0b), CONFIRMED by direct repro, not inferred: `child.on("exit", ...)` is a
+  // ONE-SHOT EventEmitter event — a listener attached AFTER the child has already exited never fires.
+  // Verified directly: injecting an artificial delay before attaching this listener reproduced a genuine,
+  // deterministic missed-event hang 5/5 trials, with `crashChild.exitCode` already non-null throughout —
+  // vs. 0/10 with no injected delay, matching the ORIGINAL code's structure exactly. The pre-fix code
+  // attached this listener only AFTER two `waitUntil` polls plus several synchronous `check()` calls;
+  // under real CI scheduling jitter (not raw CPU load — induced contention via busy-loop processes did
+  // NOT reproduce this in ~130 trials, since it slows the crash-fixture's own exit proportionally too, an
+  // asymmetric SCHEDULING delay on just the parent's own JS is what's needed) that gap can exceed the
+  // crash-fixture's own sub-second lifetime, and the exit fires and is lost before this file ever asks
+  // for it — an unbounded, genuine hang, matching the observed bimodal "fast, or hung forever" signature
+  // and the harness's own `describeTimeoutDetail` classification ("killed ... after kill", i.e. the
+  // PARENT process was still alive at the 120s ceiling, not that a grandchild held a pipe open). Fix:
+  // attach the listener HERE, at spawn time, before any such gap can open — the same reason the
+  // `stdout`/`stderr` listeners on the two lines above are already attached immediately.
+  let crashExitSettled = false;
+  let crashExitCode = null;
+  const crashExitPromise = new Promise((resolve) => {
+    crashChild.on("exit", (code) => { crashExitSettled = true; crashExitCode = code; resolve(code); });
+  });
+
   const gotSupervisorPid = await waitUntil(() => /SUPERVISOR_PID=(\d+)/.test(crashStdout), 10_000);
   check("(n) crash-fixture reports the supervisor pid it tracked (start succeeded)", gotSupervisorPid);
 
@@ -1018,8 +1048,36 @@ try {
   const heartbeatWasUp = gotHeartbeatReport && /HEARTBEAT_UP=1/.test(crashStdout);
   check("(n) POSITIVE CONTROL: the dev-server's real command was alive (heartbeat fresh) immediately before the crash-fixture crashed", heartbeatWasUp);
 
-  const crashExitCode = await new Promise((resolve) => crashChild.on("exit", (code) => resolve(code)));
-  check("(n) crash-fixture process actually crashed (nonzero exit) — a genuine uncaught exception, not a clean exit", crashExitCode !== 0);
+  // BOUNDED BACKSTOP, not the fix itself (the fix is attaching the listener above, before spawn's own
+  // async gap could ever open) — matches this file's own "never a truly unbounded wait" discipline
+  // everywhere else, and gives a future, DIFFERENT hang here something to go on beyond "the last line
+  // printed was the check above".
+  const CRASH_EXIT_WAIT_TIMEOUT_MS = 20_000;
+  let crashExitTimedOut = false;
+  await Promise.race([
+    crashExitPromise,
+    new Promise((resolve) => setTimeout(() => { crashExitTimedOut = true; resolve(); }, CRASH_EXIT_WAIT_TIMEOUT_MS)),
+  ]);
+  if (crashExitTimedOut && !crashExitSettled) {
+    const activeHandles = typeof process._getActiveHandles === "function" ? process._getActiveHandles().length : "n/a";
+    const activeRequests = typeof process._getActiveRequests === "function" ? process._getActiveRequests().length : "n/a";
+    let psSnapshot = "n/a (not POSIX)";
+    if (process.platform !== "win32") {
+      try {
+        const ps = spawnSync("ps", ["-eo", "pid,ppid,pgid,stat,etimes,cmd"], { encoding: "utf8", timeout: 5_000 });
+        psSnapshot = (ps.stdout || "").split("\n").filter((l) => /node|heartbeat|crash-fixture/i.test(l)).join(" | ");
+      } catch { /* diagnostic only — never let this throw */ }
+    }
+    check(
+      `(n) crash-fixture (pid ${crashChild.pid}, exitCode=${crashChild.exitCode}, signalCode=${crashChild.signalCode}) ` +
+        `never emitted 'exit' within ${CRASH_EXIT_WAIT_TIMEOUT_MS}ms — active handles=${activeHandles} ` +
+        `active requests=${activeRequests}; captured stdout: ${JSON.stringify(crashStdout)}; ps snapshot: ${psSnapshot}`,
+      false,
+    );
+    try { crashChild.kill("SIGKILL"); } catch { /* best effort */ }
+  } else {
+    check("(n) crash-fixture process actually crashed (nonzero exit) — a genuine uncaught exception, not a clean exit", crashExitCode !== 0);
+  }
 
   // THE ASSERTION: even though the crash-fixture never called `stop()` itself, its own exit hook — the
   // SAME register+sweep-on-exit mechanism this file's own sections now use — must have killed the REAL
