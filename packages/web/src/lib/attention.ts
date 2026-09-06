@@ -119,6 +119,11 @@ export interface AttentionItem {
   // also renders a PENDING state chip off this presence. This is the structural "is a request" check —
   // prefer it over comparing `kind` to a literal label, since the label itself is now type-varying.
   questionId?: string | null;
+  // Card 889ae619 (iii-a) — set ONLY on the DECISION STALE branch (a pending Request whose `escalatedAt`
+  // is set and isn't currently snoozed): the Snooze affordance's presence check. Deliberately a SEPARATE
+  // field from `questionId` (which is also set on the cyan/amber branches, where there's nothing stale to
+  // suppress) rather than re-deriving "is this the stale row" from `tone`/`kind` at render time.
+  staleQuestionId?: string | null;
 }
 
 // The deep-link an attention item's "Open" affordance targets, or null if it has none. A MERGE REQUEST
@@ -207,6 +212,7 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
   // it as a DISTINCT kind (amber, not the actionable cyan) rather than either hiding it (the human would
   // never learn the manager needs attention) or leaving it indistinguishable from a live, answerable
   // decision (misleading — see the residual-gap investigation, card 8701bdbb follow-up).
+  const now = Date.now();
   for (const q of (questions.data ?? []).filter((x) => x.state === "pending")) {
     const label = requestAttentionLabel(q.type); // type-aware — a credential/permission/input ask is not a "decision"
     // Card 99d41588: `escalatedAt` is stamped ONCE, server-side (IdleWatcher.tickStaleRequests), the
@@ -217,7 +223,11 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
     // session may since have exited without ever answering it, and this must still show the escalation).
     // A row that's ALSO sessionOrphaned takes the orphaned branch instead — "asking session is gone" is
     // the more actionable fact for a human to know than "and it was also stale before that".
-    const stale = q.escalatedAt != null;
+    // Card 889ae619 (iii-a): a durable, human-set `acknowledgedUntil` SUPPRESSES the STALE presentation
+    // while it's still in the future — a snooze, never a retirement (state/escalatedAt are untouched, so
+    // the row RE-REDDENS the instant acknowledgedUntil passes, with no separate "cleared" event to miss).
+    const snoozed = q.acknowledgedUntil != null && new Date(q.acknowledgedUntil).getTime() > now;
+    const stale = q.escalatedAt != null && !snoozed;
     items.push(q.sessionOrphaned
       ? {
           key: `q-${q.id}`, tone: "amber", kind: label.replace(" NEEDED", " ORPHANED"), questionId: q.id, sessionId: q.sessionId,
@@ -226,6 +236,9 @@ export function useAttention(): { items: AttentionItem[]; count: number } {
       : stale
       ? {
           key: `q-${q.id}`, tone: "red", kind: label.replace(" NEEDED", " STALE"), questionId: q.id, sessionId: q.sessionId,
+          // Structural marker for the Snooze affordance (AttentionRow) — set ONLY on this exact branch, so
+          // "snooze" never shows on a cyan/amber/orphaned row where there's nothing stale to suppress.
+          staleQuestionId: q.id,
           text: `${decisionAttentionText(q)} — pending since ${new Date(q.createdAt).toLocaleDateString()}, unanswered`,
         }
       : {

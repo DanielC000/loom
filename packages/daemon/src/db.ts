@@ -1849,11 +1849,19 @@ const QUESTION_ADDED_COLUMNS: Record<string, string> = {
   // legacy DB both gain it through this ONE ALTER-TABLE path — see migrateQuestions()'s own doc for why an
   // index referencing a migration-added column must never live in the base unconditional SCHEMA string.
   escalated_at: "TEXT",
-  // Immutable filer provenance (card cb7d6998) — LIKE most entries in this map (18 of the 19 here,
-  // `escalated_at` just above being the LONE exception — see its own doc for why it's deliberately
-  // ALTER-only), this one is ALSO already in the base CREATE TABLE `questions` block above (a fresh
-  // install gets it with no ALTER needed); it's listed here too so an EXISTING pre-cb7d6998 DB picks it
-  // up via this same ALTER-TABLE path. Nullable,
+  // Durable human snooze (card 889ae619, iii-a) — an ISO instant through which `attention.ts` suppresses
+  // this still-pending Request's STALE presentation. Nullable, written ONLY by the human-only loopback
+  // POST /api/questions/:id/acknowledge; never touches `state`, so a legacy/never-snoozed row simply
+  // reads null forever (== "not currently snoozed"), same posture as escalated_at's own null default.
+  // Deliberately added ONLY here (not to the base CREATE TABLE `questions` block above) — same reasoning
+  // as escalated_at just above (no index references this column today, but the precedent still holds:
+  // an upgraded legacy DB and a fresh install must both gain it through this ONE ALTER-TABLE path).
+  acknowledged_until: "TEXT",
+  // Immutable filer provenance (card cb7d6998) — LIKE most entries in this map (18 of the 20 here,
+  // `escalated_at` and `acknowledged_until` just above being the two deliberately ALTER-only exceptions —
+  // see their own docs for why), this one is ALSO already in the base CREATE TABLE `questions` block
+  // above (a fresh install gets it with no ALTER needed); it's listed here too so an EXISTING
+  // pre-cb7d6998 DB picks it up via this same ALTER-TABLE path. Nullable,
   // and — unlike `type`'s backfill-to-'decision' above — there is NO backfill value for a legacy row: the
   // original filer's session_id on that row was already overwritten by `reparentQuestions` on any recycle
   // that ran before this migration, so the true filer is gone, not merely un-migrated. NULL here means
@@ -7154,6 +7162,22 @@ export class Db {
     return result.changes > 0;
   }
   /**
+   * The human-only durable snooze write (card 889ae619, iii-a): stamp/clear `acknowledged_until` on ONE
+   * Request. A SNOOZE, not a retirement — deliberately does NOT touch `state` (stays `pending`, still
+   * answerable via the normal answer route; `question_pull`/`question_cancel` are byte-identical) and is
+   * deliberately UNGUARDED by `state` (unlike `markQuestionEscalated`/`cancelQuestion` above): this is a
+   * human noting "I've seen this, hide it a while" on a row, not a lifecycle transition that could race a
+   * concurrent answer — nothing reads `acknowledged_until` off a non-pending row anyway (see
+   * `attention.ts`, which only computes `stale` for `state === 'pending'`), so acknowledging an
+   * already-answered/consumed/cancelled row is a harmless no-op write. Pass `null` to un-snooze early.
+   * Returns the updated Question, or undefined if `id` doesn't exist.
+   */
+  acknowledgeQuestion(id: string, acknowledgedUntil: string | null): Question | undefined {
+    const result = this.db.prepare("UPDATE questions SET acknowledged_until = ? WHERE id = ?").run(acknowledgedUntil, id);
+    if (result.changes === 0) return undefined;
+    return this.getQuestion(id);
+  }
+  /**
    * The manager-only pull/consume: atomically reads every 'answered' question for `sessionId` and flips
    * them to 'consumed' in the SAME transaction, so a concurrent pull can never double-consume the same
    * row. Returns the questions AS THEY WERE when answered (pre-flip) — the manager's payload.
@@ -7344,7 +7368,9 @@ export class Db {
    * 'cancelled' (question_cancel/dismiss's terminal state is retained history exactly like 'consumed',
    * never a separate bucket). Newest-first. LEFT JOINs so a question whose filing/routed session or agent
    * was hard-deleted still lists (name falls back to "?") rather than silently dropping — the human should
-   * still see and answer it.
+   * still see and answer it. Same LEFT JOIN posture for the linked task (card 889ae619, iii-b): `task_id`
+   * is a soft, non-FK link (see `Question.taskId`'s own doc), so a dangling id or a null `task_id` both
+   * naturally yield `linked_task_column_key`/`linked_task_title` of `NULL` rather than dropping the row.
    *
    * Card 24a8b8c3: `agent_name` is joined via `filed_by_session_id` (the IMMUTABLE filer), NOT
    * `session_id` (the mutable routing target `reparentQuestions` rewrites on every recycle) — the same
@@ -7359,12 +7385,14 @@ export class Db {
   listOpenQuestions(includeConsumed = false): QuestionInboxItem[] {
     const rows = this.db.prepare(
       `SELECT q.*, a.name AS agent_name, p.name AS project_name, s.process_state AS session_process_state,
-              s.resumability AS session_resumability
+              s.resumability AS session_resumability, t.column_key AS linked_task_column_key,
+              t.title AS linked_task_title
        FROM questions q
        LEFT JOIN sessions s ON q.session_id = s.id
        LEFT JOIN sessions fs ON q.filed_by_session_id = fs.id
        LEFT JOIN agents a ON fs.agent_id = a.id
        LEFT JOIN projects p ON q.project_id = p.id
+       LEFT JOIN tasks t ON q.task_id = t.id
        WHERE q.state IN (${includeConsumed ? "'pending','answered','consumed','cancelled'" : "'pending','answered'"})
        ORDER BY q.created_at DESC`,
     ).all() as Row[];
@@ -7401,12 +7429,14 @@ export class Db {
   getQuestionInboxItem(id: string): QuestionInboxItem | undefined {
     const r = this.db.prepare(
       `SELECT q.*, a.name AS agent_name, p.name AS project_name, s.process_state AS session_process_state,
-              s.resumability AS session_resumability
+              s.resumability AS session_resumability, t.column_key AS linked_task_column_key,
+              t.title AS linked_task_title
        FROM questions q
        LEFT JOIN sessions s ON q.session_id = s.id
        LEFT JOIN sessions fs ON q.filed_by_session_id = fs.id
        LEFT JOIN agents a ON fs.agent_id = a.id
        LEFT JOIN projects p ON q.project_id = p.id
+       LEFT JOIN tasks t ON q.task_id = t.id
        WHERE q.id = ?`,
     ).get(id) as Row | undefined;
     return r ? toQuestionInboxItem(r) : undefined;
@@ -8658,6 +8688,7 @@ function toQuestion(r0: unknown): Question {
     cancelledBy: (r.cancelled_by as "agent" | "human" | null) ?? null,
     cancelledAt: (r.cancelled_at as string | null) ?? null,
     escalatedAt: (r.escalated_at as string | null) ?? null,
+    acknowledgedUntil: (r.acknowledged_until as string | null) ?? null,
     // Card cb7d6998 — null on a legacy row (predates this column) means "unknown," permanently; never
     // fall back to session_id here (that would silently re-introduce the exact bug this column exists to
     // fix, since session_id is the mutable routing target, not the filer).
@@ -8681,6 +8712,8 @@ function toQuestionInboxItem(r0: unknown): QuestionInboxItem {
     // flips to 'dead' in resume(), see sessions/service.ts). A merely stopped/archived/parked session
     // (state exited, resumability 'unknown'/'resumable') is NOT orphaned — it recovers on a later resume.
     sessionOrphaned: state == null || resumability === "dead",
+    linkedTaskColumnKey: (r.linked_task_column_key as string | null) ?? null,
+    linkedTaskTitle: (r.linked_task_title as string | null) ?? null,
   };
 }
 function toCompanionReminder(r0: unknown): CompanionReminder {

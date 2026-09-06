@@ -3327,6 +3327,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // provisionConnectionId/provisionBindingState comment above: a spec needing an already-escalated
           // row seeds pending with a backdated createdAt and lets the real watcher tick escalate it).
           escalatedAt: null,
+          // Card 889ae619 — same posture: always un-snoozed at seed time (no seed field for it); a spec
+          // needing an already-snoozed row calls the real acknowledge route after seeding.
+          acknowledgedUntil: null,
         });
         questionIds.push(id);
       }
@@ -5570,6 +5573,28 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const nudge = `Your request "${updated.title}" was dismissed — it will never be answered.${reason ? ` Reason: ${reason}` : ""}`;
       deps.pty.enqueueStdin(target, nudge, "human", undefined, undefined, "agent", updated.id);
     } catch { /* best-effort — the dismissal already persisted */ }
+    return reply.send(updated);
+  });
+  // Human durable snooze (card 889ae619, iii-a) — the missing middle ground between "leave a still-live
+  // pending Request permanently red in the attention queue" and dismiss's terminal cancel. Stamps
+  // `acknowledged_until`; NEVER touches `state` (stays 'pending', still answerable exactly as before —
+  // `question_pull`/`question_cancel` are byte-identical). `until` is REQUIRED, not defaulted: an ISO
+  // instant to snooze through, or explicit `null` to un-snooze immediately — this route deliberately
+  // never interprets a relative duration itself (mirrors the permission-answer route's `expiresAt`
+  // contract just above: the client computes the absolute timestamp from its own duration picker at
+  // submit time). Same human-only loopback trust posture as answer/dismiss above (Tier-0 by default —
+  // see gateway/trust-tier.ts's own doc: a new route need not be added there to stay loopback-only).
+  // No push nudge: unlike answer/dismiss, this never changes anything the ASKING session can observe
+  // (state, chosenOption, cancelledAt) — there is nothing for that session to be told.
+  app.post("/api/questions/:id/acknowledge", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { until?: string | null };
+    if (body.until === undefined)
+      return reply.code(400).send({ error: "until is required — an ISO date string to snooze through, or null to un-snooze now" });
+    if (body.until !== null && Number.isNaN(Date.parse(body.until)))
+      return reply.code(400).send({ error: "until must be a valid ISO date string, or null" });
+    const updated = deps.db.acknowledgeQuestion(id, body.until);
+    if (!updated) return reply.code(404).send({ error: "question not found" });
     return reply.send(updated);
   });
 

@@ -3316,6 +3316,16 @@ export interface Question {
    *  audit field (an answered Request that WAS escalated first keeps this value forever, so don't read a
    *  non-null value on an answered row as "still stale"; check `state` too). */
   escalatedAt: string | null;
+  /** Card 889ae619 (iii-a) — a DURABLE, human-set snooze: an ISO instant through which this still-`pending`
+   *  Request's STALE presentation (the web attention queue's red "… STALE" row, `web/src/lib/attention.ts`)
+   *  is suppressed, without touching `state` or any lifecycle field. Null means never snoozed (or the
+   *  snooze already expired and nobody re-set it) — `attention.ts` reads `stale = escalatedAt != null &&
+   *  !(acknowledgedUntil > now)`, so a still-future value drops the row to ordinary cyan and the row
+   *  RE-REDDENS the instant this passes, with no separate "cleared" event. Written ONLY by the human-only
+   *  loopback `POST /api/questions/:id/acknowledge` — never an agent MCP tool, and never a change to
+   *  `state`/`question_pull`/`question_cancel` (this is a snooze, not a retirement — see that card's hard
+   *  constraint against ever auto-cancelling or auto-answering a pending Request). */
+  acknowledgedUntil: string | null;
   /** Card cb7d6998 — the ORIGINAL filing session's own daemon id, set ONCE at `question_ask` and NEVER
    *  touched by `reparentQuestions` (unlike `sessionId`, which recycle reparents onto each successor —
    *  see `sessionId`'s own doc). This is the field a provenance reader actually wants: "which seat filed
@@ -3347,6 +3357,16 @@ export interface QuestionInboxItem extends Question {
    * only THIS flag means the normal pending→answered→consumed lifecycle can structurally never complete.
    */
   sessionOrphaned: boolean;
+  /** Card 889ae619 (iii-b) — the linked task's CURRENT `columnKey` (its raw board-column/lane slug, e.g.
+   *  "in_progress"/"done"), joined at read time off `taskId`. Null when `taskId` is null OR the linked
+   *  task no longer exists (a dangling soft link — see `Question.taskId`'s own doc; this is NOT an error,
+   *  just nothing to show). Lets a request row surface the card's lane without a second per-project fetch —
+   *  the DoD's "flag for human review" reconciliation, delivered where the human already is instead of a
+   *  new inbox row. Never itself a signal of anything actionable; purely display. */
+  linkedTaskColumnKey: string | null;
+  /** Sibling of `linkedTaskColumnKey`, same null rules — the linked task's CURRENT title, joined at read
+   *  time so a caller that only has the inbox list (not a per-project task fetch) can still show it. */
+  linkedTaskTitle: string | null;
 }
 
 /**

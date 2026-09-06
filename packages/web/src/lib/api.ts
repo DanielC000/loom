@@ -727,6 +727,13 @@ export const api = {
   // via postErr like every other answer route above). Returns the cancelled Question (state:"cancelled").
   dismissQuestion: (id: string, reason?: string) =>
     postErr<Question>(`/api/questions/${encodeURIComponent(id)}/dismiss`, reason ? { reason } : {}),
+  // Human durable snooze (POST /api/questions/:id/acknowledge, card 889ae619 iii-a) — a SNOOZE, not a
+  // retirement: `state` stays 'pending' (still answerable), only the attention queue's STALE presentation
+  // is suppressed until `until`. `until` MUST be an absolute ISO timestamp computed by the caller (this
+  // client never interprets a relative duration itself — same contract as answerPermissionQuestion's
+  // `expiresAt` above); pass `null` to un-snooze immediately. Returns the updated Question.
+  acknowledgeQuestion: (id: string, until: string | null) =>
+    postErr<Question>(`/api/questions/${encodeURIComponent(id)}/acknowledge`, { until }),
 
   // --- Session/run AUDIT LOG (replayable timeline + run-vs-run diff). READ-ONLY, HUMAN-only loopback
   // readers over the existing `orchestration_events` record — NEVER an agent MCP tool (mirrors

@@ -152,6 +152,8 @@ export function buildQuestionAsk(
       cancelledAt: null,
       // Card 99d41588 — never escalated at ask time; stamped later, only by IdleWatcher.tickStaleRequests.
       escalatedAt: null,
+      // Card 889ae619 — never snoozed at ask time; only a human can set this, via the acknowledge route.
+      acknowledgedUntil: null,
     },
   };
 }

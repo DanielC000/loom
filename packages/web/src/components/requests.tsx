@@ -129,10 +129,14 @@ function DismissButton({ q }: { q: QuestionInboxItem }) {
   );
 }
 
-// A soft-linked task chip: "task #xxxx" (the request's `taskId`, a NON-FK soft link — a dangling id is
-// tolerated, never a crash). `onClick` (when set) navigates to the card; otherwise it's inert metadata.
-function LinkedTaskChip({ taskId, title, onClick }: { taskId: string; title?: string; onClick?: () => void }) {
-  const label = `task #${taskId.slice(0, 8)}${title ? ` · ${title}` : ""}`;
+// A soft-linked task chip: "task #xxxx [· lane] [· title]" (the request's `taskId`, a NON-FK soft link —
+// a dangling id is tolerated, never a crash). `columnKey` (card 889ae619, iii-b) is the linked card's
+// CURRENT lane — its raw board-column slug (e.g. "in_progress"/"done"), shown so a human deciding whether
+// a pending Request is still relevant can see at a glance whether its card already moved on, without a
+// second fetch. Omitted (undefined) when the caller has no lane to show — the chip degrades to today's
+// bare "task #xxxx" form. `onClick` (when set) navigates to the card; otherwise it's inert metadata.
+function LinkedTaskChip({ taskId, title, columnKey, onClick }: { taskId: string; title?: string | null; columnKey?: string | null; onClick?: () => void }) {
+  const label = `task #${taskId.slice(0, 8)}${columnKey ? ` · ${columnKey}` : ""}${title ? ` · ${title}` : ""}`;
   const style = { fontFamily: font.mono, fontSize: 11, color: color.cyan, border: `1px solid ${color.border}`,
     borderRadius: radius.sm, padding: "1px 6px", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis",
     whiteSpace: "nowrap" as const };
@@ -161,7 +165,7 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
             <span style={{ color: color.cyan }}>{q.projectName}</span>
             <span>· <RequestProvenance q={q} /></span>
             <span>· {q.state === "pending" ? "asked" : "answered"} {relativeAge(q.state === "pending" ? q.createdAt : q.answeredAt, now)}</span>
-            {q.taskId && <LinkedTaskChip taskId={q.taskId} />}
+            {q.taskId && <LinkedTaskChip taskId={q.taskId} columnKey={q.linkedTaskColumnKey} />}
           </span>
         </div>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
@@ -366,7 +370,13 @@ export function RequestDetail({ id, onClose }: { id: string; onClose?: () => voi
     queryFn: () => api.tasks(question!.projectId),
     enabled: !!question?.taskId && !!question?.projectId,
   });
-  const linkedTitle = question?.taskId ? tasks.data?.find((t) => t.id === question.taskId)?.title : undefined;
+  const linkedTask = question?.taskId ? tasks.data?.find((t) => t.id === question.taskId) : undefined;
+  const linkedTitle = linkedTask?.title;
+  // Card 889ae619 (iii-b) — prefer the LIVE board fetch's columnKey (linkedTask, above) when it resolved;
+  // fall back to the enriched read's own join (question.linkedTaskColumnKey) so the lane still shows
+  // before/without that per-project fetch settling. Same soft-link tolerance as linkedTitle: a dangling
+  // taskId simply yields undefined/null from both sources, never a crash.
+  const linkedColumnKey = linkedTask?.columnKey ?? question?.linkedTaskColumnKey;
 
   const openLinkedTask = () => {
     if (!question?.taskId) return;
@@ -390,7 +400,7 @@ export function RequestDetail({ id, onClose }: { id: string; onClose?: () => voi
             <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
               <RequestProvenance q={question} /> · <span style={{ color: color.cyan }}>{question.projectName}</span>
             </span>
-            {question.taskId && <LinkedTaskChip taskId={question.taskId} title={linkedTitle} onClick={openLinkedTask} />}
+            {question.taskId && <LinkedTaskChip taskId={question.taskId} title={linkedTitle} columnKey={linkedColumnKey} onClick={openLinkedTask} />}
             <span style={{ flex: 1 }} />
             <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
               asked {relativeAge(question.createdAt, now)}
@@ -786,7 +796,7 @@ export function RequestHistory() {
               <span title={`${q.projectName} · ${requestProvenanceText(q)}`}
                 style={{ flex: "1 1 170px", minWidth: 0, fontFamily: font.mono, fontSize: 11, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.projectName} · <RequestProvenance q={q} compact /></span>
               <span style={{ flex: "2 1 200px", minWidth: 0, fontFamily: font.mono, fontSize: 11, color: q.state === "cancelled" ? color.red : color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={requestOutcome(q)}>{requestOutcome(q)}</span>
-              {q.taskId && <LinkedTaskChip taskId={q.taskId} />}
+              {q.taskId && <LinkedTaskChip taskId={q.taskId} columnKey={q.linkedTaskColumnKey} />}
               <span style={{ flexShrink: 0, fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{relativeAge(resolvedAt(q), now)}</span>
             </button>
           ))}

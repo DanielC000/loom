@@ -139,6 +139,7 @@ export function AttentionRow({ item, onOpen, onDismiss }: { item: AttentionItem;
       <span style={{ flex: 1 }} />
       {decision && <DecisionStateChip q={{ state: "pending", answeredAt: null }} now={0} />}
       {item.rateLimitSessionId && <ClearRateLimitButton sessionId={item.rateLimitSessionId} />}
+      {item.staleQuestionId && <SnoozeButton questionId={item.staleQuestionId} />}
       {onOpen && <Button variant={decision ? "primary" : "default"} onClick={onOpen}>{decision ? "Answer →" : "Open"}</Button>}
       {/* Dismiss — STUCK-BUSY only (passed when item.dismissKey is set). The heuristic false-positives
           on a legitimately long turn; this hides THIS episode (re-appears on the next one). */}
@@ -168,6 +169,38 @@ function ClearRateLimitButton({ sessionId }: { sessionId: string }) {
       onClick={() => clear.mutate()}>
       {clear.isPending ? "Clearing…" : "Clear / retry"}
     </Button>
+  );
+}
+
+// Durable per-duration snooze for a DECISION STALE attention row (card 889ae619, iii-a) — POST
+// /api/questions/:id/acknowledge with an absolute ISO `until` computed HERE (the route deliberately never
+// interprets a relative duration itself, same contract as the permission-answer duration picker in
+// requests.tsx). A SNOOZE, not a dismiss: `state` stays 'pending' and fully answerable — this only drops
+// the row to ordinary cyan until `until`, and it RE-REDDENS on its own the instant that passes (attention.ts
+// re-derives `stale` from `acknowledgedUntil` on every poll), so there's nothing to "undo" if forgotten.
+const SNOOZE_MS: Record<string, number> = { "1d": 24 * 60 * 60 * 1000, "3d": 3 * 24 * 60 * 60 * 1000, "7d": 7 * 24 * 60 * 60 * 1000 };
+function SnoozeButton({ questionId }: { questionId: string }) {
+  const qc = useQueryClient();
+  const snooze = useMutation({
+    mutationFn: (ms: number) => api.acknowledgeQuestion(questionId, new Date(Date.now() + ms).toISOString()),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["openQuestions"] }),
+    onError: (e) => window.alert((e as Error).message),
+  });
+  return (
+    <select disabled={snooze.isPending} defaultValue=""
+      title="Snooze — hides this STALE flag for a while; the request itself stays pending and answerable, and it re-reddens on its own if still unanswered once the snooze ends"
+      onChange={(e) => {
+        const ms = SNOOZE_MS[e.target.value];
+        if (ms) snooze.mutate(ms);
+        e.target.value = "";
+      }}
+      style={{ fontFamily: font.mono, fontSize: 11, background: color.panel, color: color.text,
+        border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "2px 4px", cursor: "pointer" }}>
+      <option value="" disabled>Snooze…</option>
+      <option value="1d">1 day</option>
+      <option value="3d">3 days</option>
+      <option value="7d">7 days</option>
+    </select>
   );
 }
 
