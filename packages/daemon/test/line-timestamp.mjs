@@ -1,6 +1,13 @@
 // Hermetic unit test for scripts/lib/line-timestamp.mjs (the daemon-supervisor's per-line
-// timestamp stamper). NO daemon, NO build, NO real clock. Run: node scripts/test-line-timestamp.mjs
-import { createLineTimestamper } from "./lib/line-timestamp.mjs";
+// timestamp stamper). NO daemon, NO build, NO real clock.
+//
+// Card 9936097b: lives under packages/daemon/test/ (not scripts/) so `test-daemon.mjs`'s hermetic
+// discovery walk picks it up automatically — no wiring edit needed anywhere. `scripts/lib/
+// line-timestamp.mjs` lives outside packages/daemon, but a plain relative import across that boundary
+// already has a precedent in this same directory (see ci-gate.mjs's `../../../scripts/...` import).
+// Run directly: node packages/daemon/test/line-timestamp.mjs
+// Run through the real gate entry point, scoped to just this file: pnpm --filter @loom/daemon test:daemon -- --only=line-timestamp
+import { createLineTimestamper } from "../../../scripts/lib/line-timestamp.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };

@@ -1,9 +1,16 @@
 // Hermetic unit test for scripts/lib/rotating-log.mjs (the daemon-supervisor's output-log bound).
-// NO daemon, NO build — pure fs against a throwaway temp dir. Run: node scripts/test-rotating-log.mjs
+// NO daemon, NO build — pure fs against a throwaway temp dir.
+//
+// Card 9936097b: lives under packages/daemon/test/ (not scripts/) so `test-daemon.mjs`'s hermetic
+// discovery walk picks it up automatically — no wiring edit needed anywhere. `scripts/lib/
+// rotating-log.mjs` lives outside packages/daemon, but a plain relative import across that boundary
+// already has a precedent in this same directory (see ci-gate.mjs's `../../../scripts/...` import).
+// Run directly: node packages/daemon/test/rotating-log.mjs
+// Run through the real gate entry point, scoped to just this file: pnpm --filter @loom/daemon test:daemon -- --only=rotating-log
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createRotatingLog } from "./lib/rotating-log.mjs";
+import { createRotatingLog } from "../../../scripts/lib/rotating-log.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
