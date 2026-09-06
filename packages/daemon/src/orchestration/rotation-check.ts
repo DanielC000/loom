@@ -30,6 +30,17 @@ import type { RotationMarker } from "@loom/shared";
  * see a rule that survived rotation only in reworded, summarized, or reorganized form. A green from this
  * module means "nothing was blatantly deleted" — a candidate set that nothing obviously vanished — never
  * a verdict that no meaning was lost. This must never ship advertised as proof of preservation.
+ *
+ * LIVE COMMITMENTS FLOOR NOW UNIONED WITH `rules` TOO (card e312b207, owner-approved option (a): move
+ * §LIVE COMMITMENTS into the non-rotating `Orchestrator Rules.md`, and move its count guard with it).
+ * Before this card, `countNumberedSection` was called against `input.activeText` alone, while the marker
+ * check already unioned against `rules` — so moving the section into the rules file would have made every
+ * future rotation's floor check refuse a perfectly correct doc. `countNumberedSectionUnion` closes that
+ * gap the same way the marker union already works: active tried first (byte-identical behavior while the
+ * section stays in the active doc), rules only when active has no such heading, and a hard, fail-closed
+ * refusal (never a vacuous "0 items, nothing to check, ok:true") when the heading is in neither file. See
+ * `countNumberedSectionUnion`'s own doc below for the full reasoning — it mirrors `rotation-gate.mjs`'s
+ * own extension of the exact same shape.
  */
 
 export const HONEST_LIMIT_NOTE =
@@ -116,22 +127,30 @@ function findSectionBoundary(lines: readonly string[], fromIndex: number, maxLev
 }
 
 export interface NumberedSectionCount {
-  /** null only when `headingToken`'s heading line could not be found at all. */
+  /** null only when `headingToken`'s heading line could not be found at all IN THIS TEXT. */
   count: number | null;
-  /** Always names WHERE the section was measured, so a mismatch is self-diagnosable. */
+  /** ALWAYS a non-empty string — on a hit it names WHERE the section was measured (so a mismatch is
+   *  self-diagnosable); on a miss (count:null) it still explains what was searched for. Never omitted
+   *  either way — unlike `NumberedSectionUnionCount`'s `otherDiagnostic`, which genuinely IS conditional. */
   diagnostic: string;
 }
 
 /**
  * Counts `/^\d+\. /` numbered items strictly between `headingToken`'s heading LINE and the next
  * section-boundary heading line after it (same level or shallower — see `findSectionBoundary`; or EOF if
- * there is none).
+ * there is none). Single-text only — see `countNumberedSectionUnion` below for the active/rules union
+ * built on top of this (card e312b207).
  */
 export function countNumberedSection(text: string, headingToken: string): NumberedSectionCount {
   const lines = text.split(/\r\n|\r|\n/);
   const startLine = findHeadingLine(lines, headingToken, 0);
   if (startLine === -1) {
-    return { count: null, diagnostic: `no heading line matching /^#{1,6}\\s.*${headingToken}/i found in the active doc` };
+    // Code review (card e312b207, item 5a): this text is generic — `countNumberedSectionUnion` calls it
+    // against `rulesText` just as often as `activeText` — so the message must not name a specific caller.
+    // (Today every union caller discards this exact string on the not-found path and builds its own
+    // union-aware message instead, so nothing currently leaks the old "active doc" wording — but a FUTURE
+    // direct caller of this exported function would have, which is the trap this fixes.)
+    return { count: null, diagnostic: `no heading line matching /^#{1,6}\\s.*${headingToken}/i found in this text` };
   }
   const startLevel = headingLevel(lines[startLine]!)!;
   const endLine = findSectionBoundary(lines, startLine + 1, startLevel);
@@ -143,6 +162,70 @@ export function countNumberedSection(text: string, headingToken: string): Number
       ? `end of file (no heading at level <= ${startLevel} found after it)`
       : `heading line ${endLine + 1} ("${lines[endLine]!.trim()}")`;
   return { count: matches ? matches.length : 0, diagnostic: `measured from ${startDesc} to ${endDesc}` };
+}
+
+export interface NumberedSectionUnionCount extends NumberedSectionCount {
+  /** Which text the count actually came from — null only alongside `count: null` (found in neither). */
+  source: "active" | "rules" | null;
+  /**
+   * Card e312b207 change requested by code review (T3): true when the heading was found in BOTH texts —
+   * `activeText` still wins by precedence (see this function's own doc), but this shape is the expected
+   * transient RESIDUE of a doc mid-migration into the rules file (e.g. a leftover heading where only a
+   * plain prose pointer should remain) rather than a genuine steady state, and must never pass silently.
+   * Absent (not merely `false`) whenever it doesn't apply, so a caller can test truthiness directly.
+   */
+  ambiguous?: true;
+  /** Present only when `ambiguous` is true — the count/diagnostic the OTHER file (rules) would have
+   *  produced, so a caller can report both sides, not just the winner. */
+  otherCount?: number;
+  otherDiagnostic?: string;
+}
+
+/**
+ * UNION over `activeText` and `rulesText` (card e312b207, owner-approved option (a): move
+ * §LIVE COMMITMENTS into the non-rotating `Orchestrator Rules.md`, and move its count guard with it).
+ * Mirrors `checkMarkers`'s own precedence exactly: `activeText` is tried FIRST, so a section still in
+ * place there is measured byte-identically to before this card; `rulesText` is consulted ONLY when
+ * `activeText` carries no such heading at all. This makes the two landings (this guard shipping the
+ * union, the lead moving the section into the rules file) order-independent — the same red-window-free
+ * reason the marker union exists (this module's own header + `rotation-gate.mjs`'s header for the full
+ * reasoning): neither ordering of "guard ships" vs. "vault moves" ever produces a seat where a section
+ * that genuinely still exists somewhere durable reads as missing.
+ *
+ * FAIL-CLOSED: `count: null, source: null` when the heading is in NEITHER text — the catastrophic "the
+ * block was lost outright" case. Callers must treat a null count as a hard failure (never "0 items,
+ * nothing to check, ok:true") exactly as the single-file `countNumberedSection` already required — the
+ * union only widens WHERE a hit can come from, never what happens when there is no hit at all.
+ *
+ * AMBIGUITY (code review, card e312b207): `findHeadingLine` matches ANY heading containing the token, so
+ * a post-move breadcrumb left in the active doc — e.g. "## §LIVE COMMITMENTS — moved to Orchestrator
+ * Rules.md" — still counts as "found in active" and SHADOWS the now-authoritative rules-file section
+ * (active wins by precedence; the rules file is never even read for the count). A doc in that shape can
+ * green at exit 0 while the real, current block goes unmeasured. This function does not change WHICH
+ * count wins (hard-failing "found in both" would reopen a red window during the migration, and is a
+ * deliberate non-goal here) — it makes the shape VISIBLE via `ambiguous`/`otherCount`/`otherDiagnostic`
+ * so a caller (`checkRotation` below) can surface a loud, non-gating warning instead of a silent green.
+ */
+export function countNumberedSectionUnion(activeText: string, rulesText: string | null, headingToken: string): NumberedSectionUnionCount {
+  const inActive = countNumberedSection(activeText, headingToken);
+  const inRules = rulesText !== null ? countNumberedSection(rulesText, headingToken) : null;
+  if (inActive.count !== null) {
+    if (inRules !== null && inRules.count !== null) {
+      return { ...inActive, source: "active", ambiguous: true, otherCount: inRules.count, otherDiagnostic: inRules.diagnostic };
+    }
+    return { ...inActive, source: "active" };
+  }
+  if (inRules !== null && inRules.count !== null) {
+    return { count: inRules.count, diagnostic: `${inRules.diagnostic} (in rules)`, source: "rules" };
+  }
+  return {
+    count: null,
+    source: null,
+    diagnostic:
+      rulesText !== null
+        ? `no heading line matching /^#{1,6}\\s.*${headingToken}/i found in the active doc or rules file`
+        : `no heading line matching /^#{1,6}\\s.*${headingToken}/i found in the active doc`,
+  };
 }
 
 export interface ArchiveInfo {
@@ -207,10 +290,17 @@ export interface RotationCheckResult {
    *  means no rulesPath was supplied at all (silent, as before this card). `checked:true, ok:false` means
    *  one WAS supplied but could not be read — `resolvedPath` names exactly what was tried and `reason`
    *  explains it, so a wrong-based path (e.g. vault-root-relative instead of project-vault-relative) is
-   *  self-diagnosing instead of a mystery. Deliberately NOT folded into the overall `ok` below (see the
-   *  comment at that computation) — a failed rulesPath read only means the union's extra source was
-   *  unavailable, not that any marker actually went missing from the doc; always read this field
-   *  alongside `ok`, the same way `unconfiguredWarning` must be read alongside a vacuous `ok:true`. */
+   *  self-diagnosing instead of a mystery. This field is deliberately NOT itself folded into the overall
+   *  `ok` below (see the comment at that computation) — `rulesCheck.ok:false` never DIRECTLY flips `ok`.
+   *  ⚠️ It can still flip `ok` INDIRECTLY, though (card e312b207 correction — this was previously
+   *  overstated as "unaffected," full stop): if the active doc is missing a marker or the LIVE COMMITMENTS
+   *  heading, an unreadable `rulesPath` removes the union's only other place to look, so that marker/the
+   *  commitments floor then genuinely fails and `ok` follows it down. "Not folded into `ok`" only means a
+   *  failed READ is never itself an `ok`-flipping event when the active doc alone already satisfies
+   *  everything — it is not a promise that `ok` stays green regardless of what's missing from the active
+   *  doc. Always read this field alongside `ok`, the same way `unconfiguredWarning` must be read alongside
+   *  a vacuous `ok:true` — a red `ok` with `rulesCheck.ok:false` means "diagnose the rulesPath first,"
+   *  not "the content is genuinely gone." */
   rulesCheck: { checked: boolean; ok: boolean; resolvedPath?: string; reason?: string };
   liveCommitments: {
     enabled: boolean;
@@ -218,6 +308,17 @@ export interface RotationCheckResult {
     floor: number;
     ok: boolean;
     diagnostic: string;
+    /** Card e312b207: which text the count actually came from (union with `rules`, active tried first).
+     *  null when disabled, when the section was found in neither text (the fail-closed case — `ok` is
+     *  already false then too), or on the docFound:false early-return path (nothing was ever read). */
+    source: "active" | "rules" | null;
+    /** Card e312b207, code review (T3): true when the heading was found in BOTH the active doc and the
+     *  rules file — see `countNumberedSectionUnion`'s own doc for why this is surfaced (never gated). */
+    ambiguous?: true;
+    /** Present only when `ambiguous` is true — the count/diagnostic the rules file would have produced,
+     *  so a caller can report both sides, not just the winner (`count`/`diagnostic` above, from active). */
+    otherCount?: number;
+    otherDiagnostic?: string;
   };
   archiveCheck: { checked: boolean; ok: boolean; reason?: string };
   byteCheck: { checked: boolean; ok: boolean; activeBytes?: number; preEditBytes?: number; reason?: string };
@@ -225,6 +326,9 @@ export interface RotationCheckResult {
   honestLimitNote: string;
   /** Present (and loud) only when `configured` is false. */
   unconfiguredWarning?: string;
+  /** Present (and loud) only when `liveCommitments.ambiguous` is true — see that field's own doc and
+   *  `countNumberedSectionUnion`'s (card e312b207, code review T3). Never gates `ok`. */
+  ambiguityWarning?: string;
 }
 
 /** Derives `rulesCheck` from a `RulesInput` — the ONE place this mapping happens, shared by `checkRotation`
@@ -249,11 +353,17 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
   const commitmentsEnabled = input.commitmentsHeading !== "";
   const liveCommitments = commitmentsEnabled
     ? (() => {
-        const section = countNumberedSection(input.activeText, input.commitmentsHeading);
+        // Card e312b207: unioned with `rulesText` — active tried first, rules only when active carries
+        // no such heading at all. `section.count === null` (found in neither) is the fail-closed case:
+        // `ok` is false, never a vacuous "0 items, nothing to check, pass". See countNumberedSectionUnion.
+        const section = countNumberedSectionUnion(input.activeText, rulesText, input.commitmentsHeading);
         const ok = section.count !== null && section.count >= input.commitmentsFloor;
-        return { enabled: true, count: section.count, floor: input.commitmentsFloor, ok, diagnostic: section.diagnostic };
+        return {
+          enabled: true, count: section.count, floor: input.commitmentsFloor, ok, diagnostic: section.diagnostic, source: section.source,
+          ...(section.ambiguous ? { ambiguous: section.ambiguous as true, otherCount: section.otherCount, otherDiagnostic: section.otherDiagnostic } : {}),
+        };
       })()
-    : { enabled: false, count: null, floor: input.commitmentsFloor, ok: true, diagnostic: "disabled — no rotationLiveCommitmentsHeading configured for this seat" };
+    : { enabled: false, count: null, floor: input.commitmentsFloor, ok: true, diagnostic: "disabled — no rotationLiveCommitmentsHeading configured for this seat", source: null };
 
   let archiveCheck: RotationCheckResult["archiveCheck"];
   if (!input.archive) {
@@ -289,9 +399,20 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
   // present in the active doc itself (the union's whole point is that this is a legitimate pass). That
   // would also be a behavior change for any existing caller that passes rulesPath speculatively. Chosen
   // instead: report-only, with `rulesCheck` always present and loud whenever a rulesPath was supplied and
-  // failed — the same "loud field, ok unaffected" shape this module already uses for `unconfiguredWarning`
-  // on a vacuous `ok:true`. archiveCheck stays different on purpose: it validates a required rotation
-  // ARTIFACT (the archive this rotation is producing), not an optional verification aid.
+  // failed — the same "loud field" shape this module already uses for `unconfiguredWarning` on a vacuous
+  // `ok:true`. archiveCheck stays different on purpose: it validates a required rotation ARTIFACT (the
+  // archive this rotation is producing), not an optional verification aid.
+  //
+  // ⚠️ CORRECTION (card e312b207 code review): "ok unaffected" above describes `rulesCheck.ok` NOT being a
+  // DIRECT term in the `ok` formula below — it does NOT mean a failed rulesPath read can never change `ok`
+  // at all. It still can, INDIRECTLY, through `liveCommitments.ok`/`missing` themselves: once the union is
+  // the ONLY place a marker or the LIVE COMMITMENTS heading survives (e.g. after it moves out of the
+  // active doc into the rules file), an unreadable rulesPath removes that sole remaining source, and the
+  // corresponding check genuinely fails — dragging `ok` down with it, same as if the content were simply
+  // absent. This is correct behavior, not a bug: "the rules file couldn't be read" and "nothing durable
+  // protects this any more" are the same practical situation from the caller's side. The one thing that
+  // truly never happens is `rulesCheck.ok:false` flipping `ok` while everything it could have supplemented
+  // is ALREADY satisfied by the active doc alone — that is the shape this decision protects.
   const ok = missing.length === 0 && liveCommitments.ok && archiveCheck.ok && byteCheck.ok;
 
   const result: RotationCheckResult = {
@@ -306,6 +427,15 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
     honestLimitNote: HONEST_LIMIT_NOTE,
   };
   if (!configured) result.unconfiguredWarning = UNCONFIGURED_WARNING;
+  if (liveCommitments.ambiguous) {
+    result.ambiguityWarning =
+      `[resume-doc-check] AMBIGUOUS: the "${input.commitmentsHeading}" heading was found in BOTH the ` +
+      `active doc (${liveCommitments.count} item(s)) and the rules file (${liveCommitments.otherCount} ` +
+      `item(s)) — the active doc's count wins by precedence (see countNumberedSectionUnion), and the ` +
+      `rules file's count was NOT used for this result. This is the expected transient RESIDUE of a doc ` +
+      `mid-migration into the rules file (e.g. a leftover heading where only a plain prose pointer should ` +
+      `remain) — it should be resolved (trim the active doc's heading down to prose), not left standing.`;
+  }
   return result;
 }
 
@@ -409,6 +539,7 @@ export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocC
         count: null,
         floor: opts.commitmentsFloor,
         ok: false,
+        source: null,
         diagnostic: `active doc not found at ${opts.resumeDocPath}`,
       },
       archiveCheck: { checked: false, ok: true },

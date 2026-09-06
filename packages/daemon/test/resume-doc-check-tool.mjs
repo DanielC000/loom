@@ -189,6 +189,38 @@ try {
   const neitherResult = await callRules({ rulesPath: rulesFileInside });
   check("(R) DoD-4: a marker present in NEITHER active nor rules still FAILS even with rulesPath supplied", neitherResult.ok === false && neitherResult.missingMarkers.includes("NOWHERE-MARKER"));
 
+  // ── (R2) LIVE COMMITMENTS FLOOR UNION, reachable end-to-end through the SAME live MCP surface (card
+  // e312b207, owner-approved option (a): move §LIVE COMMITMENTS into the non-rotating rules file, and
+  // move its count guard with it). Reuses pRules/mgrRules with rotationMarkers reset to empty so only the
+  // commitments-floor check is under test — proves the union isn't just a `checkRotation`-level fact but
+  // is actually reachable through `resume_doc_check`'s real config resolution + rulesPath containment.
+  fs.writeFileSync(path.join(rulesVault, "Orchestrator Log.md"), "still nothing relevant in the active doc\n", "utf8");
+  db.setProjectConfig("pRules", {
+    orchestration: {
+      rotationMarkers: [],
+      rotationLiveCommitmentsHeading: "LIVE COMMITMENTS",
+      rotationLiveCommitmentsFloor: 3,
+    },
+  });
+
+  // RED half: no rulesPath at all — the active doc has no heading, so this must fail exactly as before
+  // this card (the control proving the GREEN result below is the union actually working, not a no-op).
+  const commitmentsWithoutRules = await callRules();
+  check("(R2) RED: commitments heading absent from active doc, no rulesPath passed: ok:false, count:null", commitmentsWithoutRules.ok === false && commitmentsWithoutRules.liveCommitments.count === null);
+
+  // GREEN half: same active doc, only difference is rulesPath — the section lives there instead.
+  const rulesFileWithCommitments = path.join(rulesVault, "Orchestrator Rules-commitments.md");
+  fs.writeFileSync(rulesFileWithCommitments, "## LIVE COMMITMENTS\n1. a\n2. b\n3. c\n", "utf8");
+  const commitmentsWithRules = await callRules({ rulesPath: rulesFileWithCommitments });
+  check("(R2) GREEN: same active doc, rulesPath supplied with the section present there: ok:true, count 3 via rules", commitmentsWithRules.ok === true && commitmentsWithRules.liveCommitments.count === 3 && commitmentsWithRules.liveCommitments.source === "rules");
+
+  // Fail-closed: heading in NEITHER active nor rules, even with rulesPath supplied — must still refuse,
+  // never degrade into "0 items, nothing to check, ok:true".
+  const rulesFileNoCommitments = path.join(rulesVault, "Orchestrator Rules-no-commitments.md");
+  fs.writeFileSync(rulesFileNoCommitments, "nothing relevant here either\n", "utf8");
+  const commitmentsNeither = await callRules({ rulesPath: rulesFileNoCommitments });
+  check("(R2) fail-closed: heading in NEITHER active nor rules, even with rulesPath supplied: ok:false, count:null, source:null", commitmentsNeither.ok === false && commitmentsNeither.liveCommitments.count === null && commitmentsNeither.liveCommitments.source === null);
+
   // (E) code-review MINOR fix: the Lead surface gets the SAME no-vaultPath guard as the manager surface
   // (before the fix, an empty vaultPath would resolve to a bare relative filename against the daemon's
   // own cwd, which resolvePlatformLeadResumeDocPath's documented copyFileSync seed side-effect could
@@ -208,7 +240,7 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — resume_doc_check is wired on both the manager and Platform-Lead MCP surfaces, each resolves its OWN resume doc (no path argument) via the SAME resolver its spawn-time prompt uses, per-project config is fully independent between two different seats (no cross-talk), a live doc mutation is caught on the next call with no caching, archivePath is contained under vaultPath on BOTH surfaces (code-review 🟡 fix), a project with no vaultPath degrades to a clean {error} on BOTH surfaces rather than throwing (the Lead side is a code-review MINOR fix), and the rulesPath union (card 3c30258f) is reachable and contained: a marker absent from the active doc fails without rulesPath (RED), passes once rulesPath is supplied and the marker is present there (GREEN), rulesPath is refused outside vaultPath exactly like archivePath, and a marker present in NEITHER active nor rules still fails even with rulesPath supplied — claude-free, network-free."
+  ? "\n✅ ALL PASS — resume_doc_check is wired on both the manager and Platform-Lead MCP surfaces, each resolves its OWN resume doc (no path argument) via the SAME resolver its spawn-time prompt uses, per-project config is fully independent between two different seats (no cross-talk), a live doc mutation is caught on the next call with no caching, archivePath is contained under vaultPath on BOTH surfaces (code-review 🟡 fix), a project with no vaultPath degrades to a clean {error} on BOTH surfaces rather than throwing (the Lead side is a code-review MINOR fix), the rulesPath union (card 3c30258f) is reachable and contained for MARKERS: a marker absent from the active doc fails without rulesPath (RED), passes once rulesPath is supplied and the marker is present there (GREEN), rulesPath is refused outside vaultPath exactly like archivePath, and a marker present in NEITHER active nor rules still fails even with rulesPath supplied — AND (card e312b207) the SAME union now reaches the LIVE COMMITMENTS FLOOR too, end-to-end through this live MCP surface: RED without rulesPath, GREEN once the section is found via rulesPath, fail-closed (never a vacuous pass) when the heading is in neither file — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
 

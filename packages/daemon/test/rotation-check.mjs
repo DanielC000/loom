@@ -23,7 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  checkMarkers, countNumberedSection, checkRotation, runResumeDocCheck, containUnderVault,
+  checkMarkers, countNumberedSection, countNumberedSectionUnion, checkRotation, runResumeDocCheck, containUnderVault,
   HONEST_LIMIT_NOTE, UNCONFIGURED_WARNING,
 } from "../dist/orchestration/rotation-check.js";
 
@@ -114,6 +114,104 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
   const belowFloor = checkRotation({ activeText: doc(2), markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: floor });
   check("REGRESSION 34a6f07e: count BELOW floor fails", belowFloor.liveCommitments.ok === false && belowFloor.ok === false);
+}
+
+// ── LIVE COMMITMENTS FLOOR UNION (card e312b207) — countNumberedSectionUnion + checkRotation('rules') ──
+// Owner-approved option (a): move §LIVE COMMITMENTS into the non-rotating rules file, and move its count
+// guard with it. Before this card the floor check only ever measured `activeText` — these prove the three
+// required shapes: (1) the section is counted wherever its heading is found (active OR rules), (2)
+// behaviour is UNCHANGED while the block stays in the active doc — active is tried FIRST and wins even
+// when rules ALSO carries a (shorter) section, so this can never regress to "rules wins" by accident, and
+// (3) FAIL-CLOSED when the heading is in NEITHER file — the catastrophic "block was lost" case must never
+// degrade into "0 items, nothing to check, ok:true".
+{
+  const doc = (n) => ["## LIVE COMMITMENTS", ...Array.from({ length: n }, (_, i) => `${i + 1}. item`)].join("\n");
+  const noHeading = "This doc mentions live commitments only in prose, never as a real heading line.";
+
+  // (1) UNION: heading absent from active, present in rules ⇒ counted from rules.
+  const rActiveMissing = countNumberedSectionUnion(noHeading, doc(15), "LIVE COMMITMENTS");
+  check("union: heading absent from active, present in rules ⇒ count comes from rules", rActiveMissing.count === 15 && rActiveMissing.source === "rules");
+
+  const rViaCheckRotation = checkRotation({ activeText: noHeading, markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 12, rules: { resolvedPath: "/x", text: doc(15) } });
+  check("union via checkRotation: liveCommitments.ok:true, count/source from rules", rViaCheckRotation.liveCommitments.ok === true && rViaCheckRotation.liveCommitments.count === 15 && rViaCheckRotation.liveCommitments.source === "rules");
+  check("union via checkRotation: overall ok:true", rViaCheckRotation.ok === true);
+
+  // (2) UNCHANGED: heading present in active ⇒ active wins EVEN when rules also has one (with fewer
+  // items that would fail the floor on their own) — proves this never silently prefers rules.
+  const rActivePresent = countNumberedSectionUnion(doc(20), doc(3), "LIVE COMMITMENTS");
+  check("unchanged: heading present in active ⇒ always counted from active, never rules", rActivePresent.count === 20 && rActivePresent.source === "active");
+
+  const rViaCheckRotation2 = checkRotation({ activeText: doc(20), markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 12, rules: { resolvedPath: "/x", text: doc(3) } });
+  check("unchanged via checkRotation: source is 'active', count is active's 20 (not rules' failing 3)", rViaCheckRotation2.liveCommitments.source === "active" && rViaCheckRotation2.liveCommitments.count === 20 && rViaCheckRotation2.liveCommitments.ok === true);
+
+  // Byte-identical to before this card when no `rules` is passed at all (the pre-existing REGRESSION 2
+  // block above already proves the pass/fail shape; this proves `source` is populated the same way).
+  const rNoRulesArg = checkRotation({ activeText: doc(20), markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 12 });
+  check("no rules argument at all ⇒ still works, source:'active'", rNoRulesArg.liveCommitments.ok === true && rNoRulesArg.liveCommitments.source === "active");
+
+  // (3) FAIL-CLOSED: heading in NEITHER file.
+  const rNeither = countNumberedSectionUnion(noHeading, noHeading, "LIVE COMMITMENTS");
+  check("fail-closed: heading in neither file ⇒ count:null, source:null", rNeither.count === null && rNeither.source === null);
+  check("fail-closed: diagnostic names BOTH files were checked", rNeither.diagnostic.includes("active doc or rules file"));
+
+  const rNeitherViaCheckRotation = checkRotation({ activeText: noHeading, markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 12, rules: { resolvedPath: "/x", text: noHeading } });
+  check("fail-closed via checkRotation: liveCommitments.ok is false, never a vacuous pass", rNeitherViaCheckRotation.liveCommitments.ok === false && rNeitherViaCheckRotation.liveCommitments.count === null && rNeitherViaCheckRotation.liveCommitments.source === null);
+  check("fail-closed via checkRotation: overall ok is false", rNeitherViaCheckRotation.ok === false);
+
+  // Fail-closed also holds with NO rules argument at all (the pre-existing single-file case, unregressed).
+  const rNeitherNoRules = checkRotation({ activeText: noHeading, markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 12 });
+  check("fail-closed, no rules argument: still ok:false, source:null (unregressed single-file case)", rNeitherNoRules.liveCommitments.ok === false && rNeitherNoRules.liveCommitments.source === null);
+
+  // An UNREADABLE rules input (rules.error, not rules.text) must NOT be able to satisfy the union — mirrors
+  // checkMarkers' own "an unreadable rules file adds no coverage" rule.
+  const rUnreadableRules = checkRotation({
+    activeText: noHeading, markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 12,
+    rules: { resolvedPath: "/bogus.md", error: "rules path does not exist or is unreadable: /bogus.md" },
+  });
+  check("an unreadable rules input cannot satisfy the commitments union (still fail-closed)", rUnreadableRules.liveCommitments.ok === false && rUnreadableRules.liveCommitments.source === null);
+
+  // ── BOUNDARY (code review, item 2) — active carries the heading but BELOW the floor, while rules
+  // carries a section that would PASS on its own ⇒ must still FAIL, source:"active". Neither test above
+  // pins this: both have active passing on its own (20 vs. floor 12), so a wrong "fall through to
+  // whichever text passes" implementation would slip through unnoticed there. This is the single case
+  // that actually exercises the precedence rule the guard exists to enforce.
+  const activeBelowFloor = doc(3); // 3 < floor of 12
+  const rulesAboveFloor = doc(20); // would pass on its own — must NOT be consulted
+  const rBoundary = countNumberedSectionUnion(activeBelowFloor, rulesAboveFloor, "LIVE COMMITMENTS");
+  check("boundary: active carries the heading (even though below floor) ⇒ source stays 'active', count from active (3, not rules' 20)", rBoundary.source === "active" && rBoundary.count === 3);
+
+  const rBoundaryViaCheckRotation = checkRotation({ activeText: activeBelowFloor, markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 12, rules: { resolvedPath: "/x", text: rulesAboveFloor } });
+  check("boundary via checkRotation: FAILS even though rules alone would have passed (never falls through to a passing rules count)", rBoundaryViaCheckRotation.liveCommitments.ok === false && rBoundaryViaCheckRotation.liveCommitments.count === 3 && rBoundaryViaCheckRotation.liveCommitments.source === "active");
+  check("boundary via checkRotation: overall ok is false", rBoundaryViaCheckRotation.ok === false);
+
+  // ── AMBIGUITY (code review, item 3 — product ruling (i)+(ii), NOT (iii)) — heading found in BOTH active
+  // and rules must surface a loud, NON-GATING signal (active still wins on count; this must never fail
+  // the gate by itself — that's ruling (iii), explicitly rejected).
+  const rAmbiguous = countNumberedSectionUnion(doc(20), doc(5), "LIVE COMMITMENTS");
+  check("ambiguity: both texts carry the heading ⇒ ambiguous:true, source/count from active, otherCount from rules", rAmbiguous.ambiguous === true && rAmbiguous.source === "active" && rAmbiguous.count === 20 && rAmbiguous.otherCount === 5);
+
+  const rOnlyActive = countNumberedSectionUnion(doc(20), noHeading, "LIVE COMMITMENTS");
+  check("ambiguity: only active carries it ⇒ ambiguous is ABSENT (not merely false)", rOnlyActive.ambiguous === undefined);
+
+  const rOnlyRules = countNumberedSectionUnion(noHeading, doc(15), "LIVE COMMITMENTS");
+  check("ambiguity: only rules carries it ⇒ ambiguous is ABSENT too (active never had a candidate to conflict with)", rOnlyRules.ambiguous === undefined);
+
+  check("ambiguity: the pre-existing 'unchanged' fixture above (active=20/rules=3) is ITSELF an ambiguous shape", rViaCheckRotation2.liveCommitments.ambiguous === true && rViaCheckRotation2.liveCommitments.otherCount === 3);
+
+  const rAmbiguousViaCheckRotation = checkRotation({ activeText: doc(20), markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 12, rules: { resolvedPath: "/x", text: doc(5) } });
+  check("ambiguity via checkRotation: liveCommitments.ambiguous:true, otherCount:5", rAmbiguousViaCheckRotation.liveCommitments.ambiguous === true && rAmbiguousViaCheckRotation.liveCommitments.otherCount === 5);
+  check("ambiguity via checkRotation: STILL ok:true — ambiguity never gates the result (ruling (iii) explicitly rejected a hard fail)", rAmbiguousViaCheckRotation.ok === true);
+  check("ambiguity via checkRotation: top-level ambiguityWarning is present and loud", typeof rAmbiguousViaCheckRotation.ambiguityWarning === "string" && rAmbiguousViaCheckRotation.ambiguityWarning.includes("AMBIGUOUS"));
+  check("ambiguity via checkRotation: warning names both counts", rAmbiguousViaCheckRotation.ambiguityWarning.includes("20 item") && rAmbiguousViaCheckRotation.ambiguityWarning.includes("5 item"));
+
+  const rNonAmbiguousViaCheckRotation = checkRotation({ activeText: doc(20), markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 12 });
+  check("ambiguity via checkRotation: no rules argument at all ⇒ no ambiguityWarning field (never a false positive)", rNonAmbiguousViaCheckRotation.ambiguityWarning === undefined && rNonAmbiguousViaCheckRotation.liveCommitments.ambiguous === undefined);
+
+  // Ambiguous AND failing at the same time (active below floor, rules also carries it) — the two signals
+  // are independent; a failing gate can still be worth flagging as ambiguous (it tells a reader WHY rules
+  // wasn't consulted to rescue it).
+  const rAmbiguousAndFailing = checkRotation({ activeText: activeBelowFloor, markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 12, rules: { resolvedPath: "/x", text: doc(20) } });
+  check("ambiguity + failing boundary: both signals fire independently (ok:false AND ambiguityWarning present)", rAmbiguousAndFailing.ok === false && typeof rAmbiguousAndFailing.ambiguityWarning === "string");
 }
 
 // ── configured:false is distinct from ok:true (the single most important line in the design) ─────────
@@ -284,6 +382,40 @@ function tmpFile(name, content) {
   }
 
   fs.rmSync(vaultRoot, { recursive: true, force: true });
+}
+
+// ── LIVE COMMITMENTS FLOOR UNION, end-to-end through runResumeDocCheck's real fs wrapper (card e312b207)
+// The pure-function block above proves `checkRotation`/`countNumberedSectionUnion`; this proves the SAME
+// union survives the impure MCP-tool wrapper (real files, real rulesPath plumbing) — the actual code path
+// `resume_doc_check` calls in both the manager and platform-lead surfaces.
+{
+  const noHeadingDoc = "This active doc mentions live commitments only in prose, never as a real heading.\n";
+  const rulesDoc = ["## LIVE COMMITMENTS", ...Array.from({ length: 15 }, (_, i) => `${i + 1}. item`), ""].join("\n");
+
+  const activePath = tmpFile("e312b207-active.md", noHeadingDoc);
+  const rulesPath = tmpFile("e312b207-rules.md", rulesDoc);
+  const r = runResumeDocCheck({
+    resumeDocPath: activePath, markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 12,
+    rulesPath,
+  });
+  check("runResumeDocCheck union: heading absent from active doc, present in rules ⇒ ok:true, count 15 via rules", r.liveCommitments.ok === true && r.liveCommitments.count === 15 && r.liveCommitments.source === "rules");
+  check("runResumeDocCheck union: overall ok:true", r.ok === true);
+
+  const rNoRulesPath = runResumeDocCheck({
+    resumeDocPath: activePath, markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 12,
+  });
+  check("runResumeDocCheck fail-closed (no rulesPath at all): heading missing from the only file checked ⇒ ok:false", rNoRulesPath.liveCommitments.ok === false && rNoRulesPath.liveCommitments.count === null);
+
+  const rulesPathNoHeadingEither = tmpFile("e312b207-rules-no-heading.md", "nothing relevant here either\n");
+  const rBothMissing = runResumeDocCheck({
+    resumeDocPath: activePath, markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 12,
+    rulesPath: rulesPathNoHeadingEither,
+  });
+  check("runResumeDocCheck fail-closed (rulesPath supplied but also has no heading): ok:false, count:null, source:null", rBothMissing.liveCommitments.ok === false && rBothMissing.liveCommitments.count === null && rBothMissing.liveCommitments.source === null);
+
+  fs.rmSync(activePath, { force: true });
+  fs.rmSync(rulesPath, { force: true });
+  fs.rmSync(rulesPathNoHeadingEither, { force: true });
 }
 
 // ── rulesCheck — a SUPPLIED-but-unreadable rulesPath is reported, not silently swallowed (card 870edbcf)

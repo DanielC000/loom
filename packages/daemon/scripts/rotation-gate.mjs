@@ -96,17 +96,27 @@
 // lives outside this repo, at a location that differs per machine. --archive is REQUIRED unless --lint
 // is passed (see LINT MODE below).
 //
-// --rules <path> (OPTIONAL, card 9a5837b2): a UNION, not a replacement. A marker is satisfied if it is
-// present in --active, OR — when --rules is supplied — in the --rules file. Omitting --rules leaves
-// behavior byte-identical to before this flag existed: every marker must still be found in --active
-// alone. The union exists because some of the durable-marker content is meant to move OUT of the
-// rotating doc into the non-rotating `Operations/Orchestrator Rules.md`, and the gate must not go blind
-// to a marker the moment it's relocated there — this makes the two landings (script change, vault move)
-// order-independent: the gate passes via --active alone before the move and via --rules after, with no
-// window where a marker that still genuinely exists somewhere durable is treated as missing. A marker
-// absent from BOTH files still fails — this never weakens what "present" means, it only adds a second
-// durable place to look. On success, the script names WHICH file satisfied each marker (see below) so a
-// green never obscures where a rule now actually lives.
+// --rules <path> (OPTIONAL, card 9a5837b2; extended to the LIVE COMMITMENTS floor by card e312b207): a
+// UNION, not a replacement. A marker is satisfied if it is present in --active, OR — when --rules is
+// supplied — in the --rules file. Omitting --rules leaves behavior byte-identical to before this flag
+// existed: every marker must still be found in --active alone. The union exists because some of the
+// durable-marker content is meant to move OUT of the rotating doc into the non-rotating
+// `Operations/Orchestrator Rules.md`, and the gate must not go blind to a marker the moment it's
+// relocated there — this makes the two landings (script change, vault move) order-independent: the gate
+// passes via --active alone before the move and via --rules after, with no window where a marker that
+// still genuinely exists somewhere durable is treated as missing. A marker absent from BOTH files still
+// fails — this never weakens what "present" means, it only adds a second durable place to look. On
+// success, the script names WHICH file satisfied each marker (see below) so a green never obscures where
+// a rule now actually lives. The SAME union now also governs the LIVE COMMITMENTS section itself (card
+// e312b207): the section is counted wherever its heading is actually found — --active first, --rules
+// only when --active has none — and refused (never a silent pass) if it is in neither file. See
+// `countLiveCommitments` below. A green ALWAYS names which file the count came from now, "(via --active)"
+// as well as "(via --rules)" — never an unlabelled green (code review ruling (i)). And if the heading is
+// found in BOTH files at once (the expected transient shape of a doc mid-migration, where a leftover
+// heading in --active shadows the now-authoritative --rules section — --active still wins by precedence),
+// the script prints a loud "AMBIGUOUS" notice to stderr, unconditionally, on every exit path — this is
+// advisory only and NEVER changes the exit code (a hard failure here was considered and rejected: it would
+// reopen a red window during the migration itself, ruling (iii)).
 //
 // LINT MODE (--lint, card 9a5837b2): runs the SAME marker + LIVE COMMITMENTS checks against --active
 // (plus --rules if given) WITHOUT requiring or checking --archive at all. Rotation only happens at a
@@ -148,6 +158,22 @@
 // and is non-empty. A rotation that names an archive path which was never actually written is not a
 // rotation that happened — this is a minimal, structural sanity check that the archive side of the
 // operation is real, not a review of its content.
+//
+// UNION EXTENDED TO THE LIVE COMMITMENTS FLOOR (card e312b207, owner-approved option (a) — move
+// §LIVE COMMITMENTS into the non-rotating rules file, and move its count guard with it): before this
+// card, `--rules` only unioned the MARKERS check — `countLiveCommitments` measured `--active` alone, so
+// once the vault lead moves the section into `Operations/Orchestrator Rules.md`, every future rotation's
+// gate would refuse a perfectly correct doc. The count is now unioned the SAME way markers already are:
+// tried against --active FIRST (so a still-in-place section behaves byte-identically to before this
+// card), and against --rules only when --active carries no LIVE COMMITMENTS heading at all. This is
+// deliberately a UNION, not a hard switch to --rules, for the same red-window reason the marker union
+// exists: the guard (this repo) and the block (the vault) cannot land atomically, and a hard switch would
+// break every seat in whichever order the two land. FAIL-CLOSED when the heading is in NEITHER file — that
+// is the catastrophic case (the section was lost outright), and it must never degrade into "0 items,
+// nothing to check, green": see `countLiveCommitments` below for exactly how that's avoided. The floor
+// ASSERTION itself is untouched — wherever the section is found, its items are still counted and the same
+// `>= LIVE_COMMITMENTS_FLOOR` check still runs; this card only widens WHERE the section may live, never
+// what "found" means once it's located.
 //
 // ⚠️ HONEST LIMIT — READ BEFORE TRUSTING A GREEN: every marker check here is an EXACT-SUBSTRING grep.
 // It can prove a token's literal text is still present; it CANNOT see a rule that survived rotation only
@@ -270,8 +296,8 @@ Checks run against --active (unioned with --rules when supplied):
      the same level or shallower — a prose mention of a heading-like token that is not itself a heading
      line is ignored) still contains AT LEAST ${LIVE_COMMITMENTS_FLOOR} numbered items, matched by
      /^\\d+\\. /gm — a FLOOR, never an exact count: the list may grow without limit, it may never shrink
-     below this floor. (This section is only ever measured in --active — it is not a candidate for the
-     --rules union.)
+     below this floor. UNIONED with --rules (card e312b207): the section is counted wherever its heading
+     is found — --active first, --rules only when --active has none — and refused if found in NEITHER.
 
 Checks run against --archive (skipped entirely under --lint):
   3. The path exists, is a regular file, and is non-empty.
@@ -448,9 +474,10 @@ function findSectionBoundary(lines, fromIndex, maxLevel) {
 // Returns { count, diagnostic }. `count` is the number of /^\d+\. /gm matches strictly between the LIVE
 // COMMITMENTS heading LINE and the next section-boundary heading LINE after it (same level or shallower —
 // see findSectionBoundary; or end of file if there is none) — null if the LIVE COMMITMENTS heading itself
-// can't be located at all. `diagnostic` always names WHERE the section was measured (matched line number +
-// text, or "end of file"), so a count mismatch is self-diagnosable without reading this script's source
-// (card d78a6d5d DoD-3).
+// can't be located at all IN THIS TEXT. `diagnostic` always names WHERE the section was measured (matched
+// line number + text, or "end of file") when found, so a count mismatch is self-diagnosable without
+// reading this script's source (card d78a6d5d DoD-3). Single-file only — see `countLiveCommitments` below
+// for the --active/--rules union built on top of this.
 //
 // The START boundary is anchored to a markdown HEADING LINE, never a bare substring search — card
 // d78a6d5d: the prior version used plain case-insensitive `indexOf` on the raw text, so a PROSE mention
@@ -460,11 +487,11 @@ function findSectionBoundary(lines, fromIndex, maxLevel) {
 // to a heading line makes a prose mention inert: it is never itself a heading line, so it can never open
 // the section. The END boundary is anchored the same way, structurally, by heading DEPTH rather than by a
 // second boundary token's name — see findSectionBoundary's own comment (card a681aed5).
-function countLiveCommitments(text) {
+function countLiveCommitmentsIn(text) {
   const lines = text.split(/\r\n|\r|\n/);
   const startLine = findHeadingLine(lines, "live commitments", 0);
   if (startLine === -1) {
-    return { count: null, diagnostic: "no heading line matching /^#{1,6}\\s.*live commitments/i found anywhere in --active" };
+    return { count: null, diagnostic: null };
   }
   const startLevel = headingLevel(lines[startLine]);
   const endLine = findSectionBoundary(lines, startLine + 1, startLevel);
@@ -476,6 +503,53 @@ function countLiveCommitments(text) {
       ? `end of file (no heading at level <= ${startLevel} found after it)`
       : `heading line ${endLine + 1} ("${lines[endLine].trim()}")`;
   return { count: matches ? matches.length : 0, diagnostic: `measured from ${startDesc} to ${endDesc}` };
+}
+
+// UNION over --active and --rules (card e312b207) — mirrors `checkMarkers`'s own precedence exactly:
+// --active is tried FIRST, so a section still in place there is measured byte-identically to before this
+// card (DoD-4); --rules is consulted ONLY when --active carries no LIVE COMMITMENTS heading at all. This
+// makes the two landings (this guard shipping the union, the vault lead moving the section into the
+// rules file) order-independent, the same red-window-free reason the marker union exists (see the file
+// header). `source` names which file the count came from ("active"|"rules"|null) so a green never
+// obscures where the section now actually lives — mirroring `satisfiedBy` for markers.
+//
+// FAIL-CLOSED (DoD-3): `count: null, source: null` when the heading is in NEITHER file — this is the
+// catastrophic "the block was lost" case and must never be read as "0 items, nothing to check, green".
+// The caller (main, below) treats a null count as "could not locate the section," a hard failure, exactly
+// as it always has for the single-file case — the union only widens WHERE a hit can come from, it never
+// changes what happens when there is no hit at all.
+//
+// AMBIGUITY (code review, card e312b207): `findHeadingLine` matches ANY heading containing "live
+// commitments", so a post-move breadcrumb left in --active — e.g. "## §LIVE COMMITMENTS — moved to
+// Operations/Orchestrator Rules.md" — still counts as "found in --active" and SHADOWS the now-
+// authoritative --rules section (--active wins by precedence; --rules is never even read for the count).
+// A doc in that shape can exit 0 while the real, current block goes unmeasured. This function does not
+// change WHICH count wins (hard-failing "found in both" would reopen a red window during the migration,
+// and is a deliberate non-goal) — it makes the shape VISIBLE via `ambiguous`/`otherCount`/`otherDiagnostic`
+// so `main` (below) can print a loud, non-gating notice instead of a silent green.
+function countLiveCommitments(activeText, rulesText) {
+  const inActive = countLiveCommitmentsIn(activeText);
+  const inRules = rulesText !== null ? countLiveCommitmentsIn(rulesText) : null;
+  if (inActive.count !== null) {
+    if (inRules !== null && inRules.count !== null) {
+      return { count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: true, otherCount: inRules.count, otherDiagnostic: inRules.diagnostic };
+    }
+    return { count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: false, otherCount: null, otherDiagnostic: null };
+  }
+  if (inRules !== null && inRules.count !== null) {
+    return { count: inRules.count, diagnostic: `${inRules.diagnostic} (in --rules)`, source: "rules", ambiguous: false, otherCount: null, otherDiagnostic: null };
+  }
+  return {
+    count: null,
+    source: null,
+    ambiguous: false,
+    otherCount: null,
+    otherDiagnostic: null,
+    diagnostic:
+      rulesText !== null
+        ? "no heading line matching /^#{1,6}\\s.*live commitments/i found in --active or --rules"
+        : "no heading line matching /^#{1,6}\\s.*live commitments/i found anywhere in --active",
+  };
 }
 
 // Card d8062fbb — the drift DETECTOR for this file's own MARKERS/LIVE_COMMITMENTS_FLOOR copy: not a new
@@ -598,7 +672,21 @@ function main() {
   }
 
   const { missing, satisfiedBy } = checkMarkers(activeText, rulesText);
-  const live = countLiveCommitments(activeText);
+  const live = countLiveCommitments(activeText, rulesText);
+
+  // AMBIGUITY notice (code review, card e312b207, product ruling (i)+(ii) — NOT (iii), a hard failure is
+  // explicitly rejected): printed UNCONDITIONALLY and IMMEDIATELY, before either the failure or success
+  // path decides anything, so it can never be swallowed by whichever branch runs next — a doc in this
+  // shape must never green (or refuse) silently. See countLiveCommitments's own comment for the mechanism.
+  if (live.ambiguous) {
+    console.error(
+      `[rotation-gate] ⚠️ AMBIGUOUS: LIVE COMMITMENTS heading found in BOTH --active (${live.count} item(s)) ` +
+        `and --rules (${live.otherCount} item(s)) — --active wins by precedence and --rules was NOT used ` +
+        `for this result. This is the expected transient residue of a doc mid-migration into --rules (e.g. ` +
+        `a leftover heading where only a plain prose pointer should remain) — it should be resolved (trim ` +
+        `--active's heading section down to prose), not left standing.`
+    );
+  }
 
   // The byte check reads --active's REAL on-disk byte count (fs.statSync, not a decoded-string length)
   // so multi-byte characters are counted correctly — this is exactly the case the check exists to catch:
@@ -676,7 +764,7 @@ function main() {
     failures.push(`could not locate the LIVE COMMITMENTS section (heading missing) — cannot verify its item count (${live.diagnostic})`);
   } else if (live.count < LIVE_COMMITMENTS_FLOOR) {
     failures.push(
-      `LIVE COMMITMENTS section in --active holds ${live.count} numbered item(s), fewer than the required floor of ${LIVE_COMMITMENTS_FLOOR} (${live.diagnostic})`
+      `LIVE COMMITMENTS section in ${live.source === "rules" ? "--rules" : "--active"} holds ${live.count} numbered item(s), fewer than the required floor of ${LIVE_COMMITMENTS_FLOOR} (${live.diagnostic})`
     );
   }
 
@@ -691,15 +779,21 @@ function main() {
     process.exit(1);
   }
 
+  // UNCONDITIONAL (code review, card e312b207 ruling (i)): a green must always name where it counted —
+  // "(via --active)" as well as "(via --rules)" — never an unlabelled green that reads identically whether
+  // the count came from the doc still being edited or a rules-file fallback nobody would otherwise notice
+  // was even consulted. `live.source` is guaranteed non-null on every path that reaches this line (a null
+  // source only ever accompanies `live.count === null`, which took the `failures` branch above instead).
+  const liveSourceSuffix = ` (via --${live.source})`;
   if (args.lint) {
     console.log(
       `[rotation-gate] LINT OK — ${args.active} carries all ${MARKERS.length} markers and ${live.count} ` +
-        `LIVE COMMITMENTS item(s) (>= floor of ${LIVE_COMMITMENTS_FLOOR}). (lint mode: --archive not checked — this is not a rotation.)`
+        `LIVE COMMITMENTS item(s)${liveSourceSuffix} (>= floor of ${LIVE_COMMITMENTS_FLOOR}). (lint mode: --archive not checked — this is not a rotation.)`
     );
   } else {
     console.log(
       `[rotation-gate] OK — ${args.active} carries all ${MARKERS.length} markers and ${live.count} ` +
-        `LIVE COMMITMENTS item(s) (>= floor of ${LIVE_COMMITMENTS_FLOOR}); --archive ${args.archive} exists ` +
+        `LIVE COMMITMENTS item(s)${liveSourceSuffix} (>= floor of ${LIVE_COMMITMENTS_FLOOR}); --archive ${args.archive} exists ` +
         `(${archiveStat.size} bytes). Rotation may proceed.`
     );
   }
@@ -714,6 +808,7 @@ function main() {
     for (const m of MARKERS) {
       console.log(`  - ${m.token}: ${satisfiedBy.get(m.token)}`);
     }
+    console.log(`[rotation-gate] LIVE COMMITMENTS section satisfied via: ${live.source}`);
   }
   console.log(byteCheckLine);
   if (vaultAuditLine) console.log(vaultAuditLine);

@@ -4693,13 +4693,29 @@ export class OrchestrationMcpRouter {
           "Pass `rulesPath` (card 3c30258f) to also union-check markers against a NON-ROTATING rules " +
           "file (e.g. an Orchestrator Rules.md) — a marker is satisfied if present in the ACTIVE doc OR " +
           "the rules file, mirroring the frozen rotation-gate.mjs script's own --rules semantics; this " +
-          "is a union, NEVER a replacement — a marker present in NEITHER still fails. Like `archivePath`, " +
+          "is a union, NEVER a replacement — a marker present in NEITHER still fails. `rulesPath` NOW " +
+          "ALSO unions the LIVE-COMMITMENTS-style floor itself (card e312b207): the numbered section is " +
+          "counted wherever its heading is actually found — the active doc first (so nothing changes " +
+          "while it stays there), the rules file only when the active doc has no such heading at all — " +
+          "so this section can move OUT of the rotating doc into a rules file without ever going blind. " +
+          "`liveCommitments.source` (\"active\"|\"rules\"|null) names which file the count actually came " +
+          "from; null only alongside a hard failure (the heading was in NEITHER file). Like `archivePath`, " +
           "`rulesPath` must resolve INSIDE this project's vaultPath (refused otherwise) — omit it and " +
           "behavior is byte-identical to a call with no rules file at all. ⚠️ If `rulesPath` IS supplied " +
           "but cannot be read (e.g. a wrong base — vault-ROOT-relative instead of this project's own " +
-          "vaultPath), the union silently degrades to active-only and the overall `ok`/markers are " +
-          "UNAFFECTED — always check the returned `rulesCheck` field (card 870edbcf) when you pass this " +
-          "argument: `rulesCheck.ok:false` names the exact resolved path that could not be read.",
+          "vaultPath), the union degrades to active-only for BOTH markers and the commitments floor — " +
+          "the overall `ok` is UNAFFECTED only when the active doc alone already satisfies everything " +
+          "(the common case while the LIVE COMMITMENTS section still lives there). It is NOT unaffected " +
+          "once that section has moved: with no readable rules file to fall back to, the floor check (and " +
+          "so the overall `ok`) genuinely FAILS — this is the same 'nothing durable protects it' outcome " +
+          "as the section being missing outright, by design. Always check the returned `rulesCheck` field " +
+          "(card 870edbcf) when you pass this argument: `rulesCheck.ok:false` names the exact resolved " +
+          "path that could not be read, so a red `ok` is diagnosable as 'rulesPath unreadable', not 'the " +
+          "section is actually gone.' ⚠️ If the LIVE COMMITMENTS heading is found in BOTH the active doc " +
+          "AND the rules file (the active doc's count wins by precedence, never the rules file's), the " +
+          "response carries a loud top-level `ambiguityWarning` — this shape is the expected transient " +
+          "residue of a doc mid-migration into the rules file (a leftover heading where only a plain " +
+          "prose pointer should remain) and should be resolved, not left standing.",
         inputSchema: strictShape({
           archivePath: z.string().optional(),
           rulesPath: z.string().optional(),

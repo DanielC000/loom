@@ -7,12 +7,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 //   2. --lint — runs the same marker + LIVE COMMITMENTS checks without requiring/checking --archive, so
 //      the gate can be run against the LIVE doc any time, not only at a rotation.
 //
+// EXTENDED by card e312b207 (owner-approved option (a): move §LIVE COMMITMENTS into the non-rotating
+// rules file, and move its count guard with it): the --rules union above originally only covered MARKERS
+// — the "LIVE COMMITMENTS FLOOR UNION" block below proves --rules now also unions the commitments-count
+// check itself (found in either file, active tried first so behavior is unchanged while the section
+// stays in --active, fail-closed refusal if the heading is in neither file).
+//
 // Run: node packages/daemon/test/rotation-gate-rules-lint.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT = path.join(__dirname, "..", "scripts", "rotation-gate.mjs");
@@ -72,16 +78,16 @@ function docWith({ markers = ALL_MARKER_TOKENS, items = 20 } = {}) {
   ].join("\n");
 }
 
+// Switched from execFileSync/try-catch to spawnSync (code review, card e312b207): the old execFileSync
+// form hardcoded `stderr: ""` on every SUCCESS path — it never captured the child's stderr at all unless
+// the process actually threw. That was invisible until this card added a diagnostic (the AMBIGUOUS notice)
+// that can legitimately print to stderr on a SUCCESSFUL run (exit 0) — every such assertion silently saw
+// an empty string regardless of what the script actually printed. spawnSync returns {status, stdout,
+// stderr} uniformly for both outcomes, so a passing run's stderr is now genuinely inspectable too. No
+// existing assertion in this file reads `.stderr` on a success-path result, so this is additive only.
 function runGate(argsArr) {
-  try {
-    const stdout = execFileSync(process.execPath, [SCRIPT, ...argsArr], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    return { status: 0, stdout, stderr: "" };
-  } catch (err) {
-    return { status: err.status, stdout: err.stdout ?? "", stderr: err.stderr ?? "" };
-  }
+  const result = spawnSync(process.execPath, [SCRIPT, ...argsArr], { encoding: "utf8" });
+  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
 const archivePath = writeFixture("archive.md", "archive contents\n");
@@ -195,6 +201,77 @@ const goodActivePath = writeFixture("good-active.md", docWith({ items: 20 }));
   check("lint + --rules union: reports LINT OK", /LINT OK/.test(r.stdout));
 }
 
+// ── LIVE COMMITMENTS FLOOR UNION (card e312b207) — --rules now also covers the commitments count, not
+// just markers. Owner-approved option (a): move §LIVE COMMITMENTS into the non-rotating rules file, and
+// move its count guard with it. Proves the three required shapes: union (found in rules when active has
+// no heading), unchanged (active wins even when rules also carries a shorter section), and fail-closed
+// (heading in neither file, even with --rules supplied, must still refuse — never a silent "0 items,
+// nothing to check" pass). ──────────────────────────────────────────────────────────────────────────────
+{
+  // Active doc: every marker present as prose (including "LIVE COMMITMENTS" itself as a plain mention,
+  // NOT as a real heading line) so the marker check passes cleanly and only the commitments-section check
+  // is under test. No MY-PEER-SEND-LEDGER heading needed — that marker was retired (see file header).
+  // NOTE: the title line deliberately does NOT contain "live commitments" — a heading LINE containing
+  // that phrase (even describing the fixture's own intent) would itself satisfy the structural heading
+  // anchor and defeat the whole point of this fixture; the prose mention below is a non-heading line.
+  const activeNoHeading = [
+    "# Loom — Orchestrator Log (fixture)",
+    "",
+    ALL_MARKER_TOKENS.join(" · "),
+    "This paragraph mentions live commitments in prose only, never as a real markdown heading line.",
+    "",
+  ].join("\n");
+  const activeNoHeadingPath = writeFixture("commitments-union-active-no-heading.md", activeNoHeading);
+
+  const rulesWithHeading = writeFixture("commitments-union-rules-with-heading.md", `## LIVE COMMITMENTS\n${commitmentsList(15)}\n`);
+  const withRules = runGate(["--active", activeNoHeadingPath, "--archive", archivePath, "--rules", rulesWithHeading]);
+  check("commitments union: heading absent from --active, present in --rules: exits 0", withRules.status === 0);
+  check("commitments union: reports the count found via --rules (15 items)", /carries all \d+ markers and 15 LIVE COMMITMENTS item\(s\) \(via --rules\)/.test(withRules.stdout));
+  check("commitments union: names the section as satisfied via rules", /LIVE COMMITMENTS section satisfied via: rules/.test(withRules.stdout));
+
+  const withoutRules = runGate(["--active", activeNoHeadingPath, "--archive", archivePath]);
+  check("commitments union: same active doc, NO --rules given at all: exits 1 (unregressed single-file behavior)", withoutRules.status === 1);
+  check("commitments union: names the heading as missing, not a false '0 items'", /could not locate the LIVE COMMITMENTS section \(heading missing\)/.test(withoutRules.stderr));
+
+  // Unchanged: --active carries the real heading, so it wins even when --rules ALSO has a section — one
+  // that is deliberately BELOW the floor, to prove the gate never silently reads from --rules instead.
+  const rulesWithShortSection = writeFixture("commitments-union-rules-short.md", `## LIVE COMMITMENTS\n${commitmentsList(2)}\n`);
+  const activeWins = runGate(["--active", goodActivePath, "--archive", archivePath, "--rules", rulesWithShortSection]);
+  check("commitments union unchanged: --active has the heading ⇒ counted from --active (20), never --rules (2): exits 0", activeWins.status === 0);
+  check("commitments union unchanged: reports the count labeled '(via --active)', unconditionally (ruling (i))", /carries all \d+ markers and 20 LIVE COMMITMENTS item\(s\) \(via --active\) \(>= floor/.test(activeWins.stdout));
+  check("commitments union unchanged: does NOT claim it came from --rules", !/20 LIVE COMMITMENTS item\(s\) \(via --rules\)/.test(activeWins.stdout));
+  check("commitments union unchanged: names the section as satisfied via active", /LIVE COMMITMENTS section satisfied via: active/.test(activeWins.stdout));
+
+  // This exact fixture is ALSO an AMBIGUOUS shape (code review, ruling (i)+(ii)): --rules carries a real
+  // "## LIVE COMMITMENTS" heading too (with fewer items), so both files have a candidate — --active still
+  // wins by precedence and the exit code is unaffected (ruling (iii) rejected a hard failure here), but
+  // the shape must be surfaced loudly on stderr rather than passing as an ordinary, unremarkable green.
+  check("commitments union unchanged (also AMBIGUOUS): the AMBIGUOUS notice fires on stderr even though the run still exits 0", /AMBIGUOUS/.test(activeWins.stderr));
+  check("commitments union unchanged (also AMBIGUOUS): notice names both counts (20 from --active, 2 from --rules)", /--active \(20 item\(s\)\)/.test(activeWins.stderr) && /--rules \(2 item\(s\)\)/.test(activeWins.stderr));
+
+  // NEGATIVE CONTROL: the earlier "heading absent from --active, present in --rules" case above is NOT
+  // ambiguous (only one file carries a candidate) — proves the notice discriminates, not just always fires.
+  check("commitments union NOT ambiguous when only one file carries the heading (negative control)", !/AMBIGUOUS/.test(withRules.stderr));
+
+  // BOUNDARY (code review, item 2): --active carries the heading but BELOW the floor, while --rules
+  // carries a section that would PASS on its own — must still FAIL, source --active. Neither test above
+  // pins this (both have --active passing on its own), so a wrong "fall through to whichever passes"
+  // implementation would slip through unnoticed there.
+  const activeBelowFloorPath = writeFixture("commitments-boundary-active-below-floor.md", docWith({ items: 3 }));
+  const rulesAboveFloor = writeFixture("commitments-boundary-rules-above-floor.md", `## LIVE COMMITMENTS\n${commitmentsList(20)}\n`);
+  const boundaryResult = runGate(["--active", activeBelowFloorPath, "--archive", archivePath, "--rules", rulesAboveFloor]);
+  check("commitments boundary: --active below floor, --rules above floor ⇒ still exits 1 (never falls through to a passing --rules count)", boundaryResult.status === 1);
+  check("commitments boundary: reports the real --active count (3), not --rules' 20", /holds 3 numbered item\(s\), fewer than the required floor of 12/.test(boundaryResult.stderr));
+  check("commitments boundary: this is ALSO an ambiguous shape (both files carry a candidate) — the notice still fires on a FAILING run", /AMBIGUOUS/.test(boundaryResult.stderr));
+
+  // Fail-closed: the heading is in NEITHER file, even though --rules IS supplied — must still refuse.
+  const rulesNoHeadingEither = writeFixture("commitments-union-rules-no-heading.md", "Nothing relevant here either.\n");
+  const bothMissing = runGate(["--active", activeNoHeadingPath, "--archive", archivePath, "--rules", rulesNoHeadingEither]);
+  check("commitments union fail-closed: heading in NEITHER --active nor --rules: exits 1", bothMissing.status === 1);
+  check("commitments union fail-closed: reports 'heading missing', not a silent pass", /could not locate the LIVE COMMITMENTS section \(heading missing\)/.test(bothMissing.stderr));
+  check("commitments union fail-closed: diagnostic names BOTH files were checked", /found in --active or --rules/.test(bothMissing.stderr));
+}
+
 // ── Usage errors: --active is always required (even under --lint); --archive still required without --lint. ──
 {
   const r1 = runGate(["--lint"]);
@@ -207,6 +284,6 @@ const goodActivePath = writeFixture("good-active.md", docWith({ items: 20 }));
 fs.rmSync(tmpDir, { recursive: true, force: true });
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — --rules unions marker satisfaction across --active/--rules without ever weakening presence, and --lint runs the same checks without requiring --archive, while the unflagged rotation path is unchanged."
+  ? "\n✅ ALL PASS — --rules unions marker satisfaction across --active/--rules without ever weakening presence, --lint runs the same checks without requiring --archive, the unflagged rotation path is unchanged, and (card e312b207) the LIVE COMMITMENTS floor is now unioned the same way — active tried first (unchanged behavior), rules only when active has no heading, fail-closed refusal when the heading is in neither file."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
