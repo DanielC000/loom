@@ -23,8 +23,11 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * == STAYS INSIDE THE TRUST BOUNDARY ==================================================================
  * These are PURE READS, hard-confined to their resolved root and hard-bounded, with NO host-process spawn:
  *   - Every path is CONFINED to the resolved root — a relative path that escapes it (via `..`, an absolute
- *     path, or a symlink pointing outside) is REFUSED, so a caller can never read an arbitrary host file
- *     (e.g. `~/.ssh/id_rsa`, the prod DB, another project's source).
+ *     path, or a symlink pointing outside) is REFUSED, so `repo_read_file` / `repo_grep` / `repo_glob`
+ *     themselves can never resolve to an arbitrary host file (e.g. `~/.ssh/id_rsa`, the prod DB, another
+ *     project's source). This confinement belongs to these three tools, not to the calling SESSION as a
+ *     whole — an auditor session's own native Bash/Read/Write is unconfined and sits outside this module
+ *     entirely; it is simply never the sanctioned path for the read job these tools exist to do.
  *   - grep/glob are pure in-process `fs` reads + a translated RegExp — NEVER `git grep` / `rg` / any child
  *     process. There is no shell, no exec, nothing outward.
  *   - Hard bounds cap every read (file bytes, returned lines, match count, files walked) so a huge or

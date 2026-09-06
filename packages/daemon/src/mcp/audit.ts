@@ -37,8 +37,11 @@ export const DEFAULT_REQUESTS_LIST_CAP = 50;
  * ║ neither escape the box nor spam it (re-filing/re-suggesting an existing entry is a no-op). An        ║
  * ║ auditor session ALSO 404s on the Lead's elevated /mcp-platform (PlatformMcpRouter.resolveRole gates ║
  * ║ role==="platform") AND on /mcp-orch (OrchestrationMcpRouter.resolveRole gates manager|worker) — so  ║
- * ║ a hostile transcript can never turn an audit into an outward/destructive action. Do NOT add any     ║
- * ║ write/host/outward tool to this server beyond these three narrow, self-contained writes.             ║
+ * ║ a hostile transcript can never use THIS ROUTER to turn an audit into an outward/destructive action: ║
+ * ║ no MCP surface reachable by an auditor session grants one. That containment is per-ROUTER, not      ║
+ * ║ per-SESSION — an auditor session's own native Bash/WebFetch/Write (if any) sit outside every MCP     ║
+ * ║ router entirely and are never the sanctioned path for an audit. Do NOT add any write/host/outward    ║
+ * ║ tool to this server beyond these three narrow, self-contained writes.                                ║
  * ╚════════════════════════════════════════════════════════════════════════════════════════════════════╝
  *
  * Mirrors PlatformMcpRouter exactly: keyed by the URL-path session id, resolved SERVER-SIDE, role-gated
