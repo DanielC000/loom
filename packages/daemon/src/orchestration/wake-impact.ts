@@ -27,9 +27,18 @@ import type { RestartWakeImpact } from "./restart.js";
  * same way, without per-card `deferred:true` toil). A STUCK deferral (card 93669813 — `deferredStuck`,
  * see Task.deferredStuck's own doc) is the one exception: its blocker can no longer be shown to
  * resolve, so it counts as actionable again rather than staying discounted forever. Raw signal only —
- * see {@link strandedBoardWork} for whether it actually forces the restart nudge. Mirrors the
- * idle-watcher's actionable-count definition (orchestration/idle-watcher.ts) so the two stay consistent
- * — a divergence here would silently reopen the same invisibility bug in this second definition.
+ * see {@link strandedBoardWork} for whether it actually forces the restart nudge. Deliberately does NOT
+ * fully mirror the idle-watcher's `openCards` (orchestration/idle-watcher.ts) — three of its exclusions
+ * are absent here: a review-lane card and a platform Lead's own owner-flow 'parked' card are both counted
+ * as pending above (see "review/parked" in this comment) even though the idle-watcher discounts them from
+ * its dispatch tally (it surfaces review-lane work through its own separate `hasReviewCards` check
+ * instead, and platform-parked is the Lead's own owner-gated lane); and the idle-watcher's
+ * `hasPendingQuestion` discount (a card blocked on a pending owner Request) is not applied at all. This
+ * is safe rather than a bug: every one of these omissions can only make this function return `true` where
+ * the idle-watcher's definition would count zero actionable cards — i.e. it can only turn a would-be-silent
+ * restart wake into a full one, never the reverse. The invisibility bug this guards against is the OTHER
+ * direction (this returning `false` while real actionable work exists); that direction still requires this
+ * to mirror the idle-watcher's terminal/held/deferred/`excludeFromIdleWatchdog` exclusions above, which it does.
  */
 export function hasPendingBoardWork(db: Db, id: string): boolean {
   try {
