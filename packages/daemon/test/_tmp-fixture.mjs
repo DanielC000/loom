@@ -69,7 +69,7 @@ export async function finishAndExit(code) {
   const paths = [...registry];
   registry.clear(); // exit's sync backstop iterates an empty registry afterward — harmless no-op, not a double-attempt
   for (const p of paths) await cleanupOnePathAsync(p);
-  process.exit(code);
+  await flushStdoutAndExit(code);
 }
 // If a caller forgets to `await` this: the cleanup steps inside it are real async work (fs.promises.rm /
 // setTimeout backoff) that keeps the event loop non-empty on their own, independent of whether anything
@@ -77,6 +77,61 @@ export async function finishAndExit(code) {
 // even unawaited; it does not silently no-op or drop cleanup. The only actual risk is code a caller
 // places AFTER an unawaited call, which would then run concurrently with (or before) the exit — narrow,
 // since this call is meant to be a file's terminal statement, and callable-as-a-lint-check if it matters.
+
+// 🔴 Card 4eb6cbc0: `finishAndExit`'s own `process.exit(code)` call above carried the IDENTICAL
+// POSIX-async-pipe race card 14e733fb fixed in test-daemon.mjs's own `FAILURES:` epilogue — Node
+// documents process.stdout/process.stderr writes to a PIPE as ASYNCHRONOUS on POSIX (synchronous on
+// Windows; see that card's investigation for the empirical proof), so a caller's own preceding
+// `console.log`s can still be sitting in the stream's internal write queue, not yet delivered to the OS,
+// at the instant `process.exit()` tears the process down.
+//
+// `finishAndExit` already awaited real async work (`cleanupOnePathAsync`'s `fs.promises.rm`) before
+// reaching `process.exit()` above — which is WHY the files calling it were INCIDENTALLY shielded from the
+// same bug the other ~800 test files carry (card 4eb6cbc0's investigation) — but ONLY when the cleanup
+// registry was non-empty: an empty registry (no `mkdtempManaged()` path ever registered) makes the `for`
+// loop above run ZERO iterations, so `process.exit()` fires exactly as synchronously as every bare-exit
+// file. `flushStdoutAndExit` makes the protection DELIBERATE and UNCONDITIONAL instead of a side effect
+// of an unrelated cleanup loop.
+//
+// 🔴 BOUNDED, non-negotiably: an unbounded wait for a stream to drain would HANG the whole test file if it
+// somehow never completes (e.g. a parent that stops reading) — a hung file burns the suite's own
+// TEST_TIMEOUT_MS, precisely the failure this file's own header (directive #8, the `process.exitCode`
+// rejection) already exists to prevent. Giving up and exiting anyway on timeout — with whatever tail
+// didn't make it — is the PRE-EXISTING behaviour this replaces, strictly better than a hang, never worse.
+//
+// MECHANISM: an empty-string write is still enqueued behind every chunk already sitting in the stream's
+// own internal write queue, and a Writable stream invokes a given write's callback only once THAT write's
+// own underlying `_write` has actually completed — since a stream processes its queue strictly in order,
+// that callback firing proves every earlier chunk already reached the OS. This drains "what's already
+// queued" — exactly the guarantee needed here, since nothing runs between a caller's last `console.log`
+// and this flush. Short-circuits when `writableLength` is already 0 (nothing pending — the common case,
+// including every real run on THIS host, where writes never queue at all — see the card's investigation).
+// `writeFullySync` (scripts/test-daemon.mjs, card 14e733fb) is the SAME root cause but a deliberately
+// DIFFERENT idiom: that function WRITES new bytes synchronously; this one DRAINS bytes some earlier
+// `console.log` already handed to an async stream, which needs the stream's own completion callback, not
+// a raw `fs.writeSync` retry loop — forcing that function into this role would not fit what it was built
+// for.
+const FLUSH_TIMEOUT_MS = 2_000;
+function flushStream(stream, timeoutMs = FLUSH_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    if (!stream.writableLength) { resolve(); return; } // nothing queued — every prior write already landed
+    let settled = false;
+    const settle = () => { if (settled) return; settled = true; resolve(); };
+    const timer = setTimeout(settle, timeoutMs);
+    stream.write("", () => { clearTimeout(timer); settle(); });
+  });
+}
+
+/**
+ * Deterministically flush any output still queued on stdout/stderr, then exit — the fix for the race
+ * described above. Bounded: gives up and exits anyway after FLUSH_TIMEOUT_MS per stream rather than
+ * risking a hang.
+ * @param {number} code
+ */
+export async function flushStdoutAndExit(code) {
+  await Promise.all([flushStream(process.stdout), flushStream(process.stderr)]);
+  process.exit(code);
+}
 
 import fs from "node:fs";
 import os from "node:os";
@@ -218,4 +273,4 @@ export function cleanupPathSync(dir) {
 
 // Exported for this helper's OWN tests only (positive-controlling the EBUSY path needs to call the
 // retry logic directly) — not part of the public fixture-creation surface.
-export const _internal = { cleanupOnePathSync, cleanupOnePathAsync };
+export const _internal = { cleanupOnePathSync, cleanupOnePathAsync, flushStream };
