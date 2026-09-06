@@ -15,7 +15,6 @@ import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, Enqueue
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG } from "../pty/host.js";
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
-import { TRANSCRIPT_ROOT_READ_DENY_RULE } from "../pty/claude-transcript.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
@@ -1986,48 +1985,6 @@ function withBaselineAllow(permission: PermissionPolicy): PermissionPolicy {
   return { ...permission, allow: [...permission.allow, ...missing] };
 }
 
-/**
- * Card ac90ca8e — closes the native-Read/Glob/Grep bypass of the companion's own attested read gates.
- * `RESTRICTED_NATIVE_TOOLS` (host.ts) deliberately does NOT restrict Read/Glob/Grep for a
- * `restrictedTools` companion ("read-only — a companion needs context"), but `transcript_read`
- * (companion/capabilities.ts) gates the SAME bytes behind an owner-turn + DM-scope + project-scope
- * check — a companion refused by that tool can read the identical file straight off disk with native
- * Read/Glob, with none of those checks, since the gate is on the TOOL, not on the DATA. Live-observed
- * (card ac90ca8e triage): a Loom-driven `auto`-mode session Globbed every `.jsonl` transcript under
- * `~/.claude/projects/` (1574 files, no prompt) and read a transcript from a project it held no grant for.
- *
- * Card 44fa586a extended this from `assistant`-only to also cover `auditor` and `workspace-auditor`:
- * both rigs' entire *declared* read surface is MCP-mediated (`transcript_read`, `repo_read_*`), so the
- * transcript-root path-deny costs them nothing they claim to need, while closing the same native-Read
- * bypass for them. Every other role (worker, plain, manager, ...) is deliberately left out — a worker
- * can reach the same bytes (also observed) but is manager-driven and legitimately reads widely;
- * broadening further is a separate, separately-carded decision.
- *
- * The rule itself ({@link TRANSCRIPT_ROOT_READ_DENY_RULE}) is owned by the harness adapter
- * (`pty/claude-transcript.ts`), not written here — every claude-specific path literal lives there per
- * that file's own header (the HarnessAdapter seam, card 2b099e48), and it covers exactly the root
- * `engineTranscriptPath` (same module) computes, so the deny matches exactly the store every
- * companion's `transcript_read` reads from.
- */
-const TRANSCRIPT_ROOT_DENY_ROLES: ReadonlySet<SessionRole> = new Set(["assistant", "auditor", "workspace-auditor"]);
-const TRANSCRIPT_ROOT_DENY_RULES: readonly string[] = [TRANSCRIPT_ROOT_READ_DENY_RULE];
-
-/**
- * Return `permission` with every {@link TRANSCRIPT_ROOT_DENY_RULES} entry guaranteed present in `deny`,
- * for a role in {@link TRANSCRIPT_ROOT_DENY_ROLES} only (every other role: same reference,
- * byte-identical). Unlike `allow` (which `resolveConfig` UNIONS onto the baseline), a per-project
- * `permission.deny` override REPLACES the default wholesale (`config.ts`: `override.permission?.deny ??
- * [...d.permission.deny]`) — so without this union-at-the-spawn-boundary step, a project that sets its
- * OWN `permission.deny` would silently strip this protection. Applied at the SAME chokepoint
- * `withBaselineAllow` uses, mirroring its shape.
- */
-function withTranscriptRootDeny(permission: PermissionPolicy, role: SessionRole | undefined): PermissionPolicy {
-  if (!role || !TRANSCRIPT_ROOT_DENY_ROLES.has(role)) return permission;
-  const missing = TRANSCRIPT_ROOT_DENY_RULES.filter((t) => !permission.deny.includes(t));
-  if (!missing.length) return permission;
-  return { ...permission, deny: [...permission.deny, ...missing] };
-}
-
 /** A tasked worker_spawn's advisory "already shipped?" match — the card's title, normalized the SAME
  *  way the squash-merge path normalizes a commit subject ({@link toConventionalSubject}), already
  *  appears verbatim as a commit subject on the project's mainline. */
@@ -2971,13 +2928,14 @@ export class SessionService {
     // manager/other-role reasons) can never silently leave a worker un-cycled. Every OTHER role keeps
     // config's startupModeCycles verbatim — byte-identical to before this change. A manager can still pin
     // a specific worker to the rare edits-only `acceptEdits` mode after spawn via `worker_set_mode`.
-    const permissionBeforeRoleDeny = role === "worker"
+    // Card 3388be4d: the role-scoped transcript-root deny (formerly applied here, card ac90ca8e /
+    // 44fa586a) now lives at the single `PtyHost.createPty` spawn chokepoint (`withTranscriptRootDenyForSpawn`),
+    // keyed off `opts.role` — the session's PINNED role, threaded on every spawn path regardless of
+    // whether this method's own `agent`/`resolveAgentSpawn` re-resolution ever runs (it fixes the
+    // agent-row-missing resume/fork fallback that used to drop the deny). Nothing to do here any more.
+    const permission = role === "worker"
       ? { ...baselinePermission, startupModeCycles: cyclesToReachFromAcceptEdits("auto") }
       : baselinePermission;
-    // Card ac90ca8e (extended by 44fa586a to auditor/workspace-auditor): role-scoped deny closing the
-    // native-Read bypass of MCP-mediated read gates — see withTranscriptRootDeny's own doc.
-    // Byte-identical (same reference) for every role outside TRANSCRIPT_ROOT_DENY_ROLES.
-    const permission = withTranscriptRootDeny(permissionBeforeRoleDeny, role);
     // Same `|| undefined` empties-to-undefined coercion today's start paths use on the agent prompt.
     const ownPrompt = resolved.startupPrompt || undefined;
     // Companion (epic Phase 1): an "assistant" session gets the server-owned base brief PREPENDED here (the

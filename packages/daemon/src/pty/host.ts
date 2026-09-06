@@ -18,6 +18,7 @@ import { RepeatedCallTracker, REPEATED_CALL_THRESHOLD } from "./repeated-call-tr
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
+import { TRANSCRIPT_ROOT_READ_DENY_RULE } from "./claude-transcript.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG, detectPastePlaceholderLengthLoss, PASTE_LOSS_CALIBRATED_BYTES_PER_LINE, PASTE_LOSS_EXPLAIN_WINDOW, computeWrittenLineCounts, matchEmbeddedPlaceholderToken, PASTE_TRIPWIRE_TOKEN_WINDOW, type PasteLengthLossCandidate, type WrittenLineCountEntry, type SeenPlaceholderTokenEntry } from "../orchestration/paste-tripwire.js";
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, isPtyUseConptyDllEnabled, isLogMessageContentEnabled } from "../paths.js";
@@ -4150,6 +4151,45 @@ export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedToo
 }
 
 /**
+ * Card ac90ca8e (extended by 44fa586a to `auditor`/`workspace-auditor`; moved HERE — the single spawn
+ * chokepoint — by card 3388be4d): closes the native-Read/Glob/Grep bypass of the MCP-mediated read gates
+ * (companion `transcript_read`: owner-turn + DM-scope + project-scope; auditor/workspace-auditor
+ * `repo_read_*`) by denying these roles native read access to the engine transcript root
+ * (`~/.claude/projects/**`) via a role-scoped `permissions.deny` entry — see
+ * {@link TRANSCRIPT_ROOT_READ_DENY_RULE}'s own doc (claude-transcript.ts) for why that literal is owned
+ * there, not here.
+ *
+ * PRE-3388be4d this was applied inside `resolveAgentSpawn` (sessions/service.ts) — exactly ONE of the
+ * (at the time) ten `pty.spawn` call sites, so `startRun`, resume/fork/recycleWorker/recycleManager/
+ * recycleLead's agent-row-MISSING fallback (`agent ? resolveAgentSpawn(...).permission :
+ * config.permission`) all silently dropped the deny. Keying off `opts.role` HERE instead fixes every
+ * path structurally in one place: `role` is the session's PINNED value (the DB row's own `role` column,
+ * carried across every resume/fork/recycle regardless of whether the agent row still exists — see
+ * SpawnOpts.role's own doc), never re-derived from the agent, so this is immune to the exact class of
+ * defect that made the old call site droppable. Mirrors {@link disallowedToolsForRole}'s own
+ * chokepoint shape (computed from the pinned role at the single `createPty` boundary, not per-caller).
+ *
+ * `run` is DELIBERATELY excluded (`runs/prompt.ts` — it ingests untrusted input by design, and never
+ * reached the old call site either) — 3388be4d is a MOVE of the existing rule, not a widening; adding
+ * `run` (or any other role) to {@link TRANSCRIPT_ROOT_DENY_ROLES} is a separate, already-approved card
+ * (`d78f8217`) deferred behind this one.
+ *
+ * UNIONS the rule into `.deny` rather than replacing it — a per-project `permission.deny` override
+ * REPLACES the default wholesale (`shared/config.ts`), unlike `allow` (which unions), so without this
+ * union-at-the-spawn-boundary step a project's own custom deny would silently strip this protection.
+ * Byte-identical (same reference) for every role outside {@link TRANSCRIPT_ROOT_DENY_ROLES}, and a no-op
+ * (same reference) when the rule is already present — no duplicate entries.
+ */
+export const TRANSCRIPT_ROOT_DENY_ROLES: ReadonlySet<SessionRole> = new Set(["assistant", "auditor", "workspace-auditor"]);
+export const TRANSCRIPT_ROOT_DENY_RULES: readonly string[] = [TRANSCRIPT_ROOT_READ_DENY_RULE];
+export function withTranscriptRootDenyForSpawn(permission: PermissionPolicy, role?: SessionRole | null): PermissionPolicy {
+  if (!role || !TRANSCRIPT_ROOT_DENY_ROLES.has(role)) return permission;
+  const missing = TRANSCRIPT_ROOT_DENY_RULES.filter((t) => !permission.deny.includes(t));
+  if (!missing.length) return permission;
+  return { ...permission, deny: [...permission.deny, ...missing] };
+}
+
+/**
  * Collect every capability-injected env value riding an assembled mcpServers map's `env` blocks
  * (agent-tooling P4 credential tie — see resolveCapabilityServer). This reads STRUCTURALLY (any string
  * value under any server's `env`), not by name — so it is deliberately NOT "secrets only": a
@@ -5814,9 +5854,13 @@ export class PtyHost {
       ...capabilityAllow,
       ...(mcpServers.codescape ? CODESCAPE_TOOL_ALLOW : []),
     ];
-    const permission = extraAllow.length
+    const permissionWithAllow = extraAllow.length
       ? { ...opts.permission, allow: [...opts.permission.allow, ...extraAllow] }
       : opts.permission;
+    // Card 3388be4d: role-scoped transcript-root deny, applied HERE — the single spawn chokepoint every
+    // path (fresh/resume/fork/recycle/boot/run) inherits — keyed off the pinned `opts.role`, not
+    // re-derived from the agent row. See withTranscriptRootDenyForSpawn's own doc for why this moved.
+    const permission = withTranscriptRootDenyForSpawn(permissionWithAllow, opts.role);
     // Card 51926260 — computed HERE (before writeSessionSettings) and reused verbatim at buildSpawnArgs
     // below: the settings.json `permissions.defaultMode` and the `--permission-mode` CLI flag must agree,
     // or the two boot-mode mechanisms could disagree about where this session actually lands. See
