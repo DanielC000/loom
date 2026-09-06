@@ -7356,6 +7356,15 @@ export class Db {
    * (grant satisfied), and the asking agent's name. The binding's `profileId` lives inside the
    * `provision_target` JSON (SQL can't JOIN on it), so profile names are resolved via one `listProfiles`
    * map. Newest-answered first; a row without a binding profileId is skipped defensively.
+   *
+   * Card e54996a4 (same shape as `cb7d6998`/`5b22b262`/`24a8b8c3`): `agent_name` is joined via
+   * `filed_by_session_id` (the IMMUTABLE filer), NOT `session_id` (the mutable routing target
+   * `reparentQuestions` rewrites on every recycle) — `PendingBinding.agentName`'s own doc calls this
+   * "the agent whose session asked for the credential (who requested the grant)", a provenance surface,
+   * and `PendingBinding` carries no session-liveness/routing field that would want the current seat
+   * instead. A legacy row with a null `filed_by_session_id` or a filer whose session/agent was since
+   * hard-deleted both naturally yield no match here, falling back to `agentName: "?"` below — never the
+   * routing target's agent, which would silently re-create the bug this card fixes.
    */
   listPendingBindings(): PendingBinding[] {
     const rows = this.db.prepare(
@@ -7365,8 +7374,8 @@ export class Db {
               a.name AS agent_name, p.name AS project_name
        FROM questions q
        LEFT JOIN connections c ON q.provision_connection_id = c.id
-       LEFT JOIN sessions s ON q.session_id = s.id
-       LEFT JOIN agents a ON s.agent_id = a.id
+       LEFT JOIN sessions fs ON q.filed_by_session_id = fs.id
+       LEFT JOIN agents a ON fs.agent_id = a.id
        LEFT JOIN projects p ON q.project_id = p.id
        WHERE q.provision_binding_state = 'pending'
        ORDER BY q.answered_at DESC, q.created_at DESC`,

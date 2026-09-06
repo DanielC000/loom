@@ -20,6 +20,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (E) the binding stays in the queue after the answer is CONSUMED (the queue is state-independent —
 //       it keys off provision_binding_state='pending', NOT the open-question filter).
 //   (F) profile/agent fallbacks — a since-deleted profile degrades to its id, not a throw.
+//   (G) card e54996a4 FAIL-FIRST regression: agentName is joined via the IMMUTABLE filer
+//       (filedBySessionId), not the mutable routing target (sessionId) — a recycle-style reparent must
+//       not change the displayed asker.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/pending-bindings.mjs
 import fs from "node:fs";
@@ -242,6 +245,40 @@ async function connections(app) {
   check("(F) endpoint still 200 with a dangling profileId", status === 200);
   check("(F) profileName falls back to the raw id", rows.length === 1 && rows[0].profileName === "does-not-exist");
   check("(F) alreadyGranted is false for a missing profile", rows[0].alreadyGranted === false);
+  cleanup(e);
+}
+
+// ===== (G) card e54996a4 FAIL-FIRST regression: a recycle-style reparent must NOT change agentName =====
+{
+  const e = mkDb("recycle");
+  const app = await mkApp(e);
+  const q = askCredential(e, {
+    id: "cred-g", title: "Need a token that survives recycle",
+    provisionTo: { connection: { name: "Recycle Conn", host: "api.recycle.com" }, binding: { profileId: e.profId } },
+  });
+  await answer(app, q.id, "sk_recycle");
+  check("(G) present in the queue before any recycle", (await pendingBindings(app)).rows.length === 1);
+  check("(G) agentName is the original filer before any recycle", (await pendingBindings(app)).rows[0].agentName === "Billing Manager");
+
+  // Simulate a recycle-style reparent directly via reparentQuestions (the same call
+  // SessionService.recycleManager makes) onto a successor session belonging to a DIFFERENT agent.
+  const now = new Date().toISOString();
+  const successorAgentId = `${e.projId}-agent2`, successorSessionId = `${e.projId}-mgr2`;
+  e.db.insertAgent({ id: successorAgentId, projectId: e.projId, name: "Billing Manager II", startupPrompt: "", position: 1 });
+  e.db.insertSession({
+    id: successorSessionId, projectId: e.projId, agentId: successorAgentId, engineSessionId: "eng-mgr2", title: null, cwd: e.projId,
+    processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "manager",
+  });
+  const moved = e.db.reparentQuestions(e.mgrId, successorSessionId);
+  check("(G) reparentQuestions moved the row onto the successor", moved === 1);
+  check("(G) sessionId (the ROUTING target) is now the successor", e.db.getQuestion(q.id).sessionId === successorSessionId);
+  check("(G) filedBySessionId (the FILER) is UNCHANGED — still the original", e.db.getQuestion(q.id).filedBySessionId === e.mgrId);
+
+  // FAIL-FIRST: against pre-fix code (agent_name joined via session_id), this would read "Billing
+  // Manager II" (the successor's agent) instead of "Billing Manager" (the original filer's).
+  const { rows } = await pendingBindings(app);
+  check("🔴 FAIL-FIRST: agentName still names the ORIGINAL FILER's agent, not the successor's", rows.length === 1 && rows[0].agentName === "Billing Manager");
   cleanup(e);
 }
 

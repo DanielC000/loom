@@ -3313,8 +3313,10 @@ export interface PendingBinding {
   /** True when the connection is ALREADY on the profile's allowlist — the grant is effectively satisfied
    *  and "Review & grant" is a no-op the owner can dismiss (nothing left to Save). */
   alreadyGranted: boolean;
-  /** Display name of the agent whose session asked for the credential (who requested the grant); "?" if
-   *  the asking session/agent was since hard-deleted. */
+  /** Display name of the agent whose session FILED the credential ask (who requested the grant) — the
+   *  IMMUTABLE filer, unaffected by any later recycle-style reparent of the question's routing target
+   *  (card e54996a4, same shape as `QuestionInboxItem.agentName`); "?" if the filing session/agent was
+   *  since hard-deleted. */
   agentName: string;
   /** The owning project's id + name (a credential ask is always project-scoped). */
   projectId: string;
