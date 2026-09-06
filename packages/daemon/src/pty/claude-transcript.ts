@@ -41,6 +41,19 @@ export function engineTranscriptPath(cwd: string, engineSessionId: string): stri
 }
 
 /**
+ * Card ac90ca8e — the CLI's own gitignore-style `permissions.deny` rule (`Read(<glob>)`, `~/` expands
+ * to the engine's homedir) that covers the WHOLE transcript root every engine session's `.jsonl` lives
+ * under — i.e. every project dir this file's own `encodeProjectDir` can produce, not one session's
+ * single file. Sessions/service.ts (resolveAgentSpawn) unions this into a spawn's `permission.deny` for
+ * `role === "assistant"` only, closing the native Read/Glob bypass of `transcript_read`'s owner-turn +
+ * DM-scope + project-scope gate (that tool reads exactly this root — see engineTranscriptPath above —
+ * so a companion refused there could otherwise read the identical bytes off disk with no such checks).
+ * Lives HERE (the adapter module), not at the sessions/service.ts call site, per this file's own header:
+ * every `~/.claude/projects/...` literal is owned by the harness adapter alone.
+ */
+export const TRANSCRIPT_ROOT_READ_DENY_RULE = "Read(~/.claude/projects/**)";
+
+/**
  * Locate a session's transcript file robustly: the computed path first (fast, correct for the
  * common case), else scan `~/.claude/projects/*` for `<engineSessionId>.jsonl` — the id is a
  * globally-unique UUID, so a match is unambiguous regardless of how Claude encoded the dir. This
