@@ -83,7 +83,14 @@ const outDir = mkdtempManaged("loom-gs-out-");
   fs.writeFileSync(path.join(cwdDir, "flood-huge.mjs"), [
     "const chunk = 'x'.repeat(1024 * 1024);",
     `for (let i = 0; i < ${Math.ceil((GATE_SPILL_MAX_BYTES * 1.5) / (1024 * 1024))}; i++) process.stdout.write(chunk);`,
-    "process.exit(0);",
+    // Deliberately NO explicit process.exit() here. process.stdout writes to a PIPE are documented as
+    // SYNCHRONOUS on Windows but ASYNCHRONOUS on POSIX (Node's own "process.stdout"/"process.stderr" docs) —
+    // an immediate process.exit() right after this loop let the child tear itself down before the OS pipe
+    // write actually completed on Linux, truncating output below GATE_SPILL_MAX_BYTES before the daemon's
+    // own spill() ever saw enough bytes to trip the cap-and-mark branch (the (C) size-cap assertion still
+    // passed trivially — a smaller-than-cap file is still "under the cap" — while the marker assertion
+    // failed, since the cap was never actually crossed). Letting the event loop drain naturally keeps
+    // Node's writable-stream machinery alive until every byte is genuinely flushed, on every platform.
   ].join("\n"));
   const spillFile = path.join(outDir, "specimen-c.log");
   const res = await runGateStep("node flood-huge.mjs", cwdDir, 30_000, undefined, undefined, undefined, undefined, spillFile);
