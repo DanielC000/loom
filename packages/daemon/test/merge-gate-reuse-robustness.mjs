@@ -165,6 +165,18 @@ try {
       sessions.confirmWorkerMerge(qTwo.mgrId, qTwo.workerId),
     ]);
 
+    // Card e1183875: a real full-suite red on this scenario (2026-09-06) left NO trace of WHY the
+    // losing side didn't merge — `ptyStub.enqueueStdin` swallows the `[loom:merge-rejected]` notice
+    // that would otherwise carry `reason`/`detailText`, and the checks below only assert `undefined`,
+    // never printing what it actually was. Diagnosing that red required cross-referencing the archived
+    // `[gate:repo-guard]` mutation log by hand. Print both results' outcome-relevant fields whenever
+    // either side didn't cleanly merge, so a FUTURE recurrence is diagnosable from this file's own
+    // stdout alone — zero cost on the overwhelmingly common green path (nothing printed).
+    if (qResultOne.merged !== true || qResultTwo.merged !== true) {
+      const dump = (label, r) => console.log(`  [Q diagnostic] ${label}: merged=${r.merged} reason=${JSON.stringify(r.reason)} detailText=${JSON.stringify(r.detailText)} opId=${r.opId} cancelled=${r.cancelled} cancelKind=${r.cancelKind}`);
+      dump("one", qResultOne);
+      dump("two", qResultTwo);
+    }
     check("(Q) confirmWorkerMerge[one] landed on the FIRST pass", qResultOne.merged === true);
     check("(Q) confirmWorkerMerge[two] landed on the FIRST pass", qResultTwo.merged === true);
     check("(Q) confirmWorkerMerge[one] never reports a stale-base refusal reason", qResultOne.reason === undefined);
