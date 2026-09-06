@@ -97,7 +97,7 @@ pnpm pack:npm        # → loomctl-X.Y.Z.tgz at the repo root
 |---|---|---|
 | `dist/` | `packages/daemon/dist` (copied as-is, **not** bundled) | daemon entry `dist/index.js`; copying preserves each module's `import.meta.url` so the daemon's relative asset lookups still resolve |
 | `dist/web/` | `packages/web/dist` | Part 1's `resolveWebDistDir()` resolves `<daemon-dist>/web` |
-| `assets/` | `packages/daemon/assets` (**skills curated**) | the daemon reads `hook-relay.mjs` / `vault-lint.mjs` / bundled skills LIVE from here. The build **omits the dev-only Platform-layer skills** (`platform-lead`, `platform-audit`) from the staged `assets/skills/` — see *The dev-only Platform layer* below |
+| `assets/` | `packages/daemon/assets` (**skills curated**) | the daemon reads `hook-relay.mjs` / `vault-lint.mjs` / bundled skills LIVE from here. The build **omits the dev-only / private-product skills** from the staged `assets/skills/` — the current omitted set, and why each entry is withheld, is `DEV_ONLY_SKILLS` in `scripts/curate-release-skills.mjs`; see *The dev-only Platform layer* below |
 | `node_modules/@loom/shared/` | `packages/shared/dist` | `@loom/shared` is private (not on npm) → shipped as a **`bundledDependency`** |
 | `bin/loom.mjs` | repo `bin/` | the `loom` command: boots the daemon, waits for `/api/version`, opens the browser |
 | `package.json` | generated; `name:"loomctl"`, `version` = root `package.json` | a `name:"loom"` (monorepo) OR `name:"loomctl"` (packaged) package.json above the daemon satisfies Part 3's `loomVersion()` walk-up — `GET /api/version` returns the real version |
@@ -110,8 +110,13 @@ Loom's **Platform layer** — the reserved "Loom Platform" project + the Platfor
 
 - **Runtime seeding** is gated behind `LOOM_DEV` (one helper, `packages/daemon/src/paths.ts` › `isLoomDev`,
   read like `LOOM_SCHEDULER_ENABLED`): without the flag, the seeders skip the reserved project, the platform agents, and the two platform profiles. CORE orchestration always seeds.
-- **The published bundle** drops the two platform skill dirs. `scripts/build-npm-package.mjs` curates the
-  staged `assets/skills/` via the pure `curateSkillDirs()` helper in `scripts/curate-release-skills.mjs` (the same helper the daemon's `platform-dev-flag` test asserts against, so the build and the test never drift). The core orchestration skills (`orchestrate`/`worker`/`loom-pickup`/…) always ship.
+- **The published bundle** drops this layer's skill dirs, plus a few other dev-only / private-product /
+  install-specific ones — the full omitted set, and why each entry is there, is `DEV_ONLY_SKILLS` in
+  `scripts/curate-release-skills.mjs` (that file's own doc comment explains the reasons; don't restate the
+  list here). `scripts/build-npm-package.mjs` curates the staged `assets/skills/` via the pure
+  `curateSkillDirs()` helper in that same file (the same helper the daemon's `platform-dev-flag` test
+  asserts against, so the build and the test never drift). The core orchestration skills
+  (`orchestrate`/`worker`/`loom-pickup`/…) always ship.
 
 To add or remove a dev-only skill from the published package, edit `DEV_ONLY_SKILLS` in `scripts/curate-release-skills.mjs` — that one list drives both the build curation and the test.
 
