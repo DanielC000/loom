@@ -68,6 +68,8 @@ import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../o
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
 import { CapQueueRegistry, CapQueueRejectedError, CAP_QUEUE_TTL_MS, type CapQueuedSpawn } from "../orchestration/cap-queue.js";
+import { readFailedNamesForOp } from "../orchestration/gate-timing-band.js";
+import { deferredTriggerNotice } from "../orchestration/deferred-trigger-notice.js";
 import { mergeConfigOverride, validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { appendTaskBodySection } from "../mcp/tasks.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
@@ -16634,7 +16636,15 @@ export class SessionService {
         // confirmWorkerMergeTracked's onSettle callback reads `detailText` off the return) carry the
         // IDENTICAL detail, by construction. The gate runs strictly before the squash, so squash phase never
         // reached is always true here.
-        const detailText = `${headline}${detailBits ? ` (${detailBits})` : ""}; squash phase never reached, canonical repo untouched, worktree retained.${stepsLine}${tailBlock}`;
+        // Card 74716cfb: join key for the `[loom:deferred-trigger]` notice appendix — see
+        // deferredTriggerNotice's own doc. Appended into `detailText` itself (not a separate string tacked
+        // onto the rejectNotify call alone) so it rides BOTH downstream consumers of this one variable —
+        // the rich `[loom:merge-rejected]` notify right below AND the generic `[loom:merge-failed]`
+        // completion echo the comment above already documents reading `detailText` off this return.
+        // Byte-identical (empty string) whenever no task's own `deferredUntilEvent` names one of these
+        // failed files.
+        const deferredTriggerAppendix = deferredTriggerNotice(this.db, worker.projectId, await readFailedNamesForOp(thisOpId));
+        const detailText = `${headline}${detailBits ? ` (${detailBits})` : ""}; squash phase never reached, canonical repo untouched, worktree retained.${stepsLine}${tailBlock}${deferredTriggerAppendix}`;
         const { suppressed, sha } = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", {
           reason: "gate", sha, phase, failedStep: gateResult.failedStep, failingTest, failingTestCount, failingTestReason,
@@ -19158,7 +19168,16 @@ export class SessionService {
           if (this.gateStartStamps.get(key) === startStamp) this.gateStartStamps.delete(key);
         }
       },
-      (outcome, opId) => {
+      // Card 74716cfb: ASYNC (was sync) — this callback now `await`s readFailedNamesForOp before composing
+      // the `[loom:gate-failed]` nudge's deferred-trigger appendix (see that call site below). Safe: the
+      // caller (`PendingOpRegistry.attach`, pending-ops.ts) invokes this fire-and-forget with no `await`
+      // of its own (`onSettledAfterPending?.(...)`, never `await onSettledAfterPending?.(...)`) and its
+      // declared type is `=> void`, which TypeScript accepts from an async function exactly like every
+      // other void-typed callback in this file already returns unawaited promises from (e.g. every
+      // `enqueueDurableMessage` call inside the analogous merge-settle callback below never awaits
+      // anything either) — so this changes nothing about ordering or error handling, only unblocks the
+      // one new `await` this card needs.
+      async (outcome, opId) => {
         // TOMBSTONE ALREADY MARKED (card e3e40167, verdict persistence added by card 4c5bf820): the
         // `onSettle` opt below (fires unconditionally, for EVERY settle — not just a surfaced-pending one,
         // unlike this callback) has already flipped the durable row to `state:"settled"` — AND, since
@@ -19254,11 +19273,20 @@ export class SessionService {
         const proximityNote = outcome.ok && outcome.value.passed && outcome.value.gateProximity?.nearBudget
           ? ` ⚠ gate budget proximity: step '${outcome.value.gateProximity.step}' used ${Math.round(outcome.value.gateProximity.fraction * 100)}% of its HARD ${gateTimeoutMs}ms gateCommandTimeoutMs retry ceiling (no auto-extend on a retry, card 24642c3d — a first attempt may run ~2× further while still producing output) — consider raising gateCommandTimeoutMs, splitting the suite, or investigating what got slower before it starts timing out.`
           : "";
+        // Card 74716cfb: join key for the `[loom:deferred-trigger]` notice appendix — see
+        // deferredTriggerNotice's own doc. Only computed on a FAILURE (never the passed branch — nothing
+        // to attribute on a green run); byte-identical (empty string) whenever no task's own
+        // `deferredUntilEvent` names one of these failed files. WIRED HERE alongside the sibling site at
+        // this file's `[loom:merge-rejected]` composition — the card's own binding constraint.
+        const gateFailedForTrigger = !(outcome.ok && outcome.value.passed);
+        const deferredTriggerAppendix = gateFailedForTrigger
+          ? deferredTriggerNotice(this.db, worker.projectId, await readFailedNamesForOp(opId))
+          : "";
         const msg = outcome.ok
           ? (outcome.value.passed
             ? `[loom:gate-done] op ${opId} — gate passed${headSuffix}${passDurationNote}.${passStepsLine}${currencyNote}${proximityNote}`
-            : `[loom:gate-failed] op ${opId} — ${outcome.value.reason ?? "gate did not pass"}${detailBits ? ` (${detailBits})` : ""}${headSuffix}${currencyNote}${gd?.stderrTail ? `\n--- gate output tail ---\n${gd.stderrTail}` : ""}`)
-          : `[loom:gate-failed] op ${opId} — gate errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`;
+            : `[loom:gate-failed] op ${opId} — ${outcome.value.reason ?? "gate did not pass"}${detailBits ? ` (${detailBits})` : ""}${headSuffix}${currencyNote}${gd?.stderrTail ? `\n--- gate output tail ---\n${gd.stderrTail}` : ""}${deferredTriggerAppendix}`)
+          : `[loom:gate-failed] op ${opId} — gate errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}${deferredTriggerAppendix}`;
         // LINEAGE-RESOLVED (card 05c36bf4): re-resolve to whoever is CURRENTLY live in workerSessionId's
         // recycle lineage at settle time — a worker can worker_recycle mid-gate exactly like a manager can
         // recycle mid-merge. See resolveSettleNudgeTarget's doc for the incident this fixes. ATTRIBUTED

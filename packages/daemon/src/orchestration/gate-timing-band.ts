@@ -78,6 +78,13 @@ interface RunSummaryRow {
    *  production, so this key is a structural no-op TODAY and only starts discriminating once someone
    *  opts in. */
   isolatedPhaseFileCount?: number;
+  /** Card 74716cfb: the dense, structurally-correct join key for "which test files failed on this run" —
+   *  written directly off the runner's own accounting of which files it ran and exited non-zero
+   *  (`scripts/test-daemon.mjs`), so it's complete whenever a run-summary row exists at all. Deliberately
+   *  NOT `gateDetail.failingTest` (sessions/service.ts) — that's a heuristic scrape of the tail output
+   *  and, measured, carries a real test name on only 234 of 643 failed rows (36%). Absent on a row
+   *  written before this field shipped, or a run that failed 0 files. */
+  failedNames?: string[];
 }
 
 /** Card c8df9663: normalizes a row's scheduling-shape signal — `isolatedPhaseFileCount` missing (any row
@@ -320,4 +327,22 @@ export async function computeGateTimingBand(opId: string, filePath: string = GAT
     readWindowBytes: readBytes,
     readWindowTruncated: truncated,
   };
+}
+
+/**
+ * Card 74716cfb: this op's own `run-summary.failedNames` — the join key the `[loom:deferred-trigger]`
+ * nudge (sessions/service.ts) matches against every board task's `deferredUntilEvent.key` (for
+ * `kind:"gate-fail-naming"`). Reuses the SAME tail-read + self-row-selection machinery
+ * `computeGateTimingBand` already uses (see {@link pickSelfRow}'s own doc for why the LARGEST-testCount
+ * row wins when a retried op left more than one run-summary row under one opId — the original full-suite
+ * failure's own `failedNames`, never a narrow retry's).
+ *
+ * Returns `undefined` — never `[]` — when no run-summary row exists for this opId in the read window (a
+ * non-Loom gate command, a run older than the window, or a run whose gate command never shells out to
+ * `test-daemon.mjs` at all) so a caller can tell "nothing to check" apart from "checked, zero failures".
+ */
+export async function readFailedNamesForOp(opId: string, filePath: string = GATE_TIMING_NDJSON_PATH): Promise<string[] | undefined> {
+  const { rows } = await readTailRunSummaryRows(filePath, readCapBytes());
+  if (rows.length === 0) return undefined;
+  return pickSelfRow(rows, opId)?.failedNames;
 }

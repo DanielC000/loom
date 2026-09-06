@@ -945,7 +945,7 @@ export function createProjectTaskChecked(
  * never asked to see. Still a valid task-ish object (id + the small fields), just without the
  * heavy field — plus `changed`, the patch keys the caller actually passed.
  */
-export type TaskUpdateAck = Pick<Task, "id" | "title" | "columnKey" | "priority" | "position" | "updatedAt" | "held" | "deferred" | "heldBy" | "repoKey" | "deferredUntilTaskId" | "deferredAt" | "deferredReason" | "version"> & {
+export type TaskUpdateAck = Pick<Task, "id" | "title" | "columnKey" | "priority" | "position" | "updatedAt" | "held" | "deferred" | "heldBy" | "repoKey" | "deferredUntilTaskId" | "deferredAt" | "deferredReason" | "deferredUntilEvent" | "version"> & {
   changed: string[];
 };
 
@@ -1032,7 +1032,7 @@ export function appendTaskBodySection(currentBody: string | null | undefined, he
 
 export async function updateProjectTask(
   db: Db, projectId: string, taskId: string,
-  patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey" | "deferredUntilTaskId" | "deferredReason">>,
+  patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey" | "deferredUntilTaskId" | "deferredReason" | "deferredUntilEvent">>,
   actor?: TaskUpdateActor,
   /**
    * Card d0978321 — the `version` the caller last read for this task (`tasks_get`/`tasks_list`/a prior
@@ -1156,6 +1156,22 @@ export async function updateProjectTask(
     }
     const dedupedIds = [...new Set(resolvedIds)];
     patch = { ...patch, deferredUntilTaskId: dedupedIds.length === 1 ? dedupedIds[0] : dedupedIds };
+  }
+  // deferredUntilEvent guard (card 74716cfb) — whole-patch-reject, same convention as every guard above:
+  // this field ONLY annotates which event to watch for (see Task.deferredUntilEvent's own doc — it never
+  // auto-clears anything and carries no release semantics), so the sole thing worth validating at set
+  // time is that a malformed value is never stored. `null` (explicit clear) needs no validation; a
+  // non-null value must have a recognized `kind` and a non-empty string `key` — a reader (or the nudge
+  // join at sessions/service.ts) can never rely on this field's shape otherwise.
+  if (patch.deferredUntilEvent !== undefined && patch.deferredUntilEvent !== null) {
+    const { kind, key } = patch.deferredUntilEvent;
+    if (kind !== "gate-fail-naming" && kind !== "request-answered") {
+      return { error: `deferredUntilEvent.kind "${kind}" is not recognized (expected "gate-fail-naming" or "request-answered")` };
+    }
+    if (typeof key !== "string" || key.trim().length === 0) {
+      return { error: "deferredUntilEvent.key must be a non-empty string" };
+    }
+    patch = { ...patch, deferredUntilEvent: { kind, key: key.trim() } };
   }
   // Manual-deferral self-explaining guard (card c90e9525, delta-scoped by card 57f346e6) —
   // whole-patch-reject, same convention as the guards above: `deferred` is a stored verdict with no
@@ -1392,8 +1408,8 @@ export async function updateProjectTask(
   // that DOES pass `body` returns the full task (the caller is intentionally editing it and wants to
   // see the result).
   if (patch.body === undefined) {
-    const { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, deferredAt, deferredReason, updatedAt, version } = updated;
-    return { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, deferredAt, deferredReason, updatedAt, version, changed: Object.keys(patch) };
+    const { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, deferredAt, deferredReason, deferredUntilEvent, updatedAt, version } = updated;
+    return { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, deferredAt, deferredReason, deferredUntilEvent, updatedAt, version, changed: Object.keys(patch) };
   }
   return updated;
 }

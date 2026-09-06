@@ -2181,6 +2181,43 @@ export interface DeferredItem {
   updatedAt: string;
 }
 
+/**
+ * Card 74716cfb — the class of event {@link Task.deferredUntilEvent} can name. Scoped to what the
+ * gate-outcome nudge composition sites (`sessions/service.ts`) can actually detect at the moment they
+ * fire, not an exhaustive future taxonomy:
+ * - `"gate-fail-naming"`: a gate/merge run whose `run-summary.failedNames` (the dense, structurally-
+ *   correct list of failed test files — NOT `gateDetail.failingTest`, which only carries a name on a
+ *   minority of failed rows) includes `key` (a test file name/path).
+ * - `"request-answered"`: reserved for the owner-Request axis (card 929a2839's sibling extension) — not
+ *   wired by anything yet; validated the same way so a card can name it without a second field shape
+ *   later.
+ */
+export type DeferredUntilEventKind = "gate-fail-naming" | "request-answered";
+
+/**
+ * Card 74716cfb — a STRUCTURED annotation naming the exact event a deferred card is waiting on, so a
+ * gate-outcome nudge can point a reader at it the moment that event fires (see `sessions/service.ts`'s
+ * `[loom:merge-rejected]`/`[loom:gate-failed]` composition — the two sites named in the card's own
+ * "binding" note). This is DELIBERATELY never scanned from `deferredReason` prose — proven unsound on
+ * this board's own data (a reason can NAME a file it swept with a NEGATIVE result, which a prose scanner
+ * would misattribute) — so it exists only as this separate, agent-set field.
+ *
+ * 🔴 NEVER AUTO-CLEARS — unlike {@link Task.deferredUntilTaskId}, this field only ANNOTATES which event
+ * to watch for; it carries no release semantics of its own; `deferred`/`deferredReason` are completely
+ * untouched by anything that reads it. Every card in this class documents that release is a JUDGEMENT
+ * CALL made by a reader after reading the card's own `deferredReason` in full — a nudge naming a matching
+ * event is a POINTER to go read that reason, never proof the card should be released.
+ *
+ * Validated at set time (`updateProjectTask`, mcp/tasks.ts): `kind` must be one of
+ * {@link DeferredUntilEventKind}'s known values and `key` a non-empty string, or the whole patch is
+ * rejected (nothing written) — same "reject malformed, never store it" posture as every other guard in
+ * that function. `null`/absent (the default) is the byte-identical-to-today case.
+ */
+export interface DeferredUntilEvent {
+  kind: DeferredUntilEventKind;
+  key: string;
+}
+
 export interface Task {
   id: TaskId;
   projectId: ProjectId;
@@ -2342,6 +2379,13 @@ export interface Task {
    * card's prose to notice nothing ever answered it.
    */
   deferredItems?: DeferredItem[];
+  /**
+   * Card 74716cfb — see {@link DeferredUntilEvent}'s own doc for the full contract (never auto-clears,
+   * validated kind/key at set time, never scanned from `deferredReason` prose). `null`/absent is the
+   * default — a manual deferral with no structured trigger annotation, byte-identical to every card
+   * before this field existed.
+   */
+  deferredUntilEvent?: DeferredUntilEvent | null;
   /**
    * Multi-repo epic 49136451, phase 1: which of the project's registry repos this card targets —
    * a key into `Project.repos`, or `null`/absent (the default) meaning the project's PRIMARY repo
