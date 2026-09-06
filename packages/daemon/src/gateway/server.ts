@@ -3013,6 +3013,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // fleet affordance + "jump to live session" resolve. Defaults to a pending, options-less ask.
         questions?: {
           id?: string; sessionId: string; projectId: string;
+          // Card 5b22b262 — the immutable FILER, distinct from `sessionId` (the MUTABLE routing target
+          // `reparentQuestions` rewrites on every recycle). OMITTED defaults to `sessionId` (the real
+          // ask-time default), so every existing seed literal is byte-identical to before. A spec drives
+          // the two rendering cases the Requests UI must distinguish by setting it EXPLICITLY: a
+          // DIFFERENT session id → the diverged "filed by X · now routed to Y" row; explicit `null` →
+          // a legacy pre-column row, which must render as "filer unknown" and NEVER fall back to
+          // `sessionId`. `insertQuestion` already honors both (see its own doc); this only forwards.
+          filedBySessionId?: string | null;
           // Requests-object generalization (card 695ebab0) — defaults to "decision" (today's exact seed
           // shape) for a spec that doesn't care about the newer types.
           type?: QuestionType; title?: string; body?: string;
@@ -3290,9 +3298,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         const now = new Date().toISOString();
         deps.db.insertQuestion({
           id, sessionId: q.sessionId,
-          // Card cb7d6998 — no seed field for this (the seed shape has no notion of "filed by a different
-          // session than it's routed to"); always the seeded sessionId, mirroring the real ask-time default.
-          filedBySessionId: q.sessionId,
+          // Card cb7d6998 / 5b22b262 — an OMITTED filer defaults to the seeded sessionId (mirroring the
+          // real ask-time default), while an explicit value is honored verbatim: a DIFFERENT id seeds the
+          // diverged row, and `null` seeds a legacy pre-column row that must render "filer unknown".
+          // `insertQuestion` applies the same undefined→sessionId default at runtime, but `Question`
+          // types this field as required, so the coercion is spelled out here rather than passing
+          // `undefined` through — same rule, stated where the type demands it.
+          filedBySessionId: q.filedBySessionId === undefined ? q.sessionId : q.filedBySessionId,
           projectId: q.projectId, type: q.type ?? "decision",
           title: q.title ?? "Seeded decision", body: q.body ?? "",
           options: q.options ?? null, recommendation: q.recommendation ?? null, taskId: q.taskId ?? null,

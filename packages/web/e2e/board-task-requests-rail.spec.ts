@@ -17,6 +17,7 @@
 import { expect, test } from "./fixtures/daemon";
 import type { Page } from "@playwright/test";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 // Screenshot hook (opt-in via LOOM_E2E_SHOTS, same as board.spec.ts): unset in CI, so this is a no-op
 // there. Set it to a dir to persist the rendered dossier states for a visual review.
@@ -172,4 +173,34 @@ test("a request row expands to its answer; a credential row shows the ack + env 
   await expect(rail.getByText(/provided · encrypted, never shown/).first()).toBeVisible();
   await expect(rail.getByText("STRIPE_API_KEY", { exact: true })).toBeVisible();
   await shoot(page, "row-after-expanded.png");
+});
+
+// Card 5b22b262 — the rail's own meta line is the FOURTH surface that used to render the MUTABLE routing
+// id as the asker. It shares ONE component with the inbox row/modal/history (RequestProvenance), but the
+// COMPACT density it uses is its own rendering path, so it gets its own witness rather than inheriting
+// the inbox spec's coverage. Compact drops the WORDS, never an id: both must still be on screen.
+test("the connected-requests rail renders BOTH the filer and the current routing target", async ({ page, loomDaemon }) => {
+  // The FILER is a plain id, not a seeded session: it models the real shape (a long-retired seat), and
+  // `seedLiveSession` mints every id as `e2e-live-<uuid>`, so two seeded sessions share their first 8
+  // chars and could not express a divergence at the width this UI renders.
+  const filed = `filer-${randomUUID()}`;
+  const routed = await loomDaemon.seedLiveSession({ role: "manager", agentName: "RailRoutedMgr" });
+  // A genuine divergence, forced — the post-recycle shape an e2e can't reach without a real claude.
+  expect(filed.slice(0, 8)).not.toEqual(routed.sessionId.slice(0, 8));
+  const task = await loomDaemon.createTask(routed.projectId, { title: uniq("rail-provenance-card"), columnKey: "todo" });
+  const reqTitle = uniq("rail-provenance-ask");
+  await loomDaemon.seedQuestion({
+    sessionId: routed.sessionId, filedBySessionId: filed,
+    projectId: routed.projectId, taskId: task.id, title: reqTitle, type: "decision", options: ["A", "B"],
+  });
+  await pinActiveProject(page, routed.projectId);
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(`${loomDaemon.baseURL}/board?task=${encodeURIComponent(task.id)}`);
+  const rail = page.getByRole("dialog").getByTestId("task-requests-rail");
+  await expect(rail.getByText(reqTitle, { exact: true })).toBeVisible();
+  // The compact form: "<filer8> → <routed8>", with the spelled-out owner form on the title/aria-label.
+  await expect(rail.getByText(`${filed.slice(0, 8)} → ${routed.sessionId.slice(0, 8)}`)).toBeVisible();
+  await expect(rail.getByTitle(`filed by ${filed.slice(0, 8)} · now routed to ${routed.sessionId.slice(0, 8)}`)).toBeVisible();
+  await shoot(page, "provenance-board-rail.png");
 });

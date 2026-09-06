@@ -52,10 +52,45 @@ export function questionStateChip(q: Pick<Question, "state" | "answeredAt">, now
     : { tone: "muted", label: "ANSWERED" };
 }
 
-// The attention-queue row text for a pending decision: "mgr <id8> · <project> — <title>". Kept terse so it
-// reads at a glance beside the other attention kinds; the full ask lives on the answer page.
+// ── Provenance vs routing (card 5b22b262) ───────────────────────────────────────────────────────
+// A Request carries TWO session ids that answer DIFFERENT questions, and no human-facing surface may
+// conflate them: `filedBySessionId` is the IMMUTABLE seat that FILED the ask; `sessionId` is the MUTABLE
+// seat it is currently ROUTED to — `reparentQuestions` rewrites it onto a successor on every recycle, so
+// a row filed weeks ago by a long-retired predecessor carries today's successor's id there. Rendering the
+// routing id as the asker misattributes the ask after any recycle, on the very screen the human answers
+// from. These helpers are the single source of truth for that split so it can't drift across surfaces.
+// ⛔ ACTION affordances (the "sends your decision to…" caption, the nudge, the jump-to-live-session
+// navigate) deliberately keep reading `sessionId` ALONE — a decision genuinely goes to the seat that
+// currently owns the row, and naming the original filer there would point at a RETIRED session.
+
+// The IMMUTABLE filer, short. `null` means "unknown, permanently" — a row created before the column
+// existed, whose original filer was already overwritten by a recycle and is UNRECOVERABLE (see
+// Question.filedBySessionId). ⛔ NEVER fall back to `sessionId` here: that re-creates the exact
+// misattribution this exists to remove, and ⛔ never reconstruct a guess from timestamps.
+export function requestFilerLabel(q: Pick<Question, "filedBySessionId">): string {
+  return q.filedBySessionId ? `filed by ${q.filedBySessionId.slice(0, 8)}` : "filer unknown";
+}
+
+// The CURRENT routing target, short — "who will act on this", framed as a destination, never as the asker.
+export function requestRoutedLabel(q: Pick<Question, "sessionId">): string {
+  return `now routed to ${q.sessionId.slice(0, 8)}`;
+}
+
+// Both, in the owner's own form: "filed by 3f2a · now routed to 9b1c" (his decision on Request 68b06c50).
+// ALWAYS both, even when the two ids match — they are separate facts, and a row that renders only one
+// cannot reveal a divergence. Used verbatim as the `title` tooltip wherever the visible text ellipsizes.
+export function requestProvenanceText(q: Pick<Question, "sessionId" | "filedBySessionId">): string {
+  return `${requestFilerLabel(q)} · ${requestRoutedLabel(q)}`;
+}
+
+// The attention-queue row text for a pending decision: "routed to mgr <id8> · <project> — <title>". Kept
+// terse so it reads at a glance beside the other attention kinds; the full ask lives on the answer page.
+// This is a COMPACT surface where the full "filed by X · now routed to Y" does not fit, so it carries the
+// CURRENT ROUTING TARGET only — "who will act on this" is the useful thing on an attention row, and it is
+// what the human's answer actually reaches. It is FRAMED as a destination ("routed to mgr …") rather than
+// as the asker, which is the defect: `mgr <id8>` alone read as provenance while carrying a mutable id.
 export function decisionAttentionText(q: Pick<Question, "sessionId" | "title"> & { projectName?: string }): string {
-  const mgr = `mgr ${q.sessionId.slice(0, 8)}`;
+  const mgr = `routed to mgr ${q.sessionId.slice(0, 8)}`;
   const proj = q.projectName ? ` · ${q.projectName}` : "";
   return `${mgr}${proj} — ${q.title}`;
 }

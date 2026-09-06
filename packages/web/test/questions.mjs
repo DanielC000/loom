@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import {
   DECISION_WATCHDOG_MS, relativeAge, isDecisionWatchdog, questionStateChip, decisionAttentionText,
   requestAttentionLabel, requestOutcome,
+  requestFilerLabel, requestRoutedLabel, requestProvenanceText,
 } from "../src/lib/questions.ts";
 
 let pass = 0;
@@ -90,15 +91,49 @@ check("requestOutcome: a cancelled request reads 'cancelled' + its reason, check
   );
 });
 
-check("decisionAttentionText: mgr <id8> · <project> — <title>", () => {
+// Card 5b22b262 — the attention row carries the CURRENT ROUTING TARGET ("who will act on this"),
+// FRAMED as a destination. The old `mgr <id8>` read as the ASKER while carrying a mutable id, so it
+// misattributed the ask after any recycle. Compact surface ⇒ one id, deliberately, not both.
+check("decisionAttentionText: routed to mgr <id8> · <project> — <title>", () => {
   assert.equal(
     decisionAttentionText({ sessionId: "7a3f91c2aaaa", title: "Rate-limit strategy", projectName: "Loom" }),
-    "mgr 7a3f91c2 · Loom — Rate-limit strategy",
+    "routed to mgr 7a3f91c2 · Loom — Rate-limit strategy",
   );
-  // no project name → still renders the mgr + title
+  // no project name → still renders the routing target + title
   assert.equal(
     decisionAttentionText({ sessionId: "b2d40f18bbbb", title: "Protected main" }),
-    "mgr b2d40f18 — Protected main",
+    "routed to mgr b2d40f18 — Protected main",
+  );
+});
+
+// Card 5b22b262 — provenance vs routing. `filedBySessionId` is the IMMUTABLE filer; `sessionId` is the
+// MUTABLE routing target (reparentQuestions rewrites it on every recycle). The inbox shows BOTH.
+check("requestFilerLabel: the immutable filer, and an explicit UNKNOWN for a legacy null", () => {
+  assert.equal(requestFilerLabel({ filedBySessionId: "d3d3faf4dead" }), "filed by d3d3faf4");
+  // ⛔ a legacy row must read as explicitly unknown — NEVER a fallback to sessionId, which is the bug.
+  assert.equal(requestFilerLabel({ filedBySessionId: null }), "filer unknown");
+});
+
+check("requestRoutedLabel: the current routing target, framed as a destination", () => {
+  assert.equal(requestRoutedLabel({ sessionId: "a3f48a8fbeef" }), "now routed to a3f48a8f");
+});
+
+check("requestProvenanceText: BOTH ids, in the owner's own form", () => {
+  // The diverged case this card exists for — a row filed by one seat, since reparented onto another.
+  assert.equal(
+    requestProvenanceText({ filedBySessionId: "d3d3faf4dead", sessionId: "a3f48a8fbeef" }),
+    "filed by d3d3faf4 · now routed to a3f48a8f",
+  );
+  // A legacy row still shows the routing target — only the FILER half is unknown.
+  assert.equal(
+    requestProvenanceText({ filedBySessionId: null, sessionId: "a3f48a8fbeef" }),
+    "filer unknown · now routed to a3f48a8f",
+  );
+  // ⛔ The unrecycled case still renders BOTH: they are separate facts, and a one-id rendering could
+  // never reveal a divergence. The repeated id is the point — it is what makes a LATER split legible.
+  assert.equal(
+    requestProvenanceText({ filedBySessionId: "7a3f91c2aaaa", sessionId: "7a3f91c2aaaa" }),
+    "filed by 7a3f91c2 · now routed to 7a3f91c2",
   );
 });
 

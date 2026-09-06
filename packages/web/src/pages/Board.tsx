@@ -6,7 +6,7 @@ import type { Task, BoardTask, TaskPriority, KanbanColumn, SessionListItem, Ques
 import { api, type TaskUpdateConflictError } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Button, Input, Select, SectionLabel, StatusPill, Chip, Badge, Dot } from "../components/ui";
-import { useOpenRequest, RequestTypeTag } from "../components/requests";
+import { useOpenRequest, RequestTypeTag, RequestProvenance } from "../components/requests";
 import { DecisionStateChip } from "../components/decisions";
 import { relativeAge, requestHint, REQUEST_TYPE_TONE } from "../lib/questions";
 import { color, font, radius, tone, roleTone, type Tone } from "../theme";
@@ -1095,7 +1095,7 @@ function ConnectedRequestRow({ q, now }: { q: QuestionInboxItem; now: number }) 
         </div>
         <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          agent {q.sessionId.slice(0, 8)} · {relativeAge(q.state === "pending" ? q.createdAt : q.state === "cancelled" ? q.cancelledAt : q.answeredAt, now)}
+          <RequestProvenance q={q} compact /> · {relativeAge(q.state === "pending" ? q.createdAt : q.state === "cancelled" ? q.cancelledAt : q.answeredAt, now)}
         </span>
       </button>
       {open && (

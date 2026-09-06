@@ -12,6 +12,7 @@ import {
   isDecisionWatchdog, relativeAge,
   REQUEST_TYPE_TONE, REQUEST_TYPE_ORDER,
   requestActionLabel, requestNeedsChip, requestAnswerBadge, requestHint, requestOutcome,
+  requestProvenanceText,
 } from "../lib/questions";
 
 // The REQUESTS INBOX (card 695ebab0 — the durable Requests object generalized from the decision inbox).
@@ -37,6 +38,47 @@ function RequestNeedsChip({ type }: { type: QuestionType }) {
       textTransform: "uppercase", letterSpacing: "0.06em", color: c, border: `1px solid ${c}`, borderRadius: radius.sm, padding: "1px 8px" }}>
       <Dot tone={REQUEST_TYPE_TONE[type]} />
       {requestNeedsChip(type)}
+    </span>
+  );
+}
+
+// ── RequestProvenance — the immutable FILER and the current ROUTING TARGET, side by side ──────────
+// Card 5b22b262. Every identity/history meta line on this surface used to render `agent <sessionId>`,
+// but `sessionId` is the MUTABLE routing target (`reparentQuestions` rewrites it onto a successor on
+// every recycle), never provenance — so after any recycle the inbox attributed the ask to a seat that
+// never made it. Owner's decision (Request 68b06c50): show BOTH, visibly distinguished —
+// "filed by 3f2a · now routed to 9b1c". A legacy row whose `filedBySessionId` is permanently null reads
+// "filer unknown"; it must NEVER fall back to `sessionId`, which is precisely the bug.
+// Distinction is carried by the label words (inherited muted meta color) with the ids a shade brighter —
+// no new color system, no new component; it drops into the existing meta line as one inline run. ONE
+// component so the four surfaces that render this can't drift apart.
+// TWO densities, same two facts — never a different SET of facts, only a shorter spelling of them:
+//   default  "filed by 3f2a · now routed to 9b1c"  — the roomy, wrapping meta lines (inbox row, modal header)
+//   compact  "3f2a → 9b1c"                          — a single ellipsized cell (history table, board rail)
+// The compact form drops the WORDS, never an id: an ellipsis that ate the routing id would silently
+// re-create the one-id rendering this card removes, so density is bought with the arrow, not with a field.
+// Both spell the full owner-form text into `title` + `aria-label`, so the words are always one hover away
+// and the arrow is never the only carrier of meaning for assistive tech.
+export function RequestProvenance({ q, compact }: { q: Pick<QuestionInboxItem, "sessionId" | "filedBySessionId">; compact?: boolean }) {
+  const full = requestProvenanceText(q);
+  const routed = <span style={{ color: color.textDim }}>{q.sessionId.slice(0, 8)}</span>;
+  return (
+    <span title={full} aria-label={full} style={{ minWidth: 0 }}>
+      {compact
+        ? <>
+            {q.filedBySessionId
+              ? <span style={{ color: color.textDim }}>{q.filedBySessionId.slice(0, 8)}</span>
+              : <>unknown</>}
+            <span aria-hidden> → </span>
+            {routed}
+          </>
+        : <>
+            {q.filedBySessionId
+              ? <>filed by <span style={{ color: color.textDim }}>{q.filedBySessionId.slice(0, 8)}</span></>
+              : <>filer unknown</>}
+            {" · now routed to "}
+            {routed}
+          </>}
     </span>
   );
 }
@@ -117,7 +159,7 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
           <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
             <Dot tone={metaDot} glow={watchdog} />
             <span style={{ color: color.cyan }}>{q.projectName}</span>
-            <span>· agent {q.sessionId.slice(0, 8)}</span>
+            <span>· <RequestProvenance q={q} /></span>
             <span>· {q.state === "pending" ? "asked" : "answered"} {relativeAge(q.state === "pending" ? q.createdAt : q.answeredAt, now)}</span>
             {q.taskId && <LinkedTaskChip taskId={q.taskId} />}
           </span>
@@ -346,7 +388,7 @@ export function RequestDetail({ id, onClose }: { id: string; onClose?: () => voi
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <RequestTypeTag type={question.type} />
             <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
-              agent {question.sessionId.slice(0, 8)} · <span style={{ color: color.cyan }}>{question.projectName}</span>
+              <RequestProvenance q={question} /> · <span style={{ color: color.cyan }}>{question.projectName}</span>
             </span>
             {question.taskId && <LinkedTaskChip taskId={question.taskId} title={linkedTitle} onClick={openLinkedTask} />}
             <span style={{ flex: 1 }} />
@@ -739,7 +781,8 @@ export function RequestHistory() {
                 borderRadius: radius.sm, padding: "6px 10px" }}>
               <RequestTypeTag type={q.type} />
               <span style={{ flex: "2 1 200px", minWidth: 0, fontFamily: font.mono, fontSize: 12, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
-              <span style={{ flex: "1 1 120px", minWidth: 0, fontFamily: font.mono, fontSize: 11, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.projectName} · {q.sessionId.slice(0, 8)}</span>
+              <span title={`${q.projectName} · ${requestProvenanceText(q)}`}
+                style={{ flex: "1 1 170px", minWidth: 0, fontFamily: font.mono, fontSize: 11, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.projectName} · <RequestProvenance q={q} compact /></span>
               <span style={{ flex: "2 1 200px", minWidth: 0, fontFamily: font.mono, fontSize: 11, color: q.state === "cancelled" ? color.red : color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={requestOutcome(q)}>{requestOutcome(q)}</span>
               {q.taskId && <LinkedTaskChip taskId={q.taskId} />}
               <span style={{ flexShrink: 0, fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{relativeAge(resolvedAt(q), now)}</span>

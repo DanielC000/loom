@@ -16,6 +16,8 @@
 // question_ask uses). Answers go through the real human-only POST /api/questions/:id/answer route.
 import { expect, test } from "./fixtures/daemon";
 import type { Page } from "@playwright/test";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
 
 async function pinActiveProject(page: Page, projectId: string) {
   await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), projectId);
@@ -336,5 +338,161 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await chip.click();
     await expect(page).toHaveURL(/\/board$/);
     await expect(page.getByText(/^Task · /)).toHaveCount(0);
+  });
+});
+
+// ── Provenance vs routing (card 5b22b262) ──────────────────────────────────────────────────────────
+// A Request carries TWO session ids meaning DIFFERENT things: `filedBySessionId` is the IMMUTABLE seat
+// that FILED the ask; `sessionId` is the MUTABLE seat it is currently ROUTED to (`reparentQuestions`
+// rewrites it onto a successor on EVERY recycle). The inbox used to render the routing id as the asker,
+// so after any recycle it attributed the ask to a seat that never made it — on the screen the human
+// answers from. Owner's decision (Request 68b06c50): show BOTH, visibly distinguished.
+//
+// The seed forces a genuine DIVERGENCE (filer ≠ routing target) rather than hoping one occurs: a real
+// divergence only appears after a recycle, which an e2e can't drive without spawning a real claude.
+// A third test pins the SPLIT — the ACTION caption must keep naming the ROUTING target, so a blanket
+// sessionId → filedBySessionId swap (the tempting "fix") fails here instead of shipping as a regression.
+test.describe("request provenance vs routing (card 5b22b262)", () => {
+  const short = (id: string) => id.slice(0, 8);
+  // Opt-in screenshot capture (LOOM_E2E_SHOTS, same hook board.spec.ts and the requests rail already use):
+  // unset in CI, so a no-op there. This is a VISUAL change on the surface the owner answers from, so point
+  // it at a directory to persist the rendered diverged / legacy / action-caption states for review.
+  const shotDir = process.env.LOOM_E2E_SHOTS;
+  const shoot = async (page: import("@playwright/test").Page, name: string) => {
+    if (shotDir) await page.screenshot({ path: path.join(shotDir, name), fullPage: true });
+  };
+  // The FILER is a plain id, NOT a seeded live session — deliberately, twice over. It models the real
+  // shape (the original filer is typically a long-retired seat, which is exactly why the inbox LEFT JOINs
+  // only on `session_id` and never on this field), and `seedLiveSession` mints every id as
+  // `e2e-live-<uuid>`, so two seeded sessions share the same first 8 chars and could not express a
+  // divergence at all at the width this UI renders. (That collapse was caught by the identity guard below.)
+  const filerId = () => `filer-${randomUUID()}`;
+
+  test("a diverged row shows BOTH the filer and the current routing target, on the row and in the modal", async ({ page, loomDaemon }) => {
+    const filed = filerId();
+    const routed = await loomDaemon.seedLiveSession({ role: "manager", agentName: "RoutedToMgr" });
+    const title = uniq("diverged-provenance");
+    await loomDaemon.seedQuestion({
+      sessionId: routed.sessionId, filedBySessionId: filed,
+      projectId: routed.projectId, title, type: "decision", options: ["A", "B"],
+    });
+    // Guard the fixture's own identity: a seed that silently collapsed to one id would make every
+    // assertion below pass for the wrong reason (both halves would read the same 8 chars).
+    expect(short(filed)).not.toEqual(short(routed.sessionId));
+    const both = `filed by ${short(filed)} · now routed to ${short(routed.sessionId)}`;
+
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    const main = page.locator("main");
+    await expect(main.getByText(title, { exact: true })).toBeVisible();
+    // The row meta carries BOTH ids — the full owner-form text, spelled out.
+    await expect(main.getByTitle(both).first()).toBeVisible();
+    await expect(main.getByText(both).first()).toBeVisible();
+    await shoot(page, "provenance-diverged-row.png");
+
+    // The detail modal header carries the same pair (ONE component, so the two surfaces can't drift).
+    await main.getByRole("button", { name: "Answer →" }).first().click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText(both)).toBeVisible();
+    await shoot(page, "provenance-diverged-modal.png");
+  });
+
+  test("a legacy row whose filer is permanently null reads 'filer unknown' and NEVER falls back to the routing id", async ({ page, loomDaemon }) => {
+    const routed = await loomDaemon.seedLiveSession({ role: "manager", agentName: "LegacyFilerMgr" });
+    const title = uniq("legacy-provenance");
+    await loomDaemon.seedQuestion({
+      // Explicit null = a row created before `filed_by_session_id` existed. Its original filer was already
+      // overwritten by whatever recycle ran back then: UNRECOVERABLE, not merely unset.
+      sessionId: routed.sessionId, filedBySessionId: null,
+      projectId: routed.projectId, title, type: "decision", options: ["A", "B"],
+    });
+
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    const main = page.locator("main");
+    await expect(main.getByText(title, { exact: true })).toBeVisible();
+    // Scope to THIS row. The negative below cannot be page-wide: the shared e2e daemon carries other
+    // specs' seeded rows, every one of which legitimately renders a "filed by …" of its own — and since
+    // `seedLiveSession` mints every id as `e2e-live-<uuid>`, their filer text is character-identical to
+    // what a fallback on THIS row would produce. A page-wide assertion would fail on a correct build.
+    const row = main.locator("div").filter({ hasText: title }).last();
+    await expect(row).toContainText(`filer unknown · now routed to ${short(routed.sessionId)}`);
+    // ⛔ The regression this card removes: the routing id must NEVER appear in the FILER slot. This is the
+    // load-bearing assertion — "filer unknown" rendering is worth nothing if a fallback also crept back in.
+    // Asserting the WORDS are absent (not one particular id) catches a reconstruction from any source.
+    await expect(row).not.toContainText("filed by");
+    await shoot(page, "provenance-legacy-unknown.png");
+  });
+
+  test("the ACTION caption still names the CURRENT routing target, not the filer", async ({ page, loomDaemon }) => {
+    const filed = filerId();
+    const routed = await loomDaemon.seedLiveSession({ role: "manager", agentName: "ActionRoutedMgr" });
+    const title = uniq("action-target");
+    await loomDaemon.seedQuestion({
+      sessionId: routed.sessionId, filedBySessionId: filed,
+      projectId: routed.projectId, title, type: "permission", permissionAction: "push to origin/main",
+      permissionScopeHint: "once",
+    });
+    expect(short(filed)).not.toEqual(short(routed.sessionId));
+
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    await page.locator("main").getByRole("button", { name: "Review →" }).first().click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    // The decision genuinely GOES to the seat that currently owns the row. Naming the original filer here
+    // would point the human at a RETIRED session — actively false, which is why this line was left alone.
+    await expect(dialog.getByText(`Sends your decision to agent ${short(routed.sessionId)}.`)).toBeVisible();
+    await expect(dialog.getByText(`Sends your decision to agent ${short(filed)}.`)).toHaveCount(0);
+    await shoot(page, "provenance-action-caption.png");
+  });
+
+  test("the history row renders the COMPACT form — still both ids, never one", async ({ page, loomDaemon }) => {
+    const filed = filerId();
+    const routed = await loomDaemon.seedLiveSession({ role: "manager", agentName: "HistProvMgr" });
+    const title = uniq("history-provenance");
+    await loomDaemon.seedQuestion({
+      sessionId: routed.sessionId, filedBySessionId: filed,
+      projectId: routed.projectId, title, type: "decision", options: ["X"],
+      state: "consumed", chosenOption: "X",
+    });
+    expect(short(filed)).not.toEqual(short(routed.sessionId));
+
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    const main = page.locator("main");
+    await main.getByRole("button", { name: "History" }).click();
+    // Narrow to THIS row — the shared daemon's history carries every other spec's resolved requests.
+    await main.getByPlaceholder(/search titles/).fill(title);
+    await expect(main.getByText(title, { exact: true })).toBeVisible();
+    // The history cell is a single ellipsized column, so it renders the COMPACT form: the words drop, the
+    // ids do NOT. An ellipsis that ate the routing id would silently restore the one-id rendering this
+    // card removes, which is why both are asserted here rather than trusting the roomy form's coverage.
+    await expect(main.getByText(`${short(filed)} → ${short(routed.sessionId)}`)).toBeVisible();
+    // `exact` pins the COMPONENT's own title: the enclosing history cell carries a superset title
+    // (project name + the same text), and a substring match would resolve both under strict mode.
+    await expect(main.getByTitle(`filed by ${short(filed)} · now routed to ${short(routed.sessionId)}`, { exact: true })).toBeVisible();
+    await shoot(page, "provenance-history-compact.png");
+  });
+
+  test("the attention row frames its id as the ROUTING TARGET, and carries only that one", async ({ page, loomDaemon }) => {
+    const filed = filerId();
+    const routed = await loomDaemon.seedLiveSession({ role: "manager", agentName: "AttnProvMgr" });
+    const title = uniq("attention-provenance");
+    await loomDaemon.seedQuestion({
+      sessionId: routed.sessionId, filedBySessionId: filed,
+      projectId: routed.projectId, title, type: "decision", options: ["A", "B"], state: "pending",
+    });
+    expect(short(filed)).not.toEqual(short(routed.sessionId));
+    await pinActiveProject(page, routed.projectId);
+
+    await page.goto(`${loomDaemon.baseURL}/overview`);
+    const row = page.locator("main").getByText(title, { exact: false }).first();
+    await expect(row).toBeVisible();
+    // The attention queue is a COMPACT surface where the roomy "filed by X · now routed to Y" does not
+    // fit, so it deliberately carries ONE id — the CURRENT routing target, i.e. who will act on this —
+    // and FRAMES it as a destination. The bare `mgr <id>` it replaced read as the asker while carrying a
+    // mutable id, which is the same misattribution the rows above fix.
+    await expect(row).toContainText(`routed to mgr ${short(routed.sessionId)}`);
+    // ⛔ And NOT the filer: on this surface the filer is the id that CANNOT be acted on.
+    await expect(row).not.toContainText(short(filed));
+    await shoot(page, "provenance-attention-row.png");
   });
 });

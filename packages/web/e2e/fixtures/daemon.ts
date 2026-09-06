@@ -385,6 +385,12 @@ export interface LoomDaemon {
    */
   seedQuestion: (q: {
     sessionId: string; projectId: string; title?: string; body?: string;
+    // Card 5b22b262 — the IMMUTABLE filer, distinct from `sessionId` (the MUTABLE routing target that
+    // `reparentQuestions` rewrites on every recycle). Omit it and the daemon defaults it to `sessionId`,
+    // exactly as a real ask does, so every existing spec is unchanged. Set it to a DIFFERENT session id
+    // to seed the diverged row the Requests UI must render as "filed by X · now routed to Y"; set it to
+    // explicit `null` to seed a legacy pre-column row, which must render "filer unknown".
+    filedBySessionId?: string | null;
     // Requests-object generalization (card 695ebab0): `type` + its per-type ask-time payload. The daemon
     // seed handler already forwards all of these to insertQuestion; a spec that omits `type` gets the
     // default "decision" shape (byte-identical to before).
