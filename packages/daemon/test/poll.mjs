@@ -479,6 +479,42 @@ const seedSpawnJob = (e, id, over = {}) => seedWakeJob(e, id, { mode: "spawn", s
     dataRegion2 === JSON.stringify(guessingItems, null, 2));
 }
 
+// --- Card 4814d0dd: bound the serialized PAYLOAD SIZE, not just the item COUNT. `overflowCount` bounds
+// how many items are included at all; it does nothing for ONE pathologically large item that itself blows
+// past the shared kickoff-JSON bound — that item sails through the item-count cap untouched. ---
+{
+  const { MAX_KICKOFF_JSON_CHARS } = await import("../dist/untrusted-data.js");
+  const hugeItems = [{ id: "huge-1", note: "x".repeat(MAX_KICKOFF_JSON_CHARS * 2) }];
+  const rawJson = JSON.stringify(hugeItems, null, 2);
+  const out = formatPollItemsBlock(hugeItems, "huge.example.com", 0);
+  check("size-bound: a single oversized item does NOT produce an unbounded kickoff block",
+    out.length < rawJson.length);
+  check("size-bound: the truncation note is present", out.includes("payload truncated"));
+
+  // The truncation note must land AFTER the closing marker, never inside the untrusted-data block — an
+  // attacker controlling the payload must never be able to forge a Loom-authored note.
+  const m = /LOOM-DATA-[0-9a-f]+/.exec(out);
+  const token = m ? m[0] : "__none__";
+  const lastIdx = out.lastIndexOf(token);
+  const noteIdx = out.indexOf("payload truncated");
+  check("size-bound: the truncation note appears AFTER the closing delimiter (outside the untrusted block)",
+    noteIdx > lastIdx + token.length);
+
+  // DoD-2: the pre-existing item-count overflow note is UNCHANGED and still renders — the two caps are
+  // orthogonal and both fire together without either masking the other.
+  const outWithOverflow = formatPollItemsBlock(hugeItems, "huge.example.com", 3);
+  check("size-bound: the pre-existing item-count overflow note still renders alongside the new size bound",
+    outWithOverflow.includes("+3 more item(s) not shown"));
+
+  // Negative control: an ordinary small item must NOT be truncated — the bound only fires on the
+  // genuinely oversized case, and what survives (the full serialized item) must be intact, not just
+  // "the cap didn't fire."
+  const smallItems = [{ id: "small-1", note: "an ordinary item" }];
+  const outSmall = formatPollItemsBlock(smallItems, "small.example.com", 0);
+  check("size-bound: an ordinary small item is NOT truncated (negative control), and the full item survives intact",
+    !outSmall.includes("payload truncated") && outSmall.includes(JSON.stringify(smallItems, null, 2)));
+}
+
 // --- Card 61a012ce: a HELD wake-mode fire (busy target, NOT a throw) now leaves a durable trace ---
 // Before this fix, fire()'s bare enqueueStdin held-not-delivered outcome left NOTHING behind: tick()
 // still commits the cursor (fire() didn't throw), so a restart before the held item ever drained would

@@ -1,9 +1,5 @@
 import type { WebhookSourceType } from "@loom/shared";
-import { wrapUntrustedDataBlock } from "../untrusted-data.js";
-
-/** Bound the JSON embedded in a kickoff prompt — a pathological payload (still under WEBHOOK_BODY_LIMIT
- *  bytes on the wire, but a deeply nested/verbose JSON shape) must not blow up the kickoff prompt itself. */
-const MAX_KICKOFF_JSON_CHARS = 20_000;
+import { wrapUntrustedDataBlock, truncateForKickoff, kickoffTruncationNote } from "../untrusted-data.js";
 
 /**
  * Format a VERIFIED inbound webhook's payload as an explicitly-untrusted DATA block — reuses the SAME
@@ -17,15 +13,9 @@ const MAX_KICKOFF_JSON_CHARS = 20_000;
  * string.
  */
 export function formatWebhookEventBlock(sourceType: WebhookSourceType, endpointName: string, payload: unknown): string {
-  let body = JSON.stringify(payload, null, 2);
-  let truncated = false;
-  if (body.length > MAX_KICKOFF_JSON_CHARS) {
-    body = body.slice(0, MAX_KICKOFF_JSON_CHARS);
-    truncated = true;
-  }
-  const truncationNote = truncated ? "\n\n(payload truncated — oversized JSON body.)" : "";
+  const { body, truncated } = truncateForKickoff(JSON.stringify(payload, null, 2));
   return wrapUntrustedDataBlock(
     `[loom:webhook] A signature-verified inbound webhook was received on endpoint "${endpointName}" (source: ${sourceType})`,
     body,
-  ) + truncationNote;
+  ) + kickoffTruncationNote(truncated);
 }
