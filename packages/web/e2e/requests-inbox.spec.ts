@@ -339,6 +339,36 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await expect(page).toHaveURL(/\/board$/);
     await expect(page.getByText(/^Task · /)).toHaveCount(0);
   });
+
+  test("the linked-task chip shows the card's CURRENT lane (card 889ae619, iii-b), and follows it when the card moves", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(`req-lane-${Date.now()}`);
+    const cardTitle = uniq("lane-card");
+    const task = await loomDaemon.createTask(project.id, { title: cardTitle, columnKey: "in_progress" });
+    const mgr = await loomDaemon.seedLiveSession({ project, role: "manager", agentName: "LaneMgr" });
+    const reqTitle = uniq("decision-for-lane-card");
+    await loomDaemon.seedQuestion({
+      sessionId: mgr.sessionId, projectId: project.id, title: reqTitle, type: "decision",
+      options: ["Ship", "Hold"], taskId: task.id,
+    });
+
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    const main = page.locator("main");
+    await expect(main.getByText(reqTitle, { exact: true })).toBeVisible();
+    // The chip carries "task #xxxx · <lane>" — the raw board-column slug, joined server-side.
+    await expect(main.getByText(new RegExp(`task #${task.id.slice(0, 8)} · in_progress`))).toBeVisible();
+
+    // The card moves lanes — a REAL POST through the board's own writer, not a re-seed — and the SAME
+    // chip (no reload) reflects the new lane on its next poll (openQuestions refetches every 3s).
+    // `page.request` is Playwright's OWN network stack, independent of the page's window.fetch (which the
+    // loopback token seeded into localStorage authenticates) — the loopback human-only-write guard (card
+    // 9ccedbee) would otherwise 401 this write, so the credential is attached explicitly here.
+    const patchRes = await page.request.post(`${loomDaemon.baseURL}/api/tasks/${task.id}`, {
+      headers: { authorization: `Bearer ${loomDaemon.loopbackSecret}` },
+      data: { columnKey: "done" },
+    });
+    expect(patchRes.status()).toBe(200);
+    await expect(main.getByText(new RegExp(`task #${task.id.slice(0, 8)} · done`))).toBeVisible({ timeout: 10_000 });
+  });
 });
 
 // ── Provenance vs routing (card 5b22b262) ──────────────────────────────────────────────────────────

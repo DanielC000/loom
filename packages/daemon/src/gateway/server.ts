@@ -3037,6 +3037,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // Optional instant overrides — backdate `answeredAt` to drive the client-side watchdog (an
           // ignored `answered` re-escalating to amber) in a spec, or `createdAt` for a deterministic age.
           createdAt?: string; answeredAt?: string;
+          // Stale-Request escalation (card 99d41588) + its durable snooze (card 889ae619, iii-a) — the ONLY
+          // way an e2e spec can seed an ALREADY-STALE row directly, since the real path is a
+          // staleRequestMinutes-gated IdleWatcher tick a spec can't wait out. Both optional/nullable, same
+          // pattern as every other override in this block; a spec that omits them gets today's exact
+          // behavior (unescalated, unsnoozed).
+          escalatedAt?: string | null; acknowledgedUntil?: string | null;
           // question_cancel/dismiss (card feat(orchestration): question_cancel + dismiss) — a spec seeding
           // state:"cancelled" directly (e.g. to drive the History view) may also set these; otherwise a
           // cancelled seed defaults cancelledBy to "human" and cancelledAt to now, mirroring how "answered"
@@ -3323,14 +3329,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           cancelledReason: state === "cancelled" ? (q.cancelledReason ?? null) : null,
           cancelledBy: state === "cancelled" ? (q.cancelledBy ?? "human") : null,
           cancelledAt: state === "cancelled" ? now : null,
-          // Card 99d41588 — always unescalated at seed time (no seed field for it, mirrors the
-          // provisionConnectionId/provisionBindingState comment above: a spec needing an already-escalated
-          // row seeds pending with a backdated createdAt and lets the real watcher tick escalate it).
-          escalatedAt: null,
-          // Card 889ae619 — same posture: always un-snoozed at seed time (no seed field for it); a spec
-          // needing an already-snoozed row calls the real acknowledge route after seeding.
-          acknowledgedUntil: null,
+          // Card 99d41588 / 889ae619 — always unescalated/un-snoozed AT INSERT TIME (insertQuestion's own
+          // INSERT never binds either column — see their own docs); a seeded escalatedAt/acknowledgedUntil
+          // is applied as a SEPARATE write below, through the SAME markQuestionEscalated/acknowledgeQuestion
+          // the real IdleWatcher tick / acknowledge route use, not by widening the INSERT.
+          escalatedAt: null, acknowledgedUntil: null,
         });
+        // Card 99d41588 / 889ae619 — apply a seeded escalatedAt/acknowledgedUntil as a follow-up write
+        // through the REAL setters (markQuestionEscalated / acknowledgeQuestion), the ONLY way an e2e spec
+        // can seed an ALREADY-STALE (and optionally already-snoozed) row directly — the real escalation path
+        // is a staleRequestMinutes-gated IdleWatcher tick a spec can't wait out. Omitted (undefined) on both
+        // ⇒ today's exact behavior (unescalated, unsnoozed); markQuestionEscalated's own `state='pending' AND
+        // escalated_at IS NULL` guard is satisfied here since the row was JUST inserted with neither set.
+        if (q.escalatedAt !== undefined && q.escalatedAt !== null) deps.db.markQuestionEscalated(id, q.escalatedAt);
+        if (q.acknowledgedUntil !== undefined) deps.db.acknowledgeQuestion(id, q.acknowledgedUntil);
         questionIds.push(id);
       }
       // Project memory (Memory) rows — upserted via db.upsertProjectMemory (the memory_write path), then

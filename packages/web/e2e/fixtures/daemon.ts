@@ -400,6 +400,10 @@ export interface LoomDaemon {
     credentialEnvVar?: string | null;
     state?: "pending" | "answered" | "consumed"; chosenOption?: string | null; note?: string | null;
     createdAt?: string; answeredAt?: string;
+    // Stale-Request escalation (card 99d41588) + its durable snooze (card 889ae619, iii-a) — seed an
+    // ALREADY-STALE (and optionally already-snoozed) pending row directly, since the real escalation path
+    // is a staleRequestMinutes-gated IdleWatcher tick a spec can't wait out.
+    escalatedAt?: string | null; acknowledgedUntil?: string | null;
   }) => Promise<string>;
   /**
    * Spawn ONE real, LIVE host shell via `POST /api/terminals` (card ShellTile-e2e) — the ONLY way to make a

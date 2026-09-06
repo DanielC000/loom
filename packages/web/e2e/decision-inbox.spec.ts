@@ -126,3 +126,77 @@ test.describe("decision inbox (card 8701bdbb, child B)", () => {
     await expect(page.locator("main").getByText(/Chose:/)).toHaveCount(0);
   });
 });
+
+// ── DECISION STALE + the owner snooze (card 889ae619) ──────────────────────────────────────────────
+// A pending Request that has already crossed staleRequestMinutes (escalatedAt set — seeded directly,
+// since the real IdleWatcher tick a spec can't wait out) surfaces as a RED "DECISION STALE" attention
+// item, distinct from the ordinary cyan "DECISION NEEDED" row. It carries a "Snooze…" affordance the
+// plain row does not. Picking a duration is a DURABLE, non-terminal SNOOZE: the request stays pending
+// and fully answerable — it is NOT dismissed, cancelled, or auto-answered — only the STALE presentation
+// drops back to ordinary cyan (and, per the design, would re-redden on its own once the snooze expires,
+// which this e2e — bounded to real wall-clock time — does not wait out).
+test.describe("decision STALE + owner snooze (card 889ae619)", () => {
+  test("an escalated pending request shows DECISION STALE with a Snooze control; snoozing drops it to ordinary DECISION NEEDED without answering it", async ({ page, loomDaemon }) => {
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "StaleMgr" });
+    const title = `Escalated ask ${Date.now()}`;
+    const id = await loomDaemon.seedQuestion({
+      sessionId: mgr.sessionId, projectId: mgr.projectId, title,
+      body: "This has been sitting unanswered a while.",
+      options: ["Proceed", "Hold"],
+      // Already stale as of seed time — the real escalation path is a staleRequestMinutes-gated tick.
+      escalatedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    });
+
+    await page.goto(`${loomDaemon.baseURL}/`);
+    const main = page.locator("main");
+    // `.last()`, not `.first()`: Mission Control ALSO renders a per-manager "waiting on you" mini-card
+    // with its OWN "Answer →" button elsewhere on the page, and `title` is nested several ancestor divs
+    // deep — `.first()` resolves to an outer wrapping div broad enough to also contain that unrelated
+    // button (a strict-mode violation once two matching "Answer →" buttons are in scope). Since ancestor
+    // divs precede their own descendants in DOM order, the LAST div still matching `hasText: title` is
+    // the innermost one — the AttentionRow's own container, and nothing broader.
+    const row = main.locator("div").filter({ hasText: title }).last();
+    await expect(row).toBeVisible();
+    await expect(row.getByText("DECISION STALE")).toBeVisible();
+    await expect(row.getByText("DECISION NEEDED")).toHaveCount(0);
+
+    // The Snooze select is present ONLY on the stale row — pick "1 day" (an OBSERVABLE onChange action,
+    // not a submit-button flow: the select fires the mutation directly).
+    const snoozeSelect = row.locator("select");
+    await expect(snoozeSelect).toBeVisible();
+    await snoozeSelect.selectOption("1d");
+
+    // OBSERVABLE change: the row drops from red STALE to ordinary cyan NEEDED, and the Snooze control
+    // itself disappears (nothing left to suppress) — while the request is STILL pending and answerable.
+    await expect(row.getByText("DECISION NEEDED")).toBeVisible();
+    await expect(row.getByText("DECISION STALE")).toHaveCount(0);
+    await expect(row.locator("select")).toHaveCount(0);
+    await expect(row.getByRole("button", { name: "Answer →" })).toBeVisible();
+
+    // Durable + non-destructive: a fresh read of the SAME question confirms it is still pending, still
+    // carries its original escalatedAt (a snooze is not a retirement — nothing about the escalation
+    // itself was cleared), and now carries a future acknowledgedUntil.
+    const res = await page.request.get(`${loomDaemon.baseURL}/api/questions/${id}`);
+    const q = await res.json();
+    expect(q.state).toBe("pending");
+    expect(q.chosenOption).toBeNull();
+    expect(q.escalatedAt).not.toBeNull();
+    expect(q.acknowledgedUntil).not.toBeNull();
+    expect(Date.parse(q.acknowledgedUntil)).toBeGreaterThan(Date.now());
+  });
+
+  test("a non-stale pending request never shows a Snooze control", async ({ page, loomDaemon }) => {
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "NonStaleMgr" });
+    const title = `Fresh ask ${Date.now()}`;
+    await loomDaemon.seedQuestion({
+      sessionId: mgr.sessionId, projectId: mgr.projectId, title,
+      options: ["A", "B"],
+    });
+
+    await page.goto(`${loomDaemon.baseURL}/`);
+    const row = page.locator("main").locator("div").filter({ hasText: title }).first();
+    await expect(row).toBeVisible();
+    await expect(row.getByText("DECISION NEEDED")).toBeVisible();
+    await expect(row.locator("select")).toHaveCount(0);
+  });
+});
