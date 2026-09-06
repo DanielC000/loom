@@ -125,6 +125,10 @@ const PERM = { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 };
 const GEO = { cols: 120, rows: 40 };
 
 let grandchildPid;
+// Every grandchild pid EVER assigned to `grandchildPid` across every scenario below — `finally` sweeps
+// this whole list, not just whatever `grandchildPid` currently holds (card 1155ad99: the single-variable
+// version silently dropped scenario 1's pid the instant scenario 2 overwrote it).
+const grandchildPids = [];
 try {
   // ============ Scenario 1: reapOrphanedDescendants directly reaps an already-orphaned descendant ============
   // Sanity-check the unit in isolation before trusting the full PtyHost integration below: kill the root
@@ -134,6 +138,7 @@ try {
   {
     const root = spawnRealRoot();
     grandchildPid = await readGrandchildPid(root);
+    grandchildPids.push(grandchildPid);
     check("unit: grandchild is alive right after spawn", isAlive(grandchildPid));
     root.kill();
     await waitUntil(() => !isAlive(root.pid), ROOT_DEATH_TIMEOUT_MS);
@@ -165,6 +170,7 @@ try {
     // wrapRealRootAsPty only needs `root`, not the grandchild pid, so hoisting costs nothing.
     nextFakePty = wrapRealRootAsPty(root);
     grandchildPid = await readGrandchildPid(root);
+    grandchildPids.push(grandchildPid);
     host.spawn({ sessionId: SID, cwd: tmpHome, permission: PERM, geometry: GEO, sessionEnv: {} });
     host.deliverHook(SID, { hook_event_name: "SessionStart" });
 
@@ -183,12 +189,48 @@ try {
       console.log("SKIP  session: the escaped dev-server process is GONE after session end (POSIX: setsid reparent to init, not reapable by ppid-walk)");
     }
   }
+
+  // ============ Scenario 3 (hygiene self-check): finally's OWN sweep, isolated from reapOrphanedDescendants ============
+  // Regression guard for card 1155ad99, deliberately independent of scenarios 1/2: on win32 those two
+  // grandchildren are ALREADY reaped by the real production path (reapOrphanedDescendants / host.stop)
+  // before `finally` ever runs — see the win32 checks above — so a check built on them can't discriminate
+  // whether `finally`'s own sweep works at all; it would read GREEN either way. These two bare fixtures
+  // are never passed to reapOrphanedDescendants or host.stop — `finally`'s sweep below is the ONLY thing
+  // that can kill them, on any platform, so they isolate exactly the bug this fix closes.
+  {
+    // Push each pid onto `grandchildPids` IMMEDIATELY after its own spawn, before any check() — a pid is
+    // tracked the instant it exists, never after a later sibling spawn that could itself throw (resource
+    // limit, EAGAIN under a loaded box) and unwind into `finally` with an earlier pid never pushed. That
+    // ordering rule is what makes this class of bug impossible here, not merely fixed for these two.
+    const bareA = spawnProcess(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], { stdio: "ignore" });
+    grandchildPids.push(bareA.pid);
+    const bareB = spawnProcess(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], { stdio: "ignore" });
+    grandchildPids.push(bareB.pid);
+    check("hygiene: bare fixture A is alive right after spawn", isAlive(bareA.pid));
+    check("hygiene: bare fixture B is alive right after spawn", isAlive(bareB.pid));
+  }
 } finally {
-  // Belt-and-suspenders cleanup so a failed assertion never leaks a real process from the test run itself.
-  if (grandchildPid && isAlive(grandchildPid)) { try { process.kill(grandchildPid, "SIGKILL"); } catch { /* ignore */ } }
+  // Sweep EVERY pid ever pushed onto `grandchildPids`, not just whatever `grandchildPid` currently holds —
+  // this is the belt-and-suspenders guarantee this comment used to claim without delivering: the old
+  // single-variable check here only ever killed the LAST grandchild assigned, so scenario 1's pid (already
+  // overwritten by scenario 2's assignment by the time this ran) was silently dropped and left running
+  // past the end of the process (card 1155ad99 — this is exactly how a CI run's baseline "1 orphan node
+  // process" was produced; GitHub Actions' own runner cleanup was the only thing ever killing it).
+  for (const pid of grandchildPids) {
+    if (pid && isAlive(pid)) { try { process.kill(pid, "SIGKILL"); } catch { /* ignore */ } }
+  }
   for (const f of fakes) { try { if (isAlive(f.pid)) process.kill(f.pid, "SIGKILL"); } catch { /* ignore */ } }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
+
+// Discriminates the fix above from the old single-variable guard: with the old "keep only the latest
+// pid" shape, an earlier tracked pid (e.g. scenario 1's, or hygiene fixture A) survives this point.
+// `waitUntil` (not a bare check) because SIGKILL is a request, not a synchronous guarantee of exit.
+const allTrackedDead = await waitUntil(
+  () => grandchildPids.every((pid) => !isAlive(pid)),
+  ROOT_DEATH_TIMEOUT_MS,
+);
+check("cleanup: finally's own sweep kills EVERY tracked grandchild pid, not just the most recently assigned one", allTrackedDead);
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — a worker's escaped dev-server process is reaped on session end, even though it outlived its own root process."
