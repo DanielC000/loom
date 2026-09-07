@@ -128,6 +128,13 @@ const ALLOWLIST = new Map([
   // comment prose, which this guard already skips), so the exemption is now dead weight — removed rather
   // than left in place, since an unnecessary exemption is a silent hole for a FUTURE bare literal to slip
   // through unnoticed.
+  // Card 3edf6ef7: `profileFields`'s read-only wire projection type (`ProfileWireView`) names the SAME
+  // two-way enum ("claude"|"codex") as `profiles/validate.ts`'s own `harness` field above, widened only to
+  // add `null` for an unset value — a TYPE signature, not a runtime path literal, the same shape already
+  // exempted for `sessions/service.ts`'s return-type signature and `profiles/field-consumers.ts`'s
+  // `ProfileHarness` type. Generic MCP-layer read-projection infra, not the adapter module; "bare" only
+  // (this file has no business ever gaining a `.claude` PATH literal).
+  ["mcp/entityRowFields.ts", "bare"],
 ]);
 
 function walk(dir, out) {

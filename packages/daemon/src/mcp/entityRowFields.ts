@@ -91,6 +91,45 @@ const PROFILE_FIELDS: Record<keyof Profile, 1> = {
 };
 const PROFILE_KEYS = Object.keys(PROFILE_FIELDS) as (keyof Profile)[];
 
-export function profileFields(row: Profile | undefined): Profile | undefined {
-  return row === undefined ? row : pickFields(row, PROFILE_KEYS);
+/** The wire-only shape `profileFields` actually returns: identical to `Profile` except `harness` is
+ *  widened to include `null`, so an UNSET profile can be told apart from one explicitly holding the
+ *  shipped default. This type exists ONLY for this projection's return value (never assigned back into
+ *  a real `Profile`, which stays `?: "claude" | "codex"` with no `null` member — see the comment below). */
+type ProfileWireView = Omit<Profile, "harness"> & { harness: "claude" | "codex" | null };
+
+export function profileFields(row: Profile | undefined): ProfileWireView | undefined {
+  if (row === undefined) return row;
+  const picked = pickFields(row, PROFILE_KEYS);
+  // Card 3edf6ef7: an unset `harness` (a NULL column becomes `undefined` per db.ts's `toProfile`) and a
+  // field this projection simply doesn't carry are INDISTINGUISHABLE once this router's `ok()` envelope's
+  // `JSON.stringify` drops the undefined-valued key — `profile_get`/`list_all_profiles` could not answer
+  // "has this profile's harness been set" without querying the `profiles` table directly.
+  //
+  // The fix has to answer a SEMANTIC question, not just a structural one: what should an unset harness
+  // serialize as? Resolving it to the shipped default literal ("claude") only trades one ambiguity for
+  // another — a reader could no longer tell "never touched" from "explicitly set to claude", which is
+  // exactly the property this card exists to make readable (a human write path now exists with no
+  // trustworthy read-back). `null` is the right value: it mirrors what the DB column itself already
+  // means (NULL = unset; insertProfile's own comment: "NULL = 'claude' (absent ⇒ today's only harness)"),
+  // so `null` = unset, `"claude"`/`"codex"` = explicitly set — three distinguishable, always-present wire
+  // states from two DB states plus the resolved default.
+  //
+  // Widening a LOCAL, wire-only return type (ProfileWireView, above) — never `Profile` itself — deliberately
+  // sidesteps the type constraint this card also flags (`Profile.harness` is `?: "claude" | "codex"` with
+  // NO `null` member): nothing downstream treats `profileFields()`'s result as a real `Profile` (every
+  // call site pipes it straight into `ok(...)` for the wire), so this widening has zero blast radius
+  // outside this one function's return value.
+  //
+  // Deliberately NOT fixed by changing db.ts's `toProfile()` (or the analogous `toSession()`) to stop
+  // returning `undefined` for an unset harness: that shared object is reused UNWRAPPED as the merge base
+  // in `profile_update`/`PUT /api/profiles/:id` (`{...existing, ...patch}` → `validateProfile` →
+  // `updateProfile`), whose partial-edit semantics treat an `undefined` `harness` as "leave the column
+  // as-is" (validate.ts's own doc comment on this field). Resolving it to ANY concrete value at that
+  // shared layer — `null` included — would silently persist it into a previously-NULL column on ANY
+  // unrelated profile edit — a write-path side effect this READ-only card must not introduce.
+  // `Session.harness` (db.ts's other mapper, `toSession`) has the identical shared-object hazard via its
+  // own fork/recycle "carry the pinned vendor CLI forward" call sites and is deliberately left out of
+  // THIS card's scope: no read consumer currently exposes it ambiguously to a blocked decision the way
+  // `profile_get` did, so it's a separate, symmetric follow-up, not this fix.
+  return { ...picked, harness: picked.harness ?? null };
 }
