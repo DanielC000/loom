@@ -190,9 +190,12 @@ try {
   const rm = await svc.recycleManager("mgrRig", "CONTINUE: pick up the fleet.");
   assertThree("recycleManager", optsFor(rm.id), { delta: MGR_DELTA, expectModel: PINNED_MODEL, role: "manager", doctrine: "orchestrate" });
   // NOTE: the agent-missing fallback in resume/recycle (agent gone ⇒ bare config.permission, no model) is
-  // a DEFENSIVE guard that can't be reached hermetically — a sessions.agent_id FK + deleteAgent's cascade
-  // delete the session ALONGSIDE its agent, so a dangling session (existing row, missing agent) is not a
-  // constructible state. The guard stands as belt-and-suspenders; there's nothing live to assert it against.
+  // a DEFENSIVE guard unreachable through normal app code — a sessions.agent_id FK + deleteAgent's cascade
+  // delete the session ALONGSIDE its agent, so ordinary app-level deletes never leave a dangling session
+  // (existing row, missing agent) behind. It IS constructible via external DB surgery (a raw FK-disabled
+  // DELETE, the "FK-toggle" technique — an imported/restored DB is the real-world analog), and it IS
+  // already asserted against by two tests that use exactly that technique: transcript-root-deny-spawn-paths.mjs
+  // and resume-permission-pin-agent-missing.mjs.
 } finally {
   try {
     const { removeWorktree } = await import("../dist/git/worktrees.js");
