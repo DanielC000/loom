@@ -41,10 +41,15 @@ const MERGEABLE_INCLUSION = {
   // confirmed deliberate (traced to this file's own header comment) at card 1059b3b9, not merely
   // inferred from its absence.
   name: false,
-  // Vendor-CLI selector — same trust tier as gateCommand (validate.ts's AGENT_FORBIDDEN_PROFILE_KEYS).
-  // Whether "Revert to bundled" should silently respawn a rig on a different vendor binary is an open
-  // question, not yet decided — see card 6b4d0b45. Excluded (preserved across adopt/reset) until then.
-  harness: false,
+  // DECIDED true — card 6b4d0b45 (lead gen 286). `harness`'s membership in
+  // AGENT_FORBIDDEN_PROFILE_KEYS (validate.ts) governs WHO MAY WRITE it, not WHETHER A BUNDLED RESET
+  // RESTORES it — those are independent axes, and three of that list's other four members
+  // (connections/vaultWrite/capabilities) already reset here, so exclusion was the odd one out, not
+  // the rule. "Revert to bundled" states it restores every shipped field; leaving `harness` out was a
+  // silent 13-of-14 asymmetry. Reverting also moves toward the safe shipped default ("claude"), never
+  // to an arbitrary or possibly-uninstalled vendor binary, so the blast-radius concern that motivated
+  // the original exclusion does not apply in the reset direction.
+  harness: true,
 } as const satisfies Record<Exclude<keyof Profile, "id">, boolean>;
 
 /** The subset of `MERGEABLE_INCLUSION`'s keys marked `true` — derived, not hand-copied, so this can
@@ -56,7 +61,7 @@ type MergeableField = {
 export const MERGEABLE_PROFILE_FIELDS = (Object.keys(MERGEABLE_INCLUSION) as (keyof typeof MERGEABLE_INCLUSION)[])
   .filter((k): k is MergeableField => MERGEABLE_INCLUSION[k]);
 
-// Compile-time check that `MergeableField` hasn't silently drifted from today's known 13-field set — a
+// Compile-time check that `MergeableField` hasn't silently drifted from today's known 14-field set — a
 // wider or narrower union than expected must be caught by the compiler, never left to be re-derived by
 // eye. Asserts type equality (mutual assignability, tuple-wrapped so the union doesn't distribute)
 // against a hand-written expected union: if `MergeableField` ever gains or loses a member, this fails
@@ -64,7 +69,7 @@ export const MERGEABLE_PROFILE_FIELDS = (Object.keys(MERGEABLE_INCLUSION) as (ke
 type _ExpectedMergeableField =
   | "role" | "description" | "allowDelta" | "skills" | "model" | "icon"
   | "browserTesting" | "documentConversion" | "restrictedTools" | "noCommit"
-  | "connections" | "vaultWrite" | "capabilities";
+  | "connections" | "vaultWrite" | "capabilities" | "harness";
 type _AssertMergeableFieldUnchanged = [MergeableField] extends [_ExpectedMergeableField]
   ? [_ExpectedMergeableField] extends [MergeableField] ? true : never
   : never;
@@ -129,6 +134,10 @@ function normalizeFields(p: Partial<Profile>): Record<MergeableField, unknown> {
     // Same off-by-default direction as connections; no bundled profile seeds capabilities, so shipped
     // always normalizes to [] — the merge rule protects a user's own grants across an "adopt".
     capabilities: p.capabilities ?? [],
+    // DELIBERATELY not normalized like every sibling above (mirrors validate.ts's return-literal
+    // comment on the same field): `Profile.harness` is `?: "claude" | "codex"` with NO null member, so
+    // absence — not a null — is how "claude" (the shipped default) is expressed.
+    harness: p.harness ?? "claude",
   };
 }
 

@@ -281,13 +281,28 @@ export function bundledProfileByName(name: string): Omit<Profile, "id"> | undefi
  *
  * ALSO advances the `base` snapshot to shipped (mirrors resetSkillToBundled's base re-sync) so the
  * post-reset state is PRISTINE (mine == base == shipped) rather than a stale "update available".
+ *
+ * `{ ...bundled }` is a raw spread, NOT a `MERGEABLE_PROFILE_FIELDS`-filtered patch — unlike
+ * `adoptProfileUpdate`, this function never consulted that list (verified empirically, card 6b4d0b45:
+ * before this fix, resetting a `harness:"codex"` row left it "codex", proving the spread alone doesn't
+ * restore an omitted-optional field — `updateProfile` treats an absent key as "leave column as-is", and
+ * no `BUNDLED_PROFILES` entry sets `harness`, so the key was never even present on the spread object).
+ * `harness` is normalized here EXPLICITLY (the `Profile.harness` type has no `null` member — see
+ * `validate.ts`'s return-literal comment on the same field — so, unlike `insertProfile`'s `?? null`
+ * DB-column coercion, the patch itself must carry the literal `"claude"` default) so the reset patch
+ * always carries a defined value and the column is actually overwritten to the shipped default rather
+ * than silently left untouched. A stored literal `"claude"` reads back identically to an absent/null
+ * column everywhere `harness` is consumed (every read site normalizes via `?? undefined`/`?? "claude"`/
+ * `=== "codex"`), so this introduces no new distinguishable state. Scoped to `harness` only — other
+ * optional fields a bundled def omits (`browserTesting`/`noCommit`/etc.) have the same spread-omission
+ * gap but are NOT this card's concern; flagged in the card's worker_report as a candidate follow-up.
  */
 export function resetProfileToBundled(db: Db, id: string): boolean {
   const existing = db.getProfile(id);
   if (!existing) return false;
   const bundled = bundledProfileByName(existing.name);
   if (!bundled) return false; // not a bundled profile (or renamed away from its bundled name)
-  db.updateProfile(id, { ...bundled }); // overwrite every field with the shipped values
+  db.updateProfile(id, { ...bundled, harness: bundled.harness ?? "claude" }); // overwrite every field with the shipped values
   db.setProfileBaseSnapshot(id, JSON.stringify(bundled)); // base = shipped: post-reset is pristine
   return true;
 }

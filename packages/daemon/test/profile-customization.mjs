@@ -34,7 +34,7 @@ const { buildServer } = await import("../dist/gateway/server.js");
 const { bundledProfileByName, resetProfileToBundled, seedProfileBaseSnapshots } = await import("../dist/profiles/seed.js");
 const {
   mergeProfile, profileCustomizationState, profileUpdateAvailable, previewProfileMerge,
-  profileUpdateDiff, adoptProfileUpdate,
+  profileUpdateDiff, adoptProfileUpdate, MERGEABLE_PROFILE_FIELDS,
 } = await import("../dist/profiles/customization.js");
 
 // A full bundled-shaped profile def (sans id) — the building block for mine/base/shipped.
@@ -85,6 +85,25 @@ try {
   const skEdit = mergeProfile(prof({ skills: null }), prof({ skills: [] }), prof({ skills: null }));
   check("[merge][array] skills [] != null counts as a user edit → keep mine []", skEdit.clean === true && Array.isArray(skEdit.merged.skills) && skEdit.merged.skills.length === 0);
 
+  // --- harness joins the merge set; `name` still does not (card 6b4d0b45) ----------------------------
+  check("[fields] MERGEABLE_PROFILE_FIELDS includes harness", MERGEABLE_PROFILE_FIELDS.includes("harness"));
+  check("[fields] MERGEABLE_PROFILE_FIELDS excludes name (identity match key)", !MERGEABLE_PROFILE_FIELDS.includes("name"));
+  // mine==base (user never touched harness) → fast-forward takes shipped's normalized default.
+  const harnessFF = mergeProfile(prof({ harness: "codex" }), prof({ harness: "codex" }), prof({}));
+  check("[merge][harness] untouched harness fast-forwards to shipped (absent → \"claude\" default)",
+    harnessFF.clean === true && harnessFF.merged.harness === "claude");
+  // shipped==base (Loom didn't change it) → keep mine's edited harness.
+  const harnessKeep = mergeProfile(prof({}), prof({ harness: "codex" }), prof({}));
+  check("[merge][harness] user-edited harness kept when shipped==base", harnessKeep.clean === true && harnessKeep.merged.harness === "codex");
+  // convergent: mine == shipped (both "codex", base "claude") → no conflict, even though harness only
+  // has two possible values (so a genuine all-three-differ conflict is impossible for this field).
+  const harnessConv = mergeProfile(prof({}), prof({ harness: "codex" }), prof({ harness: "codex" }));
+  check("[merge][harness] convergent mine==shipped is clean", harnessConv.clean === true && harnessConv.merged.harness === "codex");
+  // `name` is never in the mergeable field set at all — merged never carries a `name` key, whatever mine/shipped disagree on.
+  const nameMerge = mergeProfile(prof({ name: "Base Name" }), prof({ name: "Mine Name" }), prof({ name: "Shipped Name" }));
+  check("[merge][name] name excluded from the field set (never appears in merged, never a conflict)",
+    !("name" in nameMerge.merged) && nameMerge.conflicts.every((c) => c.field !== "name"));
+
   // --- seedProfileBaseSnapshots: backfill = shipped, seed-if-absent -----------------------------------
   db.insertProfile({ id: "pDev", ...prof({ name: "Dev" }) }); // bundled-by-name, pristine (== shipped)
   db.insertProfile({ id: "pCustom", ...prof({ name: "My Custom Rig" }) }); // user-created
@@ -134,8 +153,10 @@ try {
   // mine edits icon (not in base/shipped); shipped changed description; base behind on description → clean
   // non-overlapping update: description fast-forwards (mine==base) while the icon edit is kept.
   const bugfix = bundledProfileByName("Bugfix");
-  db.insertProfile({ id: "pAdopt", ...bugfix, description: "OLD BUGFIX DESC", icon: "🐞 MINE" }); // mine
-  db.setProfileBaseSnapshot("pAdopt", JSON.stringify({ ...bugfix, description: "OLD BUGFIX DESC" })); // base: old desc, no icon edit
+  // harness: "codex" on both mine and base (untouched by the user) → adopt should fast-forward it to
+  // shipped's default ("claude", since no BUNDLED_PROFILES entry sets harness) — card 6b4d0b45.
+  db.insertProfile({ id: "pAdopt", ...bugfix, description: "OLD BUGFIX DESC", icon: "🐞 MINE", harness: "codex" }); // mine
+  db.setProfileBaseSnapshot("pAdopt", JSON.stringify({ ...bugfix, description: "OLD BUGFIX DESC", harness: "codex" })); // base: old desc, no icon edit
   check("[adopt] precondition: update available", profileUpdateAvailable(db, "pAdopt") === true);
   const pv = previewProfileMerge(db, "pAdopt");
   check("[adopt] preview clean for a non-overlapping update", pv.clean === true);
@@ -145,6 +166,7 @@ try {
   check("[adopt] adopted keeps the user's icon edit AND takes the shipped description",
     db.getProfile("pAdopt").icon === "🐞 MINE" && db.getProfile("pAdopt").description === bundledProfileByName("Bugfix").description);
   check("[adopt] still customized (the edit survived)", profileCustomizationState(db, "pAdopt").customized === true);
+  check("[adopt][harness] untouched harness also fast-forwarded to shipped default (claude)", db.getProfile("pAdopt").harness === "claude");
 
   // --- adopt with a CONFLICT: unresolved → refused; resolution applied --------------------------------
   db.insertProfile({ id: "pConf", ...bundledProfileByName("Dev"), name: "Content Strategy", description: "MINE DESC" });
@@ -165,13 +187,19 @@ try {
   check("[adopt] pristine (no update) → no-update", adoptProfileUpdate(db, "pDev", {}).reason === "no-update");
 
   // --- reset advances base ---------------------------------------------------------------------------
-  db.updateProfile("pDev", { description: "EDIT", icon: "x" });
+  db.updateProfile("pDev", { description: "EDIT", icon: "x", harness: "codex" });
   db.setProfileBaseSnapshot("pDev", JSON.stringify({ ...shippedDev, model: "behind" })); // both customized + update
   check("[reset] precondition: customized + update", profileCustomizationState(db, "pDev").customized === true && profileCustomizationState(db, "pDev").updateAvailable === true);
   check("[reset] resetProfileToBundled returns true", resetProfileToBundled(db, "pDev") === true);
   const rs = profileCustomizationState(db, "pDev");
   check("[reset] state cleared: pristine (base advanced to shipped)", rs.customized === false && rs.updateAvailable === false);
   check("[reset] row restored to shipped fields", db.getProfile("pDev").description === shippedDev.description);
+  // card 6b4d0b45: `resetProfileToBundled` builds its patch from a raw `{...bundled}` spread, NOT a
+  // MERGEABLE_PROFILE_FIELDS-filtered one — a customized `harness` would silently survive reset unless
+  // the reset patch normalizes it explicitly (no BUNDLED_PROFILES entry sets `harness`, so the key is
+  // simply absent from the spread; `updateProfile` treats an absent key as "leave column as-is").
+  check("[reset][harness] a customized harness IS restored to the shipped default (claude) by reset",
+    db.getProfile("pDev").harness === "claude");
   check("[reset] reset → false for a non-bundled name", resetProfileToBundled(db, "pCustom") === false);
 
   // --- update-diff: base→shipped field changes -------------------------------------------------------
