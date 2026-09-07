@@ -594,18 +594,47 @@ try {
     const pending = await sessions.runWorkerGate(gateWorkerId);
     check("(K) the slow gate degrades to the pending shape", pending.settled === false);
     const isGateFailedMsg = (args) => args[0] === gateWorkerId && typeof args[1] === "string" && args[1].includes("[loom:gate-failed]");
-    // "exactly ONE" is a prove-a-negative property — gating on the arrival of the first matching push (as
-    // opposed to a fixed sleep) would shrink the window a genuine DUPLICATE nudge could still be caught in
-    // to ~zero, the same false-pass shape (A) was carded for. Instead poll runWorkerGate's OWN pending op
-    // for its terminal settle: `state !== "running"` means the op has left PendingOpRegistry's `entries`
-    // map for good (runWorkerGate passes `retainMs`, so it lands in the RETAINED view rather than
-    // evicting to `undefined` — see pending-ops.ts's "EVICT-ON-SETTLE"/"RETAINED TERMINAL VIEW" class doc)
-    // — and that transition happens synchronously, in the SAME un-awaited callback turn as the
-    // `onSettledAfterPending` push that sends this nudge, so by the time this observes the terminal state,
-    // the (sole legitimate) push has already landed. Same seam an existing sibling test already uses for
-    // this exact purpose — see run-gate-result-consumption.mjs's own `sessions.pendingOps.peek(...)` wait.
-    await sharedWaitUntil(() => sessions.pendingOps.peek(`gate:${gateWorkerId}`)?.state !== "running", { timeoutMs: 10000, intervalMs: 20, label: "(K) gate op settle" });
+    // Card c4b70fe8 (the fix for ccf23ffb's diagnosis): wait on the REAL delivery signal, never on this
+    // op's settle STATE — that used to be a safe proxy but no longer is. Card 691a2184 made
+    // `onSettledAfterPending` `async` (it now `await`s `readFailedNamesForOp` before composing this nudge
+    // — see service.ts's own corrected comment at that callback), and `PendingOpRegistry.attach()` still
+    // flips the op's `state` to its terminal value SYNCHRONOUSLY, strictly BEFORE that async callback
+    // body runs. So "state !== running" now observably PRECEDES the nudge landing rather than coinciding
+    // with it — the OLD wait below (polling that state) raced this gap and flaked in-suite under real
+    // host contention: see memory `worker-run-gate-scenario-k-async-nudge-race` for the full mechanism
+    // and the deterministic repro. Poll for the nudge's actual arrival instead.
+    await sharedWaitUntil(() => enqueued.some(isGateFailedMsg), { timeoutMs: 10000, intervalMs: 20, label: "(K) gate-failed nudge delivery" });
 
+    // EXACTLY-ONE — PRESERVED, not weakened, via a different (stronger, deterministic) argument than the
+    // old state-based wait implicitly relied on:
+    //   1. `PendingOpRegistry` invokes `onSettledAfterPending` EXACTLY ONCE per settle — already proven at
+    //      the REGISTRY level, independent of this file, by pending-ops-registry.mjs's own "(nudge
+    //      slow-ok)"/"(settle)" cases. Not re-derived here.
+    //   2. This specific callback's body (service.ts's `onSettledAfterPending` passed to `runWorkerGate`'s
+    //      own `pendingOps.attach` call) reaches at most ONE `enqueueDurableMessage` call per invocation:
+    //      its `cancelled` branch `return`s before the fall-through path, so the two are mutually
+    //      exclusive within a single call, never both.
+    //   3. JS run-to-completion between `await` points means a hypothetical FUTURE regression that added a
+    //      SECOND send to the SAME invocation (with no intervening `await` between the two sends) would
+    //      already be reflected in `enqueued` by the time ANY setTimeout-driven poll — including the one
+    //      just above — observes the first occurrence; a same-tick duplicate cannot be missed by racing
+    //      the poll interval, only a duplicate separated by a genuinely NEW async gap could be, and no
+    //      such gap exists in the callback today.
+    // (1)+(2)+(3) together mean "≥1 arrived" (just proven above) entails "=1 arrived", so this
+    // deliberately does NOT add a second, bounded settle-window recheck to police it.
+    //
+    // ⚠️ THIS IS A PRIOR AUTHOR'S OBJECTION, ADDRESSED — the comment this replaced said, verbatim, that
+    // gating on the arrival of the first matching push "would shrink the window a genuine DUPLICATE nudge
+    // could still be caught in to ~zero, the same false-pass shape (A) was carded for." That objection was
+    // sound against a wait with NO further argument attached to it — a bare "stop polling the instant you
+    // see one" IS exactly the shrunk-window false-pass shape it names. It does not bind HERE, because (1)-
+    // (3) above replace "the window happened to be wide enough this run" with "no window is needed at
+    // all": they establish that a duplicate is either IMPOSSIBLE from a single invocation (2) or, if a
+    // future edit made two sends reachable with no `await` between them, VISIBLE BY CONSTRUCTION the
+    // instant the first is (3) — never a matter of catching it before some window closes. If a future
+    // change to service.ts's callback ever inserts a genuine async gap BETWEEN two reachable sends, (3) no
+    // longer holds and this reasoning WOULD need a settle-window recheck again — that dependency is
+    // recorded, greppably, at the callback itself in service.ts (search for "worker-run-gate.mjs" there).
     const gateFailedMsgs = enqueued.filter(isGateFailedMsg);
     check("(K) exactly ONE [loom:gate-failed] nudge reached the worker's own pty", gateFailedMsgs.length === 1);
     const text = gateFailedMsgs[0]?.[1] ?? "";

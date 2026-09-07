@@ -19405,14 +19405,33 @@ export class SessionService {
         }
       },
       // Card 74716cfb: ASYNC (was sync) — this callback now `await`s readFailedNamesForOp before composing
-      // the `[loom:gate-failed]` nudge's deferred-trigger appendix (see that call site below). Safe: the
-      // caller (`PendingOpRegistry.attach`, pending-ops.ts) invokes this fire-and-forget with no `await`
-      // of its own (`onSettledAfterPending?.(...)`, never `await onSettledAfterPending?.(...)`) and its
-      // declared type is `=> void`, which TypeScript accepts from an async function exactly like every
-      // other void-typed callback in this file already returns unawaited promises from (e.g. every
+      // the `[loom:gate-failed]` nudge's deferred-trigger appendix (see that call site below). Safe FOR
+      // THE CALLER: `PendingOpRegistry.attach` (pending-ops.ts) invokes this fire-and-forget with no
+      // `await` of its own (`onSettledAfterPending?.(...)`, never `await onSettledAfterPending?.(...)`)
+      // and its declared type is `=> void`, which TypeScript accepts from an async function exactly like
+      // every other void-typed callback in this file already returns unawaited promises from (e.g. every
       // `enqueueDurableMessage` call inside the analogous merge-settle callback below never awaits
-      // anything either) — so this changes nothing about ordering or error handling, only unblocks the
-      // one new `await` this card needs.
+      // anything either) — so this changes nothing about the CALLER's own ordering or error handling.
+      // ⚠️ CORRECTION (card c4b70fe8, from ccf23ffb's diagnosis): the claim above is TRUE about the
+      // caller and FALSE about every OBSERVER of this op's settle state. The op's `state` already flips
+      // to done/failed SYNCHRONOUSLY, strictly BEFORE this callback body runs — that part predates this
+      // card and is unchanged. But making this callback `async` pushed everything after its first
+      // `await` (including the `[loom:gate-failed]` nudge composed and pushed below) into a LATER turn:
+      // the push slid from "the same synchronous turn as the settle" to "after an fs read". A caller
+      // polling `pendingOps.peek(key)?.state` (or `gate_status`) can now observe "settled" before the
+      // nudge has actually been enqueued — worker-run-gate.mjs's scenario (K) did exactly this and flaked
+      // in-suite under real host contention (see memory `worker-run-gate-scenario-k-async-nudge-race`).
+      // Wait on the actual nudge delivery, never on this op's settle state, if you need to know the push
+      // landed.
+      // ⚠️ DEPENDENCY A FUTURE EDIT HERE CAN SILENTLY BREAK (card c4b70fe8): `packages/daemon/test/
+      // worker-run-gate.mjs`'s scenario (K) "exactly ONE [loom:gate-failed] nudge" check no longer waits
+      // on this op's settle state (see its own wait-site comment for the full argument) — it waits for
+      // the nudge's actual delivery and then treats "≥1 arrived" as "=1 arrived" on the strength of THIS
+      // callback reaching AT MOST ONE send per invocation with NO async gap between potential sends. If
+      // you add a NEW `await` anywhere in this callback between two potential send points (or make more
+      // than one send reachable from a single invocation), that test will NOT fail loudly — it silently
+      // degrades to proving only "≥1", and a duplicate nudge can ship undetected. Re-check that scenario's
+      // comment before adding an `await` here.
       async (outcome, opId) => {
         // TOMBSTONE ALREADY MARKED (card e3e40167, verdict persistence added by card 4c5bf820): the
         // `onSettle` opt below (fires unconditionally, for EVERY settle — not just a surfaced-pending one,
