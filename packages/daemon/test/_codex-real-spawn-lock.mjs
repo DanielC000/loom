@@ -118,22 +118,47 @@ function tryAcquireOnce() {
   }
 }
 
+// Card bb9a30ba: identifies the WAITING file for the two WARN lines below. Each CODEX_REAL_SPAWN_BASENAMES
+// file runs as its own child process (scripts/test-daemon.mjs's `spawn(process.execPath, [file], ...)`),
+// so `process.argv[1]` is that file's own path — no stack-trace inspection needed (the membership guard's
+// own doc, above, already rejects stack-trace-based identification as fragile; this sidesteps it entirely
+// by reading the one thing node itself guarantees: the entry script path of the running process).
+function waiterName() {
+  return process.argv[1] ? path.basename(process.argv[1]) : "unknown-caller";
+}
+
 /**
  * Acquire the shared real-codex-spawn lock, polling up to WAIT_TIMEOUT_MS. Registers the lock file for
  * this process's own guaranteed cleanup (`_tmp-fixture.mjs`'s `beforeExit`/`exit` hooks) so a crash
  * mid-run still releases it (SIGKILL excepted — disclosed, unmitigated non-coverage, same as every other
  * caller of that helper).
+ *
+ * Card bb9a30ba: a successful acquire used to be COMPLETELY SILENT, whether instant or delayed 179s by a
+ * contended sibling — making lock contention structurally unattributable in every log, forever. Now: stay
+ * silent on the overwhelmingly common uncontended case (no noise), but on first blocked poll emit a
+ * `WARN  ` line (the declared-warning convention `scripts/test-daemon.mjs`'s `WARN_LINE_RE` scans for, so
+ * it surfaces even on a passing gate — see codex-transcript-real-spawn.mjs's `reportGracefulStopExitCode`
+ * for the same convention), and another on eventual acquire carrying the observed wait duration. This is
+ * observability only — the acquire/retry/stale-healing mechanism above is unchanged.
  * @returns {Promise<() => void>} a release function — call it exactly once when finished with codex.
  */
 export async function acquireCodexRealSpawnLock() {
   const deadline = Date.now() + WAIT_TIMEOUT_MS;
+  let waitStartedAt = null;
   while (!tryAcquireOnce()) {
+    if (waitStartedAt === null) {
+      waitStartedAt = Date.now();
+      console.log(`WARN  ${waiterName()} is waiting on the real-codex-spawn lock (${LOCK_PATH}) — held by a sibling real-codex-spawn test file`);
+    }
     if (Date.now() > deadline) {
       throw new Error(
         `could not acquire ${LOCK_PATH} within ${WAIT_TIMEOUT_MS}ms — held by a stuck/still-running sibling real-codex-spawn test file`,
       );
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+  }
+  if (waitStartedAt !== null) {
+    console.log(`WARN  ${waiterName()} acquired the real-codex-spawn lock after waiting ${Date.now() - waitStartedAt}ms`);
   }
   registerForCleanup(LOCK_PATH);
   let released = false;
