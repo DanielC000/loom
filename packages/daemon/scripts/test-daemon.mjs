@@ -1916,6 +1916,18 @@ if (isMain) {
   // any divergence).
   const executedCount = results.filter((r) => !r.skipped).length;
 
+  // Card 22d995ca: a DECLARED WARNING is a test's own `console.log("WARN  <message>")` line — the SAME
+  // two-space convention `check()` already uses for `PASS  `/`FAIL  ` (see codex-transcript-real-spawn.mjs's
+  // `reportGracefulStopExitCode`, the motivating case: a KNOWN, non-blocking accommodation that must stay
+  // visible even when the file it lives in exits 0). Scanned across EVERY result's full captured `stdout`,
+  // pass or fail alike — unlike `failed` above, a PASSING file's own stdout is otherwise discarded entirely
+  // once this run finishes (see the `FAILURES:` epilogue below, which only ever reads `failed`), which was
+  // the actual defect: a non-blocking warning survived nowhere once the file it lived in started passing.
+  const WARN_LINE_RE = /^WARN {2}(.+)$/;
+  const declaredWarnings = results
+    .map((r) => ({ name: r.name, lines: (r.stdout ?? "").split("\n").filter((l) => WARN_LINE_RE.test(l)) }))
+    .filter((w) => w.lines.length > 0);
+
   console.log(`\n${pass}/${SELECTED.length} hermetic daemon test files passed — all selected files executed (a skip would have exited above). (pool size ${EFFECTIVE_POOL_SIZE})`);
   // Card 12bdea9e: a test excluded here has no owner and no alarm — it decays silently and its decay
   // is invisible until someone happens to run it by hand. Naming the excluded set on EVERY gate run
@@ -2001,6 +2013,25 @@ if (isMain) {
     }
   } catch (err) {
     console.warn(`⚠ gate-timing compaction block failed (non-fatal): ${err.message}`);
+  }
+
+  // Card 22d995ca: printed UNCONDITIONALLY — pass OR fail — and positioned here deliberately, as the LAST
+  // thing this file prints before either terminal branch below (the FAILURES: epilogue + process.exit(1),
+  // or the single "✅ ..." line on a clean pass). The gate step that runs this file (`gate-runner.ts`)
+  // retains a bounded TRAILING ring of a step's own stdout+stderr even on a genuine PASS (`tail()`,
+  // OUTPUT_TAIL_BYTES) — the queryable channel `gate_status(opId)` and the persisted full-output spill both
+  // read from; placing this block as close as possible to this file's own end-of-output maximizes the
+  // chance it survives whatever (if anything) the outer gate command still prints afterward. Same
+  // one-string + writeFullySync discipline as the FAILURES: epilogue immediately below (card 14e733fb) —
+  // a `console.log` loop's writes are exactly the ones a POSIX host could lose to a later process.exit()
+  // tearing the process down before they reach the pipe.
+  if (declaredWarnings.length) {
+    const warningLines = ["WARNINGS:"];
+    for (const w of declaredWarnings) {
+      warningLines.push(`  - ${w.name}:`);
+      for (const line of w.lines) warningLines.push(`      ${line}`);
+    }
+    writeFullySync(1, warningLines.join("\n") + "\n");
   }
 
   if (failed.length) {

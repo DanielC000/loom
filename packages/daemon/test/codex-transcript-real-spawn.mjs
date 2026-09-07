@@ -304,13 +304,19 @@ if (persistedRow) {
 // below) is a DIFFERENT failure mode than this — it still fails loud; only a completed, non-zero exit is
 // downgraded to non-blocking.
 //
+// Card 22d995ca: the line below leads with `WARN  ` (two spaces — the SAME convention `check()` already
+// uses for its own `PASS  `/`FAIL  ` prefix) so scripts/test-daemon.mjs's own declared-warning scan (see
+// the `WARN_LINE_RE`/`declaredWarnings` block near the end of that file) can find it and surface it in the
+// runner's own aggregate output even when this file's overall exit is 0 — the defect that card fixes: this
+// accommodation used to print a warning that survived NOWHERE once the file it lived in started passing.
+//
 // Removable once the real stopCodex fix lands on 176bdb0c and this reports clean for a sustained period —
 // see that card for the live defect status.
 function reportGracefulStopExitCode(code) {
   if (code === 0) {
     check("the real codex process exited with code 0 after a graceful stop", true);
   } else {
-    console.log(`⚠️  ACCOMMODATION (card 176bdb0c): the real codex process exited with code ${code} (not 0) after an INTENDED graceful stop. This is the KNOWN, LIVE, UNFIXED flake measured at 2/13 ≈ 15.4% — NOT failing the gate on this observation. If you are reading this, please note the observed code and the stop→exit elapsed time on card 176bdb0c; the real stopCodex fix is still pending in pty/host.ts.`);
+    console.log(`WARN  ⚠️  ACCOMMODATION (card 176bdb0c): the real codex process exited with code ${code} (not 0) after an INTENDED graceful stop. This is the KNOWN, LIVE, UNFIXED flake measured at 2/13 ≈ 15.4% — NOT failing the gate on this observation. If you are reading this, please note the observed code and the stop→exit elapsed time on card 176bdb0c; the real stopCodex fix is still pending in pty/host.ts.`);
   }
 }
 host.stop(SESSION_ID, "graceful");
