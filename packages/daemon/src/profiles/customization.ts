@@ -13,23 +13,63 @@ import { bundledProfileByName } from "./seed.js";
  * the documented limitation). See `[[Profile Customization]]` in the vault for the full contract.
  */
 
-/** The mergeable/compared fields — every writable Profile field EXCEPT `name` (the identity key). */
-export const MERGEABLE_PROFILE_FIELDS = [
-  "role",
-  "description",
-  "allowDelta",
-  "skills",
-  "model",
-  "icon",
-  "browserTesting",
-  "documentConversion",
-  "restrictedTools",
-  "noCommit",
-  "connections",
-  "vaultWrite",
-  "capabilities",
-] as const;
-type MergeableField = (typeof MERGEABLE_PROFILE_FIELDS)[number];
+/**
+ * Every writable Profile field (all 15 non-`id` fields), explicitly marked whether it participates in
+ * the bundled-profile merge/diff/adopt-reset path. `false` is a DELIBERATE, ANNOTATED exclusion, never
+ * a bare omission — `as const satisfies Record<Exclude<keyof Profile, "id">, boolean>` below forces a
+ * field newly added to `Profile` to get a reviewed true/false entry here at compile time, instead of
+ * silently landing outside the merge set the way `harness` did until card 1059b3b9 fixed it (see that
+ * card, and `profiles/validate.ts`'s matching `satisfies` totality check on the return-literal side of
+ * the same class of bug).
+ */
+const MERGEABLE_INCLUSION = {
+  role: true,
+  description: true,
+  allowDelta: true,
+  skills: true,
+  model: true,
+  icon: true,
+  browserTesting: true,
+  documentConversion: true,
+  restrictedTools: true,
+  noCommit: true,
+  connections: true,
+  vaultWrite: true,
+  capabilities: true,
+  // Identity match key — renaming un-bundles a profile (the documented limitation; see this file's
+  // header comment). Merging it makes no sense on its own terms, so this is a permanent exclusion —
+  // confirmed deliberate (traced to this file's own header comment) at card 1059b3b9, not merely
+  // inferred from its absence.
+  name: false,
+  // Vendor-CLI selector — same trust tier as gateCommand (validate.ts's AGENT_FORBIDDEN_PROFILE_KEYS).
+  // Whether "Revert to bundled" should silently respawn a rig on a different vendor binary is an open
+  // question, not yet decided — see card 6b4d0b45. Excluded (preserved across adopt/reset) until then.
+  harness: false,
+} as const satisfies Record<Exclude<keyof Profile, "id">, boolean>;
+
+/** The subset of `MERGEABLE_INCLUSION`'s keys marked `true` — derived, not hand-copied, so this can
+ *  never itself drift from the map above. */
+type MergeableField = {
+  [K in keyof typeof MERGEABLE_INCLUSION]: (typeof MERGEABLE_INCLUSION)[K] extends true ? K : never;
+}[keyof typeof MERGEABLE_INCLUSION];
+
+export const MERGEABLE_PROFILE_FIELDS = (Object.keys(MERGEABLE_INCLUSION) as (keyof typeof MERGEABLE_INCLUSION)[])
+  .filter((k): k is MergeableField => MERGEABLE_INCLUSION[k]);
+
+// Compile-time check that `MergeableField` hasn't silently drifted from today's known 13-field set — a
+// wider or narrower union than expected must be caught by the compiler, never left to be re-derived by
+// eye. Asserts type equality (mutual assignability, tuple-wrapped so the union doesn't distribute)
+// against a hand-written expected union: if `MergeableField` ever gains or loses a member, this fails
+// to compile. Positive-controlled by construction — edit either union and the assignment below breaks.
+type _ExpectedMergeableField =
+  | "role" | "description" | "allowDelta" | "skills" | "model" | "icon"
+  | "browserTesting" | "documentConversion" | "restrictedTools" | "noCommit"
+  | "connections" | "vaultWrite" | "capabilities";
+type _AssertMergeableFieldUnchanged = [MergeableField] extends [_ExpectedMergeableField]
+  ? [_ExpectedMergeableField] extends [MergeableField] ? true : never
+  : never;
+const _mergeableFieldUnionCheck: _AssertMergeableFieldUnchanged = true;
+void _mergeableFieldUnionCheck;
 
 // `allowDelta` / `skills` / `connections` are string[]-valued; everything else (but `capabilities`) is a
 // scalar/boolean. `capabilities` is object[]-valued and needs its own canonicalization (see fieldEqual).

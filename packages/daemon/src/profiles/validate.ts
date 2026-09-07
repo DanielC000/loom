@@ -220,6 +220,18 @@ export function validateProfile(
   const d = r.data;
   const restrictedToolsError = assistantRestrictedToolsOmittedError(d.role, opts?.previousRole, opts?.patch ?? raw);
   if (restrictedToolsError) return { ok: false, error: restrictedToolsError };
+  // COMPILE-TIME FIELD TOTALITY (card 1059b3b9): the `satisfies Record<keyof Omit<Profile,"id">,
+  // unknown>` below forces every key of Omit<Profile,"id"> to be named in this literal — the write-path
+  // counterpart of entityRowFields.ts's `PROFILE_FIELDS: Record<keyof Profile, 1>` on the READ path. A
+  // future optional field added to `Profile` that this literal forgets to mention now fails the BUILD
+  // instead of silently shipping a `200 OK` that drops it — the bug that shipped on `harness` (fixed by
+  // card fa2277b6, before this check existed).
+  //
+  // THE ONE SANCTIONED ESCAPE, if a field genuinely should never be persisted by this literal: narrow
+  // the `satisfies` target itself, e.g. `Record<keyof Omit<Profile, "id" | "thatField">, unknown>`, WITH
+  // a comment at the narrowing explaining why. That is a deliberate, reviewed decision — never widen the
+  // target just to make a compile error go away. TypeScript has no way to enforce this by itself; only
+  // this comment stands between a future red build and someone silencing it the fast way.
   return {
     ok: true,
     value: {
@@ -250,6 +262,6 @@ export function validateProfile(
       // — and both REST handlers persist `v.value`, never `req.body`. So no route could set it at all,
       // while a db-layer grep still read green because insertProfile/updateProfile do bind the column.
       harness: d.harness,
-    },
+    } satisfies Record<keyof Omit<Profile, "id">, unknown>,
   };
 }
