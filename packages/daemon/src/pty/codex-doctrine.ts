@@ -65,16 +65,85 @@ export const BUSY_STATUS_MARKER = /Working \(\d+s.*esc to interrupt\)/;
 export const BUSY_TITLE_SPINNER_RE = /\x1b\]0;[⠀-⣿]/;
 
 /**
- * The static input-box placeholder (landmine #2's own "false positive" text — ⛔ NEVER use this to
- * conclude CURRENT idle state; it is present during busy too, see `BUSY_STATUS_MARKER`'s own doc).
- * Reused here for a DIFFERENT, narrower, one-time question: "has codex rendered its main TUI at least
- * ONCE since boot" (i.e. boot has passed whatever screen — the trust dialog or straight to ready —
- * comes before it), which the real-spawn test (`test/codex-stateful-runtime-real-spawn.mjs`) already uses
- * as its own boot-complete signal. Checked ONCE (latched, never re-evaluated as an ongoing state) by
- * `codex-host.ts#isCodexReadyMarkerPresent` to gate the one-time kickoff delivery (card 353f6dc4's C1
- * fix) — never used to decide busy/idle on an ongoing basis, which is the one thing landmine #2 forbids.
+ * The static input-box placeholder. The probe's findings.md documents this text sitting in TWO DISTINCT
+ * traps — a reader (and, once, this codebase) can correctly defend against one and still walk straight
+ * into the other:
+ *   - **State 4 ("landmine #2")**: the placeholder is present DURING BUSY too — it is static chrome, not
+ *     an idle signal. ⛔ NEVER use its presence to conclude CURRENT idle state (see `BUSY_STATUS_MARKER`'s
+ *     own doc for the reliable busy/idle signal). This codebase HAS always defended against this one: the
+ *     placeholder is used ONLY as a one-time "has codex rendered its main TUI at least once since boot"
+ *     latch (checked ONCE, never re-evaluated as an ongoing state, by `codex-host.ts#isCodexReadyMarkerPresent`
+ *     — busy/idle detection reads `BUSY_STATUS_MARKER`/`BUSY_TITLE_SPINNER_RE` exclusively and never this
+ *     text at all).
+ *   - **State 1, card 448f1b4a**: the placeholder ALSO renders in the VERY FIRST boot frame, ALONGSIDE the
+ *     header still reading `model: loading` — BEFORE the model/profile has actually finished resolving
+ *     (see `CODEX_MODEL_LOADED_RE`'s own doc for the full specimen). Being a one-time latch defends against
+ *     State 4, but says NOTHING about State 1: "has this rendered at least once" is true the instant the
+ *     boot skeleton first paints, which can be well before the model is actually loaded. A real merge gate
+ *     (op 43cd9ec1) captured exactly this: the placeholder alone read as "ready," and a submit landed on it.
+ * ⚠️ **This constant's own presence being latched-not-ongoing is NOT evidence the question "is codex ready"
+ * was fully considered — it only answers "has codex passed whatever comes before the ready box," which is
+ * a WEAKER question than boot-readiness.** `codex-host.ts#isCodexReadyMarkerPresent` (built on this
+ * constant) is therefore combined with `codex-host.ts#isCodexModelLoaded` (built on `CODEX_MODEL_LOADED_RE`)
+ * — the composite is what `pty/host.ts`'s `live.bootReady` gates on, never this text alone.
  */
 export const CODEX_READY_PLACEHOLDER = "Ask Codex to do anything";
+
+/**
+ * Card 448f1b4a: the header's `model:` line while codex is still resolving its configured model/profile —
+ * rendered in the VERY FIRST boot frame, ALONGSIDE {@link CODEX_READY_PLACEHOLDER}, before the trust
+ * dialog (if any) and before the real ready state. Probe findings.md State 1 documented this exact trap
+ * at spec time: "the very first frame renders a boxed header... and an input placeholder line... before
+ * the model/profile has even finished loading (header shows `model: loading` at this point). This is a
+ * real trap for a naive 'wait for the ready-looking text, then submit' adapter" — a trap that was never
+ * wired into `codex-host.ts#isCodexReadyMarkerPresent`, and a real merge gate (op 43cd9ec1) later captured
+ * exactly this: the ready placeholder rendered while this text was still on screen, and the harness
+ * submitted into it. State 3 documents the real-ready form as `model: gpt-6-astra medium` (not "loading").
+ *
+ * ⛔ This is intentionally a POSITIVE match ("model:" followed by something that is NOT "loading"), never
+ * the NEGATION of a "model: loading" match. `codex-host.ts#isCodexReadyMarkerPresent`'s own doc explains
+ * why: the caller evaluates this against an ACCUMULATING scan buffer that never removes old bytes (only
+ * trims from the front once capped), so a negated check ("loading" is absent) would go permanently true
+ * the instant "loading" first scrolls out of the cap window even if the model NEVER actually finished
+ * resolving — the same landmine `BUSY_STATUS_MARKER`'s own doc warns against for busy/idle. A POSITIVE
+ * match is safe against that same buffer for the same reason `CODEX_READY_PLACEHOLDER` is: the real model
+ * name, once rendered even once, never reverts to "loading" later in the session, so "has this ever
+ * appeared" is a sound one-time question here too.
+ *
+ * 🔴 MUST BE TESTED AGAINST {@link stripAnsiCsi}'S OUTPUT, NEVER THE RAW `screenScan` BUFFER DIRECTLY.
+ * Confirmed against gate `43cd9ec1`'s own raw captured bytes (`~/.loom/gate-output/43cd9ec1-*.log`,
+ * `od -c` verified real `\x1b` bytes, not a log-rendering artifact): the real frame is `model:` + spaces +
+ * `\x1b[3m` (italic-on) + `loading` + `\x1b[23m` (italic-off) — codex styles the VALUE token with its own
+ * CSI span, separate from the label. Tested raw (no strip), `\s+` consumes the plain spaces and lands
+ * EXACTLY on the `\x1b` byte; `(?!loading\b)` then succeeds (the literal text "loading" does NOT start at
+ * an ESC byte), and `\S+` (ESC is not whitespace) happily swallows `\x1b[3mloading\x1b[23m` as its match —
+ * so the UNSTRIPPED regex returns TRUE while the model is still genuinely loading, reintroducing this
+ * card's own defect through the fix meant to close it. `codex-host.ts#isCodexModelLoaded` strips ANSI CSI
+ * sequences (mirrors `pty/host.ts`'s own `ANSI_CSI`/`collapseBoot`, kept LOCAL here rather than imported —
+ * see `stripAnsiCsi`'s own doc for why) before testing this pattern, which is the ONLY reason this stays
+ * correct against the real byte stream. ⚠️ The real-ready form (`model: gpt-6-astra medium`, State 3) was
+ * NOT similarly byte-verified — no raw capture of it was available at fix time (disclosed gap, not
+ * assumed-safe); `stripAnsiCsi` is a defensive, unconditional strip specifically so this doesn't depend on
+ * that byte shape being known.
+ */
+export const CODEX_MODEL_LOADED_RE = /model:\s+(?!loading\b)\S+/;
+
+/**
+ * Strip ANSI CSI escape sequences (mirrors `pty/host.ts`'s own private `ANSI_CSI`/`collapseBoot` — same
+ * technique, same underlying problem: codex's real TUI styles individual tokens on the SAME line with
+ * separate CSI spans, so a plain-text regex tested against raw bytes can mismatch, or — the actually-
+ * observed failure — silently match the WRONG thing by swallowing the escape sequence itself as part of a
+ * `\S+` token; see {@link CODEX_MODEL_LOADED_RE}'s own doc for the confirmed real specimen). Kept as a
+ * LOCAL copy rather than importing `pty/host.ts`'s `ANSI_CSI` — this module (`codex-doctrine.ts` →
+ * `codex-host.ts`) is deliberately the LOWER layer `pty/host.ts` imports FROM (see this file's own header),
+ * so importing back from `pty/host.ts` would invert that layering for one regex. Deliberately does NOT also
+ * collapse whitespace the way `collapseBoot` does — `CODEX_MODEL_LOADED_RE`'s own `\s+` needs real
+ * whitespace to still be present between "model:" and its value after stripping.
+ */
+const ANSI_CSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+export function stripAnsiCsi(s: string): string {
+  return s.replace(ANSI_CSI_RE, "");
+}
 
 const md5 = (buf: Buffer | string): string => createHash("md5").update(buf).digest("hex");
 

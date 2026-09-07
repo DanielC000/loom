@@ -10261,6 +10261,43 @@ export class SessionService {
   }
 
   /**
+   * Card 448f1b4a — consumes `PtyHostEvents.onCodexBootStuck`: a codex session's `live.bootReady` latch
+   * (ready marker + model-loaded + trust-dialog-resolved, ALL together — see `CodexLive.bootReady`'s own
+   * doc) never fired within its bounded ceiling (`info.timeoutMs`). Before this card, `enqueueStdinCodex`/
+   * `submitCodex` had no readiness awareness of their own, so a not-yet-ready codex TUI could silently
+   * receive a submit from any of this codebase's real `enqueueStdin` callers; the fix queues everything
+   * until `bootReady` latches — correct, but it turns "boot never completes" from a single silently-
+   * undelivered kickoff into every queued caller's message waiting forever with nothing to report it. This
+   * is that report. Reuses `handleCodexSubmitUnconfirmed`'s established two-recipient, durable-event shape
+   * immediately above rather than inventing a new one:
+   *   - RECIPIENT: `sessionId` itself — best-effort only (the session is, by definition, not yet able to
+   *     receive anything; this nudge simply queues behind whatever else is stuck, and is delivered if/when
+   *     the session naturally recovers).
+   *   - SENDER (the actionable half): for a worker, that's its manager (`parentSessionId`) — the one live
+   *     party who can actually intervene (inspect the session, `worker_stop`+respawn) while this session
+   *     sits frozen pre-boot. A session with no `parentSessionId` has no programmatic party to nudge — the
+   *     durable event below still records the gap for a human auditing the log.
+   *
+   * ⚠️ Deliberately ONE-SHOT (see `CodexLive.bootReadyTimer`'s own doc) — a LATE boot-readiness still
+   * resolves normally afterward; this only reports that the wait already exceeded `info.timeoutMs` once,
+   * it does not mean the session is permanently unrecoverable.
+   */
+  handleCodexBootStuck(sessionId: string, info: { timeoutMs: number; pendingCount: number }): void {
+    const s = this.db.getSession(sessionId);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
+      workerSessionId: sessionId, taskId: s?.taskId ?? null,
+      kind: "codex_boot_stuck", detail: { timeoutMs: info.timeoutMs, pendingCount: info.pendingCount },
+    });
+    const recipientMsg = `[loom:codex-boot-stuck] this session never finished booting (ready marker / model-loaded / trust-dialog-resolved never all held together) within ${info.timeoutMs}ms — ${info.pendingCount} message(s) are queued and frozen until boot completes or your manager intervenes.`;
+    this.enqueueSystemNudge(sessionId, recipientMsg, { kind: "warning", taskId: s?.taskId ?? null });
+    if (s?.parentSessionId) {
+      const senderMsg = `[loom:codex-boot-stuck] your codex session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} never finished booting within ${info.timeoutMs}ms — ${info.pendingCount} queued message(s) are frozen. It may self-recover if codex was just slow, but consider checking on it (inspect the session, worker_stop + respawn) if it stays quiet.`;
+      this.enqueueSystemNudge(s.parentSessionId, senderMsg, { kind: "warning", taskId: s.taskId ?? null });
+    }
+  }
+
+  /**
    * Card f9b1ea00 DoD-2 — consumes `PtyHostEvents.onPromptMismatchUnresolved`: a "recognized replay"
    * `[loom:prompt-mismatch]` detection (pty/host.ts's `UserPromptSubmit` mismatch detector, the
    * `replayedEntry !== undefined` branch) never resolved within `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` — no

@@ -1,4 +1,4 @@
-import { TRUST_DIALOG_MARKER, TRUST_DIALOG_ANSWER, BUSY_STATUS_MARKER, BUSY_TITLE_SPINNER_RE, CODEX_READY_PLACEHOLDER } from "./codex-doctrine.js";
+import { TRUST_DIALOG_MARKER, TRUST_DIALOG_ANSWER, BUSY_STATUS_MARKER, BUSY_TITLE_SPINNER_RE, CODEX_READY_PLACEHOLDER, CODEX_MODEL_LOADED_RE, stripAnsiCsi } from "./codex-doctrine.js";
 
 /**
  * Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4: the PURE, testable decision logic for the codex
@@ -51,12 +51,47 @@ export function isCodexBusy(screen: string): boolean {
  * any, or straight to ready when the directory was already trusted)? Checked against the SAME rolling,
  * multi-chunk `screen` buffer trust-dialog detection uses (a one-time "has this text appeared at all"
  * question, correctly answered by accumulation — unlike {@link isCodexBusy}, which is an ONGOING
- * true/false state and must never be asked this way, see that function's own doc). Gates the one-time
- * kickoff delivery (`pty/host.ts#spawnCodexProcess`) — ⛔ never re-evaluated as an ongoing idle signal,
- * which is exactly what landmine #2 (`CODEX_READY_PLACEHOLDER`'s own doc) forbids.
+ * true/false state and must never be asked this way, see that function's own doc).
+ *
+ * ⚠️ CARD 448f1b4a: this function ALONE answers a WEAKER question than "is codex ready for a submit," and
+ * being a safe one-time latch does not change that. `CODEX_READY_PLACEHOLDER`'s own doc names the two
+ * DISTINCT traps its text sits in — this function is correctly built to be immune to ONE of them (State 4:
+ * the placeholder is present during busy too, "landmine #2" — never re-evaluated as an ongoing idle
+ * signal, so that trap cannot fire here) but says NOTHING about the OTHER (State 1: the SAME placeholder
+ * also renders in the very first boot frame while the header still reads `model: loading`). A real merge
+ * gate (op 43cd9ec1) captured exactly that: this function alone returned true while codex was still
+ * genuinely loading, and a submit landed on it. See {@link isCodexModelLoaded}'s own doc for the
+ * complementary check that closes State 1 — `pty/host.ts#spawnCodexProcess`'s onData handler combines
+ * BOTH of these with `!live.trustDialogPending` into the full boot-readiness composite (`live.bootReady`)
+ * that gates the one-time kickoff delivery AND every other submit — never this function alone.
  */
 export function isCodexReadyMarkerPresent(screen: string): boolean {
   return screen.includes(CODEX_READY_PLACEHOLDER);
+}
+
+/**
+ * Card 448f1b4a fix: has codex's header finished resolving its model — i.e. is it NOT still showing the
+ * transient "model: loading" boot-skeleton text (probe findings.md State 1 vs State 3; see
+ * {@link CODEX_MODEL_LOADED_RE}'s own doc for why this must be a POSITIVE match, not a negated one, to
+ * stay safe against the accumulating scan buffer both this and {@link isCodexReadyMarkerPresent} read).
+ * `isCodexReadyMarkerPresent` ALONE is not a readiness signal — a real merge gate (op 43cd9ec1) captured
+ * it rendering true while this function would have returned false, and the harness submitted into that
+ * gap. `pty/host.ts#spawnCodexProcess`'s onData handler combines this with `isCodexReadyMarkerPresent` and
+ * `!live.trustDialogPending` into the full boot-readiness composite (`live.bootReady`) that
+ * `enqueueStdinCodex`/`drainCodexPending` now structurally gate every submit on — see that method's own
+ * doc for the full state machine.
+ *
+ * 🔴 `screen` is stripped via {@link stripAnsiCsi} BEFORE testing — never tested raw. Confirmed against
+ * gate `43cd9ec1`'s own real captured bytes (`stripAnsiCsi`'s own doc has the `od -c` verification): codex
+ * styles the `model:` line's VALUE token with its own CSI span, separate from the label, and the UNSTRIPPED
+ * pattern demonstrably swallows that escape sequence as part of its own `\S+` match — returning TRUE while
+ * the model is still genuinely loading, i.e. silently reintroducing this exact card's own defect through
+ * the fix meant to close it. This is not a hypothetical: it was reproduced against the real bytes before
+ * this strip was added. See `codex-queue-state-machine.mjs`'s own ANSI-bearing fixture for the regression
+ * guard.
+ */
+export function isCodexModelLoaded(screen: string): boolean {
+  return CODEX_MODEL_LOADED_RE.test(stripAnsiCsi(screen));
 }
 
 /**

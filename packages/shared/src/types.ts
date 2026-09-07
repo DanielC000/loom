@@ -1568,6 +1568,15 @@ export type OrchestrationEventKind =
   // carries { attempts, maxAttempts }. Confirms only that no turn was ever observed to start — never that
   // the queued text was lost byte-for-byte (codex exposes no echo signal to check that against).
   | "codex_submit_unconfirmed"
+  // Card 448f1b4a — a codex session's `live.bootReady` latch (ready marker + model-loaded +
+  // trust-dialog-resolved, ALL together — see pty/host.ts's `CodexLive.bootReady` own doc) never fired
+  // within its bounded fail-loud ceiling (`CODEX_BOOT_READY_TIMEOUT_MS`) — every message queued for this
+  // session (any of this codebase's real `enqueueStdin` callers) stays frozen until boot completes or a
+  // manager intervenes. Filed under the AFFECTED session's manager (same "notify whoever can act"
+  // convention as `codex_submit_unconfirmed` above), workerSessionId = the affected codex session itself;
+  // `detail` carries { timeoutMs, pendingCount }. Deliberately one-shot — a LATE boot-readiness still
+  // resolves normally afterward; this only reports that the wait already exceeded the ceiling once.
+  | "codex_boot_stuck"
   // Card 9e4205f5 — `resumeFleetOnBoot` found ≥1 fleet-wide resume failure on a daemon restart (the SAME
   // `failed`/`failedDetail` this method already computes for the requester's own count-only notice — see
   // its doc). Filed under the RESTART REQUESTER (managerSessionId = `reqId`, a manager or platform-Lead
@@ -1676,7 +1685,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
   repeated_tool_call: true, batch_merge_forfeited: true, engine_session_rotated: true,
   discovery_block_injection: true,
-  codex_submit_unconfirmed: true,
+  codex_submit_unconfirmed: true, codex_boot_stuck: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

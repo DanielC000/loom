@@ -26,7 +26,7 @@ import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
-import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, mcpServersToCodexArgs, codexTrustDialogLock } from "./codex-host.js";
+import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, codexTrustDialogLock } from "./codex-host.js";
 import { findConversationIdForSpawn } from "./codex-transcript.js";
 
 const RING_CAP_BYTES = 256 * 1024;
@@ -110,6 +110,19 @@ const CODEX_BUSY_STALE_MS = Number(process.env.LOOM_CODEX_BUSY_STALE_MS) || 3_00
  * the per-attempt window (`LOOM_CODEX_BUSY_STALE_MS`).
  */
 const CODEX_SUBMIT_MAX_RETRIES = Number(process.env.LOOM_CODEX_SUBMIT_MAX_RETRIES) || 2;
+/**
+ * Card 448f1b4a: bounded ceiling for `live.bootReady` to EVER latch (ready marker + model-loaded +
+ * trust-dialog-resolved, all together — see `CodexLive.bootReady`'s own doc) after spawn, before this is
+ * reported as a stuck boot (`onCodexBootStuck`). No confirmed production measurement of worst-case codex
+ * boot time exists — MCP-server startup (probe findings.md State 3) is the dominant variable and its
+ * upper bound was not independently verified for this card (the ~75s/150s figures seen elsewhere in this
+ * epic's own investigation trail came from a TEST HARNESS's own `waitUntil` budget, not a production
+ * constant — disclosed here explicitly rather than treated as a measured production ceiling). This
+ * default is therefore a deliberately GENEROUS, disclosed judgment call — comfortably above an ordinary
+ * MCP-startup episode, bounded enough that a genuinely wedged boot is still reported within a reasonable
+ * time — not a value derived from a specific observed worst case. Env-overridable for hermetic tests.
+ */
+const CODEX_BOOT_READY_TIMEOUT_MS = Number(process.env.LOOM_CODEX_BOOT_READY_TIMEOUT_MS) || 45_000;
 /**
  * Gap between writing a turn's text and writing the FIRST Enter (\r) that submits it. A SINGLE
  * `text + "\r"` write does NOT submit a second turn to a running claude v2.1.150 session — the
@@ -3891,6 +3904,25 @@ export interface CodexLive {
    *  unbounded rescan — see `captureCodexEngineSessionId`'s own doc for the ONE bounded retry this still
    *  allows before giving up for good. */
   engineSessionIdCaptureAttempted: boolean;
+  /** Codex-only, card 448f1b4a: has this pty instance reached FULL boot readiness — the ready marker
+   *  rendered, the header's model finished resolving (⛔ not just the placeholder text; see
+   *  `codex-host.ts#isCodexModelLoaded`'s own doc for the real captured false-ready this closes), AND no
+   *  trust dialog is still mid-answer? Latched EXACTLY ONCE by the onData handler in `spawnCodexProcess` —
+   *  see that method's own doc for the full composite and why this is now the STRUCTURAL gate
+   *  `enqueueStdinCodex`/`drainCodexPending` both check, rather than a convention only the kickoff call
+   *  site observed (the defect this card fixes: `enqueueStdinCodex`/`submitCodex` used to have ZERO
+   *  readiness awareness of their own, reachable by any of the ~56 real `enqueueStdin` callers across this
+   *  codebase, not just the one protected kickoff path). */
+  bootReady: boolean;
+  /** Codex-only, card 448f1b4a: bounded, ONE-SHOT fail-loud ceiling on `bootReady` ever latching — armed
+   *  at spawn, cleared the instant `bootReady` latches (or the session dies). Mirrors
+   *  `armCodexBusyStaleTimer`'s own CASE 4 fail-loud contract in SHAPE (console.error + a best-effort
+   *  `events.onCodexBootStuck` signal) but is deliberately NOT a retry ladder — there is nothing for Loom
+   *  to retry here (the trust-dialog answer, if any, is already handled independently by the onData
+   *  handler's own trust-dialog branch); this timer exists ONLY so "boot never completed" is a
+   *  MANAGER-visible report rather than every queued caller silently waiting forever — see
+   *  `onCodexBootStuck`'s own doc for the two-recipient contract this feeds. */
+  bootReadyTimer: NodeJS.Timeout | null;
 }
 
 export interface SpawnOpts {
@@ -4153,6 +4185,30 @@ export interface PtyHostEvents {
    * on top of the one being reported (the call site already wraps this in try/catch for that reason).
    */
   onCodexSubmitUnconfirmed?(sessionId: string, info: { attempts: number; maxAttempts: number }): void;
+  /**
+   * Card 448f1b4a — `live.bootReady`'s own fail-loud ceiling (armed at spawn, see `CodexLive.bootReadyTimer`'s
+   * own doc) fired: this codex session never reached full boot readiness (ready marker + model-loaded +
+   * trust-dialog-resolved, all together) within `info.timeoutMs`. Before this card, `enqueueStdinCodex`/
+   * `submitCodex` had NO readiness awareness at all, so any of this codebase's ~56 real `enqueueStdin`
+   * callers could submit into a not-yet-ready codex TUI; the fix queues everything until `bootReady`
+   * latches — which is correct, but it also means a codex session that NEVER becomes ready now queues
+   * every caller's message forever with no signal, unless something reports it. This is that report.
+   * `info.pendingCount` is a snapshot of `live.pending.length` at fire time — informational only (more
+   * may have queued by the time a reader acts on this). PtyHost itself cannot persist a durable event or
+   * notify a manager (no DB, same layering boundary as `onCodexSubmitUnconfirmed` above); the implementer
+   * (sessions/service.ts, via index.ts) decides how to record + notify, mirroring
+   * `handleCodexSubmitUnconfirmed`'s established two-recipient shape rather than inventing a new one.
+   *
+   * ⚠️ Deliberately ONE-SHOT, unlike `onCodexSubmitUnconfirmed`'s retry ladder — there is no retry action
+   * for Loom to take here (see `CodexLive.bootReadyTimer`'s own doc). A LATE boot-readiness (codex was
+   * merely very slow, not genuinely stuck) still resolves normally the moment the onData handler's own
+   * composite check next passes — this signal does not disable that, it only reports that the wait has
+   * already exceeded `info.timeoutMs` once. OPTIONAL, same rationale as its siblings: every existing
+   * `PtyHostEvents` test double is unaffected until it opts in. Called best-effort from a pty data-path
+   * timer callback — never let an implementer's own failure here become a second failure mode on top of
+   * the one being reported (the call site already wraps this in try/catch for that reason).
+   */
+  onCodexBootStuck?(sessionId: string, info: { timeoutMs: number; pendingCount: number }): void;
   /**
    * Card 47c11741: the bare-placeholder tripwire's own one-shot RECOVERY re-injection (`PASTE_RECOVERY_TAG`,
    * paste-tripwire.ts) ALSO collapsed — the give-up path, right where the combined `[paste-tripwire]`
@@ -5998,12 +6054,24 @@ export class PtyHost {
    * in a composer still holding the first (C2). `events.onBusy` (mirrors claude's `setBusy`) still fires
    * only on a genuine rising/falling EDGE, so this stays idempotent under repeated chunks.
    *
-   * KICKOFF (Code Review C1 fix): the one-time `opts.startupPrompt` is delivered once codex has rendered
-   * its main TUI at least once (`isCodexReadyMarkerPresent`, safe one-time use of the SAME placeholder text
-   * landmine #2 bans for ongoing idle detection — see that function's own doc) AND the trust dialog, if
-   * any, is no longer mid-answer (`!live.trustDialogPending`) — through the PUBLIC, busy-aware
+   * BOOT READINESS / KICKOFF (Code Review C1 fix, extended by card 448f1b4a into a structural gate): the
+   * one-time `opts.startupPrompt` is delivered, and `live.bootReady` latches, once ALL THREE hold: codex
+   * has rendered its main TUI at least once (`isCodexReadyMarkerPresent`, safe one-time use of the SAME
+   * placeholder text landmine #2 bans for ongoing idle detection — see that function's own doc), the
+   * header's model has actually finished resolving (`isCodexModelLoaded` — NOT implied by the placeholder
+   * alone; a real merge gate captured the placeholder rendering while the header still read `model:
+   * loading`, see that function's own doc for the full specimen), and the trust dialog, if any, is no
+   * longer mid-answer (`!live.trustDialogPending`). Card 448f1b4a: `live.bootReady` is no longer read only
+   * here — `enqueueStdinCodex`/`drainCodexPending` both structurally refuse to submit anything until it
+   * latches, closing the prior gap where safety was a CALLER CONVENTION (only this one call site checked
+   * readiness; any of this codebase's ~56 other real `enqueueStdin` callers could submit into an unready
+   * codex TUI with zero awareness). The kickoff itself still goes through the PUBLIC, busy-aware
    * `enqueueStdin` entry point (never a direct write), so it queues cleanly behind whatever the MCP-startup
-   * episode is still doing rather than racing it.
+   * episode is still doing rather than racing it. A bounded fail-loud timer (`CodexLive.bootReadyTimer`,
+   * `CODEX_BOOT_READY_TIMEOUT_MS`) reports — never silently hangs — if `bootReady` never latches at all;
+   * see that field's own doc and `onCodexBootStuck`'s own doc for why this is required rather than
+   * optional (a session that never boots would otherwise queue every caller's message forever with no
+   * signal, generalizing what used to be a single silently-undelivered kickoff into every caller).
    */
   private spawnCodexProcess(opts: SpawnOpts): void {
     // Card 887e10b8 Item 1: deliver the condensed worker doctrine into <cwd>/AGENTS.md BEFORE the real
@@ -6039,9 +6107,31 @@ export class PtyHost {
       lastBusyMarkerAt: 0, enterWrittenAt: 0, enterPending: false, submitConfirmAttempts: 0, busyStaleGen: 0, busyStaleTimer: null, kickoffDelivered: false,
       screenScan: "",
       engineSessionIdCaptureAttempted: false,
+      bootReady: false, bootReadyTimer: null,
     };
     this.liveCodex.set(opts.sessionId, live);
     attachLogErrorGuard(opts.sessionId, live);
+
+    // Card 448f1b4a: fail-loud ceiling on the ONE-TIME `live.bootReady` latch — mirrors
+    // `armCodexBusyStaleTimer`'s own CASE 4 fail-loud contract in SHAPE (console.error + a best-effort
+    // events callback), but this is deliberately a ONE-SHOT timer, not a retry ladder: there is nothing
+    // for Loom to retry here (a pending trust-dialog answer, if any, is already handled independently by
+    // the onData handler's own trust-dialog branch below). Cleared the instant `bootReady` latches (onData
+    // handler, below) or the session dies (`pty.onExit`, below) — see `CodexLive.bootReadyTimer`'s own doc.
+    live.bootReadyTimer = setTimeout(() => {
+      live.bootReadyTimer = null;
+      if (!live.alive || live.bootReady) return; // already resolved (or the session died) — nothing to report
+      // eslint-disable-next-line no-console
+      console.error(`[codex-boot-stuck] ${opts.sessionId} boot readiness never reached after ${CODEX_BOOT_READY_TIMEOUT_MS}ms (ready marker / model-loaded / trust-dialog-resolved never all held together) — ${live.pending.length} message(s) queued and frozen. Manager intervention needed.`);
+      try {
+        this.events.onCodexBootStuck?.(opts.sessionId, { timeoutMs: CODEX_BOOT_READY_TIMEOUT_MS, pendingCount: live.pending.length });
+      } catch (err) {
+        // A failure to emit this signal must never become a SECOND failure mode on top of the one being
+        // reported — swallow, loudly, and move on (this data path must never throw).
+        // eslint-disable-next-line no-console
+        console.error(`[codex-boot-stuck] ${opts.sessionId} onCodexBootStuck handler threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+      }
+    }, CODEX_BOOT_READY_TIMEOUT_MS);
 
     pty.onData((d) => {
       const buf = Buffer.from(d, "utf-8");
@@ -6119,22 +6209,77 @@ export class PtyHost {
         this.armCodexBusyStaleTimer(opts.sessionId, live);
       }
 
-      // Code Review C1 fix: deliver the one-time startup prompt once codex has rendered its main TUI at
-      // least once AND the trust dialog (if any) is no longer mid-answer — see this method's own top doc.
-      // Routed through the PUBLIC enqueueStdin (which dispatches straight back to enqueueStdinCodex, since
-      // this sessionId is already registered in `liveCodex`) rather than a direct submitCodex call, so a
-      // still-busy MCP-startup episode queues it instead of racing it.
+      // Card 448f1b4a (extends Code Review C1): full boot-readiness composite, latched EXACTLY ONCE —
+      // ready marker rendered AND the header's model has actually finished resolving (NOT implied by the
+      // marker alone — see `isCodexModelLoaded`'s own doc for the real captured false-ready this closes)
+      // AND the trust dialog, if any, is no longer mid-answer. This is now the SAME event
+      // `enqueueStdinCodex`/`drainCodexPending` structurally gate every submit on (see their own docs), so
+      // this is also where anything that queued while boot wasn't ready yet gets released.
       if (
-        opts.startupPrompt !== undefined && !live.kickoffDelivered &&
-        !live.trustDialogPending && isCodexReadyMarkerPresent(live.screenScan)
+        !live.bootReady && !live.trustDialogPending &&
+        isCodexReadyMarkerPresent(live.screenScan) && isCodexModelLoaded(live.screenScan)
       ) {
-        live.kickoffDelivered = true; // latch BEFORE calling out — never deliver twice
-        this.enqueueStdin(opts.sessionId, opts.startupPrompt, "system", undefined, undefined, "agent");
+        live.bootReady = true;
+        if (live.bootReadyTimer) { clearTimeout(live.bootReadyTimer); live.bootReadyTimer = null; } // resolved — the fail-loud ceiling no longer applies
+        // Code Review C1 fix: deliver the one-time startup prompt now that boot is ready. Routed through
+        // the PUBLIC enqueueStdin (which dispatches straight back to enqueueStdinCodex, since this
+        // sessionId is already registered in `liveCodex`) rather than a direct submitCodex call, so a
+        // still-busy MCP-startup episode queues it instead of racing it.
+        //
+        // ⚠️ CORRECTED (card 448f1b4a, real-spawn verification): `live.busy` is NOT guaranteed false here.
+        // The EARLIER, now-corrected version of this comment claimed submitting immediately was safe
+        // because "nothing could have submitted before this latch" — true, but irrelevant: `live.busy` is
+        // set by the `isCodexBusy(d)` branch ABOVE, EARLIER in this SAME onData handler (this file, a few
+        // lines up), and that branch fires from codex's OWN output — not only from Loom submitting
+        // something. A single chunk can satisfy `isCodexBusy(d)` (e.g. codex's own MCP-server-startup work
+        // rendering a busy status line) AND the boot-ready composite in the identical tick, setting
+        // `live.busy = true` moments before `live.bootReady = true` right here. Confirmed against a REAL
+        // codex process, not just reasoned about: `test/codex-submit-confirmation-real-spawn.mjs` observed
+        // exactly this ordering on a live spawn. `enqueueStdin`/`enqueueStdinCodex` handle this correctly
+        // regardless — busy means it QUEUES instead of submitting immediately, and the busy→idle edge
+        // (`armCodexBusyStaleTimer`'s CASE 2) drains it once codex's own startup work genuinely settles —
+        // this was never a bug, only a stale comment asserting an invariant that doesn't hold.
+        if (opts.startupPrompt !== undefined && !live.kickoffDelivered) {
+          live.kickoffDelivered = true; // latch BEFORE calling out — never deliver twice
+          this.enqueueStdin(opts.sessionId, opts.startupPrompt, "system", undefined, undefined, "agent");
+        } else if (!live.busy) {
+          // No kickoff to deliver (e.g. a resume) — release anything that queued while boot wasn't ready
+          // yet (drainCodexPending's own `!live.bootReady` guard was blocking it until this instant).
+          //
+          // Deliberate, not an oversight: if `live.busy` IS already true at this exact instant (the same
+          // MCP-startup-overlap shape described above), this branch correctly does NOTHING — draining now
+          // would submit on top of a turn that's still genuinely in flight. The queue isn't stranded by
+          // skipping this: the busy→idle edge (`armCodexBusyStaleTimer`'s CASE 2) and the periodic
+          // `reconcile()` safety net both call `drainCodexPending` independently once busy genuinely clears,
+          // so whatever's queued still drains — just not synchronously on this particular transition.
+          this.drainCodexPending(opts.sessionId, live);
+        }
       }
 
       // Card 2ec60d9c DoD-1: independent of kickoff (fires even with no startupPrompt, e.g. a resume) —
       // by the time the ready marker has rendered at least once, codex's rollout file should already carry
       // its session_meta line. See `captureCodexEngineSessionId`'s own doc for the bounded retry.
+      //
+      // Card 448f1b4a: DELIBERATELY left keyed on `isCodexReadyMarkerPresent` ALONE — NOT widened onto the
+      // fuller `live.bootReady` composite (ready marker + model-loaded + trust-dialog-resolved) the kickoff
+      // gate above now uses. This is a considered choice, not an oversight:
+      //   - `captureCodexEngineSessionId` is a read-only, best-effort DIAGNOSTIC/liveness scan (a
+      //     filesystem read, never a write into the TUI) — it carries none of the "writing into a not-ready
+      //     composer" risk `enqueueStdinCodex`/`submitCodex` do, so it needs none of that risk's mitigation.
+      //   - It is ALREADY tolerant of firing early: its own retry chain (`CODEX_ENGINE_ID_MAX_ATTEMPTS` ×
+      //     `CODEX_ENGINE_ID_RETRY_MS` ≈ 120s, see that function's own doc) exists precisely because "the
+      //     rollout file is created lazily, around first-turn time, not at boot" — an attempt that fires
+      //     during `model: loading` simply misses on its first try and retries, exactly as it already does
+      //     for the ordinary case where the file isn't there yet for unrelated reasons.
+      //   - Gating it on `bootReady` would make diagnosis STRICTLY WORSE: a session that never reaches
+      //     `bootReady` at all (the exact case this card's fail-loud `onCodexBootStuck` timer exists to
+      //     report) would then never even ATTEMPT engine-session-id capture — losing the one diagnostic
+      //     signal that matters most in precisely the failure case being investigated.
+      //   - ⚠️ NOT interchangeable with kickoff delivery, even though they trigger off the same event
+      //     today: `captureCodexEngineSessionId`'s own doc states it "never gates kickoff/busy-detection
+      //     either way (both already latch/fire off `screenScan` alone, independent of this)" — an engine
+      //     session id being captured is NOT proof the kickoff was ever delivered; each latches
+      //     independently off its own condition.
       if (!live.engineSessionIdCaptureAttempted && isCodexReadyMarkerPresent(live.screenScan)) {
         live.engineSessionIdCaptureAttempted = true;
         this.captureCodexEngineSessionId(opts.sessionId, live, opts.cwd);
@@ -6144,6 +6289,7 @@ export class PtyHost {
     pty.onExit(({ exitCode }) => {
       live.alive = false;
       if (live.busyStaleTimer) { clearTimeout(live.busyStaleTimer); live.busyStaleTimer = null; } // never fire against a dead session
+      if (live.bootReadyTimer) { clearTimeout(live.bootReadyTimer); live.bootReadyTimer = null; } // never fire against a dead session
       if (live.mcpSeenWaiters.length > 0) {
         const waiters = live.mcpSeenWaiters;
         live.mcpSeenWaiters = [];
@@ -6371,6 +6517,16 @@ export class PtyHost {
    * sessionId before any claude-only machinery runs. Deliberately does NOT replicate claude's fairness
    * reordering / same-sender coalescing / give-up-hold bookkeeping (a named Phase-1 simplification: plain
    * FIFO push, drained one at a time on the busy->idle edge — see `drainCodexPending`).
+   *
+   * Card 448f1b4a: gated on `live.bootReady` — while boot hasn't fully completed (ready marker + model-
+   * loaded + trust-dialog-resolved, see `CodexLive.bootReady`'s own doc), this ALWAYS queues, regardless of
+   * `live.busy`, rather than writing straight into a codex TUI that isn't ready to receive it. Before this
+   * fix, ONLY the one automatic-kickoff call site in `spawnCodexProcess`'s onData handler checked readiness
+   * — every other caller of the PUBLIC `enqueueStdin` (this codebase's ~56 real call sites: companion
+   * messages, watcher nudges, `worker_message`/`worker_redirect`, webhook ingress, etc.) reached straight
+   * through to `submitCodex` with zero awareness. Gating HERE, at the one shared chokepoint every one of
+   * those callers already funnels through, protects all of them structurally rather than requiring each to
+   * individually know about codex readiness.
    */
   private enqueueStdinCodex(
     sessionId: string, live: CodexLive, text: string, source: QueueSource, onDeliver: (() => void) | undefined,
@@ -6380,7 +6536,7 @@ export class PtyHost {
   ): EnqueueResult {
     if (!live.alive) return { delivered: false, reason: "session-dead", queued: false, deliveryState: "dropped" };
     const normalizedSenderId = senderId ?? null;
-    if (!live.busy && !live.stopping && !live.drainHeld) {
+    if (live.bootReady && !live.busy && !live.stopping && !live.drainHeld) {
       live.activeTurnRoute = route ?? null; live.lastPromptRoute = route ?? null;
       live.activeTurnProactive = proactive; live.lastPromptProactive = proactive;
       live.activeTurnOwnerText = ownerText ?? null; live.lastPromptOwnerText = ownerText ?? null;
@@ -6404,12 +6560,19 @@ export class PtyHost {
     return { delivered: false, queued: true, deliveryState: "queued" };
   }
 
-  /** Drain the NEXT queued codex message (FIFO, no coalescing — see `enqueueStdinCodex`'s own doc) once
-   *  the busy->idle edge fires. A no-op if nothing is queued, the session is stopping, or drain is held
-   *  (mirrors `drainPending`'s own suppression checks, simplified — codex has no composer-dirty/rate-limit
-   *  concept to defer for). */
+  /** Drain the NEXT queued codex message (FIFO, no coalescing — see `enqueueStdinCodex`'s own doc). Called
+   *  from THREE places: the busy->idle edge (`armCodexBusyStaleTimer` CASE 2), the periodic `reconcile()`
+   *  safety net, and — card 448f1b4a — the boot-readiness transition itself (`spawnCodexProcess`'s onData
+   *  handler, releasing anything that queued before `live.bootReady` latched). A no-op if nothing is
+   *  queued, the session is stopping, drain is held (mirrors `drainPending`'s own suppression checks,
+   *  simplified — codex has no composer-dirty/rate-limit concept to defer for), or — card 448f1b4a —
+   *  `!live.bootReady`: without this guard, `reconcile()`'s own unconditional `!live.busy` drain call would
+   *  bypass `enqueueStdinCodex`'s own bootReady gate entirely the very first time its periodic timer fired
+   *  on a not-yet-ready session, submitting straight into an unready codex TUI regardless of what queued it
+   *  there in the first place — this is the ONE shared choke both entry paths (immediate-submit and
+   *  drain-from-queue) go through, so gating here closes that gap for both at once. */
   private drainCodexPending(sessionId: string, live: CodexLive): void {
-    if (live.stopping || live.drainHeld || live.pending.length === 0) return;
+    if (!live.bootReady || live.stopping || live.drainHeld || live.pending.length === 0) return;
     const entry = live.pending.shift()!;
     live.activeTurnRoute = entry.route ?? null; live.lastPromptRoute = entry.route ?? null;
     live.activeTurnProactive = entry.proactive ?? false; live.lastPromptProactive = entry.proactive ?? false;
@@ -12371,6 +12534,34 @@ export class PtyHost {
    *  flight" there. */
   isBusy(sessionId: string): boolean {
     return this.findAnyLive(sessionId)?.busy ?? false;
+  }
+
+  /**
+   * Card 448f1b4a: whether a CODEX session has reached full boot readiness — the SAME three-clause
+   * composite (`isCodexReadyMarkerPresent && isCodexModelLoaded && !trustDialogPending`) `enqueueStdinCodex`/
+   * `drainCodexPending` structurally gate every submit on (see `CodexLive.bootReady`'s own doc).
+   *
+   * ⚠️ DELIBERATE CHOICE, not an incidental fallthrough: returns `false` for a non-codex (claude) session,
+   * a dead codex session, or an unknown `sessionId` alike — mirrors `isBusy`/`isAlive`'s own "false unless
+   * clearly true" convention (`isAlive`: `this.findAnyLive(sessionId)?.alive ?? false`). Deliberately does
+   * NOT route through `findAnyLive` the way those two do — `bootReady` only exists on `CodexLive`, never
+   * the claude-side `Live`, so this is intentionally codex-SPECIFIC (same category as `enqueueStdinCodex`/
+   * `submitCodex`/`stopCodex`/`spawnCodexProcess`, none of which are on `pty-agnostic-methods-
+   * findanylive-guard.mjs`'s pinned `AGNOSTIC_METHODS` list either — that guard's own scope is methods
+   * meant to work identically for EITHER harness via the shared resolver; this one is deliberately NOT
+   * one of those, so it correctly does not belong there).
+   *
+   * Exists so a caller — in production or a test — that needs to know REAL readiness reads the SAME
+   * internal flag PtyHost itself gates submission on, rather than re-deriving it a second time from raw pty
+   * text. That re-derivation risk is not hypothetical: `test/codex-submit-confirmation-real-spawn.mjs` used
+   * to wait on the bare ready-marker placeholder alone (the exact insufficient signal this card's whole
+   * finding is about) and was caught failing by its own subject once `enqueueStdinCodex` started genuinely
+   * enforcing `bootReady` — fixed by switching that file's own wait to THIS accessor instead of trying to
+   * re-derive the composite (including the trust-dialog clause, which a raw-text re-derivation would have
+   * had no way to observe from outside PtyHost).
+   */
+  isCodexBootReady(sessionId: string): boolean {
+    return this.liveCodex.get(sessionId)?.bootReady ?? false;
   }
 
   /**

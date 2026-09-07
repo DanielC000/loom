@@ -103,14 +103,35 @@ const unsubscribe = host.subscribe(SESSION_ID, {
 });
 
 // --- Boot + trust-dialog + ready — observed via THIS PROJECT'S OWN subscribe(), never a guessed sleep.
-// Mirrors codex-stateful-runtime-real-spawn.mjs's own wait exactly. --------------------------------------
+// Card 448f1b4a: waits on `host.isCodexBootReady()` — the SAME real `live.bootReady` flag
+// `enqueueStdinCodex` itself gates submission on (ready marker + model-loaded + trust-dialog-resolved, all
+// three) — rather than the bare ready-marker placeholder this file used to wait on. That bare-placeholder
+// wait was the exact insufficient signal this card's whole finding is about, and this file WAS caught by
+// its own subject: `enqueueStdin` below started genuinely queueing (never delivering synchronously) once
+// the placeholder alone was no longer sufficient for PtyHost's own internal readiness. Deliberately reads
+// PtyHost's own internal state rather than re-deriving the composite from `buf` a second time — a
+// raw-text re-derivation would have no way to observe `trustDialogPending` from outside PtyHost, and this
+// file's own `scratchCwd` is a genuinely fresh, never-trusted directory every run (`fs.mkdtempSync` above),
+// so the trust dialog CAN structurally fire here — confirmed by checking production: Loom never pre-writes
+// `trust_level` into `CODEX_HOME` before a spawn (codex itself is the only writer, live, after answering
+// its own dialog), so omitting that clause would NOT have been safe. See `isCodexBootReady`'s own doc.
+// ⚠️ REAL BUG FOUND AGAINST A REAL CODEX PROCESS: waiting on `isCodexBootReady` ALONE is not enough —
+// `bootReady` and `busy` are independent flags that CAN legitimately both be true at once (e.g. codex's own
+// MCP-server-startup work is a genuine busy episode that can still be running once the TUI has fully
+// rendered and the model has resolved). Confirmed at source: `spawnCodexProcess`'s onData handler checks
+// `isCodexBusy(d)` BEFORE the boot-ready composite in the SAME handler, so a single chunk that satisfies
+// both sets `live.busy = true` moments before `live.bootReady = true` in the identical tick — this test's
+// own `waitUntil(isCodexBootReady)` alone then resolves with busy ALREADY true, and the enqueue below
+// correctly queues rather than delivering (a message can never race into an already-busy composer). This
+// file's own assertion needs a genuinely IDLE, ready session (its own label says "session was idle
+// post-boot") — "ready" does not imply "idle", so both conditions are waited for explicitly.
 try {
-  await waitUntil(() => buf.includes("Ask Codex to do anything"), {
-    label: `${SESSION_ID} real codex TUI advances past the trust dialog (proves it was detected+answered by this project's own code)`,
+  await waitUntil(() => host.isCodexBootReady(SESSION_ID) && !host.isBusy(SESSION_ID), {
+    label: `${SESSION_ID} real codex reaches full boot readiness AND settles idle (ready marker + model-loaded + trust-dialog-resolved + not busy)`,
     timeoutMs: 20000,
   });
 } catch (err) {
-  console.log(`FAIL  real codex never advanced past the trust dialog within budget: ${err.message}`);
+  console.log(`FAIL  real codex never reached an idle, boot-ready state within budget: ${err.message}`);
   console.log(`--- captured output tail ---\n${buf.slice(-2000)}`);
   failures++;
 }

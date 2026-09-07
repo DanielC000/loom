@@ -14,10 +14,10 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 const {
-  isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, mcpServersToCodexArgs, CodexTrustDialogLock,
+  isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, CodexTrustDialogLock,
 } = await import("../dist/pty/codex-host.js");
 const {
-  TRUST_DIALOG_MARKER, BUSY_STATUS_MARKER, CODEX_READY_PLACEHOLDER, hashConfigBefore, diffConfigAfterSpawn,
+  TRUST_DIALOG_MARKER, BUSY_STATUS_MARKER, CODEX_READY_PLACEHOLDER, CODEX_MODEL_LOADED_RE, stripAnsiCsi, hashConfigBefore, diffConfigAfterSpawn,
 } = await import("../dist/pty/codex-doctrine.js");
 const fs = await import("node:fs");
 const path = await import("node:path");
@@ -156,6 +156,72 @@ check(
 check("isCodexReadyMarkerPresent: ordinary boot chrome with no placeholder ⇒ false (negative control)", isCodexReadyMarkerPresent("still booting...\n") === false);
 check("isCodexReadyMarkerPresent: empty screen ⇒ false", isCodexReadyMarkerPresent("") === false);
 
+// --- isCodexModelLoaded (card 448f1b4a fix) ---------------------------------------------------------
+// DoD-5's REQUIRED fixture, BYTE-EXACT — not the card body's quoted markdown rendering (which is ANSI-
+// stripped by whatever logged/rendered it into the card), but the RAW bytes from the actual gate-output
+// capture (`~/.loom/gate-output/43cd9ec1-*.log`, line 1078), extracted via `JSON.stringify` on the parsed
+// line and cross-checked with `od -c` against the log file directly. This distinction is load-bearing: a
+// manager review caught that the earlier ANSI-free version of this fixture could not have exercised the
+// real defect at all (see below) — a synthetic/rendered approximation is not evidence the predicate is
+// correct against what it actually reads (`live.screenScan`, raw pty bytes, ANSI included).
+const REAL_CAPTURED_FALSE_READY_RAW_BYTES = "      │ model:     [3mloading[23m   [38;5;6m[22m/model[m[2m to change                   │[22m[K[2m\r      ›[22m [2mAsk Codex to do anything[22m[K\r";
+check(
+  "DoD-5 REQUIRED NEGATIVE CONTROL (byte-exact): the REAL captured raw bytes (op 43cd9ec1) — isCodexReadyMarkerPresent ALONE reads true...",
+  isCodexReadyMarkerPresent(REAL_CAPTURED_FALSE_READY_RAW_BYTES) === true,
+);
+// 🔴 THE BUG THIS FILE CAUGHT (manager review, pre-merge): codex styles the "model:" line's VALUE with its
+// own CSI span, separate from the label (`model:` + spaces + `\x1b[3m` + `loading` + `\x1b[23m`). Tested
+// RAW (no ANSI strip), CODEX_MODEL_LOADED_RE's `\s+` consumes the plain spaces and lands exactly on the
+// `\x1b` byte; the `(?!loading\b)` lookahead then SUCCEEDS (the literal text "loading" does not start at
+// an ESC byte), and `\S+` (ESC is not whitespace) swallows the escape sequence itself as its match. This
+// assertion proves that failure directly — a RED proof of why stripAnsiCsi is required, not decorative.
+check(
+  "RED PROOF: CODEX_MODEL_LOADED_RE tested RAW (no ANSI strip) against the real bytes WRONGLY reads true — the ESC-wrapped 'loading' token satisfies \\S+ via the escape sequence itself, not real content",
+  CODEX_MODEL_LOADED_RE.test(REAL_CAPTURED_FALSE_READY_RAW_BYTES) === true,
+);
+check(
+  "FIX: stripAnsiCsi's output no longer contains the value-wrapping escapes, so the SAME pattern now correctly reads false",
+  CODEX_MODEL_LOADED_RE.test(stripAnsiCsi(REAL_CAPTURED_FALSE_READY_RAW_BYTES)) === false,
+);
+check(
+  "DoD-5: isCodexModelLoaded (the real production function, ANSI-strip included) correctly reads false against the byte-exact real specimen — proving the marker alone is NOT a readiness signal (the defect this card fixes), against what the predicate ACTUALLY reads, not a rendering of it",
+  isCodexModelLoaded(REAL_CAPTURED_FALSE_READY_RAW_BYTES) === false,
+);
+// The probe's own documented State-3 real-ready text (findings.md:81) — the header once the model has
+// actually finished resolving. ⚠️ No raw byte capture of this state was available at fix time (disclosed
+// gap — the real-codex window that produced it was already closed): this is the probe's own quoted prose,
+// not a byte-verified specimen the way the false-ready fixture above is. isCodexModelLoaded's ANSI strip is
+// unconditional specifically so correctness here does not depend on this byte shape being known.
+const PROBE_STATE_3_REAL_READY = "model: gpt-6-astra medium\n• Starting MCP servers (1/1): cua_repl (2s • esc to interrupt)\n› Ask Codex to do anything";
+check(
+  "isCodexModelLoaded: the probe's own documented real-ready text (State 3, model actually resolved) ⇒ true (positive control)",
+  isCodexModelLoaded(PROBE_STATE_3_REAL_READY) === true,
+);
+check(
+  "isCodexModelLoaded: ordinary boot chrome with no 'model:' line at all ⇒ false (negative control — proves this doesn't fire on everything)",
+  isCodexModelLoaded("still booting...\n") === false,
+);
+check("isCodexModelLoaded: empty screen ⇒ false", isCodexModelLoaded("") === false);
+// Accumulation-safety (this function's own doc): once the "loading" text is in the buffer and a REAL model
+// name is later appended too (the shape spawnCodexProcess's own accumulating screenScan actually produces
+// — old bytes are never removed, only trimmed from the front once capped), the function must correctly
+// read true — a stale "loading" fragment earlier in the buffer must never suppress a real, later positive
+// match (unlike a NEGATED "loading is absent" check would — see this constant's own doc for why that shape
+// was rejected). Uses the byte-exact false-ready specimen, so this also proves accumulation-safety holds
+// with real ANSI bytes present, not just a stripped approximation.
+check(
+  "isCodexModelLoaded: a buffer carrying BOTH the earlier (byte-exact, ANSI-laden) 'loading' text AND a later real model name ⇒ true (accumulation-safety — the POSITIVE-match design doesn't get suppressed by stale 'loading' bytes still sitting earlier in the same buffer)",
+  isCodexModelLoaded(`${REAL_CAPTURED_FALSE_READY_RAW_BYTES}\n${PROBE_STATE_3_REAL_READY}`) === true,
+);
+check(
+  "CODEX_MODEL_LOADED_RE regex sanity: matches the exact literal used above (proves the fixture isn't testing a stale/wrong pattern)",
+  CODEX_MODEL_LOADED_RE.test(PROBE_STATE_3_REAL_READY) === true,
+);
+check(
+  "stripAnsiCsi sanity: strips a real CSI sequence but leaves plain text untouched (positive + negative control on the helper itself)",
+  stripAnsiCsi("\x1b[3mloading\x1b[23m") === "loading" && stripAnsiCsi("plain text, no escapes") === "plain text, no escapes",
+);
+
 // --- diffConfigAfterSpawn (Code Review M7 fix: residual disclosure was INVERTED) --------------------
 // Hermetic via a scratch CODEX_HOME (codexConfigPath/realCodexHome both read process.env.CODEX_HOME
 // fresh on every call — see their own doc — so setting it here, never touching the real ~/.codex, is
@@ -204,6 +270,6 @@ check("isCodexReadyMarkerPresent: empty screen ⇒ false", isCodexReadyMarkerPre
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — codex-host.ts's trust-dialog/busy-idle/ready-marker/MCP-arg decision logic is proven both ways (real markers fire, ordinary/malformed input doesn't), the MCP-arg translation stays consistent with the REAL buildMcpServers routing table, the trust-dialog lock serializes FIFO and survives a rejecting holder, and diffConfigAfterSpawn's residual disclosure (Code Review M7) correctly fires even when the expected trust-block AND something else both changed. See codex-queue-state-machine.mjs for coverage of the real stateful wiring this logic is delegated to from."
+  ? "\n✅ ALL PASS — codex-host.ts's trust-dialog/busy-idle/ready-marker/model-loaded/MCP-arg decision logic is proven both ways (real markers fire, ordinary/malformed input doesn't); isCodexModelLoaded (card 448f1b4a) correctly reads false against the BYTE-EXACT real false-ready specimen (raw ANSI included, from the actual gate-output capture, not a stripped rendering) even though isCodexReadyMarkerPresent alone reads true against it, stays accumulation-safe against stale 'loading' bytes, and a RED proof confirms CODEX_MODEL_LOADED_RE tested WITHOUT stripAnsiCsi wrongly reads true against those same real bytes (the escape-swallowing bug a manager review caught before merge); the MCP-arg translation stays consistent with the REAL buildMcpServers routing table, the trust-dialog lock serializes FIFO and survives a rejecting holder, and diffConfigAfterSpawn's residual disclosure (Code Review M7) correctly fires even when the expected trust-block AND something else both changed. See codex-queue-state-machine.mjs for coverage of the real stateful wiring this logic is delegated to from."
   : `\n❌ ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

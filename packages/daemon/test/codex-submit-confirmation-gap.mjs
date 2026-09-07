@@ -91,6 +91,16 @@ host.spawn({
 const fakePty = host.fakeCodexPtys.get(SESSION_ID);
 const live = () => host.liveCodex.get(SESSION_ID);
 
+// Card 448f1b4a: enqueueStdinCodex now structurally gates every submit on live.bootReady (ready marker +
+// model-loaded + trust-dialog-resolved) — this file's own scenarios are about the CONFIRM-OR-RETRY ladder,
+// a DIFFERENT defect (see this file's own header), so get the session past boot readiness first with an
+// ordinary ready+model frame before any of them begin. No startupPrompt was supplied (this test's own
+// "ordinary mid-session message" framing), so the boot-ready transition drains an (empty) queue rather than
+// delivering a kickoff — a genuine no-op here, not a hidden dependency on kickoff wiring.
+fakePty.push("OpenAI Codex (v1.2.3)\n│ model:     gpt-6-astra medium                          │\n›  Ask Codex to do anything\n");
+check("(preamble) boot readiness latched before any confirm-or-retry scenario begins", live().bootReady === true);
+check("(preamble) nothing was written by the boot-ready transition itself (no startupPrompt, empty queue)", fakePty.writes.length === 0);
+
 // === SCENARIO A: the swallowed-keystroke race — exhausts retries, NEVER drains, reports up ==============
 // message one delivers immediately (idle at enqueue time).
 const enq1 = host.enqueueStdin(SESSION_ID, "message one", "system", undefined, undefined, "agent");

@@ -402,6 +402,11 @@ async function main(): Promise<void> {
     // the sender/manager. See PtyHostEvents.onCodexSubmitUnconfirmed's own doc /
     // SessionService.handleCodexSubmitUnconfirmed's own doc.
     onCodexSubmitUnconfirmed: (sessionId, info) => sessions.handleCodexSubmitUnconfirmed(sessionId, info),
+    // Card 448f1b4a: a codex session's `live.bootReady` latch never fired within its bounded ceiling —
+    // `sessions` (forward reference, same pattern as onCodexSubmitUnconfirmed above) decides how to record
+    // the durable event + fail loud to the recipient AND the sender/manager. See
+    // PtyHostEvents.onCodexBootStuck's own doc / SessionService.handleCodexBootStuck's own doc.
+    onCodexBootStuck: (sessionId, info) => sessions.handleCodexBootStuck(sessionId, info),
     // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
     // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so
     // the Scheduler / worker_spawn won't fire into a known-limited account).
