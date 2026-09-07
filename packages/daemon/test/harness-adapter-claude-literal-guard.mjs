@@ -115,6 +115,16 @@ const ALLOWLIST = new Map([
   // consumption-declaration infra, not the adapter module. "bare" only: this file has no business ever
   // gaining a `.claude` PATH literal.
   ["profiles/field-consumers.ts", "bare"],
+  // Card 6b4d0b45: `MERGEABLE_INCLUSION`'s harness entry flips to `true`, so `normalizeFields` now needs a
+  // canonical default for the SAME two-way enum ("claude"|"codex") when a mine/base/shipped version omits
+  // the field — `p.harness ?? "claude"` — matching validate.ts's own documented default. Generic
+  // merge/diff infra, not the adapter module; "bare" only, same reasoning as the entries above.
+  ["profiles/customization.ts", "bare"],
+  // Card 6b4d0b45: `resetProfileToBundled` normalizes `harness` to the SAME canonical default explicitly
+  // (`bundled.harness ?? "claude"`) so a customized value is actually overwritten on reset rather than
+  // silently left as-is (no BUNDLED_PROFILES entry sets harness, so the key is otherwise absent from the
+  // patch). Generic reset infra naming one of the two enum values; "bare" only.
+  ["profiles/seed.ts", "bare"],
 ]);
 
 function walk(dir, out) {
