@@ -104,6 +104,23 @@ const EXEMPT_FILES = new Set(["merge-gate-concurrency-verdict.mjs"]);
  * binary division operator instead. Positions in the returned string line up 1:1 with the input, so
  * indices computed against it can be used to recover line numbers from the ORIGINAL text. (String/comment
  * handling mirrors deploy-staleness-fixture-guard.mjs's own `sanitize`; regex handling is new here.)
+ *
+ * KNOWN LIMITATION (card 74cf9152, documented not fixed — see that card for the argument): the
+ * regex-vs-division heuristic above classifies `/` right after the KEYWORD `return` (and the same class of
+ * value-position keyword: `typeof`, `case`, `in`, `of`, `delete`, `void`, `yield`, `await`) as DIVISION, not
+ * a regex start, because the keyword's own last letter (e.g. `return`'s `n`) satisfies the value-ending
+ * check exactly like a real identifier would. A regex literal written in one of those positions with a
+ * brace metacharacter in it (e.g. `return /a\}/.test(x)`) can therefore have its own escaped brace
+ * miscounted as a real, unmatched structural brace, failing this guard with a misleading `unmatched "}"` —
+ * reproduced directly: RED on `return /a\}/.test(s)`, GREEN once hoisted (see WORKAROUND below). Left
+ * unfixed deliberately: a keyword-aware special case is buildable, but this guard runs on EVERY reduced
+ * gate, and a mis-tuned special case risks a silent, repo-wide false NEGATIVE — worse than the papercut it
+ * would fix, for a p3 with a near-zero-cost workaround. WORKAROUND: hoist the literal to a named constant
+ * (`const RE = /a\}/;` then `RE.test(x)`) — `=` is not a value-ending character under this heuristic, so a
+ * const-assigned regex is always classified correctly; see `codex-real-spawn-lock-membership-guard.mjs`'s
+ * own `CODEX_LOCK_IMPORT_RE` for a real in-tree instance. Swept 2026-09-07 (positive-controlled): no file
+ * in this corpus currently hits this — zero return/typeof/case/in/of/delete/void/yield/await-position
+ * regex literals containing a brace metacharacter anywhere in `packages/daemon/test/*.mjs`.
  */
 function sanitize(text) {
   let out = "";
