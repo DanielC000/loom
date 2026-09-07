@@ -28,6 +28,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import pty from "node-pty";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";
 
 const execFileAsync = promisify(execFile);
 let failures = 0;
@@ -85,6 +86,12 @@ const CONFIG_PATH = path.join(os.homedir(), ".codex", "config.toml");
 const md5 = (s) => crypto.createHash("md5").update(s).digest("hex");
 const configBefore = (() => { try { return fs.readFileSync(CONFIG_PATH, "utf8"); } catch { return ""; } })();
 const hashBefore = configBefore ? md5(configBefore) : "ENOENT";
+
+// Card 14e6cf5f: serialize against any sibling real-codex-spawn test file (currently
+// codex-stateful-runtime-real-spawn.mjs) — see _codex-real-spawn-lock.mjs's own header for the measured
+// concurrent-scheduling failure this closes. Held until the config.toml diff/cleanup below is done, since
+// that also touches the same shared file.
+const releaseCodexLock = await acquireCodexRealSpawnLock();
 
 const scratchCwd = fs.mkdtempSync(path.join(os.tmpdir(), "loom-codex-mcp-reach-cwd-"));
 const p = pty.spawn(
@@ -145,6 +152,8 @@ if (hashAfter !== hashBefore) {
 } else {
   console.log("[cleanup] config.toml unchanged (this cwd was likely already trusted from a prior run).");
 }
+
+releaseCodexLock();
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — a real codex pty boot connected to a real live Loom MCP endpoint, completed the MCP handshake, and requested tool enumeration, per the daemon's own inbound-request log (not codex's self-report)."
