@@ -12800,6 +12800,33 @@ export class SessionService {
    *   `opId` via `findByOpId`, the same lookup `gate_status` uses) distinguishes "queued" (never admitted —
    *   this branch never fires, no matter how long the wait) from "running" (admitted — `since` IS the
    *   admission timestamp, exactly what the threshold is calibrated against).
+   * - `parked-merge` — card `0e5de8e6`, origin finding: a worker that had already reported `done`, been
+   *   told by its manager to stand by, and gone idle while ITS OWN branch sat inside a merge gate
+   *   (`worker_merge_confirm`, MANAGER-initiated) was classified `stranded` — the manager's "stand by"
+   *   `worker_message` counts as an ack (see `parked-ack` above), so once the worker went idle again with
+   *   no FRESH report, this classifier fell straight through to the generic "did NOT call worker_report …
+   *   may be stalled" nudge, recommending `worker_merge`/`worker_merge_confirm` on a branch that was
+   *   already mid-gate. `peekPendingMerge` (the SAME lineage-resolved lookup `worker_status`'s
+   *   `pendingMerge` field already surfaces) is DAEMON-OWNED state exactly like the PENDING-GATE GUARD's
+   *   own `run_gate` op above — not a claim the worker or its report has to make — so this is checked in
+   *   the same early, report-independent position. Scoped to `state === "running"` ONLY (`PendingOpState`
+   *   is `"running" | "done" | "failed"`; `"running"` here covers BOTH still-queued-behind-the-semaphore
+   *   and actually-executing — see `gatePhaseForOpId`'s own doc): a "done"/"failed" state is only ever
+   *   observable via `peek()` for the brief post-settle RETENTION window (`MERGE_OP_RETAIN_MS`), and is
+   *   deliberately left to fall through to the ordinary report-derived branches below rather than
+   *   suppressed — the op JUST settled, which is exactly the moment a manager may still need to reconcile
+   *   (e.g. a rejection needs fresh direction to the worker), so treating it as "still fine, no action
+   *   needed" would risk masking a state that genuinely does need attention. A cancelled/orphaned merge
+   *   never reaches this branch at all: `confirmWorkerMergeTracked` classifies that outcome and it too only
+   *   remains peek()-able for the same short retention window, past which `peekPendingMerge` returns
+   *   `undefined` and classification is unaffected by this guard either way.
+   *   UNLIKE `parked-gate`/`parked-gate-stale`, this deliberately has NO stale-escalation sibling: a merge
+   *   op already has its own dedicated staleness/timeout machinery (the gate-timeout circuit breaker,
+   *   `gate-runner.ts`'s own auto-extend, and `confirmWorkerMergeTracked`'s own terminal
+   *   `[loom:merge-done]`/`[loom:merge-failed]` push once it settles) — duplicating a wedge check here
+   *   would just be a second, independently-drifting copy of a check that already exists and already
+   *   notifies the SAME manager. This classifier's only job is to not mislabel a healthy in-flight merge as
+   *   "may be stalled."
    * - `stranded` — genuinely finished a turn, never (usefully) reported, and none of the above apply.
    */
   private classifyIdleWorker(workerSessionId: string):
@@ -12809,7 +12836,8 @@ export class SessionService {
     | { kind: "parked-background"; status: string }
     | { kind: "parked-background-stale"; status: string; minutesSinceReport: number }
     | { kind: "parked-gate" }
-    | { kind: "parked-gate-stale"; minutesSinceStart: number; idleMs: number } {
+    | { kind: "parked-gate-stale"; minutesSinceStart: number; idleMs: number }
+    | { kind: "parked-merge"; opId: string; gatePhase: "queued" | "running" | null } {
     // TASKLESS is intentionally out of scope for THIS classifier (CR-flagged asymmetry, card 2514e6e1-
     // follow-up): every kind below `broken-spawn` reconciles via BOARD-COLUMN state (a task's active/
     // review/parked lane) — meaningless for a worker with no card. A taskless worker's OWN broken-spawn
@@ -12874,6 +12902,15 @@ export class SessionService {
       // OR the live registry lookup missed (the gate settled in the race between the two peeks, or the op
       // never carried an opId) — none of these is ever a wedged-gate signal, so no nudge fires either way.
       return { kind: "parked-gate" };
+    }
+
+    // PENDING-MERGE GUARD (card 0e5de8e6): see this classifier's own `parked-merge` doc above for the full
+    // origin finding and why there's no stale sibling. `peekPendingMerge` already walks recycle lineage
+    // (the same lookup worker_status's `pendingMerge` field uses), so this stays correct across a recycle
+    // too. Checked before any report-derived branch for the same reason as PENDING-GATE GUARD above.
+    const pendingMerge = this.peekPendingMerge(w);
+    if (pendingMerge && pendingMerge.state === "running") {
+      return { kind: "parked-merge", opId: pendingMerge.opId, gatePhase: this.gatePhaseForOpId(pendingMerge.opId) };
     }
 
     // WAKE GUARD (card dfa87343): read the worker's pending self-scheduled wakes now, but DON'T branch on
@@ -13113,6 +13150,14 @@ export class SessionService {
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) flagged worker_report(${cls.status}) as parked on its OWN backgrounded task ~${cls.minutesSinceReport} min ago and still hasn't re-engaged — that flag has no expiry of its own and this is now stale, so it may be dead rather than genuinely still running. Pull it: worker_transcript ${workerSessionId} to check what actually happened, then worker_message it or worker_stop/worker_recycle it if the background task is gone.`
       : cls.kind === "parked-ack"
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) is idle after calling worker_report(${cls.status}) — it IS parked awaiting your reply, not stalled. If you haven't replied yet, worker_message it with direction; if it looks stuck anyway, pull it first: worker_transcript ${workerSessionId}.`
+      // card 0e5de8e6: REWORDED rather than fully suppressed (unlike parked-gate above) — this branch
+      // typically means YOU are the one who started or is aware of this merge (worker_merge_confirm is
+      // manager-initiated), so a plain confirmation is strictly more useful than silence and doubles as an
+      // audit trail if a recycled/successor manager instance wasn't the one that kicked it off. No action
+      // needed: the merge's own machinery (gate-timeout circuit breaker, confirmWorkerMergeTracked's own
+      // settle push) is what actually watches this for staleness, not this watchdog.
+      : cls.kind === "parked-merge"
+      ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) is idle while its merge gate ${cls.opId}${cls.gatePhase ? ` (${cls.gatePhase})` : ""} runs on its own branch — no action needed; it will settle on its own and you'll get a [loom:merge-done]/[loom:merge-failed] nudge when it does. Only step in if you want to check on it: gate_status(${cls.opId}) / gate_queue, or worker_transcript ${workerSessionId}.`
       : `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) finished a turn and is idle but did NOT call worker_report (its task is still in_progress). Observed (single point-in-time read): turnSeq=${w.turnSeq ?? 0}, ~${Math.round((Date.now() - Date.parse(w.lastActivity)) / 60_000)} min since last activity — check these against how long this worker's turns normally take before treating either as decisive. It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review the diff before confirming (an empty branch merged via worker_merge_confirm closes as a 0-commit done with full credit and no visible error), or worker_message it.`;
     try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live */ }
   }
