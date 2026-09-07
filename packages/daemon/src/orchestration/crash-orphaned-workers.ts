@@ -90,7 +90,7 @@ export function deriveCrashOrphanedWorkers(db: Db, recovered: Session[]): CrashO
     // re-checks live at resume time regardless, so this only closes the "silently excluded on a stale
     // flag before ever reaching resume()" gap without adding a filesystem check to the common path.
     if (w.resumability === "dead") {
-      if (engineTranscriptExists(w.cwd, w.engineSessionId)) {
+      if (engineTranscriptExists(w.cwd, w.engineSessionId, w.harness)) {
         db.setResumability(w.id, "resumable"); // self-heal — the stamp was wrong
       } else {
         console.log(`[crash-recovery] worker ${w.id.slice(0, 8)} excluded from recovery: engine transcript missing (unresumable)`);

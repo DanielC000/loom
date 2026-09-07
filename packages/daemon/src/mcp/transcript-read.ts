@@ -156,7 +156,10 @@ export function registerTranscriptReadTools(
       // confined to <LOOM_HOME>/archives at the source (archivedTranscriptPath); a `../` escape throws —
       // surface it as a clean {error} (the repo-read envelope) rather than reading an arbitrary host file.
       if (archived) {
-        try { return paged(readArchivedTranscript(projectId, sessionId)); }
+        // The session row may itself be gone (a permanently-deleted project, or an id that never
+        // resolves) even though its archive snapshot survives — best-effort harness lookup, falling back
+        // to the claude default (transcriptOpsFor's own fallback) rather than failing the read outright.
+        try { return paged(readArchivedTranscript(projectId, sessionId, db.getSession(sessionId)?.harness)); }
         catch (e) { return ok({ error: (e as Error).message }); }
       }
       // Resolve a full id OR a unique id-PREFIX (the 8-char short ids Loom shows are convenient to paste);
@@ -170,7 +173,7 @@ export function registerTranscriptReadTools(
         if (!s) return ok({ error: "session not found" });
       }
       if (!s.engineSessionId) return paged([]); // no engine transcript yet (no completed turn captured)
-      return paged(readTranscript(s.cwd, s.engineSessionId));
+      return paged(readTranscript(s.cwd, s.engineSessionId, s.harness));
     },
   );
 }

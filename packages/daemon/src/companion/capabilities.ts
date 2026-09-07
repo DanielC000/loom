@@ -2368,8 +2368,8 @@ const TRANSCRIPT_READ: CompanionCapability = {
         // exists on disk — mirrors the already-correct fallback in gateway/server.ts's transcript route.
         const useSnapshot = s.archivedAt != null && archivedTranscriptExists(s.projectId, s.id);
         const turns = useSnapshot
-          ? readArchivedTranscript(s.projectId, s.id)
-          : s.engineSessionId ? readTranscript(s.cwd, s.engineSessionId) : [];
+          ? readArchivedTranscript(s.projectId, s.id, s.harness)
+          : s.engineSessionId ? readTranscript(s.cwd, s.engineSessionId, s.harness) : [];
         if (typeof lastN === "number" && lastN > 0) return ok(lastNTurns(turns, lastN));
         const page = pageTranscript(turns, { offset, limit, turnRange });
         // Aggregate walk cap — same identity convention as worker_transcript (mcp/orchestration.ts) /

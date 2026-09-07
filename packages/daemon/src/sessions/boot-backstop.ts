@@ -17,7 +17,7 @@ import { snapshotTranscript } from "./transcript.js";
 export function snapshotAndArchiveRecovered(db: Db, recovered: Session[]): void {
   for (const s of recovered) {
     if (s.role === "run") continue;
-    try { if (s.engineSessionId) snapshotTranscript(s.cwd, s.engineSessionId, s.projectId, s.id); } catch { /* best-effort — never gate boot */ }
+    try { if (s.engineSessionId) snapshotTranscript(s.cwd, s.engineSessionId, s.projectId, s.id, s.harness); } catch { /* best-effort — never gate boot */ }
     try { db.archiveSession(s.id); } catch { /* best-effort — never gate boot */ }
   }
 }

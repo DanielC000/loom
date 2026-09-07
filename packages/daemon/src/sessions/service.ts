@@ -3748,7 +3748,7 @@ export class SessionService {
     if (this.pty.isAlive(session.id)) return session;
     if (!session.engineSessionId) throw new Error("session has no engine id to resume");
     // Backstop dead-ID detection: if the engine transcript is gone, this id is unresumable.
-    if (!engineTranscriptExists(session.cwd, session.engineSessionId)) {
+    if (!engineTranscriptExists(session.cwd, session.engineSessionId, session.harness)) {
       this.db.setResumability(session.id, "dead");
       throw new Error("session is no longer resumable (engine transcript missing)");
     }
@@ -5854,7 +5854,7 @@ export class SessionService {
     for (const s of this.db.listAllSessions()) {
       if (s.processState !== "live" || !s.engineSessionId) continue;
       try {
-        if (snapshotTranscript(s.cwd, s.engineSessionId, s.projectId, s.id)) snapshotted++;
+        if (snapshotTranscript(s.cwd, s.engineSessionId, s.projectId, s.id, s.harness)) snapshotted++;
       } catch { /* never let one session block shutdown */ }
     }
     return snapshotted;
@@ -7251,7 +7251,7 @@ export class SessionService {
     if (!src.engineSessionId) throw new Error("session has no engine context to fork (it never started)");
     if (src.busy) throw new Error("cannot fork a busy session — wait until it's idle");
     // The fork reads the source's transcript; if it's gone there's nothing to branch from.
-    if (!engineTranscriptExists(src.cwd, src.engineSessionId)) {
+    if (!engineTranscriptExists(src.cwd, src.engineSessionId, src.harness)) {
       throw new Error("source conversation transcript is missing — nothing to fork");
     }
     const project = this.db.getProject(src.projectId);
@@ -10035,7 +10035,7 @@ export class SessionService {
       console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget with no parent session to notify (role=${w?.role ?? "none"}) — the dispatch was DROPPED; only the generic idle-watchdog can still catch this`);
       return;
     }
-    const transcriptNonEmpty = !!w.engineSessionId && readTranscript(w.cwd, w.engineSessionId).length > 0;
+    const transcriptNonEmpty = !!w.engineSessionId && readTranscript(w.cwd, w.engineSessionId, w.harness).length > 0;
     if (this.pty.hasFirstTurnStarted(sessionId) || transcriptNonEmpty) {
       // eslint-disable-next-line no-console
       console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget, but the session shows real activity (hasFirstTurnStarted=${this.pty.hasFirstTurnStarted(sessionId)} transcriptNonEmpty=${transcriptNonEmpty}) — this was a LATE confirmation, not a dropped kickoff; suppressing the worker-spawn-broken notice`);
@@ -12809,7 +12809,7 @@ export class SessionService {
     if (
       !this.pty.hasFirstTurnStarted(workerSessionId) &&
       !this.db.listEventsForWorker(workerSessionId).some((e) => e.kind === "worker_report") &&
-      readTranscript(w.cwd, w.engineSessionId).length === 0
+      readTranscript(w.cwd, w.engineSessionId, w.harness).length === 0
     ) {
       // BROKEN_SPAWN_HOLDOFF_MS (its own doc, above buildBrokenSpawnMsg): the three conditions above can
       // all be true for a perfectly healthy spawn still inside its normal confirmation window — don't
@@ -12944,7 +12944,7 @@ export class SessionService {
       if (
         !this.pty.hasFirstTurnStarted(workerSessionId) &&
         !everReported &&
-        readTranscript(w.cwd, w.engineSessionId).length === 0
+        readTranscript(w.cwd, w.engineSessionId, w.harness).length === 0
       ) {
         if (pastBrokenSpawnHoldoff(this.pty, workerSessionId)) {
           try { this.pty.enqueueStdin(w.parentSessionId, buildBrokenSpawnMsg(this.pty, w)); } catch { /* manager not live */ }

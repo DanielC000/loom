@@ -27,6 +27,7 @@ import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } fr
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, removeAddedTrustBlocks } from "./codex-doctrine.js";
 import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, mcpServersToCodexArgs, codexTrustDialogLock } from "./codex-host.js";
+import { findConversationIdForSpawn } from "./codex-transcript.js";
 
 const RING_CAP_BYTES = 256 * 1024;
 /** Multi-harness epic (df1f94b0) Phase 1: bounded rolling scan buffer for codex's own trust-dialog/busy-
@@ -44,6 +45,35 @@ const CODEX_SUBMIT_ENTER_DELAY_MS = 300;
  *  (same probe/finding as CODEX_SUBMIT_ENTER_DELAY_MS): "a second Ctrl+C, sent ~800ms after the first
  *  (i.e. once back at the ready box)" (State 6). */
 const CODEX_STOP_GAP_MS = 800;
+/**
+ * Card 2ec60d9c (DoD-1): retry SPACING for `captureCodexEngineSessionId`'s engine-session-identity
+ * discovery. Env-overridable so a hermetic test can shrink it (mirrors `CODEX_BUSY_STALE_MS`'s own
+ * `LOOM_CODEX_BUSY_STALE_MS` convention).
+ *
+ * ⚠️ CORRECTED against a REAL codex spawn (this card's own DoD-4 real-spawn test) — a first design that
+ * fired ONE retry ~2s after the ready marker was WRONG about WHEN codex actually creates the rollout
+ * file: it is NOT created at process boot. A real run observed the file's on-disk mtime landing ~13
+ * seconds AFTER the ready marker first rendered — the file is created lazily, around when the FIRST real
+ * turn is actually submitted/begins processing, not at bare boot. A fixed one-shot ~2s-later retry can
+ * therefore MISS every real session whose first turn takes longer than that to actually start (a busy
+ * host, a slow model response, or — the specific case the real-spawn test hit — this host's OWN personal
+ * ~/.codex/config.toml carrying extra plugin/marketplace MCP servers whose "Starting MCP servers (N/4)"
+ * episode can itself take several seconds before the first turn even begins). See
+ * `CODEX_ENGINE_ID_MAX_ATTEMPTS` for the retry COUNT this spacing multiplies against.
+ */
+const CODEX_ENGINE_ID_RETRY_MS = Number(process.env.LOOM_CODEX_ENGINE_ID_RETRY_MS) || 3_000;
+/**
+ * Card 2ec60d9c (DoD-1): total retry COUNT for `captureCodexEngineSessionId` — see
+ * `CODEX_ENGINE_ID_RETRY_MS`'s own doc for why a single retry proved insufficient against a real spawn.
+ * 40 attempts * the 3s default spacing = ~2 minutes of total budget, matching the same "a real
+ * confirmation can lag well past a naive few-second assumption" scale this project has already measured
+ * elsewhere (project memory `engine-confirmation-can-lag-minutes-timeouts-assume-seconds`) — discovery is
+ * best-effort and never gates kickoff/busy-detection either way (both already latch/fire off `screenScan`
+ * alone, independent of this), so a generous ceiling costs nothing but a few cheap directory walks against
+ * a session that's still genuinely warming up, and gives up for good (never retries after a real spawn
+ * exits) via the existing `!live.alive` guard below.
+ */
+const CODEX_ENGINE_ID_MAX_ATTEMPTS = Number(process.env.LOOM_CODEX_ENGINE_ID_MAX_ATTEMPTS) || 40;
 /**
  * Code Review C2/M3 fix: how long codex's busy STATUS-LINE marker (`isCodexBusy`, refreshed roughly once
  * per second while genuinely busy — its own text carries a live seconds counter) may go UNSEEN before a
@@ -3808,6 +3838,11 @@ export interface CodexLive {
    *  used for busy/idle detection, which is a FRESHNESS read keyed off `lastBusyMarkerAt`/`busyStaleTimer`
    *  instead (see `CODEX_BUSY_STALE_MS`'s own doc for why). */
   screenScan: string;
+  /** Codex-only, card 2ec60d9c DoD-1: has an engine-session-identity discovery attempt already fired for
+   *  THIS pty instance? Latched on the FIRST attempt (success or not) so a later chunk can't retrigger an
+   *  unbounded rescan — see `captureCodexEngineSessionId`'s own doc for the ONE bounded retry this still
+   *  allows before giving up for good. */
+  engineSessionIdCaptureAttempted: boolean;
 }
 
 export interface SpawnOpts {
@@ -5931,6 +5966,7 @@ export class PtyHost {
       trustDialogAnswered: false, trustDialogPending: false,
       lastBusyMarkerAt: 0, busyStaleTimer: null, kickoffDelivered: false,
       screenScan: "",
+      engineSessionIdCaptureAttempted: false,
     };
     this.liveCodex.set(opts.sessionId, live);
     attachLogErrorGuard(opts.sessionId, live);
@@ -6023,6 +6059,14 @@ export class PtyHost {
         live.kickoffDelivered = true; // latch BEFORE calling out — never deliver twice
         this.enqueueStdin(opts.sessionId, opts.startupPrompt, "system", undefined, undefined, "agent");
       }
+
+      // Card 2ec60d9c DoD-1: independent of kickoff (fires even with no startupPrompt, e.g. a resume) —
+      // by the time the ready marker has rendered at least once, codex's rollout file should already carry
+      // its session_meta line. See `captureCodexEngineSessionId`'s own doc for the bounded retry.
+      if (!live.engineSessionIdCaptureAttempted && isCodexReadyMarkerPresent(live.screenScan)) {
+        live.engineSessionIdCaptureAttempted = true;
+        this.captureCodexEngineSessionId(opts.sessionId, live, opts.cwd);
+      }
     });
 
     pty.onExit(({ exitCode }) => {
@@ -6045,6 +6089,33 @@ export class PtyHost {
       // spawn() onExit does, so SessionService/boot-reconcile see it the same way regardless of harness.
       this.events.onExit(opts.sessionId, exitCode, { intended: live.stopping });
     });
+  }
+
+  /**
+   * Card 2ec60d9c DoD-1: discover + report a codex session's engine-session identity — see
+   * `pty/codex-transcript.ts#findConversationIdForSpawn`'s own doc for WHY a discovery scan (rather than a
+   * hook report) is the only mechanism available. Fires `onEngineSessionId` the SAME way claude's
+   * SessionStart-hook branch does (above, `deliverHook`) so every downstream consumer (DB persistence,
+   * `worker_transcript`, dead-session sweeping) treats a codex session identically once this lands — no
+   * separate codex-only plumbing needed past this one call. `previousEngineId` is always null here (codex
+   * has no rotation concept to report). Retries up to `CODEX_ENGINE_ID_MAX_ATTEMPTS` times,
+   * `CODEX_ENGINE_ID_RETRY_MS` apart — see both constants' own docs for why a single retry proved
+   * insufficient against a real spawn (the rollout file is created lazily, around first-turn time, not at
+   * boot). Best-effort throughout: never gates kickoff/busy-detection either way (both already latch/fire
+   * off `screenScan` alone, independent of this), and stops retrying the instant the pty exits.
+   */
+  private captureCodexEngineSessionId(sessionId: string, live: CodexLive, cwd: string, attempt = 0): void {
+    if (live.engineSessionId || !live.alive) return; // already captured, or the pty is already gone
+    const found = findConversationIdForSpawn(cwd, live.startedAt);
+    if (found) {
+      live.engineSessionId = found;
+      this.events.onEngineSessionId(sessionId, found, null);
+      this.broadcastControl(live, { type: "sessionId", id: found });
+      return;
+    }
+    if (attempt < CODEX_ENGINE_ID_MAX_ATTEMPTS - 1) {
+      setTimeout(() => this.captureCodexEngineSessionId(sessionId, live, cwd, attempt + 1), CODEX_ENGINE_ID_RETRY_MS);
+    }
   }
 
   /** Codex counterpart of `setBusy` — idempotent (fires `events.onBusy`/`broadcastControl` only on a

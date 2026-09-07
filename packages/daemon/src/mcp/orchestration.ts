@@ -3371,7 +3371,7 @@ export class OrchestrationMcpRouter {
       async ({ workerSessionId, lastN, offset, limit, turnRange }) => {
         const w = selfHealWorkerLink(workerSessionId, "worker_transcript");
         if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
-        const turns = w.engineSessionId ? readTranscript(w.cwd, w.engineSessionId) : [];
+        const turns = w.engineSessionId ? readTranscript(w.cwd, w.engineSessionId, w.harness) : [];
         if (typeof lastN === "number" && lastN > 0) {
           return ok(spillableTurnsResponse(managerSessionId, `${workerSessionId}-lastN`, lastNTurns(turns, lastN), null));
         }

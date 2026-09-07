@@ -3895,9 +3895,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.get("/api/sessions/:id/transcript", async (req) => {
     const s = deps.db.getSession((req.params as { id: string }).id);
     if (!s) return [];
-    if (s.archivedAt && archivedTranscriptExists(s.projectId, s.id)) return readArchivedTranscript(s.projectId, s.id);
+    if (s.archivedAt && archivedTranscriptExists(s.projectId, s.id)) return readArchivedTranscript(s.projectId, s.id, s.harness);
     if (!s.engineSessionId) return [];
-    return readTranscript(s.cwd, s.engineSessionId);
+    return readTranscript(s.cwd, s.engineSessionId, s.harness);
   });
   // A worker's branch diff for the orchestration view (read-only — does NOT call reviewWorkerMerge,
   // so it appends no merge_request event; the manager's two-step gate is the only thing that does).
@@ -4960,8 +4960,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!run || run.projectId !== id) return reply.code(404).send({ error: "run not found" });
     if (!run.sessionId) return []; // a snapshot-failed run never spawned a session — nothing to read
     const s = deps.db.getSession(run.sessionId);
-    if (s?.engineSessionId && engineTranscriptExists(s.cwd, s.engineSessionId)) return readTranscript(s.cwd, s.engineSessionId);
-    return readArchivedTranscript(run.projectId, run.sessionId); // retained snapshot (transcriptRef); [] if none
+    if (s?.engineSessionId && engineTranscriptExists(s.cwd, s.engineSessionId, s.harness)) return readTranscript(s.cwd, s.engineSessionId, s.harness);
+    return readArchivedTranscript(run.projectId, run.sessionId, s?.harness); // retained snapshot (transcriptRef); [] if none
   });
   // Human cancel — reuse the same teardown path as the key-authed cancel (cancelRun is idempotent on a
   // terminal run). Project-scoped existence check (a run in another project → 404).

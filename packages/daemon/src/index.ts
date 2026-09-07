@@ -499,7 +499,7 @@ async function main(): Promise<void> {
       // the snapshot is missing, so this log is purely OBSERVABILITY, not a correctness fix on its own.
       try {
         if (exited?.engineSessionId) {
-          const snapshotted = snapshotTranscript(exited.cwd, exited.engineSessionId, exited.projectId, exited.id);
+          const snapshotted = snapshotTranscript(exited.cwd, exited.engineSessionId, exited.projectId, exited.id, exited.harness);
           if (!snapshotted) console.warn(`[transcript] on-exit snapshot failed for session ${exited.id} (project ${exited.projectId}) — falling back to the raw engine transcript on read`);
         }
       } catch { /* never disturb the exit path */ }

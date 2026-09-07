@@ -6,23 +6,83 @@ import {
   type TranscriptTurn,
   encodeProjectDir,
   engineTranscriptPath,
-  resolveTranscriptFile,
-  engineTranscriptExists,
-  readTranscript,
-  parseTranscriptFile,
+  resolveTranscriptFile as claudeResolveTranscriptFile,
+  engineTranscriptExists as claudeEngineTranscriptExists,
+  readTranscript as claudeReadTranscript,
+  parseTranscriptFile as claudeParseTranscriptFile,
   TOOL_RESULT_BODY_CAP,
 } from "../pty/claude-transcript.js";
+import {
+  resolveTranscriptFile as codexResolveTranscriptFile,
+  transcriptExists as codexTranscriptExists,
+  readTranscript as codexReadTranscript,
+  parseTranscriptFile as codexParseTranscriptFile,
+  snapshotTranscript as codexSnapshotTranscript,
+} from "../pty/codex-transcript.js";
 
 /**
- * HarnessAdapter seam (card 2b099e48): this file is the harness-AGNOSTIC half of transcript handling —
- * pagination, spill-to-scratch-file, and Loom's OWN archive store (`LOOM_HOME/archives`), all of which
- * operate on the generic {@link TranscriptTurn} shape and Loom's own on-disk layout, never a claude-format
- * literal. The claude-JSONL-specific half (path resolution, wire-format parsing) now lives in
- * `pty/claude-transcript.ts` — re-exported below UNCHANGED so every existing consumer of this module
- * (13 files, none of which need to change) keeps importing the same names from the same place.
+ * HarnessAdapter seam (card 2b099e48, threaded through card 2ec60d9c): this file is the harness-AGNOSTIC
+ * half of transcript handling — pagination, spill-to-scratch-file, and Loom's OWN archive store
+ * (`LOOM_HOME/archives`), all of which operate on the generic {@link TranscriptTurn} shape and Loom's own
+ * on-disk layout, never a claude-format literal. The claude-JSONL-specific half (path resolution,
+ * wire-format parsing) lives in `pty/claude-transcript.ts`; the codex rollout-JSONL-specific mirror lives
+ * in `pty/codex-transcript.ts`. `encodeProjectDir`/`engineTranscriptPath`/`TOOL_RESULT_BODY_CAP` are
+ * re-exported UNCHANGED (claude-only utilities with no codex equivalent — every real caller of these is
+ * itself already inside claude-only code, e.g. `pty/host.ts`'s context-stats give-up ladder).
+ *
+ * `resolveTranscriptFile`/`engineTranscriptExists`/`readTranscript`/`snapshotTranscript`/
+ * `readArchivedTranscript` below are no longer bare re-exports — each now takes an optional trailing
+ * `harness` param and dispatches through {@link transcriptOpsFor}, THE single resolution site (card
+ * `2ec60d9c` DoD-2 — mirrors `PtyHost.findAnyLive`'s own "one resolver, not a per-caller conditional"
+ * shape for the identical reason: scattering a `harness === "codex"` check across each of this module's
+ * ~20 call sites would let the codex/claude branches drift independently the way the reverted `Live.kind`
+ * discriminator did, card `353f6dc4` M10). `harness` mirrors `Session.harness`'s own type exactly
+ * (undefined/null/`"claude"` ⇒ claude, today's legacy default — zero data migration for the fleet's
+ * existing rows; `"codex"` ⇒ codex) so every call site can pass a session's own `.harness` field verbatim.
  */
 export type { TranscriptTurn };
-export { encodeProjectDir, engineTranscriptPath, resolveTranscriptFile, engineTranscriptExists, readTranscript, TOOL_RESULT_BODY_CAP };
+export { encodeProjectDir, engineTranscriptPath, TOOL_RESULT_BODY_CAP };
+
+/** Mirrors `Session.harness`'s own type (`@loom/shared`) — see this file's header doc. */
+export type TranscriptHarness = "claude" | "codex" | null | undefined;
+
+interface TranscriptOps {
+  resolve(cwd: string, engineSessionId: string): string | null;
+  exists(cwd: string, engineSessionId: string): boolean;
+  read(cwd: string, engineSessionId: string): TranscriptTurn[];
+  parse(file: string): TranscriptTurn[];
+  snapshot(cwd: string, engineSessionId: string, projectId: string, sessionId: string): boolean;
+}
+
+const claudeOps: TranscriptOps = {
+  resolve: claudeResolveTranscriptFile,
+  exists: claudeEngineTranscriptExists,
+  read: claudeReadTranscript,
+  parse: claudeParseTranscriptFile,
+  snapshot: claudeSnapshotTranscript,
+};
+const codexOps: TranscriptOps = {
+  resolve: codexResolveTranscriptFile,
+  exists: codexTranscriptExists,
+  read: codexReadTranscript,
+  parse: codexParseTranscriptFile,
+  snapshot: codexSnapshotTranscript,
+};
+
+/** THE single harness-resolution site (see this file's header doc). */
+function transcriptOpsFor(harness: TranscriptHarness): TranscriptOps {
+  return harness === "codex" ? codexOps : claudeOps;
+}
+
+export function resolveTranscriptFile(cwd: string, engineSessionId: string, harness?: TranscriptHarness): string | null {
+  return transcriptOpsFor(harness).resolve(cwd, engineSessionId);
+}
+export function engineTranscriptExists(cwd: string, engineSessionId: string, harness?: TranscriptHarness): boolean {
+  return transcriptOpsFor(harness).exists(cwd, engineSessionId);
+}
+export function readTranscript(cwd: string, engineSessionId: string, harness?: TranscriptHarness): TranscriptTurn[] {
+  return transcriptOpsFor(harness).read(cwd, engineSessionId);
+}
 
 // ──────────────────────────────────────────────────────────────────────────────────────────────
 // Transcript PAGINATION — bound a single transcript_read to the tool-result token cap.
@@ -286,9 +346,11 @@ export function archivedTranscriptExists(projectId: string, sessionId: string): 
  * whether to OFFER a transcript view (as opposed to reading its content) should use this, not
  * `archivedTranscriptExists` alone, or a failed-but-recoverable snapshot renders as "nothing to show".
  */
-export function transcriptAvailable(s: { projectId: string; id: string; cwd: string; engineSessionId: string | null }): boolean {
+export function transcriptAvailable(
+  s: { projectId: string; id: string; cwd: string; engineSessionId: string | null; harness?: TranscriptHarness },
+): boolean {
   if (archivedTranscriptExists(s.projectId, s.id)) return true;
-  return s.engineSessionId != null && engineTranscriptExists(s.cwd, s.engineSessionId);
+  return s.engineSessionId != null && engineTranscriptExists(s.cwd, s.engineSessionId, s.harness);
 }
 
 /**
@@ -322,12 +384,17 @@ export function archivedSnapshotIds(projectId: string): Set<string> {
  * resumed-then-exited session refreshes its snapshot). Returns true iff a snapshot now exists.
  * An already-dead session (no source JSONL) → no snapshot (returns false; the archive row then
  * shows metadata only). Copy is atomic (temp + rename) so a concurrent read never sees a partial.
+ *
+ * The claude-specific copy logic (below) is this module's own `claudeOps.snapshot` — codex reuses its
+ * OWN already-complete implementation (`pty/codex-transcript.ts#snapshotTranscript`, `codexOps.snapshot`)
+ * rather than a second copy of the same atomic-temp-file dance; both are selected through the SAME
+ * {@link transcriptOpsFor} resolution site every other function in this module goes through.
  */
-export function snapshotTranscript(
+function claudeSnapshotTranscript(
   cwd: string, engineSessionId: string, projectId: string, sessionId: string,
 ): boolean {
   try {
-    const src = resolveTranscriptFile(cwd, engineSessionId);
+    const src = claudeResolveTranscriptFile(cwd, engineSessionId);
     if (!src) return false; // already-dead session — nothing to preserve
     const dest = archivedTranscriptPath(projectId, sessionId);
     try {
@@ -345,11 +412,19 @@ export function snapshotTranscript(
   }
 }
 
-/** Render an archived snapshot with the SAME parser as readTranscript. [] when no snapshot exists. */
-export function readArchivedTranscript(projectId: string, sessionId: string): TranscriptTurn[] {
+export function snapshotTranscript(
+  cwd: string, engineSessionId: string, projectId: string, sessionId: string, harness?: TranscriptHarness,
+): boolean {
+  return transcriptOpsFor(harness).snapshot(cwd, engineSessionId, projectId, sessionId);
+}
+
+/** Render an archived snapshot with the SAME parser {@link readTranscript} would use for this harness —
+ *  a Loom archive snapshot is a raw copy of the engine's own transcript file, so its wire format matches
+ *  whichever harness produced it. [] when no snapshot exists. */
+export function readArchivedTranscript(projectId: string, sessionId: string, harness?: TranscriptHarness): TranscriptTurn[] {
   const file = archivedTranscriptPath(projectId, sessionId);
   if (!fs.existsSync(file)) return [];
-  return parseTranscriptFile(file);
+  return transcriptOpsFor(harness).parse(file);
 }
 
 /** Best-effort removal of a session's transcript snapshot (on permanent delete). Never throws. */

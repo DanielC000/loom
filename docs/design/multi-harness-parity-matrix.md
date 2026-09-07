@@ -338,26 +338,35 @@ first (temporarily reverted, rebuilt, re-run) before trusting the green.
 
 ## Known gaps (disclosed, not silently skipped)
 
-- **M6, worker_transcript still cannot read a codex session's transcript, even after this pass.** Two
-  separate defects compound: (1) `CodexLive.engineSessionId` is still never written (codex has no
-  SessionStart-hook equivalent to report it the way claude's does), and (2) more fundamentally,
-  `sessions/transcript.ts`'s `readTranscript`/`resolveTranscriptFile`/`engineTranscriptExists` are
-  hardcoded re-exports of `pty/claude-transcript.ts` (a deliberate Phase-0 "zero behavior change" choice —
-  see `pty/adapter.ts`'s own coupling-audit table) — so even a populated `engineSessionId` would still
-  resolve against claude's own JSONL path scheme. Making the real serving code harness-aware would mean
-  threading a `harness` parameter through `sessions/transcript.ts` and ~20 call sites across 8 files
-  (`gateway/server.ts`, `mcp/orchestration.ts`, `mcp/platform.ts`, `mcp/transcript-read.ts`,
-  `companion/capabilities.ts`, `sessions/service.ts`, `sessions/boot-backstop.ts`,
-  `orchestration/crash-orphaned-workers.ts`) — a genuinely separate, cross-cutting change well outside
-  `pty/`'s scope for this card and this worker's own collision-avoidance constraint ("`pty/` remains
-  exclusively yours"). This pass DID wire `codexAdapter` into actual use (`watchCodexSessions`,
-  `sessions/liveness.ts`) — see that function's own doc for why it's a near-no-op until the above lands.
-  **Recommendation: a dedicated follow-up card**, not a quiet expansion of this one.
+- **M6 — CLOSED (card `2ec60d9c`), and independently proven against a REAL codex spawn**
+  (`test/codex-transcript-real-spawn.mjs`: a real `PtyHost.spawn({harness:"codex"})`, one real completed
+  turn, `readTranscript(cwd, engineSessionId, "codex")` — the exact seam `worker_transcript` calls —
+  returning the real conversation). Both compounding defects are fixed: (1) `CodexLive.engineSessionId` is
+  now discovered (not reported — codex still has no SessionStart-hook equivalent) by
+  `pty/host.ts#captureCodexEngineSessionId`, which scans for the rollout file codex writes at
+  first-real-turn time (`pty/codex-transcript.ts#findConversationIdForSpawn`, matched by cwd+recency) and
+  fires it through the SAME `onEngineSessionId` event claude's hook branch uses — the real-spawn test
+  ALSO caught and fixed a genuine timing defect in the first cut of this: the rollout file is created
+  LAZILY, around when the first turn actually begins, not at process boot, so the original one-shot ~2s
+  retry was too narrow (observed landing ~13s after the ready marker on a host whose personal
+  `~/.codex/config.toml` carries extra plugin/marketplace MCP servers); retries now extend to
+  `CODEX_ENGINE_ID_MAX_ATTEMPTS` (default 40, ~2 minutes total). (2) `sessions/transcript.ts`'s
+  `readTranscript`/`resolveTranscriptFile`/`engineTranscriptExists`/`snapshotTranscript`/
+  `readArchivedTranscript` now take an optional `harness` param and dispatch through `transcriptOpsFor`,
+  ONE resolution site, reusing `pty/codex-transcript.ts`'s already-built parser rather than a second copy.
+  The real call-site count/file-list this bullet originally estimated (~20 sites, 8 files) was RE-DERIVED,
+  not inherited: all 8 originally-named files needed the change as stated, PLUS two more the original
+  estimate missed — `sessions/liveness.ts` (`sweepDeadSessions`'s own dead-transcript check) and `index.ts`
+  (the on-exit snapshot call) — 10 consumer files in total. Hermetic coverage: `test/
+  transcript-harness-dispatch.mjs` (harness dispatch, fixture-only) and `test/
+  codex-engine-session-id-capture.mjs` (a scripted fake-pty proving the discovery+bounded-retry+negative-
+  control shape) — both confirmed RED against their respective pre-fix behavior before going GREEN.
 - **M5 / M11 / T2** — carded separately per lead ruling #6, not attempted here (p2, off this branch for
   scope).
 - **M8's own consumer**: `codexAdapter.readCachedVersion()` is now prewarmable (`prewarmCodexVersionAsync`
-  wired in `index.ts`), but nothing calls `codexAdapter.readCachedVersion()` yet either — same root cause
-  as M6 (nothing routes a codex session through the adapter's own methods in the real serving code today).
+  wired in `index.ts`), but nothing calls `codexAdapter.readCachedVersion()` yet either — a separate,
+  still-open gap of the same SHAPE M6 used to be (nothing routes this ONE adapter method through the real
+  serving code yet), not the same root cause any more now that M6 itself is closed.
 
 ## DoD status (card `353f6dc4`)
 
@@ -368,8 +377,9 @@ first (temporarily reverted, rebuilt, re-run) before trusting the green.
    ruling #6): this is NOT "blocked ONLY on provisioning."** That claim was checked at source by a Code
    Reviewer and found FALSE before the dispatching lead acted on it — a codex worker never received its
    kickoff prompt at all (C1, now fixed — see "Real-spawn findings" and the queue/turn-state-machine fix
-   commit), its transcript was permanently unreadable (M6, only PARTIALLY addressed — see below), and five
-   more correctness bugs (C2/M3/M4/M7/M9) would have made an actual worker unreliable even once dispatched.
+   commit), its transcript was permanently unreadable (M6, now CLOSED and independently proven against a
+   real codex spawn per card `2ec60d9c` — see "Known gaps" above), and five more correctness bugs
+   (C2/M3/M4/M7/M9) would have made an actual worker unreliable even once dispatched.
    **DoD-2 provisioning stays held until this whole set is fixed AND independently verified at source** —
    see the card's own lead-ruling history for the full accounting.
 3. This document.

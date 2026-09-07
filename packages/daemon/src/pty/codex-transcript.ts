@@ -108,6 +108,73 @@ export function transcriptExists(cwd: string, conversationId: string): boolean {
   return resolveTranscriptFile(cwd, conversationId) !== null;
 }
 
+/** Read a rollout file's FIRST line only and, iff it's a `session_meta` record, return its
+ *  `{session_id, cwd}` — the two fields {@link findConversationIdForSpawn} needs to match a candidate file
+ *  against a spawn. Confirmed shape: `session_meta` is always the first line (this file's own header). */
+function readSessionMeta(file: string): { sessionId: string; cwd: string } | null {
+  let raw: string;
+  try { raw = fs.readFileSync(file, "utf8"); } catch { return null; }
+  const nl = raw.indexOf("\n");
+  const firstLine = nl === -1 ? raw : raw.slice(0, nl);
+  if (!firstLine.trim()) return null;
+  let o: Record<string, unknown>;
+  try { o = JSON.parse(firstLine); } catch { return null; }
+  if (o.type !== "session_meta") return null;
+  const payload = o.payload as Record<string, unknown> | undefined;
+  const sessionId = payload?.session_id;
+  const cwd = payload?.cwd;
+  if (typeof sessionId !== "string" || typeof cwd !== "string") return null;
+  return { sessionId, cwd: path.resolve(cwd) };
+}
+
+/**
+ * DoD-1 (card 2ec60d9c): codex has no SessionStart-hook equivalent to REPORT its own conversation id the
+ * way claude's engine does — `CodexLive.engineSessionId` (`pty/host.ts`) would stay permanently null
+ * without this. Codex writes its rollout file's FIRST line (`session_meta`, carrying `session_id`+`cwd`)
+ * essentially at conversation start — well before any TUI output a human/Loom would ever observe — so this
+ * DISCOVERS the id instead of being told it: scan every rollout file created at/after `sinceMs` (a cheap
+ * `stat`-only filter BEFORE ever reading a candidate's content) and return the `session_id` of the one
+ * whose OWN `session_meta.payload.cwd` matches `cwd` — the newest such match, if more than one candidate
+ * somehow qualifies (e.g. two sessions spawned into the same cwd within the same window). Unlike
+ * {@link resolveTranscriptFile} (which matches an ALREADY-KNOWN id against a filename substring), this has
+ * no id to match against yet — cwd + recency is the only correlator available at spawn time. Returns null
+ * (never throws) when nothing matches, including a genuinely-not-yet-written file — the caller
+ * (`pty/host.ts`'s `captureCodexEngineSessionId`) is responsible for any retry.
+ */
+export function findConversationIdForSpawn(cwd: string, sinceMs: number): string | null {
+  const resolvedCwd = path.resolve(cwd);
+  let best: { sessionId: string; mtimeMs: number } | null = null;
+  try {
+    const sessionsRoot = codexSessionsRoot();
+    for (const year of fs.readdirSync(sessionsRoot)) {
+      const yearDir = path.join(sessionsRoot, year);
+      let months: string[];
+      try { months = fs.readdirSync(yearDir); } catch { continue; }
+      for (const month of months) {
+        const monthDir = path.join(yearDir, month);
+        let days: string[];
+        try { days = fs.readdirSync(monthDir); } catch { continue; }
+        for (const day of days) {
+          const dayDir = path.join(monthDir, day);
+          let files: string[];
+          try { files = fs.readdirSync(dayDir); } catch { continue; }
+          for (const f of files) {
+            if (!f.endsWith(".jsonl")) continue;
+            const full = path.join(dayDir, f);
+            let mtimeMs: number;
+            try { mtimeMs = fs.statSync(full).mtimeMs; } catch { continue; }
+            if (mtimeMs < sinceMs) continue; // cheap filter — never reads a file that predates this spawn
+            if (best && mtimeMs <= best.mtimeMs) continue; // already have a newer-or-equal match
+            const meta = readSessionMeta(full);
+            if (meta && meta.cwd === resolvedCwd) best = { sessionId: meta.sessionId, mtimeMs };
+          }
+        }
+      }
+    }
+  } catch { /* sessions root missing — nothing to find yet */ }
+  return best?.sessionId ?? null;
+}
+
 /** Pull display text out of a `response_item` content array (`content[0].type === "input_text"`
  *  confirmed; `"output_text"` handled defensively — the documented Responses-API-style counterpart to
  *  `input_text`, unobserved on this host per this file's own header gap note). */

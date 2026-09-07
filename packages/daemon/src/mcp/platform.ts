@@ -1794,8 +1794,8 @@ export class PlatformMcpRouter {
         // exists on disk — mirrors the already-correct fallback in gateway/server.ts's transcript route.
         const useSnapshot = s.archivedAt != null && archivedTranscriptExists(s.projectId, s.id);
         const turns = useSnapshot
-          ? readArchivedTranscript(s.projectId, s.id)
-          : s.engineSessionId ? readTranscript(s.cwd, s.engineSessionId) : [];
+          ? readArchivedTranscript(s.projectId, s.id, s.harness)
+          : s.engineSessionId ? readTranscript(s.cwd, s.engineSessionId, s.harness) : [];
         if (finalMessageOnly) {
           const last = [...turns].reverse().find((t) => t.role === "assistant");
           return ok(last ? [last] : []);

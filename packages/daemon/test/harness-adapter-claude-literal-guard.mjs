@@ -102,6 +102,13 @@ const ALLOWLIST = new Map([
   // the SAME two-way enum ("claude"|"codex") — generic spawn-resolution infra, not the adapter module.
   // "bare" only: this file has no business ever gaining a `.claude` PATH literal.
   ["sessions/service.ts", "bare"],
+  // Card 2ec60d9c (this same epic, threading `harness` through the transcript-resolution seam): this
+  // file's own `TranscriptHarness` type alias names the SAME two-way enum ("claude"|"codex") — the type
+  // mirrors `Session.harness`'s own shape, it doesn't construct a claude-specific path. "bare" only: this
+  // file's `transcriptOpsFor` resolution site dispatches to the REAL adapter-owned path/parse mechanism
+  // (`pty/claude-transcript.ts`/`pty/codex-transcript.ts`) rather than ever constructing a `.claude` path
+  // literal itself — that arm stays armed.
+  ["sessions/transcript.ts", "bare"],
 ]);
 
 function walk(dir, out) {
