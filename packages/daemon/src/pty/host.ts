@@ -48,8 +48,11 @@ const CODEX_SCREEN_SCAN_CAP = 8 * 1024;
 const CODEX_SUBMIT_ENTER_DELAY_MS = Number(process.env.LOOM_CODEX_SUBMIT_ENTER_DELAY_MS) || 300;
 /** Multi-harness epic (df1f94b0) Phase 1: gap between codex's two exit-sequence Ctrl+C writes — OBSERVED
  *  (same probe/finding as CODEX_SUBMIT_ENTER_DELAY_MS): "a second Ctrl+C, sent ~800ms after the first
- *  (i.e. once back at the ready box)" (State 6). */
-const CODEX_STOP_GAP_MS = 800;
+ *  (i.e. once back at the ready box)" (State 6). Card 176bdb0c: env-overridable (mirrors
+ *  `GRACEFUL_STOP_KILL_MS`'s own `LOOM_GRACEFUL_KILL_MS` convention) so this gap can be tuned/tested
+ *  without a code change — the default stays 800, UNCHANGED, pending real-codex evidence one way or the
+ *  other on whether widening it affects `stopCodex`'s observed intermittent non-zero exit. */
+const CODEX_STOP_GAP_MS = Number(process.env.LOOM_CODEX_STOP_GAP_MS) || 800;
 /**
  * Card 2ec60d9c (DoD-1): retry SPACING for `captureCodexEngineSessionId`'s engine-session-identity
  * discovery. Env-overridable so a hermetic test can shrink it (mirrors `CODEX_BUSY_STALE_MS`'s own
@@ -3923,6 +3926,15 @@ export interface CodexLive {
    *  MANAGER-visible report rather than every queued caller silently waiting forever — see
    *  `onCodexBootStuck`'s own doc for the two-recipient contract this feeds. */
   bootReadyTimer: NodeJS.Timeout | null;
+  /** Codex-only, card 176bdb0c: wall-clock time (`Date.now()`) `stopCodex`'s SECOND `\x03` was actually
+   *  WRITTEN for the CURRENT stop attempt — `null` until then, and reset to `null` at the top of every
+   *  fresh `stopCodex(..., "graceful")` call. The write is itself conditional (`stopCodex`'s own
+   *  `setTimeout` callback skips it once `!live.alive || live.killed`), so a `null` reading at `onExit`
+   *  is itself informative: it means codex exited from the FIRST `\x03` alone, before the second was ever
+   *  due — a materially different shape than "the second was sent and codex died some time after it".
+   *  Diagnostic only, read once at `onExit` to populate `PtyHostEvents.onExit`'s `codexStopDiag` — never
+   *  read for any control-flow decision, and never touches what counts as a successful/intended stop. */
+  secondSigintWrittenAt: number | null;
 }
 
 export interface SpawnOpts {
@@ -4300,8 +4312,29 @@ export interface PtyHostEvents {
    * death (the process died without a stop() — a crash / clean self-exit). It is the load-bearing
    * discriminator the crash-recovery watchdog keys off (recorded at onExit time; a whole-daemon
    * restart/crash never reaches here, so those are excluded for free). See PtyHost.stop / Live.stopping.
+   *
+   * `signal`/`codexStopDiag` (card 176bdb0c) are DIAGNOSTIC-ONLY additions, both OPTIONAL and both
+   * currently populated ONLY by the codex spawn path — claude's own call site (and the pre-existing
+   * `{ intended }`-only test/production call sites) are untouched and remain valid callers. Neither field
+   * changes what counts as a successful/intended stop; `code`'s own discard-by-every-consumer behavior
+   * (see `index.ts`'s `onExit` implementer, historically named `_code`) is UNCHANGED for every harness —
+   * this only adds visibility, never a new success/failure branch. `signal` is node-pty's own
+   * `onExit`-event field (`{exitCode, signal?}`) passed through verbatim — ⚠️ on this project's Windows/
+   * conpty target it is ALWAYS `undefined` (confirmed by reading `node-pty`'s own
+   * `windowsTerminal.ts`: `this.emit('exit', this._agent.exitCode)` passes only ONE argument, so the
+   * `(exitCode, signal) => ...` listener in `terminal.ts` never receives a second one on this platform) —
+   * do not expect it to discriminate anything here; it is carried through only because it is free and may
+   * be useful on a POSIX host. `codexStopDiag` records what `stopCodex`'s own graceful sequence actually
+   * did: whether its SECOND `\x03` was sent at all (a fast-enough exit from the FIRST alone means it never
+   * was), and, if sent, how long it had been outstanding when the process actually died — see
+   * `CodexLive.secondSigintWrittenAt`'s own doc for why this is the field the earlier measurement
+   * campaign on that card identified as most valuable.
    */
-  onExit(sessionId: string, code: number | null, info: { intended: boolean }): void;
+  onExit(sessionId: string, code: number | null, info: {
+    intended: boolean;
+    signal?: number;
+    codexStopDiag?: { secondSigintSent: boolean; msSinceSecondSigint: number | null };
+  }): void;
 }
 
 /**
@@ -6108,6 +6141,7 @@ export class PtyHost {
       screenScan: "",
       engineSessionIdCaptureAttempted: false,
       bootReady: false, bootReadyTimer: null,
+      secondSigintWrittenAt: null,
     };
     this.liveCodex.set(opts.sessionId, live);
     attachLogErrorGuard(opts.sessionId, live);
@@ -6286,7 +6320,7 @@ export class PtyHost {
       }
     });
 
-    pty.onExit(({ exitCode }) => {
+    pty.onExit(({ exitCode, signal }) => {
       live.alive = false;
       if (live.busyStaleTimer) { clearTimeout(live.busyStaleTimer); live.busyStaleTimer = null; } // never fire against a dead session
       if (live.bootReadyTimer) { clearTimeout(live.bootReadyTimer); live.bootReadyTimer = null; } // never fire against a dead session
@@ -6299,13 +6333,19 @@ export class PtyHost {
       reapOrphanedDescendants(live.pid);
       this.toolAttribution.forget(opts.sessionId);
       this.repeatedCalls.forget(opts.sessionId);
+      // Card 176bdb0c: diagnostic-only — see `secondSigintWrittenAt`'s own doc. Computed unconditionally
+      // (cheap, and informative even on an unintended exit, where it will just read {sent:false}).
+      const codexStopDiag = {
+        secondSigintSent: live.secondSigintWrittenAt !== null,
+        msSinceSecondSigint: live.secondSigintWrittenAt !== null ? Date.now() - live.secondSigintWrittenAt : null,
+      };
       // eslint-disable-next-line no-console
-      console.log(`[pty] codex exit ${opts.sessionId} code=${exitCode} intended=${live.stopping}`);
+      console.log(`[pty] codex exit ${opts.sessionId} code=${exitCode} intended=${live.stopping} signal=${signal} secondSigintSent=${codexStopDiag.secondSigintSent} msSinceSecondSigint=${codexStopDiag.msSinceSecondSigint}`);
       try { live.logStream.end(); } catch { /* ignore */ }
       this.broadcastControl(live, { type: "exit", code: exitCode });
       // A codex session IS a real DB Session (unlike a shell) — persist the exit exactly as claude's own
       // spawn() onExit does, so SessionService/boot-reconcile see it the same way regardless of harness.
-      this.events.onExit(opts.sessionId, exitCode, { intended: live.stopping });
+      this.events.onExit(opts.sessionId, exitCode, { intended: live.stopping, signal, codexStopDiag });
     });
   }
 
@@ -6608,10 +6648,13 @@ export class PtyHost {
       live.pty.kill();
       return;
     }
+    // Card 176bdb0c: fresh diagnostic state for THIS stop attempt — see `secondSigintWrittenAt`'s own doc.
+    live.secondSigintWrittenAt = null;
     if (!live.killed) live.pty.write("\x03");
     setTimeout(() => {
       if (!live.alive || live.killed) return; // already exited from the first Ctrl+C, or already killed
       live.pty.write("\x03");
+      live.secondSigintWrittenAt = Date.now();
     }, CODEX_STOP_GAP_MS);
     // Bounded hard-kill backstop — mirrors escalateGracefulStop's own stage-3 shape (claude's sibling),
     // so a graceful stop() is deterministic here too: it ALWAYS terminates, never leaves a live orphan.

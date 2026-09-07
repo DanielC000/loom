@@ -453,13 +453,27 @@ async function main(): Promise<void> {
       });
     },
     // A hard stop fires no Stop hook, so clear busy on exit too — an exited pty is never busy.
-    onExit: (sessionId, _code, info) => {
+    onExit: (sessionId, code, info) => {
       db.setProcessState(sessionId, "exited");
       db.setBusy(sessionId, false);
       // Read the exited row ONCE (null for non-DB shell terminals) — reused by the auto-archive
       // decision AND the transcript snapshot below. Best-effort: never disturb the exit path.
       let exited;
       try { exited = db.getSession(sessionId); } catch { /* never disturb the exit path */ }
+      // Card 176bdb0c DoD-3 (fail-loud, diagnostic-only): a codex graceful stop is `intended` regardless
+      // of its raw exit code (see PtyHost's own onExit — every consumer below branches on `intended`
+      // alone), so a non-zero exit here was previously invisible past a console.log inside pty/host.ts.
+      // This does NOT change archival/cleanup/success semantics (still governed by `intended` alone,
+      // untouched) — it only surfaces a signal that a human/manager can actually see. Scoped to codex —
+      // claude's own graceful stop discards its exit code identically and is deliberately NOT touched
+      // here (out of scope for this card; a separate card if it's worth one).
+      if (info.intended && code !== null && code !== 0 && exited?.harness === "codex") {
+        console.warn(
+          `[pty] codex ${sessionId} graceful stop exited non-zero (code=${code}, signal=${info.signal}, ` +
+          `secondSigintSent=${info.codexStopDiag?.secondSigintSent}, msSinceSecondSigint=${info.codexStopDiag?.msSinceSecondSigint}) ` +
+          `— see card 176bdb0c`,
+        );
+      }
       // Auto-archive on exit (card b37750a4): every STOPPED session leaves the live rail and surfaces
       // in Archive automatically — reuses the existing archived_at field (stamp = now); resume() clears
       // it to bring the session back. Per-session, no cascade (each worker auto-archives as it exits).
