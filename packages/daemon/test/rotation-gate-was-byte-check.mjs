@@ -33,7 +33,9 @@ function writeFixture(name, content) {
 // The marker tokens rotation-gate.mjs requires, after card bcd3f690 (2026-09-02) retired
 // MY-PEER-SEND-LEDGER, ANNOUNCE-CANNOT-CARRY-A-SHA, MGR122-FLOOR, and card a681aed5 (same day) restored
 // MGR122-FLOOR (kept as a local literal — this file is a TEST, not the source of truth;
-// rotation-gate.mjs's own MARKERS array is that).
+// rotation-gate.mjs's own MARKERS array is that). Card 4cbb2999 (2026-09-07) added
+// PRAISE-IS-THE-LEAST-AUDITED-INPUT and PRE-MERGE-PAIR — included below so this file's fixtures still
+// satisfy the real (now-larger) MARKERS array; unrelated to this file's own subject (the --was check).
 const ALL_MARKER_TOKENS = [
   "Orchestrator Rules",
   "THE FOUR-LEG VERIFY",
@@ -46,6 +48,8 @@ const ALL_MARKER_TOKENS = [
   "in-memory",
   "QUIET-LANE",
   "MGR122-FLOOR",
+  "PRAISE-IS-THE-LEAST-AUDITED-INPUT",
+  "PRE-MERGE-PAIR",
 ];
 
 function commitmentsList(n) {

@@ -63,6 +63,21 @@
 // the live vault section 2026-08-28 (card `d78a6d5d`), the marker list then held 14 entries and matched
 // §ROTATION-GATE verbatim with no drift found.
 //
+// ADDED 2026-09-07 (card `4cbb2999`, found by the Platform Lead on its own setup and reported unprompted):
+// `PRAISE-IS-THE-LEAST-AUDITED-INPUT` and `PRE-MERGE-PAIR` — 10 → 12 entries. THE FALSE GREEN THIS FIXES:
+// `resume_doc_check`'s (and this script's own) `--rules`/rulesPath union satisfies a marker from EITHER the
+// active doc OR a listed rules file — so a rules file being READ was never proof anything in it was
+// GUARDED. Measured live: all 10 pre-existing markers resolved via the active doc alone, meaning
+// `Operations/Orchestrator Rules.md` (where the whole non-rotating doctrine now lives) could be gutted
+// entirely and every marker would still report green. These two tokens are deliberately chosen to be
+// RULES-FILE-ONLY (0 hits in the active `Orchestrator Log.md`, ≥6 hits each in the rules file) so they are
+// the first tokens this script (and the project's `orchestration.rotationMarkers` config, landed
+// separately — see the card) actually depends on `--rules`/rulesPath to satisfy — proven by running this
+// script with and without `--rules` against the real vault files (card `4cbb2999`'s own DoD). Two
+// candidates from the same batch — `ANNOUNCE-CANNOT-CARRY-A-SHA` and `MY-PEER-SEND-LEDGER` — were
+// deliberately NOT used here: both name rules this script already retired above (`bcd3f690`), so re-adding
+// them as markers would re-protect dead ceremony rather than live doctrine.
+//
 // ⭐ LIVE_COMMITMENTS_FLOOR IS A FLOOR, NOT AN EXACT COUNT (card 34a6f07e, 2026-08-28). It used to be
 // `REQUIRED_LIVE_COMMITMENTS_COUNT`, checked with EQUALITY (`!==`). That was a bug, not a feature: a
 // fixed arity doesn't merely fail to catch overflow — it CREATES it. The cheapest way to add a 15th
@@ -247,6 +262,8 @@ const MARKERS = [
   { token: "NO-CLEARANCE-FROM-SILENCE", caseSensitive: false, note: "protects the REPO (forbids inferring authorization from a peer's silence), not etiquette — kept by card bcd3f690" },
   { token: "QUIET-LANE", caseSensitive: false, note: "a measurement-honesty rule backing the gate-queue-read-at-fire interlock — kept by card bcd3f690" },
   { token: "MGR122-FLOOR", caseSensitive: false, note: "a floor on an announced live-worker-count number — RESTORED by card a681aed5 (2026-09-02) after a peer objection: nothing else durably carries this rule once dropped from MARKERS, and a count floor on LIVE COMMITMENTS protects the SECTION SIZE, never this SPECIFIC item — see the file header" },
+  { token: "PRAISE-IS-THE-LEAST-AUDITED-INPUT", caseSensitive: false, note: "ADDED by card 4cbb2999 (2026-09-07) — deliberately RULES-FILE-ONLY (0 hits in the active doc): the epistemic-discipline rule that a commendation is the input least likely to get re-checked, see the file header for why this token was chosen" },
+  { token: "PRE-MERGE-PAIR", caseSensitive: false, note: "ADDED by card 4cbb2999 (2026-09-07) — deliberately RULES-FILE-ONLY (0 hits in the active doc): retitle-then-confirm pre-merge discipline — the squash subject is permanent mainline history, see the file header" },
 ];
 
 // Retired 2026-09-02 by card `bcd3f690` (owner's ceremony cut): "MY-PEER-SEND-LEDGER" (the per-send

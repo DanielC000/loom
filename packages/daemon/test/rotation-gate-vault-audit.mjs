@@ -39,8 +39,9 @@ function writeFixture(name, content) {
   return p;
 }
 
-// The 10 marker tokens rotation-gate.mjs's own MARKERS array currently requires (card a681aed5, 2026-09-02
-// — see rotation-gate.mjs's own array; kept as a local literal here, same convention as the sibling test
+// The 12 marker tokens rotation-gate.mjs's own MARKERS array currently requires (card a681aed5,
+// 2026-09-02, plus PRAISE-IS-THE-LEAST-AUDITED-INPUT/PRE-MERGE-PAIR added by card 4cbb2999, 2026-09-07 —
+// see rotation-gate.mjs's own array; kept as a local literal here, same convention as the sibling test
 // files rotation-gate-rules-lint.mjs / rotation-gate-heading-anchor.mjs already use).
 const ALL_MARKER_TOKENS = [
   "Orchestrator Rules",
@@ -53,6 +54,8 @@ const ALL_MARKER_TOKENS = [
   "NO-CLEARANCE-FROM-SILENCE",
   "QUIET-LANE",
   "MGR122-FLOOR",
+  "PRAISE-IS-THE-LEAST-AUDITED-INPUT",
+  "PRE-MERGE-PAIR",
 ];
 const CURRENT_FLOOR = 12; // rotation-gate.mjs's own LIVE_COMMITMENTS_FLOOR as of card bcd3f890/a681aed5
 

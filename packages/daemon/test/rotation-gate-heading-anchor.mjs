@@ -59,12 +59,14 @@ function writeFixture(name, content) {
 // Every marker rotation-gate.mjs requires, present as plain prose text — none of these lines are headings
 // (no leading `#`), so they satisfy the presence check without ever opening/closing the commitments span.
 // Card bcd3f690 (2026-09-02) retired 3 of the original 14 markers (MY-PEER-SEND-LEDGER,
-// ANNOUNCE-CANNOT-CARRY-A-SHA, MGR122-FLOOR); card a681aed5 (same day) restored MGR122-FLOOR — this list
-// holds the 11 prose markers that currently survive (12 total incl. LIVE COMMITMENTS via the real heading).
+// ANNOUNCE-CANNOT-CARRY-A-SHA, MGR122-FLOOR); card a681aed5 (same day) restored MGR122-FLOOR; card 4cbb2999
+// (2026-09-07) added PRAISE-IS-THE-LEAST-AUDITED-INPUT and PRE-MERGE-PAIR — this list holds the 13 prose
+// markers that currently survive (14 total incl. LIVE COMMITMENTS via the real heading).
 const ALL_MARKERS_PROSE = [
   "Orchestrator Rules · THE FOUR-LEG VERIFY · OWNER-GATED · ROTATE AT 40 KB · THE SAFE-WRITE ·",
   "MULTI-HARNESS EPIC · NO-CLEARANCE-FROM-SILENCE ·",
-  "capQueued · in-memory · QUIET-LANE · MGR122-FLOOR",
+  "capQueued · in-memory · QUIET-LANE · MGR122-FLOOR ·",
+  "PRAISE-IS-THE-LEAST-AUDITED-INPUT · PRE-MERGE-PAIR",
 ].join("\n");
 
 function commitmentsList(n) {

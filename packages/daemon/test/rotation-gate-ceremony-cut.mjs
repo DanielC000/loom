@@ -14,15 +14,21 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // from MARKERS — both were satisfied ONLY by the sentence announcing them (see project memory
 // resume-doc-rotation-integrity-capability), so they guarded nothing real; the sentence itself is being
 // removed from the resume doc separately, LAST, once both checkers (this script and the daemon-native
-// resume_doc_check tool) are clear. This file's fixtures/assertions below reflect that second cut: 9
-// surviving prose markers (was 11), 10 markers total incl. LIVE COMMITMENTS (was 12). The 4 mutation
+// resume_doc_check tool) are clear. The 4 mutation
 // sub-checks that used to exist for "capQueued"/"in-memory" are REMOVED, not re-pointed — they have no
 // surviving purpose (the per-token loop below no longer iterates those tokens at all, since dropping either
 // from a fixture no longer causes — nor should cause — a refusal); every other surviving marker's mutation
 // check is untouched.
 //
+// UPDATED AGAIN 2026-09-07 (card 4cbb2999): "PRAISE-IS-THE-LEAST-AUDITED-INPUT" and "PRE-MERGE-PAIR" ADDED
+// to MARKERS — both deliberately RULES-FILE-ONLY (see rotation-gate.mjs's own header) — unrelated to this
+// file's own ceremony-cut subject, but this file's fixtures build a doc satisfying every surviving marker
+// via --active alone, so they are included below like every other surviving prose marker. This file's
+// fixtures/assertions now reflect the combined post-cut, post-addition state: 11 surviving prose markers,
+// 12 markers total incl. LIVE COMMITMENTS.
+//
 // THIS FILE PROVES BOTH DIRECTIONS, ON THE REAL SCRIPT:
-//   (a) a document carrying only the 9 surviving markers and exactly the new floor (12) of numbered
+//   (a) a document carrying only the 11 surviving markers and exactly the floor (12) of numbered
 //       LIVE COMMITMENTS items PASSES;
 //   (b) a document missing any ONE surviving marker, or holding fewer than 12 commitments, still FAILS
 //       with exit 1 — each cut narrowed WHAT is required, never weakened the check that runs.
@@ -51,10 +57,11 @@ function writeFixture(name, content) {
   return p;
 }
 
-// The 9 marker tokens rotation-gate.mjs requires AFTER cards bcd3f690 + a681aed5 + 857aa90e (kept as a
-// local literal — this file is a TEST, not the source of truth; rotation-gate.mjs's own MARKERS array is
-// that). Excludes "LIVE COMMITMENTS", which is satisfied via the real section heading below, not this
-// prose list — 9 here + that heading = 10, matching rotation-gate.mjs's current MARKERS.length.
+// The 11 marker tokens rotation-gate.mjs requires AFTER cards bcd3f690 + a681aed5 + 857aa90e + 4cbb2999
+// (kept as a local literal — this file is a TEST, not the source of truth; rotation-gate.mjs's own
+// MARKERS array is that). Excludes "LIVE COMMITMENTS", which is satisfied via the real section heading
+// below, not this prose list — 11 here + that heading = 12, matching rotation-gate.mjs's current
+// MARKERS.length.
 const SURVIVING_MARKER_TOKENS = [
   "Orchestrator Rules",
   "THE FOUR-LEG VERIFY",
@@ -65,6 +72,8 @@ const SURVIVING_MARKER_TOKENS = [
   "NO-CLEARANCE-FROM-SILENCE",
   "QUIET-LANE",
   "MGR122-FLOOR",
+  "PRAISE-IS-THE-LEAST-AUDITED-INPUT",
+  "PRE-MERGE-PAIR",
 ];
 
 const RETIRED_MARKER_TOKENS = ["MY-PEER-SEND-LEDGER", "ANNOUNCE-CANNOT-CARRY-A-SHA"];
@@ -101,14 +110,14 @@ function runGate(argsArr) {
   }
 }
 
-// ── (a) THE POST-CUT DOC PASSES: 9 surviving prose markers (+ LIVE COMMITMENTS via the real heading =
-// 10 total in MARKERS), none of the 2 bcd3f690-retired tokens, exactly the new floor (12) of numbered
+// ── (a) THE POST-CUT DOC PASSES: 11 surviving prose markers (+ LIVE COMMITMENTS via the real heading =
+// 12 total in MARKERS), none of the 2 bcd3f690-retired tokens, exactly the floor (12) of numbered
 // commitments.
 const cleanPath = writeFixture("postcut-clean.md", docWith({ items: 12 }));
 {
   const r = runGate(["--active", cleanPath, "--lint"]);
-  check("post-cut doc (10 markers, 12 commitments, no retired tokens): exits 0", r.status === 0);
-  check("post-cut doc: reports LINT OK with 10 markers and 12 commitments", /LINT OK.*carries all 10 markers and 12/.test(r.stdout));
+  check("post-cut doc (12 markers, 12 commitments, no retired tokens): exits 0", r.status === 0);
+  check("post-cut doc: reports LINT OK with 12 markers and 12 commitments", /LINT OK.*carries all 12 markers and 12/.test(r.stdout));
   for (const token of RETIRED_MARKER_TOKENS) {
     check(`post-cut doc genuinely omits retired token "${token}"`, !docWith({ items: 12 }).includes(token));
   }
@@ -144,9 +153,10 @@ for (const dropped of SURVIVING_MARKER_TOKENS) {
 fs.rmSync(tmpDir, { recursive: true, force: true });
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card bcd3f690's cut (as amended by a681aed5's restore of MGR122-FLOOR, then narrowed " +
-    "again by 857aa90e's retirement of capQueued/in-memory): the retired markers are no longer required, " +
-    "the 9 surviving prose markers (10 total incl. LIVE COMMITMENTS) are each still individually enforced, " +
+  ? "\n✅ ALL PASS — card bcd3f690's cut (as amended by a681aed5's restore of MGR122-FLOOR, narrowed again " +
+    "by 857aa90e's retirement of capQueued/in-memory, then widened by 4cbb2999's addition of " +
+    "PRAISE-IS-THE-LEAST-AUDITED-INPUT/PRE-MERGE-PAIR): the retired markers are no longer required, " +
+    "the 11 surviving prose markers (12 total incl. LIVE COMMITMENTS) are each still individually enforced, " +
     "the LIVE COMMITMENTS floor is 12 (not 20), and growth above the floor is never punished."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
