@@ -383,10 +383,35 @@ first (temporarily reverted, rebuilt, re-run) before trusting the green.
    **DoD-2 provisioning stays held until this whole set is fixed AND independently verified at source** —
    see the card's own lead-ruling history for the full accounting.
 3. This document.
-4. **NOT YET ATTEMPTED** — recycle/continuation (`codex resume`) needs a dedicated resume path in
-   `spawnCodexProcess`/`createCodexPty` (currently only a fresh spawn is wired); the probe confirmed the
-   underlying mechanism exists (State 6: a session with in-flight state prints a `codex resume <uuid>`
-   hint unprompted on clean exit, 5/5 real runs) but nothing in this pass consumes it yet.
+4. **WIRED (card `c6ce2804`), but END-TO-END CONTINUITY IS UNOBSERVED — do not read this as "confirmed."**
+   `createCodexPty`'s argv now leads with `resume <uuid>` when `opts.resumeId` is set and the spawn is not
+   a fork (`codex-host.ts#buildCodexResumeArgs`, hermetically tested — `test/codex-host-decisions.mjs`) —
+   `resume()`, `session_resume`, and boot-fleet-resume (`resumeFleetOnBoot`) all route through it
+   transparently, verified by reading each call site. **`recycle`/`recycleManagerNearLimit`/
+   `recyclePlatformLead` do NOT route through this at all, for ANY harness** — all three deliberately spawn
+   fresh with a written handoff prompt instead (`recycleWorker`'s own comment: "NOT --resume, which would
+   defeat the recycle"), so this wiring changes nothing about recycle behavior; that was a pre-existing
+   card-framing error, now corrected. `forkSession()` still falls through to a fresh spawn for codex,
+   deliberately: no `--fork-session`/`--session-id`-shaped equivalent was ever found for codex, and reusing
+   `resume <uuid>` for a fork would risk two ptys racing writes into one rollout file — a safety choice,
+   not a parity gap (loud `console.warn` on that path).
+   ⚠️ **Corrected framing (was previously misstated here as "5/5 real runs" of the mechanism itself):** the
+   probe's 5/5 figure (State 6) is about codex PRINTING the `codex resume <uuid>` HINT TEXT, unprompted, on
+   clean exit — nobody has ever actually invoked `codex resume <uuid>` and observed it continue anything.
+   A real-spawn regression test attempting exactly that (spawn → capture engine id → resume → assert the
+   resumed process's own self-reported exit id matches) was written and run TWICE against a real,
+   authenticated install (once with no MCP gateway, once with a real in-process one) — **both times it
+   could not even get an id to resume with**: a codex session that reaches ready state and exits cleanly
+   with ZERO turns run writes NO rollout file at all, confirmed directly on disk both times, regardless of
+   MCP-gateway state. Relocated (de-registered from the certified real-spawn corpus, which must not carry
+   a test that cannot currently pass) to
+   `docs/investigations/c6ce2804-codex-resume-rollout-timing/` — see that dir's `findings.md` for the full
+   method, what's established vs. merely inferred, and a related claude/codex asymmetry it surfaced
+   (carded separately: a codex worker that dies before its first turn has no engine id to resume with at
+   all, unlike claude's SessionStart-hook capture — fails SAFE via the pre-existing `engineTranscriptExists`
+   guard, not a crash risk). **Net: the resume PATH is wired and its argv-construction is deterministically
+   tested; whether it actually restores conversational state has never been observed, and observing it
+   would cost a real model turn nobody has spent.**
 5. **Real-spawn coverage now spans the full stateful surface** — `test/codex-version-real-spawn.mjs`
    (version-cache, caught the `.cmd`-shim `shell:true` bug), `test/codex-mcp-reachability-real-spawn.mjs`
    (MCP handshake against a real gateway), and the new `test/codex-stateful-runtime-real-spawn.mjs`

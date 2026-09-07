@@ -26,7 +26,7 @@ import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
-import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, codexTrustDialogLock } from "./codex-host.js";
+import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, buildCodexResumeArgs, codexTrustDialogLock } from "./codex-host.js";
 import { findConversationIdForSpawn } from "./codex-transcript.js";
 
 const RING_CAP_BYTES = 256 * 1024;
@@ -6089,6 +6089,21 @@ export class PtyHost {
    * `harness:"codex"`+`browserTesting`/`documentConversion:true` profile at save time for exactly this
    * reason (`codexStdioCapabilityUnsupportedError`) — the threading here is defense-in-depth for a profile
    * that predates that guard, not the primary enforcement point.
+   *
+   * Card `c6ce2804` (DoD-1): `opts.resumeId` now distinguishes fresh vs resume, mirroring `createPty`'s own
+   * `--resume` branch — `codex resume <uuid>` is a genuine top-level subcommand (probe findings.md State 6
+   * / point 2: codex itself prints this exact command, unprompted, on the clean exit of a session with
+   * in-flight state), so a resume spawn leads the argv with `["resume", opts.resumeId]` before the
+   * unattended-boot flags below (a clap subcommand token, not a flag — it cannot appear after `-a`/`-s`).
+   * ⚠️ **Deliberately NOT wired for `opts.fork`**, unlike the claude path: claude's fork has a real engine
+   * primitive (`--fork-session` + a pre-assigned `--session-id`) that diverges a NEW conversation from the
+   * source without touching the source's own transcript; the probe never found a codex equivalent (no
+   * `--fork-session`/`--session-id`-shaped flag surfaced in any fetched doc or `--help` output). Reusing
+   * `resume <uuid>` for a fork would attach a SECOND live pty to the SAME engine-session id the source may
+   * still be running under — a real correctness risk (two processes racing writes into one rollout file),
+   * not a cosmetic parity gap. So `opts.fork` for codex still falls through to a fresh spawn (unchanged
+   * pre-existing behavior, same as before this card), with a loud disclosed warning below rather than a
+   * silently-wrong resume attempt.
    */
   protected createCodexPty(opts: SpawnOpts): IPty {
     const bin = resolveExecutable(process.env.LOOM_CODEX_BIN || CODEX_BINARY_NAME);
@@ -6120,12 +6135,21 @@ export class PtyHost {
       projectId: opts.projectId,
     });
     const mcpArgs = mcpServersToCodexArgs(mcpServers);
+    // Card c6ce2804: buildCodexResumeArgs (codex-host.ts) is the PURE, directly-testable decision — see
+    // its own doc for why fork is deliberately excluded even when a resumeId is also present. A fork
+    // request carrying a codex resumeId is reported loudly here rather than silently mis-resumed.
+    const resumeArgs = buildCodexResumeArgs(opts);
+    const isCodexResume = resumeArgs.length > 0;
+    if (opts.fork && opts.resumeId) {
+      // eslint-disable-next-line no-console
+      console.warn(`[pty] ${opts.sessionId} codex has no discovered fork/branch mechanism analogous to claude's --fork-session, so reusing "resume ${opts.resumeId}" here would risk a SECOND live pty racing writes into the source's own rollout file — deliberately NOT done, for safety, not merely for lack of parity. This "fork" spawns a FRESH, independent codex session (sharing the source's cwd) instead, not a branched copy of its conversation. Known, disclosed gap (card c6ce2804); use harness "claude" if forking a live conversation is required.`);
+    }
     // `-a never -s workspace-write --no-alt-screen` — the probe's own OBSERVED unattended-boot recipe
     // (findings.md, "Point 4"): unattended approval + edit-capable sandbox + preserved scrollback (the
     // codex-native analogue of claude's `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` env-var workaround).
-    const args = ["-a", "never", "-s", "workspace-write", "--no-alt-screen", ...mcpArgs];
+    const args = [...resumeArgs, "-a", "never", "-s", "workspace-write", "--no-alt-screen", ...mcpArgs];
     // eslint-disable-next-line no-console
-    console.log(`[pty] spawnCodex ${opts.sessionId} bin=${bin} cwd=${opts.cwd} mcpServers=${Object.keys(mcpServers).join(",")}`);
+    console.log(`[pty] spawnCodex ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${isCodexResume ? opts.resumeId : "none"} mcpServers=${Object.keys(mcpServers).join(",")}`);
     return spawn(bin, args, {
       name: "xterm-256color",
       cols: opts.geometry.cols,

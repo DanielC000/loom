@@ -14,7 +14,7 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 const {
-  isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, CodexTrustDialogLock,
+  isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, buildCodexResumeArgs, CodexTrustDialogLock,
 } = await import("../dist/pty/codex-host.js");
 const {
   TRUST_DIALOG_MARKER, BUSY_STATUS_MARKER, CODEX_READY_PLACEHOLDER, CODEX_MODEL_LOADED_RE, stripAnsiCsi, hashConfigBefore, diffConfigAfterSpawn,
@@ -102,6 +102,28 @@ check(
 check(
   "mcpServersToCodexArgs against a REAL buildMcpServers(role:'worker') result: mounts loom-orchestration too (worker gets both, exactly as claude's --mcp-config does)",
   workerArgs.includes("mcp_servers.loom-orchestration.url=http://127.0.0.1:4317/mcp-orch/sess-1"),
+);
+
+// --- buildCodexResumeArgs (card c6ce2804 DoD-1) — the constructed-argv coverage that replaces the
+// real-spawn regression test relocated to docs/investigations/c6ce2804-codex-resume-rollout-timing/
+// after it could not observe its own claim against a real install (see that dir's findings.md). This is
+// the exact deterministic surface the wiring introduced: no real spawn, no timing dependency. -----------
+
+check(
+  "buildCodexResumeArgs: resumeId set, no fork ⇒ leads with the resume subcommand + the exact id",
+  JSON.stringify(buildCodexResumeArgs({ resumeId: "abc-123" })) === JSON.stringify(["resume", "abc-123"]),
+);
+check(
+  "buildCodexResumeArgs: no resumeId ⇒ a fresh spawn (empty prefix) — negative control",
+  JSON.stringify(buildCodexResumeArgs({})) === "[]",
+);
+check(
+  "buildCodexResumeArgs: resumeId present but fork:true ⇒ STILL a fresh spawn (empty prefix) — codex has no --fork-session equivalent, so a fork must never reuse resume (see this function's own doc for why: two ptys racing writes into one rollout file)",
+  JSON.stringify(buildCodexResumeArgs({ resumeId: "abc-123", fork: true })) === "[]",
+);
+check(
+  "buildCodexResumeArgs: fork:false with a resumeId behaves exactly like fork omitted (explicit-false isn't a different case)",
+  JSON.stringify(buildCodexResumeArgs({ resumeId: "abc-123", fork: false })) === JSON.stringify(["resume", "abc-123"]),
 );
 
 // --- CodexTrustDialogLock ----------------------------------------------------------------------------

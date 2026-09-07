@@ -124,6 +124,26 @@ export function mcpServersToCodexArgs(mcpServers: Record<string, unknown>): stri
 }
 
 /**
+ * Card c6ce2804 (DoD-1): decide the resume-related PREFIX of a codex spawn's argv — pure, so the exact
+ * fresh-vs-resume-vs-fork decision can be asserted directly (codex-resume-argv.mjs) with no real spawn
+ * required, mirroring why `mcpServersToCodexArgs` above lives here rather than inline in `createCodexPty`.
+ * `codex resume <uuid>` is a genuine top-level subcommand (probe findings.md State 6 / point 2: codex
+ * itself prints this exact command, unprompted, on the clean exit of a session with in-flight state), so
+ * a resume spawn's argv must LEAD with `["resume", <uuid>]` — a clap subcommand token, not a flag; it
+ * cannot appear after `-a`/`-s`/`--no-alt-screen` the way `createCodexPty` builds the rest of the argv.
+ *
+ * Deliberately returns `[]` (a fresh spawn) when `fork` is true, EVEN IF `resumeId` is also set: unlike
+ * claude, codex has no discovered `--fork-session`/`--session-id`-shaped equivalent (checked against both
+ * probe passes' fetched docs and `--help` output). Reusing `resume <uuid>` for a fork would attach a
+ * SECOND live pty to the SAME engine-session id the source may still be running under — a real
+ * correctness risk (two processes racing writes into one rollout file), not a cosmetic parity gap. See
+ * `createCodexPty`'s own doc for the full reasoning and the disclosed `console.warn` this triggers there.
+ */
+export function buildCodexResumeArgs(opts: { resumeId?: string; fork?: boolean }): string[] {
+  return opts.resumeId && !opts.fork ? ["resume", opts.resumeId] : [];
+}
+
+/**
  * In-process mutex serializing codex's first-use-per-directory trust-dialog window (parity matrix's
  * "CODEX_HOME" section: every codex worker on a host shares ONE real `~/.codex/config.toml`, so two
  * concurrent fresh spawns answering the dialog at the same instant could race its config write). Bounded
