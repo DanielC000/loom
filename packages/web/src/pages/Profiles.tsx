@@ -7,6 +7,8 @@ import { Panel, Button, Input, Select, SectionLabel, Badge } from "../components
 import { color, font, radius, tone, type Tone } from "../theme";
 import { agentProfiles } from "../lib/profileRoles";
 import { RolePicker } from "../components/RolePicker";
+import { HarnessPicker, HarnessDropSummary, HarnessFieldDrop, HarnessTag, dropStyle } from "../components/HarnessPicker";
+import { harnessOf, type Harness } from "../lib/harnessFields";
 import { RoleBadge, roleDisplay, roleColor } from "../lib/roleDisplay";
 
 // Loom's Profiles — the reusable, platform-level rig (role + model + permission deltas + icon) an
@@ -95,6 +97,10 @@ export default function Profiles() {
               onClick={() => setSelected(p.id)} title={p.description || p.name}>
               {p.icon && <span>{p.icon}</span>}
               <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+              {/* A rig that spawns a DIFFERENT vendor binary should be identifiable without opening it
+                  (card fa2277b6 item 5). Only codex is marked — claude is the default, so badging every
+                  row would be noise, not signal. */}
+              <HarnessTag harness={harnessOf(p.harness)} title={`${p.name} spawns the codex CLI, not claude`} />
               <StatusDots customized={!!p.customized} updateAvailable={!!p.updateAvailable} />
               <span style={{ fontSize: 10, color: roleColor(p.role), fontFamily: font.mono }}>{roleDisplay(p.role).short}</span>
             </Button>
@@ -261,6 +267,10 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
   const [documentConversion, setDocumentConversion] = useState(profile.documentConversion ?? false);
   const [restrictedTools, setRestrictedTools] = useState(profile.restrictedTools ?? false);
   const [noCommit, setNoCommit] = useState(profile.noCommit ?? false);
+  // Which vendor CLI this rig spawns (card fa2277b6). Absent on the row ⇒ "claude", so an untouched
+  // profile never reads as having chosen a harness. HUMAN-only: `harness` sits on the daemon's
+  // AGENT_FORBIDDEN_PROFILE_KEYS, so this editor and the loopback REST it drives are the ONLY grant path.
+  const [harness, setHarness] = useState<Harness>(harnessOf(profile.harness));
   // Skill subset (empty = deliver ALL, the default — null and [] are equivalent, matching the daemon).
   const [skills, setSkills] = useState<string[]>(profile.skills ?? []);
   // Authenticated-egress connection-id allowlist (empty = NO access, the secure default — UNLIKE skills,
@@ -340,6 +350,7 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
     documentConversion !== (profile.documentConversion ?? false) ||
     restrictedTools !== (profile.restrictedTools ?? false) ||
     noCommit !== (profile.noCommit ?? false) ||
+    harness !== harnessOf(profile.harness) ||
     sortedJson(skills) !== sortedJson(profile.skills ?? []) ||
     sortedJson(connections) !== sortedJson(profile.connections ?? []) ||
     capsJson(capabilities) !== capsJson(profile.capabilities ?? []);
@@ -350,13 +361,14 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
     background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: 6, padding: 8,
   };
 
-  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setDocumentConversion(profile.documentConversion ?? false); setRestrictedTools(profile.restrictedTools ?? false); setNoCommit(profile.noCommit ?? false); setSkills(profile.skills ?? []); setConnections(profile.connections ?? []); setCapabilities(profile.capabilities ?? []); };
+  const reset = () => { setName(profile.name); setRole(profile.role ?? ""); setDescription(profile.description); setAllowText(profile.allowDelta.join("\n")); setIcon(profile.icon ?? ""); setModel(profile.model ?? ""); setBrowserTesting(profile.browserTesting ?? false); setDocumentConversion(profile.documentConversion ?? false); setRestrictedTools(profile.restrictedTools ?? false); setNoCommit(profile.noCommit ?? false); setHarness(harnessOf(profile.harness)); setSkills(profile.skills ?? []); setConnections(profile.connections ?? []); setCapabilities(profile.capabilities ?? []); };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", color: color.text }}>{profile.name}</strong>
         <RoleBadge role={role || null} />
+        <HarnessTag harness={harness} />
         {bundled && <Badge tone="muted">bundled</Badge>}
         {customized && <Badge tone="cyan">customized</Badge>}
         {updateAvailable && <Badge tone="amber">update available</Badge>}
@@ -397,6 +409,15 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
         <RolePicker value={role} onChange={setRole} />
       </div>
 
+      {/* Harness — which vendor CLI a session under this rig spawns (card fa2277b6, owner directive).
+          Placed directly under Role and ABOVE every field it invalidates, so the annotations below read
+          as consequences of this choice rather than as unexplained disabled controls. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <span style={fieldLabel}>Harness · which CLI this rig spawns</span>
+        <HarnessPicker value={harness} onChange={setHarness} />
+        <HarnessDropSummary harness={harness} />
+      </div>
+
       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <span style={fieldLabel}>Description</span>
         <textarea value={description} onChange={(e) => setDescription(e.target.value)} spellCheck={false}
@@ -406,7 +427,9 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <span style={fieldLabel}>Allow delta <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>· one permission glob per line, layered onto the resolved allowlist</span></span>
         <textarea value={allowText} onChange={(e) => setAllowText(e.target.value)} spellCheck={false}
-          style={{ ...ta, minHeight: 80 }} placeholder={"Bash(pnpm *)\nRead(*)"} />
+          disabled={!!dropStyle(harness, "allowDelta")}
+          style={{ ...ta, minHeight: 80, ...dropStyle(harness, "allowDelta") }} placeholder={"Bash(pnpm *)\nRead(*)"} />
+        <HarnessFieldDrop harness={harness} field="allowDelta" />
       </label>
 
       {/* Agent-tooling P4 capability registry: ONE unified picker over the catalog (the two builtins +
@@ -414,13 +437,15 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
           Each entry launches a host process / MCP server — human-set here only, never via an agent tool.
           A `requiresConnection` entry reveals an inline P1-connection binding when checked. */}
       <label style={fieldLabel}>Capabilities</label>
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <HarnessFieldDrop harness={harness} field="capabilities" />
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, ...dropStyle(harness, "capabilities") }}>
         {availableCapabilities.map((c) => {
           const checked = isCapabilityChecked(c.slug);
           const isLegacy = c.slug === "browser-testing" || c.slug === "document-conversion";
+          const capsDropped = !!dropStyle(harness, "capabilities");
           return (
-            <label key={c.slug} style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
-              <input type="checkbox" checked={checked} onChange={() => toggleCapability(c.slug)} style={{ marginTop: 2 }} />
+            <label key={c.slug} style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: capsDropped ? "default" : "pointer" }}>
+              <input type="checkbox" checked={checked} disabled={capsDropped} onChange={() => toggleCapability(c.slug)} style={{ marginTop: 2 }} />
               <span style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1 }}>
                 <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <span style={{ ...fieldLabel, textTransform: "none", letterSpacing: 0, fontSize: 13 }}>{c.name}</span>
@@ -434,6 +459,7 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
                   <>
                     <Select
                       value={capabilityConnectionId(c.slug)}
+                      disabled={capsDropped}
                       onChange={(e) => setCapabilityConnectionId(c.slug, e.target.value)}
                       style={{ marginTop: 4, maxWidth: 260 }}
                     >
@@ -463,15 +489,23 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
 
       {/* Shared-venv provisioning status — surfaced only when this rig opts into documentConversion. ONE
           Loom-managed venv backs the capability, so this is a GLOBAL status (not per-profile): a session
-          can silently lack the markitdown MCP only because the venv is still installing or failed to. */}
-      {documentConversion && <MarkitdownProvisioning />}
+          can silently lack the markitdown MCP only because the venv is still installing or failed to.
+          Hidden on codex: the capability is never mounted there at all, so a "venv ready" row beside it
+          would report health for something that is not going to run — the same false green this card is
+          about, one layer down. */}
+      {documentConversion && harness !== "codex" && <MarkitdownProvisioning />}
 
       {/* Opt-in restricted tools: a session under this rig spawns with the dangerous NATIVE tools (raw
           shell + host-writes) removed from the model's tool list. Blast-radius control for a chat-reachable
           Companion driven by untrusted input — human-set here only, never via an agent tool. */}
-      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
-        <input type="checkbox" checked={restrictedTools} onChange={(e) => setRestrictedTools(e.target.checked)} style={{ marginTop: 2 }} />
+      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: dropStyle(harness, "restrictedTools") ? "default" : "pointer" }}>
+        <input type="checkbox" checked={restrictedTools} disabled={!!dropStyle(harness, "restrictedTools")}
+          onChange={(e) => setRestrictedTools(e.target.checked)} style={{ marginTop: 2 }} />
         <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          {/* Deliberately NOT dimmed like the other four, even though the input IS disabled: this is the
+              one FAIL-OPEN drop, and greying the row would make a safety toggle that is silently doing
+              nothing read as safely deactivated — the opposite of true. It stays at full contrast so it
+              stands out AMONG the dimmed ones, which is the whole point of triaging by failure direction. */}
           <span style={fieldLabel}>Restricted tools</span>
           <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
             Lock down blast radius: remove the dangerous native tools (Bash / Edit / Write / NotebookEdit /
@@ -480,6 +514,10 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
             them, or reach the network. Read / Glob / Grep and the Loom MCP tools stay. Turn ON for a companion
             reachable from untrusted chat; turning it OFF widens the rig deliberately.
           </span>
+          {/* The one FAIL-OPEN drop of the five: a safety toggle that reads ON while removing nothing.
+              It is deliberately NOT dimmed with the rest — the annotation must stay at full contrast
+              precisely because the control it corrects looks enabled. */}
+          <HarnessFieldDrop harness={harness} field="restrictedTools" />
         </span>
       </label>
 
@@ -502,18 +540,24 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
           skills a session under this rig may see; pick NONE to deliver ALL (the default). Pinned on the
           session row at spawn so resume/fork/recycle honor the same subset. */}
       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={fieldLabel}>Model</span>
-        <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="engine default (e.g. claude-opus-4-8)" />
+        <span style={{ ...fieldLabel, ...dropStyle(harness, "model") }}>Model</span>
+        <Input value={model} disabled={!!dropStyle(harness, "model")} onChange={(e) => setModel(e.target.value)}
+          style={dropStyle(harness, "model")} placeholder="engine default (e.g. claude-opus-4-8)" />
+        <HarnessFieldDrop harness={harness} field="model" />
       </label>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <span style={fieldLabel}>Skills <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>· {skills.length === 0 ? "none selected → ALL skills delivered (default)" : `${skills.length} selected → only these delivered`}</span></span>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {/* The "none selected → ALL delivered" caption is only true on claude — on codex NOTHING is
+            injected either way, so the caption is suppressed rather than left to assert the opposite. */}
+        <span style={{ ...fieldLabel, ...dropStyle(harness, "skills") }}>Skills {!dropStyle(harness, "skills") && <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>· {skills.length === 0 ? "none selected → ALL skills delivered (default)" : `${skills.length} selected → only these delivered`}</span>}</span>
+        <HarnessFieldDrop harness={harness} field="skills" />
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, ...dropStyle(harness, "skills") }}>
           {available.map((n) => {
             const on = skills.includes(n);
+            const skillsDropped = !!dropStyle(harness, "skills");
             return (
-              <button key={n} type="button" onClick={() => toggleSkill(n)}
-                style={{ cursor: "pointer", fontFamily: font.mono, fontSize: 12, padding: "3px 9px", borderRadius: 12,
+              <button key={n} type="button" onClick={() => toggleSkill(n)} disabled={skillsDropped}
+                style={{ cursor: skillsDropped ? "default" : "pointer", fontFamily: font.mono, fontSize: 12, padding: "3px 9px", borderRadius: 12,
                   border: `1px solid ${on ? color.phosphor : color.border}`, background: on ? color.panel2 : "transparent",
                   color: on ? color.phosphor : color.textMuted }}>
                 {on ? "✓ " : ""}{n}
@@ -522,7 +566,7 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
           })}
           {available.length === 0 && <span style={{ color: color.textMuted, fontSize: 12, fontFamily: font.mono }}>No skills in the store yet.</span>}
         </div>
-        {skills.length > 0 && <button type="button" onClick={() => setSkills([])} style={{ alignSelf: "flex-start", cursor: "pointer", fontFamily: font.mono, fontSize: 11, padding: "2px 8px", borderRadius: 10, border: `1px solid ${color.border}`, background: "transparent", color: color.textMuted }}>clear → deliver all</button>}
+        {skills.length > 0 && !dropStyle(harness, "skills") && <button type="button" onClick={() => setSkills([])} style={{ alignSelf: "flex-start", cursor: "pointer", fontFamily: font.mono, fontSize: 11, padding: "2px 8px", borderRadius: 10, border: `1px solid ${color.border}`, background: "transparent", color: color.textMuted }}>clear → deliver all</button>}
         {/* A subset name no longer in the store (e.g. a deleted skill) — surfaced so it can be cleared. */}
         {skills.filter((n) => !available.includes(n)).length > 0 && (
           <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>
@@ -530,7 +574,7 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
           </span>
         )}
       </div>
-      <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono, marginTop: -6 }}>Model + skills apply on the next spawn. Skills delivery is per-session — sessions sharing a repo see the union of their subsets, never each other stripped.</span>
+      {harness !== "codex" && <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono, marginTop: -6 }}>Model + skills apply on the next spawn. Skills delivery is per-session — sessions sharing a repo see the union of their subsets, never each other stripped.</span>}
 
       {/* Authenticated-egress connection grant (agent-tooling epic P2): which P1 credential-store
           connections a session under this rig may call the authenticated_request tool with. Human-set
@@ -578,7 +622,7 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, d
       <span style={{ flex: 1 }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || !name.trim() || saving}
-          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, documentConversion, restrictedTools, noCommit, skills: skills.length ? skills : null, connections, capabilities })}>
+          onClick={() => onSave({ name: name.trim(), role: role || null, description, allowDelta, icon: icon.trim() || null, model: model.trim() || null, browserTesting, documentConversion, restrictedTools, noCommit, harness, skills: skills.length ? skills : null, connections, capabilities })}>
           {saving ? "Saving…" : "Save"}
         </Button>
         {dirty
@@ -748,7 +792,7 @@ const FIELD_DISPLAY: Record<string, string> = {
   role: "Role", description: "Description", allowDelta: "Allow delta", skills: "Skills",
   model: "Model", icon: "Icon", browserTesting: "Browser testing", documentConversion: "Document conversion",
   restrictedTools: "Restricted tools", noCommit: "No-commit role", connections: "Connections",
-  capabilities: "Capabilities",
+  capabilities: "Capabilities", harness: "Harness",
 };
 function fieldDisplayName(field: string): string {
   return FIELD_DISPLAY[field] ?? field;

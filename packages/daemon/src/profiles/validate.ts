@@ -227,6 +227,19 @@ export function validateProfile(
       noCommit: d.noCommit ?? false, // normalize to the stored default (off)
       connections: d.connections ?? [], // normalize to the stored default (no access)
       capabilities: d.capabilities ?? [], // normalize to the stored default (none)
+      // Multi-harness epic (df1f94b0) Phase 1. DELIBERATELY not normalized like every sibling above:
+      // `Profile.harness` is `?: "claude" | "codex"` with NO null member, so absence — not a null — is
+      // how "claude" (the default) is expressed, and `d.harness` already carries exactly that type.
+      // Both writers handle the undefined correctly by their own route: insertProfile coerces
+      // `p.harness ?? null` BEFORE binding its named params, and updateProfile filters undefined out of
+      // its column map entirely (undefined = "leave this column as-is", its documented partial-edit
+      // semantics) — so no undefined is ever handed to better-sqlite3, which would throw.
+      //
+      // Omitting this line is the bug this fixes (card fa2277b6): the zod schema accepted `harness` and
+      // AGENT_FORBIDDEN_PROFILE_KEYS rejected it on the agent path, but it was absent from THIS literal
+      // — and both REST handlers persist `v.value`, never `req.body`. So no route could set it at all,
+      // while a db-layer grep still read green because insertProfile/updateProfile do bind the column.
+      harness: d.harness,
     },
   };
 }
