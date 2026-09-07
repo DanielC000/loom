@@ -51,6 +51,17 @@
 // isn't available on this host (mirrors every sibling real-spawn file's posture).
 // ZERO MODEL TURNS SPENT: this file never calls enqueueStdin/submitCodex.
 //
+// 🔴 Card ba60e802: the busy-rise/self-heal repro below is gated on `host.isCodexBootReady` (raced against
+// PtyHost's own `onCodexBootStuck` fail-loud ceiling) being reached FIRST — it no longer asserts on the
+// bare "Ask Codex to do anything" placeholder alone. That placeholder renders in the very first TUI frame
+// while the model is still genuinely loading (same trap `codex-submit-confirmation-real-spawn.mjs`'s own
+// header describes), so a real gate run under host contention saw it satisfied while codex's actual boot
+// never progressed far enough for the MCP-connect phase this repro is about — and the OLD logic then
+// reported that as a FAILURE of the self-heal invariant, when the invariant was never exercised at all
+// (gate `93280647`: `[codex-boot-stuck] ... unmet: model-loaded`, `busy transitions observed: []`). If
+// boot readiness is never reached this run, this file now logs a SKIP (precondition not met) and exits 0
+// without asserting anything about the invariant — "codex never booted" is not "the invariant holds".
+//
 // Run: 1) build (turbo builds shared first), 2) node test/codex-mcp-connect-stuck-real-spawn.mjs
 import "./_guard.mjs";
 import fs from "node:fs";
@@ -116,9 +127,11 @@ const releaseCodexLock = await acquireCodexRealSpawnLock();
 const busyTransitions = []; // { t: msSinceStart, busy }
 let startedAt = 0;
 const exitedSessions = new Map();
+const bootStuckEvents = []; // { sessionId, info } — see the boot-readiness gate below (card ba60e802)
 const events = {
   onEngineSessionId() {}, onContextStats() {}, onRateLimited() {},
   onBusy(sessionId, busy) { busyTransitions.push({ t: Date.now() - startedAt, busy }); },
+  onCodexBootStuck(sessionId, info) { bootStuckEvents.push({ sessionId, info }); },
   onExit(sessionId, code, info) { exitedSessions.set(sessionId, { code, intended: info.intended }); },
 };
 const host = new PtyHost(events);
@@ -134,48 +147,83 @@ const unsubscribe = host.subscribe(SESSION_ID, {
   onControl: () => {},
 });
 
-// --- Reach a genuine post-trust-dialog, interactive state (same bar as codex-stateful-runtime-real-spawn,
-// deliberately NOT "context left"/full-ready — see that file's own header for why). -------------------
+// --- ESTABLISH BOOT READINESS POSITIVELY FIRST (card ba60e802) — the repro below must never assert on a
+// state its own precondition never reached. The old wait here was on the bare "Ask Codex to do anything"
+// placeholder alone, which renders in the very first TUI frame while the model is still genuinely loading
+// (see codex-submit-confirmation-real-spawn.mjs's own header for why that placeholder alone is NOT a
+// readiness signal) — so it could (and, in a real gate run, did) succeed while codex's actual boot never
+// progressed far enough for the MCP-connect phase this repro is about to ever run at all. `host.isCodexBootReady`
+// reads the SAME composite (ready marker + model-loaded + trust-dialog-resolved) `enqueueStdinCodex` itself
+// gates every submit on — racing it against PtyHost's OWN fail-loud `onCodexBootStuck` ceiling
+// (pty/host.ts, CODEX_BOOT_READY_TIMEOUT_MS, default 45s) rather than inventing a second, independent
+// timeout: if codex never reaches boot readiness, that ceiling fires on its own and IS the signal that the
+// environment failed to deliver the state under test — a SKIP, never a FAIL of the self-heal invariant
+// below, since the invariant was never exercised. Budget here is the internal ceiling plus slack for the
+// event to propagate and this poll to observe it (never a second guess at "how long codex takes to boot").
+//
+// Real incident this closes: gate `93280647` (card ba60e802) saw `[codex-boot-stuck] ... unmet:
+// model-loaded` at 45s, and the OLD logic below still asserted "busy never rose" as a FAILURE of the
+// self-heal invariant — an assertion about a state (MCP-connect) that literally never had a chance to run.
+let bootReady = false;
 try {
-  await waitUntil(() => buf.includes("Ask Codex to do anything"), {
-    label: `${SESSION_ID} real codex TUI advances past the trust dialog`,
-    timeoutMs: 20000,
-  });
-} catch (err) {
-  console.log(`FAIL  real codex never advanced past the trust dialog within budget: ${err.message}`);
+  const outcome = await waitUntil(
+    () => {
+      if (host.isCodexBootReady(SESSION_ID)) return "ready";
+      if (bootStuckEvents.some((e) => e.sessionId === SESSION_ID)) return "stuck";
+      return false;
+    },
+    { label: `${SESSION_ID} reaches real boot readiness OR PtyHost's own boot-stuck ceiling fires`, timeoutMs: 50_000 },
+  );
+  bootReady = outcome === "ready";
+} catch {
+  // Outer budget exhausted without EITHER signal firing — treated identically to an observed boot-stuck
+  // report below: boot readiness was not established, so the repro below cannot run.
+  bootReady = false;
+}
+
+if (!bootReady) {
+  const stuckInfo = bootStuckEvents.find((e) => e.sessionId === SESSION_ID)?.info;
+  const unmet = stuckInfo
+    ? ([!stuckInfo.readyMarker && "ready marker", !stuckInfo.modelLoaded && "model-loaded", !stuckInfo.trustDialogResolved && "trust-dialog-resolved"].filter(Boolean).join(", ") || "none individually")
+    : null;
+  // ⚠️ SKIP, never FAIL: "codex never booted, so the invariant was not exercised" is NOT "the invariant
+  // holds" — this line exists so a future reader of this log cannot mistake a SKIP for coverage.
+  console.log(`SKIP  the MCP-connect busy/self-heal invariant was NOT exercised this run: real codex never reached boot readiness${unmet ? ` (unmet: ${unmet})` : " (no boot-stuck report observed either — the outer wait budget was exhausted)"}. This is a precondition miss, not evidence the self-heal invariant holds.`);
   console.log(`--- captured output tail ---\n${buf.slice(-2000)}`);
-  failures++;
-}
-
-// --- THE GUARD: with the unreachable MCP servers, does a real busy episode happen, and does it clear
-// again within a bounded window? Two separate, bounded waits (never one open-ended poll) — the FIRST
-// proves the degenerate state is real (busy DOES rise from the MCP-connect attempt), the SECOND proves the
-// EXISTING self-heal keeps working (busy DOES fall again on its own). Both budgets are deliberately
-// generous relative to the ~11.2s this took across four measured real trials, without pretending to prove
-// an unbounded claim — a bounded pass here is evidence the self-heal still works within this budget, never
-// proof it can never get stuck under some OTHER condition (see this file's own header for what remains
-// untested). ---------------------------------------------------------------------------------------
-try {
-  await waitUntil(() => host.isBusy(SESSION_ID), {
-    label: `${SESSION_ID} busy signal rises from the MCP-connect attempt against unreachable servers`,
-    timeoutMs: 20000,
-  });
-  check("REPRO: with unreachable MCP servers, codex's MCP-connect attempt made the session busy (a real busy episode was observed, not just boot chrome)", true);
-} catch (err) {
-  console.log(`[repro] busy never rose within budget: ${err.message}`);
-  check("REPRO: with unreachable MCP servers, codex's MCP-connect attempt made the session busy", false);
-}
-
-if (host.isBusy(SESSION_ID)) {
+} else {
+  // --- THE GUARD: with the unreachable MCP servers, does a real busy episode happen, and does it clear
+  // again within a bounded window? Two separate, bounded waits (never one open-ended poll) — the FIRST
+  // proves the degenerate state is real (busy DOES rise from the MCP-connect attempt), the SECOND proves the
+  // EXISTING self-heal keeps working (busy DOES fall again on its own). Both budgets are deliberately
+  // generous relative to the ~11.2s this took across four measured real trials, without pretending to prove
+  // an unbounded claim — a bounded pass here is evidence the self-heal still works within this budget, never
+  // proof it can never get stuck under some OTHER condition (see this file's own header for what remains
+  // untested). `busyTransitions.length > 0` (recorded by the onBusy listener from spawn time, above) is
+  // checked alongside the live `isBusy()` poll so a busy episode that already rose AND cleared while we were
+  // waiting for boot readiness above is still correctly counted — a live-only poll here could otherwise miss
+  // a transition that happened entirely before this wait started watching. ---------------------------------
   try {
-    await waitUntil(() => !host.isBusy(SESSION_ID), {
-      label: `${SESSION_ID} busy signal falls again on its own (self-heal via the existing staleness timer) — measured ~11.2s across four prior real trials, this bound is ~5x that`,
-      timeoutMs: 60_000,
+    await waitUntil(() => busyTransitions.length > 0 || host.isBusy(SESSION_ID), {
+      label: `${SESSION_ID} busy signal rises from the MCP-connect attempt against unreachable servers`,
+      timeoutMs: 20000,
     });
-    check("GUARD: the busy episode cleared on its own within 60s (bounded window) via the existing armCodexBusyStaleTimer mechanism — no unconfirmed-stuck defect reproduced under this failure shape", true);
+    check("REPRO: with unreachable MCP servers, codex's MCP-connect attempt made the session busy (a real busy episode was observed, not just boot chrome)", true);
   } catch (err) {
-    console.log(`[repro] busy did NOT clear within the 60s bounded window: ${err.message}`);
-    check("GUARD: the busy episode cleared on its own within 60s (bounded window)", false);
+    console.log(`[repro] busy never rose within budget: ${err.message}`);
+    check("REPRO: with unreachable MCP servers, codex's MCP-connect attempt made the session busy", false);
+  }
+
+  if (host.isBusy(SESSION_ID)) {
+    try {
+      await waitUntil(() => !host.isBusy(SESSION_ID), {
+        label: `${SESSION_ID} busy signal falls again on its own (self-heal via the existing staleness timer) — measured ~11.2s across four prior real trials, this bound is ~5x that`,
+        timeoutMs: 60_000,
+      });
+      check("GUARD: the busy episode cleared on its own within 60s (bounded window) via the existing armCodexBusyStaleTimer mechanism — no unconfirmed-stuck defect reproduced under this failure shape", true);
+    } catch (err) {
+      console.log(`[repro] busy did NOT clear within the 60s bounded window: ${err.message}`);
+      check("GUARD: the busy episode cleared on its own within 60s (bounded window)", false);
+    }
   }
 }
 console.log(`[repro] busy transitions observed (ms since spawn): ${JSON.stringify(busyTransitions)}`);
@@ -216,6 +264,8 @@ if (hashAfter !== hashBefore) {
 releaseCodexLock();
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a real busy episode from an unreachable-MCP-server spawn was observed and confirmed to clear again within a bounded window, via this project's own existing self-heal mechanism."
+  ? (bootReady
+      ? "\n✅ ALL PASS — a real busy episode from an unreachable-MCP-server spawn was observed and confirmed to clear again within a bounded window, via this project's own existing self-heal mechanism."
+      : "\n⚠️  SKIPPED — real codex never reached boot readiness this run, so the MCP-connect busy/self-heal invariant was NOT exercised. A SKIP is a precondition miss, not confirmation the invariant holds.")
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

@@ -137,7 +137,7 @@ const events = {
   },
   onContextStats() {}, onRateLimited() {},
   onBusy() {},
-  onExit(sessionId, code, info) { exitedSessions.set(sessionId, { code, intended: info.intended }); },
+  onExit(sessionId, code, info) { exitedSessions.set(sessionId, { code, intended: info.intended, codexStopDiag: info.codexStopDiag }); },
 };
 const exitedSessions = new Map();
 const host = new PtyHost(events);
@@ -312,17 +312,23 @@ if (persistedRow) {
 //
 // Removable once the real stopCodex fix lands on 176bdb0c and this reports clean for a sustained period —
 // see that card for the live defect status.
-function reportGracefulStopExitCode(code) {
+// Card ba60e802 (DoD-2): print `codexStopDiag` on the WARN line below — it's already received on `onExit`'s
+// own `info` (pty/host.ts:6486) but was previously discarded. Card ee58ec79 is parked waiting for a
+// sighting carrying this payload, and it could never arrive: a PASSING gate keeps only PASS lines + the
+// WARNINGS block, discarding per-file stdout, while this accommodation exists precisely to stop the FAIL
+// that would otherwise dump it. The WARNINGS block IS retained on a passing gate, so printing it here
+// arms a trigger that was otherwise unreachable. Print-only — no assertion here changes.
+function reportGracefulStopExitCode(code, codexStopDiag) {
   if (code === 0) {
     check("the real codex process exited with code 0 after a graceful stop", true);
   } else {
-    console.log(`WARN  ⚠️  ACCOMMODATION (card 176bdb0c): the real codex process exited with code ${code} (not 0) after an INTENDED graceful stop. This is the KNOWN, LIVE, UNFIXED flake measured at 2/13 ≈ 15.4% — NOT failing the gate on this observation. If you are reading this, please note the observed code and the stop→exit elapsed time on card 176bdb0c; the real stopCodex fix is still pending in pty/host.ts.`);
+    console.log(`WARN  ⚠️  ACCOMMODATION (card 176bdb0c): the real codex process exited with code ${code} (not 0) after an INTENDED graceful stop. This is the KNOWN, LIVE, UNFIXED flake measured at 2/13 ≈ 15.4% — NOT failing the gate on this observation. If you are reading this, please note the observed code and the stop→exit elapsed time on card 176bdb0c; the real stopCodex fix is still pending in pty/host.ts. codexStopDiag: ${JSON.stringify(codexStopDiag)}`);
   }
 }
 host.stop(SESSION_ID, "graceful");
 try {
   await waitUntil(() => exitedSessions.has(SESSION_ID), { label: `${SESSION_ID} real codex process onExit after graceful stop`, timeoutMs: 8000 });
-  reportGracefulStopExitCode(exitedSessions.get(SESSION_ID)?.code);
+  reportGracefulStopExitCode(exitedSessions.get(SESSION_ID)?.code, exitedSessions.get(SESSION_ID)?.codexStopDiag);
 } catch (err) {
   console.log(`FAIL  ${err.message}`);
   failures++;
