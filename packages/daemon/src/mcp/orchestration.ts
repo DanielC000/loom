@@ -19,7 +19,8 @@ import { readTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap, spil
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
-import { computeGateTimingBand } from "../orchestration/gate-timing-band.js";
+import { computeGateTimingBand, readFailedNamesForOp } from "../orchestration/gate-timing-band.js";
+import { deferredTriggerNotice } from "../orchestration/deferred-trigger-notice.js";
 import { CapQueueRejectedError } from "../orchestration/cap-queue.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
@@ -221,7 +222,7 @@ const STALE_REPORT_TURN_THRESHOLD = 3;
  * tombstone is written to disk before `deploy` returns (survives a restart the in-process cache couldn't),
  * and `pending_gate_ops` is a permanent table (never evicted by count, unlike the removed 500-entry Set).
  */
-function registerGateStatus(server: McpServer, sessions: SessionService, scopeSessionId?: string, getScopeProjectId?: () => string | undefined, getRedactCrossProjectCallerProjectId?: () => string | undefined): void {
+function registerGateStatus(server: McpServer, sessions: SessionService, db: Db, scopeSessionId?: string, getScopeProjectId?: () => string | undefined, getRedactCrossProjectCallerProjectId?: () => string | undefined): void {
   const forWorker = scopeSessionId != null;
   const description = forWorker
     ? "Read-only status for YOUR OWN gate run, by the `opId` a `run_gate` {status:\"pending\"} " +
@@ -368,7 +369,16 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "above) and `filter` also states in plain text whether/why widening happened. " +
       "`readWindowTruncated:true` means older history outside a bounded tail " +
       "read was never considered — `n`/`nUnfiltered`/`nExact` may undercount the true population, never " +
-      "overcount it."
+      "overcount it. " +
+      "On a FAILED settled row, ALSO carries `deferredTriggerNotice?` (card 5f3a394e) — the SAME " +
+      "`[loom:deferred-trigger] ...` advisory text the `[loom:gate-failed]` completion nudge composes, " +
+      "RECOMPUTED here at read time rather than only relied on from that one-shot push: present whenever " +
+      "some task on this project has annotated itself `deferredUntilEvent:{kind:\"gate-fail-naming\"}` " +
+      "naming one of THIS run's own failed test files, absent (never a fabricated empty string) when no " +
+      "task matches. Re-derived fresh on every call from the durable gate-timing NDJSON plus the board's " +
+      "CURRENT deferral state — so calling this after a missed or lost completion nudge (including one " +
+      "the daemon never got to enqueue because it crashed between this op settling and that push) still " +
+      "recovers the SAME advisory, not a stale or absent one."
     : "Read-only status for ONE merge-gate run, by the `opId` a `worker_merge_confirm` " +
       "{status:\"pending\"} response returned — lets you check whether that run is still queued behind the " +
       "daemon's gate concurrency cap, actually executing, or has already reached a terminal state, WITHOUT " +
@@ -386,7 +396,9 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "`commitSubject`, `retriedFile`, `retryWarning`, `emitCompareTestFiles`, " +
       "`emitCompareNotHermeticExcluded`, `validatedHead`, `headWarning`, `timingBand` (a foreign project's " +
       "test-file count and gate-duration distribution — mirroring `gate_queue`'s own cross-project " +
-      "redaction), and `ownerSessionAlive` (card d5e67146 — see below for why this one is redacted despite " +
+      "redaction), `deferredTriggerNotice` (card 5f3a394e — names a foreign project's own card id and " +
+      "failed test file; never even computed for a cross-project op, not merely stripped after the fact), " +
+      "and `ownerSessionAlive` (card d5e67146 — see below for why this one is redacted despite " +
       "carrying no path/test/error content of its own). This is an EXPLICIT, enumerated list, not " +
       "\"everything sensitive\" by " +
       "inference — treat any field not named here as VISIBLE on a foreign read, never assume redaction. " +
@@ -721,7 +733,17 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "— `run-summary.durationMs` is NOT the same clock as `totalDurationMs`/`Σ(steps)` above) and " +
       "`filter` also states in plain text whether/why widening happened. " +
       "`readWindowTruncated:true` means older history outside a bounded tail read was never considered — " +
-      "`n`/`nUnfiltered`/`nExact` may undercount the true population, never overcount it.";
+      "`n`/`nUnfiltered`/`nExact` may undercount the true population, never overcount it. " +
+      "On a FAILED settled row for YOUR OWN project, ALSO carries `deferredTriggerNotice?` (card " +
+      "5f3a394e) — the SAME `[loom:deferred-trigger] ...` advisory text the `[loom:merge-rejected]`/" +
+      "`[loom:gate-failed]` completion nudge composes, RECOMPUTED here at read time rather than only " +
+      "relied on from that one-shot push: present whenever some task on this project has annotated " +
+      "itself `deferredUntilEvent:{kind:\"gate-fail-naming\"}` naming one of THIS run's own failed test " +
+      "files, absent (never a fabricated empty string) when no task matches. Re-derived fresh on every " +
+      "call from the durable gate-timing NDJSON plus the board's CURRENT deferral state — so calling " +
+      "this after a missed or lost completion nudge (including one the daemon never got to enqueue " +
+      "because it crashed between this op settling and that push) still recovers the SAME advisory, not " +
+      "a stale or absent one. Redacted (never even computed) for a foreign project's op, see above.";
   server.registerTool(
     "gate_status",
     {
@@ -765,13 +787,40 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
         // aggregate numerics, not another tenant's paths/test names/error text — but still real cross-
         // tenant telemetry a foreign caller has no need for.
         if (result.state === "settled" && result.outcome !== undefined && !sessions.isCrossProjectGateOp(opId, redactCrossProject)) {
+          let enriched: Record<string, unknown> = result;
           try {
             const timingBand = await computeGateTimingBand(opId);
-            if (timingBand) return ok({ ...result, timingBand });
+            if (timingBand) enriched = { ...enriched, timingBand };
           } catch {
             // Advisory only — an observability read must never turn a real gate_status answer into an
             // error. Fall through and return the plain result below.
           }
+          // Card 5f3a394e: recompute the `[loom:deferred-trigger]` advisory HERE, at READ time, rather
+          // than relying solely on the one-shot push composed when the op settled
+          // (sessions/service.ts's `onSettledAfterPending`/`confirmWorkerMergeTracked` — see
+          // `deferredTriggerNotice`'s own doc). That push is genuinely lost if the daemon crashes in the
+          // async gap between the op's `state` flipping to settled and the nudge being enqueued (the
+          // window `deferredTriggerNotice`'s doc + card `c4b70fe8` describe) — there is no replay for it.
+          // `readFailedNamesForOp` reads the SAME durable gate-timing NDJSON the push itself reads,
+          // keyed only by this `opId` — genuinely recoverable after a restart, independent of whether the
+          // push ever fired, and re-evaluated against the board's CURRENT `deferredUntilEvent` state (a
+          // task added/edited its annotation after the gate settled is picked up too, not just what
+          // existed at push time). Fail-only (mirrors `gateFailedForTrigger` in service.ts) — a passing
+          // run has nothing to attribute, and `result.passed` is never `true` for a `"cancelled"`/`"error"`
+          // verdict (see `SessionService.gateStatus`'s own verdict-kind branches), so this can't
+          // misfire there either. Best-effort, same posture as `timingBand` immediately above.
+          if (result.passed === false) {
+            try {
+              const projectId = getScopeProjectId?.() ?? redactCrossProject?.callerProjectId;
+              if (projectId) {
+                const notice = deferredTriggerNotice(db, projectId, await readFailedNamesForOp(opId));
+                if (notice) enriched = { ...enriched, deferredTriggerNotice: notice };
+              }
+            } catch {
+              // Advisory only, same posture as timingBand above.
+            }
+          }
+          return ok(enriched);
         }
         // Card 45390f74: `run_gate`'s not-settled reply carries an explicit "Do NOT poll" `note` — this
         // one, the tool the docs tell a caller to use INSTEAD of re-calling run_gate, carried none, so a
@@ -2455,7 +2504,7 @@ export class OrchestrationMcpRouter {
       // since card e3e40167 added the durable-tombstone fallback, `scopeProjectId` too), so a worker can
       // check queued/running/settled/elapsed without starting anything and cannot probe another session's
       // run at EITHER the live-registry or tombstone layer.
-      registerGateStatus(server, sessions, sessionId, () => db.getSession(sessionId)?.projectId);
+      registerGateStatus(server, sessions, db, sessionId, () => db.getSession(sessionId)?.projectId);
       // gate_queue (card d04f9c76 — Codescape platform relay: a manager told a worker "confirm a lane is
       // free before firing", but the worker had no daemon-wide view of the shared gate cap and could only
       // ever fire `run_gate` blind). Same tool, same privacy shape as the manager's own — see
@@ -4346,7 +4395,7 @@ export class OrchestrationMcpRouter {
     // `t.record.projectId`, not `t.record.kind`. A `deploy` is daemon-global in EFFECT, but that only
     // entitles another tenant to know it ran and whether it failed (`passed`/`outcome`/`gateType`/timing
     // all still visible) — never to the deploying tenant's own build output or host paths.
-    registerGateStatus(server, sessions, undefined, undefined, () => db.getSession(managerSessionId)?.projectId);
+    registerGateStatus(server, sessions, db, undefined, undefined, () => db.getSession(managerSessionId)?.projectId);
     registerGateQueue(server, sessions, db, managerSessionId);
     registerGateIntent(server, sessions, managerSessionId);
 
