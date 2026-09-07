@@ -16,6 +16,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       at all (pre-this-card / a "deny") surfaces {scope:null, expiresAt:null, lapsed:false} — never a
 //       crash, never a false lapsed. questionAnswerByType (task_request_get/audit's shared shaper)
 //       surfaces the identical fields for the non-consuming read path.
+//   (C2) card 3880f783 — grant-fulfilment observation: an OPTIONAL ask-time `fulfillmentTarget`
+//       ({profileId, key, expectedValue?}) drives a read-time `fulfillment: {state, detail}` on every
+//       permission entry (questionPullItem AND questionAnswerByType), computed FRESH on every call, never
+//       cached on the row. Four DISJOINT states: "unknown" (no target declared — the default, and every
+//       (C) case above), "not_yet_done" (declared + checked, live value doesn't match — a MEASURED false),
+//       "fulfilled" (matches — both via the generic presence check and an explicit expectedValue), and
+//       "unwritable" (a bad profile key, or a profileId that no longer resolves — `detail` says which,
+//       never confused with "not_yet_done"). Also proves fulfillmentTarget is silently dropped on a
+//       non-"permission" type, and that it's checkable even on a still-`pending` (unanswered) request.
 //   (D) type:"credential" — THE NEVER-ECHO PROPERTY: the plaintext secret is asserted to NEVER appear in
 //       (1) the question_pull-shaped payload (questionPullItem), (2) the bare Question object returned by
 //       any db.ts read (getQuestion/pullAnsweredQuestionsForAgent/listOpenQuestions), or (3) JSON.stringify
@@ -71,7 +80,7 @@ try {
     db.answerQuestion(built.question.id, { chosenOption: "yes", note: null, answeredAt: new Date().toISOString() });
     const pulled = db.pullAnsweredQuestionsForAgent(agentId, new Date().toISOString());
     check("(A) it pulls with the ORIGINAL {questionId,title,chosenOption,note} shape (plus additive type)", pulled.length === 1 && pulled[0].chosenOption === "yes");
-    const item = questionPullItem(pulled[0]);
+    const item = questionPullItem(pulled[0], db);
     check("(A) questionPullItem shapes it as {questionId,title,type,chosenOption,note}", item.type === "decision" && item.chosenOption === "yes" && item.note === null);
   }
 
@@ -84,7 +93,7 @@ try {
     db.insertQuestion(q);
     db.answerQuestion(q.id, { chosenOption: null, note: "Saturday 2am UTC", answeredAt: new Date().toISOString() });
     const pulled = db.pullAnsweredQuestionsForAgent(agentId, new Date().toISOString());
-    const item = questionPullItem(pulled[0]);
+    const item = questionPullItem(pulled[0], db);
     check("(B) it pulls note-only, chosenOption stays null", item.type === "input" && item.chosenOption === null && item.note === "Saturday 2am UTC");
   }
 
@@ -109,14 +118,15 @@ try {
       decidedScope: "standing", decidedExpiresAt: futureExpiry,
     });
     const pulled = db.pullAnsweredQuestionsForAgent(agentId, new Date().toISOString());
-    const item = questionPullItem(pulled[0]);
+    const item = questionPullItem(pulled[0], db);
     check("(C) questionPullItem surfaces {approved:true, note}, not a raw chosenOption string", item.type === "permission" && item.approved === true && item.note === "go ahead, ping me after");
     check("(C) questionPullItem surfaces the human's ACTUAL decided scope, not the ask-time hint", item.scope === "standing");
     check("(C) questionPullItem surfaces the decided expiresAt verbatim", item.expiresAt === futureExpiry);
     check("(C) a FUTURE expiry surfaces lapsed:false", item.lapsed === false);
+    check("(C) a permission with no declared fulfillmentTarget surfaces fulfillment:{state:\"unknown\"}", item.fulfillment?.state === "unknown" && item.fulfillment?.detail === null);
     // task_request_get's non-consuming shaper (questionAnswerByType) must surface the identical grant.
     const reread = db.getQuestion(q.id);
-    const answerShape = questionAnswerByType(reread);
+    const answerShape = questionAnswerByType(reread, db);
     check("(C) questionAnswerByType (task_request_get's shaper) surfaces the same {scope, expiresAt, lapsed}", answerShape.scope === "standing" && answerShape.expiresAt === futureExpiry && answerShape.lapsed === false);
 
     // A denied permission ask — nothing was granted, so decidedScope/decidedExpiresAt must stay null.
@@ -124,7 +134,7 @@ try {
     db.insertQuestion(built2.question);
     db.answerQuestion(built2.question.id, { chosenOption: PERMISSION_ANSWERS[1], note: null, answeredAt: new Date().toISOString() });
     const pulled2 = db.pullAnsweredQuestionsForAgent(agentId, new Date().toISOString());
-    const deniedItem = questionPullItem(pulled2[0]);
+    const deniedItem = questionPullItem(pulled2[0], db);
     check("(C) a denied permission surfaces approved:false", deniedItem.approved === false);
     check("(C) a denied permission has no grant to surface — {scope:null, expiresAt:null, lapsed:false}", deniedItem.scope === null && deniedItem.expiresAt === null && deniedItem.lapsed === false);
 
@@ -137,7 +147,7 @@ try {
       decidedScope: "standing", decidedExpiresAt: pastExpiry,
     });
     const pulled3 = db.pullAnsweredQuestionsForAgent(agentId, new Date().toISOString());
-    const lapsedItem = questionPullItem(pulled3[0]);
+    const lapsedItem = questionPullItem(pulled3[0], db);
     check("(C) a PAST expiry surfaces lapsed:true — advisory only, nothing is auto-revoked", lapsedItem.approved === true && lapsedItem.lapsed === true);
 
     // An OLD-FORMAT row (fix(mcp): NULL-safety guardrail) — an authorize answered exactly as pre-this-card
@@ -147,8 +157,78 @@ try {
     db.insertQuestion(built4.question);
     db.answerQuestion(built4.question.id, { chosenOption: PERMISSION_ANSWERS[0], note: null, answeredAt: new Date().toISOString() });
     const pulled4 = db.pullAnsweredQuestionsForAgent(agentId, new Date().toISOString());
-    const legacyItem = questionPullItem(pulled4[0]);
+    const legacyItem = questionPullItem(pulled4[0], db);
     check("(C) a legacy (pre-card) authorized row with no decided grant surfaces {scope:null, expiresAt:null, lapsed:false}, never lapsed:true", legacyItem.approved === true && legacyItem.scope === null && legacyItem.expiresAt === null && legacyItem.lapsed === false);
+  }
+
+  // ===== (C2) card 3880f783 — fulfillmentTarget / computeFulfillment: the four disjoint states =====
+  {
+    db.insertProfile({ id: "fulfillProf", name: "FulfillTest", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null });
+
+    // "not_yet_done" — a real profile field, no expectedValue (generic presence check), currently absent.
+    const builtPending = buildQuestionAsk({
+      type: "permission", title: "Switch FulfillTest to codex?", body: "multi-harness pilot", action: "set harness to codex",
+      fulfillmentTarget: { profileId: "fulfillProf", key: "harness" },
+    }, { sessionId: mgrId, projectId: projId });
+    check("(C2) buildQuestionAsk persists the declared fulfillmentTarget", builtPending.question.fulfillmentTarget?.profileId === "fulfillProf" && builtPending.question.fulfillmentTarget?.key === "harness");
+    db.insertQuestion(builtPending.question);
+    db.answerQuestion(builtPending.question.id, { chosenOption: PERMISSION_ANSWERS[0], note: null, answeredAt: new Date().toISOString() });
+    const notYetDoneItem = questionPullItem(db.getQuestion(builtPending.question.id), db);
+    check("(C2) a declared target not yet set on the live profile reads not_yet_done, never unknown", notYetDoneItem.fulfillment?.state === "not_yet_done" && notYetDoneItem.fulfillment?.detail === null);
+
+    // "fulfilled" — the SAME row, recomputed AFTER the human write actually lands (never cached).
+    db.updateProfile("fulfillProf", { harness: "codex" });
+    const fulfilledItem = questionPullItem(db.getQuestion(builtPending.question.id), db);
+    check("(C2) the SAME row flips to fulfilled once the live profile value matches, with NO row write of its own", fulfilledItem.fulfillment?.state === "fulfilled" && fulfilledItem.fulfillment?.detail === null);
+
+    // "fulfilled" via an explicit expectedValue that does NOT match a bare-presence read (a boolean field
+    // set to a non-default value that presence alone wouldn't distinguish from "on").
+    const builtExpected = buildQuestionAsk({
+      type: "permission", title: "Confirm FulfillTest vaultWrite is off?", body: "compliance check", action: "leave vaultWrite disabled",
+      fulfillmentTarget: { profileId: "fulfillProf", key: "vaultWrite", expectedValue: false },
+    }, { sessionId: mgrId, projectId: projId });
+    db.insertQuestion(builtExpected.question);
+    db.answerQuestion(builtExpected.question.id, { chosenOption: PERMISSION_ANSWERS[0], note: null, answeredAt: new Date().toISOString() });
+    const expectedFalseItem = questionPullItem(db.getQuestion(builtExpected.question.id), db);
+    check("(C2) an expectedValue:false target is fulfilled against the (default-false) live value, not misread via the generic presence check", expectedFalseItem.fulfillment?.state === "fulfilled");
+
+    // "unwritable" — key is not a real Profile field (a typo), never mistaken for not_yet_done.
+    const builtBadKey = buildQuestionAsk({
+      type: "permission", title: "Set a bogus field?", body: "typo'd key", action: "set nonexistentField",
+      fulfillmentTarget: { profileId: "fulfillProf", key: "nonexistentField" },
+    }, { sessionId: mgrId, projectId: projId });
+    db.insertQuestion(builtBadKey.question);
+    db.answerQuestion(builtBadKey.question.id, { chosenOption: PERMISSION_ANSWERS[0], note: null, answeredAt: new Date().toISOString() });
+    const badKeyItem = questionPullItem(db.getQuestion(builtBadKey.question.id), db);
+    check("(C2) an unrecognized profile key reads unwritable, with a detail naming the key", badKeyItem.fulfillment?.state === "unwritable" && badKeyItem.fulfillment?.detail?.includes("nonexistentField"));
+
+    // "unwritable" — profileId no longer resolves to an existing profile (deleted after the ask was filed).
+    const builtDeadProfile = buildQuestionAsk({
+      type: "permission", title: "Grant harness on a soon-deleted profile?", body: "will be deleted", action: "set harness",
+      fulfillmentTarget: { profileId: "willBeDeleted", key: "harness" },
+    }, { sessionId: mgrId, projectId: projId });
+    db.insertQuestion(builtDeadProfile.question);
+    db.answerQuestion(builtDeadProfile.question.id, { chosenOption: PERMISSION_ANSWERS[0], note: null, answeredAt: new Date().toISOString() });
+    const deadProfileItem = questionPullItem(db.getQuestion(builtDeadProfile.question.id), db);
+    check("(C2) a target naming a nonexistent profileId reads unwritable, with a detail naming the profile id", deadProfileItem.fulfillment?.state === "unwritable" && deadProfileItem.fulfillment?.detail?.includes("willBeDeleted"));
+
+    // fulfillmentTarget is PERMISSION-ONLY — silently dropped on every other type, same convention as
+    // options/recommendation/provisionTo.
+    const builtWrongType = buildQuestionAsk({
+      type: "decision", title: "Not a permission ask", body: "sneaking in a target", options: ["a", "b"],
+      fulfillmentTarget: { profileId: "fulfillProf", key: "harness" },
+    }, { sessionId: mgrId, projectId: projId });
+    check("(C2) fulfillmentTarget is silently dropped on a non-permission type", builtWrongType.question.fulfillmentTarget === null);
+
+    // task_request_get's non-consuming shaper (questionAnswerByType) surfaces the identical fulfillment,
+    // reachable even BEFORE the request is answered (a declared target is observable pre-answer too).
+    const builtUnanswered = buildQuestionAsk({
+      type: "permission", title: "Still-pending fulfillment check", body: "not answered yet", action: "set harness",
+      fulfillmentTarget: { profileId: "fulfillProf", key: "harness", expectedValue: "claude" },
+    }, { sessionId: mgrId, projectId: projId });
+    db.insertQuestion(builtUnanswered.question);
+    const unansweredShape = questionAnswerByType(db.getQuestion(builtUnanswered.question.id), db);
+    check("(C2) a still-pending permission's declared target is still checkable — fulfillment is independent of `approved`", unansweredShape.approved === null && unansweredShape.fulfillment?.state === "not_yet_done");
   }
 
   // ===== (D) type:"credential" — THE NEVER-ECHO PROPERTY =====
@@ -176,7 +256,7 @@ try {
     check("(D) the credential question pulls (reaches 'consumed')", credPulled !== undefined && db.getQuestion(q.id)?.state === "consumed");
     check("(D) the pulled Question object never contains the plaintext", !JSON.stringify(credPulled).includes(plaintext));
 
-    const item = questionPullItem(credPulled);
+    const item = questionPullItem(credPulled, db);
     check("(D) question_pull's agent-facing payload is an ACK only, no secret field", item.type === "credential" && typeof item.ack === "string" && !("secret" in item) && !("secretBlob" in item));
     check("(D) the ack text does not itself contain the plaintext", !item.ack.includes(plaintext));
     check("(D) JSON.stringify of the pull payload never contains the plaintext", !JSON.stringify(item).includes(plaintext));

@@ -2895,8 +2895,18 @@ export class PlatformMcpRouter {
           "human may grant a different scope/expiry, or none; see question_pull's permission-entry shape " +
           "for what was actually decided. ADVISORY ONLY: Loom persists + surfaces the decided grant (and " +
           "flags it once its expiry has passed) but never itself enforces, blocks, or revokes it — you " +
-          "must read the answer and honor it yourself (this tool's `provisionTo`, below, is the same " +
-          "STATES-INTENT-ONLY posture for credentials). \"credential\" — ask for a secret (API " +
+          "must read the answer and honor it yourself (this tool's `provisionTo`/`fulfillmentTarget`, " +
+          "below, are the same STATES-INTENT-ONLY posture for credentials/observability). OPTIONAL " +
+          "`fulfillmentTarget: {profileId, key, expectedValue?}` (\"permission\" only) declares a " +
+          "LIVE-CHECKABLE profile field that would prove the authorized human-only write actually " +
+          "happened — an approval is an AUTHORIZATION, not evidence the write landed, and this is how you " +
+          "let the read side (question_pull/requests_list/task_request_get) tell the difference instead of " +
+          "you re-checking a profile by hand. `key` must name a real Profile field; `expectedValue`, if " +
+          "given, is the exact value that counts as fulfilled (omit for a generic \"no longer at its " +
+          "empty/off default\" presence check). NEVER itself performs or enables the write — the profile " +
+          "field it names stays human-only exactly as before; declaring this only tells the read side WHAT " +
+          "to observe. Omit it and fulfilment reads \"unknown\" (today's exact behavior, unconditionally) " +
+          "— see question_pull's own doc for the resulting {state, detail} shape. \"credential\" — ask for a secret (API " +
           "key/token) under a NEVER-ECHO model: you will NEVER receive the plaintext, only an ack once " +
           "it's provided; `envVar` (optional) names the env var/config key you'd like it stored under. " +
           "It is NOT auto-injected into any session — wiring it in is a separate, human-only step " +
@@ -2941,12 +2951,20 @@ export class PlatformMcpRouter {
           "Pull (return AND consume) every ANSWERED request you've asked via question_ask — your " +
           "requests-inbox pickup. Each entry carries {questionId, title, type, ...}: a \"decision\"/" +
           "\"input\" entry has {chosenOption, note} (chosenOption is one of the options you offered, or " +
-          "null); a \"permission\" entry has {approved, note, scope, expiresAt, lapsed} — `scope`/" +
-          "`expiresAt` are the human's ACTUAL decided grant (null/null if they never chose one, e.g. an " +
-          "older answer, or a denial), and `lapsed` is true only once `expiresAt` is set AND in the past. " +
-          "ADVISORY ONLY: this is a display signal for YOU to check — Loom itself never enforces, blocks, " +
-          "or revokes a standing grant, so re-read `lapsed` (e.g. after a recycle) rather than assuming a " +
-          "prior 'standing' answer still holds; a \"credential\" entry has {ack} — NEVER " +
+          "null); a \"permission\" entry has {approved, note, scope, expiresAt, lapsed, fulfillment} — " +
+          "`scope`/`expiresAt` are the human's ACTUAL decided grant (null/null if they never chose one, " +
+          "e.g. an older answer, or a denial), and `lapsed` is true only once `expiresAt` is set AND in " +
+          "the past. ADVISORY ONLY: this is a display signal for YOU to check — Loom itself never " +
+          "enforces, blocks, or revokes a standing grant, so re-read `lapsed` (e.g. after a recycle) " +
+          "rather than assuming a prior 'standing' answer still holds. `fulfillment: {state, detail}` — " +
+          "an APPROVAL IS AN AUTHORIZATION, NOT EVIDENCE THE HUMAN-ONLY WRITE IT AUTHORIZES ACTUALLY " +
+          "HAPPENED; this reports whether it was OBSERVED, recomputed fresh on EVERY read (never cached, " +
+          "so it self-corrects the moment the write lands): `state` is one of — \"unknown\" (you never " +
+          "declared a `fulfillmentTarget` at ask time; today's default, unconditionally), \"unwritable\" " +
+          "(a target was declared but can NEVER be observed — a bad profile key or a since-deleted " +
+          "profile; `detail` names which), \"not_yet_done\" (a target was declared and checked, but the " +
+          "live value doesn't match yet — a MEASURED false, never to be confused with \"unknown\"), or " +
+          "\"fulfilled\" (it matches). See question_ask's `fulfillmentTarget` param for how to opt in; a \"credential\" entry has {ack} — NEVER " +
           "the secret itself. Pulling consumes them in one shot (flips them to 'consumed') so they won't " +
           "be returned again — call this when you reach the point the request was blocking, or after the " +
           "push nudge tells you one was answered. Returns {questions: [...]} (empty if none are answered " +
@@ -2968,7 +2986,7 @@ export class PlatformMcpRouter {
         if (answered.length > 0) {
           sessions.purgeAnsweredQuestionNudges(callerSessionId, answered.map((q) => q.id));
         }
-        return ok({ questions: answered.map(questionPullItem) });
+        return ok({ questions: answered.map((q) => questionPullItem(q, db)) });
       },
     );
 

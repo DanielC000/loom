@@ -258,7 +258,7 @@ function askCredential(e, { id, title, provisionTo }) {
   check("(F) it pulls (question_pull's own DB read) cleanly", pulledQ !== undefined && pulledQ.provisionConnectionId === raw.provisionConnectionId);
   check("(F) the row is now 'consumed' post-pull", e.db.getQuestion(q.id).state === "consumed");
 
-  const item = questionPullItem(pulledQ);
+  const item = questionPullItem(pulledQ, e.db);
   check("(F) questionPullItem produces a real ack string (does not crash / return null) on a null-blob provisioned row", typeof item.ack === "string" && item.ack.length > 0);
   check("(F) the ack never contains the plaintext", !item.ack.includes(plaintext));
 
@@ -279,7 +279,7 @@ function askCredential(e, { id, title, provisionTo }) {
   // Provisioned WITH a binding requested.
   const qBound = askCredential(e, { id: "cred-ack-bound", title: "Need the key", provisionTo: { connection: { name: "Ack API", host: "api.example.com" }, binding: { profileId: "prof-ack" } } });
   await app.inject({ method: "POST", url: `/api/questions/${qBound.id}/answer`, payload: { secret: "sk_ack_bound" } });
-  const ackBound = questionPullItem(e.db.pullAnsweredQuestionsForAgent(e.agentId, new Date().toISOString()).find((p) => p.id === qBound.id)).ack;
+  const ackBound = questionPullItem(e.db.pullAnsweredQuestionsForAgent(e.agentId, new Date().toISOString()).find((p) => p.id === qBound.id), e.db).ack;
   check("(G) a bound provisioning ack names the Connection", ackBound.includes("Ack API"));
   check("(G) a bound provisioning ack says the binding is PENDING", ackBound.includes("PENDING"));
   check("(G) a bound provisioning ack says it's NOT yet wired to any session", ackBound.includes("NOT yet wired to any session"));
@@ -288,13 +288,13 @@ function askCredential(e, { id, title, provisionTo }) {
   // Provisioned with NO binding requested.
   const qUnbound = askCredential(e, { id: "cred-ack-unbound", title: "Need the key", provisionTo: { connection: { name: "Ack API 2", host: "api.example.com" } } });
   await app.inject({ method: "POST", url: `/api/questions/${qUnbound.id}/answer`, payload: { secret: "sk_ack_unbound" } });
-  const ackUnbound = questionPullItem(e.db.pullAnsweredQuestionsForAgent(e.agentId, new Date().toISOString()).find((p) => p.id === qUnbound.id)).ack;
+  const ackUnbound = questionPullItem(e.db.pullAnsweredQuestionsForAgent(e.agentId, new Date().toISOString()).find((p) => p.id === qUnbound.id), e.db).ack;
   check("(G) an unbound provisioning ack says no binding was requested", ackUnbound.includes("No profile binding was requested"));
 
   // A PLAIN (non-provisioning) credential ask keeps today's exact wording — no "Connection"/"provisioned into" language.
   const qPlain = askCredential(e, { id: "cred-ack-plain", title: "Need an SSH key" });
   await app.inject({ method: "POST", url: `/api/questions/${qPlain.id}/answer`, payload: { secret: "sk_plain" } });
-  const ackPlain = questionPullItem(e.db.pullAnsweredQuestionsForAgent(e.agentId, new Date().toISOString()).find((p) => p.id === qPlain.id)).ack;
+  const ackPlain = questionPullItem(e.db.pullAnsweredQuestionsForAgent(e.agentId, new Date().toISOString()).find((p) => p.id === qPlain.id), e.db).ack;
   check("(G) a plain credential ack does NOT mention provisioning into a Connection", !ackPlain.includes("provisioned into Connection"));
   check("(G) a plain credential ack keeps the classic 'NOT auto-injected' wording", ackPlain.includes("NOT auto-injected"));
 
@@ -311,21 +311,21 @@ function askCredential(e, { id, title, provisionTo }) {
   await app.inject({ method: "POST", url: `/api/questions/${q.id}/answer`, payload: { secret: plaintext } });
 
   const answered = e.db.getQuestion(q.id);
-  const taskItem = taskRequestGetItem(answered);
+  const taskItem = taskRequestGetItem(answered, e.db);
   check("(H) taskRequestGetItem surfaces the requested provisioning target (name/host)", taskItem.provisioning?.requested?.connectionName === "Audit API" && taskItem.provisioning?.requested?.host === "api.example.com");
   check("(H) taskRequestGetItem surfaces the requested binding profileId", taskItem.provisioning?.requested?.bindingProfileId === "prof-audit");
   check("(H) taskRequestGetItem surfaces the resulting connectionId", taskItem.provisioning?.connectionId === answered.provisionConnectionId);
   check("(H) taskRequestGetItem surfaces bindingState:'pending'", taskItem.provisioning?.bindingState === "pending");
   check("(H) taskRequestGetItem NEVER carries the plaintext", !JSON.stringify(taskItem).includes(plaintext));
 
-  const auditItem = auditRequestItem({ ...answered, agentId: e.agentId });
+  const auditItem = auditRequestItem({ ...answered, agentId: e.agentId }, e.db);
   check("(H) auditRequestItem carries the SAME non-secret provisioning shape", auditItem.provisioning?.connectionId === answered.provisionConnectionId && auditItem.provisioning?.bindingState === "pending");
   check("(H) auditRequestItem NEVER carries the plaintext", !JSON.stringify(auditItem).includes(plaintext));
 
   // A non-provisioning question's audit shape is present but all-null/"none" — callers never have to branch.
   const qPlain = askCredential(e, { id: "cred-audit-plain", title: "Need an SSH key" });
   await app.inject({ method: "POST", url: `/api/questions/${qPlain.id}/answer`, payload: { secret: "sk_plain_audit" } });
-  const plainItem = taskRequestGetItem(e.db.getQuestion(qPlain.id));
+  const plainItem = taskRequestGetItem(e.db.getQuestion(qPlain.id), e.db);
   check("(H) a non-provisioning question's provisioning.requested is null", plainItem.provisioning?.requested === null);
   check("(H) a non-provisioning question's provisioning.bindingState is 'none'", plainItem.provisioning?.bindingState === "none");
 

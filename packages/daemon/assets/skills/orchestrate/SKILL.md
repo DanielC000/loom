@@ -175,7 +175,13 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
     Loom persists it and derives `lapsed` at read time (true once `expiresAt` is past), but never itself
     enforces, blocks, or revokes a standing grant. You must re-check `lapsed` yourself before treating an
     old "standing" answer as still live — this matters most across a `worker_recycle`/manager-recycle,
-    where a successor otherwise inherits a belief instead of the actual grant state.
+    where a successor otherwise inherits a belief instead of the actual grant state. **An approval is an
+    AUTHORIZATION, not evidence the write happened** — when the action the human authorizes is itself a
+    human-only write to something you can't touch or verify directly (e.g. a config/setting change only a
+    person can make), `approved:true` tells you they said yes, not that it landed. If your platform's
+    `question_ask` accepts an optional structured fulfilment target for exactly this case, declare it at
+    ask time so the read side can OBSERVE the write instead of you having to re-check by hand — an
+    undeclared target is a deliberate, honest `"unknown"`, never a guess.
   - **`credential`** — ask for a secret under a **never-echo** model: you will NEVER receive the
     plaintext, only an ack that it's been provisioned (optionally under the `envVar` you name) — use the
     secret via your environment/config, never expect it back in the tool result.

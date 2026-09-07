@@ -96,10 +96,17 @@ export class AuditMcpRouter {
           "task_request_get's non-consuming guarantee). Returns {items, total, returned, offset, hasMore}: " +
           "`items` per row is {id, projectId, loomSessionId, filedBySessionId, agentId, taskId, type, title, " +
           "state, createdAt, answeredAt, consumedAt} plus an answer summary by type — chosenOption/note for " +
-          "decision|input, approved/note/scope/expiresAt/lapsed for permission (scope/expiresAt are the " +
-          "human's ACTUAL decided grant, distinct from the ask-time requested scope/expiry; lapsed is " +
-          "read-time-derived, true only once expiresAt is set AND past — advisory only, Loom never itself " +
-          "enforces/revokes it), ack ONLY for credential (NEVER the secret — mirrors question_pull's " +
+          "decision|input, approved/note/scope/expiresAt/lapsed/fulfillment for permission (scope/expiresAt " +
+          "are the human's ACTUAL decided grant, distinct from the ask-time requested scope/expiry; lapsed " +
+          "is read-time-derived, true only once expiresAt is set AND past — advisory only, Loom never " +
+          "itself enforces/revokes it; `fulfillment: {state, detail}` — an APPROVAL is an AUTHORIZATION, " +
+          "not evidence the write happened, so this reports whether it was actually OBSERVED, computed " +
+          "fresh on every read: \"unknown\" (the asker never declared a checkable target — the default), " +
+          "\"unwritable\" (a target was declared but can never be observed — a bad profile key or a deleted " +
+          "profile; `detail` says which), \"not_yet_done\" (a target was declared and checked, but the live " +
+          "value doesn't match yet — a MEASURED false, never confused with \"unknown\"), or \"fulfilled\" " +
+          "(it matches). Set at question_ask time via `fulfillmentTarget` — see that tool's own doc), " +
+          "ack ONLY for credential (NEVER the secret — mirrors question_pull's " +
           "never-echo shape; a pending row's answer fields read null rather than a misleading false-ish " +
           "value). `loomSessionId` is the CURRENT routing target — it MUTATES on a manager/Lead recycle, so " +
           "it does NOT identify who originally filed the request; `filedBySessionId` is the immutable filer " +
@@ -126,7 +133,7 @@ export class AuditMcpRouter {
           : undefined;
         const all = db.listQuestionsForAudit({ projectId, state, type, since });
         const paged = pageRequests(all, { limit, offset }, DEFAULT_REQUESTS_LIST_CAP);
-        return ok({ ...paged, items: paged.items.map(auditRequestItem) });
+        return ok({ ...paged, items: paged.items.map((q) => auditRequestItem(q, db)) });
       },
     );
 

@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
 import { resolveConfig, resolveCodescapeConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde } from "../paths.js";
@@ -3033,6 +3033,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // them — a spec that needs an already-provisioned row must seed pending, then answer it via the
           // real REST route below, not by pre-setting those two here.
           provisionTarget?: ProvisionTarget | null;
+          // Grant-fulfilment observation (card 3880f783) — ask-time only, "permission" seeds. Omitted
+          // defaults to null (today's status quo, `fulfillment:{state:"unknown"}` on read).
+          fulfillmentTarget?: FulfillmentTarget | null;
           state?: "pending" | "answered" | "consumed" | "cancelled"; chosenOption?: string | null; note?: string | null;
           // Optional instant overrides — backdate `answeredAt` to drive the client-side watchdog (an
           // ignored `answered` re-escalating to amber) in a spec, or `createdAt` for a deterministic age.
@@ -3320,7 +3323,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // answer-time-only (see the seed body type's own comment above) — always the pre-answer defaults
           // here; insertQuestion itself never writes any of them regardless of what's passed. A spec that
           // needs an already-decided permission row seeds pending, then answers it via the real REST route.
-          provisionTarget: q.provisionTarget ?? null, provisionConnectionId: null, provisionBindingState: "none",
+          provisionTarget: q.provisionTarget ?? null, fulfillmentTarget: q.fulfillmentTarget ?? null,
+          provisionConnectionId: null, provisionBindingState: "none",
           decidedScope: null, decidedExpiresAt: null,
           state, chosenOption: q.chosenOption ?? null, note: q.note ?? null,
           createdAt: q.createdAt ?? now,

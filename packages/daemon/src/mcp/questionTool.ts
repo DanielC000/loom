@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { QUESTION_TYPES, PERMISSION_SCOPES, PERMISSION_ANSWERS, type Question, type QuestionType, type PermissionScope, type ProvisionTarget, type SessionRole } from "@loom/shared";
+import { QUESTION_TYPES, PERMISSION_SCOPES, PERMISSION_ANSWERS, type Question, type QuestionType, type PermissionScope, type ProvisionTarget, type FulfillmentTarget, type SessionRole } from "@loom/shared";
 import { resolveIdPrefix } from "../id-prefix.js";
 import type { Db } from "../db.js";
 import { resolveAlias } from "./arg-alias.js";
+import { PROFILE_FIELD_NAMES } from "../profiles/validate.js";
 
 /** Roles allowed to set `provisionTo` on a `type:"credential"` ask (card 193de09e Q1) — manager and
  *  platform (the Lead) only. Enforced in `buildQuestionAsk` below so both `question_ask` registrations
@@ -51,6 +52,17 @@ export const QUESTION_ASK_INPUT_SHAPE = {
       binding: z.object({ profileId: z.string() }).optional(),
     })
     .optional(),
+  // Grant-fulfilment observation (card 3880f783) — OPT-IN, "permission" type only: the asker declaring a
+  // live-checkable profile field that would prove the authorized human-only write actually happened. See
+  // FulfillmentTarget's own doc. No role gate (unlike provisionTo): this never performs or enables a
+  // write, and "permission" asks are already structurally manager/platform-only.
+  fulfillmentTarget: z
+    .object({
+      profileId: z.string(),
+      key: z.string(),
+      expectedValue: z.unknown().optional(),
+    })
+    .optional(),
 } as const;
 
 export interface QuestionAskInput {
@@ -66,6 +78,7 @@ export interface QuestionAskInput {
   expiresAt?: string;
   envVar?: string;
   provisionTo?: ProvisionTarget;
+  fulfillmentTarget?: FulfillmentTarget;
   supersedes?: string;
 }
 
@@ -104,6 +117,11 @@ export function buildQuestionAsk(
       return { error: "provisionTo.binding requires a non-empty `profileId`" };
     }
   }
+  if (input.fulfillmentTarget) {
+    if (!input.fulfillmentTarget.profileId?.trim() || !input.fulfillmentTarget.key?.trim()) {
+      return { error: "fulfillmentTarget requires non-empty `profileId` and `key`" };
+    }
+  }
   let taskId: string | null = null;
   if (input.taskId) {
     const r = resolveIdPrefix(ctx.db.listTasks(ctx.projectId), input.taskId);
@@ -139,6 +157,7 @@ export function buildQuestionAsk(
       decidedExpiresAt: null,
       credentialEnvVar: type === "credential" ? (input.envVar ?? null) : null,
       provisionTarget: type === "credential" ? (input.provisionTo ?? null) : null,
+      fulfillmentTarget: type === "permission" ? (input.fulfillmentTarget ?? null) : null,
       provisionConnectionId: null,
       provisionBindingState: "none",
       state: "pending",
@@ -216,6 +235,61 @@ function permissionGrant(q: Question): { scope: PermissionScope | null; expiresA
   };
 }
 
+/** A profile field's live value counts as "set" — the generic presence check `computeFulfillment` below
+ *  falls back to when the asker didn't declare an `expectedValue`: null/undefined is never present, an
+ *  array is present only once non-empty (mirrors `capabilities`/`connections`'s empty-array default),
+ *  a boolean is present only when `true` (mirrors every opt-in boolean's off-by-default), and anything
+ *  else (a non-empty string, an enum member like `harness`) is present outright. */
+function isProfileValuePresent(v: unknown): boolean {
+  if (v === null || v === undefined) return false;
+  if (Array.isArray(v)) return v.length > 0;
+  if (typeof v === "boolean") return v === true;
+  return true;
+}
+
+/**
+ * An approval is an AUTHORIZATION, not evidence the write happened (card 3880f783) — this derives
+ * `fulfillment: {state, detail}` for ONE "permission" answer, from the asker's declared `fulfillmentTarget`
+ * (see its own doc) checked against the LIVE profile row, recomputed fresh on EVERY call — never cached on
+ * the `Question` row, so the answer self-corrects the moment the human write actually lands.
+ *
+ * Four DISJOINT string states (never a boolean+null, so "nothing measured" can never be misread as "measured
+ * false"):
+ *   - "unknown" — no `fulfillmentTarget` was declared at ask time. Today's status quo, unconditionally —
+ *     the overwhelming majority of permission asks (nothing here changes for them).
+ *   - "unwritable" — the declared target can never be observed: `key` doesn't name a real `Profile` field
+ *     (checked LIVE against `PROFILE_FIELD_NAMES`, the schema-derived enumeration — never hand-copied, so
+ *     this can't itself drift from the real schema), or `profileId` no longer resolves to an existing
+ *     profile. `detail` names which. NOTE (verified against commit 635e347e, not inferred from its
+ *     subject): the ORIGINAL harness specimen's failure mode — a real schema field silently dropped from
+ *     `validateProfile`'s own return literal — is now compile-time impossible on THAT path (the `satisfies
+ *     Record<keyof Omit<Profile,"id">, unknown>` in `profiles/validate.ts`). It does NOT cover every write
+ *     path to a profile field, though — `Db.insertProfile`/`updateProfile`'s manual per-column SQL binding
+ *     has no equivalent compile-time totality check, so a field silently dropped THERE would still read
+ *     "not_yet_done" forever with no way for this function to tell — a real, separate, still-open gap this
+ *     card's design does not attempt to close (see the card's own final report for why).
+ *   - "not_yet_done" — the target resolves and was checked, but the live value doesn't (yet) match: an
+ *     `expectedValue` was given and the live value differs, or none was given and `isProfileValuePresent`
+ *     is false. A MEASURED false, never conflated with "unknown".
+ *   - "fulfilled" — the live value matches.
+ */
+export function computeFulfillment(db: Db, q: Question): { state: "unknown" | "unwritable" | "not_yet_done" | "fulfilled"; detail: string | null } {
+  if (q.type !== "permission" || !q.fulfillmentTarget) return { state: "unknown", detail: null };
+  const { profileId, key, expectedValue } = q.fulfillmentTarget;
+  if (!(PROFILE_FIELD_NAMES as readonly string[]).includes(key)) {
+    return { state: "unwritable", detail: `"${key}" is not a recognized profile field` };
+  }
+  const profile = db.getProfile(profileId);
+  if (!profile) {
+    return { state: "unwritable", detail: `profile ${profileId} no longer exists` };
+  }
+  const value = (profile as unknown as Record<string, unknown>)[key];
+  const fulfilled = "expectedValue" in q.fulfillmentTarget
+    ? JSON.stringify(value) === JSON.stringify(expectedValue)
+    : isProfileValuePresent(value);
+  return fulfilled ? { state: "fulfilled", detail: null } : { state: "not_yet_done", detail: null };
+}
+
 /**
  * Shape ONE pulled-and-consumed `Question` into `question_pull`'s agent-facing payload (card 695ebab0),
  * branching by `type`. A "credential" answer NEVER surfaces a secret here — there is none to surface: the
@@ -225,14 +299,19 @@ function permissionGrant(q: Question): { scope: PermissionScope | null; expiresA
  * `chosenOption` to exactly one of `PERMISSION_ANSWERS` — the SAME shared const this derivation compares
  * against, so the write-side validation and this read-side derivation can never drift apart. It also
  * surfaces the human's structured `{scope, expiresAt, lapsed}` grant (`permissionGrant` above) so a
- * recycled successor manager can re-check the actual decided grant instead of inheriting a belief.
+ * recycled successor manager can re-check the actual decided grant instead of inheriting a belief. A
+ * "permission" entry also surfaces `fulfillment: {state, detail}` (card 3880f783, `computeFulfillment`) —
+ * whether the authorized write was actually OBSERVED to happen, computed fresh from `db` on every call.
  */
-export function questionPullItem(q: Question): Record<string, unknown> {
+export function questionPullItem(q: Question, db: Db): Record<string, unknown> {
   if (q.type === "credential") {
     return { questionId: q.id, title: q.title, type: q.type, ack: credentialAck(q) };
   }
   if (q.type === "permission") {
-    return { questionId: q.id, title: q.title, type: q.type, approved: q.chosenOption === PERMISSION_ANSWERS[0], note: q.note, ...permissionGrant(q) };
+    return {
+      questionId: q.id, title: q.title, type: q.type, approved: q.chosenOption === PERMISSION_ANSWERS[0], note: q.note,
+      ...permissionGrant(q), fulfillment: computeFulfillment(db, q),
+    };
   }
   return { questionId: q.id, title: q.title, type: q.type, chosenOption: q.chosenOption, note: q.note };
 }
@@ -249,15 +328,22 @@ export function questionPullItem(q: Question): Record<string, unknown> {
  * never-echo guarantee as `questionPullItem` — see `credentialAck`. Exported so both non-consuming read
  * surfaces (task-scoped and cross-project audit) share this ONE branching implementation instead of
  * drifting apart. The permission branch also surfaces `permissionGrant`'s structured `{scope, expiresAt,
- * lapsed}` — null-safe on an unanswered/legacy row exactly like `permissionGrant` itself.
+ * lapsed}` — null-safe on an unanswered/legacy row exactly like `permissionGrant` itself. A "permission"
+ * entry ALSO surfaces `fulfillment` (card 3880f783) regardless of `hasAnswer` — an authorization can be
+ * declared as a checkable target before it's even answered, but is only ever meaningfully "fulfilled" once
+ * the human's write lands, so `computeFulfillment` is safe (and correct) to call unconditionally here: an
+ * unanswered/denied permission's target simply reads "not_yet_done"/"unwritable" like any other.
  */
-export function questionAnswerByType(q: Question): Record<string, unknown> {
+export function questionAnswerByType(q: Question, db: Db): Record<string, unknown> {
   const hasAnswer = q.state === "answered" || q.state === "consumed";
   if (q.type === "credential") {
     return { ack: hasAnswer ? credentialAck(q) : null };
   }
   if (q.type === "permission") {
-    return { approved: hasAnswer ? q.chosenOption === PERMISSION_ANSWERS[0] : null, note: q.note, ...permissionGrant(q) };
+    return {
+      approved: hasAnswer ? q.chosenOption === PERMISSION_ANSWERS[0] : null, note: q.note,
+      ...permissionGrant(q), fulfillment: computeFulfillment(db, q),
+    };
   }
   return { chosenOption: q.chosenOption, note: q.note };
 }
@@ -277,13 +363,13 @@ export function questionAnswerByType(q: Question): Record<string, unknown> {
  * credential ask, or a non-credential type) so callers don't have to branch on its absence; every field is
  * null/"none" when provisioning was never requested.
  */
-export function taskRequestGetItem(q: Question): Record<string, unknown> {
+export function taskRequestGetItem(q: Question, db: Db): Record<string, unknown> {
   return {
     id: q.id, type: q.type, title: q.title, body: q.body,
     options: q.options, recommendation: q.recommendation,
     state: q.state, taskId: q.taskId,
     createdAt: q.createdAt, answeredAt: q.answeredAt,
-    ...questionAnswerByType(q),
+    ...questionAnswerByType(q, db),
     provisioning: provisioningAudit(q),
     // question_cancel/dismiss — null unless state:"cancelled". Surfaced here (and in auditRequestItem
     // below) so a task/audit reader can tell WHY a request left the pending inbox without an answer.
@@ -325,13 +411,13 @@ function provisioningAudit(q: Question): Record<string, unknown> {
  * instead, which is set once at ask time and never rewritten (null on a row that predates this field —
  * that history is genuinely unrecoverable, not just unmigrated).
  */
-export function auditRequestItem(q: Question & { agentId: string | null }): Record<string, unknown> {
+export function auditRequestItem(q: Question & { agentId: string | null }, db: Db): Record<string, unknown> {
   return {
     id: q.id, projectId: q.projectId, loomSessionId: q.sessionId, filedBySessionId: q.filedBySessionId,
     agentId: q.agentId, taskId: q.taskId,
     type: q.type, title: q.title, state: q.state,
     createdAt: q.createdAt, answeredAt: q.answeredAt, consumedAt: q.consumedAt,
-    ...questionAnswerByType(q),
+    ...questionAnswerByType(q, db),
     provisioning: provisioningAudit(q),
     // question_cancel/dismiss — null unless state:"cancelled". See taskRequestGetItem's twin field.
     cancelledReason: q.cancelledReason, cancelledBy: q.cancelledBy,

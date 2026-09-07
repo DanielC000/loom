@@ -65,7 +65,7 @@ function assertNotProdDbInTest(file: string): void {
 import type {
   Project, Agent, AgentListItem, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind, ScheduleHistoryPage, ScheduleHistoryEntry, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, ProvisionTarget, PendingBinding, PresetPrompt, PresetPromptSuggestion,
+  OrchestrationEvent, OrchestrationEventKind, ScheduleHistoryPage, ScheduleHistoryEntry, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, ProvisionTarget, FulfillmentTarget, PendingBinding, PresetPrompt, PresetPromptSuggestion,
   CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionConversationSummary, CompanionRoute,
   CompanionCapabilityGrant,
   ApiKey, ApiKeyStatus, ApiKeyCaps, GatewayToken, GatewayTokenStatus, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
@@ -1199,6 +1199,8 @@ CREATE TABLE IF NOT EXISTS questions (
                                             -- credential auto-provisioning v1 (card 193de09e), INTENT only
   provision_connection_id TEXT,            -- set ONLY by the answer boundary once provisioned
   provision_binding_state TEXT,            -- 'pending' | 'applied' once provisioned; NULL ('none') otherwise
+  fulfillment_target TEXT,                 -- ask-time JSON {profileId,key,expectedValue?} — grant-fulfilment
+                                            -- observation (card 3880f783), 'permission' type only, INTENT only
   state TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'answered' | 'consumed' | 'cancelled'
   chosen_option TEXT,
   note TEXT,
@@ -1851,6 +1853,12 @@ const QUESTION_ADDED_COLUMNS: Record<string, string> = {
   provision_target: "TEXT",
   provision_connection_id: "TEXT",
   provision_binding_state: "TEXT",
+  // Grant-fulfilment observation (card 3880f783) — the asker's ask-time JSON {profileId,key,expectedValue?}
+  // declaring a live-checkable profile field, 'permission' type only. Nullable like every other added
+  // column: a legacy row (asked before this card) simply reads null, which the read side (computeFulfillment,
+  // mcp/questionTool.ts) surfaces as fulfillment:{state:"unknown"} — the exact status-quo behavior a row
+  // with no declared target has always had, never a false "not_yet_done".
+  fulfillment_target: "TEXT",
   // Decisions-relay dedup (card 0c1365d0): the signature (state+chosenOption+answeredAt+consumedAt) as of
   // the last time this question was read via the Companion's decisions_list, so a repeat read of an
   // unchanged pending decision can be told apart from a genuinely new/state-changed one. Both nullable —
@@ -7014,12 +7022,12 @@ export class Db {
       `INSERT INTO questions
         (id,session_id,filed_by_session_id,project_id,type,title,body,options_json,recommendation,task_id,
          permission_action,permission_scope,permission_expires_at,credential_env_var,
-         provision_target,state,chosen_option,note,created_at,answered_at,consumed_at,
+         provision_target,fulfillment_target,state,chosen_option,note,created_at,answered_at,consumed_at,
          cancelled_reason,cancelled_by,cancelled_at)
        VALUES
         (@id,@sessionId,@filedBySessionId,@projectId,@type,@title,@body,@optionsJson,@recommendation,@taskId,
          @permissionAction,@permissionScopeHint,@permissionExpiresAt,@credentialEnvVar,
-         @provisionTarget,@state,@chosenOption,@note,@createdAt,@answeredAt,@consumedAt,
+         @provisionTarget,@fulfillmentTarget,@state,@chosenOption,@note,@createdAt,@answeredAt,@consumedAt,
          @cancelledReason,@cancelledBy,@cancelledAt)`,
     ).run({
       // `type` defaults to "decision" at the RUNTIME layer too (not just TS's Question interface) — a
@@ -7042,6 +7050,7 @@ export class Db {
       // provision_connection_id/provision_binding_state are deliberately NOT insertable here — they are
       // written ONLY by answerCredentialQuestion (the human-only answer boundary), never at ask time.
       provisionTarget: q.provisionTarget ? JSON.stringify(q.provisionTarget) : null,
+      fulfillmentTarget: q.fulfillmentTarget ? JSON.stringify(q.fulfillmentTarget) : null,
       state: q.state, chosenOption: q.chosenOption ?? null, note: q.note ?? null,
       createdAt: q.createdAt, answeredAt: q.answeredAt ?? null, consumedAt: q.consumedAt ?? null,
       // Normally null at insert time (a question is only ever cancelled AFTER it's created — see
@@ -8743,6 +8752,7 @@ function toQuestion(r0: unknown): Question {
     decidedExpiresAt: (r.decided_expires_at as string | null) ?? null,
     credentialEnvVar: (r.credential_env_var as string | null) ?? null,
     provisionTarget: r.provision_target ? (JSON.parse(r.provision_target as string) as ProvisionTarget) : null,
+    fulfillmentTarget: r.fulfillment_target ? (JSON.parse(r.fulfillment_target as string) as FulfillmentTarget) : null,
     provisionConnectionId: (r.provision_connection_id as string | null) ?? null,
     provisionBindingState: (r.provision_binding_state as "pending" | "applied" | null) ?? "none",
     state: r.state as QuestionState,

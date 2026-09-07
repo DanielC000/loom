@@ -794,7 +794,7 @@ export function getProjectTaskRequest(
     const linked = q.taskId === owned.id || (!!q.taskId && q.taskId.length === 8 && owned.id.startsWith(`${q.taskId}-`));
     if (!linked) return { error: "request is not connected to that task" };
   }
-  return taskRequestGetItem(q);
+  return taskRequestGetItem(q, db);
 }
 
 export function createProjectTask(

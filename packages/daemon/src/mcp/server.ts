@@ -232,12 +232,19 @@ export class TaskMcpRouter {
         description:
           "Read ONE Request connected to a task, IN FULL: {id,type,title,body,options,recommendation," +
           "state,taskId,createdAt,answeredAt} plus its answer by type — `chosenOption`+`note` for " +
-          "\"decision\"/\"input\", `approved`+`note`+`scope`+`expiresAt`+`lapsed` for \"permission\" (all " +
-          "null/false until answered) — `scope`/`expiresAt` are the human's ACTUAL decided grant (distinct " +
-          "from the ask-time REQUESTED scope/expiry), and `lapsed` is a read-time-derived flag, true only " +
-          "once `expiresAt` is set AND in the past. ADVISORY ONLY — Loom persists + surfaces this grant but " +
-          "never itself enforces, blocks, or revokes it; a recycled successor should re-read this rather " +
-          "than trust a predecessor's belief about a prior 'standing' grant. `ack` " +
+          "\"decision\"/\"input\", `approved`+`note`+`scope`+`expiresAt`+`lapsed`+`fulfillment` for " +
+          "\"permission\" (all null/false until answered) — `scope`/`expiresAt` are the human's ACTUAL " +
+          "decided grant (distinct from the ask-time REQUESTED scope/expiry), and `lapsed` is a " +
+          "read-time-derived flag, true only once `expiresAt` is set AND in the past. ADVISORY ONLY — Loom " +
+          "persists + surfaces this grant but never itself enforces, blocks, or revokes it; a recycled " +
+          "successor should re-read this rather than trust a predecessor's belief about a prior 'standing' " +
+          "grant. `fulfillment: {state, detail}` — an APPROVAL is an AUTHORIZATION, not evidence the " +
+          "human-only write it authorizes actually happened; this reports whether it was OBSERVED, " +
+          "recomputed fresh on every read (never cached): \"unknown\" (no checkable target was declared at " +
+          "ask time — the default), \"unwritable\" (a target was declared but can never be observed — " +
+          "`detail` says why), \"not_yet_done\" (declared, checked, not yet true — a MEASURED false, never " +
+          "confused with \"unknown\"), or \"fulfilled\". Set at ask time via `question_ask`'s " +
+          "`fulfillmentTarget` — see that tool's own doc. `ack` " +
           "ONLY (never the secret) for \"credential\" (null until provided). NON-CONSUMING: unlike " +
           "question_pull, reading this never flips the request's state — re-readable across turns/agents. " +
           "`id` is the request id (from tasks_get's `requests.items`/task_requests_list). Optional `taskId` " +

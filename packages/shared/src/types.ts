@@ -3294,6 +3294,26 @@ export interface ProvisionTarget {
 }
 
 /**
+ * `type:"permission"`'s optional ask-time fulfilment target (card 3880f783) — the asker declaring, at
+ * the moment it knows, a LIVE-CHECKABLE profile field that would prove the authorized human-only write
+ * actually happened. Generalizes `ProvisionTarget.binding`'s same asker-declares-a-structured-target
+ * principle from a connection binding to a plain profile key: `key` must name a real `Profile` field
+ * (checked live against the profile schema, never hand-copied — see `PROFILE_FIELD_NAMES` in
+ * `profiles/validate.ts`); `expectedValue`, if given, is the exact value that counts as fulfilled
+ * (deep-equal); omitted, fulfilment is a generic "this field is no longer at its empty/default value"
+ * presence check. STATES INTENT ONLY, like `ProvisionTarget` — declaring this never itself performs or
+ * enables the write (the profile key it names is only ever settable by a human, `AGENT_FORBIDDEN_PROFILE_KEYS`
+ * still applies in full); it only tells the read side (`question_pull`/`requests_list`/`task_request_get`)
+ * WHAT to observe. See `Question.fulfillmentTarget`'s own doc for the resulting three-state (plus
+ * "fulfilled") read.
+ */
+export interface FulfillmentTarget {
+  profileId: string;
+  key: string;
+  expectedValue?: unknown;
+}
+
+/**
  * A manager→human DECISION INBOX entry (card 8701bdbb, daemon core / child A), generalized (card
  * 695ebab0) into a typed Requests object via the `type` discriminator. A manager/orchestrator hits a
  * mid-flight decision/input/permission/credential need, asks NON-BLOCKING (the ask tool returns
@@ -3365,6 +3385,14 @@ export interface Question {
    *  below). Only settable by manager/platform (lead) roles — see `buildQuestionAsk`'s role gate. Null for
    *  every other type, and null for a plain (non-provisioning) credential ask. */
   provisionTarget: ProvisionTarget | null;
+  /** `type:"permission"` ask-time payload (card 3880f783) — the asker declaring a live-checkable profile
+   *  field that would prove the authorized human-only write actually happened. See `FulfillmentTarget`'s
+   *  own doc. Null for every other type, and null for a permission ask that never declared one — the
+   *  read side (`computeFulfillment`, `mcp/questionTool.ts`) surfaces that absence as `"unknown"`, NEVER
+   *  conflated with a declared-but-not-yet-observed `"not_yet_done"`. Recomputed FRESH on every read from
+   *  the LIVE profile row — never cached on this row, so the answer self-corrects the moment the human
+   *  write lands (or a since-fixed write path starts persisting again). */
+  fulfillmentTarget: FulfillmentTarget | null;
   /** Set by the human answer boundary when `provisionTarget` was requested and provisioning succeeded —
    *  the id of the Connection the secret landed in (created, or updated if one by that name already
    *  existed). Null until answered, and null for a non-provisioning ask. */
