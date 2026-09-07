@@ -18,6 +18,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Run: 1) build (turbo builds shared first), 2) node test/pty-codex-agnostic-methods.mjs
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -60,6 +63,40 @@ function makeCodexLive() {
     activeTurnSenderId: null, lastPromptSenderId: null,
     trustDialogAnswered: true, screenScan: "",
   };
+}
+
+// --- (T2, card 0770d916) prove this hand-written fixture's field set hasn't silently drifted from the
+// REAL `CodexLive` interface — the shape `spawnCodexProcess`'s own object literal is CHECKED AGAINST AT
+// COMPILE TIME (a direct `const live: CodexLive = {...}` literal assignment, so tsc already refuses a
+// missing/renamed field there); this JS test file is never type-checked itself, so a field renamed or
+// removed on the real interface could leave THIS fixture silently stale (still all-PASS, since nothing
+// else here compares it against anything real) — exactly the class of bug the card's own finding named.
+// Anchor-extracts the interface body (same technique profile-field-consumer-guard.mjs already uses for
+// pty/host.ts regions) and asserts every key this fixture sets is a real field on that interface — this
+// deliberately does NOT require the reverse (the interface may carry MORE fields than this fixture sets;
+// see the file header above — the fixture is intentionally the minimal subset the AGNOSTIC methods under
+// test actually read, not a full mirror).
+{
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const HOST_TS = fs.readFileSync(path.join(__dirname, "..", "src", "pty", "host.ts"), "utf8");
+  const ifaceStart = HOST_TS.indexOf("export interface CodexLive {");
+  const ifaceEnd = HOST_TS.indexOf("export interface SpawnOpts {", ifaceStart);
+  check("(shape) CodexLive interface anchors found in host.ts", ifaceStart !== -1 && ifaceEnd !== -1 && ifaceEnd > ifaceStart);
+  const CODEX_LIVE_IFACE = HOST_TS.slice(ifaceStart, ifaceEnd);
+  // Field declarations are one per line, 2-space indented (`  fieldName: Type;` / `  fieldName?: Type;`) —
+  // a JSDoc comment line is indented differently (`  /**` / `   *`) and never matches this shape.
+  const realFieldNames = new Set([...CODEX_LIVE_IFACE.matchAll(/^ {2}([A-Za-z_$][A-Za-z0-9_$]*)\??:\s/gm)].map((m) => m[1]));
+  check(`(shape) extraction found a plausible field count (>20, found ${realFieldNames.size})`, realFieldNames.size > 20);
+  // Positive control FIRST (this project's own standing rule): the extraction must be able to discriminate
+  // in BOTH directions, not just return a big, reassuring-looking set.
+  check("(shape control) extraction correctly reports a fabricated field name ABSENT", !realFieldNames.has("thisFieldDoesNotExistOnCodexLive12345"));
+  check("(shape control) extraction correctly finds a KNOWN real field (bootReadyTimer)", realFieldNames.has("bootReadyTimer"));
+
+  const staleFixtureKeys = Object.keys(makeCodexLive()).filter((k) => !realFieldNames.has(k));
+  check(
+    `(shape) every field this hand-written fixture sets still exists on the REAL CodexLive interface (stale: ${staleFixtureKeys.join(", ") || "none"})`,
+    staleFixtureKeys.length === 0,
+  );
 }
 
 // --- Negative control FIRST: before any codex entry is registered, every accessor reads as genuinely

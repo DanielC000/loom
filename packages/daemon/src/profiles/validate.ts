@@ -208,6 +208,24 @@ function assistantRestrictedToolsOmittedError(
   return "restrictedTools must be stated explicitly (true or false) when a profile becomes assistant-role (create, or a role change into assistant) — a chat-reachable companion's blast radius is a deliberate choice, not a default. Set it to true (least-privilege, dangerous native tools withdrawn) or false (accept the risk) and resubmit.";
 }
 
+/**
+ * Card `0770d916` (field-consumers.ts `restrictedTools` gap, `remedy: "no-mechanism-reject-or-warn"`):
+ * codex's ENTIRE permission model is two coarse, session-wide levers (`sandbox_mode`/`approval_policy`) —
+ * verified against the real OBSERVED pty probe (`docs/investigations/049e4a7b-codex-cli-capability-probe/
+ * findings.md`), not assumed from docs. There is NO per-native-tool disallow concept for `restrictedTools`
+ * to bind to on that harness, so silently accepting `harness:"codex"` + `restrictedTools:true` would leave
+ * a profile that reads blast-radius-restricted in the UI while running with codex's full default
+ * shell/file-write access — FAIL-OPEN for a safety-scoped field. Per this card's own DoD ("prefer
+ * rejecting where the human is looking over failing silently at spawn"), reject the combination here,
+ * where the human editing the profile sees it, rather than dropping it silently in createCodexPty.
+ */
+function codexRestrictedToolsUnsupportedError(harness: string | undefined, restrictedTools: boolean | undefined): string | null {
+  if (harness === "codex" && restrictedTools === true) {
+    return `restrictedTools is not supported on harness "codex" — codex has no per-native-tool disallow mechanism (only coarse sandbox_mode/approval_policy session-wide levers), so this combination cannot be honoured. Leave restrictedTools unset/false for a codex profile, or use harness "claude".`;
+  }
+  return null;
+}
+
 export function validateProfile(
   raw: unknown,
   opts?: { previousRole?: string | null; patch?: unknown },
@@ -220,6 +238,8 @@ export function validateProfile(
   const d = r.data;
   const restrictedToolsError = assistantRestrictedToolsOmittedError(d.role, opts?.previousRole, opts?.patch ?? raw);
   if (restrictedToolsError) return { ok: false, error: restrictedToolsError };
+  const codexRestrictedToolsError = codexRestrictedToolsUnsupportedError(d.harness, d.restrictedTools);
+  if (codexRestrictedToolsError) return { ok: false, error: codexRestrictedToolsError };
   // COMPILE-TIME FIELD TOTALITY (card 1059b3b9): the `satisfies Record<keyof Omit<Profile,"id">,
   // unknown>` below forces every key of Omit<Profile,"id"> to be named in this literal — the write-path
   // counterpart of entityRowFields.ts's `PROFILE_FIELDS: Record<keyof Profile, 1>` on the READ path. A

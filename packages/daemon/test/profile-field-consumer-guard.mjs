@@ -26,17 +26,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 //      debt) but is printed LOUDLY, naming the card, so it stays visible rather than fading into "green."
 //
 // CURRENT BOUND: card d34dd208's own sweep found FIVE fields with no codex consumer — `model`,
-// `restrictedTools` (the card's original seed evidence) plus THREE NEW FINDINGS from this sweep —
+// `restrictedTools` (the card's original seed evidence) plus THREE findings from that sweep —
 // `browserTesting`, `documentConversion`, `capabilities` (createCodexPty's own `buildMcpServers({
-// sessionId, port, role })` call omits all three). All five are now declared `gaps` tracked by card
-// `0770d916` — see field-consumers.ts for the per-field remedy. ⚠️ `restrictedTools` is NOT the same
-// shape as the other four: those are `remedy:"connect"` (a straightforward wiring fix — buildMcpServers
-// already accepts the param generically), but codex has NO per-native-tool disallow mechanism at all
-// (verified against the real capability-probe findings — see field-consumers.ts's own note), so
-// `restrictedTools` is `remedy:"no-mechanism-reject-or-warn"` — the correct fix is a validation-time
-// rejection or a loud warning for harness:"codex"+restrictedTools:true, never a silent connection. This
-// guard passes today (0 undeclared gaps) precisely because both shapes are DECLARED, not because either
-// is actually fixed — read the loud "KNOWN, CARDED GAP" lines below rather than trusting a bare PASS.
+// sessionId, port, role })` call omitted all three). Card `0770d916` closed FOUR of the five:
+// `browserTesting`/`documentConversion`/`capabilities` are now threaded through createCodexPty's own
+// `buildMcpServers` call (remedy `connect`); `restrictedTools` has no codex mechanism to connect to
+// (codex's whole permission model is two coarse, session-wide levers — verified against the real
+// capability-probe findings), so it is instead REJECTED at profile-validation time for
+// harness:"codex"+restrictedTools:true (remedy `no-mechanism-reject-or-warn`, see profiles/validate.ts's
+// `codexRestrictedToolsUnsupportedError`) rather than silently dropped at spawn. `model` is DELIBERATELY
+// LEFT as a declared, tracked `gaps[]` entry (lowest severity of the five — see field-consumers.ts's own
+// note): test/field-consumer-guard-warnings-surface.mjs needs at least one real, currently-open gap as
+// its specimen, and closing every gap in the same change would strand that unrelated card's regression
+// coverage with nothing to observe.
 //
 // ⛔ POSITIVE-CONTROLLED: every check below is exercised against BOTH a known-true case (the real
 // registry/source) and a synthetic known-false case (a fabricated field/pattern/cardId), so an

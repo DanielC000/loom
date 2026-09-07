@@ -166,10 +166,12 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
         note: "createPty derives the MCP-surface wants (loom-orchestration/platform/audit/setup/run/operator) from opts.role.",
       },
       {
+        // Card 0770d916: the codex buildMcpServers() call became multi-line (browserTesting/
+        // documentConversion/capabilities threaded through too) — pattern updated to the new exact text.
         harnesses: ["codex"],
         file: "packages/daemon/src/pty/host.ts",
         region: "codex-spawn",
-        pattern: `buildMcpServers({ sessionId: opts.sessionId, port: PORT, role: opts.role });`,
+        pattern: `sessionId: opts.sessionId, port: PORT, role: opts.role,`,
         note: "createCodexPty passes opts.role into buildMcpServers, which mounts the same role-gated MCP surface for codex sessions.",
       },
     ],
@@ -238,11 +240,20 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
         note: "createPty threads opts.model into buildSpawnArgs, which emits --model <id>.",
       },
     ],
-    // The seed defect this whole card was filed over (host.ts's codex region: 0 occurrences of
-    // `opts.model`, verified with a 50-hit `codex` positive control in the same range). `model` IS
-    // mechanically connectable on codex (the CLI has its own model-override lever — `-c model=<id>` /
-    // config.toml `model`, per docs/investigations/049e4a7b-codex-cli-capability-probe/findings.md) —
-    // there is just nothing threading `opts.model` to it yet. remedy: "connect".
+    // `model` IS mechanically connectable on codex (the CLI has its own model-override lever — `-c
+    // model=<id>` / config.toml `model`, per docs/investigations/049e4a7b-codex-cli-capability-probe/
+    // findings.md point 5) — there is just nothing threading `opts.model` to it yet. remedy: "connect".
+    // DELIBERATELY LEFT OPEN in card 0770d916's own landing (the other four fields' gaps for this same
+    // card ARE closed in that change): test/field-consumer-guard-warnings-surface.mjs (card 10787759's
+    // DoD acceptance evidence) drives the REAL PROFILE_FIELD_CONSUMERS registry end-to-end to prove a
+    // declared gap surfaces a WARN line on a PASSING gate run — it needs at least one real, currently-open
+    // gap to exist as its specimen (by its own header's design: "not a synthetic fixture"). Closing every
+    // gap in this registry in the same change would leave that test with zero real gaps to observe,
+    // breaking an unrelated card's regression coverage as a side effect. `model` is the LOWEST-severity of
+    // the five (an ignored pin, not a safety issue — see restrictedTools below for the one that mattered
+    // enough to fix regardless), so it is the one left as the specimen. Whoever closes this LAST gap must
+    // also update field-consumer-guard-warnings-surface.mjs's TRACKING_CARD_ID/specimen in the same change
+    // (its own header already anticipates this).
     gaps: [
       { harness: "codex", gap: { cardId: "0770d916", remedy: "connect", note: "createCodexPty never threads opts.model into codex's own model-override lever (-c model=<id> / config.toml). Falls back to codex's configured default model, not a safety issue — just an ignored pin." } },
     ],
@@ -264,25 +275,21 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
         pattern: `disallowedToolsForSpawn(opts.role, opts.restrictedTools,`,
         note: "createPty unions RESTRICTED_NATIVE_TOOLS into --disallowedTools when opts.restrictedTools is set.",
       },
-    ],
-    // The card's other seed defect (0 occurrences of `opts.restrictedTools` in the codex region) — but
-    // this one is a DIFFERENT SHAPE from the other four gaps in this file, verified against
-    // docs/investigations/049e4a7b-codex-cli-capability-probe/findings.md (the OBSERVED, real-pty probe,
-    // not assumed from docs): codex's ENTIRE permission model is exactly two coarse, session-wide levers
-    // — `sandbox_mode` (read-only/workspace-write/danger-full-access) and `approval_policy`
-    // (on-request/never, per the installed 0.153.4's own --help) — with NO per-native-tool
-    // allow/disallow concept anywhere codex exposes (checked: findings.md has zero mentions of a
-    // per-tool/granular/disallow mechanism). `restrictedTools`'s whole job on claude is to UNION
-    // RESTRICTED_NATIVE_TOOLS (Bash/Edit/Write/NotebookEdit/MultiEdit — Claude Code's own native tool
-    // names) into --disallowedTools; codex has no analogous "native tool" concept to disallow a subset
-    // of at all — `workspace-write` is all-or-nothing shell+file-write access. remedy:
-    // "no-mechanism-reject-or-warn", NOT "connect" — there is nothing to wire up. And unlike the other
-    // four (mere capability gaps), this one is FAIL-OPEN: a companion (role:"assistant") profile pinning
-    // harness:"codex" + restrictedTools:true today reads as blast-radius-restricted in the UI while
-    // running with codex's full default shell/file-write access — the exact "reads ON, does nothing"
-    // state the no-mechanism/exempt split above exists to keep out of `exempt`.
-    gaps: [
-      { harness: "codex", gap: { cardId: "0770d916", remedy: "no-mechanism-reject-or-warn", note: "codex has no per-native-tool disallow concept at all (only coarse sandbox_mode/approval_policy) — the correct fix is to reject harness:\"codex\"+restrictedTools:true at profile validation/resolve time (or a loud, durable warning), never a silent connection or a silent exempt." } },
+      {
+        // Card 0770d916 fix: codex's ENTIRE permission model is exactly two coarse, session-wide levers
+        // (sandbox_mode/approval_policy), verified against docs/investigations/049e4a7b-codex-cli-
+        // capability-probe/findings.md (the OBSERVED, real-pty probe) — NO per-native-tool allow/disallow
+        // concept anywhere codex exposes, so "connect" was never a coherent fix here. The remedy is
+        // "no-mechanism-reject-or-warn": reject the combination at profile-validation time instead of
+        // silently dropping it at spawn (which would be FAIL-OPEN — a toggle that reads ON, does
+        // nothing). This "proof" is therefore a REJECTION site, not a wiring site — codex sessions never
+        // reach createCodexPty with restrictedTools:true at all once this validator refuses it.
+        harnesses: ["codex"],
+        file: "packages/daemon/src/profiles/validate.ts",
+        region: "whole file",
+        pattern: `if (harness === "codex" && restrictedTools === true) {`,
+        note: "validateProfile rejects harness:\"codex\"+restrictedTools:true at save time (codexRestrictedToolsUnsupportedError) rather than silently dropping it at spawn — codex has no per-tool disallow mechanism to wire this to.",
+      },
     ],
   },
 
@@ -296,16 +303,15 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
         pattern: `role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion,`,
         note: "createPty passes opts.browserTesting into buildMcpServers, which mounts the per-session Playwright MCP when set.",
       },
-    ],
-    // NEW FINDING from this card's sweep (not in the original two-field seed evidence): createCodexPty's
-    // own buildMcpServers({ sessionId, port, role }) call omits browserTesting entirely, so
-    // resolveProfileCapabilities(o) sees it as undefined/false for every codex session regardless of
-    // what the profile actually has set — the Playwright MCP silently never mounts on codex. remedy:
-    // "connect" — buildMcpServers() already accepts `browserTesting` generically (the claude call site
-    // passes it); the codex call site just needs to pass opts.browserTesting through too. A missing
-    // CAPABILITY (the browser tool doesn't mount), not a safety hole.
-    gaps: [
-      { harness: "codex", gap: { cardId: "0770d916", remedy: "connect", note: "createCodexPty's buildMcpServers({ sessionId, port, role }) call omits browserTesting — buildMcpServers already accepts it generically, just thread opts.browserTesting through." } },
+      {
+        // Card 0770d916 fix: createCodexPty's own buildMcpServers({...}) call now threads opts.browserTesting
+        // through too — buildMcpServers() already accepted it generically, only this call site omitted it.
+        harnesses: ["codex"],
+        file: "packages/daemon/src/pty/host.ts",
+        region: "codex-spawn",
+        pattern: `browserTesting: opts.browserTesting, documentConversion: opts.documentConversion,`,
+        note: "createCodexPty passes opts.browserTesting into buildMcpServers, which mounts the per-session Playwright MCP when set.",
+      },
     ],
   },
 
@@ -319,11 +325,15 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
         pattern: `browserTesting: opts.browserTesting, documentConversion: opts.documentConversion,`,
         note: "createPty passes opts.documentConversion into buildMcpServers, which mounts the per-session markitdown MCP when set.",
       },
-    ],
-    // Same NEW FINDING as browserTesting above: createCodexPty's buildMcpServers call omits
-    // documentConversion too. remedy: "connect" — same fix shape, same non-safety (capability-only) gap.
-    gaps: [
-      { harness: "codex", gap: { cardId: "0770d916", remedy: "connect", note: "createCodexPty's buildMcpServers({ sessionId, port, role }) call omits documentConversion — buildMcpServers already accepts it generically, just thread opts.documentConversion through." } },
+      {
+        // Card 0770d916 fix: same shape as browserTesting above — createCodexPty's buildMcpServers call
+        // now threads opts.documentConversion through too.
+        harnesses: ["codex"],
+        file: "packages/daemon/src/pty/host.ts",
+        region: "codex-spawn",
+        pattern: `browserTesting: opts.browserTesting, documentConversion: opts.documentConversion,`,
+        note: "createCodexPty passes opts.documentConversion into buildMcpServers, which mounts the per-session markitdown MCP when set.",
+      },
     ],
   },
 
@@ -337,12 +347,16 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
         pattern: `capabilities: opts.capabilities, capabilityCatalog, resolveConnectionSecret: this.resolveConnectionSecret,`,
         note: "createPty passes opts.capabilities into buildMcpServers, which mounts every resolved registry-capability grant.",
       },
-    ],
-    // Same NEW FINDING: createCodexPty's buildMcpServers call omits capabilities too, so an owner-added
-    // capability grant (agent-tooling P4) silently never mounts on codex either. remedy: "connect" — same
-    // fix shape as browserTesting/documentConversion above.
-    gaps: [
-      { harness: "codex", gap: { cardId: "0770d916", remedy: "connect", note: "createCodexPty's buildMcpServers({ sessionId, port, role }) call omits capabilities — buildMcpServers already accepts it generically, just thread opts.capabilities (+ capabilityCatalog/resolveConnectionSecret) through." } },
+      {
+        // Card 0770d916 fix: createCodexPty's buildMcpServers call now threads opts.capabilities (+
+        // capabilityCatalog/resolveConnectionSecret) through too, same fix shape as browserTesting/
+        // documentConversion above.
+        harnesses: ["codex"],
+        file: "packages/daemon/src/pty/host.ts",
+        region: "codex-spawn",
+        pattern: `capabilities: opts.capabilities, capabilityCatalog, resolveConnectionSecret: this.resolveConnectionSecret,`,
+        note: "createCodexPty passes opts.capabilities into buildMcpServers, which mounts every resolved registry-capability grant.",
+      },
     ],
   },
 

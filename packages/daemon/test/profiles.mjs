@@ -252,6 +252,30 @@ check("(validator) no opts passed (legacy call shape) ⇒ falls back to checking
   return r.ok === true; // raw (merged) carries restrictedTools as an own key, so the fallback still passes
 })());
 
+// --- (guard) card 0770d916: harness:"codex" + restrictedTools:true is REJECTED — codex has no per-tool
+// disallow mechanism to honour the field with, so the fix is a validation-time rejection (remedy
+// "no-mechanism-reject-or-warn") rather than a silent drop at spawn. ---------------------------------
+check("(validator) harness:codex + restrictedTools:true ⇒ rejected", (() => {
+  const r = validateProfile({ name: "X", harness: "codex", restrictedTools: true });
+  return r.ok === false && /restrictedTools is not supported on harness "codex"/.test(r.error);
+})());
+check("(validator) harness:codex + restrictedTools:false ⇒ accepted, unaffected", (() => {
+  const r = validateProfile({ name: "X", harness: "codex", restrictedTools: false });
+  return r.ok && r.value.harness === "codex" && r.value.restrictedTools === false;
+})());
+check("(validator) harness:codex + restrictedTools omitted ⇒ accepted, normalizes to false", (() => {
+  const r = validateProfile({ name: "X", harness: "codex" });
+  return r.ok && r.value.harness === "codex" && r.value.restrictedTools === false;
+})());
+check("(validator) harness:claude + restrictedTools:true ⇒ still accepted (the gate is codex-only)", (() => {
+  const r = validateProfile({ name: "X", harness: "claude", restrictedTools: true });
+  return r.ok && r.value.restrictedTools === true;
+})());
+check("(validator) harness omitted (defaults to claude) + restrictedTools:true ⇒ still accepted", (() => {
+  const r = validateProfile({ name: "X", restrictedTools: true });
+  return r.ok && r.value.restrictedTools === true;
+})());
+
 // --- (guard) P4↔P5a: capabilityGrantBindingError rejects an oauth2 connection bound to a
 // requiresConnection capability grant (the "binds fine, spawns silently credential-less" bug this task
 // closes) — real capability_defs + connections rows through the real stores, not fakes. ---------------

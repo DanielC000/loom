@@ -6056,12 +6056,28 @@ export class PtyHost {
    * (measured TRANSIENT — see the parity matrix's "MCP wiring" section), built by translating the SAME
    * `buildMcpServers()` result claude's `--mcp-config` uses (`mcpServersToCodexArgs`, codex-host.ts) — one
    * routing table, so codex's mounted servers can never drift from claude's for the same role.
+   *
+   * Card `0770d916`: `opts.browserTesting`/`opts.documentConversion`/`opts.capabilities` are threaded into
+   * the SAME `buildMcpServers()` call the claude path already passes them to — that function already
+   * accepts all three generically, this call site was just the one omitting them, so resolving them here
+   * can never drift from claude's own capability-resolution logic. `opts.model` is DELIBERATELY NOT
+   * threaded here yet, despite being mechanically wirable (codex's own `-c model=<id>` inline override,
+   * per `docs/investigations/049e4a7b-codex-cli-capability-probe/findings.md` point 5) — see
+   * field-consumers.ts's `model` entry for why it stays a declared, tracked gap for now rather than a
+   * rushed fifth fix in the same change.
    */
   protected createCodexPty(opts: SpawnOpts): IPty {
     const bin = resolveExecutable(process.env.LOOM_CODEX_BIN || CODEX_BINARY_NAME);
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
-    const mcpServers = buildMcpServers({ sessionId: opts.sessionId, port: PORT, role: opts.role });
+    const capabilityCatalog = this.getCapabilityCatalog();
+    const mcpServers = buildMcpServers({
+      sessionId: opts.sessionId, port: PORT, role: opts.role,
+      browserTesting: opts.browserTesting, documentConversion: opts.documentConversion,
+      pythonInterpreterPath: opts.sessionEnv?.LOOM_PYTHON_INTERPRETER,
+      capabilities: opts.capabilities, capabilityCatalog, resolveConnectionSecret: this.resolveConnectionSecret,
+      projectId: opts.projectId,
+    });
     const mcpArgs = mcpServersToCodexArgs(mcpServers);
     // `-a never -s workspace-write --no-alt-screen` — the probe's own OBSERVED unattended-boot recipe
     // (findings.md, "Point 4"): unattended approval + edit-capable sandbox + preserved scrollback (the
