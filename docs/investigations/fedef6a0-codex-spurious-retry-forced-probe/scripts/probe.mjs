@@ -39,6 +39,19 @@
 // CODEX_REAL_SPAWN_BASENAMES — dropping it there would make it a REGULAR gate test that spawns real
 // codex on every run, which is wrong for a manual, manager-gated probe. Run manually, under the shared
 // real-codex lock, only when explicitly granted. Findings: ../findings.md (sibling of this script).
+//
+// Card 605f002d — the ORIGINAL fixed 6000ms post-lift observation window read host.isBusy() as still
+// true at the 6s mark on a host where the original turn was genuinely still completing (slowed by the
+// disclosed MCP-startup-incomplete condition below), leaving one pre-registered INERT criterion
+// unevaluable as written — resolved, wrongly, by substituting a different observable after the fact.
+// The window below is now EVENT-GATED, not duration-gated: it waits for the original turn's own
+// completion to be POSITIVELY ESTABLISHED (the composer's idle placeholder reappears AND a real
+// confirm-idle busy edge — armCodexBusyStaleTimer's CASE 2, "codex-marker-stale" — fires), then
+// evaluates the post-retry state. This makes "did the extra Enter start anything?" answerable
+// regardless of how long the original turn took on a given host, without trading one arbitrary
+// constant for a larger one. If the completion event never fires within the wait budget, that is
+// reported as an explicitly UNEVALUATED criterion — never silently treated as clean, and never
+// resolved by falling back to a duration read instead.
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
@@ -187,6 +200,11 @@ try {
 // classification is blind — but the real pty (and the real codex process behind it) is not. -------------
 suppress.on = true;
 const submitAt = Date.now();
+// Snapshot the subscriber buffer's length right at submission — the idle placeholder ("Ask Codex to do
+// anything") is already present in `buf` from the pre-submit trust-dialog wait above, so detecting its
+// REAPPEARANCE after the turn completes must be scoped to content written after this point, not to mere
+// presence anywhere in the whole buffer.
+const bufLenAtSubmit = buf.length;
 const PROMPT = "Reply with exactly the single word: pong. Do not run any commands.";
 const enq = host.enqueueStdin(SESSION_ID, PROMPT, "system", undefined, undefined, "agent");
 check("enqueueStdin delivered the one real turn immediately (session was idle post-boot)", enq.delivered === true);
@@ -224,17 +242,41 @@ check(
 check("the forced retry actually fired (submitConfirmAttempts reached 1)", (liveAtRetry?.submitConfirmAttempts ?? 0) >= 1);
 
 // --- Lift suppression. Observe what the extra bare Enter did to the REAL composer, with normal
-// classification restored. Bounded observation window, not a hard pass/fail — this is what the manager
-// asked to be OBSERVED and reported, not asserted against a guessed expectation. ------------------------
+// classification restored. EVENT-GATED, not duration-gated (card 605f002d — see this file's own header):
+// wait for the ORIGINAL turn's own completion to be positively established — the composer's idle
+// placeholder reappearing (the reply is rendered) AND a real confirm-idle busy edge firing
+// (armCodexBusyStaleTimer's CASE 2) — THEN evaluate the post-retry state. Not a hard pass/fail on its
+// own — this is what the manager asked to be OBSERVED and reported, not asserted against a guessed
+// expectation; the gate only decides WHEN it is sound to look, not what the answer is. -------------------
 suppress.on = false;
 const preLiftUnconfirmedCount = unconfirmedEvents.length;
 const preLiftBusyEdgeCount = busyEdges.length;
-await new Promise((r) => setTimeout(r, 6000));
-console.log(`[info] --- observation window after lifting suppression (6000ms) ---`);
-console.log(`[info] host.isBusy after observation window: ${host.isBusy(SESSION_ID)}`);
-console.log(`[info] onCodexSubmitUnconfirmed fired again during observation window: ${unconfirmedEvents.length > preLiftUnconfirmedCount}`);
-console.log(`[info] busy edges observed during observation window: ${JSON.stringify(busyEdges.slice(preLiftBusyEdgeCount))}`);
-console.log(`[info] captured reply tail (subscriber buf, escaped) after observation window:\n${buf.slice(-800).replace(/\x1b/g, "\\x1b")}`);
+const TURN_COMPLETION_WAIT_MS = 30000; // a generous ceiling for a genuinely slow host, not a duration
+  // this probe is expected to spend — the wait resolves the instant the event fires, same as every
+  // other waitUntil() call in this file; see this file's header for why a LARGER fixed window would not
+  // have actually fixed the original defect.
+let turnCompletionEstablished = false;
+try {
+  await waitUntil(
+    () => {
+      const replyRenderedAgain = buf.slice(bufLenAtSubmit).includes("Ask Codex to do anything");
+      const confirmIdleEdgeObserved = busyEdges.slice(preLiftBusyEdgeCount).some((e) => e.isBusy === false);
+      if (replyRenderedAgain && confirmIdleEdgeObserved) { turnCompletionEstablished = true; return true; }
+      return false;
+    },
+    {
+      label: `${SESSION_ID} the original turn's own completion is positively established (idle placeholder reappeared + confirm-idle busy edge observed)`,
+      timeoutMs: TURN_COMPLETION_WAIT_MS,
+    },
+  );
+} catch (err) {
+  console.log(`[info] turn completion was NOT positively established within the ${TURN_COMPLETION_WAIT_MS}ms budget: ${err.message}`);
+}
+console.log(`[info] --- post-retry evaluation, gated on turn completion (established: ${turnCompletionEstablished}) ---`);
+console.log(`[info] host.isBusy at evaluation: ${host.isBusy(SESSION_ID)}`);
+console.log(`[info] onCodexSubmitUnconfirmed fired again since lift: ${unconfirmedEvents.length > preLiftUnconfirmedCount}`);
+console.log(`[info] busy edges observed since lift: ${JSON.stringify(busyEdges.slice(preLiftBusyEdgeCount))}`);
+console.log(`[info] captured reply tail (subscriber buf, escaped) at evaluation:\n${buf.slice(-800).replace(/\x1b/g, "\\x1b")}`);
 
 // --- stop() — mirrors the sibling real-spawn test exactly, timed the same way. ---------------------------
 const stopStartedAt = Date.now();
@@ -283,6 +325,6 @@ if (hashAfter !== hashBefore) {
 
 releaseCodexLock();
 
-console.log(`\n[SUMMARY] retry forced: ${(liveAtRetry?.submitConfirmAttempts ?? 0) >= 1}; positive control (real marker seen while suppressed): ${realMarkerSeenWhileSuppressed}; second onCodexSubmitUnconfirmed after lift: ${unconfirmedEvents.length > preLiftUnconfirmedCount}; final busy state: ${host.isBusy(SESSION_ID)}`);
+console.log(`\n[SUMMARY] retry forced: ${(liveAtRetry?.submitConfirmAttempts ?? 0) >= 1}; positive control (real marker seen while suppressed): ${realMarkerSeenWhileSuppressed}; turn completion positively established: ${turnCompletionEstablished}; second onCodexSubmitUnconfirmed after lift: ${unconfirmedEvents.length > preLiftUnconfirmedCount}; final busy state: ${host.isBusy(SESSION_ID)}`);
 console.log(failures === 0 ? "\n✅ PROBE MECHANICS OK (see findings.md for the judgment call on harm/inert)." : `\n❌ ${failures} FAILURE(S) in probe mechanics itself.`);
 await finishAndExit(failures === 0 ? 0 : 1);
