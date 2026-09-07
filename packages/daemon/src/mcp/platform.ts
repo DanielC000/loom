@@ -2430,7 +2430,8 @@ export class PlatformMcpRouter {
           "rejected, nothing written), same convention as an unknown columnKey. Reuses the SAME backing path + " +
           "column validation as the in-project loom-tasks tasks_update — INCLUDING its trimmed-ack behavior: a " +
           "patch that doesn't touch body returns a small ack ({id,title,columnKey,priority,position,held," +
-          "heldBy,deferred,repoKey,updatedAt,changed}, no body) instead of the full card; pass body to intentionally edit it " +
+          "deferred,heldBy,repoKey,deferredUntilTaskId,deferredAt,deferredReason,deferredUntilEvent,updatedAt," +
+          "version,changed}, no body) instead of the full card; pass body to intentionally edit it " +
           "and get the full updated Task row back. A taskId not on the named project " +
           "resolves to not-found. projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors " +
           "project_get). Error if the project is unknown or an ambiguous prefix " +
@@ -2449,6 +2450,21 @@ export class PlatformMcpRouter {
           "returns ok even when some entries carry an error. Returns one result per id, in the given order: " +
           "`{taskId, task}` (the ack/full row updateProjectTask would return) on success, `{taskId, error}` " +
           "on failure. The single-`taskId` path is BYTE-IDENTICAL to today — same bare ack/row, not wrapped.\n" +
+          "TERMINAL-LANE PENDING-REQUEST WARNING (card c4355598, surfaced on this router by card cadb38dc): " +
+          "reuses the SAME backing path as the in-project tasks_update, so a `columnKey` move into the " +
+          "destination board's terminal (done) lane is ADDITIVELY flagged with `pendingRequestWarning: " +
+          "[{id, title}, ...]` when that task still has one or more `state:\"pending\"` owner Requests " +
+          "connected to it (the same connected-Requests set project_task_get's own `requests` summary " +
+          "surfaces — there is no cross-project task_requests_list/task_request_get equivalent on this " +
+          "router) — never a bare count, always the specific request id(s) + their actual question " +
+          "title(s). This NEVER blocks the move — same specimen as the in-project tasks_update: card " +
+          "3b2aa339 is a terminal close that was CORRECT despite a still-pending Request (it shipped one " +
+          "option and deliberately left another to the owner), so refusing the move would have blocked a " +
+          "correct action — and the field is OMITTED entirely for a non-terminal move or when nothing is " +
+          "pending. On the single-`taskId` path it lands directly on the returned ack/Task row; on the " +
+          "`taskIds` BATCH path it lands per-id, inside that id's own `{taskId, task}` result — each card " +
+          "in the batch is checked independently, so a mixed batch can carry the warning on some entries " +
+          "and not others.\n" +
           "OPTIMISTIC CONCURRENCY (card d0978321): on the single-`taskId` path, writing `title` and/or `body` " +
           "on an existing task REQUIRES `baseVersion` — the `version` you last read for it (project_task_get/ " +
           "a prior project_task_update response). A stale-or-omitted `baseVersion` on a title/body write is " +
