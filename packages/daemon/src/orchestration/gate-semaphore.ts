@@ -220,6 +220,28 @@ export interface GateDescriptor {
    * narrows the ADMISSION window, it was never meant to replace that fail-closed check.
    */
   repoPath?: string | null;
+  /**
+   * Card 99a1cf6f — set ONLY when this admission cycle is a RE-admission of a merge that already ran a
+   * genuine first attempt: `confirmWorkerMerge`'s single-file retry and its transient-kill retry both
+   * reuse the SAME `gateDescriptor` object (same `opId`, same everything) for their OWN, separate
+   * `runExclusive` call — so, before this field existed, a manager reading `gate_queue`/`gate_status`
+   * mid-retry saw a `phase:"queued"` entry structurally IDENTICAL to a first-time admission wait, with no
+   * way to tell "waiting to start" from "attempt 1 already ran (and likely took minutes), this is
+   * queued for a retry". `undefined`/absent (never a fabricated `1`) on a first admission — every ordinary
+   * merge, worker self-check, and deploy gate is unaffected. `2` on either retry's own descriptor (both
+   * retries are each a SECOND admission cycle for the same op; neither can itself retry again, so no
+   * gate descriptor ever needs a higher number). See `priorAttemptMs` alongside this for how long attempt
+   * 1 actually took, and `NEVER_CACHED_OUTCOMES`'s sibling concern in `orchestration/pending-ops.ts` for
+   * the RELATED-but-distinct problem this does NOT solve (a stale-base rejection's own cache replay —
+   * that is DoD-5, a different mechanism; this field is purely descriptive/read-only).
+   */
+  attempt?: number;
+  /** Card 99a1cf6f — present iff `attempt` is, alongside it: attempt 1's own measured wall-clock run time
+   *  (`gateAttempt1DurationMs`, `sessions/service.ts`, captured the instant attempt 1's own admission
+   *  settles) — carried onto the retry's descriptor so a manager reading `gate_status`/`gate_queue` while
+   *  `phase:"queued"` sees, e.g., `attempt:2, priorAttemptMs:1129000` instead of a bare, contextless
+   *  `queued`. Purely informational: never consulted by admission/queueing/squash logic itself. */
+  priorAttemptMs?: number;
 }
 
 /** One live gate run in the snapshot — a `GateDescriptor` enriched with its lane phase + timing. */
@@ -237,6 +259,11 @@ export interface GateSnapshotEntry {
   /** Echoed from {@link GateDescriptor.fallbackOfBatchOpId} — see its own doc. Null on every run that
    *  isn't one of a batch's own per-branch fallback confirms (including the batch's OWN gate run). */
   fallbackOfBatchOpId: string | null;
+  /** Echoed from {@link GateDescriptor.attempt} / {@link GateDescriptor.priorAttemptMs} — see their shared
+   *  doc. Null/null on a first admission (every ordinary merge, worker self-check, and deploy gate);
+   *  `2`/`<ms>` on either of `confirmWorkerMerge`'s own retries' re-admission. */
+  attempt: number | null;
+  priorAttemptMs: number | null;
   /** "running" once it holds a lane; "queued" while it's still waiting for one. */
   phase: "running" | "queued";
   /** Epoch-ms anchor for the UI's live elapsed clock: startedAt (running) or enqueuedAt (queued). */
@@ -1227,6 +1254,8 @@ export class GateSemaphore {
       batchBranches: e.descriptor.batchBranches ?? null,
       batchLandedCount: e.descriptor.batchLandedCount ?? null,
       fallbackOfBatchOpId: e.descriptor.fallbackOfBatchOpId ?? null,
+      attempt: e.descriptor.attempt ?? null,
+      priorAttemptMs: e.descriptor.priorAttemptMs ?? null,
       phase,
       since: phase === "running" ? e.startedAt! : e.enqueuedAt,
       queuePosition,

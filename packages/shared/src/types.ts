@@ -658,8 +658,13 @@ export interface PendingMerge {
    *  ("failed" there is an honest fact — an exception WAS thrown — independent of this softer `outcome`
    *  string), so `mergeDisplay` needs no separate case for "unknown" today. This is what lets the Board
    *  distinguish a rejected merge (amber) from a merged one (phosphor) instead of both reading as
-   *  green "merged" via `state === "done"` — and, since Half Four, from a cancelled one (neither). */
-  outcome?: "merged" | "cancelled" | "rejected" | "unknown";
+   *  green "merged" via `state === "done"` — and, since Half Four, from a cancelled one (neither).
+   *  "stale-base" (card 99a1cf6f) is a FIFTH, distinct classification: a benign rejection where canonical
+   *  main advanced during this merge's own gate/squash (`ConfirmMergeResult.gateBaseInvalidated`) — a
+   *  real, resolved verdict (unlike "cancelled"), but one that says nothing about the branch itself
+   *  (unlike an ordinary "rejected"). The Board's `mergeDisplay` renders it identically to "rejected"
+   *  (nothing landed either way) rather than adding a sixth visual state. */
+  outcome?: "merged" | "cancelled" | "rejected" | "unknown" | "stale-base";
   /** Disambiguates `state:"running"` into WAITING vs EXECUTING (card 53ad9ed3, closing the divergence
    *  008f33f1 left deliberately open on this REST/WS path — worker_list/worker_status's MCP `pendingMerge`
    *  already carried this). `state:"running"` alone is PendingOpRegistry's own coarse in-flight bit, set

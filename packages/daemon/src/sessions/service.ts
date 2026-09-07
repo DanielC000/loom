@@ -178,6 +178,14 @@ export interface GateQueueEntry {
    *  merge — the documented `taskId:null`/`branch:null`/`workerLabel:"Orchestrator"` predicate for
    *  finding a live BATCH op only ever matches the batch's OWN gate row, never these. */
   fallbackOfBatchOpId?: string | null;
+  /** Card 99a1cf6f — echoed from {@link GateDescriptor.attempt}/{@link GateDescriptor.priorAttemptMs}: see
+   *  their shared doc. Unconditional (never gated on caller project, same tier as `idleMs`/`extended`/
+   *  `repoContended`) — `null`/`null` on a first admission, `2`/`<ms>` while `confirmWorkerMerge`'s own
+   *  single-file or transient-kill retry is queued for (or running) its OWN, separate re-admission. This
+   *  is what lets a manager tell a genuine first-time queue wait apart from a retry re-queue, which was
+   *  otherwise structurally identical on this same field set. */
+  attempt: number | null;
+  priorAttemptMs: number | null;
   /** Card 80d54122: present on EVERY entry from a DIFFERENT project (never present, let alone `false`, on
    *  the caller's own — checking `"redacted" in entry` is how a caller tells the two shapes apart without
    *  inferring it from which OTHER keys happen to be missing). A bare boolean by design: it says "this
@@ -685,6 +693,22 @@ type ConfirmMergeResult = {
    *  for why those two phases deliberately differ). */
   cancelled?: boolean;
   cancelKind?: GateCancelKind;
+  /** Card 99a1cf6f: `true` only on the stale-base rejection return (`merge.gateBaseInvalidated`, below) —
+   *  a BENIGN race where canonical MAIN advanced during this merge's own gate/squash (see
+   *  `AdmissionReunionFailedError`'s own doc for how this differs from a REAL git failure encountered
+   *  while trying to close that staleness gap). `merged` is always `false` alongside this, exactly like
+   *  `cancelled` above, but for a different reason: this IS a real, resolved verdict (a gate genuinely ran
+   *  and would have squashed), just one whose validity depends on canonical main's state, not the branch's.
+   *  Existed for years as `merge.gateBaseInvalidated` (a git-layer-only fact, `git/worktrees.ts`) with no
+   *  echo on this return type at all — `confirmWorkerMergeTracked`'s `classifyOutcome` reads THIS field
+   *  (not `merge.gateBaseInvalidated`, which it doesn't have access to) to map the settle to the
+   *  `"stale-base"` string `PendingOpRegistry`'s `NEVER_CACHED_OUTCOMES` treats specially — see that
+   *  constant's own doc (`orchestration/pending-ops.ts`) for why a stale-base rejection must never be
+   *  served back to a later plain re-confirm: unlike an ordinary rejection (a real test failure, likely to
+   *  reproduce identically on a re-run against the SAME branch head), this rejection says nothing about
+   *  the branch at all, and the rejection's own advertised remedy ("just re-run worker_merge_confirm")
+   *  only works if a bare re-call genuinely re-gates. `undefined` on every other return path. */
+  gateBaseInvalidated?: boolean;
   /** Card 344ce950 (bounded multi-file since card 67030bb9): the bare name(s) of the test file(s) this
    *  merge's gate retried together in isolation before reaching this verdict (see gate-runner.ts's
    *  `identifyRetriableTestFiles`) — `undefined` when no such retry fired (the overwhelming majority of
@@ -4746,6 +4770,11 @@ export class SessionService {
      *  `state` is `queued`/`running` — omitted for every settled/tombstone state, where there is no
      *  current step left to have extended. */
     extended?: boolean;
+    /** Card 99a1cf6f — see {@link GateQueueEntry.attempt}/{@link GateQueueEntry.priorAttemptMs}'s shared
+     *  doc (same fields, same meaning). Present (possibly `null`/`null`) ONLY while `state` is
+     *  `queued`/`running` — a LIVE-entry-only concept, omitted for every settled/tombstone/no-row state,
+     *  same population scope as `extended` immediately above. */
+    attempt?: number | null; priorAttemptMs?: number | null;
     /** Card 4c5bf820 — see the method doc's "SETTLED VERDICT" section. Present for a settled row (either
      *  KIND) with a recorded verdict; every field below is independently optional and omitted (never a
      *  fabricated `null`/`false`) when there's nothing to report. SCOPE VARIES PER FIELD, not uniformly
@@ -4997,6 +5026,9 @@ export class SessionService {
         state: entry.phase, gateType: entry.gateType, elapsedMs: Date.now() - entry.since,
         idleMs: entry.lastOutputAt != null ? Date.now() - entry.lastOutputAt : null,
         extended: entry.extended,
+        // Card 99a1cf6f: see GateQueueEntry.attempt's own doc — same fields, same reason, now also
+        // reachable by a caller polling ONE op via gate_status(opId) rather than scanning gate_queue.
+        attempt: entry.attempt ?? null, priorAttemptMs: entry.priorAttemptMs ?? null,
         ...(entry.phase === "running" ? { liveness } : {}),
       };
     }
@@ -5524,6 +5556,12 @@ export class SessionService {
         extended: e.extended,
         queuePosition: e.queuePosition,
         repoContended: e.repoContended,
+        // Card 99a1cf6f: unconditional, same tier as idleMs/extended/repoContended above — a retry
+        // attempt number and its prior attempt's duration carry no more task/branch identity than the
+        // elapsed-time fields already visible cross-project, so there's no reason to gate them behind
+        // isOwnProject the way taskId/branch/fallbackOfBatchOpId are below.
+        attempt: e.attempt,
+        priorAttemptMs: e.priorAttemptMs,
         // Computed unconditionally, identically for own- and foreign-project entries, BEFORE the
         // callerProjectId branch below — same visibility as idleMs/extended, never scoped by caller
         // (card 33aa0291: a foreign read must fail this exact same way an own read would at the same
@@ -16286,8 +16324,11 @@ export class SessionService {
           retriedFile = candidate.names.join(",");
           let singleFileRetryStartedAt = 0;
           try {
+            // Card 99a1cf6f: `attempt`/`priorAttemptMs` on a COPY of `gateDescriptor` (never mutating the
+            // shared object other call sites still read) — see GateDescriptor.attempt's own doc for why
+            // this re-admission needs to be distinguishable from a first-time queue wait.
             const retryResult = await this.gateSemaphore.runExclusive(
-              gateCap, gateDescriptor,
+              gateCap, { ...gateDescriptor, attempt: 2, priorAttemptMs: gateAttempt1DurationMs },
               async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit) => {
                 singleFileRetryStartedAt = startedAt;
                 concurrentAtStart = this.gateSemaphore.snapshot().active;
@@ -16493,8 +16534,11 @@ export class SessionService {
         // No `anyExtended` mirroring needed here (unlike the first attempt above): `allowExtend:false`
         // means gate-runner.ts's own `canExtend` gate never lets `onExtend` fire on a retry at all.
         try {
+          // Card 99a1cf6f: same `attempt`/`priorAttemptMs` copy as the single-file retry above — this is
+          // ALSO a second, separate admission cycle reusing `gateDescriptor`'s identity, and was equally
+          // indistinguishable from a first-time queue wait before this field existed.
           gateResult = await this.gateSemaphore.runExclusive(
-            gateCap, gateDescriptor,
+            gateCap, { ...gateDescriptor, attempt: 2, priorAttemptMs: gateAttempt1DurationMs },
             async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit) => {
               retryStartedAt = startedAt;
               concurrentAtStart = this.gateSemaphore.snapshot().active;
@@ -16931,7 +16975,7 @@ export class SessionService {
         const detailText = `${why}; squash phase aborted before writing — canonical repo AND worktree untouched — just re-run worker_merge_confirm.`;
         const { suppressed, sha } = await rejectNotify("gate_base_invalidated", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", { reason: "gate_base_invalidated", sha, ...(suppressed ? { suppressed: true } : {}) });
-        return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity };
+        return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended, gateProximity, gateBaseInvalidated: true };
       }
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
       // Card 4b7ff996 CR follow-up: derive "is this the canonical-checkout-is-dirty failure class" from
@@ -18684,7 +18728,11 @@ export class SessionService {
         // breaking the pre-existing "re-poll returns the EXACT SAME opId" invariant. `identityOptional`
         // tells attach() to trust the cached verdict regardless in exactly (and only) this case.
         identityOptional: alreadyFinished,
-        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.cancelled ? "cancelled" : outcome.value.merged ? "merged" : "rejected"),
+        // Card 99a1cf6f: `gateBaseInvalidated` checked BEFORE the plain `merged`-else-`"rejected"` fallback
+        // — see `ConfirmMergeResult.gateBaseInvalidated`'s own doc and `NEVER_CACHED_OUTCOMES`
+        // (orchestration/pending-ops.ts) for why this outcome must classify distinctly from an ordinary
+        // `"rejected"` (a real test failure, safe to replay) rather than falling into it.
+        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.cancelled ? "cancelled" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.merged ? "merged" : "rejected"),
         // BYPASS BOTH CACHES ON AN EXPLICIT FORCE (CR BLOCKER 1, card 33172f01; extended by card 1555e361 to
         // also cover the new until-superseded dedupe above — same reasoning, same flag): the dedupe (see
         // PendingOpRegistry.attach's `opts.bypassRetained` doc) is keyed ONLY on `workerSessionId`, not on
