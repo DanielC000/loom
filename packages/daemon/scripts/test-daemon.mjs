@@ -981,6 +981,23 @@ const TEST_TIMEOUT_OVERRIDES = {
   "merge-canonical-dirty-overlap-backstop": 300_000, // card 4b7ff996, Code Review follow-up: 1x Db/SessionService boot, 4x createWorktree + 2 real submodule clones across 6 scenarios (A/E/S/U/D/G); measured 16.8s standalone (quiet host) — well under the blanket ceiling on its own. Carries this override for consistency with merge-stranded-backstop's DEMONSTRATED near-cap risk (comparable real-git-subprocess volume — both are in the ISOLATED_REAL_SPAWN_BASENAMES classification below), not a risk measured for this file itself: a proactive buffer, not a mechanism. That classification is ONLY consumed by the sequential isolation phase (ISOLATED_REAL_SPAWN_PHASE_ENABLED below), which is opt-in and default OFF, so membership in it confers no runtime scheduling protection today — this override applies unconditionally either way.
   "merge-canonical-untracked-overlap-backstop": 300_000, // card 98d6264d, sibling of merge-canonical-dirty-overlap-backstop above: 1x Db/SessionService boot, 4x createWorktree across 5 scenarios (A/B/U/I/C); measured 12.6s standalone (quiet host) — well under the blanket ceiling on its own. Carries this override for the same reason as its sibling above: consistency with the real-git-subprocess-heavy classification (ISOLATED_REAL_SPAWN_BASENAMES below), not a risk measured for this file itself — and that classification triggers no runtime scheduling on its own, since the sequential isolation phase it feeds (ISOLATED_REAL_SPAWN_PHASE_ENABLED below) is opt-in and default OFF; this override applies unconditionally regardless of that flag.
   "merge-gate-inert-diff": 300_000, // cards e5a75b65/55ea3b32: already in ISOLATED_REAL_SPAWN_BASENAMES below ("11x Db/SessionService boot, 15x real createWorktree") but was the ONLY member of that class with no override, running on the blanket 120s ceiling. Per-file history (~/.loom/gate-timing/daemon-per-file-timing.ndjson), n=15: 14 passes at 71,229-85,432ms (median 75,189ms, max 85,432ms) and 1 fail SIGTERM-killed AT the 120,000ms ceiling (censored — true cost unknown, bounded only from below, not a duration). Margin at the observed max pass vs the 120s ceiling: 1.40x. A same-window sibling gate ran this file concurrently and PASSED at 82,476ms, refuting concurrent load as the discriminating cause (present in both the failing and a passing run) — the honest attribution is a thin margin plus ordinary variance, not a race. 300k gives 3.51x margin at the observed max, matching the proactive-buffer posture already granted to merge-canonical-dirty-overlap-backstop/merge-canonical-untracked-overlap-backstop above (measured 16.8s/12.6s standalone).
+  // Card 3791b14e: DETERMINISTIC mechanism, not a probabilistic one — codex-doctrine-real-spawn.mjs:225's
+  // own internal "turn completes" waitUntil is 150_000ms (widened from 90s by card 887e10b8's own
+  // development: "150s, not the sibling file's 90s ... this host's real ~/.codex carries several bundled
+  // plugin skills that inflate the system prompt"), but this file was never added here, so it ran under
+  // the blanket TEST_TIMEOUT_MS=120_000 — an outer per-file kill ceiling SMALLER than its own inner wait.
+  // An outer ceiling below an inner wait can NEVER let that inner wait mature: the harness's own
+  // `child.kill()` fires at 120s regardless of whether the real codex turn was about to land at, say,
+  // 130s. This needs no trial count to justify (found reading the two constants against each other, not
+  // by observing a flake) and is independent of _codex-real-spawn-lock.mjs's own budget/scheduling fix
+  // alongside it in this same card — a perfect lock fix cannot rescue a wait that the outer harness kills
+  // before it can complete. 300_000 clears the 150_000 inner wait with 2x margin (consistent with this
+  // file's own siblings above), leaving headroom for the earlier ready-placeholder(20s)/busy-settle(60s)/
+  // kickoff-retry(30s)/engine-id(30s) steps plus a hard-stop(8s) to ALSO run long under real host load
+  // without the outer ceiling ever again undercutting a legitimate inner wait. RULE FOR THIS FILE: this
+  // override must stay numerically ABOVE codex-doctrine-real-spawn.mjs's own largest internal waitUntil
+  // timeout, whatever that becomes — if that file's own wait ever grows again, this must grow with it.
+  "codex-doctrine-real-spawn": 300_000,
 };
 
 // Card 0f0816e2: a JUDGMENT-CURATED set of real-spawn/daemon-boot-heavy basenames that run FIRST and
@@ -1093,6 +1110,19 @@ const ISOLATED_PHASE_POOL_SIZE = 1;
 // silently). With the flag off, isolatedPhaseFileCount/isolatedPhasePoolSize on the NDJSON rows both read
 // 0 — the honest signal that a run was flat, not a fabricated "1" for a phase that never actually ran.
 const ISOLATED_REAL_SPAWN_PHASE_ENABLED = process.env.LOOM_GATE_ISOLATED_REAL_SPAWN_PHASE === "1";
+
+// Card 3791b14e: the real-codex-spawn family (CODEX_REAL_SPAWN_BASENAMES, imported above from
+// `_codex-real-spawn-lock.mjs` — the single source of truth for membership) is scheduled sequentially,
+// ALWAYS-ON, pool size 1 — deliberately SEPARATE from ISOLATED_REAL_SPAWN_PHASE_ENABLED just above: it is
+// never gated by that flag, never reads it, and runs this way regardless of its value. That flag is a
+// different, larger, owner-approved opt-in cost tradeoff for a different file set (see its own doc above
+// for the measured +24-30% per-gate cost); this grouping is unconditional because the alternative —
+// sizing `_codex-real-spawn-lock.mjs`'s own wait budget to cover N-1 concurrently-running real `codex`
+// processes — is what went stale the moment a 3rd/4th contender was added (that card's own root cause).
+// Making the scheduler itself serialize this family turns that lock into a pure backstop instead of the
+// primary means of exclusion. Fixed at 1 for the same reason ISOLATED_PHASE_POOL_SIZE is fixed above:
+// this changes scheduling SHAPE for a specific, named, small file set, not the general concurrency budget.
+const CODEX_REAL_SPAWN_PHASE_POOL_SIZE = 1;
 
 const tmpRoots = [];
 
@@ -1632,15 +1662,45 @@ if (isMain) {
   if (SELECTED !== HERMETIC) {
     console.log(`ℹ selection active: running ${SELECTED.length}/${HERMETIC.length} discovered hermetic test files (--only/--exclude applied)`);
   }
-  // Card 0f0816e2: split SELECTED, preserving each subset's own relative order, into the isolated
-  // sequential phase (ISOLATED_REAL_SPAWN_SET) and everything else (the ordinary concurrent pool below,
-  // unchanged). A `--only=` selection that excludes every isolated basename legitimately yields an empty
-  // `isolatedNames` — phase 1 below is skipped entirely in that case, not an error. Gated on
-  // ISOLATED_REAL_SPAWN_PHASE_ENABLED (default OFF — see that constant's own doc for the measured cost):
-  // disabled, `isolatedNames` is always empty and `concurrentNames === SELECTED`, so dispatch below is
-  // byte-identical to the original flat-pool-only behavior.
-  const isolatedNames = ISOLATED_REAL_SPAWN_PHASE_ENABLED ? SELECTED.filter((name) => ISOLATED_REAL_SPAWN_SET.has(name)) : [];
-  const concurrentNames = ISOLATED_REAL_SPAWN_PHASE_ENABLED ? SELECTED.filter((name) => !ISOLATED_REAL_SPAWN_SET.has(name)) : SELECTED;
+  // Card 3791b14e (gate `39331d61` — my own merge-gate rejection, root-caused and fixed here): a
+  // TOP-LEVEL static import of CODEX_REAL_SPAWN_BASENAMES/SET from `../test/_codex-real-spawn-lock.mjs`
+  // broke `loadExcludedTestDirNames`/`loadNotHermeticNames` (git/worktrees.ts) — both dynamically
+  // `import()` this WHOLE FILE from an arbitrary/synthetic fixture repo just to read
+  // EXCLUDED_DIR_NAMES/NOT_HERMETIC, and a static import is resolved before the module can even start
+  // evaluating, so a fixture repo lacking that file threw ERR_MODULE_NOT_FOUND — caught by their own
+  // try/catch, silently returned `null`, and FAILED THE DIFF CLOSED to the full gate instead of the
+  // reduced one (confirmed via a two-arm control: same fixture repo, only that one file present vs.
+  // absent). Fixed the SAME way `compactGateTimingLogIfNeeded`'s import a few hundred lines down already
+  // is (see `_emit-compare-fixtures.mjs`'s own comment on that precedent): a LAZY, call-site
+  // `await import()`, placed HERE — inside `isMain`, at the one place it's actually used — never at
+  // module top. This is safe by construction, not merely lucky for today's fixtures: `isMain` can only be
+  // true when `process.argv[1]` resolves to THIS file's own path, i.e. when this script is the real
+  // process entry point — an external dynamic-import consumer like those two loaders is, by definition,
+  // some OTHER running process (the daemon) importing this file as a module, so `isMain` is false for
+  // them unconditionally and this line can never even be reached in that scenario, regardless of whether
+  // the importing repo happens to carry `test/_codex-real-spawn-lock.mjs`. (Rejected: moving the array
+  // into a new shared leaf module — this needs no new file, and reuses an already-proven pattern in this
+  // exact file for this exact hazard class rather than adding a second one.)
+  const { CODEX_REAL_SPAWN_BASENAMES, CODEX_REAL_SPAWN_SET } = await import("../test/_codex-real-spawn-lock.mjs");
+  // Card 3791b14e: split off the real-codex-spawn family FIRST, unconditionally — before the
+  // ISOLATED_REAL_SPAWN_PHASE_ENABLED-gated split below even sees the selection. `nonCodexSelected`
+  // (not `SELECTED`) feeds that split so a codex real-spawn file can never ALSO land in `concurrentNames`
+  // and run a second time. Preserves relative order (`.filter`), same discipline as the split below.
+  const codexRealSpawnNames = SELECTED.filter((name) => CODEX_REAL_SPAWN_SET.has(name));
+  const nonCodexSelected = SELECTED.filter((name) => !CODEX_REAL_SPAWN_SET.has(name));
+  if (codexRealSpawnNames.length) {
+    console.log(`ℹ codex real-spawn phase: running ${codexRealSpawnNames.length} real-codex-spawn file(s) first and sequentially (pool size ${CODEX_REAL_SPAWN_PHASE_POOL_SIZE}, always-on, independent of ISOLATED_REAL_SPAWN_PHASE_ENABLED below): ${codexRealSpawnNames.join(", ")}`);
+  }
+  // Card 0f0816e2: split the REMAINDER (nonCodexSelected), preserving each subset's own relative order,
+  // into the isolated sequential phase (ISOLATED_REAL_SPAWN_SET) and everything else (the ordinary
+  // concurrent pool below, unchanged). A `--only=` selection that excludes every isolated basename
+  // legitimately yields an empty `isolatedNames` — phase 1 below is skipped entirely in that case, not an
+  // error. Gated on ISOLATED_REAL_SPAWN_PHASE_ENABLED (default OFF — see that constant's own doc for the
+  // measured cost): disabled, `isolatedNames` is always empty and `concurrentNames === nonCodexSelected`,
+  // so dispatch below is byte-identical to the original flat-pool-only behavior MINUS whatever the codex
+  // real-spawn split above already carved out.
+  const isolatedNames = ISOLATED_REAL_SPAWN_PHASE_ENABLED ? nonCodexSelected.filter((name) => ISOLATED_REAL_SPAWN_SET.has(name)) : [];
+  const concurrentNames = ISOLATED_REAL_SPAWN_PHASE_ENABLED ? nonCodexSelected.filter((name) => !ISOLATED_REAL_SPAWN_SET.has(name)) : nonCodexSelected;
   if (isolatedNames.length) {
     console.log(`ℹ isolated phase: running ${isolatedNames.length} real-spawn/daemon-boot-heavy file(s) first and sequentially (pool size ${ISOLATED_PHASE_POOL_SIZE}): ${isolatedNames.join(", ")}`);
   }
@@ -1673,10 +1733,11 @@ if (isMain) {
   // first completion is captured too, not just gaps between completions) and, on a genuine harness crash,
   // prints the two lines itself (labelled partial) before rethrowing — see that function's own comment.
   const RSS_SAMPLE_INTERVAL_MS = 5000;
-  // Card 0f0816e2: two local arrays, one per phase — `results` (below) is assigned once both phases have
-  // completed, by concatenating these in isolated-then-concurrent order. Downstream code only ever
-  // filters/counts `results` or checks name membership via a Set, so this concatenation order has no
-  // effect on any existing assertion.
+  // Card 0f0816e2 (extended by 3791b14e): one local array per phase — `results` (below) is assigned once
+  // ALL THREE phases have completed, by concatenating these in codex-then-isolated-then-concurrent order.
+  // Downstream code only ever filters/counts `results` or checks name membership via a Set, so this
+  // concatenation order has no effect on any existing assertion.
+  const codexRealSpawnResults = new Array(codexRealSpawnNames.length);
   const isolatedResults = new Array(isolatedNames.length);
   const concurrentResults = new Array(concurrentNames.length);
   let results = [];
@@ -1726,6 +1787,12 @@ if (isMain) {
       // isolated-phase run (isolatedPhaseFileCount > 0) from a flat pre-card run (key absent).
       isolatedPhaseFileCount: isolatedNames.length,
       isolatedPhasePoolSize: ISOLATED_REAL_SPAWN_PHASE_ENABLED ? ISOLATED_PHASE_POOL_SIZE : 0,
+      // Card 3791b14e: same additive-field convention as the isolatedPhase* pair above, for the SEPARATE,
+      // always-on codex real-spawn phase — UNCONDITIONAL (no flag), so codexRealSpawnPhasePoolSize is
+      // CODEX_REAL_SPAWN_PHASE_POOL_SIZE whenever any such file was selected, never gated to 0 the way
+      // isolatedPhasePoolSize is when its own flag is off.
+      codexRealSpawnPhaseFileCount: codexRealSpawnNames.length,
+      codexRealSpawnPhasePoolSize: codexRealSpawnNames.length ? CODEX_REAL_SPAWN_PHASE_POOL_SIZE : 0,
       testSourceBytes: gateTimingTestSourceBytes,
       selected: SELECTED.slice(),
       hostBefore: gateTimingHostBefore,
@@ -1785,8 +1852,21 @@ if (isMain) {
   const { rssTracker, completionTimestamps } = await runInstrumentedSuite(async (completionTimestamps) => {
     const gateTimingCtx = { runIndex: gateTimingRunIndex, runUid: gateTimingRunUid };
 
+    // Card 3791b14e: PHASE 0 — the real-codex-spawn family (CODEX_REAL_SPAWN_SET) runs FIRST and fully to
+    // completion, at CODEX_REAL_SPAWN_PHASE_POOL_SIZE (1), UNCONDITIONALLY (no flag gates this, unlike
+    // Phase 1 below) — so no two of these files ever compete with each other, or with anything else, for
+    // the box. Reuses the SAME runLane/runOne machinery as every other phase; only the pool size and the
+    // input set differ. Skipped entirely (no lanes started) when a `--only=` selection excludes every
+    // codex real-spawn basename.
+    if (codexRealSpawnNames.length) {
+      const codexRealSpawnCursor = makeCursor(codexRealSpawnNames.length);
+      await Promise.all(
+        Array.from({ length: Math.min(CODEX_REAL_SPAWN_PHASE_POOL_SIZE, codexRealSpawnNames.length) }, (_, lane) => runLane(lane, codexRealSpawnNames, codexRealSpawnCursor, codexRealSpawnResults, completionTimestamps, gateTimingCtx)),
+      );
+    }
+
     // Card 0f0816e2 DoD-1: PHASE 1 — the isolated real-spawn/daemon-boot-heavy set (ISOLATED_REAL_SPAWN_SET
-    // above) runs FIRST and fully to completion, at ISOLATED_PHASE_POOL_SIZE (1) — so none of these files
+    // above) runs next and fully to completion, at ISOLATED_PHASE_POOL_SIZE (1) — so none of these files
     // ever compete with a concurrent sibling for the box. Reuses the SAME runLane/runOne machinery as the
     // ordinary pool below; only the pool size and the input set differ. Skipped entirely (no lanes started)
     // when a `--only=` selection excludes every isolated basename.
@@ -1803,7 +1883,7 @@ if (isMain) {
     await Promise.all(
       Array.from({ length: Math.min(EFFECTIVE_POOL_SIZE, concurrentNames.length) }, (_, lane) => runLane(lane, concurrentNames, concurrentCursor, concurrentResults, completionTimestamps, gateTimingCtx)),
     );
-    results = isolatedResults.concat(concurrentResults);
+    results = codexRealSpawnResults.concat(isolatedResults).concat(concurrentResults);
 
     // Best-effort cleanup of the per-test temp homes (WAL handles may briefly hold a few on Windows).
     // Reuses _tmp-fixture.mjs's proven-correct bounded retry WITH A REAL DELAY between attempts — the
@@ -1880,6 +1960,10 @@ if (isMain) {
       // for the on-disk-key-never-renamed convention this follows.
       isolatedPhaseFileCount: isolatedNames.length,
       isolatedPhasePoolSize: ISOLATED_REAL_SPAWN_PHASE_ENABLED ? ISOLATED_PHASE_POOL_SIZE : 0,
+      // Card 3791b14e: same additive fields as the write-ahead row's own pair above — see that row's own
+      // comment for why this one is never gated to 0 by a flag.
+      codexRealSpawnPhaseFileCount: codexRealSpawnNames.length,
+      codexRealSpawnPhasePoolSize: codexRealSpawnNames.length ? CODEX_REAL_SPAWN_PHASE_POOL_SIZE : 0,
       testSourceBytes: gateTimingTestSourceBytes,
       executedCount,
       failedCount: failed.length,

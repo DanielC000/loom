@@ -3719,6 +3719,18 @@ export const STATIC_GUARD_REPO_PATHS = [
   // codex-specific behavior it silently breaks has no claude-side test to catch it), so it could otherwise
   // take the reduced path and never trip a single check.
   "packages/daemon/test/pty-agnostic-methods-findanylive-guard.mjs",
+  // Card 3791b14e (lead-requested follow-up): a corpus-wide readdirSync scan (this array's own dominant
+  // shape, not the one diff-scoped exception above) asserting every test file that imports
+  // `acquireCodexRealSpawnLock` from `_codex-real-spawn-lock.mjs` is a registered member of that module's
+  // `CODEX_REAL_SPAWN_BASENAMES` — the list `scripts/test-daemon.mjs` schedules sequentially. A caller that
+  // forgets to register silently runs in the ORDINARY CONCURRENT POOL alongside real `codex` processes
+  // instead — passing standalone, failing only once it collides with a sibling under real gate contention,
+  // the exact class card 3791b14e's own fix exists to remove. Belongs here (readdirSync, not diff-scoped)
+  // specifically because the motivating incident was an entirely UNCOMMITTED new file — a diff-scoped
+  // check would have been blind to it until a commit landed; this guard sees it the instant it exists on
+  // disk. Verified directly against the real motivating shape (a real, uncommitted file physically added
+  // to the test/ directory, not just a synthetic fixture), not merely reasoned about.
+  "packages/daemon/test/codex-real-spawn-lock-membership-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run
