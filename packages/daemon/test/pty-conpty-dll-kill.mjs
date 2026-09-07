@@ -152,6 +152,32 @@ const stoppedIds = new Set();
 // real escalation-triggered kill() path every time. This trades away the 2-process-tree shape for the
 // graceful arms (a single powershell.exe) — the tree-teardown claim stays fully covered by the hard-stop
 // arms above; the graceful arms' job is specifically to prove the fork behavior under real escalation.
+// Teardown-wait budgets (card 16355b5b — a live RED: `[baseline-graceful] parent pid gone after kill`
+// ARRIVED LATE at 30161ms against the old flat 15000ms budget shared by every arm).
+//
+// HARD-stop's native kill() is effectively synchronous — measured parent-gone latency 243-255ms across 4
+// quiet-host runs (2 arms × 4 runs) — so its pre-existing 15s budget already carries ~60x margin and is
+// left untouched.
+//
+// GRACEFUL is different IN KIND, not just slower: host.stop() only writes Ctrl-C and calls
+// escalateGracefulStop; the real live.pty.kill() under test doesn't fire until stage 3's own
+// `GRACEFUL_STOP_KILL_MS` timer (6000ms default — host.ts) elapses, so a real, unavoidable ~6s floor is
+// baked into every graceful trial BEFORE the kill even runs. Measured on a quiet host (4 runs, 8 samples
+// across both graceful arms): parent-gone consistently arrived at 6096-6285ms — tightly clustered around
+// that 6000ms floor plus the native kill call itself and this file's own 200ms poll granularity, confirming
+// the mechanism rather than guessing at it. Card 16355b5b's own gate evidence recorded exactly ONE real
+// overshoot — 30161ms against the old 15000ms budget — attributed (see the card) to a genuine transient
+// host slowdown in a ~20-minute window that had already cleared by the very next gate run: this file has
+// zero reach into anything that merged that day, and the same trial passed twice earlier the same day and
+// once again ~20 minutes later. Not reproducible on demand.
+//
+// 45s clears that single observed spike with real margin (~1.5x it, ~7x the measured quiet-host typical)
+// without being unboundedly patient — a genuine "process never exits" regression is still caught, just
+// diagnosed a little slower, which costs nothing here since this arm already takes ~6s minimum regardless
+// of the budget.
+const HARD_TEARDOWN_TIMEOUT_MS = 15_000;
+const GRACEFUL_TEARDOWN_TIMEOUT_MS = 45_000;
+
 function spawnSpecFor(mode) {
   if (mode === "hard") {
     return { command: "cmd.exe", args: ["/c", "ping", "-n", "30", "127.0.0.1"], hasChildTree: true };
@@ -229,9 +255,18 @@ async function runTrial(label, { useDllFlag, mode, expectForkAtLeastOne, failOnC
 
     // ===== teardown: the process (and its real child, where one exists) genuinely gone, not just that
     // stop() returned =====
-    parentGone = await waitUntil(async () => !(await psAlive(parentPid)), { label: `${label} parent pid gone after kill`, timeoutMs: 15000, intervalMs: 200 });
+    // See the teardown-budget comment above `spawnSpecFor` for why hard and graceful get DIFFERENT
+    // budgets, and why those numbers are what they are. Every trial logs its own real arrival time —
+    // not just a failure's — so a future tuning pass has actual numbers to work from instead of another
+    // single incident log (card 16355b5b's own DoD-1: "the witness reports true arrival on every run").
+    const teardownTimeoutMs = mode === "graceful" ? GRACEFUL_TEARDOWN_TIMEOUT_MS : HARD_TEARDOWN_TIMEOUT_MS;
+    const parentKillT0 = performance.now();
+    parentGone = await waitUntil(async () => !(await psAlive(parentPid)), { label: `${label} parent pid gone after kill`, timeoutMs: teardownTimeoutMs, intervalMs: 200 });
+    console.log(`   [timing] ${label} parent pid gone ${Math.round(performance.now() - parentKillT0)}ms after kill (budget ${teardownTimeoutMs}ms)`);
     if (spec.hasChildTree) {
-      childGone = await waitUntil(async () => !(await psAlive(childPid)), { label: `${label} child pid gone after kill`, timeoutMs: 15000, intervalMs: 200 });
+      const childKillT0 = performance.now();
+      childGone = await waitUntil(async () => !(await psAlive(childPid)), { label: `${label} child pid gone after kill`, timeoutMs: teardownTimeoutMs, intervalMs: 200 });
+      console.log(`   [timing] ${label} child pid gone ${Math.round(performance.now() - childKillT0)}ms after kill (budget ${teardownTimeoutMs}ms)`);
     }
   } finally {
     child_process.fork = realFork;
