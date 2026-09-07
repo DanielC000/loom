@@ -251,6 +251,14 @@ for (const field of PROFILE_FIELD_NAMES) {
 // A declared, validly-carded gap PASSES the guard (per manager directive: don't block the fleet on
 // already-tracked debt) — but it must NEVER read as an ordinary silent green. Print every one of them
 // loudly, grouped by tracking card, regardless of overall pass/fail.
+//
+// Card 10787759: this block ALONE used to be the whole story — but scripts/test-daemon.mjs discards a
+// PASSING file's stdout entirely (see its own `declaredWarnings`/`WARN_LINE_RE` comment), so on every real
+// gate run this loud-looking block was written and then read by nobody (verified: 23 "gap" hits running
+// this file directly vs. 0 mentions of the tracking card through the runner). Each per-gap line below is
+// ALSO emitted under the `WARN  ` two-space convention (card 22d995ca) so the runner's own scan picks it
+// up and surfaces it in its WARNINGS: block on a passing run — gated the SAME as the block itself, so it
+// stays silent when there are no gaps.
 if (allDeclaredGaps.length > 0) {
   console.log(`\n⚠️  ${allDeclaredGaps.length} KNOWN, CARDED GAP(S) — these PASS the guard (tracked, not undeclared) but are real, currently-open instances of the defect this card exists to bound. Do not read a bare PASS above as "fixed":`);
   const byCard = new Map();
@@ -260,7 +268,10 @@ if (allDeclaredGaps.length > 0) {
   }
   for (const [cardId, gaps] of byCard) {
     console.log(`  card ${cardId}:`);
-    for (const g of gaps) console.log(`    - "${g.field}" on harness "${g.harness}" [remedy: ${g.remedy}] — ${g.note}`);
+    for (const g of gaps) {
+      console.log(`    - "${g.field}" on harness "${g.harness}" [remedy: ${g.remedy}] — ${g.note}`);
+      console.log(`WARN  card ${cardId}: "${g.field}" on harness "${g.harness}" [remedy: ${g.remedy}] — ${g.note}`);
+    }
   }
 }
 
