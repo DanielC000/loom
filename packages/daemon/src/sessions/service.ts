@@ -2386,6 +2386,23 @@ class AdmissionReunionFailedError extends Error {
   }
 }
 
+/**
+ * The WORKER/ASSISTANT `startupModeCycles` pin (audit finding 760cd01d / card 5603f40f): pins a spawned
+ * worker's or assistant's boot-cycle target to `auto` INDEPENDENT of the shared
+ * `config.permission.startupModeCycles` knob, since neither has a live human at its TUI to answer an
+ * `acceptEdits`-only prompt (see `resolveAgentSpawn`'s own inline doc for the full rationale). Factored
+ * out to a standalone, agent-free function (card e98877b1) so it can be applied from the session's
+ * PINNED `role` column ALONE — mirrors `withTranscriptRootDenyForSpawn`'s own shape (pty/host.ts):
+ * compute the role-keyed effect ONCE, from the row's own `role`, so every caller — `resolveAgentSpawn`
+ * (agent present) and `resume()`'s agent-missing fallback alike — reads the SAME derivation instead of a
+ * second, driftable copy of it. Pure/DB-free; byte-identical (same reference) for every other role.
+ */
+export function withRolePermissionModeCyclesPin(permission: PermissionPolicy, role: SessionRole | undefined): PermissionPolicy {
+  return role === "worker" || role === "assistant"
+    ? { ...permission, startupModeCycles: cyclesToReachFromAcceptEdits("auto") }
+    : permission;
+}
+
 /** Ties the session registry (Db) to the PtyHost. Owns new/resume orchestration. */
 export class SessionService {
   /**
@@ -2947,11 +2964,13 @@ export class SessionService {
     // unmodified project. It is NOT a ruling that `auto` — the broadest auto-approve mode — is the right
     // posture for an untrusted-chat-facing role; nobody has made that ruling. A stricter default, if ever
     // wanted, is a separate, deliberate decision.
-    // KNOWN GAP (card e98877b1, deliberately NOT fixed here): this pin flows through `resumePermission`
-    // below, which falls back to bare `config.permission` when the agent row backing a session has been
-    // deleted — on that fallback the pin (worker's too, pre-existing) is silently DROPPED and resume reverts
-    // to the shared knob. Same defect shape card 3388be4d fixed one field over (the transcript-root deny);
-    // left open here since it also touches the pre-existing worker pin and this file has concurrent editors.
+    // FIXED (card e98877b1): this pin used to flow ONLY through this method — `resumePermission` in
+    // `resume()` fell back to bare `config.permission` when the agent row backing a session had been
+    // deleted, silently DROPPING the pin (worker's too, pre-existing) and reverting to the shared knob.
+    // Same defect shape card 3388be4d fixed one field over (the transcript-root deny). Rescued the same
+    // way: `withRolePermissionModeCyclesPin` below is the ONE place this pin is computed, keyed off the
+    // role alone (not the agent), so `resume()`'s agent-missing fallback can call it directly instead of
+    // re-deriving a copy of this logic — see that function's own doc.
     //
     // Every OTHER role keeps config's startupModeCycles verbatim — byte-identical to before this change.
     // Card 3388be4d: the role-scoped transcript-root deny (formerly applied here, card ac90ca8e /
@@ -2959,9 +2978,7 @@ export class SessionService {
     // keyed off `opts.role` — the session's PINNED role, threaded on every spawn path regardless of
     // whether this method's own `agent`/`resolveAgentSpawn` re-resolution ever runs (it fixes the
     // agent-row-missing resume/fork fallback that used to drop the deny). Nothing to do here any more.
-    const permission = role === "worker" || role === "assistant"
-      ? { ...baselinePermission, startupModeCycles: cyclesToReachFromAcceptEdits("auto") }
-      : baselinePermission;
+    const permission = withRolePermissionModeCyclesPin(baselinePermission, role);
     // Same `|| undefined` empties-to-undefined coercion today's start paths use on the agent prompt.
     const ownPrompt = resolved.startupPrompt || undefined;
     // Companion (epic Phase 1): an "assistant" session gets the server-owned base brief PREPENDED here (the
@@ -3740,11 +3757,16 @@ export class SessionService {
     // not the bare config.permission — a profile-pinned worker/manager loses its allow entries on every
     // resume otherwise. The role is the row's locked role (NOT the profile's, so an explicit-role session
     // resumes byte-identically). Model is DELIBERATELY omitted on resume — `--resume` inherits the
-    // transcript's model. Agent-missing (deleted) ⇒ fall back to bare config.permission so the resume still works.
+    // transcript's model. Agent-missing (deleted) ⇒ fall back to bare config.permission — but STILL apply
+    // the role-keyed startupModeCycles pin (card e98877b1) via `withRolePermissionModeCyclesPin`, keyed off
+    // `session.role` (the row's PINNED value, which survives the agent row's deletion) rather than
+    // re-deriving it from the (now-absent) agent. A profile's layered allowDelta is genuinely lost on this
+    // fallback (there's no profile to re-read), but the pin itself is role-derived, not profile-derived, so
+    // it has no such dependency and shouldn't be dropped with it.
     const agent = this.db.getAgent(session.agentId);
     const resumePermission = agent
       ? this.resolveAgentSpawn(agent, config, session.role ?? undefined).permission
-      : config.permission;
+      : withRolePermissionModeCyclesPin(config.permission, session.role ?? undefined);
 
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(session.id, "live");
@@ -3779,12 +3801,12 @@ export class SessionService {
       // lands (modeAfterCyclesFromAcceptEdits of the same startupModeCycles → auto by default), so a
       // resumed session matches a fresh one exactly. `startupModeCycles` itself is moot on this path:
       // host.ts prefers `resumeModeTarget` when set (`??`), so pin it 0 here defensively rather than
-      // relying on that precedence. Read off `resumePermission` (resolveAgentSpawn's ROLE-AWARE result),
-      // not the bare `config.permission` — a worker's or an assistant's startupModeCycles is pinned to
-      // reach `auto` independent of the project's own knob (see resolveAgentSpawn), and this must match so
-      // a resumed session converges to the exact same target its fresh spawn did. (Gap: this fallback
-      // reverts to bare `config.permission` — dropping the pin — when the agent row is missing; card
-      // e98877b1, see resolveAgentSpawn's own comment.)
+      // relying on that precedence. Read off `resumePermission` (resolveAgentSpawn's ROLE-AWARE result
+      // when the agent exists, else `withRolePermissionModeCyclesPin`'s own role-only re-derivation), not
+      // the bare `config.permission` — a worker's or an assistant's startupModeCycles is pinned to reach
+      // `auto` independent of the project's own knob (see resolveAgentSpawn / withRolePermissionModeCyclesPin),
+      // and this must match so a resumed session converges to the exact same target its fresh spawn did,
+      // regardless of whether the agent row backing it still exists (card e98877b1).
       permission: { ...resumePermission, startupModeCycles: 0 },
       resumeModeTarget: modeAfterCyclesFromAcceptEdits(resumePermission.startupModeCycles ?? 0),
       geometry: config.pty,
