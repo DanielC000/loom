@@ -25,8 +25,44 @@ import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, i
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
+import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, removeAddedTrustBlocks } from "./codex-doctrine.js";
+import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, mcpServersToCodexArgs, codexTrustDialogLock } from "./codex-host.js";
 
 const RING_CAP_BYTES = 256 * 1024;
+/** Multi-harness epic (df1f94b0) Phase 1: bounded rolling scan buffer for codex's own trust-dialog/busy-
+ *  marker detection (`CodexLive.screenScan`) — large enough to hold the trust-dialog menu text plus
+ *  several lines of surrounding chrome even mid-repaint, small enough to stay a cheap string op per
+ *  output chunk. Mirrors `bootScan`'s own sizing rationale (this file). */
+const CODEX_SCREEN_SCAN_CAP = 8 * 1024;
+/** Multi-harness epic (df1f94b0) Phase 1: the gap between writing a turn's text and writing the Enter
+ *  that submits it, for codex — mirrors `SUBMIT_ENTER_DELAY_MS`'s role for claude, but this value is
+ *  OBSERVED, not a Loom-side tuning constant: the probe (`docs/investigations/049e4a7b-codex-cli-
+ *  capability-probe/findings.md`, State 4) measured `term.write(prompt)` then 300ms later
+ *  `term.write("\r")` as the recipe that worked reliably against a real codex TUI. */
+const CODEX_SUBMIT_ENTER_DELAY_MS = 300;
+/** Multi-harness epic (df1f94b0) Phase 1: gap between codex's two exit-sequence Ctrl+C writes — OBSERVED
+ *  (same probe/finding as CODEX_SUBMIT_ENTER_DELAY_MS): "a second Ctrl+C, sent ~800ms after the first
+ *  (i.e. once back at the ready box)" (State 6). */
+const CODEX_STOP_GAP_MS = 800;
+/**
+ * Code Review C2/M3 fix: how long codex's busy STATUS-LINE marker (`isCodexBusy`, refreshed roughly once
+ * per second while genuinely busy — its own text carries a live seconds counter) may go UNSEEN before a
+ * session is declared idle. The prior design recomputed busy from EVERY output chunk (either the latest
+ * chunk alone, or the accumulated `screenScan`) and treated the marker's mere ABSENCE from that one
+ * snapshot as "done" — which is unsound in BOTH directions: a stale accumulated match can linger for a
+ * long time past real completion (M3), while a single ordinary mid-turn chunk that simply doesn't happen
+ * to carry the marker (streamed tool output between status refreshes, or the marker split across a chunk
+ * boundary) would wrongly read as an immediate falling edge (C2 — a real submitCodex race: a chunk landing
+ * in the ~300ms text->\r gap, before codex has rendered the marker for THIS turn at all, would flip busy
+ * back to false and let a second message land in a composer still holding the first). Instead, busy is
+ * FRESHNESS-based: seeing the marker (re)arms a bounded per-session timer (`armCodexBusyStaleTimer`); only
+ * once this many ms pass with NO fresh sighting is the session declared genuinely idle. Comfortably larger
+ * than the ~1s observed refresh cadence (so an ordinary gap between refreshes, or one fragmented/missed
+ * chunk, is never mistaken for completion) while still bounded (so a real completion is detected promptly,
+ * not left latched forever). Env-overridable so a hermetic test can shrink it instead of sleeping for
+ * multiple real seconds (mirrors `GRACEFUL_STOP_KILL_MS`'s own `LOOM_GRACEFUL_KILL_MS` convention).
+ */
+const CODEX_BUSY_STALE_MS = Number(process.env.LOOM_CODEX_BUSY_STALE_MS) || 3_000;
 /**
  * Gap between writing a turn's text and writing the FIRST Enter (\r) that submits it. A SINGLE
  * `text + "\r"` write does NOT submit a second turn to a running claude v2.1.150 session — the
@@ -2813,6 +2849,12 @@ interface Live {
   // "canned" = a TEST-ONLY no-process entry (seedCanned) that pre-loads the ring with recorded bytes so
   // `/ws/term` attach replays a faithful screen at a pinned geometry with no real spawn (card a53e6bc9).
   // Shares the shell's Claude-only-skip exemptions but is excluded from listShells (not a real terminal).
+  // Multi-harness epic df1f94b0 Phase 1 (card 353f6dc4) — Code Review M10: this union used to also carry
+  // a `"codex"` member, reserved back when ruling #3's original plan shared this SAME map with claude. Lead
+  // ruling #5 superseded that plan — a codex session now lives in its OWN, separate `CodexLive`/`liveCodex`
+  // (see that interface's own doc) and a `Live` object is NEVER constructed with `kind:"codex"` — so the
+  // member was dead weight that broke exhaustive narrowing in the OTHER direction (code discriminating
+  // `"claude"` from the rest could no longer assume the remainder was `"shell" | "canned"`). Removed.
   kind: "claude" | "shell" | "canned";
   command?: string;   // shell only: the executable spawned (for GET /api/terminals)
   label?: string;     // shell only: human label for the tile
@@ -3683,6 +3725,91 @@ interface Live {
   lastPasteTripwireGiveUp: { gen: number; token: string | null; engineSessionId: string | null; detectedAt: number } | null;
 }
 
+/**
+ * Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4 — LEAD RULING #5: a codex session's live state
+ * lives in its OWN map (`PtyHost.liveCodex`, private, separate from `live` above), never inside `Live`
+ * itself. Ruling #3's original approved shape (a `kind:"codex"` widening of `Live`, sharing `this.live`)
+ * was SUPERSEDED after this card's own field-by-field read of `Live` found ~60 required fields — the
+ * great majority backing four separate mismatch-detection subsystems plus the give-up ladder and
+ * composer-drift tracking, each with real, non-obvious invariants — not inert bookkeeping a sentinel
+ * value could safely paper over. Sentinel-populating them (ruling #3's "cheapest form") would have made
+ * EXACTLY the absent-vs-zero mistake ruling #4 exists to prevent: a populated-but-empty `Map`/`Set`
+ * reads as "measured, nothing there," not "not applicable to this harness."
+ *
+ * `CodexLive` therefore carries ONLY the fields a codex session genuinely has — a Claude-only field
+ * simply DOES NOT EXIST here, so an accessor reading it via {@link PtyHost.findAnyLive} on a codex entry
+ * gets a real TypeScript compile error (never a runtime `undefined` guess) if it isn't narrowed first,
+ * and any codex-side "is this set" question is answered by the field being absent from the object
+ * entirely — never a sentinel a reader has to reason about. Every field here shares its exact name AND
+ * type with the corresponding `Live` field it mirrors, so `findAnyLive`'s `Live | CodexLive` union return
+ * type lets TypeScript resolve a shared field with NO narrowing at all (structurally present on both
+ * members) while still hard-erroring on any Claude-only field access — this is what makes the "route
+ * through ONE resolver" mitigation a compile-time guarantee rather than a review convention.
+ */
+export interface CodexLive {
+  kind: "codex";
+  pty: IPty;
+  pid: number;
+  cwd: string;
+  geometry: PtyGeometry;
+  /** Codex has no hook relay (MCP tool calls arrive over HTTP, never a hook POST) — empty and never
+   *  checked, mirroring `Live.hookToken`'s own shell/canned-kind convention. */
+  hookToken: string;
+  engineSessionId: string | null;
+  ring: { chunks: Buffer[]; bytes: number };
+  subscribers: Set<Subscriber>;
+  alive: boolean;
+  killed: boolean;
+  startedAt: number;
+  logStream: fs.WriteStream;
+  logBroken: boolean;
+  busy: boolean;
+  lastOutputAt: number;
+  pending: QueuedMessage[];
+  stopping: boolean;
+  drainHeld: boolean;
+  role: SessionRole | null;
+  mcpSeen: boolean;
+  mcpSeenWaiters: Array<(seen: boolean) => void>;
+  activeTurnRoute: TurnRoute | null;
+  lastPromptRoute: TurnRoute | null;
+  activeTurnProactive: boolean;
+  lastPromptProactive: boolean;
+  activeTurnOwnerText: string | null;
+  lastPromptOwnerText: string | null;
+  recentOwnerTurns: string[];
+  activeTurnSenderId: string | null;
+  lastPromptSenderId: string | null;
+  /** Codex-only: whether THIS pty instance has already answered the first-use-per-directory trust
+   *  dialog (`codex-host.ts#isTrustDialogPrompt`/`trustDialogAnswer`) — guards against re-answering on
+   *  every subsequent output chunk once the dialog has scrolled off screen but the raw ring still
+   *  contains its text. */
+  trustDialogAnswered: boolean;
+  /** Codex-only, Code Review C1/M4 fix: true from the instant `trustDialogAnswered` latches until the
+   *  answer's own "\r" keystroke has actually been written — gates the one-time kickoff delivery (and
+   *  would gate any other programmatic write) so it can never interleave with the trust-dialog answer
+   *  sequence's own two-part write. False the rest of the time, including for the common case where no
+   *  trust dialog ever appears (directory already trusted) — kickoff eligibility in that case depends only
+   *  on {@link isCodexReadyMarkerPresent}, never on this flag. */
+  trustDialogPending: boolean;
+  /** Codex-only, Code Review C2/M3 fix: wall-clock time the busy marker was LAST actually observed (0 =
+   *  never). Read by `armCodexBusyStaleTimer`'s fired callback to confirm a NEWER sighting hasn't already
+   *  superseded the timer that's about to fire — see that method's own doc. */
+  lastBusyMarkerAt: number;
+  /** Codex-only, Code Review C2/M3 fix: the currently-armed "declare idle if the marker goes unseen this
+   *  long" timer (`armCodexBusyStaleTimer`), re-armed on every fresh sighting; `null` when no turn is in
+   *  flight. Cleared on exit/stop so a dead session can never fire a stale drain. */
+  busyStaleTimer: NodeJS.Timeout | null;
+  /** Codex-only, Code Review C1 fix: has the one-time `opts.startupPrompt` kickoff already been delivered
+   *  for this pty instance? Latched the instant delivery is attempted (never re-checked/re-sent). */
+  kickoffDelivered: boolean;
+  /** Codex-only: a bounded rolling buffer of the most recent raw output, scanned for the trust dialog /
+   *  ready-marker text (mirrors `Live.bootScan`/`resumeGateScan`'s own rolling-buffer convention) — never
+   *  used for busy/idle detection, which is a FRESHNESS read keyed off `lastBusyMarkerAt`/`busyStaleTimer`
+   *  instead (see `CODEX_BUSY_STALE_MS`'s own doc for why). */
+  screenScan: string;
+}
+
 export interface SpawnOpts {
   sessionId: string;          // Loom session id
   cwd: string;                // = project repoPath
@@ -3721,6 +3848,17 @@ export interface SpawnOpts {
    * allowlist its tool surface. Default OFF — every existing spawn is byte-identical when unset/false.
    */
   documentConversion?: boolean;
+  /**
+   * Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4: which vendor CLI to spawn (resolved from the
+   * session's Profile, pinned on the session row). Undefined/`"claude"` ⇒ today's only harness, byte-
+   * identical spawn — `spawn()` dispatches to `PtyHost#spawnCodexProcess` for `"codex"` BEFORE any of the
+   * claude-specific TUI-automation logic below runs; see that method's own doc for why the stateful
+   * runtime (submit/isBusy/etc.) stays a SEPARATE, additive set of methods (delegating their PURE decision
+   * logic to `pty/codex-host.ts`) rather than a parameterization of this 5,800-line class (`pty/adapter.ts`'s
+   * own top-level doc explains the same reasoning for why the give-up/composer-trust ladder stays
+   * PtyHost-internal).
+   */
+  harness?: "claude" | "codex";
   /**
    * Card C2 (Codescape wiring epic `369dde3c`): the project's RAW `codescape.enabled` config flag — NOT
    * yet combined with `isLoomDev()` (buildMcpServers applies that gate itself). Default OFF — every
@@ -5214,7 +5352,7 @@ export async function attributeProcessesToWorktree(
  * Call once, synchronously, right after constructing each `live` entry (same tick as `createWriteStream`,
  * so there's no race with the stream's own always-async error emission).
  */
-function attachLogErrorGuard(sessionId: string, live: Live): void {
+function attachLogErrorGuard(sessionId: string, live: Live | CodexLive): void {
   live.logStream.on("error", (err) => {
     if (live.logBroken) return; // already degraded — don't re-log/spam on a re-emitted error
     live.logBroken = true;
@@ -5231,7 +5369,7 @@ function attachLogErrorGuard(sessionId: string, live: Live): void {
  * re-throws. The try/catch is defense in depth (matches this file's existing style around `.end()`);
  * `logBroken` is what actually stops repeat work, not the catch.
  */
-function writeLog(live: Live, buf: Buffer): void {
+function writeLog(live: Live | CodexLive, buf: Buffer): void {
   if (live.logBroken) return;
   try { live.logStream.write(buf); } catch { live.logBroken = true; }
 }
@@ -5244,6 +5382,28 @@ function writeLog(live: Live, buf: Buffer): void {
  */
 export class PtyHost {
   private live = new Map<string, Live>();
+  /** Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4 — LEAD RULING #5: a codex session's live state
+   *  lives in this SEPARATE, private map — never mixed into `live` above (see `CodexLive`'s own doc for
+   *  why). A sessionId is registered in AT MOST ONE of the two maps at a time (a spawn dispatches on
+   *  `harness` and constructs exactly one kind of entry); nothing today ever needs both simultaneously. */
+  private liveCodex = new Map<string, CodexLive>();
+  /**
+   * THE required mitigation for the two-registry split (lead ruling #5): the ONE place any method that
+   * must work for EITHER harness looks up a session's live state, instead of reading `this.live`/
+   * `this.liveCodex` directly. Returns `Live | CodexLive | undefined` — a genuine TypeScript union, so
+   * touching a field that exists on only ONE member (any Claude-only field) is a COMPILE ERROR here
+   * unless the caller narrows first (e.g. `"kind" in x && x.kind === "claude"`), never a silent
+   * `undefined` read. A field shared by name+type across both interfaces (`pid`/`alive`/`busy`/`pending`/
+   * …) resolves with NO narrowing needed, which is what lets the harness-agnostic accessor/mutator
+   * methods below stay one-line reads exactly as they were before the split.
+   * `test/pty-agnostic-methods-findanylive-guard.mjs` structurally asserts every method this project has
+   * classified AGNOSTIC in `docs/design/multi-harness-parity-matrix.md` actually routes through this
+   * resolver rather than `this.live.get` directly — see that guard's own header for what it does and does
+   * not cover.
+   */
+  private findAnyLive(sessionId: string): Live | CodexLive | undefined {
+    return this.live.get(sessionId) ?? this.liveCodex.get(sessionId);
+  }
   /** Card cd0c7fee: correlates a PreToolUse hook's `agent_id`/`agent_type` to the MCP request it
    *  precedes. Pure/dependency-free (see its own file doc) — no opts needed, so this is unconditional. */
   private readonly toolAttribution = new ToolAttributionTracker();
@@ -5323,6 +5483,11 @@ export class PtyHost {
   }
 
   spawn(opts: SpawnOpts): void {
+    // Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4 — LEAD RULING #4/#5: dispatch to the codex
+    // stateful runtime BEFORE any of the claude-specific machinery below runs. `spawnCodexProcess`
+    // constructs its own CodexLive entry in the SEPARATE `liveCodex` map (never `this.live` — see
+    // CodexLive's own doc for why) and returns; nothing past this point ever sees a codex spawn.
+    if (opts.harness === "codex") { this.spawnCodexProcess(opts); return; }
     // Code review (2026-08-05, card c469d54e): a readiness-fallback timer's callback re-looks-up its Live
     // by sessionId at fire time (`this.live.get(sessionId)`) rather than closing over the Live object
     // itself — so a timer left over from a PREVIOUS spawn of this SAME sessionId (e.g. a resume/recycle
@@ -5665,6 +5830,412 @@ export class PtyHost {
       this.repeatedCalls.forget(opts.id); // card 2d8d2e42: same no-op-in-practice, same-discipline cleanup
       this.live.delete(opts.id);
     });
+  }
+
+  /**
+   * Build the interactive `codex` pty for a session — the codex counterpart of `createPty` (mirrors its
+   * shape exactly: absolute bin path, inherited env, pinned geometry). Extracted as the ONE testable seam
+   * for the same reason `createPty`/`createShellPty` are: a test can subclass `PtyHost` and override this
+   * to return a fake pty with no real codex process. Production never overrides it.
+   *
+   * The MCP surface is passed via codex's own per-invocation `-c mcp_servers.<id>.url=<url>` argv form
+   * (measured TRANSIENT — see the parity matrix's "MCP wiring" section), built by translating the SAME
+   * `buildMcpServers()` result claude's `--mcp-config` uses (`mcpServersToCodexArgs`, codex-host.ts) — one
+   * routing table, so codex's mounted servers can never drift from claude's for the same role.
+   */
+  protected createCodexPty(opts: SpawnOpts): IPty {
+    const bin = resolveExecutable(process.env.LOOM_CODEX_BIN || CODEX_BINARY_NAME);
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+    const mcpServers = buildMcpServers({ sessionId: opts.sessionId, port: PORT, role: opts.role });
+    const mcpArgs = mcpServersToCodexArgs(mcpServers);
+    // `-a never -s workspace-write --no-alt-screen` — the probe's own OBSERVED unattended-boot recipe
+    // (findings.md, "Point 4"): unattended approval + edit-capable sandbox + preserved scrollback (the
+    // codex-native analogue of claude's `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` env-var workaround).
+    const args = ["-a", "never", "-s", "workspace-write", "--no-alt-screen", ...mcpArgs];
+    // eslint-disable-next-line no-console
+    console.log(`[pty] spawnCodex ${opts.sessionId} bin=${bin} cwd=${opts.cwd} mcpServers=${Object.keys(mcpServers).join(",")}`);
+    return spawn(bin, args, {
+      name: "xterm-256color",
+      cols: opts.geometry.cols,
+      rows: opts.geometry.rows,
+      cwd: opts.cwd,
+      env,
+      useConptyDll: isPtyUseConptyDllEnabled(),
+    });
+  }
+
+  /**
+   * Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4 — LEAD RULING #4/#5: the codex counterpart of
+   * `spawn()`, dispatched from it (never called directly by an external caller — mirrors `spawnShell`'s
+   * own "sibling to spawn(), not itself a SpawnOpts consumer external callers reach" shape, except here
+   * the caller-facing contract IS the same SpawnOpts, just routed here first). Builds a real node-pty
+   * process via `createCodexPty` and registers a CodexLive entry in the SEPARATE `liveCodex` map — never
+   * `this.live` (see CodexLive's own doc for why the two-registry split exists at all).
+   *
+   * TRUST DIALOG (card's landmine #1): every fresh worktree hits the undocumented first-use-per-directory
+   * "Do you trust the contents of this directory?" dialog before any real prompt can land. Detected by
+   * literal-text match against a bounded rolling scan buffer (`live.screenScan`, mirrors
+   * `Live.bootScan`/`resumeGateScan`'s own convention) and answered EXACTLY ONCE per pty instance
+   * (`live.trustDialogAnswered` latches). Serialized through `codexTrustDialogLock` (codex-host.ts) since
+   * every codex worker on this host shares ONE real `~/.codex/config.toml` (parity matrix's own
+   * "CODEX_HOME" section) — two concurrent first-use answers could otherwise race that one file's write.
+   * `hashConfigBefore()` is captured BEFORE the pty even spawns (the card's own "md5 before any run, diff
+   * after, disclose anything you cannot undo" obligation); after answering, `diffConfigAfterSpawn` +
+   * `removeAddedTrustBlocks` (codex-doctrine.ts) strip exactly the `[projects.'<cwd>']` block this
+   * spawn's own answer added, disclosing (never silently dropping) anything else that changed.
+   *
+   * BUSY/IDLE (card's landmine #2): `isCodexBusy` keys off the status-line marker / title-bar spinner,
+   * NEVER the static "Ask Codex to do anything" placeholder (present during busy too). Code Review C2/M3
+   * fix: busy is now a FRESHNESS read (`CODEX_BUSY_STALE_MS`'s own doc has the full reasoning), never a
+   * per-chunk recompute — seeing the marker (evaluated against the latest chunk alone) (re)arms a bounded
+   * timer, and ONLY that timer's own expiry (no fresher sighting within `CODEX_BUSY_STALE_MS`) ever declares
+   * idle. This fixes BOTH the prior bugs at once: a stale accumulated match can no longer latch busy
+   * forever (M3), and a chunk landing in `submitCodex`'s own text->\r write gap — before codex has rendered
+   * the marker for this turn at all — can no longer flip busy back to false and let a second message land
+   * in a composer still holding the first (C2). `events.onBusy` (mirrors claude's `setBusy`) still fires
+   * only on a genuine rising/falling EDGE, so this stays idempotent under repeated chunks.
+   *
+   * KICKOFF (Code Review C1 fix): the one-time `opts.startupPrompt` is delivered once codex has rendered
+   * its main TUI at least once (`isCodexReadyMarkerPresent`, safe one-time use of the SAME placeholder text
+   * landmine #2 bans for ongoing idle detection — see that function's own doc) AND the trust dialog, if
+   * any, is no longer mid-answer (`!live.trustDialogPending`) — through the PUBLIC, busy-aware
+   * `enqueueStdin` entry point (never a direct write), so it queues cleanly behind whatever the MCP-startup
+   * episode is still doing rather than racing it.
+   */
+  private spawnCodexProcess(opts: SpawnOpts): void {
+    // md5'd BEFORE the pty spawns — see this method's own doc on the md5-before/diff-after/disclose
+    // obligation. Captured even though the trust dialog may never actually need answering (a directory
+    // already trusted from an earlier run) — diffConfigAfterSpawn is a no-op (`changed:false`) in that
+    // case, so capturing unconditionally costs nothing and never risks skipping a real diff.
+    const configHashBefore = hashConfigBefore();
+    const pty = this.createCodexPty(opts);
+    const live: CodexLive = {
+      kind: "codex", pty, pid: pty.pid, cwd: opts.cwd, geometry: opts.geometry,
+      hookToken: "", // codex has no hook relay — never checked (mirrors shell/canned's own convention)
+      engineSessionId: null,
+      ring: { chunks: [], bytes: 0 },
+      subscribers: new Set(),
+      alive: true, killed: false, startedAt: Date.now(),
+      logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.sessionId}.log`)),
+      logBroken: false,
+      busy: false, lastOutputAt: Date.now(),
+      pending: [], stopping: false, drainHeld: false,
+      role: opts.role ?? null,
+      mcpSeen: false, mcpSeenWaiters: [],
+      activeTurnRoute: null, lastPromptRoute: null,
+      activeTurnProactive: false, lastPromptProactive: false,
+      activeTurnOwnerText: null, lastPromptOwnerText: null,
+      recentOwnerTurns: [],
+      activeTurnSenderId: null, lastPromptSenderId: null,
+      trustDialogAnswered: false, trustDialogPending: false,
+      lastBusyMarkerAt: 0, busyStaleTimer: null, kickoffDelivered: false,
+      screenScan: "",
+    };
+    this.liveCodex.set(opts.sessionId, live);
+    attachLogErrorGuard(opts.sessionId, live);
+
+    pty.onData((d) => {
+      const buf = Buffer.from(d, "utf-8");
+      live.lastOutputAt = Date.now();
+      this.appendRing(live, buf);
+      writeLog(live, buf);
+      for (const s of live.subscribers) { try { s.onData(buf); } catch { /* ignore */ } }
+
+      // Bounded rolling scan buffer (mirrors Live.bootScan/resumeGateScan's own convention) — regex
+      // markers can straddle a chunk boundary, so this accumulates rather than scanning each chunk alone.
+      // ⚠️ REAL BUG FOUND BY THE REAL-SPAWN TEST (card 353f6dc4): accumulates the RAW `d` string node-pty
+      // hands the callback, exactly like `Live.bootScan`/`resumeGateScan` do (this file, claude's onData) —
+      // NOT `buf.toString("utf-8")`. `buf` is a Buffer constructed via `Buffer.from(d, "utf-8")` for the
+      // ring/log/subscriber paths, which need real bytes; round-tripping it BACK through UTF-8 decoding is
+      // NOT lossless for a Windows ConPTY string that carries raw byte values outside valid UTF-8
+      // sequences (box-drawing/OEM-codepage bytes), and corrupted the trust-dialog marker text in a real
+      // run — `isTrustDialogPrompt` never fired, and the dialog sat unanswered until the test's own
+      // timeout. Confirmed both ways: `buf.includes(marker)` (this test's own separate, unbounded string
+      // accumulator built the SAME wrong way) failed to find the marker in one real capture and found it
+      // corrupted at a different byte offset in another, while the raw `d`-based accumulation (this fix)
+      // matches claude's own proven-in-production convention.
+      live.screenScan = (live.screenScan + d).slice(-CODEX_SCREEN_SCAN_CAP);
+
+      if (!live.trustDialogAnswered && isTrustDialogPrompt(live.screenScan)) {
+        live.trustDialogAnswered = true; // latch FIRST — never answer twice even if this chunk re-fires
+        // Code Review C1 fix: block the one-time kickoff (and any other programmatic write) from
+        // interleaving with the two-part answer write below until the real "\r" has actually gone out.
+        live.trustDialogPending = true;
+        codexTrustDialogLock.withLock(async () => {
+          // ⚠️ REAL BUG FOUND BY THE REAL-SPAWN TEST (card 353f6dc4): a SINGLE combined `pty.write("1\r")`
+          // never registered against a real codex TUI — the process sat at "Press enter to continue"
+          // indefinitely (confirmed: config.toml never changed, no further output ever arrived). Splitting
+          // into TWO separate writes — "1", then a delay, then "\r" — mirrors `submitCodex`'s own
+          // independently-OBSERVED two-write recipe (see that method's own doc) and resolved it
+          // immediately (confirmed: codex advanced past the dialog to its own ready state on the very next
+          // run). `trustDialogAnswer()`/`TRUST_DIALOG_ANSWER` still document the LOGICAL answer as a single
+          // "1\r" for readability; only the WRITE MECHANICS split it — this reuses the same
+          // CODEX_SUBMIT_ENTER_DELAY_MS gap for consistency, not because it was independently measured for
+          // this specific dialog (the probe never observed a menu-selection Enter's own timing).
+          pty.write(trustDialogAnswer().slice(0, -1)); // "1" (drop the trailing \r — see the comment above)
+          await new Promise<void>((r) => setTimeout(r, CODEX_SUBMIT_ENTER_DELAY_MS));
+          pty.write("\r");
+          live.trustDialogPending = false; // the answer is on the wire — safe for a kickoff to write now
+          // Give codex a moment to actually persist config.toml before diffing — the write above is
+          // fire-and-forget from this process's point of view; there is no confirming hook to await.
+          await new Promise<void>((r) => setTimeout(r, 1500));
+          const diff = diffConfigAfterSpawn(configHashBefore, opts.cwd);
+          if (diff.changed) {
+            if (diff.removable.length) removeAddedTrustBlocks(diff.removable);
+            if (diff.residual.length) {
+              // eslint-disable-next-line no-console
+              console.warn(`[codex-trust] ${opts.sessionId} residual config.toml delta not auto-classified — disclosing verbatim: ${JSON.stringify(diff.residual)}`);
+            }
+          }
+        }).catch((err: unknown) => {
+          // A failed write leaves trustDialogPending stuck true forever (permanently blocking kickoff) if
+          // not cleared here — best-effort recovery: assume the worst (the answer may not have landed) but
+          // don't wedge every future write behind a dialog this process can no longer act on.
+          live.trustDialogPending = false;
+          // eslint-disable-next-line no-console
+          console.error(`[codex-trust] ${opts.sessionId} trust-dialog answer/cleanup failed: ${(err as Error)?.message ?? String(err)}`);
+        });
+      }
+
+      // Code Review C2/M3 fix: busy is a FRESHNESS read, never a per-chunk recompute — see
+      // `CODEX_BUSY_STALE_MS`'s own doc for the full reasoning. Seeing the marker in THIS chunk (evaluated
+      // against the latest chunk alone; the marker is a short, single-line status text, not a multi-chunk
+      // artifact like the trust dialog, so no accumulation is needed to find it intact) (re)arms the
+      // staleness timer — it is the ONLY thing that ever turns busy false, never a chunk's mere absence of
+      // the marker, which closes the C2 race (a chunk landing in `submitCodex`'s own text->\r write gap
+      // can no longer flip busy back to false) at its root.
+      if (isCodexBusy(d)) {
+        live.lastBusyMarkerAt = Date.now();
+        if (!live.busy) this.setCodexBusy(opts.sessionId, live, true, "codex-marker");
+        this.armCodexBusyStaleTimer(opts.sessionId, live);
+      }
+
+      // Code Review C1 fix: deliver the one-time startup prompt once codex has rendered its main TUI at
+      // least once AND the trust dialog (if any) is no longer mid-answer — see this method's own top doc.
+      // Routed through the PUBLIC enqueueStdin (which dispatches straight back to enqueueStdinCodex, since
+      // this sessionId is already registered in `liveCodex`) rather than a direct submitCodex call, so a
+      // still-busy MCP-startup episode queues it instead of racing it.
+      if (
+        opts.startupPrompt !== undefined && !live.kickoffDelivered &&
+        !live.trustDialogPending && isCodexReadyMarkerPresent(live.screenScan)
+      ) {
+        live.kickoffDelivered = true; // latch BEFORE calling out — never deliver twice
+        this.enqueueStdin(opts.sessionId, opts.startupPrompt, "system", undefined, undefined, "agent");
+      }
+    });
+
+    pty.onExit(({ exitCode }) => {
+      live.alive = false;
+      if (live.busyStaleTimer) { clearTimeout(live.busyStaleTimer); live.busyStaleTimer = null; } // never fire against a dead session
+      if (live.mcpSeenWaiters.length > 0) {
+        const waiters = live.mcpSeenWaiters;
+        live.mcpSeenWaiters = [];
+        for (const w of waiters) w(false);
+      }
+      live.pending.length = 0;
+      reapOrphanedDescendants(live.pid);
+      this.toolAttribution.forget(opts.sessionId);
+      this.repeatedCalls.forget(opts.sessionId);
+      // eslint-disable-next-line no-console
+      console.log(`[pty] codex exit ${opts.sessionId} code=${exitCode} intended=${live.stopping}`);
+      try { live.logStream.end(); } catch { /* ignore */ }
+      this.broadcastControl(live, { type: "exit", code: exitCode });
+      // A codex session IS a real DB Session (unlike a shell) — persist the exit exactly as claude's own
+      // spawn() onExit does, so SessionService/boot-reconcile see it the same way regardless of harness.
+      this.events.onExit(opts.sessionId, exitCode, { intended: live.stopping });
+    });
+  }
+
+  /** Codex counterpart of `setBusy` — idempotent (fires `events.onBusy`/`broadcastControl` only on a
+   *  genuine rising/falling edge, mirroring `setBusy`'s own discipline), but simpler: codex has no
+   *  `busySince`/stuck-busy heal concept (Phase 1 names this as a real, disclosed gap — see the parity
+   *  matrix's `reconcile` row). `reason` mirrors `setBusy`'s own diagnostic-tagging convention. */
+  private setCodexBusy(sessionId: string, live: CodexLive, busy: boolean, reason: string): void {
+    if (live.busy === busy) return;
+    live.busy = busy;
+    // eslint-disable-next-line no-console
+    console.log(`[busy] ${sessionId} -> ${busy ? "true" : "false"} (${reason})`);
+    this.events.onBusy(sessionId, busy);
+    this.broadcastControl(live, { type: "busy", busy });
+  }
+
+  /**
+   * Code Review C2/M3 fix — the ONLY path that ever declares a codex session idle again: (re)armed every
+   * time the busy marker is freshly seen (`spawnCodexProcess`'s onData handler). If `CODEX_BUSY_STALE_MS`
+   * elapses with NO fresher sighting, the session is genuinely idle — the fired callback re-checks
+   * `lastBusyMarkerAt` before acting (rather than trusting its own closure alone) so a sighting that landed
+   * in the brief window between this timer's own scheduling and its firing is never overridden by a stale
+   * callback. Clearing any PRIOR timer before arming a new one means only the MOST RECENT sighting's timer
+   * is ever live — no pile-up of stale callbacks racing each other. See `CODEX_BUSY_STALE_MS`'s own doc for
+   * the full reasoning this design fixes (C2's in-flight race, M3's unbounded staleness).
+   */
+  private armCodexBusyStaleTimer(sessionId: string, live: CodexLive): void {
+    if (live.busyStaleTimer) clearTimeout(live.busyStaleTimer);
+    live.busyStaleTimer = setTimeout(() => {
+      live.busyStaleTimer = null;
+      if (!live.alive || !live.busy) return; // already stopped/idled some other way — nothing to do
+      if (Date.now() - live.lastBusyMarkerAt < CODEX_BUSY_STALE_MS) return; // a fresher sighting landed since this timer was scheduled
+      this.setCodexBusy(sessionId, live, false, "codex-marker-stale");
+      // Falling edge (busy -> idle): drain the next queued message, exactly as claude's own Stop-hook-
+      // triggered drainPending does — codex has no confirming hook, so this freshness timeout IS the
+      // turn-end signal this path drains on.
+      this.drainCodexPending(sessionId, live);
+    }, CODEX_BUSY_STALE_MS);
+  }
+
+  /**
+   * Codex counterpart of `submit()` — mirrors the probe's own OBSERVED State-4 recipe EXACTLY (findings.md
+   * `049e4a7b-codex-cli-capability-probe`): `pty.write(text)`, then `CODEX_SUBMIT_ENTER_DELAY_MS` later
+   * `pty.write("\r")`. No verify-and-retry ladder — codex has no confirming hook to verify a written Enter
+   * against, so busy/idle detection (the onData handler) is the ONLY signal a caller has that the turn
+   * actually started; this is a named, disclosed simplification versus claude's `fireEnterAndVerify`.
+   * Sets `live.busy` SYNCHRONOUSLY before returning (mirrors claude's own M1 invariant) so a concurrent
+   * `enqueueStdinCodex` call sees busy and queues instead of racing this turn's pending `\r`.
+   *
+   * Also arms the SAME `CODEX_BUSY_STALE_MS` freshness timer the onData handler's own marker sighting
+   * arms — a fallback ceiling for the (expected-rare, but real) case where this turn's busy marker never
+   * renders at all before the turn genuinely completes: without this, `live.busy` would have nothing to
+   * ever clear it, since the onData handler's `armCodexBusyStaleTimer` call only fires when a marker is
+   * actually SEEN. A real marker sighting shortly after simply re-arms with a fresher timestamp, so this
+   * is a no-op ceiling in the common case, not a competing source of truth.
+   */
+  private submitCodex(sessionId: string, live: CodexLive, text: string): void {
+    this.setCodexBusy(sessionId, live, true, "submit");
+    live.lastBusyMarkerAt = Date.now();
+    this.armCodexBusyStaleTimer(sessionId, live);
+    live.pty.write(text);
+    setTimeout(() => {
+      if (!live.alive) return; // the pty died before the delayed Enter — nothing to write
+      live.pty.write("\r");
+    }, CODEX_SUBMIT_ENTER_DELAY_MS);
+  }
+
+  /**
+   * Codex's OWN, simpler push+drain path (lead ruling #3(c)) — dispatched from `enqueueStdin` for a codex
+   * sessionId before any claude-only machinery runs. Deliberately does NOT replicate claude's fairness
+   * reordering / same-sender coalescing / give-up-hold bookkeeping (a named Phase-1 simplification: plain
+   * FIFO push, drained one at a time on the busy->idle edge — see `drainCodexPending`).
+   */
+  private enqueueStdinCodex(
+    sessionId: string, live: CodexLive, text: string, source: QueueSource, onDeliver: (() => void) | undefined,
+    route: TurnRoute | undefined, kind: QueuedMessageKind, questionId: string | undefined, ownerText: string | undefined,
+    proactive: boolean, senderId: string | null | undefined, reportEventId: string | undefined,
+    logicalId: string | undefined, mintedAtGen: number | undefined, mintedAtWallClock: number | undefined,
+  ): EnqueueResult {
+    if (!live.alive) return { delivered: false, reason: "session-dead", queued: false, deliveryState: "dropped" };
+    const normalizedSenderId = senderId ?? null;
+    if (!live.busy && !live.stopping && !live.drainHeld) {
+      live.activeTurnRoute = route ?? null; live.lastPromptRoute = route ?? null;
+      live.activeTurnProactive = proactive; live.lastPromptProactive = proactive;
+      live.activeTurnOwnerText = ownerText ?? null; live.lastPromptOwnerText = ownerText ?? null;
+      if (ownerText !== undefined) {
+        live.recentOwnerTurns.push(ownerText);
+        if (live.recentOwnerTurns.length > RECENT_OWNER_TURNS_WINDOW) live.recentOwnerTurns.shift();
+      }
+      live.activeTurnSenderId = normalizedSenderId; live.lastPromptSenderId = normalizedSenderId;
+      this.submitCodex(sessionId, live, text);
+      onDeliver?.();
+      return { delivered: true, deliveryState: "handed-off" };
+    }
+    const id = randomUUID();
+    const entry: QueuedMessage = {
+      id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive,
+      senderId: normalizedSenderId, logicalId: logicalId ?? id,
+      ...(mintedAtGen !== undefined ? { mintedAtGen } : {}),
+      ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}),
+    };
+    live.pending.push(entry);
+    return { delivered: false, queued: true, deliveryState: "queued" };
+  }
+
+  /** Drain the NEXT queued codex message (FIFO, no coalescing — see `enqueueStdinCodex`'s own doc) once
+   *  the busy->idle edge fires. A no-op if nothing is queued, the session is stopping, or drain is held
+   *  (mirrors `drainPending`'s own suppression checks, simplified — codex has no composer-dirty/rate-limit
+   *  concept to defer for). */
+  private drainCodexPending(sessionId: string, live: CodexLive): void {
+    if (live.stopping || live.drainHeld || live.pending.length === 0) return;
+    const entry = live.pending.shift()!;
+    live.activeTurnRoute = entry.route ?? null; live.lastPromptRoute = entry.route ?? null;
+    live.activeTurnProactive = entry.proactive ?? false; live.lastPromptProactive = entry.proactive ?? false;
+    live.activeTurnOwnerText = entry.ownerText ?? null; live.lastPromptOwnerText = entry.ownerText ?? null;
+    if (entry.ownerText !== undefined) {
+      live.recentOwnerTurns.push(entry.ownerText);
+      if (live.recentOwnerTurns.length > RECENT_OWNER_TURNS_WINDOW) live.recentOwnerTurns.shift();
+    }
+    live.activeTurnSenderId = entry.senderId ?? null; live.lastPromptSenderId = entry.senderId ?? null;
+    this.submitCodex(sessionId, live, entry.text);
+    if (entry.onDeliver) { try { entry.onDeliver(); } catch { /* never break the drain */ } }
+  }
+
+  /**
+   * Codex counterpart of `stop()` — mirrors the probe's own OBSERVED State-5/6 sequence exactly
+   * (findings.md, "Point 4"): a SINGLE Ctrl+C (`\x03`) interrupts a busy turn and returns to the ready
+   * box (no-op if already idle — codex showed no adverse effect from an extra Ctrl+C at idle in the
+   * probe's own runs, but this only sends the first one when genuinely needed is not verifiable either
+   * way from the probe alone, so — matching claude's own unconditional-write shape in `stop()` — this
+   * always sends it); a SECOND Ctrl+C, `CODEX_STOP_GAP_MS` later (the probe's own observed ~800ms gap),
+   * triggers a clean exit (`exitCode 0` within ~1.2-2.2s in all 5 observed runs, no hang). A hard stop
+   * skips straight to `pty.kill()`, identical in shape to claude's own hard branch. A bounded hard-kill
+   * escalation (reusing `GRACEFUL_STOP_KILL_MS`, the SAME bound claude's own graceful escalation uses —
+   * not itself codex-measured, a deliberate safety-net reuse rather than a new unmeasured constant) backs
+   * up the two-Ctrl+C sequence in case a wedged codex process doesn't respond to either.
+   */
+  private stopCodex(sessionId: string, live: CodexLive, mode: StopMode): void {
+    if (!live.alive) return;
+    live.stopping = true;
+    live.pending.length = 0;
+    if (mode === "hard") {
+      live.killed = true;
+      live.pty.kill();
+      return;
+    }
+    if (!live.killed) live.pty.write("\x03");
+    setTimeout(() => {
+      if (!live.alive || live.killed) return; // already exited from the first Ctrl+C, or already killed
+      live.pty.write("\x03");
+    }, CODEX_STOP_GAP_MS);
+    // Bounded hard-kill backstop — mirrors escalateGracefulStop's own stage-3 shape (claude's sibling),
+    // so a graceful stop() is deterministic here too: it ALWAYS terminates, never leaves a live orphan.
+    setTimeout(() => {
+      if (!live.alive || live.killed) return;
+      // eslint-disable-next-line no-console
+      console.log(`[pty] ${sessionId} codex graceful stop: still live after ${GRACEFUL_STOP_KILL_MS}ms — escalating to hard kill`);
+      live.killed = true;
+      live.pty.kill();
+    }, GRACEFUL_STOP_KILL_MS);
+  }
+
+  /**
+   * Codex counterpart of `interruptForRedirect` — SIMPLER than claude's own (no settle-timer/busySince-
+   * snapshot dance needed): a single Ctrl+C interrupts the in-flight turn, and codex's own busy-marker
+   * REGEX naturally observes the resulting busy->idle transition on the very next output chunk (the
+   * onData handler in `spawnCodexProcess` already calls `drainCodexPending` on that edge) — unlike
+   * claude's Esc-cancel, which fires NO confirming signal at all and therefore needs an artificial
+   * settle-and-self-heal window. NO-OP for a dead/stopping/idle session, mirroring claude's own guard.
+   */
+  private interruptForRedirectCodex(sessionId: string, live: CodexLive): void {
+    if (!live.alive || live.stopping || !live.busy) {
+      // eslint-disable-next-line no-console
+      console.log(`[pty] ${sessionId} codex redirect: Ctrl+C NOT sent (nothing in flight to interrupt — alive=${live.alive} stopping=${live.stopping} busy=${live.busy})`);
+      return;
+    }
+    live.pty.write("\x03");
+    // eslint-disable-next-line no-console
+    console.log(`[pty] ${sessionId} codex redirect: Ctrl+C sent — busy->idle detection will drain the redirect`);
+  }
+
+  /**
+   * Code Review M4 fix — the codex counterpart of `writeStdin`'s raw-keystroke passthrough: a real human
+   * typing directly into a codex terminal tile. Deliberately NO composer-dirty tracking, no human-submit
+   * hold, no busy gate — codex's Ink-free TUI has no Loom-observable "composer" concept to protect the way
+   * claude's does (this project's own `writeStdin` doc explains why that machinery exists at all), and a
+   * real human must always be able to type regardless of turn state, mirroring `writeStdin`'s own
+   * unconditional-write invariant for claude.
+   */
+  private writeStdinCodex(live: CodexLive, data: string): void {
+    if (!live.alive || live.killed) return;
+    live.pty.write(data);
   }
 
   /**
@@ -7665,6 +8236,20 @@ export class PtyHost {
     const captureMintGen = isTailObject ? tailOrGiveUpHeldUntil.captureMintGen === true : false;
     // `resolveTailAtDelivery` has NO positional legacy form (see EnqueueStdinTail's own doc) — options-object only.
     const resolveTailAtDelivery = isTailObject ? tailOrGiveUpHeldUntil.resolveTailAtDelivery : undefined;
+    // Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4 — LEAD RULING #3(c)/#5: dispatch to codex's OWN,
+    // simpler push+drain path BEFORE any of the claude-specific machinery below runs (`this.live.get`
+    // would return undefined for a codex sessionId anyway — WITHOUT this branch that would silently
+    // misreport a genuinely-alive codex session as `reason:"session-dead"`, exactly the fail-LOUD-not-
+    // silently-wrong violation ruling #4's condition 1 exists to prevent). Dispatched AFTER the sanitize
+    // step just below so codex text gets the same lone-surrogate cleanup as claude's, but BEFORE
+    // `healIfStuck` (claude-only). `giveUpHeldUntil`/`onGiveUpExhausted` are accepted but not acted on for
+    // codex — it has no give-up ladder (no confirming hook to verify against), a named, disclosed
+    // simplification (parity matrix's own DoD status).
+    const liveCodexEntry = this.liveCodex.get(sessionId);
+    if (liveCodexEntry) {
+      const { text: sanitizedCodexText } = sanitizeLoneSurrogates(text, kind);
+      return this.enqueueStdinCodex(sessionId, liveCodexEntry, sanitizedCodexText, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, reportEventId, logicalId, mintedAtGen, mintedAtWallClock);
+    }
     const live = this.live.get(sessionId);
     // `queued: false` makes the negative explicit: nothing is recorded, nothing will ever deliver this —
     // unlike the `held` path below, where `queued: true` is exactly as durable/successful as it sounds.
@@ -7926,7 +8511,7 @@ export class PtyHost {
    * Wakes every pending waitForMcpSeen caller. See Live.mcpSeen for why this proxy signal exists.
    */
   markMcpSeen(sessionId: string): void {
-    const live = this.live.get(sessionId);
+    const live = this.findAnyLive(sessionId);
     if (!live?.alive || live.mcpSeen) return;
     live.mcpSeen = true;
     const waiters = live.mcpSeenWaiters;
@@ -7943,7 +8528,7 @@ export class PtyHost {
    * behavior), never as an error — this is a best-effort proxy signal, not a guarantee.
    */
   waitForMcpSeen(sessionId: string, timeoutMs: number = MCP_READY_TIMEOUT_MS): Promise<boolean> {
-    const live = this.live.get(sessionId);
+    const live = this.findAnyLive(sessionId);
     if (!live?.alive) return Promise.resolve(false);
     if (live.mcpSeen) return Promise.resolve(true);
     return new Promise<boolean>((resolve) => {
@@ -7965,7 +8550,7 @@ export class PtyHost {
    * to get the stable ids it needs to address a specific entry.
    */
   getPending(sessionId: string): string[] {
-    return (this.live.get(sessionId)?.pending ?? []).map((m) => m.text);
+    return (this.findAnyLive(sessionId)?.pending ?? []).map((m) => m.text);
   }
 
 
@@ -7978,7 +8563,7 @@ export class PtyHost {
    * inbound can't redirect an in-flight turn's reply. Returns null for an unknown/dead session.
    */
   getActiveTurnOrigin(sessionId: string): TurnRoute | null {
-    return this.live.get(sessionId)?.activeTurnRoute ?? null;
+    return this.findAnyLive(sessionId)?.activeTurnRoute ?? null;
   }
 
   /**
@@ -7990,7 +8575,7 @@ export class PtyHost {
    * history row so the web chat renders the amber event line instead of an ordinary bubble.
    */
   getActiveTurnIsProactive(sessionId: string): boolean {
-    return this.live.get(sessionId)?.activeTurnProactive ?? false;
+    return this.findAnyLive(sessionId)?.activeTurnProactive ?? false;
   }
 
   /**
@@ -8004,7 +8589,7 @@ export class PtyHost {
    * attest. Returns null for an unknown/dead session.
    */
   getActiveTurnOwnerText(sessionId: string): string | null {
-    return this.live.get(sessionId)?.activeTurnOwnerText ?? null;
+    return this.findAnyLive(sessionId)?.activeTurnOwnerText ?? null;
   }
 
   /**
@@ -8019,7 +8604,7 @@ export class PtyHost {
    * or one with no owner-authored turn yet.
    */
   getRecentOwnerTurns(sessionId: string): string[] {
-    return this.live.get(sessionId)?.recentOwnerTurns.slice() ?? [];
+    return this.findAnyLive(sessionId)?.recentOwnerTurns.slice() ?? [];
   }
 
   /**
@@ -8030,7 +8615,7 @@ export class PtyHost {
    * another's acts. Returns null for an unknown/dead session.
    */
   getActiveTurnSenderId(sessionId: string): string | null {
-    return this.live.get(sessionId)?.activeTurnSenderId ?? null;
+    return this.findAnyLive(sessionId)?.activeTurnSenderId ?? null;
   }
 
   /**
@@ -8083,7 +8668,7 @@ export class PtyHost {
     const texts: string[] = [];
     const holds: Record<number, number> = {};
     const mintedAt: Record<number, number> = {};
-    for (const m of this.live.get(sessionId)?.pending ?? []) {
+    for (const m of this.findAnyLive(sessionId)?.pending ?? []) {
       if (m.onDeliver) continue;
       if (this.isGiveUpHeld(m)) holds[texts.length] = m.giveUpHeldUntil!;
       if (m.mintedAtWallClock !== undefined) mintedAt[texts.length] = m.mintedAtWallClock;
@@ -8109,7 +8694,7 @@ export class PtyHost {
     // `mintedAtWallClock` (card 1c47454b) are additive for the SAME reason — a test asserting a carried
     // paste-recovery notice's age evidence survived (or was deliberately dropped) a recycle/restart
     // boundary needs to read the REAL post-carry state, not assume it.
-    return (this.live.get(sessionId)?.pending ?? []).map(({ id, text, source, kind, giveUpGen, mintedAtGen, mintedAtWallClock }) => ({ id, text, source, kind, giveUpGen, mintedAtGen, mintedAtWallClock }));
+    return (this.findAnyLive(sessionId)?.pending ?? []).map(({ id, text, source, kind, giveUpGen, mintedAtGen, mintedAtWallClock }) => ({ id, text, source, kind, giveUpGen, mintedAtGen, mintedAtWallClock }));
   }
 
   /**
@@ -8122,7 +8707,7 @@ export class PtyHost {
    * consumePending) — a peek, not a drain. Returns 0 for a dead/unknown session.
    */
   pendingAgentCount(sessionId: string): number {
-    return (this.live.get(sessionId)?.pending ?? []).filter((m) => m.kind === "agent").length;
+    return (this.findAnyLive(sessionId)?.pending ?? []).filter((m) => m.kind === "agent").length;
   }
 
   /**
@@ -8149,7 +8734,7 @@ export class PtyHost {
    * reasoned choice, not an accidental bypass.
    */
   consumePending(sessionId: string): string[] {
-    const live = this.live.get(sessionId);
+    const live = this.findAnyLive(sessionId);
     if (!live?.alive) return []; // dead/unknown session: nothing to consume (don't hand back a stale queue)
     const removed = live.pending.splice(0); // empty the queue in place AND keep the removed entries
     // inbox_pull HANDS these to the recipient (it returns them to the agent) — that's delivery, so fire
@@ -8173,7 +8758,7 @@ export class PtyHost {
    * session. Internal to the host (called by SessionService), never exposed to the UI or an agent.
    */
   flushPending(sessionId: string): QueuedMessage[] {
-    const live = this.live.get(sessionId);
+    const live = this.findAnyLive(sessionId);
     if (!live?.alive) return [];
     return live.pending.splice(0); // empty the queue in place AND hand the removed entries (with onDeliver) back
   }
@@ -8197,7 +8782,7 @@ export class PtyHost {
    * empty `questionIds`, or when nothing matched.
    */
   purgeQueuedByQuestionIds(sessionId: string, questionIds: readonly string[]): QueuedMessage[] {
-    const live = this.live.get(sessionId);
+    const live = this.findAnyLive(sessionId);
     if (!live?.alive || questionIds.length === 0) return [];
     const ids = new Set(questionIds);
     const removed: QueuedMessage[] = [];
@@ -8224,7 +8809,7 @@ export class PtyHost {
    * `reportEventIds`, or when nothing matched.
    */
   purgeQueuedByReportEventIds(sessionId: string, reportEventIds: readonly string[]): QueuedMessage[] {
-    const live = this.live.get(sessionId);
+    const live = this.findAnyLive(sessionId);
     if (!live?.alive || reportEventIds.length === 0) return [];
     const ids = new Set(reportEventIds);
     const removed: QueuedMessage[] = [];
@@ -8258,7 +8843,7 @@ export class PtyHost {
    * would risk dropping a report the manager hasn't actually acted on yet.
    */
   purgeQueuedWorkerReportNudgesForWorker(managerSessionId: string, workerSessionId: string): QueuedMessage[] {
-    const live = this.live.get(managerSessionId);
+    const live = this.findAnyLive(managerSessionId);
     if (!live?.alive) return [];
     const removed: QueuedMessage[] = [];
     for (let i = live.pending.length - 1; i >= 0; i--) {
@@ -8294,7 +8879,7 @@ export class PtyHost {
    * false.
    */
   purgeQueuedWorkerIdleNudges(managerSessionId: string, workerSessionId: string): QueuedMessage[] {
-    const live = this.live.get(managerSessionId);
+    const live = this.findAnyLive(managerSessionId);
     if (!live?.alive) return [];
     const prefixes = [`[loom:worker-idle] worker ${workerSessionId} `, `[loom:worker-spawn-broken] worker ${workerSessionId}`];
     const removed: QueuedMessage[] = [];
@@ -8343,7 +8928,7 @@ export class PtyHost {
    * a plain false with no `refused` — it's not a boundary violation, just a lost race with the drain.)
    */
   deleteQueued(sessionId: string, id: string): { deleted: boolean; refused?: boolean } {
-    const live = this.live.get(sessionId);
+    const live = this.findAnyLive(sessionId);
     if (!live?.alive) return { deleted: false };
     const i = live.pending.findIndex((m) => m.id === id);
     if (i < 0) return { deleted: false }; // already drained / unknown id — safe no-op
@@ -8353,7 +8938,7 @@ export class PtyHost {
   }
 
   editQueued(sessionId: string, id: string, text: string): { edited: boolean; refused?: boolean } {
-    const live = this.live.get(sessionId);
+    const live = this.findAnyLive(sessionId);
     if (!live?.alive) return { edited: false };
     const m = live.pending.find((m) => m.id === id);
     if (!m) return { edited: false }; // already drained / unknown id — safe no-op
@@ -8406,7 +8991,7 @@ export class PtyHost {
    * dead/unknown session.
    */
   reorderQueued(sessionId: string, orderedIds: string[]): { reordered: boolean; refused?: boolean } {
-    const live = this.live.get(sessionId);
+    const live = this.findAnyLive(sessionId);
     if (!live?.alive) return { reordered: false };
     const byId = new Map(live.pending.map((m) => [m.id, m] as const));
     // Boundary guard: a named id that resolves to an agent-authored entry is a trust-boundary violation —
@@ -8814,6 +9399,18 @@ export class PtyHost {
       if (!live.alive || live.kind !== "claude") continue; // shells/canned entries have no busy/queue to heal or drain
       this.healIfStuck(live, sessionId);
       this.drainPending(sessionId);
+    }
+    // Code Review M9 fix: codex sessions used to be excluded from this safety net TWICE over — once by
+    // this loop only ever iterating `this.live` (codex lives in the separate `liveCodex` map), and again by
+    // `drainCodexPending`'s only call site being the onData falling edge, which a missed/never-fired busy
+    // transition (a marker split across chunks, a screen redraw this project's own regex never matches)
+    // leaves with NO recovery path — a stranded pending queue that would otherwise sit forever. Codex has
+    // no `healIfStuck` equivalent (no busySince/heal concept, a named Phase-1 simplification — see
+    // `setCodexBusy`'s own doc), so this only drains; a codex session that is genuinely still busy is a
+    // no-op here, exactly like `drainPending`'s own busy-gate for claude.
+    for (const [sessionId, live] of this.liveCodex) {
+      if (!live.alive || live.busy) continue;
+      this.drainCodexPending(sessionId, live);
     }
   }
 
@@ -11153,7 +11750,7 @@ export class PtyHost {
   }
 
   subscribe(sessionId: string, sub: Subscriber): () => void {
-    const live = this.live.get(sessionId);
+    const live = this.findAnyLive(sessionId);
     if (!live) return () => {};
     // Replay ring so a LATE attach sees a coherent screen, then stream live.
     const sb = Buffer.concat(live.ring.chunks);
@@ -11167,6 +11764,13 @@ export class PtyHost {
   }
 
   writeStdin(sessionId: string, data: string): void {
+    // Code Review M4 fix: this used to read ONLY `this.live.get`, so a codex session (registered in the
+    // separate `liveCodex` map) silently discarded every raw keystroke a human typed into its terminal
+    // tile — `live` below would be `undefined`, and the whole rest of this method (composer-dirty
+    // tracking, the human-submit-hold dance) is Claude-Ink-TUI-specific machinery with no codex equivalent
+    // anyway, so codex gets its OWN, simpler passthrough rather than a parameterization of this one.
+    const liveCodexEntry = this.liveCodex.get(sessionId);
+    if (liveCodexEntry) { this.writeStdinCodex(liveCodexEntry, data); return; }
     const live = this.live.get(sessionId);
     // DIAGNOSTIC ONLY (card 1f74080a instrumentation, no control-flow change): this is the ONE write path
     // with NO busy gate at all (by design — a real human must always be able to type) and the ONLY caller
@@ -11277,6 +11881,8 @@ export class PtyHost {
   }
 
   stop(sessionId: string, mode: StopMode): void {
+    const liveCodexEntry = this.liveCodex.get(sessionId);
+    if (liveCodexEntry) { this.stopCodex(sessionId, liveCodexEntry, mode); return; }
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
     // A Stop intent must NOT be defeated by a queued inbound turn re-arming busy. Mark the session
@@ -11394,6 +12000,8 @@ export class PtyHost {
    * that live turn's busy. If it ended and stayed idle, our setBusy(false) is a harmless idempotent repeat.
    */
   interruptForRedirect(sessionId: string): void {
+    const liveCodexEntry = this.liveCodex.get(sessionId);
+    if (liveCodexEntry) { this.interruptForRedirectCodex(sessionId, liveCodexEntry); return; }
     const live = this.live.get(sessionId);
     if (!live?.alive || live.stopping || !live.ready || !live.busy) {
       // eslint-disable-next-line no-console
@@ -11497,7 +12105,7 @@ export class PtyHost {
   }
 
   isAlive(sessionId: string): boolean {
-    return this.live.get(sessionId)?.alive ?? false;
+    return this.findAnyLive(sessionId)?.alive ?? false;
   }
 
   /** Whether a session's turn is CURRENTLY in flight — the same in-memory `live.busy` flag `setBusy`
@@ -11507,7 +12115,7 @@ export class PtyHost {
    *  of always cutting it off mid-generation. Returns false for a dead/unknown session — nothing is "in
    *  flight" there. */
   isBusy(sessionId: string): boolean {
-    return this.live.get(sessionId)?.busy ?? false;
+    return this.findAnyLive(sessionId)?.busy ?? false;
   }
 
   /**
@@ -11533,7 +12141,7 @@ export class PtyHost {
    * caller today.
    */
   holdDrain(sessionId: string): void {
-    const live = this.live.get(sessionId);
+    const live = this.findAnyLive(sessionId);
     if (live) live.drainHeld = true;
   }
 
@@ -11542,7 +12150,7 @@ export class PtyHost {
    *  re-trigger a drain: the caller that held it is expected to `flushPending`/decide next, exactly as
    *  `upgradeCompanionCapabilities` does immediately after releasing. */
   releaseDrain(sessionId: string): void {
-    const live = this.live.get(sessionId);
+    const live = this.findAnyLive(sessionId);
     if (live) live.drainHeld = false;
   }
 
@@ -11551,7 +12159,7 @@ export class PtyHost {
    *  through createPty). Read by the companion capability panel to decide whether a grant change is still
    *  pending a respawn to take effect (grant created AFTER this ⇒ not yet applied to the running process). */
   liveStartedAt(sessionId: string): number | null {
-    const live = this.live.get(sessionId);
+    const live = this.findAnyLive(sessionId);
     return live && live.alive ? live.startedAt : null;
   }
 
@@ -11560,7 +12168,7 @@ export class PtyHost {
    *  the session's own still-live process from that sweep — see {@link reapProcessesRootedInWorktree}'s
    *  `excludePids`. */
   getPid(sessionId: string): number | undefined {
-    return this.live.get(sessionId)?.pid;
+    return this.findAnyLive(sessionId)?.pid;
   }
 
   /** Epoch ms of this session's last pty OUTPUT chunk (`Live.lastOutputAt`), or undefined if it isn't
@@ -11571,7 +12179,7 @@ export class PtyHost {
    *  (worker_list/worker_status) so a manager can tell "busy + progressing" from "possibly wedged" without
    *  spending a worker_transcript pull. */
   getLastOutputAt(sessionId: string): number | undefined {
-    return this.live.get(sessionId)?.lastOutputAt;
+    return this.findAnyLive(sessionId)?.lastOutputAt;
   }
 
   /** Cumulative count of characters possibly still stranded in this session's composer from an earlier
@@ -11816,7 +12424,7 @@ export class PtyHost {
     return this.live.get(sessionId)?.firstTurnStarted ?? false;
   }
 
-  private appendRing(live: Live, buf: Buffer): void {
+  private appendRing(live: Live | CodexLive, buf: Buffer): void {
     live.ring.chunks.push(buf);
     live.ring.bytes += buf.length;
     while (live.ring.bytes > RING_CAP_BYTES && live.ring.chunks.length > 1) {
@@ -11824,7 +12432,7 @@ export class PtyHost {
     }
   }
 
-  private broadcastControl(live: Live, e: TerminalControl): void {
+  private broadcastControl(live: Live | CodexLive, e: TerminalControl): void {
     for (const s of live.subscribers) { try { s.onControl(e); } catch { /* ignore */ } }
   }
 }

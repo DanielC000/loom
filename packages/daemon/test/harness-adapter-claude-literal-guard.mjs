@@ -91,6 +91,17 @@ const ALLOWLIST = new Map([
   ["pty/session-name.ts", "both"],        // Scope-4: folds into the claude adapter module
   ["pty/tool-attribution.ts", "both"],    // Claude Code's own PreToolUse/SubagentStart/SubagentStop hook shape (folds in)
   ["pty/host.ts", "bare"],                // Live.kind:"claude" + LOOM_CLAUDE_BIN default only — see header
+  // Multi-harness epic df1f94b0 Phase 1 (card 353f6dc4): the new harness field's TYPE is a two-way enum
+  // ("claude"|"codex") — generic infra that RESOLVES/VALIDATES/STORES that enum now legitimately names
+  // "claude" as one of exactly two valid values, the SAME shape as host.ts's Live.kind:"claude"
+  // discriminator already allowlisted above. "bare" only (not "both"): neither file should ever gain a
+  // `.claude` PATH literal — that arm stays armed.
+  ["db.ts", "bare"],                      // harness column DEFAULT/comment prose + toProfile/toSession's `?? undefined` cast
+  ["profiles/validate.ts", "bare"],       // harness: z.enum(["claude","codex"]) — the human-only write validator
+  // Card 353f6dc4 (this same epic, later in Phase 1): resolveAgentSpawn's own return-type signature names
+  // the SAME two-way enum ("claude"|"codex") — generic spawn-resolution infra, not the adapter module.
+  // "bare" only: this file has no business ever gaining a `.claude` PATH literal.
+  ["sessions/service.ts", "bare"],
 ]);
 
 function walk(dir, out) {

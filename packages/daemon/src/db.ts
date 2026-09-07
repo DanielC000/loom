@@ -254,7 +254,11 @@ CREATE TABLE IF NOT EXISTS profiles (
   -- bundled-profile customization base snapshot: JSON of the shipped def (sans id) at the user's last
   -- sync. NULL = unset (falls back to shipped at read time, like a missing skill base). Backfilled at boot
   -- by seedProfileBaseSnapshots for bundled-by-name rows; advanced on adopt/reset. Computed state only.
-  base_snapshot TEXT
+  base_snapshot TEXT,
+  -- Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4: which vendor CLI a session under this rig
+  -- spawns as. NULL = "claude" (today's only harness, byte-identical spawn) — HUMAN-set only, same
+  -- trust class as gateCommand (selects which binary gets spawned).
+  harness TEXT
 );
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
@@ -409,6 +413,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- agent-tooling P4: registry-capability grants pinned at spawn (JSON {slug, connectionId?}[]), carried
   -- across every respawn (resume/fork/recycle) like browser_testing. [] on every legacy row (byte-identical).
   capabilities TEXT NOT NULL DEFAULT '[]',
+  -- Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4: which vendor CLI this session's pty runs,
+  -- pinned at spawn from the session's Profile (mirrors browser_testing) and carried across every
+  -- respawn (resume/fork/recycle) so a resumed Codex worker never silently respawns as claude. Nullable,
+  -- no DEFAULT (mirrors repo_key's shape): NULL means "claude" — every legacy row keeps today's exact
+  -- behavior with zero data migration.
+  harness TEXT,
   parent_session_id TEXT,
   task_id TEXT,
   worktree_path TEXT,
@@ -1509,6 +1519,10 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   // agent-tooling P4: registry-capability grants pinned at spawn (JSON array); legacy rows backfill to
   // '[]' = none (mirrors connections' off-by-default direction).
   capabilities: "TEXT NOT NULL DEFAULT '[]'",
+  // Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4: pinned vendor-CLI selection (mirrors
+  // browser_testing's pinning shape, repo_key's nullable/no-DEFAULT shape). NULL on every legacy row =
+  // "claude" — today's only harness, zero data migration.
+  harness: "TEXT",
   parent_session_id: "TEXT",
   task_id: "TEXT",
   worktree_path: "TEXT",
@@ -1604,6 +1618,9 @@ const PROFILE_ADDED_COLUMNS: Record<string, string> = {
   // bundled-profile customization `base` snapshot (JSON of the shipped def, sans id). Nullable; legacy
   // rows backfill to NULL and seedProfileBaseSnapshots fills bundled-by-name rows at boot (safe direction).
   base_snapshot: "TEXT",
+  // Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4: vendor-CLI selection. Nullable; legacy rows
+  // backfill to NULL = "claude" (zero data migration, byte-identical spawn).
+  harness: "TEXT",
 };
 
 /** Columns added to `schedules` after phase-2; applied to existing DBs by migrateSchedules(). */
@@ -4730,8 +4747,8 @@ export class Db {
   }
   insertProfile(p: Profile): void {
     this.db.prepare(
-      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,connections,capabilities)
-       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@connections,@capabilities)`,
+      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,connections,capabilities,harness)
+       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@connections,@capabilities,@harness)`,
     ).run({
       id: p.id, name: p.name, role: p.role ?? null, description: p.description,
       // string[] columns persist as JSON text; skills NULL means "deliver all".
@@ -4745,6 +4762,7 @@ export class Db {
       noCommit: p.noCommit ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       connections: JSON.stringify(p.connections ?? []), // [] = no access (absent ⇒ [], NOT skills' "all")
       capabilities: JSON.stringify(p.capabilities ?? []), // agent-tooling P4: registry-capability grants, raw
+      harness: p.harness ?? null, // NULL = "claude" (absent ⇒ today's only harness)
     });
   }
   /** Partial edit of a profile. Provided fields are written (null clears); omitted are left as-is. */
@@ -4764,6 +4782,7 @@ export class Db {
       no_commit: patch.noCommit === undefined ? undefined : patch.noCommit ? 1 : 0,
       connections: patch.connections === undefined ? undefined : JSON.stringify(patch.connections),
       capabilities: patch.capabilities === undefined ? undefined : JSON.stringify(patch.capabilities),
+      harness: patch.harness === undefined ? undefined : patch.harness ?? null,
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
@@ -5116,12 +5135,12 @@ export class Db {
       `INSERT INTO sessions (
          id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
-         role,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,skills,connections,capabilities,parent_session_id,task_id,worktree_path,branch,review_base_sha,repo_key,gen,recycled_from,
+         role,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,skills,connections,capabilities,harness,parent_session_id,task_id,worktree_path,branch,review_base_sha,repo_key,gen,recycled_from,
          ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline,scheduled_spawn)
        VALUES (
          @id,@projectId,@agentId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
-         @role,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@skills,@connections,@capabilities,@parentSessionId,@taskId,@worktreePath,@branch,@reviewBaseSha,@repoKey,@gen,@recycledFrom,
+         @role,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@skills,@connections,@capabilities,@harness,@parentSessionId,@taskId,@worktreePath,@branch,@reviewBaseSha,@repoKey,@gen,@recycledFrom,
          @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline,@scheduledSpawn)`,
     ).run({
       ...s,
@@ -5129,6 +5148,7 @@ export class Db {
       // Orchestration fields are optional on Session; coerce absent ones (undefined) to NULL/0
       // so plain phase-1 session literals insert unchanged.
       role: s.role ?? null,
+      harness: s.harness ?? null, // NULL = "claude" (absent ⇒ today's only harness) on every plain session literal
       browserTesting: s.browserTesting ? 1 : 0, // off (0) on every plain session literal
       documentConversion: s.documentConversion ? 1 : 0, // off (0) on every plain session literal
       vaultWrite: s.vaultWrite ? 1 : 0, // off (0) on every plain session literal
@@ -7926,6 +7946,8 @@ function toProfile(r0: unknown): Profile {
     connections: (() => { try { return JSON.parse((r.connections as string) || "[]") as string[]; } catch { return []; } })(),
     // agent-tooling P4: registry-capability grants (raw passthrough); malformed/absent degrades to [] = none.
     capabilities: (() => { try { return JSON.parse((r.capabilities as string) || "[]") as CapabilityGrant[]; } catch { return []; } })(),
+    // multi-harness epic Phase 1 (card 353f6dc4): NULL ⇒ undefined = "claude" (today's only harness).
+    harness: (r.harness as "claude" | "codex" | null) ?? undefined,
   };
 }
 function toSession(r0: unknown): Session {
@@ -7957,6 +7979,8 @@ function toSession(r0: unknown): Session {
     scheduledSpawn: (r.scheduled_spawn as number) === 1,
     // pinned registry-capability grants (agent-tooling P4); malformed/absent degrades to [] = none.
     capabilities: (() => { try { return JSON.parse((r.capabilities as string) || "[]") as CapabilityGrant[]; } catch { return []; } })(),
+    // pinned vendor-CLI selection (multi-harness epic Phase 1, card 353f6dc4); NULL ⇒ undefined = "claude".
+    harness: (r.harness as "claude" | "codex" | null) ?? undefined,
     parentSessionId: (r.parent_session_id as string) ?? null,
     taskId: (r.task_id as string) ?? null,
     worktreePath: (r.worktree_path as string) ?? null,

@@ -62,6 +62,7 @@ const EXPECTED_AGENT_KEYS = [
 const EXPECTED_PROFILE_KEYS = [
   "id", "name", "role", "description", "allowDelta", "skills", "model", "icon", "browserTesting",
   "documentConversion", "restrictedTools", "noCommit", "connections", "capabilities", "vaultWrite",
+  "harness", // multi-harness epic df1f94b0 Phase 1 (card 353f6dc4)
 ];
 
 const projected = {

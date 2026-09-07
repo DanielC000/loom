@@ -3046,7 +3046,7 @@ export class OrchestrationMcpRouter {
       gen: 1, recycledFrom: 1, ctxInputTokens: 1, ctxTurns: 1, turnSeq: 1, ctxUpdatedAt: 1,
       model: 1, rateLimitedUntil: 1, rateLimitDeadline: 1, browserTesting: 1, documentConversion: 1,
       restrictedTools: 1, noCommit: 1, skills: 1, connections: 1, vaultWrite: 1, companionLeadMode: 1,
-      capabilities: 1, archivedAt: 1, scheduledSpawn: 1,
+      capabilities: 1, archivedAt: 1, scheduledSpawn: 1, harness: 1,
     };
     const SESSION_ROW_KEYS = Object.keys(SESSION_ROW_FIELDS) as (keyof Omit<Session, "pendingMerge">)[];
 

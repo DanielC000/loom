@@ -87,7 +87,7 @@ export function agentFields(row: Agent | undefined): Agent | undefined {
 const PROFILE_FIELDS: Record<keyof Profile, 1> = {
   id: 1, name: 1, role: 1, description: 1, allowDelta: 1, skills: 1, model: 1,
   icon: 1, browserTesting: 1, documentConversion: 1, restrictedTools: 1, noCommit: 1,
-  connections: 1, capabilities: 1, vaultWrite: 1,
+  connections: 1, capabilities: 1, vaultWrite: 1, harness: 1,
 };
 const PROFILE_KEYS = Object.keys(PROFILE_FIELDS) as (keyof Profile)[];
 

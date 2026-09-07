@@ -75,6 +75,12 @@ const profileSchema = z
         message: `capabilities may not name a reserved builtin slug (${RESERVED_CAPABILITY_SLUGS.join(", ")}) — use the browserTesting/documentConversion booleans instead`,
       })
       .optional(),
+    // Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4: which vendor CLI a session under this rig
+    // spawns as. STRICTER than browserTesting/documentConversion (see AGENT_FORBIDDEN_PROFILE_KEYS
+    // below): selecting which BINARY gets spawned is the same trust class as gateCommand, not a
+    // sandboxed capability — rejected even on the elevated Setup Assistant's/Platform Lead's own
+    // profile-writing MCP tools, human REST is the ONLY grant path.
+    harness: z.enum(["claude", "codex"]).optional(),
   })
   .strict();
 
@@ -91,8 +97,12 @@ const profileSchema = z
  * human-reviewed vault corpus is exfil/tamper-adjacent, not a sandboxed capability — an elevated
  * profile-writing agent must never be able to grant itself (or any other rig) the ability to write
  * vault content a human will later trust as their own.
+ * `harness` (multi-harness epic df1f94b0 Phase 1, card 353f6dc4) gets the SAME stricter posture too, per
+ * an explicit lead ruling on that card: selecting which vendor BINARY a session spawns is the same trust
+ * class as `gateCommand`, not a sandboxed capability like `browserTesting`/`documentConversion` — an
+ * elevated profile-writing agent must never be able to switch a rig onto a different CLI unsupervised.
  */
-const AGENT_FORBIDDEN_PROFILE_KEYS = ["connections", "capabilities", "vaultWrite"] as const;
+const AGENT_FORBIDDEN_PROFILE_KEYS = ["connections", "capabilities", "vaultWrite", "harness"] as const;
 
 /**
  * Reject a RAW create/patch payload (BEFORE any merge with an existing profile) that tries to set a

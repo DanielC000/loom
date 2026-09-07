@@ -1,6 +1,7 @@
 import type { Db } from "../db.js";
 import { engineTranscriptExists } from "./transcript.js";
 import { claudeAdapter } from "../pty/claude-adapter.js";
+import { codexAdapter } from "../pty/codex-adapter.js";
 
 /**
  * Dead-ID detection (§12-Q5). A stored session is unresumable once its engine transcript
@@ -32,4 +33,21 @@ export function sweepDeadSessions(db: Db): number {
  */
 export function watchClaudeProjects(db: Db, onChange?: (marked: number) => void) {
   return claudeAdapter.watchLiveness(() => { const n = sweepDeadSessions(db); if (n > 0) onChange?.(n); });
+}
+
+/**
+ * Code Review M6 (card 353f6dc4): the codex sibling of {@link watchClaudeProjects} — same generic
+ * `sweepDeadSessions` re-sweep, watching `~/.codex/sessions` (`codexAdapter.watchLiveness`) instead of
+ * `~/.claude/projects`. `codexAdapter` was previously defined but imported by NOTHING in the real serving
+ * code — this is the first real consumer, mirroring `claudeAdapter`'s own usage above exactly. Currently a
+ * near-no-op in practice: `sweepDeadSessions` only acts on a session whose `engineSessionId` is already
+ * set, and nothing yet populates `engineSessionId` for a codex session (codex has no SessionStart-hook
+ * equivalent to report it the way claude's does) — a separate, larger, disclosed gap (see the multi-harness
+ * parity matrix's own "Known gaps" note) that also means `worker_transcript` cannot yet read a codex
+ * session's transcript at all, independent of this watcher. Wiring this now costs nothing and means the
+ * day `engineSessionId` capture lands, dead-session detection for codex starts working with no further
+ * change here.
+ */
+export function watchCodexSessions(db: Db, onChange?: (marked: number) => void) {
+  return codexAdapter.watchLiveness(() => { const n = sweepDeadSessions(db); if (n > 0) onChange?.(n); });
 }

@@ -2917,7 +2917,7 @@ export class SessionService {
    */
   private resolveAgentSpawn(
     agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false, companionName?: string,
-  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; connections: string[]; vaultWrite: boolean } {
+  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; connections: string[]; vaultWrite: boolean; harness: "claude" | "codex" | undefined } {
     // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the agent's
     // own prompt, and NO allow delta (exactly a profile-less agent's "+New").
     const profile = (forcePlain || !agent.profileId) ? undefined : this.db.getProfile(agent.profileId);
@@ -3019,6 +3019,11 @@ export class SessionService {
       // Profile-pinned confined vault-write grant (backstop false under forcePlain / no profile / an
       // unset field) — mirrors connections: read LIVE by TaskMcpRouter, never threaded to pty.spawn.
       vaultWrite: resolved.vaultWrite,
+      // Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4: profile-pinned vendor-CLI selection →
+      // spawn recipe. `|| undefined` mirrors the model coercion (null/absent ⇒ "engine default", i.e.
+      // "claude") — RESOLVED ONCE HERE, at the same chokepoint as every other profile-conferred field;
+      // see `createPty`'s own doc comment for where this feeds the actual binary choice.
+      harness: resolved.harness || undefined,
     };
   }
 
@@ -3077,7 +3082,7 @@ export class SessionService {
     // prompt is always the agent's own). No caller role here (plain "+New"), so the profile's role
     // applies when present. No profile ⇒ role undefined, the config permission unchanged — today's session.
     // forcePlain (P3) pins role to undefined even on a profile agent (see resolveAgentSpawn).
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false, opts.companionName);
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false, opts.companionName);
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -3102,6 +3107,7 @@ export class SessionService {
       skills, // profile-conferred skill subset, pinned (null ⇒ deliver all — today's behavior)
       connections, // profile-conferred authenticated-egress allowlist, pinned ([] ⇒ no access — today's behavior)
       vaultWrite, // profile-conferred confined vault-write grant, pinned (false ⇒ no access — today's behavior)
+      harness, // multi-harness epic df1f94b0 P1: profile-conferred vendor CLI, pinned (undefined ⇒ "claude")
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty, so onExit ('exited') from a fast-failing spawn always
@@ -3182,6 +3188,7 @@ export class SessionService {
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
       sessionName, // card f9b47cd1: `-n <name>` resume-picker label (version-gated at createPty)
+      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     });
     // Card badba5a8: observability only — record whether the codescape block was injected. Only fires for
     // the role==="manager" branch (the only one that ever computes codescapeStatus above).
@@ -3219,7 +3226,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'manager' role from the caller (scheduler/REST) ALWAYS wins; the profile (if any) only
     // layers its prompt + allowDelta. No profile ⇒ byte-identical to today's manager spawn.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "manager");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness } = this.resolveAgentSpawn(agent, config, "manager");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -3245,6 +3252,7 @@ export class SessionService {
       connections, // profile-pinned authenticated-egress allowlist, pinned on the row ([] ⇒ no access)
       vaultWrite, // profile-pinned confined vault-write grant, pinned on the row (false ⇒ no access)
       scheduledSpawn: !!opts?.scheduled, // card 53edd8d5: true ONLY for the Scheduler's own spawn call
+      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -3293,6 +3301,7 @@ export class SessionService {
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
       sessionName: composeRoleSessionName("manager", project.name), // card f9b47cd1: `loom-<project>-mgr`
+      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     });
     // Card badba5a8: observability only — record whether the codescape block was injected.
     this.db.appendEvent({
@@ -3331,7 +3340,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'platform' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. No profile ⇒ byte-identical to today's platform-lead spawn.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "platform");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness } = this.resolveAgentSpawn(agent, config, "platform");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -3356,6 +3365,7 @@ export class SessionService {
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
       connections, // profile-pinned authenticated-egress allowlist, pinned on the row ([] ⇒ no access)
       vaultWrite, // profile-pinned confined vault-write grant, pinned on the row (false ⇒ no access)
+      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -3384,6 +3394,7 @@ export class SessionService {
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
       sessionName: PLATFORM_LEAD_SESSION_NAME, // card f9b47cd1: "loom-lead" — no project segment
+      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     });
     return { ...session, processState: "live" };
   }
@@ -3410,7 +3421,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'auditor' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the restricted loom-audit surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "auditor");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness } = this.resolveAgentSpawn(agent, config, "auditor");
     const codescapeEnabled = resolveCodescapeConfig(project.config).enabled; // card C2: Codescape MCP wiring, per-project opt-in
 
     const now = new Date().toISOString();
@@ -3436,6 +3447,7 @@ export class SessionService {
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
       connections, // profile-pinned authenticated-egress allowlist, pinned on the row ([] ⇒ no access)
       vaultWrite, // profile-pinned confined vault-write grant, pinned on the row (false ⇒ no access)
+      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -3458,6 +3470,7 @@ export class SessionService {
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
       sessionName: composeRoleSessionName("auditor", project.name), // card f9b47cd1: `loom-<project>-audit`
+      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     });
     return { ...session, processState: "live" };
   }
@@ -3491,7 +3504,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'workspace-auditor' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. The locked role — NOT the profile role — drives the loom-user-audit surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "workspace-auditor");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness } = this.resolveAgentSpawn(agent, config, "workspace-auditor");
     const codescapeEnabled = resolveCodescapeConfig(project.config).enabled; // card C2: Codescape MCP wiring, per-project opt-in
 
     const now = new Date().toISOString();
@@ -3517,6 +3530,7 @@ export class SessionService {
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
       connections, // profile-pinned authenticated-egress allowlist, pinned on the row ([] ⇒ no access)
       vaultWrite, // profile-pinned confined vault-write grant, pinned on the row (false ⇒ no access)
+      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -3539,6 +3553,7 @@ export class SessionService {
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
       sessionName: composeRoleSessionName("workspace-auditor", project.name), // card f9b47cd1: `loom-<project>-wsaudit`
+      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     });
     return { ...session, processState: "live" };
   }
@@ -3574,7 +3589,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'setup' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the curated loom-setup surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "setup");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness } = this.resolveAgentSpawn(agent, config, "setup");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -3599,6 +3614,7 @@ export class SessionService {
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
       connections, // profile-pinned authenticated-egress allowlist, pinned on the row ([] ⇒ no access)
       vaultWrite, // profile-pinned confined vault-write grant, pinned on the row (false ⇒ no access)
+      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -3621,6 +3637,7 @@ export class SessionService {
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
       sessionName: composeRoleSessionName("setup", project.name), // card f9b47cd1: `loom-<project>-setup`
+      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     });
     return { ...session, processState: "live" };
   }
@@ -3659,7 +3676,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'operator' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the curated loom-operator surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "operator");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite, harness } = this.resolveAgentSpawn(agent, config, "operator");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -3684,6 +3701,7 @@ export class SessionService {
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
       connections, // profile-pinned authenticated-egress allowlist, pinned on the row ([] ⇒ no access)
       vaultWrite, // profile-pinned confined vault-write grant, pinned on the row (false ⇒ no access)
+      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -3706,6 +3724,7 @@ export class SessionService {
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
       sessionName: composeRoleSessionName("operator", project.name), // card f9b47cd1: `loom-<project>-operator`
+      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
     });
     return { ...session, processState: "live" };
   }
@@ -3839,6 +3858,9 @@ export class SessionService {
       // Carry the pinned skill subset across resume from the ROW (never re-resolve the profile) so the
       // resumed session sees the SAME skills it spawned with. null ⇒ all (today's behavior). (Landmine 1.)
       skills: session.skills ?? null,
+      // Multi-harness epic df1f94b0 P1: carry the pinned vendor CLI across resume from the ROW (never
+      // re-resolve the profile) — a resumed Codex worker must not silently respawn as claude.
+      harness: session.harness ?? undefined,
     });
     // A freshly-resumed session has no turn in flight (resume injects no prompt) — clear any stale
     // busy=true carried in the DB across the restart. Without this the session shows/acts "busy"
@@ -7263,6 +7285,7 @@ export class SessionService {
       skills: src.skills ?? null, // a fork inherits the source's pinned skill subset (null ⇒ all)
       connections: src.connections ?? [], // a fork inherits the source's authenticated-egress allowlist
       vaultWrite: src.vaultWrite ?? false, // a fork inherits the source's confined vault-write grant
+      harness: src.harness ?? undefined, // a fork inherits the source's pinned vendor CLI (undefined ⇒ "claude")
       // Multi-repo epic (49136451) phase 2, Code Review Minor 4: `taskId`/`worktreePath`/`branch` are
       // deliberately NOT carried (a fork is a conversation branch, not a worker — see this method's own
       // doc), but `cwd` IS carried, and for a worker `cwd` === its worktree. `repoKey` alone (with no
@@ -7314,6 +7337,7 @@ export class SessionService {
       capabilities: src.capabilities ?? [], // carry the registry-capability grants onto the fork's pty (matches the fork row)
       restrictedTools: src.restrictedTools ?? false, // carry the restricted-tools disallow onto the fork's pty (matches the fork row)
       skills: src.skills ?? null, // carry the pinned subset onto the fork's pty (matches the fork row)
+      harness: src.harness ?? undefined, // carry the pinned vendor CLI onto the fork's pty (matches the fork row)
     });
     // Project memory (card 2fd9abf9, fork half): --fork-session carries the SOURCE transcript forward
     // with NO startup prompt of its own (mirrors resume()'s "resume injects nothing" invariant), so
@@ -7938,6 +7962,7 @@ export class SessionService {
     const skills = workerSpawn.skills;
     const connections = workerSpawn.connections; // authenticated-egress allowlist (profile-pinned; [] ⇒ no access)
     const vaultWrite = workerSpawn.vaultWrite; // confined vault-write grant (profile-pinned; false ⇒ no access)
+    const harness = workerSpawn.harness; // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
 
     // Safety rails (§17a) — refuse NEW work before any side effect (worktree/pty). In-flight
     // workers are untouched. Pause is global-or-this-manager. (The concurrency cap is admitted
@@ -8112,6 +8137,7 @@ export class SessionService {
         skills, // profile-pinned skill subset for the worker (null ⇒ all); pinned so resume/recycle honor it
         connections, // profile-pinned authenticated-egress allowlist for the worker ([] ⇒ no access)
         vaultWrite, // profile-pinned confined vault-write grant for the worker (false ⇒ no access)
+        harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI for the worker (undefined ⇒ "claude")
         parentSessionId: managerSessionId,
         taskId,
         worktreePath,
@@ -8170,6 +8196,7 @@ export class SessionService {
           restrictedTools, // union the dangerous-native-tool disallow into --disallowedTools iff this worker's profile opted in
           model: workerSpawn.model, // profile-pinned model → `--model` (undefined ⇒ no `--model`); was dropped — workers never honored a profile model pin
           skills, // deliver only the worker profile's skill subset (null ⇒ all)
+          harness, // multi-harness epic df1f94b0 P1: spawn the worker's profile-pinned vendor CLI (undefined ⇒ "claude")
           // Card f9b47cd1: `loom-<project>-<agent>-<taskslug>` (or "-adhoc" for a taskless spawn), collision
           // suffix appended only if it matches a currently-live sibling worker under this same manager.
           // EXCLUDE worker.id itself — the row is already inserted+live by this point (M5 ordering above),
@@ -13206,6 +13233,7 @@ export class SessionService {
         skills: old.skills ?? null, // a recycled worker keeps its pinned skill subset (null ⇒ all)
         connections: old.connections ?? [], // a recycled worker keeps its authenticated-egress allowlist
         vaultWrite: old.vaultWrite ?? false, // a recycled worker keeps its confined vault-write grant
+        harness: old.harness ?? undefined, // a recycled worker keeps its pinned vendor CLI (undefined ⇒ "claude")
         parentSessionId: managerSessionId,
         taskId,
         worktreePath,
@@ -13278,6 +13306,7 @@ export class SessionService {
         restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
         model: workerSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`); was dropped
         skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
+        harness: old.harness ?? undefined, // carry the pinned vendor CLI forward across recycle (undefined ⇒ "claude")
         // Card f9b47cd1: RECOMPUTED (not carried from `old`) from the CURRENT agent name + task title, so a
         // recycled worker "keeps its name" for free as long as neither changed — the same agent/task pair
         // always slugs identically. EXCLUDE both fresh.id (already inserted+live by this point — the row
@@ -13395,6 +13424,7 @@ export class SessionService {
       skills: old.skills ?? null, // carry the pinned skill subset forward (null ⇒ all)
       connections: old.connections ?? [], // carry the authenticated-egress allowlist forward
       vaultWrite: old.vaultWrite ?? false, // carry the confined vault-write grant forward
+      harness: old.harness ?? undefined, // carry the pinned vendor CLI forward (undefined ⇒ "claude")
       scheduledSpawn: old.scheduledSpawn ?? false, // card 53edd8d5: a scheduler-spawned manager can't
       // dodge its own manager-cap budget by self-recycling — the successor still counts against it.
       gen: newGen,
@@ -13428,6 +13458,7 @@ export class SessionService {
       restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
       model: managerSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`); was dropped
       skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
+      harness: old.harness ?? undefined, // carry the pinned vendor CLI forward across recycle (undefined ⇒ "claude")
       sessionName: composeRoleSessionName("manager", project.name), // card f9b47cd1: unchanged across recycle
     });
 
@@ -13589,6 +13620,7 @@ export class SessionService {
       skills: old.skills ?? null, // carry the pinned skill subset forward (null ⇒ all)
       connections: old.connections ?? [], // carry the authenticated-egress allowlist forward
       vaultWrite: old.vaultWrite ?? false, // carry the confined vault-write grant forward
+      harness: old.harness ?? undefined, // carry the pinned vendor CLI forward (undefined ⇒ "claude")
       gen: newGen,
       recycledFrom: old.id,
     };
@@ -13619,6 +13651,7 @@ export class SessionService {
       restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
       model: leadSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`)
       skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
+      harness: old.harness ?? undefined, // carry the pinned vendor CLI forward across recycle (undefined ⇒ "claude")
       sessionName: PLATFORM_LEAD_SESSION_NAME, // card f9b47cd1: "loom-lead" — unchanged across recycle
     });
     // === END ATOMIC LINEAGE HANDOFF ===============================================================

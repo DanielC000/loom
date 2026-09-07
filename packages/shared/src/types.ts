@@ -283,6 +283,15 @@ export interface Profile {
    * produce or update a note, not remove vault content.
    */
   vaultWrite?: boolean;
+  /**
+   * Opt-in CLI-harness selection (multi-harness epic `df1f94b0`, Phase 1, card `353f6dc4`): which
+   * vendor CLI a session under this rig spawns as. Default absent = `"claude"` (today's only harness,
+   * byte-identical spawn) — fully additive, worker-role-only for now (Phase 2, card `5a8236b1`, will add
+   * an AGENT-level override beside `model` that resolves through this same profile field, not a rival
+   * storage site). HUMAN-set only (Profiles UI / REST), like role/browserTesting: selecting which BINARY
+   * gets spawned is the same trust class as `gateCommand` — NEVER exposed via an agent MCP tool.
+   */
+  harness?: "claude" | "codex";
 }
 
 /**
@@ -886,6 +895,15 @@ export interface Session {
    * byte-identical spawn.
    */
   capabilities?: CapabilityGrant[];
+  /**
+   * Opt-in CLI-harness selection, resolved from the session's Profile at spawn and PINNED here (mirrors
+   * `browserTesting`): which vendor CLI this session's pty runs. Absent/`"claude"` ⇒ today's only
+   * harness, byte-identical spawn. Persisted so EVERY respawn path (resume/fork/recycle) keeps the same
+   * harness — a resumed Codex worker must not silently respawn as claude. `"codex"` sessions resolve
+   * through {@link HarnessAdapter}'s `id:"codex"` implementation (`pty/codex-adapter.ts`) instead of
+   * the default claude one.
+   */
+  harness?: "claude" | "codex";
   /**
    * Per-project session Archive: the ISO instant a session was archived (moving a stopped session out
    * of the Workspace rail). null = not archived (every live/normal session). Archived sessions are

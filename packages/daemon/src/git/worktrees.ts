@@ -3702,6 +3702,18 @@ export const STATIC_GUARD_REPO_PATHS = [
   // auto-classify a hit as "real" vs. "synthetic fixture" — every pinned hit was hand-verified once, and
   // any new hit fails the guard loudly rather than being silently trusted.
   "packages/daemon/test/inert-exact-path-corpus-guard.mjs",
+  // Multi-harness epic df1f94b0 Phase 1, card 353f6dc4, lead ruling #5: a corpus-scoped source-text scan
+  // (a pinned method-name list against pty/host.ts, not the whole test/ corpus) asserting every
+  // AGNOSTIC-classified PtyHost method this card migrated routes its session lookup through the shared
+  // `findAnyLive` resolver, with no leftover `this.live.get` — the structural backstop ruling #5 required
+  // against the codex(`liveCodex`)/claude(`live`) two-registry drift hazard: a future AGNOSTIC method that
+  // reads `this.live` directly would silently ignore every codex session, the same silent-wrong-answer
+  // class this array's other guards exist to catch for their own respective source-TEXT properties.
+  // Belongs here on the same ground as its siblings above: a real `pty/host.ts` edit that regresses one of
+  // the 28 pinned methods back onto `this.live.get` changes zero compiled/runtime behavior FOR CLAUDE (the
+  // codex-specific behavior it silently breaks has no claude-side test to catch it), so it could otherwise
+  // take the reduced path and never trip a single check.
+  "packages/daemon/test/pty-agnostic-methods-findanylive-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run

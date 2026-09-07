@@ -9,7 +9,7 @@ import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-mark
 import { Db } from "./db.js";
 import { canOpenRemoteListener, isTrustTierHookActive, tlsRequirementSatisfied, isAllInterfacesBindHost } from "./gateway/trust-tier.js";
 import { getOrCreateLoopbackSecret } from "./gateway/loopback-secret.js";
-import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
+import { sweepDeadSessions, watchClaudeProjects, watchCodexSessions } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
 import { snapshotAndArchiveRecovered } from "./sessions/boot-backstop.js";
 import { deriveCrashOrphanedWorkers, deriveCrashOrphanedManagers } from "./orchestration/crash-orphaned-workers.js";
@@ -40,6 +40,7 @@ import { OrchestrationControl } from "./orchestration/control.js";
 import { Scheduler } from "./orchestration/scheduler.js";
 import { RateLimitWatcher } from "./orchestration/rate-limit-watcher.js";
 import { UsageStatusPoller, prewarmClaudeVersionAsync } from "./orchestration/usage-status.js";
+import { prewarmCodexVersionAsync } from "./pty/codex-doctrine.js";
 import { WakeService } from "./orchestration/wake.js";
 import { PollService } from "./orchestration/poll.js";
 import { EventTriggerService } from "./orchestration/event-triggers.js";
@@ -308,6 +309,9 @@ async function main(): Promise<void> {
   if (dead > 0) console.log(`[boot] marked ${dead} session(s) dead (engine transcript gone)`);
   // Keep dead-ID state fresh as Claude's transcripts come and go.
   watchClaudeProjects(db, (n) => console.log(`[watch] marked ${n} session(s) dead`));
+  // Code Review M6 (card 353f6dc4): the codex sibling — see watchCodexSessions's own doc for why this is
+  // currently a near-no-op (nothing populates a codex session's engineSessionId yet) but costs nothing.
+  watchCodexSessions(db, (n) => console.log(`[watch] marked ${n} codex session(s) dead`));
 
   // PtyHost callbacks persist runtime state into the registry (engine id on receipt; exit).
   // onExit references orchMcp (declared below) — only invoked at runtime, after init.
@@ -814,6 +818,10 @@ async function main(): Promise<void> {
   // prewarmClaudeVersionAsync's doc). Independent of the usage poller/credentials below (the version
   // probe needs neither).
   prewarmClaudeVersionAsync();
+  // Code Review M8 (card 353f6dc4): the codex sibling of the warm above — mirrors it exactly (async,
+  // best-effort, off the spawn hot path). Previously defined but called from nowhere, so the cache never
+  // warmed and every codex spawn hit the cold `fs.existsSync` path.
+  prewarmCodexVersionAsync();
 
   // The graceful-shutdown path, shared by the SIGINT/SIGTERM handlers and the loopback
   // POST /internal/shutdown control hook (`loom stop`). Assigned BELOW, after the watchers it closes

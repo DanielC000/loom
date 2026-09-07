@@ -1260,6 +1260,13 @@ export interface ResolvedProfile {
    * the legacy grants wherever both this field and the booleans are read together.
    */
   capabilities: CapabilityGrant[];
+  /**
+   * Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4: which vendor CLI a session under this rig
+   * spawns as. `null` = engine default (`"claude"`) — mirrors `model`'s null-backstop shape, not a
+   * boolean flag like `browserTesting`. Human-set-only (the agent-facing config validator rejects it,
+   * same trust class as `gateCommand`) — never resolved from anywhere but the profile.
+   */
+  harness: "claude" | "codex" | null;
 }
 
 /** The permanently-reserved builtin capability slugs the legacy boolean flags bridge to (P4). */
@@ -1300,7 +1307,7 @@ export function resolveProfile(
   const startupPrompt = agent.startupPrompt ?? "";
   if (!profile) {
     // The backstop: a null/absent profile confers NO browser/document capability (false) — today's behavior.
-    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false, connections: [], vaultWrite: false, capabilities: [] };
+    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false, connections: [], vaultWrite: false, capabilities: [], harness: null };
   }
   return {
     role: profile.role ?? null,
@@ -1322,6 +1329,9 @@ export function resolveProfile(
     vaultWrite: profile.vaultWrite ?? false,
     // Registry-capability grants — RAW passthrough (see the field doc on ResolvedProfile). Backstop [].
     capabilities: profile.capabilities ?? [],
+    // Multi-harness epic (df1f94b0) Phase 1: which vendor CLI to spawn. Backstop null (engine default,
+    // "claude") — mirrors model's null-backstop shape, not a boolean-flag backstop.
+    harness: profile.harness ?? null,
   };
 }
 
