@@ -6064,22 +6064,54 @@ export class PtyHost {
    * The MCP surface is passed via codex's own per-invocation `-c mcp_servers.<id>.url=<url>` argv form
    * (measured TRANSIENT — see the parity matrix's "MCP wiring" section), built by translating the SAME
    * `buildMcpServers()` result claude's `--mcp-config` uses (`mcpServersToCodexArgs`, codex-host.ts) — one
-   * routing table, so codex's mounted servers can never drift from claude's for the same role.
+   * routing table, so a server this call site DOES pass through can never drift from claude's own
+   * resolution logic for it.
    *
-   * Card `0770d916`: `opts.browserTesting`/`opts.documentConversion`/`opts.capabilities` are threaded into
+   * 🔴 Card `7fa73e2c` correction: this call site does NOT pass every field `createPty`'s own call does, and
+   * that is now a DELIBERATE, DOCUMENTED difference, not the drift the sentence above used to (wrongly)
+   * claim away. Two independent reasons a field is missing here:
+   *  - `opts.codescapeEnabled`/`repoPath`/`worktreeId`/the codescape-supervisor state/`integrationPaths` are
+   *    withheld ON PURPOSE — see the comment at this method's `buildMcpServers` call below for why (a real
+   *    security gap, not an oversight).
+   *  - `opts.model` is DELIBERATELY NOT threaded here yet, despite being mechanically wirable (codex's own
+   *    `-c model=<id>` inline override, per `docs/investigations/049e4a7b-codex-cli-capability-probe/
+   *    findings.md` point 5) — see field-consumers.ts's `model` entry for why it stays a declared, tracked
+   *    gap.
+   *
+   * Card `0770d916`: `opts.browserTesting`/`opts.documentConversion`/`opts.capabilities` ARE threaded into
    * the SAME `buildMcpServers()` call the claude path already passes them to — that function already
    * accepts all three generically, this call site was just the one omitting them, so resolving them here
-   * can never drift from claude's own capability-resolution logic. `opts.model` is DELIBERATELY NOT
-   * threaded here yet, despite being mechanically wirable (codex's own `-c model=<id>` inline override,
-   * per `docs/investigations/049e4a7b-codex-cli-capability-probe/findings.md` point 5) — see
-   * field-consumers.ts's `model` entry for why it stays a declared, tracked gap for now rather than a
-   * rushed fifth fix in the same change.
+   * can never drift from claude's own capability-resolution logic. ⚠️ But threading the ARGUMENT is not the
+   * same as the capability actually MOUNTING for codex: `browserTesting`/`documentConversion` both resolve
+   * to a `{type:"stdio",...}` MCP entry (Playwright/markitdown), and `mcpServersToCodexArgs` (codex-host.ts)
+   * can only translate `{type:"http"}` — a stdio entry is now REPORTED (a loud `console.warn`, card
+   * `7fa73e2c`) and skipped, never silently dropped. `profiles/validate.ts` rejects a NEW
+   * `harness:"codex"`+`browserTesting`/`documentConversion:true` profile at save time for exactly this
+   * reason (`codexStdioCapabilityUnsupportedError`) — the threading here is defense-in-depth for a profile
+   * that predates that guard, not the primary enforcement point.
    */
   protected createCodexPty(opts: SpawnOpts): IPty {
     const bin = resolveExecutable(process.env.LOOM_CODEX_BIN || CODEX_BINARY_NAME);
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
     const capabilityCatalog = this.getCapabilityCatalog();
+    // Card 7fa73e2c: `opts.codescapeEnabled`/`repoPath`/`worktreeId`/the codescape-supervisor state/
+    // `integrationPaths` are DELIBERATELY NOT passed here, unlike createPty's own buildMcpServers call.
+    // Reason: claude's codescape mount is safe only BECAUSE it's paired with a tool-level restriction —
+    // CODESCAPE_TOOL_ALLOW/CODESCAPE_WRITE_TOOLS, enforced via claude's `--allowedTools`/`--disallowedTools`
+    // (see createPty's own extraAllow/disallowedTools wiring below). createCodexPty has NO analogous
+    // per-tool lever at all (verified: opts.permission/disallowedTools never appear anywhere in this
+    // method or spawnCodexProcess) — codex's whole permission model is the two blanket
+    // `-a never -s workspace-write` flags, which approve every tool call, write tools included. Mounting
+    // "codescape" here unconditionally would hand a codex session full, unrestricted read+write access to
+    // the code graph — a strictly WORSE posture than claude's carefully gated mount, not mere parity. This
+    // is the "real design question" the card asked for, answered: don't mount it until codex has an
+    // equivalent per-tool restriction to pair it with. Surfaced loudly (not silently) below so a project
+    // that enables codescape doesn't quietly get nothing from a codex worker with no signal why.
+    if (opts.codescapeEnabled) {
+      // eslint-disable-next-line no-console
+      console.warn(`[pty] ${opts.sessionId} codescape is enabled for this project but is NOT mounted for harness "codex" — codex has no per-tool allow/disallow mechanism to pair with codescape's write-tool restriction (see createCodexPty's own doc). Use harness "claude" for codescape access.`);
+    }
     const mcpServers = buildMcpServers({
       sessionId: opts.sessionId, port: PORT, role: opts.role,
       browserTesting: opts.browserTesting, documentConversion: opts.documentConversion,

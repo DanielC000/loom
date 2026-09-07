@@ -28,17 +28,22 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 // CURRENT BOUND: card d34dd208's own sweep found FIVE fields with no codex consumer — `model`,
 // `restrictedTools` (the card's original seed evidence) plus THREE findings from that sweep —
 // `browserTesting`, `documentConversion`, `capabilities` (createCodexPty's own `buildMcpServers({
-// sessionId, port, role })` call omitted all three). Card `0770d916` closed FOUR of the five:
-// `browserTesting`/`documentConversion`/`capabilities` are now threaded through createCodexPty's own
-// `buildMcpServers` call (remedy `connect`); `restrictedTools` has no codex mechanism to connect to
-// (codex's whole permission model is two coarse, session-wide levers — verified against the real
-// capability-probe findings), so it is instead REJECTED at profile-validation time for
-// harness:"codex"+restrictedTools:true (remedy `no-mechanism-reject-or-warn`, see profiles/validate.ts's
-// `codexRestrictedToolsUnsupportedError`) rather than silently dropped at spawn. `model` is DELIBERATELY
-// LEFT as a declared, tracked `gaps[]` entry (lowest severity of the five — see field-consumers.ts's own
-// note): test/field-consumer-guard-warnings-surface.mjs needs at least one real, currently-open gap as
-// its specimen, and closing every gap in the same change would strand that unrelated card's regression
-// coverage with nothing to observe.
+// sessionId, port, role })` call omitted all three). Card `0770d916` threaded `browserTesting`/
+// `documentConversion`/`capabilities` through createCodexPty's own `buildMcpServers` call — but for
+// `browserTesting`/`documentConversion` that threading turned out NOT to close the gap: both resolve to
+// a `{type:"stdio"}` MCP entry, and codex's `mcpServersToCodexArgs` can only translate `{type:"http"}`,
+// so the mount was silently dropped at the LAST step even though the argument reached buildMcpServers.
+// Card `7fa73e2c` caught and fixed this: both fields are now REJECTED at profile-validation time for
+// harness:"codex" (remedy `no-mechanism-reject-or-warn`, `profiles/validate.ts`'s
+// `codexStdioCapabilityUnsupportedError`), same shape as `restrictedTools` (also
+// `no-mechanism-reject-or-warn`, `codexRestrictedToolsUnsupportedError` — codex's whole permission model
+// is two coarse, session-wide levers, verified against the real capability-probe findings). Only
+// `capabilities` still uses `connect` (an owner-added catalog capability CAN be stdio or http; codex gets
+// whichever the resolved server actually is, same as claude). `model` is DELIBERATELY LEFT as a declared,
+// tracked `gaps[]` entry (lowest severity — see field-consumers.ts's own note): test/
+// field-consumer-guard-warnings-surface.mjs needs at least one real, currently-open gap as its specimen,
+// and closing every gap in the same change would strand that unrelated card's regression coverage with
+// nothing to observe.
 //
 // ⛔ POSITIVE-CONTROLLED: every check below is exercised against BOTH a known-true case (the real
 // registry/source) and a synthetic known-false case (a fabricated field/pattern/cardId), so an

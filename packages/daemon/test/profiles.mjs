@@ -276,6 +276,39 @@ check("(validator) harness omitted (defaults to claude) + restrictedTools:true �
   return r.ok && r.value.restrictedTools === true;
 })());
 
+// --- (guard) card 7fa73e2c: harness:"codex" + browserTesting/documentConversion:true is REJECTED — both
+// resolve to a stdio MCP server (Playwright/markitdown), and codex's mcpServersToCodexArgs can only mount
+// {type:"http"} servers, so the fix is a validation-time rejection (remedy "no-mechanism-reject-or-warn"),
+// same shape as restrictedTools above. -----------------------------------------------------------------
+check("(validator) harness:codex + browserTesting:true ⇒ rejected", (() => {
+  const r = validateProfile({ name: "X", harness: "codex", browserTesting: true });
+  return r.ok === false && /browserTesting is not supported on harness "codex"/.test(r.error);
+})());
+check("(validator) harness:codex + documentConversion:true ⇒ rejected", (() => {
+  const r = validateProfile({ name: "X", harness: "codex", documentConversion: true });
+  return r.ok === false && /documentConversion is not supported on harness "codex"/.test(r.error);
+})());
+check("(validator) harness:codex + browserTesting:true + documentConversion:true ⇒ rejected, names both", (() => {
+  const r = validateProfile({ name: "X", harness: "codex", browserTesting: true, documentConversion: true });
+  return r.ok === false && /browserTesting and documentConversion are not supported on harness "codex"/.test(r.error);
+})());
+check("(validator) harness:codex + browserTesting:false + documentConversion:false ⇒ accepted, unaffected", (() => {
+  const r = validateProfile({ name: "X", harness: "codex", browserTesting: false, documentConversion: false });
+  return r.ok && r.value.harness === "codex" && r.value.browserTesting === false && r.value.documentConversion === false;
+})());
+check("(validator) harness:codex + browserTesting/documentConversion omitted ⇒ accepted, normalizes to false", (() => {
+  const r = validateProfile({ name: "X", harness: "codex" });
+  return r.ok && r.value.browserTesting === false && r.value.documentConversion === false;
+})());
+check("(validator) harness:claude + browserTesting:true ⇒ still accepted (the gate is codex-only)", (() => {
+  const r = validateProfile({ name: "X", harness: "claude", browserTesting: true });
+  return r.ok && r.value.browserTesting === true;
+})());
+check("(validator) harness omitted (defaults to claude) + browserTesting:true ⇒ still accepted", (() => {
+  const r = validateProfile({ name: "X", browserTesting: true });
+  return r.ok && r.value.browserTesting === true;
+})());
+
 // --- (guard) P4↔P5a: capabilityGrantBindingError rejects an oauth2 connection bound to a
 // requiresConnection capability grant (the "binds fine, spawns silently credential-less" bug this task
 // closes) — real capability_defs + connections rows through the real stores, not fakes. ---------------

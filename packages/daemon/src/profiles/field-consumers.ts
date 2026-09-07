@@ -304,13 +304,22 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
         note: "createPty passes opts.browserTesting into buildMcpServers, which mounts the per-session Playwright MCP when set.",
       },
       {
-        // Card 0770d916 fix: createCodexPty's own buildMcpServers({...}) call now threads opts.browserTesting
-        // through too — buildMcpServers() already accepted it generically, only this call site omitted it.
+        // Card 7fa73e2c CORRECTION: the codex proof used to point at createCodexPty's own
+        // buildMcpServers({...}) call (card 0770d916) and claim it "mounts the per-session Playwright
+        // MCP" — that claim was FALSE. browserTesting resolves to a {type:"stdio"} entry
+        // (playwrightMcpServer), and codex's mcpServersToCodexArgs can only translate {type:"http"} —
+        // the argument WAS threaded, but the resulting mount was silently dropped at the last step. The
+        // real, primary consumer is this validator rejection (remedy "no-mechanism-reject-or-warn", same
+        // shape as restrictedTools below): a NEW harness:"codex"+browserTesting:true profile is refused
+        // at save time, where the human editing it sees it, rather than silently mounting nothing at
+        // spawn. (createCodexPty still threads the argument through for defense-in-depth on a profile
+        // that predates this guard — see that method's own doc — and mcpServersToCodexArgs now WARNS
+        // loudly on the resulting untranslatable entry rather than skipping silently, card 7fa73e2c.)
         harnesses: ["codex"],
-        file: "packages/daemon/src/pty/host.ts",
-        region: "codex-spawn",
-        pattern: `browserTesting: opts.browserTesting, documentConversion: opts.documentConversion,`,
-        note: "createCodexPty passes opts.browserTesting into buildMcpServers, which mounts the per-session Playwright MCP when set.",
+        file: "packages/daemon/src/profiles/validate.ts",
+        region: "whole file",
+        pattern: `if (harness !== "codex") return null;`,
+        note: "validateProfile rejects harness:\"codex\"+browserTesting:true at save time (codexStdioCapabilityUnsupportedError) rather than silently mounting nothing at spawn — codex has no stdio-MCP-server mechanism to wire this to.",
       },
     ],
   },
@@ -326,13 +335,14 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
         note: "createPty passes opts.documentConversion into buildMcpServers, which mounts the per-session markitdown MCP when set.",
       },
       {
-        // Card 0770d916 fix: same shape as browserTesting above — createCodexPty's buildMcpServers call
-        // now threads opts.documentConversion through too.
+        // Card 7fa73e2c CORRECTION: same defect and same fix shape as browserTesting above — the codex
+        // proof now points at the validator rejection (the real, primary consumer), not the threading
+        // alone, which silently drops the resulting stdio mount at mcpServersToCodexArgs.
         harnesses: ["codex"],
-        file: "packages/daemon/src/pty/host.ts",
-        region: "codex-spawn",
-        pattern: `browserTesting: opts.browserTesting, documentConversion: opts.documentConversion,`,
-        note: "createCodexPty passes opts.documentConversion into buildMcpServers, which mounts the per-session markitdown MCP when set.",
+        file: "packages/daemon/src/profiles/validate.ts",
+        region: "whole file",
+        pattern: `if (harness !== "codex") return null;`,
+        note: "validateProfile rejects harness:\"codex\"+documentConversion:true at save time (codexStdioCapabilityUnsupportedError) rather than silently mounting nothing at spawn — codex has no stdio-MCP-server mechanism to wire this to.",
       },
     ],
   },

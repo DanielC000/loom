@@ -102,15 +102,22 @@ export function isCodexModelLoaded(screen: string): boolean {
  * than re-deriving role→server routing itself, so there is exactly ONE place (`buildMcpServers`) that
  * decides which servers a given role mounts — this can never drift from claude's own routing table.
  * Only `{type:"http", url}` entries are translated (codex has no stdio-server concept here); any other
- * shape is skipped rather than guessed at. `id` is codex-config-key-safe as long as the caller's server
- * ids are (LOOM_TASKS_SERVER_ID/LOOM_ORCHESTRATION_SERVER_ID/etc. are all plain `[a-z-]+` literals).
+ * shape is skipped — REPORTED (card `7fa73e2c`), never silently, since a skip here is otherwise
+ * indistinguishable from a working mount: a profile whose UI reads e.g. `browserTesting:true` would
+ * silently spawn with no Playwright MCP at all (Playwright/markitdown both resolve to `{type:"stdio"}`).
+ * `id` is codex-config-key-safe as long as the caller's server ids are (LOOM_TASKS_SERVER_ID/
+ * LOOM_ORCHESTRATION_SERVER_ID/etc. are all plain `[a-z-]+` literals).
  */
 export function mcpServersToCodexArgs(mcpServers: Record<string, unknown>): string[] {
   const args: string[] = [];
   for (const [id, entry] of Object.entries(mcpServers)) {
     if (!entry || typeof entry !== "object") continue;
     const { type, url } = entry as { type?: unknown; url?: unknown };
-    if (type !== "http" || typeof url !== "string" || !url) continue;
+    if (type !== "http" || typeof url !== "string" || !url) {
+      // eslint-disable-next-line no-console
+      console.warn(`[pty] codex mcp translate: server "${id}" (type=${typeof type === "string" ? type : String(type)}) has no codex equivalent — codex only mounts {type:"http"} servers. Spawning WITHOUT this MCP server.`);
+      continue;
+    }
     args.push("-c", `mcp_servers.${id}.url=${url}`);
   }
   return args;

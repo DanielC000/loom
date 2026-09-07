@@ -226,6 +226,31 @@ function codexRestrictedToolsUnsupportedError(harness: string | undefined, restr
   return null;
 }
 
+/**
+ * Card `7fa73e2c` (a sibling of card `0770d916`'s `restrictedTools` fix above, same remedy shape:
+ * "no-mechanism-reject-or-warn"): `browserTesting`/`documentConversion` both resolve to a
+ * `{type:"stdio"}` MCP entry (Playwright/markitdown — see `pty/host.ts`'s `playwrightMcpServer`/
+ * `markitdownMcpServer`), and codex's `mcpServersToCodexArgs` (codex-host.ts) can only translate
+ * `{type:"http"}` entries — codex has no stdio-MCP-server concept at all. Silently accepting
+ * `harness:"codex"` + either flag `true` would leave a profile that reads the capability ON in the UI
+ * while a codex session mounts nothing for it (FAIL-OPEN for what a human reads as an enabled feature).
+ * Reject the combination here, where the human editing the profile sees it, rather than a codex session
+ * discovering it missing only via a spawn-time log line.
+ */
+function codexStdioCapabilityUnsupportedError(
+  harness: string | undefined,
+  browserTesting: boolean | undefined,
+  documentConversion: boolean | undefined,
+): string | null {
+  if (harness !== "codex") return null;
+  const offending = [
+    browserTesting === true ? "browserTesting" : null,
+    documentConversion === true ? "documentConversion" : null,
+  ].filter((f): f is string => f !== null);
+  if (offending.length === 0) return null;
+  return `${offending.join(" and ")} ${offending.length > 1 ? "are" : "is"} not supported on harness "codex" — both resolve to a stdio MCP server (Playwright/markitdown), and codex can only mount {type:"http"} servers, so this combination cannot be honoured. Leave ${offending.join(" and ")} unset/false for a codex profile, or use harness "claude".`;
+}
+
 export function validateProfile(
   raw: unknown,
   opts?: { previousRole?: string | null; patch?: unknown },
@@ -240,6 +265,8 @@ export function validateProfile(
   if (restrictedToolsError) return { ok: false, error: restrictedToolsError };
   const codexRestrictedToolsError = codexRestrictedToolsUnsupportedError(d.harness, d.restrictedTools);
   if (codexRestrictedToolsError) return { ok: false, error: codexRestrictedToolsError };
+  const codexStdioCapabilityError = codexStdioCapabilityUnsupportedError(d.harness, d.browserTesting, d.documentConversion);
+  if (codexStdioCapabilityError) return { ok: false, error: codexStdioCapabilityError };
   // COMPILE-TIME FIELD TOTALITY (card 1059b3b9): the `satisfies Record<keyof Omit<Profile,"id">,
   // unknown>` below forces every key of Omit<Profile,"id"> to be named in this literal — the write-path
   // counterpart of entityRowFields.ts's `PROFILE_FIELDS: Record<keyof Profile, 1>` on the READ path. A
