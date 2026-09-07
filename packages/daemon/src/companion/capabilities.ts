@@ -21,7 +21,7 @@ import type { Db } from "../db.js";
 import { MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { AMBIGUOUS_ID_ERROR } from "../mcp/transcript-read.js";
 import { spawnableRoleError } from "../mcp/spawnable-role.js";
-import { createProjectTask, getProjectTask, listProjectTasks, relocateProjectTask, updateProjectTask, type TaskSummary, type TaskUpdateAck } from "../mcp/tasks.js";
+import { createProjectTask, getProjectTask, listProjectTasks, relocateProjectTask, updateProjectTask, type PendingRequestWarning, type TaskSummary, type TaskUpdateAck } from "../mcp/tasks.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, pageTranscript, lastNTurns, applyAggregateWalkCap } from "../sessions/transcript.js";
 import { listVaultTree, readVaultFile, resolveVaultFilePath, statVaultFile } from "../vault/browser.js";
 import type { OwnerAttestation, AuthoredContentGrantScope } from "./attestation.js";
@@ -948,6 +948,36 @@ function pendingBoardKey(sessionId: string, route: CompanionRoute | null): strin
   return `${sessionId}::${route ? `${route.channel}:${route.chatId}` : ""}::${BOARD_REACH_SLUG}`;
 }
 
+/**
+ * Card cc910aec: `board_update`'s success ack projects `updateProjectTask`'s result to a fixed
+ * `{id,title,columnKey,priority,held,projectId}` field set (see the `task: {...}` literals at its two
+ * call sites) — that projection PREDATES `pendingRequestWarning` (it was written in `9fac5bbd`, two
+ * months before card `c4355598` added the field) and no doc anywhere states an intent to withhold it;
+ * it is a stale gap, not a deliberate disclosure boundary — `title` itself (arbitrary card text) is
+ * already echoed through this same ack with no narrower-surface treatment, so there is no existing
+ * precedent of withholding Task content here for trust reasons.
+ *
+ * The owner is the one person a companion chat can put a pending Request in front of who can actually
+ * answer it, so a terminal move made THROUGH the companion is the single highest-value place for this
+ * warning to fire — yet, before this card, it was the one place it silently did not. This formats the
+ * SAME additive `pendingRequestWarning` `updateProjectTask` already computes (never a raw
+ * `{id,title}[]` dump — the companion model relays this text into chat, so pre-formatting it in
+ * human-readable prose here means it renders consistently instead of depending on the model's own
+ * paraphrase) into one optional `pendingRequestNote` string, spread into the ack only when non-empty
+ * (mirrors `updateProjectTask`'s own additive-only convention for the field itself). Returns `{}` (never
+ * a key with an empty/undefined value) so JSON.stringify never emits a stray `pendingRequestNote:
+ * undefined`. This can only ever ADD a field to an already-successful ack — it must never be able to
+ * turn a success into an error, inheriting card `c4355598`'s hard constraint that this warning can never
+ * block the write it decorates.
+ */
+function pendingRequestWarningNote(warnings: PendingRequestWarning[] | undefined): { pendingRequestNote?: string } {
+  if (!warnings || warnings.length === 0) return {};
+  const items = warnings.map((w) => `"${w.title}" (request ${w.id})`).join("; ");
+  const subject = warnings.length === 1 ? "a pending owner request" : `${warnings.length} pending owner requests`;
+  const pronoun = warnings.length === 1 ? "it" : "them";
+  return { pendingRequestNote: `Heads up: this card still has ${subject} attached — ${items}. Moving it here does not answer ${pronoun}.` };
+}
+
 const BOARD_PRIORITY_SCHEMA = z.enum(["p0", "p1", "p2", "p3"]);
 
 /** Direction (a), card 2b26035c ("inline authored-content grant") — its OWN Primitive C namespace,
@@ -1381,7 +1411,12 @@ const BOARD_REACH: CompanionCapability = {
           "{status:'confirm-mismatch'}; tell the owner to reply again, don't re-propose. Requires an " +
           "act-mode grant on the card's project and an owner-authored turn on a channel Loom can reply " +
           "to — a proactive/heartbeat turn is always rejected. There is no delete tool — card removal " +
-          "stays human-only.",
+          "stays human-only. A successful {status:'updated'} MAY also carry `pendingRequestNote`: a " +
+          "human-readable heads-up (never a raw field dump) that this card still has one or more pending " +
+          "owner Requests attached, present ONLY when you moved it into the board's terminal (done) lane " +
+          "and it still has one or more unanswered Requests — pass this note along to the owner in your " +
+          "reply so they know a question of theirs is still open; the move itself always still succeeds " +
+          "regardless.",
         inputSchema: {
           id: z.string(), title: z.string().optional(), body: z.string().optional(), appendBody: z.string().optional(),
           columnKey: z.string().optional(), priority: BOARD_PRIORITY_SCHEMA.optional(),
@@ -1460,7 +1495,9 @@ const BOARD_REACH: CompanionCapability = {
         //  - the CONFIRM branch passes `pending.baseVersion`, captured at PROPOSE time (a strictly EARLIER
         //    invocation) — never `task.version` re-read at confirm time, which is what silently defeated the
         //    gate before this card (see the incident this card's §COMPANION documents).
-        const applyPatch = async (versionForGate: number): Promise<{ error: string } | { updated: Task | TaskUpdateAck }> => {
+        const applyPatch = async (
+          versionForGate: number,
+        ): Promise<{ error: string } | { updated: (Task | TaskUpdateAck) & { pendingRequestWarning?: PendingRequestWarning[] } }> => {
           const patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "priority" | "held">> = {};
           if (hasTitle) patch.title = normalizedTitle;
           if (hasBody) patch.body = normalizedBody;
@@ -1488,6 +1525,7 @@ const BOARD_REACH: CompanionCapability = {
           return ok({
             status: "updated",
             task: { id: updated.id, title: updated.title, columnKey: updated.columnKey, priority: updated.priority, held: updated.held, projectId: task.projectId },
+            ...pendingRequestWarningNote(updated.pendingRequestWarning),
           });
         }
 
@@ -1518,6 +1556,7 @@ const BOARD_REACH: CompanionCapability = {
           return ok({
             status: "updated",
             task: { id: updated.id, title: updated.title, columnKey: updated.columnKey, priority: updated.priority, held: updated.held, projectId: task.projectId },
+            ...pendingRequestWarningNote(updated.pendingRequestWarning),
           });
         }
         if (confirmOutcome.reason === "token-mismatch") {

@@ -130,6 +130,21 @@ function seedTask(db, id, projectId, opts = {}) {
 }
 const tmpDb = () => new Db(path.join(tmpHome, `${randomUUID()}.db`));
 
+// Mirrors task-terminal-lane-request-warning.mjs's own helper (same Db.insertQuestion shape) — `sessionId`
+// defaults to `sessionId` (below) but must otherwise name a session row that actually exists in THIS
+// test's db, since `questions.session_id` is a real FK, not a soft pointer (unlike `task_id`).
+let qCounter = 0;
+function insertQuestion(db, { sessionId, projectId, taskId, title, state }) {
+  const id = `q-${++qCounter}`;
+  db.insertQuestion({
+    id, sessionId, projectId, type: "decision", title, body: "detail", options: null, recommendation: null,
+    taskId, permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null, credentialEnvVar: null,
+    state, chosenOption: state === "answered" ? "A" : null, note: null,
+    createdAt: now, answeredAt: state === "answered" ? now : null, consumedAt: null,
+  });
+  return id;
+}
+
 try {
   // ============ board_create: an act-granted companion on an EMPTY board discovers its project id via
   // board_list, then successfully files with it (the follow-up blocker: an id-free tasks_create used to
@@ -756,11 +771,104 @@ try {
     await client.close();
     db.close();
   }
+
+  // ============ board_update: pending-Request warning surfaces on a terminal move (card cc910aec) ============
+  // capabilities.ts's `board_update` routes through the SAME `updateProjectTask` that
+  // task-terminal-lane-request-warning.mjs proves computes `pendingRequestWarning` on a terminal-lane
+  // move — this block proves the COMPANION surface (previously silently dropped by capabilities.ts's own
+  // fixed `task:{...}` projection) now relays it too, as human-readable text, never a raw field dump, and
+  // never at the cost of the move itself landing.
+  {
+    const db = tmpDb();
+    const proj = "proj-pending-req";
+    seedProject(db, proj, "Pending request");
+    const companionSess = "companion-pending-req";
+    seedSession(db, companionSess, proj, "assistant");
+    seedTask(db, "t-pending", proj, { title: "Close me out", columnKey: "in_progress" });
+    const reqId = insertQuestion(db, {
+      sessionId: companionSess, projectId: proj, taskId: "t-pending", title: "Should we ship option (a) or (b)?", state: "pending",
+    });
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "board-reach", projectId: proj, mode: "act" });
+    const pty = makeFakePty("the owner said: mark it done");
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    const proposed = await call(client, "board_update", { id: "t-pending", columnKey: "done" });
+    check("pending-request warning: propose succeeds", proposed.status === "proposed");
+    const token = extractToken(companion.delivered[0].text);
+    pty.setOwnerText(`CONFIRM ${token}`);
+    const updated = await call(client, "board_update", { id: "t-pending", columnKey: "done" });
+    check("pending-request warning: the terminal move still applies (never blocked)", updated.status === "updated" && db.getTask("t-pending").columnKey === "done");
+    check("pending-request warning: pendingRequestNote is present", typeof updated.pendingRequestNote === "string");
+    check("pending-request warning: names the ACTUAL question title, not a generic label", updated.pendingRequestNote?.includes("Should we ship option (a) or (b)?"));
+    check("pending-request warning: names the request id", updated.pendingRequestNote?.includes(reqId));
+    check("pending-request warning: is human-readable prose, not a raw field dump ({\"id\":...))", !updated.pendingRequestNote?.includes("{\"id\""));
+
+    await client.close();
+    db.close();
+  }
+
+  // ============ board_update: pending-Request warning is ABSENT on a NON-terminal move (negative control:
+  // the card above proves the warning CAN fire; this proves it doesn't fire on every move) ============
+  {
+    const db = tmpDb();
+    const proj = "proj-pending-req-nonterminal";
+    seedProject(db, proj, "Pending request non-terminal");
+    const companionSess = "companion-pending-req-nonterminal";
+    seedSession(db, companionSess, proj, "assistant");
+    seedTask(db, "t-pending-nt", proj, { title: "Not done yet", columnKey: "backlog" });
+    insertQuestion(db, { sessionId: companionSess, projectId: proj, taskId: "t-pending-nt", title: "Still pending, unrelated move", state: "pending" });
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "board-reach", projectId: proj, mode: "act" });
+    const pty = makeFakePty("the owner said: move it to in_progress");
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    const proposed = await call(client, "board_update", { id: "t-pending-nt", columnKey: "in_progress" });
+    check("non-terminal move: propose succeeds", proposed.status === "proposed");
+    const token = extractToken(companion.delivered[0].text);
+    pty.setOwnerText(`CONFIRM ${token}`);
+    const updated = await call(client, "board_update", { id: "t-pending-nt", columnKey: "in_progress" });
+    check("non-terminal move: applies", updated.status === "updated" && db.getTask("t-pending-nt").columnKey === "in_progress");
+    check("non-terminal move: pendingRequestNote key is ABSENT (not present-but-empty)", !("pendingRequestNote" in updated));
+
+    await client.close();
+    db.close();
+  }
+
+  // ============ board_update: pending-Request warning is ABSENT on a terminal move with NO pending
+  // request (negative control on the OTHER axis — proves (1) above isn't unconditional on a terminal
+  // move regardless of request state) ============
+  {
+    const db = tmpDb();
+    const proj = "proj-no-pending-req";
+    seedProject(db, proj, "No pending request");
+    const companionSess = "companion-no-pending-req";
+    seedSession(db, companionSess, proj, "assistant");
+    seedTask(db, "t-clean", proj, { title: "Nothing pending", columnKey: "in_progress" });
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "board-reach", projectId: proj, mode: "act" });
+    const pty = makeFakePty("the owner said: mark it done");
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    const proposed = await call(client, "board_update", { id: "t-clean", columnKey: "done" });
+    check("no pending request: propose succeeds", proposed.status === "proposed");
+    const token = extractToken(companion.delivered[0].text);
+    pty.setOwnerText(`CONFIRM ${token}`);
+    const updated = await call(client, "board_update", { id: "t-clean", columnKey: "done" });
+    check("no pending request: applies", updated.status === "updated" && db.getTask("t-clean").columnKey === "done");
+    check("no pending request: pendingRequestNote key is ABSENT (not present-but-empty)", !("pendingRequestNote" in updated));
+
+    await client.close();
+    db.close();
+  }
 } finally {
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — an act-granted companion on a genuinely EMPTY board can discover its own project id via board_list's `projects` field and successfully board_create with it; board_create/board_update reject a non-verbatim title/body, act on a read-only-granted or ungranted project, any proactive (no-owner-text) turn, a missing reply-to route, and a failed outbound delivery; NO delete tool is ever registered; neither tool ever applies on the first (propose) call, both deliver the confirm prompt to the OWNER directly (never the companion, which receives no promptText/token), and both apply EXACTLY ONCE via the existing createProjectTask/updateProjectTask writes once the owner's own next turn carries the confirm token — a companion that never saw the token cannot forge a confirm for a swapped action; and a real confirm token minted for one tool's proposal can never commit the OTHER tool's write, in either direction, even though they share one capability-slug/pending-map namespace by design."
+  ? "\n✅ ALL PASS — an act-granted companion on a genuinely EMPTY board can discover its own project id via board_list's `projects` field and successfully board_create with it; board_create/board_update reject a non-verbatim title/body, act on a read-only-granted or ungranted project, any proactive (no-owner-text) turn, a missing reply-to route, and a failed outbound delivery; NO delete tool is ever registered; neither tool ever applies on the first (propose) call, both deliver the confirm prompt to the OWNER directly (never the companion, which receives no promptText/token), and both apply EXACTLY ONCE via the existing createProjectTask/updateProjectTask writes once the owner's own next turn carries the confirm token — a companion that never saw the token cannot forge a confirm for a swapped action; and a real confirm token minted for one tool's proposal can never commit the OTHER tool's write, in either direction, even though they share one capability-slug/pending-map namespace by design; board_update also relays a terminal-move's pendingRequestWarning as human-readable `pendingRequestNote` prose (never a raw field dump), absent on a non-terminal move or when nothing is pending, and never blocking the move either way."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
