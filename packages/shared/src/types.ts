@@ -1554,6 +1554,15 @@ export type OrchestrationEventKind =
   // Fires again at every subsequent multiple of `threshold`, not just the first crossing, so a runaway loop
   // keeps re-signalling instead of going silent after one shot.
   | "repeated_tool_call"
+  // Card fedef6a0 — a codex session's `submitCodex` confirm-or-retry ladder (pty/host.ts's
+  // `armCodexBusyStaleTimer`) exhausted its bounded retries with NO real busy-marker sighting since the
+  // last Enter write — codex has no confirming hook, so this is the only signal that a turn's Enter may
+  // never have registered at all. Filed under the AFFECTED session's manager (managerSessionId = its
+  // parent session's id if one exists, else its own id — same "notify whoever can act" convention as
+  // `repeated_tool_call`/`paste_length_loss`), workerSessionId = the affected codex session itself; `detail`
+  // carries { attempts, maxAttempts }. Confirms only that no turn was ever observed to start — never that
+  // the queued text was lost byte-for-byte (codex exposes no echo signal to check that against).
+  | "codex_submit_unconfirmed"
   // Card 9e4205f5 — `resumeFleetOnBoot` found ≥1 fleet-wide resume failure on a daemon restart (the SAME
   // `failed`/`failedDetail` this method already computes for the requester's own count-only notice — see
   // its doc). Filed under the RESTART REQUESTER (managerSessionId = `reqId`, a manager or platform-Lead
@@ -1662,6 +1671,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
   repeated_tool_call: true, batch_merge_forfeited: true, engine_session_rotated: true,
   discovery_block_injection: true,
+  codex_submit_unconfirmed: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

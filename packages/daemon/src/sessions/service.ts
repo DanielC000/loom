@@ -10188,6 +10188,41 @@ export class SessionService {
   }
 
   /**
+   * Card fedef6a0 — consumes `PtyHostEvents.onCodexSubmitUnconfirmed`: a codex session's `submitCodex`
+   * confirm-or-retry ladder (`pty/host.ts`'s `armCodexBusyStaleTimer`) exhausted `info.maxAttempts` bare-
+   * Enter retries with NO real busy-marker sighting since the last Enter write — codex has no confirming
+   * hook, so PtyHost cannot tell whether the turn ever started at all. `live.busy` is left `true` on that
+   * side (the pending queue is frozen — see that method's own doc), so THIS is the manager-visible half of
+   * the fail-loud contract. Reuses `handleRepeatedToolCall`'s established two-recipient, durable-event
+   * shape immediately above rather than inventing a new one:
+   *   - RECIPIENT: `sessionId` itself — queued for whenever (if ever) the session naturally recovers (a
+   *     late real marker sighting still re-arms and can resolve this normally; see the ladder's own doc).
+   *   - SENDER (the actionable half): for a worker, that's its manager (`parentSessionId`) — the one live
+   *     party who can actually intervene (`worker_message`/`worker_redirect`/`worker_stop`+respawn) while
+   *     this session sits frozen. A session with no `parentSessionId` has no programmatic party to nudge —
+   *     the durable event below still records the gap for a human auditing the log.
+   *
+   * ⚠️ `info.attempts`/`info.maxAttempts` confirm only that no turn was ever observed to START — never that
+   * the queued text was lost byte-for-byte (codex exposes no echo signal to check that against; see the
+   * ladder's own doc for the specimen this does NOT cover). Both messages below are worded to avoid implying
+   * more than that.
+   */
+  handleCodexSubmitUnconfirmed(sessionId: string, info: { attempts: number; maxAttempts: number }): void {
+    const s = this.db.getSession(sessionId);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
+      workerSessionId: sessionId, taskId: s?.taskId ?? null,
+      kind: "codex_submit_unconfirmed", detail: { attempts: info.attempts, maxAttempts: info.maxAttempts },
+    });
+    const recipientMsg = `[loom:codex-submit-unconfirmed] a message written to your composer was never confirmed — no busy-marker sighting registered after ${info.attempts} Enter attempt(s). This does not prove the text was lost, only that no turn was ever observed to start. Your pending queue is now frozen (nothing further will be drained on top of this) until a turn is confirmed or your manager intervenes.`;
+    this.enqueueSystemNudge(sessionId, recipientMsg, { kind: "warning", taskId: s?.taskId ?? null });
+    if (s?.parentSessionId) {
+      const senderMsg = `[loom:codex-submit-unconfirmed] your codex session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} has an unconfirmed submit — ${info.attempts} Enter attempt(s) produced no busy-marker sighting. This does NOT prove the message was lost, only that no turn was ever observed to start; the session's pending queue is now frozen. It may self-recover if codex was just slow, but consider checking on it (worker_message / worker_redirect / worker_stop) if it stays quiet.`;
+      this.enqueueSystemNudge(s.parentSessionId, senderMsg, { kind: "warning", taskId: s.taskId ?? null });
+    }
+  }
+
+  /**
    * Card f9b1ea00 DoD-2 — consumes `PtyHostEvents.onPromptMismatchUnresolved`: a "recognized replay"
    * `[loom:prompt-mismatch]` detection (pty/host.ts's `UserPromptSubmit` mismatch detector, the
    * `replayedEntry !== undefined` branch) never resolved within `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` — no

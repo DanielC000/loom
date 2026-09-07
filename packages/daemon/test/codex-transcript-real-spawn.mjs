@@ -240,12 +240,17 @@ let turnsAtSettle = [];
 if (capturedEngineId) {
   try {
     await waitUntil(
+      // Card 1027b523: "any non-empty assistant turn" was proven (on a sibling real-spawn file, same
+      // predicate shape) to be satisfiable by a reasoning-capable model's own intent preamble, standing in
+      // for "the FINAL ANSWER has arrived" when it only means "some assistant message exists". Requiring
+      // the matched turn to actually CONTAIN the requested reply ("pong") closes the same gap here — a
+      // preamble like "I'll reply now." would not satisfy this, but the genuine answer does.
       () => {
         const t = readTranscript(scratchCwd, capturedEngineId, "codex");
         turnsAtSettle = t;
-        return t.some((turn) => turn.role === "assistant" && turn.text.trim().length > 0);
+        return t.some((turn) => turn.role === "assistant" && /pong/i.test(turn.text));
       },
-      { label: `${SESSION_ID} real codex turn completes and lands in the rollout file`, timeoutMs: 90000, intervalMs: 500 },
+      { label: `${SESSION_ID} real codex turn produces an assistant message CONTAINING the requested reply "pong" (not merely any non-empty assistant message)`, timeoutMs: 90000, intervalMs: 500 },
     );
   } catch (err) {
     console.log(`FAIL  ${err.message}`);

@@ -125,16 +125,20 @@ check(
 
 {
   // Reproduces the MOTIVATING INCIDENT's exact shape: a new, unregistered basename whose source imports
-  // the lock, alongside an already-registered one that also imports it (must NOT be flagged).
+  // the lock, alongside an already-registered one that also imports it (must NOT be flagged). The
+  // "unregistered" fixture name is deliberately synthetic (never a real file on disk) rather than
+  // reusing a real basename that was unregistered only TEMPORARILY, mid-development — card fedef6a0
+  // registered "codex-submit-confirmation-real-spawn" for real, which would otherwise silently flip this
+  // proof from RED to a false GREEN the moment that registration landed, with nothing here to notice.
   const syntheticCorpus = {
     "codex-doctrine-real-spawn": 'import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";',
-    "codex-submit-confirmation-real-spawn": 'import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";',
+    "codex-totally-synthetic-unregistered-fixture": 'import { acquireCodexRealSpawnLock } from "./_codex-real-spawn-lock.mjs";',
     "some-unrelated-test": 'import { thing } from "./thing.mjs";',
   };
   const violations = findViolations(syntheticCorpus, CODEX_REAL_SPAWN_SET);
   check(
     "RED PROOF: an unregistered basename that imports the lock IS flagged (reproduces the motivating incident)",
-    violations.includes("codex-submit-confirmation-real-spawn"),
+    violations.includes("codex-totally-synthetic-unregistered-fixture"),
   );
   check(
     "GREEN: an ALREADY-registered basename that imports the lock is NOT flagged",

@@ -39,8 +39,13 @@ const CODEX_SCREEN_SCAN_CAP = 8 * 1024;
  *  that submits it, for codex — mirrors `SUBMIT_ENTER_DELAY_MS`'s role for claude, but this value is
  *  OBSERVED, not a Loom-side tuning constant: the probe (`docs/investigations/049e4a7b-codex-cli-
  *  capability-probe/findings.md`, State 4) measured `term.write(prompt)` then 300ms later
- *  `term.write("\r")` as the recipe that worked reliably against a real codex TUI. */
-const CODEX_SUBMIT_ENTER_DELAY_MS = 300;
+ *  `term.write("\r")` as the recipe that worked reliably against a real codex TUI. Env-overridable (card
+ *  fedef6a0) so a hermetic test can shrink it BELOW `LOOM_CODEX_BUSY_STALE_MS` without inverting their real
+ *  ordering — the confirm-or-retry ladder (`armCodexBusyStaleTimer`) assumes the Enter has already been
+ *  written by the time its first staleness window could plausibly elapse, which is only true by
+ *  construction in production (300ms vs. a 3s default) but must be preserved explicitly once a test shrinks
+ *  the staleness window too, mirroring `CODEX_BUSY_STALE_MS`'s own `LOOM_CODEX_BUSY_STALE_MS` convention. */
+const CODEX_SUBMIT_ENTER_DELAY_MS = Number(process.env.LOOM_CODEX_SUBMIT_ENTER_DELAY_MS) || 300;
 /** Multi-harness epic (df1f94b0) Phase 1: gap between codex's two exit-sequence Ctrl+C writes — OBSERVED
  *  (same probe/finding as CODEX_SUBMIT_ENTER_DELAY_MS): "a second Ctrl+C, sent ~800ms after the first
  *  (i.e. once back at the ready box)" (State 6). */
@@ -93,6 +98,18 @@ const CODEX_ENGINE_ID_MAX_ATTEMPTS = Number(process.env.LOOM_CODEX_ENGINE_ID_MAX
  * multiple real seconds (mirrors `GRACEFUL_STOP_KILL_MS`'s own `LOOM_GRACEFUL_KILL_MS` convention).
  */
 const CODEX_BUSY_STALE_MS = Number(process.env.LOOM_CODEX_BUSY_STALE_MS) || 3_000;
+/**
+ * Card fedef6a0 DoD-2/DoD-3: bounded retry count for `armCodexBusyStaleTimer`'s confirm-or-retry ladder —
+ * how many bare `"\r"` retries (never re-typing `text`, see `retryCodexEnter`'s own doc) are attempted
+ * before a still-unconfirmed submit is treated as genuinely stuck and reported (`onCodexSubmitUnconfirmed`)
+ * rather than silently drained past. A deliberately SMALL, bounded ladder — never a blind port of claude's
+ * much heavier `fireEnterAndVerify`/give-up machinery (no confirming hook exists here to verify against, so
+ * there is nothing for a heavier ladder to buy); see `armCodexBusyStaleTimer`'s own doc for the full state
+ * machine this bounds. Worst-case latency before FAIL LOUD, at today's defaults: `(this + 1) *
+ * CODEX_BUSY_STALE_MS` ≈ 9s. Env-overridable so a hermetic test can shrink the retry COUNT independently of
+ * the per-attempt window (`LOOM_CODEX_BUSY_STALE_MS`).
+ */
+const CODEX_SUBMIT_MAX_RETRIES = Number(process.env.LOOM_CODEX_SUBMIT_MAX_RETRIES) || 2;
 /**
  * Gap between writing a turn's text and writing the FIRST Enter (\r) that submits it. A SINGLE
  * `text + "\r"` write does NOT submit a second turn to a running claude v2.1.150 session — the
@@ -3822,10 +3839,41 @@ export interface CodexLive {
    *  trust dialog ever appears (directory already trusted) — kickoff eligibility in that case depends only
    *  on {@link isCodexReadyMarkerPresent}, never on this flag. */
   trustDialogPending: boolean;
-  /** Codex-only, Code Review C2/M3 fix: wall-clock time the busy marker was LAST actually observed (0 =
-   *  never). Read by `armCodexBusyStaleTimer`'s fired callback to confirm a NEWER sighting hasn't already
-   *  superseded the timer that's about to fire — see that method's own doc. */
+  /** Codex-only, Code Review C2/M3 fix: wall-clock time a REAL busy marker was LAST actually observed in
+   *  the pty's own output (0 = never) — written ONLY by the onData handler's `isCodexBusy(d)` branch, never
+   *  optimistically (card fedef6a0 fixed a prior optimistic stamp at submit time — see `submitCodex`'s own
+   *  doc for why that was the root of the unconfirmed-drain bug). Read by `armCodexBusyStaleTimer`'s fired
+   *  callback (compared against `enterWrittenAt` below) to tell a genuinely-completed turn apart from one
+   *  whose Enter was never confirmed at all — see that method's own doc for the full state machine.
+   *  `busyStaleGen` below, not this field, is what tells a superseded callback apart from the live one. */
   lastBusyMarkerAt: number;
+  /** Codex-only, card fedef6a0: wall-clock time THIS turn's (or its latest retry's, see
+   *  `retryCodexEnter`) real `"\r"` write actually happened — set inside `submitCodex`'s delayed callback,
+   *  never at submit-call time. `armCodexBusyStaleTimer` compares `lastBusyMarkerAt` against this field to
+   *  decide "confirmed" (a marker arrived AFTER this Enter went out) vs "never confirmed" (it didn't) — see
+   *  that method's own doc for the full state machine this distinction drives. */
+  enterWrittenAt: number;
+  /** Codex-only, card fedef6a0: true from the SYNCHRONOUS instant `submitCodex` is called until its
+   *  delayed `"\r"` write actually happens — i.e. `enterWrittenAt` still reflects a PRIOR turn's Enter, not
+   *  this one's. Guards `armCodexBusyStaleTimer` against a marker sighting that lands in this pre-Enter gap
+   *  (rare, but real — an onData chunk that happens to match `isCodexBusy` before this turn's own Enter
+   *  even went out) being wrongly read as confirming the CURRENT turn against a STALE `enterWrittenAt` left
+   *  over from an earlier one — which would declare idle and drain the next message while this turn's real
+   *  Enter write is still outstanding, corrupting the very write it hasn't made yet. See that method's own
+   *  doc for the full state machine. */
+  enterPending: boolean;
+  /** Codex-only, card fedef6a0: how many bare-Enter retries `armCodexBusyStaleTimer` has fired for the
+   *  CURRENT turn (0 = none yet). Reset to 0 at the top of every fresh `submitCodex` call — a new turn
+   *  always starts its own ladder clean, regardless of how the PRIOR turn's ended. Capped at
+   *  `CODEX_SUBMIT_MAX_RETRIES`; see `armCodexBusyStaleTimer`'s own doc for what happens on exhaustion. */
+  submitConfirmAttempts: number;
+  /** Codex-only, card fedef6a0: monotonically incremented every time `armCodexBusyStaleTimer` arms a new
+   *  timer; each fired callback captures the value it saw at arm time and self-no-ops if the LIVE value has
+   *  since moved on (a later arm superseded it) — see that method's own CASE 1 doc for why this replaced an
+   *  earlier `Date.now()`-difference comparison (unsound under real `setTimeout` rounding: a callback can
+   *  fire a hair before its own nominal delay has fully elapsed by wall-clock time, which made THIS exact
+   *  timestamp check misfire against its OWN freshly-armed marker). */
+  busyStaleGen: number;
   /** Codex-only, Code Review C2/M3 fix: the currently-armed "declare idle if the marker goes unseen this
    *  long" timer (`armCodexBusyStaleTimer`), re-armed on every fresh sighting; `null` when no turn is in
    *  flight. Cleared on exit/stop so a dead session can never fire a stale drain. */
@@ -4086,6 +4134,25 @@ export interface PtyHostEvents {
    * existing `PtyHostEvents` test double is unaffected until it opts in.
    */
   onRepeatedToolCall?(sessionId: string, info: { tool: string; argsHash: string; count: number; threshold: number }): void;
+  /**
+   * Card fedef6a0 — `armCodexBusyStaleTimer`'s confirm-or-retry ladder exhausted `maxAttempts` retries with
+   * NO real busy-marker sighting since the last Enter write (its own doc's case 4): codex's TUI has no
+   * confirming hook the way claude does, so this is the ONLY signal PtyHost has that a codex turn's Enter
+   * may never have registered at all. `live.busy` is left `true` when this fires (the pending queue is
+   * frozen, never drained on top of the unconfirmed turn), so this is the manager-visible half of that
+   * fail-loud contract — PtyHost itself cannot persist a durable event or notify a manager (no DB, same
+   * layering boundary as `onPasteLengthLoss`/`onRepeatedToolCall` above); the implementer (sessions/
+   * service.ts, via index.ts) decides how to record + notify, mirroring `handleRepeatedToolCall`'s
+   * established two-recipient shape rather than inventing a new one.
+   *
+   * ⚠️ CONFIRMS ONLY THAT NO TURN WAS EVER OBSERVED TO START — never read `attempts`/`maxAttempts` as proof
+   * the queued TEXT was lost byte-for-byte; codex exposes no echo signal to check that against (see
+   * `armCodexBusyStaleTimer`'s own doc for the full disclosure). OPTIONAL, same rationale as its siblings:
+   * every existing `PtyHostEvents` test double is unaffected until it opts in. Called best-effort from a
+   * pty data-path timer callback — never let an implementer's own failure here become a second failure mode
+   * on top of the one being reported (the call site already wraps this in try/catch for that reason).
+   */
+  onCodexSubmitUnconfirmed?(sessionId: string, info: { attempts: number; maxAttempts: number }): void;
   /**
    * Card 47c11741: the bare-placeholder tripwire's own one-shot RECOVERY re-injection (`PASTE_RECOVERY_TAG`,
    * paste-tripwire.ts) ALSO collapsed — the give-up path, right where the combined `[paste-tripwire]`
@@ -5969,7 +6036,7 @@ export class PtyHost {
       recentOwnerTurns: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       trustDialogAnswered: false, trustDialogPending: false,
-      lastBusyMarkerAt: 0, busyStaleTimer: null, kickoffDelivered: false,
+      lastBusyMarkerAt: 0, enterWrittenAt: 0, enterPending: false, submitConfirmAttempts: 0, busyStaleGen: 0, busyStaleTimer: null, kickoffDelivered: false,
       screenScan: "",
       engineSessionIdCaptureAttempted: false,
     };
@@ -6137,53 +6204,165 @@ export class PtyHost {
   }
 
   /**
-   * Code Review C2/M3 fix — the ONLY path that ever declares a codex session idle again: (re)armed every
-   * time the busy marker is freshly seen (`spawnCodexProcess`'s onData handler). If `CODEX_BUSY_STALE_MS`
-   * elapses with NO fresher sighting, the session is genuinely idle — the fired callback re-checks
-   * `lastBusyMarkerAt` before acting (rather than trusting its own closure alone) so a sighting that landed
-   * in the brief window between this timer's own scheduling and its firing is never overridden by a stale
-   * callback. Clearing any PRIOR timer before arming a new one means only the MOST RECENT sighting's timer
-   * is ever live — no pile-up of stale callbacks racing each other. See `CODEX_BUSY_STALE_MS`'s own doc for
-   * the full reasoning this design fixes (C2's in-flight race, M3's unbounded staleness).
+   * Code Review C2/M3 fix, extended by card fedef6a0 into a confirm-or-retry-or-fail-loud state machine —
+   * the ONLY path that ever declares a codex session idle again, or retries an unconfirmed Enter. Re-armed
+   * on every FRESH real busy-marker sighting (`spawnCodexProcess`'s onData handler) AND on every real Enter
+   * write (`submitCodex`/`retryCodexEnter`) — clearing any PRIOR timer first means only the MOST RECENT arm
+   * is ever live, no pile-up of stale callbacks racing each other.
+   *
+   * ⚠️ HISTORY (the bug this replaced): before card fedef6a0, `live.lastBusyMarkerAt` was stamped
+   * OPTIMISTICALLY at submit time, so this timer could not tell "codex genuinely ran the turn to completion"
+   * apart from "codex never registered the Enter at all" (the swallowed-keystroke race — see the card body,
+   * and `codex-transcript-real-spawn.mjs:145-217` for the first-hand specimen). Both looked identical:
+   * `lastBusyMarkerAt` stale, so this fired and drained regardless. Fix: `lastBusyMarkerAt` is now written
+   * ONLY by a REAL onData marker sighting; `live.enterWrittenAt` (set by `submitCodex`/`retryCodexEnter` at
+   * the REAL write instant) is the new reference point this method compares it against.
+   *
+   * STATE MACHINE resolved on every fire (re-checked against live state, never trusted from closure alone,
+   * exactly as before):
+   *   0. `live.enterPending` — this turn's OWN Enter hasn't been written yet (still inside
+   *      `submitCodex`'s `CODEX_SUBMIT_ENTER_DELAY_MS` text->\r gap); this fire only happened because a
+   *      marker sighting armed a timer during that gap. `enterWrittenAt` still reflects the PRIOR turn, so
+   *      comparing against it here would be comparing against the wrong reference point — declaring
+   *      "confirmed" now would drain the next message while THIS turn's real Enter write is still
+   *      outstanding, corrupting it the instant it fires. No-op: the delayed write itself (`submitCodex`'s
+   *      own callback) arms the REAL confirm clock once it actually happens.
+   *   1. This callback has been SUPERSEDED by a later arm (`live.busyStaleGen` no longer matches the
+   *      generation this callback captured at arm time) → no-op; that later arm's OWN callback is the live
+   *      timer now. ⚠️ CORRECTED (card fedef6a0, caught by this file's own hermetic tests firing this exact
+   *      shape under real timer jitter): this used to compare `Date.now() - lastBusyMarkerAt <
+   *      CODEX_BUSY_STALE_MS` instead — WRONG, because `setTimeout` can fire a callback a hair (observed:
+   *      1ms) before the nominal delay has fully elapsed by wall-clock `Date.now()`, which made the CURRENT
+   *      (not superseded) callback's own freshly-armed marker read as "too fresh," self-cancel, and leave
+   *      NOTHING re-armed — a genuine, if rare, way for the whole ladder to silently wedge (busy=true
+   *      forever, no retry, no exhaustion, no report), undermining the exact fail-loud guarantee this state
+   *      machine exists to provide. A generation counter is immune to timer/clock rounding by construction.
+   *   2. Genuinely stale, AND a real marker was seen AT OR AFTER this turn's own `enterWrittenAt`
+   *      (`lastBusyMarkerAt >= enterWrittenAt` — `>=`, not `>`: a millisecond-tie is a real confirmation
+   *      here, not an ambiguous one, since CASE 0 already rules out a marker seen genuinely BEFORE this
+   *      turn's Enter write) → CONFIRMED: the turn genuinely ran and has now completed.
+   *      Declare idle and drain the next queued message — the original, unchanged end-of-turn path.
+   *   3. Genuinely stale, NO real marker since `enterWrittenAt` (the swallowed-keystroke case), retries
+   *      remain (`submitConfirmAttempts < CODEX_SUBMIT_MAX_RETRIES`) → retry one bare Enter
+   *      (`retryCodexEnter` — never re-types `text`) and re-arm from that write's own instant.
+   *   4. Genuinely stale, no confirmation, retries EXHAUSTED → FAIL LOUD (card 6bf0ee32 doctrine): log,
+   *      fire the best-effort `onCodexSubmitUnconfirmed` signal (see its own doc on `PtyHostEvents` — this
+   *      is what makes the failure MANAGER-visible, not just a daemon-log line), and STOP. `live.busy`
+   *      stays true and NOTHING re-arms the timer from inside this branch, so `drainCodexPending` can never
+   *      write a further message on top of this unconfirmed one (DoD-3) — case 2's own `!live.busy` guard,
+   *      and `reconcile()`'s own `!live.busy` gate, both structurally can't fire while this holds. This is
+   *      not a dead end, though: if codex was merely very slow (not genuinely lost) and a real marker
+   *      eventually DOES arrive, onData's own UNCONDITIONAL `armCodexBusyStaleTimer` call re-arms regardless
+   *      of this exhausted state — that re-arm's own eventual fire lands in case 2 and resolves normally.
+   *      Exhaustion pauses the ladder; it does not disable it.
+   *
+   * ⚠️ CONFIRMS A TURN RAN, NOT THAT YOUR TEXT ARRIVED INTACT. A real busy-marker sighting proves codex
+   * started processing SOMETHING; it is not a byte-level echo check — codex exposes no such signal today,
+   * and none is invented here. Same distinction claude's own `fireEnterAndVerify` draws between "a
+   * confirming hook fired" (a turn started) and "the bytes matched" (see that method's own doc). The card's
+   * own §INDEPENDENT CORROBORATION cites the failure mode this does NOT cover: TEXT truncated (42,082 bytes
+   * written, 444 echoed) while the Enter itself still registered fine — this state machine would read that
+   * as case 2, CONFIRMED, and rightly so for what it actually checks; it must never be read as proof the
+   * full message arrived.
+   *
+   * ⚠️ KNOWN, UN-VERIFIED RISK (disclosed, not resolved — the real-codex spawn window was closed for this
+   * card): case 3's retry writes a bare extra `"\r"` even when the ORIGINAL Enter secretly DID land and
+   * codex is simply slow to render its first marker (a plausible, not-yet-observed shape on a host whose
+   * real `~/.codex/config.toml` carries a slow MCP-startup episode). Whether a stray Enter into an
+   * already-emptied, mid-turn codex composer is harmless (a no-op on empty input, as most TUIs do) or does
+   * something unwanted was NOT verified against a real process — no real-spawn coverage of this exact
+   * shape exists yet (fenced pending DoD-4). Treat this as a known risk to close empirically once the
+   * real-codex window reopens, not as an assumed non-issue.
    */
   private armCodexBusyStaleTimer(sessionId: string, live: CodexLive): void {
     if (live.busyStaleTimer) clearTimeout(live.busyStaleTimer);
+    const gen = ++live.busyStaleGen; // captured now — see CASE 1's own doc for why this replaces a timestamp comparison
     live.busyStaleTimer = setTimeout(() => {
       live.busyStaleTimer = null;
+      if (live.busyStaleGen !== gen) return; // CASE 1 — superseded by a later arm; see this method's own doc
       if (!live.alive || !live.busy) return; // already stopped/idled some other way — nothing to do
-      if (Date.now() - live.lastBusyMarkerAt < CODEX_BUSY_STALE_MS) return; // a fresher sighting landed since this timer was scheduled
-      this.setCodexBusy(sessionId, live, false, "codex-marker-stale");
-      // Falling edge (busy -> idle): drain the next queued message, exactly as claude's own Stop-hook-
-      // triggered drainPending does — codex has no confirming hook, so this freshness timeout IS the
-      // turn-end signal this path drains on.
-      this.drainCodexPending(sessionId, live);
+      if (live.enterPending) return; // CASE 0 — this turn's own Enter hasn't gone out yet; see this method's own doc
+      // `>=`, not `>`: `Date.now()` is millisecond-granular, and CASE 0 already guarantees a marker reaching
+      // this comparison happened no earlier (in real event order) than THIS turn's own Enter write — so a
+      // tie (both landing in the same wall-clock millisecond, easily reachable when a test drives the
+      // confirming push synchronously right after `enterPending` clears) is a genuine confirmation, not an
+      // ambiguous one. A strict `>` treated a tie as unconfirmed and fired a spurious retry ladder on
+      // otherwise-healthy turns purely from millisecond rounding (caught by this file's own hermetic tests).
+      if (live.lastBusyMarkerAt >= live.enterWrittenAt) {
+        // CASE 2 — CONFIRMED: a real marker was seen after this turn's own Enter write, and has now gone
+        // stale. Falling edge (busy -> idle): drain the next queued message, exactly as claude's own
+        // Stop-hook-triggered drainPending does — codex has no confirming hook, so this freshness timeout
+        // IS the turn-end signal this path drains on.
+        this.setCodexBusy(sessionId, live, false, "codex-marker-stale");
+        this.drainCodexPending(sessionId, live);
+        return;
+      }
+      if (live.submitConfirmAttempts < CODEX_SUBMIT_MAX_RETRIES) {
+        // CASE 3 — retry.
+        this.retryCodexEnter(sessionId, live);
+        return;
+      }
+      // CASE 4 — exhausted. FAIL LOUD, never silently drain — see this method's own doc.
+      // eslint-disable-next-line no-console
+      console.error(`[codex-submit-stuck] ${sessionId} Enter never confirmed after ${live.submitConfirmAttempts} retries (${CODEX_BUSY_STALE_MS}ms window each) — no busy-marker sighting since the last Enter write; leaving busy=true so the pending queue can never be drained on top of this unconfirmed turn. Manager intervention needed.`);
+      try {
+        this.events.onCodexSubmitUnconfirmed?.(sessionId, { attempts: live.submitConfirmAttempts, maxAttempts: CODEX_SUBMIT_MAX_RETRIES });
+      } catch (err) {
+        // A failure to emit this signal must never become a SECOND failure mode on top of the one being
+        // reported — swallow, loudly, and move on (this data path must never throw).
+        // eslint-disable-next-line no-console
+        console.error(`[codex-submit-stuck] ${sessionId} onCodexSubmitUnconfirmed handler threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+      }
     }, CODEX_BUSY_STALE_MS);
+  }
+
+  /**
+   * Card fedef6a0 — case 3 of `armCodexBusyStaleTimer`'s state machine: write ONE more bare `"\r"`, never
+   * re-typing `text` (the composer may already hold it from the original write; a second full write risks
+   * genuine duplication/concatenation if the first COULD have landed — the exact "corruption" shape the
+   * card's own body names). Re-arms the staleness timer from THIS write's own instant, giving codex another
+   * full `CODEX_BUSY_STALE_MS` window to show a real marker before the next decision.
+   */
+  private retryCodexEnter(sessionId: string, live: CodexLive): void {
+    if (!live.alive) return; // the pty died since this was scheduled — nothing to write or arm
+    live.submitConfirmAttempts++;
+    // eslint-disable-next-line no-console
+    console.warn(`[codex-submit] ${sessionId} Enter attempt ${live.submitConfirmAttempts}/${CODEX_SUBMIT_MAX_RETRIES} — no busy-marker sighting since the last Enter write after ${CODEX_BUSY_STALE_MS}ms; retrying`);
+    live.pty.write("\r");
+    live.enterWrittenAt = Date.now();
+    this.armCodexBusyStaleTimer(sessionId, live);
   }
 
   /**
    * Codex counterpart of `submit()` — mirrors the probe's own OBSERVED State-4 recipe EXACTLY (findings.md
    * `049e4a7b-codex-cli-capability-probe`): `pty.write(text)`, then `CODEX_SUBMIT_ENTER_DELAY_MS` later
-   * `pty.write("\r")`. No verify-and-retry ladder — codex has no confirming hook to verify a written Enter
-   * against, so busy/idle detection (the onData handler) is the ONLY signal a caller has that the turn
-   * actually started; this is a named, disclosed simplification versus claude's `fireEnterAndVerify`.
-   * Sets `live.busy` SYNCHRONOUSLY before returning (mirrors claude's own M1 invariant) so a concurrent
-   * `enqueueStdinCodex` call sees busy and queues instead of racing this turn's pending `\r`.
+   * `pty.write("\r")`. Sets `live.busy` SYNCHRONOUSLY before returning (mirrors claude's own M1 invariant)
+   * so a concurrent `enqueueStdinCodex` call sees busy and queues instead of racing this turn's pending
+   * `\r`. `live.submitConfirmAttempts` resets to 0 here — a FRESH turn's retry ladder always starts clean,
+   * regardless of how the PRIOR turn's own ladder ended (confirmed normally, or exhausted — see
+   * `armCodexBusyStaleTimer`'s own doc).
    *
-   * Also arms the SAME `CODEX_BUSY_STALE_MS` freshness timer the onData handler's own marker sighting
-   * arms — a fallback ceiling for the (expected-rare, but real) case where this turn's busy marker never
-   * renders at all before the turn genuinely completes: without this, `live.busy` would have nothing to
-   * ever clear it, since the onData handler's `armCodexBusyStaleTimer` call only fires when a marker is
-   * actually SEEN. A real marker sighting shortly after simply re-arms with a fresher timestamp, so this
-   * is a no-op ceiling in the common case, not a competing source of truth.
+   * Card fedef6a0: the staleness timer is armed HERE, from the REAL Enter-write instant
+   * (`live.enterWrittenAt`) — not synchronously at submit-call time as before (that used to also stamp
+   * `live.lastBusyMarkerAt` optimistically, which was the root of the unconfirmed-drain bug this card fixed;
+   * see `armCodexBusyStaleTimer`'s own doc for the full state machine this now feeds). `live.enterPending`
+   * is `true` for the duration of the `CODEX_SUBMIT_ENTER_DELAY_MS` gap below — a real marker sighting
+   * during that gap (rare, but possible — an onData chunk that happens to match `isCodexBusy` before this
+   * turn's own Enter even goes out) can still arm a timer independently via the onData handler's own
+   * unconditional call, but `armCodexBusyStaleTimer`'s CASE 0 no-ops any such fire while `enterPending` is
+   * true, rather than confirming against this turn's still-stale `enterWrittenAt`.
    */
   private submitCodex(sessionId: string, live: CodexLive, text: string): void {
     this.setCodexBusy(sessionId, live, true, "submit");
-    live.lastBusyMarkerAt = Date.now();
-    this.armCodexBusyStaleTimer(sessionId, live);
+    live.submitConfirmAttempts = 0;
+    live.enterPending = true; // this turn's Enter is not written yet — see CASE 0 on armCodexBusyStaleTimer's own doc
     live.pty.write(text);
     setTimeout(() => {
-      if (!live.alive) return; // the pty died before the delayed Enter — nothing to write
+      if (!live.alive) return; // the pty died before the delayed Enter — nothing to write or arm
       live.pty.write("\r");
+      live.enterWrittenAt = Date.now();
+      live.enterPending = false;
+      this.armCodexBusyStaleTimer(sessionId, live);
     }, CODEX_SUBMIT_ENTER_DELAY_MS);
   }
 

@@ -211,10 +211,22 @@ let replyText = "";
 if (capturedEngineId) {
   try {
     await waitUntil(
+      // Card 1027b523: `t.find(non-empty assistant)` used to be satisfied by a reasoning-capable model's
+      // OWN intent preamble ("I'll read AGENTS.md...") — that means "any assistant message exists", not
+      // "the FINAL ANSWER has arrived", and a preamble is a real assistant message that legitimately
+      // precedes the model actually invoking the read tool. Fixed by requiring the matched turn to
+      // CONTAIN the expected id itself — a preamble structurally cannot satisfy this, so a genuine failure
+      // now times out honestly instead of succeeding early on the wrong turn. `expectedId ? ... : true`
+      // preserves the OLD "any non-empty text" signal only for the degraded fallback (AGENTS.md write
+      // somehow failed, no id to check against) — see codex-doctrine-completion-predicate.mjs for the
+      // hermetic RED/GREEN proof, built from the two real preamble strings this bug actually produced.
       () => {
         const t = readTranscript(scratchCwd, capturedEngineId, "codex");
         turnsAtSettle = t;
-        const reply = t.find((turn) => turn.role === "assistant" && turn.text.trim().length > 0);
+        const reply = t.find((turn) => {
+          if (turn.role !== "assistant" || !turn.text.trim()) return false;
+          return expectedId ? turn.text.includes(expectedId) : true;
+        });
         replyText = reply?.text ?? "";
         return !!reply;
       },
@@ -222,7 +234,10 @@ if (capturedEngineId) {
       // overshoot (91.9s) on a host whose real ~/.codex carries several bundled plugin skills that inflate
       // the system prompt (visible in the transcript dump) — the turn DID complete correctly (the reply
       // landed, twice, by the time the 90s wait gave up), so this is a wait-window tuning fix, not a hang.
-      { label: `${SESSION_ID} real codex turn completes and lands in the rollout file`, timeoutMs: 150000, intervalMs: 500 },
+      // Card 1027b523: this window is UNCHANGED — the defect was never the timeout length (a previous
+      // author already looked at this exact wait and correctly ruled that out); it was the predicate
+      // returning early on the wrong condition, fixed above.
+      { label: `${SESSION_ID} real codex turn produces an assistant message CONTAINING the expected LOOM-DOCTRINE-ID (not merely any non-empty assistant message — an intent preamble must not satisfy this)`, timeoutMs: 150000, intervalMs: 500 },
     );
   } catch (err) {
     console.log(`FAIL  ${err.message}`);

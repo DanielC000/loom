@@ -37,6 +37,7 @@ export const CODEX_REAL_SPAWN_BASENAMES = [
   "codex-doctrine-real-spawn",
   "codex-mcp-reachability-real-spawn",
   "codex-stateful-runtime-real-spawn",
+  "codex-submit-confirmation-real-spawn",
   "codex-transcript-real-spawn",
 ];
 export const CODEX_REAL_SPAWN_SET = new Set(CODEX_REAL_SPAWN_BASENAMES);
@@ -44,14 +45,15 @@ export const CODEX_REAL_SPAWN_SET = new Set(CODEX_REAL_SPAWN_BASENAMES);
 const LOCK_PATH = path.join(os.tmpdir(), "loom-codex-real-spawn.lock");
 // Far longer than any file's own worst-case runtime is EVER expected to be, but no longer this lock's
 // PRIMARY defense — see the file header. Only reached if `scripts/test-daemon.mjs`'s own sequential
-// scheduling for CODEX_REAL_SPAWN_BASENAMES (N=4 today: codex-doctrine-real-spawn,
-// codex-mcp-reachability-real-spawn, codex-stateful-runtime-real-spawn, codex-transcript-real-spawn) is
-// itself violated (a scheduling bug, or one of these files run ad hoc outside that harness). Because
-// scheduling — not this budget — is what prevents concurrent contention now, this number does NOT need
-// to scale with N (it never has to cover N-1 *other* holders finishing first); it only needs to exceed
-// ONE legitimate holder's worst real runtime. Sized from ACTUAL production gate-op `7d31427a`'s surviving
-// log (~/.loom/gate-output/7d31427a-824f-495c-8606-c868ae77cfac.log, captured before card 3791b14e's own
-// 20-minute prune window closed) under REAL 4-way contention — the exact condition this fix removes:
+// scheduling for CODEX_REAL_SPAWN_BASENAMES above (read the array for current membership — restating it
+// here would drift the moment it changes again) is itself violated (a scheduling bug, or one of these
+// files run ad hoc outside that harness). Because scheduling — not this budget — is what prevents
+// concurrent contention now, this number does NOT need to scale with membership count (it never has to
+// cover N-1 *other* holders finishing first); it only needs to exceed ONE legitimate holder's worst real
+// runtime. Sized from ACTUAL production gate-op `7d31427a`'s surviving log
+// (~/.loom/gate-output/7d31427a-824f-495c-8606-c868ae77cfac.log, captured before card 3791b14e's own
+// 20-minute prune window closed) under REAL 4-way contention (the family's size AT THAT TIME, before this
+// file's own 5th member was added) — the exact condition this fix removes:
 // codex-transcript-real-spawn 120.0s (killed at the OUTER per-file ceiling, still holding this lock —
 // see PID-liveness reaping below for why that no longer costs a full STALE_MS wait), codex-doctrine-
 // real-spawn 96.8s (PASS), codex-mcp-reachability-real-spawn 91.7s (FAIL, blocked on this very lock),

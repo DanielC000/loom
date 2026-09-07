@@ -396,6 +396,12 @@ async function main(): Promise<void> {
     // record the durable event + fail loud to the recipient AND the sender. See
     // PtyHostEvents.onRepeatedToolCall's own doc / SessionService.handleRepeatedToolCall's own doc.
     onRepeatedToolCall: (sessionId, info) => sessions.handleRepeatedToolCall(sessionId, info),
+    // Card fedef6a0: a codex submit's confirm-or-retry ladder exhausted its retries with no busy-marker
+    // sighting since the last Enter write — `sessions` (forward reference, same pattern as
+    // onRepeatedToolCall above) decides how to record the durable event + fail loud to the recipient AND
+    // the sender/manager. See PtyHostEvents.onCodexSubmitUnconfirmed's own doc /
+    // SessionService.handleCodexSubmitUnconfirmed's own doc.
+    onCodexSubmitUnconfirmed: (sessionId, info) => sessions.handleCodexSubmitUnconfirmed(sessionId, info),
     // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
     // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so
     // the Scheduler / worker_spawn won't fire into a known-limited account).

@@ -18,7 +18,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // restored via `git apply` of the captured diff — see the worker report for the exact commands used.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/codex-queue-state-machine.mjs
-process.env.LOOM_CODEX_BUSY_STALE_MS = "40"; // read once at module load below — must be set BEFORE the dynamic import
+//
+// Card fedef6a0: `armCodexBusyStaleTimer`'s confirm-or-retry ladder (see its own doc) needs a real,
+// nonzero gap between "text written" and "Enter written" to exist BEFORE a confirming marker can be pushed
+// (a marker pushed before the real Enter write predates `enterWrittenAt` and is correctly ignored — see
+// each scenario's own "CAUSALITY" comment below) — `LOOM_CODEX_SUBMIT_ENTER_DELAY_MS` shrinks that gap
+// from production's 300ms so this stays fast. `LOOM_CODEX_BUSY_STALE_MS` is kept comfortably larger than
+// both that gap AND `waitUntil`'s own poll interval (10ms) — a value as tight as the two constants used to
+// share (40ms) left too little margin for a confirming push's own re-arm to land before the PRIOR timer
+// (armed at the real Enter write) already fired a spurious retry, flaking this file under ordinary
+// scheduling jitter. Both are read once at module load below — must be set BEFORE the dynamic import.
+process.env.LOOM_CODEX_SUBMIT_ENTER_DELAY_MS = "20";
+process.env.LOOM_CODEX_BUSY_STALE_MS = "300";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
 
@@ -91,8 +102,23 @@ check("C1: delivering the kickoff armed busy (submitCodex's own M1-mirroring inv
 fakePty.push("> Ask Codex to do anything\n");
 check("C1: the kickoff is never delivered twice (kickoffDelivered latches)", fakePty.writes.filter((w) => w.includes(KICKOFF)).length === 1);
 
-// Let the kickoff's own turn go idle (no busy marker was ever fed for it) before the next scenario.
-await waitUntil(() => host.isBusy(SESSION_ID) === false, { label: "kickoff turn goes idle (no marker ever fed -> immediately stale)" });
+// Card fedef6a0: a real busy-marker sighting CONFIRMS this turn (mirrors every real spawn per the probe —
+// even a trivial one-word reply showed a "Working" frame, findings.md State 4) before it's allowed to go
+// idle. Without this, "no marker ever fed" is now (correctly, post-fix) indistinguishable from the
+// swallowed-keystroke case this card exists to catch, and would exhaust the retry ladder instead of ever
+// reaching idle — see armCodexBusyStaleTimer's own doc for why that's the fix, not a bug in this test.
+//
+// CAUSALITY, not a formality: `submitCodex`'s real Enter write is a REAL setTimeout
+// (`CODEX_SUBMIT_ENTER_DELAY_MS`), so a marker pushed synchronously (before it fires) predates
+// `enterWrittenAt` and is correctly ignored by CASE 0 (`armCodexBusyStaleTimer`'s own doc) — in a real
+// codex TUI, a marker literally cannot render before the Enter that caused it was actually sent. Wait for
+// `enterPending` to clear (the real write happened) before pushing a marker meant to confirm this turn.
+await waitUntil(() => host.liveCodex.get(SESSION_ID).enterPending === false, { label: "kickoff turn's own Enter write has actually happened" });
+fakePty.push("Working (1s • esc to interrupt)\n");
+check("kickoff turn's busy marker CONFIRMS it (armed from the marker sighting)", host.isBusy(SESSION_ID) === true);
+
+// Let the kickoff's own (now-confirmed) turn go idle before the next scenario.
+await waitUntil(() => host.isBusy(SESSION_ID) === false, { label: "kickoff turn goes idle once its confirmed marker goes stale" });
 
 // --- C2: the in-flight race — a chunk in submitCodex's own text->\r write gap must NEVER flip busy false
 const enq1 = host.enqueueStdin(SESSION_ID, "message one", "system", undefined, undefined, "agent");
@@ -114,6 +140,10 @@ check("no extra write landed yet (message two did not get written prematurely)",
 // message two. Draining calls submitCodex again (message two's OWN turn), which re-arms busy=true
 // synchronously in the SAME tick — so the observable sequence is true -> [stale: false, then immediately
 // true again for message two] -> [message two's own turn eventually goes stale too].
+//
+// CAUSALITY (see the C1 section's own note): message one's real Enter write must have actually happened
+// before a marker confirming IT is pushed, or CASE 0 correctly ignores it as predating `enterWrittenAt`.
+await waitUntil(() => host.liveCodex.get(SESSION_ID).enterPending === false, { label: "message one's own Enter write has actually happened" });
 fakePty.push("Working (1s • esc to interrupt)\n");
 check("busy marker observed -> still busy", host.isBusy(SESSION_ID) === true);
 await waitUntil(() => fakePty.writes.some((w) => w.includes("message two")), { label: "message two drained once the busy marker goes stale (no further sighting fed)" });
@@ -123,12 +153,20 @@ check(
   "busy events show the stale-falling-edge immediately followed by message two's own rising edge",
   busyEvents.filter((e) => e.sessionId === SESSION_ID).slice(-2).map((e) => e.busy).join(",") === "false,true",
 );
-// Let message two's own turn (no marker fed for it either) go stale before the next scenario.
-await waitUntil(() => host.isBusy(SESSION_ID) === false, { label: "message two's own turn goes idle (no marker fed -> falls back to the submit-time ceiling)" });
+// Confirm message two's OWN turn too (same causality requirement) before letting it go idle — a
+// still-unconfirmed message two would instead retry-then-stick, wrongly leaving `busy` true forever and
+// breaking M3's own "delivers immediately (idle at enqueue time)" premise below.
+await waitUntil(() => host.liveCodex.get(SESSION_ID).enterPending === false, { label: "message two's own Enter write has actually happened" });
+fakePty.push("Working (1s • esc to interrupt)\n");
+await waitUntil(() => host.isBusy(SESSION_ID) === false, { label: "message two's own (now-confirmed) turn goes idle" });
 
 // --- M3: a session that keeps refreshing the marker must NEVER go idle while genuinely still busy -------
 const enq3 = host.enqueueStdin(SESSION_ID, "message three (long turn)", "system", undefined, undefined, "agent");
 check("message three delivers immediately (idle at enqueue time)", enq3.delivered === true);
+// CAUSALITY (see the C1 section's own note): wait for message three's own real Enter write before any
+// marker meant to confirm it — otherwise every refresh below predates `enterWrittenAt` and CASE 0 ignores
+// them all, then CASE 3's retry ladder fires instead of this scenario's intended "stays busy" behavior.
+await waitUntil(() => host.liveCodex.get(SESSION_ID).enterPending === false, { label: "message three's own Enter write has actually happened" });
 // Refresh the marker several times with ZERO real delay between pushes — deliberately, not a timing
 // shortcut: because this is fully synchronous, the PRIOR staleness timer can never get a chance to fire
 // before armCodexBusyStaleTimer's own clearTimeout cancels it (Node's single-threaded event loop can't
