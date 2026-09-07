@@ -24,6 +24,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   checkMarkers, countNumberedSection, countNumberedSectionUnion, checkRotation, runResumeDocCheck, containUnderVault,
+  checkMarkersUnion, countNumberedSectionUnionMulti,
   HONEST_LIMIT_NOTE, UNCONFIGURED_WARNING,
 } from "../dist/orchestration/rotation-check.js";
 
@@ -525,7 +526,429 @@ function tmpFile(name, content) {
   check("checkRotation: omitted `rules` ⇒ rulesCheck stays silent (checked:false)", rNone.rulesCheck.checked === false && rNone.rulesCheck.ok === true);
 }
 
+// ── MULTI-FILE RULES UNION (card f6985338) — checkMarkersUnion / countNumberedSectionUnionMulti ──────────
+// Lets resume_doc_check accept MULTIPLE rules files (the `rulesPaths` MCP argument), for a seat that has
+// grown past one non-rotating doctrine file (the concrete trigger card 14f14d92 pre-registered: "if a
+// third doctrine file is ever added, this is the trigger to revisit"). These GENERALIZE checkMarkers/
+// countNumberedSectionUnion above from exactly-one-other-file to N — the ORIGINAL functions stay
+// completely untouched (still exercised by every test above them, still what a legacy single-`rulesPath`
+// caller runs through via checkRotation below), so this capability is purely additive.
+{
+  const markers = [
+    { token: "ALPHA", caseSensitive: false },
+    { token: "BETA", caseSensitive: false },
+    { token: "GAMMA", caseSensitive: false },
+  ];
+
+  // (1) basic N-file union: each marker found in a DIFFERENT source, active has none.
+  const sources = [
+    { label: "/vault/rules-a.md", text: "...ALPHA lives here..." },
+    { label: "/vault/rules-b.md", text: "...BETA lives here..." },
+  ];
+  const rMulti = checkMarkersUnion("nothing relevant in the active doc", markers, sources);
+  check("checkMarkersUnion: ALPHA found in the first source, attributed to its own label (not a generic 'rules')", rMulti.satisfiedBy.get("ALPHA") === "/vault/rules-a.md");
+  check("checkMarkersUnion: BETA found in the second source, attributed to its own label", rMulti.satisfiedBy.get("BETA") === "/vault/rules-b.md");
+  check("checkMarkersUnion: GAMMA absent from active AND every source ⇒ reported missing", rMulti.missing.some((m) => m.token === "GAMMA"));
+
+  // (2) precedence: active still wins over every source (unchanged from the single-file version).
+  const rPrecedence = checkMarkersUnion("...ALPHA lives in the active doc too...", markers.slice(0, 1), sources);
+  check("checkMarkersUnion: active still wins over every source", rPrecedence.satisfiedBy.get("ALPHA") === "active");
+
+  // Sources are tried IN THE ORDER GIVEN — the first one that matches wins.
+  const bothHaveAlpha = [
+    { label: "/vault/first.md", text: "ALPHA here" },
+    { label: "/vault/second.md", text: "ALPHA here too" },
+  ];
+  const rOrder = checkMarkersUnion("nothing relevant", markers.slice(0, 1), bothHaveAlpha);
+  check("checkMarkersUnion: the FIRST source (in the order given) wins when more than one would satisfy it", rOrder.satisfiedBy.get("ALPHA") === "/vault/first.md");
+
+  // (3) zero sources behaves exactly like the single-file version with no rulesText at all.
+  const rNoSources = checkMarkersUnion("nothing relevant", markers.slice(0, 1), []);
+  check("checkMarkersUnion: zero sources ⇒ missing, same as the single-file version with rulesText:null", rNoSources.missing.length === 1 && rNoSources.missing[0].token === "ALPHA");
+
+  // ── countNumberedSectionUnionMulti ──
+  const doc = (n) => ["## LIVE COMMITMENTS", ...Array.from({ length: n }, (_, i) => `${i + 1}. item`)].join("\n");
+  const noHeading = "nothing relevant here";
+
+  const rNeither = countNumberedSectionUnionMulti(noHeading, [{ label: "/a.md", text: noHeading }, { label: "/b.md", text: noHeading }], "LIVE COMMITMENTS");
+  check("countNumberedSectionUnionMulti: fail-closed when the heading is in active AND every source", rNeither.count === null && rNeither.source === null);
+  check("countNumberedSectionUnionMulti: fail-closed diagnostic names that rules files WERE checked", rNeither.diagnostic.includes("any supplied rules file"));
+
+  // Found in the SECOND source only — proves the union actually walks past a non-matching source instead
+  // of stopping at the first one tried.
+  const rSecondOnly = countNumberedSectionUnionMulti(noHeading, [{ label: "/a.md", text: noHeading }, { label: "/b.md", text: doc(9) }], "LIVE COMMITMENTS");
+  check("countNumberedSectionUnionMulti: found in the SECOND source when the first has no heading", rSecondOnly.count === 9 && rSecondOnly.source === "/b.md");
+
+  // AMBIGUITY across 3 places (active + two sources) — the N-file generalization of the single-file
+  // otherCount/otherDiagnostic pair, now `others` (plural, one entry per OTHER location).
+  const rAmbiguous3 = countNumberedSectionUnionMulti(doc(20), [{ label: "/a.md", text: doc(5) }, { label: "/b.md", text: doc(3) }], "LIVE COMMITMENTS");
+  check("countNumberedSectionUnionMulti: active wins (20), both sources reported as 'others'", rAmbiguous3.source === "active" && rAmbiguous3.count === 20 && rAmbiguous3.ambiguous === true);
+  check("countNumberedSectionUnionMulti: 'others' names BOTH other locations with their own counts", rAmbiguous3.others.length === 2 && rAmbiguous3.others.some((o) => o.source === "/a.md" && o.count === 5) && rAmbiguous3.others.some((o) => o.source === "/b.md" && o.count === 3));
+
+  // BOUNDARY: active is below the floor even though a LATER source would pass on its own — must never
+  // fall through to a passing source (mirrors the single-file boundary test above).
+  const rBoundaryMulti = countNumberedSectionUnionMulti(doc(2), [{ label: "/a.md", text: doc(20) }], "LIVE COMMITMENTS");
+  check("countNumberedSectionUnionMulti: active carries the heading (even below a real floor) ⇒ never falls through to a passing source", rBoundaryMulti.source === "active" && rBoundaryMulti.count === 2);
+
+  // Only ONE other location (active absent, exactly one source carries it) ⇒ `ambiguous` absent — proves
+  // it isn't spuriously set just because a `sources` array was passed at all.
+  const rOnlyOneOther = countNumberedSectionUnionMulti(noHeading, [{ label: "/only.md", text: doc(7) }], "LIVE COMMITMENTS");
+  check("countNumberedSectionUnionMulti: exactly one source carries it, active absent ⇒ ambiguous is ABSENT", rOnlyOneOther.ambiguous === undefined && rOnlyOneOther.source === "/only.md" && rOnlyOneOther.count === 7);
+}
+
+// ── checkRotation('rulesFiles') — multi-file union end-to-end through the pure function (card f6985338) ──
+{
+  const markers = [{ token: "ALPHA" }, { token: "BETA" }];
+
+  // DoD-1, the regression that matters most — a caller supplying ONLY the legacy `rules` field must get
+  // the EXACT same result as before this card.
+  //
+  // ⚠️ CODE REVIEW (B1) CORRECTION: this used to compare `checkRotation(legacyInput)` against
+  // `checkRotation({...legacyInput, rulesFiles: []})` and call the agreement "byte-identical to before
+  // this card." That comparison is a TAUTOLOGY, not evidence — `rotation-check.ts`'s own
+  // `input.rulesFiles ?? []` normalizes BOTH calls onto the IDENTICAL code path before either one runs, so
+  // of course they agree; the reviewer proved this mechanically by mutating ONLY the legacy branch in a
+  // scratch copy of the built module and watching that assertion stay green regardless. Two sides, one
+  // source, is not two witnesses. The underlying CLAIM survives — the reviewer verified the legacy branch
+  // (`if (!hasMultiFiles)`) is the OLD code moved verbatim, unedited — but this test must not be the
+  // evidence cited for it. The GOLDEN SNAPSHOT below is: a hand-written literal, independent of
+  // `checkRotation` itself, that would go RED the moment anyone changes the legacy path's shape or values
+  // — which is exactly the property a "byte-identical" claim needs behind it.
+  const rLegacy = checkRotation({
+    activeText: "nothing relevant here", markers,
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rules: { resolvedPath: "/x/rules.md", text: "...ALPHA...BETA..." },
+  });
+  const golden = {
+    configured: true,
+    ok: true,
+    missingMarkers: [],
+    markerSources: { ALPHA: "rules", BETA: "rules" },
+    rulesCheck: { checked: true, ok: true, resolvedPath: "/x/rules.md" },
+    liveCommitments: {
+      enabled: false, count: null, floor: 0, ok: true,
+      diagnostic: "disabled — no rotationLiveCommitmentsHeading configured for this seat", source: null,
+    },
+    archiveCheck: { checked: false, ok: true },
+    byteCheck: { checked: false, ok: true },
+    honestLimitNote: HONEST_LIMIT_NOTE,
+  };
+  check("checkRotation DoD-1 GOLDEN SNAPSHOT: a legacy-only call's FULL result matches a hand-written literal, byte for byte — this is what actually goes red if the legacy path's shape/values ever change", JSON.stringify(rLegacy) === JSON.stringify(golden));
+  check("checkRotation DoD-1: markerSources still say 'rules' verbatim, not a path", rLegacy.markerSources.ALPHA === "rules" && rLegacy.markerSources.BETA === "rules");
+  check("checkRotation DoD-1: no rulesChecks field at all on the legacy path (absent, not [])", rLegacy.rulesChecks === undefined);
+
+  // `rulesFiles:[]` vs. omitted DOES legitimately confirm the two spellings of "no multi-file input" are
+  // treated identically (both normalize via `?? []`) — but, per the correction above, this is NOT
+  // independent proof the legacy path is unchanged (both sides run the SAME code); it only tests that the
+  // normalization itself doesn't discriminate on omitted-vs-explicit-empty.
+  const rLegacyWithEmptyRulesFiles = checkRotation({
+    activeText: "nothing relevant here", markers,
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rules: { resolvedPath: "/x/rules.md", text: "...ALPHA...BETA..." },
+    rulesFiles: [],
+  });
+  check("checkRotation: rulesFiles:[] is treated identically to rulesFiles omitted (both normalize to the same branch, NOT independent evidence of legacy-path stability — see the golden snapshot above for that)", JSON.stringify(rLegacy) === JSON.stringify(rLegacyWithEmptyRulesFiles));
+
+  // DoD-2/3: rulesFiles present ⇒ union across ALL of them, markerSources names the SPECIFIC file.
+  const rMulti = checkRotation({
+    activeText: "nothing relevant here", markers,
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rulesFiles: [
+      { resolvedPath: "/vault/rules-a.md", text: "...ALPHA only here..." },
+      { resolvedPath: "/vault/rules-b.md", text: "...BETA only here..." },
+    ],
+  });
+  check("checkRotation multi-file: ALPHA attributed to rules-a.md specifically", rMulti.markerSources.ALPHA === "/vault/rules-a.md");
+  check("checkRotation multi-file: BETA attributed to rules-b.md specifically", rMulti.markerSources.BETA === "/vault/rules-b.md");
+  check("checkRotation multi-file: overall ok:true (every marker satisfied somewhere)", rMulti.ok === true && rMulti.missingMarkers.length === 0);
+
+  // DoD-4: a rulesFiles entry that could not be read FAILS VISIBLY — a real ok:false entry in
+  // `rulesChecks`, NEVER silently dropped from the array — even while the union itself is satisfied
+  // elsewhere (the dangerous cell: a green `ok` must not hide a missing file).
+  const rMissingFile = checkRotation({
+    activeText: "nothing relevant here", markers,
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rulesFiles: [
+      { resolvedPath: "/vault/rules-a.md", text: "...ALPHA...BETA..." },
+      { resolvedPath: "/vault/bogus.md", error: "rules path does not exist or is unreadable: /vault/bogus.md" },
+    ],
+  });
+  check("checkRotation multi-file DANGEROUS CELL: overall ok is unaffected (every marker genuinely satisfied by the readable file)", rMissingFile.ok === true && rMissingFile.missingMarkers.length === 0);
+  check("checkRotation multi-file DANGEROUS CELL: rulesChecks has BOTH entries, in order — the bad one is NOT dropped", rMissingFile.rulesChecks.length === 2);
+  check("checkRotation multi-file DANGEROUS CELL: the readable entry reports ok:true", rMissingFile.rulesChecks[0].ok === true && rMissingFile.rulesChecks[0].resolvedPath === "/vault/rules-a.md");
+  check("checkRotation multi-file DANGEROUS CELL: the UNREADABLE entry reports ok:false with its own resolvedPath + reason — the loud signal", rMissingFile.rulesChecks[1].ok === false && rMissingFile.rulesChecks[1].resolvedPath === "/vault/bogus.md" && rMissingFile.rulesChecks[1].reason.includes("/vault/bogus.md"));
+
+  // A marker ONLY the unreadable file could have satisfied must genuinely fail — never read as "satisfied
+  // elsewhere" (the exact false-green DoD-4 exists to prevent).
+  const rMissingFileIsTheOnlySource = checkRotation({
+    activeText: "nothing relevant here", markers: [{ token: "ONLY_IN_BOGUS" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rulesFiles: [{ resolvedPath: "/vault/bogus.md", error: "rules path does not exist or is unreadable: /vault/bogus.md" }],
+  });
+  check("checkRotation multi-file: a marker ONLY the unreadable file could have satisfied genuinely fails, never a false green", rMissingFileIsTheOnlySource.ok === false && rMissingFileIsTheOnlySource.missingMarkers.includes("ONLY_IN_BOGUS"));
+  check("checkRotation multi-file: rulesChecks still names the failure even though it changed nothing else", rMissingFileIsTheOnlySource.rulesChecks.length === 1 && rMissingFileIsTheOnlySource.rulesChecks[0].ok === false);
+
+  // legacy `rules` PLUS `rulesFiles` together: the legacy field keeps its "rules" label, array entries get
+  // their own paths — proves the two inputs COMPOSE rather than one silently overriding the other.
+  const rMixed = checkRotation({
+    activeText: "nothing relevant here", markers: [{ token: "ALPHA" }, { token: "BETA" }, { token: "GAMMA" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rules: { resolvedPath: "/legacy/rules.md", text: "...ALPHA..." },
+    rulesFiles: [{ resolvedPath: "/vault/extra.md", text: "...BETA...GAMMA..." }],
+  });
+  check("checkRotation mixed rules+rulesFiles: legacy field still labeled 'rules'", rMixed.markerSources.ALPHA === "rules");
+  check("checkRotation mixed rules+rulesFiles: the array entry is labeled by its own path", rMixed.markerSources.BETA === "/vault/extra.md" && rMixed.markerSources.GAMMA === "/vault/extra.md");
+  check("checkRotation mixed rules+rulesFiles: legacy rulesCheck AND the new rulesChecks are BOTH populated", rMixed.rulesCheck.ok === true && rMixed.rulesChecks.length === 1 && rMixed.rulesChecks[0].resolvedPath === "/vault/extra.md");
+}
+
+// ── checkRotation('rulesFiles') — LIVE COMMITMENTS floor unions across N files too (DoD-2) ───────────────
+{
+  const doc = (n) => ["## LIVE COMMITMENTS", ...Array.from({ length: n }, (_, i) => `${i + 1}. item`)].join("\n");
+  const noHeading = "nothing relevant here";
+
+  const rFromSecondFile = checkRotation({
+    activeText: noHeading, markers: [],
+    commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 5,
+    rulesFiles: [
+      { resolvedPath: "/vault/a.md", text: noHeading },
+      { resolvedPath: "/vault/b.md", text: doc(8) },
+    ],
+  });
+  check("checkRotation multi-file floor: found in the second rules file when the first has none", rFromSecondFile.liveCommitments.ok === true && rFromSecondFile.liveCommitments.count === 8 && rFromSecondFile.liveCommitments.source === "/vault/b.md");
+
+  const rAmbiguousMulti = checkRotation({
+    activeText: doc(20), markers: [],
+    commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 5,
+    rulesFiles: [
+      { resolvedPath: "/vault/a.md", text: doc(3) },
+      { resolvedPath: "/vault/b.md", text: doc(9) },
+    ],
+  });
+  check("checkRotation multi-file floor ambiguity: active wins (20), otherSources names BOTH other files", rAmbiguousMulti.liveCommitments.ambiguous === true && rAmbiguousMulti.liveCommitments.count === 20 && rAmbiguousMulti.liveCommitments.otherSources.length === 2);
+  check("checkRotation multi-file floor ambiguity: single-file otherCount/otherDiagnostic are ABSENT (mutually exclusive with otherSources)", rAmbiguousMulti.liveCommitments.otherCount === undefined && rAmbiguousMulti.liveCommitments.otherDiagnostic === undefined);
+  check("checkRotation multi-file floor ambiguity: top-level ambiguityWarning enumerates MULTIPLE places by path", typeof rAmbiguousMulti.ambiguityWarning === "string" && rAmbiguousMulti.ambiguityWarning.includes("MULTIPLE") && rAmbiguousMulti.ambiguityWarning.includes("/vault/a.md") && rAmbiguousMulti.ambiguityWarning.includes("/vault/b.md"));
+
+  const rFailClosedMulti = checkRotation({
+    activeText: noHeading, markers: [],
+    commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 5,
+    rulesFiles: [{ resolvedPath: "/vault/a.md", text: noHeading }, { resolvedPath: "/vault/b.md", text: noHeading }],
+  });
+  check("checkRotation multi-file floor: fail-closed when the heading is nowhere at all", rFailClosedMulti.liveCommitments.ok === false && rFailClosedMulti.liveCommitments.count === null && rFailClosedMulti.ok === false);
+}
+
+// ── runResumeDocCheck('rulesPaths') — the real fs wrapper, multi-file, end-to-end (card f6985338) ─────────
+{
+  const activeDoc = "active doc — no markers here\n";
+  const activePath = tmpFile("f6985338-active.md", activeDoc);
+  const rulesAPath = tmpFile("f6985338-rules-a.md", "RULE_ONE lives only here\n");
+  const rulesBPath = tmpFile("f6985338-rules-b.md", "RULE_TWO lives only here\n");
+  const bogusPath = path.join(os.tmpdir(), `loom-rot-f6985338-bogus-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`);
+  // never written — proves the "supplied but unreadable" branch, mirrors the existing pattern above.
+
+  const markers = [{ token: "RULE_ONE" }, { token: "RULE_TWO" }];
+
+  const rGreen = runResumeDocCheck({
+    resumeDocPath: activePath, markers,
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rulesPaths: [rulesAPath, rulesBPath],
+  });
+  check("runResumeDocCheck multi-path: both markers satisfied, each attributed to its own file", rGreen.ok === true && rGreen.markerSources.RULE_ONE === rulesAPath && rGreen.markerSources.RULE_TWO === rulesBPath);
+  check("runResumeDocCheck multi-path: rulesChecks reports BOTH files as ok:true", rGreen.rulesChecks.length === 2 && rGreen.rulesChecks.every((r) => r.ok === true));
+
+  // DoD-4: a missing rulesPaths entry fails visibly, not silently skipped, even while the union stays
+  // green via the OTHER file.
+  const rDangerousCell = runResumeDocCheck({
+    resumeDocPath: activePath, markers: [{ token: "RULE_ONE" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rulesPaths: [rulesAPath, bogusPath],
+  });
+  check("runResumeDocCheck multi-path DANGEROUS CELL: ok unaffected (RULE_ONE genuinely satisfied by the readable file)", rDangerousCell.ok === true);
+  check("runResumeDocCheck multi-path DANGEROUS CELL: rulesChecks names the bogus file as ok:false, not dropped", rDangerousCell.rulesChecks.length === 2 && rDangerousCell.rulesChecks.some((r) => r.resolvedPath === bogusPath && r.ok === false));
+
+  // docFound:false + rulesPaths supplied (one missing) — must still report rulesChecks (generalizes the
+  // existing docFound:false + rulesPath test above to the array form).
+  const missingActivePath = tmpFile("f6985338-missing-active.md", null);
+  const rDocMissing = runResumeDocCheck({
+    resumeDocPath: missingActivePath, markers: [{ token: "x" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rulesPaths: [rulesAPath, bogusPath],
+  });
+  check("runResumeDocCheck docFound:false + rulesPaths: docFound is false", rDocMissing.docFound === false);
+  check("runResumeDocCheck docFound:false + rulesPaths: rulesChecks STILL reports both files (not silently dropped just because the active doc itself is missing)", rDocMissing.rulesChecks.length === 2 && rDocMissing.rulesChecks.some((r) => r.resolvedPath === bogusPath && r.ok === false) && rDocMissing.rulesChecks.some((r) => r.resolvedPath === rulesAPath && r.ok === true));
+
+  // ── DoD-5: BREAK → RED → REVERT (byte-identical) → GREEN, MULTI-PATH FORM ──
+  const rulesBOriginal = fs.readFileSync(rulesBPath, "utf8");
+  fs.writeFileSync(rulesBPath, "nothing relevant in this file any more\n", "utf8");
+  const rRed = runResumeDocCheck({ resumeDocPath: activePath, markers, commitmentsHeading: "", commitmentsFloor: 0, rulesPaths: [rulesAPath, rulesBPath] });
+  check("BREAK→RED (multi-path): removing RULE_TWO from rules-b flips ok to false", rRed.ok === false && rRed.missingMarkers.includes("RULE_TWO"));
+  check("BREAK→RED (multi-path): RULE_ONE is still fine (not a blanket failure)", !rRed.missingMarkers.includes("RULE_ONE"));
+  fs.writeFileSync(rulesBPath, rulesBOriginal, "utf8");
+  const rGreenAgain = runResumeDocCheck({ resumeDocPath: activePath, markers, commitmentsHeading: "", commitmentsFloor: 0, rulesPaths: [rulesAPath, rulesBPath] });
+  check("REVERT→GREEN (multi-path): restoring the exact original bytes flips ok back to true", rGreenAgain.ok === true && rGreenAgain.missingMarkers.length === 0);
+  check("REVERT→GREEN (multi-path): the reverted result is byte-identical to the original green (same JSON)", JSON.stringify(rGreenAgain) === JSON.stringify(rGreen));
+
+  fs.rmSync(activePath, { force: true });
+  fs.rmSync(rulesAPath, { force: true });
+  fs.rmSync(rulesBPath, { force: true });
+  fs.rmSync(missingActivePath, { force: true });
+}
+
+// ── DoD-5: BREAK → RED → REVERT (byte-identical) → GREEN, SINGLE-PATH FORM ─────────────────────────────
+// Proves the ORIGINAL single-`rulesPath` code path (unchanged by this card) still exhibits the same
+// break/revert cycle through the real entry point — DoD-1's "the regression that matters most" is that
+// this form's behavior never moved.
+{
+  const activeDoc = "active doc — no markers here\n";
+  const activePath = tmpFile("f6985338-single-active.md", activeDoc);
+  const rulesPath = tmpFile("f6985338-single-rules.md", "SOLO_MARKER lives only here\n");
+  const markers = [{ token: "SOLO_MARKER" }];
+
+  const rGreen = runResumeDocCheck({ resumeDocPath: activePath, markers, commitmentsHeading: "", commitmentsFloor: 0, rulesPath });
+  check("BREAK→RED→REVERT→GREEN (single-path) baseline: ok:true", rGreen.ok === true);
+
+  const original = fs.readFileSync(rulesPath, "utf8");
+  fs.writeFileSync(rulesPath, "nothing relevant any more\n", "utf8");
+  const rRed = runResumeDocCheck({ resumeDocPath: activePath, markers, commitmentsHeading: "", commitmentsFloor: 0, rulesPath });
+  check("BREAK→RED (single-path): removing the marker from the rules file flips ok to false", rRed.ok === false && rRed.missingMarkers.includes("SOLO_MARKER"));
+
+  fs.writeFileSync(rulesPath, original, "utf8");
+  const rGreenAgain = runResumeDocCheck({ resumeDocPath: activePath, markers, commitmentsHeading: "", commitmentsFloor: 0, rulesPath });
+  check("REVERT→GREEN (single-path): restoring the exact original bytes flips ok back to true", rGreenAgain.ok === true);
+  check("REVERT→GREEN (single-path): the reverted result is byte-identical to the original green (same JSON)", JSON.stringify(rGreenAgain) === JSON.stringify(rGreen));
+
+  fs.rmSync(activePath, { force: true });
+  fs.rmSync(rulesPath, { force: true });
+}
+
+// ── CODE REVIEW N1 — top-level `rulesUnreadableWarning`, SINGULAR path too, never gates `ok` ────────────
+// DoD-4 said "fail visibly"; `rulesCheck`/`rulesChecks` only report nested. This proves the promised
+// TOP-LEVEL warning fires for BOTH the legacy singular path and the new plural path, stays absent when
+// every supplied rules source read cleanly, and never changes `ok` on its own.
+{
+  const dangerDoc = "prose containing DANGER_MARKER right here, nothing else\n";
+  const bogusPath = "/nonexistent/loom-rot-n1-bogus.md"; // never created — proves the unreadable branch
+
+  // Singular `rules` (readable) ⇒ warning absent.
+  const rSingularOk = checkRotation({
+    activeText: dangerDoc, markers: [{ token: "DANGER_MARKER" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rules: { resolvedPath: "/ok.md", text: "irrelevant" },
+  });
+  check("N1: singular rules readable ⇒ rulesUnreadableWarning ABSENT", rSingularOk.rulesUnreadableWarning === undefined);
+
+  // Singular `rules` (unreadable) ⇒ warning PRESENT, names the path, `ok` UNAFFECTED (marker satisfied by active).
+  const rSingularBad = checkRotation({
+    activeText: dangerDoc, markers: [{ token: "DANGER_MARKER" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rules: { resolvedPath: bogusPath, error: `rules path does not exist or is unreadable: ${bogusPath}` },
+  });
+  check("N1: singular rules UNREADABLE ⇒ top-level rulesUnreadableWarning fires (the more dangerous blind spot — every existing seat uses this path)", typeof rSingularBad.rulesUnreadableWarning === "string" && rSingularBad.rulesUnreadableWarning.includes(bogusPath));
+  check("N1: the warning never flips ok on its own (marker genuinely satisfied by the active doc)", rSingularBad.ok === true);
+
+  // Plural `rulesFiles`, one unreadable among several ⇒ warning PRESENT, names just that one.
+  const rPluralMixed = checkRotation({
+    activeText: dangerDoc, markers: [{ token: "DANGER_MARKER" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rulesFiles: [
+      { resolvedPath: "/good.md", text: "irrelevant" },
+      { resolvedPath: bogusPath, error: `rules path does not exist or is unreadable: ${bogusPath}` },
+    ],
+  });
+  check("N1: plural rulesFiles, one unreadable ⇒ warning fires, names exactly the bad one, not the good one", typeof rPluralMixed.rulesUnreadableWarning === "string" && rPluralMixed.rulesUnreadableWarning.includes(bogusPath) && !rPluralMixed.rulesUnreadableWarning.includes("/good.md"));
+
+  // Plural `rulesFiles`, all readable ⇒ warning absent.
+  const rPluralOk = checkRotation({
+    activeText: dangerDoc, markers: [{ token: "DANGER_MARKER" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rulesFiles: [{ resolvedPath: "/good.md", text: "irrelevant" }],
+  });
+  check("N1: plural rulesFiles all readable ⇒ rulesUnreadableWarning ABSENT", rPluralOk.rulesUnreadableWarning === undefined);
+
+  // Both singular AND plural unreadable ⇒ warning names BOTH.
+  const rBothBad = checkRotation({
+    activeText: dangerDoc, markers: [{ token: "DANGER_MARKER" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rules: { resolvedPath: "/legacy-bogus.md", error: "rules path does not exist or is unreadable: /legacy-bogus.md" },
+    rulesFiles: [{ resolvedPath: bogusPath, error: `rules path does not exist or is unreadable: ${bogusPath}` }],
+  });
+  check("N1: singular AND plural both unreadable ⇒ warning names BOTH paths", typeof rBothBad.rulesUnreadableWarning === "string" && rBothBad.rulesUnreadableWarning.includes("/legacy-bogus.md") && rBothBad.rulesUnreadableWarning.includes(bogusPath));
+
+  // Genuine failure case: the ONLY source that could satisfy a marker is unreadable ⇒ ok:false AND the
+  // warning both fire — the warning explains WHY the failure isn't "satisfied elsewhere".
+  const rGenuineFailure = checkRotation({
+    activeText: "nothing relevant here", markers: [{ token: "ONLY_IN_BOGUS" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rules: { resolvedPath: bogusPath, error: `rules path does not exist or is unreadable: ${bogusPath}` },
+  });
+  check("N1: genuine failure (only source is unreadable) ⇒ ok:false AND the warning both fire together", rGenuineFailure.ok === false && typeof rGenuineFailure.rulesUnreadableWarning === "string");
+
+  // runResumeDocCheck's docFound:false early return must ALSO surface the warning (mirrors checkRotation).
+  const rDocMissingWithBogusRules = runResumeDocCheck({
+    resumeDocPath: "/nonexistent/loom-rot-n1-missing-active.md",
+    markers: [{ token: "x" }], commitmentsHeading: "", commitmentsFloor: 0,
+    rulesPath: bogusPath,
+  });
+  check("N1: docFound:false path also surfaces rulesUnreadableWarning for a supplied-but-unreadable rulesPath", rDocMissingWithBogusRules.docFound === false && typeof rDocMissingWithBogusRules.rulesUnreadableWarning === "string" && rDocMissingWithBogusRules.rulesUnreadableWarning.includes(bogusPath));
+}
+
+// ── CODE REVIEW N3 — dedupe by resolvedPath: no SPURIOUS ambiguityWarning on a duplicate path ────────────
+// Verified defect: `rulesPaths:[A,A]`, or `rulesPath:A` + `rulesPaths:[A]` (a shape the tool description
+// itself invites — "pass rulesPaths instead of/alongside rulesPath"), used to read as the heading being
+// found in TWO different places, tripping a false ambiguityWarning that sends a reader hunting a
+// duplicate heading that doesn't exist. Fixed by deduping on resolvedPath before building `sources`.
+{
+  const doc = (n) => ["## LIVE COMMITMENTS", ...Array.from({ length: n }, (_, i) => `${i + 1}. item`)].join("\n");
+  const noHeading = "nothing relevant here";
+  const dupPath = "/vault/same-file.md";
+
+  // rulesPaths:[A, A] — the exact same path listed twice.
+  const rDupInArray = checkRotation({
+    activeText: noHeading, markers: [],
+    commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 5,
+    rulesFiles: [
+      { resolvedPath: dupPath, text: doc(8) },
+      { resolvedPath: dupPath, text: doc(8) },
+    ],
+  });
+  check("N3: rulesPaths:[A,A] ⇒ NOT ambiguous (deduped to one source)", rDupInArray.liveCommitments.ambiguous === undefined && rDupInArray.liveCommitments.count === 8 && rDupInArray.liveCommitments.source === dupPath);
+  check("N3: rulesPaths:[A,A] ⇒ no spurious top-level ambiguityWarning", rDupInArray.ambiguityWarning === undefined);
+
+  // legacy `rules` (labeled "rules") + `rulesFiles:[A]` where A is the SAME resolvedPath as `rules`.
+  const rDupAcrossLegacyAndPlural = checkRotation({
+    activeText: noHeading, markers: [],
+    commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 5,
+    rules: { resolvedPath: dupPath, text: doc(8) },
+    rulesFiles: [{ resolvedPath: dupPath, text: doc(8) }],
+  });
+  check("N3: rules===rulesFiles[0] (same resolvedPath) ⇒ NOT ambiguous, wins as 'rules' (legacy precedence)", rDupAcrossLegacyAndPlural.liveCommitments.ambiguous === undefined && rDupAcrossLegacyAndPlural.liveCommitments.source === "rules" && rDupAcrossLegacyAndPlural.liveCommitments.count === 8);
+  check("N3: rules===rulesFiles[0] ⇒ no spurious top-level ambiguityWarning", rDupAcrossLegacyAndPlural.ambiguityWarning === undefined);
+
+  // Marker union: same dedupe applies there too (a marker present in the duplicated file must still be
+  // attributed to exactly one source, not silently double-counted or mis-picked).
+  const rDupMarkers = checkRotation({
+    activeText: "nothing relevant here", markers: [{ token: "ONLY_HERE" }],
+    commitmentsHeading: "", commitmentsFloor: 0,
+    rulesFiles: [
+      { resolvedPath: dupPath, text: "...ONLY_HERE..." },
+      { resolvedPath: dupPath, text: "...ONLY_HERE..." },
+    ],
+  });
+  check("N3: marker union also deduped — ONLY_HERE attributed to the single deduped source", rDupMarkers.markerSources.ONLY_HERE === dupPath && rDupMarkers.ok === true);
+
+  // NEGATIVE CONTROL — a GENUINE second file (different resolvedPath, same or different content) must
+  // STILL trip ambiguity normally. Proves the dedupe fix didn't accidentally suppress real ambiguity too.
+  const rGenuineAmbiguity = checkRotation({
+    activeText: noHeading, markers: [],
+    commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 5,
+    rulesFiles: [
+      { resolvedPath: "/vault/file-a.md", text: doc(8) },
+      { resolvedPath: "/vault/file-b.md", text: doc(8) }, // different path, same content — still 2 real files
+    ],
+  });
+  check("N3 NEGATIVE CONTROL: two DIFFERENT resolvedPaths (even with identical content) still correctly trip ambiguity — the dedupe fix didn't overreach", rGenuineAmbiguity.liveCommitments.ambiguous === true && rGenuineAmbiguity.liveCommitments.otherSources.length === 1 && rGenuineAmbiguity.ambiguityWarning !== undefined);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — rotation-check's marker/floor/archive/byte checks behave correctly, the two named historical bugs (a681aed5's name-anchor fail-open, 34a6f07e's equality-vs-floor) are proven absent from this port, a mutation test confirms a dropped marker is caught and named, configured:false is distinct from ok:true, and the impure fs wrapper never throws on a missing doc — claude-free."
+  ? "\n✅ ALL PASS — rotation-check's marker/floor/archive/byte checks behave correctly, the two named historical bugs (a681aed5's name-anchor fail-open, 34a6f07e's equality-vs-floor) are proven absent from this port, a mutation test confirms a dropped marker is caught and named, configured:false is distinct from ok:true, the impure fs wrapper never throws on a missing doc, and the new multi-rules-file union (card f6985338) is byte-identical for a legacy single-rulesPath caller while correctly unioning/attributing/failing-visibly across N files — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

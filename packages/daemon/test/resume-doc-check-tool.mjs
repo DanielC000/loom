@@ -234,13 +234,83 @@ try {
   const noVaultPlatServer = platRouter.buildServer("leadNoVault");
   const noVaultPlatResult = JSON.parse((await noVaultPlatServer._registeredTools["resume_doc_check"].handler({})).content[0].text);
   check("(E) Lead surface: no vaultPath bound to the project: a clean {error}, never a throw or a stray-file write", typeof noVaultPlatResult.error === "string");
+
+  // ── (RP) rulesPaths (PLURAL) — code review B2, card f6985338 ─────────────────────────────────────────
+  // (R)/(R2) above cover the SINGULAR rulesPath at the router level. `rulesPaths` has its OWN per-entry
+  // containment loop in BOTH orchestration.ts and platform.ts (a genuinely different code path — a loop,
+  // not a single containUnderVault call) that was completely unexercised here before this fold-in, even
+  // though test/rotation-check.mjs already covers the underlying runResumeDocCheck/checkRotation logic
+  // exhaustively. This proves the ROUTER-LEVEL wiring: (a) a green multi-path call, (b) an out-of-vault
+  // entry refused BY INDEX, on BOTH the manager and platform surfaces.
+  const rpVault = path.join(tmpHome, "rp-vault");
+  fs.mkdirSync(rpVault, { recursive: true });
+  db.insertProject({ id: "pRP", name: "RPProj", repoPath: tmpHome, vaultPath: rpVault, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "aRP", projectId: "pRP", name: "Lead", startupPrompt: "do it", position: 0 });
+  db.insertSession({
+    id: "mgrRP", projectId: "pRP", agentId: "aRP", engineSessionId: null, title: null, cwd: rpVault,
+    processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "manager",
+  });
+  const rpServer = orchRouter.buildServer("mgrRP", "manager");
+  const callRP = async (args) => JSON.parse((await rpServer._registeredTools["resume_doc_check"].handler(args ?? {})).content[0].text);
+
+  fs.writeFileSync(path.join(rpVault, "Orchestrator Log.md"), "nothing relevant in the active doc\n", "utf8");
+  db.setProjectConfig("pRP", { orchestration: { rotationMarkers: [{ token: "RP-ALPHA" }, { token: "RP-BETA" }] } });
+
+  const rpRulesA = path.join(rpVault, "rules-a.md");
+  const rpRulesB = path.join(rpVault, "rules-b.md");
+  fs.writeFileSync(rpRulesA, "RP-ALPHA lives only here\n", "utf8");
+  fs.writeFileSync(rpRulesB, "RP-BETA lives only here\n", "utf8");
+
+  // (a) GREEN multi-path call — MANAGER surface.
+  const rpGreenMgr = await callRP({ rulesPaths: [rpRulesA, rpRulesB] });
+  check("(RP)(M) green multi-path call: both markers satisfied, each attributed to its own resolved path", rpGreenMgr.ok === true && rpGreenMgr.markerSources["RP-ALPHA"] === rpRulesA && rpGreenMgr.markerSources["RP-BETA"] === rpRulesB);
+  check("(RP)(M) rulesChecks reports both files ok:true", Array.isArray(rpGreenMgr.rulesChecks) && rpGreenMgr.rulesChecks.length === 2 && rpGreenMgr.rulesChecks.every((r) => r.ok === true));
+
+  // (b) an out-of-vault SECOND entry is refused, naming `rulesPaths[1]` specifically — MANAGER surface.
+  const rpOutside = path.join(tmpHome, "rp-outside-vault.md");
+  fs.writeFileSync(rpOutside, "RP-BETA lives out here too\n", "utf8");
+  const rpRefusedMgr = await callRP({ rulesPaths: [rpRulesA, rpOutside] });
+  check("(RP)(M) an out-of-vault SECOND entry is refused, naming rulesPaths[1] in the error (not a generic message)", typeof rpRefusedMgr.error === "string" && rpRefusedMgr.error.includes("rulesPaths[1]"));
+  check("(RP)(M) the refusal is clean — no partial result (ok/markerSources) leaks through", rpRefusedMgr.ok === undefined && rpRefusedMgr.markerSources === undefined);
+
+  // ── (RP) the SAME two assertions, on the PLATFORM surface — independent vault, independent config ────
+  const rpPlatVault = path.join(tmpHome, "rp-plat-vault");
+  fs.mkdirSync(rpPlatVault, { recursive: true });
+  db.insertProject({ id: "pRPPlat", name: "RP Platform", repoPath: tmpHome, vaultPath: rpPlatVault, config: {}, createdAt: now, archivedAt: null, reserved: true });
+  db.insertAgent({ id: "aRPPlat", projectId: "pRPPlat", name: "Lead", startupPrompt: "do it", position: 0 });
+  db.insertSession({
+    id: "leadRP", projectId: "pRPPlat", agentId: "aRPPlat", engineSessionId: null, title: null, cwd: rpPlatVault,
+    processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "platform",
+  });
+  const rpPlatServer = platRouter.buildServer("leadRP");
+  const callRPPlat = async (args) => JSON.parse((await rpPlatServer._registeredTools["resume_doc_check"].handler(args ?? {})).content[0].text);
+
+  fs.writeFileSync(path.join(rpPlatVault, "PLATFORM-LEAD-RESUME.md"), "nothing relevant in the active doc\n", "utf8");
+  db.setProjectConfig("pRPPlat", { orchestration: { rotationMarkers: [{ token: "RP-PLAT-ALPHA" }, { token: "RP-PLAT-BETA" }] } });
+
+  const rpPlatRulesA = path.join(rpPlatVault, "rules-a.md");
+  const rpPlatRulesB = path.join(rpPlatVault, "rules-b.md");
+  fs.writeFileSync(rpPlatRulesA, "RP-PLAT-ALPHA lives only here\n", "utf8");
+  fs.writeFileSync(rpPlatRulesB, "RP-PLAT-BETA lives only here\n", "utf8");
+
+  const rpGreenPlat = await callRPPlat({ rulesPaths: [rpPlatRulesA, rpPlatRulesB] });
+  check("(RP)(P) green multi-path call on the PLATFORM surface too: both markers satisfied, each attributed to its own path", rpGreenPlat.ok === true && rpGreenPlat.markerSources["RP-PLAT-ALPHA"] === rpPlatRulesA && rpGreenPlat.markerSources["RP-PLAT-BETA"] === rpPlatRulesB);
+  check("(RP)(P) rulesChecks reports both files ok:true on the PLATFORM surface too", Array.isArray(rpGreenPlat.rulesChecks) && rpGreenPlat.rulesChecks.length === 2 && rpGreenPlat.rulesChecks.every((r) => r.ok === true));
+
+  const rpPlatOutside = path.join(tmpHome, "rp-plat-outside-vault.md");
+  fs.writeFileSync(rpPlatOutside, "RP-PLAT-BETA lives out here too\n", "utf8");
+  const rpRefusedPlat = await callRPPlat({ rulesPaths: [rpPlatRulesA, rpPlatOutside] });
+  check("(RP)(P) an out-of-vault SECOND entry is refused on the PLATFORM surface too, naming rulesPaths[1]", typeof rpRefusedPlat.error === "string" && rpRefusedPlat.error.includes("rulesPaths[1]"));
+  check("(RP)(P) the refusal is clean on the PLATFORM surface too — no partial result leaks through", rpRefusedPlat.ok === undefined && rpRefusedPlat.markerSources === undefined);
 } finally {
   db.close();
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — resume_doc_check is wired on both the manager and Platform-Lead MCP surfaces, each resolves its OWN resume doc (no path argument) via the SAME resolver its spawn-time prompt uses, per-project config is fully independent between two different seats (no cross-talk), a live doc mutation is caught on the next call with no caching, archivePath is contained under vaultPath on BOTH surfaces (code-review 🟡 fix), a project with no vaultPath degrades to a clean {error} on BOTH surfaces rather than throwing (the Lead side is a code-review MINOR fix), the rulesPath union (card 3c30258f) is reachable and contained for MARKERS: a marker absent from the active doc fails without rulesPath (RED), passes once rulesPath is supplied and the marker is present there (GREEN), rulesPath is refused outside vaultPath exactly like archivePath, and a marker present in NEITHER active nor rules still fails even with rulesPath supplied — AND (card e312b207) the SAME union now reaches the LIVE COMMITMENTS FLOOR too, end-to-end through this live MCP surface: RED without rulesPath, GREEN once the section is found via rulesPath, fail-closed (never a vacuous pass) when the heading is in neither file — claude-free, network-free."
+  ? "\n✅ ALL PASS — resume_doc_check is wired on both the manager and Platform-Lead MCP surfaces, each resolves its OWN resume doc (no path argument) via the SAME resolver its spawn-time prompt uses, per-project config is fully independent between two different seats (no cross-talk), a live doc mutation is caught on the next call with no caching, archivePath is contained under vaultPath on BOTH surfaces (code-review 🟡 fix), a project with no vaultPath degrades to a clean {error} on BOTH surfaces rather than throwing (the Lead side is a code-review MINOR fix), the rulesPath union (card 3c30258f) is reachable and contained for MARKERS: a marker absent from the active doc fails without rulesPath (RED), passes once rulesPath is supplied and the marker is present there (GREEN), rulesPath is refused outside vaultPath exactly like archivePath, and a marker present in NEITHER active nor rules still fails even with rulesPath supplied — AND (card e312b207) the SAME union now reaches the LIVE COMMITMENTS FLOOR too, end-to-end through this live MCP surface: RED without rulesPath, GREEN once the section is found via rulesPath, fail-closed (never a vacuous pass) when the heading is in neither file — AND (card f6985338, code review B2) the PLURAL rulesPaths gets the SAME router-level coverage on BOTH surfaces: a green multi-path call and an out-of-vault entry refused by index (rulesPaths[N]) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
 

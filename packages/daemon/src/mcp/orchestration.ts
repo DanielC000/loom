@@ -4715,14 +4715,28 @@ export class OrchestrationMcpRouter {
           "AND the rules file (the active doc's count wins by precedence, never the rules file's), the " +
           "response carries a loud top-level `ambiguityWarning` — this shape is the expected transient " +
           "residue of a doc mid-migration into the rules file (a leftover heading where only a plain " +
-          "prose pointer should remain) and should be resolved, not left standing.",
+          "prose pointer should remain) and should be resolved, not left standing. " +
+          "Card f6985338: pass `rulesPaths` (an array) instead of/alongside `rulesPath` to union-check " +
+          "against MULTIPLE non-rotating rules files at once (e.g. a seat with more than one doctrine " +
+          "file) — `rulesPath` alone is UNCHANGED and byte-identical to before this card; passing " +
+          "`rulesPaths` (even a single-entry array) switches to an EXTENDED response shape that names " +
+          "WHICH file satisfied each marker/the commitments floor by its own resolved path instead of the " +
+          "generic \"rules\" label: `markerSources` values become that path, `liveCommitments.source` can " +
+          "be that path too, and on ambiguity (the heading found in more than one place) the response " +
+          "carries `liveCommitments.otherSources` (an array of every OTHER place it was found) instead of " +
+          "the single-file `otherCount`/`otherDiagnostic` pair. Each entry of `rulesPaths` is independently " +
+          "vault-contained exactly like `rulesPath` (refused if any resolves outside this project's " +
+          "vaultPath) and independently reported in the response's `rulesChecks` array (mirrors " +
+          "`rulesCheck` per-file) — a file that does not exist or cannot be read is a REAL entry there " +
+          "with `ok:false`, never silently dropped from the union.",
         inputSchema: strictShape({
           archivePath: z.string().optional(),
           rulesPath: z.string().optional(),
+          rulesPaths: z.array(z.string()).optional(),
           preEditBytes: z.number().int().positive().optional(),
         }),
       },
-      async ({ archivePath, rulesPath, preEditBytes }) => {
+      async ({ archivePath, rulesPath, rulesPaths, preEditBytes }) => {
         const managerProjectId = db.getSession(managerSessionId)?.projectId;
         const project = managerProjectId ? db.getProject(managerProjectId) : undefined;
         if (!project) return ok({ error: "no project bound to this session" });
@@ -4745,6 +4759,16 @@ export class OrchestrationMcpRouter {
           if (!contained.ok) return ok({ error: contained.error });
           containedRulesPath = contained.value;
         }
+        // Card f6985338: rulesPaths — same containment as rulesPath, applied to each entry independently
+        // so one bad entry names itself in the refusal rather than a generic "one of these is wrong".
+        const containedRulesPaths: string[] = [];
+        if (rulesPaths) {
+          for (let i = 0; i < rulesPaths.length; i++) {
+            const contained = containUnderVault(project.vaultPath ?? "", rulesPaths[i]!, `rulesPaths[${i}]`);
+            if (!contained.ok) return ok({ error: contained.error });
+            containedRulesPaths.push(contained.value);
+          }
+        }
         return ok(
           runResumeDocCheck({
             resumeDocPath,
@@ -4753,6 +4777,7 @@ export class OrchestrationMcpRouter {
             commitmentsFloor: resolved.orchestration.rotationLiveCommitmentsFloor,
             archivePath: containedArchivePath,
             rulesPath: containedRulesPath,
+            rulesPaths: containedRulesPaths.length > 0 ? containedRulesPaths : null,
             preEditBytes: preEditBytes ?? null,
           }),
         );

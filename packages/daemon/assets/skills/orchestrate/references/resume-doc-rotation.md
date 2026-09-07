@@ -39,7 +39,17 @@ checked. `rulesCheck` reports whether an optional rules-file union source you su
 only `rulesCheck: {checked:true, ok:true}` does that. `markerSources` names which text satisfied each
 marker (`"active"` or `"rules"`) — a `"rules"` source is positive proof that file was read, but only when
 at least one marker is exclusive to the rules file; if every marker also lives in the active doc, every
-source reads `"active"` and tells you nothing. If nothing is configured yet
+source reads `"active"` and tells you nothing.
+
+**If you've grown a SECOND (or more) durable, non-rotating doctrine file** — a rules file living outside
+this rotating doc — you don't have to pick just one: pass every one of them at once as a `rulesPaths`
+array (alongside, or instead of, the single `rulesPath`) and the union spans all of them, for both markers
+and the numbered live-commitments section. Each supplied file gets its own `rulesChecks` entry so a
+missing/unreadable one is never silently dropped, and `markerSources`/the floor's `source` field then
+names that SPECIFIC file's own path rather than the generic `"rules"` label. Watch for
+`rulesUnreadableWarning`, a top-level field present whenever ANY supplied rules file (singular or plural)
+could not be read — loud, but like `rulesCheck` it does NOT drive `ok` on its own, so a bad path never
+just quietly stops contributing without you noticing. If nothing is configured yet
 and you want this protection, add markers via your own project's config (additive-only from a manager
 session — you can grow the list but not shrink it; ask the human/Lead for a removal). This is a Loom
 daemon capability, not a doc convention — you don't need to build anything to use it.

@@ -232,7 +232,16 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    doc — it resolves and reads YOUR OWN lineage's doc itself (no path to get wrong) and refuses
    (`ok:false`, naming the missing token) if the rotation silently dropped one. `configured:false` means
    nothing is set up yet — not a pass, nothing checked. Its own `honestLimitNote` is the honest limit: an
-   exact-substring grep proves literal text survived, never that no meaning survived a rewording. You (as
+   exact-substring grep proves literal text survived, never that no meaning survived a rewording. **If
+   you carry more than one durable, non-rotating doctrine/rules file alongside this rotating one** — a
+   common shape once a seat's standing operating rules grow past a single page — pass ALL of them at once
+   as a `rulesPaths` array (not just one via the older singular `rulesPath`): markers and the numbered
+   live-commitments section then union across every file you name, each gets its own entry in the
+   response's `rulesChecks` (so a missing/unreadable one is never silently dropped from protection), and
+   `markerSources` names the SPECIFIC file that satisfied each marker instead of a generic label. Watch the
+   top-level `rulesUnreadableWarning` field — present whenever any supplied rules file couldn't be read —
+   it never blocks `ok` on its own, but it is the signal that one of your files just silently stopped
+   contributing. You (as
    the human-equivalent elevated role) can both add AND remove markers via `project_configure` on the
    Platform project. **On boot, if the injected lineage doc's
    "Last updated" materially lags the board/git, inherit the freshest sibling handoff** via a DIRECTED

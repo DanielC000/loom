@@ -228,6 +228,118 @@ export function countNumberedSectionUnion(activeText: string, rulesText: string 
   };
 }
 
+/**
+ * Card f6985338: N-file generalization of the single-`rules`-file union above, used ONLY on the NEW
+ * `rulesFiles` code path in `checkRotation` (see that function's own branch comment) — the ORIGINAL
+ * `checkMarkers`/`countNumberedSectionUnion` above stay completely untouched and remain the code path for
+ * a caller that supplies at most the legacy singular `rules` field, which is what makes that call
+ * BYTE-IDENTICAL to pre-f6985338 behavior (this card's own DoD-1 — the regression that matters most).
+ *
+ * `label` is what a caller sees in `markerSources`/`liveCommitments.source` when THIS source is what
+ * satisfied a check — "rules" for the legacy singular `rules` field (so a caller mixing the old field with
+ * the new `rulesFiles` list still gets the familiar label for that one), or the file's own `resolvedPath`
+ * for anything supplied via `rulesFiles` (this is the "which file satisfied it" DoD-3 asks for).
+ */
+export interface RuleFileSource {
+  label: string;
+  text: string;
+}
+
+/** A single supplied-and-attempted rules FILE in the `rulesFiles` list — unlike the legacy `RulesInput`,
+ *  never `null` (an entry only exists here because a path was actually supplied and read/attempted). */
+export type RulesFileEntry = { resolvedPath: string; text: string } | { resolvedPath: string; error: string };
+
+export interface MarkerCheckResultMulti {
+  missing: RotationMarker[];
+  /** token -> "active" or the satisfying source's `label` (see `RuleFileSource` above). Only FOUND markers
+   *  appear here — mirrors `MarkerCheckResult.satisfiedBy` exactly, just widened from a 2-value union to
+   *  any source label. */
+  satisfiedBy: Map<string, string>;
+}
+
+/**
+ * N-file marker union (card f6985338). Same precedence rule as `checkMarkers`: `activeText` first, then
+ * `sources` IN THE ORDER GIVEN — the first source that contains a marker wins, mirroring exactly how the
+ * single-file version tries `rulesText` only after `activeText` comes up empty. A marker absent from
+ * `activeText` and every source in `sources` is missing.
+ */
+export function checkMarkersUnion(
+  activeText: string,
+  markers: readonly RotationMarker[],
+  sources: readonly RuleFileSource[],
+): MarkerCheckResultMulti {
+  const missing: RotationMarker[] = [];
+  const satisfiedBy = new Map<string, string>();
+  for (const marker of markers) {
+    if (textIncludes(activeText, marker)) {
+      satisfiedBy.set(marker.token, "active");
+      continue;
+    }
+    const hit = sources.find((s) => textIncludes(s.text, marker));
+    if (hit) satisfiedBy.set(marker.token, hit.label);
+    else missing.push(marker);
+  }
+  return { missing, satisfiedBy };
+}
+
+export interface NumberedSectionUnionCountMulti {
+  count: number | null;
+  diagnostic: string;
+  /** "active", a source's `label`, or null (found nowhere) — generalizes `NumberedSectionUnionCount.source`
+   *  from a 3-value union to any source label. */
+  source: string | null;
+  /** true when the heading was ALSO found somewhere else besides the winning `source` — generalizes the
+   *  single-file version's `ambiguous` boolean to N files; see `others` below for the per-source detail
+   *  the single-file version reported as singular `otherCount`/`otherDiagnostic`. Absent (not merely
+   *  false) whenever there is no other location, so a caller can test truthiness directly. */
+  ambiguous?: true;
+  /** Present only when `ambiguous` is true — every OTHER place (besides the winning `source`) the heading
+   *  was found, each with its own count/diagnostic, so a caller can report all of them, not just the
+   *  winner. Never present alongside `ambiguous` absent. */
+  others?: { source: string; count: number; diagnostic: string }[];
+}
+
+/**
+ * N-file generalization of `countNumberedSectionUnion` (card f6985338). Same precedence as the single-file
+ * version: `activeText` tried first, then `sources` IN ORDER — the first source with the heading wins.
+ * FAIL-CLOSED exactly like the single-file version: `count: null, source: null` when the heading is in
+ * NEITHER `activeText` NOR any source — never a vacuous "0 items, ok:true".
+ */
+export function countNumberedSectionUnionMulti(
+  activeText: string,
+  sources: readonly RuleFileSource[],
+  headingToken: string,
+): NumberedSectionUnionCountMulti {
+  const inActive = countNumberedSection(activeText, headingToken);
+  const inSources = sources
+    .map((s) => ({ label: s.label, result: countNumberedSection(s.text, headingToken) }))
+    .filter((s): s is { label: string; result: NumberedSectionCount & { count: number } } => s.result.count !== null);
+
+  if (inActive.count !== null) {
+    const others = inSources.map((s) => ({ source: s.label, count: s.result.count, diagnostic: s.result.diagnostic }));
+    return { ...inActive, source: "active", ...(others.length > 0 ? { ambiguous: true as const, others } : {}) };
+  }
+  if (inSources.length > 0) {
+    const [first, ...rest] = inSources;
+    return {
+      count: first!.result.count,
+      diagnostic: `${first!.result.diagnostic} (in ${first!.label})`,
+      source: first!.label,
+      ...(rest.length > 0
+        ? { ambiguous: true as const, others: rest.map((s) => ({ source: s.label, count: s.result.count, diagnostic: s.result.diagnostic })) }
+        : {}),
+    };
+  }
+  return {
+    count: null,
+    source: null,
+    diagnostic:
+      sources.length > 0
+        ? `no heading line matching /^#{1,6}\\s.*${headingToken}/i found in the active doc or any supplied rules file`
+        : `no heading line matching /^#{1,6}\\s.*${headingToken}/i found in the active doc`,
+  };
+}
+
 export interface ArchiveInfo {
   exists: boolean;
   isFile: boolean;
@@ -268,6 +380,15 @@ export interface RotationCheckInput {
   /** Union source for markers (present in activeText OR rules.text) AND the source for `rulesCheck` below
    *  — see `RulesInput`'s own doc for why this is now one field instead of two. */
   rules?: RulesInput;
+  /** Card f6985338: ADDITIONAL rules files beyond the singular `rules` above (the `rulesPaths` MCP-tool
+   *  argument, already-read by the caller — mirrors `rules` itself: an entry is a successful read OR a
+   *  read failure, never silently dropped). Omitted/empty ⇒ `checkRotation` runs the ORIGINAL single-file
+   *  code path below completely unchanged — this is what makes a caller supplying only the legacy `rules`
+   *  field BYTE-IDENTICAL to pre-f6985338 behavior (DoD-1, the regression that matters most). Non-empty ⇒
+   *  markers/the commitments floor union across `rules` (if present, labeled "rules") AND every entry here
+   *  (labeled by its own `resolvedPath` — see `RuleFileSource`), and `rulesChecks` below reports each
+   *  entry's own readability so a missing file FAILS VISIBLY (DoD-4) rather than silently not counting. */
+  rulesFiles?: readonly RulesFileEntry[];
   markers: readonly RotationMarker[];
   /** "" disables the LIVE-COMMITMENTS-style floor check entirely for this seat. */
   commitmentsHeading: string;
@@ -285,7 +406,12 @@ export interface RotationCheckResult {
   configured: boolean;
   ok: boolean;
   missingMarkers: string[];
-  markerSources: Record<string, "active" | "rules">;
+  /** token -> the source that satisfied it. "active" | "rules" on the ORIGINAL single-rules-file path
+   *  (untouched, byte-identical); on the NEW `rulesFiles` union path (card f6985338) a marker satisfied by
+   *  one of THOSE files reports that file's own `resolvedPath` instead of the generic "rules" — this is
+   *  the "which file satisfied it" DoD-3 asks for. Widened from a 2-value union to `string` for this
+   *  reason; every existing "active"/"rules" comparison still holds unchanged. */
+  markerSources: Record<string, string>;
   /** Symmetric twin of `archiveCheck` for the `rulesPath` union input (card 870edbcf). `checked:false`
    *  means no rulesPath was supplied at all (silent, as before this card). `checked:true, ok:false` means
    *  one WAS supplied but could not be read — `resolvedPath` names exactly what was tried and `reason`
@@ -302,6 +428,13 @@ export interface RotationCheckResult {
    *  a vacuous `ok:true` — a red `ok` with `rulesCheck.ok:false` means "diagnose the rulesPath first,"
    *  not "the content is genuinely gone." */
   rulesCheck: { checked: boolean; ok: boolean; resolvedPath?: string; reason?: string };
+  /** Card f6985338: per-`rulesFiles`-entry breakdown, ONE entry per file in `rulesFiles`, same order,
+   *  mirroring `rulesCheck`'s own {checked,ok,resolvedPath,reason} shape (`checked` always true here — an
+   *  entry only exists because a path was actually supplied and attempted). ABSENT (not merely `[]`) when
+   *  `rulesFiles` was empty/omitted — `rulesCheck` above is the complete story for that call, unchanged.
+   *  ⚠️ DoD-4: an unreadable file is a REAL entry here with `ok:false` + `reason` — never silently dropped,
+   *  which would read as "there were fewer files than actually supplied." */
+  rulesChecks?: Array<{ checked: true; ok: boolean; resolvedPath: string; reason?: string }>;
   liveCommitments: {
     enabled: boolean;
     count: number | null;
@@ -310,15 +443,27 @@ export interface RotationCheckResult {
     diagnostic: string;
     /** Card e312b207: which text the count actually came from (union with `rules`, active tried first).
      *  null when disabled, when the section was found in neither text (the fail-closed case — `ok` is
-     *  already false then too), or on the docFound:false early-return path (nothing was ever read). */
-    source: "active" | "rules" | null;
+     *  already false then too), or on the docFound:false early-return path (nothing was ever read).
+     *  Card f6985338: widened from "active"|"rules"|null to `string | null` — on the `rulesFiles` union
+     *  path this can also be one of those files' own `resolvedPath`; the ORIGINAL single-rules-file path
+     *  only ever produces "active"|"rules"|null, unchanged. */
+    source: string | null;
     /** Card e312b207, code review (T3): true when the heading was found in BOTH the active doc and the
-     *  rules file — see `countNumberedSectionUnion`'s own doc for why this is surfaced (never gated). */
+     *  rules file — see `countNumberedSectionUnion`'s own doc for why this is surfaced (never gated).
+     *  Card f6985338: on the `rulesFiles` union path this instead means "found somewhere besides the
+     *  winning source" (possibly more than one other place) — see `otherSources` below for that case. */
     ambiguous?: true;
-    /** Present only when `ambiguous` is true — the count/diagnostic the rules file would have produced,
-     *  so a caller can report both sides, not just the winner (`count`/`diagnostic` above, from active). */
+    /** Present only when `ambiguous` is true AND the count came from the ORIGINAL single-rules-file path —
+     *  the count/diagnostic the rules file would have produced, so a caller can report both sides, not
+     *  just the winner (`count`/`diagnostic` above, from active). Card f6985338: on the `rulesFiles` union
+     *  path, use `otherSources` (plural) instead — there can be more than one other place. */
     otherCount?: number;
     otherDiagnostic?: string;
+    /** Card f6985338: present only when `ambiguous` is true AND the count came from the `rulesFiles` union
+     *  path — every OTHER place (besides the winning `source`) the heading was also found, each with its
+     *  own count/diagnostic. Mutually exclusive with `otherCount`/`otherDiagnostic` above (those are the
+     *  single-other-file shape from the original path; this is the N-file shape from the new path). */
+    otherSources?: { source: string; count: number; diagnostic: string }[];
   };
   archiveCheck: { checked: boolean; ok: boolean; reason?: string };
   byteCheck: { checked: boolean; ok: boolean; activeBytes?: number; preEditBytes?: number; reason?: string };
@@ -329,6 +474,18 @@ export interface RotationCheckResult {
   /** Present (and loud) only when `liveCommitments.ambiguous` is true — see that field's own doc and
    *  `countNumberedSectionUnion`'s (card e312b207, code review T3). Never gates `ok`. */
   ambiguityWarning?: string;
+  /** Code review N1 (card f6985338): present (and loud) whenever ANY supplied rules source — the legacy
+   *  singular `rules` field OR any `rulesFiles` entry — could not be read. `rulesCheck`/`rulesChecks`
+   *  already report this per-file, but ONLY nested; DoD-4 asked for "fail visibly," and a field nobody
+   *  reads unless they already suspect a problem is not visible enough on its own. This is a TOP-LEVEL
+   *  warning, the same idiom `unconfiguredWarning`/`ambiguityWarning` already use, so a reader scanning
+   *  only top-level fields still sees it. Applies to the SINGULAR `rulesPath` path too, not just the
+   *  `rulesFiles` union — the singular path is the more dangerous blind spot precisely because it is the
+   *  one every existing seat already uses. ⚠️ Deliberately does NOT drive `ok` (same DoD-2/870edbcf
+   *  reasoning as `rulesCheck` itself — see the `ok` computation's own comment) — a rules file that
+   *  cannot be read is not itself proof that protection was lost; it only becomes a real failure when
+   *  `missingMarkers`/`liveCommitments.ok` say so, which they already do independently. */
+  rulesUnreadableWarning?: string;
 }
 
 /** Derives `rulesCheck` from a `RulesInput` — the ONE place this mapping happens, shared by `checkRotation`
@@ -340,27 +497,133 @@ function deriveRulesCheck(rules: RulesInput | undefined): RotationCheckResult["r
   return { checked: true, ok: false, resolvedPath: rules.resolvedPath, reason: rules.error };
 }
 
+/** Derives `rulesChecks` from a `rulesFiles` list — the ONE place this mapping happens (mirrors
+ *  `deriveRulesCheck`'s own reasoning), shared by `checkRotation` below AND `runResumeDocCheck`'s
+ *  `docFound:false` early return, so the two paths can never disagree about what a supplied `rulesFiles`
+ *  list means (card f6985338, DoD-4: a missing/unreadable file must fail VISIBLY on EITHER path). */
+function deriveRulesChecks(rulesFiles: readonly RulesFileEntry[] | undefined): RotationCheckResult["rulesChecks"] {
+  if (!rulesFiles || rulesFiles.length === 0) return undefined;
+  return rulesFiles.map((r) =>
+    "text" in r
+      ? { checked: true as const, ok: true, resolvedPath: r.resolvedPath }
+      : { checked: true as const, ok: false, resolvedPath: r.resolvedPath, reason: r.error },
+  );
+}
+
+/**
+ * Derives `rulesUnreadableWarning` from the SAME `rulesCheck`/`rulesChecks` values a caller already
+ * computed (code review N1, card f6985338) — the ONE place this mapping happens, shared by `checkRotation`
+ * AND `runResumeDocCheck`'s `docFound:false` early return, so the two paths can never disagree about
+ * whether a supplied-but-unreadable rules source is worth a top-level warning. Applies to the SINGULAR
+ * `rulesCheck` too, not just the plural `rulesChecks` — see the field's own doc for why the singular path
+ * is the more dangerous blind spot.
+ */
+function deriveRulesUnreadableWarning(
+  rulesCheck: RotationCheckResult["rulesCheck"],
+  rulesChecks: RotationCheckResult["rulesChecks"],
+): string | undefined {
+  const unreadable: { resolvedPath: string; reason?: string }[] = [];
+  if (rulesCheck.checked && !rulesCheck.ok) unreadable.push({ resolvedPath: rulesCheck.resolvedPath!, reason: rulesCheck.reason });
+  if (rulesChecks) for (const rc of rulesChecks) if (!rc.ok) unreadable.push({ resolvedPath: rc.resolvedPath, reason: rc.reason });
+  if (unreadable.length === 0) return undefined;
+  return (
+    `[resume-doc-check] ${unreadable.length} rules file(s) could not be read and are NOT contributing to ` +
+    `this result: ${unreadable.map((u) => `${u.resolvedPath}${u.reason ? ` (${u.reason})` : ""}`).join("; ")}. ` +
+    `A marker or the LIVE COMMITMENTS floor that ONLY lived in one of these files reads as genuinely ` +
+    `missing above, never as "satisfied elsewhere" — but if it ALSO lives in the active doc or another ` +
+    `readable file, this result can still be a legitimate ok:true while quietly running with less ` +
+    `protection than intended. Fix the path(s) or the file(s).`
+  );
+}
+
+/**
+ * Builds the ordered, DEDUPED `RuleFileSource` list for the multi-file union (code review N3, card
+ * f6985338) — `rules` first (if present, labeled "rules"), then every readable `rulesFiles` entry labeled
+ * by its own `resolvedPath` — but an entry whose `resolvedPath` was ALREADY SEEN (from `rules` itself, or
+ * an earlier `rulesFiles` entry) is SKIPPED, never pushed a second time.
+ *
+ * Without this, the SAME on-disk file counted more than once (`rulesPath` equal to one of `rulesPaths`, a
+ * shape this tool's own description explicitly invites via "pass `rulesPaths` instead of/alongside
+ * `rulesPath`" — or a duplicate entry within `rulesPaths` itself) reads as TWO DIFFERENT places the
+ * heading/marker was found, tripping `ambiguous`/`otherSources`/the top-level `ambiguityWarning` even
+ * though there is only ONE real file and nothing to migrate. That warning's own wording tells a reader
+ * this is doc-migration residue to resolve — sending them hunting a duplicate heading that does not exist
+ * is a false alarm on the module's loudest signal, worse than no signal at all. Dedup by resolvedPath
+ * (not by content) is a strict subset of correct behavior: a caller who accidentally names the SAME file
+ * twice always meant one file; a caller who genuinely wants two DIFFERENT files with the SAME content is
+ * still free to do that (different resolvedPath ⇒ never merged), so this never removes real ambiguity, it
+ * only removes duplicate reporting of what was never ambiguous to begin with.
+ */
+function buildRuleSources(rules: RulesInput | undefined, rulesFiles: readonly RulesFileEntry[]): RuleFileSource[] {
+  const sources: RuleFileSource[] = [];
+  const seen = new Set<string>();
+  if (rules && "text" in rules) {
+    sources.push({ label: "rules", text: rules.text });
+    seen.add(rules.resolvedPath);
+  }
+  for (const rf of rulesFiles) {
+    if (!("text" in rf)) continue;
+    if (seen.has(rf.resolvedPath)) continue;
+    seen.add(rf.resolvedPath);
+    sources.push({ label: rf.resolvedPath, text: rf.text });
+  }
+  return sources;
+}
+
 /** Pure — takes already-read file contents/stats, never touches the filesystem itself (the MCP tool
  *  handler owns all fs I/O and error handling; this function never throws). */
 export function checkRotation(input: RotationCheckInput): RotationCheckResult {
   const rulesText = input.rules && "text" in input.rules ? input.rules.text : null;
-  const { missing, satisfiedBy } = checkMarkers(input.activeText, input.markers, rulesText);
-  const markerSources: Record<string, "active" | "rules"> = {};
-  for (const [token, src] of satisfiedBy) markerSources[token] = src;
+  // Card f6985338: `rulesFiles` non-empty is what selects the NEW N-file union path below. Empty/omitted
+  // (the overwhelmingly common case, and every pre-f6985338 caller) runs the branch that follows —
+  // completely untouched, calling the exact same `checkMarkers`/`countNumberedSectionUnion` this module
+  // has always called — so a caller that never passes `rulesFiles` gets byte-identical output (DoD-1).
+  const rulesFiles = input.rulesFiles ?? [];
+  const hasMultiFiles = rulesFiles.length > 0;
+
+  let missing: RotationMarker[];
+  let markerSources: Record<string, string>;
+  if (!hasMultiFiles) {
+    const r = checkMarkers(input.activeText, input.markers, rulesText);
+    missing = r.missing;
+    markerSources = {};
+    for (const [token, src] of r.satisfiedBy) markerSources[token] = src;
+  } else {
+    // NEW path: union across `rules` (if present, labeled "rules" — same label the original path uses,
+    // so a marker satisfied by the legacy field reads identically whether or not `rulesFiles` is ALSO
+    // supplied) AND every `rulesFiles` entry, labeled by its own `resolvedPath` (DoD-3), DEDUPED by
+    // resolvedPath (code review N3) so the same on-disk file never counts as two different places.
+    const sources = buildRuleSources(input.rules, rulesFiles);
+    const r = checkMarkersUnion(input.activeText, input.markers, sources);
+    missing = r.missing;
+    markerSources = {};
+    for (const [token, src] of r.satisfiedBy) markerSources[token] = src;
+  }
 
   const rulesCheck = deriveRulesCheck(input.rules);
+  const rulesChecks = deriveRulesChecks(input.rulesFiles);
 
   const commitmentsEnabled = input.commitmentsHeading !== "";
-  const liveCommitments = commitmentsEnabled
+  const liveCommitments: RotationCheckResult["liveCommitments"] = commitmentsEnabled
     ? (() => {
-        // Card e312b207: unioned with `rulesText` — active tried first, rules only when active carries
-        // no such heading at all. `section.count === null` (found in neither) is the fail-closed case:
-        // `ok` is false, never a vacuous "0 items, nothing to check, pass". See countNumberedSectionUnion.
-        const section = countNumberedSectionUnion(input.activeText, rulesText, input.commitmentsHeading);
+        if (!hasMultiFiles) {
+          // Card e312b207: unioned with `rulesText` — active tried first, rules only when active carries
+          // no such heading at all. `section.count === null` (found in neither) is the fail-closed case:
+          // `ok` is false, never a vacuous "0 items, nothing to check, pass". See countNumberedSectionUnion.
+          const section = countNumberedSectionUnion(input.activeText, rulesText, input.commitmentsHeading);
+          const ok = section.count !== null && section.count >= input.commitmentsFloor;
+          return {
+            enabled: true, count: section.count, floor: input.commitmentsFloor, ok, diagnostic: section.diagnostic, source: section.source,
+            ...(section.ambiguous ? { ambiguous: section.ambiguous as true, otherCount: section.otherCount, otherDiagnostic: section.otherDiagnostic } : {}),
+          };
+        }
+        // NEW path (card f6985338): same DEDUPED union set as the marker check above.
+        const sources = buildRuleSources(input.rules, rulesFiles);
+        const section = countNumberedSectionUnionMulti(input.activeText, sources, input.commitmentsHeading);
         const ok = section.count !== null && section.count >= input.commitmentsFloor;
         return {
           enabled: true, count: section.count, floor: input.commitmentsFloor, ok, diagnostic: section.diagnostic, source: section.source,
-          ...(section.ambiguous ? { ambiguous: section.ambiguous as true, otherCount: section.otherCount, otherDiagnostic: section.otherDiagnostic } : {}),
+          ...(section.ambiguous ? { ambiguous: section.ambiguous as true, otherSources: section.others } : {}),
         };
       })()
     : { enabled: false, count: null, floor: input.commitmentsFloor, ok: true, diagnostic: "disabled — no rotationLiveCommitmentsHeading configured for this seat", source: null };
@@ -421,6 +684,7 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
     missingMarkers: missing.map((m) => m.token),
     markerSources,
     rulesCheck,
+    ...(rulesChecks ? { rulesChecks } : {}),
     liveCommitments,
     archiveCheck,
     byteCheck,
@@ -428,14 +692,27 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
   };
   if (!configured) result.unconfiguredWarning = UNCONFIGURED_WARNING;
   if (liveCommitments.ambiguous) {
-    result.ambiguityWarning =
-      `[resume-doc-check] AMBIGUOUS: the "${input.commitmentsHeading}" heading was found in BOTH the ` +
-      `active doc (${liveCommitments.count} item(s)) and the rules file (${liveCommitments.otherCount} ` +
-      `item(s)) — the active doc's count wins by precedence (see countNumberedSectionUnion), and the ` +
-      `rules file's count was NOT used for this result. This is the expected transient RESIDUE of a doc ` +
-      `mid-migration into the rules file (e.g. a leftover heading where only a plain prose pointer should ` +
-      `remain) — it should be resolved (trim the active doc's heading down to prose), not left standing.`;
+    result.ambiguityWarning = liveCommitments.otherSources
+      ? // Card f6985338 (N-file path): enumerate every OTHER place the heading was found, not just one.
+        `[resume-doc-check] AMBIGUOUS: the "${input.commitmentsHeading}" heading was found in MULTIPLE ` +
+        `places — the winner is "${liveCommitments.source}" (${liveCommitments.count} item(s)); also found ` +
+        `in: ${liveCommitments.otherSources.map((o) => `"${o.source}" (${o.count} item(s))`).join(", ")}. ` +
+        `The winner's count is what this result uses (see countNumberedSectionUnionMulti) — the others were ` +
+        `NOT used. This is the expected transient RESIDUE of a doc mid-migration between rules files (e.g. a ` +
+        `leftover heading where only a plain prose pointer should remain) — it should be resolved, not left ` +
+        `standing.`
+      : `[resume-doc-check] AMBIGUOUS: the "${input.commitmentsHeading}" heading was found in BOTH the ` +
+        `active doc (${liveCommitments.count} item(s)) and the rules file (${liveCommitments.otherCount} ` +
+        `item(s)) — the active doc's count wins by precedence (see countNumberedSectionUnion), and the ` +
+        `rules file's count was NOT used for this result. This is the expected transient RESIDUE of a doc ` +
+        `mid-migration into the rules file (e.g. a leftover heading where only a plain prose pointer should ` +
+        `remain) — it should be resolved (trim the active doc's heading down to prose), not left standing.`;
   }
+  // Code review N1 (card f6985338): a TOP-LEVEL warning whenever ANY supplied rules source failed to
+  // read — the legacy singular `rules` field AND every `rulesFiles` entry, so the singular path (the one
+  // every existing seat already uses) gets the same visibility as the new plural one. Never drives `ok`.
+  const rulesUnreadableWarning = deriveRulesUnreadableWarning(rulesCheck, rulesChecks);
+  if (rulesUnreadableWarning) result.rulesUnreadableWarning = rulesUnreadableWarning;
   return result;
 }
 
@@ -482,6 +759,12 @@ export interface RunResumeDocCheckOptions {
    *  active-only, same as before, but is now reported via the result's `rulesCheck` (card 870edbcf) —
    *  see this file's module doc. */
   rulesPath?: string | null;
+  /** Card f6985338: ADDITIONAL rules files beyond `rulesPath` above (the `rulesPaths` MCP-tool argument —
+   *  each already vault-contained by the caller, mirroring `rulesPath` itself). Omitted/empty ⇒
+   *  byte-identical to pre-f6985338 behavior (only `rulesPath` — or nothing — is ever consulted). A path
+   *  that cannot be read is a real, visible failure (`rulesChecks`), never silently dropped from the
+   *  union (DoD-4). */
+  rulesPaths?: readonly string[] | null;
   archivePath?: string | null;
   preEditBytes?: number | null;
 }
@@ -519,6 +802,19 @@ export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocC
     }
   }
 
+  // Card f6985338: resolved up here too (same reasoning as `rules` above) so the docFound:false early
+  // return and the found-doc path below can never disagree about what a supplied `rulesPaths` list means.
+  const rulesFiles: RulesFileEntry[] = (opts.rulesPaths ?? []).map((p) => {
+    try {
+      const text = fs.readFileSync(p, "utf8");
+      return { resolvedPath: p, text };
+    } catch {
+      return { resolvedPath: p, error: `rules path does not exist or is unreadable: ${p}` };
+    }
+  });
+
+  const rulesChecks = deriveRulesChecks(rulesFiles);
+
   let activeText: string | null;
   try {
     activeText = fs.readFileSync(opts.resumeDocPath, "utf8");
@@ -534,6 +830,7 @@ export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocC
       missingMarkers: opts.markers.map((m) => m.token),
       markerSources: {},
       rulesCheck: deriveRulesCheck(rules),
+      ...(rulesChecks ? { rulesChecks } : {}),
       liveCommitments: {
         enabled: opts.commitmentsHeading !== "",
         count: null,
@@ -547,6 +844,10 @@ export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocC
       honestLimitNote: HONEST_LIMIT_NOTE,
     };
     if (!configured) result.unconfiguredWarning = UNCONFIGURED_WARNING;
+    // Code review N1: same top-level warning as checkRotation's found-doc path — a supplied-but-unreadable
+    // rules source is worth surfacing even when the active doc itself is missing.
+    const rulesUnreadableWarning = deriveRulesUnreadableWarning(result.rulesCheck, result.rulesChecks);
+    if (rulesUnreadableWarning) result.rulesUnreadableWarning = rulesUnreadableWarning;
     return result;
   }
 
@@ -574,7 +875,7 @@ export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocC
   }
 
   const result = checkRotation({
-    activeText, rules, markers: opts.markers,
+    activeText, rules, rulesFiles, markers: opts.markers,
     commitmentsHeading: opts.commitmentsHeading, commitmentsFloor: opts.commitmentsFloor,
     archive, byteCheck,
   });
