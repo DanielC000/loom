@@ -85,6 +85,16 @@ const profileSchema = z
   .strict();
 
 /**
+ * The profile validator's field-name enumeration, DERIVED from `profileSchema.shape` — never
+ * hand-copied — so a future field added to the schema above is picked up automatically by any
+ * consumer that enumerates this list (card d34dd208: `profile-field-consumer-guard.mjs` uses this
+ * to detect a validator-accepted field with no registered per-harness consumption declaration).
+ * A hand-copied list would drift the exact way `STATIC_GUARD_REPO_PATHS`'s own folk-recipe drifted
+ * (CLAUDE.md's "ENUMERATE, NOT COUNT" discipline) — this can't, since it reads the schema itself.
+ */
+export const PROFILE_FIELD_NAMES = Object.keys(profileSchema.shape) as (keyof z.infer<typeof profileSchema>)[];
+
+/**
  * Profile keys that must NEVER be settable through an agent MCP tool, even the elevated Setup
  * Assistant / Platform Lead profile writers that otherwise share this same strict validator for every
  * other field. Mirrors `agentOrchestrationOverride`'s omission of `gateCommand`/`alertWebhook` (mcp/

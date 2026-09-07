@@ -3719,6 +3719,18 @@ export const STATIC_GUARD_REPO_PATHS = [
   // codex-specific behavior it silently breaks has no claude-side test to catch it), so it could otherwise
   // take the reduced path and never trip a single check.
   "packages/daemon/test/pty-agnostic-methods-findanylive-guard.mjs",
+  // Card d34dd208 (the "structured field that lies" class): a corpus-scoped source-text scan (re-derives
+  // PROFILE_FIELD_NAMES from profiles/validate.ts's own zod schema, not hand-copied) asserting every
+  // Profile field the validator accepts has a registered, re-verified consumer, a legitimate closed-enum
+  // exemption, or a declared+carded open gap (a real Loom board card id — see field-consumers.ts's own
+  // header) on every supported harness. Belongs here on the same ground as its siblings above: a NEW
+  // field added to profileSchema with no matching field-consumers.ts entry, or a refactor that silently
+  // drops a real consumption line one of the existing entries' `proofs[].pattern` still claims, changes
+  // zero compiled/runtime behavior on its own (it's a missing DECLARATION, not a type error) — exactly
+  // the "caught by a human reading the artifact, never by CI" failure mode this card exists to close, so
+  // it could otherwise take the reduced path and never trip a single check. Currently green with 5 known,
+  // carded gaps (tracked by card 0770d916) printed loudly at every run — see the guard's own header.
+  "packages/daemon/test/profile-field-consumer-guard.mjs",
   // Card 3791b14e (lead-requested follow-up): a corpus-wide readdirSync scan (this array's own dominant
   // shape, not the one diff-scoped exception above) asserting every test file that imports
   // `acquireCodexRealSpawnLock` from `_codex-real-spawn-lock.mjs` is a registered member of that module's

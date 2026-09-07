@@ -109,6 +109,12 @@ const ALLOWLIST = new Map([
   // (`pty/claude-transcript.ts`/`pty/codex-transcript.ts`) rather than ever constructing a `.claude` path
   // literal itself — that arm stays armed.
   ["sessions/transcript.ts", "bare"],
+  // Card d34dd208 (the "structured field that lies" class): PROFILE_FIELD_CONSUMERS' `ProfileHarness`
+  // type and its per-field `harnesses`/`exempt[].harness` values name the SAME two-way enum
+  // ("claude"|"codex") as `profiles/validate.ts`'s own `harness` field above — generic per-harness
+  // consumption-declaration infra, not the adapter module. "bare" only: this file has no business ever
+  // gaining a `.claude` PATH literal.
+  ["profiles/field-consumers.ts", "bare"],
 ]);
 
 function walk(dir, out) {
