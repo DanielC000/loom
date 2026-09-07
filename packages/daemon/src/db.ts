@@ -4771,31 +4771,44 @@ export class Db {
       connections: JSON.stringify(p.connections ?? []), // [] = no access (absent ⇒ [], NOT skills' "all")
       capabilities: JSON.stringify(p.capabilities ?? []), // agent-tooling P4: registry-capability grants, raw
       harness: p.harness ?? null, // NULL = "claude" (absent ⇒ today's only harness)
-    });
+      // COMPILE-TIME FIELD TOTALITY (card 4dfa3c04, extending 635e347e's write-path coverage down to the
+      // DB-binding layer itself): forces every key of Profile (id included — this literal binds it too)
+      // to be named above. Unlike validate.ts's Omit<Profile,"id"> literal, this one binds `id` as well,
+      // so the target is the full Profile, not Omit<Profile,"id">. A future field added to Profile but
+      // forgotten here now fails the BUILD instead of silently never reaching the column — the exact
+      // layer `635e347e` did NOT cover (see that commit's own doc comment at validate.ts:223).
+    } satisfies Record<keyof Profile, unknown>);
   }
   /** Partial edit of a profile. Provided fields are written (null clears); omitted are left as-is. */
   updateProfile(id: string, patch: Partial<Omit<Profile, "id">>): void {
-    const cols: Record<string, unknown> = {
-      name: patch.name,
-      role: patch.role,
-      description: patch.description,
-      allow_delta: patch.allowDelta === undefined ? undefined : JSON.stringify(patch.allowDelta),
-      skills: patch.skills === undefined ? undefined : patch.skills === null ? null : JSON.stringify(patch.skills),
-      model: patch.model,
-      icon: patch.icon,
-      browser_testing: patch.browserTesting === undefined ? undefined : patch.browserTesting ? 1 : 0,
-      document_conversion: patch.documentConversion === undefined ? undefined : patch.documentConversion ? 1 : 0,
-      vault_write: patch.vaultWrite === undefined ? undefined : patch.vaultWrite ? 1 : 0,
-      restricted_tools: patch.restrictedTools === undefined ? undefined : patch.restrictedTools ? 1 : 0,
-      no_commit: patch.noCommit === undefined ? undefined : patch.noCommit ? 1 : 0,
-      connections: patch.connections === undefined ? undefined : JSON.stringify(patch.connections),
-      capabilities: patch.capabilities === undefined ? undefined : JSON.stringify(patch.capabilities),
-      harness: patch.harness === undefined ? undefined : patch.harness ?? null,
-    };
-    const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
-    if (names.length === 0) return;
-    const set = names.map((c) => `${c} = ?`).join(", ");
-    this.db.prepare(`UPDATE profiles SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+    // COMPILE-TIME FIELD TOTALITY (card 4dfa3c04): each entry pairs a Profile field with its DB column
+    // name + bind value, so `satisfies Record<keyof Omit<Profile,"id">, ...>` below forces every field to
+    // be named here — the same guarantee validate.ts:265 already gives the write path, extended down to
+    // this hand-bound UPDATE. A future field forgotten here now fails the BUILD instead of silently never
+    // reaching the column when patched (`cols` used to be keyed by DB column name, which is what let a
+    // field slip through unnoticed — see that commit's own doc comment for the original `harness` incident
+    // this pattern guards against).
+    const bindings = {
+      name: { column: "name", value: patch.name },
+      role: { column: "role", value: patch.role },
+      description: { column: "description", value: patch.description },
+      allowDelta: { column: "allow_delta", value: patch.allowDelta === undefined ? undefined : JSON.stringify(patch.allowDelta) },
+      skills: { column: "skills", value: patch.skills === undefined ? undefined : patch.skills === null ? null : JSON.stringify(patch.skills) },
+      model: { column: "model", value: patch.model },
+      icon: { column: "icon", value: patch.icon },
+      browserTesting: { column: "browser_testing", value: patch.browserTesting === undefined ? undefined : patch.browserTesting ? 1 : 0 },
+      documentConversion: { column: "document_conversion", value: patch.documentConversion === undefined ? undefined : patch.documentConversion ? 1 : 0 },
+      vaultWrite: { column: "vault_write", value: patch.vaultWrite === undefined ? undefined : patch.vaultWrite ? 1 : 0 },
+      restrictedTools: { column: "restricted_tools", value: patch.restrictedTools === undefined ? undefined : patch.restrictedTools ? 1 : 0 },
+      noCommit: { column: "no_commit", value: patch.noCommit === undefined ? undefined : patch.noCommit ? 1 : 0 },
+      connections: { column: "connections", value: patch.connections === undefined ? undefined : JSON.stringify(patch.connections) },
+      capabilities: { column: "capabilities", value: patch.capabilities === undefined ? undefined : JSON.stringify(patch.capabilities) },
+      harness: { column: "harness", value: patch.harness === undefined ? undefined : patch.harness ?? null },
+    } satisfies Record<keyof Omit<Profile, "id">, { column: string; value: unknown }>;
+    const entries = Object.values(bindings).filter((b) => b.value !== undefined);
+    if (entries.length === 0) return;
+    const set = entries.map((b) => `${b.column} = ?`).join(", ");
+    this.db.prepare(`UPDATE profiles SET ${set} WHERE id = ?`).run(...entries.map((b) => b.value), id);
   }
   /**
    * Delete a profile. SAFE for assigned agents: an agent whose profile_id now dangles resolves to the
