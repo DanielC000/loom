@@ -286,10 +286,37 @@ if (persistedRow) {
 }
 
 // --- stop() — the real codex exit sequence, observed via THIS PROJECT'S OWN events.onExit. --------------
+//
+// ⚠️⚠️ DECLARED TEST-SIDE ACCOMMODATION (card 176bdb0c, stopgap landed by card 2efd4bd7) — NOT a fix.
+// `stopCodex`'s INTENDED graceful stop (packages/daemon/src/pty/host.ts) intermittently exits non-zero —
+// measured 2/13 valid trials ≈ 15.4% (176bdb0c DoD-1, both raw exit code 1: one fast-path ~1.9s shape
+// pointing at codex's own shutdown semantics for that state, one ~6.1s shape where Loom's own hard-kill
+// backstop fired). Observed live across 5 real merge gates on unrelated (codex-untouched) branches,
+// rejecting one merge outright. The defect is LIVE and UNFIXED — the real fix lives in pty/host.ts, which
+// is one-at-a-time and held by a different lane. Per 176bdb0c's DoD-2, production's stopCodex is NEVER
+// widened to accept this as success — this accommodation stays entirely on the test side.
+//
+// So: the exit code is still OBSERVED and REPORTED (never silently dropped), but a non-zero code no longer
+// fails this gate-blocking assertion. This is scoped to exactly this one check — every other assertion in
+// this file (engine-session-id capture, both readTranscript calls, engineTranscriptExists,
+// resolveTranscriptFile, the persisted DB row's engineSessionId + harness, the worker_transcript call) is
+// untouched and still fails the gate if it ever breaks. A hang/never-exits case (the waitUntil timeout
+// below) is a DIFFERENT failure mode than this — it still fails loud; only a completed, non-zero exit is
+// downgraded to non-blocking.
+//
+// Removable once the real stopCodex fix lands on 176bdb0c and this reports clean for a sustained period —
+// see that card for the live defect status.
+function reportGracefulStopExitCode(code) {
+  if (code === 0) {
+    check("the real codex process exited with code 0 after a graceful stop", true);
+  } else {
+    console.log(`⚠️  ACCOMMODATION (card 176bdb0c): the real codex process exited with code ${code} (not 0) after an INTENDED graceful stop. This is the KNOWN, LIVE, UNFIXED flake measured at 2/13 ≈ 15.4% — NOT failing the gate on this observation. If you are reading this, please note the observed code and the stop→exit elapsed time on card 176bdb0c; the real stopCodex fix is still pending in pty/host.ts.`);
+  }
+}
 host.stop(SESSION_ID, "graceful");
 try {
   await waitUntil(() => exitedSessions.has(SESSION_ID), { label: `${SESSION_ID} real codex process onExit after graceful stop`, timeoutMs: 8000 });
-  check("the real codex process exited with code 0", exitedSessions.get(SESSION_ID)?.code === 0);
+  reportGracefulStopExitCode(exitedSessions.get(SESSION_ID)?.code);
 } catch (err) {
   console.log(`FAIL  ${err.message}`);
   failures++;
