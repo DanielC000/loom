@@ -3907,6 +3907,23 @@ export interface CodexLive {
    *  unbounded rescan — see `captureCodexEngineSessionId`'s own doc for the ONE bounded retry this still
    *  allows before giving up for good. */
   engineSessionIdCaptureAttempted: boolean;
+  /** Codex-only, card ece98bd8: WHY the engine-session-id capture chain ended WITHOUT ever finding an id
+   *  — `null` while capture is still pending, or once it succeeds (this is a FAILURE-diagnostic field
+   *  only; never populated on the ordinary success path). Latched exactly once, by whichever of the two
+   *  sites first determines the chain is over:
+   *   - `"exhausted"` — `captureCodexEngineSessionId`'s own last scheduled attempt ran, the pty was
+   *     still alive, and the rollout file still hadn't turned up after all `CODEX_ENGINE_ID_MAX_ATTEMPTS`
+   *     tries. Set THERE, immediately — the pty may keep running long afterward, so this can't wait for
+   *     `pty.onExit`.
+   *   - `"died-mid-capture"` — the pty exited after at least one attempt had already fired
+   *     (`engineSessionIdCaptureAttempted`) but before any attempt found an id or the ladder exhausted.
+   *   - `"capture-not-attempted"` — the pty exited before the ready marker ever rendered, so
+   *     `engineSessionIdCaptureAttempted` never latched and the retry chain never started at all.
+   *  The `died-mid-capture`/`capture-not-attempted` split is resolved at `pty.onExit` itself, not by
+   *  waiting for the in-flight `setTimeout` to fire again against a now-dead pty — that stale tick would
+   *  only learn, up to `CODEX_ENGINE_ID_RETRY_MS` later, exactly what `pty.onExit` already knows at the
+   *  instant of death. Read via `codexStopDiag` (`PtyHostEvents.onExit`) and the exit console line. */
+  engineSessionIdCaptureEndReason: "exhausted" | "died-mid-capture" | "capture-not-attempted" | null;
   /** Codex-only, card 448f1b4a: has this pty instance reached FULL boot readiness — the ready marker
    *  rendered, the header's model finished resolving (⛔ not just the placeholder text; see
    *  `codex-host.ts#isCodexModelLoaded`'s own doc for the real captured false-ready this closes), AND no
@@ -4328,12 +4345,18 @@ export interface PtyHostEvents {
    * did: whether its SECOND `\x03` was sent at all (a fast-enough exit from the FIRST alone means it never
    * was), and, if sent, how long it had been outstanding when the process actually died — see
    * `CodexLive.secondSigintWrittenAt`'s own doc for why this is the field the earlier measurement
-   * campaign on that card identified as most valuable.
+   * campaign on that card identified as most valuable. `engineSessionIdCaptureEndReason` (card ece98bd8)
+   * is a LATER, independent addition to the same diagnostic bag — it says nothing about the stop
+   * sequence; see `CodexLive.engineSessionIdCaptureEndReason`'s own doc for what it records.
    */
   onExit(sessionId: string, code: number | null, info: {
     intended: boolean;
     signal?: number;
-    codexStopDiag?: { secondSigintSent: boolean; msSinceSecondSigint: number | null };
+    codexStopDiag?: {
+      secondSigintSent: boolean;
+      msSinceSecondSigint: number | null;
+      engineSessionIdCaptureEndReason?: "exhausted" | "died-mid-capture" | "capture-not-attempted" | null;
+    };
   }): void;
 }
 
@@ -6140,6 +6163,7 @@ export class PtyHost {
       lastBusyMarkerAt: 0, enterWrittenAt: 0, enterPending: false, submitConfirmAttempts: 0, busyStaleGen: 0, busyStaleTimer: null, kickoffDelivered: false,
       screenScan: "",
       engineSessionIdCaptureAttempted: false,
+      engineSessionIdCaptureEndReason: null,
       bootReady: false, bootReadyTimer: null,
       secondSigintWrittenAt: null,
     };
@@ -6322,6 +6346,13 @@ export class PtyHost {
 
     pty.onExit(({ exitCode, signal }) => {
       live.alive = false;
+      // Card ece98bd8: resolve the two capture-end outcomes that can only be known once the pty is
+      // actually dead — "exhausted" (the genuinely surprising, still-alive case) is already latched by
+      // `captureCodexEngineSessionId` itself, above, so it's left untouched here. Never overwrites an
+      // already-successful capture (`live.engineSessionId` set) or an already-latched reason.
+      if (!live.engineSessionId && !live.engineSessionIdCaptureEndReason) {
+        live.engineSessionIdCaptureEndReason = live.engineSessionIdCaptureAttempted ? "died-mid-capture" : "capture-not-attempted";
+      }
       if (live.busyStaleTimer) { clearTimeout(live.busyStaleTimer); live.busyStaleTimer = null; } // never fire against a dead session
       if (live.bootReadyTimer) { clearTimeout(live.bootReadyTimer); live.bootReadyTimer = null; } // never fire against a dead session
       if (live.mcpSeenWaiters.length > 0) {
@@ -6338,9 +6369,10 @@ export class PtyHost {
       const codexStopDiag = {
         secondSigintSent: live.secondSigintWrittenAt !== null,
         msSinceSecondSigint: live.secondSigintWrittenAt !== null ? Date.now() - live.secondSigintWrittenAt : null,
+        engineSessionIdCaptureEndReason: live.engineSessionIdCaptureEndReason,
       };
       // eslint-disable-next-line no-console
-      console.log(`[pty] codex exit ${opts.sessionId} code=${exitCode} intended=${live.stopping} signal=${signal} secondSigintSent=${codexStopDiag.secondSigintSent} msSinceSecondSigint=${codexStopDiag.msSinceSecondSigint}`);
+      console.log(`[pty] codex exit ${opts.sessionId} code=${exitCode} intended=${live.stopping} signal=${signal} secondSigintSent=${codexStopDiag.secondSigintSent} msSinceSecondSigint=${codexStopDiag.msSinceSecondSigint} engineSessionIdCaptureEndReason=${codexStopDiag.engineSessionIdCaptureEndReason}`);
       try { live.logStream.end(); } catch { /* ignore */ }
       this.broadcastControl(live, { type: "exit", code: exitCode });
       // A codex session IS a real DB Session (unlike a shell) — persist the exit exactly as claude's own
@@ -6361,6 +6393,12 @@ export class PtyHost {
    * insufficient against a real spawn (the rollout file is created lazily, around first-turn time, not at
    * boot). Best-effort throughout: never gates kickoff/busy-detection either way (both already latch/fire
    * off `screenScan` alone, independent of this), and stops retrying the instant the pty exits.
+   *
+   * Card ece98bd8: a chain that ends WITHOUT an id used to be silent — indistinguishable from a pty death
+   * mid-window or a ready marker that never rendered at all. This function now records its own genuinely
+   * surprising failure mode (exhausting every attempt on a STILL-LIVE pty) the instant it happens, into
+   * `live.engineSessionIdCaptureEndReason` — see that field's own doc for the other two outcomes, which
+   * are resolved at `pty.onExit` instead (nothing left to check here once the pty is dead).
    */
   private captureCodexEngineSessionId(sessionId: string, live: CodexLive, cwd: string, attempt = 0): void {
     if (live.engineSessionId || !live.alive) return; // already captured, or the pty is already gone
@@ -6373,7 +6411,14 @@ export class PtyHost {
     }
     if (attempt < CODEX_ENGINE_ID_MAX_ATTEMPTS - 1) {
       setTimeout(() => this.captureCodexEngineSessionId(sessionId, live, cwd, attempt + 1), CODEX_ENGINE_ID_RETRY_MS);
+      return;
     }
+    // Card ece98bd8 DoD-3: the last scheduled attempt just ran, the pty is still alive, and the rollout
+    // file was never found — record it NOW rather than deferring to `pty.onExit`, which may be a long
+    // time away (or never, for a session that keeps running after a failed capture).
+    live.engineSessionIdCaptureEndReason = "exhausted";
+    // eslint-disable-next-line no-console
+    console.warn(`[codex-engine-id] ${sessionId} engine-session id never discovered after ${CODEX_ENGINE_ID_MAX_ATTEMPTS} attempts (~${CODEX_ENGINE_ID_MAX_ATTEMPTS * CODEX_ENGINE_ID_RETRY_MS}ms) — pty still alive; rollout file was never found for this spawn.`);
   }
 
   /** Codex counterpart of `setBusy` — idempotent (fires `events.onBusy`/`broadcastControl` only on a

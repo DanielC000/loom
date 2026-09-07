@@ -10,9 +10,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // `LOOM_CODEX_ENGINE_ID_RETRY_MS` shrinks the bounded-retry constant (mirrors that file's own
 // `LOOM_CODEX_BUSY_STALE_MS` shrink convention) so the retry scenario stays fast; the genuine async retry
 // timer is observed via `waitUntil` (poll for the real `onEngineSessionId` event), never a blind sleep.
+// `LOOM_CODEX_ENGINE_ID_MAX_ATTEMPTS` similarly shrinks the retry COUNT so scenario D below (exhausting the
+// whole ladder) doesn't need to wait through the real 40-attempt default.
+//
+// Card ece98bd8: scenarios D/E/F cover `CodexLive.engineSessionIdCaptureEndReason` — the three ways this
+// chain can end WITHOUT ever finding an id ("exhausted", "died-mid-capture", "capture-not-attempted"),
+// previously indistinguishable from each other (and from success) by anything downstream.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/codex-engine-session-id-capture.mjs
 process.env.LOOM_CODEX_ENGINE_ID_RETRY_MS = "40"; // read once at module load below — must be set BEFORE the dynamic import
+process.env.LOOM_CODEX_ENGINE_ID_MAX_ATTEMPTS = "3"; // ditto — keeps scenario D's exhaustion fast
 import fs from "node:fs";
 import path from "node:path";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
@@ -58,11 +65,12 @@ class FakeCodexHost extends PtyHost {
 }
 
 const engineSessionIdEvents = [];
+const exitEvents = [];
 const events = {
   onEngineSessionId(sessionId, engineId, previousEngineId) { engineSessionIdEvents.push({ sessionId, engineId, previousEngineId }); },
   onContextStats() {}, onRateLimited() {},
   onBusy() {},
-  onExit() {},
+  onExit(sessionId, code, info) { exitEvents.push({ sessionId, code, info }); },
 };
 const host = new FakeCodexHost(events);
 
@@ -167,6 +175,62 @@ function writeRollout(conversationId, cwd) {
 
   check("(C) NEGATIVE CONTROL: a rollout file for a DIFFERENT cwd is never captured, even after the retry window elapses",
     engineSessionIdEvents.filter((e) => e.sessionId === sessionId).length === 0);
+}
+
+// --- Scenario D: EXHAUSTED — no rollout file ever appears while the pty stays alive; card ece98bd8's
+// genuinely-surprising case (the doc says the file lands around first-turn time, well inside the retry
+// window) must give up after LOOM_CODEX_ENGINE_ID_MAX_ATTEMPTS(=3 here) attempts and RECORD why, rather
+// than retrying forever with nothing to show for it. ---
+{
+  const sessionId = "engine-id-d-exhausted";
+  const cwd = "/fake/codex/cwd-d-exhausted";
+
+  host.spawn({ sessionId, cwd, permission: {}, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role: "worker", harness: "codex" });
+  const fakePty = host.fakeCodexPtys.get(sessionId);
+  fakePty.push(`codex TUI booted\n${READY}\n`); // schedules the retry chain; no rollout file is ever written for this cwd
+
+  await waitUntil(
+    () => host.liveCodex.get(sessionId)?.engineSessionIdCaptureEndReason !== null,
+    { label: "(D) the capture chain records an end reason once every attempt has run out" },
+  );
+  check("(D) engineSessionIdCaptureEndReason is \"exhausted\"", host.liveCodex.get(sessionId)?.engineSessionIdCaptureEndReason === "exhausted");
+  check("(D) no onEngineSessionId ever fired (nothing was ever found)", engineSessionIdEvents.filter((e) => e.sessionId === sessionId).length === 0);
+  check("(D) NEGATIVE CONTROL: the pty is still alive — exhaustion is not a pty-death outcome (contrast with E below)", host.liveCodex.get(sessionId)?.alive === true);
+}
+
+// --- Scenario E: DIED-MID-CAPTURE — the ready marker renders (an attempt fires, at least once) but the pty
+// exits before any attempt ever finds the rollout file. Must be recorded by `pty.onExit` ITSELF, not by
+// waiting for the already-scheduled-but-now-stale retry tick to notice `!live.alive` on its own. ---
+{
+  const sessionId = "engine-id-e-died";
+  const cwd = "/fake/codex/cwd-e-died";
+
+  host.spawn({ sessionId, cwd, permission: {}, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role: "worker", harness: "codex" });
+  const fakePty = host.fakeCodexPtys.get(sessionId);
+  fakePty.push(`codex TUI booted\n${READY}\n`); // first attempt misses (no rollout file) — capture IS attempted
+  check("(E) capture was attempted before death", host.liveCodex.get(sessionId)?.engineSessionIdCaptureAttempted === true);
+
+  fakePty.kill(); // pty dies mid-window — synchronous, so onExit has already run by the time this returns
+  const exit = exitEvents.find((e) => e.sessionId === sessionId);
+  check("(E) onExit fired", exit !== undefined);
+  check("(E) engineSessionIdCaptureEndReason is \"died-mid-capture\"", exit?.info.codexStopDiag?.engineSessionIdCaptureEndReason === "died-mid-capture");
+}
+
+// --- Scenario F: CAPTURE-NOT-ATTEMPTED — the pty dies before the ready marker ever renders, so the retry
+// chain never even starts (the outer `engineSessionIdCaptureAttempted` latch never fires). ---
+{
+  const sessionId = "engine-id-f-never";
+  const cwd = "/fake/codex/cwd-f-never";
+
+  host.spawn({ sessionId, cwd, permission: {}, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role: "worker", harness: "codex" });
+  const fakePty = host.fakeCodexPtys.get(sessionId);
+  fakePty.push(`codex TUI booting...\n`); // no ready marker ever rendered
+  check("(F) capture was never attempted", host.liveCodex.get(sessionId)?.engineSessionIdCaptureAttempted === false);
+
+  fakePty.kill();
+  const exit = exitEvents.find((e) => e.sessionId === sessionId);
+  check("(F) onExit fired", exit !== undefined);
+  check("(F) engineSessionIdCaptureEndReason is \"capture-not-attempted\"", exit?.info.codexStopDiag?.engineSessionIdCaptureEndReason === "capture-not-attempted");
 }
 
 await finishAndExit(failures === 0 ? 0 : 1);
