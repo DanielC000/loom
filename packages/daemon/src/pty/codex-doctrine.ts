@@ -216,3 +216,154 @@ export function watchCodexLiveness(onRemoved: () => void): FSWatcher {
       console.warn(`[liveness] codex-sessions watcher error (ignored, watcher continues): ${e?.code ?? ""} ${e?.message ?? String(err)}`);
     });
 }
+
+/**
+ * Card 887e10b8 Item 1 (multi-harness epic df1f94b0 Phase 1): codex's doctrine-injection mechanism
+ * (`HarnessAdapter.capabilities.doctrineInjection`). Codex has no `.claude/skills`-style directory
+ * convention and no Skill-invocation tool — its OWN native project-instructions file is `AGENTS.md` (a
+ * single file, read at process start, the codex analogue of CLAUDE.md), so a doctrine-skill body (like
+ * `/worker`'s SKILL.md) cannot be pointed at by name the way it is for claude — the essential rules are
+ * inlined here directly instead.
+ */
+export const CODEX_DOCTRINE_FILE = "AGENTS.md";
+
+/** Whether `p` (a git-status-relative path, forward-slash form) is the codex doctrine file — mirrors
+ *  `claude-doctrine.ts#isDoctrineArtifactPath`'s role for `git/worktrees.ts#uncommittedWorkFiles`. A fresh
+ *  worktree checkout never carries an untracked root file on its own (see this repo's own CLAUDE.md:
+ *  "A fresh worktree does NOT carry gitignored files"), so an untracked `AGENTS.md` appearing in a
+ *  worker's worktree can only be something this injection wrote — safe to treat as doctrine noise, never
+ *  the project's own real (already-tracked) AGENTS.md, which would show a DIFFERENT git status ("M", not
+ *  "??") and is never touched by {@link injectCodexDoctrine} in the first place. */
+export function isCodexDoctrinePath(p: string): boolean {
+  return p === CODEX_DOCTRINE_FILE;
+}
+
+function codexDoctrineFile(cwd: string): string {
+  return path.join(cwd, CODEX_DOCTRINE_FILE);
+}
+
+const CODEX_DOCTRINE_BEGIN = "<!-- LOOM:CODEX-DOCTRINE:BEGIN (managed by Loom — regenerated every spawn; do not edit by hand) -->";
+const CODEX_DOCTRINE_END = "<!-- LOOM:CODEX-DOCTRINE:END -->";
+
+/** The condensed, harness-agnostic worker doctrine a claude worker gets via its `/worker` skill body —
+ *  inlined here (not pointed at) because codex has no skill-invocation tool to follow such a pointer.
+ *  Deliberately narrow: only the three rules card `887e10b8` names as load-bearing for a doctrine-blind
+ *  worker (the targeted-test default, the no-speculative-full-gate rule, and the escalate-up rule), plus a
+ *  pointer to the project's own CLAUDE.md for everything project-specific — this is NOT a full transcription
+ *  of `/worker`'s much larger doctrine, which assumes tools (Skill, a Task-list UI) codex does not have. */
+function codexWorkerDoctrineBody(): string {
+  return [
+    "# Loom worker doctrine (condensed for Codex)",
+    "",
+    "You are a Loom-dispatched WORKER session running on the Codex CLI, assigned ONE task on an isolated",
+    "git worktree and branch. This file is Codex's own project-instructions convention (`AGENTS.md`),",
+    "carrying a condensed version of the doctrine a Claude Code worker gets from its `/worker` skill —",
+    "Codex has no skill-invocation tool, so the load-bearing rules are inlined here directly rather than",
+    "pointed at by name.",
+    "",
+    "## Read this project's own CLAUDE.md at the repository root FIRST",
+    "It is the authoritative source for this project's conventions, commit-message rules, and build/test",
+    "(DoD) gate command. This file carries only the cross-project worker rules below; it never overrides",
+    "or restates project specifics.",
+    "",
+    "## The three load-bearing rules",
+    "1. Targeted-test default. Default to running the SPECIFIC test file(s) your task affects, directly —",
+    "   not the project's full build/test gate. Only run a full gate when your task's own instructions",
+    "   explicitly call for it, or the change is genuinely load-bearing/fleet-wide in a way no specific",
+    "   test file can cover.",
+    "2. Never speculatively run a shared/full gate. A full build/test gate (if this project exposes one as",
+    "   a tool) is a shared, capped resource other work may already be queued behind. Never fire it on your",
+    "   own judgment call — report up and ask first, and wait for the answer, unless your kickoff already",
+    "   told you which check to run.",
+    "3. Escalate up, never sideways, never to a human directly. On a decision, ambiguity, or blocker beyond",
+    "   your assigned task's clear scope: STOP. Report the blocker rather than guessing, and never silently",
+    "   expand scope or contact a human yourself — only your manager does that.",
+    "",
+    "## Reporting",
+    "Report your status (done / blocked / progress) through the daemon's own reporting tool for your",
+    "session — a plain reply in the conversation is not seen by your manager and does not end your",
+    "assignment. Commit your verified work to your assigned branch before reporting done; never commit to",
+    "the project's mainline.",
+  ].join("\n");
+}
+
+/** The full injected block, including the ID line a real-spawn test can ask codex to read back verbatim
+ *  to prove RECEPTION (not merely delivery) — see `test/codex-doctrine-real-spawn.mjs`. The id is derived
+ *  from the body content itself (not a random per-run value), so it changes only when the doctrine wording
+ *  changes and stays stable across repeated spawns/resumes of the SAME doctrine version. */
+function codexDoctrineBlock(): string {
+  const body = codexWorkerDoctrineBody();
+  const id = md5(body).slice(0, 8);
+  return `${CODEX_DOCTRINE_BEGIN}\n<!-- LOOM-DOCTRINE-ID: ${id} -->\n${body}\n${CODEX_DOCTRINE_END}\n`;
+}
+
+/**
+ * Resolve the git dir `info/exclude` actually lives in for `cwd` — duplicated from
+ * `skills/inject.ts#resolveGitCommonDir` (small + self-contained; kept local rather than cross-imported so
+ * this file's git-hygiene concern doesn't create a new pty↔skills coupling for one helper). See that
+ * function's own doc for the full worktree-indirection reasoning.
+ */
+function resolveGitCommonDirForDoctrine(cwd: string): string | null {
+  const gitPath = path.join(cwd, ".git");
+  let stat: fs.Stats;
+  try { stat = fs.statSync(gitPath); } catch { return null; }
+  if (stat.isDirectory()) return gitPath;
+  let pointer: string;
+  try { pointer = fs.readFileSync(gitPath, "utf8"); } catch { return null; }
+  const m = pointer.match(/^gitdir:\s*(.+?)\s*$/m);
+  if (!m || !m[1]) return null;
+  const privateDir = path.resolve(cwd, m[1]);
+  let commondirRaw: string;
+  try { commondirRaw = fs.readFileSync(path.join(privateDir, "commondir"), "utf8").trim(); }
+  catch { return null; }
+  return path.resolve(privateDir, commondirRaw);
+}
+
+/** Hide the injected `AGENTS.md` from `git status` via the shared `.git/info/exclude` (local only; never
+ *  edits a tracked `.gitignore`) — mirrors `skills/inject.ts#hideFromGit`'s discipline for `.claude/`. */
+function hideCodexDoctrineFromGit(cwd: string): void {
+  const gitDir = resolveGitCommonDirForDoctrine(cwd);
+  if (!gitDir) return;
+  const infoDir = path.join(gitDir, "info");
+  try { fs.mkdirSync(infoDir, { recursive: true }); } catch { /* ignore */ }
+  const excludePath = path.join(infoDir, "exclude");
+  let cur = ""; try { cur = fs.readFileSync(excludePath, "utf8"); } catch { /* none */ }
+  const entry = `/${CODEX_DOCTRINE_FILE}`;
+  if (cur.split(/\r?\n/).includes(entry)) return;
+  const prefix = cur === "" || cur.endsWith("\n") ? "" : "\n";
+  try { fs.appendFileSync(excludePath, `${prefix}# loom-managed exclusions (injected per session; do not commit)\n${entry}\n`); } catch { /* ignore */ }
+}
+
+/**
+ * Deliver the condensed worker doctrine into `<cwd>/AGENTS.md` for a codex WORKER session — the codex
+ * counterpart of `skills/inject.ts#injectSkills` for claude. Only `role === "worker"` gets doctrine
+ * injected for now (a named, disclosed Phase-1 scope limit: no other codex role is dispatched in
+ * production yet, so building per-role content nothing exercises would be speculative rather than
+ * verified work — mirrors `skills/inject.ts#ROLE_DOCTRINE_SKILL`'s per-role shape for a future pass).
+ *
+ * Idempotent + non-destructive: writes ONLY when the file doesn't exist yet, or exists and is ENTIRELY a
+ * prior Loom-managed block (starts with {@link CODEX_DOCTRINE_BEGIN}) — refreshed to the CURRENT content on
+ * every spawn/resume so a doctrine wording update reaches a resumed session too. A file that exists and
+ * does NOT start with the marker is the project's own real `AGENTS.md` (or another tool's) — never
+ * touched, mirroring `injectSkills`'s "never clobber a repo's own pre-existing" rule. Best-effort: never
+ * throws (a failed write is logged, not fatal to the spawn — mirrors the git-exclude helper above).
+ */
+export function injectCodexDoctrine(cwd: string, role: string | null | undefined): void {
+  if (role !== "worker") return;
+  const target = codexDoctrineFile(cwd);
+  const block = codexDoctrineBlock();
+  let existing: string | null = null;
+  try { existing = fs.readFileSync(target, "utf8"); } catch { /* no file yet — normal first spawn */ }
+  if (existing !== null && !existing.startsWith(CODEX_DOCTRINE_BEGIN)) return; // the repo's own real AGENTS.md
+  if (existing === block) { hideCodexDoctrineFromGit(cwd); return; } // already current; still ensure it's excluded
+  const tmp = `${target}.loom-tmp`;
+  try {
+    fs.writeFileSync(tmp, block);
+    fs.renameSync(tmp, target);
+  } catch (e) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
+    console.log(`[codex-doctrine] failed to write ${target}: ${(e as Error)?.message ?? String(e)}`);
+    return;
+  }
+  hideCodexDoctrineFromGit(cwd);
+}

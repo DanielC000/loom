@@ -29,7 +29,7 @@ const capabilities: HarnessCapabilities = {
   usageTelemetry: false, // ditto
   rateLimitStatus: false, // no poller instance wired (mirrors claudeAdapter's own reasoning)
   livenessWatch: true,
-  doctrineInjection: "none", // AGENTS.md injection is NOT yet built — see the parity matrix's open items
+  doctrineInjection: "file", // card 887e10b8 Item 1 — AGENTS.md injection, wired in spawnCodexProcess (host.ts)
   builtinReset: false, // no documented in-band reset command found for Codex (probe + --help sweep)
   versionGating: true,
 };

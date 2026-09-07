@@ -92,8 +92,9 @@ export interface HarnessCapabilities {
   /** `watchLiveness` returns a real watcher rather than null (a proactively-watchable transcript store exists). */
   livenessWatch: boolean;
   /** How doctrine (skills/MCP config) reaches the CLI. "directory" = mirrored into a project-local dir
-   *  (Claude's `.claude/skills` convention); "none" = no such mechanism. */
-  doctrineInjection: "directory" | "none";
+   *  (Claude's `.claude/skills` convention); "file" = a single project-local file (Codex's `AGENTS.md`
+   *  convention — see `pty/codex-doctrine.ts#injectCodexDoctrine`); "none" = no such mechanism. */
+  doctrineInjection: "directory" | "file" | "none";
   /** `vendorProcessSlashCommand` returns a real in-band command for at least one `kind`. */
   builtinReset: boolean;
   /** `readCachedVersion` is meaningful (spawn-recipe gating reads an installed CLI version). */

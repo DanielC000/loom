@@ -25,7 +25,7 @@ import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, i
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
-import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, removeAddedTrustBlocks } from "./codex-doctrine.js";
+import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
 import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, mcpServersToCodexArgs, codexTrustDialogLock } from "./codex-host.js";
 import { findConversationIdForSpawn } from "./codex-transcript.js";
 
@@ -5939,6 +5939,11 @@ export class PtyHost {
    * episode is still doing rather than racing it.
    */
   private spawnCodexProcess(opts: SpawnOpts): void {
+    // Card 887e10b8 Item 1: deliver the condensed worker doctrine into <cwd>/AGENTS.md BEFORE the real
+    // process starts — codex reads its project-instructions file at boot, so this must land on disk ahead
+    // of createCodexPty, not raced in afterward. Best-effort + role-gated (worker only); see
+    // injectCodexDoctrine's own doc.
+    injectCodexDoctrine(opts.cwd, opts.role ?? null);
     // md5'd BEFORE the pty spawns — see this method's own doc on the md5-before/diff-after/disclose
     // obligation. Captured even though the trust dialog may never actually need answering (a directory
     // already trusted from an earlier run) — diffConfigAfterSpawn is a no-op (`changed:false`) in that

@@ -10,6 +10,7 @@ import { withTimeout, withTimeoutKillingChild, boundedSimpleGit } from "./bounde
 import { withCanonicalIndexLock } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { isDoctrineArtifactPath, isDoctrineSkillsPath } from "../pty/claude-doctrine.js";
+import { isCodexDoctrinePath } from "../pty/codex-doctrine.js";
 
 export interface WorktreeInfo {
   worktreePath: string;
@@ -1772,6 +1773,10 @@ export function uncommittedWorkFiles(porcelain: string): string[] {
     //      closes that leak. (Loom never commits `.claude/skills/`; it is injected per-session + git-excluded.)
     if (status === "??" && isDoctrineArtifactPath(p)) continue;
     if (isDoctrineSkillsPath(p)) continue;
+    // Card 887e10b8 Item 1: codex's injected AGENTS.md is the SAME kind of doctrine noise as claude's
+    // `.claude/` — untracked-only, mirroring (a) above (a repo's own real, already-TRACKED AGENTS.md would
+    // show a different status and is never touched by injectCodexDoctrine in the first place).
+    if (status === "??" && isCodexDoctrinePath(p)) continue;
     files.push(p);
   }
   return files;
