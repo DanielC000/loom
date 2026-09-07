@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Profile } from "@loom/shared";
 import { isLoomDev } from "../paths.js";
 import type { Db } from "../db.js";
+import { normalizedShippedFields } from "./customization.js";
 
 /**
  * Loom's bundled Profiles — the reusable, platform-level "rig" (role + model + allow-delta +
@@ -282,27 +283,30 @@ export function bundledProfileByName(name: string): Omit<Profile, "id"> | undefi
  * ALSO advances the `base` snapshot to shipped (mirrors resetSkillToBundled's base re-sync) so the
  * post-reset state is PRISTINE (mine == base == shipped) rather than a stale "update available".
  *
- * `{ ...bundled }` is a raw spread, NOT a `MERGEABLE_PROFILE_FIELDS`-filtered patch — unlike
- * `adoptProfileUpdate`, this function never consulted that list (verified empirically, card 6b4d0b45:
- * before this fix, resetting a `harness:"codex"` row left it "codex", proving the spread alone doesn't
- * restore an omitted-optional field — `updateProfile` treats an absent key as "leave column as-is", and
- * no `BUNDLED_PROFILES` entry sets `harness`, so the key was never even present on the spread object).
- * `harness` is normalized here EXPLICITLY (the `Profile.harness` type has no `null` member — see
- * `validate.ts`'s return-literal comment on the same field — so, unlike `insertProfile`'s `?? null`
- * DB-column coercion, the patch itself must carry the literal `"claude"` default) so the reset patch
- * always carries a defined value and the column is actually overwritten to the shipped default rather
- * than silently left untouched. A stored literal `"claude"` reads back identically to an absent/null
- * column everywhere `harness` is consumed (every read site normalizes via `?? undefined`/`?? "claude"`/
- * `=== "codex"`), so this introduces no new distinguishable state. Scoped to `harness` only — other
- * optional fields a bundled def omits (`browserTesting`/`noCommit`/etc.) have the same spread-omission
- * gap but are NOT this card's concern; flagged in the card's worker_report as a candidate follow-up.
+ * ⚠️ FIXED at card 11c3dc70 — previously a raw `{ ...bundled }` spread, NOT a `MERGEABLE_PROFILE_FIELDS`-
+ * filtered patch, unlike `adoptProfileUpdate`. `db.updateProfile` treats an absent key as "leave column
+ * as-is", so ANY optional field a `BUNDLED_PROFILES` entry OMITS (not just `harness` — also
+ * `browserTesting`/`documentConversion`/`restrictedTools`/`noCommit`/`connections`/`vaultWrite`/
+ * `capabilities`) was simply absent from the raw spread and silently survived reset (proven empirically
+ * per field, card 11c3dc70's DoD-1 probe — each showed `STILL_CUSTOM_AFTER_RESET` before this fix, with a
+ * `description` positive control proving the probe itself could detect a real revert). Root fix: overlay
+ * `normalizedShippedFields(bundled)` (customization.ts) — the SAME normalization `adoptProfileUpdate`
+ * already gets via `mergeProfile`'s `ns[f]` lookups — so every `MERGEABLE_PROFILE_FIELDS` entry always
+ * carries a concrete, defined value in the patch, never an absence for `updateProfile` to skip. This also
+ * resolves reset and adopt disagreeing about what "every shipped field" means (both now derive it from
+ * ONE normalization instead of reset's own one-off `?? "claude"` literal). Per-field null-vs-absent
+ * contracts stay exactly as `normalizeFields` already documents them (e.g. `harness` has no `null`
+ * member, so its absence there is a defined `"claude"` literal, not `?? null`).
  */
 export function resetProfileToBundled(db: Db, id: string): boolean {
   const existing = db.getProfile(id);
   if (!existing) return false;
   const bundled = bundledProfileByName(existing.name);
   if (!bundled) return false; // not a bundled profile (or renamed away from its bundled name)
-  db.updateProfile(id, { ...bundled, harness: bundled.harness ?? "claude" }); // overwrite every field with the shipped values
+  // `{ ...bundled }` carries every field a BUNDLED_PROFILES entry always sets (name/role/description/
+  // allowDelta/skills/model/icon); normalizedShippedFields then overlays every MERGEABLE field
+  // (including ones a given entry OMITS) with its normalized shipped default — never absent.
+  db.updateProfile(id, { ...bundled, ...normalizedShippedFields(bundled) });
   db.setProfileBaseSnapshot(id, JSON.stringify(bundled)); // base = shipped: post-reset is pristine
   return true;
 }

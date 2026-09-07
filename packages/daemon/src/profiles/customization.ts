@@ -217,6 +217,20 @@ export function profileUpdateAvailable(db: Db, id: string): boolean {
   return MERGEABLE_PROFILE_FIELDS.some((f) => !fieldEqual(f, nb[f], ns[f]));
 }
 
+/**
+ * The shipped values for every MERGEABLE field, normalized so an optional field a bundled def OMITS
+ * still gets a concrete, defined value instead of being absent from the patch — the reset-to-bundled
+ * analog of what `adoptProfileUpdate` already gets for free via `mergeProfile`'s own `ns[f]` lookups.
+ * Exported for `resetProfileToBundled` (seed.ts, card 11c3dc70) so BOTH bundled-profile write paths
+ * derive "what does every shipped field resolve to" from this ONE normalization, instead of reset's
+ * former raw `{ ...bundled }` spread (which silently left an omitted optional field's column untouched —
+ * `db.updateProfile` treats an absent key as "leave as-is") disagreeing with adopt about what "every
+ * shipped field" means.
+ */
+export function normalizedShippedFields(shipped: Omit<Profile, "id">): Partial<Profile> {
+  return normalizeFields(shipped) as Partial<Profile>;
+}
+
 /** Preview the field-level adopt-update merge for a bundled-by-name profile. null if not bundled-by-name. */
 export function previewProfileMerge(db: Db, id: string): ProfileMergeResult | null {
   const v = threeVersions(db, id);

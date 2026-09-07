@@ -200,6 +200,34 @@ try {
   // simply absent from the spread; `updateProfile` treats an absent key as "leave column as-is").
   check("[reset][harness] a customized harness IS restored to the shipped default (claude) by reset",
     db.getProfile("pDev").harness === "claude");
+
+  // --- card 11c3dc70: the SEVEN other optional fields a bundled def OMITS also survive raw-spread reset
+  // unless normalized the same way `harness` is — `shippedDev` ('Dev') omits every one of these, so
+  // `db.updateProfile` sees an absent key and leaves the customized column untouched (the SAME
+  // spread-omission mechanism `harness` had, proven per-field in the card's DoD-1 probe). Sibling tests
+  // (setup-profile.mjs, profiles-crud.mjs) only ever tamper always-set fields (description/icon/role/
+  // allowDelta/skills/model), which `BUNDLED_PROFILES` sets on every entry — that's why they pass without
+  // covering this gap; these assertions tamper the OMITTED-by-'Dev' fields specifically.
+  db.updateProfile("pDev", {
+    browserTesting: true, documentConversion: true, restrictedTools: true, noCommit: true,
+    connections: ["conn-1"], vaultWrite: true, capabilities: [{ slug: "x", connectionId: "y" }],
+  });
+  check("[reset] precondition: all 7 fields customized away from shipped (Dev omits all of them)",
+    db.getProfile("pDev").browserTesting === true && db.getProfile("pDev").documentConversion === true &&
+    db.getProfile("pDev").restrictedTools === true && db.getProfile("pDev").noCommit === true &&
+    JSON.stringify(db.getProfile("pDev").connections) === JSON.stringify(["conn-1"]) &&
+    db.getProfile("pDev").vaultWrite === true &&
+    JSON.stringify(db.getProfile("pDev").capabilities) === JSON.stringify([{ slug: "x", connectionId: "y" }]));
+  check("[reset] resetProfileToBundled returns true (7-field precondition)", resetProfileToBundled(db, "pDev") === true);
+  const rsAll = db.getProfile("pDev");
+  check("[reset][browserTesting] restored to shipped default (false)", rsAll.browserTesting === false);
+  check("[reset][documentConversion] restored to shipped default (false)", rsAll.documentConversion === false);
+  check("[reset][restrictedTools] restored to shipped default (false)", rsAll.restrictedTools === false);
+  check("[reset][noCommit] restored to shipped default (false)", rsAll.noCommit === false);
+  check("[reset][connections] restored to shipped default ([])", JSON.stringify(rsAll.connections) === JSON.stringify([]));
+  check("[reset][vaultWrite] restored to shipped default (false)", rsAll.vaultWrite === false);
+  check("[reset][capabilities] restored to shipped default ([])", JSON.stringify(rsAll.capabilities) === JSON.stringify([]));
+
   check("[reset] reset → false for a non-bundled name", resetProfileToBundled(db, "pCustom") === false);
 
   // --- update-diff: base→shipped field changes -------------------------------------------------------
