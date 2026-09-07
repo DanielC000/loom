@@ -4236,8 +4236,17 @@ export interface PtyHostEvents {
    * `PtyHostEvents` test double is unaffected until it opts in. Called best-effort from a pty data-path
    * timer callback — never let an implementer's own failure here become a second failure mode on top of
    * the one being reported (the call site already wraps this in try/catch for that reason).
+   *
+   * Card 4babeb43: `info.readyMarker`/`info.modelLoaded`/`info.trustDialogResolved` name WHICH of
+   * the three composite conditions were true/false at the instant this fired (re-evaluated fresh against
+   * live state at report time, the SAME predicates the onData handler's own composite check uses) — mirrors
+   * `CodexLive.engineSessionIdCaptureEndReason`'s own split (card ece98bd8) into a distinguishable diagnosis
+   * rather than one undifferentiated "never all held together" report. All three `true` here is itself a
+   * genuinely distinct, real outcome — not a contradiction — meaning every condition held INDIVIDUALLY at
+   * some point but was never observed simultaneously in one single onData tick (the composite is only ever
+   * evaluated inside the onData handler, never on a standalone timer of its own).
    */
-  onCodexBootStuck?(sessionId: string, info: { timeoutMs: number; pendingCount: number }): void;
+  onCodexBootStuck?(sessionId: string, info: { timeoutMs: number; pendingCount: number; readyMarker: boolean; modelLoaded: boolean; trustDialogResolved: boolean }): void;
   /**
    * Card 47c11741: the bare-placeholder tripwire's own one-shot RECOVERY re-injection (`PASTE_RECOVERY_TAG`,
    * paste-tripwire.ts) ALSO collapsed — the give-up path, right where the combined `[paste-tripwire]`
@@ -6195,10 +6204,25 @@ export class PtyHost {
     live.bootReadyTimer = setTimeout(() => {
       live.bootReadyTimer = null;
       if (!live.alive || live.bootReady) return; // already resolved (or the session died) — nothing to report
+      // Card 4babeb43: name WHICH of the three composite conditions was unmet, rather than
+      // collapsing all three into one undifferentiated report — mirrors card ece98bd8's
+      // `engineSessionIdCaptureEndReason` split. Re-evaluated fresh, right now, against the SAME predicates
+      // the onData handler's own composite check (above) uses — never cached from an earlier tick.
+      const readyMarker = isCodexReadyMarkerPresent(live.screenScan);
+      const modelLoaded = isCodexModelLoaded(live.screenScan);
+      const trustDialogResolved = !live.trustDialogPending;
+      const unmet = [
+        !readyMarker ? "ready marker" : null,
+        !modelLoaded ? "model-loaded" : null,
+        !trustDialogResolved ? "trust-dialog-resolved" : null,
+      ].filter((c): c is string => c !== null);
+      const unmetLabel = unmet.length > 0
+        ? unmet.join(", ")
+        : "none individually — all three held at some point but were never observed simultaneously in one onData tick";
       // eslint-disable-next-line no-console
-      console.error(`[codex-boot-stuck] ${opts.sessionId} boot readiness never reached after ${CODEX_BOOT_READY_TIMEOUT_MS}ms (ready marker / model-loaded / trust-dialog-resolved never all held together) — ${live.pending.length} message(s) queued and frozen. Manager intervention needed.`);
+      console.error(`[codex-boot-stuck] ${opts.sessionId} boot readiness never reached after ${CODEX_BOOT_READY_TIMEOUT_MS}ms — unmet: ${unmetLabel} — ${live.pending.length} message(s) queued and frozen. Manager intervention needed.`);
       try {
-        this.events.onCodexBootStuck?.(opts.sessionId, { timeoutMs: CODEX_BOOT_READY_TIMEOUT_MS, pendingCount: live.pending.length });
+        this.events.onCodexBootStuck?.(opts.sessionId, { timeoutMs: CODEX_BOOT_READY_TIMEOUT_MS, pendingCount: live.pending.length, readyMarker, modelLoaded, trustDialogResolved });
       } catch (err) {
         // A failure to emit this signal must never become a SECOND failure mode on top of the one being
         // reported — swallow, loudly, and move on (this data path must never throw).
@@ -6289,6 +6313,16 @@ export class PtyHost {
       // AND the trust dialog, if any, is no longer mid-answer. This is now the SAME event
       // `enqueueStdinCodex`/`drainCodexPending` structurally gate every submit on (see their own docs), so
       // this is also where anything that queued while boot wasn't ready yet gets released.
+      //
+      // Card 4babeb43 (investigation, no fix attempted here — see that card for why): this composite is
+      // ONLY ever (re-)evaluated HERE, inside onData — nothing polls it independently. `trustDialogPending`
+      // above clears from an ASYNC callback (`codexTrustDialogLock`), not synchronously with a pty chunk,
+      // so the composite can only re-latch on whatever chunk happens to arrive next; `screenScan`'s 8KB cap
+      // (`CODEX_SCREEN_SCAN_CAP`) means enough intervening output before that chunk could evict the earlier
+      // ready-marker/model-loaded text. If `CodexLive.bootReadyTimer` ever fires with `onCodexBootStuck`'s
+      // `readyMarker`/`modelLoaded`/`trustDialogResolved` all reporting `true` (despite `bootReady` never
+      // having latched), that is the signature of exactly this race — every condition held individually at
+      // some point, just never all three together in one onData tick.
       if (
         !live.bootReady && !live.trustDialogPending &&
         isCodexReadyMarkerPresent(live.screenScan) && isCodexModelLoaded(live.screenScan)

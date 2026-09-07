@@ -10281,18 +10281,34 @@ export class SessionService {
    * ⚠️ Deliberately ONE-SHOT (see `CodexLive.bootReadyTimer`'s own doc) — a LATE boot-readiness still
    * resolves normally afterward; this only reports that the wait already exceeded `info.timeoutMs` once,
    * it does not mean the session is permanently unrecoverable.
+   *
+   * Card 4babeb43: `info.readyMarker`/`info.modelLoaded`/`info.trustDialogResolved` name WHICH of
+   * the three composite conditions were true/false at fire time (see `PtyHostEvents.onCodexBootStuck`'s own
+   * doc) — surfaced in both recipient messages and persisted on the durable event's `detail`, rather than
+   * the prior undifferentiated "never all held together" wording.
    */
-  handleCodexBootStuck(sessionId: string, info: { timeoutMs: number; pendingCount: number }): void {
+  handleCodexBootStuck(sessionId: string, info: { timeoutMs: number; pendingCount: number; readyMarker: boolean; modelLoaded: boolean; trustDialogResolved: boolean }): void {
     const s = this.db.getSession(sessionId);
+    const unmet = [
+      !info.readyMarker ? "ready marker" : null,
+      !info.modelLoaded ? "model-loaded" : null,
+      !info.trustDialogResolved ? "trust-dialog-resolved" : null,
+    ].filter((c): c is string => c !== null);
+    const unmetLabel = unmet.length > 0
+      ? unmet.join(", ")
+      : "none individually (all three held at some point, never observed simultaneously)";
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
       workerSessionId: sessionId, taskId: s?.taskId ?? null,
-      kind: "codex_boot_stuck", detail: { timeoutMs: info.timeoutMs, pendingCount: info.pendingCount },
+      kind: "codex_boot_stuck", detail: {
+        timeoutMs: info.timeoutMs, pendingCount: info.pendingCount,
+        readyMarker: info.readyMarker, modelLoaded: info.modelLoaded, trustDialogResolved: info.trustDialogResolved,
+      },
     });
-    const recipientMsg = `[loom:codex-boot-stuck] this session never finished booting (ready marker / model-loaded / trust-dialog-resolved never all held together) within ${info.timeoutMs}ms — ${info.pendingCount} message(s) are queued and frozen until boot completes or your manager intervenes.`;
+    const recipientMsg = `[loom:codex-boot-stuck] this session never finished booting (unmet: ${unmetLabel}) within ${info.timeoutMs}ms — ${info.pendingCount} message(s) are queued and frozen until boot completes or your manager intervenes.`;
     this.enqueueSystemNudge(sessionId, recipientMsg, { kind: "warning", taskId: s?.taskId ?? null });
     if (s?.parentSessionId) {
-      const senderMsg = `[loom:codex-boot-stuck] your codex session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} never finished booting within ${info.timeoutMs}ms — ${info.pendingCount} queued message(s) are frozen. It may self-recover if codex was just slow, but consider checking on it (inspect the session, worker_stop + respawn) if it stays quiet.`;
+      const senderMsg = `[loom:codex-boot-stuck] your codex session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} never finished booting within ${info.timeoutMs}ms (unmet: ${unmetLabel}) — ${info.pendingCount} queued message(s) are frozen. It may self-recover if codex was just slow, but consider checking on it (inspect the session, worker_stop + respawn) if it stays quiet.`;
       this.enqueueSystemNudge(s.parentSessionId, senderMsg, { kind: "warning", taskId: s.taskId ?? null });
     }
   }

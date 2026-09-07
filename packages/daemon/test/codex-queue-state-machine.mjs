@@ -268,6 +268,13 @@ check("M4 FIX: writeStdin's raw bytes reached the fake codex pty", fakePty.write
   const stuckEvent = bootStuckEvents.find((e) => e.sessionId === STUCK_SESSION_ID);
   check("R4 FIX: the boot-stuck report names the ceiling that was exceeded", stuckEvent.info.timeoutMs === 200);
   check("R4 FIX: the boot-stuck report's pendingCount reflects the queued (never-written) message", stuckEvent.info.pendingCount === 1);
+  // Card 4babeb43: this session never received ANY pty output, so BOTH the ready marker and the
+  // model-loaded check must be reported unmet — but trust-dialog-resolved must NOT be, since a dialog that
+  // never even appeared was never "pending" in the first place (a wrong polarity here would falsely blame
+  // the trust dialog for a boot that never got far enough to show one).
+  check("R4 FIX: the boot-stuck report names 'ready marker' unmet (no output ever received)", stuckEvent.info.readyMarker === false);
+  check("R4 FIX: the boot-stuck report names 'model-loaded' unmet (no output ever received)", stuckEvent.info.modelLoaded === false);
+  check("R4 FIX: the boot-stuck report does NOT blame trust-dialog-resolved when no dialog ever appeared", stuckEvent.info.trustDialogResolved === true);
   check("R4: nothing was EVER written to the never-booting session's pty (no premature submit)", stuckPty.writes.length === 0);
   check("R4: bootReady never latched for the never-booting session", host.liveCodex.get(STUCK_SESSION_ID).bootReady === false);
   // A LATE recovery (codex was merely slow, not genuinely stuck) must still resolve normally — the fail-
