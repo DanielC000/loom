@@ -120,11 +120,14 @@ const ALLOWLIST = new Map([
   // the field — `p.harness ?? "claude"` — matching validate.ts's own documented default. Generic
   // merge/diff infra, not the adapter module; "bare" only, same reasoning as the entries above.
   ["profiles/customization.ts", "bare"],
-  // Card 6b4d0b45: `resetProfileToBundled` normalizes `harness` to the SAME canonical default explicitly
-  // (`bundled.harness ?? "claude"`) so a customized value is actually overwritten on reset rather than
-  // silently left as-is (no BUNDLED_PROFILES entry sets harness, so the key is otherwise absent from the
-  // patch). Generic reset infra naming one of the two enum values; "bare" only.
-  ["profiles/seed.ts", "bare"],
+  // Card 6b4d0b45 added a "profiles/seed.ts" "bare" exemption here for `resetProfileToBundled`'s own
+  // one-off `bundled.harness ?? "claude"` literal. Card 11c3dc70 deleted that literal — reset now derives
+  // the harness default (and every other omitted-optional field's default) from `normalizedShippedFields`
+  // (customization.ts), which already carries the sole surviving bare "claude" literal and is already
+  // exempted above. seed.ts has no code-line bare "claude" literal left (its remaining mentions are
+  // comment prose, which this guard already skips), so the exemption is now dead weight — removed rather
+  // than left in place, since an unnecessary exemption is a silent hole for a FUTURE bare literal to slip
+  // through unnoticed.
 ]);
 
 function walk(dir, out) {
