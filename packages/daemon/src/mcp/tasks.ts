@@ -1030,6 +1030,21 @@ export function appendTaskBodySection(currentBody: string | null | undefined, he
   return `${currentBody ?? ""}${section}`;
 }
 
+/**
+ * Card c4355598 (item (ii) of `889ae619`'s LEAD RULING): a terminal-lane move's ONLY advisory about a
+ * still-pending owner Request connected to the card. Named per-request — `id` + `title` (the Request's
+ * own REQUIRED `title` field, i.e. the actual question asked, never the optional freeform `body`) — on
+ * purpose: the ruling's binding condition is "ship it ONLY IF the warning names the SPECIFIC pending ask,"
+ * because a generic "heads up" at this exact agent boundary was MEASURED at 0-acted-on (project memory
+ * `shipping-a-detector-is-not-someone-reading-it`). See {@link updateProjectTask}'s own terminal-move
+ * block for where this is computed and why it can NEVER block the move (grounded in a specimen — card
+ * `3b2aa339` — where the terminal close was correct and a block would have refused it).
+ */
+export interface PendingRequestWarning {
+  id: string;
+  title: string;
+}
+
 export async function updateProjectTask(
   db: Db, projectId: string, taskId: string,
   patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey" | "deferredUntilTaskId" | "deferredReason" | "deferredUntilEvent">>,
@@ -1066,7 +1081,13 @@ export async function updateProjectTask(
    * fire on a correct append costs nothing, and removing it would blind the exact case it exists for.
    */
   appendBody?: string,
-): Promise<Task | TaskUpdateAck | { error: string } | TaskUpdateConflict | TaskUpdateTruncationGuard> {
+): Promise<
+  | (Task & { pendingRequestWarning?: PendingRequestWarning[] })
+  | (TaskUpdateAck & { pendingRequestWarning?: PendingRequestWarning[] })
+  | { error: string }
+  | TaskUpdateConflict
+  | TaskUpdateTruncationGuard
+> {
   // Guard: the task must belong to this project — and taskId may be a full id OR an unambiguous
   // 8-char id-prefix (card 342e433d). Resolve to the FULL id before writing: `db.updateTask` takes
   // an exact id, so a prefix must never be written straight through.
@@ -1087,10 +1108,32 @@ export async function updateProjectTask(
   // orphan a card onto a non-existent key (the HARD INVARIANT board-column lifecycle code upholds). Applied
   // in the SHARED backing function, so the in-project tasks_update and the cross-project project_task_update
   // honor it identically. Resolved columns (override merged over defaults), so a custom/renamed column works.
+  // Terminal-lane pending-Request warning (card c4355598): computed here, alongside the column guard
+  // above, since both need the SAME resolved `cols` for the SAME `patch.columnKey` — never a second
+  // resolveConfig call. Additive-only (see PendingRequestWarning's own doc) — this never rejects the
+  // patch, so it must be computed strictly AFTER the unknown-column reject above returns, never instead
+  // of it. `owned.id` (not the raw `taskId`, which may be an 8-char prefix) so listQuestionsForTask's own
+  // prefix-tolerant match has a full id to compare against, matching every other caller of that method.
+  //
+  // Code Review follow-up: this runs BEFORE the db.updateTask write below, so a throw here (a future
+  // widening of listQuestionsForTask — a JOIN, a throw-on-missing) would otherwise kill the WRITE, not
+  // merely the warning — silently converting an advisory into a blocker, which is exactly what this
+  // card's hard constraint ("must NEVER block") forbids. try/catch makes that true BY CONSTRUCTION rather
+  // than by audit: a failure here drops the WARNING only, never the write. Logged (not swallowed) so a
+  // broken advisory is still visible — mirrors persistDeferredStateBestEffort's own best-effort catch above.
+  let pendingRequestWarning: PendingRequestWarning[] | undefined;
   if (patch.columnKey !== undefined) {
     const cols = resolveConfig(project?.config).kanbanColumns;
     if (!cols.some((c) => c.key === patch.columnKey)) {
       return { error: `unknown column "${patch.columnKey}" on this project's board (valid: ${cols.map((c) => c.key).join(", ")})` };
+    }
+    if (patch.columnKey === columnKeyForRole(cols, "terminal")) {
+      try {
+        const pending = db.listQuestionsForTask(projectId, owned.id).filter((q) => q.state === "pending");
+        if (pending.length > 0) pendingRequestWarning = pending.map((q) => ({ id: q.id, title: q.title }));
+      } catch (e) {
+        console.warn(`[mcp/tasks] terminal-lane pending-Request warning lookup failed for task ${owned.id} (the move itself is unaffected):`, e);
+      }
     }
   }
   // repoKey guard (multi-repo epic 49136451, phases 1+2). Three checks, all whole-patch-reject (nothing
@@ -1409,9 +1452,13 @@ export async function updateProjectTask(
   // see the result).
   if (patch.body === undefined) {
     const { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, deferredAt, deferredReason, deferredUntilEvent, updatedAt, version } = updated;
-    return { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, deferredAt, deferredReason, deferredUntilEvent, updatedAt, version, changed: Object.keys(patch) };
+    const ack: TaskUpdateAck & { pendingRequestWarning?: PendingRequestWarning[] } = {
+      id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, deferredAt, deferredReason, deferredUntilEvent, updatedAt, version, changed: Object.keys(patch),
+    };
+    if (pendingRequestWarning) ack.pendingRequestWarning = pendingRequestWarning;
+    return ack;
   }
-  return updated;
+  return pendingRequestWarning ? { ...updated, pendingRequestWarning } : updated;
 }
 
 /**
