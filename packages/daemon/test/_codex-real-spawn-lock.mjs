@@ -35,6 +35,7 @@ import { registerForCleanup, unregister } from "./_tmp-fixture.mjs";
 // change when this list grows, so there is no second number to keep in sync.
 export const CODEX_REAL_SPAWN_BASENAMES = [
   "codex-doctrine-real-spawn",
+  "codex-mcp-connect-stuck-real-spawn",
   "codex-mcp-reachability-real-spawn",
   "codex-stateful-runtime-real-spawn",
   "codex-submit-confirmation-real-spawn",
