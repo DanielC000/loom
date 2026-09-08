@@ -6334,10 +6334,15 @@ export class PtyHost {
           // "1\r" for readability; only the WRITE MECHANICS split it — this reuses the same
           // CODEX_SUBMIT_ENTER_DELAY_MS gap for consistency, not because it was independently measured for
           // this specific dialog (the probe never observed a menu-selection Enter's own timing).
-          pty.write(trustDialogAnswer().slice(0, -1)); // "1" (drop the trailing \r — see the comment above)
+          // Card 7c2a6dc0 (Code Review audit): this two-part write previously had NO alive/killed guard at
+          // all — a session that died or was hard-stopped between the two writes (or during the delay
+          // between them) would still be written to, the exact `Live.killed`-doc'd crash risk on a
+          // destroyed `_inSocket`. Guard both writes independently since the delay below is a real gap the
+          // session can die/be killed in.
+          if (live.alive && !live.killed) pty.write(trustDialogAnswer().slice(0, -1)); // "1" (drop the trailing \r — see the comment above)
           await new Promise<void>((r) => setTimeout(r, CODEX_SUBMIT_ENTER_DELAY_MS));
-          pty.write("\r");
-          live.trustDialogPending = false; // the answer is on the wire — safe for a kickoff to write now
+          if (live.alive && !live.killed) pty.write("\r");
+          live.trustDialogPending = false; // the answer is on the wire (or the session died/was killed under it) — safe for a kickoff to write now
           // Give codex a moment to actually persist config.toml before diffing — the write above is
           // fire-and-forget from this process's point of view; there is no confirming hook to await.
           await new Promise<void>((r) => setTimeout(r, 1500));
@@ -6627,6 +6632,16 @@ export class PtyHost {
       live.busyStaleTimer = null;
       if (live.busyStaleGen !== gen) return; // CASE 1 — superseded by a later arm; see this method's own doc
       if (!live.alive || !live.busy) return; // already stopped/idled some other way — nothing to do
+      // Card 7c2a6dc0: a deliberate stop is in flight — never retry/notify/drain against it. `stopCodex`
+      // already neutralizes the COMMON case (clears any timer armed before the stop + bumps `busyStaleGen`
+      // so this exact callback would already have been invalidated by CASE 1 above), but a busy-marker
+      // chunk seen DURING the stopping window (codex echoing output before it actually exits) re-arms a
+      // FRESH timer via onData's own unconditional call — that fresh arm's `gen` is valid, so only this
+      // explicit check catches it. Without it: CASE 3 would write a stray "\r" into a session being
+      // deliberately stopped (the card's own "concrete chain"), CASE 2 would drain a queued message on top
+      // of a stop, and CASE 4 would fire a false "manager intervention needed" for a worker the manager
+      // deliberately stopped.
+      if (live.stopping) return;
       if (live.enterPending) return; // CASE 0 — this turn's own Enter hasn't gone out yet; see this method's own doc
       // `>=`, not `>`: `Date.now()` is millisecond-granular, and CASE 0 already guarantees a marker reaching
       // this comparison happened no earlier (in real event order) than THIS turn's own Enter write — so a
@@ -6670,7 +6685,12 @@ export class PtyHost {
    * full `CODEX_BUSY_STALE_MS` window to show a real marker before the next decision.
    */
   private retryCodexEnter(sessionId: string, live: CodexLive): void {
-    if (!live.alive) return; // the pty died since this was scheduled — nothing to write or arm
+    // Card 7c2a6dc0: `killed` stays false through the async kill()->'exit' window (see `Live.killed`'s own
+    // doc — `CodexLive` carries the same field) — `alive` alone is NOT enough during that window, or during
+    // the multi-second graceful-stop window where the pty is still alive on purpose. This callback is
+    // itself normally unreachable once stopping (armCodexBusyStaleTimer's own `stopping` check upstream),
+    // but a defensive `killed` check here matches every sibling deferred-write site's own guard.
+    if (!live.alive || live.killed) return;
     live.submitConfirmAttempts++;
     // eslint-disable-next-line no-console
     console.warn(`[codex-submit] ${sessionId} Enter attempt ${live.submitConfirmAttempts}/${CODEX_SUBMIT_MAX_RETRIES} — no busy-marker sighting since the last Enter write after ${CODEX_BUSY_STALE_MS}ms; retrying`);
@@ -6702,9 +6722,25 @@ export class PtyHost {
     this.setCodexBusy(sessionId, live, true, "submit");
     live.submitConfirmAttempts = 0;
     live.enterPending = true; // this turn's Enter is not written yet — see CASE 0 on armCodexBusyStaleTimer's own doc
+    // Card 7c2a6dc0: capture the generation NOW, before the delayed write below. There is no
+    // `busyStaleTimer` armed yet for THIS turn (this raw setTimeout is the only outstanding action during
+    // the enterPending gap), so a `stopCodex`/`interruptForRedirectCodex` landing in that gap has nothing to
+    // `clearTimeout` — bumping `busyStaleGen` is the only signal either of them can leave, and comparing
+    // against it below is what stops this closure writing a stray "\r" into a session that was deliberately
+    // stopped or redirected mid-submit (the card's own "arguably the worse half" finding, for the redirect
+    // case).
+    const gen = live.busyStaleGen;
     live.pty.write(text);
     setTimeout(() => {
-      if (!live.alive) return; // the pty died before the delayed Enter — nothing to write or arm
+      if (!live.alive || live.killed) return; // the pty died, or was killed, before the delayed Enter — nothing to write or arm
+      // Superseded by a stop/redirect during the gap — see this method's own doc. Deliberately does NOT
+      // touch `live.enterPending` here: the caller that bumped `busyStaleGen` (stopCodex, or
+      // interruptForRedirectCodex) already owns any follow-up for THIS turn, and `interruptForRedirectCodex`
+      // may already have started a NEXT turn (drainCodexPending -> a fresh submitCodex call) whose OWN
+      // `enterPending = true` this stale closure must never clobber if it fires while that next turn's gap
+      // is still open — a real, not just theoretical, interleaving since both closures share the same
+      // CODEX_SUBMIT_ENTER_DELAY_MS delay and can be scheduled only microseconds apart.
+      if (live.busyStaleGen !== gen) return;
       live.pty.write("\r");
       live.enterWrittenAt = Date.now();
       live.enterPending = false;
@@ -6803,6 +6839,14 @@ export class PtyHost {
     if (!live.alive) return;
     live.stopping = true;
     live.pending.length = 0;
+    // Card 7c2a6dc0: mirror claude's own `stop()` (see that method's own doc) — a still-outstanding
+    // retry/give-up-style callback from whatever turn was in flight serves no purpose once a deliberate
+    // stop has been issued. Clearing the timer stops an ALREADY-armed CASE 3/4 fire; bumping the generation
+    // additionally invalidates (via `submitCodex`'s own gen check) a still-pending pre-Enter write if this
+    // stop landed inside `submitCodex`'s own text->\r gap. `armCodexBusyStaleTimer`'s own `stopping` check
+    // is the belt-and-suspenders backstop for a FRESH arm from output seen during the graceful window below.
+    if (live.busyStaleTimer) { clearTimeout(live.busyStaleTimer); live.busyStaleTimer = null; }
+    live.busyStaleGen++;
     if (mode === "hard") {
       live.killed = true;
       live.pty.kill();
@@ -6830,10 +6874,50 @@ export class PtyHost {
   /**
    * Codex counterpart of `interruptForRedirect` — SIMPLER than claude's own (no settle-timer/busySince-
    * snapshot dance needed): a single Ctrl+C interrupts the in-flight turn, and codex's own busy-marker
-   * REGEX naturally observes the resulting busy->idle transition on the very next output chunk (the
-   * onData handler in `spawnCodexProcess` already calls `drainCodexPending` on that edge) — unlike
-   * claude's Esc-cancel, which fires NO confirming signal at all and therefore needs an artificial
-   * settle-and-self-heal window. NO-OP for a dead/stopping/idle session, mirroring claude's own guard.
+   * staleness ladder (`armCodexBusyStaleTimer`) naturally observes the resulting busy->idle transition once
+   * a timer for this turn goes stale — its CASE 2 is what actually calls `drainCodexPending` on that edge.
+   * (Code Review finding 5 / card 7c2a6dc0: this doc previously claimed the `spawnCodexProcess` onData
+   * handler "already calls `drainCodexPending` on that edge" on "the very next output chunk" — false;
+   * onData only ever ARMS the timer on a marker sighting, it never drains directly, and the drain is a
+   * bounded timeout later, not an immediate edge read.) Unlike claude's Esc-cancel, which fires NO
+   * confirming signal at all and therefore needs an artificial settle-and-self-heal window. NO-OP for a
+   * dead/stopping/idle session, mirroring claude's own guard.
+   *
+   * Card 7c2a6dc0: also neutralizes the same two things `stopCodex` does — clears any armed staleness
+   * timer and bumps `busyStaleGen`, so a still-outstanding retry/give-up-ladder callback from the
+   * interrupted turn can't fire against what this redirect just cut short.
+   *
+   * 🔴 Code Review (post-7c2a6dc0, BLOCKING regression, reproduced with a positive control): clearing the
+   * timer unconditionally on the COMMON path — a genuinely busy turn whose own Enter already went out,
+   * `!live.enterPending` — used to leave NOTHING that would ever drain the redirect: the timer just
+   * cleared WAS the only thing that would have called `drainCodexPending`, `retryCodexEnter` needs a fired
+   * timer to run at all, and `submitCodex`'s own delayed closure needs a drain to even be scheduled — so
+   * `busy` stayed pinned true forever, the exact hang this card exists to fix, moved onto the primary path
+   * `worker_redirect` actually targets. Fixed by re-arming a FRESH timer (valid gen, since we just bumped
+   * it) for that path: this turn's `lastBusyMarkerAt` is already `>= enterWrittenAt` from its own earlier
+   * real confirmation, so once codex's busy marker genuinely goes stale (documented absent once idle — it
+   * stops the instant the Ctrl+C takes effect) this lands in CASE 2 and drains, exactly as it would have
+   * without this card's neutralization ever touching the timer. This also gives codex a real
+   * `CODEX_BUSY_STALE_MS` window to actually process the interrupt before anything is written into its
+   * composer, rather than a synchronous write straight after `\x03` — see this method's own ⚠️ KNOWN,
+   * UN-VERIFIED RISK note below for the ONE path that still writes synchronously.
+   *
+   * If the interrupt instead lands inside `submitCodex`'s own `CODEX_SUBMIT_ENTER_DELAY_MS` text->\r gap
+   * (`live.enterPending`), no busy-marker was EVER seen for this turn — re-arming a timer here would just
+   * sit forever (CASE 0 no-ops on `enterPending`, and this turn's own Enter is never coming since
+   * `submitCodex`'s delayed closure independently no-ops its now-stale write via the same `busyStaleGen`
+   * bump). Handle that case explicitly instead: declare the turn over and drain right now, mirroring CASE
+   * 2's own falling-edge contract.
+   *
+   * ⚠️ KNOWN, UN-VERIFIED RISK (disclosed, not resolved — the real-codex spawn window was closed for this
+   * follow-up, same posture as `armCodexBusyStaleTimer`'s own CASE 3 disclosure): the `enterPending` branch
+   * writes the next turn's text SYNCHRONOUSLY, with zero settle, immediately after `\x03`. Nothing in this
+   * repo establishes what Ctrl+C does to a NON-empty codex composer — `stopCodex`'s own doc only records
+   * "no adverse effect at idle" (an EMPTY box). If Ctrl+C does not clear a non-empty composer, this write
+   * could concatenate onto the abandoned turn's own uncommitted text. Every sibling write in this file is
+   * deliberately spaced (`CODEX_SUBMIT_ENTER_DELAY_MS`, `CODEX_STOP_GAP_MS`); this one is not. The COMMON
+   * (non-`enterPending`) path above does NOT carry this risk — its re-armed timer already imposes a real
+   * `CODEX_BUSY_STALE_MS` settle before anything drains.
    */
   private interruptForRedirectCodex(sessionId: string, live: CodexLive): void {
     if (!live.alive || live.stopping || !live.busy) {
@@ -6841,9 +6925,22 @@ export class PtyHost {
       console.log(`[pty] ${sessionId} codex redirect: Ctrl+C NOT sent (nothing in flight to interrupt — alive=${live.alive} stopping=${live.stopping} busy=${live.busy})`);
       return;
     }
+    if (live.busyStaleTimer) { clearTimeout(live.busyStaleTimer); live.busyStaleTimer = null; }
+    live.busyStaleGen++;
     live.pty.write("\x03");
-    // eslint-disable-next-line no-console
-    console.log(`[pty] ${sessionId} codex redirect: Ctrl+C sent — busy->idle detection will drain the redirect`);
+    if (live.enterPending) {
+      live.enterPending = false;
+      this.setCodexBusy(sessionId, live, false, "codex-redirect-interrupted-pre-enter");
+      this.drainCodexPending(sessionId, live);
+      // eslint-disable-next-line no-console
+      console.log(`[pty] ${sessionId} codex redirect: Ctrl+C sent — this turn's own Enter never went out (no marker to go stale on); drained immediately`);
+    } else {
+      // The COMMON path — re-arm a fresh timer so the ordinary busy->idle staleness edge resumes and
+      // drains this once codex actually goes idle (see this method's own doc for why this is safe/correct).
+      this.armCodexBusyStaleTimer(sessionId, live);
+      // eslint-disable-next-line no-console
+      console.log(`[pty] ${sessionId} codex redirect: Ctrl+C sent — re-armed a fresh staleness timer; busy->idle detection will drain the redirect`);
+    }
   }
 
   /**
@@ -10023,9 +10120,12 @@ export class PtyHost {
     }
     // Code Review M9 fix: codex sessions used to be excluded from this safety net TWICE over — once by
     // this loop only ever iterating `this.live` (codex lives in the separate `liveCodex` map), and again by
-    // `drainCodexPending`'s only call site being the onData falling edge, which a missed/never-fired busy
-    // transition (a marker split across chunks, a screen redraw this project's own regex never matches)
-    // leaves with NO recovery path — a stranded pending queue that would otherwise sit forever. Codex has
+    // `drainCodexPending` having no periodic caller of its own — its OTHER two call sites (the busy->idle
+    // staleness edge, `armCodexBusyStaleTimer` CASE 2, and the boot-readiness transition; see
+    // `drainCodexPending`'s own doc for the full list of three, this reconcile() call being the third) are
+    // both EVENT-triggered, so a missed/never-fired busy transition (a marker split across chunks, a screen
+    // redraw this project's own regex never matches) used to leave NO recovery path — a stranded pending
+    // queue that would otherwise sit forever. Codex has
     // no `healIfStuck` equivalent (no busySince/heal concept, a named Phase-1 simplification — see
     // `setCodexBusy`'s own doc), so this only drains; a codex session that is genuinely still busy is a
     // no-op here, exactly like `drainPending`'s own busy-gate for claude.
