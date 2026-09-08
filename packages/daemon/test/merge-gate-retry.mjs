@@ -395,7 +395,7 @@ try {
     check("(G) the transient-kill retry's OWN admission is genuinely QUEUED (setup sanity)", !!retryEntry);
 
     if (retryEntry) {
-      const cancelResult = await sessions.cancelGateOp(G.mgrId, retryEntry.opId);
+      const cancelResult = await sessions.cancelGateOp(G.mgrId, retryEntry.opId, { scope: { kind: "project" } });
       check("(G) cancelling the retry's QUEUED admission SUCCEEDS", cancelResult.outcome === "cancelled" && cancelResult.phase === "queued" && cancelResult.gateType === "merge");
 
       const confirmG = await p1;

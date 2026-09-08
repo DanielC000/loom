@@ -428,7 +428,7 @@ try {
     check("(H) the single-file retry's OWN admission is genuinely QUEUED (setup sanity)", !!retryEntry);
 
     if (retryEntry) {
-      const cancelResult = await sessions.cancelGateOp(H.mgrId, retryEntry.opId);
+      const cancelResult = await sessions.cancelGateOp(H.mgrId, retryEntry.opId, { scope: { kind: "project" } });
       check("(H) cancelling the retry's QUEUED admission SUCCEEDS", cancelResult.outcome === "cancelled" && cancelResult.phase === "queued" && cancelResult.gateType === "merge");
 
       const confirmH = await p1;

@@ -705,8 +705,11 @@ what you checked. Found none? Treat it as live.
      changes anything you'll do. If your platform exposes a cancel tool scoped to a gate op (e.g.
      `gate_cancel`), use it on the worker's `opId` — it settles as a distinct cancelled/superseded outcome,
      never a false pass or fail, and frees the slot for real work instead of quietly finishing a check
-     whose answer you've already made moot. This is a MANAGER-side lever, not something to delegate to the
-     worker itself.
+     whose answer you've already made moot. **Act on it yourself here — don't relay it down for the worker
+     to cancel** (a worker's OWN `gate_cancel`, where your platform provisions one, is scoped to cancelling
+     only its own self-check, for a reason only IT can see from inside its own turn — it has no visibility
+     into a fleet-wide decision like "I've decided to merge/reject/recycle this branch," which is exactly
+     what makes this YOUR call to act on directly, not something to hand back down as an instruction).
    - **Can't tell healthy contention from a leaked slot? Read the whole queue, don't guess.** `gate_status`
      only ever answers "what is MY op doing" — it has no view of the daemon-wide picture. If your platform
      exposes a `gate_queue` read tool, call it: ONE read returns the resolved concurrency cap plus every

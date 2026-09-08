@@ -115,7 +115,13 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      command's own notification (see below), which is not. **While parked on that nudge, `worker_report
      progress` with `awaiting: "background"`** — from Loom's view you've gone idle, and without that flag
      the idle watchdog defaults to nudging your manager that you may be done-but-unreported or stalled, a
-     wasted round-trip to discover you're just healthy-parked on your own gate. **If you also want a
+     wasted round-trip to discover you're just healthy-parked on your own gate. **File that report ONCE,
+     then end your turn and actually wait for the completion nudge — don't file a follow-up report that
+     says only "still running."** Checking `gate_status` yourself in the meantime is fine and correct (see
+     below) — but a status read that found NO CHANGE is not itself a reportable event: your manager can
+     see the same "still queued/running" fact for free from `gate_queue`, and a no-change report costs a
+     turn on both sides for nothing new. Only report again once something has actually changed — you're
+     ready to act, you decided to cancel it, or your disposition genuinely shifted. **If you also want a
      belt-and-suspenders fallback wake for this park, prefer `wake_me` over any other scheduling
      primitive you have available** — Loom can see a `wake_me` and auto-cancels it the instant the
      awaited nudge actually lands, so a healthy park never leaves a stale wake to fire later; a wake
@@ -140,8 +146,11 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      it. Two consequences make this self-enforcing, and both are worth knowing before you hit them: the
      run's result goes **VOID for your current code** (it no longer describes what you're about to
      report), and the daemon **won't start a genuinely fresh gate** until the in-flight one settles — so
-     a mutation made mid-gate **blocks its own remedy** too, and re-calling `run_gate` just re-attaches to
-     the same stale run instead of starting a clean one. **Having reasoned about this risk while planning
+     a mutation made mid-gate **blocks its own remedy** too, and re-calling `run_gate` doesn't give you a
+     clean gate against your current tree either way — once the in-flight run is genuinely ADMITTED (not
+     merely queued), a plain re-call now REFUSES outright rather than attaching (see the run_gate/
+     gate_cancel bullets below); a still-queued one still attaches, but to the SAME run you just
+     contaminated. **Having reasoned about this risk while planning
      is not the same as checking it at the moment you act** — a check written into a plan fires at
      planning time, but the hazard fires at mutation time, so put the check where the mutation happens:
      right before you merge/rebase/checkout/edit anything in a worktree with a gate outstanding, call
@@ -155,9 +164,10 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      act — don't blind-fire `run_gate` again to find out.** `run_gate` returned an `opId`; pass that same
      `opId` to `gate_status` (also on your tool list) to read its LIVE state — `queued`/`running` plus
      `elapsedMs` — WITHOUT starting anything. It only ever shows YOU your own op; there's nothing to
-     configure. Re-calling `run_gate` itself is a real ACTION, not a free status check: it can attach to
-     your still-in-flight run and hand back a result you must then discard (`staleAgainstWorktree`) —
-     wasting a turn to learn what `gate_status` would have told you for free. `elapsedMs` is scoped to
+     configure. Re-calling `run_gate` itself is a real ACTION, not a free status check: against a still-
+     queued op it can attach and hand back a result you didn't need (`staleAgainstWorktree`); against a
+     GENUINELY ADMITTED, stale one it now REFUSES outright instead — either way that's a real turn spent
+     learning something `gate_status` would have told you for free, with nothing started. `elapsedMs` is scoped to
      whichever phase `state` currently reports — time WAITING while `queued`, re-basing to time RUNNING the
      moment it flips to `running` — so read `state` first: a large `elapsedMs` while still `queued` is queue
      depth, not a stuck run. Compare it against how long this project's gate normally takes in that SAME
@@ -169,13 +179,20 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      lost track of one, this is how you recover the result without re-running the gate: don't treat a
      `"settled"` state as a dead end that forces a fresh `run_gate` call.
    - **A parked `run_gate` can end in a cancelled/superseded nudge instead of a pass/fail — that is NOT a
-     failure.** Your manager can cancel a gate op it can see is now redundant (e.g. it already decided to
-     merge, making your self-check moot) — you'll get a distinct nudge for this rather than an ordinary
-     `[loom:gate-done]`/`[loom:gate-failed]`, saying plainly that no verdict was reached because the run
-     was cancelled, not because anything failed. **You have no cancel tool of your own for this** — if you
-     believe a running self-check has become pointless (e.g. you realize a different check would answer
-     the question, or your manager already told you it's merging), say so in your next report and let your
-     manager decide whether to cancel it; don't try to work around a parked gate yourself.
+     failure.** A gate op you own can be cancelled either by your MANAGER (it can see a self-check is now
+     redundant — e.g. it already decided to merge, making yours moot) or by YOU, via your own `gate_cancel`
+     tool — you'll get a distinct nudge for this rather than an ordinary `[loom:gate-done]`/
+     `[loom:gate-failed]`, saying plainly that no verdict was reached because the run was cancelled, not
+     because anything failed. **`gate_cancel` is on YOUR OWN tool surface, scoped to your own `run_gate`
+     self-check** (never a merge/deploy gate, and never another session's op — those are refused). Reach
+     for it yourself when a running or queued self-check has become pointless for a reason only YOU can
+     see from inside your own turn (e.g. you realize a different check would actually answer the question,
+     or you already know your work needs to change before this run's result would even matter) — cancel it,
+     then re-fire `run_gate` once you're ready. Reach for `run_gate`'s own `staleAgainstWorktree`/refusal
+     signal (see above) rather than guessing when a run has gone stale on you. For anything that depends on
+     your MANAGER's view instead — it's about to merge, it wants you to hold — say so in your report and
+     let it decide; that's a decision only it can see the fleet-wide context for, not one your own
+     `gate_cancel` call can substitute for.
    - **If it reports your project has no gate command configured**, only then fall back to running your
      own build/test command — under the foreground rules below, pinning single-lane concurrency yourself
      if your project's docs name such a knob, since that raw run is outside the daemon's budget. Report

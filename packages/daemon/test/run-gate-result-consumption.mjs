@@ -286,6 +286,106 @@ try {
     check("(C) THE FIX: a re-call against a KNOWN-CONTAMINATED cached result triggers a genuinely FRESH gate run, not a cache hit", gateCalls === 2);
     check("(C) the fresh run returns a DIFFERENT opId — it is not the stale cached one handed back again", r2.settled === true && r2.ok === true && r2.value.opId !== opId1);
   }
+
+  // ── (D) Code Review MAJOR [1] (card a0d912f5): a re-call against an op that is merely QUEUED (never
+  //     admitted past the semaphore) must NEVER be refused, no matter how the worktree has moved — the
+  //     gate hasn't spawned yet, so once it DOES run it builds whatever's on disk at ADMISSION, commit
+  //     included (RELABELED, not RACY — see describeGateHeadCurrency's own doc). This is the manager's
+  //     own reproduction: worker fires run_gate, it queues behind higher-priority work, the worker commits
+  //     while still queued, re-calls — must attach normally (advisory staleAgainstWorktree, no refusal),
+  //     never send the worker to cancel a run that was about to validate exactly what it wanted. ─────────
+  {
+    const repo = path.join(os.tmpdir(), `loom-rgc-repo-d-${Date.now()}-${process.pid}`);
+    registerForCleanup(repo);
+    fs.mkdirSync(repo, { recursive: true });
+    fs.writeFileSync(path.join(repo, "README.md"), "# rgc\n");
+    execSync(`git init -q && git config user.email rgc@loom && git config user.name rgc`, { cwd: repo });
+    commitAll(repo, "init", GIT_ID);
+
+    const db = new Db();
+    dbs.push(db);
+    const P = "rgc-d";
+    const holderId = "rgc-d-holder", xId = "rgc-d-x";
+    db.insertProject({ id: P, name: "RGC-D", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: `${P}-holder`, projectId: P, name: "t", startupPrompt: "", position: 0 });
+    const { worktreePath: holderWt, branch: holderBranch } = await createWorktree(repo, P, "t-d-holder");
+    worktrees.push([repo, holderWt]);
+    db.insertSession({ id: holderId, projectId: P, agentId: `${P}-holder`, engineSessionId: null, title: null, cwd: holderWt, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId: null, worktreePath: holderWt, branch: holderBranch });
+    db.insertAgent({ id: `${P}-x`, projectId: P, name: "t", startupPrompt: "", position: 0 });
+    const { worktreePath: xWt, branch: xBranch } = await createWorktree(repo, P, "t-d-x");
+    worktrees.push([repo, xWt]);
+    db.insertSession({ id: xId, projectId: P, agentId: `${P}-x`, engineSessionId: null, title: null, cwd: xWt, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId: null, worktreePath: xWt, branch: xBranch });
+
+    let releaseHolder;
+    const holderHold = new Promise((res) => { releaseHolder = res; });
+    let xGateCalls = 0;
+    const sharedGate = async (_gate, cwd) => {
+      if (cwd === holderWt) { await holderHold; return { passed: true }; }
+      xGateCalls++;
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: sharedGate });
+
+    const pHolderRun = sessions.runWorkerGate(holderId);
+    await waitUntil(() => sessions.gateQueueForManager(P).activeCount === 1, 8000, 25);
+
+    // X's OWN self-check — genuinely QUEUED (cap 1, default, already held by the holder above); NOT merely
+    // "PendingOpRegistry-running-but-slow" like scenario (B)'s admitted-and-slow case — this op has not
+    // been admitted past the semaphore at all yet.
+    const pXRun1 = sessions.runWorkerGate(xId);
+    pXRun1.catch(() => {}); // never re-awaited (see the (D) fix block below for why) — silence the dangler
+    await waitUntil(() => sessions.gateQueueForManager(P).queued.some((e) => e.gateType === "worker"), 8000, 25);
+    check("(D) setup: X's own self-check is genuinely QUEUED, not admitted", sessions.gateQueueForManager(P).queued.some((e) => e.gateType === "worker"));
+    check("(D) setup: X's own self-check has NOT spawned a real gate invocation yet", xGateCalls === 0);
+
+    // Simulate "the worker committed while its own self-check was still queued" — an uncommitted edit to
+    // an EXISTING tracked file, exactly scenario (B)'s edit shape, but landing during the QUEUE WAIT this
+    // time, never during admitted execution.
+    fs.appendFileSync(path.join(xWt, "README.md"), "edited while queued\n");
+
+    // THE ACTUAL FIX UNDER TEST: a plain re-call (no force) against a merely-queued op must NOT refuse.
+    // AWAITED IMMEDIATELY (unlike pXRun1 above, deliberately left un-awaited): `runWorkerGate`'s own
+    // promise resolves EXACTLY ONCE, to whichever shape it settles/degrades to at that moment — re-awaiting
+    // it later would not observe a LATER real settle, it would just re-read the SAME already-resolved
+    // pending value. A `.refused` read on the un-awaited Promise itself would be `undefined` on ANY
+    // Promise, passing vacuously regardless of the real behavior — awaiting first is what gives this check
+    // any power at all.
+    const pending2 = await sessions.runWorkerGate(xId);
+    check("(D) THE FIX: a re-call against a merely-QUEUED op is NEVER refused, however stale the worktree", pending2.refused !== true);
+    check("(D) it still degrades to the ordinary pending shape (settled:false)", pending2.settled === false);
+    check("(D) it still reports attachedToInFlight:true (this call did not mint the op)", pending2.attachedToInFlight === true);
+    // The pre-existing ADVISORY flag is UNCHANGED by this card — still computed post-hoc, fire-time vs now,
+    // exactly as before card a0d912f5. This block is about the REFUSAL never firing, not about retiring
+    // the advisory signal underneath it.
+    check("(D) the pre-existing advisory staleAgainstWorktree flag still fires (unchanged, informational only)", pending2.staleAgainstWorktree === true);
+
+    // Positive control: released, the queued op actually runs for real and its gate genuinely COVERS the
+    // edit made while it was queued — proving the refusal above would have been WRONG to fire: the op was
+    // never going to produce a stale result in the first place. Neither `pXRun1` nor `pending2` can be
+    // re-awaited to observe this (each resolves EXACTLY ONCE, already consumed above). A THIRD
+    // `runWorkerGate` call is deliberately NOT used to observe it either: this op's own eventual
+    // `headCurrent` is `false` (RELABELED — the worktree moved during the queue wait, not during
+    // execution, see `describeGateHeadCurrency`'s own doc), which `isRetainedResultUsable` deliberately
+    // EXCLUDES from retention-cache reuse (card 79b0ee52 policy — `headCurrent` must be exactly `true` to
+    // be served from cache), so a third call here would mint a genuinely SECOND real gate run rather than
+    // merely observing the first one. Read the REAL verdict via the read-only `gateStatus`, by the KNOWN
+    // opId `pending2` already reported, instead.
+    releaseHolder("go");
+    await pHolderRun.catch(() => {});
+    await waitUntil(() => sessions.pendingOps.peek(`gate:${xId}`)?.state !== "running", 20_000, 25);
+    check("(D) X's self-check actually ran for real once admitted (the queued edit was never lost)", xGateCalls === 1);
+    const xStatus = sessions.gateStatus(pending2.op.opId);
+    check("(D) gate_status confirms the queued op genuinely settled (never orphaned/evicted)", xStatus.state === "settled");
+    check("(D) the real settle carries a genuine pass/fail verdict, never cancelled", xStatus.passed === true && xStatus.cancelled !== true);
+    // RELABELED, not RACY (Code Review's own distinction): the worktree moved during the QUEUE WAIT, which
+    // `describeGateHeadCurrency` reports via `headWarning` as a "STALE LABEL, not a stale RESULT" — never
+    // the RACY "changed WHILE running" wording, which is what a refusal firing here would have wrongly
+    // implied. (`gateStatus` doesn't expose `headCurrent` as its own boolean field — `headWarning`'s
+    // presence/wording is the observable signal at this read surface.)
+    check("(D) headWarning is present (headCurrent was false — this run's label understates what it covered)", typeof xStatus.headWarning === "string" && xStatus.headWarning.length > 0);
+    check("(D) the headWarning names a STALE LABEL, never that the worktree changed WHILE running (that would be the RACY case, not this one)",
+      /STALE LABEL/i.test(xStatus.headWarning ?? "") && !/WHILE this gate was actively running/i.test(xStatus.headWarning ?? ""));
+  }
 } finally {
   for (const [repo, wt] of worktrees) { if (wt) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } } }
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
@@ -293,6 +393,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — run_gate's settle-grace retention window returns a USABLE cached result with no second run, a mid-flight PLAIN re-call against an edited worktree is now REFUSED outright (card a0d912f5) rather than silently attached, force:true still opts into the old attach-anyway shape, the ORIGINATING call is never itself refused, and (card 79b0ee52) a re-call against a settled result already known CONTAMINATED (headCurrent:false) never reuses it — it mints a genuinely fresh gate run against the current tree instead."
+  ? "\n✅ ALL PASS — run_gate's settle-grace retention window returns a USABLE cached result with no second run, a mid-flight PLAIN re-call against an ADMITTED, edited worktree is now REFUSED outright (card a0d912f5) rather than silently attached, force:true still opts into the old attach-anyway shape, the ORIGINATING call is never itself refused, a re-call against a MERELY-QUEUED (not yet admitted) op is NEVER refused however stale the worktree — Code Review MAJOR [1] — and the queued edit is proven to actually land in what the gate builds once admitted, and (card 79b0ee52) a re-call against a settled result already known CONTAMINATED (headCurrent:false) never reuses it — it mints a genuinely fresh gate run against the current tree instead."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

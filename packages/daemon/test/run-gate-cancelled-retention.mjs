@@ -154,7 +154,7 @@ try {
     check("(D) setup: the target's self-check is genuinely QUEUED, not running", !!queuedEntry);
 
     if (queuedEntry) {
-      const cancelResult = await sessions.cancelGateOp(mgrX, queuedEntry.opId);
+      const cancelResult = await sessions.cancelGateOp(mgrX, queuedEntry.opId, { scope: { kind: "project" } });
       check("(D) setup: the queued self-check was cancelled", cancelResult.outcome === "cancelled" && cancelResult.phase === "queued");
 
       const r1 = await pTargetRun;

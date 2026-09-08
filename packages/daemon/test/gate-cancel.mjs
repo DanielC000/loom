@@ -367,7 +367,7 @@ function makeRepo(repo) {
   // Guard: a timed-out waitUntil yields undefined — dereferencing liveEntry.opId unguarded is the exact
   // shape card f5767961 fixed (B2-2's crash). Skip the dependent assertions rather than crash the file.
   if (liveEntry) {
-    const cancelFromA = await sessions.cancelGateOp(mgrA, liveEntry.opId);
+    const cancelFromA = await sessions.cancelGateOp(mgrA, liveEntry.opId, { scope: { kind: "project" } });
     check("(refuse) a DIFFERENT project's manager is REFUSED", cancelFromA.outcome === "refused");
     // Pin the REASON, not just the outcome (card 8f58c354) — a future refusal branch could produce the same
     // "refused" outcome for a different reason (e.g. an auth check unrelated to project scope) and this
@@ -624,7 +624,7 @@ function makeRepo(repo) {
   // yields undefined, and dereferencing mergeEntry.opId unguarded turned a soft, correctly-reported
   // assertion failure into a TypeError that killed the whole suite. Skip the dependent assertions instead.
   if (mergeEntry) {
-    const cancelResult = await sessions.cancelGateOp(mgrId, mergeEntry.opId);
+    const cancelResult = await sessions.cancelGateOp(mgrId, mergeEntry.opId, { scope: { kind: "project" } });
     check("(B2-2/361520a0) cancelling a QUEUED merge gate now SUCCEEDS — negative control: before this card outcome would be 'not_cancelled'",
       cancelResult.outcome === "cancelled" && cancelResult.phase === "queued" && cancelResult.gateType === "merge");
   } else {
@@ -707,7 +707,7 @@ function makeRepo(repo) {
   check("(DoD-6) the MERGE gate is genuinely RUNNING, not queued (setup sanity)", !!mergeEntry && gateSpawned === true);
 
   if (mergeEntry) {
-    const cancelResult = await sessions.cancelGateOp(mgrId, mergeEntry.opId);
+    const cancelResult = await sessions.cancelGateOp(mgrId, mergeEntry.opId, { scope: { kind: "project" } });
     check("(DoD-6) cancelling a RUNNING merge gate is REFUSED", cancelResult.outcome === "not_cancelled");
     check("(DoD-6) the refusal names the RUNNING-merge-specific reason, not a generic/queued one",
       /RUNNING merge gate is not supported/i.test(cancelResult.reason ?? ""));
@@ -790,7 +790,7 @@ function makeRepo(repo) {
     // RETURN before the fake gate has even been invoked yet. That race is exactly why `cancelResult` and
     // `abortObservedPromise` are asserted INDEPENDENTLY below, each on its own real completion signal, rather
     // than assuming one implies the timing of the other.
-    const cancelResult = await sessions.cancelGateOp(workerId /* any manager id works here — same project */, liveEntry.opId);
+    const cancelResult = await sessions.cancelGateOp(workerId /* any manager id works here — same project */, liveEntry.opId, { scope: { kind: "project" } });
     check("(never-settling) cancelGateOp reports NOT cancelled (kill unverified)", cancelResult.outcome === "not_cancelled");
     check("(never-settling) the reason names the verification bound, not a generic failure", /not verified dead/i.test(cancelResult.reason ?? ""));
     await abortObservedPromise; // no timeout — see its own doc above
@@ -911,7 +911,7 @@ function makeRepo(repo) {
   check("(b) precondition: worker2's inert-skip wait is genuinely QUEUED and visible in gate_queue", !!waiterEntry);
 
   if (waiterEntry) {
-    const cancelResult = await sessions.cancelGateOp(mgrId, waiterEntry.opId);
+    const cancelResult = await sessions.cancelGateOp(mgrId, waiterEntry.opId, { scope: { kind: "project" } });
     check("(b) gate_cancel resolves worker2's QUEUED repo-guard-only wait", cancelResult.outcome === "cancelled" && cancelResult.phase === "queued" && cancelResult.gateType === "merge");
 
     const confirm2 = await p2;
@@ -945,7 +945,7 @@ function makeRepo(repo) {
   const pWaiter = sessions.gateSemaphore.acquireRepoGuardOnly({ repoPath: "/tmp/rgo-c-foreign/repo", projectId: P2, sessionId: "waiter", opId: "rgo-c-waiter" }).catch((e) => e);
   await waitUntil(() => sessions.gateQueueForManager(P2).repoGuardOnly.some((e) => e.phase === "queued"));
 
-  const cancelResult = await sessions.cancelGateOp(mgr1, "rgo-c-waiter"); // P1's manager, P2's opId
+  const cancelResult = await sessions.cancelGateOp(mgr1, "rgo-c-waiter", { scope: { kind: "project" } }); // P1's manager, P2's opId
   check("(c) a DIFFERENT project's QUEUED repo-guard-only wait is REFUSED", cancelResult.outcome === "refused");
   check("(c) the refusal names the cross-project reason", /different project/i.test(cancelResult.reason ?? ""));
 
@@ -970,7 +970,7 @@ function makeRepo(repo) {
   db.insertSession({ id: mgr1, projectId: P1, agentId: `${P1}-a`, engineSessionId: null, title: null, cwd: "/tmp/rgo-d", processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
 
   const release = await sessions.gateSemaphore.acquireRepoGuardOnly({ repoPath: "/tmp/rgo-d/repo", projectId: P1, sessionId: "holder-d", opId: "rgo-d-holder" });
-  const cancelResult = await sessions.cancelGateOp(mgr1, "rgo-d-holder");
+  const cancelResult = await sessions.cancelGateOp(mgr1, "rgo-d-holder", { scope: { kind: "project" } });
   check("(d) cancelling a HOLDING repo-guard-only wait is REFUSED (not_cancelled)", cancelResult.outcome === "not_cancelled");
   check("(d) the refusal names the staged-residue/HOLDING reason, not a generic one", /staged-residue|HOLDING/i.test(cancelResult.reason ?? ""));
   release();
@@ -1072,14 +1072,14 @@ function makeRepo(repo) {
 
   if (selfCheckAEntry && selfCheckBEntry && mergeAEntry) {
     // (e-1) workerB cannot cancel workerA's own self-check — cross-session refusal.
-    const crossSessionAttempt = await sessions.cancelGateOp(workerBId, selfCheckAEntry.opId, { restrictToOwnerSessionId: workerBId });
+    const crossSessionAttempt = await sessions.cancelGateOp(workerBId, selfCheckAEntry.opId, { scope: { kind: "own", sessionId: workerBId } });
     check("(e-1) workerB is REFUSED cancelling workerA's own self-check", crossSessionAttempt.outcome === "refused");
     check("(e-1) the refusal names the session-ownership reason", /different session/i.test(crossSessionAttempt.reason ?? ""));
     check("(e-1) workerA's self-check is STILL queued — the cross-session attempt cancelled NOTHING",
       sessions.gateQueueForManager(projId).queued.some((e) => e.opId === selfCheckAEntry.opId));
 
     // (e-2) workerA cannot cancel its OWN merge gate, despite sharing its own sessionId — gateType scope.
-    const ownMergeAttempt = await sessions.cancelGateOp(workerAId, mergeAEntry.opId, { restrictToOwnerSessionId: workerAId });
+    const ownMergeAttempt = await sessions.cancelGateOp(workerAId, mergeAEntry.opId, { scope: { kind: "own", sessionId: workerAId } });
     check("(e-2) workerA is REFUSED cancelling its OWN merge gate (gateType scope, not just sessionId)", ownMergeAttempt.outcome === "refused");
     check("(e-2) the refusal names the merge/deploy-gateType reason, not the session-ownership one",
       /merge\/deploy gate/i.test(ownMergeAttempt.reason ?? ""));
@@ -1089,7 +1089,7 @@ function makeRepo(repo) {
     // (e-3) workerA CAN cancel its OWN self-check — the actual DoD-1 capability — WITH intent/reason
     // (DoD-4) threaded into the settled op's own reason text.
     const ownCancel = await sessions.cancelGateOp(workerAId, selfCheckAEntry.opId, {
-      restrictToOwnerSessionId: workerAId, intent: "hold-for-instructions", reason: "waiting on manager direction",
+      scope: { kind: "own", sessionId: workerAId }, intent: "hold-for-instructions", reason: "waiting on manager direction",
     });
     check("(e-3) workerA CAN cancel its own self-check", ownCancel.outcome === "cancelled" && ownCancel.phase === "queued" && ownCancel.gateType === "worker");
     let selfCheckACaught;
@@ -1117,8 +1117,99 @@ function makeRepo(repo) {
   check("(e) workerA's merge, left uncancelled by the refused attempt, still completes normally (real fn ran, real result)", mergeAResult?.passed === true);
 }
 
+// ── (f) Code Review Minor [5] (card a0d912f5): the RUNNING-cancel abort-reason threading (`cancelSignalRef`
+//    in runWorkerGate) is exercised end to end — a VERIFIED cancel of a genuinely RUNNING self-check, with
+//    intent+reason, must carry them in the settled op's own `reason`, not the generic fallback string. The
+//    fallback string is EXACTLY what a regression that stops assigning `cancelSignalRef` would silently
+//    produce (still `outcome:"cancelled"`, still a plausible-looking reason) — so this also NEGATIVE-
+//    controls the SAME mechanism with a bare cancel (no intent/reason), proving the fallback text is real
+//    and distinguishable from the threaded one, not just present in both cases by coincidence. ───────────
+{
+  const sfx = `running-reason-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-gc-rr-${sfx}`);
+  registerForCleanup(reposDir);
+  const db = new Db();
+  dbs.push(db);
+
+  const projId = `gc-rr-p-${sfx}`, mgrId = `gc-rr-mgr-${sfx}`;
+  const repo = path.join(reposDir, "worker");
+  makeRepo(repo);
+  db.insertProject({ id: projId, name: "RR", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: `agent-rr-m-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: mgrId, projectId: projId, agentId: `agent-rr-m-${sfx}`, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  // A fake gate that RESPONDS to cancellation (unlike the "never-settling" block above, which deliberately
+  // never does) — resolves with a real GateSequentialResult `{cancelled:true}` shape the instant the abort
+  // signal fires, mirroring gate-runner.ts's OWN cancel-handling contract (checks `.aborted` up front,
+  // ALSO listens for the event — the same real race window the "never-settling" block's own comment names).
+  const respondingGate = (_gate, _cwd, _timeoutMs, _runStep, _envOverride, _allowExtend, cancelSignal) => new Promise((resolve) => {
+    const onAbort = () => resolve({ cancelled: true, steps: [] });
+    if (!cancelSignal) return;
+    if (cancelSignal.aborted) { onAbort(); return; }
+    cancelSignal.addEventListener("abort", onAbort);
+  });
+  const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
+
+  // (f-1) WITH intent/reason — must land verbatim in the settled reason.
+  {
+    const agentId = `agent-rr-w1-${sfx}`, workerId = `gc-rr-w1-${sfx}`, taskId = `gc-rr-t1-${sfx}`;
+    db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+    db.insertTask({ id: taskId, projectId: projId, title: "RR-TASK-1", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const wt = await createWorktree(repo, projId, taskId);
+    worktrees.push(wt.worktreePath);
+    db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: wt.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: wt.worktreePath, branch: wt.branch });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: respondingGate });
+
+    const pRun = sessions.runWorkerGate(workerId);
+    const liveEntry = await waitUntil(() => sessions.gateQueueForManager(projId).running[0]);
+    check("(f-1) the self-check is genuinely RUNNING before cancel", !!liveEntry);
+    if (liveEntry) {
+      const cancelResult = await sessions.cancelGateOp(mgrId, liveEntry.opId, { scope: { kind: "project" }, intent: "refire-when-clear", reason: "clearing the lane for a higher-priority merge" });
+      check("(f-1) the RUNNING self-check cancel is VERIFIED (outcome:cancelled, not merely requested)", cancelResult.outcome === "cancelled" && cancelResult.phase === "running");
+      const settled = await pRun;
+      check("(f-1) the settled result reports cancelled, never a real pass/fail", settled.settled === true && settled.ok === true && settled.value?.cancelled === true);
+      const reasonText = settled.value?.reason ?? "";
+      check("(f-1) intent + reason both landed in the RUNNING-cancel settled reason (cancelSignalRef threaded, not the generic fallback)",
+        /refire-when-clear/.test(reasonText) && /clearing the lane for a higher-priority merge/.test(reasonText));
+      check("(f-1) the reason names the caller as \"manager\" (card a0d912f5's callerLabel)", /cancelled by manager/i.test(reasonText));
+    } else {
+      console.log("SKIP  (f-1) cancel assertions — setup sanity check above already failed");
+      await pRun.catch(() => {});
+    }
+  }
+
+  // (f-2) NEGATIVE CONTROL — a bare cancel (no intent/reason) on the SAME mechanism must NOT carry either
+  // string, proving (f-1)'s match wasn't a coincidence of some OTHER, unrelated text always being present.
+  {
+    const agentId = `agent-rr-w2-${sfx}`, workerId = `gc-rr-w2-${sfx}`, taskId = `gc-rr-t2-${sfx}`;
+    db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+    db.insertTask({ id: taskId, projectId: projId, title: "RR-TASK-2", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const wt = await createWorktree(repo, projId, taskId);
+    worktrees.push(wt.worktreePath);
+    db.insertSession({ id: workerId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: wt.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath: wt.worktreePath, branch: wt.branch });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: respondingGate });
+
+    const pRun = sessions.runWorkerGate(workerId);
+    const liveEntry = await waitUntil(() => sessions.gateQueueForManager(projId).running.find((e) => e.taskId === taskId));
+    check("(f-2) the self-check is genuinely RUNNING before cancel", !!liveEntry);
+    if (liveEntry) {
+      const cancelResult = await sessions.cancelGateOp(mgrId, liveEntry.opId, { scope: { kind: "project" } });
+      check("(f-2) the RUNNING self-check cancel is VERIFIED (outcome:cancelled)", cancelResult.outcome === "cancelled" && cancelResult.phase === "running");
+      const settled = await pRun;
+      const reasonText = settled.value?.reason ?? "";
+      check("(f-2) NEGATIVE CONTROL: a bare cancel carries NEITHER (f-1)'s intent nor its reason text",
+        !/refire-when-clear/.test(reasonText) && !/clearing the lane for a higher-priority merge/.test(reasonText));
+      check("(f-2) the reason STILL names the caller (proves this is a real, threaded reason, not an empty/undefined one falling through)",
+        /cancelled by manager/i.test(reasonText));
+    } else {
+      console.log("SKIP  (f-2) cancel assertions — setup sanity check above already failed");
+      await pRun.catch(() => {});
+    }
+  }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GateSemaphore serializes same-worktree gate ops regardless of cap/tier (never grouping worktree-less ops together), a manager's merge decision auto-supersedes a worker's queued self-check for free, gate_cancel is project-scoped + never frees a slot over an unverified kill, and — card b9e07a4a — the SAME tool now reaches a repo-guard-only wait: a QUEUED one cancels cleanly through confirmWorkerMerge's own merge_cancelled path, a foreign project's is refused, and a HOLDING one is refused for the same staged-residue reason a RUNNING merge gate is. Card a0d912f5: a WORKER can cancel only its OWN run_gate self-check — never another worker's, and never a merge gate that happens to share its own sessionId — and intent/reason land verbatim in the settled op's own reason text."
+  ? "\n✅ ALL PASS — GateSemaphore serializes same-worktree gate ops regardless of cap/tier (never grouping worktree-less ops together), a manager's merge decision auto-supersedes a worker's queued self-check for free, gate_cancel is project-scoped + never frees a slot over an unverified kill, and — card b9e07a4a — the SAME tool now reaches a repo-guard-only wait: a QUEUED one cancels cleanly through confirmWorkerMerge's own merge_cancelled path, a foreign project's is refused, and a HOLDING one is refused for the same staged-residue reason a RUNNING merge gate is. Card a0d912f5: a WORKER can cancel only its OWN run_gate self-check — never another worker's, and never a merge gate that happens to share its own sessionId — and intent/reason land verbatim in the settled op's own reason text, for BOTH a QUEUED cancel (GateCancelledError.detail) AND a VERIFIED RUNNING cancel (cancelSignalRef), the latter negative-controlled against a bare cancel that carries neither string."
   : `\n❌ ${failures} FAILURE(S).`);
 
 for (const db of dbs) try { db.close(); } catch { /* ignore */ }

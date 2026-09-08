@@ -222,6 +222,9 @@ const KNOWN_TIER_B_DEBT = new Map([
     "const repo = path.join(os.tmpdir(), `loom-rgc-repo-a-${Date.now()}-${process.pid}`);",
     "const repo = path.join(os.tmpdir(), `loom-rgc-repo-b-${Date.now()}-${process.pid}`);",
     "const repo = path.join(os.tmpdir(), `loom-rgc-repo-c-${Date.now()}-${process.pid}`);",
+    // Card a0d912f5's new scenario (D) — SAME pattern as (A)/(B)/(C) immediately above, added here for
+    // the SAME reason: consistent with this file's own established per-scenario repo path shape.
+    "const repo = path.join(os.tmpdir(), `loom-rgc-repo-d-${Date.now()}-${process.pid}`);",
   ]],
   ["schedule-name.mjs", [
     "const tmpHome = path.join(os.tmpdir(), `loom-schedname-mig-${Date.now()}-${process.pid}`);",

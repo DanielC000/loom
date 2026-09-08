@@ -406,6 +406,15 @@ interface RetainedWorktreeRecord {
   projectName: string;
 }
 
+/**
+ * {@link SessionService.cancelGateOp}'s REQUIRED scope discriminator (card a0d912f5, Code Review [4]) —
+ * see that method's own doc for the full rationale. `{kind:"project"}` is the MANAGER surface (any op in
+ * the caller's own project); `{kind:"own", sessionId}` is the WORKER surface (only an op that specific
+ * session owns). Required, not optional, so a future call site that forgets to choose fails to COMPILE
+ * rather than silently inheriting manager-level cancel power.
+ */
+export type GateCancelScope = { kind: "project" } | { kind: "own"; sessionId: string };
+
 /** One entry in {@link SessionService.getRetainedWorktrees}'s result — a worktree Pass B of
  *  {@link SessionService.reconcileOrchestrationOnBoot} found still holding work (`worktreeHasWork`
  *  returned true) and therefore did NOT reclaim. Purely observational: nothing here feeds back into any
@@ -2535,6 +2544,27 @@ export class SessionService {
    * harmless (nothing can attach to it after restart anyway — the op itself doesn't survive either).
    */
   private readonly gateStartStamps = new Map<string, WorktreeGateStamp>();
+  /**
+   * The worktree stamp {@link runWorkerGate} recorded at the moment its CURRENTLY-RUNNING gate op was
+   * ADMITTED past the semaphore (card a0d912f5 Code Review, `describeGateHeadCurrency`'s `admitStamp`) —
+   * a SIBLING of {@link gateStartStamps}, keyed the same way, but deliberately a DIFFERENT checkpoint.
+   * Set/cleared alongside it, at the same two sites, for the same reason.
+   *
+   * WHY A SEPARATE MAP, NOT A REUSE OF `gateStartStamps`: the pre-emptive stale-attach REFUSAL a re-call
+   * performs BEFORE ever attaching must distinguish "the worktree moved during the QUEUE WAIT" (benign —
+   * see `describeGateHeadCurrency`'s own RELABELED doc: the gate hasn't spawned yet, so it will build
+   * whatever's on disk at ADMISSION, commit included) from "the worktree moved while the gate was already
+   * admitted/running" (the only case a refusal is honest about). Comparing against `gateStartStamps` (fire
+   * time) instead would collapse exactly the distinction `describeGateHeadCurrency`'s own three-stamp
+   * design exists to preserve — a queued op's own eventual result WOULD cover a commit made after fire
+   * time, so refusing on that basis tells a caller to cancel a run that was going to validate exactly what
+   * it wanted. This map is read ONLY once the caller has independently confirmed (via a fresh
+   * `gateSemaphore.snapshot()` read) that the op is genuinely ADMITTED, not merely queued — never trust its
+   * mere presence as proof of that on its own, since a raced entry could theoretically outlive its own
+   * queued phase in this map's absence rather than its presence (in practice this is only ever written
+   * from inside the admitted branch, so this is belt-and-suspenders, not a known gap).
+   */
+  private readonly gateAdmitStamps = new Map<string, WorktreeGateStamp>();
   /** {@link LastWorkerGateCheck} per worker session — see that type's doc. Keyed by `workerSessionId`
    *  (not `gate:${workerSessionId}` like {@link gateStartStamps} — this outlives a single run_gate call's
    *  own lifecycle, on purpose: it's read much later, at merge-confirm time). PLAIN IN-MEMORY, process-
@@ -5785,18 +5815,22 @@ export class SessionService {
    * `ambiguous` — since none of the globally-ambiguous candidates were even a valid target for this caller.
    */
   /**
-   * `opts.restrictToOwnerSessionId` (card a0d912f5): the WORKER-scoped surface — a worker may cancel only
-   * an op it OWNS (`gateType === "worker"` AND `entry.sessionId === restrictToOwnerSessionId`). A "merge"
-   * gate's own descriptor happens to be stamped with the WORKER's sessionId too (it shares the same
-   * worktree key, `merge:${workerSessionId}` vs `gate:${workerSessionId}` — see `confirmWorkerMerge`'s own
-   * descriptor construction), so a bare sessionId match alone would let a worker cancel its OWN merge gate
-   * — a MANAGER's decision, never the worker's — as an accidental side effect of that coincidence. The
-   * explicit `gateType === "worker"` conjunct is what keeps this scoped to a worker's own `run_gate`
-   * self-check and nothing else, in EITHER branch below (the ordinary registry entry and the
-   * repo-guard-only fallback, which is unconditionally merge-shaped — see its own doc). Omitted (the
-   * default) for the pre-existing MANAGER surface: unchanged, project-scoped only, exactly as before this
-   * card.
-   * `opts.intent`/`opts.reason` (DoD-4): folded into the SAME `detail` string threaded into
+   * `params.scope` (card a0d912f5, Code Review [4]): a REQUIRED discriminator — `{kind:"project"}` (the
+   * pre-existing MANAGER surface: project-scoped only, exactly as before this card) or `{kind:"own",
+   * sessionId}` (the WORKER-scoped surface added by this card: cancel only an op it OWNS — `gateType ===
+   * "worker"` AND `entry.sessionId === sessionId`). REQUIRED, not optional, on purpose: an earlier draft
+   * made this an optional `restrictToOwnerSessionId` field, which meant a future caller that simply forgot
+   * to pass it would silently inherit MANAGER-level (any op in the project) cancel power instead of
+   * failing to compile — Code Review caught this as a real capability-escalation-by-omission risk before
+   * it ever shipped. A "merge" gate's own descriptor happens to be stamped with the WORKER's sessionId too
+   * (it shares the same worktree key, `merge:${workerSessionId}` vs `gate:${workerSessionId}` — see
+   * `confirmWorkerMerge`'s own descriptor construction), so a bare sessionId match alone would let a
+   * worker cancel its OWN merge gate — a MANAGER's decision, never the worker's — as an accidental side
+   * effect of that coincidence; the explicit `gateType === "worker"` conjunct is what keeps `{kind:"own"}`
+   * scoped to a worker's own `run_gate` self-check and nothing else, in EITHER branch below (the ordinary
+   * registry entry and the repo-guard-only fallback, which is unconditionally merge-shaped — see its own
+   * doc).
+   * `params.intent`/`params.reason` (DoD-4): folded into the SAME `detail` string threaded into
    * `cancelQueued`/`cancelRunning`/`cancelRepoGuardOnlyWait` below — already what a QUEUED cancel's
    * `GateCancelledError.detail` (and, since this card, a RUNNING cancel's captured abort reason — see
    * `runWorkerGate`'s `cancelSignalRef`) surfaces back out as the settled op's own `reason`, and from
@@ -5805,15 +5839,16 @@ export class SessionService {
    */
   async cancelGateOp(
     callerSessionId: string, opId: string,
-    opts?: { restrictToOwnerSessionId?: string; intent?: string; reason?: string },
+    params: { scope: GateCancelScope; intent?: string; reason?: string },
   ): Promise<
     | { outcome: "cancelled"; phase: "queued" | "running"; opId: string; gateType: GateType }
     | { outcome: "refused" | "not_found" | "ambiguous" | "not_cancelled"; reason: string; opId: string }
   > {
     const caller = this.db.getSession(callerSessionId);
-    const callerLabel = opts?.restrictToOwnerSessionId ? "worker" : "manager";
-    const detailSuffix = opts?.intent || opts?.reason
-      ? ` (intent: ${opts.intent ?? "unspecified"}${opts.reason ? ` — ${opts.reason}` : ""})`
+    const restrictToOwnerSessionId = params.scope.kind === "own" ? params.scope.sessionId : undefined;
+    const callerLabel = params.scope.kind === "own" ? "worker" : "manager";
+    const detailSuffix = params.intent || params.reason
+      ? ` (intent: ${params.intent ?? "unspecified"}${params.reason ? ` — ${params.reason}` : ""})`
       : "";
     const detail = `cancelled by ${callerLabel} ${callerSessionId} via gate_cancel${detailSuffix}`;
     let found = this.gateSemaphore.findByOpId(opId);
@@ -5849,7 +5884,7 @@ export class SessionService {
         // WORKER SCOPE: a repo-guard-only wait is ALWAYS merge-shaped (see this method's own doc) — never
         // a worker's own gateType:"worker" self-check — so a worker-scoped caller is refused outright,
         // never reaching an ownership-by-sessionId question at all.
-        if (opts?.restrictToOwnerSessionId) {
+        if (restrictToOwnerSessionId) {
           return { outcome: "refused", reason: "this op is a merge-type wait, not your own run_gate self-check — workers may only cancel their own gate op", opId: rgoEntry.opId ?? opId };
         }
         if (rgoEntry.phase === "holding") {
@@ -5869,11 +5904,11 @@ export class SessionService {
     }
     // OWNERSHIP SCOPE (card a0d912f5, worker surface only — see this method's own doc for why gateType is
     // part of this check, not just sessionId).
-    if (opts?.restrictToOwnerSessionId) {
+    if (restrictToOwnerSessionId) {
       if (entry.gateType !== "worker") {
         return { outcome: "refused", reason: "this op is a merge/deploy gate, not your own run_gate self-check — workers may only cancel their own gate op", opId: entry.opId ?? opId };
       }
-      if (entry.sessionId !== opts.restrictToOwnerSessionId) {
+      if (entry.sessionId !== restrictToOwnerSessionId) {
         return { outcome: "refused", reason: "this op belongs to a different session — you may only cancel your own gate op", opId: entry.opId ?? opId };
       }
     }
@@ -19287,21 +19322,45 @@ export class SessionService {
     // today's control-flow analysis. If you're reading this because `??` looks like a clean simplification:
     // it was considered and rejected for exactly this reason — don't reintroduce it.
     const opStartedAt = attachedToInFlight ? preAttachPeek!.startedAt : fnEntryInstant;
-    // PRE-EMPTIVE STALE-ATTACH REFUSAL (card a0d912f5): only reachable when `attachedToInFlight` — i.e.
-    // this call is merely RE-ATTACHING to an op an EARLIER call already started (the originating call
-    // itself has nothing to pre-emptively refuse; its own staleness, if any, only exists to compute once
-    // it degrades to pending below). `gateStartStamps.get(key)` is the SAME start stamp the in-flight
-    // run's own `run()` closure recorded — readable here without waiting on the run itself. If the
-    // worktree has already moved since that run started, attaching would only hand this caller a result
-    // it already knows it must discard (the exact "guaranteed wasted round trip" card a0d912f5 exists to
-    // close) — so refuse before ever touching `attach()`, unless the caller explicitly opts back into the
-    // old behavior via `force`.
+    // PRE-EMPTIVE STALE-ATTACH REFUSAL (card a0d912f5, NARROWED by Code Review): only reachable when
+    // `attachedToInFlight` — i.e. this call is merely RE-ATTACHING to an op an EARLIER call already
+    // started (the originating call itself has nothing to pre-emptively refuse). PendingOpRegistry's own
+    // "running" state means only that SOME earlier call's `run()` closure is executing — NOT that the
+    // underlying GateSemaphore op has been ADMITTED: a "low"-priority worker self-check routinely sits
+    // QUEUED behind higher-priority merge/deploy gates for a long time while its OWN closure (and
+    // therefore `attachedToInFlight`) already reads "running". Refusing a merely-QUEUED op against its
+    // FIRE-TIME stamp would be exactly the "cries wolf on the benign case" mistake `describeGateHeadCurrency`'s
+    // own doc warns against — a commit made during the queue wait is fully covered by whatever the gate
+    // builds once it's actually admitted (RELABELED, not RACY), so there is nothing to refuse there; fall
+    // through to the ordinary attach + advisory `staleAgainstWorktree` flag instead, byte-identical to
+    // before this card. Only a GENUINELY ADMITTED op — confirmed via a FRESH `gateSemaphore.snapshot()`
+    // read, never inferred from `attachedToInFlight` alone — is eligible, and it's compared against
+    // {@link gateAdmitStamps} (the ADMISSION checkpoint), never {@link gateStartStamps} (fire time).
     if (attachedToInFlight && !opts?.force) {
-      const inFlightStartStamp = this.gateStartStamps.get(key);
-      if (inFlightStartStamp) {
-        const preCheckStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
-        if (gateStampsDiffer(inFlightStartStamp, preCheckStamp)) {
-          return { settled: false, refused: true, op: preAttachPeek!, attachedToInFlight: true, staleAgainstWorktree: true };
+      const semEntry = this.gateSemaphore.snapshot().entries.find(
+        (e) => e.sessionId === workerSessionId && e.gateType === "worker" && e.projectId === worker.projectId,
+      );
+      if (semEntry?.phase === "running") {
+        const inFlightAdmitStamp = this.gateAdmitStamps.get(key);
+        // UNREADABLE-HEAD GUARD (Code Review, Minor [3]): `computeWorktreeGateStamp` never throws — on a
+        // git error/timeout it returns `{head:null}`, and `gateStampsDiffer` treats a null head as
+        // "differs" BY DESIGN (an unreadable read never gets to assert unchanged) — correct for the
+        // existing ADVISORY flag, but wrong here: a REFUSAL's note asserts as FACT that a commit landed,
+        // which an unreadable stamp never actually established. Both stamps must have a real head before
+        // this ever refuses; an unreadable one falls through to the ordinary attach instead, same as the
+        // "not genuinely admitted" case above — never a refusal built on a claim the code couldn't verify.
+        if (inFlightAdmitStamp && inFlightAdmitStamp.head !== null) {
+          const preCheckStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+          // RE-PEEK (Code Review): the git read just above is a real, bounded await — the in-flight op can
+          // genuinely settle DURING it. A refusal naming an opId that's already gone would send the caller
+          // to `gate_cancel` for an op it would report `not_found` for. Confirm the op is STILL attachable
+          // (still "running" in PendingOpRegistry) before ever refusing — a settle in this narrow window
+          // instead falls through to the ordinary attach, which correctly serves whatever the op actually
+          // settled to (a real result, or a retained/cancelled outcome — never this refusal's business).
+          const postCheckPeek = this.pendingOps.peek(key);
+          if (postCheckPeek?.state === "running" && preCheckStamp.head !== null && gateStampsDiffer(inFlightAdmitStamp, preCheckStamp)) {
+            return { settled: false, refused: true, op: postCheckPeek, attachedToInFlight: true, staleAgainstWorktree: true };
+          }
         }
       }
     }
@@ -19313,6 +19372,11 @@ export class SessionService {
         // map only ever holds an entry for the lifetime of ITS OWN in-flight invocation.
         const startStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
         this.gateStartStamps.set(key, startStamp);
+        // Card a0d912f5 Code Review: declared HERE (function scope, sibling to `startStamp` above), not
+        // inside the `try` below — a `let` scoped to the try body is invisible to the try's OWN `finally`,
+        // and the finally needs to read this to clean up {@link gateAdmitStamps} the same way it already
+        // cleans up `gateStartStamps`.
+        let admitStamp: WorktreeGateStamp | undefined;
         try {
           // OP-ID STAMPED ONTO EVERY EVENT (card 7d492f8b) — see confirmWorkerMerge's identical `evt`
           // closure for the full rationale (findGateOpEventsByOpId's join key / recoverGateOpVerdict).
@@ -19338,13 +19402,13 @@ export class SessionService {
           // emission point in this function — mirrors `concurrentAtStart`'s own reuse pattern exactly.
           let concurrentAtStart = 0;
           let getConcurrentGatesMax: (() => number) | undefined;
-          // ADMISSION STAMP (card 39196378, verified-mechanism revision): taken as the FIRST thing inside
-          // `fn`, before `runGateSeq` is ever called — i.e. at the exact moment this run is admitted past
-          // the semaphore, strictly before the build/test child process is spawned against the worktree.
-          // See describeGateHeadCurrency's doc for why this third checkpoint (vs. only start+settle)
-          // matters: it's what separates "moved during the queue wait" (the gate's execution still saw a
-          // single stable, current tree) from "moved while the gate was actually running" (genuinely racy).
-          let admitStamp: WorktreeGateStamp | undefined;
+          // ADMISSION STAMP (card 39196378, verified-mechanism revision; hoisted to function scope above,
+          // card a0d912f5 Code Review): taken as the FIRST thing inside `fn`, before `runGateSeq` is ever
+          // called — i.e. at the exact moment this run is admitted past the semaphore, strictly before the
+          // build/test child process is spawned against the worktree. See describeGateHeadCurrency's doc
+          // for why this third checkpoint (vs. only start+settle) matters: it's what separates "moved
+          // during the queue wait" (the gate's execution still saw a single stable, current tree) from
+          // "moved while the gate was actually running" (genuinely racy).
           // Card 78214063: mirrors confirmWorkerMerge's OWN `anyExtended` local (identical `onExtend`
           // mirroring technique) — the ONLY way to capture whether this run's current step consumed its
           // one-time auto-extend, since `hooks`'s live state lives in the GateSemaphore's in-memory
@@ -19372,6 +19436,10 @@ export class SessionService {
                 getConcurrentGatesMax = getMaxConcurrentGates;
                 cancelSignalRef = cancelSignal;
                 admitStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+                // Card a0d912f5 Code Review: recorded the instant it's known, alongside `gateStartStamps`'
+                // own set-site — see {@link gateAdmitStamps}' own doc for why this is a SEPARATE map/
+                // checkpoint, not a reuse of the fire-time one.
+                this.gateAdmitStamps.set(key, admitStamp);
                 // Card 78214063: mirror onExtend into `workerGateExtended`, never a REPLACEMENT for the
                 // semaphore's own live-registry tracking (confirmWorkerMerge's identical `mirroredHooks`
                 // comment applies verbatim here) — `hooks.onExtend?.()` still fires so gate_queue/gate_status
@@ -19553,6 +19621,7 @@ export class SessionService {
           };
         } finally {
           if (this.gateStartStamps.get(key) === startStamp) this.gateStartStamps.delete(key);
+          if (admitStamp !== undefined && this.gateAdmitStamps.get(key) === admitStamp) this.gateAdmitStamps.delete(key);
         }
       },
       // Card 74716cfb: ASYNC (was sync) — this callback now `await`s readFailedNamesForOp before composing

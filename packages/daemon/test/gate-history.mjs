@@ -590,14 +590,14 @@ function seed(db) {
     check("(e2e, REAL WRITE PATH, card 3a6f04cc) precondition: worker2's op is genuinely QUEUED", sessions.gateStatus(op2Id).state === "queued");
 
     // THE POSITIVE CONTROL, ARM 1: a real gate_cancel on the QUEUED op.
-    const cancelResult = await sessions.cancelGateOp(mgrId, op2Id);
+    const cancelResult = await sessions.cancelGateOp(mgrId, op2Id, { scope: { kind: "project" } });
     check("(e2e, REAL WRITE PATH, card 3a6f04cc) cancelGateOp cancels the QUEUED op immediately, zero process risk", cancelResult.outcome === "cancelled" && cancelResult.phase === "queued" && cancelResult.gateType === "worker");
     await waitUntil(() => (sessions.gateStatus(op2Id).state === "settled" ? true : undefined), { timeoutMs: 10_000, label: "op2 to settle after cancel" });
 
     // THE POSITIVE CONTROL, ARM 3 (Code Review finding [A]'s own regression guard): a real gate_cancel on
     // the genuinely RUNNING op, whose injected gate reacts to the real cancel signal and settles with
     // ZERO steps run — the exact shape that used to read gateRan:true before this correction.
-    const cancelRunningResult = await sessions.cancelGateOp(mgrId, op3Id);
+    const cancelRunningResult = await sessions.cancelGateOp(mgrId, op3Id, { scope: { kind: "project" } });
     check("(e2e, REAL WRITE PATH, card 3a6f04cc — FINDING [A] REGRESSION GUARD) cancelGateOp cancels the RUNNING op (verified kill)", cancelRunningResult.outcome === "cancelled" && cancelRunningResult.phase === "running" && cancelRunningResult.gateType === "worker");
     await waitUntil(() => (sessions.gateStatus(op3Id).state === "settled" ? true : undefined), { timeoutMs: 10_000, label: "op3 to settle after running-cancel" });
 

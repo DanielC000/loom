@@ -2467,13 +2467,16 @@ export class OrchestrationMcpRouter {
             "If you've edited since the last run_gate call, don't trust a cached pass — wait out the grace " +
             "window (or just act on your own judgment) before treating it as current. " +
             "STALE RE-ATTACH IS NOW REFUSED, NOT JOINED (card a0d912f5): a re-call that would otherwise " +
-            "attach to an in-flight op ALREADY known — before ever attaching — to be running against a " +
-            "stale worktree is refused outright: {status:\"refused\", action:\"stale-attached\", opId, " +
-            "canCancel:true, note}, never a wasted wait on a result you'd only have to discard. `gate_cancel` " +
-            "is on YOUR OWN tool surface too — cancel that opId yourself, then re-fire run_gate against your " +
-            "current tree. Pass `force:true` to opt back into the OLD behavior (attach anyway) — e.g. if " +
-            "you'd rather let the stale run finish than pay for a fresh one. `force` has no effect unless " +
-            "there's actually a stale in-flight op to attach to; it's always safe to pass.",
+            "attach to an in-flight op ALREADY known — before ever attaching — to be GENUINELY ADMITTED " +
+            "(past the gate cap, not merely queued behind a higher-priority merge/deploy gate — a queued " +
+            "op's own eventual run still covers whatever's on disk at admission, so a commit made while it " +
+            "was only queued is harmless and never triggers this) and running against a worktree that has " +
+            "moved SINCE that admission is refused outright: {status:\"refused\", action:\"stale-attached\", " +
+            "opId, canCancel:true, note}, never a wasted wait on a result you'd only have to discard. " +
+            "`gate_cancel` is on YOUR OWN tool surface too — cancel that opId yourself, then re-fire run_gate " +
+            "against your current tree. Pass `force:true` to opt back into the OLD behavior (attach anyway) " +
+            "— e.g. if you'd rather let the stale run finish than pay for a fresh one. `force` has no effect " +
+            "unless there's actually a stale, admitted in-flight op to attach to; it's always safe to pass.",
           inputSchema: strictShape({ force: z.boolean().optional() }),
         },
         async ({ force }) => {
@@ -2482,7 +2485,7 @@ export class OrchestrationMcpRouter {
             if ("refused" in r && r.refused) {
               return ok({
                 status: "refused", action: "stale-attached", opId: r.op.opId, canCancel: true,
-                note: `an earlier run_gate (${r.op.opId}) is still running but is already stale against your worktree — a new commit or an uncommitted edit landed since it started, so its eventual result would not describe your current code. Refused rather than attaching you to a result you'd have to discard. Cancel it yourself with gate_cancel(opId:"${r.op.opId}"), then re-fire run_gate against your current tree — or pass force:true here to attach to it anyway.`,
+                note: `an earlier run_gate (${r.op.opId}) is genuinely ADMITTED and running, but a new commit or an uncommitted edit landed AFTER it was admitted (not merely while it was queued — that case is harmless and never refused), so its eventual result would not describe your current code. Refused rather than attaching you to a result you'd have to discard. Cancel it yourself with gate_cancel(opId:"${r.op.opId}"), then re-fire run_gate against your current tree — or pass force:true here to attach to it anyway.`,
               });
             }
             if (!r.settled) {
@@ -2559,7 +2562,7 @@ export class OrchestrationMcpRouter {
         },
         async ({ opId, intent, reason }) => {
           try {
-            return ok(await sessions.cancelGateOp(sessionId, opId, { restrictToOwnerSessionId: sessionId, intent, reason }));
+            return ok(await sessions.cancelGateOp(sessionId, opId, { scope: { kind: "own", sessionId }, intent, reason }));
           } catch (e) {
             return ok({ error: (e as Error).message });
           }
@@ -4847,7 +4850,7 @@ export class OrchestrationMcpRouter {
       },
       async ({ opId, intent, reason }) => {
         try {
-          return ok(await sessions.cancelGateOp(managerSessionId, opId, { intent, reason }));
+          return ok(await sessions.cancelGateOp(managerSessionId, opId, { scope: { kind: "project" }, intent, reason }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
