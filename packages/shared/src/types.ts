@@ -2299,6 +2299,28 @@ export interface Task {
    */
   heldBy?: "human" | "agent" | null;
   /**
+   * Card 0ad1ca68 — a STANDING annotation naming WHICH owner Request this card's hold traces back to,
+   * independent of `held`/`deferred` themselves and independent of that Request's OWN `taskId` (a
+   * project-wide owner "decision" Request is very often filed with `taskId:null`, or tied to a sibling/
+   * epic card rather than this one — see `Question.taskId`'s own single-task limitation). The gap this
+   * closes: `held`/`deferred` are the brake, but neither says WHY — and once the gating Request is
+   * answered/consumed, it stops showing up as a live pending question anywhere, so a manager reading a
+   * still-held card long afterward has no mechanical way back to the decision that explains it, only
+   * body prose (real specimen: session `bb707b3f` — a multi-harness epic held by an already-consumed
+   * 2026-08-27 answer, with the owner unable to find "which request is related to multi-harness epic").
+   *
+   * Deliberately NOT auto-populated and NOT auto-cleared: nothing infers this from `question_ask`'s own
+   * (single, optional) `taskId` — a manager/agent sets it explicitly via `tasks_update` when it recognizes
+   * "this card's hold traces back to request X", and it stays set even once that request is answered/
+   * consumed/cancelled (that's the whole point — the link must SURVIVE the request leaving the live
+   * pending set). Validated at set time (`updateProjectTask`, mcp/tasks.ts): must resolve to a real
+   * request in THIS project; `null` clears it. Resolved LIVE (never cached) at read time by
+   * `resolveHeldRequestState` — a dangling reference (the request was since deleted) degrades to a
+   * fail-visible "not-found" state, mirroring `deferredUntilTaskId`'s own "never silently drop" posture
+   * for a dangling blocker reference.
+   */
+  heldRequestId?: string | null;
+  /**
    * Manager-settable DEFERRED flag: a card the MANAGER is intentionally sequencing behind other work —
    * its own dependency-gating/ordering marker, orthogonal to `held` (the owner's SOLE brake). The idle
    * watchdog discounts a deferred card from its "actionable" count (same treatment as `held`), but

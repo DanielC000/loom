@@ -525,7 +525,29 @@ export interface TaskRequestsSummary {
 }
 
 /** A task extended with its connected-requests summary + git-derived merged state — what getProjectTask/tasks_get returns. */
-export type TaskWithRequests = TaskWithMerged & { requests: TaskRequestsSummary; incomingDeferredItems: IncomingDeferredItemsSummary };
+export type TaskWithRequests = TaskWithMerged & { requests: TaskRequestsSummary; incomingDeferredItems: IncomingDeferredItemsSummary; heldRequestState: HeldRequestState | null };
+
+/**
+ * The live-resolved state of a task's {@link Task.heldRequestId} link (card 0ad1ca68) — `null` when the
+ * task carries no link at all (the common case). When it DOES carry one, this is ALWAYS resolved fresh
+ * from the requests store at read time, never cached on the task row itself — that's what makes the hold
+ * "still mechanically visible" after its request is answered/consumed: `state` simply reports whatever
+ * the request's CURRENT state is, same categories `Question.state` already uses. `notFound:true` is the
+ * fail-visible degrade for a dangling reference (the linked request was since deleted) — mirrors
+ * `deferredUntilTaskId`'s own "never silently drop a dangling reference" posture; the caller still sees
+ * the id it can no longer resolve, rather than the field silently vanishing.
+ */
+export type HeldRequestState =
+  | { id: string; notFound: true }
+  | { id: string; notFound: false; state: QuestionState; title: string; answeredAt: string | null; consumedAt: string | null };
+
+/** Resolve a task's {@link Task.heldRequestId} to its LIVE current state (see {@link HeldRequestState}'s own doc for why this is never cached). `null` when the task carries no link. */
+function resolveHeldRequestState(db: Db, task: Pick<Task, "heldRequestId">): HeldRequestState | null {
+  if (!task.heldRequestId) return null;
+  const q = db.getQuestion(task.heldRequestId);
+  if (!q) return { id: task.heldRequestId, notFound: true };
+  return { id: q.id, notFound: false, state: q.state, title: q.title, answeredAt: q.answeredAt, consumedAt: q.consumedAt };
+}
 
 function summarizeTaskRequests(questions: Question[]): TaskRequestsSummary {
   // Each bucket is derived EXPLICITLY by state — never `total - pending` (that silently mis-groups any
@@ -671,6 +693,7 @@ export async function getProjectTask(
     ...found, deferred, deferredUntilTaskId: autoCleared ? null : found.deferredUntilTaskId, deferredStuck: stuck, merged,
     requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)),
     incomingDeferredItems: summarizeIncomingDeferredItems(db, projectId, found.id),
+    heldRequestState: resolveHeldRequestState(db, found),
   };
 }
 
@@ -945,7 +968,7 @@ export function createProjectTaskChecked(
  * never asked to see. Still a valid task-ish object (id + the small fields), just without the
  * heavy field — plus `changed`, the patch keys the caller actually passed.
  */
-export type TaskUpdateAck = Pick<Task, "id" | "title" | "columnKey" | "priority" | "position" | "updatedAt" | "held" | "deferred" | "heldBy" | "repoKey" | "deferredUntilTaskId" | "deferredAt" | "deferredReason" | "deferredUntilEvent" | "version"> & {
+export type TaskUpdateAck = Pick<Task, "id" | "title" | "columnKey" | "priority" | "position" | "updatedAt" | "held" | "deferred" | "heldBy" | "heldRequestId" | "repoKey" | "deferredUntilTaskId" | "deferredAt" | "deferredReason" | "deferredUntilEvent" | "version"> & {
   changed: string[];
 };
 
@@ -1047,7 +1070,7 @@ export interface PendingRequestWarning {
 
 export async function updateProjectTask(
   db: Db, projectId: string, taskId: string,
-  patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey" | "deferredUntilTaskId" | "deferredReason" | "deferredUntilEvent">>,
+  patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey" | "deferredUntilTaskId" | "deferredReason" | "deferredUntilEvent" | "heldRequestId">>,
   actor?: TaskUpdateActor,
   /**
    * Card d0978321 — the `version` the caller last read for this task (`tasks_get`/`tasks_list`/a prior
@@ -1215,6 +1238,21 @@ export async function updateProjectTask(
       return { error: "deferredUntilEvent.key must be a non-empty string" };
     }
     patch = { ...patch, deferredUntilEvent: { kind, key: key.trim() } };
+  }
+  // heldRequestId guard (card 0ad1ca68) — whole-patch-reject, same convention as every guard above: a
+  // non-null value must resolve to a REAL request that belongs to THIS project (mirrors the cross-project
+  // scoping `listQuestionsForTask` already enforces for the taskId-linkage path) — an id from a foreign
+  // project, or one that never existed, is rejected outright rather than silently stored as a dangling
+  // pointer nobody can ever resolve. Deliberately does NOT require the request's OWN `taskId` to match
+  // this card (see Task.heldRequestId's own doc for why: that's the exact limitation this field exists to
+  // work around) and does NOT require the request to still be pending — an already-answered/consumed
+  // request is the common, expected case (that's what "survives its request" means). `null` (explicit
+  // clear) or `undefined` (omit) need no validation.
+  if (patch.heldRequestId !== undefined && patch.heldRequestId !== null) {
+    const linked = db.getQuestion(patch.heldRequestId);
+    if (!linked || linked.projectId !== projectId) {
+      return { error: `heldRequestId "${patch.heldRequestId}" does not resolve to a request in this project` };
+    }
   }
   // Manual-deferral self-explaining guard (card c90e9525, delta-scoped by card 57f346e6) —
   // whole-patch-reject, same convention as the guards above: `deferred` is a stored verdict with no
@@ -1451,9 +1489,9 @@ export async function updateProjectTask(
   // that DOES pass `body` returns the full task (the caller is intentionally editing it and wants to
   // see the result).
   if (patch.body === undefined) {
-    const { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, deferredAt, deferredReason, deferredUntilEvent, updatedAt, version } = updated;
+    const { id, title, columnKey, priority, position, held, deferred, heldBy, heldRequestId, repoKey, deferredUntilTaskId, deferredAt, deferredReason, deferredUntilEvent, updatedAt, version } = updated;
     const ack: TaskUpdateAck & { pendingRequestWarning?: PendingRequestWarning[] } = {
-      id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, deferredAt, deferredReason, deferredUntilEvent, updatedAt, version, changed: Object.keys(patch),
+      id, title, columnKey, priority, position, held, deferred, heldBy, heldRequestId, repoKey, deferredUntilTaskId, deferredAt, deferredReason, deferredUntilEvent, updatedAt, version, changed: Object.keys(patch),
     };
     if (pendingRequestWarning) ack.pendingRequestWarning = pendingRequestWarning;
     return ack;

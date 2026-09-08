@@ -93,6 +93,31 @@ const seedLiveAuditor = (e, id, role = "auditor") => e.db.insertSession({
   processState: "live", resumability: "unknown", busy: false,
   createdAt: new Date().toISOString(), lastActivity: new Date().toISOString(), lastError: null, role,
 });
+// Card 0ad1ca68 (owner-request spawn gate) — seed a board card in an explicit column, optionally
+// held/deferred (mirrors idle-watcher.mjs's own seedTitled helper).
+const seedTask = (e, columnKey, { title = columnKey, held = false, deferred = false } = {}) => {
+  const id = `tk-${columnKey}-${Math.random().toString(36).slice(2, 8)}`;
+  e.db.insertTask({
+    id, projectId: e.projId, title, body: "", columnKey, held, deferred,
+    deferredReason: deferred ? "test-seeded deferral reason" : null,
+    position: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+  });
+  return id;
+};
+// Seed a project-scoped owner Request (question_ask). `filerSessionId` must be a live row (FK) — the
+// caller seeds a throwaway manager session via seedLiveManager for this (its role/scheduledSpawn don't
+// matter here; it's only ever used as the FK target, never ticked).
+const seedQuestion = (e, filerSessionId, taskId, state = "pending") => {
+  const id = `q-${Math.random().toString(36).slice(2, 8)}`;
+  e.db.insertQuestion({
+    id, sessionId: filerSessionId, projectId: e.projId, type: "decision", title: "a decision", body: "",
+    options: null, recommendation: null, taskId,
+    permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null, credentialEnvVar: null,
+    state, chosenOption: null, note: null, createdAt: new Date().toISOString(),
+    answeredAt: state !== "pending" ? new Date().toISOString() : null, consumedAt: null,
+  });
+  return id;
+};
 function cleanupEnv(e) {
   try { e.db.close(); } catch { /* ignore */ }
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(e.dbFile + ext, { force: true }); } catch { /* ignore */ } }
@@ -391,6 +416,136 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
   check("Mixed tick: the over-cap manager is deferred but the later auditor STILL fires (continue, not break)",
     e.calls.length === 1 && e.calls[0].via === "auditor" &&
     e.db.getSchedule("sch-mgr-deferred").lastFiredAt === null);
+  cleanupEnv(e);
+}
+
+// === Card 0ad1ca68 — owner-request spawn gate: stop respawning an identical manager seat into a board
+// already known to be fully gated on an unanswered owner Request ===
+
+// Positive: a project-wide pending owner Request (taskId:null, the "owner decision" shape) + a board
+// with zero genuinely-actionable cards (both held) → the due manager schedule is DEFERRED, not fired.
+{
+  const e = makeEnv();
+  const filer = "mgr-filer-1"; seedLiveManager(e, filer);
+  seedQuestion(e, filer, null, "pending"); // project-wide owner decision, no task attached
+  seedTask(e, "waiting", { held: true });
+  seedTask(e, "waiting", { held: true });
+  seedSchedule(e, "sch-owner-gated");
+  const now = new Date();
+  await e.scheduler.tick(now);
+  check("Owner-request gate: a fully owner-gated board does NOT spawn a manager", e.calls.length === 0);
+  const after = e.db.getSchedule("sch-owner-gated");
+  check("Owner-request gate: the schedule is deferred, left due (not disabled, not advanced)",
+    after.lastFiredAt === null && after.enabled === true && !!after.lastDeferredAt);
+  check("Owner-request gate: the deferral reason names the pending-owner-request cause",
+    (after.lastDeferredReason ?? "").includes("pending owner request"));
+  cleanupEnv(e);
+}
+
+// 🔴 NEGATIVE CONTROL #1 (the important test per the card's own DoD): the SAME pending owner Request
+// exists, but the board ALSO carries a genuinely actionable card — the schedule must still fire. A
+// pending Request must never dominate unrelated dispatchable work (mirrors idle-watcher's own
+// 8e87f3b5-narrowed suppression, applied here at spawn time instead of nudge time).
+{
+  const e = makeEnv();
+  const filer = "mgr-filer-2"; seedLiveManager(e, filer);
+  seedQuestion(e, filer, null, "pending");
+  seedTask(e, "todo"); // genuinely actionable — not held, not deferred
+  seedSchedule(e, "sch-owner-gated-but-actionable");
+  await e.scheduler.tick(new Date());
+  check("Owner-request gate: a pending request does NOT suppress a spawn when real actionable work exists",
+    e.calls.length === 1 && e.calls[0].via === "manager");
+  check("Owner-request gate: the schedule fired (not deferred)",
+    e.db.getSchedule("sch-owner-gated-but-actionable").lastFiredAt !== null);
+  cleanupEnv(e);
+}
+
+// 🔴🔴 NEGATIVE CONTROL #2 — THE GUARDRAIL ITSELF: a board with zero actionable cards but NO pending
+// owner Request at all must still fire. Suppression is gated on an actual pending Request, never on
+// "0 actionable" alone (a board that's merely held/deferred for unrelated reasons must still get a
+// fresh seat — nothing else will ever re-check it).
+{
+  const e = makeEnv();
+  seedTask(e, "waiting", { held: true });
+  seedTask(e, "backlog", { deferred: true });
+  seedSchedule(e, "sch-zero-actionable-no-request");
+  await e.scheduler.tick(new Date());
+  check("Owner-request gate GUARDRAIL: 0-actionable with NO pending request still fires (never suppress on 0-actionable alone)",
+    e.calls.length === 1 && e.calls[0].via === "manager");
+  check("Owner-request gate GUARDRAIL: the schedule fired, no deferral recorded for this reason",
+    e.db.getSchedule("sch-zero-actionable-no-request").lastFiredAt !== null);
+  cleanupEnv(e);
+}
+
+// A review-lane card is independently actionable (go merge it) even with a pending Request elsewhere —
+// must not be suppressed.
+{
+  const e = makeEnv();
+  const filer = "mgr-filer-3"; seedLiveManager(e, filer);
+  seedQuestion(e, filer, null, "pending");
+  seedTask(e, "review");
+  seedSchedule(e, "sch-review-lane-actionable");
+  await e.scheduler.tick(new Date());
+  check("Owner-request gate: a review-lane card is actionable — schedule still fires",
+    e.calls.length === 1 && e.calls[0].via === "manager");
+  cleanupEnv(e);
+}
+
+// Auditor-kind schedules are EXEMPT from this gate (read-mostly reviewers, not the respawn cost this
+// gate targets) — fires even though the board is fully owner-gated.
+{
+  const e = makeEnv();
+  const filer = "mgr-filer-4"; seedLiveManager(e, filer);
+  seedQuestion(e, filer, null, "pending");
+  seedTask(e, "waiting", { held: true });
+  seedSchedule(e, "sch-auditor-exempt", { kind: "auditor" });
+  await e.scheduler.tick(new Date());
+  check("Owner-request gate: an auditor-kind schedule is exempt — fires on a fully owner-gated board",
+    e.calls.length === 1 && e.calls[0].via === "auditor");
+  cleanupEnv(e);
+}
+
+// Transition-only bookkeeping (mirrors the manager-cap defer's own anti-flood guard): a second tick with
+// the SAME still-pending Request writes no fresh lastDeferredAt and no second event.
+{
+  const e = makeEnv();
+  const filer = "mgr-filer-5"; seedLiveManager(e, filer);
+  seedQuestion(e, filer, null, "pending");
+  seedTask(e, "waiting", { held: true });
+  seedSchedule(e, "sch-owner-gated-repeat");
+  const firstTickAt = new Date();
+  await e.scheduler.tick(firstTickAt);
+  const firstDeferredAt = e.db.getSchedule("sch-owner-gated-repeat").lastDeferredAt;
+  check("Owner-request gate transition-only: first tick records a deferral", !!firstDeferredAt);
+  // Deterministic distinct instant for the second tick (no wall-clock wait needed at all — `tick` takes
+  // an explicit `now`, so this is exact, not a race): if the anti-flood guard were broken and rewrote
+  // lastDeferredAt on every same-reason tick, THIS second, later instant is what would show up instead.
+  await e.scheduler.tick(new Date(firstTickAt.getTime() + 60_000));
+  check("Owner-request gate transition-only: a second same-reason tick leaves lastDeferredAt UNCHANGED",
+    e.db.getSchedule("sch-owner-gated-repeat").lastDeferredAt === firstDeferredAt);
+  const raw = new Database(e.dbFile);
+  const evCount = raw.prepare("SELECT COUNT(*) AS c FROM orchestration_events WHERE kind = 'schedule_fire_deferred'").get().c;
+  raw.close();
+  check("Owner-request gate transition-only: still only ONE schedule_fire_deferred event after two ticks", evCount === 1);
+  cleanupEnv(e);
+}
+
+// Clears once the owner answers: the SAME Request flips to 'answered' → the next tick fires normally
+// (the deferral self-clears, mirrors markFired's own clear for the budget-gate defer).
+{
+  const e = makeEnv();
+  const filer = "mgr-filer-6"; seedLiveManager(e, filer);
+  const qid = seedQuestion(e, filer, null, "pending");
+  seedTask(e, "waiting", { held: true });
+  seedSchedule(e, "sch-owner-gate-clears");
+  await e.scheduler.tick(new Date());
+  check("Owner-request gate clears: deferred while the request is pending", !!e.db.getSchedule("sch-owner-gate-clears").lastDeferredAt);
+  e.db.answerQuestion(qid, { chosenOption: "ok", note: null, answeredAt: new Date().toISOString() });
+  await e.scheduler.tick(new Date());
+  const after = e.db.getSchedule("sch-owner-gate-clears");
+  check("Owner-request gate clears: fires once the request is answered", after.lastFiredAt !== null);
+  check("Owner-request gate clears: lastDeferredAt/lastDeferredReason cleared back to null",
+    after.lastDeferredAt === null && after.lastDeferredReason === null);
   cleanupEnv(e);
 }
 

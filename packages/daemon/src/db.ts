@@ -1753,6 +1753,18 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
   // every legacy row to version 1 in place, the same starting point a brand-new row gets — see
   // Task.version's own doc for why it advances ONLY on a title/body change, not on every write.
   version: "INTEGER NOT NULL DEFAULT 1",
+  // Card 0ad1ca68 — a STANDING hold-link annotation: which owner Request (any state, including already
+  // answered/consumed) this card's hold traces back to. Nullable, no DEFAULT (mirrors held_by/repo_key):
+  // every legacy row backfills to NULL ("no linked request"). Deliberately INDEPENDENT of `held_by`/
+  // `deferred_reason` — a Request already answered/consumed no longer shows up as a live pending question
+  // anywhere, so without this a manager reading a held/deferred card long after the owner answered has no
+  // mechanical way back to WHICH decision explains the hold; only body prose (real specimen: session
+  // `bb707b3f`, the owner asking "which request is related to multi-harness epic? Cant find it"). Set/
+  // cleared via `updateProjectTask` (mcp/tasks.ts), which validates it resolves to a real request on THIS
+  // project at set time; resolved LIVE (never cached) at read time via `resolveHeldRequestState`, so the
+  // hold's explanation survives the request moving through pending → answered → consumed, or even being
+  // deleted (a dangling reference degrades to a fail-visible "not-found" state, never silently drops).
+  held_request_id: "TEXT",
 };
 
 /** Columns added to `project_memory` after its card-2fd9abf9 launch; applied to existing DBs by
@@ -6177,7 +6189,7 @@ export class Db {
   // NOT go through this method — see {@link backfillTaskMergedInfo} below, which writes the same three
   // columns WITHOUT touching `updatedAt`, so opening an old done card's drawer can never reorder the
   // owner's `byRecentlyDone`-sorted done lane (Code Review finding, card 1eebc46a).
-  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason" | "deferredUntilEvent">>): void {
+  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "heldRequestId" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason" | "deferredUntilEvent">>): void {
     const cur = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
     if (!cur) return;
     const t = toTask(cur);
@@ -6193,8 +6205,8 @@ export class Db {
     const touchesContent = patch.title !== undefined || patch.body !== undefined;
     const next = { ...t, ...patch, updatedAt: new Date().toISOString(), version: touchesContent ? t.version + 1 : t.version };
     this.db.prepare(
-      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification, deferred_until_task_id=@deferredUntilTaskId, deferred_stuck=@deferredStuck, deferred_at=@deferredAt, deferred_reason=@deferredReason, deferred_until_event=@deferredUntilEvent, version=@version WHERE id=@id",
-    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null, mergedVerification: next.mergedVerification ?? null,
+      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, held_request_id=@heldRequestId, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification, deferred_until_task_id=@deferredUntilTaskId, deferred_stuck=@deferredStuck, deferred_at=@deferredAt, deferred_reason=@deferredReason, deferred_until_event=@deferredUntilEvent, version=@version WHERE id=@id",
+    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, heldRequestId: next.heldRequestId ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null, mergedVerification: next.mergedVerification ?? null,
       // Card 022659ac: `next.deferredUntilTaskId` may carry the CURRENT already-parsed (possibly
       // array-shaped) value forward from `t = toTask(cur)` even when THIS patch never mentions the field
       // at all — better-sqlite3 cannot bind a raw array, so this must re-serialize unconditionally, not
@@ -6223,7 +6235,7 @@ export class Db {
    */
   updateTaskChecked(
     id: string,
-    patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason" | "deferredUntilEvent">>,
+    patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "heldRequestId" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason" | "deferredUntilEvent">>,
     baseVersion: number | undefined,
   ): { ok: true; task: Task } | { ok: false; current: Task } | { ok: false; notFound: true } {
     const run = this.db.transaction((): { ok: true; task: Task } | { ok: false; current: Task } | { ok: false; notFound: true } => {
@@ -8503,6 +8515,7 @@ function toTask(r0: unknown): Task {
     })(),
     deferredUntilEvent: parseDeferredUntilEvent(r.deferred_until_event as string | null),
     heldBy: (r.held_by as Task["heldBy"]) ?? null,
+    heldRequestId: (r.held_request_id as string | null) ?? null,
     repoKey: (r.repo_key as string | null) ?? null,
     mergedSha: (r.merged_sha as string | null) ?? null,
     mergedRepoKey: (r.merged_repo_key as string | null) ?? null,

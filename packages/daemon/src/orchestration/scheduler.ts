@@ -4,6 +4,7 @@ import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
 import { nextFireAt } from "./cron.js";
 import { isLikelyNearClaudeUsageLimit } from "./usage-awareness.js";
+import { isProjectGatedOnPendingOwnerRequest } from "./pending-request-gate.js";
 
 export interface SchedulerDeps {
   db: Db;
@@ -97,6 +98,12 @@ export class Scheduler {
    *    tick for a schedule that stays blocked for the SAME reason. A schedule starved for hours would
    *    otherwise write a near-identical event every 60s tick, flooding the event log. Both are cleared by
    *    `markFired` on the schedule's next successful fire.
+   *  - OWNER-REQUEST SPAWN GATE (card 0ad1ca68): a "manager"-kind schedule whose project board is fully
+   *    gated on an unanswered owner Request is deferred, via the SAME transition-only bookkeeping as the
+   *    manager-cap defer above, rather than booting an identical seat that would just re-derive the same
+   *    "0 actionable" conclusion a predecessor already reached. See pending-request-gate.ts for the
+   *    predicate itself (and the guardrail it's built to respect: never suppress on 0-actionable alone).
+   *    Auditor-kind schedules are exempt — read-mostly, not the respawn cost this gate targets.
    */
   async tick(now: Date = new Date()): Promise<void> {
     const due = this.deps.db.listDueSchedules(now.toISOString());
@@ -144,10 +151,36 @@ export class Scheduler {
         continue;
       }
       // Finding 1 — deleted agent: never fireable → disable so it stops re-firing every tick.
-      if (!this.deps.db.getAgent(s.agentId)) {
+      const agent = this.deps.db.getAgent(s.agentId);
+      if (!agent) {
         this.deps.db.updateSchedule(s.id, { enabled: false });
         // eslint-disable-next-line no-console
         console.error(`[scheduler] schedule ${s.id} (${s.cron}) disabled — agent ${s.agentId} no longer exists`);
+        continue;
+      }
+      // Card 0ad1ca68 — SPAWN-policy gate: a "manager"-kind schedule whose project board is already
+      // known to be fully gated on an unanswered owner Request would just boot an identical seat that
+      // re-derives the same "0 actionable" conclusion a predecessor already reached (burning a full
+      // context window for zero commits — the card's own specimen). Auditor-kind schedules are exempt:
+      // they're read-mostly reviewers, not the respawn-cost this gate exists to stop. Deferred (not
+      // disabled) via the SAME transition-only bookkeeping the budget gate above uses, so the badge
+      // self-clears the moment the owner answers and a later tick fires normally — never a permanent
+      // suppression. See pending-request-gate.ts's own doc for the "never on 0-actionable alone"
+      // guardrail this gate is built to respect.
+      if (!isAuditor && isProjectGatedOnPendingOwnerRequest(this.deps.db, agent.projectId)) {
+        const reason = `board fully gated on a pending owner request (project ${agent.projectId.slice(0, 8)})`;
+        // eslint-disable-next-line no-console
+        console.error(`[scheduler] ${reason} — deferring schedule ${s.id} to the next tick`);
+        if (s.lastDeferredReason !== reason || !s.lastDeferredAt) {
+          try {
+            this.deps.db.markDeferred(s.id, now.toISOString(), reason);
+            this.deps.db.appendEvent({
+              id: randomUUID(), ts: now.toISOString(),
+              managerSessionId: "", kind: "schedule_fire_deferred",
+              detail: { scheduleId: s.id, cron: s.cron, kind: s.kind, reason },
+            });
+          } catch { /* never let the durable-record write itself crash the tick */ }
+        }
         continue;
       }
       try {
