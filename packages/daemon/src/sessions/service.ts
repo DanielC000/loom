@@ -15295,44 +15295,71 @@ export class SessionService {
 
     // BACKSTOP (BEFORE the gate/merge) — card f324e8fa: refuse before burning a gate lane when a SOLO
     // merge's squash subject would carry a literal HTML entity. `mergeBranchLocked` (git/worktrees.ts)
-    // uses this task's `title` VERBATIM as the commit subject below (`taskTitle`, just past the gate) —
-    // and a squash commit is permanent, unrewritable mainline history under this repo's do-not-rewrite
+    // uses this task's `title` VERBATIM as the commit subject (`taskTitle`, resolved fresh past the gate)
+    // — and a squash commit is permanent, unrewritable mainline history under this repo's do-not-rewrite
     // rule. This has already shipped once (commit fe2c1c6b). `checkTitleHtmlEntities` is the SAME guard
     // `createProjectTaskChecked`/`updateProjectTask` (mcp/tasks.ts, card 267fd215) already enforce at
-    // write time — reused here, not re-derived, so the write-boundary and merge-boundary predicates can
-    // never drift apart.
+    // write time — reused here (now living in tasks/title-guard.ts, a leaf module both this file and
+    // git/worktrees.ts can import without a cycle), not re-derived, so the write-boundary and
+    // merge-boundary predicates can never drift apart.
+    //
+    // ⚠️ THIS IS AN EARLY ADVISORY, NOT THE LAST LINE OF DEFENSE — that line is
+    // `mergeBranchLocked`'s OWN check at the point `subject` is actually built (git/worktrees.ts, right
+    // after `toConventionalSubject`), which this check cannot substitute for: the title read here is a
+    // SNAPSHOT, and the human REST edit route (`POST /api/tasks/:id`, gateway/server.ts) writes `title`
+    // with no entity check at all, so a title can change out from under this read during the minutes a
+    // gate can run. This check exists purely to save a gate lane on the COMMON case (an entity present
+    // right now); it is not, by itself, a correctness guarantee.
     //
     // DESIGN DECISION (card f324e8fa's own required design question): this ALWAYS passes `allow:false` —
-    // it does NOT honor a card's create-time `allowHtmlEntities` override. Argued, not assumed:
+    // there is no caller-supplied override threaded through `worker_merge_confirm` to honor OR ignore.
+    // Measured (Code Review, card f324e8fa follow-up): NOTHING is persisted anywhere that could carry a
+    // card's create-time `allowHtmlEntities:true` forward to merge time — `Task` (shared/src/types.ts)
+    // has no such field, the `tasks` table (db.ts) has no such column, and every `allowHtmlEntities` hit
+    // outside dist/ is a transient zod/function param, never a stored one. `checkTitleHtmlEntities`'s
+    // `allow` is a PER-CALL argument, full stop — there is no create-time flag sitting on the task for
+    // this site to read. Argued for why one must NOT be added here, rather than merely absent:
     //  1. Neither known specimen (fe2c1c6b, and the independent 2026-07-17 origination) was a title
-    //     genuinely ABOUT escaped HTML — both were accidental escapes of an ordinary title. The
-    //     "legitimate" case (267fd215's own example, a bug report literally about literal entities
-    //     rendering) has never once reached a solo merge carrying its title verbatim, because this
-    //     repo's own commit-subject convention already pushes away from it: a subject states WHAT THE
-    //     COMMIT DOES, never the defect it removes (see CLAUDE.md), so a card titled after the DEFECT
-    //     gets retitled to describe the FIX before it ever ships — and a fix-shaped title has no reason
-    //     to carry the literal entity text of the bug it fixes.
-    //  2. Even granting a genuine edge case, the fix costs nothing: unlike the write boundary (where
-    //     rejecting outright would make an author redo real authoring work), a manager can retitle the
-    //     CARD immediately before confirming the merge — the entity text stays fully preserved in the
-    //     card body and this project's history, just not frozen into the one artifact this repo can
-    //     never rewrite.
-    //  3. Honoring a create-time flag here would need it to survive verbatim from create/update time
-    //     (persisted on the task, per card 267fd215's `allowHtmlEntities` override) through to a merge
-    //     that can land weeks later and from a different session — with no mechanism to re-validate that
-    //     the flag still applies to whatever the title has since become on edit. A stale "I meant it"
-    //     stamp is a weaker guarantee at exactly the boundary this card calls the LAST LINE OF DEFENSE;
-    //     an unconditional check keeps that boundary maximally strict for a mistake that is permanent and
-    //     irreversible once it lands, at the cost of a retitle a manager can do in seconds for the one
-    //     case that has never actually occurred.
+    //     genuinely ABOUT escaped HTML — both were accidental escapes of an ordinary title. This repo's
+    //     own commit-subject convention (a subject states WHAT THE COMMIT DOES, never the defect it
+    //     removes — see CLAUDE.md) already pushes a defect-titled card toward a fix-shaped retitle before
+    //     it ships, so a genuinely-about-escaping title has little reason to reach a solo merge carrying
+    //     its entities verbatim. This is a convention, though, not something mechanically enforced on
+    //     card titles — it narrows the risk, it doesn't eliminate it.
+    //  2. Even granting a genuine edge case, the fix costs nothing: a manager can retitle the CARD
+    //     immediately before confirming the merge — a false refusal costs seconds, while a false accept
+    //     is permanent unrewritable mainline history. That asymmetry is why adding a per-call override
+    //     parameter to the merge path (which 1. alone wouldn't fully justify) still isn't worth it: the
+    //     one boundary meant to be the last line of defense should stay maximally strict rather than grow
+    //     a bypass for a case that has never actually occurred.
     // Taskless merges (`taskId === null`) have no card title to check — `mergeBranchLocked` falls back to
-    // a branch-derived subject there, untouched by this guard.
+    // a branch-derived subject there; its own check (git/worktrees.ts) covers that subject too.
     if (taskId) {
-      const taskForTitleGuard = this.db.getTask(taskId);
+      // TENSION (Code Review, card f324e8fa follow-up): this check runs before the union-merge/preLanded
+      // capture below, so without this lookup it would refuse a pure re-confirm of work ALREADY on main
+      // (a title-entity task legitimately re-confirmed after a prior successful — possibly out-of-band —
+      // merge) even though `mergeBranchLocked`'s own noop path (`!staged`) returns before `subject` is
+      // ever built, meaning no entity could ever actually land. Resolved by checking the SAME signal the
+      // early idempotency block above and the `preLanded` capture below both already use
+      // (`findLandedSquashCommit`) — cheap (a single bounded git op), and it directly answers "will a
+      // real subject be built here at all", which is the only question this refusal cares about. A
+      // one-off empty-diff retry unrelated to a prior landing (`STAGE_EMPTY_RETRY`) is not specially
+      // detected here and could still see an over-refusal in that narrow combination — but no incorrect
+      // commit can ever result either way, since `mergeBranchLocked` never reaches subject construction
+      // on ANY noop path; the residual cost is at most an unnecessary refusal, not a missed guard.
+      const priorLanding = await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
+      const taskForTitleGuard = priorLanding ? null : this.db.getTask(taskId);
       const titleGuard = taskForTitleGuard ? checkTitleHtmlEntities(taskForTitleGuard.title, false) : null;
       if (titleGuard) {
-        const detailText = `MERGE-SUBJECT GUARD: ${titleGuard.error} Retitle the card (tasks_update) to a clean subject — the ` +
-          `entity text stays intact in the card body — then re-confirm. Squash phase never reached; canonical repo and worktree untouched.`;
+        // Composed from the structured `match`/`decoded` fields, NOT `titleGuard.error` verbatim — that
+        // write-boundary string's own remedy ("retry with allowHtmlEntities:true") names a param
+        // `worker_merge_confirm` does not accept; embedding it here would tell a manager to make a real,
+        // succeeding `tasks_update` call that changes nothing, then re-confirm into an identical refusal
+        // (Code Review, card f324e8fa follow-up). This message names exactly ONE remedy: retitle.
+        const detailText = `MERGE-SUBJECT GUARD: task title contains an HTML entity ("${titleGuard.match}") — a SOLO merge ` +
+          `would use it VERBATIM as the squash commit subject, becoming a PERMANENT, unrewritable mainline artifact ` +
+          `(this has already happened once: commit fe2c1c6b). Did you mean: "${titleGuard.decoded}"? Retitle the card ` +
+          `(tasks_update) to a clean subject, then re-confirm. Squash phase never reached; canonical repo and worktree untouched.`;
         const { suppressed, sha } = await rejectNotify("title_html_entity", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", { reason: "title_html_entity", sha, ...(suppressed ? { suppressed: true } : {}) });
         return { merged: false, reason: "task title contains an HTML entity — would become a permanent, unrewritable mainline commit subject; retitle the card and re-confirm", detailText, notified: !suppressed, opId: thisOpId };
