@@ -976,8 +976,149 @@ function makeRepo(repo) {
   release();
 }
 
+// ── (e) card a0d912f5: the WORKER-scoped gate_cancel surface — cancelGateOp's `restrictToOwnerSessionId`.
+//    A worker can cancel its OWN "worker" self-check; it CANNOT cancel a "merge" gate even though that
+//    merge op's own descriptor happens to be stamped with the SAME worker sessionId (confirmWorkerMerge's
+//    gate descriptor uses sessionId:workerSessionId, since it shares that worker's worktree key — see
+//    cancelGateOp's own doc for why gateType is part of the ownership check, not just sessionId); and it
+//    cannot cancel a DIFFERENT worker's own self-check. Also proves intent/reason land in the cancelled
+//    op's own reason text (and so, transitively, in its [loom:gate-cancelled] nudge — see that nudge's own
+//    composition, which reads outcome.value.reason verbatim). ─────────────────────────────────────────────
+{
+  const sfx = `wscope-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-gc-wscope-${sfx}`);
+  registerForCleanup(reposDir);
+  const db = new Db();
+  dbs.push(db);
+  db.setPlatformConfig({ maxConcurrentGates: 1 }); // saturate with an unrelated holder so everything below genuinely queues
+
+  const projId = `gc-ws-p-${sfx}`, mgrId = `gc-ws-mgr-${sfx}`;
+  const taskAId = `gc-ws-ta-${sfx}`, workerAId = `gc-ws-wa-${sfx}`;
+  const taskBId = `gc-ws-tb-${sfx}`, workerBId = `gc-ws-wb-${sfx}`;
+  const taskHolderId = `gc-ws-th-${sfx}`, workerHolderId = `gc-ws-wh-${sfx}`;
+  const repo = path.join(reposDir, "worker");
+  makeRepo(repo);
+  db.insertProject({ id: projId, name: "WS", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: `agent-ws-m-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: mgrId, projectId: projId, agentId: `agent-ws-m-${sfx}`, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+
+  db.insertAgent({ id: `agent-ws-a-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskAId, projectId: projId, title: "WS-TASK-A", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  const wtA = await createWorktree(repo, projId, taskAId);
+  worktrees.push(wtA.worktreePath);
+  fs.writeFileSync(path.join(wtA.worktreePath, "feature-a.txt"), "work-a\n");
+  commitAll(wtA.worktreePath, "feature-a.txt", GIT_ID);
+  db.insertSession({ id: workerAId, projectId: projId, agentId: `agent-ws-a-${sfx}`, engineSessionId: null, title: null, cwd: wtA.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: taskAId, worktreePath: wtA.worktreePath, branch: wtA.branch });
+
+  db.insertAgent({ id: `agent-ws-b-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskBId, projectId: projId, title: "WS-TASK-B", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  const wtB = await createWorktree(repo, projId, taskBId);
+  worktrees.push(wtB.worktreePath);
+  db.insertSession({ id: workerBId, projectId: projId, agentId: `agent-ws-b-${sfx}`, engineSessionId: null, title: null, cwd: wtB.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: taskBId, worktreePath: wtB.worktreePath, branch: wtB.branch });
+
+  db.insertAgent({ id: `agent-ws-h-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskHolderId, projectId: projId, title: "WS-HTASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  const wtHolder = await createWorktree(repo, projId, taskHolderId);
+  worktrees.push(wtHolder.worktreePath);
+  db.insertSession({ id: workerHolderId, projectId: projId, agentId: `agent-ws-h-${sfx}`, engineSessionId: null, title: null, cwd: wtHolder.worktreePath, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: taskHolderId, worktreePath: wtHolder.worktreePath, branch: wtHolder.branch });
+
+  let releaseHolder;
+  const holderHold = new Promise((res) => { releaseHolder = res; });
+  const sharedGate = async (_gate, cwd) => {
+    if (cwd === wtHolder.worktreePath) { await holderHold; return { passed: true }; }
+    return { passed: true };
+  };
+  const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate });
+
+  const pHolderRun = sessions.runWorkerGate(workerHolderId);
+  await waitUntil(() => sessions.gateQueueForManager(projId).activeCount === 1);
+
+  // workerA's OWN self-check — queues behind the holder. Selected by `taskId`, never by find-order/index —
+  // both workerA's and workerB's own self-checks queue with gateType:"worker", so an order-based pick would
+  // be a real, silent risk of testing the WRONG worker's op under the RIGHT worker's label (each own-project
+  // entry's `taskId` is unambiguous and distinct per worker here, unlike opId-arrival order).
+  const pSelfCheckA = sessions.runWorkerGate(workerAId);
+  await waitUntil(() => sessions.gateQueueForManager(projId).queued.some((e) => e.gateType === "worker" && e.taskId === taskAId));
+  const selfCheckAEntry = sessions.gateQueueForManager(projId).queued.find((e) => e.gateType === "worker" && e.taskId === taskAId);
+  check("(e) workerA's own self-check is queued (setup sanity)", !!selfCheckAEntry);
+
+  // workerB's OWN self-check — queues too, so there's a genuine "someone else's own op" to test refusal
+  // against (not merely a foreign project, already covered by (2) above). Also selected by taskId.
+  const pSelfCheckB = sessions.runWorkerGate(workerBId);
+  await waitUntil(() => sessions.gateQueueForManager(projId).queued.some((e) => e.gateType === "worker" && e.taskId === taskBId));
+  const selfCheckBEntry = sessions.gateQueueForManager(projId).queued.find((e) => e.gateType === "worker" && e.taskId === taskBId);
+  check("(e) workerB's own self-check is ALSO queued (setup sanity)", !!selfCheckBEntry);
+  check("(e) workerA's and workerB's own self-checks are genuinely DIFFERENT ops (setup sanity)", selfCheckAEntry?.opId !== selfCheckBEntry?.opId);
+
+  // A queued MERGE gate for workerA — its OWN descriptor.sessionId is workerAId, mirroring the EXACT
+  // production coincidence cancelGateOp's own doc warns about (confirmWorkerMerge's real gate descriptor
+  // shares the worker's own worktree key, sessionId:workerSessionId — see service.ts's own construction).
+  // Synthesized DIRECTLY via gateSemaphore.runExclusive (same technique batch-merge-gate-history.mjs /
+  // emit-compare-gate-scope.mjs already use) rather than via confirmWorkerMergeTracked: that real call
+  // would ALSO fire supersedeQueuedSelfCheck as its own first synchronous statement (see this file's block
+  // (1) above), auto-cancelling workerA's queued self-check as a SIDE EFFECT before this block ever gets
+  // to test its OWN cancel path against it — a real interaction with an unrelated mechanism this block
+  // must not depend on. Constructing the merge op directly isolates exactly the ownership-scope question
+  // this block exists to answer.
+  const MERGE_A_OP_ID = `gc-ws-merge-op-${sfx}`;
+  const pMergeA = sessions.gateSemaphore.runExclusive(
+    1, { gateType: "merge", projectId: projId, sessionId: workerAId, taskId: taskAId, opId: MERGE_A_OP_ID, worktreePath: wtA.worktreePath },
+    async () => ({ passed: true }), "high",
+  );
+  pMergeA.catch(() => {}); // observed via gateQueueForManager below, not its own settle
+  const mergeAEntry = await waitUntil(() => sessions.gateQueueForManager(projId).queued.find((e) => e.gateType === "merge" && e.opId === MERGE_A_OP_ID));
+  check("(e) workerA's merge gate is ALSO queued, under the SAME sessionId (setup sanity)", !!mergeAEntry);
+
+  if (selfCheckAEntry && selfCheckBEntry && mergeAEntry) {
+    // (e-1) workerB cannot cancel workerA's own self-check — cross-session refusal.
+    const crossSessionAttempt = await sessions.cancelGateOp(workerBId, selfCheckAEntry.opId, { restrictToOwnerSessionId: workerBId });
+    check("(e-1) workerB is REFUSED cancelling workerA's own self-check", crossSessionAttempt.outcome === "refused");
+    check("(e-1) the refusal names the session-ownership reason", /different session/i.test(crossSessionAttempt.reason ?? ""));
+    check("(e-1) workerA's self-check is STILL queued — the cross-session attempt cancelled NOTHING",
+      sessions.gateQueueForManager(projId).queued.some((e) => e.opId === selfCheckAEntry.opId));
+
+    // (e-2) workerA cannot cancel its OWN merge gate, despite sharing its own sessionId — gateType scope.
+    const ownMergeAttempt = await sessions.cancelGateOp(workerAId, mergeAEntry.opId, { restrictToOwnerSessionId: workerAId });
+    check("(e-2) workerA is REFUSED cancelling its OWN merge gate (gateType scope, not just sessionId)", ownMergeAttempt.outcome === "refused");
+    check("(e-2) the refusal names the merge/deploy-gateType reason, not the session-ownership one",
+      /merge\/deploy gate/i.test(ownMergeAttempt.reason ?? ""));
+    check("(e-2) workerA's merge gate is STILL queued — refusing it never touched the semaphore",
+      sessions.gateQueueForManager(projId).queued.some((e) => e.opId === mergeAEntry.opId));
+
+    // (e-3) workerA CAN cancel its OWN self-check — the actual DoD-1 capability — WITH intent/reason
+    // (DoD-4) threaded into the settled op's own reason text.
+    const ownCancel = await sessions.cancelGateOp(workerAId, selfCheckAEntry.opId, {
+      restrictToOwnerSessionId: workerAId, intent: "hold-for-instructions", reason: "waiting on manager direction",
+    });
+    check("(e-3) workerA CAN cancel its own self-check", ownCancel.outcome === "cancelled" && ownCancel.phase === "queued" && ownCancel.gateType === "worker");
+    let selfCheckACaught;
+    try { await pSelfCheckA; } catch (e) { selfCheckACaught = e; }
+    check("(e-3) the cancelled self-check settles with the intent+reason folded into its reason text",
+      selfCheckACaught === undefined /* runWorkerGate never throws — see its own doc */);
+  } else {
+    console.log("SKIP  (e) worker-scope assertions — setup sanity check above already failed");
+  }
+
+  // Confirm (e-3)'s intent/reason actually reached the settled result's own `reason` (runWorkerGate never
+  // throws for a cancelled op — it resolves with {cancelled:true, reason}, see its own GateCancelledError
+  // catch), which is the SAME text a [loom:gate-cancelled] nudge would read out.
+  const selfCheckASettled = await pSelfCheckA;
+  check("(e-3) the settled self-check reports cancelled, never a real pass/fail", selfCheckASettled.settled === true && selfCheckASettled.ok === true && selfCheckASettled.value?.cancelled === true);
+  check("(e-3) intent + reason both landed in the settled op's own reason text",
+    /hold-for-instructions/.test(selfCheckASettled.value?.reason ?? "") && /waiting on manager direction/.test(selfCheckASettled.value?.reason ?? ""));
+  check("(e-3) the reason also names the caller as \"worker\", not \"manager\" (card a0d912f5's callerLabel)",
+    /cancelled by worker/i.test(selfCheckASettled.value?.reason ?? ""));
+
+  releaseHolder("go");
+  await pHolderRun.catch(() => {});
+  await pSelfCheckB.catch(() => {});
+  const mergeAResult = await pMergeA;
+  check("(e) workerA's merge, left uncancelled by the refused attempt, still completes normally (real fn ran, real result)", mergeAResult?.passed === true);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GateSemaphore serializes same-worktree gate ops regardless of cap/tier (never grouping worktree-less ops together), a manager's merge decision auto-supersedes a worker's queued self-check for free, gate_cancel is project-scoped + never frees a slot over an unverified kill, and — card b9e07a4a — the SAME tool now reaches a repo-guard-only wait: a QUEUED one cancels cleanly through confirmWorkerMerge's own merge_cancelled path, a foreign project's is refused, and a HOLDING one is refused for the same staged-residue reason a RUNNING merge gate is."
+  ? "\n✅ ALL PASS — GateSemaphore serializes same-worktree gate ops regardless of cap/tier (never grouping worktree-less ops together), a manager's merge decision auto-supersedes a worker's queued self-check for free, gate_cancel is project-scoped + never frees a slot over an unverified kill, and — card b9e07a4a — the SAME tool now reaches a repo-guard-only wait: a QUEUED one cancels cleanly through confirmWorkerMerge's own merge_cancelled path, a foreign project's is refused, and a HOLDING one is refused for the same staged-residue reason a RUNNING merge gate is. Card a0d912f5: a WORKER can cancel only its OWN run_gate self-check — never another worker's, and never a merge gate that happens to share its own sessionId — and intent/reason land verbatim in the settled op's own reason text."
   : `\n❌ ${failures} FAILURE(S).`);
 
 for (const db of dbs) try { db.close(); } catch { /* ignore */ }
