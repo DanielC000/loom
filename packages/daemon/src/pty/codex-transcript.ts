@@ -191,9 +191,12 @@ function extractContentText(content: unknown): string {
 
 function classifyRole(role: unknown): TranscriptTurn["role"] {
   if (role === "assistant") return "assistant";
-  // "developer" (the system/instruction-carrying role observed on this host) collapses into "user" —
-  // there is no fourth bucket on the harness-agnostic TranscriptTurn contract (see pty/adapter.ts's own
-  // doc on the deliberate 3-way union), and a developer-authored line is not something Codex itself typed.
+  // "developer" (the system/instruction-carrying role observed on this host) maps to "system" (card
+  // 100c523f — the fourth bucket pty/adapter.ts's TranscriptTurn.role union added for exactly this): a
+  // developer-authored line is not something a human typed, so folding it into "user" would silently
+  // mislabel it. Anything else observed on this role (there is no third value seen on this host) falls
+  // back to "user" rather than guessing at an unconfirmed shape.
+  if (role === "developer") return "system";
   return "user";
 }
 

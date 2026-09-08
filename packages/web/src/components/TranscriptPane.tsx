@@ -4,7 +4,7 @@ import { api, type TranscriptTurn } from "../lib/api";
 import { color, font } from "../theme";
 import { Badge, Button, Input } from "./ui";
 
-type RoleFilter = "all" | "user" | "assistant" | "tool_result";
+type RoleFilter = "all" | "user" | "assistant" | "tool_result" | "system";
 
 // Split `text` into plain runs + <mark>ed runs for every case-insensitive occurrence of `q`.
 function highlight(text: string, q: string): ReactNode {
@@ -89,6 +89,7 @@ export function TranscriptPane({ sessionId, runRef }: { sessionId: string; runRe
         <RoleChip label="user" current={role} onPick={setRole} />
         <RoleChip label="assistant" current={role} onPick={setRole} />
         <RoleChip label="tool_result" current={role} onPick={setRole} />
+        <RoleChip label="system" current={role} onPick={setRole} />
         {active && (
           <Badge tone={filtered.length ? "phosphor" : "muted"}>
             {filtered.length} / {turns?.length ?? 0}
@@ -119,9 +120,12 @@ function RoleChip({ label, current, onPick }: { label: RoleFilter; current: Role
   );
 }
 
-// user = green, assistant = blue, tool_result = muted (it's a tool's output, not a speaker).
-const ROLE_COLOR: Record<TranscriptTurn["role"], string> = { user: "#8c8", assistant: "#9ad", tool_result: color.textMuted };
-const ROLE_LABEL: Record<TranscriptTurn["role"], string> = { user: "user", assistant: "assistant", tool_result: "tool result" };
+// user = green, assistant = blue, tool_result = muted (it's a tool's output, not a speaker), system =
+// cyan/info (a system/instruction turn — e.g. codex's "developer" role, card 100c523f — is likewise not
+// a speaker, but it's live instruction content rather than inert tool output, so it gets the info tone
+// instead of tool_result's muted one).
+const ROLE_COLOR: Record<TranscriptTurn["role"], string> = { user: "#8c8", assistant: "#9ad", tool_result: color.textMuted, system: color.cyan };
+const ROLE_LABEL: Record<TranscriptTurn["role"], string> = { user: "user", assistant: "assistant", tool_result: "tool result", system: "system" };
 
 function Turn({ turn, q }: { turn: TranscriptTurn; q: string }) {
   return (

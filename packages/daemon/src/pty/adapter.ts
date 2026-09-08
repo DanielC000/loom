@@ -4,13 +4,16 @@ import type { ContextStats, RunUsageStats } from "../sessions/context.js";
  * The harness-AGNOSTIC transcript-turn shape every adapter's `readTranscript` returns (Code Review
  * MAJOR-2, card 2b099e48: DEFINED here, in the interface's own module, rather than inside adapter #1's
  * implementation module — `pty/claude-transcript.ts` re-exports it unchanged for its own callers). The
- * three-way `role` union is Claude Code's OWN JSONL role-encoding quirk (a tool_result physically arrives
- * as `type:"user"` and gets reclassified — see `claude-transcript.ts#classifyRole`'s own doc), not a
- * neutral turn taxonomy; a future adapter with a differently-shaped native turn set (e.g. distinct
- * reasoning/system/error turns) must collapse into these three (see card `100c523f`).
+ * `role` union is grown from claude adapter #1's own JSONL role-encoding quirks — `"tool_result"` because
+ * a tool result physically arrives as `type:"user"` and gets reclassified (see
+ * `claude-transcript.ts#classifyRole`'s own doc) — plus `"system"`, added for card `100c523f`'s Phase-1
+ * finding: Codex's rollout JSONL carries a genuine fourth turn kind (`role:"developer"`, its
+ * system/instruction-carrying role) that a 3-way union forced to silently mislabel as `"user"` — see
+ * `codex-transcript.ts#classifyRole`'s own doc. Still NOT a neutral taxonomy: a future adapter with yet
+ * another distinct native turn kind (e.g. a reasoning or error turn) must collapse into one of these four.
  */
 export interface TranscriptTurn {
-  role: "user" | "assistant" | "tool_result";
+  role: "user" | "assistant" | "tool_result" | "system";
   text: string;
 }
 

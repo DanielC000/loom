@@ -39,7 +39,11 @@ export type ProfileFieldResolution = "mine" | "shipped";
 // the per-column accent / soft WIP limit it didn't touch — the PUT replaces the entire array.
 export interface DesiredColumn { key: string; label: string; role?: ColumnRole; prevKey?: string; accentColor?: string; wipLimit?: number; }
 
-export interface TranscriptTurn { role: "user" | "assistant" | "tool_result"; text: string; }
+// MIRRORS the daemon's own TranscriptTurn (packages/daemon/src/pty/adapter.ts) — a hand-copy across the
+// package boundary, not an import, so this union must be updated by hand whenever that one changes
+// (card 100c523f added "system" for a harness whose native turns include a system/instruction role that
+// would otherwise silently mislabel as "user" — see that file's own doc).
+export interface TranscriptTurn { role: "user" | "assistant" | "tool_result" | "system"; text: string; }
 // One queued (not-yet-delivered) message. `id` is server-minted and stable, so the UI can
 // delete/edit/reorder a specific entry even as the FIFO head drains between polls. `source` is who
 // enqueued it ('human' composer vs 'system' programmatic) and `kind` classifies a system entry: 'warning'

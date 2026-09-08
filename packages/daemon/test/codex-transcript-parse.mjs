@@ -48,9 +48,17 @@ fs.writeFileSync(rolloutFile, rolloutLines.join("\n") + "\n");
 
 const turns = parseTranscriptFile(rolloutFile);
 check("extracts exactly 3 turns (developer+user response_items + the task_complete fallback; malformed/empty lines skipped)", turns.length === 3);
-check("developer role collapses to 'user' (no 4th bucket on the harness-agnostic TranscriptTurn contract)", turns[0]?.role === "user" && turns[0]?.text === "system instructions");
+check("developer role maps to 'system' (card 100c523f — the 4th bucket TranscriptTurn.role added so this doesn't silently mislabel as 'user')", turns[0]?.role === "system" && turns[0]?.text === "system instructions");
 check("user response_item extracted verbatim", turns[1]?.role === "user" && turns[1]?.text === "Reply with exactly the single word: pong.");
 check("task_complete.last_agent_message fallback surfaces as an assistant turn", turns[2]?.role === "assistant" && turns[2]?.text === "pong");
+
+// A response_item with a role that is neither "assistant" nor "developer" must fall back to "user" —
+// proves classifyRole's "system" mapping is specific to "developer" and not a blanket default, so the
+// PASS above (turns[0].role === "system") isn't vacuously true from a broken classifier that always
+// returns "system".
+const unknownRoleFile = path.join(dayDir, "rollout-2026-09-07T00-02-00-unknown-role.jsonl");
+fs.writeFileSync(unknownRoleFile, JSON.stringify({ type: "response_item", payload: { type: "message", id: "r4", role: "some_future_role", content: [{ type: "input_text", text: "unclassified" }] } }) + "\n");
+check("an unrecognized role falls back to 'user', not 'system' (negative control on the developer->system mapping)", parseTranscriptFile(unknownRoleFile)[0]?.role === "user");
 
 // A response_item with NO matching content-block type (e.g. a future item type this parser doesn't
 // recognize) must not crash and must not add a spurious blank turn.
