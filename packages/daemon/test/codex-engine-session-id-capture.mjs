@@ -26,13 +26,41 @@ import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
 
 let failures = 0;
-const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+// `diag` (card cc1b4328) is an OPTIONAL pre-computed string, printed ONLY when `cond` is false — it never
+// affects PASS/FAIL itself (existing call sites that omit it are byte-identical in behaviour). Callers
+// compute it EAGERLY (see mtimeDiagLine below), not lazily inside this function, so its correctness never
+// depends on the failure path actually being reached — a passing run computes and discards the exact same
+// value a failing one would have printed.
+const check = (label, cond, diag) => {
+  console.log(`${cond ? "PASS" : "FAIL"}  ${label}`);
+  if (!cond) {
+    failures++;
+    if (diag) console.log(`      ${diag}`);
+  }
+};
+
+/** Card cc1b4328: the residual ~4%-vs-~50% rate gap on `findConversationIdForSpawn`'s `mtimeMs < sinceMs -
+ *  MTIME_SKEW_TOLERANCE_MS` filter (see codex-transcript.ts's own doc on that constant) has never been
+ *  observed directly from a real failing gate — only reproduced in a standalone microbenchmark. This
+ *  captures the SAME pair `findConversationIdForSpawn` itself compares, so the next natural failure of a
+ *  scenario that depends on that scan (A, B below) prints exactly what it saw, no re-run required. Never
+ *  throws — a missing file/session (e.g. a DIFFERENT bug shape entirely) reports `null` rather than masking
+ *  the real failure with a diagnostic-code crash. */
+function safeMtimeMs(file) {
+  try { return fs.statSync(file).mtimeMs; } catch { return null; }
+}
+function mtimeDiagLine(label, mtimeMs, sinceMs) {
+  const delta = mtimeMs !== null && sinceMs !== null ? mtimeMs - sinceMs : null;
+  const deltaStr = delta === null ? "n/a" : `${delta >= 0 ? "+" : ""}${delta}ms`;
+  return `${label}: mtimeMs=${mtimeMs} sinceMs=${sinceMs} delta=${deltaStr} (MTIME_SKEW_TOLERANCE_MS=${MTIME_SKEW_TOLERANCE_MS}ms)`;
+}
 
 const tmpCodexHome = mkdtempManaged("loom-codex-engine-id-codexhome-");
 process.env.CODEX_HOME = tmpCodexHome;
 process.env.LOOM_HOME = mkdtempManaged("loom-codex-engine-id-loomhome-");
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { MTIME_SKEW_TOLERANCE_MS } = await import("../dist/pty/codex-transcript.js");
 
 const READY = "> Ask Codex to do anything";
 
@@ -98,12 +126,18 @@ function writeRollout(conversationId, cwd) {
   // for the wrong reason and not test what this scenario intends.)
   host.spawn({ sessionId, cwd, permission: {}, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role: "worker", harness: "codex" });
   const fakePty = host.fakeCodexPtys.get(sessionId);
-  writeRollout(conversationId, cwd); // lands AFTER spawn, BEFORE the ready marker is ever pushed below
+  // Captured EAGERLY, right where they're accurate — `sinceMs` is the exact `live.startedAt` value the
+  // real scan compares against, `mtimeMs` is the rollout file's real on-disk mtime once written; neither
+  // changes for the rest of this scenario, so both are correct whether this check ends up passing or not.
+  const sinceMsA = host.liveCodex.get(sessionId)?.startedAt ?? null;
+  const rolloutFileA = writeRollout(conversationId, cwd); // lands AFTER spawn, BEFORE the ready marker is ever pushed below
+  const mtimeMsA = safeMtimeMs(rolloutFileA);
   check("(A) no onEngineSessionId fired before the ready marker ever appears", engineSessionIdEvents.filter((e) => e.sessionId === sessionId).length === 0);
   fakePty.push(`codex TUI booted\n${READY}\n`);
   check("(A) onEngineSessionId fired exactly once, with the correct id, on the FIRST attempt (file already existed)",
     engineSessionIdEvents.filter((e) => e.sessionId === sessionId).length === 1 &&
-    engineSessionIdEvents.find((e) => e.sessionId === sessionId)?.engineId === conversationId);
+    engineSessionIdEvents.find((e) => e.sessionId === sessionId)?.engineId === conversationId,
+    mtimeDiagLine("(A)", mtimeMsA, sinceMsA));
   check("(A) previousEngineId is null (codex has no rotation concept)",
     engineSessionIdEvents.find((e) => e.sessionId === sessionId)?.previousEngineId === null);
 
@@ -124,16 +158,26 @@ function writeRollout(conversationId, cwd) {
 
   host.spawn({ sessionId, cwd, permission: {}, geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role: "worker", harness: "codex" });
   const fakePty = host.fakeCodexPtys.get(sessionId);
+  const sinceMsB = host.liveCodex.get(sessionId)?.startedAt ?? null; // same value the real scan compares against, on every attempt
   fakePty.push(`codex TUI booted\n${READY}\n`); // first attempt MISSES — no rollout file exists yet
   check("(B) the FIRST attempt misses (no rollout file yet) — no event fired synchronously", engineSessionIdEvents.filter((e) => e.sessionId === sessionId).length === 0);
 
-  writeRollout(conversationId, cwd); // the file lands AFTER the first miss, BEFORE the retry fires
-  await waitUntil(
-    () => engineSessionIdEvents.some((e) => e.sessionId === sessionId),
-    { label: "(B) the bounded retry captures the id once the rollout file lands" },
-  );
+  const rolloutFileB = writeRollout(conversationId, cwd); // the file lands AFTER the first miss, BEFORE the retry fires
+  const mtimeMsB = safeMtimeMs(rolloutFileB); // stable from here on — mtime never changes across retries, which is exactly why a rejection here is PERMANENT
+  try {
+    await waitUntil(
+      () => engineSessionIdEvents.some((e) => e.sessionId === sessionId),
+      { label: "(B) the bounded retry captures the id once the rollout file lands" },
+    );
+  } catch (err) {
+    // A permanent mtime-skew rejection (codex-transcript.ts's `mtimeMs < sinceMs - MTIME_SKEW_TOLERANCE_MS`)
+    // manifests HERE as a timeout, never as a normal check() FAIL — the retry ladder exhausts silently.
+    console.log(`      ${mtimeDiagLine("(B)", mtimeMsB, sinceMsB)}`);
+    throw err; // never swallowed — pass/fail is unchanged, this only adds a diagnostic line before the same crash
+  }
   check("(B) the retry's captured id is correct",
-    engineSessionIdEvents.find((e) => e.sessionId === sessionId)?.engineId === conversationId);
+    engineSessionIdEvents.find((e) => e.sessionId === sessionId)?.engineId === conversationId,
+    mtimeDiagLine("(B)", mtimeMsB, sinceMsB));
   check("(B) exactly one event fired for this session (the retry doesn't double-fire alongside a phantom first success)",
     engineSessionIdEvents.filter((e) => e.sessionId === sessionId).length === 1);
 }
