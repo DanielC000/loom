@@ -428,12 +428,16 @@ COMMON `.git` dir, not per-worktree — every worktree of the same repo shares O
 bare `pop` can return a sibling session's WIP into your tree, or a sibling's `pop` can silently
 swallow yours — regardless of which worktree pushed which entry.
 To temporarily revert a file to prove a check goes RED, then restore it: `git diff -- <file> >
-<SCRATCHPAD>/<name>.patch` (capture **outside the repo** — a stray `.patch` left inside it can land in
-a commit), `git checkout HEAD -- <file>`, run the check, then `git apply <SCRATCHPAD>/<name>.patch` to
-restore. These act only on your worktree's own index and files, never a shared ref, so they're safe
-under concurrent sibling workers. If foreign content ever appears in your tree anyway, don't discard
-it — it's another session's real work: copy it aside, `git checkout HEAD -- <file>` to clear your own
-tree, and report the incident up.
+"$LOOM_SCRATCH_DIR"/<name>.patch` (capture **outside the repo** — a stray `.patch` left inside it can
+land in a commit), `git checkout HEAD -- <file>`, run the check, then `git apply
+"$LOOM_SCRATCH_DIR"/<name>.patch` to restore. `$LOOM_SCRATCH_DIR` is your out-of-tree per-session
+scratch root, exported into your env for exactly this — quote it (it can contain spaces). **If it's
+unset or empty, your session predates that export** (an old session resumed across the upgrade): make
+your own directory outside the repo instead (e.g. `mkdir -p` a path under a platform temp dir) and use
+that in its place. These act only on your worktree's own index and files, never a shared ref, so they're
+safe under concurrent sibling workers. If foreign content ever appears in your tree anyway, don't
+discard it — it's another session's real work: copy it aside, `git checkout HEAD -- <file>` to clear
+your own tree, and report the incident up.
 
 **Windows worktree hazard — never junction a live tree before removing it.** On Windows, **never**
 create a directory junction or symlink (`mklink /J`, `New-Item -ItemType SymbolicLink`) from a live
