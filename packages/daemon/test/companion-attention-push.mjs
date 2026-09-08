@@ -489,16 +489,53 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
 }
 
 // --- 19. END-TO-END: a real platform_escalate event ticks through the watcher and pushes a turn whose
-//     body carries the escalation's title (not just an opaque "escalated to platform" line). ---
+//     body carries the escalation's title (not just an opaque "escalated to platform" line). The home
+//     project is this session's OWN bound project (e.projA) — a companion literally hosted on the
+//     Platform home board — so the taskId is genuinely resolvable via its own plain loom-tasks router;
+//     see 19b/19c below for the cross-project (card 91b9105e) resolvability cases. ---
 {
   const e = makeEnv({ configA: { alertClasses: ["escalation"] } });
   e.watcher.start(); e.watcher.stop();
-  fire(e, "platform_escalate", e.mgrA, { originProjectId: e.projA, severity: "high", platformProjectId: "pHome", title: "worker_merge gate hangs on a slow build" }, { taskId: "task-xyz" });
+  fire(e, "platform_escalate", e.mgrA, { originProjectId: e.projA, severity: "high", platformProjectId: e.projA, title: "worker_merge gate hangs on a slow build" }, { taskId: "task-xyz" });
   e.watcher.tick(new Date());
   check("platform_escalate e2e: enqueues ONE turn", e.enqueued.length === 1);
   check("platform_escalate e2e: framed [loom:alert]", e.enqueued[0].text.startsWith(ALERT_TAG));
   check("platform_escalate e2e: the pushed turn carries the escalation's title", e.enqueued[0].text.includes("worker_merge gate hangs on a slow build"));
-  check("platform_escalate e2e: the pushed turn carries the taskId for board_get", e.enqueued[0].text.includes("task:task-xyz"));
+  check("platform_escalate e2e: own-project home ⇒ the pushed turn carries the taskId for board_get", e.enqueued[0].text.includes("task:task-xyz"));
+  cleanupEnv(e);
+}
+
+// --- 19b. CARD 91b9105e — THE BUG: a platform_escalate event's taskId lives on the Platform HOME
+//     project, never the escalating manager's own origin project. A companion granted attention-push
+//     scoped to the ORIGIN project (projA) — matching what the per-event scope filter checks — but with
+//     NO way to read the home project (not its own bound project, no board-reach grant covering it)
+//     must NOT be handed an id it is structurally forbidden to resolve. This is the negative case the
+//     card's own DoD requires: a happy-path-only test would pass before this fix too and prove nothing —
+//     this one fails on unfixed code (pre-fix it asserted `.includes("task:task-unreachable")`). ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["escalation"] } });
+  const unreachableHome = `unreachable-home-${randomUUID()}`; // not e.projA, no board-reach grant for it
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "platform_escalate", e.mgrA, { originProjectId: e.projA, severity: "high", platformProjectId: unreachableHome, title: "unresolvable-id regression" }, { taskId: "task-unreachable" });
+  e.watcher.tick(new Date());
+  check("91b9105e negative: the escalation still fires (owner still learns about it)", e.enqueued.length === 1 && e.enqueued[0].text.includes("unresolvable-id regression"));
+  check("91b9105e negative: the pushed turn does NOT carry an id this recipient cannot resolve", !e.enqueued[0].text.includes("task:task-unreachable") && !e.enqueued[0].text.includes("task:"));
+  cleanupEnv(e);
+}
+
+// --- 19c. CARD 91b9105e — the board-reach escape hatch: a companion whose board-reach grant's OWN scope
+//     covers the Platform home project CAN resolve the id (option (2) from the card, exercised per-
+//     recipient rather than widened globally) — the taskId is carried again. Proves the check
+//     discriminates on the grant, not merely a hardcoded "always suppress" regression. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["escalation"] } });
+  const homeProjectId = `platform-home-${randomUUID()}`;
+  seedProject(e.db, homeProjectId, "Loom Platform");
+  e.db.upsertCompanionCapabilityGrant({ sessionId: e.sessId, capability: "board-reach", projectId: homeProjectId, mode: "read", config: {} });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "platform_escalate", e.mgrA, { originProjectId: e.projA, severity: "high", platformProjectId: homeProjectId, title: "board-reach-resolvable escalation" }, { taskId: "task-reachable" });
+  e.watcher.tick(new Date());
+  check("91b9105e board-reach: the pushed turn carries the taskId once the grant can resolve it", e.enqueued.length === 1 && e.enqueued[0].text.includes("task:task-reachable"));
   cleanupEnv(e);
 }
 

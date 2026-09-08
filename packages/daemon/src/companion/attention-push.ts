@@ -159,7 +159,7 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
 /** Render ONE terse chat line for a classified event: `{project}: <what> — <who>` (8-char id slices),
  *  bounded to ALERT_LINE_MAX_CHARS (CR fold-in [5] — an unbounded source field, e.g. question_ask's title,
  *  must never produce a pathologically long line). */
-export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass, projectName: string): string {
+export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass, projectName: string, taskIdResolvable = true): string {
   const detail = e.detail ?? {};
   const w8 = e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)}` : null;
   const m8 = `m:${e.managerSessionId.slice(0, 8)}`;
@@ -265,7 +265,14 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       // board_get(project:<platformProjectId>, taskId:<this>) the full escalation body; a truncated slice
       // can't resolve. Placed BEFORE the (unbounded) title so a long title's truncation (ALERT_LINE_MAX_CHARS)
       // trims the title's tail, never this id.
-      const taskRef = e.taskId ? ` (task:${e.taskId})` : "";
+      // Card 91b9105e: a `platform_escalate` taskId lives on the Platform HOME project, never the
+      // escalating manager's own origin project (see `canResolveEscalationTask`'s doc in tick()) — the
+      // per-tick scope filter above only checked the ORIGIN project against this grant, saying nothing
+      // about whether THIS recipient can actually resolve the home-project id. `taskIdResolvable` (computed
+      // by the caller BEFORE this render) is false exactly when neither this session's own project nor its
+      // `board-reach` grant can reach the home project — in that case the id is dropped from the line
+      // rather than naming an id this recipient is structurally forbidden to resolve.
+      const taskRef = e.taskId && taskIdResolvable ? ` (task:${e.taskId})` : "";
       // Card e9688b1b DoD-3: when the title itself was cut, say so explicitly (same discipline applied to
       // question_asked above) — the bare "…" a plain truncateText() leaves behind reads exactly like a
       // genuinely short title, not a cut one.
@@ -292,7 +299,7 @@ export interface AttentionPushWatcherDeps {
 }
 
 type EventWithSeq = OrchestrationEvent & { seq: number };
-type Qualifying = { e: EventWithSeq; cls: AttentionAlertClass; projectName: string };
+type Qualifying = { e: EventWithSeq; cls: AttentionAlertClass; projectName: string; taskIdResolvable: boolean };
 
 export class AttentionPushWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -383,7 +390,11 @@ export class AttentionPushWatcher {
         continue;
       }
       const projectName = db.getProject(projectId)?.name ?? "?";
-      qualifying.push({ e, cls, projectName });
+      // Card 91b9105e: `cls === "escalation"` is ONLY ever `platform_escalate` (see classify()'s 1:1
+      // mapping) — its taskId lives on the Platform HOME project, not the origin project just scoped-
+      // checked above, so a separate resolvability check is needed before the id is safe to render.
+      const taskIdResolvable = cls === "escalation" ? this.canResolveEscalationTask(session.projectId, e.detail) : true;
+      qualifying.push({ e, cls, projectName, taskIdResolvable });
     }
 
     if (digestMinutes > 0) this.tickDigest(now, qualifying, digestMinutes, scanned);
@@ -401,6 +412,27 @@ export class AttentionPushWatcher {
 
   stop(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
+  }
+
+  /**
+   * Card 91b9105e: can THIS recipient actually resolve a `platform_escalate` event's `taskId`? That id
+   * always lives on the Platform HOME project (`detail.platformProjectId`, stamped by
+   * `SessionService.platformEscalate` — never the escalating manager's own origin project), so the
+   * per-event origin-project scope check in `tick()` (which gates on `attention-push`'s OWN grant) says
+   * nothing about whether this session can read a card on that DIFFERENT, home project. Two read paths
+   * can reach it: (1) this session's own plain `loom-tasks` board — `mcp/tasks.ts`'s `resolveProjectTaskId`
+   * resolves ONLY against the session's own bound `projectId` (strict single-project equality, never a
+   * set), so that path works only when this companion IS bound to the Platform home itself; or (2) a
+   * `board-reach` grant (companion/capabilities.ts) whose OWN scope includes the Platform home —
+   * `board_get` performs the identical `ctx.scope.projectIds.has(project)` check this mirrors. Returns
+   * `true` (never withholds) when the event carries no home-project id to check in the first place.
+   */
+  private canResolveEscalationTask(sessionProjectId: string, detail: Record<string, unknown> | undefined): boolean {
+    const platformProjectId = typeof detail?.platformProjectId === "string" ? detail.platformProjectId : undefined;
+    if (!platformProjectId) return true;
+    if (sessionProjectId === platformProjectId) return true;
+    const boardScope = resolveCompanionGrant(this.deps.db, this.deps.sessionId, "board-reach");
+    return !!boardScope && boardScope.projectIds.has(platformProjectId);
   }
 
   // ---- internals -------------------------------------------------------------------------------
@@ -468,7 +500,7 @@ export class AttentionPushWatcher {
       // inAppHomeRoute's doc) so this proactive push still lands somewhere instead of chat_reply resolving
       // `no-target`.
       const home = this.deps.db.getCompanionHome(this.deps.sessionId) ?? inAppHomeRoute(this.deps.sessionId);
-      const lines = qualifying.map(({ e, cls, projectName }) => alertLine(e, cls, projectName));
+      const lines = qualifying.map(({ e, cls, projectName, taskIdResolvable }) => alertLine(e, cls, projectName, taskIdResolvable));
       // proactive:true (proactive event-line producer) — a daemon-driven alert push, tagged for the web
       // chat's amber event line.
       this.deps.pty.enqueueStdin(this.deps.sessionId, framedDigest(lines), "system", undefined, home, "agent", undefined, undefined, true);
@@ -479,10 +511,10 @@ export class AttentionPushWatcher {
     } else if (qualifying.length > 0) {
       // Same in-app fallback as the digest branch above.
       const home = this.deps.db.getCompanionHome(this.deps.sessionId) ?? inAppHomeRoute(this.deps.sessionId);
-      for (const { e, cls, projectName } of qualifying) {
+      for (const { e, cls, projectName, taskIdResolvable } of qualifying) {
         // kind:"agent" — a daemon-driven push turn, must land as its own turn (never mashed with a sibling).
         // proactive:true — see the digest branch above.
-        this.deps.pty.enqueueStdin(this.deps.sessionId, framedAlert(alertLine(e, cls, projectName)), "system", undefined, home, "agent", undefined, undefined, true);
+        this.deps.pty.enqueueStdin(this.deps.sessionId, framedAlert(alertLine(e, cls, projectName, taskIdResolvable)), "system", undefined, home, "agent", undefined, undefined, true);
         this.deferredSinceLastPush = false;
         this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e, cls) });
       }
@@ -517,7 +549,7 @@ export class AttentionPushWatcher {
     // No home configured ⇒ fall back to the session's implicit in-app route — see tickImmediate's digest
     // branch above.
     const home = this.deps.db.getCompanionHome(this.deps.sessionId) ?? inAppHomeRoute(this.deps.sessionId);
-    const lines = qualifying.map(({ e, cls, projectName }) => alertLine(e, cls, projectName));
+    const lines = qualifying.map(({ e, cls, projectName, taskIdResolvable }) => alertLine(e, cls, projectName, taskIdResolvable));
     // proactive:true — see tickImmediate's digest branch above.
     this.deps.pty.enqueueStdin(this.deps.sessionId, framedDigest(lines), "system", undefined, home, "agent", undefined, undefined, true);
     this.lastDigestFlushAt = now.getTime();
