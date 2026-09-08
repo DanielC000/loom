@@ -10,6 +10,8 @@ import { resolveRepoKeyOrError } from "../projects/repos.js";
 import { checkTaskRepoKeyRebind } from "../projects/rebind.js";
 import { findSuspectedDuplicate } from "./duplicateDetection.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
+import { checkTitleHtmlEntities } from "../tasks/title-guard.js";
+export { checkTitleHtmlEntities } from "../tasks/title-guard.js";
 
 // Task-tool business logic. EVERY function takes the projectId resolved SERVER-SIDE from the
 // session id — the agent never passes a projectId, so cross-project access is impossible.
@@ -820,69 +822,11 @@ export function getProjectTaskRequest(
   return taskRequestGetItem(q, db);
 }
 
-/**
- * Card 267fd215 — a SOLO `worker_merge_confirm` uses a card's title VERBATIM as the squash commit
- * subject, and that lands in mainline history under this repo's do-not-rewrite-published-history rule.
- * A title carrying an HTML entity (`&lt;id&gt;` typed where the author meant the literal `<id>`) has
- * already shipped this way once (commit `fe2c1c6b`, unrewritable). Two independent origination events
- * ~7 weeks apart with no shared upstream escaping surface found (see the card's own sweep) mean an
- * author-side fix can't be scoped — so this guard rejects the SHAPE at the write boundary regardless of
- * origin, matching MIN_SUBSTANTIAL_BODY_CHARS-style guards above: whole-call reject, explicit override.
- *
- * Deliberately checks ONLY named XML/HTML entities that could plausibly be an ACCIDENTAL escape of plain
- * text (`<`, `>`, `&`, `"`) plus numeric entities — decimal (`&#60;`) or hex (`&#x3C;`), a real serializer
- * output — never a broader "any `&...;`-shaped substring", so an ordinary title using `&` as a bare
- * conjunction (never itself an entity) is untouched.
- *
- * ⚠️ FALSE POSITIVE, BY DESIGN, NOT A BUG: a title genuinely ABOUT escaped HTML — e.g. this board's own
- * `Release list shows literal &quot;Sub: &amp;mdash;&quot; when subs missing` — really does contain these
- * entities on purpose, and decoding them would destroy the exact point of the title (it's reporting that
- * literal entity text is rendering instead of the intended character). There is no cheap way to tell that
- * case apart from an accidental artifact by pattern alone, so this guard does NOT try to guess intent —
- * it rejects both by default and requires the caller to say which one it is via `allowHtmlEntities`. A
- * caller who means it types the flag once; a caller who typed the entity by accident (the actual damage
- * class here) gets the decoded suggestion instead of a permanent mainline artifact.
- */
-const TITLE_HTML_ENTITY_PATTERN = /&(lt|gt|amp|quot|#(?:\d+|[xX][0-9a-fA-F]+));/;
-const NAMED_HTML_ENTITY_DECODE: Record<string, string> = { lt: "<", gt: ">", amp: "&", quot: '"' };
-/** The highest valid Unicode code point — {@link decodeKnownHtmlEntities}'s bound against a numeric
- *  entity whose value `String.fromCodePoint` would throw on (card 267fd215 code review: `Number.isFinite`
- *  alone let `&#999999999;` through and threw a RangeError instead of falling back to `match`, turning a
- *  guard whose entire job is a clean `{error}` into an unhandled exception). */
-const MAX_UNICODE_CODE_POINT = 0x10ffff;
-
-/** Best-effort decode of the entities {@link TITLE_HTML_ENTITY_PATTERN} recognizes, for the "did you mean"
- *  suggestion in {@link checkTitleHtmlEntities}'s error — never used to silently rewrite a stored title. */
-function decodeKnownHtmlEntities(s: string): string {
-  return s.replace(new RegExp(TITLE_HTML_ENTITY_PATTERN.source, "g"), (match, name: string) => {
-    if (name.startsWith("#")) {
-      const numeric = name.slice(1);
-      const isHex = numeric[0] === "x" || numeric[0] === "X";
-      const code = isHex ? parseInt(numeric.slice(1), 16) : Number(numeric);
-      return Number.isInteger(code) && code >= 0 && code <= MAX_UNICODE_CODE_POINT ? String.fromCodePoint(code) : match;
-    }
-    return NAMED_HTML_ENTITY_DECODE[name] ?? match;
-  });
-}
-
-/**
- * Rejects (returns `{error}`) a title carrying an HTML entity unless `allow` is explicitly true. See the
- * doc above this pattern for why a false positive on a title genuinely ABOUT escaping is accepted rather
- * than guessed around, and why `allow` exists. Returns `null` (no rejection) when the title is clean OR
- * `allow` was passed.
- */
-export function checkTitleHtmlEntities(title: string, allow: boolean | undefined): { error: string } | null {
-  if (allow) return null;
-  const match = title.match(TITLE_HTML_ENTITY_PATTERN);
-  if (!match) return null;
-  const decoded = decodeKnownHtmlEntities(title);
-  return {
-    error: `title contains an HTML entity ("${match[0]}") — a SOLO merge uses the card title VERBATIM as ` +
-      `the squash commit subject, so this would become a PERMANENT, unrewritable mainline artifact ` +
-      `(this has already happened once: commit fe2c1c6b). Did you mean: "${decoded}"? If this title is ` +
-      `genuinely ABOUT escaped HTML — not an accidental artifact — retry with allowHtmlEntities:true.`,
-  };
-}
+// checkTitleHtmlEntities (card 267fd215) now lives in ../tasks/title-guard.js — a leaf module reused by
+// the write boundary here, sessions/service.ts's pre-gate merge check, and git/worktrees.ts's
+// squash-subject check (card f324e8fa); it can't live here any more because worktrees.ts's own
+// getTaskMergedInfo is imported INTO this file above, and it needs this predicate too, which would cycle.
+// See that module for the full doc. Imported above; re-exported here for existing external consumers.
 
 export function createProjectTask(
   db: Db, projectId: string,
