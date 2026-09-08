@@ -27,9 +27,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       field's known blind spot (0 does not mean harmless — never-matched and matched-then-evicted both
 //       read as 0). Read-only; its `limit` clamp defaults to DEFAULT_MEMORY_SEARCH_CAP and never exceeds
 //       MAX_MEMORY_SEARCH_CAP.
-//   (4) TRUST GATE — all FOUR tools (the three above plus project_memory_search) are PRESENT on
+//   (4) TRUST GATE — platform_config_get, agent_prompt_search, and project_memory_search are PRESENT on
 //       loom-platform but ABSENT from every agent-facing surface: loom-orchestration (manager AND
-//       worker), loom-setup, and the in-project loom-tasks.
+//       worker), loom-setup, and the in-project loom-tasks. `events_search` is the deliberate exception
+//       (card 60c1fff8): it is now ALSO registered on loom-orchestration's MANAGER surface (reusing this
+//       SAME query/validation code via mcp/eventsSearch.js — see events-search-manager-surface.mjs for
+//       that surface's own dedicated proof), so it is asserted present on both platform AND manager, but
+//       still absent from setup/worker/in-project.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-forensics-reads.mjs
 import fs from "node:fs";
@@ -410,11 +414,16 @@ try {
   const workerTools = await listTools(orchRouter.buildServer("W", "worker"));
   const taskTools = await listTools(new TaskMcpRouter(db, wakes).buildServer("pTarget", "M"));
 
-  for (const t of ["platform_config_get", "events_search", "agent_prompt_search", "project_memory_search"]) {
+  for (const t of ["platform_config_get", "agent_prompt_search", "project_memory_search"]) {
     check(`(4) ${t} IS on loom-platform and ABSENT from setup/manager/worker/in-project`,
       platformTools.includes(t) && !setupTools.includes(t) && !mgrTools.includes(t) && !workerTools.includes(t) && !taskTools.includes(t));
   }
-  // Negative control: prove the absence assertion has teeth (the gate would catch a leak).
+  // events_search (card 60c1fff8): the DELIBERATE exception — present on BOTH platform and manager, still
+  // absent from setup/worker/in-project. See events-search-manager-surface.mjs for the manager surface's
+  // own dedicated cross-project + unknown-kind proof; this check only asserts REGISTRATION placement.
+  check("(4) events_search IS on loom-platform AND on the manager surface, still ABSENT from setup/worker/in-project",
+    platformTools.includes("events_search") && mgrTools.includes("events_search") && !setupTools.includes("events_search") && !workerTools.includes("events_search") && !taskTools.includes("events_search"));
+  // Negative control: prove the absence assertions have teeth (the gate would catch a leak).
   check("(4) negative control: a tool that DOES exist on orchestration is detected (proves teeth)",
     mgrTools.includes("worker_spawn"));
 } finally {

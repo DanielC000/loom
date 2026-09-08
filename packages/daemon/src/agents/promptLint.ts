@@ -78,7 +78,7 @@ export const RUN_TOOLS: readonly string[] = ["submit_result"];
 export const ORCH_MANAGER_TOOLS: readonly string[] = [
   "agent_assign_profile", "agent_delete", "agent_get", "agent_list", "agent_update",
   "board_column_create", "board_column_delete", "board_column_rename", "daemon_restart", "end_me",
-  "escalation_status", "gate_cancel", "gate_history", "gate_intent_declare", "gate_intent_withdraw",
+  "escalation_status", "events_search", "gate_cancel", "gate_history", "gate_intent_declare", "gate_intent_withdraw",
   "gate_queue", "gate_status", "idle_report", "inbox_pull", "merge_batch", "my_context",
   "platform_escalate", "profile_delete", "project_archive", "project_update", "question_ask",
   "question_cancel", "question_pull", "question_resolve", "recycle_me", "requests_list",

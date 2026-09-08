@@ -5,9 +5,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry, MsBounds, RotationMarker } from "@loom/shared";
-import { MEMORY_CONFIG_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, resolveConfig, ALL_ORCHESTRATION_EVENT_KINDS } from "@loom/shared";
+import { MEMORY_CONFIG_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
+import { eventsSearchQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
+export { DEFAULT_EVENTS_SEARCH_CAP };
 import type { SessionService } from "../sessions/service.js";
 import type { PtyHost } from "../pty/host.js";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, cancelQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
@@ -38,20 +40,6 @@ import { skillListData, skillWriteData, skillWriteInputSchema, skillEditData, sk
 import { searchAgentPrompts, DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP } from "./promptSearch.js";
 import { searchProjectMemory, DEFAULT_MEMORY_SEARCH_CAP, MAX_MEMORY_SEARCH_CAP } from "./projectMemorySearch.js";
 
-/** Backstop cap on a default `events_search` read (limit omitted) — same posture as
- *  DEFAULT_PROMPT_SEARCH_CAP/DEFAULT_AGENT_SUMMARY_CAP: bounds the payload of an unscoped forensics
- *  query, while an explicit `limit` can still page up to MAX_EVENTS_SEARCH_PAGE. */
-export const DEFAULT_EVENTS_SEARCH_CAP = 50;
-
-/** Card 39f79291: `events_search`'s `kind` filter used to accept ANY string and silently match zero rows
- *  on a typo/unknown value — a false-negative generator on a forensics surface (a caller investigating
- *  precisely BECAUSE they don't know what happened reads a silent `[]` as "this never occurred"). Both
- *  the validation Set and the description string below are derived from the SAME canonical
- *  `ALL_ORCHESTRATION_EVENT_KINDS` (itself compiler-checked against the `OrchestrationEventKind` union in
- *  shared/types.ts), so an unrecognized-kind rejection and the tool's own advertised valid-kinds list can
- *  never drift apart from each other or from the real type. */
-const EVENT_SEARCH_VALID_KINDS_SET = new Set<string>(ALL_ORCHESTRATION_EVENT_KINDS);
-const EVENT_SEARCH_VALID_KINDS_LIST = [...ALL_ORCHESTRATION_EVENT_KINDS].sort().join(", ");
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { resolvePlatformLeadResumeDocPath } from "../sessions/platform-lead-prompt.js";
@@ -1440,25 +1428,13 @@ export class PlatformMcpRouter {
         }),
       },
       async ({ kind, projectId, sessionId, taskId, limit, offset }) => {
-        if (kind && kind.length > 0) {
-          const unrecognized = kind.filter((k) => !EVENT_SEARCH_VALID_KINDS_SET.has(k));
-          if (unrecognized.length > 0) {
-            return ok({ error: `unrecognized kind(s): ${unrecognized.join(", ")} — valid kinds are: ${EVENT_SEARCH_VALID_KINDS_LIST}` });
-          }
-        }
         let resolvedProjectId: string | null = null;
         if (projectId !== undefined) {
           const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
           if ("error" in project) return ok(project);
           resolvedProjectId = project.id;
         }
-        const off = offset ?? 0;
-        const page = db.listOrchestrationEventsBounded({
-          kind, projectId: resolvedProjectId, sessionId: sessionId ?? null, taskId: taskId ?? null,
-          limit: limit ?? DEFAULT_EVENTS_SEARCH_CAP, offset: off,
-        });
-        const nextOffset = off + page.items.length < page.total ? off + page.items.length : null;
-        return ok({ events: page.items, total: page.total, returned: page.items.length, offset: off, nextOffset });
+        return ok(eventsSearchQuery(db, { kind, projectId: resolvedProjectId, sessionId, taskId, limit, offset }));
       },
     );
 

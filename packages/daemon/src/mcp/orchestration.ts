@@ -10,7 +10,8 @@ import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
 import type { Db } from "../db.js";
-import { MAX_GATE_HISTORY_PAGE } from "../db.js";
+import { MAX_GATE_HISTORY_PAGE, MAX_EVENTS_SEARCH_PAGE } from "../db.js";
+import { eventsSearchQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
 import type { PtyHost } from "../pty/host.js";
 import { possibleDuplicateRootLabel } from "../pty/host.js";
 import type { ToolAttributionResult } from "../pty/tool-attribution.js";
@@ -4778,6 +4779,57 @@ export class OrchestrationMcpRouter {
         const page = db.listGateEvents({ projectId, limit: limit ?? 100, offset: off });
         const nextOffset = off + page.items.length < page.total ? off + page.items.length : null;
         return ok({ items: page.items, total: page.total, limit: page.limit, offset: off, nextOffset });
+      },
+    );
+
+    // events_search (card 60c1fff8): the general, kind-unrestricted sibling of `gate_history` just above —
+    // that tool only ever surfaces settled GATE runs; a manager investigating a fleet-down incident may
+    // need kill_switch/recycle_begin/merge_rejected/platform_escalate/etc, none of which `gate_history`
+    // can return no matter how it's queried. The real registration already existed on the `LOOM_DEV`-gated
+    // Platform surface (`mcp/platform.ts`) — this is the SAME query path (`eventsSearchQuery`, shared via
+    // `./eventsSearch.js`), including the SAME card-39f79291 unknown-`kind` rejection, never a hand-copied
+    // predicate that could drift from it.
+    // PROJECT-SCOPED SERVER-SIDE, NOT BY ARGUMENT — identical posture to `gate_history` above: there is no
+    // `projectId` parameter, the project is always the CALLER's own, resolved from this session. A manager
+    // cannot request another project's rows through any input this tool accepts, and a foreign-project row
+    // is never returned at all (not merely redacted).
+    server.registerTool(
+      "events_search",
+      {
+        description:
+          "A BOUNDED, newest-first page of orchestration_events for YOUR OWN project ONLY — the general " +
+          "sibling of `gate_history` (which only ever returns settled GATE runs), for forensics that " +
+          "aren't limited to gate-run kinds (a fleet-down incident may need kill_switch/recycle_begin/" +
+          "merge_rejected/platform_escalate/etc, not just worker_gate/build_gate/deploy). `kind` optionally " +
+          "narrows to specific event kinds — omitted, returns every kind. An UNRECOGNIZED kind is an " +
+          "EXPLICIT error (never a silent `[]`) naming which value(s) were bad, since a caller reaching for " +
+          "this tool is usually investigating precisely BECAUSE they don't know what happened — a wrongly-" +
+          "empty result would misread as \"this never occurred\" rather than \"you asked a question this " +
+          "tool cannot answer\". Valid kind values: " + EVENT_SEARCH_VALID_KINDS_LIST + ". PROJECT-SCOPED " +
+          "SERVER-SIDE, NOT BY ARGUMENT: there is no `projectId` parameter — the project is always the " +
+          "CALLER's own, resolved from this session, exactly like `gate_queue`/`gate_history`. `sessionId` " +
+          "(input filter — the DAEMON's own Loom-namespaced session id, e.g. `loomSessionId` from " +
+          "`my_context`, or the bare `id` `list_all_sessions` returns, never the engine's own id) matches " +
+          "an event where that session is EITHER the manager or the worker. `taskId` matches the event's " +
+          "linked task. Each event returns {id, ts, kind, detail, taskId, taskTitle, loomSessionId, " +
+          "projectId, projectName, agentName, branch} — `detail` is the raw kind-specific payload (already-" +
+          "durable operational metadata, not a dump of session transcript content). limit/offset paginate " +
+          "(default " + DEFAULT_EVENTS_SEARCH_CAP + " when omitted, clamped to " + MAX_EVENTS_SEARCH_PAGE +
+          "); the result is ALWAYS the {events, total, returned, offset, nextOffset} envelope (never a bare " +
+          "array) since this read is inherently a forensics page, not a small enumerable set — page " +
+          "deterministically via offset:nextOffset until it is null, same contract as `gate_history`.",
+        inputSchema: strictShape({
+          kind: z.array(z.string()).optional(),
+          sessionId: z.string().optional(),
+          taskId: z.string().optional(),
+          limit: z.number().int().positive().optional(),
+          offset: z.number().int().nonnegative().optional(),
+        }),
+      },
+      async ({ kind, sessionId, taskId, limit, offset }) => {
+        const projectId = db.getSession(managerSessionId)?.projectId;
+        if (!projectId) return ok({ error: "no project for this session" });
+        return ok(eventsSearchQuery(db, { kind, projectId, sessionId, taskId, limit, offset }));
       },
     );
 
