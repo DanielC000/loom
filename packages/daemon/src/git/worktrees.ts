@@ -11,6 +11,7 @@ import { withCanonicalIndexLock } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { isDoctrineArtifactPath, isDoctrineSkillsPath } from "../pty/claude-doctrine.js";
 import { isCodexDoctrinePath } from "../pty/codex-doctrine.js";
+import { checkTitleHtmlEntities } from "../tasks/title-guard.js";
 
 export interface WorktreeInfo {
   worktreePath: string;
@@ -6486,6 +6487,39 @@ async function mergeBranchLocked(
     const taskSubject = taskTitle ? taskTitle.trim().split(/\r?\n/)[0]!.trim() : undefined;
     const rawSubject = taskSubject || (await deriveTasklessSubject(repoPath, branch, deps)) || branch;
     const subject = toConventionalSubject(rawSubject);
+    // TITLE/SUBJECT ENTITY BACKSTOP (card f324e8fa Code Review follow-up) — the AUTHORITATIVE enforcement
+    // point, not merely a second copy of the pre-gate check `confirmWorkerMerge` (sessions/service.ts)
+    // already runs. `subject` here is the exact string `git commit -m` below is about to use, at the
+    // moment it is well and truly fixed — this sits AFTER the staged-diff noop check above (a genuine
+    // ALREADY_MERGED/STAGE_EMPTY_RETRY re-confirm returns before `subject` is ever built, via the `!staged`
+    // branch above, so it can never trip this) and INSIDE the canonical index lock, downstream of every
+    // subject source (`taskSubject`, the taskless `deriveTasklessSubject` fallback, and the branch-name
+    // last resort) — so it closes the taskless-merge gap too, as a side effect, at no extra cost.
+    //
+    // WHY THE PRE-GATE CHECK ISN'T ENOUGH ON ITS OWN: it reads the task's title once, before the gate
+    // runs — a SNAPSHOT. The title can be rewritten out from under it before this call ever lands: the
+    // human REST edit route (`POST /api/tasks/:id`, gateway/server.ts) writes `title` directly, with NO
+    // entity check at all (see checkTitleHtmlEntities's own scope — it guards createProjectTaskChecked/
+    // updateProjectTask, not that route). A gate can run for minutes; that's a real window. This check is
+    // what makes the invariant actually hold regardless of when/how the title last changed — the pre-gate
+    // check stays too, because refusing before a gate lane is spent is still strictly better when it
+    // catches the common case (see that check's own doc for why it isn't redundant to remove).
+    //
+    // Reuses the SAME predicate every other call site does ({@link checkTitleHtmlEntities},
+    // tasks/title-guard.ts) — never a second pattern. Unconditional (`allow:false`): this path has no
+    // caller-supplied override to honor, for the same reason the pre-gate check doesn't (see that check's
+    // own doc — nothing is persisted for either site to read).
+    const subjectGuard = checkTitleHtmlEntities(subject, false);
+    if (subjectGuard) {
+      const cleanupIssue = await resetOrSkip("title-html-entity cleanup");
+      return {
+        ok: false,
+        reason: `squash subject contains an HTML entity ("${subjectGuard.match}") — would become a PERMANENT, ` +
+          `unrewritable mainline commit subject (this has already happened once: commit fe2c1c6b). Retitle the ` +
+          `card (tasks_update) to a clean subject, then re-confirm. Squash phase aborted before landing; ` +
+          `canonical repo restored to its pre-merge state.${cleanupIssue ? ` (${cleanupIssue})` : ""}`,
+      };
+    }
     // The worker-commit-log body (card 8b7b81e0 DoD-3) needs the branch's OWN pre-landing commit range —
     // merge-base(HEAD, branch)..branch, the worker's real authored history — computed HERE, before the
     // squash lands. Deliberately UNRELATED to the PathSet/Base stamp below, which captures the STAGED
