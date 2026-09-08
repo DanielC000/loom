@@ -1780,9 +1780,18 @@ function filteredWorkLines(porcelain: string): string[] {
   return lines;
 }
 
-/** De-quote a porcelain v1 line's path (status + space prefix stripped, `"`-wrapped special-char paths unwrapped). */
+/**
+ * De-quote a porcelain v1 line's path (status + space prefix stripped, `"`-wrapped special-char paths
+ * unwrapped). A RENAME/COPY line's path field is `old -> new` (git quotes each half independently, e.g.
+ * `"old file.txt" -> "new file.txt"`) — this returns the NEW path (the one that matters going forward: a
+ * later content edit to the renamed file is diffed/reported against `new`, not the stale `old`, and
+ * naming `old -> new` as one "file" in an uncommittedWorkFiles refusal was never a real committable path
+ * anyway).
+ */
 function porcelainLinePath(line: string): string {
   let p = line.slice(3);
+  const arrow = p.indexOf(" -> ");
+  if (arrow !== -1) p = p.slice(arrow + 4); // rename/copy: take the NEW path
   if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1);
   return p;
 }

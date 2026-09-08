@@ -23,6 +23,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       already-tracked file: `gateStampsDiffer` is TRUE. This is the load-bearing assertion — the fix
 //       makes the detector LESS sensitive to noise, and this proves it did not also make it blind to a
 //       genuine change.
+//   (D) POSITIVE CONTROL, rename case — reviewer nit on this fix's own diff-scoping: porcelain v1 renders
+//       a rename/copy as `old -> new`, so scoping the hash's `diff HEAD` to the porcelain-derived path
+//       could easily extract that WHOLE `old -> new` string as one bogus pathspec (matching nothing) and
+//       go blind to a REAL content edit made to the renamed file afterward. A `git mv`, then a content
+//       edit to the renamed file, must still flip `gateStampsDiffer`.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/gate-stamp-noise-filter.mjs
 import fs from "node:fs";
@@ -60,6 +65,7 @@ function addNoise(dir) {
 
 const repoA = path.join(os.tmpdir(), `loom-gsnf-a-${Date.now()}-${process.pid}`);
 const repoB = path.join(os.tmpdir(), `loom-gsnf-b-${Date.now()}-${process.pid}`);
+const repoD = path.join(os.tmpdir(), `loom-gsnf-d-${Date.now()}-${process.pid}`);
 
 try {
   // ── (A) already-dirty tree + daemon/.claude noise ─────────────────────────────────────────────────
@@ -90,6 +96,39 @@ try {
   const aStamp3 = await computeWorktreeGateStamp(repoA);
   check("(C) [positive control] a genuine further tracked edit DOES flip gateStampsDiffer",
     gateStampsDiffer(aStamp2, aStamp3) === true);
+
+  // ── (D) POSITIVE CONTROL: a FULLY-STAGED rename, then a FURTHER staged content edit small enough to
+  //     stay above git's rename-similarity threshold — the porcelain STATUS LINE reads byte-identical both
+  //     times ("R  old -> new", nothing left unstaged; asserted below, not assumed), so only the SCOPED
+  //     `diff HEAD` can tell the two states apart. This is the exact case a bogus, unsplit `old -> new`
+  //     pathspec goes blind to (verified separately: `git diff HEAD -- "a -> b"` returns empty, silently,
+  //     no error) — proving the fix must extract the NEW path from a rename line, not merely that doing so
+  //     doesn't crash. (An earlier version of this case used a large edit that dropped git's own rename
+  //     detection below its similarity threshold — the porcelain line itself then changed shape (`R`
+  //     became `D`+`A`), which discriminates for an unrelated reason and would pass even pre-fix.)
+  try {
+    initRepo(repoD);
+    const base = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n") + "\n";
+    fs.writeFileSync(path.join(repoD, "renamed source.txt"), base);
+    execSync(`git add -A && git commit -q -m "add renamed source"`, { cwd: repoD });
+    execSync(`git mv "renamed source.txt" "renamed target.txt"`, { cwd: repoD });
+    execSync(`git add -A`, { cwd: repoD }); // fully stage the rename, content still v1
+    const dPorcelain1 = execSync(`git status --porcelain`, { cwd: repoD }).toString();
+    const dStamp1 = await computeWorktreeGateStamp(repoD);
+    check("(D) fully-staged rename registers as dirty", dStamp1.dirty === true && dStamp1.dirtyHash !== null);
+
+    fs.writeFileSync(path.join(repoD, "renamed target.txt"), base + "one more small line\n");
+    execSync(`git add -A`, { cwd: repoD }); // re-stage: small edit, still detected as the same rename
+    const dPorcelain2 = execSync(`git status --porcelain`, { cwd: repoD }).toString();
+    check("(D) [precondition] the porcelain status line is byte-identical before/after the content edit "
+      + "— confirms this case exercises the diff, not the status text", dPorcelain1 === dPorcelain2 && /^R  /.test(dPorcelain1));
+    const dStamp2 = await computeWorktreeGateStamp(repoD);
+    check("(D) [positive control] a staged content edit to the RENAMED file still flips gateStampsDiffer "
+      + "(even though the porcelain status line itself did not change)",
+      gateStampsDiffer(dStamp1, dStamp2) === true);
+  } finally {
+    try { fs.rmSync(repoD, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
 } finally {
   for (const d of [repoA, repoB]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
   try { fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true }); } catch { /* best-effort */ }
