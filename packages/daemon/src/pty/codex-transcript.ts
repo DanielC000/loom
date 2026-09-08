@@ -50,6 +50,45 @@ function codexSessionsRoot(): string {
   return path.join(realCodexHome(), "sessions");
 }
 
+/**
+ * Card 49d43ef9: `findConversationIdForSpawn`'s freshness filter compares a candidate rollout file's
+ * `mtimeMs` (filesystem-reported) against `sinceMs` (a `Date.now()` wall-clock reading captured BEFORE
+ * the spawn). Those two clocks are not guaranteed to agree — measured on this host, n=3000, no induced
+ * load: a just-written file's `mtimeMs` read BELOW `sinceMs` in 4.37% of writes (min observed −1.97ms).
+ * A strict `mtimeMs < sinceMs` therefore permanently rejects a valid, just-written rollout file a few
+ * percent of the time — permanently, because mtime never changes between retries, so every subsequent
+ * attempt in the retry ladder rejects the same file identically.
+ *
+ * ⚠️ WHY THIS IS NOT 2000ms (the first draft's value, and NOT a FAT/exFAT-granularity justification —
+ * this project's target filesystems (NTFS/ext4/APFS) don't run at 2s granularity; the measured skew above
+ * was sub-2ms, well inside even NTFS's ~15.6ms system-clock-tick granularity): `sessions/service.ts`'s
+ * `recycleWorker` hard-stops a worker and spawns its successor into the SAME `cwd` (worktreePath, `fresh:
+ * Session = { ..., cwd: worktreePath, ... }`, `worktreePath = old.worktreePath ?? old.cwd`) with NO
+ * `--resume` — a genuinely fresh spawn, so `captureCodexEngineSessionId` scans again from scratch. The
+ * predecessor's own rollout file (same cwd ⇒ same `session_meta.payload.cwd` match) can therefore be
+ * SITTING RIGHT THERE when the successor's scan runs, and if its mtime lands within this tolerance of the
+ * successor's `sinceMs`, a naive tolerance could hand the successor the PREDECESSOR's conversation id — a
+ * correctness failure (silent identity adoption) far worse than the missed-capture bug this card fixes.
+ * Two things bound (not eliminate) that risk here, deliberately kept SMALL to leave as little as possible
+ * to the second:
+ *  1. The newest-mtime tiebreak below (`best && mtimeMs <= best.mtimeMs → skip`) already prefers a
+ *     strictly-fresher candidate over a stale-but-in-tolerance one whenever BOTH are present at scan time
+ *     — and this file's own header states codex writes `session_meta` "well before any TUI output", while
+ *     the FIRST scan only fires once the ready marker has rendered (`pty/host.ts`), so the successor's OWN
+ *     rollout file should normally already exist by then. This is an empirical observation, not a code-
+ *     enforced ordering guarantee across codex CLI versions — it narrows the risk, it does not close it.
+ *  2. The tolerance itself is kept to the smallest value that comfortably swamps the MEASURED skew
+ *     (100ms ≈ 50× the observed −1.97ms max) rather than a round, "safe-feeling" number — a wide tolerance
+ *     widens the SAME window that lets the recycle race through, since this filter cannot distinguish
+ *     "the true new file, mildly skewed" from "the predecessor's leftover file, genuinely stale by a
+ *     similar margin." Closing the residual race fully would need an explicit exclusion (e.g. threading
+ *     the predecessor's already-known engine-session id/rollout path into the scan) — that reaches into
+ *     `pty/host.ts`, out of this file's scope; flagged up rather than attempted here.
+ * Env-overridable so a hermetic test can exercise the boundary without waiting on real skew (mirrors this
+ * project's `LOOM_CODEX_*_MS` convention in `pty/host.ts`).
+ */
+export const MTIME_SKEW_TOLERANCE_MS = Number(process.env.LOOM_CODEX_MTIME_SKEW_TOLERANCE_MS) || 100;
+
 /** Bounded cache mirroring `claude-transcript.ts#resolvedPathCache` — a repeat lookup for an id already
  *  found by the recursive scan below skips rescanning the whole dated tree. */
 const RESOLVED_PATH_CACHE_MAX = 500;
@@ -163,7 +202,9 @@ export function findConversationIdForSpawn(cwd: string, sinceMs: number): string
             const full = path.join(dayDir, f);
             let mtimeMs: number;
             try { mtimeMs = fs.statSync(full).mtimeMs; } catch { continue; }
-            if (mtimeMs < sinceMs) continue; // cheap filter — never reads a file that predates this spawn
+            // Card 49d43ef9: tolerate mtime/wall-clock skew (see MTIME_SKEW_TOLERANCE_MS's own doc) —
+            // never reads a file that predates this spawn by more than that tolerance.
+            if (mtimeMs < sinceMs - MTIME_SKEW_TOLERANCE_MS) continue;
             if (best && mtimeMs <= best.mtimeMs) continue; // already have a newer-or-equal match
             const meta = readSessionMeta(full);
             if (meta && meta.cwd === resolvedCwd) best = { sessionId: meta.sessionId, mtimeMs };
