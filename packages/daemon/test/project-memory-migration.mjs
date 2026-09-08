@@ -349,7 +349,120 @@ try {
   cleanupPathSync(tmpHome3);
 }
 
+// ===== FOURTH scenario (card aeec1880): a pre-`trigger_glob`-column project_memory DB — the EXACT shape
+// every real Loom install has TODAY (has `request_ids` from card e6d270b3, but no `trigger_glob` yet).
+// Proves migrateProjectMemory()'s new ADD COLUMN reaches an existing table with real rows, backfills every
+// pre-existing note's triggerGlob to null (''  ⇒  no predicate — DoD-3's "byte-identical behavior" for an
+// existing pinned:true note starts here, at the DB layer), and that a POST-migration triggerGlob write
+// persists and round-trips correctly against a note that predates the migration. A SEPARATE tmp dir — the
+// first three scenarios' `finally` blocks above already deleted their own tmpHomes.
+const tmpHome4 = path.join(os.tmpdir(), `loom-pm-triggerglob-migration-${Date.now()}-${process.pid}`);
+fs.mkdirSync(tmpHome4, { recursive: true });
+const dbFile4 = path.join(tmpHome4, "legacy-pre-trigger-glob-column.db");
+const projId4 = randomUUID();
+const noteId4 = randomUUID();
+const t3 = "2026-01-01T00:00:00.000Z";
+
+{
+  const raw = new Database(dbFile4);
+  raw.pragma("journal_mode = WAL");
+  raw.exec(`
+    CREATE TABLE projects (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, repo_path TEXT NOT NULL, vault_path TEXT NOT NULL,
+      config_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, archived_at TEXT, reserved INTEGER NOT NULL DEFAULT 0
+    );
+    -- project_memory WITH request_ids (card e6d270b3) but WITHOUT trigger_glob — the real shape every Loom
+    -- install has today, immediately before this card.
+    CREATE TABLE project_memory (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      key TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      text TEXT NOT NULL,
+      pinned INTEGER NOT NULL DEFAULT 0,
+      tags TEXT NOT NULL DEFAULT '[]',
+      version INTEGER NOT NULL DEFAULT 1,
+      request_ids TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_retrieved_at TEXT,
+      retrieval_count INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(project_id, key)
+    );
+    CREATE INDEX idx_project_memory_project ON project_memory(project_id, pinned, last_retrieved_at);
+    CREATE VIRTUAL TABLE project_memory_fts USING fts5(title, text, content='project_memory', content_rowid='rowid');
+    CREATE TRIGGER project_memory_ai AFTER INSERT ON project_memory BEGIN
+      INSERT INTO project_memory_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
+    END;
+    CREATE TRIGGER project_memory_ad AFTER DELETE ON project_memory BEGIN
+      INSERT INTO project_memory_fts(project_memory_fts, rowid, title, text) VALUES ('delete', old.rowid, old.title, old.text);
+    END;
+    CREATE TRIGGER project_memory_au AFTER UPDATE OF title, text ON project_memory BEGIN
+      INSERT INTO project_memory_fts(project_memory_fts, rowid, title, text) VALUES ('delete', old.rowid, old.title, old.text);
+      INSERT INTO project_memory_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
+    END;
+  `);
+  raw.prepare("INSERT INTO projects (id, name, repo_path, vault_path, config_json, created_at, archived_at, reserved) VALUES (?, ?, ?, ?, '{}', ?, NULL, 0)")
+    .run(projId4, "Pre-TriggerGlob Project", projId4, projId4, t3);
+  // A real pre-existing PINNED note, written before trigger_glob existed — this is the row the migration
+  // must reach, and the one DoD-3 ("an existing pinned:true note with no predicate is byte-identical in
+  // behavior") is actually about.
+  raw.prepare(
+    "INSERT INTO project_memory (id, project_id, key, title, text, pinned, tags, version, created_at, updated_at, last_retrieved_at, retrieval_count) VALUES (?, ?, 'pre-existing-pinned-note', 'A note from before trigger gating', 'this pinned note predates the trigger_glob column', 1, '[]', 1, ?, ?, NULL, 0)",
+  ).run(noteId4, projId4, t3, t3);
+  raw.close();
+
+  const cols0 = new Set(new Database(dbFile4, { readonly: true }).prepare("PRAGMA table_info(project_memory)").all().map((c) => c.name));
+  check("(tg-migrate setup) the synthesized pre-migration table has NO trigger_glob column yet", !cols0.has("trigger_glob"));
+}
+
+let db4;
+try {
+  let ctorError4 = null;
+  try {
+    const { Db } = await import("../dist/db.js");
+    db4 = new Db(dbFile4);
+  } catch (err) {
+    ctorError4 = err;
+  }
+  check("(tg-migrate) constructing Db against a pre-trigger_glob-column project_memory DB does not throw", ctorError4 === null);
+  if (ctorError4) console.log(`    threw: ${ctorError4?.stack || ctorError4}`);
+
+  if (!ctorError4) {
+    const raw2 = new Database(dbFile4, { readonly: true });
+    try {
+      const cols = raw2.prepare("PRAGMA table_info(project_memory)").all().map((c) => c.name);
+      check("(tg-migrate) the `trigger_glob` column was added to the existing table", cols.includes("trigger_glob"));
+    } finally {
+      raw2.close();
+    }
+
+    // ===== the pre-existing PINNED row backfills triggerGlob to null ("no predicate"), untouched otherwise,
+    // and still rides UNCONDITIONALLY — DoD-3's "byte-identical behavior" proven at the retrieval layer too.
+    const { retrieveProjectMemoryForKickoff } = await import("../dist/sessions/project-memory-recall.js");
+    const preExisting = db4.getProjectMemoryByKey(projId4, "pre-existing-pinned-note");
+    check("(tg-migrate) the pre-existing note is still readable post-migration", preExisting?.text === "this pinned note predates the trigger_glob column");
+    check("(tg-migrate) the pre-existing note backfills triggerGlob to null (same as a brand-new note that never set one)", preExisting?.triggerGlob === null);
+    check("(tg-migrate) the pre-existing note's version survived the migration untouched", preExisting?.version === 1);
+    const framedUnrelated = retrieveProjectMemoryForKickoff(db4, projId4, "a completely unrelated kickoff about something else entirely");
+    check("(tg-migrate) a migrated pre-existing pinned note with no predicate still rides an UNRELATED kickoff (unconditional pinning, unaffected by this card)",
+      typeof framedUnrelated === "string" && framedUnrelated.includes("this pinned note predates the trigger_glob column"));
+
+    // ===== a POST-migration write with triggerGlob actually persists against this upgraded-in-place row =====
+    const updated = db4.upsertProjectMemoryChecked(projId4, { key: "pre-existing-pinned-note", text: "the real next edit", triggerGlob: "packages/daemon/src/memory/**" }, 500, preExisting.version);
+    check("(tg-migrate) a post-migration write with triggerGlob against a MIGRATED row succeeds", updated.ok === true);
+    check("(tg-migrate) triggerGlob actually persisted on the migrated row", updated.entry?.triggerGlob === "packages/daemon/src/memory/**");
+
+    // ===== a brand-new post-migration note with no triggerGlob behaves exactly as before this card =====
+    const fresh = db4.upsertProjectMemory(projId4, { key: "brand-new-post-migration", text: "no predicate here" }, 500);
+    check("(tg-migrate) a brand-new post-migration note with triggerGlob omitted defaults to null", fresh.triggerGlob === null);
+  }
+} finally {
+  try { db4?.close(); } catch { /* ignore */ }
+  cleanupPathSync(tmpHome4);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Db boots clean against a real pre-project_memory legacy DB (the brand-new-table CREATE TABLE IF NOT EXISTS additive migration never references data that isn't there yet), project_memory + project_memory_fts + all three sync triggers land correctly, pre-existing rows are untouched, and the full write/search/upsert/evict/forget round-trip works against the upgraded-in-place DB (not just table-exists — the FTS5 triggers are actually wired). Also: Db boots clean against a real pre-`version`-column project_memory DB (card a5f98bb4), migrateProjectMemory() ADD COLUMNs `version` and backfills every pre-existing row to 1 in place, and the version-based optimistic-concurrency guard (stale-rejected, correct-accepted, version bumps by exactly 1) works correctly against a note that predates the migration — not just against brand-new rows. Also: Db boots clean against a real pre-`request_ids`-column project_memory DB (card e6d270b3 — the exact shape every Loom install has TODAY), migrateProjectMemory() ADD COLUMNs `request_ids`, every pre-existing note backfills requestIds to null, and a post-migration requestIds write persists correctly against a note that predates the migration."
+  ? "\n✅ ALL PASS — Db boots clean against a real pre-project_memory legacy DB (the brand-new-table CREATE TABLE IF NOT EXISTS additive migration never references data that isn't there yet), project_memory + project_memory_fts + all three sync triggers land correctly, pre-existing rows are untouched, and the full write/search/upsert/evict/forget round-trip works against the upgraded-in-place DB (not just table-exists — the FTS5 triggers are actually wired). Also: Db boots clean against a real pre-`version`-column project_memory DB (card a5f98bb4), migrateProjectMemory() ADD COLUMNs `version` and backfills every pre-existing row to 1 in place, and the version-based optimistic-concurrency guard (stale-rejected, correct-accepted, version bumps by exactly 1) works correctly against a note that predates the migration — not just against brand-new rows. Also: Db boots clean against a real pre-`request_ids`-column project_memory DB (card e6d270b3 — the exact shape every Loom install has TODAY), migrateProjectMemory() ADD COLUMNs `request_ids`, every pre-existing note backfills requestIds to null, and a post-migration requestIds write persists correctly against a note that predates the migration. Also: Db boots clean against a real pre-`trigger_glob`-column project_memory DB (card aeec1880), migrateProjectMemory() ADD COLUMNs `trigger_glob`, every pre-existing note backfills triggerGlob to null, a migrated PINNED note with no predicate still rides an unrelated kickoff unconditionally (DoD-3's backward-compat guarantee, proven at the retrieval layer against a real upgraded-in-place DB, not just a fixture), and a post-migration triggerGlob write persists correctly against a note that predates the migration."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

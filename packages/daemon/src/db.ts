@@ -1276,6 +1276,10 @@ CREATE TABLE IF NOT EXISTS project_memory (
                                            -- NULL means "links nothing" — resolved against the LIVE requests
                                            -- store at read time, never frozen here (see toProjectMemoryEntry
                                            -- + sessions/project-memory-request-links.ts)
+  trigger_glob TEXT NOT NULL DEFAULT '',  -- card aeec1880: optional path-glob predicate gating a pinned
+                                           -- note's delivery to a matching kickoff; '' (mirrors title's own
+                                           -- empty-means-unset convention) = no predicate, behaves exactly
+                                           -- like an ordinary pinned note. See ProjectMemoryEntry.triggerGlob.
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   last_retrieved_at TEXT,                 -- NULL until first retrieved; feeds LRU-by-retrieval eviction
@@ -1778,6 +1782,10 @@ const PROJECT_MEMORY_ADDED_COLUMNS: Record<string, string> = {
   // TASK_ADDED_COLUMNS) — every pre-existing note backfills to NULL ("links nothing"), identical to the
   // behavior a brand-new note gets when its writer simply omits `requestIds`.
   request_ids: "TEXT",
+  // Trigger predicate (card aeec1880). NOT NULL + constant DEFAULT '' backfills every legacy note to ''
+  // ("no predicate") in place — the same starting point a brand-new, predicate-less note gets, so an
+  // existing `pinned:true` note is byte-identical in behavior after this migration runs.
+  trigger_glob: "TEXT NOT NULL DEFAULT ''",
 };
 
 /** Columns added to `companion_config` after its initial ship; applied to existing DBs by
@@ -6437,27 +6445,30 @@ export class Db {
    *  The agent-facing memory_write path goes through {@link upsertProjectMemoryChecked} instead. */
   upsertProjectMemory(
     projectId: string,
-    input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[]; requestIds?: string[] },
+    input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[]; requestIds?: string[]; triggerGlob?: string },
     maxNotes: number,
   ): ProjectMemoryEntry {
     const now = new Date().toISOString();
-    // PATCH semantics on update (card 249004c3, extended to requestIds by card e6d270b3): title/pinned/
-    // tags/requestIds each bind as SQL NULL when the caller omits them, and COALESCE against the
-    // pre-existing row's own column in the ON CONFLICT branch — an omitted field survives an update
-    // untouched instead of resetting to a default. A brand-new row has no existing value to fall back to,
-    // so the INSERT branch's COALESCE lands on the same "" / false / [] defaults the old unconditional
-    // bind used — the create path is byte-identical either way. requestIds has no such default to
-    // coalesce to on INSERT (NULL — "links nothing" — IS its correct create-time default), so it binds
-    // directly rather than via COALESCE there. An EXPLICIT clear (pinned:false, tags:[], requestIds:[], or
-    // title:"") still binds a concrete non-null value, so COALESCE takes it as-is on UPDATE — the escape
-    // hatch stays reachable.
+    // PATCH semantics on update (card 249004c3, extended to requestIds by card e6d270b3, triggerGlob by
+    // card aeec1880): title/pinned/tags/requestIds/triggerGlob each bind as SQL NULL when the caller omits
+    // them, and COALESCE against the pre-existing row's own column in the ON CONFLICT branch — an omitted
+    // field survives an update untouched instead of resetting to a default. A brand-new row has no
+    // existing value to fall back to, so the INSERT branch's COALESCE lands on the same "" / false / []
+    // defaults the old unconditional bind used — the create path is byte-identical either way. requestIds
+    // has no such default to coalesce to on INSERT (NULL — "links nothing" — IS its correct create-time
+    // default), so it binds directly rather than via COALESCE there. An EXPLICIT clear (pinned:false,
+    // tags:[], requestIds:[], title:"", or triggerGlob:"") still binds a concrete non-null value, so
+    // COALESCE takes it as-is on UPDATE — the escape hatch stays reachable. `triggerGlob` mirrors `title`'s
+    // exact binding shape (`?? null`, not a ternary/ JSON.stringify) since both are plain nullable-in-JS/
+    // empty-string-in-SQL text fields with the identical "" ⇒ unset convention.
     this.db.prepare(
-      `INSERT INTO project_memory (id, project_id, key, title, text, pinned, tags, request_ids, created_at, updated_at, last_retrieved_at, retrieval_count, version)
-       VALUES (@id, @projectId, @key, COALESCE(@title, ''), @text, COALESCE(@pinned, 0), COALESCE(@tags, '[]'), @requestIds, @now, @now, NULL, 0, 1)
+      `INSERT INTO project_memory (id, project_id, key, title, text, pinned, tags, request_ids, trigger_glob, created_at, updated_at, last_retrieved_at, retrieval_count, version)
+       VALUES (@id, @projectId, @key, COALESCE(@title, ''), @text, COALESCE(@pinned, 0), COALESCE(@tags, '[]'), @requestIds, COALESCE(@triggerGlob, ''), @now, @now, NULL, 0, 1)
        ON CONFLICT(project_id, key) DO UPDATE SET
          title = COALESCE(@title, title), text = @text,
          pinned = COALESCE(@pinned, pinned), tags = COALESCE(@tags, tags),
          request_ids = COALESCE(@requestIds, request_ids),
+         trigger_glob = COALESCE(@triggerGlob, trigger_glob),
          updated_at = @now, version = version + 1`,
     ).run({
       id: randomUUID(),
@@ -6468,6 +6479,7 @@ export class Db {
       pinned: input.pinned === undefined ? null : (input.pinned ? 1 : 0),
       tags: input.tags === undefined ? null : JSON.stringify(input.tags),
       requestIds: input.requestIds === undefined ? null : JSON.stringify(input.requestIds),
+      triggerGlob: input.triggerGlob ?? null,
       now,
     });
     // Card 2bc735d3: exclude the row just written from eviction candidates — otherwise a brand-new row
@@ -6513,7 +6525,7 @@ export class Db {
    */
   upsertProjectMemoryChecked(
     projectId: string,
-    input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[]; requestIds?: string[] },
+    input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[]; requestIds?: string[]; triggerGlob?: string },
     maxNotes: number,
     baseVersion: number | undefined,
   ): { ok: true; entry: ProjectMemoryEntry } | { ok: false; current: ProjectMemoryEntry } {
@@ -6550,14 +6562,20 @@ export class Db {
     return (this.db.prepare("SELECT * FROM project_memory WHERE project_id = ? AND pinned = 1 ORDER BY updated_at DESC")
       .all(projectId) as Row[]).map(toProjectMemoryEntry);
   }
-  /** "Related" tier (kickoff injection §3) — top-`limit` UNPINNED notes whose title/text FTS5-MATCH the
-   *  kickoff/task text, ranked by fts5's default bm25 `rank`. Deliberately excludes pinned rows (they
-   *  already ride in full via {@link listPinnedProjectMemory} — never inject the same note twice). Zero
-   *  metered tokens: this is a local SQLite FTS5 query, no embedding endpoint, no API call. `kickoffText`
-   *  is tokenized into a quoted OR-query (ftsProjectMemoryQuery) so free-form prose with FTS5-special
-   *  characters (quotes, colons, hyphens, boolean keywords) can never throw a query-syntax error; an
-   *  empty/all-stopword kickoff text or a genuine FTS5 error both degrade to "no related notes" (`[]`)
-   *  rather than surfacing an error to the caller. */
+  /** "Related" tier (kickoff injection §3) — top-`limit` notes whose title/text FTS5-MATCH the kickoff/
+   *  task text, ranked by fts5's default bm25 `rank`. Deliberately excludes ORDINARY pinned rows (they
+   *  already ride in full via {@link listPinnedProjectMemory} — never inject the same note twice) — EXCEPT
+   *  a pinned row carrying a trigger predicate (`trigger_glob != ''`, card aeec1880): that note only rides
+   *  the pinned tier on a kickoff whose predicate actually fires, so on every OTHER kickoff it must stay
+   *  reachable here exactly like an unpinned note — a predicate that never fires must never leave a note
+   *  LESS reachable than plain unpinned would. The caller (`retrieveProjectMemoryForKickoff`) is
+   *  responsible for deduping a trigger-gated note that both fired its predicate AND independently
+   *  FTS-matched, so it is never injected twice. Zero metered tokens: this is a local SQLite FTS5 query,
+   *  no embedding endpoint, no API call. `kickoffText` is tokenized into a quoted OR-query
+   *  (ftsProjectMemoryQuery) so free-form prose with FTS5-special characters (quotes, colons, hyphens,
+   *  boolean keywords) can never throw a query-syntax error; an empty/all-stopword kickoff text or a
+   *  genuine FTS5 error both degrade to "no related notes" (`[]`) rather than surfacing an error to the
+   *  caller. */
   searchProjectMemory(projectId: string, kickoffText: string, limit: number): ProjectMemoryEntry[] {
     if (limit <= 0) return [];
     const match = ftsProjectMemoryQuery(kickoffText);
@@ -6566,7 +6584,7 @@ export class Db {
       return (this.db.prepare(
         `SELECT pm.* FROM project_memory pm
          JOIN project_memory_fts fts ON fts.rowid = pm.rowid
-         WHERE pm.project_id = ? AND pm.pinned = 0 AND project_memory_fts MATCH ?
+         WHERE pm.project_id = ? AND (pm.pinned = 0 OR pm.trigger_glob != '') AND project_memory_fts MATCH ?
          ORDER BY rank LIMIT ?`,
       ).all(projectId, match, limit) as Row[]).map(toProjectMemoryEntry);
     } catch {
@@ -8545,6 +8563,9 @@ function toProjectMemoryEntry(r0: unknown): ProjectMemoryEntry {
         return null;
       }
     })(),
+    // Card aeec1880 — '' (the column's own DEFAULT, and every pre-existing/legacy row) ⇒ null ("no
+    // predicate"), mirroring the row-shape convention already used for title's own "" default elsewhere.
+    triggerGlob: (r.trigger_glob as string | null) || null,
   };
 }
 /** Turn free-form kickoff/task text into a safe FTS5 MATCH query: split into word tokens, drop short

@@ -457,6 +457,19 @@ export class TaskMcpRouter {
           "self-corrects the moment the owner answers it instead of saying PENDING forever. Omitting " +
           "`requestIds` on an update preserves the existing links (same PATCH semantics as `tags`); pass " +
           "`[]` explicitly to clear them. " +
+          "Optional `triggerGlob` (card aeec1880) — a path-glob predicate that gates a `pinned:true` " +
+          "note's delivery to a kickoff whose text names a matching path, instead of pinning it globally: " +
+          "on a kickoff where the glob matches, the note rides the pinned tier exactly as today; on every " +
+          "other kickoff it stays FULLY reachable via full-text search instead (never less reachable than " +
+          "an ordinary unpinned note), same as a note the FTS-related tier would surface anyway. Only " +
+          "meaningful on a note that is (effectively, post-write) `pinned:true` and NOT tagged " +
+          "`\"never-drop\"` — never-drop's own guarantee always bypasses any trigger, so tagging both " +
+          "leaves the trigger inert; the response's `triggerGateStatus` says which applies. Same PATCH " +
+          "semantics as other optional fields: omit to leave the stored predicate unchanged, pass `\"\"` " +
+          "explicitly to clear it back to unconditional pinning, or pass a glob (e.g. " +
+          "`\"packages/daemon/src/memory/**\"`) to set it — matched against path-like substrings found " +
+          "literally in the RECEIVING session's own kickoff/task text (the same text driving the RELATED " +
+          "tier's own match), not against real touched files (unknowable this early). " +
           "Card 8d158088: REFUSED with {error} if this specific call is CONFIRMED to have originated from " +
           "a sub-agent (a Task/Agent sub-call), rather than your own top-level turn — project memory is " +
           "shared, durable knowledge meant to reflect the calling agent's own reasoning; call this " +
@@ -474,6 +487,7 @@ export class TaskMcpRouter {
           pinned: z.boolean().optional(),
           tags: z.array(z.string()).optional(),
           requestIds: z.array(z.string()).optional(),
+          triggerGlob: z.string().optional(),
           baseVersion: z.number().int().optional(),
         }),
       },

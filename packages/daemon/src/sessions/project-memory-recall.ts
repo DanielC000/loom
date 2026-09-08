@@ -604,6 +604,116 @@ export function buildFramedProjectMemory(
 }
 
 /**
+ * Card aeec1880 — the TRIGGER-PREDICATE mechanism: gates a `pinned:true` note's delivery to kickoffs
+ * whose text names a matching path, instead of pinning it globally, so its byte cost is paid only on
+ * kickoffs where it's actually relevant and the freed budget goes to the RELATED tier the rest of the
+ * time. See {@link ProjectMemoryEntry.triggerGlob}'s own doc comment for the field contract.
+ *
+ * MECHANISM CHOSEN: a touched-path GLOB, matched against path-like tokens found literally in the kickoff/
+ * task text — the SAME text {@link retrieveProjectMemoryForKickoff} already threads through to the FTS
+ * "related" query via its own `kickoffText` param — not the actual files a worker's branch ends up
+ * touching (unknowable at kickoff time, before the worker has touched anything; the git-diff-based
+ * deny-glob matcher in `git/worktrees.ts` operates on REAL touched files, but only exists post-hoc at
+ * merge review, a different moment entirely). A Loom task card routinely names the files it concerns
+ * literally in its own title/body (this project's own board cards do this constantly, including the card
+ * that filed this feature) — a worker-spawn kickoffText is exactly `${task.title}\n${task.body}`
+ * (sessions/service.ts) — so a glob predicate over that text needs ZERO new plumbing: the data it needs
+ * already exists at the one place this note is composed, for every kickoff shape (fresh spawn, resume,
+ * fork, recycle) {@link retrieveProjectMemoryForKickoff} already covers.
+ *
+ * REJECTED — tool name: no tool has been invoked yet at kickoff time (the session hasn't taken a turn),
+ * so gating on "the next tool this session calls" isn't a kickoff-time predicate at all — it would need
+ * the note re-evaluated and injected MID-session, on every tool call, which needs new runtime plumbing
+ * inside every MCP router (a materially bigger surface than this card's scope, and would touch
+ * `mcp/orchestration.ts` — a file this card's own kickoff flags as held by another live worker).
+ *
+ * REJECTED — card label: `Task` (shared/src/types.ts) has no modeled "label" concept at all — only
+ * `title`/`body`/`columnKey`/`priority`/etc. (verified by reading the interface directly). This predicate
+ * would first require adding an entirely new task field (schema + validation + UI) — a separate, larger
+ * card of its own — where a touched-path glob needs none of that.
+ */
+const PATH_TOKEN_RE = /[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+/g;
+
+/** Extracts path-like tokens (2+ `/`-separated segments of path-safe characters) from free-form prose —
+ *  a kickoff/task title+body routinely contains a literal repo path this way. Trailing prose punctuation
+ *  that can glue onto a mentioned path (e.g. "...see `packages/daemon/src/db.ts`." or
+ *  "(packages/daemon/src/db.ts)") is stripped before matching — never part of a real path. Leading
+ *  punctuation never needs stripping: {@link PATH_TOKEN_RE} only ever starts a match on a path-safe
+ *  character. */
+function extractPathTokens(text: string): string[] {
+  const found = text.match(PATH_TOKEN_RE) ?? [];
+  return found.map((t) => t.replace(/[.,:;)\]'"]+$/, ""));
+}
+
+/** Compiles a glob (`*`/`**`/`?`, anchored full-token match) into a RegExp — the identical semantics to
+ *  `git/worktrees.ts`'s `pathGlobToRegExp` (deny-glob matching against real diff paths), reimplemented
+ *  here rather than imported: that function matches a KNOWN list of real file paths post-hoc at merge
+ *  review — a different call shape from matching free-form kickoff prose — and keeping this a small,
+ *  independently-testable copy avoids a cross-layer import from git-review code into kickoff-composition
+ *  code for two functions this different in purpose (any future drift between the two is exactly what
+ *  each module's own tests would catch, same as any other behavior expressed twice in this codebase). A
+ *  bare leading `*` with no `/` (e.g. `*.ts`) is auto-prefixed with `**​/` (mirrors the same fix in
+ *  `pathGlobToRegExp`) so a bare-filename glob matches that file anywhere, not just a root-level path. */
+function triggerGlobToRegExp(rawGlob: string): RegExp {
+  const glob = rawGlob.startsWith("*") && !rawGlob.startsWith("**") && !rawGlob.includes("/")
+    ? `**/${rawGlob}`
+    : rawGlob;
+  const SPECIAL = /[.+^${}()|[\]\\]/g;
+  let re = "^";
+  let i = 0;
+  while (i < glob.length) {
+    const c = glob[i]!;
+    if (c === "*" && glob[i + 1] === "*") {
+      const slashBefore = i === 0 || glob[i - 1] === "/";
+      const j = i + 2;
+      const slashAfter = glob[j] === "/";
+      if (slashBefore && slashAfter) { re += "(?:.*/)?"; i = j + 1; continue; }
+      re += ".*"; i = j; continue;
+    }
+    if (c === "*") { re += "[^/]*"; i++; continue; }
+    if (c === "?") { re += "[^/]"; i++; continue; }
+    re += c.replace(SPECIAL, "\\$&"); i++;
+  }
+  return new RegExp(re + "$");
+}
+
+/** True iff `triggerGlob` matches at least one path-like token found in `kickoffText` — the SELECTION
+ *  decision a trigger-gated note's inclusion turns on. A blank/whitespace-only glob degrades to "no
+ *  match" rather than throwing or matching everything — the safer failure direction for a gate: a broken
+ *  predicate should make a note LESS likely to ride, never silently un-gate it back to global pinning. */
+export function triggerMatchesKickoff(triggerGlob: string, kickoffText: string): boolean {
+  const glob = triggerGlob.trim();
+  if (!glob) return false;
+  const re = triggerGlobToRegExp(glob);
+  return extractPathTokens(kickoffText).some((tok) => re.test(tok));
+}
+
+/** Card aeec1880 — partitions this project's PINNED notes for ONE specific kickoff: which ride the pinned
+ *  tier this time (`forDigest` — every unconditionally-pinned note, every "never-drop" note REGARDLESS of
+ *  its own trigger per DoD-5 ["never-drop" is a guarantee a predicate must never silently override], and
+ *  any trigger-gated note whose predicate fired against `kickoffText`) versus which are gated OUT this
+ *  time (`gatedOut` — a trigger-gated, non-never-drop note whose predicate did NOT fire) and must instead
+ *  compete via the ordinary FTS "related" path (`db.ts`'s `searchProjectMemory`, which stays reachable for
+ *  exactly these — see its own doc comment). Pure and DB-free, so the selection decision itself is
+ *  directly unit-testable without a live Db or a real kickoff round-trip. */
+export function partitionPinnedForKickoff(
+  pinned: ProjectMemoryEntry[],
+  kickoffText: string,
+): { forDigest: ProjectMemoryEntry[]; gatedOut: ProjectMemoryEntry[] } {
+  const forDigest: ProjectMemoryEntry[] = [];
+  const gatedOut: ProjectMemoryEntry[] = [];
+  for (const m of pinned) {
+    const gated = !!m.triggerGlob && !isNeverDrop(m);
+    if (!gated || triggerMatchesKickoff(m.triggerGlob as string, kickoffText)) {
+      forDigest.push(m);
+    } else {
+      gatedOut.push(m);
+    }
+  }
+  return { forDigest, gatedOut };
+}
+
+/**
  * The impure orchestration entry point every kickoff call site uses: resolve this project's memory
  * config, read pinned + FTS5-related notes for `kickoffText`, build the framed digest, and bump
  * `lastRetrievedAt`/`retrievalCount` for whatever actually got included. Returns `null` (no DB writes,
@@ -622,9 +732,21 @@ export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kicko
   const project = db.getProject(projectId);
   if (!project) return null;
   const memoryConfig = resolveConfig(project.config).memory;
-  const pinned = db.listPinnedProjectMemory(projectId);
-  const related = kickoffText.trim() ? db.searchProjectMemory(projectId, kickoffText, memoryConfig.topK) : [];
-  if (pinned.length === 0 && related.length === 0) return null;
+  const allPinned = db.listPinnedProjectMemory(projectId);
+  // Card aeec1880 — a trigger-gated pinned note only rides THIS kickoff's pinned tier when its predicate
+  // fires against `kickoffText`; a gated-out note falls through to the ordinary FTS related query below
+  // (db.searchProjectMemory already stays reachable for exactly this case — see its own doc comment). An
+  // existing note with no triggerGlob is untouched by this partition (always lands in `pinned`), so this
+  // is additive over the pre-this-card behavior.
+  const { forDigest: pinned } = partitionPinnedForKickoff(allPinned, kickoffText);
+  const relatedRaw = kickoffText.trim() ? db.searchProjectMemory(projectId, kickoffText, memoryConfig.topK) : [];
+  // A trigger-gated note whose predicate just fired is already included via `pinned` above — exclude it
+  // here so a note that ALSO happens to FTS-match its own kickoff text is never injected twice. A
+  // gated-OUT note that FTS-matches is exactly the intended "competes on relevance instead" path and
+  // passes through unfiltered.
+  const pinnedIds = new Set(pinned.map((m) => m.id));
+  const related = relatedRaw.filter((m) => !pinnedIds.has(m.id));
+  if (allPinned.length === 0 && related.length === 0) return null;
   // Card e4e180ad: combined annotate (linked-Request state + inbound [[wikilink]] backlinks) — the SAME
   // function mcp/memory.ts's computeNeverDropStatus uses to size the floor tier, so the two can never
   // silently diverge on what counts toward a note's rendered/estimated size.

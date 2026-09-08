@@ -71,11 +71,24 @@ export interface MemoryWriteInput {
    * self-corrects the moment the owner answers it — see project-memory-request-links.ts.
    */
   requestIds?: string[];
+  /**
+   * Card aeec1880 — an OPTIONAL path-glob predicate that gates a `pinned:true` note's delivery to a
+   * kickoff whose text names a matching path, instead of pinning it globally. Same PATCH semantics as
+   * `title`: omit to leave the stored predicate unchanged, pass `""` explicitly to clear it back to "no
+   * predicate" (unconditional pinning), or pass a glob (e.g. `"packages/daemon/src/memory/**"`) to set it.
+   * Only meaningful on a note that is (effectively, post-write) `pinned:true` and NOT tagged
+   * `"never-drop"` — see {@link ProjectMemoryEntry.triggerGlob}'s own doc comment for why, and
+   * {@link computeTriggerGateStatus} for the informational signal this write returns either way.
+   */
+  triggerGlob?: string;
   /** The `version` the caller last read for this key (memory_read/memory_list/a prior memory_write
    *  response) — required to UPDATE an existing key; irrelevant for a brand-new one. Deliberately an
    *  integer version counter, NOT a timestamp — see {@link writeProjectMemory}. */
   baseVersion?: number;
 }
+
+/** Bounds hardening for `triggerGlob` — a predicate is meant to be a short path pattern, not free text. */
+const MAX_TRIGGER_GLOB_CHARS = 200;
 
 export interface MemoryWriteConflict {
   error: string;
@@ -140,6 +153,47 @@ export interface RestTierSignal {
 }
 
 /**
+ * Card aeec1880 — an informational signal returned alongside a successful write whose (post-write)
+ * `triggerGlob` is set, mirroring {@link NeverDropSignal}'s "compute the consequence at the ONE moment the
+ * author can act on it" posture: purely advisory, never turns a write that would otherwise succeed into a
+ * rejection. `inert: true` covers the two cases where the predicate does nothing at all — the note is
+ * UNPINNED (a trigger only ever gates the pinned tier), or the note is ALSO tagged `"never-drop"` (that
+ * floor guarantee always bypasses its own trigger per DoD-5 — a predicate must never silently weaken it).
+ * Otherwise the note is a genuine trigger-gated pin: the message states what it does in one sentence
+ * without re-litigating the whole mechanism doc comment.
+ */
+export interface TriggerGateSignal {
+  message: string;
+  inert?: true;
+}
+
+function computeTriggerGateStatus(entry: ProjectMemoryEntry): TriggerGateSignal | undefined {
+  if (!entry.triggerGlob) return undefined;
+  if (!entry.pinned) {
+    return {
+      inert: true,
+      message: `triggerGlob is set ("${entry.triggerGlob}") but this note is UNPINNED — a trigger only ` +
+        "gates the pinned tier, so it does nothing until the note is also pinned (pinned:true); an " +
+        "unpinned note already competes on relevance via full-text search.",
+    };
+  }
+  if (entry.tags.includes(NEVER_DROP_TAG)) {
+    return {
+      inert: true,
+      message: `triggerGlob is set ("${entry.triggerGlob}") but this note is also tagged ` +
+        `"${NEVER_DROP_TAG}" — the never-drop floor guarantee ALWAYS bypasses its own trigger (a ` +
+        "predicate must never silently weaken that guarantee), so this note rides every kickoff " +
+        "regardless of the glob, exactly as if triggerGlob were unset.",
+    };
+  }
+  return {
+    message: `this note only rides the pinned tier on a kickoff whose text names a path matching ` +
+      `"${entry.triggerGlob}" — on every other kickoff it competes for the RELATED tier via full-text ` +
+      "search instead of riding for free, exactly like an unpinned note would.",
+  };
+}
+
+/**
  * UPSERT by `key` (owner decision #2: always-update in place) — a second write to the same key updates
  * the note rather than piling a contradictory duplicate. Enforces the per-project bounded-store cap
  * (`memory.maxNotes`, resolveConfig) on every write; pinned notes are exempt (see
@@ -170,7 +224,7 @@ export function writeProjectMemory(
   projectId: string,
   input: MemoryWriteInput,
 ):
-  | (ProjectMemoryEntry & { neverDropStatus?: NeverDropSignal; restTierStatus?: RestTierSignal })
+  | (ProjectMemoryEntry & { neverDropStatus?: NeverDropSignal; restTierStatus?: RestTierSignal; triggerGateStatus?: TriggerGateSignal })
   | { error: string }
   | MemoryWriteConflict
   | MemoryWriteTooLong {
@@ -238,6 +292,13 @@ export function writeProjectMemory(
   if (title && title.length > MAX_TITLE_CHARS) {
     return { error: `title is too long (${title.length} chars, max ${MAX_TITLE_CHARS})` };
   }
+  // Card aeec1880 — unlike `title` above, an explicit `""` here is a deliberate CLEAR (see
+  // MemoryWriteInput.triggerGlob's own doc comment), not collapsed to "omitted/preserve": `undefined`
+  // (the key genuinely absent from `input`) is the only value that preserves the stored predicate.
+  const triggerGlob = input.triggerGlob === undefined ? undefined : input.triggerGlob.trim();
+  if (triggerGlob && triggerGlob.length > MAX_TRIGGER_GLOB_CHARS) {
+    return { error: `triggerGlob is too long (${triggerGlob.length} chars, max ${MAX_TRIGGER_GLOB_CHARS})` };
+  }
   // Trim/drop blanks only — no format validation (no regex-sniffing a "real" request id; an id that
   // resolves to nothing just annotates fail-visibly at read time, see project-memory-request-links.ts).
   const requestIds = input.requestIds === undefined
@@ -246,7 +307,7 @@ export function writeProjectMemory(
   const memoryConfig = resolveConfig(db.getProject(projectId)?.config).memory;
   const result = db.upsertProjectMemoryChecked(
     projectId,
-    { key, title, text, pinned: input.pinned, tags: input.tags, requestIds },
+    { key, title, text, pinned: input.pinned, tags: input.tags, requestIds, triggerGlob },
     memoryConfig.maxNotes,
     input.baseVersion,
   );
@@ -260,10 +321,12 @@ export function writeProjectMemory(
   }
   const neverDropStatus = computeNeverDropStatus(db, projectId, result.entry, memoryConfig.budgetTokens);
   const restTierStatus = computeRestTierSignal(db, projectId, result.entry, memoryConfig.budgetTokens);
+  const triggerGateStatus = computeTriggerGateStatus(result.entry);
   return {
     ...result.entry,
     ...(neverDropStatus ? { neverDropStatus } : {}),
     ...(restTierStatus ? { restTierStatus } : {}),
+    ...(triggerGateStatus ? { triggerGateStatus } : {}),
   };
 }
 
