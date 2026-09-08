@@ -6974,6 +6974,25 @@ export class PtyHost {
    * `session_message_queued`/`session_message_delivered` audit trail, a manager's own view of what it
    * sent) still holds the ORIGINAL, unfolded text — only the bytes actually typed into codex's TUI are
    * folded, so nothing durable or manager-visible is ever silently rewritten.
+   *
+   * Card 02e42746: `text` used to reach the pty via ONE `live.pty.write(...)` call — unlike the claude
+   * path (`writeChunked`, defined below), which exists because a single large `pty.write` is TRUNCATED by
+   * Windows ConPTY's input buffer. That truncation sits BELOW the harness: `createPty` (claude) and
+   * `createCodexPty` both spawn through the identical `node-pty` `IPty`, whose `.write()` is a bare
+   * `net.Socket.write` onto ConPTY's input pipe regardless of which process is on the other end (verified
+   * by reading node-pty@1.1.0's own `terminal.js`/`windowsTerminal.js` — `write()` -> `_write()` ->
+   * `this._agent.inSocket.write(data)`, with no per-harness branching anywhere in that path). So nothing
+   * about codex's own TUI shields it — the reviewer's asymmetry was real, not merely apparent, and this is
+   * a MEASURED conclusion about the write path's structure, not an inference from the claude-side comment
+   * alone (that comment is evidence the hazard exists at all; the shared node-pty code path is what
+   * establishes it also reaches codex). No independent codex-side truncation repro was attempted (per the
+   * card's own instruction not to manufacture one) and no numeric threshold is known for either harness —
+   * `writeChunkedCodex` below reuses the SAME `PTY_WRITE_CHUNK_UNITS`/`PTY_WRITE_CHUNK_DELAY_MS`/
+   * `surrogateSafeChunkEnd` machinery `writeChunked` already uses, rather than inventing a second, untested
+   * threshold. The delayed Enter write (and the staleness timer it arms) now starts counting from the
+   * LAST chunk landing, not from this call's own synchronous instant — preserving the "write, then wait
+   * `CODEX_SUBMIT_ENTER_DELAY_MS`, then Enter" shape the probe observed, just measured from the write's
+   * true completion rather than its start.
    */
   private submitCodex(sessionId: string, live: CodexLive, text: string): void {
     this.setCodexBusy(sessionId, live, true, "submit");
@@ -6984,30 +7003,61 @@ export class PtyHost {
     // false-positive: a marker sighting with NO submit ever having happened must never count as a
     // completed turn).
     live.submitOutstanding = true;
-    // Card 7c2a6dc0: capture the generation NOW, before the delayed write below. There is no
-    // `busyStaleTimer` armed yet for THIS turn (this raw setTimeout is the only outstanding action during
-    // the enterPending gap), so a `stopCodex`/`interruptForRedirectCodex` landing in that gap has nothing to
-    // `clearTimeout` — bumping `busyStaleGen` is the only signal either of them can leave, and comparing
-    // against it below is what stops this closure writing a stray "\r" into a session that was deliberately
-    // stopped or redirected mid-submit (the card's own "arguably the worse half" finding, for the redirect
-    // case).
+    // Card 7c2a6dc0: capture the generation NOW, before the chunked write below. A `stopCodex`/
+    // `interruptForRedirectCodex` landing anywhere in the write-then-wait window — whether mid-chunk (card
+    // 02e42746 widened this window from "near-instant" to however long the chunked write takes) or in the
+    // post-write `CODEX_SUBMIT_ENTER_DELAY_MS` gap — has nothing else to `clearTimeout` for THIS turn:
+    // bumping `busyStaleGen` is the only signal either of them can leave, and comparing against it once the
+    // whole write has landed is what stops this closure writing a stray "\r" into a session that was
+    // deliberately stopped or redirected mid-submit (the card's own "arguably the worse half" finding, for
+    // the redirect case) — this holds regardless of how long the chunked write itself takes.
     const gen = live.busyStaleGen;
-    live.pty.write(codexAsciiFold(text));
-    setTimeout(() => {
-      if (!live.alive || live.killed) return; // the pty died, or was killed, before the delayed Enter — nothing to write or arm
-      // Superseded by a stop/redirect during the gap — see this method's own doc. Deliberately does NOT
-      // touch `live.enterPending` here: the caller that bumped `busyStaleGen` (stopCodex, or
-      // interruptForRedirectCodex) already owns any follow-up for THIS turn, and `interruptForRedirectCodex`
-      // may already have started a NEXT turn (drainCodexPending -> a fresh submitCodex call) whose OWN
-      // `enterPending = true` this stale closure must never clobber if it fires while that next turn's gap
-      // is still open — a real, not just theoretical, interleaving since both closures share the same
-      // CODEX_SUBMIT_ENTER_DELAY_MS delay and can be scheduled only microseconds apart.
-      if (live.busyStaleGen !== gen) return;
-      live.pty.write("\r");
-      live.enterWrittenAt = Date.now();
-      live.enterPending = false;
-      this.armCodexBusyStaleTimer(sessionId, live);
-    }, CODEX_SUBMIT_ENTER_DELAY_MS);
+    this.writeChunkedCodex(sessionId, live, codexAsciiFold(text), () => {
+      setTimeout(() => {
+        if (!live.alive || live.killed) return; // the pty died, or was killed, before the delayed Enter — nothing to write or arm
+        // Superseded by a stop/redirect during the gap — see this method's own doc. Deliberately does NOT
+        // touch `live.enterPending` here: the caller that bumped `busyStaleGen` (stopCodex, or
+        // interruptForRedirectCodex) already owns any follow-up for THIS turn, and `interruptForRedirectCodex`
+        // may already have started a NEXT turn (drainCodexPending -> a fresh submitCodex call) whose OWN
+        // `enterPending = true` this stale closure must never clobber if it fires while that next turn's gap
+        // is still open — a real, not just theoretical, interleaving since both closures share the same
+        // CODEX_SUBMIT_ENTER_DELAY_MS delay and can be scheduled only microseconds apart.
+        if (live.busyStaleGen !== gen) return;
+        live.pty.write("\r");
+        live.enterWrittenAt = Date.now();
+        live.enterPending = false;
+        this.armCodexBusyStaleTimer(sessionId, live);
+      }, CODEX_SUBMIT_ENTER_DELAY_MS);
+    });
+  }
+
+  /**
+   * Codex's own chunked-write helper — card 02e42746, mirrors `writeChunked` (this file's own doc, at its
+   * definition below) against `CodexLive`'s fields instead of `Live`'s. No `ptyWrite` diagnostic wrapper
+   * here: that wrapper (and the `writeSeq`/log-record convention it feeds) is typed to `Live` only, so a
+   * bare per-chunk `.pty.write` is the whole of it — see `submitCodex`'s own doc for why the same
+   * truncation risk `writeChunked` guards against also reaches this path. Re-fetches the live entry from
+   * `liveCodex` on every step (not the closed-over `live` reference), for the same reason `writeChunked`
+   * does: a multi-chunk write can span many `setTimeout` ticks — wide enough for a resume/recycle to
+   * replace this session's `CodexLive` entry mid-write. Deliberately does NOT check `busyStaleGen` per
+   * chunk (a stop/redirect landing mid-write can still let a later chunk of already-superseded text reach
+   * the pty) — `writeChunked` accepts the identical risk for claude; this mirrors it rather than inventing
+   * a stronger guarantee only one harness would have.
+   */
+  private writeChunkedCodex(sessionId: string, live: CodexLive, text: string, done?: () => void): void {
+    if (!live.alive || live.killed) { done?.(); return; }
+    if (text.length === 0) { done?.(); return; }
+    let i = 0;
+    const step = (): void => {
+      const l = this.liveCodex.get(sessionId);
+      if (!l?.alive || l.killed) { done?.(); return; }
+      const end = surrogateSafeChunkEnd(text, i, PTY_WRITE_CHUNK_UNITS);
+      l.pty.write(text.slice(i, end));
+      i = end;
+      if (i >= text.length) { done?.(); return; }
+      setTimeout(step, PTY_WRITE_CHUNK_DELAY_MS);
+    };
+    step();
   }
 
   /**
