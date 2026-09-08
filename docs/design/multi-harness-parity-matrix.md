@@ -38,7 +38,7 @@ project) remains OUTSTANDING and is the dispatching lead's to provision, per thi
 | `doctrineInjection` | `"directory"` (`.claude/skills`) | `"none"` | **NOT YET BUILT.** Codex's convention is `AGENTS.md` (a single file, not a directory of skill files) — mapping Loom's `/worker`-equivalent doctrine + skill content into that shape is real, un-started design/build work, named in the card's own scope. This pass prioritized the stateful-runtime build (spawn/submit/stop — DoD-1's blocking piece) over this; still open for a future pass. |
 | `vendorProcessSlashCommand` (builtinReset) | ✅ (`/clear`) | ❌ | No documented in-band reset command found for Codex in the `--help` sweep or the probe. Real absence, not a declared-honest gap — Codex simply doesn't appear to have one. |
 | `readCachedVersion` (versionGating) | ✅ | ✅ | Mirrors `usage-status.ts`'s async-prewarm/non-blocking-read pattern exactly (`codex-doctrine.ts`). **A real-spawn test caught a genuine bug here**: an npm-global Windows install of `codex` resolves to a `.cmd` shim, and plain `child_process.execFile` (unlike `execSync`/node-pty's Windows agent) refuses to run a `.cmd` directly without `shell:true` — the version cache silently never populated until fixed. This is exactly the failure class DoD-5's real-spawn requirement exists to catch; a mocked exec would never have caught it. |
-| `buildSpawnArgs`/`submit`/`isBusy`/`handleHookEvent` (the stateful runtime) | ✅ (`pty/host.ts`, ~5,800 lines) | ✅ **built this pass** — `spawnCodexProcess`/`createCodexPty`/`enqueueStdinCodex`/`submitCodex`/`drainCodexPending`/`stopCodex`/`interruptForRedirectCodex` (own registry, `liveCodex`, never `Live`/`this.live` — see §2). Real-spawn-tested; two genuine bugs found and fixed (see "Real-spawn findings" below). No give-up ladder, no verify-and-retry, no fairness reordering/coalescing on the pending queue — busy/idle regex detection is the only turn-confirmation signal, a named Phase-1 simplification versus claude's hook-confirmed ladder. | |
+| `buildSpawnArgs`/`submit`/`isBusy`/`handleHookEvent` (the stateful runtime) | ✅ (`pty/host.ts`, ~5,800 lines) | ✅ **built this pass** — `spawnCodexProcess`/`createCodexPty`/`enqueueStdinCodex`/`submitCodex`/`drainCodexPending`/`stopCodex`/`interruptForRedirectCodex` (own registry, `liveCodex`, never `Live`/`this.live` — see §2). Real-spawn-tested; two genuine bugs found and fixed (see "Real-spawn findings" below). No give-up ladder, no verify-and-retry, no fairness reordering/coalescing on the pending queue — busy/idle regex detection is the only turn-confirmation signal, a named Phase-1 simplification versus claude's hook-confirmed ladder. **Card `0e83c855`: `submitCodex` also ASCII-folds the measured drop class before writing to the pty** — see "Real-spawn findings" §3. | |
 
 ## Open architecture questions (reported up, not decided unilaterally)
 
@@ -120,7 +120,7 @@ directly). The objection evaporated once checked, which is why the shape changed
 simply being accepted as a dead end. The pure decision logic (`codex-host.ts`) and the classification
 inventory (below) both carried over unchanged into the final shape — neither was wasted work.
 
-## Real-spawn findings — two genuine bugs a mocked exec could never have caught
+## Real-spawn findings — genuine bugs a mocked exec could never have caught
 
 `test/codex-stateful-runtime-real-spawn.mjs` drives the ACTUAL `spawnCodexProcess`/`createCodexPty`
 implementation (not a hand-rolled duplicate) against a real, installed, authenticated codex CLI. Two real
@@ -148,6 +148,54 @@ busy-spinner marker (`BUSY_TITLE_SPINNER_RE`) gets stuck indefinitely (`isCodexB
 a REAL gateway is already covered by `test/codex-mcp-reachability-real-spawn.mjs` (which re-confirms clean
 on this same host); a real end-to-end worker under full production conditions (live manager, real project,
 real gate) is DoD-2, explicitly the dispatching lead's to provision.
+
+3. **(Card `0e83c855`) codex's own TUI silently drops some non-ASCII input — root cause is Windows conpty,
+   fixed by an ASCII fold, not a file-delivery detour.** A real, discriminating repro (not a hunch): the
+   identical bytes, written via the SAME `pty.write()` call and node-pty/conpty this project uses, arrive
+   INTACT at a plain raw-mode-reading child process (proven with a control — isolates Loom's own write
+   path and node-pty/conpty's key synthesis in general from codex's specific composer entirely) but are
+   CORRUPTED the moment codex's own TUI composer renders them.
+   **Measured boundary (25/25 against a wide, ground-truthed specimen set — Python `unicodedata`, not
+   memorized categories):** a Unicode LETTER codepoint (`Ll`/`Lu`/`Lo`/`Lt`/`Lm` — Latin, Cyrillic, Greek,
+   CJK, ...) NEVER drops. An ASTRAL/supplementary-plane codepoint (> U+FFFF, a UTF-16 surrogate pair —
+   most emoji) NEVER drops either, regardless of category. Every OTHER non-ASCII BMP codepoint —
+   punctuation (dashes, quotes), symbol (arrows, checkmarks, warning/no-entry signs), space (NBSP), mark
+   (a bare combining accent), number (both digit and non-digit categories) — DOES drop. Two prior
+   hypotheses (byte-length: "3-byte UTF-8 BMP drops"; East-Asian-Width-ambiguous) were each tested and
+   falsified by direct counter-example before this boundary was found — each explained only ~2/3 of the
+   wide specimen set (⛔ U+26D4 is EAW=Wide, not Ambiguous, yet drops; é U+00E9 is EAW=Ambiguous, not
+   narrow, yet survives).
+   **Root cause, established by elimination (owner-directed follow-up investigation, replacing an earlier
+   file-delivery workaround that itself produced three blocking Code Review defects across two rounds —
+   see this card's own board history):** neither codex's own Rust code nor crossterm (the terminal-input
+   crate it depends on, via an OpenAI fork pinned to a specific rev) can be the site. codex's
+   `paste_burst.rs` (Windows-specific paste-burst timing) only ever receives already-constructed `char`
+   values. crossterm's Windows key-event parser (`src/event/sys/windows/parse.rs`, read at the exact
+   pinned fork/rev) passes every ordinary printable BMP `u_char` straight through unconditionally — no
+   keyboard-layout lookup, no filter — and handles astral surrogate pairs via explicit, also-unconditional
+   buffering. Swapping node-pty's Windows backend (system conpty vs bundled conpty.dll vs winpty) changes
+   WHICH class drops, not whether one does — no backend preserves everything, and each backend's own drop
+   class is DIFFERENT and NON-OVERLAPPING, which is itself the evidence that neither codex's code nor
+   crossterm's owns the bug (a shared bug would produce the same behavior across backends). Root cause is
+   Microsoft's conpty: its closed-source translation of the raw VT/UTF-8 byte stream into synthesized
+   Win32 `KeyEventRecord` structures, upstream of both crossterm and codex.
+   **Fix:** `submitCodex` now ASCII-folds ONLY the measured-dropping class before writing to the pty
+   (`codex-host.ts#codexAsciiFold`/`codexCharNeedsAsciiFold`) — a curated substitution for common
+   doctrine-vocabulary symbols (dashes → `--`/`-`, warning → `[!]`, no-entry → `[X]`, arrows → `->`/`<-`/
+   `<->`/`=>`, quotes, ellipsis, bullet, checkmarks/cross mark, star), a generic `?` fallback for anything
+   else in the drop class (never silently vanished), and clean elision of variation selectors (which carry
+   no independent meaning of their own). Deliberately NOT a blanket non-ASCII gate — that was the reverted
+   file-delivery workaround's own choice, and folding Cyrillic/Greek/CJK text that codex's TUI already
+   handles correctly today would be a strictly WORSE outcome than the bug being fixed. The message stays a
+   message: no scratch-file indirection, no "read this file" instruction, no transcript-legibility
+   regression, no recursion risk.
+   **Accepted staleness risk, pinned rather than silent:** if a future codex/conpty build widens the drop
+   class beyond what this predicate folds, that text would arrive corrupted again with no signal from the
+   fold function alone — `test/codex-prompt-ascii-fold-real-spawn.mjs` is the real-spawn test that exists
+   specifically to catch that drift at the merge gate (both polarities: the drop class folds, letters/
+   astral pass through untouched), converting a silent hazard into a loud one. If the drop class ever
+   NARROWS instead, this only folds something unnecessarily (harmless, still legible) — the asymmetry that
+   makes a slightly-too-wide gate safe to ship.
 
 ## The two landmines (probe-established, carry forward into the eventual stateful build)
 

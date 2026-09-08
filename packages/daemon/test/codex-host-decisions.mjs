@@ -15,6 +15,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 const {
   isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, CodexTrustDialogLock,
+  codexAsciiFold, codexCharNeedsAsciiFold,
 } = await import("../dist/pty/codex-host.js");
 const {
   TRUST_DIALOG_MARKER, BUSY_STATUS_MARKER, CODEX_READY_PLACEHOLDER, CODEX_MODEL_LOADED_RE, stripAnsiCsi, hashConfigBefore, diffConfigAfterSpawn,
@@ -319,7 +320,74 @@ check(
   delete process.env.CODEX_HOME;
 }
 
+// --- codexCharNeedsAsciiFold / codexAsciiFold (card 0e83c855 round 4) --------------------------------
+// Hermetic, hardcoded-expected coverage of the FOLD BOUNDARY itself — the real-spawn test
+// (codex-prompt-ascii-fold-real-spawn.mjs) proves the wiring (submitCodex actually calls this, codex
+// actually receives the result); this proves the PURE predicate/transform is exactly what it claims,
+// against literal expected strings, never self-referentially computed.
+{
+  // POLARITY 1 — the measured drop class folds (curated + generic fallback + variation-selector elision).
+  check("codexCharNeedsAsciiFold: em dash U+2014 (measured-dropping, 3-byte BMP, Pd) ⇒ true", codexCharNeedsAsciiFold(0x2014) === true);
+  check("codexCharNeedsAsciiFold: no-entry U+26D4 (measured-dropping, EAW=Wide — falsifies the EAW theory) ⇒ true", codexCharNeedsAsciiFold(0x26d4) === true);
+  check("codexCharNeedsAsciiFold: NBSP U+00A0 (measured-dropping, 2-byte, Neutral — falsifies both prior theories) ⇒ true", codexCharNeedsAsciiFold(0x00a0) === true);
+  check("codexCharNeedsAsciiFold: plus-minus U+00B1 (measured-dropping, 2-byte — falsifies byte-length theory) ⇒ true", codexCharNeedsAsciiFold(0x00b1) === true);
+  check("codexCharNeedsAsciiFold: arabic-indic digit U+0660 (measured-dropping, a NUMBER category, not just punctuation/symbol) ⇒ true", codexCharNeedsAsciiFold(0x0660) === true);
+  check("codexAsciiFold: em dash folds to the curated '--'", codexAsciiFold("run — date") === "run -- date");
+  check("codexAsciiFold: en dash folds to the curated '-'", codexAsciiFold("p.1–2") === "p.1-2");
+  check("codexAsciiFold: warning sign folds to the curated '[!]'", codexAsciiFold("⚠ caution") === "[!] caution");
+  check("codexAsciiFold: no-entry folds to the curated '[X]'", codexAsciiFold("stop ⛔ now") === "stop [X] now");
+  check("codexAsciiFold: rightwards arrow folds to the curated '->'", codexAsciiFold("a → b") === "a -> b");
+  check("codexAsciiFold: warning sign + VS16 (the emoji-presentation pair) folds to '[!]' with NO trailing placeholder for the elided selector", codexAsciiFold("⚠️ caution") === "[!] caution");
+  check("codexAsciiFold: an UNMAPPED dropping codepoint (section sign, not in the curated table) falls back to a visible '?', never silently vanishes", codexAsciiFold("a§b") === "a?b");
+  check("codexAsciiFold: a run of unmapped dropping codepoints (section/degree/plus-minus — none curated) each get their OWN '?' (never merged/collapsed into one)", codexAsciiFold("§°±") === "???");
+
+  // POLARITY 2 — letters (any script) and astral codepoints survive completely UNTOUCHED, regardless of
+  // category or the OLD byte-length/EAW theories' predictions.
+  check("codexCharNeedsAsciiFold: e-acute U+00E9 (a LETTER, EAW=Ambiguous — this is the exact case that falsified the EAW theory) ⇒ false", codexCharNeedsAsciiFold(0x00e9) === false);
+  check("codexCharNeedsAsciiFold: CJK U+4E2D (a LETTER, 3-byte BMP — falsifies the byte-length theory) ⇒ false", codexCharNeedsAsciiFold(0x4e2d) === false);
+  check("codexCharNeedsAsciiFold: Cyrillic U+0430 (a LETTER) ⇒ false", codexCharNeedsAsciiFold(0x0430) === false);
+  check("codexCharNeedsAsciiFold: Greek U+03B1 (a LETTER) ⇒ false", codexCharNeedsAsciiFold(0x03b1) === false);
+  check("codexCharNeedsAsciiFold: astral emoji U+1F534 (red circle, category So — NOT a letter, but astral always survives) ⇒ false", codexCharNeedsAsciiFold(0x1f534) === false);
+  check("codexCharNeedsAsciiFold: ASCII '!' U+0021 (out of scope entirely, never consulted for real ASCII text, but must read false if it were) ⇒ false", codexCharNeedsAsciiFold(0x0021) === false);
+  check("codexAsciiFold: Cyrillic text passes through completely byte-identical", codexAsciiFold("привет") === "привет");
+  check("codexAsciiFold: CJK text passes through completely byte-identical", codexAsciiFold("中文") === "中文");
+  check("codexAsciiFold: astral emoji passes through completely byte-identical (surrogate pair intact, not split)", codexAsciiFold("🔴 red 📌 pin") === "🔴 red 📌 pin");
+  check("codexAsciiFold: pure ASCII text is returned byte-identical (the early-return fast path)", codexAsciiFold("plain ascii, nothing to fold (1 2 3)") === "plain ascii, nothing to fold (1 2 3)");
+
+  // MIXED — the realistic case: a real message carries all of dropping-class, letter, and astral
+  // codepoints together; only the dropping class changes.
+  const MIXED = "⭐⭐ → done ⛔ stop — wait café 🔴 中文";
+  const MIXED_EXPECTED = "[*][*] -> done [X] stop -- wait café 🔴 中文";
+  check("codexAsciiFold: mixed doctrine-shaped text folds ONLY the dropping-class codepoints, leaving é/astral/CJK untouched", codexAsciiFold(MIXED) === MIXED_EXPECTED);
+
+  // POLARITY 3 — Code Review Major [2]: the `?` fallback is correct for VISIBLE dropping content, wrong
+  // for the invisible/whitespace subclass. Every assertion here checks what the codepoint folds TO, not
+  // merely that codexCharNeedsAsciiFold reports it as dropping (that alone is how NBSP's missing "folds
+  // to a plain space, not '?'" behavior slipped past review the first time).
+  check("codexAsciiFold: NBSP U+00A0 folds to a PLAIN SPACE, never '?' — 'see the board' must never become 'see the?board'", codexAsciiFold("see the board") === "see the board");
+  check("codexAsciiFold: ideographic space U+3000 also folds to a plain space", codexAsciiFold("a　b") === "a b");
+  check("codexAsciiFold: narrow no-break space U+202F folds to a plain space", codexAsciiFold("a b") === "a b");
+  check("codexAsciiFold: soft hyphen U+00AD elides to NOTHING (no independent content, not a visible '?')", codexAsciiFold("co­op") === "coop");
+  check("codexAsciiFold: ZWSP U+200B elides to NOTHING", codexAsciiFold("a​b") === "ab");
+  check("codexAsciiFold: BOM U+FEFF elides to NOTHING", codexAsciiFold("a﻿b") === "ab");
+  check("codexAsciiFold: LRM U+200E elides to NOTHING", codexAsciiFold("a‎b") === "ab");
+  check("codexAsciiFold: a ZWJ emoji sequence (man+ZWJ+laptop, both halves astral) elides the joiner, joining the two survivors directly — NOT split by a '?'", codexAsciiFold("\u{1F468}‍\u{1F4BB}") === "\u{1F468}\u{1F4BB}");
+  check("codexAsciiFold: a longer ZWJ sequence (family emoji, three astral codepoints + two joiners) elides BOTH joiners", codexAsciiFold("\u{1F468}‍\u{1F469}‍\u{1F466}") === "\u{1F468}\u{1F469}\u{1F466}");
+  check("codexAsciiFold: rainbow flag (astral flag + VS16 + ZWJ + astral rainbow) elides VS16 AND the joiner, leaving both survivors adjacent", codexAsciiFold("\u{1F3F3}️‍\u{1F308}") === "\u{1F3F3}\u{1F308}");
+  check("codexAsciiFold: a BARE combining accent (no letter to attach to) still folds to a visible '?' — Default_Ignorable_Code_Point does NOT catch combining marks (verified false for U+0301 in node)", codexAsciiFold("é") === "e?");
+  check("codexAsciiFold: NEGATIVE CONTROL — em dash (real, visible content) must NEVER fold to a plain space", codexAsciiFold("run—date") !== "run date" && codexAsciiFold("run—date") === "run--date");
+  check("codexAsciiFold: NEGATIVE CONTROL — a curated symbol immediately after an elided ZWJ/VS16 still shows its OWN substitute, proving elision and curated-fold compose cleanly (not just each in isolation)", codexAsciiFold("⚠️—x") === "[!]--x");
+
+  // Known, disclosed limit (Code Review [2]'s own direction: "state that limit in the doc" — this is the
+  // test half of that): an abugida's dependent vowel-sign is a COMBINING MARK, not a \p{L} letter, so it
+  // still falls to the generic '?' fallback — deliberately, since it carries real phonetic content the
+  // way a bare accent does. Devanagari "कि" (KA + vowel sign I) — the base consonant is \p{L} and
+  // survives; the vowel sign is Mn and folds to '?'.
+  check("codexAsciiFold: KNOWN LIMIT — a Devanagari base consonant (a LETTER) survives untouched", codexAsciiFold("कि").startsWith("क"));
+  check("codexAsciiFold: KNOWN LIMIT — the dependent vowel sign after it (a combining MARK, not a letter) folds to '?', losing the vowel — disclosed in codexCharNeedsAsciiFold's own doc, not silently accepted", codexAsciiFold("कि") === "क?");
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — codex-host.ts's trust-dialog/busy-idle/ready-marker/model-loaded/MCP-arg decision logic is proven both ways (real markers fire, ordinary/malformed input doesn't); isCodexModelLoaded (card 448f1b4a) correctly reads false against the BYTE-EXACT real false-ready specimen (raw ANSI included, from the actual gate-output capture, not a stripped rendering) even though isCodexReadyMarkerPresent alone reads true against it, stays accumulation-safe against stale 'loading' bytes, and a RED proof confirms CODEX_MODEL_LOADED_RE tested WITHOUT stripAnsiCsi wrongly reads true against those same real bytes (the escape-swallowing bug a manager review caught before merge); the MCP-arg translation stays consistent with the REAL buildMcpServers routing table, the trust-dialog lock serializes FIFO and survives a rejecting holder, and diffConfigAfterSpawn's residual disclosure (Code Review M7) correctly fires even when the expected trust-block AND something else both changed. See codex-queue-state-machine.mjs for coverage of the real stateful wiring this logic is delegated to from."
+  ? "\n✅ ALL PASS — codex-host.ts's trust-dialog/busy-idle/ready-marker/model-loaded/MCP-arg decision logic is proven both ways (real markers fire, ordinary/malformed input doesn't); isCodexModelLoaded (card 448f1b4a) correctly reads false against the BYTE-EXACT real false-ready specimen (raw ANSI included, from the actual gate-output capture, not a stripped rendering) even though isCodexReadyMarkerPresent alone reads true against it, stays accumulation-safe against stale 'loading' bytes, and a RED proof confirms CODEX_MODEL_LOADED_RE tested WITHOUT stripAnsiCsi wrongly reads true against those same real bytes (the escape-swallowing bug a manager review caught before merge); the MCP-arg translation stays consistent with the REAL buildMcpServers routing table, the trust-dialog lock serializes FIFO and survives a rejecting holder, and diffConfigAfterSpawn's residual disclosure (Code Review M7) correctly fires even when the expected trust-block AND something else both changed; and (card 0e83c855 round 4, Code Review round 1 Major [2] fix included) codexAsciiFold/codexCharNeedsAsciiFold's measured letter/astral boundary is pinned across THREE polarities, every assertion checking what a codepoint folds TO rather than merely that it needs folding — the visible drop class folds to curated substitutions or a generic '?' fallback; Default_Ignorable_Code_Point codepoints (variation selectors, ZWJ including inside real multi-codepoint emoji sequences, ZWSP, soft hyphen, BOM, LRM) elide to nothing; White_Space codepoints (NBSP and friends) fold to a plain space rather than corrupting running text with a stray '?'; a bare combining mark still folds to '?' as a disclosed, deliberate limit (verified NOT swept into the elision set); and any Unicode letter (Latin/Cyrillic/Greek/CJK) or astral codepoint passes through completely byte-identical, including the exact specimens that falsified the prior byte-length and East-Asian-Width theories. See codex-queue-state-machine.mjs for coverage of the real stateful wiring this logic is delegated to from (including the WIRING assertion itself — that submitCodex actually calls this, not just that the pure function is correct in isolation), and codex-prompt-ascii-fold-real-spawn.mjs for the real-spawn proof that a real codex process actually receives the folded result."
   : `\n❌ ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

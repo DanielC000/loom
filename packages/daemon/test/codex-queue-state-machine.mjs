@@ -47,6 +47,7 @@ const TMP = mkdtempManaged("loom-codex-queue-sm-");
 process.env.LOOM_HOME = TMP;
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { codexAsciiFold } = await import("../dist/pty/codex-host.js");
 
 /** A fake, fully-scripted codex pty: no real process, no OS-driven I/O — every "chunk" of output is
  *  pushed by this test calling `fakePty.push(text)` directly. The only REAL async in this file is the
@@ -317,7 +318,36 @@ check("M4 FIX: writeStdin's raw bytes reached the fake codex pty", fakePty.write
   check("R4: the previously-queued message drains once the late boot-readiness latches", stuckPty.writes.some((w) => w.includes("queued against a session that never boots")));
 }
 
+// --- FOLD WIRING (card 0e83c855 round 4, Code Review round 1 Major [1]): the only proof anywhere that
+// `submitCodex` actually CALLS `codexAsciiFold` on its write path, not merely that the pure function is
+// correct in isolation (that's codex-host-decisions.mjs's own job) — and unlike the real-spawn test
+// (codex-prompt-ascii-fold-real-spawn.mjs), this NEVER skips: it needs no authenticated codex install, so
+// it runs identically on CI and on a host where auth has lapsed. The reviewer's own finding: deleting the
+// `codexAsciiFold(...)` call at submitCodex's write site (host.ts) and rebuilding left every existing test
+// GREEN — the fix shipping silently unwired on the path every codex prompt traverses. This is the
+// backstop for exactly that: a fresh, dedicated session (mirrors R4's own isolated-session pattern above,
+// never touching the shared SESSION_ID's own state/scenario ordering), one non-ASCII turn, asserted
+// against `fakePty.writes` directly — the SAME real `enqueueStdinCodex`/`submitCodex` code path every
+// other scenario in this file already exercises, per this file's own header doc.
+{
+  const FOLD_SESSION_ID = "codex-fold-wiring-test";
+  host.spawn({
+    sessionId: FOLD_SESSION_ID, cwd: "/fake/codex/worktree-fold", permission: {}, geometry: { cols: 120, rows: 40 },
+    sessionEnv: {}, role: "worker", harness: "codex",
+  });
+  const foldPty = host.fakeCodexPtys.get(FOLD_SESSION_ID);
+  foldPty.push("OpenAI Codex (v1.2.3)\n│ model:     gpt-6-astra medium                          │\n›  Ask Codex to do anything\n");
+  check("(fold wiring setup) boot readiness latched for the fresh, dedicated session", host.liveCodex.get(FOLD_SESSION_ID).bootReady === true);
+  const NON_ASCII = "run — stop ⛔ warn ⚠️ café 🔴 中文";
+  const EXPECTED_FOLDED = codexAsciiFold(NON_ASCII); // the SAME production function — this test proves WIRING, not the fold's own boundary logic (that's codex-host-decisions.mjs's job, with hardcoded literals)
+  check("(fold wiring) EXPECTED_FOLDED genuinely differs from the raw specimen — the fold must actually do something for this test to discriminate at all", EXPECTED_FOLDED !== NON_ASCII);
+  const enqFold = host.enqueueStdin(FOLD_SESSION_ID, NON_ASCII, "system", undefined, undefined, "agent");
+  check("(fold wiring) the non-ASCII turn delivered immediately (fresh session, idle post-boot)", enqFold.delivered === true);
+  check("WIRING FIX (Code Review Major [1]): the RAW specimen — with its dropping-class codepoints still present — was NEVER written to the pty", !foldPty.writes.some((w) => w.includes(NON_ASCII)));
+  check("WIRING FIX: the FOLDED form (curated substitutes, letters/astral untouched) WAS written — proves submitCodex actually calls codexAsciiFold, not just that the function exists", foldPty.writes.some((w) => w.includes(EXPECTED_FOLDED)));
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the codex queue/turn state machine (enqueueStdinCodex/submitCodex/drainCodexPending/setCodexBusy), the C1 kickoff-delivery fix, the C2 in-flight busy guard, the M3 freshness-based busy read, the M9 reconcile() safety net, the M4 writeStdin passthrough, the R1-R3 boot-readiness gate (card 448f1b4a — a ready placeholder alone, with the model still loading, no longer latches readiness or lets a queued message through, including via reconcile()), and the R4 boot-stuck fail-loud ceiling all behave correctly under a fully scripted fake pty."
+  ? "\n✅ ALL PASS — the codex queue/turn state machine (enqueueStdinCodex/submitCodex/drainCodexPending/setCodexBusy), the C1 kickoff-delivery fix, the C2 in-flight busy guard, the M3 freshness-based busy read, the M9 reconcile() safety net, the M4 writeStdin passthrough, the R1-R3 boot-readiness gate (card 448f1b4a — a ready placeholder alone, with the model still loading, no longer latches readiness or lets a queued message through, including via reconcile()), the R4 boot-stuck fail-loud ceiling, and (card 0e83c855 round 4, Code Review Major [1]) the ASCII-fold WIRING itself — submitCodex demonstrably calls codexAsciiFold on its write path, never shipping the raw non-ASCII specimen — all behave correctly under a fully scripted fake pty."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

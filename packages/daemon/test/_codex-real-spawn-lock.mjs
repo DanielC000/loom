@@ -37,6 +37,7 @@ export const CODEX_REAL_SPAWN_BASENAMES = [
   "codex-doctrine-real-spawn",
   "codex-mcp-connect-stuck-real-spawn",
   "codex-mcp-reachability-real-spawn",
+  "codex-prompt-ascii-fold-real-spawn",
   "codex-stateful-runtime-real-spawn",
   "codex-submit-confirmation-real-spawn",
   "codex-transcript-real-spawn",

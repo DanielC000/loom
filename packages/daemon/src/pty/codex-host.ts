@@ -198,3 +198,153 @@ export class CodexTrustDialogLock {
 /** The single, process-wide lock instance — see {@link CodexTrustDialogLock}'s own doc for why one shared
  *  instance (not per-session) is correct here. */
 export const codexTrustDialogLock = new CodexTrustDialogLock();
+
+/**
+ * Card 0e83c855 round 4 — the MEASURED root-cause fix, replacing the file-delivery workaround (reverted;
+ * see that revert commit's own message for the full elimination chain). codex-cli's own TUI silently
+ * drops SOME non-ASCII codepoints on direct paste — not Loom's `pty.write()`, not node-pty/conpty's key
+ * synthesis in general (ruled out with controls), not codex's own `paste_burst.rs` (structurally cannot
+ * be the site — it only ever receives already-constructed `char` values), not the OpenAI crossterm fork's
+ * Windows key-event parser (same reason — ordinary printable codepoints pass through unconditionally,
+ * with no keyboard-layout lookup). The loss happens inside Windows conpty's own closed-source translation
+ * of the raw VT/UTF-8 byte stream into synthesized `KeyEventRecord`s — evidenced, not merely inferred, by
+ * three independently-implemented pty backends (system conpty, winpty, node-pty's bundled conpty.dll)
+ * each dropping a DIFFERENT, non-overlapping character class when swapped against the identical specimen.
+ *
+ * THE MEASURED BOUNDARY (25/25 against a wide, ground-truthed specimen set — Python `unicodedata`, not
+ * memorized categories): a Unicode LETTER codepoint (`\p{L}`: Ll/Lu/Lo/Lt/Lm — covers Latin, Cyrillic,
+ * Greek, CJK, ...) NEVER drops. An ASTRAL/supplementary-plane codepoint (> U+FFFF, a UTF-16 surrogate
+ * pair — most emoji) NEVER drops either, regardless of category. Every OTHER non-ASCII BMP codepoint —
+ * punctuation (dashes, quotes), symbol (arrows, checkmarks, warning/no-entry signs), space (NBSP), mark
+ * (a bare combining accent), number (both decimal-digit and superscript/other-number categories) — DOES
+ * drop. Two prior hypotheses were tested and falsified by direct counter-example before this one was
+ * found: byte-length ("3-byte UTF-8 BMP drops") and East-Asian-Width-ambiguous both explained only
+ * roughly 2/3 of the wide specimen set (⛔ U+26D4 is EAW=Wide, not Ambiguous, yet drops; é U+00E9 is
+ * EAW=Ambiguous, not narrow, yet survives).
+ *
+ * ⛔ Deliberately NOT a blanket non-ASCII gate (that was the file-delivery workaround's own choice, and
+ * is why it needed a whole scratch-file detour): folding every non-ASCII codepoint would silently corrupt
+ * Cyrillic/Greek/CJK text that codex's TUI already handles correctly today, which is a strictly WORSE
+ * outcome than the bug being fixed. This gate is exactly as wide as the measured drop class and no wider.
+ *
+ * ⚠️ Accepted staleness risk, PINNED rather than silent: if a future codex/conpty build widens the drop
+ * class beyond what this predicate folds, that text would arrive corrupted again with no signal from this
+ * function alone — see `codex-prompt-ascii-fold-real-spawn.mjs`'s own doc for the real-spawn test that
+ * exists specifically to catch that drift at the merge gate, converting a silent hazard into a loud one.
+ * If the drop class ever NARROWS instead, this only folds something unnecessarily (harmless, still
+ * legible) — the asymmetry that makes a slightly-too-wide gate safe to ship.
+ *
+ * ⚠️ KNOWN LIMIT, disclosed rather than silently accepted: this fold protects ALPHABETIC scripts (Latin,
+ * Cyrillic, Greek, CJK, ...) fully, but only PARTIALLY for an abugida (Devanagari and similar scripts
+ * where a base consonant letter survives via `\p{L}` but a dependent vowel-sign/matra is a COMBINING MARK,
+ * not a letter, and so still falls to the generic `?` fallback below — e.g. Devanagari "कि" folds to
+ * "क?", losing the vowel sign). This is deliberate, not an oversight: a matra carries real phonetic
+ * content the way a bare combining accent does, so a visible placeholder is the correct degradation there
+ * (see {@link codexIsDefaultIgnorable}'s own doc for the contrasting case — a codepoint that carries NO
+ * content of its own, which elides instead).
+ */
+const CODEX_LETTER_RE = /\p{L}/u;
+export function codexCharNeedsAsciiFold(codepoint: number): boolean {
+  if (codepoint <= 0x7f) return false; // ASCII — never in scope; always survives untouched
+  if (codepoint > 0xffff) return false; // astral/supplementary-plane — survives regardless of category
+  return !CODEX_LETTER_RE.test(String.fromCodePoint(codepoint));
+}
+
+/**
+ * Code Review Major [2]: codepoints with NO independent meaning of their own — each one only modifies or
+ * requests a presentation style for an ADJACENT codepoint (a variation selector), or joins/separates two
+ * adjacent codepoints without being visible content itself (ZWJ in an emoji sequence, ZWSP, a soft
+ * hyphen, a BOM, a directional mark). Unicode's own `Default_Ignorable_Code_Point` property is exactly
+ * this set — verified in node against VS1/VS16/ZWJ/ZWSP/SHY/BOM/LRM (all `true`) and against NBSP/a bare
+ * combining accent/em dash/CJK (all `false`, so none of THOSE are accidentally swept in here). Eliding one
+ * is not losing content the way eliding a real symbol is, so it folds to NOTHING rather than a visible
+ * placeholder — the alternative (a generic `?` fallback) would double up right after an adjacent
+ * character's own fold, e.g. producing `[!]?` instead of `[!]` for warning-sign-plus-VS16, or splitting a
+ * ZWJ emoji sequence like "👨‍💻" into "👨?💻" instead of the correct "👨💻" (both base emoji are astral and
+ * already survive on their own; only the joiner between them needs to disappear cleanly).
+ *
+ * Subsumes the narrower VS-only carve-out this replaced (Code Review Major [2] on this card) — every VS1/
+ * VS16 case that carve-out covered is still covered, plus ZWJ/ZWSP/SHY/BOM/LRM it never named.
+ */
+const CODEX_DEFAULT_IGNORABLE_RE = /\p{Default_Ignorable_Code_Point}/u;
+function codexIsDefaultIgnorable(ch: string): boolean {
+  return CODEX_DEFAULT_IGNORABLE_RE.test(ch);
+}
+
+/**
+ * Code Review Major [2]: a codepoint whose ONLY role is to be some kind of space — NBSP, ideographic
+ * space, narrow NBSP, thin space, ... — folds to a single plain ASCII space rather than the generic `?`
+ * fallback. `?` is right for a character that carries real visible content the author put there
+ * deliberately; a space is neither visible nor deliberate-looking, and the author never sees it as
+ * anything but a gap between words. Folding NBSP to `?` turned *"see the board"* into *"see the?board"* —
+ * exactly the kind of corruption this whole fix exists to prevent, just relocated one fallback branch
+ * over. Verified in node: `\p{White_Space}` is `true` for NBSP/ideographic/narrow-NBSP/thin space and
+ * `false` for ZWSP (a WIDTH-zero separator, correctly handled by {@link codexIsDefaultIgnorable} instead,
+ * never as a visible space) and for em dash (a real, visible symbol — must never fold to a space).
+ */
+const CODEX_WHITE_SPACE_RE = /\p{White_Space}/u;
+function codexIsFoldableWhitespace(ch: string): boolean {
+  return CODEX_WHITE_SPACE_RE.test(ch);
+}
+
+/**
+ * A small, curated table of ASCII substitutions for the highest-frequency members of the drop class in
+ * THIS project's own doctrine vocabulary (dashes, arrows, checkmarks, warning/no-entry signs, quotes) —
+ * chosen for legibility, not exhaustiveness. Every OTHER dropping codepoint (the long tail this table
+ * does not name) still folds correctly via {@link codexAsciiFold}'s own generic `?` fallback — this table
+ * is a readability improvement over that fallback for common cases, never a correctness requirement; a
+ * codepoint missing from it is still ALWAYS folded, never passed through raw.
+ */
+const CODEX_ASCII_FOLD_MAP: ReadonlyMap<number, string> = new Map([
+  [0x2014, "--"], // em dash
+  [0x2013, "-"], // en dash
+  [0x2018, "'"], [0x2019, "'"], // single quotes
+  [0x201c, '"'], [0x201d, '"'], // double quotes
+  [0x2026, "..."], // horizontal ellipsis
+  [0x2022, "*"], // bullet
+  [0x2192, "->"], [0x2190, "<-"], [0x2194, "<->"], // arrows
+  [0x21d2, "=>"], // rightwards double arrow ("implies")
+  [0x26a0, "[!]"], // warning sign
+  [0x26d4, "[X]"], // no entry
+  [0x2705, "[ok]"], [0x2713, "[ok]"], // check marks
+  [0x274c, "[x]"], // cross mark
+  [0x2b50, "[*]"], // star
+]);
+
+/**
+ * Card 0e83c855 round 4 — THE fix: fold ONLY {@link codexCharNeedsAsciiFold}'s measured drop class to a
+ * plain-ASCII substitute — curated where {@link CODEX_ASCII_FOLD_MAP} names one; elided to nothing for a
+ * {@link codexIsDefaultIgnorable} codepoint (carries no content of its own); folded to a plain space for
+ * a {@link codexIsFoldableWhitespace} codepoint (NBSP and friends — a space is not "content" the way a
+ * visible symbol is, so a `?` there would corrupt running text worse than the bug being fixed); else a
+ * generic `?` — NEVER silently dropped, mirroring the file-delivery workaround's own now-reverted preview
+ * convention: a visible placeholder beats a character vanishing with no trace. Every other codepoint —
+ * plain ASCII, any Unicode letter, any astral codepoint — passes through completely untouched, so this
+ * can never corrupt Cyrillic/Greek/CJK text or emoji that codex's TUI already delivers correctly (see
+ * {@link codexCharNeedsAsciiFold}'s own doc for the one disclosed exception: an abugida's combining
+ * vowel-sign still folds to `?`, deliberately, since it carries real phonetic content).
+ *
+ * Code Review [3]: applied on the one path Loom AUTHORS text on for codex — `submitCodex`'s write to the
+ * pty — never on the claude path, which this module has nothing to do with, and never on anything read
+ * back FROM codex (a transcript, a file codex wrote) — those already hold whatever codex itself produced,
+ * unrelated to what Loom typed into it. Deliberately NOT applied to `writeStdinCodex` (`pty/host.ts`) —
+ * the raw relay for a live human typing directly into a codex terminal tile — even though that path
+ * writes through the identical `live.pty.write()` -> conpty -> TUI composer and is just as exposed to the
+ * same drop. Left alone on purpose: a human watching their own keystrokes land sees the corruption
+ * immediately and can react (retype, paste differently); a Loom-authored agent turn is unattended and
+ * would otherwise ship silently wrong with nobody watching, which is the actual defect this fold exists
+ * to close. Folding a human's own live keystrokes without their input is a different, PRODUCT-level
+ * decision, deliberately left undecided here.
+ */
+export function codexAsciiFold(text: string): string {
+  if (!/[^\x00-\x7f]/.test(text)) return text; // pure ASCII — byte-identical, no allocation
+  let out = "";
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!;
+    if (!codexCharNeedsAsciiFold(cp)) { out += ch; continue; }
+    if (codexIsDefaultIgnorable(ch)) continue; // elide — see its own doc
+    if (codexIsFoldableWhitespace(ch)) { out += " "; continue; } // fold to a plain space — see its own doc
+    out += CODEX_ASCII_FOLD_MAP.get(cp) ?? "?";
+  }
+  return out;
+}

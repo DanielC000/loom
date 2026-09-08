@@ -26,7 +26,7 @@ import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
-import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, codexTrustDialogLock } from "./codex-host.js";
+import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, codexTrustDialogLock, codexAsciiFold } from "./codex-host.js";
 import { findConversationIdForSpawn } from "./codex-transcript.js";
 
 const RING_CAP_BYTES = 256 * 1024;
@@ -6937,6 +6937,13 @@ export class PtyHost {
    * turn's own Enter even goes out) can still arm a timer independently via the onData handler's own
    * unconditional call, but `armCodexBusyStaleTimer`'s CASE 0 no-ops any such fire while `enterPending` is
    * true, rather than confirming against this turn's still-stale `enterWrittenAt`.
+   *
+   * Card 0e83c855 round 4: `text` is ASCII-folded (`codex-host.ts#codexAsciiFold`) before it reaches the
+   * pty — see that function's own doc for the measured drop class this closes and why it is deliberately
+   * NOT a blanket non-ASCII gate. Every OTHER caller of `text` in this codebase (durable records, the
+   * `session_message_queued`/`session_message_delivered` audit trail, a manager's own view of what it
+   * sent) still holds the ORIGINAL, unfolded text — only the bytes actually typed into codex's TUI are
+   * folded, so nothing durable or manager-visible is ever silently rewritten.
    */
   private submitCodex(sessionId: string, live: CodexLive, text: string): void {
     this.setCodexBusy(sessionId, live, true, "submit");
@@ -6955,7 +6962,7 @@ export class PtyHost {
     // stopped or redirected mid-submit (the card's own "arguably the worse half" finding, for the redirect
     // case).
     const gen = live.busyStaleGen;
-    live.pty.write(text);
+    live.pty.write(codexAsciiFold(text));
     setTimeout(() => {
       if (!live.alive || live.killed) return; // the pty died, or was killed, before the delayed Enter — nothing to write or arm
       // Superseded by a stop/redirect during the gap — see this method's own doc. Deliberately does NOT
