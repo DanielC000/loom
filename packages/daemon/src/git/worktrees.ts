@@ -354,13 +354,21 @@ export interface ProvisionDeps {
   buildTimeoutMs?: number;
   /**
    * Whether the monorepo BUILD phase may run at all for this worktree (default true — every existing
-   * caller stays byte-identical). A build-free rig — a `noCommit`/read-only role such as Code Reviewer
-   * or Docs & Vault — never runs a build gate, so paying for a full top-level `pnpm build` at worktree
-   * creation is pure spawn-latency with zero benefit. INSTALL still runs unconditionally when `false`
-   * (a no-commit rig still needs `node_modules` to run/read the repo) — only the build phase is gated.
-   * Threaded from the spawn caller (`sessions/service.ts`) off the session's resolved `noCommit` flag.
-   * Named `runBuild`, not `build`, to avoid colliding with the injectable {@link ProvisionDeps.build}
-   * function seam above.
+   * caller stays byte-identical). A `noCommit`/read-only rig (Code Reviewer, Docs & Vault, …) never runs
+   * a build GATE — but that does NOT mean a build has zero benefit for it: a reviewer that only reads/
+   * reasons never needs `dist/`, but one that EXECUTES a test file under review does, and a build-free
+   * worktree never populates `dist/` for it to import (board card 503cd822 — a real Code Reviewer session
+   * could not run 2 of 5 changed files under review for exactly this reason, and its manager had to
+   * relay a "build and run those yourself" round-trip back to the author).
+   *
+   * So `runBuild` is NOT derived from `noCommit` alone. The spawn caller (`sessions/service.ts`) sets it
+   * to `!noCommit` for an ordinary noCommit rig with nothing yet to review (a fresh task — no diff exists
+   * yet to inspect), but for a REVIEW spawn (`reviewOfWorkerSessionId`/`reviewOfTaskId`) it additionally
+   * asks {@link reviewDiffNeedsBuild} whether the REVIEWED branch's diff touches a test-shaped file —
+   * build the review worktree if so, even though the reviewer itself never commits. INSTALL still runs
+   * unconditionally when `false` (a no-commit rig still needs `node_modules` to run/read the repo) —
+   * only the build phase is gated. Named `runBuild`, not `build`, to avoid colliding with the injectable
+   * {@link ProvisionDeps.build} function seam above.
    */
   runBuild?: boolean;
 }
@@ -586,7 +594,8 @@ const WORKSPACE_BUILD_COMMANDS: Record<PackageManager, string> = {
  *   2. BUILD — only attempted after a SUCCESSFUL install (a build over incomplete/missing deps is
  *      pointless), only when {@link isWorkspaceMonorepo} detects a workspace root (a single-package
  *      repo skips this phase entirely), AND only when {@link ProvisionDeps.runBuild} isn't explicitly
- *      `false` (a build-free/noCommit rig gets install only — see {@link ProvisionDeps.runBuild}).
+ *      `false` (a spawn the caller decided doesn't need `dist/` gets install only — see {@link
+ *      ProvisionDeps.runBuild} for how that decision is actually made, which is more than just `noCommit`).
  *      Runs on its OWN budget ({@link PROVISION_BUILD_TIMEOUT_MS}), independent of the install's.
  * Either phase's failure/timeout is CLASSIFIED and logged LOUDLY (see {@link logProvisionFailure} — the
  * specific reason plus a captured output tail, not a silent `console.warn`) and then SWALLOWED — the
@@ -2594,6 +2603,52 @@ export function matchAddedDenyGlobs(files: DiffstatFile[], denyGlobs: string[]):
   if (denyGlobs.length === 0) return [];
   const regexes = denyGlobs.map(pathGlobToRegExp);
   return files.filter((f) => f.status === "A" && regexes.some((re) => re.test(f.file))).map((f) => f.file);
+}
+
+/**
+ * Generic "does `filePath` look like a test file" check — ecosystem-wide JS/TS testing conventions (a
+ * `test`/`tests`/`__tests__`/`spec`/`e2e` path SEGMENT, or a `*.test.*`/`*.spec.*` filename), deliberately
+ * NOT scoped to any one project's own test-directory name: this file provisions worktrees for every
+ * project the daemon manages, not just this one, so a heuristic here must stay project-agnostic. Segment
+ * matching (not substring) means `src/testament.ts` and `contest/foo.ts` do NOT match — see {@link
+ * reviewDiffNeedsBuild}'s test for the negative-control proof this isn't a bare substring check.
+ */
+export function looksLikeTestFile(filePath: string): boolean {
+  const TEST_DIR_NAMES = new Set(["test", "tests", "__tests__", "spec", "e2e"]);
+  const segments = filePath.replace(/\\/g, "/").split("/");
+  if (segments.some((seg) => TEST_DIR_NAMES.has(seg.toLowerCase()))) return true;
+  const base = segments[segments.length - 1] ?? "";
+  return /\.(test|spec)\.[^./]+$/i.test(base);
+}
+
+/**
+ * Whether a REVIEW spawn's REVIEWED branch is worth building for, even though the review rig itself is
+ * `noCommit` (see {@link ProvisionDeps.runBuild}). A build-free reviewer can still read and reason about
+ * source, but it can never EXECUTE a test file that imports compiled `dist/` output — the incident this
+ * closes (board card 503cd822): a real Code Reviewer session could not run 2 of 5 changed files under
+ * review because they imported from `packages/daemon/dist/`, which a build-free worktree never populates.
+ *
+ * Building for EVERY review would defeat the entire point of `runBuild:false`'s latency win — most
+ * reviews touch no test at all — so this keys the decision on the REVIEWED diff itself: build only when
+ * it touches at least one test-shaped file ({@link looksLikeTestFile}), since that's the population that
+ * can plausibly need to be executed. A docs/vault/source-only review still skips the build, unchanged
+ * from before this card.
+ *
+ * FAILS OPEN (returns `true`, i.e. "build") on ANY diff error — a bad ref, a timeout, a git failure. An
+ * undetectable diff must never silently degrade to the exact "reviewer can't run tests" bug this closes;
+ * the cost of a false-positive build is bounded latency, the cost of a false-negative skip is a repeat of
+ * the incident. `deps` mirrors {@link diffBranch}'s own injectable seam so a test can stub the diff.
+ */
+export async function reviewDiffNeedsBuild(
+  repoPath: string, branch: string, base = "HEAD", deps: DiffBranchDeps = {},
+): Promise<boolean> {
+  try {
+    const { filesChanged, allFiles } = await diffBranch(repoPath, branch, base, { includePatch: false }, deps);
+    if (filesChanged === 0) return false; // nothing changed on the reviewed branch → nothing to run
+    return allFiles.some((f) => looksLikeTestFile(f.file));
+  } catch {
+    return true; // undetectable → fail OPEN (build), never silently reproduce the bug this closes
+  }
 }
 
 /**

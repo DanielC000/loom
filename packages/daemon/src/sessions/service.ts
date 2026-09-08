@@ -18,7 +18,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
@@ -8138,9 +8138,10 @@ export class SessionService {
     this.inFlightSpawnTaskIds.add(claimKey);
     this.inFlightSpawnCountByManager.set(managerSessionId, (this.inFlightSpawnCountByManager.get(managerSessionId) ?? 0) + 1);
     try {
-      // A noCommit/read-only rig (Code Reviewer, Docs & Vault, …) never runs a build gate, so skip the
-      // monorepo BUILD phase for it — install still runs (it still needs node_modules to run/read).
-      // WORKTREE KEY: a tasked spawn keys its (deterministic, reused-on-re-spawn) worktree/branch off
+      // A noCommit/read-only rig (Code Reviewer, Docs & Vault, …) never runs a build GATE, but that no
+      // longer means the monorepo BUILD phase is unconditionally skipped for it — see the `runBuild`
+      // computation below (card 503cd822). Install still runs regardless (it still needs node_modules to
+      // run/read). WORKTREE KEY: a tasked spawn keys its (deterministic, reused-on-re-spawn) worktree/branch off
       // `taskId` exactly as before. A taskless spawn has no stable id to key off, and must NEVER reuse
       // another spawn's worktree — so it keys off `claimKey` (this call's own fresh randomUUID()),
       // guaranteeing its own ISOLATED worktree/branch that can never collide with a task's worktree or
@@ -8159,7 +8160,16 @@ export class SessionService {
       // in — never always-primary — so the review target's own resolved repo wins over the normal
       // taskId-or-primary resolution below.
       const targetRepo = reviewForkFrom ? reviewForkFrom.repo : resolveRepo(project, taskId ? this.db.getTask(taskId) : null);
-      const { worktreePath, branch, reusedDirtyWorktree, discardedOnRecut, staleBase } = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit }, targetRepo.key, reviewForkFrom?.branch);
+      // Card 503cd822: `noCommit` alone used to gate the build phase off unconditionally (`runBuild:
+      // !noCommit`), on the premise that a build-free rig never runs a build GATE so a build has zero
+      // benefit for it — false for a REVIEW spawn whose reviewed branch touches a test file the reviewer
+      // needs to EXECUTE (a build-free worktree never populates `dist/` for it to import). For an ordinary
+      // noCommit rig with no reviewed branch yet (a fresh task — nothing to inspect), the decision is
+      // unchanged: `!noCommit`. See ProvisionDeps.runBuild's doc for the full rationale.
+      const runBuild = !noCommit || (reviewForkFrom
+        ? await reviewDiffNeedsBuild(reviewForkFrom.repo.path, reviewForkFrom.branch, "HEAD", { timeoutMs: this.gitOpMs })
+        : false);
+      const { worktreePath, branch, reusedDirtyWorktree, discardedOnRecut, staleBase } = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild }, targetRepo.key, reviewForkFrom?.branch);
       // Card 088afc94 (P4 wiring): register this worktree with codescape's fleet daemon — fire-and-forget,
       // NEVER blocks the spawn. DELIBERATELY pinned to `project.repoPath` (the primary), NOT
       // `targetRepo.path` — Codescape indexes ONE graph per project regardless of which repo a given task
