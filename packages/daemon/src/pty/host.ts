@@ -6239,13 +6239,35 @@ export class PtyHost {
     // CODESCAPE_TOOL_ALLOW/CODESCAPE_WRITE_TOOLS, enforced via claude's `--allowedTools`/`--disallowedTools`
     // (see createPty's own extraAllow/disallowedTools wiring below). createCodexPty has NO analogous
     // per-tool lever at all (verified: opts.permission/disallowedTools never appear anywhere in this
-    // method or spawnCodexProcess) — codex's whole permission model is the two blanket
-    // `-a never -s workspace-write` flags, which approve every tool call, write tools included. Mounting
-    // "codescape" here unconditionally would hand a codex session full, unrestricted read+write access to
-    // the code graph — a strictly WORSE posture than claude's carefully gated mount, not mere parity. This
-    // is the "real design question" the card asked for, answered: don't mount it until codex has an
-    // equivalent per-tool restriction to pair it with. Surfaced loudly (not silently) below so a project
-    // that enables codescape doesn't quietly get nothing from a codex worker with no signal why.
+    // method or spawnCodexProcess).
+    // 🔴 CARD d7657543 CORRECTION: this comment used to assert "codex's whole permission model is the two
+    // blanket `-a never -s workspace-write` flags, which approve every tool call, write tools included." —
+    // FALSE, and the opposite of the real risk. VERIFIED (codex-cli 0.153.4, `codex --help`): `-a never`
+    // is documented as "Never ask for user approval. Execution failures are immediately returned to the
+    // model" — i.e. `-a never` never ESCALATES to a human, but anything that would have needed approval is
+    // DENIED outright and reported back to the model as a failure, not silently auto-approved. Corroborated
+    // by a real pilot worker: its own `worker_report` call was REJECTED ("requires approval and approval
+    // policy is never" — `worker_report_get` → none recorded, `worker_list` → `reportedState: null`). The
+    // SAME deny-not-approve shape holds for `-s workspace-write`'s filesystem sandbox: it is a real,
+    // enforced allow/deny boundary (an OS-level Windows restricted-token sandbox — ALLOW ACEs on the
+    // workdir + any `--add-dir` roots), not a blanket grant — directly proven by card d7657543's own
+    // real-spawn finding that `.git` writes are DENIED even from INSIDE a granted writable root (see
+    // `createCodexPty`'s argv-construction comment below for that finding in full). So "approves everything"
+    // is backwards on both axes this comment conflated: MCP-tool approval and filesystem writability are
+    // each closer to deny-by-default outside an explicit grant, evaluated with no human ever asked.
+    // ⚠️ EVIDENCE TIER: ESTABLISHED — `-a never`'s own documented semantics, and the pilot's corroborated
+    // `worker_report` denial. NOT ESTABLISHED — an exhaustive enumeration of exactly which MCP tools codex
+    // classifies as approval-requiring (all non-read-only tools? something narrower?); this comment fixes
+    // the FALSE premise but does not close that broader audit — card d7657543's own report names it as
+    // still open.
+    // Mounting "codescape" here unconditionally would hand a codex session full, unrestricted read+write
+    // access to the code graph — a strictly WORSE posture than claude's carefully gated mount, not mere
+    // parity. This is the "real design question" the card asked for, answered: don't mount it until codex
+    // has an equivalent per-tool restriction to pair it with. Surfaced loudly (not silently) below so a
+    // project that enables codescape doesn't quietly get nothing from a codex worker with no signal why.
+    // ✅ This security conclusion (decline to mount codescape) is UNCHANGED by the correction above — a
+    // "denies unless explicitly granted" model is at least as strict as "approves everything" would have
+    // been, so the decision to withhold codescape from codex errs the same safe direction either way.
     // Card `b987f086`: collect every capability this spawn cannot mount for codex — combined below into
     // ONE `onCodexUnsupportedCapability` report so a manager sees the full picture in one nudge rather than
     // learning about a codescape gap and a dropped-MCP-server gap as two unrelated events.
@@ -6288,6 +6310,45 @@ export class PtyHost {
     // `-a never -s workspace-write --no-alt-screen` — the probe's own OBSERVED unattended-boot recipe
     // (findings.md, "Point 4"): unattended approval + edit-capable sandbox + preserved scrollback (the
     // codex-native analogue of claude's `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` env-var workaround).
+    //
+    // 🔴 CARD d7657543 FINDING — a codex worker on Windows can NEVER `git commit` in its own worktree, and
+    // NO writable-roots lever fixes it. `git add`/`git commit` fail with "Unable to create '<gitdir>/
+    // index.lock': Permission denied" because a worktree's real gitdir (`<repo>/.git/worktrees/<name>`, and
+    // the shared `<repo>/.git` objects/refs it points at) sits outside every writable sandbox root this
+    // spawn grants (the worktree itself, `:slash_tmp`, `:tmpdir`).
+    // The card's own kickoff hypothesized a per-spawn writable-roots lever might exist and cure this — it
+    // does (documented, top-level `--add-dir <DIR>`: "Additional directories that should be writable
+    // alongside the primary workspace"; superseding the kickoff's own INFERRED `-c
+    // sandbox_workspace_write.writable_roots=…` guess, which was never confirmed and is now moot). ⛔ IT
+    // DOES NOT WORK FOR THIS CASE. REAL-SPAWN VERIFIED (codex-cli 0.153.4, this host, 2026-09-08): passing
+    // `--add-dir` for the worktree's gitdir — tried three ways, each on a FRESH never-before-sandboxed
+    // worktree to rule out ACL residue from an earlier probe: (1) `--add-dir <repo>/.git`, (2) `--add-dir
+    // <repo>/.git/worktrees/<name>` (the leaf itself), and (3) no add-dir at all in a PLAIN, non-worktree
+    // repo where `.git` sits directly INSIDE the already-writable workdir root, needing no add-dir — ALL
+    // THREE still fail with the identical "index.lock: Permission denied". `--add-dir` demonstrably DOES
+    // grant write elsewhere (verified working on an ordinary non-`.git` directory, existing or fresh) — the
+    // failure is specific to `.git`. `icacls` on the denied `.git` directory shows why: codex's Windows
+    // sandbox applies an explicit, non-inherited DENY ACE for Write/Delete directly on `.git` (both a direct
+    // DENY and an inherit-only DENY for its future children), which NTFS evaluates BEFORE the inherited
+    // ALLOW `--add-dir` produces — the deny always wins, regardless of what's on the writable-roots list. A
+    // strings scan of the bundled `codex-windows-sandbox-setup.exe` confirms this is deliberate, not a bug:
+    // its sandbox payload carries a dedicated `deny_write_paths` field (distinct from `write_roots`) and logs
+    // `"applied deny ACE to protect "` for entries in it. A `codex_git_commit` feature flag exists
+    // (`codex features list` → `stage: removed`) — plausibly the vestige of a rolled-back attempt to allow
+    // exactly this — but force-enabling it (`codex features enable codex_git_commit`) and re-testing on
+    // another fresh worktree changed nothing; still denied. (Config-cleanup discipline: every scratch
+    // `~/.codex/config.toml` trust block and the feature-flag toggle this investigation added were removed
+    // again before this commit — see the sibling real-spawn test files' own md5-diff-disclose convention.)
+    // ⚠️ EVIDENCE TIER: ESTABLISHED, all of the above, on THIS host/version (codex-cli 0.153.4, Windows).
+    // NOT ESTABLISHED: whether the same hardcoded `.git` protection exists on codex's macOS (Seatbelt) or
+    // Linux (landlock/bwrap) sandboxes — this investigation only had a Windows host to test against, and the
+    // protected-path mechanism is plausibly platform-specific (this exact binary is `codex-windows-sandbox-
+    // setup.exe`).
+    // ⛔ PER THE CARD'S OWN SECURITY LINE: no fix was attempted here. The narrowest legitimate lever
+    // (`--add-dir`) is proven insufficient, and reaching for `-s danger-full-access` or
+    // `--dangerously-bypass-approvals-and-sandbox` to route around a DELIBERATE upstream protection is
+    // explicitly out of a worker's authority to decide — reported up instead, per the card's own
+    // instruction to stop rather than escalate the grant.
     const args = [...resumeArgs, "-a", "never", "-s", "workspace-write", "--no-alt-screen", ...mcpArgs];
     // eslint-disable-next-line no-console
     console.log(`[pty] spawnCodex ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${isCodexResume ? opts.resumeId : "none"} mcpServers=${Object.keys(mcpServers).join(",")}`);
