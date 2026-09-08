@@ -1529,6 +1529,20 @@ function worktreeGcWarning(outcome: "wedged" | "left-on-disk" | "needs-human-ski
   }
 }
 
+/** Card df14d55e — the shared hazard framing for an empty (0-commit) worker branch, reused by both the
+ *  `[loom:worker-idle]` and `[loom:worker-exited]` nudges (`notifyManagerOfIdleWorker` /
+ *  `notifyManagerOfExitedWorker`, below) so the two copies can't drift the way they did before this card:
+ *  both had settled on wording that read as a REASSURANCE ("full credit and no visible error") rather
+ *  than the hazard it actually is. The underlying rule (an empty branch is a legitimate, correct outcome
+ *  for a worker that genuinely found nothing to change) is still true — the defect was that the copy gave
+ *  a manager no reason to first ask WHY the branch is empty before confirming, and `worker_merge_confirm`
+ *  closes the task done, full credit, no visible error, whether the branch is empty because there was
+ *  nothing to do OR because the worker was structurally blocked — two cases that demand opposite manager
+ *  responses. */
+function zeroCommitMergeHazardNote(): string {
+  return "⚠️ an empty branch closes done via worker_merge_confirm with full credit and no visible error EITHER WAY — confirm WHY it's empty (nothing to do vs. blocked/unable) before confirming, not just that it's empty";
+}
+
 /** Card e1ac691b — the `worker_merge_confirm` surfacing for the composer-fusion/prompt-mismatch/
  *  paste-tripwire family (`Live.lastMismatchReplay`/`lastMismatchFusion`/`lastMismatchUnmatched`/
  *  `lastPasteTripwireGiveUp`, pty/host.ts). Per pinned memory `shipping-a-detector-is-not-someone-
@@ -13211,7 +13225,7 @@ export class SessionService {
       // settle push) is what actually watches this for staleness, not this watchdog.
       : cls.kind === "parked-merge"
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) is idle while its merge gate ${cls.opId}${cls.gatePhase ? ` (${cls.gatePhase})` : ""} runs on its own branch — no action needed; it will settle on its own and you'll get a [loom:merge-done]/[loom:merge-failed] nudge when it does. Only step in if you want to check on it: gate_status(${cls.opId}) / gate_queue, or worker_transcript ${workerSessionId}.`
-      : `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) finished a turn and is idle but did NOT call worker_report (its task is still in_progress). Observed (single point-in-time read): turnSeq=${w.turnSeq ?? 0}, ~${Math.round((Date.now() - Date.parse(w.lastActivity)) / 60_000)} min since last activity — check these against how long this worker's turns normally take before treating either as decisive. It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review the diff before confirming (an empty branch merged via worker_merge_confirm closes as a 0-commit done with full credit and no visible error), or worker_message it.`;
+      : `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) finished a turn and is idle but did NOT call worker_report (its task is still in_progress). Observed (single point-in-time read): turnSeq=${w.turnSeq ?? 0}, ~${Math.round((Date.now() - Date.parse(w.lastActivity)) / 60_000)} min since last activity — check these against how long this worker's turns normally take before treating either as decisive. It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review the diff before confirming (${zeroCommitMergeHazardNote()}), or worker_message it.`;
     try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live */ }
   }
 
@@ -13296,7 +13310,7 @@ export class SessionService {
     const eligible = isCrashRecoveryEligible(this.db, this.control, w);
     const msg = eligible
       ? `[loom:worker-exited] worker ${workerSessionId} (task ${w.taskId}) died unexpectedly — its task is still in_progress. Loom's crash-recovery watchdog will attempt to auto-resume it; no action needed yet. If recovery is later abandoned you'll get a follow-up nudge.`
-      : `[loom:worker-exited] worker ${workerSessionId} (task ${w.taskId}) EXITED without ever calling worker_report — its task is still in_progress and it will NOT come back on its own. Any work it committed is on branch ${w.branch ?? "(unknown)"}. Pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review the diff before confirming (an empty branch merged via worker_merge_confirm closes as a 0-commit done with full credit and no visible error), or re-dispatch the task.`;
+      : `[loom:worker-exited] worker ${workerSessionId} (task ${w.taskId}) EXITED without ever calling worker_report — its task is still in_progress and it will NOT come back on its own. Any work it committed is on branch ${w.branch ?? "(unknown)"}. Pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review the diff before confirming (${zeroCommitMergeHazardNote()}), or re-dispatch the task.`;
     try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live — the durable event stands */ }
   }
 
