@@ -102,7 +102,9 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    `run_gate`, never after** — edits → targeted test file(s) → **commit** → `run_gate` (when used) →
    report `done`, touching nothing after. Committing first lets your self-check double as the merge gate
    instead of being silently re-run from scratch. **When you do reach for `run_gate`**
-   (`mcp__loom-orchestration__run_gate`, no args), use the tool rather than running your project's gate
+   (`mcp__loom-orchestration__run_gate` — no args ordinarily, an optional `force:boolean` only to opt back
+   into re-attaching to a known-stale in-flight op instead of the default refusal), use the tool rather
+   than running your project's gate
    yourself in a shell — the DAEMON spawns it, so every worker gate + merge gate on the daemon shares ONE
    concurrency budget and parallel workers can't collectively swamp the host. It also pins two-lane test
    concurrency for you, so **don't set a test-concurrency env var yourself**. **Its tool description is
@@ -490,16 +492,18 @@ too, so prefer absolute paths there as well.
 ## Report protocol
 
 Your action/report tools live under the `mcp__loom-orchestration__` namespace — `worker_report`,
-`run_gate` (your DoD gate — see step 4), `gate_status` (a read-only check on your OWN gate op — see step
-4's note on checking vs re-firing), `gate_queue` (a read-only, daemon-wide snapshot of the shared gate
-cap — see step 4's note on checking a lane is free before firing), and `my_context` (you RECEIVE
-`worker_message`, and your manager
+`run_gate` (your DoD gate — see step 4; takes an optional `force:boolean` to re-attach to a known-stale
+in-flight op instead of the default refusal — see step 4's own note), `gate_cancel` (cancel YOUR OWN
+`run_gate` self-check, queued or running — see step 4's note on when to reach for it yourself vs. report
+up to your manager), `gate_status` (a read-only check on your OWN gate op — see step 4's note on checking
+vs re-firing), `gate_queue` (a read-only, daemon-wide snapshot of the shared gate cap — see step 4's note
+on checking a lane is free before firing), and `my_context` (you RECEIVE `worker_message`, and your manager
 may `worker_recycle` you — neither is a
 tool you call); board reads are `mcp__loom-tasks__tasks_get` / `tasks_list`; and the `mcp__loom-tasks__`
 namespace also gives you `wake_me` (schedule a wake — `delaySeconds` OR `minutes`, plus a `note`/`reason`;
 `wake_cancel` / `wake_list` manage pending wakes) and `task_requests_list` / `task_request_get` (read your
 card's connected Requests). Load them in ONE ToolSearch:
-`select:mcp__loom-orchestration__worker_report,mcp__loom-orchestration__run_gate,mcp__loom-orchestration__gate_status,mcp__loom-orchestration__gate_queue,mcp__loom-orchestration__my_context,mcp__loom-tasks__tasks_get,mcp__loom-tasks__tasks_list,mcp__loom-tasks__wake_me`.
+`select:mcp__loom-orchestration__worker_report,mcp__loom-orchestration__run_gate,mcp__loom-orchestration__gate_cancel,mcp__loom-orchestration__gate_status,mcp__loom-orchestration__gate_queue,mcp__loom-orchestration__my_context,mcp__loom-tasks__tasks_get,mcp__loom-tasks__tasks_list,mcp__loom-tasks__wake_me`.
 (`authenticated_request` — a proxied outbound HTTP call over a human-granted connection — exists **only
 when your session was provisioned such a connection**; assume it's absent unless your brief says otherwise.)
 

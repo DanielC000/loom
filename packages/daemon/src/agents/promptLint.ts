@@ -93,7 +93,7 @@ export const ORCH_MANAGER_TOOLS: readonly string[] = [
 // registerGateQueue's doc. `directive_status`, card 35c96aa6, is the worker-facing read-only complement to
 // the manager-facing staleDirectiveProjection — see resolveDirectiveOutcome's doc. `gate_cancel`, card
 // a0d912f5, is a WRITE but scoped to cancelling only the caller's OWN run_gate self-check — see
-// SessionService.cancelGateOp's `restrictToOwnerSessionId` doc).
+// SessionService.cancelGateOp's `params.scope`/`GateCancelScope` doc).
 export const ORCH_WORKER_TOOLS: readonly string[] = ["directive_status", "gate_cancel", "gate_queue", "gate_status", "my_context", "run_gate", "worker_report"];
 export const ORCH_ASSISTANT_TOOLS: readonly string[] = ["my_context", "notify_lead"];
 

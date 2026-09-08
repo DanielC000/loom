@@ -2485,7 +2485,7 @@ export class OrchestrationMcpRouter {
             if ("refused" in r && r.refused) {
               return ok({
                 status: "refused", action: "stale-attached", opId: r.op.opId, canCancel: true,
-                note: `an earlier run_gate (${r.op.opId}) is genuinely ADMITTED and running, but a new commit or an uncommitted edit landed AFTER it was admitted (not merely while it was queued — that case is harmless and never refused), so its eventual result would not describe your current code. Refused rather than attaching you to a result you'd have to discard. Cancel it yourself with gate_cancel(opId:"${r.op.opId}"), then re-fire run_gate against your current tree — or pass force:true here to attach to it anyway.`,
+                note: `an earlier run_gate (${r.op.opId}) is genuinely ADMITTED and running, but the worktree fingerprint has changed since it was admitted (not merely while it was queued — that case is harmless and never refused), so its eventual result would not reliably describe your current code. Refused rather than attaching you to a result you'd have to discard. Cancel it yourself with gate_cancel(opId:"${r.op.opId}"), then re-fire run_gate against your current tree — or pass force:true here to attach to it anyway.`,
               });
             }
             if (!r.settled) {

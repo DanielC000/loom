@@ -1094,21 +1094,21 @@ function makeRepo(repo) {
     check("(e-3) workerA CAN cancel its own self-check", ownCancel.outcome === "cancelled" && ownCancel.phase === "queued" && ownCancel.gateType === "worker");
     let selfCheckACaught;
     try { await pSelfCheckA; } catch (e) { selfCheckACaught = e; }
-    check("(e-3) the cancelled self-check settles with the intent+reason folded into its reason text",
-      selfCheckACaught === undefined /* runWorkerGate never throws — see its own doc */);
+    check("(e-3) awaiting the cancelled self-check does NOT throw (runWorkerGate never throws for a cancelled op — it resolves with {cancelled:true, reason} — see its own GateCancelledError catch)",
+      selfCheckACaught === undefined);
+    // Card a0d912f5 Code Review [7]: kept INSIDE this guard, unlike every other block in this file's own
+    // convention where dependent assertions were left outside one — a setup timeout here must not ALSO
+    // produce 3 misleading FAILs on top of the real one below.
+    const selfCheckASettled = await pSelfCheckA;
+    check("(e-3) the settled self-check reports cancelled, never a real pass/fail", selfCheckASettled.settled === true && selfCheckASettled.ok === true && selfCheckASettled.value?.cancelled === true);
+    check("(e-3) intent + reason both landed in the settled op's own reason text",
+      /hold-for-instructions/.test(selfCheckASettled.value?.reason ?? "") && /waiting on manager direction/.test(selfCheckASettled.value?.reason ?? ""));
+    check("(e-3) the reason also names the caller as \"worker\", not \"manager\" (card a0d912f5's callerLabel)",
+      /cancelled by worker/i.test(selfCheckASettled.value?.reason ?? ""));
   } else {
     console.log("SKIP  (e) worker-scope assertions — setup sanity check above already failed");
+    await pSelfCheckA.catch(() => {});
   }
-
-  // Confirm (e-3)'s intent/reason actually reached the settled result's own `reason` (runWorkerGate never
-  // throws for a cancelled op — it resolves with {cancelled:true, reason}, see its own GateCancelledError
-  // catch), which is the SAME text a [loom:gate-cancelled] nudge would read out.
-  const selfCheckASettled = await pSelfCheckA;
-  check("(e-3) the settled self-check reports cancelled, never a real pass/fail", selfCheckASettled.settled === true && selfCheckASettled.ok === true && selfCheckASettled.value?.cancelled === true);
-  check("(e-3) intent + reason both landed in the settled op's own reason text",
-    /hold-for-instructions/.test(selfCheckASettled.value?.reason ?? "") && /waiting on manager direction/.test(selfCheckASettled.value?.reason ?? ""));
-  check("(e-3) the reason also names the caller as \"worker\", not \"manager\" (card a0d912f5's callerLabel)",
-    /cancelled by worker/i.test(selfCheckASettled.value?.reason ?? ""));
 
   releaseHolder("go");
   await pHolderRun.catch(() => {});

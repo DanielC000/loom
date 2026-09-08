@@ -2548,7 +2548,12 @@ export class SessionService {
    * The worktree stamp {@link runWorkerGate} recorded at the moment its CURRENTLY-RUNNING gate op was
    * ADMITTED past the semaphore (card a0d912f5 Code Review, `describeGateHeadCurrency`'s `admitStamp`) —
    * a SIBLING of {@link gateStartStamps}, keyed the same way, but deliberately a DIFFERENT checkpoint.
-   * Set/cleared alongside it, at the same two sites, for the same reason.
+   * CLEARED alongside it, at the same site — but SET at a DELIBERATELY LATER, DIFFERENT site than
+   * `gateStartStamps` (which is set at FIRE time, before admission): this one is set only once `fn` is
+   * actually admitted and running, inside `runExclusive`'s callback. Do not "simplify" that gap away —
+   * collapsing the two set-sites back to one is exactly what would reintroduce the queued-op false
+   * refusal {@link runWorkerGate}'s own pre-emptive-refusal check (and `run-gate-result-consumption.mjs`
+   * scenario (D)) exists to prevent; see that check's own doc for the full argument.
    *
    * WHY A SEPARATE MAP, NOT A REUSE OF `gateStartStamps`: the pre-emptive stale-attach REFUSAL a re-call
    * performs BEFORE ever attaching must distinguish "the worktree moved during the QUEUE WAIT" (benign —
@@ -19436,9 +19441,10 @@ export class SessionService {
                 getConcurrentGatesMax = getMaxConcurrentGates;
                 cancelSignalRef = cancelSignal;
                 admitStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
-                // Card a0d912f5 Code Review: recorded the instant it's known, alongside `gateStartStamps`'
-                // own set-site — see {@link gateAdmitStamps}' own doc for why this is a SEPARATE map/
-                // checkpoint, not a reuse of the fire-time one.
+                // Card a0d912f5 Code Review: recorded the instant it's known — deliberately NOT at the
+                // same site as `gateStartStamps` (that one is set at FIRE time, well before this callback
+                // ever runs) — see {@link gateAdmitStamps}' own doc for why this later, separate checkpoint
+                // is the load-bearing part, not merely which map it lives in.
                 this.gateAdmitStamps.set(key, admitStamp);
                 // Card 78214063: mirror onExtend into `workerGateExtended`, never a REPLACEMENT for the
                 // semaphore's own live-registry tracking (confirmWorkerMerge's identical `mirroredHooks`

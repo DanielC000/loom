@@ -360,7 +360,7 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
   // per card d04f9c76 — same project-scoped redaction either way, see registerGateQueue's doc),
   // `gate_cancel` (card 8d585277, now on BOTH surfaces per card a0d912f5 — the worker's own call is
   // pre-scoped to its own gateType:"worker" op only, see SessionService.cancelGateOp's
-  // `restrictToOwnerSessionId` doc), `gate_history` (card 753d9911, MANAGER-ONLY), and
+  // `params.scope`/`GateCancelScope` doc), `gate_history` (card 753d9911, MANAGER-ONLY), and
   // `gate_intent_declare`/`gate_intent_withdraw` (card a5d1ae04, MANAGER-ONLY) are DELIBERATE, reviewed
   // exceptions to the /gate/i sweep below: `run_gate` only EXECUTES the project's EXISTING gateCommand
   // (daemon-mediated, through the GateSemaphore), `gate_status` only READS the live GateSemaphore registry
