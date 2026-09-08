@@ -123,6 +123,16 @@ export function readContextStats(cwd: string, engineSessionId: string): ContextS
       continue;
     }
     if (o.type !== "assistant" || !o.message) continue;
+    // Claude Code injects a SYNTHETIC assistant-role line on a transient API error — not a real model
+    // turn: model:"<synthetic>", an all-zero (but truthy) usage object, and `isApiErrorMessage:true` on
+    // the raw line itself. Discriminate on `isApiErrorMessage` rather than `message.model==="<synthetic>"`:
+    // it's the CLI's own purpose-built flag for exactly this condition, whereas the "<synthetic>" model
+    // sentinel is a broader "no real model call happened" marker the CLI is not confirmed to reserve for
+    // API errors alone — using it here risks silently skipping some OTHER synthetic-but-legitimate line.
+    // (Single measured specimen — see card 73263d73 — so treat this as the precise, narrowly-scoped
+    // discriminator rather than a verified-exhaustive one.) Skipped from `lastUsage`/`lastModel`/`lastText`
+    // AND `turns`, so neither the last-wins fields nor the running turn count are corrupted by it.
+    if (o.isApiErrorMessage === true) continue;
     turns++;
     const msg = o.message as { usage?: Record<string, unknown>; model?: string; content?: unknown };
     if (msg.usage) lastUsage = msg.usage; // keep the most recent turn's usage

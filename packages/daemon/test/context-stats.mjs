@@ -54,6 +54,21 @@ try {
   check("contextWindowForModel(some-model-[1m]) = 1M (explicit marker unchanged)", contextWindowForModel("some-model-[1m]") === 1_000_000);
   check("contextWindowForModel(unknown-model) = 200k (unchanged unknown case)", contextWindowForModel("unknown-model") === 200_000);
 
+  // (i) card 73263d73: Claude Code injects a SYNTHETIC assistant-role line on a transient API error —
+  // model:"<synthetic>", isApiErrorMessage:true, an all-zero usage object (truthy, so it would otherwise
+  // WIN as lastUsage), and no real turn behind it. A real assistant turn followed by this synthetic line
+  // as the LAST assistant line must NOT clobber the real turn's inputTokens/model, and `turns` must not
+  // count the synthetic line.
+  writeFixture("api-error-tail", [
+    { type: "user", message: { content: "hi" } },
+    { type: "assistant", message: { content: [{ type: "text", text: "real reply" }], model: "claude-sonnet-5", usage: { input_tokens: 800, cache_read_input_tokens: 50, cache_creation_input_tokens: 5, output_tokens: 12 } } },
+    { type: "assistant", isApiErrorMessage: true, message: { model: "<synthetic>", content: "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)", usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } },
+  ]);
+  const ae = readContextStats(cwd, "api-error-tail");
+  check("(i) synthetic API-error tail: inputTokens survives from the REAL turn (855), not zeroed", ae?.inputTokens === 855);
+  check("(i) synthetic API-error tail: model survives from the REAL turn (claude-sonnet-5), not clobbered", ae?.model === "claude-sonnet-5");
+  check("(i) synthetic API-error tail: turns excludes the synthetic line (1, not 2)", ae?.turns === 1);
+
   // (d) assistant lines present but none carry usage → null (even though turns would be > 0).
   writeFixture("nousage", [
     { type: "user", message: { content: "hi" } },
