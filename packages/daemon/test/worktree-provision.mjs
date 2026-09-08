@@ -39,7 +39,10 @@ const repo = path.join(os.tmpdir(), `loom-wtp-repo-${stamp}`);
 // pnpm must be on PATH (it is in the build gate's env). If not, SKIP rather than false-fail a weird env.
 const pnpmProbe = spawnSync("pnpm --version", { shell: true, stdio: "ignore" });
 if (pnpmProbe.status !== 0) {
-  console.log("SKIP  pnpm not on PATH — cannot exercise real dep provisioning in this environment.");
+  // Card 85bd4052 (sibling of 5978735a): MUST be a `WARN  ` line (exact two-space prefix, test-daemon.mjs's
+  // own WARN_LINE_RE) — a bare `SKIP` line is discarded entirely once this file reports a pass, leaving
+  // zero trace that this file's real coverage never ran on this host.
+  console.log("WARN  SKIP  pnpm not on PATH — cannot exercise real dep provisioning in this environment.");
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
   process.exit(0);
 }

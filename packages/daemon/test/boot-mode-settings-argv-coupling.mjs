@@ -30,7 +30,10 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 if (process.platform !== "win32") {
-  console.log("SKIP  boot-mode-settings-argv-coupling.mjs — the LOOM_CLAUDE_BIN real-node.exe-substitution technique this file uses was only established/verified on Windows (process.platform !== 'win32' here); see spawn-command-line-preflight.mjs's own header for the same gap.");
+  // Card 85bd4052 (sibling of 5978735a): MUST be a `WARN  ` line (exact two-space prefix, test-daemon.mjs's
+  // own WARN_LINE_RE) — a bare `SKIP` line is discarded entirely once this file reports a pass, leaving
+  // zero trace on ubuntu-latest CI that this file's real coverage never ran there.
+  console.log("WARN  SKIP  boot-mode-settings-argv-coupling.mjs — the LOOM_CLAUDE_BIN real-node.exe-substitution technique this file uses was only established/verified on Windows (process.platform !== 'win32' here); see spawn-command-line-preflight.mjs's own header for the same gap.");
   process.exit(0);
 }
 
