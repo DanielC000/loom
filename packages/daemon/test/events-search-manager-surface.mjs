@@ -73,7 +73,7 @@ function seed(db) {
   try {
     const db = new Db();
     dbs.push(db);
-    const { P1, P2, mgr1, w1, w2, t2 } = seed(db);
+    const { P1, P2, mgr1, w1, w2, t1, t2 } = seed(db);
 
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {});
@@ -113,6 +113,17 @@ function seed(db) {
 
     const byBogusSessionId = await mgr.call("events_search", { sessionId: "does-not-exist" });
     check("(2e) filtering by a session id that matches nothing at all also returns EMPTY (no crash, no leak)", byBogusSessionId.total === 0);
+
+    // Positive controls (card cf803152 review — an all-total-0 assertion set can pass for the wrong
+    // reason if the sessionId/taskId filter path is broken, e.g. an accidental AND instead of OR against
+    // manager/worker session id): prove the SAME filters return real, discriminating non-zero results
+    // against P1's OWN ids before trusting that "0 for a foreign id" means the filter actually ran.
+    const byOwnWorkerSessionId = await mgr.call("events_search", { sessionId: w1 });
+    check("(2g) POSITIVE CONTROL: filtering by P1's own WORKER session id returns exactly the 1 row naming it", byOwnWorkerSessionId.total === 1);
+    const byOwnManagerSessionId = await mgr.call("events_search", { sessionId: mgr1 });
+    check("(2h) POSITIVE CONTROL: filtering by P1's own MANAGER session id returns BOTH rows (manager on both)", byOwnManagerSessionId.total === 2);
+    const byOwnTaskId = await mgr.call("events_search", { taskId: t1 });
+    check("(2i) POSITIVE CONTROL: filtering by P1's own task id returns exactly the 1 row linked to it", byOwnTaskId.total === 1);
 
     // Positive control: proves the P1-only results above are the scoping filter actually working, not an
     // accidental global absence of P2's data — an UNSCOPED db read (no projectId) sees both.

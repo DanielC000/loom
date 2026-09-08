@@ -4793,6 +4793,14 @@ export class OrchestrationMcpRouter {
     // `projectId` parameter, the project is always the CALLER's own, resolved from this session. A manager
     // cannot request another project's rows through any input this tool accepts, and a foreign-project row
     // is never returned at all (not merely redacted).
+    // ⚠️ KNOWN GAP, PRE-EXISTING in `listOrchestrationEventsBounded` (db.ts) — surfaced by review, not
+    // introduced here: project-scoping joins through `COALESCE(worker_session_id, manager_session_id)`,
+    // but several emitters stamp an empty string rather than NULL for an absent worker session
+    // (sessions/service.ts:11759/:11915/:10805, mcp/tasks.ts:1567, mcp/platform.ts:2321/:2564) — COALESCE
+    // still picks that "" over the real manager id, the join matches nothing, and the row is invisible to
+    // EVERY project-scoped read. The Platform surface's optional `projectId` lets a Lead fall back to an
+    // unscoped read and still see these; this manager tool has no such escape hatch. See the tool's own
+    // description for the caller-facing consequence (this comment is why, not what).
     server.registerTool(
       "events_search",
       {
@@ -4817,7 +4825,14 @@ export class OrchestrationMcpRouter {
           "(default " + DEFAULT_EVENTS_SEARCH_CAP + " when omitted, clamped to " + MAX_EVENTS_SEARCH_PAGE +
           "); the result is ALWAYS the {events, total, returned, offset, nextOffset} envelope (never a bare " +
           "array) since this read is inherently a forensics page, not a small enumerable set — page " +
-          "deterministically via offset:nextOffset until it is null, same contract as `gate_history`.",
+          "deterministically via offset:nextOffset until it is null, same contract as `gate_history`. " +
+          "⚠️ KNOWN GAP: a row whose event was recorded with an empty-string (never NULL) worker/manager " +
+          "session id is EXCLUDED from every project-scoped read, this tool included — a small number of " +
+          "emitters stamp \"\" rather than omitting the field, and the scoping join treats that \"\" as a " +
+          "real, non-matching session, not an absence to fall back past. One concrete consequence: for a " +
+          "`cross_project_message` event, the SENDING manager's own project resolves through the OTHER " +
+          "(worker/target) session id, not its own — so a manager can be structurally unable to see its own " +
+          "outbound peer messages here. Never read a `0`/missing result on this class as \"never happened\".",
         inputSchema: strictShape({
           kind: z.array(z.string()).optional(),
           sessionId: z.string().optional(),

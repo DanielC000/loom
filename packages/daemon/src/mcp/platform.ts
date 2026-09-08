@@ -9,7 +9,6 @@ import { MEMORY_CONFIG_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, resolveConfig } fro
 import type { Db } from "../db.js";
 import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
 import { eventsSearchQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
-export { DEFAULT_EVENTS_SEARCH_CAP };
 import type { SessionService } from "../sessions/service.js";
 import type { PtyHost } from "../pty/host.js";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, cancelQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
