@@ -358,14 +358,19 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
         note: "createPty passes opts.capabilities into buildMcpServers, which mounts every resolved registry-capability grant.",
       },
       {
-        // Card 0770d916 fix: createCodexPty's buildMcpServers call now threads opts.capabilities (+
-        // capabilityCatalog/resolveConnectionSecret) through too, same fix shape as browserTesting/
-        // documentConversion above.
+        // Card b987f086 CORRECTION: the prior codex proof here pointed at createCodexPty THREADING
+        // opts.capabilities into buildMcpServers — the exact "threading is not mounting" trap this field's
+        // own registry (this file's own header, and createCodexPty's own doc) warns about: EVERY registry
+        // capability is transport:"stdio" structurally (capabilities/registry.ts's validateCapabilityDefInput
+        // rejects any other transport at catalog-creation time; resolveCapabilityServer's own return type
+        // hardcodes type:"stdio"), and codex's mcpServersToCodexArgs can only mount {type:"http"} — so the
+        // threaded value could NEVER actually mount for codex, exactly like browserTesting/documentConversion
+        // before card 7fa73e2c. The real, primary consumer is now the validator rejection (same fix shape).
         harnesses: ["codex"],
-        file: "packages/daemon/src/pty/host.ts",
-        region: "codex-spawn",
-        pattern: `capabilities: opts.capabilities, capabilityCatalog, resolveConnectionSecret: this.resolveConnectionSecret,`,
-        note: "createCodexPty passes opts.capabilities into buildMcpServers, which mounts every resolved registry-capability grant.",
+        file: "packages/daemon/src/profiles/validate.ts",
+        region: "whole file",
+        pattern: `if (harness !== "codex") return null;`,
+        note: "validateProfile rejects harness:\"codex\"+a non-empty capabilities array at save time (codexStdioCapabilityUnsupportedError) rather than silently mounting nothing at spawn — codex has no stdio-MCP-server mechanism to wire this to, and no registry capability can ever resolve to anything but stdio.",
       },
     ],
   },

@@ -14,7 +14,7 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 const {
-  isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, buildCodexResumeArgs, CodexTrustDialogLock,
+  isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, CodexTrustDialogLock,
 } = await import("../dist/pty/codex-host.js");
 const {
   TRUST_DIALOG_MARKER, BUSY_STATUS_MARKER, CODEX_READY_PLACEHOLDER, CODEX_MODEL_LOADED_RE, stripAnsiCsi, hashConfigBefore, diffConfigAfterSpawn,
@@ -88,6 +88,34 @@ check("mcpServersToCodexArgs: empty map ⇒ empty args", JSON.stringify(mcpServe
 check(
   "mcpServersToCodexArgs: malformed entry (missing url) is SKIPPED rather than emitting 'url=undefined'",
   JSON.stringify(mcpServersToCodexArgs({ broken: { type: "http" } })) === "[]",
+);
+
+// --- unsupportedCodexMcpServers (card b987f086) — companion to mcpServersToCodexArgs above: WHICH
+// entries get dropped, so a real caller can report it instead of leaving the console.warn as the only
+// signal. Run against the EXACT SAME inputs as the mcpServersToCodexArgs block above, so a reader can see
+// the two functions agree on what "dropped" means without re-deriving it. -----------------------------
+
+check(
+  "unsupportedCodexMcpServers: single http server (nothing dropped) ⇒ empty (negative control, known-mountable input)",
+  JSON.stringify(unsupportedCodexMcpServers({ "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/abc" } })) === "[]",
+);
+check(
+  "unsupportedCodexMcpServers: a non-http entry IS reported, naming its id and real type (positive control — proves this doesn't just always return empty)",
+  JSON.stringify(unsupportedCodexMcpServers({ "some-stdio-server": { type: "stdio", command: "foo" } }))
+    === JSON.stringify([{ id: "some-stdio-server", type: "stdio" }]),
+);
+check("unsupportedCodexMcpServers: empty map ⇒ empty", JSON.stringify(unsupportedCodexMcpServers({})) === "[]");
+check(
+  "unsupportedCodexMcpServers: malformed entry (missing url) IS reported as dropped, type reflects what was present",
+  JSON.stringify(unsupportedCodexMcpServers({ broken: { type: "http" } })) === JSON.stringify([{ id: "broken", type: "http" }]),
+);
+check(
+  "unsupportedCodexMcpServers: mixed map ⇒ reports ONLY the non-mountable entries, not the mountable ones",
+  JSON.stringify(unsupportedCodexMcpServers({
+    "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/abc" },
+    "playwright": { type: "stdio", command: "npx" },
+    "markitdown": { type: "stdio", command: "markitdown-mcp" },
+  })) === JSON.stringify([{ id: "playwright", type: "stdio" }, { id: "markitdown", type: "stdio" }]),
 );
 
 // Real integration with the SAME buildMcpServers this project's claude spawn path already uses — proves

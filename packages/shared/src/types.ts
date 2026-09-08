@@ -1577,6 +1577,15 @@ export type OrchestrationEventKind =
   // `detail` carries { timeoutMs, pendingCount }. Deliberately one-shot — a LATE boot-readiness still
   // resolves normally afterward; this only reports that the wait already exceeded the ceiling once.
   | "codex_boot_stuck"
+  // Card b987f086 — a codex spawn declared ≥1 capability the harness structurally cannot mount: either an
+  // MCP server this session resolved is not `{type:"http"}` (codex has no stdio-MCP-server concept — see
+  // pty/codex-host.ts's `unsupportedCodexMcpServers`), or the project's `codescape.enabled` is true (codex
+  // has no per-tool allow/disallow mechanism to pair with codescape's write-tool restriction). Before this
+  // card the only signal was a `console.warn` into a shared multi-tenant log — see project memory
+  // `shipping-a-detector-is-not-someone-reading-it`. Filed under the AFFECTED session's manager (same
+  // "notify whoever can act" convention as `codex_boot_stuck` above), workerSessionId = the affected codex
+  // session itself; `detail` carries { items: { id, reason }[] }.
+  | "codex_unsupported_capability"
   // Card 9e4205f5 — `resumeFleetOnBoot` found ≥1 fleet-wide resume failure on a daemon restart (the SAME
   // `failed`/`failedDetail` this method already computes for the requester's own count-only notice — see
   // its doc). Filed under the RESTART REQUESTER (managerSessionId = `reqId`, a manager or platform-Lead
@@ -1685,7 +1694,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
   repeated_tool_call: true, batch_merge_forfeited: true, engine_session_rotated: true,
   discovery_block_injection: true,
-  codex_submit_unconfirmed: true, codex_boot_stuck: true,
+  codex_submit_unconfirmed: true, codex_boot_stuck: true, codex_unsupported_capability: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

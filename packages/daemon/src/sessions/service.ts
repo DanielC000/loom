@@ -10316,6 +10316,40 @@ export class SessionService {
   }
 
   /**
+   * Card `b987f086` — consumes `PtyHostEvents.onCodexUnsupportedCapability`: this codex spawn declared one
+   * or more capabilities (a stdio MCP server codex cannot mount, or the project's `codescape.enabled`) that
+   * the harness structurally cannot honour. Before this card the ONLY signal was a `console.warn` into a
+   * shared multi-tenant log — project memory `shipping-a-detector-is-not-someone-reading-it` measures that
+   * exact shape (passive notice, nobody polling) at 0-acted-on on this project. Reuses `handleCodexBootStuck`'s
+   * established two-recipient, durable-event shape immediately above rather than inventing a new one:
+   *   - RECIPIENT: `sessionId` itself — so the session that lacks the capability knows NOT to rely on it
+   *     (the `/worker` doctrine's own self-verify-with-Playwright step is exactly the kind of instruction a
+   *     codex QA worker would otherwise follow into an improvised workaround with no tool to back it).
+   *   - SENDER (the actionable half): for a worker, that's its manager (`parentSessionId`) — the one live
+   *     party who can decide whether the missing capability actually matters for this task (re-profile to
+   *     harness "claude", or proceed knowing the gap). A session with no `parentSessionId` has no
+   *     programmatic party to nudge — the durable event below still records the gap for a human auditing
+   *     the log.
+   * Fired ONCE per spawn (fresh/resume/fork/recycle each re-evaluate and may fire again) — this is a
+   * spawn-time report, not a retry ladder like `onCodexSubmitUnconfirmed`'s.
+   */
+  handleCodexUnsupportedCapability(sessionId: string, info: { items: { id: string; reason: string }[] }): void {
+    const s = this.db.getSession(sessionId);
+    const itemLabel = info.items.map((i) => `${i.id} (${i.reason})`).join("; ");
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
+      workerSessionId: sessionId, taskId: s?.taskId ?? null,
+      kind: "codex_unsupported_capability", detail: { items: info.items },
+    });
+    const recipientMsg = `[loom:codex-unsupported-capability] this session declared ${info.items.length === 1 ? "a capability" : "capabilities"} this harness (codex) cannot mount: ${itemLabel}. Do not rely on ${info.items.length === 1 ? "it" : "them"} being available.`;
+    this.enqueueSystemNudge(sessionId, recipientMsg, { kind: "warning", taskId: s?.taskId ?? null });
+    if (s?.parentSessionId) {
+      const senderMsg = `[loom:codex-unsupported-capability] your codex session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} declared ${info.items.length === 1 ? "a capability" : "capabilities"} codex cannot mount: ${itemLabel}. If this task needs it, use harness "claude" instead — otherwise no action needed.`;
+      this.enqueueSystemNudge(s.parentSessionId, senderMsg, { kind: "warning", taskId: s.taskId ?? null });
+    }
+  }
+
+  /**
    * Card f9b1ea00 DoD-2 — consumes `PtyHostEvents.onPromptMismatchUnresolved`: a "recognized replay"
    * `[loom:prompt-mismatch]` detection (pty/host.ts's `UserPromptSubmit` mismatch detector, the
    * `replayedEntry !== undefined` branch) never resolved within `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` — no

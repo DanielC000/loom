@@ -309,6 +309,32 @@ check("(validator) harness omitted (defaults to claude) + browserTesting:true �
   return r.ok && r.value.browserTesting === true;
 })());
 
+// --- (guard) card b987f086: harness:"codex" + a non-empty capabilities array is REJECTED too — EVERY
+// registry capability is transport:"stdio" structurally (capabilities/registry.ts's
+// validateCapabilityDefInput rejects any other transport at catalog-creation time), so a registry grant can
+// never resolve to {type:"http"} for codex to mount, same defect shape as browserTesting/documentConversion
+// above (folded into the SAME codexStdioCapabilityUnsupportedError, remedy "no-mechanism-reject-or-warn"). ---
+check("(validator) harness:codex + a non-empty capabilities array ⇒ rejected", (() => {
+  const r = validateProfile({ name: "X", harness: "codex", capabilities: [{ slug: "some-capability" }] });
+  return r.ok === false && /capabilities is not supported on harness "codex"/.test(r.error);
+})());
+check("(validator) harness:codex + browserTesting/documentConversion/capabilities all set ⇒ rejected, names all three", (() => {
+  const r = validateProfile({ name: "X", harness: "codex", browserTesting: true, documentConversion: true, capabilities: [{ slug: "some-capability" }] });
+  return r.ok === false && /browserTesting and documentConversion and capabilities are not supported on harness "codex"/.test(r.error);
+})());
+check("(validator) harness:codex + capabilities: [] ⇒ accepted, unaffected (empty grant list)", (() => {
+  const r = validateProfile({ name: "X", harness: "codex", capabilities: [] });
+  return r.ok && r.value.harness === "codex" && Array.isArray(r.value.capabilities) && r.value.capabilities.length === 0;
+})());
+check("(validator) harness:codex + capabilities omitted ⇒ accepted, normalizes to []", (() => {
+  const r = validateProfile({ name: "X", harness: "codex" });
+  return r.ok && Array.isArray(r.value.capabilities) && r.value.capabilities.length === 0;
+})());
+check("(validator) harness:claude + a non-empty capabilities array ⇒ still accepted (the gate is codex-only)", (() => {
+  const r = validateProfile({ name: "X", harness: "claude", capabilities: [{ slug: "some-capability" }] });
+  return r.ok && r.value.capabilities.length === 1;
+})());
+
 // --- (guard) P4↔P5a: capabilityGrantBindingError rejects an oauth2 connection bound to a
 // requiresConnection capability grant (the "binds fine, spawns silently credential-less" bug this task
 // closes) — real capability_defs + connections rows through the real stores, not fakes. ---------------

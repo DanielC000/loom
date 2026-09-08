@@ -107,6 +107,10 @@ export function isCodexModelLoaded(screen: string): boolean {
  * silently spawn with no Playwright MCP at all (Playwright/markitdown both resolve to `{type:"stdio"}`).
  * `id` is codex-config-key-safe as long as the caller's server ids are (LOOM_TASKS_SERVER_ID/
  * LOOM_ORCHESTRATION_SERVER_ID/etc. are all plain `[a-z-]+` literals).
+ *
+ * ⚠️ Card `b987f086`: the `console.warn` above is a shared-log-only signal — see
+ * {@link unsupportedCodexMcpServers} for the companion pure function `createCodexPty` calls on this SAME
+ * input to turn a real drop into a durable, manager-visible report instead.
  */
 export function mcpServersToCodexArgs(mcpServers: Record<string, unknown>): string[] {
   const args: string[] = [];
@@ -121,6 +125,31 @@ export function mcpServersToCodexArgs(mcpServers: Record<string, unknown>): stri
     args.push("-c", `mcp_servers.${id}.url=${url}`);
   }
   return args;
+}
+
+/**
+ * Card `b987f086`: companion to {@link mcpServersToCodexArgs} — WHICH entries of the SAME `mcpServers` map
+ * that function silently (bar the `console.warn` above, into a shared multi-tenant log nobody polls —
+ * project memory `shipping-a-detector-is-not-someone-reading-it` measures passive notice at 0-acted-on)
+ * drops, so a real caller (`pty/host.ts#createCodexPty`) can turn this into a durable, manager-visible
+ * report (`PtyHostEvents.onCodexUnsupportedCapability`) instead of leaving the log line as the only signal.
+ * Deliberately a SEPARATE pure function rather than changing `mcpServersToCodexArgs`'s own return shape —
+ * every existing call site/test asserting on its plain `string[]` return (codex-host-decisions.mjs) stays
+ * byte-identical; this one is called ALONGSIDE it, never instead of it, on the exact same input map.
+ */
+export function unsupportedCodexMcpServers(mcpServers: Record<string, unknown>): { id: string; type: string }[] {
+  const dropped: { id: string; type: string }[] = [];
+  for (const [id, entry] of Object.entries(mcpServers)) {
+    if (!entry || typeof entry !== "object") {
+      dropped.push({ id, type: "unknown" });
+      continue;
+    }
+    const { type, url } = entry as { type?: unknown; url?: unknown };
+    if (type !== "http" || typeof url !== "string" || !url) {
+      dropped.push({ id, type: typeof type === "string" ? type : String(type) });
+    }
+  }
+  return dropped;
 }
 
 /**

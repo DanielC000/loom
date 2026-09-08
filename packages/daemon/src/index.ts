@@ -407,6 +407,11 @@ async function main(): Promise<void> {
     // the durable event + fail loud to the recipient AND the sender/manager. See
     // PtyHostEvents.onCodexBootStuck's own doc / SessionService.handleCodexBootStuck's own doc.
     onCodexBootStuck: (sessionId, info) => sessions.handleCodexBootStuck(sessionId, info),
+    // Card b987f086: a codex spawn declared a capability (a stdio MCP server, or codescape) this harness
+    // structurally cannot mount — `sessions` (forward reference, same pattern as onCodexBootStuck above)
+    // decides how to record the durable event + fail loud to the recipient AND the sender/manager. See
+    // PtyHostEvents.onCodexUnsupportedCapability's own doc / SessionService.handleCodexUnsupportedCapability's own doc.
+    onCodexUnsupportedCapability: (sessionId, info) => sessions.handleCodexUnsupportedCapability(sessionId, info),
     // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
     // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so
     // the Scheduler / worker_spawn won't fire into a known-limited account).

@@ -26,7 +26,7 @@ import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
-import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, buildCodexResumeArgs, codexTrustDialogLock } from "./codex-host.js";
+import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, codexTrustDialogLock } from "./codex-host.js";
 import { findConversationIdForSpawn } from "./codex-transcript.js";
 
 const RING_CAP_BYTES = 256 * 1024;
@@ -4292,6 +4292,33 @@ export interface PtyHostEvents {
    */
   onCodexBootStuck?(sessionId: string, info: { timeoutMs: number; pendingCount: number; readyMarker: boolean; modelLoaded: boolean; trustDialogResolved: boolean }): void;
   /**
+   * Card `b987f086`: a codex spawn declared one or more capabilities that this harness structurally cannot
+   * mount, and the only signal before this card was a `console.warn` into a shared multi-tenant log —
+   * project memory `shipping-a-detector-is-not-someone-reading-it` measures that exact shape (passive
+   * notice, nobody polling) at 0-acted-on on this project, against 3/3 for a blocking precondition and 4/4
+   * for an addressed directive. Fired from `createCodexPty` (`pty/host.ts`) for two independent reasons,
+   * both real and both worth naming distinctly in `info.items[].reason` rather than one blended sentence:
+   *  - an MCP server this session resolved (`buildMcpServers`) is not `{type:"http"}` — codex has no stdio-
+   *    MCP-server concept at all (`codex-host.ts#unsupportedCodexMcpServers`, the companion to
+   *    `mcpServersToCodexArgs` that this call site also runs). `profiles/validate.ts` now rejects a NEW
+   *    `harness:"codex"` profile that sets `browserTesting`/`documentConversion`/a non-empty `capabilities`
+   *    array at SAVE time (`codexStdioCapabilityUnsupportedError`) — this event is defense-in-depth for a
+   *    profile that predates that guard, or a slug added to the catalog after the profile was saved, not
+   *    the primary enforcement point.
+   *  - `opts.codescapeEnabled` is true for this project — codescape is deliberately never even attempted
+   *    for codex (no per-tool allow/disallow mechanism to pair with its write-tool restriction; see
+   *    `createCodexPty`'s own doc) and there is no profile-level save-time gate for this: `codescape.enabled`
+   *    lives on the PROJECT, not the profile, so the mismatch can only ever be detected at spawn time.
+   * Reuses `onCodexBootStuck`'s established two-recipient (session + manager) durable-event shape rather
+   * than inventing a new one. PtyHost itself cannot persist a durable event or notify a manager (no DB, same
+   * layering boundary as every sibling above); the implementer (sessions/service.ts, via index.ts) decides
+   * how to record + notify. OPTIONAL, same rationale as its siblings: every existing `PtyHostEvents` test
+   * double is unaffected until it opts in. Called best-effort from the spawn path — never let an
+   * implementer's own failure here become a second failure mode on top of the one being reported (the call
+   * site wraps this in try/catch for that reason, same as every sibling event above).
+   */
+  onCodexUnsupportedCapability?(sessionId: string, info: { items: { id: string; reason: string }[] }): void;
+  /**
    * Card 47c11741: the bare-placeholder tripwire's own one-shot RECOVERY re-injection (`PASTE_RECOVERY_TAG`,
    * paste-tripwire.ts) ALSO collapsed — the give-up path, right where the combined `[paste-tripwire]`
    * console.warn (this file's Stop-hook call site) already fires. Distinct from `onPasteLengthLoss` above:
@@ -6176,9 +6203,14 @@ export class PtyHost {
     // is the "real design question" the card asked for, answered: don't mount it until codex has an
     // equivalent per-tool restriction to pair it with. Surfaced loudly (not silently) below so a project
     // that enables codescape doesn't quietly get nothing from a codex worker with no signal why.
+    // Card `b987f086`: collect every capability this spawn cannot mount for codex — combined below into
+    // ONE `onCodexUnsupportedCapability` report so a manager sees the full picture in one nudge rather than
+    // learning about a codescape gap and a dropped-MCP-server gap as two unrelated events.
+    const unsupportedItems: { id: string; reason: string }[] = [];
     if (opts.codescapeEnabled) {
       // eslint-disable-next-line no-console
       console.warn(`[pty] ${opts.sessionId} codescape is enabled for this project but is NOT mounted for harness "codex" — codex has no per-tool allow/disallow mechanism to pair with codescape's write-tool restriction (see createCodexPty's own doc). Use harness "claude" for codescape access.`);
+      unsupportedItems.push({ id: "codescape", reason: "codescape is enabled for this project but codex has no per-tool allow/disallow mechanism to pair with its write-tool restriction — never mounted for this harness, use harness \"claude\" for codescape access" });
     }
     const mcpServers = buildMcpServers({
       sessionId: opts.sessionId, port: PORT, role: opts.role,
@@ -6188,6 +6220,19 @@ export class PtyHost {
       projectId: opts.projectId,
     });
     const mcpArgs = mcpServersToCodexArgs(mcpServers);
+    for (const dropped of unsupportedCodexMcpServers(mcpServers)) {
+      unsupportedItems.push({ id: dropped.id, reason: `resolved to a "${dropped.type}" MCP server, which codex cannot mount — codex only mounts {type:"http"} servers` });
+    }
+    if (unsupportedItems.length > 0) {
+      try {
+        this.events.onCodexUnsupportedCapability?.(opts.sessionId, { items: unsupportedItems });
+      } catch (err) {
+        // A failure to emit this signal must never become a SECOND failure mode on top of the one being
+        // reported — swallow, loudly, and move on (this data path must never throw).
+        // eslint-disable-next-line no-console
+        console.error(`[codex-unsupported-capability] ${opts.sessionId} onCodexUnsupportedCapability handler threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+      }
+    }
     // Card c6ce2804: buildCodexResumeArgs (codex-host.ts) is the PURE, directly-testable decision — see
     // its own doc for why fork is deliberately excluded even when a resumeId is also present. A fork
     // request carrying a codex resumeId is reported loudly here rather than silently mis-resumed.

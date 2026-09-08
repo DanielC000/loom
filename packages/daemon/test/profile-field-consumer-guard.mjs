@@ -37,13 +37,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 // harness:"codex" (remedy `no-mechanism-reject-or-warn`, `profiles/validate.ts`'s
 // `codexStdioCapabilityUnsupportedError`), same shape as `restrictedTools` (also
 // `no-mechanism-reject-or-warn`, `codexRestrictedToolsUnsupportedError` — codex's whole permission model
-// is two coarse, session-wide levers, verified against the real capability-probe findings). Only
-// `capabilities` still uses `connect` (an owner-added catalog capability CAN be stdio or http; codex gets
-// whichever the resolved server actually is, same as claude). `model` is DELIBERATELY LEFT as a declared,
-// tracked `gaps[]` entry (lowest severity — see field-consumers.ts's own note): test/
-// field-consumer-guard-warnings-surface.mjs needs at least one real, currently-open gap as its specimen,
-// and closing every gap in the same change would strand that unrelated card's regression coverage with
-// nothing to observe.
+// is two coarse, session-wide levers, verified against the real capability-probe findings).
+// Card `b987f086` CORRECTION: `capabilities` was believed to genuinely need `connect` ("an owner-added
+// catalog capability CAN be stdio or http; codex gets whichever the resolved server actually is") — that
+// premise was never true: `capabilities/registry.ts`'s `validateCapabilityDefInput` rejects any transport
+// other than `"stdio"` at catalog-CREATION time, and `resolveCapabilityServer`'s own return type hardcodes
+// `type:"stdio"`, so NO registry capability, today or by any currently-declared shape, could ever resolve
+// to `{type:"http"}`. `capabilities` now gets the SAME rejection as `browserTesting`/`documentConversion`
+// (folded into the same `codexStdioCapabilityUnsupportedError`) — it is fully CONSUMED, not a gap. `model`
+// is the ONLY field DELIBERATELY LEFT as a declared, tracked `gaps[]` entry (lowest severity — see
+// field-consumers.ts's own note): test/field-consumer-guard-warnings-surface.mjs needs at least one real,
+// currently-open gap as its specimen, and closing every gap in the same change would strand that
+// unrelated card's regression coverage with nothing to observe.
 //
 // ⛔ POSITIVE-CONTROLLED: every check below is exercised against BOTH a known-true case (the real
 // registry/source) and a synthetic known-false case (a fabricated field/pattern/cardId), so an

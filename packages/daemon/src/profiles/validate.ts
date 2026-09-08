@@ -236,19 +236,35 @@ function codexRestrictedToolsUnsupportedError(harness: string | undefined, restr
  * while a codex session mounts nothing for it (FAIL-OPEN for what a human reads as an enabled feature).
  * Reject the combination here, where the human editing the profile sees it, rather than a codex session
  * discovering it missing only via a spawn-time log line.
+ *
+ * Card `b987f086`: `capabilities` (the P4 registry-grant array) gets the SAME rejection, for the SAME
+ * reason, and it is NOT a narrower case of the two booleans above — it's a WIDER one. Every capability
+ * the registry can ever produce is `transport:"stdio"` STRUCTURALLY, not just today's two builtins:
+ * `validateCapabilityDefInput` (capabilities/registry.ts) rejects any transport other than `"stdio"` at
+ * catalog-CREATION time ("the 'http' transport is not yet supported"), and `resolveCapabilityServer`'s own
+ * return type (`CapabilityMcpServer`) hardcodes `type: "stdio"` — there is no code path, today or by any
+ * currently-declared shape, that could ever produce an `{type:"http"}` registry capability. So a non-empty
+ * `capabilities` array is unconditionally incompatible with `harness:"codex"`, for every present and future
+ * catalog entry alike — not something that needs re-checking per-slug. Before this fix, `field-consumers.ts`
+ * wrongly declared this field fully "consumed" on codex (a `proofs` entry pointing at `createCodexPty`
+ * THREADING `opts.capabilities` into `buildMcpServers` — the exact "threading is not mounting" trap
+ * `createCodexPty`'s own doc names as the lesson from the `browserTesting`/`documentConversion` fix); that
+ * entry is corrected alongside this one.
  */
 function codexStdioCapabilityUnsupportedError(
   harness: string | undefined,
   browserTesting: boolean | undefined,
   documentConversion: boolean | undefined,
+  capabilities: { slug: string; connectionId?: string }[] | undefined,
 ): string | null {
   if (harness !== "codex") return null;
   const offending = [
     browserTesting === true ? "browserTesting" : null,
     documentConversion === true ? "documentConversion" : null,
+    capabilities && capabilities.length > 0 ? "capabilities" : null,
   ].filter((f): f is string => f !== null);
   if (offending.length === 0) return null;
-  return `${offending.join(" and ")} ${offending.length > 1 ? "are" : "is"} not supported on harness "codex" — both resolve to a stdio MCP server (Playwright/markitdown), and codex can only mount {type:"http"} servers, so this combination cannot be honoured. Leave ${offending.join(" and ")} unset/false for a codex profile, or use harness "claude".`;
+  return `${offending.join(" and ")} ${offending.length > 1 ? "are" : "is"} not supported on harness "codex" — ${offending.length > 1 ? "these all resolve" : "this resolves"} to a stdio MCP server (Playwright/markitdown/any registry capability), and codex can only mount {type:"http"} servers, so this combination cannot be honoured. Leave ${offending.join(" and ")} unset/false/empty for a codex profile, or use harness "claude".`;
 }
 
 export function validateProfile(
@@ -265,7 +281,7 @@ export function validateProfile(
   if (restrictedToolsError) return { ok: false, error: restrictedToolsError };
   const codexRestrictedToolsError = codexRestrictedToolsUnsupportedError(d.harness, d.restrictedTools);
   if (codexRestrictedToolsError) return { ok: false, error: codexRestrictedToolsError };
-  const codexStdioCapabilityError = codexStdioCapabilityUnsupportedError(d.harness, d.browserTesting, d.documentConversion);
+  const codexStdioCapabilityError = codexStdioCapabilityUnsupportedError(d.harness, d.browserTesting, d.documentConversion, d.capabilities);
   if (codexStdioCapabilityError) return { ok: false, error: codexStdioCapabilityError };
   // COMPILE-TIME FIELD TOTALITY (card 1059b3b9): the `satisfies Record<keyof Omit<Profile,"id">,
   // unknown>` below forces every key of Omit<Profile,"id"> to be named in this literal — the write-path
