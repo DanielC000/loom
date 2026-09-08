@@ -23,6 +23,22 @@ import { watchCodexLiveness, getCachedCodexVersion } from "./codex-doctrine.js";
  * unsupported capabilities honestly ... turn-count recycle fallback from Phase 0's capability flags").
  * `rateLimitStatus` is `false` for the same reason `claudeAdapter` leaves it false: no live poller
  * instance exists yet for either harness's account-wide usage endpoint.
+ *
+ * ## Addendum, card a1916267: a SECOND, independent reason `ctxInputTokens`/`ctxTurns`/`model` read null
+ * on every codex worker row, beyond the field-shape uncertainty above. `pty/host.ts`'s ONLY capture
+ * chokepoint for these (the Stop-hook handler that calls `readContextStats` + `db.setContextCounters`,
+ * and `sessions/service.ts#autoRetireStopWhenIdle`'s belt-and-suspenders re-capture) is reached ONLY via a
+ * confirming hook event. Codex has NO hook relay at all (`CodexLive.hookToken` is permanently empty and
+ * never checked — see that field's own doc, `pty/host.ts`) — so even a hypothetical field-shape-correct
+ * `readContextStats` implementation on this adapter would still never be INVOKED for a codex session; the
+ * capture is hook-triggered, and codex never fires one. MEASURED: grepped `codex-host.ts` for
+ * `setContextCounters`/`ctxInputTokens`/`ctxTurns` — zero hits. A real Phase-2 fix for codex context
+ * telemetry needs BOTH pieces: a confirmed `token_count`/footer-percentage field shape (this file's
+ * existing note) AND a non-hook capture chokepoint for this harness (e.g. keyed off the same screen-scan
+ * markers `armCodexBusyStaleTimer` already polls, or a periodic read) — neither exists today, and this is
+ * the explicit ruling that gap is DEFERRED, not silently unhandled: card a1916267 found the symptom
+ * (null DB columns on a live codex worker row) but did not resolve either piece, both being real,
+ * separately-scoped engineering work beyond a diagnostics bugfix.
  */
 const capabilities: HarnessCapabilities = {
   contextTelemetry: false, // see header note — unconfirmed token_count field shape, not a real absence

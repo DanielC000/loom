@@ -3827,7 +3827,18 @@ export interface CodexLive {
   logStream: fs.WriteStream;
   logBroken: boolean;
   busy: boolean;
-  lastOutputAt: number;
+  // Card a1916267: NO `lastOutputAt` field here — deliberately, unlike `Live.lastOutputAt`. Codex's TUI
+  // repaints continuously (spinner/cursor chrome) with NO turn running, so a per-chunk "engine produced
+  // output" timestamp does not discriminate "working" from "idle and finished" on this harness the way it
+  // does for claude (measured: a codex worker's projected `lastEngineOutputAt` kept advancing ~30 minutes
+  // past its last real turn). It also has NO internal consumer here — codex's own busy/idle ladder
+  // (`armCodexBusyStaleTimer`) keys off `lastBusyMarkerAt`/screen-scan markers, never this field. Per
+  // `CodexLive`'s own doc above (ruling #4's "absent-vs-zero mistake"): a field that is not genuinely
+  // applicable to this harness is OMITTED, not sentinel-populated — `getLastOutputAt` (below) now reads
+  // only claude's `Live` map, so a codex row projects `lastEngineOutputAt: null`, an honest "not
+  // applicable" absence instead of a misleading advancing value. Mirrors `composerDirtyLen`'s existing
+  // codex-null convention (that getter has always read `this.live`, never `findAnyLive`, for the same
+  // reason).
   pending: QueuedMessage[];
   stopping: boolean;
   drainHeld: boolean;
@@ -6433,7 +6444,7 @@ export class PtyHost {
       alive: true, killed: false, startedAt: Date.now(),
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.sessionId}.log`)),
       logBroken: false,
-      busy: false, lastOutputAt: Date.now(),
+      busy: false,
       pending: [], stopping: false, drainHeld: false,
       role: opts.role ?? null,
       mcpSeen: false, mcpSeenWaiters: [],
@@ -6493,7 +6504,6 @@ export class PtyHost {
 
     pty.onData((d) => {
       const buf = Buffer.from(d, "utf-8");
-      live.lastOutputAt = Date.now();
       this.appendRing(live, buf);
       writeLog(live, buf);
       for (const s of live.subscribers) { try { s.onData(buf); } catch { /* ignore */ } }
@@ -13172,14 +13182,25 @@ export class PtyHost {
   }
 
   /** Epoch ms of this session's last pty OUTPUT chunk (`Live.lastOutputAt`), or undefined if it isn't
-   *  live. Distinct from the DB-persisted `lastActivity` (which only moves at turn boundaries — hook
-   *  events): this advances on EVERY engine-output chunk, so it keeps moving THROUGH a single long turn
-   *  and only goes stale once the engine truly stops producing — already fed to the busy-stale self-heal
-   *  (see `healIfStuck`'s use of `lastOutputAt`); this getter just surfaces the same signal to a reader
-   *  (worker_list/worker_status) so a manager can tell "busy + progressing" from "possibly wedged" without
-   *  spending a worker_transcript pull. */
+   *  live IN THE CLAUDE ENGINE. Distinct from the DB-persisted `lastActivity` (which only moves at turn
+   *  boundaries — hook events): this advances on EVERY engine-output chunk, so it keeps moving THROUGH a
+   *  single long turn and only goes stale once the engine truly stops producing — already fed to the
+   *  busy-stale self-heal (see `healIfStuck`'s use of `lastOutputAt`); this getter just surfaces the same
+   *  signal to a reader (worker_list/worker_status) so a manager can tell "busy + progressing" from
+   *  "possibly wedged" without spending a worker_transcript pull.
+   *
+   *  Card a1916267: deliberately reads `this.live` (claude only), NEVER `findAnyLive` — mirrors
+   *  `getComposerDirtyLen`'s own claude-only convention (see that getter's own doc), for the SAME reason.
+   *  `CodexLive` has no `lastOutputAt` field at all (see its own doc, this file) because codex's TUI
+   *  repaints continuously with no turn running, so a per-chunk output timestamp does not discriminate
+   *  "working" from "idle and finished" on that harness — a codex row therefore always projects
+   *  `lastEngineOutputAt: null`, an honest "not applicable to this harness" absence rather than a value
+   *  that misleadingly keeps advancing on a dead-ended session. `undefined` here still also covers the
+   *  ordinary "not live in this process at all" case, same ambiguity `getComposerDirtyLen` already
+   *  accepts — a reader can't distinguish the two from this field alone, and doesn't need to: either way
+   *  there is nothing to read from this signal. */
   getLastOutputAt(sessionId: string): number | undefined {
-    return this.findAnyLive(sessionId)?.lastOutputAt;
+    return this.live.get(sessionId)?.lastOutputAt;
   }
 
   /** Cumulative count of characters possibly still stranded in this session's composer from an earlier

@@ -2938,6 +2938,14 @@ export class OrchestrationMcpRouter {
     // engine truly stops producing. Lets a manager tell "busy and emitting" (recent) from "silent, possibly
     // wedged" (stale) at a glance, without spending a worker_transcript pull.
     //
+    // Card a1916267: `pty.getLastOutputAt` reads CLAUDE ONLY (`this.live`, never `findAnyLive`) — a
+    // non-claude (e.g. codex) worker row therefore always projects `lastEngineOutputAt: null`, the SAME
+    // codex-null convention `composerDirtyLen` below already has. This was NOT always true: it used to read
+    // every harness's live state, and on codex that meant the field kept advancing on pure TUI repaint with
+    // no turn running — a signal that read as "busy and emitting" on a session that would never act again,
+    // which is worse than an absent signal (a manager trusting it as liveness had nothing to warn it
+    // otherwise). See `PtyHost.getLastOutputAt`'s own doc (pty/host.ts) for the harness-level reasoning.
+    //
     // WHAT IT DOES NOT PROVE (card docs(orchestration): lastEngineOutputAt's description over-claims
     // progress): liveness is a property of the PROCESS, not the WORK — a retry loop, or a worker
     // re-reading the same file, moves this field identically to real progress. `lastActivity` advancing

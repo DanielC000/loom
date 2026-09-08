@@ -40,6 +40,13 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
  * source of truth, and re-deriving from it would just move the "trust this label" problem, not remove
  * it) — see this file's own header for the maintenance discipline.
  */
+// Card a1916267: `getLastOutputAt` REMOVED from this list (was here) — RECLASSIFIED to CLAUDE-ONLY, not
+// AGNOSTIC. `CodexLive` no longer carries a `lastOutputAt` field at all (codex's TUI repaints continuously
+// with no turn running, so the field never discriminated "working" from "idle and finished" on that
+// harness, and had no internal consumer there either — see the field's removal doc in pty/host.ts and the
+// parity matrix's own correction row for this method). It now reads `this.live.get(` only, the same
+// claude-only shape `getComposerDirtyLen`/`getComposerDirtyLenBelieved` already use — correctly absent from
+// this list, same as those two.
 const AGNOSTIC_METHODS = [
   "markMcpSeen", "waitForMcpSeen",
   "getPending", "getActiveTurnOrigin", "getActiveTurnIsProactive", "getActiveTurnOwnerText",
@@ -49,7 +56,7 @@ const AGNOSTIC_METHODS = [
   "purgeQueuedWorkerReportNudgesForWorker", "purgeQueuedWorkerIdleNudges",
   "deleteQueued", "editQueued", "reorderQueued",
   "subscribe", "isAlive", "isBusy", "holdDrain", "releaseDrain", "liveStartedAt", "getPid",
-  "getLastOutputAt", "hasFirstTurnStarted",
+  "hasFirstTurnStarted",
 ];
 
 /**

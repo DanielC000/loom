@@ -329,7 +329,7 @@ gracefully; a mutator must be guarded per condition 1 above if reachable from a 
 | `releaseDrain` | AGNOSTIC | `[grep]` | Same. |
 | `liveStartedAt` | AGNOSTIC | `[grep]` | Reads `live.startedAt`. |
 | `getPid` | AGNOSTIC | `[grep]` | Reads `live.pid`. |
-| `getLastOutputAt` | AGNOSTIC | `[grep]` | Reads `live.lastOutputAt`, set on every pty data chunk regardless of harness. |
+| `getLastOutputAt` | RECLASSIFIED to CLAUDE-ONLY — fixed by card `a1916267` | `[read]` | ⚠️ **CORRECTION**: this row was WRONG in a load-bearing way. It WAS true that `live.lastOutputAt` is "set on every pty data chunk regardless of harness" — but that's exactly the bug: codex's TUI repaints continuously (spinner/cursor chrome) with NO turn running, so the field kept advancing on a dead-ended codex session, indistinguishable from genuine liveness to a manager reading `worker_list`'s `lastEngineOutputAt` (measured: ~30 minutes past the worker's last real turn). `CodexLive` no longer carries a `lastOutputAt` field at all — it also had NO internal consumer (codex's own busy/idle ladder keys off `lastBusyMarkerAt`/screen-scan markers, never this). `getLastOutputAt` now reads `this.live.get(id)` only, the SAME convention `getComposerDirtyLen` below already uses — a codex row now honestly projects `lastEngineOutputAt: null`. |
 | `getComposerDirtyLen` | CLAUDE-ONLY | `[read]` | Accessor for a Claude-only field; safe no-op (`undefined`) on a codex `Live` that never sets it. |
 | `getComposerDirtyLenBelieved` | CLAUDE-ONLY | `[read]` | Same family. |
 | `getPendingConfirmMs` | CLAUDE-ONLY | `[grep]` | Adjacent to `humanSubmitHeldUntil` handling. |

@@ -14,7 +14,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // `pty`/`logStream` stub is enough because NONE of the AGNOSTIC methods under test touch `.pty`/
 // `.logStream` directly (verified by reading each one during the guard's own development — see that
 // file's header) — only `.pending`/`.busy`/`.alive`/`.pid`/`.subscribers`/`.ring`/`.geometry`/`.mcpSeen`/
-// `.activeTurn*`/`.drainHeld`/`.startedAt`/`.lastOutputAt`.
+// `.activeTurn*`/`.drainHeld`/`.startedAt`. (Card a1916267: `.lastOutputAt` REMOVED from this list —
+// `getLastOutputAt` is no longer AGNOSTIC; see that method's own doc in pty/host.ts and the negative
+// assertion below.)
 //
 // Run: 1) build (turbo builds shared first), 2) node test/pty-codex-agnostic-methods.mjs
 import { randomUUID } from "node:crypto";
@@ -52,7 +54,7 @@ function makeCodexLive() {
     subscribers: new Set(),
     alive: true, killed: false, startedAt,
     logStream: fakeLogStream, logBroken: false,
-    busy: false, lastOutputAt: Date.now() - 1000,
+    busy: false,
     pending: [], stopping: false, drainHeld: false,
     role: "worker",
     mcpSeen: false, mcpSeenWaiters: [],
@@ -129,6 +131,16 @@ live.firstTurnStarted = true;
 check("hasFirstTurnStarted reads true once the codex entry's own field flips (routed through findAnyLive, zero codex-specific code in the accessor itself)", host.hasFirstTurnStarted(SESSION_ID) === true);
 live.firstTurnStarted = false; // restore for the rest of this file's scenarios
 
+// --- getLastOutputAt (card a1916267) — DELIBERATELY CLAUDE-ONLY, not AGNOSTIC -----------------------
+// This is the negative proof for the fix: a codex entry that is genuinely LIVE and REGISTERED must still
+// read `getLastOutputAt` as undefined, exactly like the "no entry at all" case above (line 109) — the two
+// are indistinguishable BY DESIGN (see that getter's own doc, pty/host.ts) because the field no longer
+// exists on CodexLive at all. Before the fix this read as a real, advancing number (proven historically by
+// this same file's own removed `lastOutputAt: Date.now() - 1000` fixture field and its since-removed
+// assertion) — the exact bug: codex's TUI repaints continuously with no turn running, so this signal never
+// discriminated "working" from "idle and finished" on this harness.
+check("getLastOutputAt reads undefined for a LIVE, REGISTERED codex entry — deliberately not agnostic (card a1916267)", host.getLastOutputAt(SESSION_ID) === undefined);
+
 // --- isAlive / isBusy -----------------------------------------------------------------------------
 check("isAlive reads true for a live codex entry (routed through findAnyLive, zero codex-specific code)", host.isAlive(SESSION_ID) === true);
 check("isBusy reads false for an idle codex entry", host.isBusy(SESSION_ID) === false);
@@ -136,9 +148,8 @@ live.busy = true;
 check("isBusy reads true once the codex entry's busy flag flips (proves this isn't cached/stale)", host.isBusy(SESSION_ID) === true);
 live.busy = false;
 
-// --- getPid / getLastOutputAt / liveStartedAt ------------------------------------------------------
+// --- getPid / liveStartedAt -------------------------------------------------------------------------
 check("getPid returns the codex pty's real pid", host.getPid(SESSION_ID) === fakePty.pid);
-check("getLastOutputAt returns the codex entry's lastOutputAt", host.getLastOutputAt(SESSION_ID) === live.lastOutputAt);
 check("liveStartedAt returns the codex entry's startedAt while alive", host.liveStartedAt(SESSION_ID) === startedAt);
 live.alive = false;
 check("liveStartedAt reads null once the codex entry is no longer alive", host.liveStartedAt(SESSION_ID) === null);
@@ -245,6 +256,6 @@ check("releaseDrain clears drainHeld on a codex entry", (host.releaseDrain(SESSI
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the 'zero extra code for agnostic methods' claim (lead ruling #3, condition 2) is PROVEN, not merely asserted from inspection: a codex-kind live entry, registered directly in PtyHost's own liveCodex map with no real spawn, drives every pinned AGNOSTIC method (isAlive/isBusy/getPid/getLastOutputAt/liveStartedAt/holdDrain/releaseDrain/markMcpSeen/waitForMcpSeen/the full pending-queue family/subscribe/the getActiveTurn* family) correctly through findAnyLive with zero codex-specific code in any of them — and, checked FIRST as the negative control, every one of those same accessors reads as genuinely ABSENT (undefined/null/false/[]), never a measured zero, for a sessionId with no live entry at all in either registry."
+  ? "\n✅ ALL PASS — the 'zero extra code for agnostic methods' claim (lead ruling #3, condition 2) is PROVEN, not merely asserted from inspection: a codex-kind live entry, registered directly in PtyHost's own liveCodex map with no real spawn, drives every pinned AGNOSTIC method (isAlive/isBusy/getPid/liveStartedAt/holdDrain/releaseDrain/markMcpSeen/waitForMcpSeen/the full pending-queue family/subscribe/the getActiveTurn* family) correctly through findAnyLive with zero codex-specific code in any of them — and, checked FIRST as the negative control, every one of those same accessors reads as genuinely ABSENT (undefined/null/false/[]), never a measured zero, for a sessionId with no live entry at all in either registry. `getLastOutputAt` (card a1916267) is proven the OPPOSITE way, deliberately: still undefined even for a live, registered codex entry, because it's reclassified CLAUDE-ONLY."
   : `\n❌ ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);
