@@ -65,6 +65,10 @@ const EXPECTED_KEYS = [
   "ctxUpdatedAt", "model", "rateLimitedUntil", "rateLimitDeadline", "browserTesting", "documentConversion",
   "restrictedTools", "noCommit", "skills", "connections", "vaultWrite", "companionLeadMode",
   "capabilities", "archivedAt", "scheduledSpawn",
+  // Card 41f35bfe: `harness` is now ALWAYS present (an unset session's harness resolves to explicit
+  // `null` at the wire boundary, rather than serializing away as an undefined-valued key) — see
+  // `projectSessionRowFields`'s own doc comment in mcp/orchestration.ts for the full reasoning.
+  "harness",
   // derived/computed fields layered on top by the worker_status handler
   "neverCompletedTurn", "lastEngineOutputAt", "composerDirtyLen", "composerDirtyLenBelieved",
   "unconfirmedDeliveryMs", "lastMismatchReplay", "lastMismatchFusion", "lastMismatch",

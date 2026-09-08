@@ -3123,10 +3123,43 @@ export class OrchestrationMcpRouter {
     };
     const SESSION_ROW_KEYS = Object.keys(SESSION_ROW_FIELDS) as (keyof Omit<Session, "pendingMerge">)[];
 
+    /** The wire-only shape `projectSessionRowFields` actually returns: identical to `Omit<Session,
+     *  "pendingMerge">` except `harness` is widened to include `null`, so an UNSET worker can be told
+     *  apart from one explicitly holding the shipped default. This type exists ONLY for this
+     *  projection's return value (never assigned back into a real `Session`, which stays
+     *  `?: "claude" | "codex"` with no `null` member — see entityRowFields.ts's `ProfileWireView` for
+     *  the identical shape on the Profile side). */
+    type SessionWireView = Omit<Session, "pendingMerge" | "harness"> & { harness: "claude" | "codex" | null };
+
     // ONE list, not two: the sentinel's own keys ARE the field list this projects, so there is nothing to
-    // keep in sync by hand. Behaviour-preserving against the prior object literal (same 39 keys).
-    const projectSessionRowFields = (w: Session): Omit<Session, "pendingMerge"> =>
-      pickKeys(w, SESSION_ROW_KEYS);
+    // keep in sync by hand. Behaviour-preserving against the prior object literal (same 39 keys) except
+    // for card 41f35bfe's `harness` resolution below.
+    //
+    // Card 41f35bfe (the symmetric Session half of 3edf6ef7's `profileFields`/`ProfileWireView` — see
+    // that function's own doc comment for the full reasoning): an unset `harness` (a NULL column becomes
+    // `undefined` per db.ts's `toSession`) and a field this projection simply doesn't carry were
+    // INDISTINGUISHABLE once this router's `ok()` envelope's `JSON.stringify` drops the undefined-valued
+    // key — `worker_status` could not answer "has this worker's harness been set" (observed directly:
+    // a real worker_status call on a live claude worker returned every sibling field and no `harness`
+    // key at all). `null` = unset, `"claude"`/`"codex"` = explicitly set — mirroring what the DB column
+    // itself already means (db.ts's insertSession comment: "NULL = 'claude' (absent ⇒ today's only
+    // harness)").
+    //
+    // Deliberately NOT fixed by changing db.ts's `toSession()` to stop returning `undefined` for an
+    // unset harness: that shared object is reused UNWRAPPED as the merge base in the fork/recycle "carry
+    // the pinned vendor CLI forward" call sites (sessions/service.ts), whose semantics read an
+    // `undefined` `harness` as "leave the column as-is" — resolving it at that shared layer to ANY
+    // concrete value, `null` included, would silently persist it into a previously-NULL column on an
+    // unrelated fork/recycle. Widening a LOCAL, wire-only return type (`SessionWireView`, above) —
+    // never `Session` itself — sidesteps that: `worker_status` is this field's only exposed reader
+    // (`fleetView`'s own curated `worker_list` row never names `harness` at all — a separate,
+    // pre-existing curation choice, not this bug) and it spreads this function's result straight into
+    // `ok({...})` alongside other computed fields, never treating it as a real `Session` — so this
+    // widening has zero blast radius outside this one function's return value.
+    const projectSessionRowFields = (w: Session): SessionWireView => {
+      const picked = pickKeys(w, SESSION_ROW_KEYS);
+      return { ...picked, harness: picked.harness ?? null };
+    };
 
     const fleetView = async () => {
       const workers = db.listWorkers(managerSessionId).map((w) => {

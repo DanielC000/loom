@@ -135,6 +135,12 @@ const ALLOWLIST = new Map([
   // `ProfileHarness` type. Generic MCP-layer read-projection infra, not the adapter module; "bare" only
   // (this file has no business ever gaining a `.claude` PATH literal).
   ["mcp/entityRowFields.ts", "bare"],
+  // Card 41f35bfe (the symmetric Session half of 3edf6ef7 above): `projectSessionRowFields`'s read-only
+  // wire projection type (`SessionWireView`) names the SAME two-way enum ("claude"|"codex"), widened only
+  // to add `null` for an unset value — the identical TYPE-signature shape already exempted for
+  // `mcp/entityRowFields.ts`'s `ProfileWireView` just above. Generic MCP-layer read-projection infra, not
+  // the adapter module; "bare" only (this file has no business ever gaining a `.claude` PATH literal).
+  ["mcp/orchestration.ts", "bare"],
 ]);
 
 function walk(dir, out) {
