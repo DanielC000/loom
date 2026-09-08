@@ -85,7 +85,12 @@ const codexBin = resolveExecutable(process.env.LOOM_CODEX_BIN || "codex");
 try {
   await execFileAsync(codexBin, ["login", "status"], { timeout: 10000, windowsHide: true, shell: process.platform === "win32" });
 } catch (e) {
-  console.log(`SKIP  codex-mcp-connect-stuck-real-spawn.mjs — real, authenticated codex CLI not available on this host (${e.message.split("\n")[0]}).`);
+  // Card 5978735a: MUST be a `WARN  ` line (exact two-space prefix, test-daemon.mjs's own WARN_LINE_RE) —
+  // a bare `SKIP  ` line is discarded entirely once this file reports a pass, leaving zero trace on CI
+  // (ubuntu-latest, no codex CLI) that this file's real coverage never ran. (Distinct from the two
+  // mid-file/closing `WARN  SKIP:` lines below, which cover the boot-readiness precondition miss —
+  // card ba60e802 — not this earlier, top-of-file codex-availability gate.)
+  console.log(`WARN  SKIP  codex-mcp-connect-stuck-real-spawn.mjs — real, authenticated codex CLI not available on this host (${e.message.split("\n")[0]}).`);
   process.exit(0);
 }
 

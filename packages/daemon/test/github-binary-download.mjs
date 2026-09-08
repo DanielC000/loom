@@ -47,7 +47,10 @@ const {
 
 const asset = resolveGithubMcpAssetName(process.platform, process.arch);
 if (!asset) {
-  console.log(`SKIP — unsupported test host platform/arch (${process.platform}/${process.arch}) for the github-binary download pipeline; nothing to exercise here.`);
+  // Card 5978735a: MUST be a `WARN  ` line (exact two-space prefix, test-daemon.mjs's own WARN_LINE_RE) —
+  // a bare `SKIP` line is discarded entirely once this file reports a pass, leaving zero trace that this
+  // file's real coverage never ran on this host's platform/arch.
+  console.log(`WARN  SKIP — unsupported test host platform/arch (${process.platform}/${process.arch}) for the github-binary download pipeline; nothing to exercise here.`);
   process.exit(0);
 }
 const isWin = process.platform === "win32";
