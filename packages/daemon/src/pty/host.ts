@@ -6186,6 +6186,16 @@ export class PtyHost {
     // is a harmless no-op (codex never sets those), and the git-safety/LOOM_WORKTREE/Python-encoding vars +
     // the sessionEnv merge are exactly as load-bearing for an unattended codex pty as for a claude one.
     const env = buildSpawnEnv(process.env, opts.sessionEnv, opts.cwd);
+    // Card 9346ed5b: mirror createPty's obsidian-preflight block (see that method's own comment for the
+    // full contract). buildSpawnEnv (since 8d828fa4, above) merges opts.sessionEnv, so LOOM_OBSIDIAN_AUTOSTART
+    // now reaches a codex spawn's env where it previously never arrived at all — but createCodexPty never set
+    // the PARTNER path variable createPty's block sets, so a codex worker on an obsidian.autoStart project
+    // would see the flag SET and the script path EMPTY, while the obsidian-preflight skill fragment (gated
+    // on opts.sessionEnv directly in skills/inject.ts, independent of this env build) still instructs the
+    // agent to `node "$LOOM_OBSIDIAN_PREFLIGHT"`. Additive-when-off, same as createPty's own block.
+    if (env.LOOM_OBSIDIAN_AUTOSTART === "1" && !env.LOOM_OBSIDIAN_PREFLIGHT) {
+      env.LOOM_OBSIDIAN_PREFLIGHT = ENSURE_OBSIDIAN_SCRIPT;
+    }
     const scratchDir = sessionScratchDir(opts.sessionId);
     try { fs.mkdirSync(scratchDir, { recursive: true }); } catch { /* best-effort; never block spawn */ }
     Object.assign(env, scratchDirEnv(opts.sessionId));

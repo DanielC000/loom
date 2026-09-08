@@ -57,8 +57,18 @@ process.env.FIXTURE_ENV_OUTPUT_FILE = envOutputFile;
 process.env.CLAUDECODE = "1";
 process.env.CLAUDE_CODE_ENTRYPOINT = "cli";
 
+// Card 9346ed5b: this HOST's own ambient shell env can ALREADY carry LOOM_OBSIDIAN_AUTOSTART=1 +
+// LOOM_OBSIDIAN_PREFLIGHT (a real project running with obsidian.autoStart enabled locally sets these) —
+// buildSpawnEnv reads the REAL `process.env` as its base, so leaving these ambient would make both the
+// negative control below and the positive obsidian-variant spawn pass or fail for the wrong reason (host
+// state, not this test's own scenario) — the exact "hermetic test" trap the worker doctrine warns about.
+// Strip them from THIS test process's own env before any spawn so the fix-under-test is exercised on a
+// clean baseline; the positive spawn below re-adds LOOM_OBSIDIAN_AUTOSTART via its own sessionEnv only.
+delete process.env.LOOM_OBSIDIAN_AUTOSTART;
+delete process.env.LOOM_OBSIDIAN_PREFLIGHT;
+
 const { PtyHost } = await import("../dist/pty/host.js");
-const { sessionScratchDir } = await import("../dist/paths.js");
+const { sessionScratchDir, ENSURE_OBSIDIAN_SCRIPT } = await import("../dist/paths.js");
 
 const events = { onEngineSessionId() {}, onContextStats() {}, onRateLimited() {}, onBusy() {}, onExit() {} };
 const host = new PtyHost(events);
@@ -112,6 +122,40 @@ check("the scratch dir was actually created on disk (mirrors createPty's own eag
 // --- the CLAUDECODE/CLAUDE_CODE_* scrub is ALSO now live on the codex path (positive-controlled above) ---
 check("CLAUDECODE is scrubbed from the real codex child env (positive-controlled: was '1' on this process's own env)", !("CLAUDECODE" in spawnedEnv));
 check("CLAUDE_CODE_ENTRYPOINT (a CLAUDE_CODE_* var) is scrubbed from the real codex child env", !("CLAUDE_CODE_ENTRYPOINT" in spawnedEnv));
+
+// --- negative control: LOOM_OBSIDIAN_PREFLIGHT must be ABSENT when autostart is off (this spawn's own opts
+// never set LOOM_OBSIDIAN_AUTOSTART) — proves the obsidian block below only fires when it's meant to ------
+check("[9346ed5b, negative control] LOOM_OBSIDIAN_PREFLIGHT is absent from the real codex child env when LOOM_OBSIDIAN_AUTOSTART is not set", !("LOOM_OBSIDIAN_PREFLIGHT" in spawnedEnv));
+
+// --- Card 9346ed5b: mirror createPty's obsidian-preflight block — buildSpawnEnv (since 8d828fa4) merges
+// opts.sessionEnv, so LOOM_OBSIDIAN_AUTOSTART now reaches a codex spawn's env, but createCodexPty never set
+// the PARTNER path variable createPty's own block sets — leaving the obsidian-preflight skill fragment
+// (injected off opts.sessionEnv directly, independent of this env build) instructing the agent to run an
+// empty variable. A second, distinct spawn (own sessionId + own FIXTURE_ENV_OUTPUT_FILE override via
+// sessionEnv, so it never clobbers the first spawn's already-captured dump above) with autostart turned on.
+const SESSION_ID_OBSIDIAN = "codex-spawn-env-test-obsidian";
+const envOutputFileObsidian = path.join(tmpHome, "spawned-env-obsidian.json");
+const spawnCwdObsidian = fs.mkdtempSync(path.join(tmpHome, "cwd-obsidian-"));
+const optsObsidian = {
+  ...opts,
+  sessionId: SESSION_ID_OBSIDIAN,
+  cwd: spawnCwdObsidian,
+  sessionEnv: {
+    ...opts.sessionEnv,
+    LOOM_OBSIDIAN_AUTOSTART: "1",
+    FIXTURE_ENV_OUTPUT_FILE: envOutputFileObsidian,
+  },
+};
+const ptyObsidian = host.createCodexPty(optsObsidian);
+let spawnedEnvObsidian;
+try {
+  await waitUntil(() => fs.existsSync(envOutputFileObsidian), { label: "obsidian-variant fixture's env dump file to appear" });
+  spawnedEnvObsidian = JSON.parse(fs.readFileSync(envOutputFileObsidian, "utf8"));
+} finally {
+  try { ptyObsidian.kill(); } catch { /* best-effort */ }
+}
+check("[9346ed5b] LOOM_OBSIDIAN_AUTOSTART=1 reaches the real codex child env (plain sessionEnv passthrough, unrelated to this card's own fix)", spawnedEnvObsidian.LOOM_OBSIDIAN_AUTOSTART === "1");
+check("[9346ed5b fix] LOOM_OBSIDIAN_PREFLIGHT is set to the ensure-obsidian script's absolute path on the real codex child env when autostart is on (mirrors createPty's own block)", spawnedEnvObsidian.LOOM_OBSIDIAN_PREFLIGHT === ENSURE_OBSIDIAN_SCRIPT);
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — createCodexPty's real spawn env now carries opts.sessionEnv (proven on a real OS child process, the field the pre-fix bare process.env copy silently dropped) plus buildSpawnEnv's git-safety/LOOM_WORKTREE/Python-encoding vars and the CLAUDECODE/CLAUDE_CODE_* scrub, and scratchDirEnv's LOOM_SCRATCH_DIR (mkdir'd on disk) — all routed through the SAME shared unit createPty already uses, with a sessionEnv override still winning on the codex path exactly as it does on claude's."
