@@ -1745,8 +1745,10 @@ function buildBrokenSpawnMsg(pty: PtyHost, w: Session): string {
  * real UserPromptSubmit hook confirmed it — `hasFirstTurnStarted:true`) but has not yet COMPLETED one
  * (`turnSeq` — incremented ONLY at the genuine Stop-hook chokepoint, host.ts's `onTurnCompleted` — is
  * still 0, the same `neverCompletedTurn` field `worker_status`/`mcp/orchestration.ts` already expose).
- * `hasFirstTurnStarted` answers "did anything begin", never "did it finish" — it flips true on the FIRST
- * `UserPromptSubmit` hook, i.e. turn START (host.ts:4740/8790-8801), so a live, actively-producing,
+ * `hasFirstTurnStarted` answers "did anything begin", never "did it finish" — for a claude session it flips
+ * true on the FIRST `UserPromptSubmit` hook, i.e. turn START (host.ts:4740/8790-8801); for a codex session
+ * (card 361a5520 — codex has no start-confirming hook at all) it flips true on the first CONFIRMED
+ * completion instead (`armCodexBusyStaleTimer`'s CASE 2, host.ts) — either way, a live, actively-producing,
  * `busy:true` session mid its first turn is `turnSeq:0` by construction. The taskless branch used to fall
  * through past this state straight into the plain "finished a turn and is idle" wording below — FALSE for
  * this case (measured: Specimen 2, a healthy Code Reviewer ~90s into its first turn, got that exact false
@@ -13116,7 +13118,8 @@ export class SessionService {
       }
       if (everReported) return; // already reported at least once — nothing to nudge about
       // DISCRIMINATOR B (card 6651bf24 SPECIMEN 2): discriminator A is false, so a turn genuinely STARTED
-      // — but `turnSeq` (the ONLY thing `onTurnCompleted` increments, and only at the genuine Stop-hook
+      // — but `turnSeq` (the ONLY thing `onTurnCompleted` increments, at claude's genuine Stop-hook
+      // chokepoint or, since card 361a5520, codex's own analogous `armCodexBusyStaleTimer` CASE-2
       // chokepoint) is still 0, i.e. `neverCompletedTurn`. See buildNeverCompletedTurnMsg's own doc for why
       // this is reworded rather than folded into the plain "finished a turn" wording below.
       if ((w.turnSeq ?? 0) === 0) {

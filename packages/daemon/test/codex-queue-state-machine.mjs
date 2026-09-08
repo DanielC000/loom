@@ -31,10 +31,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 process.env.LOOM_CODEX_SUBMIT_ENTER_DELAY_MS = "20";
 process.env.LOOM_CODEX_BUSY_STALE_MS = "300";
 // Card 448f1b4a: shrinks live.bootReady's fail-loud ceiling so the R4 "boot never completes" scenario
-// below doesn't need a real ~45s wait. Every OTHER scenario in this file pushes its ready+model-loaded
-// frame synchronously (in the same tick as the spawn, well under 200ms of real wall-clock time), so this
-// shrink cannot spuriously fire against them.
-process.env.LOOM_CODEX_BOOT_READY_TIMEOUT_MS = "200";
+// below doesn't need a real ~45s wait. Card 361a5520 round 2 raised this from 200ms to 800ms: the new
+// BOOT-EPISODE scenario (below, proving a pre-submit codex busy episode does NOT falsely count as a
+// completed turn) needs a real ~CODEX_BUSY_STALE_MS (300ms) wait for its own marker to go stale BEFORE
+// this file's other scenarios push their ready+model-loaded frame — comfortably inside 800ms, same
+// margin discipline as this file's other constants (never tight against the thing it must outlast).
+process.env.LOOM_CODEX_BOOT_READY_TIMEOUT_MS = "800";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
 
@@ -80,10 +82,12 @@ class FakeCodexHost extends PtyHost {
 
 const busyEvents = [];
 const bootStuckEvents = [];
+const turnCompletedEvents = []; // card 361a5520 — see the "onTurnCompleted / hasFirstTurnStarted" section below
 const events = {
   onEngineSessionId() {}, onContextStats() {}, onRateLimited() {},
   onBusy(sessionId, busy) { busyEvents.push({ sessionId, busy }); },
   onCodexBootStuck(sessionId, info) { bootStuckEvents.push({ sessionId, info }); },
+  onTurnCompleted(sessionId) { turnCompletedEvents.push(sessionId); },
   onExit() {},
 };
 const host = new FakeCodexHost(events);
@@ -95,6 +99,25 @@ host.spawn({
   sessionEnv: {}, role: "worker", harness: "codex", startupPrompt: KICKOFF,
 });
 const fakePty = host.fakeCodexPtys.get(SESSION_ID);
+
+// --- BOOT-EPISODE (card 361a5520, Code Reviewer's blocking Critical, round 2): codex's own MCP-server-
+// startup work can render a busy status-line marker BEFORE `bootReady` ever latches and BEFORE Loom has
+// submitted anything at all — this file's own R3/C1 section below (and this method's real-spawn-corrected
+// doc) documents this as the OBSERVED, real-spawn-confirmed shape: the kickoff QUEUES behind it and drains
+// once it goes stale. `enterWrittenAt` inits to 0 (spawnCodexProcess's live literal) and the marker branch
+// sets `busy=true` unconditionally (not gated on `bootReady`), so `lastBusyMarkerAt >= enterWrittenAt`
+// (0) is trivially true once this episode's own timer goes stale — CASE 2 fires with NO turn ever having
+// been submitted. Round 1 wired `onTurnCompleted`/`firstTurnStarted` straight to that edge with no guard,
+// so this genuinely fired a false completion (reproduced below against round 1's own committed code,
+// commit 10e78f39, before applying round 2's `submitOutstanding` latch fix) — the exact false-positive
+// this scenario now pins as a permanent regression guard.
+check("(pre-boot-episode) nothing written yet, not busy", fakePty.writes.length === 0 && host.isBusy(SESSION_ID) === false);
+fakePty.push("Working (1s • esc to interrupt)\n"); // a REAL busy-marker match, same text this file's own C1 section uses below
+check("boot-episode: the marker is recognized as busy even though nothing has ever been submitted (`bootReady` still false, no `submitCodex` call has ever happened for this session)", host.isBusy(SESSION_ID) === true && host.liveCodex.get(SESSION_ID).bootReady === false);
+await waitUntil(() => host.isBusy(SESSION_ID) === false, { label: "the boot-episode's own marker goes stale and CASE 2 fires" });
+check("REGRESSION GUARD (round-1 defect, now RED-BEFORE-GREEN-verified against commit 10e78f39): the boot-episode's own CASE-2 falling edge must NOT fire onTurnCompleted — nothing was ever submitted", turnCompletedEvents.length === 0);
+check("REGRESSION GUARD: hasFirstTurnStarted must still read false after the boot episode settles (round-1 defect: it read true here, defeating handleKickoffGiveUpExhausted/notifyManagerOfIdleWorker's DISCRIMINATOR A for a codex worker whose kickoff genuinely never landed)", host.hasFirstTurnStarted(SESSION_ID) === false);
+check("the boot episode's own drain is a genuine no-op (nothing was ever queued pre-bootReady) — zero bytes written to the pty", fakePty.writes.length === 0);
 
 // --- R1/R2: card 448f1b4a — the ready placeholder ALONE (model still "loading") must NOT be read as
 // boot-readiness, and a message enqueued during that window must QUEUE rather than write straight into
@@ -153,6 +176,13 @@ check("kickoff turn's busy marker CONFIRMS it (armed from the marker sighting)",
 // Let the kickoff's own (now-confirmed) turn go idle before the next scenario.
 await waitUntil(() => host.isBusy(SESSION_ID) === false, { label: "kickoff turn goes idle once its confirmed marker goes stale" });
 
+// --- card 361a5520: onTurnCompleted/hasFirstTurnStarted must fire from THIS SAME CASE-2 edge — codex has
+// no confirming hook (deliverHook's Stop/StopFailure case, the ONLY other onTurnCompleted call site,
+// structurally excludes codex — `if (live.kind !== "claude") return;`), so before this fix `turnSeq`
+// stayed 0 forever for every codex session while being reported to managers as an OBSERVED fact.
+check("RED-BEFORE-GREEN (pre-fix this read 0/false forever — see the worker report for the reverted-file run): onTurnCompleted fired exactly once for the kickoff turn's own CASE-2 completion", turnCompletedEvents.length === 1 && turnCompletedEvents[0] === SESSION_ID);
+check("hasFirstTurnStarted flips true on the SAME edge (was permanently false pre-fix — a bare this.live.get(id) on a codex session, which lives in the separate liveCodex map)", host.hasFirstTurnStarted(SESSION_ID) === true);
+
 // --- C2: the in-flight race — a chunk in submitCodex's own text->\r write gap must NEVER flip busy false
 const enq1 = host.enqueueStdin(SESSION_ID, "message one", "system", undefined, undefined, "agent");
 check("enqueueStdin (idle) delivers message one immediately", enq1.delivered === true);
@@ -192,6 +222,7 @@ check(
 await waitUntil(() => host.liveCodex.get(SESSION_ID).enterPending === false, { label: "message two's own Enter write has actually happened" });
 fakePty.push("Working (1s • esc to interrupt)\n");
 await waitUntil(() => host.isBusy(SESSION_ID) === false, { label: "message two's own (now-confirmed) turn goes idle" });
+check("card 361a5520: onTurnCompleted fired once for message one's own CASE-2 completion (the edge that drained message two) and once more for message two's own — no double-count, no missed count (kickoff + message one + message two = 3)", turnCompletedEvents.length === 3);
 
 // --- M3: a session that keeps refreshing the marker must NEVER go idle while genuinely still busy -------
 const enq3 = host.enqueueStdin(SESSION_ID, "message three (long turn)", "system", undefined, undefined, "agent");
@@ -214,6 +245,7 @@ for (let i = 0; i < 5; i++) {
 // NOW let it genuinely go idle by observing the real staleness transition — an OBSERVABLE-event wait
 // (waitUntil polls real state), never a blind sleep guessed to outlast CODEX_BUSY_STALE_MS.
 await waitUntil(() => host.isBusy(SESSION_ID) === false, { label: "message three's turn finally goes idle once refreshes stop" });
+check("card 361a5520: M3's repeated marker refreshes (re-arming the SAME turn's timer 5 times, never firing CASE 2 until refreshes stop) did NOT fire onTurnCompleted an extra time per refresh — still exactly 4 total (+1 for message three's own genuine completion)", turnCompletedEvents.length === 4);
 
 // --- M9: reconcile() is the safety net for a queue stranded by a busy flag flipped some OTHER way --------
 // (e.g. a lost/never-armed timer) than the normal onData-driven staleness path. Before the M9 fix,
@@ -227,6 +259,7 @@ check("(pre-reconcile) message five is still stuck in pending", host.getPending(
 host.reconcile();
 check("M9 FIX: reconcile() drained the stranded queue", fakePty.writes.some((w) => w.includes("message five")));
 check("(post-reconcile) pending is empty", host.getPending(SESSION_ID).length === 0);
+check("card 361a5520: reconcile()'s M9 safety-net drain does NOT go through armCodexBusyStaleTimer's CASE 2 (the busy flag here was forced false by this scenario itself, not a genuine confirmed-then-stale marker) — onTurnCompleted must NOT fire for it, still exactly 4", turnCompletedEvents.length === 4);
 
 // reconcile() must be a no-op for a genuinely busy codex session (never force-drain mid-turn).
 host.liveCodex.get(SESSION_ID).busy = true;
@@ -247,7 +280,7 @@ check("M4 FIX: writeStdin's raw bytes reached the fake codex pty", fakePty.write
 
 // --- R4: card 448f1b4a — a session that NEVER reaches boot readiness must FAIL LOUD, not queue silently
 // forever. A SEPARATE session (this file's shared SESSION_ID is already past boot) that is spawned and
-// then never fed a ready+model-loaded frame at all — LOOM_CODEX_BOOT_READY_TIMEOUT_MS was shrunk to 200ms
+// then never fed a ready+model-loaded frame at all — LOOM_CODEX_BOOT_READY_TIMEOUT_MS was shrunk to 800ms
 // above, so this stays real-time but fast; the fail-loud ceiling itself is a genuine setTimeout, so this
 // is observed via waitUntil, never a blind sleep.
 {
@@ -266,7 +299,7 @@ check("M4 FIX: writeStdin's raw bytes reached the fake codex pty", fakePty.write
   check("R4: a message enqueued against a never-booting session queues", enqStuck.queued === true);
   await waitUntil(() => bootStuckEvents.some((e) => e.sessionId === STUCK_SESSION_ID), { label: "onCodexBootStuck fires for the never-booting session" });
   const stuckEvent = bootStuckEvents.find((e) => e.sessionId === STUCK_SESSION_ID);
-  check("R4 FIX: the boot-stuck report names the ceiling that was exceeded", stuckEvent.info.timeoutMs === 200);
+  check("R4 FIX: the boot-stuck report names the ceiling that was exceeded", stuckEvent.info.timeoutMs === 800);
   check("R4 FIX: the boot-stuck report's pendingCount reflects the queued (never-written) message", stuckEvent.info.pendingCount === 1);
   // Card 4babeb43: this session never received ANY pty output, so BOTH the ready marker and the
   // model-loaded check must be reported unmet — but trust-dialog-resolved must NOT be, since a dialog that

@@ -62,6 +62,7 @@ function makeCodexLive() {
     recentOwnerTurns: [],
     activeTurnSenderId: null, lastPromptSenderId: null,
     trustDialogAnswered: true, screenScan: "",
+    firstTurnStarted: false,
   };
 }
 
@@ -109,10 +110,24 @@ check("(absent) getLastOutputAt on an unregistered sessionId reads undefined (no
 check("(absent) liveStartedAt on an unregistered sessionId reads null", host.liveStartedAt(SESSION_ID) === null);
 check("(absent) getPending on an unregistered sessionId reads [] (not a crash)", JSON.stringify(host.getPending(SESSION_ID)) === "[]");
 check("(absent) getActiveTurnOrigin on an unregistered sessionId reads null", host.getActiveTurnOrigin(SESSION_ID) === null);
+check("(absent) hasFirstTurnStarted on an unregistered sessionId reads false", host.hasFirstTurnStarted(SESSION_ID) === false);
 
 // --- Register the codex entry directly into the private liveCodex map -------------------------------
 const live = makeCodexLive();
 host.liveCodex.set(SESSION_ID, live);
+
+// --- hasFirstTurnStarted (card 361a5520) -----------------------------------------------------------
+// RED-BEFORE-GREEN, recorded here rather than re-run: against the PRE-FIX `hasFirstTurnStarted` (a bare
+// `this.live.get(sessionId)?.firstTurnStarted ?? false`), a registered codex entry — even with
+// `firstTurnStarted:true` set below — read `false`, because a codex session lives in the SEPARATE
+// `liveCodex` map, never `this.live`. That is the exact defect card 361a5520 fixes: a codex session's
+// first-confirmed-turn state was structurally, permanently unreadable — indistinguishable from a session
+// that genuinely never started, which is what `handleKickoffGiveUpExhausted` (sessions/service.ts) reads
+// this for. Post-fix (`findAnyLive`), both checks below hold.
+check("hasFirstTurnStarted reads false for a live codex entry whose first turn has not yet completed", host.hasFirstTurnStarted(SESSION_ID) === false);
+live.firstTurnStarted = true;
+check("hasFirstTurnStarted reads true once the codex entry's own field flips (routed through findAnyLive, zero codex-specific code in the accessor itself)", host.hasFirstTurnStarted(SESSION_ID) === true);
+live.firstTurnStarted = false; // restore for the rest of this file's scenarios
 
 // --- isAlive / isBusy -----------------------------------------------------------------------------
 check("isAlive reads true for a live codex entry (routed through findAnyLive, zero codex-specific code)", host.isAlive(SESSION_ID) === true);

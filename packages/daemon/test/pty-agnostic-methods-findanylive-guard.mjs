@@ -49,7 +49,7 @@ const AGNOSTIC_METHODS = [
   "purgeQueuedWorkerReportNudgesForWorker", "purgeQueuedWorkerIdleNudges",
   "deleteQueued", "editQueued", "reorderQueued",
   "subscribe", "isAlive", "isBusy", "holdDrain", "releaseDrain", "liveStartedAt", "getPid",
-  "getLastOutputAt",
+  "getLastOutputAt", "hasFirstTurnStarted",
 ];
 
 /**

@@ -3952,6 +3952,37 @@ export interface CodexLive {
    *  Diagnostic only, read once at `onExit` to populate `PtyHostEvents.onExit`'s `codexStopDiag` — never
    *  read for any control-flow decision, and never touches what counts as a successful/intended stop. */
   secondSigintWrittenAt: number | null;
+  /** Card 361a5520: codex's counterpart of `Live.firstTurnStarted` — but tied to a DIFFERENT chokepoint,
+   *  because codex has no `UserPromptSubmit`-equivalent confirming hook to flip it at turn START. Latched
+   *  `true` inside `armCodexBusyStaleTimer`'s CASE 2, but ONLY when `submitOutstanding` (below) is also
+   *  true — i.e. the FIRST genuinely-confirmed turn COMPLETION for a turn Loom actually SUBMITTED, not
+   *  start, and not merely "a marker went stale." Deliberately conservative: a busy-marker sighting alone
+   *  (`isCodexBusy` in the onData handler) can fire from codex's own MCP-startup output before any real
+   *  turn was ever submitted — round 1 of this card latched straight off CASE 2 with no such guard and
+   *  the Code Reviewer reproduced exactly this false positive (a boot-episode marker going stale, with
+   *  `enterWrittenAt` still at its `0` init value, satisfied CASE 2's `lastBusyMarkerAt >= enterWrittenAt`
+   *  trivially). `submitOutstanding` is what closes that gap — see its own doc. Every consumer of
+   *  `hasFirstTurnStarted` OR's it with other, weaker signals (a non-empty transcript, a real
+   *  `worker_report` event) to SUPPRESS a false "kickoff dropped" alarm, so a false positive here is the
+   *  dangerous direction, not a false negative. Never flips back to `false`. */
+  firstTurnStarted: boolean;
+  /** Card 361a5520 round 2: latched `true` at the top of `submitCodex` (a turn Loom actually submitted is
+   *  now outstanding) and cleared the instant `armCodexBusyStaleTimer`'s CASE 2 confirms it — the gate
+   *  that gives `firstTurnStarted`/`onTurnCompleted` their PROVEN false-positive fix (see both fields'/
+   *  events' own docs for the reproduced boot-episode specimen this closes). Deliberately NOT cleared by
+   *  CASE 3 (retry) or CASE 4 (exhausted) — a retry ladder or a fail-loud exhaustion is still the SAME
+   *  outstanding submitted turn, and per `armCodexBusyStaleTimer`'s own doc a LATER marker sighting can
+   *  still resolve a CASE-4-exhausted turn into a genuine CASE-2 completion; clearing this early would
+   *  wrongly suppress that resolution. Also cleared by `interruptForRedirectCodex`'s `enterPending` branch
+   *  (a turn redirected before its own Enter ever went out — nothing was actually sent, so nothing is
+   *  outstanding; that branch drains directly and never reaches CASE 2 at all, so if this weren't cleared
+   *  there it would wrongly validate a LATER, unrelated marker sighting as if it confirmed this abandoned
+   *  turn). Deliberately NOT cleared by `interruptForRedirectCodex`'s common (already-confirmed) path — a
+   *  redirect-interrupted turn that already had a confirmed marker before the interrupt is still the SAME
+   *  outstanding turn, now settling via its own re-armed timer; see that method's own doc for why codex
+   *  counting this (unlike claude's own `interruptForRedirect` settle-site exclusion — `onTurnCompleted`'s
+   *  own contract doc) is a reasoned, disclosed divergence rather than a defect. */
+  submitOutstanding: boolean;
 }
 
 export interface SpawnOpts {
@@ -4085,10 +4116,11 @@ export interface PtyHostEvents {
   onContextStats(sessionId: string, stats: ContextStats): void;
   /**
    * Card 343441bd: a real worker turn just completed — bump the persisted turn counter (staleDirective's
-   * "opportunities to act" clock). Fired EXACTLY ONCE per GENUINE Stop/StopFailure completion, from inside
-   * that case's try block, immediately before `drainPending` — deliberately NOT at the `setBusy(false,
-   * "stop-hook")` falling edge itself, and deliberately NOT from any of the other FIVE setBusy(false)
-   * sites in this file:
+   * "opportunities to act" clock). For a CLAUDE session, fired EXACTLY ONCE per GENUINE Stop/StopFailure
+   * completion, from inside that case's try block, immediately before `drainPending` — deliberately NOT at
+   * the `setBusy(false, "stop-hook")` falling edge itself, and deliberately NOT from any of the other FIVE
+   * setBusy(false) sites in this file (this paragraph, through the "never zero, never twice" sentence
+   * below, describes CLAUDE'S call site specifically):
    *   - `healIfStuck`'s two sites and `sendEnterAndVerify`'s give-up-recovery two — a submit that was
    *     NEVER CONFIRMED to have started; the worker had no real opportunity to act, so counting them would
    *     inflate turnsSinceDelivery for non-opportunities and could FALSE-FIRE the no-false-alarm-critical
@@ -4103,9 +4135,21 @@ export interface PtyHostEvents {
    *     they also pass through. Every OTHER path between that edge and drainPending (a failed/successful
    *     context-stats read, the paste-placeholder tripwire) falls through to the call site, so it still
    *     fires for every turn that reaches drain — never zero, never twice.
-   * A future edit must NOT wire this to any of those five setBusy(false) sites, and must NOT move it back
-   * above the two park breaks — doing either reintroduces exactly the false-alarm risk this scoping was
-   * designed to avoid. A wedged/stuck worker is a DIFFERENT signal, owned by the busy-stuck watchdog.
+   * A future edit must NOT wire claude's call site to any of those five setBusy(false) sites, and must NOT
+   * move it back above the two park breaks — doing either reintroduces exactly the false-alarm risk this
+   * scoping was designed to avoid. A wedged/stuck worker is a DIFFERENT signal, owned by the busy-stuck
+   * watchdog.
+   *
+   * CODEX has its own, SEPARATE call site (card 361a5520): `armCodexBusyStaleTimer`'s CASE 2, the ONLY
+   * genuine turn-completion chokepoint for codex (it has no hook relay at all, so claude's Stop/StopFailure
+   * case structurally never fires for it). That site carries its OWN analogous exclusion, gated on
+   * `CodexLive.submitOutstanding` rather than a `live.kind` check: a busy-marker sighting with NO submit
+   * ever having happened (codex's own MCP-startup work can render one before `bootReady` even latches —
+   * see that field's own doc for the reproduced false-positive this closes) is the SAME "no real
+   * opportunity to act" exclusion claude's first bullet above states, just reached via a different signal
+   * (no confirming hook to check "never confirmed to have started" against). This is a DELIBERATE, already-
+   * guarded second call site, not a violation of the "must NOT wire claude's call site to a sixth site"
+   * rule above — that rule is scoped to claude's own five exclusions, not to codex adding its own.
    *
    * OPTIONAL (unlike its siblings above) so the many existing test doubles that construct a `PtyHostEvents`
    * object (the shared `SeamHost` fake-pty double in test/_seam-host-fixture.mjs, used across 115 daemon
@@ -6256,6 +6300,8 @@ export class PtyHost {
       engineSessionIdCaptureEndReason: null,
       bootReady: false, bootReadyTimer: null,
       secondSigintWrittenAt: null,
+      firstTurnStarted: false, // flips true on the FIRST confirmed CASE-2 completion — see the field's own doc
+      submitOutstanding: false, // set true by submitCodex, cleared by CASE 2 — see the field's own doc
     };
     this.liveCodex.set(opts.sessionId, live);
     attachLogErrorGuard(opts.sessionId, live);
@@ -6653,7 +6699,32 @@ export class PtyHost {
         // CASE 2 — CONFIRMED: a real marker was seen after this turn's own Enter write, and has now gone
         // stale. Falling edge (busy -> idle): drain the next queued message, exactly as claude's own
         // Stop-hook-triggered drainPending does — codex has no confirming hook, so this freshness timeout
-        // IS the turn-end signal this path drains on.
+        // IS the turn-end signal this path drains on. UNCONDITIONAL — this drain must fire regardless of
+        // whether anything was ever submitted (see the guard just below), since it's also what releases a
+        // queue stranded behind codex's own pre-submit MCP-startup busy episode (that episode's own
+        // `enterWrittenAt` is still `0`, its init value, so this comparison is trivially true for it too).
+        //
+        // Card 361a5520: this is ALSO codex's ONLY genuine turn-completion chokepoint — the counterpart of
+        // claude's `deliverHook` Stop/StopFailure case, which never fires for a codex session (no hook
+        // relay at all — `CodexLive.hookToken` is permanently `""`). Before this fix, `turnSeq` stayed
+        // structurally `0` forever for every codex session while being reported to managers as an OBSERVED
+        // fact. Mirrors claude's own ordering (`deliverHook`, this file: bump the counter immediately
+        // before drain).
+        //
+        // Round 2 (Code Reviewer's blocking Critical): round 1 wired the completion signal to THIS edge
+        // unconditionally — but this edge is ALSO where the pre-submit boot episode above lands (its own
+        // `enterWrittenAt:0` trivially satisfies `lastBusyMarkerAt >= enterWrittenAt`), so a codex session
+        // could get `onTurnCompleted`/`firstTurnStarted:true` fired for a turn that was never submitted at
+        // all — reproduced empirically (a boot-episode-only marker, zero pty writes, still incremented
+        // `turnSeq`). `live.submitOutstanding` (set by `submitCodex`, see its own doc) is what a real
+        // submitted turn carries and the boot episode does not — gating the completion signal on it (never
+        // the drain itself, which must stay unconditional) closes that gap without touching the
+        // busy->idle/drain behavior at all.
+        if (live.submitOutstanding) {
+          live.firstTurnStarted = true;
+          this.events.onTurnCompleted?.(sessionId);
+          live.submitOutstanding = false;
+        }
         this.setCodexBusy(sessionId, live, false, "codex-marker-stale");
         this.drainCodexPending(sessionId, live);
         return;
@@ -6722,6 +6793,11 @@ export class PtyHost {
     this.setCodexBusy(sessionId, live, true, "submit");
     live.submitConfirmAttempts = 0;
     live.enterPending = true; // this turn's Enter is not written yet — see CASE 0 on armCodexBusyStaleTimer's own doc
+    // Card 361a5520 round 2: a turn Loom is actually SUBMITTING is now outstanding — see this field's own
+    // doc for why CASE 2 gates the onTurnCompleted/firstTurnStarted signal on it (closes the boot-episode
+    // false-positive: a marker sighting with NO submit ever having happened must never count as a
+    // completed turn).
+    live.submitOutstanding = true;
     // Card 7c2a6dc0: capture the generation NOW, before the delayed write below. There is no
     // `busyStaleTimer` armed yet for THIS turn (this raw setTimeout is the only outstanding action during
     // the enterPending gap), so a `stopCodex`/`interruptForRedirectCodex` landing in that gap has nothing to
@@ -6930,6 +7006,11 @@ export class PtyHost {
     live.pty.write("\x03");
     if (live.enterPending) {
       live.enterPending = false;
+      // Card 361a5520 round 2: this turn's own Enter never went out — nothing was actually submitted, so
+      // nothing is outstanding. This branch drains directly and never reaches CASE 2 at all, so if this
+      // weren't cleared here it would sit `true` and wrongly validate a LATER, unrelated marker sighting
+      // as if it confirmed THIS abandoned turn (see `submitOutstanding`'s own doc).
+      live.submitOutstanding = false;
       this.setCodexBusy(sessionId, live, false, "codex-redirect-interrupted-pre-enter");
       this.drainCodexPending(sessionId, live);
       // eslint-disable-next-line no-console
@@ -6937,6 +7018,20 @@ export class PtyHost {
     } else {
       // The COMMON path — re-arm a fresh timer so the ordinary busy->idle staleness edge resumes and
       // drains this once codex actually goes idle (see this method's own doc for why this is safe/correct).
+      // Card 361a5520 round 2 (reconciled, not changed — Code Reviewer flagged as a documented divergence,
+      // not a defect): `live.submitOutstanding` is deliberately left untouched here. This turn already had
+      // a CONFIRMED marker before the interrupt (`lastBusyMarkerAt >= enterWrittenAt` from its own earlier
+      // real confirmation — see the doc above), so it is the SAME outstanding submitted turn, now settling
+      // via its own re-armed timer; once that timer reaches CASE 2, `onTurnCompleted` WILL fire for it.
+      // This diverges from claude's own `interruptForRedirect` settle site, which `onTurnCompleted`'s own
+      // contract doc deliberately EXCLUDES (claude under-counts a redirected turn on purpose, since that
+      // settle site is architecturally separate from the Stop-hook chokepoint). Codex has no such separate
+      // settle mechanism — CASE 2 is the ONLY drain path for a redirected turn, natural completion, or
+      // anything else — so there is no way to drain this queue without also passing through the same edge
+      // that fires the completion signal. Given the turn genuinely ran (a real marker was seen) before
+      // being cut short, counting it here is arguably MORE accurate than claude's conservative exclusion,
+      // not less — and splitting it out would need a THIRD state distinguishing "settling from a redirect"
+      // from "settling normally" for no concretely-named benefit. Left as-is, deliberately.
       this.armCodexBusyStaleTimer(sessionId, live);
       // eslint-disable-next-line no-console
       console.log(`[pty] ${sessionId} codex redirect: Ctrl+C sent — re-armed a fresh staleness timer; busy->idle detection will drain the redirect`);
@@ -13160,8 +13255,14 @@ export class PtyHost {
     return this.live.get(sessionId)?.lastPasteTripwireGiveUp;
   }
 
-  /** Whether this session's first real turn has been CONFIRMED (`Live.firstTurnStarted` — flips true on
-   *  the first `UserPromptSubmit` hook, see that field's own doc). Card 00bd3b4a: the discriminator
+  /** Whether this session's first real turn has been CONFIRMED. For claude, `Live.firstTurnStarted` flips
+   *  true on the first `UserPromptSubmit` hook (turn START — see that field's own doc); for codex,
+   *  `CodexLive.firstTurnStarted` flips true on the first CONFIRMED turn COMPLETION instead (see that
+   *  field's own doc for why codex is latched at a different chokepoint — it has no start-confirming hook
+   *  that can't also false-positive from boot/MCP-startup output). Card 361a5520: routed through
+   *  `findAnyLive` (was `this.live.get` — a codex session lives in the separate `liveCodex` map, so this
+   *  used to read structurally, permanently `false` for every codex session, indistinguishable from a
+   *  session that genuinely never started). Card 00bd3b4a: the discriminator
    *  `handleKickoffGiveUpExhausted` (sessions/service.ts) reads before treating an exhausted kickoff
    *  give-up as a genuine "nothing began at all" drop — Loom's own delivery-confirmation budget exhausting
    *  proves only that ITS confirmation is stale, never that the engine never received the write (see pinned
@@ -13170,7 +13271,7 @@ export class PtyHost {
    *  give-up signal reads. `false` (never `undefined`) for a session that isn't live — not-live also means
    *  not-started, the correct read for that case too. */
   hasFirstTurnStarted(sessionId: string): boolean {
-    return this.live.get(sessionId)?.firstTurnStarted ?? false;
+    return this.findAnyLive(sessionId)?.firstTurnStarted ?? false;
   }
 
   private appendRing(live: Live | CodexLive, buf: Buffer): void {
