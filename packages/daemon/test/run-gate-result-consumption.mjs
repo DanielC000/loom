@@ -295,9 +295,8 @@ try {
   //     while still queued, re-calls — must attach normally (advisory staleAgainstWorktree, no refusal),
   //     never send the worker to cancel a run that was about to validate exactly what it wanted. ─────────
   {
-    const repo = path.join(os.tmpdir(), `loom-rgc-repo-d-${Date.now()}-${process.pid}`);
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "loom-rgc-repo-d-"));
     registerForCleanup(repo);
-    fs.mkdirSync(repo, { recursive: true });
     fs.writeFileSync(path.join(repo, "README.md"), "# rgc\n");
     execSync(`git init -q && git config user.email rgc@loom && git config user.name rgc`, { cwd: repo });
     commitAll(repo, "init", GIT_ID);
