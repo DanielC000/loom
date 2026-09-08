@@ -329,12 +329,14 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
   const e = makeEnv({ cap: 1 });
   seedLiveScheduledManager(e, "mgr-still-full");
   seedSchedule(e, "sch-repeat-defer");
-  await e.scheduler.tick(new Date());
+  const firstTickAt = new Date();
+  await e.scheduler.tick(firstTickAt);
   const firstDeferredAt = e.db.getSchedule("sch-repeat-defer").lastDeferredAt;
   check("Transition-only: first tick records a deferral", !!firstDeferredAt);
-  // A second tick, same reason (cap still 1, still exactly at it) — must NOT rewrite lastDeferredAt.
-  await new Promise((r) => setTimeout(r, 5));
-  await e.scheduler.tick(new Date());
+  // Deterministic distinct instant for the second tick (no wall-clock wait needed at all — `tick` takes
+  // an explicit `now`, so this is exact, not a race): if the anti-flood guard were broken and rewrote
+  // lastDeferredAt on every same-reason tick, THIS second, later instant is what would show up instead.
+  await e.scheduler.tick(new Date(firstTickAt.getTime() + 60_000));
   check("Transition-only: a second same-reason tick leaves lastDeferredAt UNCHANGED",
     e.db.getSchedule("sch-repeat-defer").lastDeferredAt === firstDeferredAt);
   const raw = new Database(e.dbFile);

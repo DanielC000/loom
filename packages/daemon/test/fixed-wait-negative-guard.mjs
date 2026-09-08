@@ -407,9 +407,6 @@ const KNOWN_UNAUDITED_WAITS = new Map([
   ["scheduler-disabled.mjs", [
     "disabled: NO manager session booted in the agent",
   ]],
-  ["scheduler.mjs", [
-    "Transition-only: a second same-reason tick leaves lastDeferredAt UNCHANGED",
-  ]],
   ["shutdown-endpoint.mjs", [
     "(b) requestShutdown NOT invoked by the rejected caller (still 1)",
   ]],
