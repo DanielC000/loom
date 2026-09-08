@@ -6107,8 +6107,17 @@ export class PtyHost {
    */
   protected createCodexPty(opts: SpawnOpts): IPty {
     const bin = resolveExecutable(process.env.LOOM_CODEX_BIN || CODEX_BINARY_NAME);
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
+    // Card 8d828fa4: was a bare `process.env` copy — silently dropped opts.sessionEnv (despite
+    // buildMcpServers, below, READING opts.sessionEnv?.LOOM_PYTHON_INTERPRETER on the very next lines) plus
+    // the git-safety/worktree-anchor/Python-encoding vars createPty's own spawn already gets. Route through
+    // the SAME shared unit createPty uses (see buildSpawnEnv's own doc) instead of hand-rolling a subset —
+    // read in full, everything it does is correct for a codex spawn too: the CLAUDECODE/CLAUDE_CODE_* scrub
+    // is a harmless no-op (codex never sets those), and the git-safety/LOOM_WORKTREE/Python-encoding vars +
+    // the sessionEnv merge are exactly as load-bearing for an unattended codex pty as for a claude one.
+    const env = buildSpawnEnv(process.env, opts.sessionEnv, opts.cwd);
+    const scratchDir = sessionScratchDir(opts.sessionId);
+    try { fs.mkdirSync(scratchDir, { recursive: true }); } catch { /* best-effort; never block spawn */ }
+    Object.assign(env, scratchDirEnv(opts.sessionId));
     const capabilityCatalog = this.getCapabilityCatalog();
     // Card 7fa73e2c: `opts.codescapeEnabled`/`repoPath`/`worktreeId`/the codescape-supervisor state/
     // `integrationPaths` are DELIBERATELY NOT passed here, unlike createPty's own buildMcpServers call.
