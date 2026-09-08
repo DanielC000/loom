@@ -30,6 +30,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       while that destination is unmerged, and flips to `resolved` ONLY once a REAL squash commit lands
 //       for it (a genuine `getTaskMergedInfo` git-derived check, not a mock) — `resolved` is DERIVED from
 //       the destination's own ship state, never asserted from the Platform board's column.
+//   (g) card 9eaae37b — a task escalated repeatedly (N `platform_escalate` events, ONE distinct taskId)
+//       does NOT make its own unambiguous prefix read back as "ambiguous". The candidate set used to be
+//       built one entry per EVENT rather than per distinct task, so a re-escalated card's own id-prefix
+//       matched itself N times and was rejected as ambiguous against itself. Genuine cross-task ambiguity
+//       (two DISTINCT ids sharing a prefix, case (e) above) must still be reported and still name both.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/escalation-status.mjs
 import fs from "node:fs";
@@ -268,6 +273,40 @@ try {
   check("(e) a FULL id still resolves unambiguously even when its prefix is shared with another escalation",
     fullDespiteCollision.found === true && fullDespiteCollision.escalation.taskId === dupId1);
 
+  // ===================== (g) RE-ESCALATION: N events on ONE task must not manufacture ambiguity (card 9eaae37b) =====
+  // `escalation_status`'s candidate set used to be built ONE ENTRY PER `platform_escalate` EVENT rather
+  // than per DISTINCT task — a card re-escalated N times fed resolveIdPrefix N candidates all carrying
+  // the SAME id, so its own unambiguous prefix was rejected as "ambiguous" against itself (a manager hit
+  // this live: `ambiguous escalation id-prefix … it matches` followed by the SAME full id printed 11
+  // times). Reproduce the precondition directly through the public tool: `followUpOn` appends a fresh
+  // platform_escalate event onto the SAME task UNCONDITIONALLY (unlike the automatic title-dedupe scan,
+  // it never short-circuits on matching severity — sessions/service.ts's followUpOn branch), so repeated
+  // follow-ups is the real path that produces this shape.
+  const esc3 = await callAs("MGR_A", "manager", "platform_escalate", {
+    title: "third escalation from project A — re-escalated repeatedly", detail: "initial file", severity: "low",
+  });
+  check("(g) platform_escalate filed T3", !!esc3.taskId && !esc3.error);
+  const t3 = esc3.taskId;
+  for (let i = 0; i < 10; i++) {
+    const follow = await callAs("MGR_A", "manager", "platform_escalate", {
+      title: `re-escalation update ${i}`, detail: `update ${i}`, severity: "low", followUpOn: t3,
+    });
+    check(`(g) follow-up #${i} appended onto the SAME task T3`, follow.taskId === t3 && !follow.error);
+  }
+  // Confirm the repro precondition itself: T3 now carries 11 platform_escalate events (1 initial + 10
+  // follow-ups) — the exact "N events, one task" shape that broke the candidate set.
+  const t3EventCount = db.listEscalationsForProject("pA").filter((e) => e.taskId === t3).length;
+  check("(g) T3 now carries 11 platform_escalate events (the repro precondition)", t3EventCount === 11);
+
+  const t3Prefix = t3.slice(0, 8);
+  const st3Prefix = await callAs("MGR_A", "manager", "escalation_status", { taskId: t3Prefix });
+  check("(g) an UNAMBIGUOUS prefix of a task escalated 11 times still resolves — never ambiguous against itself (THE FIX)",
+    st3Prefix.found === true && st3Prefix.escalation.taskId === t3 && st3Prefix.error === undefined);
+
+  const st3Full = await callAs("MGR_A", "manager", "escalation_status", { taskId: t3 });
+  check("(g) the full id for the same re-escalated task also resolves cleanly",
+    st3Full.found === true && st3Full.escalation.taskId === t3);
+
   // Defense in depth: the service method itself rejects a non-manager caller. escalationStatus is now
   // async (card ba04d607 — deriving `resolved` needs an awaited git-derived merged check), so its guard
   // throw surfaces as a REJECTED promise, not a synchronous throw — await it inside the try.
@@ -281,6 +320,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — escalation_status is manager-gated and origin-project-scoped: a manager reads its own project's filed escalations (status pending→in_progress→triaged→closed as the Platform task's column/existence changes, current title read back live), a different project's manager gets found:false for both a real foreign taskId and an unknown one (never leaking which), a different managerSessionId in the SAME project (recycle) still sees escalations its predecessor filed, taskId accepts an unambiguous 8-char id-prefix scoped to the caller's own escalation set (ambiguous named, out-of-scope still found:false), and (card ba04d607) reaching the terminal column alone reads triaged/never resolved — resolved is DERIVED only once a linked destination task is git-verified merged — claude-free, network-free."
+  ? "\n✅ ALL PASS — escalation_status is manager-gated and origin-project-scoped: a manager reads its own project's filed escalations (status pending→in_progress→triaged→closed as the Platform task's column/existence changes, current title read back live), a different project's manager gets found:false for both a real foreign taskId and an unknown one (never leaking which), a different managerSessionId in the SAME project (recycle) still sees escalations its predecessor filed, taskId accepts an unambiguous 8-char id-prefix scoped to the caller's own escalation set (ambiguous named, out-of-scope still found:false), a task escalated 11 times still resolves cleanly by its own prefix (card 9eaae37b — never ambiguous against itself, while a genuine two-distinct-id collision still IS reported ambiguous), and (card ba04d607) reaching the terminal column alone reads triaged/never resolved — resolved is DERIVED only once a linked destination task is git-verified merged — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

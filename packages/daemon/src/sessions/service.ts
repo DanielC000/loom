@@ -11866,7 +11866,17 @@ export class SessionService {
       // shared OrchestrationEvent type — filter defensively so resolveIdPrefix's candidates are always
       // real strings rather than coercing a null/undefined into a matchable "" prefix.
       const withId = events.filter((e): e is typeof e & { taskId: string } => typeof e.taskId === "string");
-      const r = resolveIdPrefix(withId.map((e) => ({ id: e.taskId, event: e })), ref);
+      // card 9eaae37b: dedupe to ONE candidate per DISTINCT taskId before resolving — a re-escalated
+      // card contributes one `platform_escalate` event per escalation, so `withId` can hold several
+      // entries sharing the same taskId. resolveIdPrefix's contract is one candidate per entity; feeding
+      // it the raw event list made an UNAMBIGUOUS prefix "ambiguous" against its own repeated id. Keep
+      // the LATEST event per taskId (highest `ts`) — the freshest filed title/state for that card.
+      const latestByTaskId = new Map<string, (typeof withId)[number]>();
+      for (const e of withId) {
+        const existing = latestByTaskId.get(e.taskId);
+        if (!existing || e.ts > existing.ts) latestByTaskId.set(e.taskId, e);
+      }
+      const r = resolveIdPrefix(Array.from(latestByTaskId.values()).map((e) => ({ id: e.taskId, event: e })), ref);
       if (r.kind === "ambiguous") {
         return { error: `ambiguous escalation id-prefix '${ref}' — it matches ${r.ids.join(", ")}; pass more characters or the full id` };
       }
