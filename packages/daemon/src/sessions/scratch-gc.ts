@@ -5,6 +5,7 @@ import { SCRATCH_ROOT_DIR } from "../paths.js";
 import { withTimeout } from "../git/bounded.js";
 import { killableRemoveDir, type RemoveDirResult } from "../git/worktrees.js";
 import { listAllTranscriptIds } from "../pty/claude-transcript.js";
+import { engineTranscriptExists } from "./transcript.js";
 
 /**
  * Card 9775559c — boot GC for `SCRATCH_ROOT_DIR` (`~/.loom/tmp/scratch/<sessionId>`), which nothing has
@@ -20,7 +21,9 @@ import { listAllTranscriptIds } from "../pty/claude-transcript.js";
  * ║ TOCTOU miss can "permanently stamp a perfectly-healthy worker `dead`"), and was measured LYING for 13  ║
  * ║ real dirs whose engine transcript was present on disk. Neither column is trustworthy without a live    ║
  * ║ re-check, so — exactly like `deriveCrashOrphanedWorkers` and `resume()` — this sweep re-verifies       ║
- * ║ transcript existence AT SWEEP TIME via {@link listAllTranscriptIds} rather than trusting either.       ║
+ * ║ transcript existence AT SWEEP TIME: via {@link listAllTranscriptIds} for a claude row, or the           ║
+ * ║ harness-aware per-session {@link engineTranscriptExists} for a codex row (card cb8b7eff) — never       ║
+ * ║ trusting either cached column.                                                                          ║
  * ╚══════════════════════════════════════════════════════════════════════════════════════════════════════╝
  */
 
@@ -68,9 +71,19 @@ export interface ScratchGcDeps {
   removeDir?: (target: string, timeoutMs: number) => Promise<RemoveDirResult>;
   timeoutMs?: number;
   nowMs?: number;
-  /** The live engine-transcript-id set — defaults to a real, single-pass `listAllTranscriptIds()` scan.
-   *  A test injects a fixed `Set` instead of pointing at a real `~/.claude/projects` fixture tree. */
+  /** The live engine-transcript-id set for CLAUDE rows only — defaults to a real, single-pass
+   *  `listAllTranscriptIds()` scan of `~/.claude/projects`. A test injects a fixed `Set` instead of
+   *  pointing at a real fixture tree. Never consulted for a `harness:"codex"` row — see
+   *  {@link codexTranscriptExists}. */
   transcriptIds?: Set<string>;
+  /** Per-session resumability check for a `harness:"codex"` row — defaults to the harness-aware
+   *  `engineTranscriptExists(cwd, id, "codex")` (`sessions/transcript.ts`), which dispatches to codex's
+   *  own rollout-file scan (`pty/codex-transcript.ts`) — the SAME check `resume()`'s own ghost-resume
+   *  guard already trusts (`sessions/service.ts`). A codex conversation id is a codex rollout id and can
+   *  NEVER appear in {@link transcriptIds} (that set scans ONLY `~/.claude/projects`), so a codex row
+   *  needs this separate per-session check rather than folding into the claude bulk set (card cb8b7eff).
+   *  A test injects a fixed function instead of touching a real `~/.codex/sessions` tree. */
+  codexTranscriptExists?: (cwd: string, engineSessionId: string) => boolean;
 }
 
 export interface ScratchGcResult {
@@ -115,7 +128,12 @@ async function withBoundedConcurrency<T>(items: T[], limit: number, worker: (ite
  *      regardless of anything else);
  *   4. that row's `engineSessionId` is set (nothing to check transcript existence against otherwise —
  *      absent-id rows are skipped rather than treated as automatically reapable);
- *   5. that id is ABSENT from the live transcript-id set (`resume()` is then structurally impossible);
+ *   5. that id is not resumable per its OWN harness's liveness source (`resume()` is then structurally
+ *      impossible) — a plain/`"claude"` row checks membership in the bulk claude-only
+ *      `listAllTranscriptIds()` set; a `"codex"` row instead calls {@link ScratchGcDeps.codexTranscriptExists}
+ *      (default: the harness-aware `engineTranscriptExists(cwd, id, "codex")`), since a codex conversation
+ *      id is a codex rollout id and can never appear in the claude-only set (card cb8b7eff — the claude
+ *      set's own scan is scoped to `~/.claude/projects`, see `pty/claude-transcript.ts`);
  *   6. `lastActivity` is older than {@link SCRATCH_GC_GRACE_MS}.
  */
 export async function sweepUnresumableScratchDirs(db: Db, deps: ScratchGcDeps = {}): Promise<ScratchGcResult> {
@@ -129,6 +147,7 @@ export async function sweepUnresumableScratchDirs(db: Db, deps: ScratchGcDeps = 
 
   const nowMs = deps.nowMs ?? Date.now();
   const liveTranscriptIds = deps.transcriptIds ?? listAllTranscriptIds();
+  const codexTranscriptExists = deps.codexTranscriptExists ?? ((cwd, id) => engineTranscriptExists(cwd, id, "codex"));
   const timeoutMs = deps.timeoutMs ?? SCRATCH_GC_REMOVE_TIMEOUT_MS;
   const removeDir = deps.removeDir ?? ((p, ms) => killableRemoveDir(p, ms));
 
@@ -141,7 +160,10 @@ export async function sweepUnresumableScratchDirs(db: Db, deps: ScratchGcDeps = 
     if (!row) continue; // no-DB-row dir (predicate 2) — carve-out, see header doc
     if (row.processState === "live" || row.processState === "starting") continue; // predicate 3
     if (!row.engineSessionId) continue; // predicate 4
-    if (liveTranscriptIds.has(row.engineSessionId)) continue; // predicate 5 — still resumable, never reap
+    const stillResumable = row.harness === "codex"
+      ? codexTranscriptExists(row.cwd, row.engineSessionId)
+      : liveTranscriptIds.has(row.engineSessionId);
+    if (stillResumable) continue; // predicate 5 — still resumable, never reap
     const lastActivityMs = Date.parse(row.lastActivity);
     if (Number.isNaN(lastActivityMs) || nowMs - lastActivityMs < SCRATCH_GC_GRACE_MS) continue; // predicate 6
 

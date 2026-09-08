@@ -15,7 +15,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   5. a no-DB-row dir is NOT reaped;
 //   6. a non-uuid-shaped entry and a root-level loose file are NEVER touched (not even scanned);
 //   7. a wedged removal resolves (never hangs) and leaves the dir for the next boot sweep;
-//   8. concurrency stays bounded under a large reap set (never one OS process per candidate).
+//   8. concurrency stays bounded under a large reap set (never one OS process per candidate);
+//   9. card cb8b7eff — a resumable "codex" row is NOT reaped (predicate 5 must consult the harness-aware
+//      per-session codexTranscriptExists seam, never the claude-only bulk transcriptIds set);
+//  10. and the reverse polarity: a genuinely dead "codex" row past grace IS still reaped.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/scratch-gc-boot-sweep.mjs
 import fs from "node:fs";
@@ -58,11 +61,12 @@ function mkScratchDir(id) {
   return dir;
 }
 
-function insertSessionRow({ id, engineSessionId, processState, resumability, lastActivity }) {
+function insertSessionRow({ id, engineSessionId, processState, resumability, lastActivity, harness }) {
   db.insertSession({
     id, projectId: "proj1", agentId: "agent1", engineSessionId: engineSessionId ?? null, title: null,
     cwd: tmpHome, processState, resumability: resumability ?? "unknown", busy: false,
     createdAt: lastActivity, lastActivity, lastError: null, role: "worker", parentSessionId: null,
+    harness,
   });
 }
 
@@ -228,10 +232,48 @@ function trackingRemoveDir(delayMs) {
   check("8 every candidate reported reaped (the injected removeDir always resolves {removed:true})", ids.every((id) => result.reaped.includes(id)));
 }
 
+// ============================== 9. a RESUMABLE codex session is NOT reaped (card cb8b7eff) ==============================
+// `listAllTranscriptIds` (the claude-only bulk set) scans ONLY `~/.claude/projects` — a codex
+// conversation id can NEVER appear in it, so before the fix, predicate 5 always fell through to reap a
+// still-resumable codex session past the grace period. This is the RED case: it must fail on unfixed
+// predicate-5 logic (bulk-Set-only) and pass once a "codex" row instead consults its own per-session
+// `codexTranscriptExists` seam.
+{
+  const id = randomUUID();
+  const engineId = randomUUID();
+  mkScratchDir(id);
+  insertSessionRow({ id, engineSessionId: engineId, processState: "exited", resumability: "resumable", lastActivity: oldIso, harness: "codex" });
+
+  // The claude bulk set is EMPTY (this codex id would never be in it even in production), and the
+  // injected codex check reports the rollout file still exists ⇒ genuinely resumable.
+  const codexCalls = [];
+  const codexTranscriptExists = (cwd, checkedId) => { codexCalls.push({ cwd, checkedId }); return checkedId === engineId; };
+  const result = await sweepUnresumableScratchDirs(db, { transcriptIds: new Set(), nowMs, codexTranscriptExists });
+  check("9 a resumable codex session's scratch dir is NOT reaped", fs.existsSync(path.join(SCRATCH_ROOT_DIR, id)));
+  check("9 not reported reaped", !result.reaped.includes(id));
+  check("9 the injected codex check was actually consulted, with the row's own cwd+engineSessionId", codexCalls.length === 1 && codexCalls[0].cwd === tmpHome && codexCalls[0].checkedId === engineId);
+  fs.rmSync(path.join(SCRATCH_ROOT_DIR, id), { recursive: true, force: true });
+}
+
+// ============================== 10. a genuinely DEAD codex session IS still reaped (both polarities) ==============================
+// The GC's real job must keep working for codex: a session whose rollout file is genuinely gone (never
+// resumable) must still be collected past grace, not spared by construction just because it's codex.
+{
+  const id = randomUUID();
+  const engineId = randomUUID();
+  mkScratchDir(id);
+  insertSessionRow({ id, engineSessionId: engineId, processState: "exited", resumability: "resumable", lastActivity: oldIso, harness: "codex" });
+
+  const codexTranscriptExists = () => false; // rollout file gone
+  const result = await sweepUnresumableScratchDirs(db, { transcriptIds: new Set(), nowMs, codexTranscriptExists });
+  check("10 a genuinely dead codex session's scratch dir IS reaped", !fs.existsSync(path.join(SCRATCH_ROOT_DIR, id)));
+  check("10 reported as reaped", result.reaped.includes(id));
+}
+
 db.close();
 fs.rmSync(tmpHome, { recursive: true, force: true });
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — sweepUnresumableScratchDirs never reaps a live/starting session, never trusts the stale cached resumability column (re-verifies the live transcript-id set instead), reaps only transcript-gone dirs past the grace period, never touches a no-DB-row dir / non-uuid entry / loose root file, bounds a wedged removal instead of hanging, and bounds concurrency under a large reap set."
+  ? "\n✅ ALL PASS — sweepUnresumableScratchDirs never reaps a live/starting session, never trusts the stale cached resumability column (re-verifies the live transcript-id set instead), reaps only transcript-gone dirs past the grace period, never touches a no-DB-row dir / non-uuid entry / loose root file, bounds a wedged removal instead of hanging, bounds concurrency under a large reap set, and — per harness — never reaps a resumable codex row while still reaping a genuinely dead one."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
