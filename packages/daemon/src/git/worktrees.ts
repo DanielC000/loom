@@ -1753,42 +1753,49 @@ export function worktreeStatusHasWork(porcelain: string): boolean {
 }
 
 /**
- * The REAL-work paths in a `git status --porcelain` output — the list form of {@link worktreeStatusHasWork}
- * (which is now just `length > 0`), so the two share one filter and can't drift. Two daemon-noise classes
- * are dropped: an UNTRACKED (`??`) path under `.claude/` (skill injection + Claude's own `.claude/
- * settings.local.json` permission writes), AND the daemon-injected `.claude/skills/` subtree at ANY status
- * (a re-copy over a tracked colliding skill name surfaces as a tracked modification, not `??`). Everything
- * else — tracked modifications elsewhere (incl. a tracked non-skills file under `.claude/`), staged/unstaged
- * changes, untracked paths OUTSIDE `.claude/` — is the worker's product and kept. Exported so the
- * worker_report(done) pre-check can NAME the uncommitted files in its refusal. Paths are de-quoted (git
- * quotes paths with special chars).
+ * The filtered, noise-excluded `git status --porcelain` LINES (not just paths) — the shared foundation
+ * both {@link uncommittedWorkFiles} and {@link computeWorktreeGateStamp}'s `dirtyHash` build on, so every
+ * consumer of "what counts as real work" agrees. Two daemon-noise classes are dropped: an UNTRACKED (`??`)
+ * path under `.claude/` (skill injection + Claude's own `.claude/settings.local.json` permission writes),
+ * AND the daemon-injected `.claude/skills/` subtree at ANY status (a re-copy over a tracked colliding skill
+ * name surfaces as a tracked modification, not `??`). Everything else — tracked modifications elsewhere
+ * (incl. a tracked non-skills file under `.claude/`), staged/unstaged changes, untracked paths OUTSIDE
+ * `.claude/` — is the worker's product and kept. Card 887e10b8 Item 1: codex's injected AGENTS.md is the
+ * SAME kind of doctrine noise, untracked-only (a repo's own real, already-TRACKED AGENTS.md would show a
+ * different status and is never touched by injectCodexDoctrine in the first place).
  */
-export function uncommittedWorkFiles(porcelain: string): string[] {
-  const files: string[] = [];
+function filteredWorkLines(porcelain: string): string[] {
+  const lines: string[] = [];
   for (const line of porcelain.split(/\r?\n/)) {
     if (line.trim() === "") continue;
     // porcelain v1 line: 2 status chars, a space, then the path. `??` = untracked.
     const status = line.slice(0, 2);
     let p = line.slice(3);
     if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1); // git quotes paths with special chars
-    // Daemon/Claude-injected `.claude/` churn that is NEVER the worker's committable product:
-    //  (a) ANY UNTRACKED `.claude/` entry — the skills injection AND Claude Code's own per-session writes
-    //      (e.g. `.claude/settings.local.json` from acceptEdits permission persistence). Kept broad so that
-    //      churn keeps being swallowed; narrowing this prefix would surface it as phantom "work".
-    //  (b) the daemon-injected SKILLS subtree at ANY status. injectSkills re-copies `~/.loom/skills/<name>`
-    //      into `.claude/skills/<name>` on every spawn; in a repo that TRACKS a colliding skill name the
-    //      re-copy surfaces as a TRACKED modification (` M …`/`A  …`), not `??`, so the untracked-only rule
-    //      (a) misses it and boot-reconcile Pass B reads a genuinely-clean worktree as "has work". This drop
-    //      closes that leak. (Loom never commits `.claude/skills/`; it is injected per-session + git-excluded.)
     if (status === "??" && isDoctrineArtifactPath(p)) continue;
     if (isDoctrineSkillsPath(p)) continue;
-    // Card 887e10b8 Item 1: codex's injected AGENTS.md is the SAME kind of doctrine noise as claude's
-    // `.claude/` — untracked-only, mirroring (a) above (a repo's own real, already-TRACKED AGENTS.md would
-    // show a different status and is never touched by injectCodexDoctrine in the first place).
     if (status === "??" && isCodexDoctrinePath(p)) continue;
-    files.push(p);
+    lines.push(line);
   }
-  return files;
+  return lines;
+}
+
+/** De-quote a porcelain v1 line's path (status + space prefix stripped, `"`-wrapped special-char paths unwrapped). */
+function porcelainLinePath(line: string): string {
+  let p = line.slice(3);
+  if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1);
+  return p;
+}
+
+/**
+ * The REAL-work paths in a `git status --porcelain` output — the list form of {@link worktreeStatusHasWork}
+ * (which is now just `length > 0`), built on the same {@link filteredWorkLines} filter so the two (and
+ * {@link computeWorktreeGateStamp}'s `dirtyHash`) can't drift apart. Exported so the worker_report(done)
+ * pre-check can NAME the uncommitted files in its refusal. Paths are de-quoted (git quotes paths with
+ * special chars).
+ */
+export function uncommittedWorkFiles(porcelain: string): string[] {
+  return filteredWorkLines(porcelain).map(porcelainLinePath);
 }
 
 export interface DoneReportPrecheck {
@@ -2372,11 +2379,16 @@ export interface WorktreeGateStamp {
   /** Whether the worktree carried any REAL uncommitted work (via {@link uncommittedWorkFiles}'s
    *  daemon-noise filter) at the moment this stamp was taken. */
   dirty: boolean;
-  /** sha256 over `git status --porcelain` + `git diff HEAD` when `dirty` — content-level for TRACKED
-   *  changes (staged or unstaged). `null` when clean or unreadable. KNOWN GAP: editing the CONTENT of an
-   *  already-untracked new file IN PLACE (no `git add`, no commit) changes neither input, so that exact
-   *  edit is invisible to this hash — accepted here because the reported incidents (card 50c1e0d0) were
-   *  edits to an EXISTING tracked file, not a brand-new untracked one.
+  /** sha256 over the {@link filteredWorkLines}-filtered `git status --porcelain` lines + a `git diff HEAD`
+   *  scoped to those SAME survivor paths, when `dirty` — content-level for TRACKED changes (staged or
+   *  unstaged). `null` when clean or unreadable. Card dc281db8: BOTH inputs are filtered through the same
+   *  daemon-noise exclusion `dirty` itself uses (`uncommittedWorkFiles`) — an EARLIER version hashed the
+   *  raw, unfiltered porcelain + full `diff HEAD`, so pure `.claude/` noise on an already-dirty tree could
+   *  flip this hash even though `dirty` correctly stayed governed by the filtered view; that mismatch is
+   *  what this comment now documents as fixed. KNOWN GAP: editing the CONTENT of an already-untracked new
+   *  file IN PLACE (no `git add`, no commit) changes neither input, so that exact edit is invisible to this
+   *  hash — accepted here because the reported incidents (card 50c1e0d0) were edits to an EXISTING tracked
+   *  file, not a brand-new untracked one.
    */
   dirtyHash: string | null;
 }
@@ -2396,12 +2408,17 @@ export async function computeWorktreeGateStamp(worktreePath: string, deps: Bound
     const { git, timeoutMs } = boundedGit(worktreePath, deps);
     const head = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "gate-stamp rev-parse HEAD")).trim();
     const porcelain = await withTimeout(git.raw(["status", "--porcelain"]), timeoutMs, "gate-stamp status --porcelain");
-    if (!worktreeStatusHasWork(porcelain)) return { head, dirty: false, dirtyHash: null };
+    const workLines = filteredWorkLines(porcelain);
+    if (workLines.length === 0) return { head, dirty: false, dirtyHash: null };
+    // Card dc281db8: hash the FILTERED lines/paths — the same daemon-noise exclusion `dirty` uses — not the
+    // raw porcelain, and scope the diff to those same survivor paths, so noise-only churn (e.g. a re-copied
+    // `.claude/skills/` file) that `uncommittedWorkFiles` correctly ignores can never flip this hash either.
+    const files = workLines.map(porcelainLinePath);
     // Best-effort: a `diff HEAD` failure still yields a (slightly weaker, porcelain-only) comparable hash
     // rather than aborting the whole stamp — the outer try/catch is reserved for a genuinely unreadable
     // worktree (rev-parse/status themselves failing).
-    const diff = await withTimeout(git.raw(["diff", "HEAD"]), timeoutMs, "gate-stamp diff HEAD").catch(() => "");
-    const dirtyHash = createHash("sha256").update(porcelain).update(diff).digest("hex");
+    const diff = await withTimeout(git.raw(["diff", "HEAD", "--", ...files]), timeoutMs, "gate-stamp diff HEAD").catch(() => "");
+    const dirtyHash = createHash("sha256").update(workLines.join("\n")).update(diff).digest("hex");
     return { head, dirty: true, dirtyHash };
   } catch {
     return { head: null, dirty: false, dirtyHash: null };
