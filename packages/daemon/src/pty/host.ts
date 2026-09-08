@@ -6175,6 +6175,39 @@ export class PtyHost {
    * not a cosmetic parity gap. So `opts.fork` for codex still falls through to a fresh spawn (unchanged
    * pre-existing behavior, same as before this card), with a loud disclosed warning below rather than a
    * silently-wrong resume attempt.
+   *
+   * **This method (and `spawnCodexProcess` below) never calls `injectSkills` — card `7fbd1ba5`'s ruling:
+   * DELIBERATE, not a gap.** `HarnessAdapter`'s `doctrineInjection` field (`adapter.ts`) declares exactly
+   * two shapes for how doctrine reaches a CLI: `"directory"` (claude's `.claude/skills` convention,
+   * delivered by `injectSkills`, `skills/inject.ts`) and `"file"` (codex's `AGENTS.md` convention).
+   * `claudeAdapter` declares `"directory"`; `codexAdapter` declares `"file"` (`codex-adapter.ts:32`) —
+   * this is a load-bearing architectural choice baked into the Phase-0 seam interface itself (card
+   * `2b099e48`), not an incidental omission in this call site. Codex is NOT skills-blind — it ships its
+   * own first-party skills tree (`~/.codex/skills/.system/`, including a `skill-installer`; see
+   * `docs/investigations/049e4a7b-codex-cli-capability-probe/findings.md:16`) — but mirroring `.claude/
+   * skills` into a codex worktree would deliver a claude-specific path/layout codex has no reason to read;
+   * a codex-side skills equivalent, if ever built, belongs on codex's OWN skills convention, not this one.
+   * `injectCodexDoctrine` (`codex-doctrine.ts`) is the "file" counterpart — called from
+   * `spawnCodexProcess` below, mirroring `injectSkills`'s call site in `createPty` — and its own doc
+   * comment says exactly this.
+   *
+   * What a codex WORKER therefore does NOT get, relative to a claude worker (`injectSkills` enumerated,
+   * card `7fbd1ba5`'s DoD-2 — none of these are wired to any codex-side equivalent today):
+   *  - The project's whole skill set (every store skill, or the profile-pinned subset) — `AGENTS.md`
+   *    carries no directory-of-skills equivalent by design.
+   *  - The role's full operating-doctrine skill (`ROLE_DOCTRINE_SKILL`, `skills/inject.ts`) — codex gets
+   *    only a hand-condensed worker doctrine (`codexWorkerDoctrineBody`, `codex-doctrine.ts`: three
+   *    load-bearing rules named by card `887e10b8`), and ONLY for `role === "worker"`; every other role
+   *    (manager/platform/auditor/workspace-auditor/setup) gets NO doctrine injection at all on codex
+   *    today — a named Phase-1 scope limit (`injectCodexDoctrine`'s own doc), not an oversight, but worth
+   *    knowing before any non-worker codex role is ever dispatched.
+   *  - The conditional Obsidian-preflight skill FRAGMENT (`OBSIDIAN_FRAGMENT_SKILLS`, `skills/inject.ts`)
+   *    — codex has no skill file to append it to. Card `9346ed5b` already threads the underlying
+   *    `LOOM_OBSIDIAN_PREFLIGHT` env var into a codex spawn's env (see the comment above), so an
+   *    `obsidian.autoStart` codex worker ends up with the script path SET but no instruction telling it
+   *    to run it — a known, disclosed asymmetry, not new.
+   * Whether any of these gaps needs a codex-side equivalent is a separate, undecided question this
+   * comment does not settle — see card `7fbd1ba5` for the full ruling and evidence trail.
    */
   protected createCodexPty(opts: SpawnOpts): IPty {
     const bin = resolveExecutable(process.env.LOOM_CODEX_BIN || CODEX_BINARY_NAME);
