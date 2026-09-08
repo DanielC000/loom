@@ -127,9 +127,14 @@ export function profileFields(row: Profile | undefined): ProfileWireView | undef
   // as-is" (validate.ts's own doc comment on this field). Resolving it to ANY concrete value at that
   // shared layer — `null` included — would silently persist it into a previously-NULL column on ANY
   // unrelated profile edit — a write-path side effect this READ-only card must not introduce.
-  // `Session.harness` (db.ts's other mapper, `toSession`) has the identical shared-object hazard via its
-  // own fork/recycle "carry the pinned vendor CLI forward" call sites and is deliberately left out of
-  // THIS card's scope: no read consumer currently exposes it ambiguously to a blocked decision the way
-  // `profile_get` did, so it's a separate, symmetric follow-up, not this fix.
+  // `Session.harness` (db.ts's other mapper, `toSession`) does NOT have this hazard, despite sharing the
+  // identical `?: "claude" | "codex"` type shape: no `UPDATE sessions SET` statement in db.ts touches the
+  // `harness` column at all, and the fork/recycle "carry the pinned vendor CLI forward" call sites
+  // (sessions/service.ts) each build a brand-new `Session` literal (never a partial update) via
+  // `old.harness ?? undefined`, which `insertSession`'s own binding (`s.harness ?? null`) collapses to the
+  // same NULL regardless of whether the source was `undefined` or an explicit `null` — so there is no
+  // "leave-as-is" semantic on the Session side to disturb. The real blocker on `toSession()` is a TYPE
+  // one instead: `Session.harness` has no `null` member, so returning an explicit `null` there wouldn't
+  // compile without widening that shared type — out of scope here.
   return { ...picked, harness: picked.harness ?? null };
 }
