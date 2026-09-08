@@ -188,7 +188,13 @@ if (!bootReady) {
     : null;
   // ⚠️ SKIP, never FAIL: "codex never booted, so the invariant was not exercised" is NOT "the invariant
   // holds" — this line exists so a future reader of this log cannot mistake a SKIP for coverage.
-  console.log(`SKIP  the MCP-connect busy/self-heal invariant was NOT exercised this run: real codex never reached boot readiness${unmet ? ` (unmet: ${unmet})` : " (no boot-stuck report observed either — the outer wait budget was exhausted)"}. This is a precondition miss, not evidence the self-heal invariant holds.`);
+  // 🔴 Card ba60e802 round 2: MUST be a `WARN  ` line (exact two-space prefix, test-daemon.mjs's own
+  // WARN_LINE_RE), not a bare `SKIP  ` line — a PASSING file's own stdout is otherwise discarded entirely
+  // (test-daemon.mjs:1923's own comment), so an un-prefixed SKIP notice here would exit 0 and vanish
+  // without a trace on a green gate, silently converting the exact "asserted something it did not measure"
+  // defect this card exists to remove into an invisible false PASS instead. See reportGracefulStopExitCode
+  // in codex-transcript-real-spawn.mjs for the sibling case this same rule was already applied to.
+  console.log(`WARN  SKIP: the MCP-connect busy/self-heal invariant was NOT exercised this run: real codex never reached boot readiness${unmet ? ` (unmet: ${unmet})` : " (no boot-stuck report observed either — the outer wait budget was exhausted)"}. This is a precondition miss, not evidence the self-heal invariant holds.`);
   console.log(`--- captured output tail ---\n${buf.slice(-2000)}`);
 } else {
   // --- THE GUARD: with the unreachable MCP servers, does a real busy episode happen, and does it clear
@@ -266,6 +272,11 @@ releaseCodexLock();
 console.log(failures === 0
   ? (bootReady
       ? "\n✅ ALL PASS — a real busy episode from an unreachable-MCP-server spawn was observed and confirmed to clear again within a bounded window, via this project's own existing self-heal mechanism."
-      : "\n⚠️  SKIPPED — real codex never reached boot readiness this run, so the MCP-connect busy/self-heal invariant was NOT exercised. A SKIP is a precondition miss, not confirmation the invariant holds.")
+      // Card ba60e802 round 2: also a `WARN  ` line (same reasoning as the mid-file notice above) — this
+      // is the terse, at-a-glance closing verdict; the mid-file line above carries the diagnostic detail
+      // (which of ready-marker/model-loaded/trust-dialog-resolved was unmet). Both earn a place in the
+      // retained WARNINGS block: this one lets a reader scanning many files' closing lines immediately see
+      // "this file's overall run was a SKIP, not a real PASS" without reading the longer detail line.
+      : "\nWARN  ⚠️  SKIPPED — real codex never reached boot readiness this run, so the MCP-connect busy/self-heal invariant was NOT exercised. A SKIP is a precondition miss, not confirmation the invariant holds.")
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
