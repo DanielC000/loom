@@ -77,6 +77,17 @@ const { STATIC_GUARD_REPO_PATHS } = await import(pathToFileURL(distPath).href);
 
 const verbose = process.argv.includes("--verbose");
 
+// --paths <repo/relative/path[,repo/relative/path...]> — TEST SEAM ONLY (same posture as
+// negative-control.mjs's own --repo-root): every real invocation omits this and runs the authoritative
+// STATIC_GUARD_REPO_PATHS list below. A test can pass this instead to drive the real PASS/FAIL-line /
+// exit-code / false-green logic against a synthetic fixture script, without mutating
+// STATIC_GUARD_REPO_PATHS (still imported above — the freshness check stays live either way) or the
+// worktrees.ts source it lives in.
+const pathsArgIndex = process.argv.indexOf("--paths");
+const guardPaths = pathsArgIndex !== -1
+  ? process.argv[pathsArgIndex + 1].split(",").map((p) => p.trim()).filter(Boolean)
+  : STATIC_GUARD_REPO_PATHS;
+
 // Every guard's own `check(label, cond)` helper (independently defined, but byte-identical across all of
 // them — verified by grep before relying on it) prints exactly `PASS  <label>` / `FAIL  <label>`, so this
 // count is read straight off a guard's REAL output, never estimated or hardcoded per guard.
@@ -87,7 +98,7 @@ function countChecks(output) {
 }
 
 const failed = [];
-for (const repoRelPath of STATIC_GUARD_REPO_PATHS) {
+for (const repoRelPath of guardPaths) {
   if (verbose) {
     console.log(`[guards] running ${repoRelPath}`);
     const result = spawnSync(process.execPath, [repoRelPath], { cwd: repoRoot, stdio: "inherit" });
@@ -124,7 +135,7 @@ for (const repoRelPath of STATIC_GUARD_REPO_PATHS) {
 }
 
 if (failed.length > 0) {
-  console.error(`[guards] ${failed.length}/${STATIC_GUARD_REPO_PATHS.length} guard(s) failed: ${failed.join(", ")}`);
+  console.error(`[guards] ${failed.length}/${guardPaths.length} guard(s) failed: ${failed.join(", ")}`);
   process.exit(1);
 }
-console.log(`[guards] all ${STATIC_GUARD_REPO_PATHS.length} guard(s) passed`);
+console.log(`[guards] all ${guardPaths.length} guard(s) passed`);
