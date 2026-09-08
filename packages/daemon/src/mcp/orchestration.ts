@@ -3146,16 +3146,25 @@ export class OrchestrationMcpRouter {
     // harness)").
     //
     // Deliberately NOT fixed by changing db.ts's `toSession()` to stop returning `undefined` for an
-    // unset harness: that shared object is reused UNWRAPPED as the merge base in the fork/recycle "carry
-    // the pinned vendor CLI forward" call sites (sessions/service.ts), whose semantics read an
-    // `undefined` `harness` as "leave the column as-is" — resolving it at that shared layer to ANY
-    // concrete value, `null` included, would silently persist it into a previously-NULL column on an
-    // unrelated fork/recycle. Widening a LOCAL, wire-only return type (`SessionWireView`, above) —
-    // never `Session` itself — sidesteps that: `worker_status` is this field's only exposed reader
-    // (`fleetView`'s own curated `worker_list` row never names `harness` at all — a separate,
-    // pre-existing curation choice, not this bug) and it spreads this function's result straight into
-    // `ok({...})` alongside other computed fields, never treating it as a real `Session` — so this
-    // widening has zero blast radius outside this one function's return value.
+    // unset harness — but NOT for the reason a first read of the Profile-side precedent above might
+    // suggest by analogy. `Session.harness` is typed `?: "claude" | "codex"` with NO `null` member, so
+    // `toSession()` returning an explicit `null` would not even COMPILE without widening that shared
+    // type, which is out of scope here. This differs from the Profile side: `Profile.harness` has the
+    // identical type shape, but `updateProfile`'s column binding (db.ts:4806, `patch.harness === undefined
+    // ? undefined : patch.harness ?? null`) genuinely DOES read an unresolved `undefined` as "leave the
+    // column as-is" on a real partial-PATCH path (`profile_update`/`PUT /api/profiles/:id`) — that hazard
+    // is real for Profiles. It does NOT transfer to Sessions: no `UPDATE sessions SET` statement in db.ts
+    // touches the `harness` column at all, and the fork/recycle "carry the pinned vendor CLI forward"
+    // call sites (sessions/service.ts) each build a brand-new `Session` literal via `old.harness ??
+    // undefined`, which `insertSession`'s own binding (`s.harness ?? null`) then collapses to the same
+    // NULL value whether the source was `undefined` or an explicit `null` — so there is no "leave-as-is"
+    // semantic on the Session side to disturb. Widening a LOCAL, wire-only return type (`SessionWireView`,
+    // above) — never `Session` itself — is still the right call regardless, on its own independent merit:
+    // `worker_status` is this field's only exposed reader (`fleetView`'s own curated `worker_list` row
+    // never names `harness` at all — a separate, pre-existing curation choice, not this bug) and it
+    // spreads this function's result straight into `ok({...})` alongside other computed fields, never
+    // treating it as a real `Session` — so this widening has zero blast radius outside this one
+    // function's return value.
     const projectSessionRowFields = (w: Session): SessionWireView => {
       const picked = pickKeys(w, SESSION_ROW_KEYS);
       return { ...picked, harness: picked.harness ?? null };

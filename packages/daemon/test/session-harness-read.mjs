@@ -18,10 +18,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the key is ALWAYS present, AND an unset worker stays distinguishable from one explicitly set to
 //       "claude" (the property this card needs: can a reader answer "is this set?", not just "is the
 //       key present?"). `null` mirrors what the DB column itself already means.
-//   (3) SCOPE — `db.ts`'s shared `toSession()` mapper (reused UNWRAPPED as the merge base by the
-//       fork/recycle "carry the pinned vendor CLI forward" call sites) is left UNTOUCHED: an unset
-//       harness still reads back as `undefined` off `db.getSession()` directly. Negative control on the
-//       read fix itself — it must not have leaked into the shared object it wraps.
+//   (3) SCOPE — `db.ts`'s shared `toSession()` mapper is left UNTOUCHED: an unset harness still reads
+//       back as `undefined` off `db.getSession()` directly. Negative control on the read fix itself — it
+//       must not have leaked into the shared object it wraps. Left untouched for a TYPE reason, not a
+//       partial-update "leave the column as-is" one: `Session.harness` is typed `?: "claude" | "codex"`
+//       with no `null` member, so `toSession()` returning an explicit `null` wouldn't compile without
+//       widening that shared type. This does NOT mirror the Profile side: no `UPDATE sessions SET`
+//       statement in db.ts touches `harness` at all (unlike `updateProfile`'s binding at db.ts:4806,
+//       which genuinely does read an unresolved `undefined` as "leave the column as-is" on a real
+//       partial-PATCH path) — the fork/recycle "carry the pinned vendor CLI forward" call sites
+//       (sessions/service.ts) each build a brand-new `Session` literal, so there is no leave-as-is
+//       semantic on the Session side to disturb in the first place.
 //   (4) worker_list's own curated fleet row is UNCHANGED by this fix (a separate, pre-existing curation
 //       choice that never included `harness` at all — not this card's bug, not this card's fix).
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/session-harness-read.mjs
@@ -94,7 +101,8 @@ try {
   // Negative control on the fix itself: if worker_status's resolution had leaked into the shared
   // db.getSession() object, this would go red.
   check("(3 scope) db.getSession() raw output for the UNSET worker is untouched: harness is still " +
-    "`undefined` (never coerced) — preserves the fork/recycle merge-base \"absent = leave column as-is\" semantics",
+    "`undefined` (never coerced) — left this way for a TYPE reason (Session.harness has no null member), " +
+    "not a partial-update merge-base \"leave-as-is\" one (that hazard is Profile-only, db.ts:4806)",
     db.getSession("w-unset").harness === undefined);
   check("(3 scope) db.getSession() raw output for the SET worker is untouched",
     db.getSession("w-codex").harness === "codex");
