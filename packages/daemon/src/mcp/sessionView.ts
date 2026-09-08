@@ -103,8 +103,60 @@ const SESSION_LIST_FIELDS: Record<keyof SessionListItem, 1> = {
 };
 const SESSION_LIST_KEYS = Object.keys(SESSION_LIST_FIELDS) as (keyof SessionListItem)[];
 
-/** Project ONE session row to the full (non-summary) shape `full:true` returns. See SESSION_LIST_FIELDS. */
-const toFullSessionRow = (s: SessionListItem): SessionListItem => pickFields(s, SESSION_LIST_KEYS);
+/** The wire-only shape `toFullSessionRow` actually returns: identical to `SessionListItem` except
+ *  `harness` is widened to include `null`, so an UNSET session can be told apart from one explicitly
+ *  holding the shipped default. This type exists ONLY for this projection's return value (never assigned
+ *  back into a real `SessionListItem` — see entityRowFields.ts's `ProfileWireView`/orchestration.ts's
+ *  `SessionWireView` for the identical shape on the Profile/worker_status sides). */
+type SessionFullWireView = Omit<SessionListItem, "harness"> & { harness: "claude" | "codex" | null };
+
+/**
+ * Project ONE session row to the full (non-summary) shape `full:true` returns. See SESSION_LIST_FIELDS.
+ *
+ * Card 589afd55 (the third `harness`-reads-are-ambiguous instalment, after 3edf6ef7's `profileFields` and
+ * 41f35bfe's `projectSessionRowFields`): an unset `harness` (a NULL column becomes `undefined` per
+ * db.ts's `toSession`) and a field this projection simply doesn't carry were INDISTINGUISHABLE once this
+ * router's `ok()` envelope's `JSON.stringify` drops the undefined-valued key — `list_all_sessions`
+ * (platform.ts + setup.ts) and `list_sessions` (transcript-read.ts) on the `full:true` path could not
+ * answer "has this session's harness been set". `null` = unset, `"claude"`/`"codex"` = explicitly set —
+ * mirroring what the DB column itself already means (db.ts's insertSession comment: "NULL = 'claude'
+ * (absent ⇒ today's only harness)").
+ *
+ * Deliberately NOT fixed by changing db.ts's shared `toSession()`/`listAllSessions()` mappers to stop
+ * returning `undefined` for an unset harness — but NOT for the reason the Profile-side precedent might
+ * suggest by analogy. `Session.harness` is typed `?: "claude" | "codex"` with NO `null` member, so
+ * `toSession()` returning an explicit `null` would not even COMPILE without widening that shared type,
+ * which is out of scope here. This differs from the Profile side: `Profile.harness` has the identical
+ * type shape, but `updateProfile`'s column binding (db.ts:4806, `patch.harness === undefined ? undefined
+ * : patch.harness ?? null`) genuinely DOES read an unresolved `undefined` as "leave the column as-is" on
+ * a real partial-PATCH path (`profile_update`/`PUT /api/profiles/:id`) — that hazard is real for
+ * Profiles. It does NOT transfer to Sessions: checked directly — no `UPDATE sessions SET` statement in
+ * db.ts touches the `harness` column at all (verified by grepping every such statement), and the
+ * fork/recycle "carry the pinned vendor CLI forward" call sites (sessions/service.ts) each build a
+ * brand-new `Session` literal (`id: randomUUID()`, a full `insertSession`, never a partial update) via
+ * `old.harness ?? undefined`, which `insertSession`'s own binding (`s.harness ?? null`) then collapses to
+ * the same NULL value whether the source was `undefined` or an explicit `null` — so there is no
+ * "leave-as-is" semantic on the Session side to disturb. Widening a LOCAL, wire-only return type
+ * (`SessionFullWireView`, above) — never `SessionListItem` itself — is still the right call regardless,
+ * on its own independent merit: every caller of `projectSessionList`'s `full:true` path (`list_all_sessions`
+ * on platform.ts + setup.ts, `list_sessions` on transcript-read.ts) only ever uses the result for its
+ * `.length` and spreads it straight into `ok(...)`/an envelope for the wire, never treating it as a real
+ * `SessionListItem` — verified at each of those three call sites — so this widening has zero blast radius
+ * outside this one function's return value, with no need to touch the shared mapper either way.
+ *
+ * Card 589afd55's Site B (`gateway/fleet-hub.ts`'s `session:upsert` WS push) is DELIBERATELY left
+ * unfixed: that push's shape is `ServerFleetMessage`'s `session:upsert` variant, a SHARED cross-package
+ * protocol type (`packages/shared/src/protocol.ts`) consumed by the web UI — not a local, function-scoped
+ * wire type like this one — and no web UI code reads `session.harness` today (verified: `harness` greps
+ * in `packages/web/src` hit only Profile-editing UI, unrelated to the fleet feed). The same REST route
+ * that seeds the same `["allSessions"]` cache (`GET /api/sessions`, server.ts) has the identical
+ * unresolved-`harness` gap and isn't touched by this card either — widening only the WS delta would make
+ * it disagree with that REST seed for this one field, a worse state than today's uniform ambiguity.
+ */
+const toFullSessionRow = (s: SessionListItem): SessionFullWireView => {
+  const picked = pickFields(s, SESSION_LIST_KEYS);
+  return { ...picked, harness: picked.harness ?? null };
+};
 
 /**
  * Apply the shared MCP-layer list shape to an already-fetched, already-filtered session list:
@@ -113,7 +165,7 @@ const toFullSessionRow = (s: SessionListItem): SessionListItem => pickFields(s, 
 export function projectSessionList(
   rows: SessionListItem[],
   opts: { full?: boolean; limit?: number; offset?: number } = {},
-): SessionListItem[] | SessionSummary[] {
+): SessionFullWireView[] | SessionSummary[] {
   let page = rows;
   if (opts.offset !== undefined) page = page.slice(opts.offset);
   if (opts.limit !== undefined) page = page.slice(0, opts.limit);

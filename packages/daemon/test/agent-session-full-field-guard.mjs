@@ -80,6 +80,9 @@ const EXPECTED_SESSION_FULL_KEYS = [
   "browserTesting", "documentConversion", "restrictedTools", "noCommit", "skills", "connections",
   "vaultWrite", "companionLeadMode", "capabilities", "archivedAt", "scheduledSpawn",
   "projectName", "agentName",
+  // Card 589afd55: `harness` is now ALWAYS present on the full:true wire shape (an unset harness resolves
+  // to explicit `null` instead of serializing away) — see sessionView.ts's `toFullSessionRow` doc comment.
+  "harness",
 ];
 
 // `pickFields` assigns EVERY sentinel key onto the output object, including ones absent from the input
