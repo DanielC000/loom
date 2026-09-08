@@ -27,7 +27,7 @@ import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } fr
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
 import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, codexTrustDialogLock, codexAsciiFold } from "./codex-host.js";
-import { findConversationIdForSpawn } from "./codex-transcript.js";
+import { findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } from "./codex-transcript.js";
 
 const RING_CAP_BYTES = 256 * 1024;
 /** Multi-harness epic (df1f94b0) Phase 1: bounded rolling scan buffer for codex's own trust-dialog/busy-
@@ -3977,6 +3977,16 @@ export interface CodexLive {
    *  `worker_report` event) to SUPPRESS a false "kickoff dropped" alarm, so a false positive here is the
    *  dangerous direction, not a false negative. Never flips back to `false`. */
   firstTurnStarted: boolean;
+  /** Codex-only, card `cbae4520`: a snapshot of every rollout `session_id` already on disk for this cwd,
+   *  taken by `spawnCodexProcess` BEFORE this pty's own process was created — always a `Set` (possibly
+   *  empty) for a fresh spawn; `null` ONLY for a `resume` spawn (which must legitimately be able to
+   *  re-match its own pre-existing file). Threaded into every {@link findConversationIdForSpawn} call this
+   *  pty's `captureCodexEngineSessionId` retry ladder makes, so a recycled worker sharing its predecessor's
+   *  worktree cwd can never adopt a PRE-EXISTING predecessor's conversation id BY CONSTRUCTION — see
+   *  `snapshotExistingConversationIdsForSpawn`'s own doc (`codex-transcript.ts`) for why the snapshot can
+   *  never contain this pty's own eventual file, AND for the narrower, still-open case (with its own
+   *  tracking card id) this field does NOT close. */
+  excludeEngineSessionIds: ReadonlySet<string> | null;
   /** Card 361a5520 round 2: latched `true` at the top of `submitCodex` (a turn Loom actually submitted is
    *  now outstanding) and cleared the instant `armCodexBusyStaleTimer`'s CASE 2 confirms it — the gate
    *  that gives `firstTurnStarted`/`onTurnCompleted` their PROVEN false-positive fix (see both fields'/
@@ -6434,11 +6444,21 @@ export class PtyHost {
     // already trusted from an earlier run) — diffConfigAfterSpawn is a no-op (`changed:false`) in that
     // case, so capturing unconditionally costs nothing and never risks skipping a real diff.
     const configHashBefore = hashConfigBefore();
+    // Card cbae4520: snapshot BEFORE createCodexPty spawns the real process — this pty's own eventual
+    // rollout file structurally cannot exist yet at this instant, so anything this returns is necessarily
+    // some OTHER conversation's file that was ALREADY on disk (a predecessor's). Never for a resume: a
+    // resume spawn legitimately needs to re-match its OWN pre-existing file, which this snapshot would
+    // otherwise wrongly exclude. See `snapshotExistingConversationIdsForSpawn`'s own doc (codex-
+    // transcript.ts) for the full "by construction" argument AND the narrower, still-open case (with its
+    // own tracking card id) it does not close.
+    const isCodexResumeSpawn = buildCodexResumeArgs(opts).length > 0;
+    const excludeEngineSessionIds = isCodexResumeSpawn ? null : snapshotExistingConversationIdsForSpawn(opts.cwd);
     const pty = this.createCodexPty(opts);
     const live: CodexLive = {
       kind: "codex", pty, pid: pty.pid, cwd: opts.cwd, geometry: opts.geometry,
       hookToken: "", // codex has no hook relay — never checked (mirrors shell/canned's own convention)
       engineSessionId: null,
+      excludeEngineSessionIds,
       ring: { chunks: [], bytes: 0 },
       subscribers: new Set(),
       alive: true, killed: false, startedAt: Date.now(),
@@ -6727,7 +6747,7 @@ export class PtyHost {
    */
   private captureCodexEngineSessionId(sessionId: string, live: CodexLive, cwd: string, attempt = 0): void {
     if (live.engineSessionId || !live.alive) return; // already captured, or the pty is already gone
-    const found = findConversationIdForSpawn(cwd, live.startedAt);
+    const found = findConversationIdForSpawn(cwd, live.startedAt, live.excludeEngineSessionIds ?? undefined);
     if (found) {
       live.engineSessionId = found;
       this.events.onEngineSessionId(sessionId, found, null);

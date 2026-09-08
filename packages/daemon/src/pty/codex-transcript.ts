@@ -81,9 +81,17 @@ function codexSessionsRoot(): string {
  *     (100ms ≈ 50× the observed −1.97ms max) rather than a round, "safe-feeling" number — a wide tolerance
  *     widens the SAME window that lets the recycle race through, since this filter cannot distinguish
  *     "the true new file, mildly skewed" from "the predecessor's leftover file, genuinely stale by a
- *     similar margin." Closing the residual race fully would need an explicit exclusion (e.g. threading
- *     the predecessor's already-known engine-session id/rollout path into the scan) — that reaches into
- *     `pty/host.ts`, out of this file's scope; flagged up rather than attempted here.
+ *     similar margin."
+ * Card `cbae4520` CLOSES the SEQUENTIAL-reuse shape of the residual race these two layers only bounded —
+ * the recycle case this card targets, where a predecessor's rollout file is already sitting on disk before
+ * this spawn's own process is ever created: {@link findConversationIdForSpawn} now takes an optional
+ * `excludeSessionIds` set — every rollout file already on disk for a cwd, snapshotted by `pty/host.ts`'s
+ * `spawnCodexProcess` BEFORE the new codex process is spawned for a genuinely fresh (non-`resume`) spawn —
+ * see that snapshot's own doc ({@link snapshotExistingConversationIdsForSpawn}) for why this closes THAT
+ * shape BY CONSTRUCTION (identity, not mtime) rather than merely narrowing it further. It does NOT close a
+ * DIFFERENT, pre-existing shape: two fresh spawns into the SAME cwd within the ~120s capture window (see
+ * that same doc's own caveat) — narrower in kind than what this tolerance alone ever bounded, but real, and
+ * left open by design rather than silently unaddressed.
  * Env-overridable so a hermetic test can exercise the boundary without waiting on real skew (mirrors this
  * project's `LOOM_CODEX_*_MS` convention in `pty/host.ts`).
  */
@@ -147,15 +155,80 @@ export function transcriptExists(cwd: string, conversationId: string): boolean {
   return resolveTranscriptFile(cwd, conversationId) !== null;
 }
 
+/**
+ * Bounded cache of `readSessionMeta`'s per-file result, keyed by absolute file path — mirrors
+ * `resolvedPathCache` above (same size cap, same LRU-by-reinsertion eviction). A rollout file's FIRST line
+ * never changes after creation (this file's own header: `session_meta` is always written first), so once
+ * read it can be trusted indefinitely; the `mtimeMs`+`size` stamp is a defensive staleness check only (it
+ * should never actually fire for a real rollout file — nothing this project does ever rewrites one).
+ *
+ * Card `cbae4520` code review [1]: without this, `snapshotExistingConversationIdsForSpawn`'s whole-corpus
+ * scan `readFileSync`s EVERY matching-cwd-candidate rollout file on EVERY fresh (non-resume) codex spawn —
+ * measured 74.2ms on a real 242-file/13.76MB `~/.codex/sessions` tree, entirely synchronous on the codex
+ * spawn hot path (`spawn()` → `spawnCodexProcess()`), the exact shape `CLAUDE.md`'s Python-venv invariant
+ * bans ("the spawn HOT PATH does NO blocking work"). With this cache warm, the SAME scan measures ~5.7ms
+ * (stat-only after the first pass). Bounded like `resolvedPathCache` so a host with an ever-growing
+ * sessions tree can't grow this cache without limit either (code review's own addition, beyond what the
+ * reviewer measured).
+ */
+const SESSION_META_CACHE_MAX = 500;
+const sessionMetaCache = new Map<string, { mtimeMs: number; size: number; sessionId: string; cwd: string }>();
+function rememberSessionMeta(file: string, entry: { mtimeMs: number; size: number; sessionId: string; cwd: string }): void {
+  sessionMetaCache.delete(file);
+  sessionMetaCache.set(file, entry);
+  if (sessionMetaCache.size > SESSION_META_CACHE_MAX) {
+    const oldest = sessionMetaCache.keys().next().value;
+    if (oldest !== undefined) sessionMetaCache.delete(oldest);
+  }
+}
+
+/**
+ * Read a file up to (not including) its first `\n`, in bounded 4KB chunks — never the whole file. Card
+ * `cbae4520` code review [1]: a rollout file's `session_meta` line can be large (measured on the same real
+ * corpus: ALL 242 real first lines exceeded 8KB, max 22,311 bytes — `base_instructions` is inlined into it)
+ * — so a fixed read cap would truncate a real one, and reading incrementally until the newline is actually
+ * found decouples cost from conversation length instead (measured 78.8ms → 52.1ms on that same corpus, on
+ * top of the cache above). `0x0a` ("\n") can never appear as part of a multi-byte UTF-8 continuation
+ * sequence (those are always ≥0x80), so a raw byte search across chunk boundaries is safe — the eventual
+ * `toString("utf8")` decode always happens on a byte range that starts a fresh line. Never throws.
+ */
+function readFirstLine(file: string): string | null {
+  let fd: number;
+  try { fd = fs.openSync(file, "r"); } catch { return null; }
+  try {
+    const chunks: Buffer[] = [];
+    const buf = Buffer.alloc(4096);
+    for (;;) {
+      let n: number;
+      try { n = fs.readSync(fd, buf, 0, buf.length, null); } catch { return null; }
+      if (n <= 0) break; // EOF before any newline — whatever was read (if anything) is the "first line"
+      const nl = buf.subarray(0, n).indexOf(0x0a);
+      if (nl !== -1) {
+        chunks.push(Buffer.from(buf.subarray(0, nl)));
+        return Buffer.concat(chunks).toString("utf8");
+      }
+      chunks.push(Buffer.from(buf.subarray(0, n)));
+    }
+    return chunks.length > 0 ? Buffer.concat(chunks).toString("utf8") : null;
+  } finally {
+    try { fs.closeSync(fd); } catch { /* ignore */ }
+  }
+}
+
 /** Read a rollout file's FIRST line only and, iff it's a `session_meta` record, return its
  *  `{session_id, cwd}` — the two fields {@link findConversationIdForSpawn} needs to match a candidate file
- *  against a spawn. Confirmed shape: `session_meta` is always the first line (this file's own header). */
+ *  against a spawn. Confirmed shape: `session_meta` is always the first line (this file's own header).
+ *  Cached (see {@link sessionMetaCache}'s own doc) and reads incrementally (see {@link readFirstLine}'s own
+ *  doc), never the whole file. */
 function readSessionMeta(file: string): { sessionId: string; cwd: string } | null {
-  let raw: string;
-  try { raw = fs.readFileSync(file, "utf8"); } catch { return null; }
-  const nl = raw.indexOf("\n");
-  const firstLine = nl === -1 ? raw : raw.slice(0, nl);
-  if (!firstLine.trim()) return null;
+  let stat: fs.Stats;
+  try { stat = fs.statSync(file); } catch { return null; }
+  const cached = sessionMetaCache.get(file);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return { sessionId: cached.sessionId, cwd: cached.cwd };
+  }
+  const firstLine = readFirstLine(file);
+  if (!firstLine || !firstLine.trim()) return null;
   let o: Record<string, unknown>;
   try { o = JSON.parse(firstLine); } catch { return null; }
   if (o.type !== "session_meta") return null;
@@ -163,7 +236,9 @@ function readSessionMeta(file: string): { sessionId: string; cwd: string } | nul
   const sessionId = payload?.session_id;
   const cwd = payload?.cwd;
   if (typeof sessionId !== "string" || typeof cwd !== "string") return null;
-  return { sessionId, cwd: path.resolve(cwd) };
+  const resolvedCwd = path.resolve(cwd);
+  rememberSessionMeta(file, { mtimeMs: stat.mtimeMs, size: stat.size, sessionId, cwd: resolvedCwd });
+  return { sessionId, cwd: resolvedCwd };
 }
 
 /**
@@ -179,8 +254,18 @@ function readSessionMeta(file: string): { sessionId: string; cwd: string } | nul
  * no id to match against yet — cwd + recency is the only correlator available at spawn time. Returns null
  * (never throws) when nothing matches, including a genuinely-not-yet-written file — the caller
  * (`pty/host.ts`'s `captureCodexEngineSessionId`) is responsible for any retry.
+ *
+ * `excludeSessionIds` (card `cbae4520`): a candidate whose OWN `session_id` is in this set is skipped
+ * OUTRIGHT — never becomes `best`, regardless of how fresh its mtime is or how small the skew. This closes
+ * the SEQUENTIAL-reuse shape of the recycle race {@link MTIME_SKEW_TOLERANCE_MS}'s own doc only BOUNDS:
+ * `pty/host.ts` passes a snapshot of every rollout file already on disk for this cwd, taken BEFORE the new
+ * (non-resume) codex process was even spawned — see {@link snapshotExistingConversationIdsForSpawn}'s own
+ * doc for why that snapshot can never contain the successor's own eventual file, AND for the narrower,
+ * still-open concurrent-same-cwd shape it does not close. Omitted (undefined) ⇒ byte-identical to before
+ * this card — every existing caller (a resume spawn's own re-discovery of its OWN pre-existing file
+ * legitimately NEEDS to match a pre-existing candidate, so it must never pass this).
  */
-export function findConversationIdForSpawn(cwd: string, sinceMs: number): string | null {
+export function findConversationIdForSpawn(cwd: string, sinceMs: number, excludeSessionIds?: ReadonlySet<string>): string | null {
   const resolvedCwd = path.resolve(cwd);
   let best: { sessionId: string; mtimeMs: number } | null = null;
   try {
@@ -207,13 +292,90 @@ export function findConversationIdForSpawn(cwd: string, sinceMs: number): string
             if (mtimeMs < sinceMs - MTIME_SKEW_TOLERANCE_MS) continue;
             if (best && mtimeMs <= best.mtimeMs) continue; // already have a newer-or-equal match
             const meta = readSessionMeta(full);
-            if (meta && meta.cwd === resolvedCwd) best = { sessionId: meta.sessionId, mtimeMs };
+            if (!meta || meta.cwd !== resolvedCwd) continue;
+            if (excludeSessionIds?.has(meta.sessionId)) continue; // card cbae4520: never adopt a known predecessor id
+            best = { sessionId: meta.sessionId, mtimeMs };
           }
         }
       }
     }
   } catch { /* sessions root missing — nothing to find yet */ }
   return best?.sessionId ?? null;
+}
+
+/**
+ * Card `cbae4520`: snapshot every rollout file's `session_id` ALREADY on disk whose `session_meta.cwd`
+ * matches `cwd` — regardless of mtime, unlike {@link findConversationIdForSpawn}'s own freshness scan.
+ * Intended to be called by `pty/host.ts`'s `spawnCodexProcess` IMMEDIATELY BEFORE it creates the new codex
+ * process for a genuinely fresh (non-`resume`) spawn, then threaded back into that same spawn's own
+ * {@link findConversationIdForSpawn} calls as `excludeSessionIds` for the lifetime of the retry ladder.
+ *
+ * WHY THIS CLOSES THE SEQUENTIAL-REUSE SHAPE BY CONSTRUCTION, NOT BY TIMING MARGIN: a fresh (non-resume)
+ * spawn's own rollout file cannot possibly exist yet at the instant this snapshot is taken — the codex
+ * process that will eventually write it hasn't been created. So every id this returns is, by definition,
+ * some OTHER conversation's file that was ALREADY on disk before this spawn began (a predecessor's, from
+ * this generation or an earlier one sharing the same recycled worktree cwd) — never this spawn's own.
+ * Excluding exactly this set removes every SEQUENTIAL false-adoption candidate without narrowing (or
+ * depending on) the mtime tolerance at all: it holds regardless of clock skew, retry timing, or how close
+ * together the predecessor's last write and this spawn's own first write land. A resume spawn must NEVER
+ * receive this exclusion — resume's whole point is to legitimately re-match its own ALREADY-EXISTING file,
+ * which this snapshot would otherwise exclude.
+ *
+ * ⚠️ WHAT THIS DOES NOT CLOSE (code review [2], card cbae4520): the snapshot is frozen at THIS spawn's own
+ * start, while the capture retry ladder keeps scanning for up to `CODEX_ENGINE_ID_MAX_ATTEMPTS ×
+ * CODEX_ENGINE_ID_RETRY_MS` (≈120s, `pty/host.ts`) afterward, and that scan prefers the newest mtime. A
+ * DIFFERENT fresh spawn into the SAME cwd, created AFTER this snapshot was taken (e.g. two workers
+ * dispatched to the same project `repoPath` within that ~120s window), writes a rollout file that is
+ * invisible to THIS spawn's exclusion set and can still be exactly what this spawn's own scan adopts —
+ * a CONCURRENT-reuse shape, narrower than and distinct from the sequential one this snapshot closes, and
+ * pre-existing in kind (not introduced by this card). Left open by design — tracked as card `7a0b826e`
+ * ("fix(pty): close the concurrent same-cwd codex conversation-id race"), whose DoD-1 is to establish
+ * whether this shape is even reachable on this host at all. THIS is the authoritative pointer for that
+ * card id — `pty/host.ts` and `test/codex-recycle-conversation-id-exclusion.mjs` deliberately point back
+ * here rather than repeating it, so it can't drift out of sync in three places. Do not read this
+ * function's own certainty about the sequential case as covering the concurrent one too.
+ *
+ * Reads every matching file's `session_meta` (not just `stat`s it, unlike the freshness scan above) since
+ * cwd is only knowable from content — cached and read incrementally, never the whole file (see
+ * `readSessionMeta`'s own doc) — bounded to the same `depth:3` (YYYY/MM/DD) tree walk; never throws. A
+ * missing `sessions` root (this host has never run codex) is the only silently-tolerated outcome — any
+ * OTHER failure mid-walk (EMFILE/EACCES on a busy daemon, say) is disclosed via `console.warn`, since a
+ * silent empty result here means the exclusion this card added is NOT active for this spawn, which would
+ * otherwise fail OPEN with no visible sign.
+ */
+export function snapshotExistingConversationIdsForSpawn(cwd: string): Set<string> {
+  const resolvedCwd = path.resolve(cwd);
+  const ids = new Set<string>();
+  try {
+    const sessionsRoot = codexSessionsRoot();
+    for (const year of fs.readdirSync(sessionsRoot)) {
+      const yearDir = path.join(sessionsRoot, year);
+      let months: string[];
+      try { months = fs.readdirSync(yearDir); } catch { continue; }
+      for (const month of months) {
+        const monthDir = path.join(yearDir, month);
+        let days: string[];
+        try { days = fs.readdirSync(monthDir); } catch { continue; }
+        for (const day of days) {
+          const dayDir = path.join(monthDir, day);
+          let files: string[];
+          try { files = fs.readdirSync(dayDir); } catch { continue; }
+          for (const f of files) {
+            if (!f.endsWith(".jsonl")) continue;
+            const meta = readSessionMeta(path.join(dayDir, f));
+            if (meta && meta.cwd === resolvedCwd) ids.add(meta.sessionId);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      // eslint-disable-next-line no-console
+      console.warn(`[codex-transcript] snapshotExistingConversationIdsForSpawn(${cwd}) failed unexpectedly (${(err as NodeJS.ErrnoException)?.code ?? "?"}) — falling back to an EMPTY exclusion set, which means card cbae4520's recycle-race guard is NOT active for this spawn: ${(err as Error)?.message ?? String(err)}`);
+    }
+    // ENOENT (sessions root missing) is the expected, silent case — nothing pre-exists yet.
+  }
+  return ids;
 }
 
 /** Pull display text out of a `response_item` content array (`content[0].type === "input_text"`
