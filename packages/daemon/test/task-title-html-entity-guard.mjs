@@ -12,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Db } from "../dist/db.js";
-import { createProjectTaskChecked, updateProjectTask } from "../dist/mcp/tasks.js";
+import { createProjectTaskChecked, updateProjectTask, checkTitleHtmlEntities } from "../dist/mcp/tasks.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -76,6 +76,48 @@ try {
   const fieldOnly = await updateProjectTask(db, "projA", editAllowed.id, { priority: "p0" }, undefined, undefined);
   check("(5) a title-less patch is never touched by this guard", "priority" in fieldOnly && fieldOnly.priority === "p0" && !("error" in fieldOnly));
 
+  // --- (6) Manager code-review Finding 1: an out-of-range decimal numeric entity must not THROW. Before
+  //     the fix, `Number.isFinite(999999999)` is true, so it passed straight to `String.fromCodePoint`,
+  //     which throws RangeError above 0x10FFFF — turning a guard whose entire job is a clean {error} into
+  //     an unhandled exception. Exercised at both the raw checkTitleHtmlEntities level AND through
+  //     createProjectTaskChecked, so a caller of the actual MCP tool is also proven never to see a throw. ---
+  const OUT_OF_RANGE_NUMERIC_TITLE = "feat: broken &#999999999; title";
+  let threw = false;
+  let guardResult;
+  try {
+    guardResult = checkTitleHtmlEntities(OUT_OF_RANGE_NUMERIC_TITLE, undefined);
+  } catch {
+    threw = true;
+  }
+  check("(6a) an out-of-range decimal numeric entity does not throw", !threw);
+  check("(6a) ...and still returns a clean {error} rejection", !!guardResult && "error" in guardResult);
+  check("(6a) ...whose decoded suggestion falls back to the original entity (never a garbage code point)",
+    !!guardResult && "error" in guardResult && guardResult.error.includes("&#999999999;"));
+  let createThrew = false;
+  let createResult;
+  try {
+    createResult = createProjectTaskChecked(db, "projA", { title: OUT_OF_RANGE_NUMERIC_TITLE });
+  } catch {
+    createThrew = true;
+  }
+  check("(6b) the same title through createProjectTaskChecked also does not throw", !createThrew);
+  check("(6b) ...and is rejected (not silently created)", !!createResult && "error" in createResult);
+
+  // --- (7) Manager code-review Finding 2: the doc comment claims "numeric entities" generically, but the
+  //     pattern implemented DECIMAL only — a hex numeric entity (&#x3C;, a real serializer output) passed
+  //     through undetected. Widened the pattern rather than narrowing the comment (manager's weak
+  //     preference, taken): the class this guard exists to make impossible should cover both forms. ---
+  const HEX_ENTITY_TITLE = "feat: a &#x3C;id&#x3E; thing";
+  const hexRejected = checkTitleHtmlEntities(HEX_ENTITY_TITLE, undefined);
+  check("(7a) a hex numeric entity (&#x3C;) is detected, not silently ignored", !!hexRejected && "error" in hexRejected);
+  check("(7a) ...and decodes to the literal characters in the suggestion",
+    !!hexRejected && "error" in hexRejected && hexRejected.error.includes("<id>"));
+  // In-range DECIMAL numeric entity still decodes correctly too — the bound fix in (6) must not have
+  // regressed the ordinary case while capping the out-of-range one.
+  const decimalDecoded = checkTitleHtmlEntities("feat: x &#60; y", undefined);
+  check("(7b) an ordinary in-range decimal numeric entity (&#60;) still decodes to '<'",
+    !!decimalDecoded && "error" in decimalDecoded && decimalDecoded.error.includes('"feat: x < y"'));
+
   db.close();
 } finally {
   fs.rmSync(file, { force: true });
@@ -84,6 +126,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — createProjectTaskChecked/updateProjectTask reject an entity-bearing title by default, name the decoded form, are escapable via allowHtmlEntities:true (including for a genuinely-about-escaping title), and never touch a title-less patch."
+  ? "\n✅ ALL PASS — createProjectTaskChecked/updateProjectTask reject an entity-bearing title by default, name the decoded form, are escapable via allowHtmlEntities:true (including for a genuinely-about-escaping title), never touch a title-less patch, never throw on an out-of-range numeric entity, and detect hex numeric entities alongside decimal."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

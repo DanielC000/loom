@@ -830,8 +830,9 @@ export function getProjectTaskRequest(
  * origin, matching MIN_SUBSTANTIAL_BODY_CHARS-style guards above: whole-call reject, explicit override.
  *
  * Deliberately checks ONLY named XML/HTML entities that could plausibly be an ACCIDENTAL escape of plain
- * text (`<`, `>`, `&`, `"`) plus numeric entities — never a broader "any `&...;`-shaped substring", so an
- * ordinary title using `&` as a bare conjunction (never itself an entity) is untouched.
+ * text (`<`, `>`, `&`, `"`) plus numeric entities — decimal (`&#60;`) or hex (`&#x3C;`), a real serializer
+ * output — never a broader "any `&...;`-shaped substring", so an ordinary title using `&` as a bare
+ * conjunction (never itself an entity) is untouched.
  *
  * ⚠️ FALSE POSITIVE, BY DESIGN, NOT A BUG: a title genuinely ABOUT escaped HTML — e.g. this board's own
  * `Release list shows literal &quot;Sub: &amp;mdash;&quot; when subs missing` — really does contain these
@@ -842,16 +843,23 @@ export function getProjectTaskRequest(
  * caller who means it types the flag once; a caller who typed the entity by accident (the actual damage
  * class here) gets the decoded suggestion instead of a permanent mainline artifact.
  */
-const TITLE_HTML_ENTITY_PATTERN = /&(lt|gt|amp|quot|#\d+);/;
+const TITLE_HTML_ENTITY_PATTERN = /&(lt|gt|amp|quot|#(?:\d+|[xX][0-9a-fA-F]+));/;
 const NAMED_HTML_ENTITY_DECODE: Record<string, string> = { lt: "<", gt: ">", amp: "&", quot: '"' };
+/** The highest valid Unicode code point — {@link decodeKnownHtmlEntities}'s bound against a numeric
+ *  entity whose value `String.fromCodePoint` would throw on (card 267fd215 code review: `Number.isFinite`
+ *  alone let `&#999999999;` through and threw a RangeError instead of falling back to `match`, turning a
+ *  guard whose entire job is a clean `{error}` into an unhandled exception). */
+const MAX_UNICODE_CODE_POINT = 0x10ffff;
 
 /** Best-effort decode of the entities {@link TITLE_HTML_ENTITY_PATTERN} recognizes, for the "did you mean"
  *  suggestion in {@link checkTitleHtmlEntities}'s error — never used to silently rewrite a stored title. */
 function decodeKnownHtmlEntities(s: string): string {
   return s.replace(new RegExp(TITLE_HTML_ENTITY_PATTERN.source, "g"), (match, name: string) => {
     if (name.startsWith("#")) {
-      const code = Number(name.slice(1));
-      return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+      const numeric = name.slice(1);
+      const isHex = numeric[0] === "x" || numeric[0] === "X";
+      const code = isHex ? parseInt(numeric.slice(1), 16) : Number(numeric);
+      return Number.isInteger(code) && code >= 0 && code <= MAX_UNICODE_CODE_POINT ? String.fromCodePoint(code) : match;
     }
     return NAMED_HTML_ENTITY_DECODE[name] ?? match;
   });
