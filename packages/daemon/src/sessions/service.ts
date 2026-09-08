@@ -5784,11 +5784,38 @@ export class SessionService {
    * names THEIR OWN project's ids, and no match within their own project reports `not_found` — never
    * `ambiguous` — since none of the globally-ambiguous candidates were even a valid target for this caller.
    */
-  async cancelGateOp(managerSessionId: string, opId: string): Promise<
+  /**
+   * `opts.restrictToOwnerSessionId` (card a0d912f5): the WORKER-scoped surface — a worker may cancel only
+   * an op it OWNS (`gateType === "worker"` AND `entry.sessionId === restrictToOwnerSessionId`). A "merge"
+   * gate's own descriptor happens to be stamped with the WORKER's sessionId too (it shares the same
+   * worktree key, `merge:${workerSessionId}` vs `gate:${workerSessionId}` — see `confirmWorkerMerge`'s own
+   * descriptor construction), so a bare sessionId match alone would let a worker cancel its OWN merge gate
+   * — a MANAGER's decision, never the worker's — as an accidental side effect of that coincidence. The
+   * explicit `gateType === "worker"` conjunct is what keeps this scoped to a worker's own `run_gate`
+   * self-check and nothing else, in EITHER branch below (the ordinary registry entry and the
+   * repo-guard-only fallback, which is unconditionally merge-shaped — see its own doc). Omitted (the
+   * default) for the pre-existing MANAGER surface: unchanged, project-scoped only, exactly as before this
+   * card.
+   * `opts.intent`/`opts.reason` (DoD-4): folded into the SAME `detail` string threaded into
+   * `cancelQueued`/`cancelRunning`/`cancelRepoGuardOnlyWait` below — already what a QUEUED cancel's
+   * `GateCancelledError.detail` (and, since this card, a RUNNING cancel's captured abort reason — see
+   * `runWorkerGate`'s `cancelSignalRef`) surfaces back out as the settled op's own `reason`, and from
+   * there into the `[loom:gate-cancelled]`/`[loom:merge-cancelled]` nudge text — so this is the ONE place
+   * that needs to compose it; nothing downstream needs its own intent/reason plumbing.
+   */
+  async cancelGateOp(
+    callerSessionId: string, opId: string,
+    opts?: { restrictToOwnerSessionId?: string; intent?: string; reason?: string },
+  ): Promise<
     | { outcome: "cancelled"; phase: "queued" | "running"; opId: string; gateType: GateType }
     | { outcome: "refused" | "not_found" | "ambiguous" | "not_cancelled"; reason: string; opId: string }
   > {
-    const caller = this.db.getSession(managerSessionId);
+    const caller = this.db.getSession(callerSessionId);
+    const callerLabel = opts?.restrictToOwnerSessionId ? "worker" : "manager";
+    const detailSuffix = opts?.intent || opts?.reason
+      ? ` (intent: ${opts.intent ?? "unspecified"}${opts.reason ? ` — ${opts.reason}` : ""})`
+      : "";
+    const detail = `cancelled by ${callerLabel} ${callerSessionId} via gate_cancel${detailSuffix}`;
     let found = this.gateSemaphore.findByOpId(opId);
     if (found.kind === "ambiguous") {
       // Re-resolve SCOPED to the caller's own project (see this method's own doc) BEFORE ever returning an
@@ -5819,10 +5846,16 @@ export class SessionService {
         if (rgoEntry.projectId !== caller?.projectId) {
           return { outcome: "refused", reason: "this op belongs to a different project", opId: rgoEntry.opId ?? opId };
         }
+        // WORKER SCOPE: a repo-guard-only wait is ALWAYS merge-shaped (see this method's own doc) — never
+        // a worker's own gateType:"worker" self-check — so a worker-scoped caller is refused outright,
+        // never reaching an ownership-by-sessionId question at all.
+        if (opts?.restrictToOwnerSessionId) {
+          return { outcome: "refused", reason: "this op is a merge-type wait, not your own run_gate self-check — workers may only cancel their own gate op", opId: rgoEntry.opId ?? opId };
+        }
         if (rgoEntry.phase === "holding") {
           return { outcome: "not_cancelled", reason: "cancelling a HOLDING repo-guard-only wait is not supported — interrupting one risks the same staged-residue hazard a RUNNING merge gate cancel is refused for; a QUEUED repo-guard-only wait can still be cancelled cleanly (nothing was ever spawned for it)", opId: rgoEntry.opId ?? opId };
         }
-        const cancelled = this.gateSemaphore.cancelRepoGuardOnlyWait(rgoEntry.id, "manual", `cancelled by manager ${managerSessionId} via gate_cancel`);
+        const cancelled = this.gateSemaphore.cancelRepoGuardOnlyWait(rgoEntry.id, "manual", detail);
         if (!cancelled) return { outcome: "not_cancelled", reason: "no longer queued (it was granted or settled moments ago) — re-check gate_queue", opId: rgoEntry.opId ?? opId };
         return { outcome: "cancelled", phase: "queued", opId: rgoEntry.opId ?? opId, gateType: "merge" };
       }
@@ -5833,6 +5866,16 @@ export class SessionService {
     // refused call never touches the semaphore at all.
     if (!caller?.projectId || entry.projectId !== caller.projectId) {
       return { outcome: "refused", reason: "this op belongs to a different project", opId: entry.opId ?? opId };
+    }
+    // OWNERSHIP SCOPE (card a0d912f5, worker surface only — see this method's own doc for why gateType is
+    // part of this check, not just sessionId).
+    if (opts?.restrictToOwnerSessionId) {
+      if (entry.gateType !== "worker") {
+        return { outcome: "refused", reason: "this op is a merge/deploy gate, not your own run_gate self-check — workers may only cancel their own gate op", opId: entry.opId ?? opId };
+      }
+      if (entry.sessionId !== opts.restrictToOwnerSessionId) {
+        return { outcome: "refused", reason: "this op belongs to a different session — you may only cancel your own gate op", opId: entry.opId ?? opId };
+      }
     }
     // GATETYPE SCOPE (Code Review finding B2-2, NARROWED by card 361520a0 Half Two) — checked before either
     // branch below ever touches the semaphore. `deploy` stays refused in BOTH phases; `merge` is refused
@@ -5845,7 +5888,6 @@ export class SessionService {
     if (entry.gateType === "merge" && entry.phase === "running") {
       return { outcome: "not_cancelled", reason: "cancelling a RUNNING merge gate is not supported — interrupting one risks leaving staged residue in the canonical checkout that fails closed and needs a HUMAN to clear it by hand before any further merge on this repo succeeds; a QUEUED merge gate can still be cancelled cleanly (nothing was ever spawned for it)", opId: entry.opId ?? opId };
     }
-    const detail = `cancelled by manager ${managerSessionId} via gate_cancel`;
     if (entry.phase === "queued") {
       const cancelled = this.gateSemaphore.cancelQueued(entry.id, "manual", detail);
       if (!cancelled) return { outcome: "not_cancelled", reason: "no longer queued (it was admitted or settled moments ago) — re-check gate_queue", opId: entry.opId ?? opId };
@@ -19120,10 +19162,15 @@ export class SessionService {
    * a held semaphore slot. A worker that dies before ever consuming a `{status:"pending"}` result just
    * wastes one gate run — harmless.
    */
-  async runWorkerGate(workerSessionId: string): Promise<
+  async runWorkerGate(workerSessionId: string, opts?: { force?: boolean }): Promise<
     | { settled: true; ok: true; value: WorkerGateResult }
     | { settled: true; ok: false; error: unknown }
     | { settled: false; op: PendingOpView; attachedToInFlight: boolean; staleAgainstWorktree: boolean }
+    // REFUSED RE-ATTACH (card a0d912f5): a re-call that would otherwise attach to an in-flight op ALREADY
+    // known (before ever attaching) to be running against a stale worktree — refused outright rather than
+    // spending the sync-attach budget on a result the caller would just have to discard. `opts.force`
+    // bypasses this and falls through to the ordinary attach path below.
+    | { settled: false; refused: true; op: PendingOpView; attachedToInFlight: true; staleAgainstWorktree: true }
   > {
     // FUNCTION-ENTRY CAPTURE (card 7dc0cca5): stamped as the FIRST statement, before `checkGateTimeoutBreaker`
     // or anything else below that can `await` and yield. SEMANTIC: `opStartedAt` means the instant this
@@ -19240,6 +19287,24 @@ export class SessionService {
     // today's control-flow analysis. If you're reading this because `??` looks like a clean simplification:
     // it was considered and rejected for exactly this reason — don't reintroduce it.
     const opStartedAt = attachedToInFlight ? preAttachPeek!.startedAt : fnEntryInstant;
+    // PRE-EMPTIVE STALE-ATTACH REFUSAL (card a0d912f5): only reachable when `attachedToInFlight` — i.e.
+    // this call is merely RE-ATTACHING to an op an EARLIER call already started (the originating call
+    // itself has nothing to pre-emptively refuse; its own staleness, if any, only exists to compute once
+    // it degrades to pending below). `gateStartStamps.get(key)` is the SAME start stamp the in-flight
+    // run's own `run()` closure recorded — readable here without waiting on the run itself. If the
+    // worktree has already moved since that run started, attaching would only hand this caller a result
+    // it already knows it must discard (the exact "guaranteed wasted round trip" card a0d912f5 exists to
+    // close) — so refuse before ever touching `attach()`, unless the caller explicitly opts back into the
+    // old behavior via `force`.
+    if (attachedToInFlight && !opts?.force) {
+      const inFlightStartStamp = this.gateStartStamps.get(key);
+      if (inFlightStartStamp) {
+        const preCheckStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+        if (gateStampsDiffer(inFlightStartStamp, preCheckStamp)) {
+          return { settled: false, refused: true, op: preAttachPeek!, attachedToInFlight: true, staleAgainstWorktree: true };
+        }
+      }
+    }
     const result = await this.pendingOps.attach<WorkerGateResult>(
       key, "gate", workerSessionId, this.syncAttachBudgetMs,
       async (opId) => {
@@ -19288,6 +19353,11 @@ export class SessionService {
           // which is evicted and unrecoverable once this op is no longer live (see gate_queue/gate_status's
           // own `extended` field doc for that in-memory-only lifetime).
           let workerGateExtended = false;
+          // CANCEL-DETAIL CAPTURE (card a0d912f5): the `AbortSignal` handed to `fn` — captured so a
+          // RUNNING cancel (which resolves normally rather than rejecting, see the `gateResult.cancelled`
+          // branch below) can report the SAME `detail` string `gate_cancel`/`cancelRunning` aborted it
+          // with (an intent + reason, when the caller supplied one) instead of a fixed generic sentence.
+          let cancelSignalRef: AbortSignal | undefined;
           try {
             // "low" priority (card 24642c3d) — a worker's own DoD self-check must never head-of-line-block
             // a higher-priority merge/deploy gate queued behind it; it keeps the (already-existing) full
@@ -19300,6 +19370,7 @@ export class SessionService {
                 gateStartedAt = startedAt;
                 concurrentAtStart = this.gateSemaphore.snapshot().active;
                 getConcurrentGatesMax = getMaxConcurrentGates;
+                cancelSignalRef = cancelSignal;
                 admitStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
                 // Card 78214063: mirror onExtend into `workerGateExtended`, never a REPLACEMENT for the
                 // semaphore's own live-registry tracking (confirmWorkerMerge's identical `mirroredHooks`
@@ -19370,8 +19441,17 @@ export class SessionService {
             // actually started (gate-runner.ts pushes onto `steps` the instant `runStep` resolves, before
             // ever checking `res.cancelled`), so this is exact for production traffic; a double must
             // populate `steps` itself to be measured correctly by this field.
-            evt({ cancelled: true, cancelKind: "manual", gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax, durationMs: Date.now() - gateStartedAt, gateSpawned: (gateResult.steps?.length ?? 0) > 0 });
-            return { ran: false, cancelled: true, cancelKind: "manual", reason: "cancelled by manager while running", opId };
+            // ABORT-REASON THREADING (card a0d912f5): `cancelRunning(id, detail)` (gate-semaphore.ts) sets
+            // this SAME `detail` string as `controller.abort(detail)`'s reason — read it back here so a
+            // `gate_cancel` intent/reason actually reaches the worker's own `[loom:gate-cancelled]` nudge
+            // for a RUNNING cancel, not just a QUEUED one (which already threads it via
+            // `GateCancelledError.detail`, see the `catch` block above). Falls back to a generic sentence
+            // when nothing informative was captured (e.g. a test double that never wires cancelSignalRef).
+            const runningCancelReason = typeof cancelSignalRef?.reason === "string" && cancelSignalRef.reason.length > 0
+              ? cancelSignalRef.reason
+              : "cancelled while running";
+            evt({ cancelled: true, cancelKind: "manual", cancelDetail: runningCancelReason, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax, durationMs: Date.now() - gateStartedAt, gateSpawned: (gateResult.steps?.length ?? 0) > 0 });
+            return { ran: false, cancelled: true, cancelKind: "manual", reason: runningCancelReason, opId };
           }
           if (worker.branch) {
             if (gateResult.failedTimedOut) {

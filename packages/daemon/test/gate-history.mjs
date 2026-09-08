@@ -427,13 +427,13 @@ function seed(db) {
     // Role gate: gate_history is a MANAGER-ONLY read (an investigative trend tool, not a live-op check a
     // depth-1 worker needs) — confirm it's absent from the worker's pinned surface and the pinned set is
     // otherwise UNCHANGED (mgmt-surface.mjs / my-context-gate.mjs / idle-report.mjs / inbox-pull.mjs /
-    // orch-scope.mjs pin the exact 6-tool list: {directive_status, gate_queue, gate_status, my_context,
+    // orch-scope.mjs pin the exact 7-tool list: {directive_status, gate_cancel, gate_queue, gate_status, my_context,
     // run_gate, worker_report} — this card must not silently grow that list).
     const wkr = await connect(w1, "worker");
     const wTools = Object.keys(wkr.server._registeredTools);
     check("(e2e, MCP) gate_history is NOT on the worker's surface", !wTools.includes("gate_history"));
-    check("(e2e, MCP) worker surface is STILL EXACTLY the pinned 6-tool set (unchanged by this card)",
-      wTools.slice().sort().join(",") === "directive_status,gate_queue,gate_status,my_context,run_gate,worker_report");
+    check("(e2e, MCP) worker surface is STILL EXACTLY the pinned 7-tool set (unchanged by this card)",
+      wTools.slice().sort().join(",") === "directive_status,gate_cancel,gate_queue,gate_status,my_context,run_gate,worker_report");
     await wkr.client.close();
   } finally {
     for (const db of dbs) try { db.close(); } catch { /* ignore */ }

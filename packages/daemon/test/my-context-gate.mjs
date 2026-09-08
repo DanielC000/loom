@@ -358,13 +358,16 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
   // `run_gate` (card 7f96aa09), `gate_status` (card edc1ec12, now on BOTH surfaces per card fc243a43 —
   // the worker's own call is scoped to its own ops), `gate_queue` (card fa359824, now on BOTH surfaces
   // per card d04f9c76 — same project-scoped redaction either way, see registerGateQueue's doc),
-  // `gate_cancel` (card 8d585277, MANAGER-ONLY), `gate_history` (card 753d9911, MANAGER-ONLY), and
+  // `gate_cancel` (card 8d585277, now on BOTH surfaces per card a0d912f5 — the worker's own call is
+  // pre-scoped to its own gateType:"worker" op only, see SessionService.cancelGateOp's
+  // `restrictToOwnerSessionId` doc), `gate_history` (card 753d9911, MANAGER-ONLY), and
   // `gate_intent_declare`/`gate_intent_withdraw` (card a5d1ae04, MANAGER-ONLY) are DELIBERATE, reviewed
   // exceptions to the /gate/i sweep below: `run_gate` only EXECUTES the project's EXISTING gateCommand
   // (daemon-mediated, through the GateSemaphore), `gate_status` only READS the live GateSemaphore registry
   // by opId, `gate_queue` only READS the same live registry's whole running/queued snapshot (cap/depth/
   // holder), `gate_cancel` only CANCELS a live gate OP already admitted/queued through that same registry
-  // (project-scoped, refuses cross-project), `gate_history` only READS the durable settled-gate-run
+  // (project-scoped, refuses cross-project — and, on the worker surface, additionally scoped to the
+  // caller's OWN op), `gate_history` only READS the durable settled-gate-run
   // history (a thin wrapper over `db.listGateEvents`, project-scoped server-side, no `projectId`
   // argument), and `gate_intent_declare`/`gate_intent_withdraw` — despite the mutating verb — set NOTHING
   // on `gateCommand`/`GateSemaphore` at all: they only write into the SEPARATE, structurally-decoupled
@@ -384,13 +387,14 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
   // synthetic probe of the `gateSetTool` function, not the live surface) must still be caught.
   check("(S) gateSetTool positive control: a genuine setter-shaped name is STILL caught, not swallowed by the allowlist",
     gateSetTool(["gate_configure", "my_context"]) === "gate_configure");
-  // The worker surface is exactly { directive_status, gate_queue, gate_status, my_context, run_gate,
-  // worker_report } — run_gate (card 7f96aa09), gate_status (card fc243a43, read-only + own-op-scoped),
-  // gate_queue (card d04f9c76, read-only + project-scoped), and directive_status (card 35c96aa6, read-only
-  // + own-lineage-scoped) are the deliberate additions since this assertion was first written; anything
-  // else would be a surface leak.
-  check("(S) worker surface is STILL exactly { directive_status, gate_queue, gate_status, my_context, run_gate, worker_report }",
-    workerTools.slice().sort().join(",") === "directive_status,gate_queue,gate_status,my_context,run_gate,worker_report");
+  // The worker surface is exactly { directive_status, gate_cancel, gate_queue, gate_status, my_context,
+  // run_gate, worker_report } — run_gate (card 7f96aa09), gate_status (card fc243a43, read-only +
+  // own-op-scoped), gate_queue (card d04f9c76, read-only + project-scoped), directive_status (card
+  // 35c96aa6, read-only + own-lineage-scoped), and gate_cancel (card a0d912f5, a WRITE but scoped to the
+  // caller's own gateType:"worker" op only) are the deliberate additions since this assertion was first
+  // written; anything else would be a surface leak.
+  check("(S) worker surface is STILL exactly { directive_status, gate_cancel, gate_queue, gate_status, my_context, run_gate, worker_report }",
+    workerTools.slice().sort().join(",") === "directive_status,gate_cancel,gate_queue,gate_status,my_context,run_gate,worker_report");
   // my_context is present on BOTH role branches (it's the tool the gate is folded into).
   check("(S) my_context registered on both manager + worker surfaces",
     managerTools.includes("my_context") && workerTools.includes("my_context"));

@@ -4,7 +4,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   1) a re-call AFTER settle started a brand-new run instead of returning the cached result (this file's
 //      scenario (A));
 //   2) a re-call WHILE the gate is still running silently attached to the stale op with no signal that the
-//      worktree had since changed (this file's scenario (B));
+//      worktree had since changed (this file's scenario (B)) — SUPERSEDED by card a0d912f5: a plain
+//      re-call now REFUSES that attach outright (before ever touching it) instead of merely flagging it;
+//      `force:true` opts back into the old attach-anyway behavior, still exercised in (B) as a sub-case;
 //   3) nothing recorded which worktree HEAD a gate actually validated.
 // Fix: PendingOpRegistry.attach's opt-in retention (the SAME mechanism confirmWorkerMergeTracked already
 // uses — see MERGE_OP_RETAIN_MS) now also covers "gate" ops (GATE_OP_RETAIN_MS), and runWorkerGate stamps
@@ -18,8 +20,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Asserts:
 //   (A) a re-call within the settle-grace window returns the SAME settled result (same opId) with NO
 //       second gate invocation.
-//   (B) a re-call while the gate is still running reports attachedToInFlight:true, and — after the
-//       worktree is edited mid-flight — staleAgainstWorktree:true.
+//   (B) a PLAIN re-call while the gate is still running, against a worktree edited mid-flight, is REFUSED
+//       outright (card a0d912f5: settled:false, refused:true, attachedToInFlight:true,
+//       staleAgainstWorktree:true) rather than joining the stale run; `force:true` opts back into the old
+//       attach-anyway shape; the ORIGINATING call is never itself refused (nothing to refuse attaching to).
 //   (C) card 79b0ee52 — once a run SETTLES already known-contaminated (headCurrent:false, the RACY shape:
 //       the worktree moved WHILE the gate was actually running), a re-call within the SAME settle-grace
 //       window this file's scenario (A) proves reuses a cached result for must NOT reuse that contaminated
@@ -199,20 +203,37 @@ try {
     // tracked file (the origin finding's exact scenario), no commit.
     fs.appendFileSync(path.join(worktreePath, "README.md"), "edited mid-gate\n");
 
-    const r2 = await sessions.runWorkerGate(workerId); // attaches to the SAME in-flight op
-    check("(B) the re-call degrades to pending (gate still running)", r2.settled === false);
-    check("(B) attachedToInFlight is true (this call did NOT start the op)", r2.attachedToInFlight === true);
-    check("(B) staleAgainstWorktree is true (worktree edited since the run started)", r2.staleAgainstWorktree === true);
+    // CARD a0d912f5: a PLAIN re-call (no `force`) now REFUSES outright — before ever attaching — rather
+    // than silently joining a verdict it already knows is stale. This SUPERSEDES the old "silently
+    // attached with no signal" behavior scenario (B) originally proved (see this file's own header
+    // comment, point 2) — the refusal IS the fix now, not the mere staleAgainstWorktree flag.
+    const r2 = await sessions.runWorkerGate(workerId);
+    check("(B) a plain re-call REFUSES rather than attaching (card a0d912f5)", r2.settled === false && r2.refused === true);
+    check("(B) the refusal still reports attachedToInFlight:true (this call did NOT start the op)", r2.attachedToInFlight === true);
+    check("(B) the refusal still reports staleAgainstWorktree:true (worktree edited since the run started)", r2.staleAgainstWorktree === true);
+
+    // `force:true` opts back into the OLD attach-anyway behavior — proves force is not a no-op, and that
+    // the refused op above is still genuinely alive underneath (a refusal never touched attach() at all).
+    const r2Forced = await sessions.runWorkerGate(workerId, { force: true });
+    check("(B, force) a forced re-call attaches instead of refusing", r2Forced.refused !== true);
+    check("(B, force) the forced re-call still degrades to pending (gate still running)", r2Forced.settled === false);
+    check("(B, force) the forced re-call still reports attachedToInFlight:true", r2Forced.attachedToInFlight === true);
+    check("(B, force) the forced re-call still reports staleAgainstWorktree:true", r2Forced.staleAgainstWorktree === true);
+    check("(B, force) the forced re-call reports the SAME opId the refusal named", r2Forced.op.opId === r2.op.opId);
 
     const r1 = await p1;
     check("(B) the ORIGINATING call also degraded to pending (gate genuinely slow)", r1.settled === false);
     check("(B) the originating call reports attachedToInFlight:false (it minted the op itself)", r1.attachedToInFlight === false);
+    // The pre-emptive refusal only ever applies to a RE-ATTACH (attachedToInFlight:true) — the ORIGINATING
+    // call has no earlier op to refuse attaching to (it IS the one that mints it), so it must never be
+    // refused regardless of how stale the tree turns out to be by the time it settles.
+    check("(B) the ORIGINATING call is NEVER refused — it minted the op itself, nothing to refuse attaching to", r1.refused !== true);
     // Code Review hardening (card 50c1e0d0): staleAgainstWorktree is independent of attachedToInFlight —
     // the ORIGINATING call's own pending check is computed AFTER its own sync-wait elapses, by which point
     // the mid-flight edit above has already happened, so it must ALSO report staleAgainstWorktree:true,
     // not just the re-call that attached to it.
     check("(B) the ORIGINATING call ALSO reports staleAgainstWorktree:true (edited during its own sync-wait)", r1.staleAgainstWorktree === true);
-    check("(B) both calls report the SAME opId", r1.op.opId === r2.op.opId);
+    check("(B) the refusal, the forced re-attach, and the originating call all report the SAME opId", r1.op.opId === r2.op.opId && r1.op.opId === r2Forced.op.opId);
 
     // Let the real op actually settle so nothing dangles past this block.
     await waitUntil(() => sessions.pendingOps.peek(`gate:${workerId}`)?.state !== "running", 20_000);
@@ -272,6 +293,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — run_gate's settle-grace retention window returns a USABLE cached result with no second run, a mid-flight re-call correctly reports attachedToInFlight + staleAgainstWorktree after a worktree edit, and (card 79b0ee52) a re-call against a settled result already known CONTAMINATED (headCurrent:false) never reuses it — it mints a genuinely fresh gate run against the current tree instead."
+  ? "\n✅ ALL PASS — run_gate's settle-grace retention window returns a USABLE cached result with no second run, a mid-flight PLAIN re-call against an edited worktree is now REFUSED outright (card a0d912f5) rather than silently attached, force:true still opts into the old attach-anyway shape, the ORIGINATING call is never itself refused, and (card 79b0ee52) a re-call against a settled result already known CONTAMINATED (headCurrent:false) never reuses it — it mints a genuinely fresh gate run against the current tree instead."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

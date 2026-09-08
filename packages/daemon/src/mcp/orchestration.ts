@@ -2465,25 +2465,40 @@ export class OrchestrationMcpRouter {
             "still tell if the commit changed by comparing its `validatedHead` to your own HEAD, but an " +
             "UNCOMMITTED edit you make AFTER an already-clean settle, before your re-call, is invisible to it. " +
             "If you've edited since the last run_gate call, don't trust a cached pass — wait out the grace " +
-            "window (or just act on your own judgment) before treating it as current.",
-          inputSchema: strictShape({}),
+            "window (or just act on your own judgment) before treating it as current. " +
+            "STALE RE-ATTACH IS NOW REFUSED, NOT JOINED (card a0d912f5): a re-call that would otherwise " +
+            "attach to an in-flight op ALREADY known — before ever attaching — to be running against a " +
+            "stale worktree is refused outright: {status:\"refused\", action:\"stale-attached\", opId, " +
+            "canCancel:true, note}, never a wasted wait on a result you'd only have to discard. `gate_cancel` " +
+            "is on YOUR OWN tool surface too — cancel that opId yourself, then re-fire run_gate against your " +
+            "current tree. Pass `force:true` to opt back into the OLD behavior (attach anyway) — e.g. if " +
+            "you'd rather let the stale run finish than pay for a fresh one. `force` has no effect unless " +
+            "there's actually a stale in-flight op to attach to; it's always safe to pass.",
+          inputSchema: strictShape({ force: z.boolean().optional() }),
         },
-        async () => {
+        async ({ force }) => {
           try {
-            const r = await sessions.runWorkerGate(sessionId);
+            const r = await sessions.runWorkerGate(sessionId, { force });
+            if ("refused" in r && r.refused) {
+              return ok({
+                status: "refused", action: "stale-attached", opId: r.op.opId, canCancel: true,
+                note: `an earlier run_gate (${r.op.opId}) is still running but is already stale against your worktree — a new commit or an uncommitted edit landed since it started, so its eventual result would not describe your current code. Refused rather than attaching you to a result you'd have to discard. Cancel it yourself with gate_cancel(opId:"${r.op.opId}"), then re-fire run_gate against your current tree — or pass force:true here to attach to it anyway.`,
+              });
+            }
             if (!r.settled) {
               // ADDRESSED DIRECTIVE, NOT A PASSIVE NOTICE (card cfd11b13): a live specimen (worker
               // `684ff2c2`) read a bare `staleAgainstWorktree:true` WARNING correctly — it declined to
               // trust the attached result — but its only stated next step was to WAIT for the stale op to
               // settle on its own, holding one of only two daemon-global gate lanes for ~18 minutes. The
-              // gap wasn't the detector; it was that NOTHING told the worker a worker cannot cancel its own
-              // gate op (`gate_cancel` is manager-only — never registered on this role's own tool surface,
-              // see the `role === "worker"` branch above), so the correct remedy (escalate to the manager,
-              // who CAN cancel it) was never named. Name all three explicitly, every time this fires: the
-              // caller can't cancel it, the manager can (with the exact opId), and to report that up NOW
-              // rather than park waiting for settle.
+              // gap wasn't the detector; it was that NOTHING told the worker how to actually resolve it.
+              // Card a0d912f5 closed that gap two ways: (1) the pre-emptive refusal above now catches this
+              // exact shape BEFORE it ever reaches here for a plain re-call (no `force`) — this branch is
+              // now only reached by the ORIGINATING call degrading past its own sync budget (nothing to
+              // refuse — there's no earlier op to refuse attaching to, THIS call minted it) or by an
+              // explicit `force:true` re-attach; and (2) `gate_cancel` is now on the WORKER's own tool
+              // surface (see the `role === "worker"` branch above) — no manager round-trip needed either way.
               const note = r.staleAgainstWorktree
-                ? `gate still running, but staleAgainstWorktree is true — your worktree has changed (a new commit or an uncommitted edit) since THIS run started, so do not trust its outcome for your current code. You cannot cancel this op yourself. Your MANAGER can, via gate_cancel(${r.op.opId}) — report this up NOW (worker_report progress or blocked, naming that opId) instead of waiting for it to settle. Do not poll or re-call run_gate to fetch its result.`
+                ? `gate still running, but staleAgainstWorktree is true — your worktree has changed (a new commit or an uncommitted edit) since THIS run started, so do not trust its outcome for your current code. You can cancel it yourself: gate_cancel(opId:"${r.op.opId}"). Then re-fire run_gate against your current tree, or worker_report progress/blocked naming that opId if you'd rather let it finish first. Do not poll or re-call run_gate to fetch its result.`
                 : `gate still running. Do NOT poll or re-call to fetch the result — worker_report progress with awaiting:"background" and END your turn; the [loom:gate-done]/[loom:gate-failed] nudge starts your next turn with the result.`;
               return ok({
                 opId: r.op.opId, status: "pending", attachedToInFlight: r.attachedToInFlight, staleAgainstWorktree: r.staleAgainstWorktree,
@@ -2492,6 +2507,59 @@ export class OrchestrationMcpRouter {
             }
             if (!r.ok) return ok({ error: r.error instanceof Error ? r.error.message : String(r.error) });
             return ok(r.value);
+          } catch (e) {
+            return ok({ error: (e as Error).message });
+          }
+        },
+      );
+      // gate_cancel (card a0d912f5): the WORKER-scoped half of the manager's own gate_cancel tool
+      // (registered separately below, in the `role === "manager"` surface) — this closes the exact gap
+      // named in run_gate's own doc above: a worker whose re-attach was refused as stale-attached used to
+      // have no local remedy at all ("gate_cancel is manager-only — never registered on this role's own
+      // tool surface", per the comment this card's fix superseded). Cancellable ONLY the caller's OWN
+      // `run_gate` self-check (gateType "worker", sessionId === this worker) — SessionService.cancelGateOp
+      // enforces this via `restrictToOwnerSessionId` (see that method's own doc for why gateType is part
+      // of the check, not just sessionId: a "merge" gate op happens to be stamped with the SAME worker
+      // sessionId, since it shares that worker's worktree key — without the gateType conjunct a worker
+      // could accidentally cancel its OWN merge gate, a manager decision, never the worker's). A merge or
+      // deploy op, or another session's op, is refused exactly like a cross-project attempt — see the
+      // manager tool's own description for the full outcome vocabulary (cancelled/refused/not_found/
+      // ambiguous/not_cancelled); this tool shares that SAME return shape and SAME cancellation mechanics,
+      // just pre-scoped to "your own run_gate self-check" before either ever touches the semaphore.
+      server.registerTool(
+        "gate_cancel",
+        {
+          description:
+            "Cancel YOUR OWN `run_gate` self-check, by the `opId` a `run_gate` pending/refused response or " +
+            "`gate_queue` entry already named (full id or an unambiguous prefix). Scoped to ops YOU OWN — " +
+            "your own worker self-check (gateType `worker`), queued or running — never a merge/deploy gate " +
+            "or another session's op, which are refused exactly like a cross-project attempt. " +
+            "Returns {outcome:\"cancelled\", phase:\"queued\"|\"running\", opId, gateType:\"worker\"} on " +
+            "success — settles that run_gate op as a distinct `cancelled` outcome, never a failure, and " +
+            "pushes you the SAME `[loom:gate-cancelled]` nudge a manager-initiated cancel would. " +
+            "{outcome:\"refused\", reason} covers a different project's op, a merge/deploy gate, or another " +
+            "session's op — you may only cancel your own run_gate self-check. {outcome:\"not_found\"} means " +
+            "nothing LIVE matches this id (already settled — check the nudge — or never existed). " +
+            "{outcome:\"ambiguous\", reason} means your opId prefix matches more than one of your own " +
+            "project's ops — pass more characters. {outcome:\"not_cancelled\", reason} covers a race with " +
+            "natural completion, or — for a RUNNING self-check — a kill issued but not verified dead within " +
+            "a bounded window (the run continues under its own existing timeout; the slot stays held rather " +
+            "than freed on an unverified assumption). " +
+            "`intent`/`reason` (both optional) are rendered into the SAME text this call returns AND into " +
+            "your own settled op's `reason` — which is what your `[loom:gate-cancelled]` nudge reads out. " +
+            "`intent` is a one-word next-step signal: `refire-when-clear` (re-fire once whatever you're " +
+            "clearing makes way), `hold-for-instructions` (wait for direction before re-firing), or " +
+            "`superseded` (a newer run already replaces this one). `reason` is free text for anything the " +
+            "intent alone doesn't say.",
+          inputSchema: strictShape({
+            opId: z.string(),
+            intent: z.enum(["refire-when-clear", "hold-for-instructions", "superseded"]).optional(),
+            reason: z.string().optional(),
+          }),
+        },
+        async ({ opId, intent, reason }) => {
+          try {
+            return ok(await sessions.cancelGateOp(sessionId, opId, { restrictToOwnerSessionId: sessionId, intent, reason }));
           } catch (e) {
             return ok({ error: (e as Error).message });
           }
@@ -2574,10 +2642,11 @@ export class OrchestrationMcpRouter {
           return ok({ ...result, deliveryCount: result.deliveries.length });
         },
       );
-      // The worker's tested depth-1 surface is now EXACTLY { directive_status, gate_queue, gate_status,
-      // my_context, run_gate, worker_report } — my-context-gate.mjs, idle-report.mjs, inbox-pull.mjs,
-      // gate-queue.mjs, mgmt-surface.mjs, and (indirectly, via ORCH_WORKER_TOOLS in agents/promptLint.ts)
-      // orch-scope.mjs all pin this sorted list; update ALL of them if this surface ever changes again.
+      // The worker's tested depth-1 surface is now EXACTLY { directive_status, gate_cancel, gate_queue,
+      // gate_status, my_context, run_gate, worker_report } (card a0d912f5 added gate_cancel) —
+      // my-context-gate.mjs, idle-report.mjs, inbox-pull.mjs, gate-queue.mjs, mgmt-surface.mjs, and
+      // (indirectly, via ORCH_WORKER_TOOLS in agents/promptLint.ts) orch-scope.mjs all pin this sorted
+      // list; update ALL of them if this surface ever changes again.
       return server;
     }
 
@@ -4760,12 +4829,25 @@ export class OrchestrationMcpRouter {
           "cancels with zero process risk exactly like a queued merge; a currently-HOLDING one is refused " +
           "for the same reason a RUNNING merge gate is (interrupting it risks the same staged-residue " +
           "hazard) - gateType on a successful cancel here always reads \"merge\" (this IS a merge op, " +
-          "just one that never reached the ordinary gate registry).",
-        inputSchema: strictShape({ opId: z.string() }),
+          "just one that never reached the ordinary gate registry). " +
+          "`intent`/`reason` (card a0d912f5, both optional) are rendered straight into the SAME `reason` " +
+          "text this call returns AND into the cancelled op's own settle text — which is what the " +
+          "`[loom:gate-cancelled]`/`[loom:merge-cancelled]` nudge reads out to whoever is parked on that " +
+          "op, worker or manager. `intent` is a one-word next-step signal: `refire-when-clear` (re-fire " +
+          "once whatever you're clearing makes way — e.g. a merge is about to land), " +
+          "`hold-for-instructions` (don't re-fire yet, wait for direction), or `superseded` (a newer run " +
+          "already replaces this one, nothing to do). `reason` is free text for anything the intent alone " +
+          "doesn't say. Omitting both still cancels — the nudge just falls back to the SAME generic " +
+          "wording it always used.",
+        inputSchema: strictShape({
+          opId: z.string(),
+          intent: z.enum(["refire-when-clear", "hold-for-instructions", "superseded"]).optional(),
+          reason: z.string().optional(),
+        }),
       },
-      async ({ opId }) => {
+      async ({ opId, intent, reason }) => {
         try {
-          return ok(await sessions.cancelGateOp(managerSessionId, opId));
+          return ok(await sessions.cancelGateOp(managerSessionId, opId, { intent, reason }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

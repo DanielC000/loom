@@ -327,14 +327,16 @@ function makeRepo(repo) {
 
     // Role gate: gate_queue IS on the worker's pinned depth-1 surface as of card d04f9c76 (mgmt-surface.mjs
     // / my-context-gate.mjs / idle-report.mjs / inbox-pull.mjs / orch-scope.mjs pin the EXACT list — card
-    // 35c96aa6 added directive_status alongside it: {directive_status, gate_queue, gate_status, my_context,
-    // run_gate, worker_report}) — read-only + project-scoped (directive_status: read-only + own-lineage-
-    // scoped), so neither adds any writable/manager-only surface (see the live redaction proof above).
+    // 35c96aa6 added directive_status alongside it, card a0d912f5 added gate_cancel:
+    // {directive_status, gate_cancel, gate_queue, gate_status, my_context, run_gate, worker_report}) —
+    // read-only + project-scoped (directive_status: read-only + own-lineage-scoped; gate_cancel: a WRITE,
+    // but scoped to cancelling only the caller's own run_gate self-check — see that tool's own doc), so
+    // none of these add any manager-only surface (see the live redaction proof above).
     const wkr = await connect(w1, "worker");
     const wTools = Object.keys(wkr.server._registeredTools);
     check("(e2e, MCP) gate_queue IS on the worker surface (read-only, project-scoped)", wTools.includes("gate_queue"));
-    check("(e2e, MCP) worker surface is EXACTLY the pinned 6-tool set",
-      wTools.slice().sort().join(",") === "directive_status,gate_queue,gate_status,my_context,run_gate,worker_report");
+    check("(e2e, MCP) worker surface is EXACTLY the pinned 7-tool set",
+      wTools.slice().sort().join(",") === "directive_status,gate_cancel,gate_queue,gate_status,my_context,run_gate,worker_report");
     await wkr.client.close();
   } finally {
     for (const db of dbs) try { db.close(); } catch { /* ignore */ }

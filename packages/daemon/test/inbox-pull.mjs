@@ -168,11 +168,12 @@ process.env.LOOM_HOME = tmpHome;
   check("(T) inbox_pull is NOT on the worker surface", !workerTools.includes("inbox_pull"));
   // run_gate (card 7f96aa09, the daemon-mediated DoD self-gate), the scoped gate_status (card fc243a43,
   // read-only + restricted to the worker's own ops), the project-scoped gate_queue (card d04f9c76,
-  // read-only daemon-wide queue snapshot), and directive_status (card 35c96aa6, read-only + restricted to
-  // the worker's own recycle lineage) were added to the worker surface since this anchor was first
-  // written — the depth-1 gate now holds at six tools, not two.
-  check("(T) the worker surface is still exactly { directive_status, gate_queue, gate_status, my_context, run_gate, worker_report } (depth-1 gate held)",
-    workerTools.slice().sort().join(",") === "directive_status,gate_queue,gate_status,my_context,run_gate,worker_report");
+  // read-only daemon-wide queue snapshot), directive_status (card 35c96aa6, read-only + restricted to
+  // the worker's own recycle lineage), and gate_cancel (card a0d912f5, a WRITE but scoped to the caller's
+  // own gateType:"worker" op only) were added to the worker surface since this anchor was first
+  // written — the depth-1 gate now holds at seven tools, not two.
+  check("(T) the worker surface is still exactly { directive_status, gate_cancel, gate_queue, gate_status, my_context, run_gate, worker_report } (depth-1 gate held)",
+    workerTools.slice().sort().join(",") === "directive_status,gate_cancel,gate_queue,gate_status,my_context,run_gate,worker_report");
 
   db.close();
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }

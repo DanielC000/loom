@@ -20,7 +20,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //                      `declaredAt`/`ageMs`/`msUntilFire` cross the boundary either way (mirrors
 //                      GateQueueEntry's own established redaction tiers). No raw `sessionId` anywhere.
 //   (e2e, MCP)         the REAL gate_intent_declare/gate_intent_withdraw tools over a real router/client:
-//                      manager-only (absent from the worker's pinned 6-tool surface, unchanged), a bad
+//                      manager-only (absent from the worker's pinned 7-tool surface, unchanged), a bad
 //                      `inMs` is rejected with {error}, declare→read-back→withdraw→gone, and a DIFFERENT
 //                      project's WORKER caller reading gate_queue sees the SAME redacted shape a manager
 //                      caller there would (redaction keys off caller PROJECT, never caller ROLE — same
@@ -273,8 +273,8 @@ const now = new Date().toISOString();
     check("(e2e, MCP worker) gateType/firesAt still visible to the worker caller (the sanctioned cross-project set)", wEntry.gateType === "merge" && typeof wEntry.firesAt === "string");
     check("(e2e, MCP worker) worker surface does NOT register gate_intent_declare/withdraw — manager-only",
       !Object.keys(wkr.server._registeredTools).includes("gate_intent_declare") && !Object.keys(wkr.server._registeredTools).includes("gate_intent_withdraw"));
-    check("(e2e, MCP worker) worker surface is UNCHANGED — still EXACTLY the pinned 6-tool set",
-      Object.keys(wkr.server._registeredTools).slice().sort().join(",") === "directive_status,gate_queue,gate_status,my_context,run_gate,worker_report");
+    check("(e2e, MCP worker) worker surface is UNCHANGED — still EXACTLY the pinned 7-tool set",
+      Object.keys(wkr.server._registeredTools).slice().sort().join(",") === "directive_status,gate_cancel,gate_queue,gate_status,my_context,run_gate,worker_report");
     await wkr.client.close();
 
     const withdrawn = await mgr.call("gate_intent_withdraw");
@@ -291,6 +291,6 @@ const now = new Date().toISOString();
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GateIntentRegistry declares/redeclares/withdraws correctly with an injectable clock; msUntilFire goes negative rather than clamping or vanishing exactly at firesAt; the grace-window and hard-backstop reaps fire at their exact boundaries; dead-seat detection (session no longer live) reaps independently of and faster than either clock rule; a deliberately-too-aggressive mutant expiry rule was shown to WRONGLY drop a live declaration before the real registry was shown to correctly keep it (proving that assertion has power); SessionService.gateQueueForManager's declarations array redacts repoKey/note/declaredBy cross-project while gateType/firesAt/declaredAt/ageMs/msUntilFire cross the boundary, with no raw sessionId anywhere; and the real gate_intent_declare/gate_intent_withdraw MCP tools are manager-only (absent from the worker's unchanged pinned 6-tool surface) while gate_queue's declarations array is visible on both surfaces with redaction keyed off caller project, never caller role."
+  ? "\n✅ ALL PASS — GateIntentRegistry declares/redeclares/withdraws correctly with an injectable clock; msUntilFire goes negative rather than clamping or vanishing exactly at firesAt; the grace-window and hard-backstop reaps fire at their exact boundaries; dead-seat detection (session no longer live) reaps independently of and faster than either clock rule; a deliberately-too-aggressive mutant expiry rule was shown to WRONGLY drop a live declaration before the real registry was shown to correctly keep it (proving that assertion has power); SessionService.gateQueueForManager's declarations array redacts repoKey/note/declaredBy cross-project while gateType/firesAt/declaredAt/ageMs/msUntilFire cross the boundary, with no raw sessionId anywhere; and the real gate_intent_declare/gate_intent_withdraw MCP tools are manager-only (absent from the worker's unchanged pinned 7-tool surface) while gate_queue's declarations array is visible on both surfaces with redaction keyed off caller project, never caller role."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
