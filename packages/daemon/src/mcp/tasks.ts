@@ -820,6 +820,62 @@ export function getProjectTaskRequest(
   return taskRequestGetItem(q, db);
 }
 
+/**
+ * Card 267fd215 — a SOLO `worker_merge_confirm` uses a card's title VERBATIM as the squash commit
+ * subject, and that lands in mainline history under this repo's do-not-rewrite-published-history rule.
+ * A title carrying an HTML entity (`&lt;id&gt;` typed where the author meant the literal `<id>`) has
+ * already shipped this way once (commit `fe2c1c6b`, unrewritable). Two independent origination events
+ * ~7 weeks apart with no shared upstream escaping surface found (see the card's own sweep) mean an
+ * author-side fix can't be scoped — so this guard rejects the SHAPE at the write boundary regardless of
+ * origin, matching MIN_SUBSTANTIAL_BODY_CHARS-style guards above: whole-call reject, explicit override.
+ *
+ * Deliberately checks ONLY named XML/HTML entities that could plausibly be an ACCIDENTAL escape of plain
+ * text (`<`, `>`, `&`, `"`) plus numeric entities — never a broader "any `&...;`-shaped substring", so an
+ * ordinary title using `&` as a bare conjunction (never itself an entity) is untouched.
+ *
+ * ⚠️ FALSE POSITIVE, BY DESIGN, NOT A BUG: a title genuinely ABOUT escaped HTML — e.g. this board's own
+ * `Release list shows literal &quot;Sub: &amp;mdash;&quot; when subs missing` — really does contain these
+ * entities on purpose, and decoding them would destroy the exact point of the title (it's reporting that
+ * literal entity text is rendering instead of the intended character). There is no cheap way to tell that
+ * case apart from an accidental artifact by pattern alone, so this guard does NOT try to guess intent —
+ * it rejects both by default and requires the caller to say which one it is via `allowHtmlEntities`. A
+ * caller who means it types the flag once; a caller who typed the entity by accident (the actual damage
+ * class here) gets the decoded suggestion instead of a permanent mainline artifact.
+ */
+const TITLE_HTML_ENTITY_PATTERN = /&(lt|gt|amp|quot|#\d+);/;
+const NAMED_HTML_ENTITY_DECODE: Record<string, string> = { lt: "<", gt: ">", amp: "&", quot: '"' };
+
+/** Best-effort decode of the entities {@link TITLE_HTML_ENTITY_PATTERN} recognizes, for the "did you mean"
+ *  suggestion in {@link checkTitleHtmlEntities}'s error — never used to silently rewrite a stored title. */
+function decodeKnownHtmlEntities(s: string): string {
+  return s.replace(new RegExp(TITLE_HTML_ENTITY_PATTERN.source, "g"), (match, name: string) => {
+    if (name.startsWith("#")) {
+      const code = Number(name.slice(1));
+      return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+    }
+    return NAMED_HTML_ENTITY_DECODE[name] ?? match;
+  });
+}
+
+/**
+ * Rejects (returns `{error}`) a title carrying an HTML entity unless `allow` is explicitly true. See the
+ * doc above this pattern for why a false positive on a title genuinely ABOUT escaping is accepted rather
+ * than guessed around, and why `allow` exists. Returns `null` (no rejection) when the title is clean OR
+ * `allow` was passed.
+ */
+export function checkTitleHtmlEntities(title: string, allow: boolean | undefined): { error: string } | null {
+  if (allow) return null;
+  const match = title.match(TITLE_HTML_ENTITY_PATTERN);
+  if (!match) return null;
+  const decoded = decodeKnownHtmlEntities(title);
+  return {
+    error: `title contains an HTML entity ("${match[0]}") — a SOLO merge uses the card title VERBATIM as ` +
+      `the squash commit subject, so this would become a PERMANENT, unrewritable mainline artifact ` +
+      `(this has already happened once: commit fe2c1c6b). Did you mean: "${decoded}"? If this title is ` +
+      `genuinely ABOUT escaped HTML — not an accidental artifact — retry with allowHtmlEntities:true.`,
+  };
+}
+
 export function createProjectTask(
   db: Db, projectId: string,
   input: { title: string; body?: string; columnKey?: string; priority?: TaskPriority; repoKey?: string | null },
@@ -918,7 +974,13 @@ export function createProjectTaskChecked(
   db: Db, projectId: string,
   input: { title: string; body?: string; columnKey?: string; priority?: TaskPriority; repoKey?: string | null },
   dedupe?: CreateTaskDedupeOptions,
+  /** Card 267fd215 — bypasses {@link checkTitleHtmlEntities}'s rejection for a title genuinely about
+   *  escaped HTML. A separate param, not folded into `dedupe`: it skips a DIFFERENT refusal (the entity
+   *  guard, not the duplicate-detection one `CreateTaskDedupeOptions`'s own doc scopes itself to). */
+  allowHtmlEntitiesInTitle?: boolean,
 ): Task | { error: string } {
+  const titleGuard = checkTitleHtmlEntities(input.title, allowHtmlEntitiesInTitle);
+  if (titleGuard) return titleGuard;
   let body = input.body ?? "";
   let relationNote: string | undefined;
   let backlinkTarget: Task | undefined;
@@ -1104,6 +1166,11 @@ export async function updateProjectTask(
    * fire on a correct append costs nothing, and removing it would blind the exact case it exists for.
    */
   appendBody?: string,
+  /** Card 267fd215 — bypasses {@link checkTitleHtmlEntities}'s rejection of a `title` write carrying an
+   *  HTML entity, for a title genuinely about escaped HTML. Only consulted when `patch.title` is set;
+   *  irrelevant otherwise, same convention as `allowTruncate` above being irrelevant when `patch.body`
+   *  is absent. */
+  allowHtmlEntities?: boolean,
 ): Promise<
   | (Task & { pendingRequestWarning?: PendingRequestWarning[] })
   | (TaskUpdateAck & { pendingRequestWarning?: PendingRequestWarning[] })
@@ -1116,6 +1183,14 @@ export async function updateProjectTask(
   // an exact id, so a prefix must never be written straight through.
   let owned = resolveProjectTaskId(db, projectId, taskId);
   if ("error" in owned) return owned;
+  // Card 267fd215 — checked BEFORE the appendBody/column/repoKey guards below (same whole-patch-reject
+  // convention as every other guard in this function): a `title` write carrying an HTML entity would
+  // become a permanent, unrewritable commit subject on a solo merge. `appendBody` never touches `title`,
+  // so this doesn't need to run after that block.
+  if (patch.title !== undefined) {
+    const titleGuard = checkTitleHtmlEntities(patch.title, allowHtmlEntities);
+    if (titleGuard) return titleGuard;
+  }
   if (appendBody !== undefined) {
     if (patch.body !== undefined) return { error: "pass either body or appendBody, not both" };
     // Re-read fresh immediately before composing the new body — mirrors the `freshForFold` pattern used
