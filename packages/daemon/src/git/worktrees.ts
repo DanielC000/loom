@@ -2359,8 +2359,13 @@ const INERT_PREFIX_ANCHOR_PATTERN = "(__dirname|__filename|process\\.cwd\\(\\)|i
  * extensions any file would need for those literal tokens to be syntactically meaningful in it at all. That
  * completeness is what lets {@link repoTreeHasJsTsSourceFile} bound its own applicability question (see
  * that function's doc) without reintroducing the same per-language guessing game this card fixes.
+ *
+ * Also reused as {@link repoTreeReferencesInertPrefix}'s `git grep` pathspec (card d05831a7), so its scan
+ * can never again search non-JS/TS files (e.g. markdown quoting the pattern as a literal example) with no
+ * vocabulary check at all. Keep it one shared array, never two hand-copied lists.
  */
-const JS_TS_SOURCE_EXTENSION_PATTERN = /\.(?:[cm]?[jt]sx?)$/i;
+const JS_TS_SOURCE_EXTENSIONS = ["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"];
+const JS_TS_SOURCE_EXTENSION_PATTERN = new RegExp(`\\.(?:${JS_TS_SOURCE_EXTENSIONS.join("|")})$`, "i");
 
 /** @decision 0910531e — is the read-call/anchor scan's JS/TS vocabulary even APPLICABLE to this repo's
  *  tracked tree? In a repo with zero JS/TS-extension files, a "no match" is a TAUTOLOGY, not evidence
@@ -2420,7 +2425,11 @@ export async function repoTreeReferencesInertPrefix(
     // syntax at all (measured: git rejects it outright with "Invalid preceding regular expression", exit
     // 128 — itself fail-closed, but this is the fix, not a case to rely on failing closed for).
     const pattern = `${INERT_PREFIX_READ_CALL_NAMES}\\([^)]*(${INERT_PREFIX_ANCHOR_PATTERN}[^)]*${bareToken}|${bareToken}[^)]*${INERT_PREFIX_ANCHOR_PATTERN})`;
-    const child = spawn("git", ["grep", "-I", "-l", "-E", pattern, treeish], {
+    // card d05831a7: scoped to the SAME JS/TS extension vocabulary repoTreeHasJsTsSourceFile already
+    // gated on above — without this pathspec the scan searched the WHOLE tree (markdown included), so a
+    // doc merely QUOTING this pattern as a literal example (a real docs/decisions/1c0d4aa4-*.md hit) could
+    // falsely confirm the token "referenced" and disable the docs/-inert skip repo-wide.
+    const child = spawn("git", ["grep", "-I", "-l", "-E", pattern, treeish, "--", ...JS_TS_SOURCE_EXTENSIONS.map((ext) => `*.${ext}`)], {
       cwd: repoPath,
       stdio: ["ignore", "ignore", "pipe"],
       windowsHide: true,
@@ -2691,6 +2700,13 @@ export const STATIC_GUARD_REPO_PATHS = [
   // auto-classify a hit as "real" vs. "synthetic fixture" — every pinned hit was hand-verified once, and
   // any new hit fails the guard loudly rather than being silently trusted.
   "packages/daemon/test/inert-exact-path-corpus-guard.mjs",
+  // Card d05831a7: this scan's own sibling above (inert-exact-path-corpus-guard.mjs) was already in this
+  // array, but this file — the one that actually pins repoTreeReferencesInertPrefix's per-repo re-scan,
+  // including check (4)'s LIVE assertion against Loom's own real HEAD — was not. A reduced gate for a
+  // worktrees.ts-only diff never ran the one test guarding its own premise, which is how a missing
+  // git-grep pathspec (the scan searching markdown, not just JS/TS) shipped green: main went red only
+  // because a later docs-only commit happened to add prose quoting the scan's own pattern as an example.
+  "packages/daemon/test/inert-prefix-repo-scan.mjs",
   // Multi-harness epic df1f94b0 Phase 1, card 353f6dc4, lead ruling #5: a corpus-scoped source-text scan
   // (a pinned method-name list against pty/host.ts, not the whole test/ corpus) asserting every
   // AGNOSTIC-classified PtyHost method this card migrated routes its session lookup through the shared
