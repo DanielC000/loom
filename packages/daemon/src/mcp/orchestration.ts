@@ -7,6 +7,11 @@ import { z } from "zod";
 import { contextWindowForModel, contextPercentFor, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn, type Session, type OrchestrationEvent, type GateType } from "@loom/shared";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem, pageRequests, cancelQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
 import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
+// Card 40f4cae9 — the `fields:[...]` projection carried forward from `tasks_list` (card 23fde5f8): reuse
+// the SAME generic `pickFields` (mcp/tasks.ts) rather than writing a second projector — see that
+// function's own doc for its three deliberate properties (no-op when `fields` is omitted, an unknown
+// field name silently ignored, `id` never auto-added).
+import { pickFields } from "./tasks.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
 import type { Db } from "../db.js";
@@ -4310,7 +4315,13 @@ export class OrchestrationMcpRouter {
           "question_ask, call this to check whether you (or a predecessor session on your agent) already " +
           "filed an equivalent request that's still pending or answered-but-unpulled, instead of re-filing " +
           `a duplicate every cycle. Newest-first (createdAt DESC). Bounded to ${DEFAULT_REQUESTS_LIST_CAP} ` +
-          "rows by default (see `hasMore`) — pass an explicit limit/offset to page past it.",
+          "rows by default (see `hasMore`) — pass an explicit limit/offset to page past it. " +
+          "`fields:[...]` (card 40f4cae9, same contract as `tasks_list`'s own `fields`) projects each " +
+          "returned item down to ONLY the given top-level key names, e.g. fields:[\"id\",\"type\",\"title\"," +
+          "\"state\"] for a quick triage scan — an un-asked-for field is genuinely ABSENT from every item, " +
+          "not merely a smaller preview, and an unmatched/unknown field name is silently ignored rather " +
+          "than erroring. `id` is NOT auto-added — include it yourself if you need to correlate items back " +
+          "to requests.",
         inputSchema: strictShape({
           state: z.enum(QUESTION_STATES).optional(),
           type: z.enum(QUESTION_TYPES).optional(),
@@ -4318,17 +4329,22 @@ export class OrchestrationMcpRouter {
           mine: z.boolean().optional(),
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
+          fields: z.array(z.string()).optional(),
         }),
       },
-      async ({ state, type, includeConsumed, mine, limit, offset }) => {
+      async ({ state, type, includeConsumed, mine, limit, offset, fields }) => {
         const asker = db.getSession(managerSessionId);
         if (!asker?.projectId) return ok({ error: "no project for this session" });
         const all = db.listQuestionsForAudit({
           projectId: asker.projectId, state, type, excludeConsumed: !includeConsumed,
           agentId: mine ? asker.agentId : undefined,
         });
+        // Card 40f4cae9: `pageRequests`'s own total/hasMore are already computed above (over the FULL
+        // `all` set, before this slice) — projecting the sliced-and-shaped items afterwards never touches
+        // either count, same ordering rule `tasks_list` established.
         const paged = pageRequests(all, { limit, offset }, DEFAULT_REQUESTS_LIST_CAP);
-        return ok({ ...paged, items: paged.items.map((q) => auditRequestItem(q, db)) });
+        const items = pickFields(paged.items.map((q) => auditRequestItem(q, db)), fields);
+        return ok({ ...paged, items });
       },
     );
 
@@ -4778,19 +4794,28 @@ export class OrchestrationMcpRouter {
           "request another project's rows through any input this tool accepts, and a foreign-project row " +
           "is never returned at all (not merely redacted), so this cannot expose anything `gate_queue`'s " +
           "own cross-project redaction doesn't already allow. Reuses `db.listGateEvents` verbatim — no " +
-          "duplicate query logic.",
+          "duplicate query logic. `fields:[...]` (card 40f4cae9, same contract as `tasks_list`'s own " +
+          "`fields`) projects each returned row down to ONLY the given top-level key names, e.g. " +
+          "fields:[\"outcome\",\"durationMs\",\"endedAt\"] for a duration trend read that doesn't need the " +
+          "full diagnostic set — an un-asked-for field is genuinely ABSENT from every row, not merely a " +
+          "smaller preview, and an unmatched/unknown field name is silently ignored rather than erroring. " +
+          "`id` is NOT auto-added.",
         inputSchema: strictShape({
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
+          fields: z.array(z.string()).optional(),
         }),
       },
-      async ({ limit, offset }) => {
+      async ({ limit, offset, fields }) => {
         const projectId = db.getSession(managerSessionId)?.projectId;
         if (!projectId) return ok({ error: "no project for this session" });
         const off = offset ?? 0;
         const page = db.listGateEvents({ projectId, limit: limit ?? 100, offset: off });
+        // Card 40f4cae9: nextOffset is derived from page.items.length/page.total BEFORE projection — fields
+        // narrows what's IN each row, never how many rows there are (same ordering rule as tasks_list).
         const nextOffset = off + page.items.length < page.total ? off + page.items.length : null;
-        return ok({ items: page.items, total: page.total, limit: page.limit, offset: off, nextOffset });
+        const items = pickFields(page.items as unknown as Record<string, unknown>[], fields);
+        return ok({ items, total: page.total, limit: page.limit, offset: off, nextOffset });
       },
     );
 
@@ -4846,19 +4871,24 @@ export class OrchestrationMcpRouter {
           "the recipient project's own read. ⚠️ `session_message_delivered` events carry no project " +
           "attribution at all (no resolvable session, no linked task) and are structurally invisible to " +
           "EVERY project-scoped read, this one included — a `0`/missing result on that kind specifically " +
-          "is likewise never proof it didn't happen (card ab1d1129).",
+          "is likewise never proof it didn't happen (card ab1d1129). `fields:[...]` (card 40f4cae9, same " +
+          "contract as `tasks_list`'s own `fields`) projects each returned event down to ONLY the given " +
+          "top-level key names, e.g. fields:[\"ts\",\"kind\",\"taskId\"] for a lightweight timeline scan — " +
+          "an un-asked-for field is genuinely ABSENT from every event, not merely a smaller preview, and " +
+          "an unmatched/unknown field name is silently ignored rather than erroring. `id` is NOT auto-added.",
         inputSchema: strictShape({
           kind: z.array(z.string()).optional(),
           sessionId: z.string().optional(),
           taskId: z.string().optional(),
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
+          fields: z.array(z.string()).optional(),
         }),
       },
-      async ({ kind, sessionId, taskId, limit, offset }) => {
+      async ({ kind, sessionId, taskId, limit, offset, fields }) => {
         const projectId = db.getSession(managerSessionId)?.projectId;
         if (!projectId) return ok({ error: "no project for this session" });
-        return ok(eventsSearchQuery(db, { kind, projectId, sessionId, taskId, limit, offset }));
+        return ok(eventsSearchQuery(db, { kind, projectId, sessionId, taskId, limit, offset, fields }));
       },
     );
 

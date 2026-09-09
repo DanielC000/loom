@@ -9,6 +9,9 @@ import { registerTranscriptReadTools } from "./transcript-read.js";
 import { registerRepoReadTools } from "./repo-read.js";
 import { auditRequestItem, pageRequests } from "./questionTool.js";
 import { strictShape } from "./arg-alias.js";
+// Card 40f4cae9: the `fields:[...]` projection carried forward from `tasks_list` (card 23fde5f8) — reuse
+// the SAME generic `pickFields` rather than a second projector.
+import { pickFields } from "./tasks.js";
 
 // Same envelope as the task / orchestration / platform MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -117,7 +120,11 @@ export class AuditMcpRouter {
           "moot/superseded ask withdrawn via question_cancel/dismiss, never an answer), type, sinceMinutes (only requests " +
           "created within the last N minutes). Newest-first (createdAt DESC); no filters returns the whole " +
           `platform. Bounded to ${DEFAULT_REQUESTS_LIST_CAP} rows by default (see \`hasMore\`) — pass an ` +
-          "explicit limit/offset to page past it.",
+          "explicit limit/offset to page past it. `fields:[...]` (card 40f4cae9, same contract as " +
+          "`tasks_list`'s own `fields`) projects each returned item down to ONLY the given top-level key " +
+          "names — an un-asked-for field is genuinely ABSENT from every item, not merely a smaller " +
+          "preview, and an unmatched/unknown field name is silently ignored rather than erroring. `id` is " +
+          "NOT auto-added.",
         inputSchema: strictShape({
           projectId: z.string().optional(),
           state: z.enum(QUESTION_STATES).optional(),
@@ -125,15 +132,17 @@ export class AuditMcpRouter {
           sinceMinutes: z.number().int().positive().optional(),
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
+          fields: z.array(z.string()).optional(),
         }),
       },
-      async ({ projectId, state, type, sinceMinutes, limit, offset }) => {
+      async ({ projectId, state, type, sinceMinutes, limit, offset, fields }) => {
         const since = sinceMinutes !== undefined
           ? new Date(Date.now() - sinceMinutes * 60_000).toISOString()
           : undefined;
         const all = db.listQuestionsForAudit({ projectId, state, type, since });
         const paged = pageRequests(all, { limit, offset }, DEFAULT_REQUESTS_LIST_CAP);
-        return ok({ ...paged, items: paged.items.map((q) => auditRequestItem(q, db)) });
+        const items = pickFields(paged.items.map((q) => auditRequestItem(q, db)), fields);
+        return ok({ ...paged, items });
       },
     );
 

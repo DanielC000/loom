@@ -1,5 +1,10 @@
 import type { Db, EventForensicsRow } from "../db.js";
 import { ALL_ORCHESTRATION_EVENT_KINDS } from "@loom/shared";
+// Card 40f4cae9: the `fields:[...]` projection carried forward from `tasks_list` (card 23fde5f8) — reuse
+// the SAME generic `pickFields` rather than a second projector. Applied HERE (the one query path every
+// `events_search` registration — manager (mcp/orchestration.ts) and platform (mcp/platform.ts) — calls)
+// so both surfaces get it uniformly instead of drifting apart.
+import { pickFields } from "./tasks.js";
 
 /** Backstop cap on a default `events_search` read (limit omitted) — same posture as
  *  DEFAULT_PROMPT_SEARCH_CAP/DEFAULT_AGENT_SUMMARY_CAP: bounds the payload of an unscoped forensics
@@ -33,9 +38,12 @@ export function eventsSearchQuery(
     taskId?: string | null;
     limit?: number;
     offset?: number;
+    /** Card 40f4cae9: project each returned event down to ONLY these top-level key names — see
+     *  `pickFields`'s own doc (mcp/tasks.ts) for its three deliberate properties. */
+    fields?: string[];
   },
-): { error: string } | { events: EventForensicsRow[]; total: number; returned: number; offset: number; nextOffset: number | null } {
-  const { kind, projectId, sessionId, taskId, limit, offset } = args;
+): { error: string } | { events: EventForensicsRow[] | Partial<EventForensicsRow>[]; total: number; returned: number; offset: number; nextOffset: number | null } {
+  const { kind, projectId, sessionId, taskId, limit, offset, fields } = args;
   if (kind && kind.length > 0) {
     const unrecognized = kind.filter((k) => !EVENT_SEARCH_VALID_KINDS_SET.has(k));
     if (unrecognized.length > 0) {
@@ -47,6 +55,9 @@ export function eventsSearchQuery(
     kind, projectId, sessionId: sessionId ?? null, taskId: taskId ?? null,
     limit: limit ?? DEFAULT_EVENTS_SEARCH_CAP, offset: off,
   });
+  // Card 40f4cae9: nextOffset/total/returned are all derived from page.items.length/page.total BEFORE
+  // projection — fields narrows what's IN each event, never how many events there are (tasks_list's rule).
   const nextOffset = off + page.items.length < page.total ? off + page.items.length : null;
-  return { events: page.items, total: page.total, returned: page.items.length, offset: off, nextOffset };
+  const events = pickFields(page.items as unknown as Record<string, unknown>[], fields) as EventForensicsRow[] | Partial<EventForensicsRow>[];
+  return { events, total: page.total, returned: page.items.length, offset: off, nextOffset };
 }

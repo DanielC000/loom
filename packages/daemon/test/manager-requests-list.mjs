@@ -136,7 +136,8 @@ try {
     const tool = (await mcpClient.listTools()).tools.find((t) => t.name === "requests_list");
     const props = tool?.inputSchema?.properties ?? {};
     check("(D) requests_list has NO projectId param to widen the read", !("projectId" in props));
-    check("(D) requests_list exposes exactly state/type/includeConsumed/mine/limit/offset", ["state", "type", "includeConsumed", "mine", "limit", "offset"].every((k) => k in props) && Object.keys(props).length === 6);
+    // Card 40f4cae9: `fields` joined the param set (the tasks_list-style projection) — widened here too.
+    check("(D) requests_list exposes exactly state/type/includeConsumed/mine/limit/offset/fields", ["state", "type", "includeConsumed", "mine", "limit", "offset", "fields"].every((k) => k in props) && Object.keys(props).length === 7);
     await mcpClient.close();
   }
 
