@@ -94,22 +94,9 @@ export interface StaleBaseInfo {
   truncated: boolean;
 }
 
-/**
- * Default per-git-op ceiling for every {@link boundedGit}/{@link boundedMergeGit} call in this file that
- * doesn't override it (removeWorktree / findLandedSquashCommit / deleteBranch / mergeBranchLocked /
- * scanCanonicalReposForMergeResidue / …) — generous for a real op (sub-second normally, and this project's
- * own local-git-write default in `git/writer.ts`'s `GIT_LOCAL_TIMEOUT_MS` agrees: same 15s, for the same
- * "local plumbing op, not a network push" reasoning), but BOUNDED so a wedged child can't hang the caller.
- * This is the fix for the boot-outage: a git op on a busy/locked dir (e.g. a directory handle stuck by
- * an unrelated process) HANGS INDEFINITELY — it doesn't throw — and a try/catch only catches throws.
- * Originally introduced for boot-reconcile (Pass A: findLandedSquashCommit → finalizeMerge's
- * removeWorktree + deleteBranch; Pass B: removeWorktree), which ran these ops during daemon BOOT, so one
- * hung op blocked the whole daemon from booting, for hours, on 2026-06-03 — since generalized to every
- * bounded op in this file (board card 44c28799 added `mergeBranchLocked`'s own ~10 `git.raw` calls: the
- * squash-merge is local plumbing exactly like the rest, not a slow/legitimately-long-running gate, so the
- * same 15s ceiling that's generous for a real merge is still tight enough to fail a wedged commit hook
- * fast instead of wedging the per-repo merge mutex permanently).
- */
+// @decision 44c28799 — bound every git op in this file to 15s (see
+// docs/decisions/44c28799-bound-every-git-op-in-this-file-to-15s.md); the fix for the 2026-06-03 boot
+// outage — a hung git op never throws, so a try/catch alone can't catch it.
 const GIT_OP_TIMEOUT_MS = 15_000;
 
 /**
@@ -131,36 +118,11 @@ export interface BoundedGitDeps {
   removeDir?: (target: string, timeoutMs: number) => Promise<RemoveDirResult>;
 }
 
-/**
- * `simpleGit(repoPath, ...)` throws `GitConstructError` SYNCHRONOUSLY when `repoPath` doesn't exist or
- * isn't a directory (verified directly against the installed simple-git, with an existing-dir control
- * that constructs fine — board card 0f965ab7). Every caller of {@link boundedGit}/{@link boundedMergeGit}/
- * {@link boundedDiffGit} in this file documents its own fail-safe contract on error/timeout ("FAIL SAFE",
- * "FAILS CLOSED", "best-effort, logged not fatal", …) by wrapping the git CALLS it makes in its own
- * try/catch — but a synchronous throw from CONSTRUCTING the git handle escapes every one of those (they
- * only guard the calls made INSIDE them), rejecting the function outright instead of honouring its
- * documented contract. Two of ~nine affected callers (`worktreeHasWork`, `findLandedSquashCommit`) were
- * each individually patched to wrap their own construct call — the exact "an invariant the next caller can
- * forget" shape that let the other seven regress. Rather than add seven more per-caller wraps, this catches
- * the construct throw ONCE, here: `git` degrades to a stub whose every method returns the SAME rejected
- * promise the construct threw, so a caller's existing `await withTimeout(git.<method>(...), ...)` inside
- * its own try/catch sees this as an ordinary async git failure — indistinguishable from a timeout or a real
- * git error — and no caller needs to change. `listCheckedOutBranches` is UNCHANGED by this: it has no
- * try/catch of its own around its git call, so the (now-async, previously-sync) rejection still propagates
- * out of it uncaught, exactly as its doc says it must.
- *
- * ⚠️ **`then`/`catch`/`finally` (and any symbol-keyed property) must resolve to `undefined`, NOT a
- * rejecting function** — a `get` trap that answers EVERY property makes this stub a THENABLE (any code
- * that `await`s the `{git}` handle itself, returns it from an `async` function, or passes it to
- * `Promise.resolve()` calls `.then(resolve, reject)`). A trapped `then` here would be
- * `() => Promise.reject(rejection)` — called with `(resolve, reject)` but IGNORING both and returning its
- * own fresh (uncaptured) rejected promise instead of invoking either — so the awaiting promise would NEVER
- * SETTLE: the exact unsettling-promise hazard {@link withTimeout}'s own doc warns about, reintroduced
- * inside the fail-safe primitive meant to prevent it. No caller today awaits the handle itself (every one
- * destructures `{git}` and calls a method on it), so this was latent, not reachable — but the whole reason
- * this is fixed centrally rather than per-caller is the caller that doesn't exist yet. No real git method
- * is ever named `then`/`catch`/`finally` or symbol-keyed, so excluding them costs nothing.
- */
+// @decision 0f965ab7 — catch simple-git's synchronous construct throw once, centrally, via a stub proxy
+// (see docs/decisions/0f965ab7-catch-simplegit-construct-throw-once-centrally.md).
+// ⛔ `then`/`catch`/`finally` (symbol-keyed too) MUST resolve to `undefined`, never a rejecting function —
+// trapping them makes this proxy thenable, and a trapped `then` ignoring its (resolve,reject) args would
+// leave an awaiting promise NEVER SETTLING.
 export function gitConstructFailure<T extends object>(err: unknown): T {
   const rejection = err instanceof Error ? err : new Error(String(err));
   return new Proxy({} as T, {
@@ -353,24 +315,9 @@ export interface ProvisionDeps {
   /** Overrides {@link PROVISION_BUILD_TIMEOUT_MS} for the build step specifically — INDEPENDENT of the
    *  install's `timeoutMs`, so a test (or a slow install) can never starve the build's own budget. */
   buildTimeoutMs?: number;
-  /**
-   * Whether the monorepo BUILD phase may run at all for this worktree (default true — every existing
-   * caller stays byte-identical). A `noCommit`/read-only rig (Code Reviewer, Docs & Vault, …) never runs
-   * a build GATE — but that does NOT mean a build has zero benefit for it: a reviewer that only reads/
-   * reasons never needs `dist/`, but one that EXECUTES a test file under review does, and a build-free
-   * worktree never populates `dist/` for it to import (board card 503cd822 — a real Code Reviewer session
-   * could not run 2 of 5 changed files under review for exactly this reason, and its manager had to
-   * relay a "build and run those yourself" round-trip back to the author).
-   *
-   * So `runBuild` is NOT derived from `noCommit` alone. The spawn caller (`sessions/service.ts`) sets it
-   * to `!noCommit` for an ordinary noCommit rig with nothing yet to review (a fresh task — no diff exists
-   * yet to inspect), but for a REVIEW spawn (`reviewOfWorkerSessionId`/`reviewOfTaskId`) it additionally
-   * asks {@link reviewDiffNeedsBuild} whether the REVIEWED branch's diff touches a test-shaped file —
-   * build the review worktree if so, even though the reviewer itself never commits. INSTALL still runs
-   * unconditionally when `false` (a no-commit rig still needs `node_modules` to run/read the repo) —
-   * only the build phase is gated. Named `runBuild`, not `build`, to avoid colliding with the injectable
-   * {@link ProvisionDeps.build} function seam above.
-   */
+  /** @decision 503cd822 — `runBuild` is NOT derived from `noCommit` alone; a review spawn also checks
+   *  whether the reviewed diff touches a test file. See
+   *  docs/adr/503cd822-build-review-worktrees-only-when-the-diff-needs-it.md. */
   runBuild?: boolean;
 }
 
@@ -638,22 +585,9 @@ export async function provisionWorktreeDeps(worktreePath: string, deps: Provisio
   }
 }
 
-/**
- * Card `82b4d9ac`: START/OK/FAILED are a matched triple per phase (install, build) — the fix for the
- * old failure-only logging, which left duration and concurrency of provisioning structurally
- * unobservable (no start timestamp, no success emission at all). `console.log`/`.error` only — NOT an
- * `orchestration_event` row: {@link createWorktree}'s one call site (`sessions/service.ts` `spawnWorker`)
- * runs BEFORE a worker session row exists, so there is no `manager_session_id`/`worker_session_id`/
- * `task_id` yet to key such a row on, and inventing a parallel event shape just to carry a worktree path
- * is exactly what the card's DoD says not to do. `worktreePath` already encodes the project id as a path
- * segment ({@link WORKTREES_DIR}`/<projectId>/<taskKey>`), so it alone makes a window attributable to a
- * project without a separate field. Each line embeds explicit ISO wall-clock timestamps (not just a
- * duration) so two provisioning windows can be read DIRECTLY off the log for overlap — no proxy, no
- * inference from unrelated completion events. Purely diagnostic: `Date.now()`/`console.log` are cheap,
- * synchronous, non-blocking calls already used throughout this file (see {@link logProvisionFailure}'s
- * prior `console.error`-only form) — this adds no I/O and changes no provisioning behavior/timeout/
- * precedence.
- */
+/** @decision 82b4d9ac — START/OK/FAILED logged as a matched triple per phase, not failure-only; a plain
+ *  log, since no `orchestration_event` row exists yet to key on at this call site. See
+ *  docs/decisions/82b4d9ac-log-provisioning-start-ok-failed-as-a-matched-triple.md. */
 function logProvisionStart(stage: "install" | "build", manager: PackageManager, worktreePath: string): number {
   const startedAt = Date.now();
   // eslint-disable-next-line no-console
@@ -706,47 +640,10 @@ export function mayRecutOntoMain(aheadRaw: string): boolean {
   return Number.isFinite(ahead) && ahead === 0;
 }
 
-/**
- * For a REUSED branch (either reuse path of {@link createWorktree}), re-cut an EMPTY/STALE branch onto
- * the canonical main BEFORE handing the worktree to the worker — the fix for the stale-base bug
- * (2026-06-04): a task whose worktree/branch survives from a PRIOR attempt was re-attached at its OLD
- * base commit, so a "fresh" re-spawn silently inherited a stale tree (wrong toolchain/gate, phantom
- * pre-existing failures, a big merge-conflict reconcile).
- *
- *   - ZERO commits ahead of canonical HEAD (empty/stale branch at an old base) → `reset --hard` the
- *     worktree onto main's CURRENT sha: branch pointer AND checkout both move forward to current main.
- *   - >0 commits ahead (RECOVERY case — the branch carries real unmerged work, e.g. a cherry-picked
- *     recovery commit) → leave it EXACTLY as-is. The recovery flow RELIES on branch reuse; a branch
- *     with unmerged work is NEVER reset/re-cut. This is the load-bearing invariant.
- *
- * "Commits ahead" = `git rev-list --count <mainSha>..<branch>` (0 ⇒ safe to re-cut): commits reachable
- * from the branch but not from current main, which for an empty stale branch (tip is an ancestor of
- * main) is 0, and for a recovery branch is its real prior commit(s). The 0-check is delegated to the
- * FAIL-SAFE {@link mayRecutOntoMain} so a malformed count can never fall through to the reset. We reset
- * to a SHA, never a branch name — a worktree can't check out a branch that's checked out elsewhere
- * (canonical main lives in repoPath).
- *
- * BOUNDED (card c801d688) via {@link boundedGit}/{@link withTimeout}: every read here throws straight
- * through (no local try/catch), so a timeout is indistinguishable from any other git failure — it
- * propagates to the caller and the function returns WITHOUT ever reaching the `reset --hard` below.
- * That is the fail-safe this timeout must land on: "could not determine" (throw, no reset), never
- * "provably empty" (a timeout can NEVER synthesize a 0-ahead result that reaches {@link
- * mayRecutOntoMain}). A hung child now surfaces as a failed (visible, recoverable) spawn instead of a
- * wedged one — see the card for why that distinction matters on this hot path.
- *
- * Board card 13cc2300: for the 0-ahead path, captures whatever the worktree carries as TRACKED work
- * IMMEDIATELY BEFORE the destructive `reset --hard` below — the only moment it's still there to read —
- * and returns it as {@link DiscardedOnRecutInfo} so a caller can report what the reset just destroyed.
- * Delegates to {@link captureDiscardedOnRecut}, which shares its bound/truncation caps and FAIL-SAFE
- * posture with {@link detectReusedDirtyWorktree} (a capture hiccup reads as "nothing to report", never
- * blocking or altering the reset) but filters to TRACKED paths ONLY ({@link discardedByResetFiles}) — an
- * UNTRACKED leftover survives `reset --hard` untouched, so it is never "discarded" by one; it is still
- * reported, separately, by `createWorktree`'s own post-recut {@link detectReusedDirtyWorktree} read.
- * `undefined` covers BOTH "the branch was never recut" (>0 ahead, the early return below) and "it was
- * recut but no TRACKED path was dirty" (an untracked-only leftover, or a genuinely clean reuse) — a
- * caller cannot distinguish those two from this return value alone, and does not need to: either way
- * there is nothing destroyed to report.
- */
+// @decision 13cc2300 — re-cutting a stale (0-ahead) reused branch onto main is deliberate and destructive
+// (the fix for the 2026-06-04 stale-base bug); a >0-ahead recovery branch is NEVER reset/re-cut — the
+// recovery flow relies on branch reuse; this is load-bearing. See
+// docs/decisions/13cc2300-destructive-recut-of-a-stale-reused-branch-is-deliberate.md.
 async function recutStaleReusedBranch(
   repoPath: string, worktreePath: string, branch: string, deps: BoundedGitDeps = {},
 ): Promise<DiscardedOnRecutInfo | undefined> {
@@ -857,21 +754,9 @@ async function captureDiscardedOnRecut(worktreePath: string, deps: BoundedGitDep
  *  what changed without growing the spawn result/prompt unboundedly. */
 const STALE_BASE_FILES_MAX = 30;
 
-/**
- * Card 5150fdc2 part 1 — for a REUSED/reattached branch (either reuse path of {@link createWorktree},
- * called AFTER {@link recutStaleReusedBranch} has already had its say): is this branch's history missing
- * commits current main HEAD carries? A 0-ahead branch was already re-cut onto `mainSha` above, so this
- * only ever fires for a RECOVERY branch (>0 commits ahead of ITS OWN old base, correctly left untouched by
- * the recut's fail-safe) whose base has since fallen behind — the systematic case a mockups-first branch
- * hits: `recutStaleReusedBranch` never advances it (correctly — see {@link mayRecutOntoMain}), so a build
- * that started at the old fork point silently stays rooted there across every re-spawn.
- *
- * Uses {@link countCommitsBehind} for the "how many" signal (fail-safe to `undefined`/not-stale on any
- * error, and already BOUNDED itself); only when that's genuinely > 0 do we pay for `merge-base` + a
- * `diff --name-only` to name the fork point and what changed since — also BOUNDED (card c801d688) via
- * {@link boundedGit}/{@link withTimeout}. Any error past the count read (including a timeout) also reads
- * as "not stale" — this is purely ADVISORY and must never block or alter a spawn.
- */
+/** @decision 5150fdc2 — detect + auto-forward a reused/reattached branch whose base has fallen behind
+ *  main (a recovery branch recutStaleReusedBranch correctly left untouched); purely advisory, must never
+ *  block or alter a spawn. See docs/decisions/5150fdc2-detect-and-auto-forward-a-stale-reused-branch.md. */
 async function detectStaleBase(repoPath: string, branch: string, mainSha: string, deps: BoundedGitDeps = {}): Promise<StaleBaseInfo | undefined> {
   const behindBy = await countCommitsBehind(repoPath, branch, mainSha, deps);
   if (!behindBy || behindBy <= 0) return undefined;
@@ -945,28 +830,16 @@ async function resolveStaleBase(
  *   - neither               → fresh worktree on a new branch (-b).
  *
  * For BOTH reuse paths, an EMPTY/STALE branch (0 commits ahead of current main) is re-cut onto main
- * first (see {@link recutStaleReusedBranch}) so a fresh re-spawn doesn't inherit a stale base; a branch
- * carrying unmerged work (recovery) is left untouched. The fresh `-b` path already cuts off current
- * HEAD, so it needs no re-cut.
+ * first (see {@link recutStaleReusedBranch}); a branch carrying unmerged work (recovery) is left
+ * untouched. The fresh `-b` path already cuts off current HEAD, so it needs no re-cut.
  *
- * ⚠️ THAT RE-CUT IS DESTRUCTIVE, AND THIS IS DELIBERATE, NOT A BUG (board card 13cc2300): for the
- * worktree-dir-present reuse path, a 0-ahead branch's `reset --hard` discards any tracked edits still in
- * that worktree (e.g. a worker hard-stopped mid-edit, before its first commit) — untracked leftovers
- * survive, tracked ones do not. This trade is intentionally kept, not something this function (or its
- * caller) is meant to opt out of on its own judgement. What this function DOES do about it: {@link
- * recutStaleReusedBranch} snapshots whatever it's about to discard immediately before the reset and
- * returns it as {@link WorktreeInfo.discardedOnRecut}, so the loss is at least reportable even though the
- * files themselves are gone — see that field's own doc for how it differs from {@link
- * WorktreeInfo.reusedDirtyWorktree} (survived vs. destroyed).
+ * @decision 13cc2300 — that re-cut is DELIBERATELY destructive, not a bug; do not make it non-destructive
+ * without updating the recovery contract. See
+ * docs/decisions/13cc2300-destructive-recut-of-a-stale-reused-branch-is-deliberate.md.
  *
- * `repoKey` (multi-repo epic 49136451 phase 2) adds a REPO AXIS to the worktree dir for a NON-primary
- * repo: `WORKTREES_DIR/projectId/<repoKey>/<taskKey>` instead of `WORKTREES_DIR/projectId/<taskKey>`, so
- * a task re-targeted across repos (or two different tasks on two different registry repos) can never
- * collide on the same dir. Omitted, `undefined`, or `"primary"` keeps the ORIGINAL 2-segment path —
- * BYTE-IDENTICAL to every call before this param existed, which is load-bearing: an existing live
- * worktree/branch must survive a daemon upgrade mid-flight. The branch name (`loom/<key>`) itself gets
- * NO axis — branches are a per-repo namespace, so the same key can never collide across two distinct
- * repos; only the shared filesystem path needs disambiguating.
+ * @decision 49136451 — `repoKey` adds a repo axis to the worktree dir only for a non-primary repo; the
+ * branch name itself gets none. See
+ * docs/decisions/49136451-repokey-axis-disambiguates-worktree-dirs-across-repos.md.
  */
 export async function createWorktree(
   repoPath: string, projectId: string, taskId: string, deps: ProvisionDeps = {}, repoKey?: string | null,
@@ -1040,26 +913,10 @@ export async function createWorktree(
   // propagates exactly like any other git failure already did, just bounded instead of unbounded.
   const timeoutMs = gitDeps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
   fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
-  // Card 2fcd5eae: `prune` -> `branch --list` -> `add` is a multi-step read-modify-write against the
-  // SHARED `.git/worktrees/` admin state — serialize ONLY this sequence per canonical repo path, via the
-  // SAME lock `mergeBranch`/`GitWriter` already use (`withCanonicalIndexLock`, repo-lock.ts). Verified
-  // no re-entrancy: createWorktree's one call site (sessions/service.ts spawnWorker) is never reached
-  // while this lock is already held — `mergeBranch` (the lock's other acquirer) always fully returns
-  // (releasing the lock) before its caller goes anywhere near a spawn, and the cap-queue drain that can
-  // follow a merge's finalize is fire-and-forget, never nested inside the lock's callback. Deliberately
-  // does NOT wrap `provisionWorktreeDeps` below (a package-manager install, potentially minutes) — that
-  // would serialize every worker spawn on the daemon behind each other's install.
-  //
-  // Card 8e75ee20: unlike every OTHER bounded call in this file, these three calls run INSIDE the lock
-  // above — releasing it on a bare `withTimeout` race (which settles independent of the child) would let
-  // the NEXT queued caller start while THIS call's `git worktree add` may still be alive and still
-  // mutating `.git/worktrees/`, reopening the exact race the lock exists to close (see
-  // [[simple-git-block-timeout-is-idle-not-elapsed]] for why the instance's own `block` idle-timeout does
-  // not already prevent this for a slow-but-talking child). So: the REAL git path (no injected
-  // `gitDeps.gitFactory`) uses {@link withTimeoutKillingChild}, which kills the child on expiry and only
-  // settles once that child is confirmed dead. A test's `gitFactory` fake can't be killed (it ignores the
-  // abort signal entirely — there's no real child behind it), so that path keeps the plain {@link
-  // withTimeout} race, unchanged from before.
+  // @decision 2fcd5eae — serialize prune -> branch --list -> add per canonical repo under
+  // withCanonicalIndexLock; never wrap provisionWorktreeDeps in it. Card 8e75ee20: release the lock only
+  // once withTimeoutKillingChild confirms the child dead, never on a bare withTimeout race. See
+  // docs/decisions/2fcd5eae-serialize-prune-branch-list-add-under-the-canonical-lock.md.
   const boundedLockedRaw = (args: string[], label: string): Promise<string> => {
     if (gitDeps.gitFactory) return withTimeout(gitDeps.gitFactory(repoPath, timeoutMs).raw(args), timeoutMs, label);
     const controller = new AbortController();
@@ -1076,107 +933,25 @@ export async function createWorktree(
           : ["worktree", "add", worktreePath, "-b", branch],          // fresh task → new branch off current HEAD
         "git worktree add");
     } catch (addErr) {
-      // Card af436c99: `git worktree add`'s own SUCCESS output is entirely informational progress text —
-      // `Preparing worktree (new branch '…')` / `Preparing worktree (checking out '…')` / `HEAD is now at
-      // <sha> <subject>` — split across stdout and stderr. simple-git's default error detection flags a
-      // task as failed whenever the reported exitCode is truthy AND stderr carries ANY content at all
-      // (`error-detection.plugin.ts`'s `isTaskError`), with NO regard for what that content actually says
-      // — so an `add` that finishes genuinely fine, but whose completion-detection plugin reports a
-      // stale/misread non-zero exitCode (`completion-detection.plugin.ts` seeds `exitCode = -1`, itself
-      // truthy, until the child's `close`/`exit` events land — a known race under host contention), still
-      // throws a `GitError` whose entire message is that benign progress text. A real batch gate hit
-      // exactly this: `merge-deny-glob.mjs`'s own assertions all passed, then the process died on a
-      // `GitError` reading only `HEAD is now at 366e155 init\nPreparing worktree (new branch '…')`.
-      //
-      // Recognize ONLY that narrow shape — EVERY line of the error matches git's own known worktree-add
-      // progress format — and treat it as success once the resulting worktree is independently confirmed
-      // present and on the right branch. This deliberately does NOT swallow a genuine failure: a real
-      // `fatal:`/`error:` line, or either of `withTimeoutKillingChild`'s own wrapper suffixes ("git child
-      // killed" / "giving up … hung git child?"), never matches the benign pattern, so a killed/timed-out
-      // child and an "already used by worktree" failure fall straight through to the existing recovery +
-      // rethrow below, unchanged (see worktree-locked-residue-cleanup.mjs, which pins exactly that).
+      // @decision af436c99 — recognize git worktree add's own benign progress text (mistaken for failure
+      // by a simple-git exitCode race) as success, once independently confirmed landed; never widen the
+      // pattern to swallow a real fatal:/error: line. See
+      // docs/decisions/af436c99-recognize-benign-worktree-add-progress-text-as-success.md.
       if (isBenignWorktreeAddNoise((addErr as Error).message ?? "")
         && (await worktreeAddLanded(worktreePath, branch, gitDeps))) {
         return exists;
       }
-      // Card 1a858805: a killed `worktree add` (withTimeoutKillingChild above, card 8e75ee20) can leave
-      // `.git/worktrees/<name>/locked` (content `initializing`) behind — git's own in-progress marker,
-      // normally cleared on success, now orphaned because the child died mid-checkout. `git worktree
-      // prune` SKIPS locked records BY DESIGN (so a concurrent prune can't delete an in-progress add) —
-      // the leading prune above can never clear it (git refuses: "cannot remove a locked working tree,
-      // lock reason: initializing"). Neither could `removeWorktree()` at the time this paragraph was
-      // written; card adf03de8 (AFTER this one) has since upgraded IT to the same `-f -f` override this
-      // catch uses, so `removeWorktree()` now also clears an intact locked record on its own — see the
-      // card fdfe8a56 paragraph below, which relies on that.
+      // @decision 1a858805 — best-effort recovery of a locked .git/worktrees/ admin record left by a
+      // killed `worktree add`, via `git worktree remove -f -f` inside this same canonical lock. See
+      // docs/decisions/1a858805-recover-a-locked-worktree-admin-record-after-a-failed-add.md.
       //
-      // `git worktree remove -f -f` is git's own documented override for exactly this lock reason — the
-      // error text names it verbatim. Recover it here, best-effort, via the SAME lock-scoped
-      // `boundedLockedRaw` the three calls above use (still inside withCanonicalIndexLock's callback, so
-      // this doesn't reopen the race the lock exists to close).
+      // @decision fdfe8a56 — SKIP that recovery when the add's child isn't confirmed dead (PATH-2
+      // "giving up (hung git child?)") — racing a possibly-still-writing child is worse than leaving a
+      // self-healing locked residue behind. See
+      // docs/decisions/fdfe8a56-skip-locked-record-cleanup-on-an-unconfirmed-dead-add-child.md.
       //
-      // BOUNDED, not absolute: `worktreePath` is confirmed non-existent by the `fs.existsSync(worktreePath)`
-      // reuse-return check above (OUTSIDE this lock) before control ever reaches this lock block — so in
-      // practice this only ever targets a fresh directory Loom itself is trying to create, never an
-      // existing worktree a human deliberately locked. That check and this `add` are NOT atomic with
-      // each other (the existsSync read is outside the lock the add runs inside), so this is a narrow
-      // TOCTOU window, not a proof — accepted because `worktreePath` is deterministic PER TASK
-      // (`taskKey(taskId)`, see below) and this daemon never runs two live spawns for the same task
-      // concurrently: `sessions/service.ts` `spawnWorker` refuses a second live worker on a `taskId`
-      // already held by one (`Db.liveSessionIdForTask`, checked before any worktree/pty side effect), AND
-      // closes that check's own TOCTOU gap with a true, proven-atomic in-memory mutex
-      // (`inFlightSpawnTaskIds` — its own doc comment there has the atomicity proof: the daemon is a
-      // single process, and the claim's test-and-set has no `await` between them, so no other spawn call
-      // can interleave). So nothing else can be concurrently creating (or deliberately locking) THIS exact
-      // path while this call runs — making the realistic exposure nil, not because the window itself is
-      // closed.
-      //
-      // Two failure shapes reach this catch, both handled the same best-effort way:
-      //  - the add failed WITHOUT ever creating worktreePath (e.g. "already used by worktree at
-      //    <other path>") — the remove below is then a harmless no-op against a path that was never
-      //    registered; it must never be able to touch whatever OTHER path such an error names.
-      //  - the add left a genuine locked ghost — the remove below clears it.
-      // Either way, a failure to clean must NEVER throw past createWorktree — swallow it and rethrow the
-      // ORIGINAL add error unchanged, so a cleanup failure can never mask or replace the real one.
-      //
-      // Card fdfe8a56: `boundedLockedRaw`'s production path (`withTimeoutKillingChild`) only guarantees
-      // the child is confirmed dead on its PATH-1 settlement (the "(git child killed)" rejection). Its
-      // `giveUpTimer` fallback (PATH 2, "...giving up (hung git child?)") rejects on a bare timer with NO
-      // such confirmation — see card 963f69ab for the discriminator regex. On a PATH-2 `addErr` the add's
-      // child may STILL BE ALIVE, so running this destructive `remove -f -f` there would race a possibly-
-      // still-writing child: clear the dir, then have the still-live add re-create part of it with no
-      // admin record — a shape Code Review flagged as newly reachable BY THIS CLEANUP (not pre-existing),
-      // probability unquantified. SKIP the cleanup on PATH 2 rather than risk that race.
-      //
-      // THE TRADE, RE-PRICED against the ACTUAL residue mechanics (a follow-up review of this exact
-      // paragraph, still card fdfe8a56): an earlier draft here claimed `worktreePath` is "per-spawn
-      // unique, never reused" — FALSE. `worktreePath` is `path.join(WORKTREES_DIR, projectId, [repoKey,]
-      // taskKey(taskId))`, a pure deterministic function of `taskId` (see `taskKey` above) — a
-      // respawn/retry/recycle on the SAME task lands on the IDENTICAL path, straight into the
-      // `fs.existsSync(worktreePath)` reuse branch above (its own doc: "a hard-stopped or rejected-merge
-      // attempt on the same task"). So the residue absolutely CAN be reused into. What actually happens
-      // then was traced empirically (real git, not a mock — not just read), for both shapes:
-      //   - SKIP leaves the admin record INTACT whenever the child dies without our cleanup racing it — a
-      //     locked-but-otherwise-valid worktree. A later respawn's reuse path works completely normally
-      //     against it: createWorktree succeeds, and a genuinely-missing/leftover file surfaces via the
-      //     existing `reusedDirtyWorktree` reporting rather than anything throwing — `locked` only ever
-      //     blocks `worktree remove`/`prune`, never ordinary git ops run inside the worktree (verified:
-      //     `reset --hard`/`status` both succeed against a still-locked worktree). It's not a permanent
-      //     leak either: `removeWorktree()` (this file) clears an intact locked residue on its own, no
-      //     manual step, confirmed by direct call — see the paragraph above.
-      //   - NOT skipping risks the OTHER shape: our own `remove -f -f` racing the still-alive add, wiping
-      //     the admin record while the child keeps writing, leaving `worktreePath` populated but with NO
-      //     `.git` link at all. Confirmed by direct call: a later respawn's reuse branch then throws
-      //     "fatal: not a git repository" — LOUD, not silent (the canonical repo's own HEAD stays
-      //     untouched in this test; nothing escaped upward into an unrelated repo) — but createWorktree has
-      //     no fallback to detect and recover from THIS shape, so that task's respawns stay broken until a
-      //     human deletes the stray directory by hand.
-      // So SKIP trades a residue that self-heals through `removeWorktree()`'s ordinary lifecycle for one
-      // that — only if the race actually manifests — needs a human to notice and clear it. And skipping is
-      // what makes that second, worse shape structurally UNREACHABLE via our own code: it can only occur
-      // through OUR destructive call racing the child; leaving the child alone never produces it. PATH 2
-      // has never been observed firing in this fixture (0/45, 0/65 local trials — an upper bound on those
-      // approaches, not a rate, not proof it's unreachable), so this trade is still made on the mechanism
-      // argument, now priced against the TRUE reuse-path behavior rather than an assumed one.
+      // ⛔ A cleanup failure here must NEVER throw past createWorktree or mask the ORIGINAL add error —
+      // swallow it and rethrow addErr unchanged either way.
       const isPath2GiveUp = /giving up \(hung git child\?\)/.test((addErr as Error).message ?? "");
       if (!isPath2GiveUp) {
         await boundedLockedRaw(["worktree", "remove", worktreePath, "-f", "-f"], "git worktree remove -f -f (add-failure cleanup)")
@@ -1277,24 +1052,9 @@ export async function branchExistsInRepo(repoPath: string, branch: string, deps:
  *  measured 275-branch backlog (card 09f268a5) — this is headroom, not a tuned-for-today number. */
 const DELETE_BRANCHES_CHUNK_SIZE = 200;
 
-/**
- * Delete MANY branches in as few git invocations as possible — measured for card 09f268a5's 275-branch
- * backlog at ~14x faster than N sequential {@link deleteBranch} calls (14.1s → 0.99s on this host), because
- * each `deleteBranch` call is a separate Windows subprocess spawn and spawn cost dominates at this N. A
- * SEPARATE function from `deleteBranch`, which is left byte-identical — it has other callers (finalizeMerge)
- * this card must not perturb.
- *
- * One batched `git branch -D <n1> <n2> ...` per {@link DELETE_BRANCHES_CHUNK_SIZE}-sized chunk. Git deletes
- * every branch it CAN in one invocation and exits non-zero if ANY of them failed (checked out elsewhere
- * since the caller's own `listCheckedOutBranches` read, concurrently removed, a locked ref, …) — so a
- * naive "the whole chunk succeeded or none of it did" read would (a) undercount `deleted` for branches
- * that in fact WERE removed, and (b) abandon ~199 good deletions over one bad ref. On a chunk failure this
- * falls back to per-branch {@link deleteBranch} calls for THAT CHUNK ONLY (idempotent — a branch the failed
- * batch already removed is a harmless no-op there), verifying each via {@link branchExistsInRepo} so the
- * returned `deleted` list — and therefore a caller's reclaimed-count — reflects what ACTUALLY happened,
- * never an assumption. The slow per-branch path only ever runs on the rare failure; the common case keeps
- * the full batched speedup.
- */
+/** @decision 09f268a5 — batch `git branch -D` for large deletion backlogs (~14x faster at 275 branches);
+ *  fall back to verified per-branch deletes only within a failed chunk, never abandon the whole chunk.
+ *  See docs/decisions/09f268a5-batch-branch-deletion-for-large-backlogs.md. */
 export async function deleteBranches(repoPath: string, branches: string[], deps: BoundedGitDeps = {}): Promise<{ deleted: string[] }> {
   const deleted: string[] = [];
   for (let i = 0; i < branches.length; i += DELETE_BRANCHES_CHUNK_SIZE) {
@@ -1336,26 +1096,9 @@ export interface NestedRepoScanResult {
   truncated: boolean;
 }
 
-/**
- * Find nested git repositories inside a worker worktree (card b6d41db1) — a subdirectory carrying its
- * OWN `.git` (dir or file), distinct from the worktree's own root git linkage. Every worker worktree
- * ALWAYS has expected ephemeral untracked content (`node_modules`, `dist`, `.turbo`, …) — that's WHY
- * removeWorktree force-removes it — but a nested `.git` marks something else: a cloned repo, which can
- * hold real unrecoverable work (unpushed branches). This is the precise signal that distinguishes that
- * valuable class from ordinary build/dep noise.
- *
- * ASYNC + BOUNDED: walks with `fs.promises.readdir` (never a synchronous recursive walk that could block
- * the event loop) and stops after {@link NESTED_REPO_SCAN_MAX_ENTRIES} visited entries — signalling
- * `truncated:true` when it does, so a caller can distinguish "confirmed clean" from "gave up partway"
- * (CR finding, card b6d41db1 follow-up: a cap that silently returns a partial `repos` list lets a wide
- * enough build-output sibling exhaust the budget before the walk ever reaches a real nested repo,
- * re-opening the exact data-loss hole this scan exists to close). Never descends into the known
- * build/dep noise dirs in {@link NESTED_REPO_SCAN_SKIP_DIRS} (bulk of most trees, never a legitimate
- * nested-repo location) or into a repo it just found (no need to look inside a clone for further
- * clones). Fails OPEN on a read error for any one directory (permissions, a race with concurrent
- * cleanup) — a scan glitch on ONE subdirectory must never itself block a legitimate merge; it simply
- * skips what it couldn't read (distinct from hitting the entry cap, which DOES signal `truncated`).
- */
+/** @decision b6d41db1 — scan a worker worktree for nested git repos before removal; a truncated scan
+ *  MUST fail safe (treated as found), never as "confirmed clean". See
+ *  docs/decisions/b6d41db1-scan-worker-worktrees-for-nested-git-repos.md. */
 export async function findNestedGitRepos(worktreePath: string): Promise<NestedRepoScanResult> {
   const repos: string[] = [];
   let visited = 0;
@@ -1423,22 +1166,9 @@ function killRemoveChild(child: ChildProcess): void {
   try { child.kill("SIGKILL"); } catch { /* already gone / no permission */ }
 }
 
-/**
- * KILLABLE directory removal — the fix for bd9fc808's leak. The prior backstop (`fs.promises.rm`) runs
- * on the libuv THREADPOOL; a wedged directory handle makes that call hang past any timeout we impose
- * from JS (`withTimeout` only stops US waiting — the detached call keeps occupying a threadpool slot
- * FOREVER, and there is no API to cancel an in-flight threadpool task). With only 4 threads by default,
- * a handful of wedged dirs starves fs/dns/crypto process-wide (the incident this task exists to fix).
- *
- * This instead runs the removal in a SEPARATE OS PROCESS. A wedged handle blocks only that child, never
- * a daemon thread, and on timeout we FORCE-KILL it (`killRemoveChild`) — an OS-level TerminateProcess/
- * SIGKILL that works regardless of what the child is blocked on, unlike a threadpool task with no kill
- * primitive at all. A killed child releases everything it held, and every NORMAL path (found already-gone
- * / removed / clean failure / killed) RESOLVES (never settles false-negative) within `timeoutMs` — the
- * function is not designed to reject. (A synchronous throw from an injected `spawnChild` seam would still
- * propagate as a rejection via the Promise executor; the real default spawn never throws synchronously,
- * and callers already wrap this in a `.catch` for exactly that belt-and-suspenders reason.)
- */
+/** @decision bd9fc808 — run directory removal in a killable CHILD PROCESS, never the libuv threadpool (a
+ *  wedged handle there leaks a threadpool slot forever). See
+ *  docs/decisions/bd9fc808-killable-child-process-removal-replaces-threadpool-rm.md. */
 export function killableRemoveDir(
   target: string, timeoutMs: number, spawnChild: SpawnRemoveChild = defaultSpawnRemoveChild,
 ): Promise<RemoveDirResult> {
@@ -1473,73 +1203,14 @@ const REMOVE_DIR_CLEAN_RETRY_DELAY_MS = 500;
  * Remove a worker's worktree and prune the admin record. Branch deletion (after merge) is
  * #16's concern, not here.
  *
- * UNLOCKED BY DESIGN, not an oversight (board card c6a6f405 item 2 — filed as a reviewer QUESTION, not
- * a data-loss finding, and left that way here). `git worktree remove -f -f` + the trailing `prune`
- * below mutate the SAME shared `.git/worktrees/` admin state {@link createWorktree} takes {@link
- * withCanonicalIndexLock} for (card 2fcd5eae's "prune → branch --list → add is a multi-step
- * read-modify-write" rationale) — but this function does NOT take that lock, and runs concurrently with
- * spawns (`finalizeMerge`, boot-reconcile Pass B, the wedge sweep). Judged safe today because git's own
- * `locked`/`initializing` admin marker makes a concurrent `prune` SKIP an in-flight `add` BY DESIGN —
- * the realistic overlap this function can actually race against.
- * ⚠️ THE LOCK IS NOT RE-ENTRANT: this function's one caller (`SessionService`'s worktree-GC path,
- * sessions/service.ts) never holds it, and `finalizeMerge` only calls this function AFTER `mergeBranch`
- * has fully released the lock — but a FUTURE caller invoking this from inside an already-held
- * `withCanonicalIndexLock` block would DEADLOCK. Before wrapping this call in the lock reflexively,
- * confirm no caller holds it first, or give this function (and its callers) a re-entrancy story.
+ * @decision c6a6f405 — deliberately UNLOCKED (not an oversight): do not wrap this in
+ * withCanonicalIndexLock reflexively — the lock is NOT re-entrant, and a caller that already holds it
+ * would deadlock. See docs/decisions/c6a6f405-removeworktree-stays-unlocked-by-design.md.
  *
- * Windows handle-release race: when a worker is hard-stopped just before its worktree is removed
- * (the merge path — confirmWorkerMerge), node-pty's exit event fires when the process SIGNALS
- * exit, but the OS releases the worktree's directory handle a beat later. `git worktree remove`
- * then fails ("failed to delete '…': Permission denied") and is NOT idempotent — it can drop the
- * worktree's admin record while leaving the dir on disk, so retrying the same command fails with
- * "is not a working tree". So: attempt the clean git removal once (best-effort), then back it up
- * with the killable filesystem removal below, then prune any stale admin record. When nothing holds
- * the dir (merge-gate's no-pty rows) the git removal succeeds and the backstop is a no-op.
- *
- * BOUNDED (priority reliability fix): a busy/locked worktree dir makes `git worktree remove` HANG
- * INDEFINITELY rather than throw, and boot-reconcile's Pass B calls this DURING daemon boot — so one
- * stuck removal blocked the whole daemon from booting for hours (2026-06-03). Both git ops now run on
- * a simpleGit configured with a `block` timeout (kills a no-output hung child) AND through a
- * {@link withTimeout} race, so the worst case is a BOUNDED failure within ~{@link GIT_OP_TIMEOUT_MS}
- * — the dir is left on disk for a later GC (boot-reconcile Pass B), NEVER an infinite hang. The
- * git instance/timeout is injectable via {@link BoundedGitDeps} so a test can prove the bound.
- *
- * THE FILESYSTEM BACKSTOP is now KILLABLE ({@link killableRemoveDir}) instead of the un-killable
- * threadpool `fs.promises.rm` that leaked libuv threadpool threads on a wedged dir (bd9fc808, reverted
- * 2026-07-03 after it stuck the daemon — see the docstring on {@link killableRemoveDir}). Each attempt
- * is additionally wrapped in {@link withTimeout} so an INJECTED test seam that never resolves is still
- * bounded (the real `killableRemoveDir` always resolves on its own); that outer bound fails SAFE by
- * treating a never-settling seam as WEDGED (`killed:true`), never as a clean reject — a hang must never
- * be looped, injected or real. Two distinct failure shapes:
- *   - a CLEAN reject (settled, `killed:false`) — a transient EBUSY/EPERM handle-lag — gets up to
- *     {@link REMOVE_DIR_CLEAN_RETRY_ATTEMPTS} short, bounded retries (it SETTLES, so it never risks
- *     hanging a thread; this is the ONLY case worth retrying in-session).
- *   - a KILLED timeout (`killed:true`) — genuinely wedged — is NEVER retried HERE, in this one call (a
- *     fast in-process loop on a hang would be exactly the bd9fc808 defect again). The caller
- *     (SessionService) instead tracks it and retries it on a SLOW cadence (once per boot + a
- *     low-frequency background sweep, tens of minutes apart) — most wedges are eventually resolvable (a
- *     held handle releases, a junction-choked `fs.rm` case a plain `rmdir` clears), so it is NOT
- *     abandoned; only a long give-up bound stops the retries.
- * Returns `{removed, wedged}` so the caller can decide how to track/retry it, without re-deriving the
- * same `fs.existsSync` check itself.
- *
- * Card 79b8d8a9: uses `-f -f` (not a single `--force`), git's own documented override for a LOCKED
- * admin record (e.g. the `.git/worktrees/<name>/locked` residue a killed `worktree add` can leave —
- * card 1a858805). Against a locked record, single `--force` refuses outright ("cannot remove a locked
- * working tree"); the filesystem backstop below still deletes the directory anyway, but the trailing
- * `prune` SKIPS locked records BY DESIGN, so the admin record survived forever and the next `worktree
- * add` at that path failed with "is a missing but locked worktree" — a real, verified bug this closes.
- *
- * This is judged SAFE, not merely convenient, because the second `-f` adds NO destructive capability
- * beyond what this function's own filesystem backstop already exercises today: (1) git's SINGLE
- * `--force` already deletes tracked-dirty and untracked files on an ordinary (non-locked) worktree —
- * verified against real git — so `-f -f` changes nothing for that, the overwhelmingly common, case
- * (the second force bit only ever gates the LOCKED/corrupted-HEAD check, per git's own semantics); and
- * (2) even when the git removal fails for ANY reason (locked or not), the filesystem backstop below
- * runs UNCONDITIONALLY and deletes the directory's contents regardless of dirty/uncommitted state — so
- * a locked-and-dirty worktree ALREADY loses its uncommitted files today, via the backstop, before this
- * change. `-f -f` therefore does not create a new way to lose work; it only makes git's own admin
- * bookkeeping match what the backstop already does to the filesystem, closing the ghost-record gap.
+ * @decision 79b8d8a9 — bounded, best-effort git removal (`-f -f`, closing a Windows handle-release race)
+ * backed by the killable filesystem removal; a KILLED (wedged) attempt is never retried here — only a
+ * clean reject gets short in-session retries. See
+ * docs/decisions/79b8d8a9-remove-worktree-force-force-clears-locked-admin-records-safely.md.
  */
 export async function removeWorktree(
   repoPath: string,
@@ -1581,23 +1252,9 @@ export async function removeWorktree(
   return { removed, wedged };
 }
 
-/**
- * Is `branch` already fully merged into `base` (default: the repo's current HEAD — the canonical
- * branch confirmWorkerMerge's `git merge` lands onto)? ⚠️ Card 9cb0287a (2026-08-29): boot-reconcile
- * Pass A no longer calls this — under squash it now requires POSITIVE proof of a landed squash via the
- * `Loom-Worker-Branch` trailer instead (see {@link worktreeHasWork}'s own doc for the full history). This
- * function currently has ZERO production call sites (test-only); kept for now pending card 0f965ab7's
- * review of the fail-safe siblings that reference it. Detected via `git branch --merged <base> --list
- * <branch>` membership — exit-0 with a
- * non-empty line only when the branch both exists AND is fully reachable from `base`. (We deliberately
- * do NOT use `merge-base --is-ancestor`: simple-git's raw doesn't reject on its exit-1 "not-ancestor"
- * signal, so a try/catch around it reads every branch as merged.) Returns false when the branch ref
- * is gone (a completed merge deletes it), which keeps the reconcile idempotent.
- *
- * BOUNDED: runs through the block-timeout + {@link withTimeout} guard, same as every other reconcile op;
- * a timeout-throw is caught and read as "not merged" (false) — the SAFE default a caller can rely on
- * without itself acting on a bad signal.
- */
+/** @decision 9cb0287a — test-only since boot-reconcile switched to positive squash-trailer proof
+ *  ({@link worktreeHasWork}); kept pending card 0f965ab7's review of its fail-safe siblings. See
+ *  docs/decisions/9cb0287a-isbranchmerged-is-test-only-since-the-squash-trailer-proof.md. */
 export async function isBranchMerged(repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {}): Promise<boolean> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
@@ -1607,33 +1264,9 @@ export async function isBranchMerged(repoPath: string, branch: string, base = "H
   }
 }
 
-/**
- * Resolve the repo's MAINLINE branch name — independent of `HEAD`. `HEAD` is NOT reliably mainline in
- * this repo: the human-only `git_checkout` writer (`git/writer.ts`) can switch the PRIMARY checkout onto
- * an arbitrary existing branch, and the owner uses it. Any caller that needs "is this branch merged into
- * mainline" (not "merged into whatever's currently checked out") must anchor on this, not `HEAD` — see
- * card 09f268a5, where a `--merged HEAD` sweep would have silently deleted branches merged into a
- * temporarily-checked-out non-mainline branch instead — an unrecoverable-by-the-user data loss on exactly
- * the destructive op this exists to make safe.
- *
- * Reads the LOCAL `refs/remotes/origin/HEAD` symbolic ref (set at clone time / by `git remote set-head`)
- * — a pure local ref read, never a network call (unlike `git remote show origin`, which can contact the
- * remote and hang). FAILS CLOSED to `null` (no guessed fallback — never assume "main") when the ref is
- * absent or the read errors/times out; every caller MUST treat `null` as "cannot determine mainline, skip
- * this repo" rather than falling back to `HEAD`.
- *
- * KNOWN GAP, not a bug: `refs/remotes/origin/HEAD` is written by `git clone` (or `git remote set-head`),
- * NEVER by plain `git init` — and Loom's own `project_init` (see `CLAUDE.md`) creates brand-new projects
- * with `git init`, no remote. Such a repo always resolves `null` here, so a caller like card 09f268a5's
- * branch-ref sweep skips it FOREVER — a local-only project's `loom/*` branches simply never get
- * automatically reclaimed. That's the correct, deliberate trade-off (an inert sweep beats a wrong one),
- * but it must stay VISIBLE to whoever's debugging "why didn't my branches get cleaned up" — a caller
- * skipping on `null` must log it distinguishably from "swept, nothing to do", not skip silently. DO NOT
- * "fix" this by falling back to a guessed `"main"` when the ref is missing — that reintroduces the exact
- * anchor hazard this function exists to close (see card 09f268a5's regression scenario F: a repo whose
- * primary checkout is parked on a non-`main` branch would then have `--merged` computed against the WRONG
- * target and silently destroy real, un-merged-into-mainline work).
- */
+// @decision 09f268a5 — resolve mainline via refs/remotes/origin/HEAD, never HEAD itself (which can be
+// parked on an arbitrary branch here); FAILS CLOSED to null with NO guessed "main" fallback — see
+// docs/decisions/09f268a5-batch-branch-deletion-for-large-backlogs.md.
 export async function resolveMainlineBranch(repoPath: string, deps: BoundedGitDeps = {}): Promise<string | null> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
