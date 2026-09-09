@@ -22,9 +22,21 @@
 // byte-identical to a session with no injection at all (DoD-2). Always exits 0: a bug in this script
 // must never block or alter the underlying `Read` result.
 //
-// On a hit, writes a JSON object to stdout carrying the record via BOTH `systemMessage` and PostToolUse
-// `hookSpecificOutput.additionalContext` (whichever the running Claude honors) — the same non-blocking
-// advisory shape `vault-lint.mjs` already uses. This hook never blocks or denies a `Read`.
+// On a hit, writes a JSON object to stdout carrying the record via PostToolUse
+// `hookSpecificOutput.additionalContext` ONLY. This hook never blocks or denies a `Read`.
+//
+// FIELD DETERMINATION (card da723d41, 2026-09-09) — do not reintroduce a `systemMessage` copy: a prior
+// version of this script emitted the record via BOTH `systemMessage` and `hookSpecificOutput.
+// additionalContext`, "whichever the running Claude honors" — pure hedging, never actually checked. It
+// was checked here, empirically: a real `claude` process, wired via a scratch `.claude/settings.json`
+// PostToolUse hook to a synthetic script emitting distinct marker strings in each field, was asked to
+// read a file and report verbatim any hook text it saw in its own context. Across three trials (both
+// fields set, the two field values SWAPPED to rule out a labeling/ordering artifact, and `systemMessage`
+// set ALONE with no `additionalContext`) the model's context carried the `additionalContext` value every
+// time and NEVER the `systemMessage` value — including the isolation trial, where `systemMessage` alone
+// produced zero injected text. `systemMessage` is a UI-only field (a warning surfaced to the human at the
+// terminal); it never reaches the model. Emitting both cost 100% overhead on every injection for a field
+// the model never sees.
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
@@ -37,7 +49,15 @@ const ANCHOR_RE = /@decision\s+([0-9a-f]{8})\b/gi;
 // its existing convention nests each report under its own `<id>-<slug>/` directory (see any
 // docs/investigations/*/findings.md), not a flat file.
 const FLAT_STORES = ["adr", "decisions"];
-const PER_RECORD_MAX_BYTES = 4000; // a single oversized record is truncated WITH an explicit signal, never silently.
+// A single oversized record is truncated WITH an explicit signal, never silently. Raised from 4000 to
+// 6000 (card da723d41, 2026-09-09): the three largest records in this repo's docs/adr at the time (4,515 /
+// 4,475 / 4,017 bytes) all exceeded the old 4000 cap and were silently truncating on every injection —
+// 6000 clears the whole then-current set with headroom. Record authors: if a NEW record in docs/adr or
+// docs/decisions exceeds this cap, it will be truncated (head+tail kept, an explicit marker names the cut
+// and the full path to read directly) — this is a real, load-bearing limit, not just an implementation
+// detail; keep records under it, or accept the truncation and expect it may be re-raised. See CLAUDE.md's
+// "Comment taxonomy — the source-vs-record split" for the docs/adr and docs/decisions convention.
+const PER_RECORD_MAX_BYTES = 6000;
 const TOTAL_MAX_BYTES = 12000; // once the total for this call would exceed this, further WHOLE records are dropped (never partially).
 const BLOCK_EXPAND_MAX = 40; // bounds the blank-line-delimited "enclosing block" upward lookback below.
 const DEFAULT_READ_LIMIT = 2000; // the real Read tool's own default line cap when offset/limit are omitted.
@@ -314,7 +334,7 @@ async function main() {
       + omitted.map((o) => relPath(repoRoot, o.recordPath)).join(", ");
     for (const { id } of omitted) delivered.add(id);
     saveDelivered(dedupeFile, delivered);
-    await emit({ systemMessage: note, hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: note } });
+    await emit({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: note } });
     return;
   }
 
@@ -327,7 +347,6 @@ async function main() {
   const msg = `Complete decision record(s) governing this range (injected in full — never a positional fragment):\n\n${sections.join("\n\n---\n\n")}${omittedNote}`;
 
   await emit({
-    systemMessage: msg,
     hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: msg },
   });
 }

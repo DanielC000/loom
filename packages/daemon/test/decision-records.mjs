@@ -22,6 +22,9 @@
 //   N3: id resolution requires a real boundary after the id (no bare-prefix false match) and is
 //       deterministic.
 //   N4: a single line carrying two anchors yields both ids.
+// Plus card da723d41 (2026-09-09): the payload carries the record via `hookSpecificOutput.
+// additionalContext` ONLY — no `systemMessage` copy (that field is never fed to the model; see the
+// asset's own header for the empirical determination) — and the per-record byte cap was raised.
 // Plus card 5244adc2 (the remaining half of 661b7d46 DoD-2's "no overhead"): writeSessionSettings wires
 // the Read PostToolUse hook group ONLY when its `repoPath` arg resolves to a project carrying at least
 // one of the three record stores; `repoPath` omitted stays byte-identical to the old always-wired default.
@@ -53,8 +56,8 @@ fs.mkdirSync(path.join(REPO, "docs", "investigations", "bbbbbbbb-a-real-investig
 fs.writeFileSync(path.join(REPO, "docs", "adr", "aaaaaaaa-adr-store.md"), "# ADR aaaaaaaa\n\nAn immutable decision record, resolved from docs/adr.\n");
 fs.writeFileSync(path.join(REPO, "docs", "investigations", "bbbbbbbb-a-real-investigation", "findings.md"), "# bbbbbbbb — findings\n\nAn investigation report, resolved from the nested docs/investigations convention.\n");
 fs.writeFileSync(path.join(REPO, "docs", "decisions", "dddddddd-decisions-store.md"), "# Decision dddddddd\n\nA mutable decision record, resolved from docs/decisions.\n");
-// deadbeef: deliberately oversized (> the script's 4000-byte per-record cap).
-fs.writeFileSync(path.join(REPO, "docs", "decisions", "deadbeef-oversized.md"), "# deadbeef\n\n" + "x".repeat(5000) + "\n");
+// deadbeef: deliberately oversized (> the script's 6000-byte per-record cap).
+fs.writeFileSync(path.join(REPO, "docs", "decisions", "deadbeef-oversized.md"), "# deadbeef\n\n" + "x".repeat(9000) + "\n");
 // four ~3500-byte records that individually fit the per-record cap but together exceed the shared
 // per-call budget (3 * ~3550 fits under 12000; a 4th does not) — for the drop-whole-record case.
 for (const id of ["e0000001", "e0000002", "e0000003", "e0000004"]) {
@@ -132,9 +135,20 @@ try {
   // block, still gets the complete record (the "enclosing block" scope control, card 661b7d46). ---
   const a1 = runHook("s1", lineOf.aaaaaaaa + 2, 3); // a few lines AFTER the anchor, still in block A
   check("DoD-1: read inside block A (not the anchor line itself) injects the complete aaaaaaaa record",
-    !!a1 && /An immutable decision record, resolved from docs\/adr\./.test(a1.systemMessage));
+    !!a1 && /An immutable decision record, resolved from docs\/adr\./.test(a1.hookSpecificOutput.additionalContext));
   check("DoD-1: the injected record is the FULL file text, not a fragment",
-    !!a1 && a1.systemMessage.includes("# ADR aaaaaaaa"));
+    !!a1 && a1.hookSpecificOutput.additionalContext.includes("# ADR aaaaaaaa"));
+
+  // --- card da723d41 regression: a record is emitted EXACTLY ONCE, via `hookSpecificOutput.
+  // additionalContext` only — never a duplicate `systemMessage` copy of the same body (the defect this
+  // card fixed: the payload used to carry the identical record text in BOTH fields, "whichever the
+  // running Claude honors", doubling every injection's byte cost for a field never actually read by the
+  // model — see the asset's own header for the empirical determination). ---
+  check("card da723d41: the payload carries NO systemMessage field at all",
+    !!a1 && !("systemMessage" in a1));
+  check("card da723d41: hookSpecificOutput.additionalContext is the ONLY place the record body appears "
+    + "(top-level JSON keys are exactly hookSpecificOutput)",
+    !!a1 && Object.keys(a1).length === 1 && Object.keys(a1)[0] === "hookSpecificOutput");
 
   // --- DoD-1 (investigations convention) + DoD-5 positive control: bbbbbbbb resolves (nested dir), and
   // this SAME call also carries an anchor (cccccccc) that has NO record anywhere — proving the
@@ -142,10 +156,10 @@ try {
   // very same hook invocation (not just an isolated always-empty result). ---
   const a2 = runHook("s2", bAndCRange[0], bAndCRange[1]); // spans both bbbbbbbb (block B) and cccccccc (block C)
   check("DoD-1: nested docs/investigations/<id>-*/findings.md convention resolves",
-    !!a2 && /An investigation report, resolved from the nested docs\/investigations convention\./.test(a2.systemMessage));
+    !!a2 && /An investigation report, resolved from the nested docs\/investigations convention\./.test(a2.hookSpecificOutput.additionalContext));
   check("DoD-5: an anchored id with no record anywhere is silently skipped (never a broken partial), "
     + "in the SAME call that correctly resolved a sibling id — proves the miss is a real absence, not a broken check",
-    !!a2 && !a2.systemMessage.includes("cccccccc"));
+    !!a2 && !a2.hookSpecificOutput.additionalContext.includes("cccccccc"));
 
   // --- DoD-2: a read entirely inside block C (no anchor in range or its own block) is a byte-identical
   // no-op — AND, since the read is separated by a blank line from block B's own anchors, this also
@@ -182,10 +196,10 @@ try {
   const bigResult = spawnSync(process.execPath, [DECISION_RECORDS_SCRIPT, DEDUPE_DIR], { input: JSON.stringify(bigPayload), encoding: "utf8" });
   const a4b = (bigResult.stdout || "").trim() ? JSON.parse(bigResult.stdout) : null;
   check("default (no offset/limit) read: an anchor WITHIN the default 2000-line window is injected",
-    !!a4b && a4b.systemMessage.includes("Within the default window."));
+    !!a4b && a4b.hookSpecificOutput.additionalContext.includes("Within the default window."));
   check("default (no offset/limit) read: an anchor PAST the default 2000-line window is NOT injected "
     + "(the real Read tool never returned it, so injecting it would misattribute context the agent never saw)",
-    !!a4b && !a4b.systemMessage.includes("0fff2000"));
+    !!a4b && !a4b.hookSpecificOutput.additionalContext.includes("0fff2000"));
 
   // --- DoD-3: per-session dedupe. ---
   const dedupeSession = "s-dedupe";
@@ -201,17 +215,17 @@ try {
   const deadbeefLine = fs.readFileSync(SRC, "utf8").split(/\r?\n/).findIndex((l) => l.includes("deadbeef")) + 1;
   const a5 = runHook("s-trunc", deadbeefLine, 1);
   check("DoD-4a: an oversized record is injected truncated, with an explicit TRUNCATED marker naming the byte cap",
-    !!a5 && a5.systemMessage.includes("[TRUNCATED at 4000 bytes"));
-  check("DoD-4a: the truncated body itself is capped near the stated limit, not the full 5000+ bytes",
-    !!a5 && a5.systemMessage.length < 4600);
+    !!a5 && a5.hookSpecificOutput.additionalContext.includes("[TRUNCATED at 6000 bytes"));
+  check("DoD-4a: the truncated body itself is capped near the stated limit, not the full 9000+ bytes",
+    !!a5 && a5.hookSpecificOutput.additionalContext.length < 6800);
 
   // --- DoD-4b: several records competing for one call's shared budget — the ones that fit are injected
   // COMPLETE (never partially truncated to fit more in), and the rest are dropped WHOLE and named. ---
   const a6 = runHook("s-budget", blockEStart, blockESpan); // all four e000000N anchors in one range
   check("DoD-4b: at least one budget-competing record is injected in full (not truncated)",
-    !!a6 && /# e0000001/.test(a6.systemMessage) && !a6.systemMessage.includes("[TRUNCATED"));
+    !!a6 && /# e0000001/.test(a6.hookSpecificOutput.additionalContext) && !a6.hookSpecificOutput.additionalContext.includes("[TRUNCATED"));
   check("DoD-4b: at least one record is explicitly named as omitted for shared budget, not silently dropped",
-    !!a6 && /omitted for byte budget/.test(a6.systemMessage) && /e000000\d-budget\.md/.test(a6.systemMessage));
+    !!a6 && /omitted for byte budget/.test(a6.hookSpecificOutput.additionalContext) && /e000000\d-budget\.md/.test(a6.hookSpecificOutput.additionalContext));
 
   // --- B1 regression: block expansion is upward-only. A DENSE file (no blank lines anywhere) with an
   // anchor at line 30 — a read strictly BEFORE it must NOT reach it via downward expansion, and must NOT
@@ -232,7 +246,7 @@ try {
   const b1Later = runHookOnFile(DENSE_SRC, b1Session, 25, 15); // lines 25-39, actually contains line 30
   check("B1: the SAME session's later read that actually contains the anchor still gets it "
     + "(not falsely marked delivered by the earlier, too-early read)",
-    !!b1Later && b1Later.systemMessage.includes("Governs the block starting near line 30."));
+    !!b1Later && b1Later.hookSpecificOutput.additionalContext.includes("Governs the block starting near line 30."));
 
   // --- B2 regression: byte-accurate truncation on MULTI-BYTE content. The prior slice(0, 4000) cut
   // UTF-16 CODE UNITS, so 4000 chars of 3-byte em dashes produced 12000 BYTES — 3x the stated per-record
@@ -243,23 +257,23 @@ try {
   fs.writeFileSync(B2_SRC, "// @decision b2b2b2b2 — multi-byte record\n");
   const b2Result = runHookOnFile(B2_SRC, "s-b2", 1, 1);
   check("B2: a multi-byte-heavy oversized record is INJECTED, truncated (not dropped whole for exceeding the shared budget)",
-    !!b2Result && /# b2b2b2b2/.test(b2Result.systemMessage) && !/too large to inject/.test(b2Result.systemMessage));
+    !!b2Result && /# b2b2b2b2/.test(b2Result.hookSpecificOutput.additionalContext) && !/too large to inject/.test(b2Result.hookSpecificOutput.additionalContext));
   check("B2: it carries the explicit TRUNCATED marker (never a silent cut)",
-    !!b2Result && b2Result.systemMessage.includes("[TRUNCATED at 4000 bytes"));
+    !!b2Result && b2Result.hookSpecificOutput.additionalContext.includes("[TRUNCATED at 6000 bytes"));
   check("B2: the WHOLE emitted message (not just this one record) stays within the shared 12000-byte budget "
     + "— proof the per-record truncation is measured in real bytes, not UTF-16 code units",
-    !!b2Result && Buffer.byteLength(b2Result.systemMessage, "utf8") <= 12000);
+    !!b2Result && Buffer.byteLength(b2Result.hookSpecificOutput.additionalContext, "utf8") <= 12000);
 
   // --- N2 regression: truncation must keep HEAD AND TAIL. This repo's own convention puts a caveat/bound
   // at the END of a comment — a head-only cut keeps the claim and silently drops its qualifier. ---
-  const n2Body = "HEAD-CLAIM-MARKER\n" + "z".repeat(6000) + "\nTAIL-CAVEAT-MARKER";
+  const n2Body = "HEAD-CLAIM-MARKER\n" + "z".repeat(9000) + "\nTAIL-CAVEAT-MARKER";
   fs.writeFileSync(path.join(REPO, "docs", "decisions", "22222220-headtail.md"), `# 22222220\n\n${n2Body}\n`);
   const N2_SRC = path.join(REPO, "n2.ts");
   fs.writeFileSync(N2_SRC, "// @decision 22222220 — head+tail check\n");
   const n2Result = runHookOnFile(N2_SRC, "s-n2", 1, 1);
-  check("N2: a truncated record keeps its HEAD", !!n2Result && n2Result.systemMessage.includes("HEAD-CLAIM-MARKER"));
+  check("N2: a truncated record keeps its HEAD", !!n2Result && n2Result.hookSpecificOutput.additionalContext.includes("HEAD-CLAIM-MARKER"));
   check("N2: a truncated record ALSO keeps its TAIL (a trailing caveat must survive truncation, not just the opening claim)",
-    !!n2Result && n2Result.systemMessage.includes("TAIL-CAVEAT-MARKER"));
+    !!n2Result && n2Result.hookSpecificOutput.additionalContext.includes("TAIL-CAVEAT-MARKER"));
 
   // --- N3 regression: a bare prefix match would let id `deadbeef` match an unrelated
   // `deadbeefcafe-other.md`. Require a real boundary (`-`/`.`) after the id. deadbeef's OWN record
@@ -269,9 +283,9 @@ try {
   fs.writeFileSync(N3_SRC, "// @decision deadbeef — boundary check\n");
   const n3Result = runHookOnFile(N3_SRC, "s-n3", 1, 1);
   check("N3: a prefix-sharing but unrelated store file is NEVER matched",
-    !!n3Result && !n3Result.systemMessage.includes("A DIFFERENT record that merely SHARES a prefix"));
+    !!n3Result && !n3Result.hookSpecificOutput.additionalContext.includes("A DIFFERENT record that merely SHARES a prefix"));
   check("N3: the id's OWN correctly-bounded record still resolves",
-    !!n3Result && n3Result.systemMessage.includes("[TRUNCATED at 4000 bytes")); // deadbeef's own record is the oversized one
+    !!n3Result && n3Result.hookSpecificOutput.additionalContext.includes("[TRUNCATED at 6000 bytes")); // deadbeef's own record is the oversized one
 
   // --- N4 regression: a single line carrying TWO anchors must yield BOTH ids, not just the first (the
   // prior regex had no `g` flag). ---
@@ -281,8 +295,8 @@ try {
   fs.writeFileSync(MULTI_SRC, "// @decision 11111111 — first  // @decision 22222222 — second\n");
   const multiResult = runHookOnFile(MULTI_SRC, "s-n4", 1, 1);
   check("N4: a single line carrying TWO anchors injects BOTH records (not just the first)",
-    !!multiResult && multiResult.systemMessage.includes("First of two anchors on one line.")
-      && multiResult.systemMessage.includes("Second of two anchors on one line."));
+    !!multiResult && multiResult.hookSpecificOutput.additionalContext.includes("First of two anchors on one line.")
+      && multiResult.hookSpecificOutput.additionalContext.includes("Second of two anchors on one line."));
 
   // --- S4 regression: never resolve records against a repo OTHER than the session's own cwd — a Read of
   // a file that happens to live in a DIFFERENT repo on the same host must not inject THAT tree's records. ---
@@ -296,7 +310,7 @@ try {
   const s4ForeignOwnCwd = runHookRaw(FOREIGN_SRC, FOREIGN_REPO, "s-foreign-2", 1, 1); // cwd = that SAME foreign repo
   check("S4 sanity: the same file DOES resolve when the session's own cwd is that repo "
     + "(proves the silence above is the cross-repo guard firing, not a broken resolver)",
-    !!s4ForeignOwnCwd && s4ForeignOwnCwd.systemMessage.includes("Foreign repo record."));
+    !!s4ForeignOwnCwd && s4ForeignOwnCwd.hookSpecificOutput.additionalContext.includes("Foreign repo record."));
 
   // --- S1: the early-bail when a repo has adopted NONE of the three record stores at all — a repo with
   // no docs/adr, docs/decisions, or docs/investigations must stay silent even over a syntactically
