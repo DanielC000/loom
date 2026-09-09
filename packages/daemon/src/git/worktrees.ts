@@ -3894,6 +3894,7 @@ export const STATIC_GUARD_REPO_PATHS = [
  */
 export const ASSET_READING_TEST_REPO_PATHS = [
   "packages/daemon/test/codescape-prompt-block.mjs",
+  "packages/daemon/test/decision-records.mjs",
   "packages/daemon/test/dev-server.mjs",
   "packages/daemon/test/ensure-obsidian.mjs",
   "packages/daemon/test/manager-context-block.mjs",

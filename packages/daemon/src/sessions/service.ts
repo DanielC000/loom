@@ -12904,7 +12904,8 @@ export class SessionService {
    *   precisely because Loom has no visibility into it, only the OS process tree). The wired hook surface
    *   (SessionStart/UserPromptSubmit/Stop/StopFailure; PreToolUse matcher-scoped to worker_report/
    *   memory_write; SubagentStart/SubagentStop for the drift cross-check, card e6ef5062 — see
-   *   SubagentDriftTracker's own doc, pty/tool-attribution.ts; PostToolUse only for the vault-lint matcher)
+   *   SubagentDriftTracker's own doc, pty/tool-attribution.ts; PostToolUse for the vault-lint matcher and
+   *   the always-on decision-records Read matcher, card 661b7d46)
    *   STILL captures nothing here: SubagentStart/Stop only bound a SYNCHRONOUS, same-turn Task-tool
    *   sub-agent call — Claude Code blocks the invoking turn until that tool call itself returns (see
    *   tool-attribution.ts's own ORDERING GUARANTEE), so by the time a worker's OWN turn ends (Stop) any

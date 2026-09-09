@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { PermissionPolicy } from "@loom/shared";
-import { SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, PORT } from "../paths.js";
+import { SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, DECISION_RECORDS_SCRIPT, DECISION_RECORDS_DEDUPE_DIR, PORT } from "../paths.js";
 
 /**
  * Card cd0c7fee: matcher for the correlation-only `PreToolUse` hook below. Deliberately scoped to the
@@ -194,6 +194,11 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  * When `vaultPath` is given (docLint on), a PostToolUse hook (matcher Write|Edit) runs the
  * mechanical vault-lint on .md writes under that vault (Pillar D). Advisory only — it never blocks.
  *
+ * A PostToolUse hook (matcher Read) is ALWAYS wired too (card 661b7d46) — `decision-records.mjs`
+ * appends any complete, out-of-band decision record anchored in the range a `Read` call actually
+ * returned, so a range that slices through a long comment block never delivers a fragment of a record
+ * without the rest of it. Advisory only, same posture as vault-lint above — it never blocks a `Read`.
+ *
  * `hookToken` (card a2407ed4) rides as a 4th argv on the relay command, alongside the sessionId/port
  * already there — `hook-relay.mjs` forwards it in the POST body, and `/internal/hook` requires it to
  * match the target session's own `Live.hookToken` before a hook is processed. It is REQUIRED (not
@@ -261,14 +266,22 @@ export function writeSessionSettings(
     SubagentStart: [hookCmd],
     SubagentStop: [hookCmd],
   };
-  const postToolUse: unknown[] = [];
+  const postToolUse: unknown[] = [
+    // Card 661b7d46: ALWAYS wired (no vaultPath-style gate) — every session gets complete decision
+    // records injected on a `Read` whose range intersects a `// @decision <id>` anchor. Silent when the
+    // range carries no anchor (DoD-2), so this is a no-op cost on the overwhelming majority of reads.
+    {
+      matcher: "Read",
+      hooks: [{ type: "command", command: `node "${DECISION_RECORDS_SCRIPT}" "${DECISION_RECORDS_DEDUPE_DIR}"` }],
+    },
+  ];
   if (vaultPath) {
     postToolUse.push({
       matcher: "Write|Edit",
       hooks: [{ type: "command", command: `node "${VAULT_LINT_SCRIPT}" "${vaultPath}"` }],
     });
   }
-  if (postToolUse.length) hooks.PostToolUse = postToolUse;
+  hooks.PostToolUse = postToolUse;
   const settings = {
     hooks,
     permissions: {

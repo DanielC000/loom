@@ -199,6 +199,21 @@ export const RELAY_SCRIPT = path.join(__dirname, "..", "assets", "hook-relay.mjs
 /** vault-lint.mjs (Pillar D PostToolUse hook) ships as an asset too. */
 export const VAULT_LINT_SCRIPT = path.join(__dirname, "..", "assets", "vault-lint.mjs");
 /**
+ * decision-records.mjs (card 661b7d46) — the PostToolUse `Read` hook that appends complete, out-of-band
+ * decision records to a `Read` result when the range actually returned intersects a `// @decision <id>`
+ * source anchor. Ships as an asset, read live from the package dir like the other hooks here — no
+ * daemon restart needed for an edit to this script to take effect (see decision-records.mjs's own doc).
+ */
+export const DECISION_RECORDS_SCRIPT = path.join(__dirname, "..", "assets", "decision-records.mjs");
+/**
+ * Per-session dedupe state for decision-records.mjs — one small JSON file per session (`<sessionId>.json`,
+ * a flat array of already-injected record ids) so a repeated `Read` over the same anchored region doesn't
+ * re-inject the same record every call. Ephemeral, small, and keyed only by session id — created lazily by
+ * the hook script itself on first injection (never in `ensureDirs`, same posture as `SCRATCH_ROOT_DIR`'s
+ * own per-session dirs above), so a daemon that never injects a record never creates this directory.
+ */
+export const DECISION_RECORDS_DEDUPE_DIR = path.join(LOOM_HOME, "tmp", "decision-records");
+/**
  * ensure-obsidian.mjs (Obsidian auto-start vault preflight) ships as an asset too. Injected into a
  * session's env as LOOM_OBSIDIAN_PREFLIGHT only when obsidian.autoStart is on, so a vault skill can run
  * `node "$LOOM_OBSIDIAN_PREFLIGHT"` before its `obsidian` CLI calls (self-heals or falls back to FS).

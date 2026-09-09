@@ -60,26 +60,38 @@ try {
 
   check("PreToolUse still carries its matcher alongside a correctly-shaped hooks array",
     typeof withVault.hooks.PreToolUse[0].matcher === "string" && withVault.hooks.PreToolUse[0].matcher.length > 0);
+  // Card 661b7d46 added an always-on "Read" PostToolUse group ahead of vault-lint's own — find each by
+  // matcher rather than assuming array position.
+  const vaultGroup = withVault.hooks.PostToolUse.find((g) => g.matcher === "Write|Edit");
+  const decisionGroup = withVault.hooks.PostToolUse.find((g) => g.matcher === "Read");
   check("PostToolUse (vault-lint) still carries its matcher alongside a correctly-shaped hooks array",
-    withVault.hooks.PostToolUse[0].matcher === "Write|Edit");
+    !!vaultGroup);
+  check("PostToolUse (decision-records) carries matcher = Read alongside a correctly-shaped hooks array",
+    !!decisionGroup);
   check("SubagentStop (no matcher, per card 8d158088) is still shape-valid without one",
     !("matcher" in withVault.hooks.SubagentStop[0]) && violations.length === 0);
 
-  // --- Also check the no-vaultPath path (no PostToolUse key at all) is clean on its own.
+  // --- Also check the no-vaultPath path (PostToolUse present but WITHOUT the vault-lint group) is clean.
   const plain = JSON.parse(
     fs.readFileSync(writeSessionSettings("shape-plain", perm, "test-hook-token"), "utf8"),
   );
-  check("the no-vaultPath emitted settings.hooks (no PostToolUse) also has zero shape violations",
+  check("the no-vaultPath emitted settings.hooks also has zero shape violations",
     hooksShapeViolations(plain.hooks).length === 0);
-  check("no-vaultPath path correctly omits PostToolUse entirely", !("PostToolUse" in plain.hooks));
+  check("no-vaultPath path correctly omits the vault-lint Write|Edit group",
+    !plain.hooks.PostToolUse.some((g) => g.matcher === "Write|Edit"));
+  check("no-vaultPath path still carries the always-on decision-records Read group",
+    plain.hooks.PostToolUse.some((g) => g.matcher === "Read"));
 
   // --- PRESENCE (card 5a88166d, DoD 2): the shape checker above is silent on event-key presence — a
   // `hooks` object missing an event entirely has zero shape violations. Assert each expected event key is
   // actually present (a non-empty groups array), independent of the shape checker. Re-derived directly
   // from `writeSessionSettings` (packages/daemon/src/pty/claude-settings.ts), NOT copied from this file's
   // old check-1 label or the card body — see this task's worker_report for the two-lists comparison.
+  // Card 661b7d46: PostToolUse is now unconditional too (the decision-records Read group is always
+  // wired), so it joins the other always-present events here.
   const UNCONDITIONAL_EVENTS = [
     "SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "PreToolUse", "SubagentStart", "SubagentStop",
+    "PostToolUse",
   ];
   for (const event of UNCONDITIONAL_EVENTS) {
     check(`settings.hooks.${event} is present (non-empty groups array) with vaultPath set`,
@@ -89,12 +101,12 @@ try {
     check(`settings.hooks.${event} is present (non-empty groups array) with no vaultPath`,
       Array.isArray(plain.hooks[event]) && plain.hooks[event].length > 0);
   }
-  // PostToolUse is conditional on vaultPath — assert presence is gated on the CONDITION, not just that
-  // one arm happens to have it: present (non-empty) when vaultPath is set, absent when it is not (the
-  // "no-vaultPath path correctly omits PostToolUse entirely" check above already covers the absence arm;
-  // this is the presence arm of the same condition).
-  check("settings.hooks.PostToolUse is present (non-empty groups array) when vaultPath is set",
-    Array.isArray(withVault.hooks.PostToolUse) && withVault.hooks.PostToolUse.length > 0);
+  // The vault-lint Write|Edit GROUP within PostToolUse is still conditional on vaultPath — assert
+  // presence is gated on the CONDITION, not just that one arm happens to have it (the "no-vaultPath path
+  // correctly omits the vault-lint Write|Edit group" check above already covers the absence arm; this is
+  // the presence arm of the same condition).
+  check("PostToolUse carries a Write|Edit group when vaultPath is set",
+    withVault.hooks.PostToolUse.some((g) => g.matcher === "Write|Edit"));
 
   // --- RED-PROOF (DoD 2): the SAME checker must FAIL against the exact historical double-wrap defect.
   // Reconstructs the real broken shape from cd0c7fee/8d158088 verbatim: `hookCmd` is already a

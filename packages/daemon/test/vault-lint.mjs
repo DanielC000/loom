@@ -113,13 +113,21 @@ try {
   const perm = { mode: "acceptEdits", allow: [], deny: [] };
   const withVault = JSON.parse(fs.readFileSync(writeSessionSettings("vl-on", perm, "test-hook-token", VAULT), "utf8"));
   const ptu = withVault.hooks.PostToolUse;
-  check("writeSessionSettings(vaultPath): PostToolUse matcher = Write|Edit", Array.isArray(ptu) && ptu[0].matcher === "Write|Edit");
+  // Card 661b7d46 added an always-on "Read" group ahead of vault-lint's own — find it by matcher rather
+  // than assuming array position.
+  const vaultGroup = Array.isArray(ptu) ? ptu.find((g) => g.matcher === "Write|Edit") : undefined;
+  check("writeSessionSettings(vaultPath): a PostToolUse group with matcher = Write|Edit exists", !!vaultGroup);
   check("writeSessionSettings(vaultPath): command points at vault-lint.mjs + the vault path",
-    ptu[0].hooks[0].command.includes("vault-lint.mjs") && ptu[0].hooks[0].command.includes(VAULT));
+    !!vaultGroup && vaultGroup.hooks[0].command.includes("vault-lint.mjs") && vaultGroup.hooks[0].command.includes(VAULT));
   check("writeSessionSettings(vaultPath): includeCoAuthoredBy === false (suppress Claude commit trailer)",
     withVault.includeCoAuthoredBy === false);
   const noVault = JSON.parse(fs.readFileSync(writeSessionSettings("vl-off", perm, "test-hook-token"), "utf8"));
-  check("writeSessionSettings(no vaultPath / docLint off): NO PostToolUse entry", noVault.hooks.PostToolUse === undefined);
+  // Card 661b7d46: PostToolUse is no longer vaultPath-gated overall — the decision-records Read hook is
+  // ALWAYS wired. Assert the vault-lint Write|Edit group specifically is absent, not the whole key.
+  check("writeSessionSettings(no vaultPath / docLint off): NO vault-lint Write|Edit group",
+    !(noVault.hooks.PostToolUse || []).some((g) => g.matcher === "Write|Edit"));
+  check("writeSessionSettings(no vaultPath): decision-records Read hook still present",
+    (noVault.hooks.PostToolUse || []).some((g) => g.matcher === "Read" && g.hooks[0].command.includes("decision-records.mjs")));
   check("writeSessionSettings(no vaultPath): includeCoAuthoredBy === false (suppress Claude commit trailer)",
     noVault.includeCoAuthoredBy === false);
 } finally {
