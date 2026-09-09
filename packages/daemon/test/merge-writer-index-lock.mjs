@@ -48,9 +48,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const distGitDir = path.join(process.cwd(), "dist", "git");
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const distGitDir = path.join(__dirname, "..", "dist", "git");
 const { mergeBranch } = await import(pathToFileURL(path.join(distGitDir, "worktrees.js")).href);
 const { GitWriter } = await import(pathToFileURL(path.join(distGitDir, "writer.js")).href);
 

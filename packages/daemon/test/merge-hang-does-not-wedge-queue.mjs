@@ -27,9 +27,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const distUrl = pathToFileURL(path.join(process.cwd(), "dist", "git", "worktrees.js")).href;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const distUrl = pathToFileURL(path.join(__dirname, "..", "dist", "git", "worktrees.js")).href;
 const { mergeBranch } = await import(distUrl);
 
 let failures = 0;

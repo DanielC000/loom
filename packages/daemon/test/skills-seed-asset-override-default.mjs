@@ -7,12 +7,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Fully hermetic on the store side (temp LOOM_HOME + sandboxed HOME); deliberately reads the real,
 // checked-in assets/skills/worker/SKILL.md as the comparison oracle. Never touches ~/.loom or :4317.
-// Run after build, from the daemon package root (assets/skills/ is relative to process.cwd()).
+// Run after build:  node test/skills-seed-asset-override-default.mjs — assets/skills/ is resolved
+// from this file's own location, not process.cwd(), so it runs correctly from any cwd.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
 import { hermeticPort } from "./_hermetic-port.mjs";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -32,7 +36,7 @@ process.env.USERPROFILE = sandboxHome; // Windows
 process.env.HOME = sandboxHome;        // POSIX
 
 const { seedGlobalSkills } = await import("../dist/skills/seed.js");
-const realWorkerSkillMd = path.join(process.cwd(), "assets", "skills", "worker", "SKILL.md");
+const realWorkerSkillMd = path.join(__dirname, "..", "assets", "skills", "worker", "SKILL.md");
 
 try {
   check("[precondition] the real repo asset this test compares against exists", fs.existsSync(realWorkerSkillMd));

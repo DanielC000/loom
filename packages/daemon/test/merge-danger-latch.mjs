@@ -45,6 +45,7 @@ import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit, useOwnLoomHome } from "./_tmp-fixture.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // ───────────────────────── CHILD MODE ─────────────────────────
 const scenario = process.env.MDL_SCENARIO;
@@ -200,8 +201,8 @@ try {
 
   // ── F: describeMergeDangerLatchAtBoot, exercised against a REAL scanCanonicalReposForMergeResidue result
   {
-    const { describeMergeDangerLatchAtBoot } = await import(pathToFileURL(path.join(process.cwd(), "dist", "git", "merge-danger-latch.js")).href);
-    const { scanCanonicalReposForMergeResidue } = await import(pathToFileURL(path.join(process.cwd(), "dist", "git", "worktrees.js")).href);
+    const { describeMergeDangerLatchAtBoot } = await import(pathToFileURL(path.join(__dirname, "..", "dist", "git", "merge-danger-latch.js")).href);
+    const { scanCanonicalReposForMergeResidue } = await import(pathToFileURL(path.join(__dirname, "..", "dist", "git", "worktrees.js")).href);
     const GIT_ID = "-c user.email=mdl@loom -c user.name=mdl";
     const repo = path.join(os.tmpdir(), `loom-mdl-classify-repo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
     fs.mkdirSync(repo, { recursive: true });

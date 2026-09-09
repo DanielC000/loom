@@ -23,8 +23,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { useOwnLoomHome, finishAndExit } from "./_tmp-fixture.mjs";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // mergeBranchLocked now ALSO durably latches (merge-danger-latch.ts), which resolves its file path from
 // LOOM_HOME at import time — isolate it BEFORE importing dist/git/worktrees.js (which transitively imports
@@ -33,8 +35,8 @@ import { useOwnLoomHome, finishAndExit } from "./_tmp-fixture.mjs";
 // ~/.loom — confirmed happening before this fix was added.
 useOwnLoomHome("loom-mdw-home-");
 
-const worktreesUrl = pathToFileURL(path.join(process.cwd(), "dist", "git", "worktrees.js")).href;
-const dangerWindowUrl = pathToFileURL(path.join(process.cwd(), "dist", "git", "merge-danger-window.js")).href;
+const worktreesUrl = pathToFileURL(path.join(__dirname, "..", "dist", "git", "worktrees.js")).href;
+const dangerWindowUrl = pathToFileURL(path.join(__dirname, "..", "dist", "git", "merge-danger-window.js")).href;
 const { mergeBranch } = await import(worktreesUrl);
 const { enterMergeDangerWindow, exitMergeDangerWindow, listActiveMergeDangerWindows, waitForMergeDangerWindowsToClear } = await import(dangerWindowUrl);
 
