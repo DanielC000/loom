@@ -169,8 +169,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // --- findOversizedRecords (card d0d0401b) --------------------------------------------------------------
 
 {
-  const dir = path.join(os.tmpdir(), `loom-oversized-records-${Date.now()}-${process.pid}`);
-  fs.mkdirSync(dir, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-oversized-records-"));
   try {
     const smallPath = path.join(dir, "small.md");
     const bigPath = path.join(dir, "big.md");
