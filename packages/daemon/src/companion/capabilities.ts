@@ -63,22 +63,11 @@ const SESSION_STEER_CLASS_SLUGS: readonly string[] = ["session-steer"];
  *  advisory's own doc. Used only to count DISTINCT co-granted Tier-A act capabilities for that advisory. */
 const TIER_A_ACT_SLUGS: readonly string[] = ["decisions-relay", "board-reach", "git-push"];
 
-/**
- * Compute the grant-time co-grant advisories for a companion session's WHOLE resolved grant set (pass every
- * row from `listCompanionCapabilityGrantsForSession` — cross-project by design: `transcript-read` on
- * project X + `session-steer` on project Y is exactly the risk, so project is deliberately ignored here).
- * Pure + side-effect-free; returns `[]` for a benign grant set (the common case), so a single-lever grant
- * surfaces nothing. Order is stable (primary launder risk first, then the shared-window ceiling).
- *
- * (1) transcript-read + session-steer LAUNDER: `transcript_read` pulls UNTRUSTED transcript text into the
- *     owner's turn context, and a friction-free session-steer act can then commit an attacker-composed
- *     steer on that SAME owner-authored turn with no confirm — so injected instructions can be laundered
- *     from a transcript into a real cross-session action inside one benign turn. Fires when BOTH are in the
- *     grant set (transcript-read is read-only, so any grant of it counts; session-steer must be act).
- * (2) MULTI-Tier-A shared-window ceiling (CR LOW #4): 2+ DISTINCT Tier-A act capabilities share one trust
- *     window, so a confirm on the lowest-stakes one warms it for ALL of them — the effective confirmation
- *     ceiling becomes the highest-consequence Tier-A act granted, not each on its own.
- */
+/** Compute the grant-time co-grant advisories for a companion session's WHOLE resolved grant set (pass
+ *  every row from `listCompanionCapabilityGrantsForSession`). Pure + side-effect-free; returns `[]` for a
+ *  benign grant set. @decision 4c33a1bc — the two advisories (transcript-read+session-steer laundering,
+ *  multi-Tier-A shared-window ceiling) and why; see
+ *  docs/decisions/4c33a1bc-companion-co-grant-risk-advisories.md. */
 export function computeCoGrantWarnings(grants: Pick<CompanionCapabilityGrant, "capability" | "mode">[]): CompanionCoGrantWarning[] {
   const warnings: CompanionCoGrantWarning[] = [];
 
@@ -170,14 +159,10 @@ export interface ResolvedGrantScope {
  * list grants genuinely has none, so every capability stays OFF, which is exactly the byte-identical
  * default this framework promises for every session it doesn't know about.
  *
- * Companion "lead mode" (Option B, no guardrails — owner decision `b5c606aa`, 2026-07-20) is checked
- * FIRST, ahead of any grant-row read: when `sessions.companion_lead_mode` is set on this session, this
- * SHORT-CIRCUITS to {@link synthesizeLeadModeScope}'s synthesized full-scope answer instead of reading
- * `companion_capability_grants` at all — SUPERSEDING the rows, never deleting/mutating them, so toggling
- * lead mode back off instantly reverts to whatever was granted before. Every lever downstream of this gate
- * (registration, per-call `mayAct`/`configFor` re-checks, Primitive A/B/C, friction tiers, trust windows)
- * runs completely unchanged — lead mode only changes what THIS function returns, never how a lever
- * consumes it.
+ * Companion "lead mode" is checked FIRST, ahead of any grant-row read: when set on this session, this
+ * SHORT-CIRCUITS to {@link synthesizeLeadModeScope}'s synthesized full-scope answer — SUPERSEDING the
+ * rows, never deleting/mutating them. @decision b5c606aa — Option B, no guardrails; see
+ * docs/decisions/b5c606aa-companion-lead-mode-option-b-no-guardrails.md.
  */
 export function resolveCompanionGrant(db: Db, sessionId: string, capability: string): ResolvedGrantScope | null {
   if (isCompanionLeadModeEnabled(db, sessionId)) {
@@ -224,43 +209,13 @@ export function isCompanionLeadModeEnabled(db: Db, sessionId: string): boolean {
   return db.getSession(sessionId)?.companionLeadMode === true;
 }
 
-/**
- * Synthesizes a FULL, all-project act-mode {@link ResolvedGrantScope} for `capability` (Companion "lead
- * mode", Option B — owner decision `b5c606aa`, 2026-07-20: maximal control, NO guardrails). Iterates
- * `db.listAllProjects()` LIVE on every call (never cached) — the INCLUSIVE list (Framework-adjacent
- * `listProjects()`'s reserved-excluding picker feed is deliberately NOT used here): a project created
- * AFTER lead mode was enabled is included on the very next read, and a reserved/system project (e.g. the
- * Platform home) is in scope too — "every project" means every project. Every project resolves to
- * mode:'act', so every lever's own `hasActGrant` gate + per-project `mayAct` check pass unconditionally,
- * and `session-steer`'s per-project `roleFilter` (config-driven, absent here ⇒ `{}`) stays unset — NO role
- * exclusion, reaching an infrastructure (platform/operator/setup) session exactly like an ordinary
- * worker/manager one, per Option B's explicit "no exclusions" ruling.
- *
- * Per-capability config is synthesized only where a lever actually reads one (every other capability gets
- * `{}`, matching an ordinary grant's own absent-config default — including `session-steer`'s `roleFilter`
- * and `board-reach`'s `authoredContent`, DELIBERATELY left conservative: Option B's decision covers the
- * session-steer exclusion floor and decision/alert visibility only, never a relaxation of verbatim-relay):
- *   - `decisions-relay` → `{decisionClasses: [...DECISION_CLASSES]}` (all 3 classes — a deploy/irreversible
- *     decision still ALWAYS steps up via Tier X; lead mode only widens which classes are ELIGIBLE, never
- *     the friction tier a resolve runs through).
- *   - `attention-push` → `{alertClasses: ["*"]}` — a wildcard sentinel `attention-push.ts`'s own
- *     `resolveConfig` expands, rather than importing that array here (attention-push.ts already imports
- *     `resolveCompanionGrant` FROM this file — importing back would be a module cycle). The REST
- *     grant-config validator only ever accepts a literal class name (gateway/server.ts), so `"*"` can never
- *     be written by a human grant — it is reachable ONLY through this synthesis path. As of the owner's
- *     2026-07-21 ruling (request d024eda7), that expansion is EVERY class EXCEPT attention-push.ts's own
- *     `FLEET_OPS_ALERT_CLASSES` (merge-gate/worker-blocked/worker-crashed/manager-idle) — routine fleet-ops
- *     noise stays out of the lead-mode PUSH feed by default (still fully visible in-app/via other reads);
- *     this file only ever emits the `"*"` sentinel, so the exclusion lives entirely in `resolveConfig`, not
- *     here.
- *   - `media-out` → `{roots: [project.vaultPath]}` when that project has one, else `{}` — the one lever
- *     with no safe host-wide wildcard (arbitrary host FS, no closed vocabulary), so lead mode's default is
- *     bounded to each project's OWN vault content rather than granting nothing or every path on the host.
- *
- * Returns `null` (never an empty-but-truthy scope, mirroring `resolveCompanionGrant`'s own contract) when
- * there are zero live projects, or when `db` doesn't implement `listAllProjects` at all (the same minimal
- * test-double tolerance `resolveCompanionGrant` extends to `listCompanionCapabilityGrantsForSession`).
- */
+/** Synthesizes a FULL, all-project act-mode {@link ResolvedGrantScope} for `capability` under companion
+ *  "lead mode". Iterates `db.listAllProjects()` LIVE on every call (never cached) — the INCLUSIVE list, so
+ *  a project created after lead mode was enabled is included on the very next read. Returns `null` (never
+ *  an empty-but-truthy scope) when there are zero live projects or `db` doesn't implement
+ *  `listAllProjects`. @decision b5c606aa — Option B, no guardrails, and the per-capability config
+ *  synthesized for decisions-relay/attention-push/media-out; see
+ *  docs/decisions/b5c606aa-companion-lead-mode-option-b-no-guardrails.md. */
 function synthesizeLeadModeScope(db: Db, capability: string): ResolvedGrantScope | null {
   if (typeof db.listAllProjects !== "function") return null;
   const projects = db.listAllProjects();
@@ -948,28 +903,11 @@ function pendingBoardKey(sessionId: string, route: CompanionRoute | null): strin
   return `${sessionId}::${route ? `${route.channel}:${route.chatId}` : ""}::${BOARD_REACH_SLUG}`;
 }
 
-/**
- * Card cc910aec: `board_update`'s success ack projects `updateProjectTask`'s result to a fixed
- * `{id,title,columnKey,priority,held,projectId}` field set (see the `task: {...}` literals at its two
- * call sites) — that projection PREDATES `pendingRequestWarning` (it was written in `9fac5bbd`, two
- * months before card `c4355598` added the field) and no doc anywhere states an intent to withhold it;
- * it is a stale gap, not a deliberate disclosure boundary — `title` itself (arbitrary card text) is
- * already echoed through this same ack with no narrower-surface treatment, so there is no existing
- * precedent of withholding Task content here for trust reasons.
- *
- * The owner is the one person a companion chat can put a pending Request in front of who can actually
- * answer it, so a terminal move made THROUGH the companion is the single highest-value place for this
- * warning to fire — yet, before this card, it was the one place it silently did not. This formats the
- * SAME additive `pendingRequestWarning` `updateProjectTask` already computes (never a raw
- * `{id,title}[]` dump — the companion model relays this text into chat, so pre-formatting it in
- * human-readable prose here means it renders consistently instead of depending on the model's own
- * paraphrase) into one optional `pendingRequestNote` string, spread into the ack only when non-empty
- * (mirrors `updateProjectTask`'s own additive-only convention for the field itself). Returns `{}` (never
- * a key with an empty/undefined value) so JSON.stringify never emits a stray `pendingRequestNote:
- * undefined`. This can only ever ADD a field to an already-successful ack — it must never be able to
- * turn a success into an error, inheriting card `c4355598`'s hard constraint that this warning can never
- * block the write it decorates.
- */
+/** Formats `updateProjectTask`'s additive `pendingRequestWarning` into one optional `pendingRequestNote`
+ *  string, spread into the `board_update` ack only when non-empty — never a raw `{id,title}[]` dump, so
+ *  it renders consistently in companion chat. @decision cc910aec — surfaces a warning that previously
+ *  never reached the companion ack surface at all; see
+ *  docs/decisions/cc910aec-board-update-ack-pending-request-note.md. */
 function pendingRequestWarningNote(warnings: PendingRequestWarning[] | undefined): { pendingRequestNote?: string } {
   if (!warnings || warnings.length === 0) return {};
   const items = warnings.map((w) => `"${w.title}" (request ${w.id})`).join("; ");
@@ -999,20 +937,12 @@ function pendingAuthoredGrantKey(sessionId: string, route: CompanionRoute | null
 }
 
 /** Clears every outstanding proposal PAYLOAD held for `sessionId`, across all FIVE ACT levers' own
- *  module-scoped pending-payload maps (decisions-relay/board-reach/authored-content-grant/session-spawn/
- *  git-push — `pendingSpawns`/`pendingGitWrites`, each declared further down this file with their own
- *  lever's registration, are in scope here the same way `pendingBoardWrites`/`pendingAuthoredGrants` are:
- *  a module-level `const`, safe to reference from an exported function that only ever runs after the
- *  whole module has finished evaluating) — the lever side of the session-close hygiene fix; a caller must
- *  ALSO call `OwnerConfirmStore.clearSession` (attestation.ts) for the SAME sessionId, since this only
- *  clears the levers' own remembered payloads, never the confirm tokens themselves (card 327bcaaa).
- *  Before this, `closeCompanionTrustWindow` cleared neither store, so a recycled/unbound/re-paired
- *  session's pending proposal became permanently-orphaned dead memory — never a security issue (nothing
- *  can ever confirm it once the session is gone), but genuine leaked state. CR follow-up (this card): the
- *  first pass missed `pendingSpawns` — session_spawn uses the identical proposeConfirmation→pending→
- *  confirm shape via the same `OwnerConfirmStore`, so it needed the same clear as the other three.
- *  `pendingGitWrites` (card a3c3ade8) joins the set for the identical reason. Prefix-matches on
- *  `${sessionId}::`, mirroring every pending*Key helper's own key shape. */
+ *  module-scoped pending-payload maps. A caller must ALSO call `OwnerConfirmStore.clearSession`
+ *  (attestation.ts) for the SAME sessionId — this only clears the levers' own remembered payloads, never
+ *  the confirm tokens themselves. Prefix-matches on `${sessionId}::`, mirroring every pending*Key helper's
+ *  own key shape. @decision 327bcaaa — why this exists (orphaned pending-proposal memory on session
+ *  close) and the CR follow-up that caught a missed lever; see
+ *  docs/decisions/327bcaaa-clear-pending-proposals-on-session-close.md. */
 export function clearPendingProposalsForSession(sessionId: string): void {
   const prefix = `${sessionId}::`;
   for (const k of pendingDecisionResolves.keys()) if (k.startsWith(prefix)) pendingDecisionResolves.delete(k);
