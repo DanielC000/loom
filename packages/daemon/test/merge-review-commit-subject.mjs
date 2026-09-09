@@ -39,6 +39,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       isn't hardcoded false and genuinely discriminates on the non-tip commits' own form.
 //   (J) SINGLE-commit branch (cases A/B/C/E/G above) must NOT get noisier: `ownNonTipCommitSubjects` is
 //       absent entirely — asserted explicitly here against case (A)'s review.
+//   (K) Card 8ea85329 — a TASKED worker whose branch's OWN TIP commit subject carries an HTML entity
+//       (`&lt;id&gt;`) gets a `warning` that names the entity and the offending subject — the merge_batch
+//       gap this card decided to leave WARN-ONLY (see batch-merge.ts's own residual-gap doc) rather than
+//       refuse.
+//   (L) NEGATIVE CONTROL for (K) — a TASKED worker whose branch's own tip commit is entity-free (case A's
+//       review, reused) gets NO entity mention in `warning` at all — proves the check doesn't fire on
+//       every review regardless of content.
+//   (M) Card 8ea85329 — the entity lives on a NON-TIP commit of a multi-commit branch (tip itself is
+//       clean) — the warning still fires, proving the check scans `ownNonTipCommitSubjects` too, not just
+//       the tip alone (mirrors case (H)'s own tip-clean/non-tip-dirty shape for the conventional-form check).
 // Run: 1) build daemon (pnpm build), 2) node test/merge-review-commit-subject.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -93,6 +103,8 @@ const D = { projId: `mrcs-d-proj-${sfx}`, agentId: `mrcs-d-top-${sfx}`, taskId: 
 const E = { projId: `mrcs-e-proj-${sfx}`, agentId: `mrcs-e-top-${sfx}`, taskId: `mrcs-e-task-${sfx}`, mgrId: `mrcs-e-mgr-${sfx}`, workerId: `mrcs-e-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrcs-own-conv-${sfx}`), title: "Refresh the dashboard" };
 const H = { projId: `mrcs-h-proj-${sfx}`, agentId: `mrcs-h-top-${sfx}`, taskId: `mrcs-h-task-${sfx}`, mgrId: `mrcs-h-mgr-${sfx}`, workerId: `mrcs-h-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrcs-multi-bad-${sfx}`), title: "fix(daemon): tidy up widgets" };
 const I = { projId: `mrcs-i-proj-${sfx}`, agentId: `mrcs-i-top-${sfx}`, taskId: `mrcs-i-task-${sfx}`, mgrId: `mrcs-i-mgr-${sfx}`, workerId: `mrcs-i-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrcs-multi-clean-${sfx}`), title: "fix(daemon): tidy up widgets" };
+const K = { projId: `mrcs-k-proj-${sfx}`, agentId: `mrcs-k-top-${sfx}`, taskId: `mrcs-k-task-${sfx}`, mgrId: `mrcs-k-mgr-${sfx}`, workerId: `mrcs-k-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrcs-entity-tip-${sfx}`), title: "fix(daemon): tidy up widgets" };
+const M = { projId: `mrcs-m-proj-${sfx}`, agentId: `mrcs-m-top-${sfx}`, taskId: `mrcs-m-task-${sfx}`, mgrId: `mrcs-m-mgr-${sfx}`, workerId: `mrcs-m-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrcs-entity-nontip-${sfx}`), title: "fix(daemon): tidy up widgets" };
 
 try {
   // ── (A) ALREADY-CONVENTIONAL: commitSubject unchanged, coerced:false ───────────────────────────────────
@@ -113,6 +125,9 @@ try {
     // task title `commitSubject` above previews.
     check("(F) ownTipSubject === the branch's own tip commit (bare prose, NOT the card title)", review.ownTipSubject === "add feature");
     check("(F) ownTipSubjectConventional is false for the bare-prose tip commit", review.ownTipSubjectConventional === false);
+    // ── (L) NEGATIVE CONTROL for (K): an entity-free tip commit gets no entity mention in `warning` ────────
+    check("(L) warning is absent (or, if present for some other reason, contains no HTML ENTITY mention) for an entity-free tip commit",
+      review.warning === undefined || !review.warning.includes("HTML ENTITY"));
   }
 
   // ── (B) LEGACY BRACKET: mapped type, coerced:true ───────────────────────────────────────────────────────
@@ -230,9 +245,42 @@ try {
     check("(I) ownNonTipCommitSubjects === [the ALREADY-conventional non-tip subject]", Array.isArray(review.ownNonTipCommitSubjects) && review.ownNonTipCommitSubjects.length === 1 && review.ownNonTipCommitSubjects[0] === "fix(daemon): start widget tidy-up");
     check("(I) ownNonTipCommitSubjectsConventional is TRUE — proves the flag isn't hardcoded false and genuinely discriminates on the non-tip commits' own form", review.ownNonTipCommitSubjectsConventional === true);
   }
+
+  // ── (K) Card 8ea85329 — HTML ENTITY on the branch's OWN TIP commit fires a WARN-ONLY advisory ───────────
+  initRepo(K.repo);
+  {
+    const { worktreePath, branch } = await createWorktree(K.repo, K.projId, K.taskId);
+    K.worktreePath = worktreePath; K.branch = branch;
+    const entitySubject = "fix(daemon): reject the &lt;id&gt; escape in question_ask";
+    commitChange(worktreePath, "entity.ts", "export const q = 1;\n", entitySubject);
+    seed(K, { withTask: true });
+
+    const review = await sessions.reviewWorkerMerge(K.mgrId, K.workerId);
+    check("(K) ownTipSubject carries the entity verbatim (not decoded, not stripped)", review.ownTipSubject === entitySubject);
+    check("(K) warning is present", typeof review.warning === "string");
+    check("(K) warning names the offending entity", !!review.warning && review.warning.includes("&lt;"));
+    check("(K) warning names the offending subject", !!review.warning && review.warning.includes(entitySubject));
+    check("(K) warning explains merge_batch has no equivalent hard check", !!review.warning && review.warning.includes("merge_batch"));
+  }
+
+  // ── (M) Card 8ea85329 — entity on a NON-TIP commit (tip itself clean) still fires the warning ───────────
+  initRepo(M.repo);
+  {
+    const { worktreePath, branch } = await createWorktree(M.repo, M.projId, M.taskId);
+    M.worktreePath = worktreePath; M.branch = branch;
+    const nonTipEntitySubject = "fix(daemon): handle the &amp; case in the parser";
+    commitChange(worktreePath, "parser.ts", "export const p = 1;\n", nonTipEntitySubject);
+    commitChange(worktreePath, "parser2.ts", "export const p2 = 2;\n", "fix(daemon): finish the parser fix");
+    seed(M, { withTask: true });
+
+    const review = await sessions.reviewWorkerMerge(M.mgrId, M.workerId);
+    check("(M) ownTipSubject itself is entity-free", review.ownTipSubject === "fix(daemon): finish the parser fix");
+    check("(M) ownNonTipCommitSubjects carries the entity-bearing subject", Array.isArray(review.ownNonTipCommitSubjects) && review.ownNonTipCommitSubjects.includes(nonTipEntitySubject));
+    check("(M) warning STILL fires even though the tip alone is clean — proves the check scans non-tip commits too", !!review.warning && review.warning.includes("&amp;"));
+  }
 } finally {
   db.close();
-  for (const p of [A, B, C, D, E, H, I]) {
+  for (const p of [A, B, C, D, E, H, I, K, M]) {
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
     try { fs.rmSync(p.repo, { recursive: true, force: true }); } catch { /* ignore */ }
   }
@@ -250,6 +298,8 @@ console.log(failures === 0
     "and ownNonTipCommitSubjects/ownNonTipCommitSubjectsConventional (card 591906ae) now surface a " +
     "multi-commit branch's OTHER commits too, genuinely firing red on a real non-conventional non-tip " +
     "subject even when the tip alone reads clean, while staying absent (no noisier) for the common " +
-    "single-commit case."
+    "single-commit case — and (card 8ea85329) a WARN-ONLY entity advisory now fires on an HTML entity in " +
+    "either the tip or a non-tip own-commit subject (naming the entity, the subject, and merge_batch's own " +
+    "lack of an equivalent hard check), while staying silent for an entity-free branch."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

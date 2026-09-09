@@ -99,6 +99,21 @@ import { nonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
  *    bounded batch sizes this repo can ever reach (K<=4; see the feasibility study).
  *  - Canonical main is FORFEITED (refused, not partially advanced) if it moved between the batch being cut
  *    and the fast-forward — the batch's single gate never validated whatever main became in the meantime.
+ *
+ * 🔴 RESIDUAL GAP (card 8ea85329, DECIDED not fixed here): `mergeBranchLocked`'s HTML-entity backstop
+ * (card f324e8fa, `git/worktrees.ts`) is the SOLO squash path's "last line of defence" against an
+ * accidentally-escaped title becoming a permanent mainline commit subject — it is NOT that for this file.
+ * `landBranchCommitsIndividually` below lands every candidate's own commit subjects VERBATIM (see
+ * `finalMessage` — sourced from each commit's real `%B`, never re-derived or checked), with no equivalent
+ * entity check anywhere in this landing path. A hard refusal here was considered and REJECTED: unlike a
+ * card title (a manager retitles in seconds), a worker-authored commit message has no cheap fix once the
+ * worker may already be retired and `git rebase -i` is unsupported in this repo — refusing mid-batch would
+ * strand the branch with no cheap recovery, a materially worse trade than the one f324e8fa made. Instead,
+ * `SessionService.reviewWorkerMerge` (`sessions/service.ts`) now surfaces a WARN-ONLY advisory from the
+ * SAME `ownTipSubject`/`ownNonTipCommitSubjects` fields a manager already reviews before choosing solo vs.
+ * batch — before batch time, while the worker is typically still alive to amend. That advisory is
+ * non-blocking: a manager can still ignore it and batch anyway, so this file's own landing path remains,
+ * by design, un-enforced for this class of defect. Do not read this file's silence on entities as coverage.
  */
 
 const GIT_OP_TIMEOUT_MS = 15_000;

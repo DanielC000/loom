@@ -14606,6 +14606,15 @@ export class SessionService {
    * manager can title-check THIS field the way they already title-check `coerced` before a solo confirm,
    * before deciding to route this worker into a `merge_batch` instead. Absent (like `tasklessSubjectPreview`)
    * only when the branch has no readable commit at all.
+   *
+   * Card 8ea85329: an `entityWarning` folded into the `warning` string (WARN-ONLY, never blocking) fires
+   * when `ownTipSubject` or any `ownNonTipCommitSubjects` entry carries an HTML entity — the same class of
+   * defect {@link checkTitleHtmlEntities}'s hard refusal in `mergeBranchLocked` (`git/worktrees.ts`, card
+   * f324e8fa) closes for the SOLO squash path, which `merge_batch` has no equivalent hard check for (see
+   * `batch-merge.ts`'s own residual-gap doc). A refusal HERE was deliberately rejected: a worker-authored
+   * commit message has no cheap fix once the worker may be retired, unlike a card title a manager retitles
+   * in seconds — so this stays advisory, giving a manager the chance to catch it before batching while the
+   * worker is typically still alive to amend, without stranding anyone who batches past it anyway.
    */
   async reviewWorkerMerge(
     managerSessionId: string, workerSessionId: string,
@@ -14678,6 +14687,29 @@ export class SessionService {
     const retractedPremiseWarning = retractedPremiseMarker
       ? `RETRACTED-PREMISE: this card's body carries a retraction marker ("${retractedPremiseMarker}") but its title still claims \`fix(…)\` — retitle before confirming (title = squash subject).`
       : undefined;
+    // ENTITY-IN-OWN-COMMIT advisory (card 8ea85329): `mergeBranchLocked` (git/worktrees.ts) hard-refuses an
+    // HTML entity in the SOLO squash subject before it can become a permanent mainline artifact (card
+    // f324e8fa) — but `merge_batch` (git/batch-merge.ts) lands each candidate branch's OWN commit subjects
+    // VERBATIM, by deliberate owner design (card 6801c0a1), with no equivalent check. A hard refusal AT
+    // BATCH TIME was considered and rejected: unlike a card title (retitle in seconds), a worker-authored
+    // commit message has no cheap fix once the worker may be retired and `git rebase -i` is unsupported
+    // here — refusing there would strand the branch. This is a WARN-ONLY advisory instead, reusing the
+    // subjects already computed above (`ownTipSubject`/`ownNonTipCommitSubjects`) so it costs no extra git
+    // call, surfaced at THIS review step — before a manager picks solo vs. batch, and typically while the
+    // worker is still alive to amend its own commit. It does NOT close the batch-time gap (a manager can
+    // still ignore the warning and batch anyway); see batch-merge.ts's own header for that residual.
+    const entityCarrier = [
+      ...(ownTipSubject !== undefined ? [ownTipSubject] : []),
+      ...(ownNonTipCommitSubjects?.subjects ?? []),
+    ].map((s) => ({ subject: s, guard: checkTitleHtmlEntities(s, false) })).find((x): x is { subject: string; guard: NonNullable<ReturnType<typeof checkTitleHtmlEntities>> } => x.guard !== null);
+    const entityWarning = entityCarrier
+      ? `HTML ENTITY IN OWN COMMIT: this branch's own commit subject "${entityCarrier.subject}" contains an ` +
+        `HTML entity ("${entityCarrier.guard.match}"). A SOLO merge refuses this at commit time (see ` +
+        `mergeBranchLocked's entity backstop); \`merge_batch\` has NO equivalent check and lands each ` +
+        `branch's own commit subjects VERBATIM — confirming a batch here would make this a PERMANENT, ` +
+        `unrewritable mainline commit subject. Ask the worker to amend the commit message before batching, ` +
+        `or route this branch through a solo confirm instead (which will refuse and let you retitle).`
+      : undefined;
     // Multi-repo epic (49136451) phase 2: this manager-facing diff/review is against ONE worker's ONE
     // worktree — resolve against the SESSION's own stamped repoKey (see Session.repoKey's doc), not
     // project.repoPath, so a manager reviewing a secondary-repo worker's diff sees the actual branch.
@@ -14714,7 +14746,7 @@ export class SessionService {
     const denyGlobWarning = deniedAdds.length > 0
       ? `DENY-GLOB: branch adds ${deniedAdds.length} file(s) under a project-configured deny path (${(project.denyGlobs ?? []).join(", ")}): ${deniedAdds.slice(0, 10).join(", ")}${deniedAdds.length > 10 ? `, +${deniedAdds.length - 10} more` : ""}. This commonly means a mockup or other deliverable landed in the code repo instead of the vault. Not a hard block — confirming will merge it as-is; verify that's intended before proceeding.`
       : undefined;
-    const warning = [strandedWarning, staleWarning, denyGlobWarning, retractedPremiseWarning].filter((w): w is string => !!w).join(" ") || undefined;
+    const warning = [strandedWarning, staleWarning, denyGlobWarning, retractedPremiseWarning, entityWarning].filter((w): w is string => !!w).join(" ") || undefined;
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "merge_request",
