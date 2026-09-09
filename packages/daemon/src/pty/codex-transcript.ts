@@ -321,18 +321,30 @@ export function findConversationIdForSpawn(cwd: string, sinceMs: number, exclude
  * receive this exclusion — resume's whole point is to legitimately re-match its own ALREADY-EXISTING file,
  * which this snapshot would otherwise exclude.
  *
- * ⚠️ WHAT THIS DOES NOT CLOSE (code review [2], card cbae4520): the snapshot is frozen at THIS spawn's own
- * start, while the capture retry ladder keeps scanning for up to `CODEX_ENGINE_ID_MAX_ATTEMPTS ×
- * CODEX_ENGINE_ID_RETRY_MS` (≈120s, `pty/host.ts`) afterward, and that scan prefers the newest mtime. A
- * DIFFERENT fresh spawn into the SAME cwd, created AFTER this snapshot was taken (e.g. two workers
- * dispatched to the same project `repoPath` within that ~120s window), writes a rollout file that is
- * invisible to THIS spawn's exclusion set and can still be exactly what this spawn's own scan adopts —
- * a CONCURRENT-reuse shape, narrower than and distinct from the sequential one this snapshot closes, and
- * pre-existing in kind (not introduced by this card). Left open by design — tracked as card `7a0b826e`
- * ("fix(pty): close the concurrent same-cwd codex conversation-id race"), whose DoD-1 is to establish
- * whether this shape is even reachable on this host at all. THIS is the authoritative pointer for that
- * card id — `pty/host.ts` and `test/codex-recycle-conversation-id-exclusion.mjs` deliberately point back
- * here rather than repeating it, so it can't drift out of sync in three places. Do not read this
+ * ⚠️ WHAT THIS DOES NOT CLOSE, AND STILL DOESN'T (code review [2], card cbae4520; card `7a0b826e` after
+ * it): the snapshot is frozen at THIS spawn's own start, while the capture retry ladder keeps scanning for
+ * up to `CODEX_ENGINE_ID_MAX_ATTEMPTS × CODEX_ENGINE_ID_RETRY_MS` (≈120s, `pty/host.ts`) afterward, and
+ * that scan prefers the newest mtime. A DIFFERENT fresh spawn into the SAME cwd, created AFTER this
+ * snapshot was taken (e.g. two workers dispatched to the same project `repoPath` within that ~120s window),
+ * writes a rollout file that is invisible to THIS spawn's exclusion set and can still be exactly what this
+ * spawn's own scan adopts — a CONCURRENT-reuse shape, narrower than and distinct from the sequential one
+ * this snapshot closes, and pre-existing in kind (not introduced by this card).
+ *
+ * **Card `7a0b826e` MEASURED this shape reachable** — no spawn lock exists anywhere in `sessions/
+ * service.ts` or `pty/host.ts` (checked directly), and at least seven fresh-spawn call sites there share
+ * `cwd: project.repoPath`, so nothing serialises two fresh codex spawns to one project root. That same card
+ * then tried, and ABANDONED, an in-scan mitigation (rejecting a candidate already claimed by a live
+ * sibling): refusing a contested candidate systematically punishes whichever session is the RIGHTFUL
+ * owner of that file (the thief has already captured and stopped scanning; the owner is the one still
+ * being told "not yours") — every variant tried either reproduced a two-way identity swap when the
+ * candidate set shifted mid-ladder, or left the rightful owner with no id at all, which is worse than the
+ * plain race (a plain race leaves one wrong + one correct capture sharing one id, at least detectable by a
+ * uniqueness sweep). The scan has no identity information — no signal tying a codex process to its own
+ * rollout file — to resolve this with, so nothing at THIS layer closes it. Real closure needs either a
+ * genuine spawn-time identity correlator (none found in the codex CLI's own flags/docs as of this writing)
+ * or serialising fresh codex spawns per cwd — both tracked at card `184fd82e`, not here. `pty/host.ts` and
+ * `test/codex-recycle-conversation-id-exclusion.mjs`/`test/codex-concurrent-same-cwd-exclusion.mjs`
+ * deliberately point back here rather than repeating this, so it can't drift out of sync. Do not read this
  * function's own certainty about the sequential case as covering the concurrent one too.
  *
  * Reads every matching file's `session_meta` (not just `stat`s it, unlike the freshness scan above) since
