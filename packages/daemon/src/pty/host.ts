@@ -53,22 +53,9 @@ const CODEX_SUBMIT_ENTER_DELAY_MS = Number(process.env.LOOM_CODEX_SUBMIT_ENTER_D
  *  without a code change — the default stays 800, UNCHANGED, pending real-codex evidence one way or the
  *  other on whether widening it affects `stopCodex`'s observed intermittent non-zero exit. */
 const CODEX_STOP_GAP_MS = Number(process.env.LOOM_CODEX_STOP_GAP_MS) || 800;
-/**
- * Card 2ec60d9c (DoD-1): retry SPACING for `captureCodexEngineSessionId`'s engine-session-identity
- * discovery. Env-overridable so a hermetic test can shrink it (mirrors `CODEX_BUSY_STALE_MS`'s own
- * `LOOM_CODEX_BUSY_STALE_MS` convention).
- *
- * ⚠️ CORRECTED against a REAL codex spawn (this card's own DoD-4 real-spawn test) — a first design that
- * fired ONE retry ~2s after the ready marker was WRONG about WHEN codex actually creates the rollout
- * file: it is NOT created at process boot. A real run observed the file's on-disk mtime landing ~13
- * seconds AFTER the ready marker first rendered — the file is created lazily, around when the FIRST real
- * turn is actually submitted/begins processing, not at bare boot. A fixed one-shot ~2s-later retry can
- * therefore MISS every real session whose first turn takes longer than that to actually start (a busy
- * host, a slow model response, or — the specific case the real-spawn test hit — this host's OWN personal
- * ~/.codex/config.toml carrying extra plugin/marketplace MCP servers whose "Starting MCP servers (N/4)"
- * episode can itself take several seconds before the first turn even begins). See
- * `CODEX_ENGINE_ID_MAX_ATTEMPTS` for the retry COUNT this spacing multiplies against.
- */
+/** @decision 2ec60d9c — retry spacing corrected against a real codex spawn: the rollout file is created
+ *  lazily (~13s after ready), not at boot — see
+ *  docs/decisions/2ec60d9c-codex-engine-id-retry-spacing-corrected-against-real-spawn.md */
 const CODEX_ENGINE_ID_RETRY_MS = Number(process.env.LOOM_CODEX_ENGINE_ID_RETRY_MS) || 3_000;
 /**
  * Card 2ec60d9c (DoD-1): total retry COUNT for `captureCodexEngineSessionId` — see
@@ -174,21 +161,9 @@ function fnv1a32(s: string): string {
   return (h >>> 0).toString(16).padStart(8, "0");
 }
 
-/**
- * Card d005f55b DoD-2: extends a fnv1a32 hash already computed over some prefix string A with additional
- * trailing text B, producing exactly `fnv1a32(A + B)` — WITHOUT ever needing A's own bytes, only its
- * already-computed hash. Valid because fnv1a32's accumulator `h` is folded purely via `^=`/`Math.imul`,
- * both bitwise ops JS evaluates via ToInt32 regardless of whether the operand is held as a signed int32
- * or the `>>> 0`-formatted unsigned representation `fnv1a32` returns — so parsing the returned hex string
- * back to a 32-bit int and continuing the SAME fold on B yields the identical bit pattern `fnv1a32(A + B)`
- * would compute directly (verified: `fnv1a32Continue(fnv1a32(A), B) === fnv1a32(A + B)` for every sampled
- * A/B pair, including the card's own gen=10/gen=11 fixture lengths).
- *
- * This is what lets `Live.recentReportedTurns` retain only each generation's REPORTED length+hash — never
- * its full text, matching `Live.ambiguousDispatches`'s existing minimal-signature discipline (see that
- * field's own doc) — while still supporting an exact-hash "reported(prior) + written(current)" candidate
- * in `detectComposerAccumulationOverDivergedPrior` below.
- */
+/** @decision d005f55b — extends a hash over prefix A with trailing B into fnv1a32(A + B) WITHOUT A's own
+ *  bytes; lets recentReportedTurns retain only length+hash — see
+ *  docs/decisions/d005f55b-fnv1a32continue-extends-a-hash-without-the-prefix-bytes.md */
 function fnv1a32Continue(priorHash: string, s: string): string {
   let h = parseInt(priorHash, 16) | 0;
   for (let i = 0; i < s.length; i++) {
@@ -198,27 +173,9 @@ function fnv1a32Continue(priorHash: string, s: string): string {
   return (h >>> 0).toString(16).padStart(8, "0");
 }
 
-/**
- * Card 4a0af485: the MINIMAL signature `Live.ambiguousDispatches` stores per still-ambiguous generation —
- * length + the SAME cheap `fnv1a32` hash `ptyWrite`'s own log line already uses, never the full text (see
- * that map's own doc for why).
- *
- * ⚠️ CODE REVIEW CORRECTION (an earlier draft of this comment claimed a collision is "never a false-
- * positive purge" — WRONG, and the real vector needs no collision at all): a 32-bit hash collision between
- * two genuinely DIFFERENT texts is ~2⁻³² and not worth carding on its own. But two GENUINELY DISTINCT
- * messages that happen to carry byte-IDENTICAL text (P=1 if they coexist, no collision needed) land on the
- * exact same signature too — indistinguishable from a coalesced batch's members by signature alone.
- * FIXED (card bc0774c4): `purgeConfirmedGiveUpRequeue` no longer purges every signature match
- * unconditionally — every `Live.ambiguousDispatches` entry also carries a `batchId` (the `gen` every member
- * of ONE `requeueGiveUpOrigin` call is seeded under; see that map's own doc), and a content match purges
- * ONLY when every matched entry shares ONE `batchId`. A match spanning more than one `batchId` — the
- * genuinely-distinct-same-text case — is left entirely untouched rather than guessed at (an age-based
- * tie-break was considered and rejected: a batch that has already redrained under a fresh
- * `submitGeneration` breaks the "oldest batch confirmed first" assumption — see
- * `purgeConfirmedGiveUpRequeue`'s own doc for the concrete trace). A non-byte-identical engine echo,
- * separately, is still only ever a false-negative MISS (a real duplicate this map could have purged is
- * left for the FIFO-position fallback instead) — that half of the original claim holds.
- */
+/** @decision 4a0af485 — ambiguousDispatches signature purge is scoped to ONE batchId; a match spanning
+ *  more than one is left untouched (genuinely-distinct-same-text, not a duplicate) — see
+ *  docs/decisions/4a0af485-ambiguousdispatches-signature-purge-scoped-to-one-batchid.md */
 function textSignature(text: string): { len: number; hash: string } {
   return { len: text.length, hash: fnv1a32(text) };
 }
@@ -262,36 +219,9 @@ const COMPOSER_ACCUM_WINDOW = 8;
  */
 const OFFSET_OMISSION_MAX_TAIL_CHARS = 2;
 
-/**
- * Card c2c750a9 — the CONSUMING half of card 736de9c0's hash-confirmed finding: the engine's
- * UserPromptSubmit hook can report back the composer's whole accumulated buffer (everything written
- * since the composer last genuinely cleared), not just the current turn's own text, when a clear is
- * silently missed between submissions. `[prompt-echo]` (below) already logs every field this needs on
- * every submission — this function is the first thing that actually READS it.
- *
- * TWO STAGES, deliberately kept separate (736de9c0's own counterexample: `A+B+C` and `C+A+B` share length
- * 11105 but hash `1136780e` vs `687d2824` — a sum cannot pin ordering, only a hash can):
- *   TRIGGER     — `reportedLen` equals the SUM of the current write's length plus one-or-more IMMEDIATELY-
- *                 PRECEDING writes' lengths (a contiguous suffix of `window`, which is oldest-first and
- *                 always ends with the current submission's own entry).
- *   CONFIRMATION — `fnv1a32` of those same payloads' TEXT, concatenated in that same gen order, BARE (no
- *                 separator bytes), equals `reportedHash`. Only a length-AND-order match is a genuine
- *                 accumulation; a length-only match (same total, different order/content) is refused here
- *                 — see the reorder counterexample above.
- * Tries the SMALLEST span first (k=2 upward) and returns the first CONFIRMED (hash-matching) span it
- * finds; if none confirm, returns the smallest span whose SUM matched anyway (`confirmed: false`) so a
- * caller can tell "no candidate at all" apart from "a candidate existed and the hash refused it" — the
- * exact distinction card c2c750a9's DoD requires demonstrating.
- *
- * ⚠️ COVERAGE LIMIT this function cannot lift (state in any caller's own log/report too, per the card):
- * `[prompt-echo]` fires only at the NEXT write — an accumulation with no SUBSEQUENT submission on that
- * session emits nothing and is structurally invisible here. Scope every claim this produces to
- * "accumulation detectable at the next write", never "duplicates detected" (card 736de9c0's own limit).
- * Also out of scope by construction: this compares SUBMITTED-TURN text (`live.lastPrompt` / `hook.prompt`,
- * already fully decoded), never raw `[pty-write]` byte chunks — so the give-up clear's
- * `BACKSPACE.repeat(N)` false-signature class (content-identical by construction, see `ptyWrite`'s own
- * doc) never reaches this comparison at all; it doesn't need excluding here because it was never included.
- */
+/** @decision c2c750a9 — two-stage sum-then-hash accumulation detector (a sum alone can't pin ordering);
+ *  coverage limit: detects only "at the next write", never a general duplicate census — see
+ *  docs/decisions/c2c750a9-detectcomposeraccumulation-two-stage-trigger-and-confirm.md */
 function detectComposerAccumulation(
   reportedLen: number,
   reportedHash: string,
@@ -310,29 +240,9 @@ function detectComposerAccumulation(
   return bestUnconfirmed ? { confirmed: false, ...bestUnconfirmed } : null;
 }
 
-/**
- * Card d005f55b DoD-2 — the SEPARATE, ADDITIVE candidate the card's own fix direction names. `detectComposerAccumulation`
- * above can never confirm a fusion whose PRIOR generation's own reported echo had ALREADY diverged from
- * what Loom wrote for it — it sums `recentWrittenTurns` (what Loom WROTE), but the composer's real state
- * is what was actually SUBMITTED (see the card's §THE COMPOUNDING MECHANISM: on a real, arithmetically-
- * exact specimen, `reported(gen11) = written(gen11) + reported(gen10)`, not `written(gen11) +
- * written(gen10)`, once gen10's own report had already mismatched). This tries exactly ONE additional,
- * narrower candidate: the immediately preceding RECORDED generation's own REPORTED signature (never its
- * written one) plus the CURRENT write's own WRITTEN text. Still exact-sum AND exact-hash — no loosening:
- * `fnv1a32Continue` reconstructs the concatenation's hash from the prior entry's own hash alone (see that
- * function's own doc for why this needs no full text), so this confirmation is no less rigorous than the
- * sibling detector above; it only widens WHICH prior signature a candidate is allowed to reuse.
- *
- * Deliberately narrow — a single two-entry candidate (prior generation's REPORTED value + the current
- * write's own WRITTEN text), not a multi-span search like `detectComposerAccumulation`. The card's own
- * regression fixture (gen=10/gen=11: written 1893/1126, reported 2161/3287) and fix direction name exactly
- * this shape, measured on n=1 pair in the card body; a real-corpus length-only sweep (worker report, card
- * d005f55b) found the SAME sum equation — `reportedLen(N) == writtenLen(N) + reportedLen(prior recorded
- * gen)` — satisfied by 80 of 362 checked mismatches (~22%) across 6 rotations of `daemon-output.log`, so
- * this is not a one-off shape. Widening to a multi-generation REPORTED chain (prior-of-prior, etc.) is
- * unestablished by this sweep (which only checked one hop back) and is explicitly left as a follow-up —
- * see the card's own bounds on not re-litigating scope here.
- */
+/** @decision d005f55b — the diverged-prior candidate reuses the PRIOR gen's REPORTED signature (never its
+ *  written one), narrow to a single two-entry span; do not widen to a multi-generation chain — see
+ *  docs/decisions/d005f55b-diverged-prior-reported-chain-candidate.md */
 function detectComposerAccumulationOverDivergedPrior(
   reportedLen: number,
   reportedHash: string,
@@ -347,37 +257,9 @@ function detectComposerAccumulationOverDivergedPrior(
   return { confirmed: true, priorGen: priorReported.gen, sumOfLens: sum };
 }
 
-/**
- * Card d005f55b DoD-3 (the card's own floor item — mergeable even if DoD-1/2 above are deferred). Tried
- * ONLY once every exact-match candidate above (`replayedEntry`, `detectComposerAccumulation`,
- * `detectComposerAccumulationOverDivergedPrior`) has already refused. Tests whether `reported` nonetheless
- * CONTAINS a recorded write as a SUBSTRING ANYWHERE (rather than equalling it, or being one exact term of
- * an exact-sum span) — this is deliberately NOT a confirmation of anything and asserts no new mechanism or
- * confidence: it only names what WAS recognized so a caller can say the LEADING/TRAILING remainder around
- * it is unaccounted-for, instead of the prior "could not be matched to any... at all" wording that reads
- * identically whether zero bytes or nearly the whole payload are actually explained (§THE GAP, card
- * d005f55b — this is what stops an observed foreign-content fusion from reading as noise).
- *
- * ⚠️ DELIBERATELY NOT edge-anchored (an earlier draft of this function only tried `startsWith`/`endsWith`
- * and would have MISSED the card's own motivating gen=4 specimen: `<26ch placeholder><gen3's full
- * text><gen4's own text>` — gen3's own write sits SANDWICHED in the MIDDLE, between the placeholder prefix
- * and the current generation's own trailing text, not at either edge). Uses `indexOf` (a true substring
- * search) and reports BOTH remainders — whatever precedes and follows the match — since either or both can
- * be non-empty depending on where the recognized write sits.
- *
- * `window` must be the CALLER's own writes EXCLUDING the current generation's own just-pushed entry (pass
- * `recentWrittenTurns.slice(0, -1)`, mirroring `priorEntry`'s own `length - 2` exclusion elsewhere in this
- * file) — the current generation's own text is, by construction, almost always a literal trailing
- * substring of `reported` in a fusion-shaped mismatch (`recentWrittenTurns.push` happens at submit() time,
- * before this hook ever fires), so including it here would trivially "recognize" the caller's own current
- * turn on nearly every unmatched-longer mismatch and never surface a genuinely PRIOR generation's write —
- * the whole point of this check.
- *
- * Checked most-recent-generation-first (mirrors this file's own `findLast` precedent elsewhere) so a match
- * against the freshest prior write wins over an older, possibly-recycled one; only the FIRST hit is
- * returned — this is a diagnostic aid, not an exhaustive census, and callers must not treat "no hit" as
- * anything beyond that.
- */
+/** @decision d005f55b — names a recognized write, confirms nothing; NEVER pass the current gen's own
+ *  just-pushed entry inside `window` (it would trivially self-match) — see
+ *  docs/decisions/d005f55b-findrecognizedsubstring-names-not-confirms.md */
 function findRecognizedSubstring(
   reported: string,
   window: ReadonlyArray<{ gen: number; text: string }>,
@@ -397,54 +279,15 @@ function findRecognizedSubstring(
   return null;
 }
 
-/**
- * Card 78e4b3f2 — the RECIPIENT-side half of duplicate legibility (the sender-side half, card 417cea0a,
- * is the `[loom:redelivery-parked]`/`[loom:redelivery-confirmed]` notices above). Duplicate-over-loss
- * (`bc0774c4`) stays exactly as it is — this does not reduce or gate a single re-delivery — it only marks
- * one so the recipient can tell it apart from genuine new direction, per that card's own recommended
- * direction.
- *
- * Applied to a re-delivery of a message whose FIRST write was never confirmed, via TWO distinct triggers:
- * an in-session requeue (`requeueGiveUpOrigin` stamps `giveUpGen` on the kept entry; the actual call to
- * THIS function happens later, at the moment of physical re-write — `joinSubmittedText`, this file, shared
- * by `drainPending`'s real write and `requeueGiveUpOrigin`'s own signature-seed) or a cross-remint
- * (`handleGiveUpExhausted`, sessions/service.ts, `chainDepth > 0` — applied immediately at message
- * CREATION, before it's ever enqueued). The ORIGINAL, first-ever write of a logical message never triggers
- * either path — see each site's own doc — so a genuine first-time directive is never marked (marking it
- * would train recipients to discount real direction, exactly the outcome card 78e4b3f2 rules out).
- *
- * `rootMsgId` is `QueuedMessage.logicalId` — stable across every requeue/re-mint (card 4a0af485) — so
- * every re-delivery of the SAME logical message carries the SAME tag; no new identifier is minted.
- */
+/** @decision 78e4b3f2 — marks a re-delivery only, NEVER a first-time directive (would train recipients to
+ *  discount real direction); rootMsgId is the stable logicalId across every requeue/re-mint — see
+ *  docs/decisions/78e4b3f2-possible-duplicate-tag-marks-only-a-redelivery.md */
 const POSSIBLE_DUPLICATE_TAG_RE = /^\[loom:possible-duplicate root:[0-9a-f]{8}\] /;
 const HEX8_RE = /^[0-9a-f]{8}$/;
 
-/**
- * CR follow-up (card 78e4b3f2, found in review): `rootMsgId` is NOT always a UUID. `worker_message`'s
- * `resendOf` (sessions/service.ts, `messageWorker`) is a raw, UNVALIDATED MCP string argument
- * (`mcp/orchestration.ts`'s `z.string().optional()`) that a caller can set to anything and that then flows
- * straight through as `rootMsgId` — a non-hex or short value would produce a tag `POSSIBLE_DUPLICATE_TAG_RE`
- * can never recognize again, breaking the frame/strip pair's inverse property (a later re-tag would
- * double-prefix instead of correctly no-op-ing, and `stripPossibleDuplicateFrame` would never remove it).
- * The common case — every self-minted `msgId` IS a UUID, and a chain whose `rootMsgId` was never set via
- * `resendOf` at ANY point in its OWN history resolves to that UUID's own `.slice(0, 8)` — short-circuits
- * there so the tag stays the SAME 8 chars the `[loom:redelivery-parked]` notice's own
- * `root ${rootMsgId.slice(0, 8)}` wording already shows a human. NOT scoped to "this call didn't pass
- * `resendOf`": `ctx.rootMsgId` wins priority over `ctx.resendOf` (service.ts's `enqueueDurableMessage`), so
- * a later re-mint that itself never sets `resendOf` still carries an earlier hop's tainted value forward
- * via `ctx.rootMsgId` — this function validates the ACTUAL VALUE it receives, not which path it arrived
- * by, so any irregular id (a direct `resendOf`, or one inherited from an earlier hop) falls back to
- * `fnv1a32` (already used elsewhere in this file for exactly this "always 8 lowercase hex chars,
- * deterministic" shape) — still correlatable (same input ⇒ same label) but never breaks the regex
- * invariant, regardless of how the irregularity entered the chain.
- *
- * Exported (card 35c96aa6): the worker-facing `directive_status` MCP tool (mcp/orchestration.ts) needs
- * this SAME label computation to match a root a worker supplies against the internal rootMsgId values in
- * its own durable event history. Reusing this function (a pure function of its own input) guarantees that
- * ONE step — computing a label from a candidate rootMsgId — is byte-identical to what produced the tag a
- * worker sees, rather than a re-derived approximation that could silently drift from it; it says nothing
- * about whether the tool's SURROUNDING logic correctly identifies the right rootMsgId to feed in.
- */
+/** @decision 78e4b3f2 — rootMsgId is NOT always a UUID (resendOf is a raw unvalidated MCP string); any
+ *  irregular value falls back to fnv1a32, never breaks the HEX8_RE regex invariant — see
+ *  docs/decisions/78e4b3f2-rootmsgid-is-not-always-a-uuid.md */
 export function possibleDuplicateRootLabel(rootMsgId: string): string {
   const slice = rootMsgId.slice(0, 8);
   return HEX8_RE.test(slice) ? slice : fnv1a32(rootMsgId);
@@ -482,37 +325,9 @@ export function stripPossibleDuplicateFrame(text: string): string {
   return text.replace(POSSIBLE_DUPLICATE_TAG_RE, "");
 }
 
-/**
- * Card d005f55b — manager-supplied LIVE evidence (sessions 494db005/f6eeeb52, 2026-08-06) CONFIRMS the
- * card's own Candidate #3 ("a Loom redelivery wrapper", marked PLAUSIBLE/UNVERIFIED in the card body) as a
- * real foreign-content source — but as a DEFICIT, not a fusion: both measured specimens had `reported`
- * SHORTER than `intended` by EXACTLY 40 chars (`divergesAtChar=0`, `lenDelta=-40`), and 40 is the fixed
- * length of `POSSIBLE_DUPLICATE_TAG_RE`'s own match regardless of which 8 hex chars fill the root id
- * (`"[loom:possible-duplicate root:"` (30) + 8 hex + `"] "` (2) = 40 — verified). In both specimens,
- * `intended` (what Loom wrote for that generation) STARTS WITH the tag, and `reported` equals `intended`
- * with the tag stripped, byte-for-byte.
- *
- * ⛔ NOT an accumulation/fusion (those are always LONGER, never shorter) — deliberately its own,
- * orthogonal check; do not fold this into `detectComposerAccumulation`/`…OverDivergedPrior` above.
- *
- * ⭐ CORRECTED MECHANISM (manager measurement, 2026-08-06, card 854d1632 — supersedes an earlier, wrong
- * "does not establish whether the tag reached the engine" framing this doc used to carry): the wrapper
- * DOES reach the engine and IS echoed back byte-identically in the ordinary case — verified directly via
- * `[submit-write]`/`[prompt-echo]` pairs showing a wrapped write (`len=written+40`) confirmed
- * `byteIdentical=true` at its full wrapped length. The `-40` specimens are best explained as a STALE,
- * OUT-OF-ORDER confirmation: the hook that fired belongs to an EARLIER, bare (pre-wrap) write, but by the
- * time it arrives `live.lastPrompt` has already advanced to a LATER, wrapped re-mint of that same
- * content. This is an ATTRIBUTION/ORDERING artifact, NOT corruption and NOT content loss — every byte of
- * SOME intended content (the earlier bare write) did arrive; it's compared against the wrong (already-
- * advanced) generation's `intended`, not evidence that anything failed to transmit.
- * ⛔ Do NOT chase the wrapper's actual delivery path from here — that question is answered and tracked
- * separately (card 854d1632); this function only NAMES the byte-pattern precisely enough that it stops
- * reading as "matched nothing" (card d005f55b DoD-3's own point, which this specimen strengthens) — it
- * must NOT be worded as a loss/deficit in anything that consumes it (see the notice text below).
- * Precise and non-heuristic, mirroring `isStalePlaceholderPrefix`'s own exact-strip-and-compare
- * discipline (this file, below) — reuses the EXISTING `stripPossibleDuplicateFrame` (no new matcher, no
- * loosening of anything): fires ONLY when stripping the tag from `intended` produces `reported` EXACTLY.
- */
+/** ⛔ NOT an accumulation/fusion — do not fold into detectComposerAccumulation/…OverDivergedPrior.
+ *  ⛔ Do NOT chase the wrapper's delivery path from here — tracked separately (card 854d1632).
+ *  @decision d005f55b — see docs/decisions/d005f55b-wrapper-deficit-is-not-a-fusion.md */
 function detectPossibleDuplicateWrapperDeficit(reported: string, intended: string): { strippedTag: string } | null {
   const stripped = stripPossibleDuplicateFrame(intended);
   if (stripped === intended) return null; // no tag was present to strip
@@ -520,42 +335,10 @@ function detectPossibleDuplicateWrapperDeficit(reported: string, intended: strin
   return { strippedTag: intended.slice(0, intended.length - stripped.length) };
 }
 
-/**
- * Card c23e2869 — d005f55b's own Candidate #3 ("a Loom redelivery wrapper"), arithmetically confirmed on a
- * real specimen (session `daf64e68`, gen=10): `9,709 + 1,640 = 11,349` (recognized entry's own length plus
- * the current write's stripped length equals `reported`'s length) and, independently, `1,680 − 40 = 1,640`
- * (the current write's own intended length minus the fixed 40-char redelivery-tag length). Both exact.
- *
- * {@link detectPossibleDuplicateWrapperDeficit} above only tests whether `reported` equals the CURRENT
- * generation's own intended text with its wrapper stripped, IN FULL — it cannot confirm a specimen where
- * `reported` is that PLUS an EARLIER generation's own recorded WRITTEN text fused onto it, the shape this
- * card measured: `reported` matched an entry in `window` as a leading/trailing SUBSTRING (what
- * `findRecognizedSubstring` below already recognizes), with the REMAINDER left unaccounted for — even
- * though that remainder is itself exactly explainable as the current write's own wrapper-stripped text.
- *
- * Tries EACH window entry (most-recent-first, mirroring `findRecognizedSubstring`'s own precedent) in
- * BOTH concatenation orders — `[entry][strippedCurrent]` and `[strippedCurrent][entry]` — since either can
- * legitimately sit first depending on when the redelivered wrapper was drained relative to the earlier
- * generation's own content. EXACT-EQUALITY, not sum+hash: a literal `===` comparison is strictly stronger
- * than a 32-bit hash (no collision is possible) — this is the exact-match discipline this card's own DoD-1
- * requires preserved, never loosened (d005f55b's standing bound).
- *
- * Returns `null` immediately if the current write carries no recognizable wrapper to strip — an unwrapped
- * current write can never satisfy this candidate, so it is a no-op on every ordinary (non-redelivered)
- * turn, same posture as `detectPossibleDuplicateWrapperDeficit`.
- *
- * ⚠️ Code Review (manager, card c23e2869): ALSO returns `null` when the stripped current write is EMPTY —
- * a bare tag with no body (`currentIntendedText` is exactly the 40-char tag and nothing else). Without
- * this, `strippedCurrent === ""` and the loop below degenerates: the length check becomes
- * `entry.text.length === reported.length` and `reported === entry.text + ""` collapses to
- * `reported === entry.text` — the PLAIN `replayedEntry` whole-string-match condition — so this function
- * would fire "NOT A LOSS, fused with a zero-char stripped write" for what is actually an ordinary
- * unresolved replay, silently disarming its own follow-up loss timer (`isRecognizedReplayAwaitingResolution`
- * guards against `confirmedWrapperAwareFusion` alongside its siblings). `entry.text.length === 0` below
- * protects the WINDOW side of this same degeneracy; nothing protected the CURRENT side until this line —
- * the asymmetry was the whole bug. A bare-tag-only write looks impossible today; that is exactly why this
- * guard must stay even though it looks like it protects nothing.
- */
+/** ⛔ NEVER remove the strippedCurrent.length===0 guard below — a bare-tag-only write looks impossible
+ *  today, but without it the loop degenerates to a plain whole-string match and silently disarms the
+ *  follow-up loss timer. @decision c23e2869 — see
+ *  docs/decisions/c23e2869-wrapper-stripped-current-fusion-candidate.md */
 function detectRecognizedFusionWithWrapperStrippedCurrent(
   reported: string,
   currentIntendedText: string,
@@ -578,28 +361,9 @@ function detectRecognizedFusionWithWrapperStrippedCurrent(
   return null;
 }
 
-/**
- * Card a640c110: a sibling to {@link detectPossibleDuplicateWrapperDeficit} — a DIFFERENT benign
- * byte-pattern that otherwise presents as an ordinary mismatch. Measured specimen (worker
- * `671766c9…`, gen=3, from `daemon-output.log`): `reportedLen=4106 intendedLen=4115 lenDelta=-9
- * divergesAtChar=897`, and `intended` carried EXACTLY two ANSI/CSI escape sequences at that point
- * (`\x1b[31m` = 5 chars, `\x1b[0m` = 4 chars) — `5 + 4 = 9`, matching `lenDelta` exactly, and
- * `divergesAtChar` lands precisely where the first sequence starts. The engine's own echo had
- * stripped both sequences and reproduced everything else byte-for-byte: NOT corruption, NOT content
- * loss — an attribution/rendering artifact, same posture as the wrapper-deficit shape above.
- *
- * Precise and non-heuristic, mirroring `detectPossibleDuplicateWrapperDeficit`'s own
- * exact-strip-and-compare discipline: reuses the EXISTING `ANSI_CSI` regex (this file, below —
- * the same one `collapseBoot` already strips with), no new matcher. Fires ONLY when stripping
- * EVERY ANSI/CSI escape sequence from `intended` produces `reported` EXACTLY, byte-for-byte — never
- * a fuzzy/near match, and never a one-sided/partial strip (a payload where ANSI is present but the
- * REMAINING content also genuinely diverges fails the `stripped !== reported` check below and is
- * correctly left unclassified, same as a payload with no ANSI at all).
- *
- * ⛔ n=1 (one specimen, one shape) — this classifies THIS byte-pattern only; it is not license for
- * any broader claim that mismatches are generally benign. See memory
- * `the-qualifier-dies-in-the-summary-label`.
- */
+/** ⛔ n=1 (one specimen, one shape) — classifies THIS byte-pattern only, no broader "mismatches are
+ *  generally benign" claim. @decision a640c110 — see
+ *  docs/decisions/a640c110-ansi-strip-deficit-is-a-rendering-artifact.md */
 function detectAnsiEscapeStripDeficit(reported: string, intended: string): { strippedAnsiLen: number } | null {
   const stripped = intended.replace(ANSI_CSI, "");
   if (stripped === intended) return null; // no ANSI/CSI escape sequence was present to strip
@@ -607,91 +371,17 @@ function detectAnsiEscapeStripDeficit(reported: string, intended: string): { str
   return { strippedAnsiLen: intended.length - stripped.length };
 }
 
-/**
- * Card 41950a38 — specimen: Platform Lead session, gen=1, a `daemon_restart` resume boundary
- * (2026-09-02T10:12:43Z), `reportedLen=519 intendedLen=30646 divergesAtChar=0`. Traced past this file
- * entirely, to the engine's own transcript: `reported` was NOT truncated/spliced Loom content at all — it
- * was byte-for-byte Claude Code's OWN engine-generated `<task-notification>...</task-notification>` block
- * (a background-task-status notice the CLI itself synthesizes on resume, reporting a stale shell command
- * from the prior process with no completion record — entirely independent of anything Loom wrote to the
- * pty for this generation). The transcript's own `queue-operation` records show Loom's actual gen=1 write
- * was queued by the CLI's own internal input queue at this same moment and delivered as a later turn
- * moments after — nothing was lost in that one specimen.
- *
- * Deliberately NOT a suppression, unlike `detectAnsiEscapeStripDeficit`/`detectPossibleDuplicateWrapperDeficit`
- * above (both prove RECONCILIATION — stripping the recognized wrapper leaves the remainder byte-identical
- * to `intended`): there is no byte-level relationship between a task-notification and `intended` to
- * reconcile against, and this daemon has no visibility into the CLI's own internal turn/queue state (see
- * this file's own "never assert a CLI-internal CAUSE" doctrine at the `[loom:prompt-mismatch]` notice
- * site, below) — so this cannot CONFIRM the intended text arrived, only that `reported` itself is not
- * evidence it didn't. Structural, not heuristic: the whole (trimmed) `reported` string is bounded by the
- * CLI's own fixed wrapper tags, a shape Loom itself never writes (Loom's own frames are all
- * `[loom:...]`-tagged). This only ever ENRICHES the notice's wording (mirroring `unmatchedRecognized`'s
- * own cautious, non-suppressing posture below) — the "possible LOSS" alarm still fires unchanged.
- *
- * ⛔ n=1 (one specimen) — classifies THIS byte-pattern only. See memory `the-qualifier-dies-in-the-
- * summary-label`.
- */
+/** ⛔ n=1 (one specimen) — classifies THIS byte-pattern only; never a general loss-confirmation. Deliberately
+ *  NOT a suppression — the "possible LOSS" alarm still fires unchanged, this only enriches the wording.
+ *  @decision 41950a38 — see docs/decisions/41950a38-task-notification-report-is-not-a-loss-confirmation.md */
 function isEngineTaskNotificationReport(reported: string): boolean {
   const trimmed = reported.trim();
   return trimmed.startsWith("<task-notification>") && trimmed.endsWith("</task-notification>");
 }
 
-/**
- * Card 4af5aefa: a real, live false positive showed a paste-recovery notice minted CORRECTLY (its
- * resent content genuinely was the most recent inbound at the moment of detection) but delivered
- * ~293s and TWO genuine intervening turns later — by which point a newer message had already arrived
- * and been actioned, making the resend read as stale. Reconstructed from `daemon-output.log`'s own
- * per-line epoch-ms timestamps for the actual specimen: the gap was ordinary FIFO queue-wait behind
- * two successfully-confirmed turns, not a give-up/re-mint retry, and not a stale `originalText` capture.
- *
- * The fix is NOT to suppress or re-verify "is this still current" at delivery time — that would ask a
- * question the detector still can't answer (engine/recipient VISIBILITY), reintroducing the exact
- * proxy-for-the-claim substitution this card exists to name, one level up. What IS genuinely observable
- * at delivery time is a fact about OUR OWN QUEUE: how many `Live.submitGeneration` bumps happened since
- * this was minted. So this only ever ANNOTATES — it never drops, never gates, never alters ordering.
- *
- * Code review correction: the disclosed count is worded as "submit generations", never "turns" — a
- * SECOND, independent false claim was caught here, inside this very card's own remedy. `submitGeneration`
- * counts submit ATTEMPTS ISSUED (`submit()`'s own `++`) plus out-of-band bumps (a give-up via
- * `healIfStuck`, both stop paths) — NOT completed turns. A give-up can consume a whole generation with NO
- * turn ever actually running, so "N turns ago" would sometimes be false (e.g. mint at G, one give-up with
- * zero turns run, delivery at G+1 — that is NOT "1 turn ago"). "N submit generations ago" is true by
- * construction: it's exactly what `currentGen - mintedAtGen` counts, nothing inferred beyond it.
- *
- * EXHAUSTIVE no-op / branch conditions (code review, card 4af5aefa; extended by card 1c47454b): (1) BOTH
- * `mintedAtGen` and `mintedAtWallClock` are `undefined` — set only for a paste-recovery mint, so `text`
- * for anything else is returned unchanged; (2) `mintedAtGen` is defined but `currentGen` is no greater
- * than it — delivered before anything else ran IN THIS SAME SESSION, nothing to disclose yet; (3) the
- * text, once any possible-duplicate frame is stripped, doesn't start with `PASTE_RECOVERY_TAG` at all —
- * not a recovery notice. Checking the STRIPPED text (not the raw `text`) for (3) matters: a recovery
- * notice that itself gave up once and redrained arrives here PREFIXED with `[loom:possible-duplicate
- * root:…]` (`joinSubmittedText` applies that framing first) — a raw `startsWith` check would silently
- * no-op on EXACTLY the notices whose age is largest (a give-up hold adds minutes on top of the ordinary
- * queue wait this function exists to disclose), which is this fix failing in its own motivating case. Any
- * possible-duplicate prefix is preserved verbatim ahead of the tag; the note always lands immediately
- * after `PASTE_RECOVERY_TAG` itself, regardless of what (if anything) precedes it.
- *
- * TWO DISTINCT disclosures, card 1c47454b: `mintedAtGen` defined (and `currentGen` has advanced) means
- * this entry is being read in the SAME session it was minted in — the existing "N submit generations
- * ago" wording, unchanged. `mintedAtGen` UNDEFINED but `mintedAtWallClock` defined means this entry just
- * crossed a `worker_recycle`/`daemon_restart` boundary — `carryPendingToSuccessor`/the restart replay
- * both deliberately omit `mintedAtGen` when threading a carried entry onto its successor (see
- * `mintedAtGen`'s own doc on `QueuedMessage` for why: comparing a predecessor's generation count against
- * a fresh successor's, which always restarts at 0, is a unit error — "47 submit generations ago" would
- * be reported against a session that has run at most a handful), so this branch reports the one thing
- * that DOES survive the boundary honestly: an absolute wall-clock mint time, for the recipient to weigh
- * against their own handoff/transcript. `mintedAtGen`'s presence alone still selects WHICH wording leads
- * (generation-count phrasing for the in-session case, wall-clock-only phrasing for the cross-boundary
- * case) — but card 2d36337e: the in-session branch now ALSO appends that same absolute wall-clock time
- * (verified: every current construction path that sets `mintedAtGen` also sets `mintedAtWallClock` in the
- * SAME call — the paste-recovery mint site stamps both together, and every carry across a boundary either
- * keeps both or deliberately drops `mintedAtGen` alone, never the reverse — see the grep audit in that
- * card's history). A relative generation count ("2 submit generations ago") tells the recipient nothing
- * about whether this predates a SPECIFIC later message they've already read; a directly comparable
- * absolute timestamp does — that gap (not guard (a) below, which correctly stays quiet only when nothing
- * has run since mint) is what let a recovered message read as redundant instead of as a missed premise.
- */
+/** @decision 4af5aefa — annotates queue age only (never suppresses/gates/reorders); disclosed count is
+ *  worded "submit generations", never "turns" (a give-up can consume a generation with none run) — see
+ *  docs/decisions/4af5aefa-paste-recovery-age-annotates-never-suppresses.md */
 function annotatePasteRecoveryAge(
   text: string, mintedAtGen: number | undefined, currentGen: number, mintedAtWallClock: number | undefined,
 ): string {
@@ -745,52 +435,15 @@ export const SUBMIT_MAX_ATTEMPTS = Number(process.env.LOOM_SUBMIT_MAX_ATTEMPTS) 
  */
 export const GIVE_UP_REQUEUE_LIMIT = Number(process.env.LOOM_GIVE_UP_REQUEUE_LIMIT) || 1;
 
-/**
- * Card b64b3726: bounded poll for the GIVE-UP attempt's own paste-reassert (`BRACKET_PASTE_START +
- * BRACKET_PASTE_END`, written by `sendEnterAndVerify` on every `attempt > 1`) to settle BEFORE writing
- * that attempt's Enter and capturing `enterWrittenAt` — see `awaitReassertSettle`. Mirrors this file's
- * existing `RESUME_MODE_READ_POLL_MS`/`RESUME_MODE_CHANGE_MAX_POLLS` poll-count convention (observe, don't
- * guess, but stay bounded).
- *
- * SIZED FROM A MEASURED DISTRIBUTION, not guessed (real `claude` engine, card b64b3726 probes — see
- * `test/_probe-empty-paste-provocation.mjs` for the base finding). The re-assert alone reliably provokes a
- * deterministic 16-byte TUI response (a keyboard-protocol renegotiation) — but only INTERMITTENTLY at
- * production's actual retry cadence (~900ms between reasserts): a cadence-matched probe found it lands
- * inside its own attempt's verify window in ~13-20% of give-ups, not "always" (an earlier, wider-spaced
- * probe had wrongly suggested "always" — see that finding's own correction note for why probe CADENCE has
- * to match the thing being measured). When it DOES fire, latency across n=10 pooled real-engine samples was
- * bimodal: 8/10 (80%) landed in 1.15-7.65ms, 2/10 (20%) landed at 820.96/1367.94ms. `REASSERT_SETTLE_MAX_POLLS`
- * × `REASSERT_SETTLE_POLL_MS` ≈ 300ms therefore catches the fast majority with wide margin and deliberately
- * accepts the slow tail as a residual — a slow-arriving response can still land after this bound and cause a
- * suppress on THIS attempt, same as before this fix. That residual is acceptable ONLY because `healIfStuck`
- * (card b64b3726 Half 2) backstops the consequence regardless of which vector caused the suppression — if
- * that backstop is ever removed, this bound needs re-deriving against a fuller sample, not just widened.
- * If a future re-measurement shows the fast group is no longer the majority, THIS bound is the wrong one to
- * keep — don't just halve it, re-derive it from a fresh distribution.
- */
+/** @decision b64b3726 — sized from a MEASURED bimodal latency distribution (n=10), not guessed; do not
+ *  just widen/halve on a future re-measurement, re-derive from the fresh distribution — see
+ *  docs/decisions/b64b3726-reassert-settle-window-sized-from-a-measured-distribution.md */
 const REASSERT_SETTLE_POLL_MS = Number(process.env.LOOM_REASSERT_SETTLE_POLL_MS) || 15;
 const REASSERT_SETTLE_MAX_POLLS = Number(process.env.LOOM_REASSERT_SETTLE_MAX_POLLS) || 20;
 
-/**
- * Card 441499ee (hardening against the give-up discriminator's own measured false-negative rate — card
- * 04de8bbf, n=84: ~86% of give-ups that reach this point are followed by a confirming hook, i.e. the turn
- * actually started; only ~14% are genuine drops). A SHORT, bounded, OBSERVED wait for `enterConfirmed` to
- * flip true, inserted right where the output-based discriminator has ALREADY failed to suppress a give-up
- * — see `awaitGiveUpConfirmSettle`. Modeled on `REASSERT_SETTLE_POLL_MS`/`_MAX_POLLS`'s own shape and
- * accept-a-residual philosophy, but kept as an INDEPENDENT constant pair: that one is sized against a
- * measured LOCAL terminal-protocol renegotiation latency (a completely different, much faster mechanism
- * than an actual hook round-trip), so reusing it here would smuggle in an unmeasured assumption.
- *
- * DELIBERATELY NOT sized to cover the full hook-confirmation latency distribution — give-ups are
- * CONTENTION-DRIVEN BURSTS (see SUBMIT_VERIFY_TIMEOUT_MS's own REJECTED ALTERNATIVE note), so a bound wide
- * enough to reliably catch a contention-delayed hook would have to keep growing to chase wherever fleet
- * contention peaks next — the exact anti-pattern this project has reverted twice (cards 595aad10,
- * fea23514). This is a SHORT last-chance check that only claims to catch the FASTEST-confirming subset of
- * the 86% for free (zero requeue, zero purge race, ever, for those); anything slower still falls through to
- * GIVE-UP RECOVERY's existing requeue, with `purgeConfirmedGiveUpRequeue` as the defense-in-depth for a
- * confirmation that arrives later still, before the requeued entry has actually drained. Closing the gap
- * further needs the discriminator itself fixed (04de8bbf), not a bigger constant here.
- */
+/** @decision 441499ee — a SHORT last-chance check (catches only the fastest-confirming subset), NOT full
+ *  hook-confirmation coverage; do not widen to chase fleet contention or reuse REASSERT_SETTLE's pair — see
+ *  docs/decisions/441499ee-give-up-confirm-settle-is-a-short-last-chance-check.md */
 const GIVE_UP_CONFIRM_SETTLE_POLL_MS = Number(process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_POLL_MS) || 15;
 const GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = Number(process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS) || 20;
 
@@ -806,23 +459,9 @@ const GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = Number(process.env.LOOM_GIVE_UP_CONFIRM
 const FLUSH_CONFIRM_POLL_MS = Number(process.env.LOOM_FLUSH_CONFIRM_POLL_MS) || 100;
 const FLUSH_CONFIRM_MAX_POLLS = Number(process.env.LOOM_FLUSH_CONFIRM_MAX_POLLS) || 50;
 
-/**
- * Card 73d5c34a: how long a GIVE-UP-requeued entry stays INELIGIBLE for `drainPending` after
- * `requeueGiveUpOrigin` puts it back on `live.pending`, giving a late confirming hook a fair window to
- * `purgeConfirmedGiveUpRequeue` it before anything can resubmit it a second time — see that method's doc
- * for the race this closes (a ~10s reconcile tick beating a merely-late hook to the punch). Sized well
- * past one reconcile tick (`watchers.reconcileMs`, daemon-default 10_000ms) so an ordinary reconcile pass
- * can never win the race outright; NOT tied to the live reconcile interval itself (this file has no
- * access to that daemon-resolved config, and coupling to it would make the bound implicit and
- * un-overridable in isolation). Still a HARD bound, never infinite: a genuine give-up (no hook ever
- * arrives) is held only this long before falling through to the pre-existing recovery-and-drain behavior
- * (card 441499ee) — the silent-drop protection that bound exists to preserve. Env-overridable so a
- * hermetic test can shrink it instead of waiting real seconds.
- *
- * EXPORTED (card ccb407eb CR follow-up): `sessions/service.ts`'s cross-turn-boundary re-mint reuses this
- * SAME constant when stamping its own `giveUpHeldUntil` — "matching the requeue path's own discipline"
- * means literally sharing the bound, not maintaining a second one that could drift from it.
- */
+/** @decision 73d5c34a — sized past one reconcile tick, deliberately NOT coupled to the live reconcile
+ *  interval; sessions/service.ts's cross-turn re-mint MUST reuse this constant, never a second one — see
+ *  docs/decisions/73d5c34a-give-up-hold-window-outlasts-one-reconcile-tick.md */
 export const GIVE_UP_HOLD_MS = Number(process.env.LOOM_GIVE_UP_HOLD_MS) || 20_000;
 
 /**
@@ -839,43 +478,9 @@ export const GIVE_UP_HOLD_MS = Number(process.env.LOOM_GIVE_UP_HOLD_MS) || 20_00
  */
 export const HUMAN_SUBMIT_CONFIRM_HOLD_MS = Number(process.env.LOOM_HUMAN_SUBMIT_CONFIRM_HOLD_MS) || 20_000;
 
-/**
- * Card f9b1ea00 — the bounded window a `[loom:prompt-mismatch]` "recognized replay" notice's own "wait
- * one generation and re-check before treating this as a confirmed loss" promise gets to actually resolve
- * (a LATER generation's own submission fusing this one's content back in whole — see
- * `Live.mismatchResolvedGens`' own doc) before Loom stops waiting and fails loud instead of staying
- * silent forever (the gap this card exists to close — see `checkPromptMismatchUnresolved`'s own doc).
- *
- * SIZING (DoD-4: "pick the window deliberately and say why" — too short false-alarms on a late fusion,
- * too long lets the recipient act on a wrong premise for that much longer): there is no direct measured
- * distribution for "how long until a composer-accumulation fusion resolves a pending replay" specifically
- * — the closest real data this fleet has is `confirmationLatencyProportionalityClause`'s own n=177
- * give-up-driven engine-confirmation-latency pool (sessions/service.ts, card 518d0305): p50=8.5s,
- * p90=45.9s, p95=342s (~5.7min), p99=675s (~11.25min), max=970s (~16min) — see pinned memory
- * `engine-confirmation-can-lag-minutes-timeouts-assume-seconds`. That's a different signal (a single
- * turn's own hook confirmation, not "does a LATER turn ever arrive at all"), but it's the best available
- * evidence for the order of magnitude a genuinely slow-but-healthy engine round-trip can take on this
- * fleet, and a resolving fusion needs a full extra turn on top of that. 10 minutes sits between the
- * measured p95 and p99 — closer to the tail than the median on purpose, because a false "this is now a
- * confirmed loss" alarm sends its reader chasing a loss that never happened (the exact false-alarm
- * regression DoD-3 guards against), which is a worse failure than this notice landing a few minutes later
- * than it could have. Env-overridable so a hermetic test can shrink it instead of waiting real minutes.
- *
- * Code Review MINOR (confirmed), later found INCOMPLETE by a second pass and completed here: unlike this
- * file's sibling `Number(env) || default` constants — where a bad override degrades to a benign no-op or a
- * slightly-off timing — a bad value here is not benign in EITHER direction. `Number(x) || default` only
- * falls back on `0`/`NaN`/unset, so a negative override (e.g. `-1`, still truthy) would pass straight
- * through, and `setTimeout` treats a negative delay as `0` — arming this follow-up to fire on the very next
- * tick. The FIRST fix rejected that (and `NaN`/zero) via `Number.isFinite(...) && > 0`, but left the
- * opposite hole open: Node clamps any `setTimeout` delay ABOVE `2_147_483_647` (2^31-1 ms, `setTimeout`'s
- * own signed-32-bit ceiling) to fire almost immediately instead — MEASURED, not theorized (a delay of
- * 3_000_000_000 fires in ~3ms with a `TimeoutOverflowWarning`) — so an override like
- * `LOOM_PROMPT_MISMATCH_RESOLVE_WINDOW_MS=3000000000` reproduces the EXACT same instant-false-alarm failure
- * as the negative case, just from the other side of the valid range. Bounding on BOTH sides
- * (`0 < x <= 2_147_483_647`) rejects every value that would either fire the mechanism this constant guards
- * on the wrong tick — the class of failure this whole card exists to prevent, now closed at BOTH ends
- * rather than reintroduced at the other one.
- */
+/** @decision f9b1ea00 — sized past the measured p95 engine-confirmation lag (342s), deliberately not the
+ *  median; env override MUST be bounded on both sides (0, 2^31-1] or it reproduces the instant-false-alarm
+ *  bug from either direction — see docs/decisions/f9b1ea00-prompt-mismatch-resolve-window-sized-past-p95.md */
 const rawPromptMismatchResolveWindowMs = Number(process.env.LOOM_PROMPT_MISMATCH_RESOLVE_WINDOW_MS);
 export const PROMPT_MISMATCH_RESOLVE_WINDOW_MS =
   Number.isFinite(rawPromptMismatchResolveWindowMs) && rawPromptMismatchResolveWindowMs > 0 && rawPromptMismatchResolveWindowMs <= 2_147_483_647
