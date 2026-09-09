@@ -3067,44 +3067,12 @@ export class SessionService {
     // An explicit caller role still wins; then the (clamped) profile role (null under forcePlain), then
     // undefined (today's plain). The force-plain path passes no explicitRole, so it resolves null.
     const role = explicitRole ?? profileRole ?? undefined;
-    // WORKER structural default (audit finding 760cd01d, sev medium): `acceptEdits` auto-approves file
-    // edits ONLY — Bash/`gh`/build/test and non-allowlisted MCP calls still prompt, and a spawned worker
-    // has no human at its TUI to answer, so it stalls (the owner had to manually worker_set_mode('auto')
-    // twice before this fix). Pin a WORKER's boot-cycle target to `auto` INDEPENDENT of the shared
-    // `config.permission.startupModeCycles` knob, so a project-level cycles customization (made for
-    // manager/other-role reasons) can never silently leave a worker un-cycled. A manager can still pin
-    // a specific worker to the rare edits-only `acceptEdits` mode after spawn via `worker_set_mode`.
-    //
-    // ASSISTANT gets the SAME pin (card 5603f40f, out of ac90ca8e's investigation): a companion's "human"
-    // reaches it over a CHAT channel via `chat_reply`, so its stdin is never a live TUI human either — the
-    // identical structural property `disallowedToolsForRole` already recognizes it shares with worker (both
-    // get HUMAN_PROMPT_TOOLS disallowed for exactly this reason). Before this pin there was no single true
-    // answer to "what mode does a companion run in" — it was whatever `startupModeCycles` resolved to,
-    // movable by a knob set for a manager's sake with no role guard. Was leaving assistant off the original
-    // 2026-07-20 pin deliberate or an oversight? The record doesn't settle it: that fix's own comment and
-    // commit discuss worker only, yet the assistant role already existed (since 2026-07-01) and was ALREADY
-    // classified alongside worker in `disallowedToolsForRole` for the same "no live human at stdin" property
-    // — suggestive of an oversight, not proof of one, since card 760cd01d itself isn't readable from here
-    // and a stated worker-only reason there can't be ruled out.
-    // Target choice: `auto` PRESERVES today's effective default (the shared config default is cycles=2 →
-    // auto already), so this closes the side-effect/coupling channel WITHOUT changing behavior on an
-    // unmodified project. It is NOT a ruling that `auto` — the broadest auto-approve mode — is the right
-    // posture for an untrusted-chat-facing role; nobody has made that ruling. A stricter default, if ever
-    // wanted, is a separate, deliberate decision.
-    // FIXED (card e98877b1): this pin used to flow ONLY through this method — `resumePermission` in
-    // `resume()` fell back to bare `config.permission` when the agent row backing a session had been
-    // deleted, silently DROPPING the pin (worker's too, pre-existing) and reverting to the shared knob.
-    // Same defect shape card 3388be4d fixed one field over (the transcript-root deny). Rescued the same
-    // way: `withRolePermissionModeCyclesPin` below is the ONE place this pin is computed, keyed off the
-    // role alone (not the agent), so `resume()`'s agent-missing fallback can call it directly instead of
-    // re-deriving a copy of this logic — see that function's own doc.
-    //
-    // Every OTHER role keeps config's startupModeCycles verbatim — byte-identical to before this change.
-    // Card 3388be4d: the role-scoped transcript-root deny (formerly applied here, card ac90ca8e /
-    // 44fa586a) now lives at the single `PtyHost.createPty` spawn chokepoint (`withTranscriptRootDenyForSpawn`),
-    // keyed off `opts.role` — the session's PINNED role, threaded on every spawn path regardless of
-    // whether this method's own `agent`/`resolveAgentSpawn` re-resolution ever runs (it fixes the
-    // agent-row-missing resume/fork fallback that used to drop the deny). Nothing to do here any more.
+    // @decision 760cd01d — do not let config.permission.startupModeCycles determine a worker's boot-cycle
+    // target; it is pinned to `auto` via withRolePermissionModeCyclesPin (docs/decisions/760cd01d-pin-worker-boot-mode-to-auto.md)
+    // @decision 5603f40f — the assistant role gets the SAME `auto` pin, for the same no-live-TUI-human
+    // reason as worker (docs/decisions/5603f40f-pin-assistant-boot-mode-to-auto.md)
+    // @decision 3388be4d — the role-scoped transcript-root deny lives solely at PtyHost.createPty, never
+    // recomputed here (docs/decisions/3388be4d-role-scoped-transcript-root-deny-lives-at-createpty.md)
     const permission = withRolePermissionModeCyclesPin(baselinePermission, role);
     // Same `|| undefined` empties-to-undefined coercion today's start paths use on the agent prompt.
     const ownPrompt = resolved.startupPrompt || undefined;
@@ -3899,16 +3867,8 @@ export class SessionService {
     const project = this.db.getProject(session.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
-    // Re-resolve the agent's spawn so a resumed session keeps its profile's LAYERED allowlist (allowDelta),
-    // not the bare config.permission — a profile-pinned worker/manager loses its allow entries on every
-    // resume otherwise. The role is the row's locked role (NOT the profile's, so an explicit-role session
-    // resumes byte-identically). Model is DELIBERATELY omitted on resume — `--resume` inherits the
-    // transcript's model. Agent-missing (deleted) ⇒ fall back to bare config.permission — but STILL apply
-    // the role-keyed startupModeCycles pin (card e98877b1) via `withRolePermissionModeCyclesPin`, keyed off
-    // `session.role` (the row's PINNED value, which survives the agent row's deletion) rather than
-    // re-deriving it from the (now-absent) agent. A profile's layered allowDelta is genuinely lost on this
-    // fallback (there's no profile to re-read), but the pin itself is role-derived, not profile-derived, so
-    // it has no such dependency and shouldn't be dropped with it.
+    // @decision e98877b1 — on agent-row-missing resume, still apply the role-keyed pin via
+    // withRolePermissionModeCyclesPin(config.permission, session.role) — never bare config.permission (docs/decisions/e98877b1-preserve-role-mode-pin-when-agent-row-missing.md)
     const agent = this.db.getAgent(session.agentId);
     const resumePermission = agent
       ? this.resolveAgentSpawn(agent, config, session.role ?? undefined).permission
@@ -3930,29 +3890,8 @@ export class SessionService {
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd, // SAME cwd — Claude keys sessions to the project dir
-      // RESUME mode convergence (card f05e4897, generalized to fresh spawns too by b99d3d67) —
-      // SUPERSEDES Fix A's blind startupModeCycles:0. `resumeModeTarget` below is what lets a `--resume`
-      // reach the SAME target a fresh spawn of this config reaches, since `--resume` HONOURS
-      // `--permission-mode` and does NOT restore the persisted mode (probe-verified on 2.1.163; the
-      // opposite of Fix A's premise) — the raw `permission.mode` field here stays `acceptEdits` (a
-      // resolveAgentSpawn/PermissionPolicy constant), but card 51926260's `computeBootMode`
-      // (pty/host.ts, at the actual spawn chokepoint) resolves `resumeModeTarget` into the REAL
-      // `--permission-mode` flag directly when it's expressible, so this resume typically boots straight
-      // at its target with zero presses rather than climbing there. `computeBootMode` falls back to the
-      // SAME feedback-verified cycler (cycleToMode in host.ts) — read the footer and press Shift+Tab
-      // until it lands on the target — for a target that isn't directly expressible, instead of a fixed
-      // blind press count (the old blind-2 half-landed on plan on the summary-gate path — the 2026-06-03
-      // strand bug; Fix A's blind-0 left it ONE short, stuck at acceptEdits). Resume
-      // passes its target here EXPLICITLY via `resumeModeTarget` — wherever a FRESH spawn of THIS config
-      // lands (modeAfterCyclesFromAcceptEdits of the same startupModeCycles → auto by default), so a
-      // resumed session matches a fresh one exactly. `startupModeCycles` itself is moot on this path:
-      // host.ts prefers `resumeModeTarget` when set (`??`), so pin it 0 here defensively rather than
-      // relying on that precedence. Read off `resumePermission` (resolveAgentSpawn's ROLE-AWARE result
-      // when the agent exists, else `withRolePermissionModeCyclesPin`'s own role-only re-derivation), not
-      // the bare `config.permission` — a worker's or an assistant's startupModeCycles is pinned to reach
-      // `auto` independent of the project's own knob (see resolveAgentSpawn / withRolePermissionModeCyclesPin),
-      // and this must match so a resumed session converges to the exact same target its fresh spawn did,
-      // regardless of whether the agent row backing it still exists (card e98877b1).
+      // @decision f05e4897 — do not give --resume a blind Shift-Tab count; pass resumeModeTarget so a
+      // resumed session converges to the same mode a fresh spawn of this config would reach (docs/decisions/f05e4897-converge-resume-mode-target-with-fresh-spawn.md)
       permission: { ...resumePermission, startupModeCycles: 0 },
       resumeModeTarget: modeAfterCyclesFromAcceptEdits(resumePermission.startupModeCycles ?? 0),
       geometry: config.pty,
@@ -3993,24 +3932,8 @@ export class SessionService {
     // busy=true carried in the DB across the restart. Without this the session shows/acts "busy"
     // forever, so enqueued worker reports queue instead of submitting and the idle guard can't fire.
     this.db.setBusy(session.id, false);
-    // Companion memory RECALL (resume half, companion/memory-recall.ts) — a DELIBERATE, DOCUMENTED
-    // exception to "resume injects no prompt" above: an assistant session's own durable memory
-    // (memory_write) would otherwise stay mute on every resume forever, since a long-lived companion may
-    // not see a fresh spawn again for months. Enqueued via the ordinary enqueueStdin turn-injection
-    // primitive — ready-gated in host.ts, so it becomes the companion's FIRST turn once the resumed engine
-    // is ready, ahead of anything queued below (the redelivered messages) or by a caller after resume()
-    // returns (e.g. a wake's own note). Empty memory ⇒ buildFramedMemoryRecall returns null ⇒ no enqueue —
-    // a companion with no memory, and every non-assistant resume (this whole block is role-gated), stay
-    // byte-identical to today. The frame itself tells the model to stay SILENT (never chat_reply just
-    // because this turn arrived) — see memory-recall.ts.
-    //
-    // Dedup gate (card ea648f89, hardened by finding 0e08c0b7 — see the shared doc comment on
-    // stampProjectMemoryDigest/stampCompanionMemoryDigest above): resume() re-retrieves on EVERY resume
-    // (idle-nudge resumes, wakes, crash/restart recovery all call it) with no change-detection otherwise —
-    // this call site used to re-inject the IDENTICAL framed block verbatim every time (observed live as
-    // 25+ consecutive identical injections into one companion). Hash the framed block and compare against
-    // the digest PERSISTED on the session row (survives a daemon restart, unlike an in-memory cache); the
-    // compare runs BEFORE enqueueStdin, so an unchanged digest never mints a standalone turn.
+    // @decision ea648f89 — do not re-enqueue this block unconditionally on every resume; compare its
+    // digest against the one persisted on the session row and skip when unchanged (docs/decisions/ea648f89-dedupe-resume-time-memory-reinjection-by-digest.md)
     if (session.role === "assistant") {
       const recall = buildFramedMemoryRecall(listCompanionMemories(session.id), (name) => readCompanionMemory(session.id, name));
       const recallDigest = recall ? createHash("sha256").update(recall).digest("hex") : null;
@@ -4019,21 +3942,8 @@ export class SessionService {
         this.db.setLastCompanionMemoryDigest(session.id, recallDigest);
       }
     }
-    // Project memory (card 2fd9abf9, resume half) — a DELIBERATE, DOCUMENTED exception to "resume
-    // injects no prompt", exactly like the companion recall above but generalized to EVERY role (not
-    // assistant-only): a long-lived worker/manager resumed after a restart would otherwise never see
-    // project notes written since its last fresh spawn. Enqueued via the SAME ordinary enqueueStdin
-    // turn-injection primitive — kind defaults to "warning" (operational/coalescible, never direction).
-    // Search text is the resumed session's own task (title+body) when it has one bound (the richest
-    // match source), else the agent's own startup prompt; both empty ⇒ pinned-only. null (no project
-    // memory notes match) ⇒ no enqueue, byte-identical to today.
-    //
-    // Dedup gate (card ea648f89, hardened by finding 0e08c0b7): same shape as the companion-recall gate
-    // above — hash the framed block and compare against the digest persisted on the session row (see
-    // stampProjectMemoryDigest's doc comment for why this moved off an in-memory Map); skip the enqueue
-    // when unchanged. This still preserves the "sees notes written since last spawn" intent — a genuinely
-    // new/edited note changes the digest and is injected — it just stops re-blasting identical content,
-    // including across a daemon restart.
+    // @decision ea648f89 — do not re-enqueue this block unconditionally on every resume; compare its
+    // digest against the one persisted on the session row and skip when unchanged (docs/decisions/ea648f89-dedupe-resume-time-memory-reinjection-by-digest.md)
     {
       const boundTask = session.taskId ? this.db.getTask(session.taskId) : undefined;
       const kickoffText = boundTask ? `${boundTask.title}\n${boundTask.body}` : (agent?.startupPrompt ?? "");
