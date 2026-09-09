@@ -7542,7 +7542,12 @@ export class PtyHost {
     // two happen to be runtime-equal; `bootMode` (already a `CliPermissionMode`) is the only value that
     // type-checks here. Byte-identical output for every currently-reachable config: `bootMode` was already
     // written into `.mode` on both branches of the old ternary.
-    const settingsPath = writeSessionSettings(opts.sessionId, { ...permission, mode: bootMode }, hookToken ?? "", opts.vaultPath);
+    // Card 5244adc2: `opts.cwd` (this session's ACTUAL working directory — a worker's own worktree, not
+    // necessarily the main checkout) is what decides whether the decision-records Read hook is wired at
+    // all — deliberately NOT `opts.repoPath`, which is documented above as always the project's main
+    // checkout and would disagree with what decision-records.mjs itself checks at runtime (it walks up
+    // from the session's own cwd). See writeSessionSettings's own doc for the staleness window this implies.
+    const settingsPath = writeSessionSettings(opts.sessionId, { ...permission, mode: bootMode }, hookToken ?? "", opts.vaultPath, opts.cwd);
     // Role-scoped disallow of the interactive human-prompt tools (AskUserQuestion / Exit|EnterPlanMode):
     // a Loom-driven role (worker/setup/auditor/workspace-auditor) must never block on a human — UNIONed with
     // the curated dangerous native tools when this session's Profile set restrictedTools (Companion

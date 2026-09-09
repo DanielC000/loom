@@ -22,6 +22,9 @@
 //   N3: id resolution requires a real boundary after the id (no bare-prefix false match) and is
 //       deterministic.
 //   N4: a single line carrying two anchors yields both ids.
+// Plus card 5244adc2 (the remaining half of 661b7d46 DoD-2's "no overhead"): writeSessionSettings wires
+// the Read PostToolUse hook group ONLY when its `repoPath` arg resolves to a project carrying at least
+// one of the three record stores; `repoPath` omitted stays byte-identical to the old always-wired default.
 //
 // RUN with an isolated LOOM_HOME (writeSessionSettings just needs the settings dir; no daemon needed):
 //   pnpm build (repo root) then `node test/decision-records.mjs` from packages/daemon.
@@ -306,17 +309,41 @@ try {
   check("S1: a repo with NONE of the three record stores stays silent even over a well-formed anchor",
     s1NoStore === null);
 
-  // --- writeSessionSettings wiring: the Read PostToolUse hook is ALWAYS present, vaultPath or not. ---
+  // --- writeSessionSettings wiring (card 5244adc2 — the remaining half of 661b7d46 DoD-2's "no
+  // overhead"): the Read PostToolUse hook is emitted ONLY when `repoPath` resolves to a project with at
+  // least one of the three record stores; `repoPath` omitted keeps the pre-5244adc2 always-wired default. ---
   ensureDirs();
   const perm = { mode: "acceptEdits", allow: [], deny: [] };
-  const settings = JSON.parse(fs.readFileSync(writeSessionSettings("decrec-wiring", perm, "test-hook-token"), "utf8"));
-  const readGroup = (settings.hooks.PostToolUse || []).find((g) => g.matcher === "Read");
-  check("writeSessionSettings: PostToolUse always carries a Read group (no vaultPath needed)", !!readGroup);
-  check("writeSessionSettings: the Read group's command points at decision-records.mjs",
-    !!readGroup && readGroup.hooks[0].command.includes("decision-records.mjs"));
+
+  // Arm 2 FIRST, per the polarity discipline (card DoD-3): prove the selector can SEE the Read group at
+  // all before trusting arm 1's silence below — REPO already has all three record stores from the
+  // decision-records.mjs fixtures above.
+  const withStore = JSON.parse(fs.readFileSync(writeSessionSettings("decrec-wiring-store", perm, "test-hook-token", undefined, REPO), "utf8"));
+  const readGroupWithStore = (withStore.hooks.PostToolUse || []).find((g) => g.matcher === "Read");
+  check("writeSessionSettings(repoPath WITH a record store): PostToolUse carries a Read group", !!readGroupWithStore);
+  check("writeSessionSettings(repoPath WITH a record store): the Read group's command points at decision-records.mjs",
+    !!readGroupWithStore && readGroupWithStore.hooks[0].command.includes("decision-records.mjs"));
+
+  // Arm 1: NO_STORE_REPO has none of the three record stores — no Read group at all, not merely a fast
+  // in-process bail inside the hook itself (that bail still exists as the mid-session-deletion backstop —
+  // DoD-5 — and is unchanged; this is a SEPARATE, earlier gate that skips wiring the hook in the first place).
+  const noStore = JSON.parse(fs.readFileSync(writeSessionSettings("decrec-wiring-nostore", perm, "test-hook-token", undefined, NO_STORE_REPO), "utf8"));
+  const readGroupNoStore = (noStore.hooks.PostToolUse || []).find((g) => g.matcher === "Read");
+  check("writeSessionSettings(repoPath with NO record store): PostToolUse carries NO Read group at all "
+    + "(literal zero overhead — the hook's own process is never spawned on this project's Reads)",
+    !readGroupNoStore);
+
+  // repoPath omitted entirely (the shape every OTHER test in this file, and every pre-5244adc2 caller,
+  // still uses) stays byte-identical to the old always-wired behavior.
+  const omitted = JSON.parse(fs.readFileSync(writeSessionSettings("decrec-wiring-omitted", perm, "test-hook-token"), "utf8"));
+  const readGroupOmitted = (omitted.hooks.PostToolUse || []).find((g) => g.matcher === "Read");
+  check("writeSessionSettings(repoPath omitted): PostToolUse still carries a Read group (backward-compatible default)",
+    !!readGroupOmitted);
 } finally {
   for (const d of [REPO, DEDUPE_DIR, FOREIGN_REPO, NO_STORE_REPO]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ } }
-  try { fs.rmSync(path.join(SETTINGS_DIR, "decrec-wiring.json"), { force: true }); } catch { /* ignore */ }
+  for (const id of ["decrec-wiring-store", "decrec-wiring-nostore", "decrec-wiring-omitted"]) {
+    try { fs.rmSync(path.join(SETTINGS_DIR, `${id}.json`), { force: true }); } catch { /* ignore */ }
+  }
 }
 
 console.log(failures === 0

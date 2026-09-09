@@ -194,17 +194,32 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  * When `vaultPath` is given (docLint on), a PostToolUse hook (matcher Write|Edit) runs the
  * mechanical vault-lint on .md writes under that vault (Pillar D). Advisory only — it never blocks.
  *
- * A PostToolUse hook (matcher Read) is ALWAYS wired too (card 661b7d46) — `decision-records.mjs`
- * appends any complete, out-of-band decision record anchored in the range a `Read` call actually
- * returned, so a range that slices through a long comment block never delivers a fragment of a record
- * without the rest of it. Advisory only, same posture as vault-lint above — it never blocks a `Read`.
+ * A PostToolUse hook (matcher Read) runs `decision-records.mjs`, which appends any complete,
+ * out-of-band decision record anchored in the range a `Read` call actually returned, so a range that
+ * slices through a long comment block never delivers a fragment of a record without the rest of it.
+ * Advisory only, same posture as vault-lint above — it never blocks a `Read`.
+ *
+ * Card 5244adc2 (the remaining half of `661b7d46` DoD-2's "no injection, no overhead"): this hook group
+ * is wired ONLY when `repoPath` resolves to a project that has adopted at least one of the three record
+ * stores (`docs/adr`, `docs/decisions`, `docs/investigations` — see `anyDecisionRecordStoreExists`
+ * below, which mirrors `decision-records.mjs`'s own runtime `anyStoreExists` bail — keep both in sync).
+ * A project with none of the three never spawns the hook's node process on ANY `Read`, meeting "no
+ * overhead" literally rather than via the script's own fast in-process bail (still left in place as the
+ * backstop for a store deleted mid-session — see that script's own doc). `repoPath` OMITTED (not every
+ * caller threads it — see the test population in test/*.mjs) falls back to the pre-5244adc2 behavior of
+ * always wiring the hook, so every existing caller stays byte-identical without change.
+ * ⚠️ STALENESS WINDOW: this function runs at every `createPty` (fresh/resume/fork/recycle), so the
+ * decision re-evaluates on every respawn — a project that later adopts a record store picks the hook up
+ * on its NEXT session with no daemon restart needed. A session already LIVE when the first store
+ * appears will NOT have the hook wired until its own next resume; this is an accepted, documented gap,
+ * not a bug (see the card).
  *
  * `hookToken` (card a2407ed4) rides as a 4th argv on the relay command, alongside the sessionId/port
  * already there — `hook-relay.mjs` forwards it in the POST body, and `/internal/hook` requires it to
  * match the target session's own `Live.hookToken` before a hook is processed. It is REQUIRED (not
  * optional) so a caller can never accidentally omit it and silently reopen the zero-token gap; see
  * `PtyHost.verifyHookToken`'s doc for exactly what this does and does not close. Placed BEFORE the
- * optional `vaultPath` — TypeScript disallows a required param after an optional one.
+ * optional `vaultPath`/`repoPath` — TypeScript disallows a required param after an optional one.
  */
 /**
  * Card 016ee373 — the CLI's ACTUALLY-accepted `--permission-mode` values (and, byte-for-byte, the only
@@ -232,6 +247,23 @@ export function toCliPermissionMode(mode: PermissionPolicy["mode"]): CliPermissi
   return mode === "default" ? "manual" : mode;
 }
 
+/**
+ * Card 5244adc2 — whether `repoRoot` has adopted ANY of the three decision-record stores at all.
+ * Deliberately duplicated from `decision-records.mjs`'s own `anyStoreExists` (assets/decision-records.mjs)
+ * rather than imported: that script ships as a standalone asset invoked via a bare `node <path>` spawn
+ * (see DECISION_RECORDS_SCRIPT), independent of this package's compiled `dist/` — it has no way to import
+ * from here, and this daemon-side copy exists purely to decide whether to WIRE the hook at all, not to
+ * replace that script's own runtime bail (which stays, see its own doc, as the backstop for a store
+ * deleted mid-session — DoD-5 on card 5244adc2). Same shape-drift risk as `PRE_TOOL_USE_ATTRIBUTION_MATCHER`
+ * above: keep the store list (`docs/adr`, `docs/decisions`, `docs/investigations`) in sync with that
+ * script's own `FLAT_STORES` + investigations-dir check if either ever changes.
+ */
+function anyDecisionRecordStoreExists(repoRoot: string): boolean {
+  return fs.existsSync(path.join(repoRoot, "docs", "adr"))
+    || fs.existsSync(path.join(repoRoot, "docs", "decisions"))
+    || fs.existsSync(path.join(repoRoot, "docs", "investigations"));
+}
+
 export function writeSessionSettings(
   sessionId: string,
   // Card 51926260: `mode` is the CLI-accepted `CliPermissionMode`, not the narrower `PermissionPolicy["mode"]`
@@ -246,6 +278,13 @@ export function writeSessionSettings(
   permission: { mode: CliPermissionMode; allow: PermissionPolicy["allow"]; deny: PermissionPolicy["deny"] },
   hookToken: string,
   vaultPath?: string,
+  // Card 5244adc2: the session's own repo root (host.ts's `createPty` passes `opts.cwd` — the session's
+  // ACTUAL working directory, e.g. a worker's own worktree — never `opts.repoPath`, which is documented
+  // elsewhere as "ALWAYS the project's main checkout, never a worker's own worktree"; the decision-records
+  // hook must agree with what `decision-records.mjs` itself checks at runtime, which walks up from the
+  // session's own cwd, not the main checkout). OMITTED ⇒ the Read hook is always wired (the pre-5244adc2
+  // behavior) — every caller that doesn't thread this (see the test population) stays byte-identical.
+  repoPath?: string,
 ): string {
   const hookCmd = {
     hooks: [{ type: "command", command: `node "${RELAY_SCRIPT}" ${sessionId} ${PORT} ${hookToken}` }],
@@ -266,15 +305,18 @@ export function writeSessionSettings(
     SubagentStart: [hookCmd],
     SubagentStop: [hookCmd],
   };
-  const postToolUse: unknown[] = [
-    // Card 661b7d46: ALWAYS wired (no vaultPath-style gate) — every session gets complete decision
-    // records injected on a `Read` whose range intersects a `// @decision <id>` anchor. Silent when the
-    // range carries no anchor (DoD-2), so this is a no-op cost on the overwhelming majority of reads.
-    {
+  const postToolUse: unknown[] = [];
+  // Card 5244adc2: wire the decision-records Read hook only when this project could possibly have
+  // anything for it to find — `repoPath` omitted (pre-5244adc2 callers) keeps the old always-wired
+  // behavior; given, it's wired only when `anyDecisionRecordStoreExists` finds at least one store. A
+  // repo with none pays ZERO per-`Read` node-spawn cost, meeting 661b7d46 DoD-2's "no overhead" literally
+  // rather than via the script's own in-process bail (that bail stays as the mid-session-deletion backstop).
+  if (repoPath === undefined || anyDecisionRecordStoreExists(repoPath)) {
+    postToolUse.push({
       matcher: "Read",
       hooks: [{ type: "command", command: `node "${DECISION_RECORDS_SCRIPT}" "${DECISION_RECORDS_DEDUPE_DIR}"` }],
-    },
-  ];
+    });
+  }
   if (vaultPath) {
     postToolUse.push({
       matcher: "Write|Edit",
