@@ -2311,13 +2311,52 @@ type CodescapeGraphGateReason = "no-supervisor" | "not-enabled" | "no-port" | "n
 
 /**
  * Card badba5a8: every reason `resolveCodescapeInjectionStatus`/{@link composeCodescapeInjectionStatus}
- * can record — the four graph gates above plus the two asset outcomes. Kept as SIX distinct values
- * (never collapsed) per the card's own DoD-2 principle: a bare boolean/collapsed reason can't
- * distinguish operationally different states, and folding `asset-unreadable` (a packaging/deploy fault —
- * the shipped-package case) together with `asset-empty` (a content fault) would reproduce that exact
- * defect one level down, just because both happen to fail at the same call site.
+ * can record — the four graph gates above plus the two asset outcomes, plus (card bed49000)
+ * `task-class-excluded`. Kept as SEVEN distinct values (never collapsed) per the card's own DoD-2
+ * principle: a bare boolean/collapsed reason can't distinguish operationally different states, and
+ * folding `asset-unreadable` (a packaging/deploy fault — the shipped-package case) together with
+ * `asset-empty` (a content fault) would reproduce that exact defect one level down, just because both
+ * happen to fail at the same call site. `task-class-excluded` (card bed49000) is a fifth kind of gate,
+ * distinct from the four `CodescapeGraphGateReason`s above: those record the graph/serving
+ * infrastructure being unavailable, this one records the graph being AVAILABLE but withheld because the
+ * dispatched task's own class is judged unlikely to benefit — see {@link isCodescapeExcludedTaskClass}.
  */
-export type CodescapeInjectionReason = CodescapeGraphGateReason | "asset-unreadable" | "asset-empty";
+export type CodescapeInjectionReason = CodescapeGraphGateReason | "asset-unreadable" | "asset-empty" | "task-class-excluded";
+
+/**
+ * Card bed49000 — worker kickoffs carry the codescape orientation block ({@link CODESCAPE_PROMPT_BLOCK_ASSET})
+ * unconditionally; a Platform Auditor sample (n=4 transcripts) found it net-negative for docs-only work
+ * (skipped outright — a code graph over SYMBOLS cannot help a task that never touches one) while
+ * structural/exploration/refactor work was left untested either way. GATE, don't delete: a code graph
+ * plausibly earns its keep on a large refactor, and the sample cannot see that case, so a false KEEP
+ * (an unhelpful block on a docs task) is cheap — one skippable paragraph — while a false EXCLUDE (a
+ * withheld block on a task that could have used it) is not, so the boundary below is deliberately
+ * conservative: exclude only what's cheaply and reliably knowable BEFORE the worker has touched a
+ * single file, default to keeping it for everything else.
+ *
+ * SIGNAL: this project's own Conventional-Commits `type(scope): summary` title convention
+ * (`CLAUDE.md` "Conventional Commits" + "Commit scopes" — managers title board cards this way). The
+ * leading `type` is a cheap, reliable, already-documented proxy for task shape, known at dispatch time
+ * (before any worktree/file is touched) via the task's `title` alone — no new task field, no text-mining
+ * the kickoff prompt. EXCLUDED types: `docs` (pure prose — the sampled CHANGELOG case) and `style`
+ * (formatting-only) — neither ever touches code structure a symbol graph could illuminate. Every other
+ * type (`feat`, `fix`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`), a title that
+ * doesn't parse as `type(scope): …`, and a taskless spawn (`undefined`/`null`) all default to KEEP.
+ *
+ * NOT ATTEMPTED: the card's SCOPE section also names "single-file" and "test-fixture" dispatches as
+ * candidates to exclude. Neither has a signal available at dispatch time distinct from the type prefix
+ * above (a task is not yet known to be single-file until the worker decides how many files to touch;
+ * "test-fixture" vs. a test task that DOES need structural exploration cannot be told apart from a
+ * title alone) — rather than guess with a brittle keyword heuristic, this gate leaves both classes on
+ * the conservative KEEP default. Whether the graph ever HELPS a kept class remains UNESTABLISHED (no
+ * measurement, either direction) — this gate narrows exposure to the one class with clear negative
+ * evidence, it does not claim the kept classes are proven to benefit.
+ */
+export function isCodescapeExcludedTaskClass(taskTitle: string | null | undefined): boolean {
+  if (!taskTitle) return false;
+  const match = /^([a-z]+)\([^)]*\):\s/.exec(taskTitle.trim());
+  return !!match && (match[1] === "docs" || match[1] === "style");
+}
 
 /**
  * Card badba5a8: the THREE deliberately-separate facts recorded about one spawn/recycle's codescape
@@ -2336,26 +2375,34 @@ export interface CodescapeInjectionStatus {
 
 /**
  * Card badba5a8: PURE composition of a {@link SessionService.resolveCodescapeGraphContext} result plus
- * an asset-read result (see {@link readCodescapePromptBlockAsset} in `paths.ts`) into one
- * {@link CodescapeInjectionStatus}. Exported and kept free of `this`/`fs`/any I/O specifically so it is
- * directly unit-testable with literal `info`/`asset` fixtures covering all SEVEN outcomes (2 injected ×
- * stamped/unstamped, plus the 6 reasons) — WITHOUT ever needing to make the real, shared, tracked
- * `CODESCAPE_PROMPT_BLOCK_ASSET` file unreadable or empty, which would race every other codescape test
- * in this repo's gate if attempted via the real file. `resolveCodescapeInjectionStatus` (the class
- * method) is thin wiring over this: it resolves the graph context, conditionally reads the real asset
- * (only when the graph context succeeded — `asset` is `undefined` on a graph-gate failure, since nothing
- * ever needs to read the asset in that branch), and hands both straight here. The TEXT composition
- * (`${base} Graph last indexed: ${lastIngestedAt}.` when stamped, else `base`, else `null`) is BYTE-
- * IDENTICAL to the pre-refactor inline computation this function replaces — see the card's Ruling 2 on
- * why that equivalence had to be proven, not merely asserted.
+ * an asset-read result (see {@link readCodescapePromptBlockAsset} in `paths.ts`) — plus (card bed49000)
+ * an optional dispatched task title — into one {@link CodescapeInjectionStatus}. Exported and kept free
+ * of `this`/`fs`/any I/O specifically so it is directly unit-testable with literal `info`/`asset`/
+ * `taskTitle` fixtures covering all EIGHT outcomes (2 injected × stamped/unstamped, plus the 6 reasons —
+ * the four graph gates, the two asset outcomes, and `task-class-excluded`) — WITHOUT ever needing to make
+ * the real, shared, tracked `CODESCAPE_PROMPT_BLOCK_ASSET` file unreadable or empty, which would race
+ * every other codescape test in this repo's gate if attempted via the real file. `resolveCodescapeInjectionStatus`
+ * (the class method) is thin wiring over this: it resolves the graph context, conditionally reads the real
+ * asset (only when the graph context succeeded — `asset` is `undefined` on a graph-gate failure, since
+ * nothing ever needs to read the asset in that branch), and hands both plus its own `taskTitle` param
+ * straight here. The TEXT composition (`${base} Graph last indexed: ${lastIngestedAt}.` when stamped, else
+ * `base`, else `null`) is BYTE-IDENTICAL to the pre-refactor inline computation this function replaces —
+ * see the card's Ruling 2 on why that equivalence had to be proven, not merely asserted. `taskTitle` is
+ * checked LAST, after both infra gates pass — a manager/taskless caller that never has a title to check
+ * passes `undefined`, which {@link isCodescapeExcludedTaskClass} always reads as "keep" (byte-identical to
+ * pre-bed49000 behavior for every non-worker-dispatch call site).
  */
 export function composeCodescapeInjectionStatus(
   info: { ok: true; lastIngestedAt: string | null } | { ok: false; reason: CodescapeGraphGateReason },
   asset: ReturnType<typeof readCodescapePromptBlockAsset> | undefined,
+  taskTitle?: string | null,
 ): CodescapeInjectionStatus {
   if (!info.ok) return { injected: false, reason: info.reason, stamped: null, text: null };
   if (!asset || "error" in asset) {
     return { injected: false, reason: asset?.error === "empty" ? "asset-empty" : "asset-unreadable", stamped: null, text: null };
+  }
+  if (isCodescapeExcludedTaskClass(taskTitle)) {
+    return { injected: false, reason: "task-class-excluded", stamped: null, text: null };
   }
   // `stamped` MUST use the SAME predicate (truthiness) as the text branch above, not `!= null` — an
   // empty-string `lastIngestedAt` is falsy (so `text` correctly omits the stamp) but is NOT `null` (so
@@ -2925,11 +2972,16 @@ export class SessionService {
    * own doc) so there is exactly one place that computes the text — never a second, parallel gate mirror
    * that could drift from this one (the class doc above already warns about that risk for the FIRST
    * mirror, `codescapeHttpMcpServer`; this method deliberately avoids creating a third).
+   *
+   * `taskTitle` (card bed49000, optional) is the dispatched task's title, when the caller has one — a
+   * worker dispatch (spawnWorker/recycleWorker) passes it; every manager-role caller (startNew's
+   * manager branch, startManager, recycleManager) has no task and omits it, so `isCodescapeExcludedTaskClass`
+   * always reads `undefined` as "keep" and those call sites are byte-identical to before this card.
    */
-  private resolveCodescapeInjectionStatus(project: Project): CodescapeInjectionStatus {
+  private resolveCodescapeInjectionStatus(project: Project, taskTitle?: string | null): CodescapeInjectionStatus {
     const info = this.resolveCodescapeGraphContext(project);
     const asset = info.ok ? readCodescapePromptBlockAsset(CODESCAPE_PROMPT_BLOCK_ASSET) : undefined;
-    return composeCodescapeInjectionStatus(info, asset);
+    return composeCodescapeInjectionStatus(info, asset, taskTitle);
   }
 
   /**
@@ -8305,8 +8357,9 @@ export class SessionService {
       this.stampProjectMemoryDigest(worker.id, workerProjectMemoryFramed);
       // Card badba5a8: computed ONCE, before the spawn call, so both the composition inside it and the
       // observability event after it (only fired on a SUCCESSFUL spawn — see the catch below) read the
-      // SAME result.
-      const codescapeStatus = this.resolveCodescapeInjectionStatus(project);
+      // SAME result. Card bed49000: `taskTitle` (captured above, tasked spawns only — null for a taskless
+      // spawn) gates the block on task class; see isCodescapeExcludedTaskClass's doc for the boundary.
+      const codescapeStatus = this.resolveCodescapeInjectionStatus(project, taskTitle);
       try {
         this.pty.spawn({
           sessionId: worker.id,
@@ -13616,8 +13669,10 @@ export class SessionService {
       // resume's would be. Fire-and-forget + idempotent; see resume()'s identical call for the full doc.
       this.fireCodescapeRegisterWorktree(project.id, resolveCodescapeConfig(project.config).enabled, project.repoPath, codescapeWorktreeId(taskId), worktreePath, branch ?? "");
       // Card badba5a8: computed ONCE, before the spawn call, so both the composition inside it and the
-      // observability event alongside recycle_complete below read the SAME result.
-      const codescapeStatus = this.resolveCodescapeInjectionStatus(project);
+      // observability event alongside recycle_complete below read the SAME result. Card bed49000: gate
+      // on the SAME task (recycle keeps the same taskId/worktree) whose title the sessionName recompute
+      // below already re-reads — see isCodescapeExcludedTaskClass's doc for the boundary.
+      const codescapeStatus = this.resolveCodescapeInjectionStatus(project, taskId ? this.db.getTask(taskId)?.title ?? null : null);
       this.pty.spawn({
         sessionId: fresh.id,
         cwd: worktreePath,
