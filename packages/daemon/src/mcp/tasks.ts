@@ -344,6 +344,29 @@ export interface ListTasksOptions {
   includeMerged?: boolean;
 }
 
+/**
+ * Project each row down to ONLY the given top-level key names (card 23fde5f8) — the `fields:[...]`
+ * param on `tasks_list`. Returns `rows` UNCHANGED when `fields` is omitted/empty (today's behavior,
+ * byte-identical) so this is a pure opt-in, never a silent shape change for an existing caller. An
+ * unmatched/unknown field name is silently absent from the projected row, never an error — the same
+ * tolerant convention `columns`/`titleContains` already use elsewhere in this file; a caller who typos
+ * a field name gets a smaller row, not a thrown error. Deliberately does NOT force `id` into the
+ * projection — if the caller omits it, it's omitted, since a silent "we know better" addition would
+ * make the response NOT actually match what was asked for (the exact defect this projection exists to
+ * fix on the write side, per the card: "un-asked-for fields absent from the response").
+ */
+export function pickFields<T extends Record<string, unknown>>(rows: T[], fields?: string[]): Partial<T>[] | T[] {
+  if (!fields || fields.length === 0) return rows;
+  const want = new Set(fields);
+  return rows.map((row) => {
+    const out: Partial<T> = {};
+    for (const key of want) {
+      if (key in row) out[key as keyof T] = row[key as keyof T];
+    }
+    return out;
+  });
+}
+
 /** Project ONE (already merged-enriched) Task row down to its summary (drops the unbounded body). Mirrors toAgentSummary. */
 export const toTaskSummary = (t: TaskWithMerged): TaskSummary => ({
   id: t.id, title: t.title, columnKey: t.columnKey, position: t.position, priority: t.priority, updatedAt: t.updatedAt, merged: t.merged, repoKey: t.repoKey ?? null,
