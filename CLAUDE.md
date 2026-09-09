@@ -202,6 +202,27 @@ This list is **Loom-specific**. Every project keeps its OWN "Commit scopes" list
 - Vault + git writes are enabled via a HUMAN-only REST surface (vault: `vault/writer.ts`; git:
   `git/writer.ts` — checkout/commit/push/create-branch). These are trust-boundary surfaces like gateCommand: NO **core / project-session** MCP tool exposes them; an agent in an ordinary project session can never write/commit/push. The one deliberate exception is the `LOOM_DEV`-gated **Platform Lead** surface (`mcp/platform.ts`), which is itself human-driven and ABOVE all projects: it registers `git_checkout`/`git_create_branch`/`git_commit`/`git_push` + `vault_write` as agent tools (each reusing the same bounded writer code by explicit `projectId`). Every git write is bounded by a timeout so a hung git call can't wedge the daemon. `GIT_TERMINAL_PROMPT=0` is a separate, narrower guarantee on top of that: it applies to the paths that can actually reach the network (`git/writer.ts`'s fetch/push/clone surface) and is deliberately omitted where the call set is purely local — `vault/versioner.ts`'s `commitVault` (the primary vault commit path) is the live exception; see `boundedVaultGit`'s own doc comment there for why. The read-only log/branches view is unchanged.
 
+### Comment taxonomy — the source-vs-record split
+A comment is one of four classes, each with its own correct disposition (card `90b19799`, the convention this section adopts):
+- **A. Guard / prohibition** ("this is deliberate, do not change it, see card X") — **stays inline, permanently**, compressed to <=3 lines. Never relocate it: the reasoning that justifies this is recorded on card `90b19799` itself — two near-misses where prose sitting AT the predicate is what stopped a "fix" from undoing the deliberate choice, or stopped a real defect from looking safe unreviewed. Move that prose to a file the agent doesn't open and both failure modes come back.
+- **B. Decision record / incident narrative** — **moves out** to a version-controlled markdown record in one of the two registers below, keyed by card id, with an anchor left at the source.
+- **C. Contract / API docs** (`@param`/`@returns`/etc.) — leave as-is; nothing to do.
+- **D. Restating the code** ("// increment the counter") — **delete outright**. Don't relocate noise — that just moves the mess.
+
+A and B are routinely interleaved inside the same long comment block, so splitting one is not mechanical: read the whole block and separate the one-line guard that stays from the narrative that goes.
+
+**Two registers for class B**, alongside the existing `docs/investigations/`:
+- `docs/adr/` — architecturally significant, cross-cutting decisions a contributor must know even if they never touch the file. Few. **Immutable**: amend or supersede, never edit in place.
+- `docs/decisions/` — local implementation decisions and incident findings tied to one module. Many. **Mutable**: normal doc hygiene applies.
+
+Promotion test between them: *would a contributor who never touches this file still need to know?* The anchor format is register-agnostic, so a record can move between the two without touching the source file that points at it.
+
+**Anchor left at the source when a class-B comment moves out:**
+```
+// @decision <8hex card id> — <the prohibition or consequence, not a summary>
+```
+<=3 lines. Keyed on the **board card id**, never a sequential ADR number — thousands of existing source comments already cite card ids, and those already join the board where the actual discussion lives; a second id space would only compete with the one that already works.
+
 ### Vault structure
 Loom's design docs live in the Obsidian vault at `Projects/Loom/` in a **shallow (one-level), stable** taxonomy — not a flat wall of notes. **Fixed-path / canonical docs stay pinned at the vault root** — including the ones this `CLAUDE.md` references by exact path (`Architecture.md`, `Vision & Architecture.md`, `Setup Assistant Design.md`), which is *why* they're pinned: moving them would break those refs. The root-pinned set: `Architecture.md`, `Vision & Architecture.md`, `Setup Assistant Design.md`, `Companion Design.md`, `Loom.md`, `Platform Manager.md`, `Orchestrator Log.md`. (The Platform Lead's living resume doc is **not** a vault note — it's a LOOM_HOME operational file at `~/.loom/PLATFORM-LEAD-RESUME.md`, injected into each Lead spawn.) **Every other note lives in a taxonomy folder:** `Design/`, `Operations/`, `Roadmap/`, `Release/`, `Spikes/`. One non-note folder, **`Mockups/`**, archives design-mockup deliverable SETS the owner reviews before a build — one sub-folder per feature named `YYYY-MM-DD <Feature>`, each holding the interactive mockup HTML + rendered PNG directions (see `Mockups/README.md` for the set list + which direction was picked). The **LEAD files a completed mockup set there** (the Web Designer produces it and reports the path); verification screenshots of a *built* change are NOT mockups — those stay under `~/.loom/workspaces/`, never the vault. An **`_Index.md`** map-of-content at the vault root lists every note by group — **read it to locate a note instead of Globbing, and update its line when you add or move a note.** Wikilinks resolve by note name, so moving a note between folders never breaks a `[[link]]`.
 
