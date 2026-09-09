@@ -4045,61 +4045,20 @@ export class SessionService {
     const agent = this.db.getAgent(session.agentId);
     if (!agent) throw new Error("agent not found");
     const config = resolveConfig(project.config);
-    // Force role "assistant" (the row's own, immutable role) rather than trusting session.role blindly —
-    // mirrors composeCompanionReinjectPrompt's explicitRole pattern. Model/prompt are discarded here (only
-    // the capability surface matters); resume() below never threads --model or injects a startup prompt.
-    // `connections`/`vaultWrite` ARE re-pinned in the row write below (card 1a048349), same as every other
-    // field here — but for a DIFFERENT reason than the rest of the surface. Every other field is a
-    // spawn-time property (argv/`--allowedTools`) that needs the RESPAWN below to take live effect.
-    // `connections`/`vaultWrite` are the opposite: `mcp/server.ts`'s TaskMcpRouter is stateless and
-    // re-resolves them off THIS ROW fresh on every request, never threading either through `pty.spawn` or
-    // `resume()` at all — so the row write alone already takes effect on the companion's very next tool
-    // call, respawn or not. They're written here anyway (not via a separate live-effect-only path) purely
-    // because this is the one place that re-pins the whole surface from a single `resolveAgentSpawn` call —
-    // sourced from the human-set Profile, never from agent input, same as every other field here.
+    // @decision 1a048349 — `connections`/`vaultWrite` are re-pinned here for a stateless-router
+    // reason, not a respawn one (docs/decisions/1a048349-repin-connections-vaultwrite-stateless-router-reason.md)
     const { browserTesting, documentConversion, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite } =
       this.resolveAgentSpawn(agent, config, "assistant");
     this.db.setSessionCapabilitySurface(sessionId, { browserTesting, documentConversion, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite });
     const carried: QueuedMessage[] = [];
     const drain = (): void => { carried.push(...this.pty.flushPending(sessionId)); };
     if (this.pty.isAlive(sessionId)) {
-      // Card d88163b7 (CR fix): HOLD the drain surface for this session's ENTIRE stop sequence below —
-      // BEFORE the busy-wait even starts. Without this, the wait could observe the ACTIVE turn end
-      // mid-wait: the Stop hook's `drainPending` runs SYNCHRONOUSLY (the M2 invariant) and would splice a
-      // QUEUED message OUT of `live.pending` and submit it as a fresh turn before our next poll even runs —
-      // invisible to `flushPending`/`drain()` below (it's no longer in `pending`), and then killed by
-      // `pty.stop()` anyway. Worse, a brand-new inbound message arriving during the wait's momentarily-idle
-      // gap would hit `enqueueStdin`'s idle-submit path and become a turn WITHOUT ever entering `pending`
-      // at all. `holdDrain` forces BOTH paths to queue instead — exactly where `drain()` below can recover
-      // them. Released in `finally` — including on the "didn't stop in time" abort/throw path below, or
-      // this session's drain stays wedged shut forever (a worse bug than the one this fixes).
+      // @decision d88163b7 — hold the drain surface for this session's entire stop sequence before
+      // the busy-wait below, or a message can bypass drain() (docs/decisions/d88163b7-hold-drain-surface-and-bounded-busy-wait.md)
       this.pty.holdDrain(sessionId);
       try {
-        // Give an ACTIVE turn a short bounded window to finish naturally before we force-interrupt it. A
-        // companion mid-turn — possibly with a `chat_reply` MCP call already dispatched — that gets
-        // Ctrl-C'd below loses that turn outright: nothing recaptures it, since `flushPending` only
-        // recovers messages still QUEUED, never one already handed to the pty as a turn in progress (see
-        // the AVAILABILITY-GAP comment above — it's scoped to a NEW inbound message racing the stop, not
-        // an ALREADY-IN-FLIGHT one). Most real turns settle within a couple seconds of a tool call; if
-        // this one does too, `pty.stop` below lands on an already-IDLE session — the clean, no-interrupt
-        // exit `stop()`'s own comment describes ("double Ctrl-C exits an IDLE claude"). If it's still busy
-        // past the bound — a genuinely long turn, OR a STALE busy that only the multi-minute self-heal
-        // watchdog (`healIfStuck`) would otherwise clear — fall through to the SAME forced interrupt this
-        // method has always done. HONEST SCOPE OF WHAT `holdDrain` FIXES (CR round 2 correction — do not
-        // read this as "the wait is loss-free, so raise the bound freely"): `holdDrain` only protects
-        // MESSAGES QUEUED (or arriving) DURING the wait — those are captured by `drain()` below and never
-        // silently dropped, regardless of whether the bound is hit. It does NOT protect the busy turn
-        // ITSELF — a turn STILL busy when the bound expires is STILL force-interrupted here exactly as
-        // before this fix, and its in-flight reply (e.g. a dispatched-but-unfinished `chat_reply`) is
-        // STILL lost. So `UPGRADE_BUSY_WAIT_MS` is a genuine trade: a longer bound catches more real
-        // in-flight turns before they're cut off, at the cost of a longer REST "Save" hang; it is NOT a
-        // free knob now that queuing is safe. Kept at ~3s for REST responsiveness — see the constant's own
-        // doc for the full rationale. Either way (interrupted or not), the REST caller is never blocked
-        // longer than this bound and an upgrade can never be permanently refused. Bounded on a MONOTONIC
-        // clock, not an iteration count — under event-loop load (e.g. the Stop hook's own synchronous
-        // multi-MB JSONL whole-file read — see readContextStats' own doc, card 21a77e85) a 100ms
-        // `setTimeout` can run long, and counting iterations as if each
-        // were exactly 100ms would silently overshoot the intended wall-clock bound.
+        // @decision d88163b7 — the busy-wait bound only protects queued messages, never the busy
+        // turn itself; not a free knob to raise (docs/decisions/d88163b7-hold-drain-surface-and-bounded-busy-wait.md)
         const waitDeadline = performance.now() + UPGRADE_BUSY_WAIT_MS;
         while (this.pty.isBusy(sessionId) && performance.now() < waitDeadline) {
           await new Promise((r) => setTimeout(r, 100));
@@ -4126,20 +4085,12 @@ export class SessionService {
           drain();
         }
         if (!died) {
-          // The pty is STILL alive — push everything we drained OUT of its FIFO back onto it before aborting
-          // (nothing else will redeliver them; resume() below never runs on this path). The capability re-pin
-          // above already landed durably — a later manual restart/resume picks it up.
-          //
-          // PRESERVE the hold (card f25bf3bf): this is the SAME session/process, never stopped — any
-          // still-held give-up requeue (`msg.giveUpHeldUntil`) is exactly as ambiguous as it was the
-          // instant we drained it, so putting it back with the hold intact just restores the status quo.
-          // CR follow-up (card ccb407eb, finding [6]): carry msg.onGiveUpExhausted too. And (card
-          // 02baa3a5): carry msg.logicalId, msg.mintedAtGen, AND msg.mintedAtWallClock — ALL THREE,
-          // mintedAtGen included. This path never reaches `resume()` below (the throw two lines down
-          // fires first), so these entries go back onto the SAME, still-alive pty: no boundary is
-          // crossed, `submitGeneration` never resets, and mintedAtGen is still valid age evidence here
-          // (unlike the post-resume() loop below, which deliberately omits it — see that call's own
-          // comment for why).
+          // @decision f25bf3bf — preserve the give-up hold when requeuing back onto the still-alive
+          // pty (docs/decisions/f25bf3bf-preserve-give-up-hold-on-requeue.md)
+          // @decision ccb407eb — carry msg.onGiveUpExhausted through this requeue too (finding [6])
+          // (docs/decisions/ccb407eb-carry-givenupexhausted-through-upgrade-requeue.md)
+          // @decision 02baa3a5 — also carry logicalId/mintedAtGen/mintedAtWallClock — mintedAtGen is
+          // still valid age evidence here, no resume boundary crossed (docs/decisions/02baa3a5-carry-logicalid-mintedat-through-upgrade-requeue.md)
           for (const msg of carried) {
             this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, {
               giveUpHeldUntil: msg.giveUpHeldUntil, onGiveUpExhausted: msg.onGiveUpExhausted, logicalId: msg.logicalId,
@@ -4154,31 +4105,14 @@ export class SessionService {
       }
     }
     const resumed = this.resume(sessionId);
-    // Redeliver anything captured above onto the FRESH process, in order — the old process is gone and its
-    // FIFO was wiped, so without this the captured entries would simply vanish despite being "queued". A
-    // durable entry (onDeliver set) is SKIPPED — resume()'s own redrive (just above) already re-delivers it;
-    // redelivering it here too would double it.
-    //
-    // PRESERVE the hold (card f25bf3bf, deciding what 9e27f4d2 left open for this path): `resume()` above
-    // reconnects to the SAME engine session via --resume (this is a re-pin respawn, not a fresh successor —
-    // the recipient session id is unchanged), so the resumed conversation's transcript already reflects
-    // whatever the predecessor's engine actually did before it was stopped. If the original give-up was a
-    // false negative (the turn had already run), replaying the same text into that SAME continuing
-    // conversation immediately is precisely the confusing-duplicate shape the hold exists to delay — the
-    // restart path's own reasoning (9e27f4d2), not the recycle path's (`carryPendingToSuccessor` above
-    // DELIVERS instead — see its doc for why a fresh, non-resumed successor differs). The purge can never
-    // actually fire here either (this respawn's own `giveUpConfirmQueue` starts empty, same as a restart),
-    // so this only ever delays delivery — but a delayed, possibly-superseded duplicate beats an immediate,
-    // certain one landing the instant the resumed process is back up.
+    // @decision f25bf3bf — preserve the give-up hold across this resume too; an immediate replay
+    // into the resumed transcript is the confusing-duplicate shape the hold prevents (docs/decisions/f25bf3bf-preserve-give-up-hold-on-requeue.md)
     for (const msg of carried) {
       if (msg.onDeliver) continue;
-      // Card ccb407eb, finding [6]: a durable (onDeliver-bearing) entry is skipped above, so this loop only
-      // ever carries plain (non-durable) entries — msg.onGiveUpExhausted is always undefined here in
-      // practice, but pass it through anyway. Card 02baa3a5: also carry msg.logicalId and
-      // msg.mintedAtWallClock, but deliberately OMIT msg.mintedAtGen — `resume()` above just produced a
-      // brand-new Live, whose submitGeneration restarts at 0, so the predecessor's generation count
-      // compared against it would be a unit error, not evidence (the same boundary carryPendingToSuccessor
-      // / card 1c47454b treats identically — see QueuedMessage.mintedAtGen's own doc, pty/host.ts).
+      // @decision ccb407eb — carry msg.onGiveUpExhausted through this requeue too (finding [6])
+      // (docs/decisions/ccb407eb-carry-givenupexhausted-through-upgrade-requeue.md)
+      // @decision 02baa3a5 — carry logicalId/mintedAtWallClock but deliberately omit mintedAtGen —
+      // resume() resets submitGeneration to 0 (docs/decisions/02baa3a5-carry-logicalid-mintedat-through-upgrade-requeue.md)
       this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, {
         giveUpHeldUntil: msg.giveUpHeldUntil, onGiveUpExhausted: msg.onGiveUpExhausted, logicalId: msg.logicalId,
         mintedAtGen: undefined, // DELIBERATELY OMITTED — fresh Live's submitGeneration restarts at 0 (see comment above)
