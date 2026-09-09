@@ -287,7 +287,7 @@ const HEX8_RE = /^[0-9a-f]{8}$/;
 
 /** @decision 78e4b3f2 — rootMsgId is NOT always a UUID (resendOf is a raw unvalidated MCP string); any
  *  irregular value falls back to fnv1a32, never breaks the HEX8_RE regex invariant — see
- *  docs/decisions/78e4b3f2-rootmsgid-is-not-always-a-uuid.md */
+ *  docs/decisions/78e4b3f2-possible-duplicate-tag-marks-only-a-redelivery.md (§2) */
 export function possibleDuplicateRootLabel(rootMsgId: string): string {
   const slice = rootMsgId.slice(0, 8);
   return HEX8_RE.test(slice) ? slice : fnv1a32(rootMsgId);
@@ -502,47 +502,16 @@ export const PROMPT_MISMATCH_RESOLVE_WINDOW_MS =
  */
 export const PROMPT_MISMATCH_EXCERPT_MAX_LEN = 200;
 
-/**
- * Card 87d2dc95 — the literal, stable prefix every `[loom:prompt-mismatch]` session-facing notice THIS
- * FILE mints (`mismatchText`, below) begins with, regardless of which branch produced it (an ESTABLISHED
- * fusion, a benign wrapper/ANSI-strip deficit, or the generic possible-loss fallback — see `mismatchText`'s
- * own ternary). Used to recognize, at the START of the NEXT generation's own detection, that THIS
- * generation's own intended text (`live.lastPrompt`) IS one of Loom's own notices rather than session
- * content — see `intendedIsOwnMismatchNotice`'s own call site for the self-sustaining feedback loop this
- * closes (card 87d2dc95, "the unresolved-loss alarm firing during a lag-by-one replay chain"): a persistent
- * engine-confirmation lag can make a notice's OWN delivery mismatch too, and without this guard that
- * mismatch would mint ANOTHER notice, forever.
- *
- * ⚠️ CORRECTED (manager review, card 87d2dc95): this is a `startsWith` PREFIX test, not a substring test —
- * `"[loom:prompt-mismatch-unresolved] ...".startsWith(PROMPT_MISMATCH_NOTICE_TAG)` is FALSE (the two tags
- * share a prefix, but this one has an extra `]` where the other has `-unresolved]`), so this constant ALONE
- * does not recognize `SessionService.handlePromptMismatchUnresolved`'s own two notices (sessions/service.ts
- * — a SEPARATE file, minted from the `checkPromptMismatchUnresolved` follow-up, not from this file's own
- * `mismatchText`). Exported (was file-local) and paired with `PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG` below
- * for exactly that reason — see `intendedIsOwnMismatchNotice`'s own call site, which now checks BOTH.
- */
+/** Card 87d2dc95 — stable prefix every `[loom:prompt-mismatch]` notice this file mints begins with; a
+ *  `startsWith` PREFIX test (not substring), paired with the UNRESOLVED tag below so a persistent
+ *  confirmation lag can't re-trigger its own notice forever. @decision 87d2dc95 — see
+ *  docs/decisions/87d2dc95-prompt-mismatch-notice-tags-prevent-self-loop.md. */
 export const PROMPT_MISMATCH_NOTICE_TAG = "[loom:prompt-mismatch]";
 
-/**
- * Card 87d2dc95 (added on manager review, after the original fix shipped checking only
- * `PROMPT_MISMATCH_NOTICE_TAG` above) — the literal, stable prefix of the OTHER family of notice this whole
- * mechanism can mint: `SessionService.handlePromptMismatchUnresolved`'s own recipient/sender messages
- * (sessions/service.ts), fired when `checkPromptMismatchUnresolved`'s bounded-window follow-up finds a gen
- * still unresolved. THE REACHABILITY QUESTION THIS ANSWERS: could a generation whose own intended text is
- * one of THESE notices mismatch and mint a FRESH plain `[loom:prompt-mismatch]` notice (which the tag above
- * alone would still correctly exempt from minting a THIRD notice), which then leaves ITS OWN newly-armed
- * follow-up timer to fire ANOTHER `-unresolved` notice later if the recognizing generation happens to
- * confirm cleanly instead of continuing the lag? Traced, not assumed: yes — nothing in this file or in what
- * is known about the upstream engine-confirmation lag (its actual mechanism is explicitly unverified
- * elsewhere in this file — outside this repo) proves the lag is a strict step function that, once broken
- * for one generation's own resolve window, can never recur for a later, unrelated generation. A `gen`
- * whose intended text is an `-unresolved` notice is therefore checked here too, closing the SAME class of
- * loop for this second notice family rather than leaving an unproven "probably fine" residual. Exported so
- * `SessionService` can mint its own two notices FROM this constant (see that method's own doc) instead of a
- * second hardcoded literal — a single source of truth for both the mint site and the recognition site,
- * so they cannot silently drift apart the way the reachability gap above was found (a hardcoded literal at
- * each site, never cross-checked).
- */
+/** Card 87d2dc95 — stable prefix of `SessionService.handlePromptMismatchUnresolved`'s own notice family
+ *  (sessions/service.ts); exported so both mint and recognition sites share one source instead of two
+ *  literals that could drift. @decision 87d2dc95 — see
+ *  docs/decisions/87d2dc95-prompt-mismatch-notice-tags-prevent-self-loop.md. */
 export const PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG = "[loom:prompt-mismatch-unresolved]";
 
 /**
@@ -558,27 +527,10 @@ export const PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG = "[loom:prompt-mismatch-unre
  */
 export const PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG = "[loom:prompt-mismatch-unmatched]";
 
-/**
- * Card 4a0af485: bounds `Live.ambiguousDispatches` by COUNT, deliberately NOT by elapsed time — the whole
- * point of that map is to keep listening for a late confirmation for as long as the session lives, since a
- * real engine-confirmation lag has no known upper bound (232s measured, no ceiling established). This is an
- * OBSERVATION-WINDOW bound, not a retry DEADLINE — `SUBMIT_VERIFY_TIMEOUT_MS`/`GIVE_UP_REQUEUE_LIMIT` (the
- * actual retry cadence) are untouched by this card.
- *
- * ⚠️ CODE REVIEW CORRECTION (an earlier draft claimed this cap is "expected to almost never actually
- * evict" because "real ambiguity is rare" — WRONG as originally reasoned): the map tracks EVER-given-up
- * generations, not CURRENTLY-ambiguous ones — with no cleanup on resolution, it grows MONOTONICALLY with
- * every give-up event for the session's whole life, and this card's own body measures give-ups at
- * 79%/~86% false-negative rates under load; 20 distinct give-ups in one long session is ordinary, not rare.
- * The cap's actual safety net is `purgeConfirmedGiveUpRequeue`/`drainPending` DELETING an entry the MOMENT
- * its own ambiguity resolves (content match, the FIFO-position fallback's own purge, or a `giveUpGen`-
- * tagged entry's successful re-drain — see each site's own comment) — cleaned up promptly like that, the
- * map commonly WILL stay near-empty in practice, but that is a CONSEQUENCE of the cleanup discipline, not
- * an independent claim about how rarely a session gives up. This cap is the memory-safety BACKSTOP for
- * whatever manages to outlive that cleanup (e.g. a session that gives up dozens of times with no confirming
- * hook ever arriving for any of them) — eviction only ever discards the OLDEST entry, oldest-first being
- * correct precisely BECAUSE cleanup keeps the map append-only-but-current, not append-only-and-stale.
- */
+/** Card 4a0af485 — bounds `Live.ambiguousDispatches` by COUNT (not elapsed time): an OBSERVATION-WINDOW
+ *  bound, not a retry deadline (the lag has no known ceiling — 232s measured, none established).
+ *  @decision 4a0af485 — the cap is a memory-safety backstop, not a claim ambiguity is rare; see
+ *  docs/decisions/4a0af485-ambiguousdispatches-signature-purge-scoped-to-one-batchid.md. */
 const AMBIGUOUS_DISPATCH_CAP = 20;
 
 /** Card dbc7ffea: per-logicalId cap on `Live.retiredGiveUpSignatures`'s own array of retired cycles — small,
@@ -642,119 +594,37 @@ const BRACKET_PASTE_END = "\x1b[201~";
  */
 const DRAIN_SEPARATOR = "\n\n────────\n\n";
 
-/**
- * Card eac3464d DoD-1/DoD-2/DoD-4: bounds on a SAME-SENDER agent-kind coalesced run (see
- * `drainPending`'s same-sender branch and `enqueueStdin`'s reorder-on-enqueue) — a run stops at
- * whichever binds first. Both are a DELIBERATE, STATED bound: card eac3464d's own "LIVE RISK" section
- * (sharpened by that card's DoD-0 finding) is that coalescing makes writes BIGGER on a write path with a
- * live, unresolved confirmation-loss defect (cards c23e2869/3ce3fa39, and DoD-0's own give-up/re-mint
- * finding, card 8af2b9bd) — an unbounded run is not acceptable.
- *
- * COUNT (5): handles the common 2-3-message same-sender burst DoD-0 measured in production without
- * letting one sender's backlog balloon into a single enormous write. Also used as the REORDER LOOKBACK
- * in `enqueueStdin` (see there) — sharing one constant keeps the "how far can one sender reach" mental
- * model single-valued instead of two knobs that can silently drift apart.
- *
- * BYTES (20,000 chars): comfortably clears typical single-report sizes observed in production (up to
- * ~15KB) — a head entry already over this bound is NEVER excluded by it and still drains alone, exactly
- * as today; the bound only limits how much MORE gets folded onto an already-large head. It bounds the
- * INCREMENTAL growth coalescing adds, not any single message's own size.
- */
+/** Card eac3464d — bounds on a SAME-SENDER agent-kind coalesced run (`drainPending`'s same-sender branch,
+ *  `enqueueStdin`'s reorder-on-enqueue); COUNT also doubles as the reorder lookback, so the two never
+ *  drift apart. @decision eac3464d — a DELIBERATE bound against a live confirmation-loss risk (cards
+ *  c23e2869/3ce3fa39/8af2b9bd) that coalescing writes bigger amplifies; see
+ *  docs/decisions/eac3464d-agent-coalesce-bounds-are-deliberate-against-a-live-confirmation-loss-risk.md. */
 const AGENT_COALESCE_MAX_COUNT = Number(process.env.LOOM_AGENT_COALESCE_MAX_COUNT) || 5;
 const AGENT_COALESCE_MAX_BYTES = Number(process.env.LOOM_AGENT_COALESCE_MAX_BYTES) || 20_000;
 
-/**
- * Card 21a281b6 — renders the shared daemon-supplied MINT-TIME stamp onto an ORDINARY agent-message frame
- * (`peer_message`/`session_message`/`worker_message`, and their `:redirect` variants — the four
- * `messageWorker`/`deliverRedirect`/`deliverSessionMessage`/`messagePeerManager` callers in sessions/
- * service.ts, the ONLY ones that pass `ctx.mintedAtWallClock`) at the moment the text is ACTUALLY handed
- * to the pty — mirroring `annotatePasteRecoveryAge`'s own "annotate at drain time, never bake it into
- * `QueuedMessage.text`" discipline, for the identical reason: `hasAmbiguousMatch` (card 4a0af485) content-
- * matches a fresh dispatch against `QueuedMessage.text` verbatim to auto-join a manual resend with no id —
- * a non-deterministic wall-clock value baked into that STORED text at construction would make two resends
- * of the literal same instruction compare as different content and silently break that join. Stamping only
- * `mintedAtWallClock` on the entry (never inside `m.text`) and rendering it here, once, at write time,
- * keeps the compared/stored text stable while still handing the recipient an absolute send time it cannot
- * fake or omit (card 21a281b6 DoD-1/DoD-2).
- *
- * UNCONDITIONAL when `mintedAtWallClock` is defined (DoD-1: "every delivered agent-message frame") —
- * unlike `annotatePasteRecoveryAge`, this never gates on a tag or a generation comparison: an absolute
- * ISO-8601 UTC timestamp is legible and unambiguous whether delivery is instant or, per card 788781da's
- * measurement, delayed 10-15 routine minutes behind a busy recipient's queue (DoD-3) — the recipient's own
- * turn supplies "now"; this supplies the one fact (when this was actually minted) it cannot verify or fake
- * for itself. Reuses `annotatePasteRecoveryAge`'s own "Originally sent at <ISO>." wording verbatim rather
- * than inventing a second vocabulary (DoD-3) — tagged `[loom:mint-time]` so it can never be confused with
- * sender-authored body text (DoD-2).
- *
- * A no-op when `mintedAtWallClock` is undefined — every message this card does not scope (worker_report,
- * settle-nudges, warnings, and a paste-recovery notice, which is disclosed by `annotatePasteRecoveryAge`
- * instead, not this).
- *
- * ⚠️ ONE GATE, borrowed verbatim from `annotatePasteRecoveryAge`'s guard (2): when `mintedAtGen` is defined
- * and `currentGen` has not yet advanced past it, this is the message's OWN first write — return `text`
- * UNCHANGED. Not an optimization: `enqueueStdin` (see its own `mintedAtGen` default-capture comment)
- * guarantees `mintedAtGen === live.submitGeneration` at the moment THIS write's `currentGen` is captured
- * for a message's first attempt, so this boundary is exactly "has anything else run since mint" — the
- * SAME boundary `Live.ambiguousDispatches`/`hasAmbiguousMatch` (card 4a0af485) depend on a message's first
- * write staying byte-identical to its pristine `QueuedMessage.text`. Skipping this gate would seed that
- * signature from an ANNOTATED write no fresh resend's pristine text could ever equal, silently disabling
- * resend auto-join for every message this card touches. `mintedAtGen === undefined` (a carried-forward
- * entry that crossed a recycle/restart boundary, which deliberately drops `mintedAtGen` — see
- * `QueuedMessage.mintedAtGen`'s own doc) skips this gate and always renders: there is no "first write"
- * concept left to protect once the generation counter itself has been reset out from under it.
- *
- * ⚠️ SECOND GATE (card 78e4b3f2's own scenario, measured via `pty-giveup-marked-resend-autojoin.mjs`):
- * `giveUpGen !== undefined` — this write is a RE-DELIVERY of a message that has ALREADY given up at least
- * once — ALSO returns `text` unchanged, unconditionally, regardless of `mintedAtGen`/`currentGen`. The
- * first gate alone only protects a message's OWN FIRST write; a message can give up, redrain (crossing
- * generations — the first gate no longer applies), and give up AGAIN, at which point `requeueGiveUpOrigin`
- * re-seeds `Live.ambiguousDispatches` from THAT second write. Without this second gate, that second write
- * would carry the annotation, and a plain manual resend (which never knows about it — it types the tag-
- * STRIPPED original content) could never content-match the now-annotated signature again. A message that
- * has ever given up therefore never discloses its mint time via this path — it already carries
- * `framePossibleDuplicate`'s own `[loom:possible-duplicate root:…]` marker instead, a distinct signal.
- *
- * ⭐ SHARED VOCABULARY: card 8e0d09e8 (escalation-notification mint-time stamping) is expected to reuse
- * this EXACT `[loom:mint-time] Originally sent at <ISO>.` tag + wording rather than minting a second one.
- */
+/** Card 21a281b6 — renders the shared MINT-TIME stamp onto an ordinary agent-message frame ONCE, at drain
+ *  time (never baked into `QueuedMessage.text`), so `hasAmbiguousMatch`'s (card 4a0af485) content-match
+ *  join still sees byte-identical text on a message's first write. @decision 21a281b6 — the two gates
+ *  below are load-bearing, not optional; see
+ *  docs/decisions/21a281b6-annotate-mint-stamp-gates-are-load-bearing.md. */
 function annotateMintStamp(
   text: string, giveUpGen: number | undefined, mintedAtGen: number | undefined, currentGen: number,
   mintedAtWallClock: number | undefined,
 ): string {
   if (mintedAtWallClock === undefined) return text;
-  if (giveUpGen !== undefined) return text; // a re-delivery of a message that has already given up once
-  if (mintedAtGen !== undefined && currentGen <= mintedAtGen) return text; // this message's own first write
+  // GATE 2 (card 78e4b3f2): a re-delivery of an already-given-up message — must stay unchanged, or a
+  // plain manual resend (tag-stripped) can never content-match it again.
+  if (giveUpGen !== undefined) return text;
+  // GATE 1: this message's own first write — annotating it here would break hasAmbiguousMatch's
+  // content-match join (card 4a0af485) against a fresh resend's pristine text.
+  if (mintedAtGen !== undefined && currentGen <= mintedAtGen) return text;
   return `${text}\n\n[loom:mint-time] Originally sent at ${new Date(mintedAtWallClock).toISOString()}.`;
 }
 
-/**
- * Card ea77f71d (Code Reviewer Major ②, follow-up on 8e0d09e8): `m.resolveTailAtDelivery` (if present) is
- * resolved HERE, but only ONCE ever, on the first evaluation that TOUCHES this entry — the result is
- * memoized onto the entry itself (`m.resolvedTailReady`/`m.resolvedTail`) and every later call, for the
- * SAME `m`, returns the cached value without re-invoking the resolver. This is load-bearing for TWO
- * things at once:
- *   (1) BYTE-IDENTITY: `requeueGiveUpOrigin` reconstructs the exact text a failed attempt actually wrote,
- *       by calling this SAME function again on the SAME `QueuedMessage` object (`origin`'s members are the
- *       identical references `drainPending` drained — see `submit`'s `live.giveUpOrigin = origin`). Before
- *       this memoization, a resolver that reads live external state (e.g. a task's current board column)
- *       could return a DIFFERENT value on that later reconstruction than it did at the real write, silently
- *       breaking the late-confirmation content-match/purge mechanism this function's `Card 78e4b3f2` doc
- *       (below) already declares load-bearing.
- *   (2) COST: `projectedWrittenLength` (below) can invoke this up to 3x per drain candidate (a byte-bound
- *       probe, then the accumulate, then the real write) — including, before this fix, for a candidate that
- *       fails the byte bound and is therefore never drained at all. Memoizing collapses that back to at most
- *       one real resolver invocation, ever, per entry.
- * ⚠️ KNOWN CAVEAT (accepted, not closed by this fix): memoization happens on the FIRST touch, which is not
- * always the real delivery write — a coalescing-budget probe that ends up REJECTING this candidate (it
- * stays in `live.pending` for a later drain) still counts as a touch. Today's one production resolver
- * (`SessionService.platformEscalate`) can never hit this, because it always enqueues with no `senderId`,
- * which keeps it out of the same-sender coalescing-candidate scan entirely (see that scan's own
- * `senderKey !== null` guard) — so it is always resolved exactly at its own head-of-batch, i.e. genuinely at
- * drain time. A FUTURE resolver-bearing caller that DOES supply a `senderId` and gets rejected as a
- * coalescing candidate would see its tail frozen at that earlier, rejected probe rather than at its actual
- * later delivery — the resolver's own `resolveTailAtDelivery` doc (below) names this explicitly so a future
- * caller can judge whether that's acceptable for what it reads.
- */
+/** Card ea77f71d — `m.resolveTailAtDelivery` is resolved ONCE, on first touch, and memoized onto the entry;
+ *  load-bearing for byte-identity between `drainPending`'s real write and `requeueGiveUpOrigin`'s later
+ *  reconstruction, and for cost (up to 3 calls/candidate otherwise). @decision ea77f71d — do not remove the
+ *  memoization; see docs/decisions/ea77f71d-withdeliverytail-memoizes-once-for-byte-identity-and-cost.md. */
 function withDeliveryTail(m: QueuedMessage): string {
   if (!m.resolveTailAtDelivery) return m.text;
   if (!m.resolvedTailReady) {
@@ -768,35 +638,10 @@ function withDeliveryTail(m: QueuedMessage): string {
   return m.resolvedTail ? `${m.text}${m.resolvedTail}` : m.text;
 }
 
-/**
- * Card 78e4b3f2: the text ACTUALLY submitted for a batch of drained (or `Live.giveUpOrigin`-captured)
- * messages — coalesces them with `DRAIN_SEPARATOR` exactly like before this card, but ALSO frames any
- * member whose `giveUpGen` is already set (this write is a genuine re-delivery of a message that was never
- * confirmed) as a possible duplicate — see `framePossibleDuplicate`'s own doc. A first-ever write
- * (`giveUpGen` undefined) or an already-tagged cross-remint (the idempotency guard) passes through
- * unmarked/unchanged.
- *
- * SHARED, deliberately, between `drainPending` (computes what to actually write) and `requeueGiveUpOrigin`
- * (must seed `Live.ambiguousDispatches`'s signature from EXACTLY what was written for the failing attempt,
- * never from `QueuedMessage.text`'s own possibly-pristine value — `giveUpGen` has not yet been bumped to
- * the NEW generation at the point `requeueGiveUpOrigin` reads it, so this reconstructs the SAME text
- * `drainPending` used to write the attempt that just gave up). Letting these two drift would break the
- * late-confirmation content-match/purge mechanism the instant a marked (giveUpGen-tagged) retry itself
- * gives up: the engine's real echo would carry the tag, but a signature computed from the pristine text
- * would never match it.
- *
- * Card 4af5aefa: `currentGen` — the generation count at the moment THIS text is being assembled for a
- * real write — is threaded through the SAME way, for the SAME reason: `annotatePasteRecoveryAge` must
- * run on whatever `drainPending` is about to actually write, and `requeueGiveUpOrigin` must reconstruct
- * that exact same annotated text (not the pristine one) to seed a matching signature. See both call
- * sites for why each passes the value it passes.
- *
- * Card 21a281b6: `annotateMintStamp` runs LAST, after any paste-recovery age disclosure — the two are
- * mutually exclusive in practice (a paste-recovery notice's own `mintedAtWallClock` is fully consumed by
- * `annotatePasteRecoveryAge`'s cross-boundary branch; an ordinary agent message never matches
- * `PASTE_RECOVERY_TAG` so `annotatePasteRecoveryAge` no-ops on it and leaves it untouched for this
- * function to stamp) but composing them regardless keeps this call site correct even if that changes.
- */
+/** Card 78e4b3f2 — the text ACTUALLY submitted for a drained batch; SHARED verbatim between `drainPending`
+ *  (the real write) and `requeueGiveUpOrigin` (must reconstruct that SAME text to seed a matching
+ *  content-match signature). @decision 78e4b3f2 — do not let the two diverge; see
+ *  docs/decisions/78e4b3f2-possible-duplicate-tag-marks-only-a-redelivery.md (§3). */
 function annotatedMessageText(m: QueuedMessage, currentGen: number): string {
   const base = withDeliveryTail(m);
   const t = m.giveUpGen !== undefined ? framePossibleDuplicate(base, m.logicalId) : base;
@@ -1096,27 +941,11 @@ export function detectPermissionMode(recentOutput: string): { mode: LandedMode; 
   return { mode: "unknown", matchedToken: null };
 }
 
-/**
- * The cycle order Shift+Tab walks from the gate-free `acceptEdits` boot mode, AS OBSERVED under Loom's own
- * spawn conditions (claude 2.1.163; mapped by the probe — board card f05e4897 / test/_probe-resume-mode.mjs):
- *   acceptEdits →(+1) plan →(+2) auto →(+3) default →(+4) acceptEdits   (period 4).
- *
- * Card 8c60c068 — re-verified against the installed CLI (v2.1.246) by extracting its bundled JS: the real
- * mode-cycle handler is a CONDITIONAL state machine, not a fixed array. From `plan` it advances to
- * `bypassPermissions` if that mode is available, else `auto` if THAT is available, else `default`; from
- * `bypassPermissions` it advances to `auto` if available else `default`; `dontAsk` is never entered by
- * forward cycling at all (only exits to `default`). `bypassPermissions` is available ONLY when the session
- * was launched with `--dangerously-skip-permissions` (confirmed in the CLI's own refusal string) — Loom
- * never passes that flag — so that branch is permanently dead here, which is why omitting it from this
- * array is correct. `auto`'s availability is genuinely dynamic at runtime (model support + a rollout gate +
- * `permissions.disableAutoMode`), so this array/period-4 arithmetic describes the cycle correctly only when
- * auto is available (the expected case), not as a universal guarantee of the real CLI's behavior. This is
- * safe in practice, not just lucky: {@link runCycleToMode}'s press loop never blind-presses off this array
- * — it presses ONE Shift+Tab, observes the REAL footer mode, and only stops (`nextCycleAction`) on what it
- * actually reads, or gives up leaving the session at its last observed mode. This array is only ever used
- * to LABEL a target mode from a `startupModeCycles` integer ({@link modeAfterCyclesFromAcceptEdits}); it is
- * never used to blindly count presses against the real terminal.
- */
+/** Cycle order Shift+Tab walks from the gate-free `acceptEdits` boot mode, AS OBSERVED (card f05e4897;
+ *  re-verified card 8c60c068 — the real CLI handler is a conditional state machine, correct here only
+ *  when `auto` is available). @decision f05e4897 — safe regardless: {@link runCycleToMode} never blind-
+ *  presses off this array, it only LABELS a target from observed footer reads; see
+ *  docs/decisions/f05e4897-converge-resume-mode-target-with-fresh-spawn.md. */
 const ACCEPT_EDITS_CYCLE_ORDER: LandedMode[] = ["acceptEdits", "plan", "auto", "default"];
 /**
  * The permission mode reached after `cycles` Shift+Tab presses from the gate-free acceptEdits boot mode.
@@ -1199,22 +1028,10 @@ const RESUME_MODE_MAX_PRESSES = Number(process.env.LOOM_RESUME_MODE_MAX_PRESSES)
  * definite read. `"unknown"` is excluded by construction here, not by a separate runtime check.
  */
 const HEALABLE_MODES: ReadonlySet<LandedMode> = new Set(["plan", "acceptEdits", "default", "bypassPermissions"]);
-/**
- * Card 51926260 — `LandedMode`s the real `claude --permission-mode` flag accepts DIRECTLY as a boot
- * value (probe-verified: `claude --help` lists "acceptEdits"/"auto"/"plan" among its accepted
- * `--permission-mode` choices). Deliberately excludes `bypassPermissions` (never reachable via
- * {@link ACCEPT_EDITS_CYCLE_ORDER} anyway — see {@link cyclesToReachFromAcceptEdits}'s own doc — and kept
- * off this list defensively, matching {@link HEALABLE_MODES}'s style) and `default`/`unknown` (not
- * confirmed as accepted flag values — booting those still climbs off `acceptEdits` via the unchanged
- * Shift+Tab convergence below).
- *
- * Card 016ee373 — typed `ReadonlySet<LandedMode & CliPermissionMode>` (not bare `ReadonlySet<LandedMode>`)
- * so the initializer itself is a compile-time guard: a value that is a `LandedMode` but NOT a CLI-accepted
- * `--permission-mode` value (e.g. `"default"`) — or vice versa — can no longer be added here without a
- * `tsc` failure (proof: adding `"default"` to this initializer was shown to fail with TS2769 — see this
- * card's worker_report for the pasted compiler output; not committed here as a permanent fixture since
- * `tsc` itself IS the regression test for a type-level invariant).
- */
+/** Card 51926260 — `LandedMode`s the real `claude --permission-mode` flag accepts DIRECTLY as a boot value
+ *  (probe-verified). @decision 016ee373 — typed `ReadonlySet<LandedMode & CliPermissionMode>` so a value
+ *  that ISN'T also a CLI-accepted mode (e.g. `"default"`) can't be added without a `tsc` failure; see
+ *  docs/decisions/016ee373-direct-boot-modes-typed-as-compile-time-guard.md. */
 const DIRECT_BOOT_MODES: ReadonlySet<LandedMode & CliPermissionMode> = new Set<LandedMode & CliPermissionMode>(["acceptEdits", "plan", "auto"]);
 /**
  * Bridges a plain `LandedMode` read (e.g. `resolveModeTarget`'s output) to the `LandedMode & CliPermissionMode`
@@ -1275,45 +1092,17 @@ const MODE_OVERRIDE_MAX_ATTEMPTS = Number(process.env.LOOM_MODE_OVERRIDE_MAX_ATT
 // kickoff-real-spawn.mjs's real-child-boot budget derives from this production constant too.
 export const READY_FALLBACK_MS = Number(process.env.LOOM_READY_FALLBACK_MS) || 20_000;
 
-/**
- * Card c469d54e — mode-cycle-scoped readiness fallback, re-armed from SessionStart (not spawn) once the
- * SessionStart hook's `deliverHook` call is actually DISPATCHED (not merely once the hook has arrived at
- * the process — an arrived-but-not-yet-dispatched hook, e.g. queued behind other synchronous work on an
- * overloaded event loop, gets none of this budget's protection until dispatch actually happens). Sized
- * like READY_FALLBACK_MS's own original budget: comfortably over cycleToMode's documented worst case
- * (~13-14s, see its doc comment) so a HEALTHY cycle always finishes first. Under host contention
- * SessionStart's dispatch can land late enough to leave less than this much runway before the ORIGINAL
- * spawn-anchored deadline — that shrinking residual, not cycleToMode being slow, was the actual defect:
- * confirmed against the 2026-08-01 mass-restart's raw daemon-output.log — 9/9 fallback firings in that
- * incident had SessionStart already dispatched 5.3s-11.6s before the old spawn+20s deadline, well under
- * this budget, and 7/9 (8/9 under a broader any-non-clean-landing definition) showed the corrupted-footer
- * signature this card fixes (see docs/investigations/c469d54e-ready-fallback-race/findings.md for the
- * frozen log, its md5, and the re-runnable extraction script — this is manager-verified, not the parent
- * card's original worker-reported figure). Re-arming FROM SessionStart's dispatch gives every healthy
- * cycle its full, un-eroded budget regardless of how late that dispatch was. Env-overridable so tests
- * don't wait it out.
- *
- * INVARIANT (must hold for the clamp below to ever matter): READY_FALLBACK_ABSOLUTE_CEILING_MS −
- * MODE_CYCLE_FALLBACK_MS ≥ READY_FALLBACK_MS (45s − 20s ≥ 20s at the shipped defaults). All three are
- * independently env-overridable — raising LOOM_READY_FALLBACK_MS past ~25s alone (holding the other two at
- * their defaults) shrinks that margin below zero and deterministically RE-CREATES this card's race: the
- * ceiling would then clamp the re-armed budget to LESS than the original spawn-anchored deadline already
- * gave a cycle starting near spawn+0, for no reason. Nothing enforces this invariant at runtime — it is a
- * deployment-time contract between three env vars, stated here so a future override doesn't reopen it silently.
- */
+/** Card c469d54e — mode-cycle-scoped readiness fallback, re-armed from SessionStart's `deliverHook`
+ *  DISPATCH (not spawn) — fixes a shrinking-residual race under host contention (2026-08-01 mass-restart:
+ *  9/9 firings had SessionStart dispatched 5.3-11.6s late, 7/9 corrupted-footer). @decision c469d54e — an
+ *  INVARIANT ties this to READY_FALLBACK_ABSOLUTE_CEILING_MS/READY_FALLBACK_MS; see
+ *  docs/decisions/c469d54e-ready-fallback-reanchored-to-sessionstart-dispatch.md before changing any of
+ *  the three. */
 export const MODE_CYCLE_FALLBACK_MS = Number(process.env.LOOM_MODE_CYCLE_FALLBACK_MS) || 20_000;
 
-/**
- * Card c469d54e — absolute ceiling on the re-armed timer above, measured from SPAWN (Live.startedAt), not
- * SessionStart. Preserves READY_FALLBACK_MS's original liveness guarantee ("never strand a queued boot
- * injection forever") for the residual failure mode this fix does NOT eliminate: a SessionStart hook whose
- * `deliverHook` dispatch is delayed to or past the original spawn+READY_FALLBACK_MS mark — a strictly worse
- * contention level than anything observed in the incident this card fixes (worst observed SessionStart-
- * dispatch gap there was ~11.6s, per docs/investigations/c469d54e-ready-fallback-race/findings.md; this
- * ceiling gives roughly 4x that margin before giving up regardless). Deliberately NOT unbounded: a cycle
- * that starts very late still gets bounded runway, not an open-ended wait. See MODE_CYCLE_FALLBACK_MS's own
- * doc for the three-constant invariant this ceiling's value participates in.
- */
+/** Card c469d54e — absolute ceiling on the re-armed timer above, measured from SPAWN not SessionStart;
+ *  deliberately NOT unbounded. @decision c469d54e — part of the same three-constant invariant as
+ *  MODE_CYCLE_FALLBACK_MS; see docs/decisions/c469d54e-ready-fallback-reanchored-to-sessionstart-dispatch.md. */
 export const READY_FALLBACK_ABSOLUTE_CEILING_MS = Number(process.env.LOOM_READY_FALLBACK_ABSOLUTE_CEILING_MS) || 45_000;
 
 /**
@@ -1700,31 +1489,11 @@ export function markitdownMcpServer(pythonInterpreterPath?: string): { type: "st
   return { type: "stdio", command: bin, args: [] };
 }
 
-/**
- * Card 088afc94 (P4 wiring) — the streamable-HTTP MCP-config entry for a codescape-enabled session,
- * pointed at the SHARED `codescape serve` process (`/mcp/<codescapeId>` for a manager, or
- * `/mcp/<codescapeId>/<worktreeId>` for a worker tied to a task — codescape confirmed this route is the
- * STABLE long-term interface: it serves the project's main graph today and will serve worktree-adjusted
- * overlay content through this SAME URL once that ships, so this is not a placeholder to "simplify" back
- * to the bare route later). Returns `null` — a CLEAN SKIP, never a stale/absent fallback (Platform Lead
- * ruling on this card: silent staleness was the ORIGINAL defect, and a stdio-snapshot fallback would
- * silently reproduce exactly that) — when `port` is null (serve isn't up: disabled, never started, mid-
- * restart, or gave up) or when `resolveProjectId` can't resolve an id for `repoPath` (never registered).
- * `resolveProjectId` should be the SAME supervisor instance's `resolveProjectId` (its own boot-
- * registration cache first, falling back to the cold manifest read — see codescape/supervisor.ts) — kept
- * as an injected function (not a raw homeDir) so this stays a pure, hermetically-testable seam and so
- * every caller shares the ONE id-resolution strategy in one place.
- *
- * PRIOR-ATTEMPT NOTE: an EARLIER HTTP-mount attempt was abandoned because it scoped by Loom's own
- * project.id, which never matched codescape's OWN path-derived id — the MCP never registered, silently.
- * Resolving via `resolveProjectId` (never a reimplemented hash) is what fixes that class of bug for good.
- *
- * ⭐ Card 42f50ca1: the returned URL bakes `port` in literally. `buildMcpServers`' caller writes this into
- * a session's `--mcp-config` at `createPty` time (fresh spawn/resume/fork/recycle) — the running `claude`
- * process holds that URL for the rest of its life and never re-reads `getPort()`. So the supervisor's port
- * MUST stay stable for as long as a session that mounted it stays alive; see the reuse-on-restart doc at
- * `codescape/supervisor.ts`'s `spawnServe()` for why that stability is deliberate, not incidental.
- */
+/** Card 088afc94 — streamable-HTTP MCP-config entry for a codescape-enabled session; returns `null` as a
+ *  CLEAN SKIP (never a stale/absent fallback) when unresolvable. @decision 088afc94 — never add a
+ *  fallback here, and never scope by Loom's own project.id (card 42f50ca1: the returned port is baked in
+ *  and must stay stable for the session's life); see
+ *  docs/decisions/088afc94-codescape-http-mcp-clean-skip-and-stable-id-resolution.md. */
 export function codescapeHttpMcpServer(opts: { repoPath: string; port: number | null; worktreeId?: string | null; resolveProjectId?: (repoPath: string) => string | null }): { type: "http"; url: string } | null {
   if (opts.port == null || !opts.resolveProjectId) return null;
   const id = opts.resolveProjectId(opts.repoPath);
@@ -1914,42 +1683,11 @@ export function buildMcpServers(o: {
       console.warn(`[pty] ${o.sessionId} capability '${grant.slug}' could not be resolved — spawning without it (provisioning may be in progress in the background).`);
     }
   }
-  // Card C2 (Codescape wiring epic `369dde3c`), P4 REWRITE (card 088afc94): a per-PROJECT opt-in (NOT a
-  // profile capability grant, hence outside the resolveProfileCapabilities loop above). `o.codescapeEnabled`
-  // is the RAW project flag — isLoomDev() is re-checked HERE (not pre-baked by the caller) so this pure
-  // seam can assert the LOOM_DEV-off negative case directly.
-  //
-  // GATE ORDERING IS LOAD-BEARING (card 3e429d83) — keep the cheap checks (`o.codescapeEnabled`,
-  // `isLoomDev()`) first; don't reorder or hoist them behind `isCodescapeSupervisorEnabled`.
-  // `isCodescapeSupervisorEnabled` bottoms out in `resolveExecutable`, a SYNCHRONOUS walk of every PATH
-  // dir × PATHEXT extension (measured ~17-20ms on a real Windows PATH) — exactly the kind of blocking
-  // work the spawn hot path (`createPty` → `buildMcpServers`) must never do (see CLAUDE.md's "no blocking
-  // work on the hot path" invariant).
-  //
-  // TWO INDEPENDENT LAYERS keep that walk off the hot path for a normal spawn, not one: this outer
-  // ordering, AND `isCodescapeSupervisorEnabled` itself re-checking `isLoomDev()` before touching the
-  // filesystem (paths.ts). A regression has to defeat BOTH to actually reach `resolveExecutable`.
-  //
-  // test/pty-hot-path-no-path-walk.mjs guards the INVARIANT — "no PATH walk on the hot path for a normal
-  // spawn" — not this specific ordering: it reddens on anything that actually causes the walk (e.g.
-  // removing/inlining `isCodescapeSupervisorEnabled`'s own `isLoomDev()` short-circuit, confirmed by
-  // fail-first testing), but it will NOT catch a reorder of just this outer gate — the inner short-circuit
-  // still prevents the walk, so that alone is harmless and the test correctly stays green. Keep this
-  // ordering as defense-in-depth anyway; just don't read the test's silence on a reorder as proof nothing
-  // changed.
-  //
-  // P4: the per-session mount is now a streamable-HTTP entry pointed at the SHARED `codescape serve`
-  // process (`codescapeHttpMcpServer`) — no per-session spawn at all. This SUPERSEDES the C2/C3-era
-  // per-session stdio `codescape mcp --graph <graph.json>` process (which read a Loom-maintained snapshot
-  // file); that mechanism is gone. `isCodescapeSupervisorEnabled(dbPath)` (isLoomDev() AND a codescape CLI
-  // actually detected on the host) stays the daemon-wide master switch for the whole Codescape feature.
-  // `o.integrationPaths?.codescape` (the DB-persisted path) is passed through so THIS gate check honors
-  // the same DB-first precedence the supervisor's own detection uses — a daemon with the DB path set but
-  // no LOOM_CODESCAPE_BIN/bare-PATH binary still detects correctly. Ruling (card 088afc94): when serve
-  // isn't up (`codescapePort` null) or `resolveCodescapeProjectId` can't resolve an id for this repo,
-  // this CLEAN-SKIPS — no stdio-snapshot fallback — a silent stale/absent mount masquerading as fresh is
-  // the exact defect this card exists to fix, and a permanent second code path is exactly the "weaker
-  // architecture" avoided by not duplicating codescape's own server-side staleness/single-flight machinery.
+  // Codescape MCP mount (per-project opt-in; card 088afc94). @decision 3e429d83 — GATE ORDERING IS
+  // LOAD-BEARING: keep the cheap checks (`o.codescapeEnabled`, `isLoomDev()`) first; don't reorder or
+  // hoist them behind `isCodescapeSupervisorEnabled`, which bottoms out in a synchronous PATH walk that
+  // must never run on the spawn hot path. See
+  // docs/decisions/3e429d83-codescape-mcp-mount-gate-ordering-and-clean-skip.md.
   if (o.codescapeEnabled && o.repoPath) {
     if (isLoomDev()) {
       if (isCodescapeSupervisorEnabled(o.integrationPaths?.codescape)) {
@@ -1977,24 +1715,10 @@ export function buildMcpServers(o: {
   return mcpServers;
 }
 
-/**
- * Card C2 (+ card 5a7491d3, DoD-1/DoD-3): the `--allowedTools` contribution for a mounted Codescape MCP
- * entry — ONLY the 9 read tools (list_flows/trace_flow/what_touches/describe_symbol/render_tree/
- * boundary_map/scenario_space/overview/declared_actions), NEVER the control/write tools in
- * {@link CODESCAPE_WRITE_TOOLS}. `overview` was added by card 5a7491d3: it was mounted and advertised
- * (it's the orientation entry point our own `/codescape` skill teaches agents to call FIRST) but sat in
- * neither list — a pure read/orientation tool, same shape as `list_flows`, so it belongs here, not on the
- * write side. `declared_actions` was ALSO added by card 5a7491d3, after initially being placed fail-closed
- * on the write side pending confirmation: the peer project (who own the server) confirmed it is registered
- * as a tool in their `src/mcp/server.ts`, through the SAME `logged(...)` wrapper as their other read tools,
- * and its handler (`src/mcp/walk.ts`) only projects a field already stamped at ingest — it mutates nothing.
- * ⚠️ NAME-COLLISION TRAP: `declared_actions` is ALSO a member of `open_view`'s VIEW enum in their
- * `src/mcp/control.ts` (a control-surface concern, unrelated to the tool) — grepping the peer repo for the
- * bare name lands mostly in THAT file and reads like a write tool. The discriminator is which file
- * registers the name AS A TOOL (`server.ts`), never where the string merely appears. Read-only "agent
- * orients itself" integration (Q4). Named per-tool, not the whole `mcp__codescape` server prefix, so the
- * write surface stays unreachable even though the server itself exposes it.
- */
+/** Card C2 + card 5a7491d3 — `--allowedTools` for a mounted Codescape MCP: ONLY the 9 read tools, NEVER
+ *  {@link CODESCAPE_WRITE_TOOLS}. @decision 5a7491d3 — classify a new tool by which file registers it AS
+ *  A TOOL (`server.ts`), never by grepping the peer repo for the bare name (name-collision trap); see
+ *  docs/decisions/5a7491d3-codescape-tool-allow-write-partition.md. */
 export const CODESCAPE_TOOL_ALLOW: readonly string[] = [
   "mcp__codescape__list_flows",
   "mcp__codescape__trace_flow",
@@ -2007,24 +1731,11 @@ export const CODESCAPE_TOOL_ALLOW: readonly string[] = [
   "mcp__codescape__declared_actions",
 ];
 
-/**
- * Card C2 hardening (post-hoc CR blocker) + card 5a7491d3 (DoD-2): the control/write Codescape tools —
- * NEVER allowlisted (see {@link CODESCAPE_TOOL_ALLOW}), but the mounted `codescape` MCP entry still
- * ADVERTISES every tool it registers to the model regardless — this array and `CODESCAPE_TOOL_ALLOW`
- * TOGETHER are meant to partition that full advertised set; don't quote a fixed total here (see
- * {@link codescapeUnclassifiedTools} for the drift check that keeps the partition honest instead of a
- * hardcoded count going stale the moment either list changes). Under `--permission-mode acceptEdits`, a
- * tool that's mounted but not allowlisted is NOT auto-approved — it PROMPTS. A Loom-driven role
- * (worker/setup/auditor/workspace-auditor, stdin owned by its manager, `AskUserQuestion` disallowed) can
- * never answer that prompt, so a stray call wedges the turn until the busy-stuck watchdog fires. These
- * names are unioned into `--disallowedTools` (see {@link disallowedToolsForSpawn}) whenever the codescape
- * MCP is actually mounted, so the write surface is structurally unreachable rather than merely
- * un-allowlisted.
- *
- * `clear_annotations` (card 5a7491d3) is `annotate`'s own counterpart — clearing annotations mutates the
- * graph's view state exactly like setting them does, so it belongs on this side for the same reason
- * `annotate` does.
- */
+/** Card C2 hardening + card 5a7491d3 — control/write Codescape tools, NEVER allowlisted; unioned into
+ *  `--disallowedTools` whenever the MCP is mounted, so the write surface stays structurally unreachable
+ *  even though the server still advertises it. @decision 5a7491d3 — don't quote a fixed partition total
+ *  anywhere (use `codescapeUnclassifiedTools`'s drift check instead); see
+ *  docs/decisions/5a7491d3-codescape-tool-allow-write-partition.md. */
 export const CODESCAPE_WRITE_TOOLS: readonly string[] = [
   "mcp__codescape__focus_flow",
   "mcp__codescape__highlight",
@@ -2097,24 +1808,11 @@ export const PLAYWRIGHT_DISALLOWED_TOOLS: readonly string[] = [
   "mcp__playwright__browser_run_code_unsafe",
 ];
 
-/**
- * Security hardening (card f1609e1a, a residual the Code Reviewer surfaced OUTSIDE card 7159466a's
- * RCE scope): beyond `browser_run_code_unsafe`, `@playwright/mcp`'s default tool set also mounts two
- * tools that take ABSOLUTE HOST FILE PATHS and read them into a page — verified against the installed
- * `@playwright/mcp` README (`browser_file_upload`'s and `browser_drop`'s `paths` params) —
- * `browser_file_upload` and `browser_drop`. (`browser_drag` was checked and excluded: it takes only
- * page-snapshot element refs, no host path.) Combined with `browser_navigate` to an attacker-controlled
- * page, that's a host-secret EXFILTRATION primitive (read `~/.ssh/id_rsa` / `.env`, POST from a
- * cooperating page) — NOT RCE, but the same threat model as PLAYWRIGHT_DISALLOWED_TOOLS: a human
- * enabling `browserTesting` on the untrusted-chat-facing companion (`assistant`) profile.
- *
- * UNLIKE `browser_run_code_unsafe` (which no legitimate workflow needs and is disallowed for EVERY
- * role), these two ARE legitimately needed for upload/drag-drop testing on the worker rigs (QA Tester /
- * Web Designer) — so this set is ROLE-SCOPED: {@link disallowedToolsForSpawn} unions it in ONLY when
- * `role === "assistant"` AND the Playwright MCP is mounted, leaving worker/manager/other roles
- * byte-identical (they keep file_upload/drop). Same posture as `RESTRICTED_NATIVE_TOOLS` — blast-radius
- * control scoped to the chat-reachable companion, not a blanket restriction.
- */
+/** Card f1609e1a (a residual OUTSIDE card 7159466a's RCE scope) — `browser_file_upload`/`browser_drop`
+ *  take absolute HOST FILE PATHS; combined with `browser_navigate` to an attacker page that's a
+ *  host-secret EXFILTRATION primitive. @decision f1609e1a — ROLE-SCOPED to `role === "assistant"` only
+ *  (legitimately needed on worker rigs); see
+ *  docs/decisions/f1609e1a-assistant-playwright-disallowed-tools-is-role-scoped-exfil-hardening.md. */
 export const ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS: readonly string[] = [
   "mcp__playwright__browser_file_upload",
   "mcp__playwright__browser_drop",
@@ -2143,31 +1841,11 @@ interface Subscriber {
   onControl: (e: TerminalControl) => void;
 }
 
-/**
- * One entry in a session's busy-gated inbound FIFO. The `id` is a stable, server-minted handle (set
- * at enqueue) so the human-facing UI can delete / edit / reorder a SPECIFIC queued entry: the FIFO
- * head drains autonomously between the UI's poll and a click, so addressing by array index would hit
- * the wrong (shifted) entry — an id op instead targets exactly one message and is a safe no-op once
- * that message has drained. Internal to the host; the queue is in-memory and dies with the pty.
- *
- * `source` records who enqueued it: 'human' (only the REST composer, POST /input) or 'system'
- * (everything programmatic — worker reports, idle/context/busy nudges, resume notes, escalations).
- * It is the trust boundary the human-facing mutators enforce: delete/edit/reorder may only touch a
- * 'human' entry, so an agent's queued report can never be rewritten or reordered out from under it.
- *
- * `onDeliver` is an OPTIONAL, additive delivery callback (card 2ca18433): set ONLY by SessionService's
- * durable-message helpers, it fires the instant this held entry is actually HANDED to the recipient — at
- * the next Stop drain (drainPending) or via inbox_pull (consumePending) — so the durable queued-message
- * event can be marked delivered. It is NEVER invoked on the immediate idle-submit path (that returns
- * delivered:true synchronously and persists nothing), so the load-bearing M1/M2 busy-gate ordering is
- * untouched; for every existing (non-messaging) entry it is undefined → a no-op. Internal to the host
- * (stripped from getPendingEntries, never persisted), the callback dies with the pty like the queue.
- *
- * It takes an OPTIONAL `reason`: the drain/pull paths call it with NO arg (a plain delivery), while a
- * caller that RETIRES a held entry rather than delivering it — `flushPending`'s consumer (worker_redirect)
- * — passes a reason ("superseded") so the resolution event records WHY. Back-compatible: every existing
- * no-arg call leaves reason undefined (unchanged behaviour).
- */
+/** One entry in a session's busy-gated inbound FIFO. `id` lets the human UI delete/edit/reorder a
+ *  SPECIFIC entry despite the FIFO draining autonomously; `source` ('human' vs 'system') is the trust
+ *  boundary those mutators enforce. @decision 2ca18433 — `onDeliver` fires ONLY on a real drain/pull,
+ *  never the immediate idle-submit path (would touch the load-bearing M1/M2 busy-gate ordering); see
+ *  docs/decisions/2ca18433-restart-pending-snapshot-excludes-durable-messages.md. */
 export type QueueSource = "human" | "system";
 /**
  * An originating chat ROUTE pinned to a turn (Loom Companion multi-channel reply routing). An ALIAS of
@@ -6903,33 +6581,9 @@ export class PtyHost {
     }
   }
 
-  /**
-   * Code Review M4 fix — the codex counterpart of `writeStdin`'s raw-keystroke passthrough: a real human
-   * typing directly into a codex terminal tile. Deliberately NO composer-dirty tracking, no human-submit
-   * hold, no busy gate — codex's Ink-free TUI has no Loom-observable "composer" concept to protect the way
-   * claude's does (this project's own `writeStdin` doc explains why that machinery exists at all), and a
-   * real human must always be able to type regardless of turn state, mirroring `writeStdin`'s own
-   * unconditional-write invariant for claude.
-   *
-   * Card fd799f0f (DELIBERATE, REVISITABLE — not an oversight): this write is deliberately NOT
-   * ASCII-folded, unlike `submitCodex`'s write of Loom-authored text (card 0e83c855's `codexAsciiFold`).
-   * `submitCodex` repairs Loom's OWN transport; this carries a HUMAN's own keystrokes, watched live — they
-   * can see and retype a corrupted paste within seconds, an agent turn cannot, and folding would silently
-   * alter what they actually typed (type `—`, see `--` appear) — worse than an honest visible drop for
-   * input a human, not Loom, authored.
-   * Reachability of the same measured drop class here is INFERRED, not measured: the drop was shown to
-   * require a live codex/crossterm-style console-input reader on this conpty instance
-   * (`docs/design/multi-harness-parity-matrix.md:152-181` — a plain raw-mode-reading child gets the SAME
-   * bytes intact; only codex's own TUI composer corrupts them), and this write feeds that SAME live codex
-   * process untransformed — no real-spawn repro of THIS path exists.
-   * fold-with-notice was costed and found NOT cheap before choosing this: no per-tile notice affordance
-   * exists in `Terminal.tsx` today, and the app's toast system is bound to the global fleet
-   * `AttentionItem` feed — the wrong shape for per-paste feedback; it would need a new WS control-frame
-   * plus a new frontend component.
-   * @decision fd799f0f — do not fold human keystrokes here without a fresh owner ask; a confirmed
-   * direction on the multi-harness epic (card 00a6cdd6) is a legitimate trigger to revisit this, not a
-   * reason to silently change it.
-   */
+  /** Codex counterpart of `writeStdin`'s raw-keystroke passthrough — no composer-dirty tracking, no busy
+   *  gate; a human must always type regardless of turn state. @decision fd799f0f — do not ASCII-fold this
+   *  write without a fresh owner ask (see docs/decisions/fd799f0f-do-not-ascii-fold-human-keystrokes-in-writestdincodex.md). */
   private writeStdinCodex(live: CodexLive, data: string): void {
     if (!live.alive || live.killed) return;
     live.pty.write(data);
