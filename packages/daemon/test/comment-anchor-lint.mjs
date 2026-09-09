@@ -19,6 +19,10 @@
 //   7. oversizedRecords (card d0d0401b): a record file over `PER_RECORD_MAX_BYTES` (imported from
 //      decision-records.mjs — one source of truth, not a hand-copied number) is flagged with its measured
 //      byte size; CLI-scan only — records live outside SOURCE_ROOTS, so the per-file hook never sees one.
+//   8. collidingRecords (card a4b83fb7): two record files sharing an id are flagged, naming every
+//      candidate AND which one currently wins — replicating decision-records.mjs's own `resolveRecord()`
+//      winner pick (store precedence, then alphabetically-first within the winning store), not just
+//      "same id, arbitrary member". CLI-scan only, same ground as oversizedRecords.
 // Run: `node test/comment-anchor-lint.mjs` from packages/daemon (no build, no LOOM_HOME needed).
 import fs from "node:fs";
 import os from "node:os";
@@ -28,6 +32,7 @@ import {
   findFileAnchors,
   findBrokenAnchors,
   findOversizedRecords,
+  findCollidingRecords,
   listRecordIds,
   computeReport,
   computeFileReport,
@@ -185,7 +190,52 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   }
 }
 
-// --- computeReport: fixture repo, all five checks end to end ------------------------------------------
+// --- findCollidingRecords (card a4b83fb7) --------------------------------------------------------------
+
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-colliding-records-"));
+  try {
+    fs.mkdirSync(path.join(dir, "docs", "adr"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "docs", "decisions"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "docs", "investigations", "cccccccc-third-collider"), { recursive: true });
+
+    // aaaaaaaa: a SINGLE record, no collision — must never appear in the result at all.
+    fs.writeFileSync(path.join(dir, "docs", "decisions", "aaaaaaaa-solo.md"), "# aaaaaaaa\n\nno collision.\n");
+
+    // bbbbbbbb: TWO records, both in docs/decisions — resolveRecord's own bare `.sort()` picks
+    // "bbbbbbbb-alpha-first.md" over "bbbbbbbb-zzz-later.md" (alphabetically first wins WITHIN a store).
+    fs.writeFileSync(path.join(dir, "docs", "decisions", "bbbbbbbb-zzz-later.md"), "# bbbbbbbb (loses)\n");
+    fs.writeFileSync(path.join(dir, "docs", "decisions", "bbbbbbbb-alpha-first.md"), "# bbbbbbbb (wins)\n");
+
+    // cccccccc: THREE-way collision across all three stores — proves STORE PRECEDENCE beats alphabetical
+    // filename order: "docs/adr" must win even though its own filename ("zzz-adr") would sort AFTER both
+    // the docs/decisions file ("aaa-decisions") and the investigations directory name alphabetically.
+    fs.writeFileSync(path.join(dir, "docs", "adr", "cccccccc-zzz-adr.md"), "# cccccccc (adr, must win)\n");
+    fs.writeFileSync(path.join(dir, "docs", "decisions", "cccccccc-aaa-decisions.md"), "# cccccccc (decisions, must lose)\n");
+    fs.writeFileSync(path.join(dir, "docs", "investigations", "cccccccc-third-collider", "findings.md"), "# cccccccc (investigations, must lose)\n");
+
+    const colliding = findCollidingRecords(dir);
+    const byId = Object.fromEntries(colliding.map((c) => [c.id, c]));
+
+    check("findCollidingRecords: a solo record (no collision) never appears in the result",
+      !("aaaaaaaa" in byId) && colliding.length === 2);
+    check("findCollidingRecords: a same-store collision picks the alphabetically-first filename as the winner",
+      byId.bbbbbbbb?.winnerPath === "docs/decisions/bbbbbbbb-alpha-first.md");
+    check("findCollidingRecords: the same-store loser is named as dark, exactly once",
+      byId.bbbbbbbb?.darkPaths.length === 1 && byId.bbbbbbbb.darkPaths[0] === "docs/decisions/bbbbbbbb-zzz-later.md");
+    check("findCollidingRecords: a cross-store collision picks by STORE PRECEDENCE (docs/adr), "
+      + "never by alphabetically-first filename across stores",
+      byId.cccccccc?.winnerPath === "docs/adr/cccccccc-zzz-adr.md");
+    check("findCollidingRecords: BOTH losers (docs/decisions AND docs/investigations) are named as dark",
+      byId.cccccccc?.darkPaths.length === 2
+      && byId.cccccccc.darkPaths.includes("docs/decisions/cccccccc-aaa-decisions.md")
+      && byId.cccccccc.darkPaths.includes("docs/investigations/cccccccc-third-collider/findings.md"));
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+// --- computeReport: fixture repo, all six checks end to end ------------------------------------------
 
 const REPO = path.join(os.tmpdir(), `loom-comment-anchor-lint-${Date.now()}-${process.pid}`);
 try {
@@ -244,6 +294,9 @@ try {
   fs.writeFileSync(path.join(REPO, "docs", "adr", "template.md"), "# <card-id> — template, must never be treated as a record\n");
   // 12345678: a record over PER_RECORD_MAX_BYTES — must be flagged as oversized (card d0d0401b).
   fs.writeFileSync(path.join(REPO, "docs", "decisions", "12345678-oversized.md"), "# 12345678\n\n" + "y".repeat(PER_RECORD_MAX_BYTES + 500) + "\n");
+  // 99999999: two records sharing an id — must be flagged as colliding (card a4b83fb7).
+  fs.writeFileSync(path.join(REPO, "docs", "decisions", "99999999-b-loses.md"), "# 99999999 (loses)\n");
+  fs.writeFileSync(path.join(REPO, "docs", "decisions", "99999999-a-wins.md"), "# 99999999 (wins)\n");
 
   const report = computeReport(REPO, { minLines: 15 });
 
@@ -260,10 +313,11 @@ try {
     !report.orphanAnchors.items.some((a) => a.id === "ffffffff"));
   check("computeReport: eeeeeeee (no inbound anchor) IS an orphan record, marked advisory",
     report.orphanRecords.items.some((r) => r.id === "eeeeeeee") && report.orphanRecords.advisory === true);
-  // 4 real records (aaaaaaaa via adr, bbbbbbbb via investigations, eeeeeeee + 12345678 via decisions) —
-  // template.md excluded despite living in docs/adr alongside a real record.
+  // 6 real records (aaaaaaaa via adr, bbbbbbbb via investigations, eeeeeeee + 12345678 + the two
+  // colliding 99999999 files via decisions) — template.md excluded despite living in docs/adr alongside
+  // a real record.
   check("computeReport: template.md is never treated as a record",
-    !report.orphanRecords.items.some((r) => r.path.endsWith("template.md")) && report.recordCount === 4);
+    !report.orphanRecords.items.some((r) => r.path.endsWith("template.md")) && report.recordCount === 6);
   // Card ad3a9a85: the split-anchor shape (keyword and id on different lines) is invisible to every other
   // check (no valid ANCHOR_RE match exists on either line) — brokenAnchors is the ONLY one that sees it.
   check("computeReport: the split anchor is flagged as a broken anchor, exactly once",
@@ -279,6 +333,15 @@ try {
     && report.oversizedRecords.items[0]?.bytes > PER_RECORD_MAX_BYTES && report.oversizedRecords.maxBytes === PER_RECORD_MAX_BYTES);
   check("computeReport: the small records are never flagged as oversized",
     !report.oversizedRecords.items.some((r) => ["aaaaaaaa", "bbbbbbbb", "eeeeeeee"].includes(r.id)));
+  // Card a4b83fb7: 99999999's two records must be flagged as colliding, naming both files and the winner.
+  check("computeReport: the colliding id 99999999 is flagged, exactly once, with the correct winner",
+    report.collidingRecords.count === 1 && report.collidingRecords.items[0]?.id === "99999999"
+    && report.collidingRecords.items[0]?.winnerPath === "docs/decisions/99999999-a-wins.md");
+  check("computeReport: the collision's dark file is named",
+    report.collidingRecords.items[0]?.darkPaths.length === 1
+    && report.collidingRecords.items[0].darkPaths[0] === "docs/decisions/99999999-b-loses.md");
+  check("computeReport: a non-colliding record (e.g. 12345678) never appears in collidingRecords",
+    !report.collidingRecords.items.some((c) => c.id === "12345678"));
   // Guard class is a SHAPE classification (length <= GUARD_MAX_LINES && has an anchor), independent of
   // whether that anchor resolves — all three 1-line anchors (aaaaaaaa, bbbbbbbb, and the orphaned
   // dddddddd) are guard-class-shaped even though dddddddd is separately flagged as an orphan anchor.
@@ -297,6 +360,10 @@ try {
     // rather than silently reporting zero and looking like it checked.
     check("computeFileReport: oversizedRecords is not a key on the hook-shaped report (CLI-scan only, by design)",
       !("oversizedRecords" in fileReport));
+    // Card a4b83fb7 DoD-4: collidingRecords is CLI-scan only for the identical reason — a single changed
+    // source file can never tell you whether ANOTHER record file under docs/ now shares its anchor's id.
+    check("computeFileReport: collidingRecords is not a key on the hook-shaped report (CLI-scan only, by design)",
+      !("collidingRecords" in fileReport));
   }
 
   // DoD-3: N is configurable — a smaller minLines flags what the default doesn't, a larger one flags less.
@@ -314,7 +381,9 @@ console.log(failures === 0
   ? "\n✅ ALL PASS — comment-anchor-lint.mjs correctly flags unanchored long blocks and orphan anchors, "
     + "treats orphan records as advisory-only, never flags the guard class (isolated or merged-adjacent), "
     + "excludes test/-fixture noise from the sweep, honors a configurable minLines, flags a split (line-"
-    + "wrapped) anchor in both the CLI scan and the live per-file hook, and flags a record over "
-    + "PER_RECORD_MAX_BYTES (read from decision-records.mjs, not a hand-copied number)."
+    + "wrapped) anchor in both the CLI scan and the live per-file hook, flags a record over "
+    + "PER_RECORD_MAX_BYTES (read from decision-records.mjs, not a hand-copied number), and flags two "
+    + "record files sharing an id, naming every candidate and which one resolveRecord() actually wins "
+    + "(store precedence, then alphabetically-first within that store)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

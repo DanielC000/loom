@@ -7,6 +7,12 @@
 // CLAUDE.md's decision-records convention, card 90b19799): `docs/adr/<id>*.md` (immutable),
 // `docs/decisions/<id>*.md` (mutable), or an existing `docs/investigations/<id>-*/findings.md`.
 //
+// ONE FILE PER ID, ALWAYS (card a4b83fb7) — `resolveRecord` below picks exactly one winner per id (store
+// precedence, then alphabetically-first within that store) and silently drops every other file sharing
+// that id, forever, with no error. Same id ⇒ same file; a second decision under an existing id is a new
+// SECTION in the existing record, never a new file. See CLAUDE.md's "Comment taxonomy" section for the
+// full rationale and `comment-anchor-lint.mjs`'s `collidingRecords` check for the (CLI-scan-only) backstop.
+//
 // A `Read` call only ever sees whatever byte range it actually asked for — a ranged read can slice
 // straight through a long comment block and deliver a fragment that carries the OPPOSITE instruction of
 // the whole (measured: 42.1% of block/window intersections truncated — see card 661b7d46's own evidence).
@@ -154,7 +160,9 @@ function idBoundaryMatch(nameLower, id) {
 
 /** Resolve an anchored `id` to its full record text + source path, across the three stores. Null if none.
  * Deterministic: candidates are sorted before picking the first (card-review N3 — `readdirSync` order is
- * not guaranteed). */
+ * not guaranteed). ⚠️ A second candidate for the SAME id is a BUG, not a valid state to design for — see
+ * this file's own header (card a4b83fb7): it is silently, permanently unreachable, and this function has
+ * no way to warn about it (that's `comment-anchor-lint.mjs`'s `collidingRecords` check, CLI-scan only). */
 function resolveRecord(repoRoot, id) {
   for (const store of FLAT_STORES) {
     const dir = path.join(repoRoot, "docs", store);

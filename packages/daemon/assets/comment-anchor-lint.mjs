@@ -24,7 +24,7 @@
 // `posttooluse-hook-honors-additionalcontext-not-systemmessage` and decision-records.mjs's own header for
 // the full method.
 //
-// Five checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
+// Six checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
 //   1. unanchoredLongBlocks — a contiguous comment block >= `minLines` (default DEFAULT_MIN_LINES) with
 //      no `@decision <id>` anywhere in it. The "narrative is regrowing in source" signal.
 //   2. orphanAnchors — an `@decision <id>` whose id resolves to no record in ANY of the three stores this
@@ -53,6 +53,16 @@
 //      against at read time, never a second copy of the number). CLI-scan mode only: records live under
 //      `docs/`, outside SOURCE_ROOTS, so the per-file hook (which only ever sees a write under
 //      packages/{daemon,web,shared}) structurally never observes a record file being authored or edited.
+//   6. collidingRecords (card a4b83fb7) — two or more record files (across docs/adr, docs/decisions, and
+//      docs/investigations) whose ids resolve to the SAME id. `decision-records.mjs`'s own `resolveRecord()`
+//      picks exactly ONE winner per id (store precedence, then alphabetically-first filename within that
+//      store — replicated here, not imported, same reasoning as ANCHOR_RE's duplication above) and silently
+//      drops every other file sharing that id, forever, with no error anywhere — the failure this check
+//      exists to surface: a well-formed anchor that resolves, to the WRONG decision. Reports every colliding
+//      id, every candidate file, and which one currently wins, so the author sees the casualty, not just a
+//      count. CLI-scan mode only, same ground as oversizedRecords above: records live under `docs/`, outside
+//      SOURCE_ROOTS, so the per-file hook structurally never observes a second record file for an id that
+//      already has one.
 //
 // A <= GUARD_MAX_LINES-line block that DOES carry an anchor is the convention's TARGET STATE (Class A: a
 // short guard/prohibition, permanently inline) and is counted separately as `guardClassBlocks` — it is
@@ -256,6 +266,77 @@ export function findOversizedRecords(records, maxBytes) {
   return oversized;
 }
 
+/**
+ * Every id with more than one candidate record file across the three stores, naming EVERY candidate and
+ * which one currently wins (card a4b83fb7). Deliberately NOT built from `listRecordIds` above — that
+ * function collapses store identity into a flat list, which loses exactly the information needed to
+ * replicate `decision-records.mjs`'s own `resolveRecord()` winner pick: store precedence (`docs/adr`
+ * before `docs/decisions` before `docs/investigations` — an id split across stores is decided by
+ * precedence ALONE, never by filename, even if a `docs/decisions` file would sort first alphabetically),
+ * then alphabetically-first WITHIN the winning store. This walks the same three directories itself
+ * (duplicated, not imported — same "assets ship standalone" reasoning as `ANCHOR_RE`/`idBoundaryMatch`
+ * above) so the winner this check reports is never a second, drifting implementation of that rule.
+ * `.md` sort uses plain `<`/`>` (mirrors `resolveRecord`'s bare `.sort()`, i.e. UTF-16 code-unit order —
+ * these filenames are ASCII, so this is equivalent to `resolveRecord`'s own default sort in every real
+ * case); the investigations directory match uses `localeCompare`, mirroring `resolveRecord`'s own second
+ * sort call exactly. Every other candidate for that id is DARK: unreachable by any anchor, ever, however
+ * many anchors cite it — see this check's own header doc above for why neither `orphanAnchors` nor
+ * `orphanRecords` can ever catch this (the anchor resolves fine; every candidate file has a record).
+ */
+export function findCollidingRecords(repoRoot) {
+  const STORE_ORDER = [...FLAT_STORES, "investigations"];
+  const byId = new Map(); // id -> [{ store, name, path }], in no particular order within the array
+
+  for (const store of FLAT_STORES) {
+    const dir = path.join(repoRoot, "docs", store);
+    let entries;
+    try { entries = fs.readdirSync(dir); } catch { continue; }
+    for (const name of entries) {
+      const lower = name.toLowerCase();
+      if (!lower.endsWith(".md") || lower === "template.md") continue;
+      const m = /^([0-9a-f]{8})[-.]/.exec(lower);
+      if (!m || !idBoundaryMatch(lower, m[1])) continue;
+      const id = m[1];
+      if (!byId.has(id)) byId.set(id, []);
+      byId.get(id).push({ store, name, path: path.join(dir, name) });
+    }
+  }
+  const invDir = path.join(repoRoot, "docs", "investigations");
+  let invEntries;
+  try { invEntries = fs.readdirSync(invDir, { withFileTypes: true }); } catch { invEntries = []; }
+  for (const e of invEntries) {
+    if (!e.isDirectory()) continue;
+    const lower = e.name.toLowerCase();
+    const m = /^([0-9a-f]{8})-/.exec(lower);
+    if (!m || !idBoundaryMatch(lower, m[1])) continue;
+    const findings = path.join(invDir, e.name, "findings.md");
+    if (!fs.existsSync(findings)) continue;
+    const id = m[1];
+    if (!byId.has(id)) byId.set(id, []);
+    byId.get(id).push({ store: "investigations", name: e.name, path: findings });
+  }
+
+  const colliding = [];
+  for (const [id, candidates] of byId) {
+    if (candidates.length <= 1) continue;
+    let winner = null;
+    for (const store of STORE_ORDER) {
+      const inStore = candidates.filter((c) => c.store === store);
+      if (inStore.length === 0) continue;
+      winner = store === "investigations"
+        ? [...inStore].sort((a, b) => a.name.localeCompare(b.name))[0]
+        : [...inStore].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))[0];
+      break;
+    }
+    colliding.push({
+      id,
+      winnerPath: relPath(repoRoot, winner.path),
+      darkPaths: candidates.filter((c) => c !== winner).map((c) => relPath(repoRoot, c.path)),
+    });
+  }
+  return colliding;
+}
+
 function walkSourceFiles(repoRoot) {
   const files = [];
   const walk = (dir) => {
@@ -296,7 +377,7 @@ export function bucketDistribution(blocks) {
 }
 
 /**
- * Scan `repoRoot` and compute all five checks plus the calibration distribution. Never throws on a
+ * Scan `repoRoot` and compute all six checks plus the calibration distribution. Never throws on a
  * violation being found — violations are just data in the returned report (DoD-1/2: warn-only, with the
  * count reported). `opts.minLines` overrides `DEFAULT_MIN_LINES` (DoD-3: N is configurable).
  */
@@ -320,6 +401,7 @@ export function computeReport(repoRoot, opts = {}) {
   const recordIdSet = new Set(records.map((r) => r.id));
   const anchorIdSet = new Set(allAnchors.map((a) => a.id));
   const oversizedRecords = findOversizedRecords(records, PER_RECORD_MAX_BYTES);
+  const collidingRecords = findCollidingRecords(repoRoot);
 
   const unanchoredLong = allBlocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
   const guardClass = allBlocks.filter((b) => b.length <= GUARD_MAX_LINES && b.anchorIds.length > 0);
@@ -362,6 +444,10 @@ export function computeReport(repoRoot, opts = {}) {
       count: oversizedRecords.length,
       maxBytes: PER_RECORD_MAX_BYTES,
       items: oversizedRecords.map((r) => ({ id: r.id, path: relPath(repoRoot, r.path), bytes: r.bytes })),
+    },
+    collidingRecords: {
+      count: collidingRecords.length,
+      items: collidingRecords,
     },
     distribution: bucketDistribution(allBlocks),
   };
