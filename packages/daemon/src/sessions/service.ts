@@ -907,48 +907,10 @@ function deriveBatchGateVerdict(
   };
 }
 
-/**
- * Card 7d492f8b: recover a genuinely-settled gate/merge op's REAL verdict from its own durable audit
- * events ({@link Db.findGateOpEventsByOpId}, keyed off the `opId` every `evt()` closure now stamps onto
- * its detail) — the fix for `SessionService.reconcileOrphanedGateOps` misreporting a settled op as
- * `orphaned-by-restart` purely because its `pending_gate_ops` tombstone row never reached
- * `state:'settled'` before a crash. A crash can land in the (normally millisecond-wide) gap between the
- * op's own `evt()` write — unconditional, happens the moment the run genuinely finishes — and the LATER
- * `PendingOpRegistry.attach()` settle callback that flips the tombstone (`onSettle` → `settlePendingGateOp`);
- * that gap is not always millisecond-wide in practice (e.g. confirmWorkerMerge still awaits `rejectNotify`
- * after its `build_gate` write but before `merge_rejected`), so the durable audit trail can be strictly
- * more complete than the tombstone — this recovers from it instead of discarding it.
- *
- * "gate" (a worker's own `run_gate` self-check): the SINGLE `worker_gate` event IS the op's own terminal
- * signal — nothing follows it in `runWorkerGate` — so whichever one is found is fully recoverable
- * (pass/fail/cancelled), mirroring {@link deriveWorkerGateVerdict}'s own field mapping off the identical
- * detail shape that function's live caller populates. `undefined` only for an "error" audit write (the
- * AUDIT-ON-ERROR site in `runWorkerGate`, `evt({passed:false, error, ...})`) — that shape carries no
- * `phase`/`failedStep`/etc. to recover, so it is intentionally left unrecovered rather than fabricating
- * a fail with false diagnostic fields.
- *
- * "merge": deliberately MORE CONSERVATIVE than "gate", because a passing gate is NOT the end of a merge —
- * it is followed by the actual git squash-merge, a step this audit trail never logs at all.
- *   - A `merge_cancelled` or `merge_rejected` event is a genuine terminal signal: `confirmWorkerMerge`
- *     returns immediately after logging either one (see its own cancel/rejection branches) — squash is
- *     never reached on either path. `merge_rejected`'s richer detail (failingTest/phase/etc., logged only
- *     for a `reason:"gate"` rejection) is preferred whenever both it and a bare `build_gate` fail exist
- *     for the same opId.
- *   - A bare `build_gate`/`build_gate_retry` event with `passed:false` and NO rejection/cancel event is
- *     ALSO safely recoverable as a FAIL (with less detail): the code path that logs it can only go on to
- *     the rejection branch next (the squash is only reachable once the gate has PASSED), so the verdict
- *     was already decided the instant this event was written — the crash (if any) struck only the
- *     richer notify/evt calls that were ABOUT to follow, never the outcome itself.
- *   - A PASSING `build_gate`/`build_gate_retry` with no subsequent rejection/cancel is the one shape this
- *     deliberately does NOT recover: "the gate passed" is not proof "the merge landed" — the crash could
- *     have struck during the unlogged squash step. Falls through to `undefined`, which the caller must
- *     treat as "outcome genuinely unrecoverable," never as license to fabricate a pass.
- *
- * `events` is expected in the chronological order {@link Db.findGateOpEventsByOpId} already returns
- * (`seq ASC`); this function does not itself depend on that order beyond documenting intent (a `.find`/
- * `.reverse().find` over an out-of-order array would still return A match, just not necessarily the
- * newest one for the bare-fail fallback — keep the caller passing chronological order).
- */
+/** @decision 7d492f8b — recovers a settled gate/merge op's verdict from durable audit events when its
+ *  own tombstone was lost to a crash; "merge" deliberately does NOT recover a bare passing gate as a
+ *  merge pass (the unlogged squash step could still have failed) — see
+ *  docs/decisions/7d492f8b-recover-gate-op-verdict-from-durable-audit-events.md */
 function recoverGateOpVerdict(
   kind: "gate" | "merge", events: OrchestrationEvent[],
 ): { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } | undefined {
@@ -1079,24 +1041,10 @@ function formatRecoveredGateOpNudge(
   return `[loom:${tag}] op ${opId} — ${preface}: ${reason}${detailBits ? ` (${detailBits})` : ""}.${gap}`;
 }
 
-/**
- * A worker's most recent SETTLED `run_gate` self-check outcome (card e50600d2 — reuse a green
- * self-check instead of re-running the identical gate at merge). Recorded by {@link
- * SessionService.runWorkerGate} on EVERY settled (`ran:true`) outcome, pass OR fail — overwriting
- * whatever was there before — so a LATER failing (or racy) self-check at the exact same commit always
- * supersedes an earlier green one; a stale green can never be resurrected by this record alone.
- *
- * `stamp` is the SAME {@link WorktreeGateStamp} `runWorkerGate` took at settle (equivalent to its start/
- * admit stamps whenever `headCurrent` is true, since those three stamps must already agree for
- * `headCurrent` to read true — see `describeGateHeadCurrency`) — {@link SessionService.confirmWorkerMerge}
- * compares a FRESH stamp against this one via {@link gateStampsDiffer} to prove (or refute) that the
- * worktree is byte-identical to what this run validated.
- *
- * In-memory only, same daemon-uptime-scoped posture as {@link gateStartStamps}: a daemon restart between
- * the self-check and the merge confirm simply loses this record, which is FINE — the reuse check in
- * `confirmWorkerMerge` fails closed on a missing record (falls through to running the gate exactly as
- * before this existed), never on a false "nothing changed" guess.
- */
+/** @decision e50600d2 — records a worker's most recent SETTLED run_gate outcome for merge-time reuse;
+ *  in-memory only, so a daemon restart loses it and the reuse check must fail closed, never assume
+ *  "nothing changed" — see
+ *  docs/decisions/e50600d2-lastworkergatecheck-stamp-equivalence-and-restart-loss.md */
 type LastWorkerGateCheck = { passed: boolean; headCurrent: boolean; stamp: WorktreeGateStamp; opId: string; branch: string };
 
 /** How long a settled `run_gate` op stays `peek()`-able (as a RETAINED terminal view) — and, more to the
@@ -1108,66 +1056,17 @@ type LastWorkerGateCheck = { passed: boolean; headCurrent: boolean; stamp: Workt
  *  terminal view doesn't linger. */
 const GATE_OP_RETAIN_MS = 5_000;
 
-/** Forced onto the worker self-gate's OWN spawned child (card 7f96aa09, revised by 68920f5b, raised again
- *  by 2ff32b5c), additive to whatever env the worker's shell already has — pins the daemon test runner's
- *  own internal test-lane pool per gate invocation to MATCH the merge gate's own unpinned default
- *  (`DEFAULT_CONCURRENCY` in `scripts/test-daemon.mjs`). Owner decision 68920f5b (request 3d73c2a8):
- *  `run_gate` was running the SAME suite at HALF the merge gate's parallelism against the SAME
- *  `gateCommandTimeoutMs`, making it structurally more timeout-prone than the merge gate it feeds — a
- *  `run_gate` timeout did not predict a merge rejection. Raising this to 2 (and then, by card 2ff32b5c, to
- *  3 alongside `DEFAULT_CONCURRENCY`'s own 2->3 raise) removes that asymmetry.
- *
- *  Still safe: `orchestration.maxConcurrentGates` (code default 1, current live owner-set value 2 — see
- *  CLAUDE.md) admits gate RUNS — merge, deploy, AND run_gate — through the SAME `gateSemaphore`, so a
- *  3-lane `run_gate` peaks at the SAME lanes a merge gate already reaches today, whatever the resolved cap
- *  is. The 2026-07-15 8-lane incident was ONE gate's pool defaulting to full core count (no
- *  `LOOM_GATE_TEST_CONCURRENCY` pin at all), not concurrent gates — this override still pins a bound, just
- *  3 instead of unbounded. At the owner's current live `maxConcurrentGates=2`, the real host-load budget is
- *  `maxConcurrentGates × 3` = 6 concurrent test processes — below the documented 8-lane failure level (see
- *  `DEFAULT_CONCURRENCY`'s own doc in `scripts/test-daemon.mjs` for the full product-math table); that only
- *  changes if someone raises `maxConcurrentGates` further, which carries the identical exposure for the
- *  merge gate too — no new risk class.
- *
- *  This is DELIBERATELY DIFFERENT from the raw-Bash fallback pin (still `LOOM_GATE_TEST_CONCURRENCY=1`,
- *  documented below and in CLAUDE.md): a raw self-check run via Bash is OUTSIDE the semaphore entirely —
- *  N concurrent raw gates is N × lanes with no structural bound, so its pin stays conservative at 1. This
- *  override is admitted through the semaphore, so it can safely match the merge gate's default.
- *
- *  Card ba3c9580: renamed from the generic `LOOM_TEST_CONCURRENCY` — that name was indistinguishable from
- *  a name any OTHER project's own test harness might independently choose, so it was unconditionally
- *  injected into every project's gate child regardless of whether anything there was meant to read it.
- *  `LOOM_GATE_TEST_CONCURRENCY` is unambiguously Loom's own gate-runner convention. */
+/** @decision 68920f5b — pins the worker self-gate's own test-lane pool to MATCH the merge gate's default
+ *  (currently 3), admitted through the shared gateSemaphore — see
+ *  docs/decisions/68920f5b-worker-gate-concurrency-pin-matches-merge-gate.md */
 const WORKER_GATE_ENV_OVERRIDE: NodeJS.ProcessEnv = { LOOM_GATE_TEST_CONCURRENCY: "3" };
 
-/** Card 720bb7ad DoD-3: stamp this op's `opId` onto the gate child's environment as `LOOM_GATE_OP_ID` —
- *  `scripts/test-daemon.mjs` reads it and, when present, includes it on its own `kind:"run-summary"`
- *  NDJSON row, so that row can finally be joined back to the `gate_status`-visible op that produced it
- *  (previously: no producer of that row carried any correlating id at all, and two runs admitted close
- *  together at `maxConcurrentGates>=2` were indistinguishable by timestamp alone — see the card's own
- *  §ATTRIBUTION). Merges ADDITIVELY on top of any base override a call site already needs (e.g. the
- *  worker self-gate's own `WORKER_GATE_ENV_OVERRIDE`) — `LOOM_GATE_OP_ID` always wins if `base` somehow
- *  already set it, since object spread order below places it last.
- *
- *  ⚠️ CROSS-PROJECT CONTRACT (card 0f1920e0): `LOOM_GATE_OP_ID` is not purely internal — Codescape reads
- *  it in production, from inside the gate child (`scripts/runTests.mjs` reads `process.env.LOOM_GATE_OP_ID`
- *  and stamps its own `gate-measurements.ndjson` rows with it). Renaming this env var, or dropping it from
- *  any `runGateSeq(` call site, is a BREAKING CHANGE for that external consumer — tell them first (a
- *  manager reaches them via `peer_message`) before doing either.
- *
- *  The `{ ...base, ... }` spread is ALSO load-bearing for a second, unrelated reason: at the worker
- *  self-gate call site, `base` is `WORKER_GATE_ENV_OVERRIDE`, which carries the `LOOM_GATE_TEST_CONCURRENCY:
- *  "3"` host-starvation pin (see that const's own doc above — one unpinned gate at 8 lanes starved the host
- *  on 2026-07-15). Replacing this spread with a plain `{ LOOM_GATE_OP_ID: opId }` assignment would silently
- *  drop that pin for every caller that passes a `base`.
- *
- *  `batchSize` (card dbc6f660, accepted peer request from Codescape) ALSO stamps `LOOM_GATE_BATCH_SIZE` —
- *  REQUIRED (not optional), so no call site can forget it: Codescape's gate-variance baseline lives on a
- *  duration column that would otherwise silently mix a 1-branch run with an up-to-4-branch batched one, with
- *  nothing in the row telling them apart. Stamped on EVERY gate child, not merely batched ones — an ordinary
- *  solo merge passes `1`, a worker self-check or deploy gate (neither is a merge, neither has a branch
- *  count) passes `0`, a real batch passes the ACTUAL post-assembly landed-branch count (never the requested
- *  K — see runBatchedMerge's own doc). A field present on every row means absence has exactly ONE meaning
- *  ("produced by a build older than this change"), never a second, ambiguous one. */
+/** @decision 720bb7ad — stamps `LOOM_GATE_OP_ID` (+ required `LOOM_GATE_BATCH_SIZE`) onto every gate
+ *  child so a `test-daemon.mjs` run-summary row joins back to its op — see
+ *  docs/decisions/720bb7ad-gate-op-id-env-stamp-and-batch-size-requirement.md
+ *  ⚠️ CROSS-PROJECT CONTRACT (card 0f1920e0): Codescape reads `LOOM_GATE_OP_ID` in production from
+ *  inside the gate child. Renaming it, or dropping it from any `runGateSeq(` call site, is a BREAKING
+ *  CHANGE for that external consumer — tell them first (a manager reaches them via `peer_message`). */
 function gateOpIdEnvOverride(opId: string, batchSize: number, base?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return { ...base, LOOM_GATE_OP_ID: opId, LOOM_GATE_BATCH_SIZE: String(batchSize) };
 }
@@ -1225,69 +1124,9 @@ function zeroCommitMergeHazardNote(): string {
   return "⚠️ an empty branch closes done via worker_merge_confirm with full credit and no visible error EITHER WAY — confirm WHY it's empty (nothing to do vs. blocked/unable) before confirming, not just that it's empty";
 }
 
-/** Card e1ac691b — the `worker_merge_confirm` surfacing for the composer-fusion/prompt-mismatch/
- *  paste-tripwire family (`Live.lastMismatchReplay`/`lastMismatchFusion`/`lastMismatchUnmatched`/
- *  `lastPasteTripwireGiveUp`, pty/host.ts). Per pinned memory `shipping-a-detector-is-not-someone-
- *  reading-it`, the ADVISORY arm of this family (a console.warn, an attention-path nudge) has scored
- *  ZERO acted-on; this puts the SAME signal in front of an ACTION a manager was already taking
- *  (confirming a merge) instead of adding a fourth advisory channel. NON-BLOCKING, ALWAYS — this must
- *  never gate, refuse, or require clearing to merge (a refusal a manager cannot satisfy is worse than a
- *  notice they can ignore, per that same note) — purely a `warning`-string addition, mirroring
- *  {@link nestedRepoBlockWarning}/{@link worktreeGcWarning}'s own established shape and call-site
- *  pattern (shared by the Green path and the ALREADY_MERGED path so the two can't drift).
- *
- *  Called from INSIDE the single async operation `confirmWorkerMergeTracked`'s `pendingOps.attach()`
- *  wraps (`confirmWorkerMerge` / `finishAlreadyMerged`) — computed ONCE, baked into the returned
- *  `ConfirmMergeResult` at the moment the merge actually executes, never at the outer call's own
- *  issuance time. This is what makes it correct across ALL THREE of `worker_merge_confirm`'s response
- *  shapes without extra plumbing: a sync-settled call sees this directly; a slow, async `pending` call's
- *  eventual settle (via `[loom:merge-done]`/`gate_status`) reads the SAME frozen result, computed when
- *  the op actually ran, never at request time; and a later cached-verdict reuse (a re-call at the same
- *  commit) replays that identical frozen object rather than re-deriving anything — so it can never emit
- *  a warning "computed at request time" for the pending case, nor a silently-stale one on reuse (it is
- *  not stale; it is the correct, frozen answer for the run that produced it, same as every sibling
- *  warning field already behaves).
- *
- *  ⚠️ IN-PROCESS BOUND, NOT A NEW ONE (this is `Live`'s own existing posture, restated here where a
- *  reader of THIS warning will actually see it): these four fields live only in `PtyHost`'s in-memory
- *  `live` map. A real claude session's `Live` entry survives its own pty process exit (only a bare
- *  "shell" kind's entry is deleted — see `pty.onExit`'s own comment), so the signal is still readable
- *  here even after the worker has stopped — but a DAEMON RESTART between the worker's work and this
- *  merge confirm silently loses it (a fresh boot never had the events to record). Absence of this
- *  warning is therefore "none recorded, or the daemon restarted since" — never a positive "nothing ever
- *  happened" guarantee.
- *
- *  Surfaces EVERY candidate currently set (up to 4), not just one — CORRECTED from an earlier
- *  "most-recent-of-four" design (manager review, card e1ac691b): picking by `detectedAt` alone can HIDE
- *  the severe case behind a benign one — an `unmatched` (possible LOSS) at gen=4 followed by a `fusion`
- *  (ESTABLISHED, nothing lost) at gen=9 used to surface ONLY the fusion, telling a manager "nothing was
- *  lost" while a possible-loss event sat unmentioned. Picking by SEVERITY alone has its own trap this
- *  reasoning surfaced: a `fusion` can specifically RESOLVE an earlier `replay`'s own open question (the
- *  replay's own text says exactly this — "a later generation may still fuse it back in whole"), so
- *  suppressing the later, resolving fusion in favor of the earlier, nominally-more-severe replay would
- *  hide the very news that the concern was resolved — the mirror-image of the recency bug. Showing ALL
- *  candidates sidesteps having to adjudicate that precedence at all, and at ≤4 short clauses the cost is
- *  negligible. Ordered CHRONOLOGICALLY (oldest `detectedAt` first) — not severity-first — so a resolving
- *  later event reads, in the warning's own text, AFTER the concern it resolves, the same order a human
- *  reading the session's own notices over time would see them; the per-field detail (exact lengths,
- *  which the doc-string wording above already surfaces via `spanGens`/`replayedGen`/`intendedLen`) is
- *  ALSO already on `worker_list`/`worker_status`'s own `lastMismatchReplay`/`lastMismatchFusion`/
- *  `lastMismatchUnmatched`/`lastPasteTripwireGiveUp` fields (and `lastMismatch`, card 31f3d047's
- *  generic derived view over the first three) for a manager who wants the full structured record.
- *
- *  Card e1ac691b (design input from a LIVE specimen the manager observed on their own session mid-card,
- *  `gen=10`, `spanGens=[9,10]`, confirmed and duplicate-checked clean): the session-facing
- *  `[loom:prompt-mismatch]` notice this mirrors is actionable for three reasons, and each candidate's
- *  wording below deliberately does the same three things — never a bare "an integrity event occurred":
- *  (1) CLASSIFIES rather than just alarms (a reader who can't tell benign from harmful treats every
- *  instance as noise) — each label below states its own kind AND, where the underlying detection
- *  established it, whether anything was actually lost; (2) carries the SAME SCOPE the notice itself
- *  computed (`spanGens`/`replayedGen`/length) — a span is what lets a reader bound a duplicate-check to
- *  a few recent actions instead of re-auditing everything; (3) names the ONE check only the recipient
- *  (here, the confirming manager) can actually run — never just "something happened." Deliberately
- *  BARE where the underlying data doesn't support more: this reuses ONLY fields the four `Live` types
- *  already carry (mirrored from the notice branches in `pty/host.ts`'s `deliverHook`, ~5659-5762) —
- *  nothing here is invented past what detection itself established. */
+/** @decision e1ac691b — surfaces every live mismatch/paste-tripwire candidate (≤4), chronologically —
+ *  see docs/decisions/e1ac691b-worker-merge-confirm-surfaces-every-mismatch-candidate-chronologically.md
+ *  ⛔ NON-BLOCKING, ALWAYS: must never gate, refuse, or require clearing to merge. */
 function composerIntegrityWarning(pty: PtyHost, workerSessionId: string): string | undefined {
   // Guarded with `typeof … === "function"`, not a plain call: many existing merge-confirm tests drive
   // `confirmWorkerMerge`/`finishAlreadyMerged` (this function's two call sites) against a minimal
@@ -1386,32 +1225,9 @@ function confirmationLatencyProportionalityClause(): string {
     `range is routine, not itself evidence of breakage (see memory engine-confirmation-can-lag-minutes-timeouts-assume-seconds).`;
 }
 
-/**
- * Card 92902cc2: `notifyManagerOfIdleWorker`'s [loom:worker-spawn-broken] notice — the SECOND, INDEPENDENT
- * sender of this tag (the idle watchdog; site A is `handleKickoffGiveUpExhausted`, above). Unlike site A,
- * this one is PERIODIC — it re-fires on every idle tick, not once — so unlike site A it must stay close to
- * the original's length, not grow to match it; only restate what site A does NOT already cover.
- *
- * `classifyIdleWorker`'s `broken-spawn` kind has TWO structurally distinct triggers that both used to
- * reach one hardcoded string here: `!engineSessionId` (genuinely no session — "no engine session was ever
- * established" is TRUE) and `engineSessionId` SET but no turn ever started (a stranded-composer candidate
- * — that clause is FALSE there). Computing the cause from the actual field, instead of asserting one
- * unconditionally, is what makes the notice correct on BOTH triggers instead of only one — and it means a
- * caller can never reintroduce the false clause by drifting past whatever gate it gets to today (e.g. the
- * taskless branch's own `!w.engineSessionId` check, below): the builder itself never asserts what it
- * hasn't read off `w`.
- *
- * `getComposerDirtyLen` is read via a `typeof` guard, not a plain call, for the SAME reason the rootMsgId
- * join guard a few hundred lines below is (see that guard's own comment): `this.pty` is a concrete
- * `PtyHost` in production (the method always exists there), but this codebase's test suite is full of
- * hermetic PtyStub fakes that duck-type only the subset of the contract their own scenario needs — an
- * unguarded call throws "not a function" on every stub that hasn't opted into this method.
- *
- * `composerDirtyLen` itself has a BLIND WINDOW even when read successfully: it is only set once Loom's own
- * give-up/heal budget exhausts (tens of seconds) — the idle watchdog can fire inside that window, and
- * `undefined`/`null` (not live in this process, or not yet set) is NOT proof the composer is clean. The
- * notice states this explicitly rather than letting a `0`/`n/a` reading pass as a clean bill.
- */
+/** @decision 92902cc2 — computes broken-spawn cause from `engineSessionId`, never asserts one unconditionally
+ *  (two structurally distinct triggers); `composerDirtyLen` unset is NOT proof of a clean composer — see
+ *  docs/decisions/92902cc2-worker-spawn-broken-notice-computes-cause-from-the-real-field.md */
 function buildBrokenSpawnMsg(pty: PtyHost, w: Session): string {
   const composerDirtyLen = typeof pty.getComposerDirtyLen === "function" ? (pty.getComposerDirtyLen(w.id) ?? null) : null;
   const startedAt = typeof pty.liveStartedAt === "function" ? pty.liveStartedAt(w.id) : null;
@@ -1436,88 +1252,24 @@ function buildBrokenSpawnMsg(pty: PtyHost, w: Session): string {
     `(0 turns, no engine output) is worker_stop + a fresh worker_spawn the right recovery.`;
 }
 
-/**
- * Card 6651bf24 SPECIMEN 2: a taskless worker whose FIRST turn genuinely started (SessionStart fired, a
- * real UserPromptSubmit hook confirmed it — `hasFirstTurnStarted:true`) but has not yet COMPLETED one
- * (`turnSeq` — incremented ONLY at the genuine Stop-hook chokepoint, host.ts's `onTurnCompleted` — is
- * still 0, the same `neverCompletedTurn` field `worker_status`/`mcp/orchestration.ts` already expose).
- * `hasFirstTurnStarted` answers "did anything begin", never "did it finish" — for a claude session it flips
- * true on the FIRST `UserPromptSubmit` hook, i.e. turn START (host.ts:4740/8790-8801); for a codex session
- * (card 361a5520 — codex has no start-confirming hook at all) it flips true on the first CONFIRMED
- * completion instead (`armCodexBusyStaleTimer`'s CASE 2, host.ts) — either way, a live, actively-producing,
- * `busy:true` session mid its first turn is `turnSeq:0` by construction. The taskless branch used to fall
- * through past this state straight into the plain "finished a turn and is idle" wording below — FALSE for
- * this case (measured: Specimen 2, a healthy Code Reviewer ~90s into its first turn, got that exact false
- * claim plus a `worker_stop` recommendation — see the card).
- *
- * Reworded, NOT silenced (card 6651bf24 DoD-4: "fix the claim it makes", not "silence the nudge
- * generally") — a genuinely wedged first turn is real signal worth surfacing; the fix is to stop asserting
- * a completion that never happened, not to go quiet. The `busy:false` reading this fires on is a single
- * point-in-time snapshot that can already be stale by the time it's read (delivery can lag behind
- * classification — same class of staleness `parked-gate-stale`'s own wording hedges for the tasked path,
- * above) — an actively-working first turn can dip `busy:false` and recover before the manager ever reads
- * this, which is exactly why the message below leads with a live re-check rather than an escalation.
- */
+/** @decision 6651bf24 — never claims a completion that never happened for a taskless worker mid its
+ *  first turn (turnSeq=0); reworded, not silenced; leads with a live re-check before any escalation —
+ *  see docs/decisions/6651bf24-never-completed-first-turn-notice-rechecks-live-before-escalating.md */
 function buildNeverCompletedTurnMsg(w: Session): string {
   return `[loom:worker-idle] worker ${w.id}${w.taskId ? ` (task ${w.taskId})` : ""} started its first turn but has NOT completed one (turnSeq=0, taskless — no board card to check) and has never called worker_report. Do NOT read this as a completion — it isn't one. This may be a genuinely wedged first turn, or a transient busy(false) reading mid an otherwise-healthy long turn (a single point-in-time snapshot — it can already be stale by the time you see it, the engine may already be back at work). ` +
     `${confirmationLatencyProportionalityClause()} Re-check LIVE first: worker_status({workerSessionId:"${w.id}"}) for a fresh busy/turnSeq read — free, no risk. Only if it's STILL busy:false with turnSeq:0 after that re-check should you pull worker_transcript ${w.id} to see what it's actually doing, and only worker_message it or worker_stop it once that confirms it's genuinely stuck, not just caught between busy-flag edges.`;
 }
 
-/**
- * Card 738f2109 DoD-1 measurement (worker report, 2026-08-05): `notifyManagerOfIdleWorker` fires on a
- * worker's busy(false) edge with ZERO holdoff (index.ts's `onBusy` hook calls it synchronously right
- * after `db.setBusy`) — so `classifyIdleWorker`'s `broken-spawn` kind used to be eligible on the VERY
- * FIRST give-up cycle, ~5-7s after a fresh kickoff write, regardless of how routinely long real engine
- * confirmation can take under load. Measured across n=177 give-up-driven, CONTENT-MATCHED confirmations
- * (`purgeConfirmedGiveUpRequeue`'s `"CONFIRMED logicalId=… latencyMs=…"` line — deliberately NOT the far
- * more common single-generation `"CONFIRMED gen=N …"` line, which fires on every ordinary confirmed turn
- * and is a different, much larger population that would understate the tail) pooled from 4
- * daemon-output.log rotations (~2026-07-29–08-05): p50=8.5s, p90=45.9s, p95=342s, p99=675s, max=970s
- * (16min) — a genuinely unbounded tail (see pinned memory
- * engine-confirmation-can-lag-minutes-timeouts-assume-seconds). A live false positive (worker
- * `67ee24fb`, card `03016805`) fired at ~22s — UNDER p90 — with the engine confirming ~1.5s after the
- * notice had already drained to the manager.
- *
- * Set just above p90 so `classifyIdleWorker` stops asserting "broken" while confirmation is still
- * ROUTINE (this card's own title) — not to chase the tail: at 60s, 17/177 (9.6%) of the same population
- * still confirm later. That residual is mechanism (1) from the same DoD-1 report — the give-up/requeue
- * BUDGET itself (`GIVE_UP_REQUEUE_LIMIT`/`GIVE_UP_REMINT_LIMIT`/`GIVE_UP_HOLD_MS`) being shorter than the
- * tail — separately carded and deliberately NOT touched here (a budget raise can't close a tail this
- * heavy without making the notice uselessly slow; that's a design question for that card, not a tuning
- * nudge for this one).
- *
- * NO env override (card 738f2109 CR follow-up): an ORIGINAL draft added `LOOM_BROKEN_SPAWN_HOLDOFF_MS`
- * via the repo's usual `Number(process.env.X) || default` idiom — but that idiom silently coerces `0`
- * (the ONE value an operator would plausibly reach for, to restore the old immediate-fire behaviour
- * during an incident) and any non-numeric value back to the default, doing the OPPOSITE of what was
- * asked with no error and no log line. Nothing else needs this seam (this suite's own tests mock
- * `pty.liveStartedAt` directly rather than shrinking the constant), so removed rather than fixed —
- * an untested, undocumented escape hatch that lies when pulled is worse than no escape hatch.
- */
+/** @decision 738f2109 — set just above the MEASURED p90 confirmation latency (n=177: p50=8.5s, p90=45.9s,
+ *  p95=342s, p99=675s, max=970s); deliberately NO env override (a `Number(process.env.X) || default`
+ *  idiom would silently coerce `0` back to default) — see
+ *  docs/decisions/738f2109-broken-spawn-holdoff-set-above-measured-p90-no-env-override.md */
 const BROKEN_SPAWN_HOLDOFF_MS = 60_000;
 
-/**
- * True once `BROKEN_SPAWN_HOLDOFF_MS` has elapsed since `workerSessionId`'s CURRENT live pty PROCESS
- * started — see `BROKEN_SPAWN_HOLDOFF_MS`'s own doc for the measurement. Shared by `classifyIdleWorker`'s
- * two broken-spawn branches AND `notifyManagerOfIdleWorker`'s taskless direct check (below) — all three
- * are the SAME notice firing on the SAME busy(false) edge with no holdoff of their own, so all three gate
- * identically.
- *
- * Measured from `pty.liveStartedAt` — the CURRENT live pty PROCESS's own start, fresh on every
- * spawn/resume/fork/recycle — deliberately NOT `w.lastActivity` (DB `sessions.last_activity`, restamped
- * by `db.setBusy` on EVERY busy transition, true OR false: a worker mid a give-up/retry chain flips busy
- * repeatedly, which would reset that clock to ~0 on every single edge and make this holdoff never elapse
- * at all on the edge-triggered call — the exact call this exists to hold back) and NOT `w.createdAt` (the
- * DB session ROW's creation time, unchanged across a `resume` of the SAME row — stale/old for a resumed
- * session even though its live pty process, and `hasFirstTurnStarted`, both just restarted fresh).
- *
- * `typeof`-guarded (mirrors `buildBrokenSpawnMsg`'s own `getComposerDirtyLen` guard, same reason): this
- * codebase's test suite is full of hermetic PtyStub fakes that duck-type only the subset of the real
- * PtyHost contract their own scenario needs. A stub that hasn't opted into `liveStartedAt` reads as
- * unmeasurable here, and unmeasurable defaults to PAST the holdoff (never suppress) — preserving every
- * existing test's pre-holdoff behavior unchanged; only a stub that explicitly implements `liveStartedAt`
- * (this card's own new coverage) ever exercises the suppression branch.
- */
+/** @decision 738f2109 — measured from `pty.liveStartedAt` (the live PROCESS start), never
+ *  `w.lastActivity`/`w.createdAt` (both reset/stale in ways that defeat the holdoff); an unmeasurable
+ *  stub defaults to PAST the holdoff, never suppress — see
+ *  docs/decisions/738f2109-broken-spawn-holdoff-set-above-measured-p90-no-env-override.md */
 function pastBrokenSpawnHoldoff(pty: PtyHost, workerSessionId: string): boolean {
   const startedAt = typeof pty.liveStartedAt === "function" ? pty.liveStartedAt(workerSessionId) : null;
   return startedAt === null ? true : Date.now() - startedAt >= BROKEN_SPAWN_HOLDOFF_MS;
@@ -1666,22 +1418,9 @@ function suggestAgentRef(agents: Agent[], ref: string): string | undefined {
   return looksLikeId(ref) ? nearestAgentIdPrefix(agents, ref) : nearestAgentName(agents, ref);
 }
 
-/**
- * Least-privilege hardening: the ONLY session roles a Profile may confer on a default "+New" spawn.
- * "assistant" (the long-lived Loom Companion — non-worktree, resume-durable) joins manager/worker as
- * profile-spawnable: it holds no elevated/outward capability (its whole orchestration surface is
- * my_context + the companion-gated chat_reply), so a "+New" on an assistant-profile agent may spawn it
- * directly, like a manager/worker rig.
- * The elevated/locked roles — "platform" (loom-platform surface), "auditor" (loom-audit),
- * "workspace-auditor" (loom-user-audit), "setup" (loom-setup), "operator" (loom-operator, Bucket 2b) and
- * "run" (internal-only Agent Runs) — must come EXCLUSIVELY from their explicit human spawn paths
- * (startPlatformLead/startAuditor/startSetup/startWorkspaceAuditor/startOperator) or internal starters,
- * which pass an explicit caller role. A profile role outside this set is dropped to a plain (role-null)
- * spawn in resolveAgentSpawn,
- * so a "normal-looking" agent carrying an elevated profile + a role-omitted REST spawn can never
- * silently elevate. (Note: validateProfile already forbids "auditor"/"workspace-auditor"/"run" on a
- * profile; this is the spawn-side backstop and also covers the still-mintable "platform"/"setup".)
- */
+/** ⛔ Least-privilege hardening: ONLY manager/worker/assistant are profile-spawnable on a default
+ *  "+New" spawn. Elevated roles (platform/auditor/workspace-auditor/setup/operator/run) must come
+ *  EXCLUSIVELY from their explicit human spawn paths — never widen this set. */
 const PROFILE_SPAWNABLE_ROLES: ReadonlySet<SessionRole> = new Set<SessionRole>(["manager", "worker", "assistant"]);
 
 /**
@@ -1847,62 +1586,9 @@ const UPGRADE_BUSY_WAIT_MS = Number(process.env.LOOM_UPGRADE_BUSY_WAIT_MS) || 3_
  */
 const AUTO_RETIRE_IDLE_WAIT_MS = Number(process.env.LOOM_AUTO_RETIRE_IDLE_WAIT_MS) || 25_000;
 
-/**
- * Card ccb407eb: how many times a durable "agent" message may be RE-MINTED (a fresh `enqueueDurableMessage`
- * dispatch, budget reset, at the recipient's next genuine turn boundary) after its in-session
- * `GIVE_UP_REQUEUE_LIMIT` (pty/host.ts) is exhausted, before `handleGiveUpExhausted` gives up on automatic
- * redelivery and PARKS it instead (stops writing to the recipient's pty for this message; surfaces to a
- * live sender). This is a SEPARATE, ORTHOGONAL bound from `GIVE_UP_REQUEUE_LIMIT` — that one guards the
- * immediate in-turn retry loop against a session already shown wedged; this one guards against re-minting
- * forever across turn boundaries if the recipient STAYS wedged (⛔ never widen `GIVE_UP_REQUEUE_LIMIT` to
- * fix a loss — that was rejected; this bound exists so re-minting itself can't become the new unbounded
- * loop).
- *
- * PINNED AT 1, MEASURED (not a guess): a re-mint's own give-up cycle is NOT free — it re-runs the full
- * `SUBMIT_MAX_ATTEMPTS`-Enter-attempt/`SUBMIT_VERIFY_TIMEOUT_MS` sequence at PRODUCTION timing (these
- * constants are not test-shortened outside a suite that explicitly pins them), measured at ~5-6s per
- * cycle. An earlier default of 3 here (0→1→2→park, 4 total give-up cycles for a message whose recipient
- * stays wedged) turned `merge-spawn-tracked.mjs` from a clean ~26s pass into a >60s timeout — EVERY
- * settle-nudge push (population B, this same card) that happens to land on a session mid-give-up in ANY
- * test now pays this cost, compounding across the whole suite, not just one message. 1 means: the message
- * gets exactly ONE genuinely fresh second chance (2 total cycles) before parking — still strictly better
- * than the pre-fix behavior (0 chances, a bare unrecoverable drop), while keeping the worst-case
- * compounding cost bounded to roughly what a single ordinary give-up already cost. Override via env for a
- * deployment that can afford more automatic chances. CR follow-up (card ccb407eb, finding [12]): NOT
- * "or fewer" — `Number(…) || 1` treats `LOOM_GIVE_UP_REMINT_LIMIT=0` (falsy) the same as unset, silently
- * falling back to 1; 0 is unreachable via this env var. Genuinely wanting zero re-mints (park on the very
- * first exhaustion) needs a code change to the fallback expression, not an env override.
- *
- * Card 518d0305, ADDENDUM (2026-08-05): the SAME pinning above also forecloses "just raise the kickoff
- * park budget" — `handleKickoffGiveUpExhausted` (this file, `[loom:worker-spawn-broken]`'s OTHER,
- * independent sender; the idle-watchdog sender is `notifyManagerOfIdleWorker`/`buildBrokenSpawnMsg`, card
- * 738f2109) reuses THIS constant for its own remint chain — it has no kickoff-scoped budget of its own to
- * tune. Any raise here lands on population B (ordinary durable/settle-nudge messages) too, reopening the
- * exact regression already recorded above (3→1, `merge-spawn-tracked.mjs` 26s→60s+). Measured (worker
- * report, card 738f2109 DoD-1): n=177 give-up-driven, content-matched confirmations (kickoffs + ordinary
- * messages pooled, 4 daemon-output.log rotations, ~2026-07-29–08-05): p50=8.5s, p90=45.9s, p95=342s,
- * p99=675s, max=970s. The one fully-traced kickoff false positive (`ba6b65dc`, card 05056168) confirmed
- * 120.6s after first write. A kickoff-SCOPED 1→2 remint (a separate constant, NOT this one) would land
- * the park budget at ~113-116s (`PARK_HOLDS`=1×3=3 × `GIVE_UP_HOLD_MS` + the same ~53-56s submit-retry
- * overhead already observed on top of the hold) — BELOW 120.6s, so it would NOT have caught even the one
- * specimen this card has. (`c33fb627`, the other park event in the observation window, was
- * `worker_stop`'d before any confirmation could land — its true outcome is unrecoverable from logs and
- * must NOT be counted as a second confirmed false positive.)
- * SECOND SPECIMEN, added 2026-08-05: `f229f9e0`, kickoff parked, engine-confirmed (content-matched
- * `[loom:redelivery-confirmed]`) ~271s after write — more than 2× past the ~113-116s a 1→2 raise would
- * have produced. Attribution between Loom's own late retry and a manual submit is NOT established (a
- * manager-message origin IS excluded: `worker_list` showed no directive ever sent to this worker); state
- * only that it confirmed late. n=2 confirmed late-confirmation false positives; `c33fb627` stays excluded.
- * DECISION: no constant moves. The notice's CLAIM was made proportionate instead — see
- * `confirmationLatencyProportionalityClause`, shared with `buildBrokenSpawnMsg` (card 738f2109's fix for
- * the OTHER sender) so both state the same derived numbers rather than drifting — plus the existing
- * pre-park discriminator (`handleKickoffGiveUpExhausted`'s `readTranscript`/`hasFirstTurnStarted` check)
- * which already suppresses the notice whenever the engine confirms before park-time. A load-elastic
- * budget (cf. `66649a90`, which proposes the same shape for the remint re-dispatch delay) is DEFERRED,
- * not rejected: `66649a90` is itself unresolved on a cold-start trap (a cross-item/EWMA input reads empty
- * at daemon start / first-of-batch). Re-open this once that card lands a proven rule shape, rather than
- * designing a second, possibly-diverging one here.
- */
+/** @decision ccb407eb — pinned at 1, by MEASURED compounding cost (a 1→3 raise turned a ~26s test
+ *  into a >60s timeout), not a guess. ⛔ Never widen `GIVE_UP_REQUEUE_LIMIT` to fix a loss instead —
+ *  see docs/decisions/ccb407eb-give-up-remint-limit-pinned-at-1-measured-cost.md */
 const GIVE_UP_REMINT_LIMIT = Number(process.env.LOOM_GIVE_UP_REMINT_LIMIT) || 1;
 
 /**
@@ -1941,21 +1627,9 @@ let warnedMissingHasAmbiguousMatch = false;
  */
 const BACKGROUND_PARK_STALE_MINUTES = 20;
 
-/**
- * Card aa4e24ff, §TRIGGER DECISION: how long a `worker_message` must have sat HELD behind a busy
- * worker's mid-turn before `messageWorker` appends an advisory pointing the manager at
- * `worker_redirect`. Gated on the OBSERVABLE `busyForMs` the hold already carries — NEVER on the
- * message's own text (a stop/hold phrase list is lexically unbounded and, worse, fires on an
- * IMMEDIATE delivery to an idle worker where nothing is actually landing late) — so this constant is
- * the entire trigger surface; there is no companion phrase list anywhere in this file.
- * 5 minutes: below it, an ordinary worker turn (a build/test cycle, a routine multi-file edit) can
- * plausibly still end and drain the message soon on its own, so advising interruption would be noise
- * more often than not. Above it, the hold is long enough that a manager who wants the message to land
- * sooner should be told the interrupting alternative exists before they assume it already landed.
- * Trade: a hold of a few minutes never gets the advisory even when a manager would have wanted it —
- * deliberate, so a routine short hold doesn't teach managers to tune the advisory out (the same failure
- * mode a text-trigger would have hit on every single message, per the card's reason 1).
- */
+/** @decision aa4e24ff — the `worker_redirect` advisory triggers on OBSERVABLE `busyForMs` (5min),
+ *  never on the message's own text (a phrase list is lexically unbounded) — see
+ *  docs/decisions/aa4e24ff-redirect-advisory-triggers-on-observable-hold-time-not-message-text.md */
 const WORKER_MESSAGE_HELD_ADVISORY_MS = 5 * 60_000;
 
 /**
@@ -1996,35 +1670,9 @@ type CodescapeGraphGateReason = "no-supervisor" | "not-enabled" | "no-port" | "n
  */
 export type CodescapeInjectionReason = CodescapeGraphGateReason | "asset-unreadable" | "asset-empty" | "task-class-excluded";
 
-/**
- * Card bed49000 — worker kickoffs carry the codescape orientation block ({@link CODESCAPE_PROMPT_BLOCK_ASSET})
- * unconditionally; a Platform Auditor sample (n=4 transcripts) found it net-negative for docs-only work
- * (skipped outright — a code graph over SYMBOLS cannot help a task that never touches one) while
- * structural/exploration/refactor work was left untested either way. GATE, don't delete: a code graph
- * plausibly earns its keep on a large refactor, and the sample cannot see that case, so a false KEEP
- * (an unhelpful block on a docs task) is cheap — one skippable paragraph — while a false EXCLUDE (a
- * withheld block on a task that could have used it) is not, so the boundary below is deliberately
- * conservative: exclude only what's cheaply and reliably knowable BEFORE the worker has touched a
- * single file, default to keeping it for everything else.
- *
- * SIGNAL: this project's own Conventional-Commits `type(scope): summary` title convention
- * (`CLAUDE.md` "Conventional Commits" + "Commit scopes" — managers title board cards this way). The
- * leading `type` is a cheap, reliable, already-documented proxy for task shape, known at dispatch time
- * (before any worktree/file is touched) via the task's `title` alone — no new task field, no text-mining
- * the kickoff prompt. EXCLUDED types: `docs` (pure prose — the sampled CHANGELOG case) and `style`
- * (formatting-only) — neither ever touches code structure a symbol graph could illuminate. Every other
- * type (`feat`, `fix`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`), a title that
- * doesn't parse as `type(scope): …`, and a taskless spawn (`undefined`/`null`) all default to KEEP.
- *
- * NOT ATTEMPTED: the card's SCOPE section also names "single-file" and "test-fixture" dispatches as
- * candidates to exclude. Neither has a signal available at dispatch time distinct from the type prefix
- * above (a task is not yet known to be single-file until the worker decides how many files to touch;
- * "test-fixture" vs. a test task that DOES need structural exploration cannot be told apart from a
- * title alone) — rather than guess with a brittle keyword heuristic, this gate leaves both classes on
- * the conservative KEEP default. Whether the graph ever HELPS a kept class remains UNESTABLISHED (no
- * measurement, either direction) — this gate narrows exposure to the one class with clear negative
- * evidence, it does not claim the kept classes are proven to benefit.
- */
+/** @decision bed49000 — the codescape kickoff block is GATED by conventional-commit type
+ *  (excludes `docs`/`style` only), not deleted — a false KEEP is cheap, a false EXCLUDE is not — see
+ *  docs/decisions/bed49000-codescape-kickoff-block-gated-by-conventional-commit-type-not-deleted.md */
 export function isCodescapeExcludedTaskClass(taskTitle: string | null | undefined): boolean {
   if (!taskTitle) return false;
   const match = /^([a-z]+)\([^)]*\):\s/.exec(taskTitle.trim());
@@ -2046,25 +1694,9 @@ export interface CodescapeInjectionStatus {
   text: string | null;
 }
 
-/**
- * Card badba5a8: PURE composition of a {@link SessionService.resolveCodescapeGraphContext} result plus
- * an asset-read result (see {@link readCodescapePromptBlockAsset} in `paths.ts`) — plus (card bed49000)
- * an optional dispatched task title — into one {@link CodescapeInjectionStatus}. Exported and kept free
- * of `this`/`fs`/any I/O specifically so it is directly unit-testable with literal `info`/`asset`/
- * `taskTitle` fixtures covering all EIGHT outcomes (2 injected × stamped/unstamped, plus the 6 reasons —
- * the four graph gates, the two asset outcomes, and `task-class-excluded`) — WITHOUT ever needing to make
- * the real, shared, tracked `CODESCAPE_PROMPT_BLOCK_ASSET` file unreadable or empty, which would race
- * every other codescape test in this repo's gate if attempted via the real file. `resolveCodescapeInjectionStatus`
- * (the class method) is thin wiring over this: it resolves the graph context, conditionally reads the real
- * asset (only when the graph context succeeded — `asset` is `undefined` on a graph-gate failure, since
- * nothing ever needs to read the asset in that branch), and hands both plus its own `taskTitle` param
- * straight here. The TEXT composition (`${base} Graph last indexed: ${lastIngestedAt}.` when stamped, else
- * `base`, else `null`) is BYTE-IDENTICAL to the pre-refactor inline computation this function replaces —
- * see the card's Ruling 2 on why that equivalence had to be proven, not merely asserted. `taskTitle` is
- * checked LAST, after both infra gates pass — a manager/taskless caller that never has a title to check
- * passes `undefined`, which {@link isCodescapeExcludedTaskClass} always reads as "keep" (byte-identical to
- * pre-bed49000 behavior for every non-worker-dispatch call site).
- */
+/** @decision badba5a8 — pure composition (no `this`/`fs`/I/O) so all 8 outcomes are unit-testable via
+ *  fixtures, never the real shared asset file; `taskTitle` checked LAST, after both infra gates — see
+ *  docs/decisions/badba5a8-codescape-injection-status-is-pure-and-unit-testable-without-the-real-asset.md */
 export function composeCodescapeInjectionStatus(
   info: { ok: true; lastIngestedAt: string | null } | { ok: false; reason: CodescapeGraphGateReason },
   asset: ReturnType<typeof readCodescapePromptBlockAsset> | undefined,
