@@ -1,6 +1,6 @@
-# 720bb7ad — `gateOpIdEnvOverride` stamps `LOOM_GATE_OP_ID` (and a required `LOOM_GATE_BATCH_SIZE`) onto every gate child
+# 720bb7ad — `gateOpIdEnvOverride` stamps `LOOM_GATE_OP_ID` (and a required `LOOM_GATE_BATCH_SIZE`) onto every gate child; `admittedAt` is MINT time, not admission
 
-## Narrative
+## Narrative (DoD-3: the env stamp)
 
 Card 720bb7ad DoD-3: stamp this op's `opId` onto the gate child's environment as `LOOM_GATE_OP_ID` — `scripts/test-daemon.mjs` reads it and, when present, includes it on its own `kind:"run-summary"` NDJSON row, so that row can finally be joined back to the `gate_status`-visible op that produced it (previously: no producer of that row carried any correlating id at all, and two runs admitted close together at `maxConcurrentGates>=2` were indistinguishable by timestamp alone — see the card's own §ATTRIBUTION). Merges additively on top of any base override a call site already needs (e.g. the worker self-gate's own `WORKER_GATE_ENV_OVERRIDE`) — `LOOM_GATE_OP_ID` always wins if `base` somehow already set it, since object spread order places it last.
 
@@ -8,11 +8,22 @@ The `{ ...base, ... }` spread is also load-bearing for a second, unrelated reaso
 
 `batchSize` (card dbc6f660, accepted peer request from Codescape) also stamps `LOOM_GATE_BATCH_SIZE` — required (not optional), so no call site can forget it: Codescape's gate-variance baseline lives on a duration column that would otherwise silently mix a 1-branch run with an up-to-4-branch batched one, with nothing in the row telling them apart. Stamped on every gate child, not merely batched ones — an ordinary solo merge passes `1`, a worker self-check or deploy gate (neither is a merge, neither has a branch count) passes `0`, a real batch passes the actual post-assembly landed-branch count (never the requested K — see `runBatchedMerge`'s own doc). A field present on every row means absence has exactly one meaning ("produced by a build older than this change"), never a second, ambiguous one.
 
+## Narrative (DoD-4: `admittedAt` is MINT time, not admission time — the trap its own name invites)
+
+`gate_status`/`gate_queue`'s `admittedAt` READS as "the instant this op was admitted past the gate concurrency cap" but is NOT that — it is MINT time (when the op was first created/queued, before it ever competed for a slot). A queued op can sit for minutes before it's actually admitted (routine at `maxConcurrentGates>=2` under fleet load), so `totalDurationMs` (`settledAt - admittedAt`) SILENTLY INCLUDES that queue wait — it is the REAL total op wall time (worktree prep + queue wait + gate + squash), never a queue-wait-excluded "how long did the actual work take" figure. Measured: one op's `admittedAt` sat ~7m16s before `GateQueueEntry.since` (the LIVE field that re-bases to the moment this SAME op was actually admitted) read the op as `"running"` — a real, not hypothetical, gap.
+
+The field that DOES re-base to true admission is `gate_queue`'s (or this same op's own live, pre-settle `gate_status` read's) `since`/`elapsedMs` — but ONLY while the op is still live (`queued`/`running`); once settled, that live view is gone and `admittedAt` (mint time) is the only admission-adjacent timestamp left on the durable record. There is no settled-and-queue-wait-excluded field — if queue wait specifically is needed, read it from `gate_queue`/`gate_status` while the op is still live, before it settles. `admittedAt` is present for EVERY tombstone-branch result (settled, evicted-dead-owner, orphaned-by-restart, or the real `pending` window), not gated on a recorded verdict, since it's the row's own `started_at` column, always known once a row exists at all — absent only for the two no-row outcomes and the live `queued`/`running`/`ambiguous` returns, which report `since`/`elapsedMs` instead.
+
 ## Do not
 
 - Do not replace the `{ ...base, ... }` spread with a plain `{ LOOM_GATE_OP_ID: opId }` assignment — that silently drops any `base` override (e.g. the `LOOM_GATE_TEST_CONCURRENCY` host-starvation pin) for every caller that passes one.
 - Do not make `batchSize` optional — an absent `LOOM_GATE_BATCH_SIZE` on some rows and present on others reintroduces the ambiguity Codescape's duration column can't otherwise resolve.
+- Do not read `admittedAt` as "when this op was admitted past the cap" — it is mint time, before the op ever competed for a slot.
+- Do not read `totalDurationMs` (`settledAt - admittedAt`) as excluding queue wait — it silently includes it; there is no settled figure that excludes it.
+- Do not try to recover true admission time after an op has settled — read `since`/`elapsedMs` from `gate_queue`/`gate_status` while the op is still live, before it settles.
 
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts` (`gateOpIdEnvOverride`'s top-of-function doc, minus the class-A cross-project-contract guard left inline): lines 1090-1118, as of this tranche's HEAD. Relocated by card 5dcc1e98 (tranche 6); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+
+JSDoc comment in `packages/daemon/src/sessions/service.ts` (`gateStatus`'s `admittedAt` return-type field). Relocated by card `f05ca65c` (tranche 8); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped. (Folded into this file, rather than kept as a separate `720bb7ad-*` record, per manager review during tranche 8: `decision-records.mjs`'s `resolveRecord()` resolves exactly one record file per id via `.sort()[0]` — a second file for an id that already has one is silently unreachable.)

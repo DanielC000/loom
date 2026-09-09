@@ -3516,7 +3516,7 @@ export class SessionService {
     /** @decision 9f6598dd — admittedAt is the op's own mint instant, present for every tombstone-branch
      *  result (docs/decisions/9f6598dd-mergeverdict-derivation-closes-the-settled-merge-gap.md)
      *  @decision 720bb7ad — TRAP: admittedAt is MINT time, not admission time; totalDurationMs silently
-     *  includes queue wait (docs/decisions/720bb7ad-admittedat-is-mint-time-not-admission.md) */
+     *  includes queue wait (docs/decisions/720bb7ad-gate-op-id-env-stamp-and-batch-size-requirement.md) */
     admittedAt?: string;
     /** @decision d5e67146 — ownerSessionAlive: the liveness signal for tombstone state:"pending",
      *  derived via liveLineageSuccessor (not a bare session-dead check); present only for the unscoped
