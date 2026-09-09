@@ -4031,12 +4031,22 @@ export interface SpawnOpts {
    */
   model?: string;
   /**
-   * When set (docLint on), wires the vault-lint PostToolUse hook scoped to this vault (Pillar D). Card
-   * 67621894: the SAME condition also wires the per-file comment-anchor-lint PostToolUse hook (scoped by
-   * `repoPath` below, not this field's own value) — see `writeSessionSettings`'s own doc in
-   * claude-settings.ts for why `vaultPath` is reused purely as the docLint on/off signal there.
+   * When set, wires the vault-lint PostToolUse hook scoped to this vault (Pillar D). Set by callers as
+   * `config.docLint ? project.vaultPath : undefined` (sessions/service.ts) — vault-lint genuinely needs a
+   * real vault to lint, so it stays gated on this path's presence rather than on {@link docLint} below.
    */
   vaultPath?: string;
+  /**
+   * Card d92ec82b: the EXPLICIT "docLint is on" signal, independent of {@link vaultPath}. Threaded from
+   * sessions/service.ts's own `config.docLint` at every spawn call site. Gates the per-file
+   * comment-anchor-lint PostToolUse hook (card 67621894) alongside `repoPath` — see `writeSessionSettings`'s
+   * own doc in claude-settings.ts for the full mechanism. Before this field existed, that hook was gated
+   * on `vaultPath` truthiness — a proxy that could not distinguish "docLint is on" from "a vault is
+   * configured" — so a project with docLint on but no vault never got a hook that targets source files,
+   * not vault notes, and had no legitimate reason to require one. Undefined/false ⇒ that hook is never
+   * wired, same as today.
+   */
+  docLint?: boolean;
   /**
    * Opt-in browser-automation (resolved from the session's Profile, gated). When true, inject a
    * per-session stdio Playwright MCP (@playwright/mcp) so the agent can drive a headless browser, and
@@ -7552,7 +7562,7 @@ export class PtyHost {
     // all — deliberately NOT `opts.repoPath`, which is documented above as always the project's main
     // checkout and would disagree with what decision-records.mjs itself checks at runtime (it walks up
     // from the session's own cwd). See writeSessionSettings's own doc for the staleness window this implies.
-    const settingsPath = writeSessionSettings(opts.sessionId, { ...permission, mode: bootMode }, hookToken ?? "", opts.vaultPath, opts.cwd);
+    const settingsPath = writeSessionSettings(opts.sessionId, { ...permission, mode: bootMode }, hookToken ?? "", opts.vaultPath, opts.cwd, opts.docLint);
     // Role-scoped disallow of the interactive human-prompt tools (AskUserQuestion / Exit|EnterPlanMode):
     // a Loom-driven role (worker/setup/auditor/workspace-auditor) must never block on a human — UNIONed with
     // the curated dangerous native tools when this session's Profile set restrictedTools (Companion

@@ -3269,6 +3269,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
       codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
       projectId: project.id,
       repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
@@ -3362,6 +3363,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
       codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
       projectId: project.id,
       repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — a manager runs in the main repo
@@ -3477,6 +3479,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
       codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
       projectId: project.id,
       repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — the Lead runs in the main repo
@@ -3554,6 +3557,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
       codescapeEnabled, projectId: project.id, // card C2: Codescape MCP wiring
       repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — an auditor runs in the main repo
       startupPrompt: appendScheduledPrompt(startupPrompt, prompt),
@@ -3637,6 +3641,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
       codescapeEnabled, projectId: project.id, // card C2: Codescape MCP wiring
       repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — a workspace-auditor runs in the main repo
       startupPrompt: appendScheduledPrompt(startupPrompt, prompt),
@@ -3721,6 +3726,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
       codescapeEnabled: resolveCodescapeConfig(project.config).enabled, projectId: project.id, // card C2
       repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — setup runs in the main repo
       startupPrompt,
@@ -3808,6 +3814,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
       codescapeEnabled: resolveCodescapeConfig(project.config).enabled, projectId: project.id, // card C2
       repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — an operator runs in the main repo
       startupPrompt,
@@ -3897,6 +3904,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
       codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
       projectId: project.id,
       repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
@@ -7305,6 +7313,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
       codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
       projectId: project.id,
       repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
@@ -7436,6 +7445,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
       startupPrompt,
       role: "run", // buildMcpServers mounts ONLY loom-run; createPty allowlists mcp__loom-run
       browserTesting: false,
@@ -8163,6 +8173,7 @@ export class SessionService {
           geometry: config.pty,
           sessionEnv: config.sessionEnv,
           vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+          docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
           codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
           projectId: project.id,
           repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
@@ -13475,6 +13486,7 @@ export class SessionService {
         geometry: config.pty,
         sessionEnv: config.sessionEnv,
         vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
         codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
         projectId: project.id,
         repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
@@ -13638,6 +13650,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
       codescapeEnabled: resolveCodescapeConfig(project.config).enabled, projectId: project.id, // card C2
       repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — a manager runs in the main repo
       startupPrompt: appendMemoryRecallToStartupPrompt(startupPrompt, recycleManagerProjectMemoryFramed),
@@ -13831,6 +13844,7 @@ export class SessionService {
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
       codescapeEnabled: resolveCodescapeConfig(project.config).enabled, projectId: project.id, // card C2
       repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — the Lead runs in the main repo
       startupPrompt,

@@ -3,9 +3,11 @@
 //   1. The pure per-file functions (`isInScope`/`computeFileReport`/`formatHookMessage`) against a fixture
 //      repo, plus a real subprocess spawn of the script's own `--hook` mode (no build needed for either —
 //      same "assets are plain ESM" posture as test/comment-anchor-lint.mjs).
-//   2. writeSessionSettings' wiring: the hook is gated on the SAME docLint on/off signal as vault-lint
-//      (`vaultPath` given) AND requires `repoPath` — imported from `../dist/pty/claude-settings.js`, so
-//      THIS half needs a build first (`pnpm --filter @loom/daemon build`), same as test/vault-lint.mjs.
+//   2. writeSessionSettings' wiring: card d92ec82b reworked this gate — the hook now wires on the EXPLICIT
+//      `docLint` param AND requires `repoPath`, independently of `vaultPath` (vault-lint's own, separate
+//      gate) — so a project with docLint on but no Obsidian vault still gets it. Imported from
+//      `../dist/pty/claude-settings.js`, so THIS half needs a build first (`pnpm --filter @loom/daemon
+//      build`), same as test/vault-lint.mjs.
 //
 // RUN with an isolated LOOM_HOME (no daemon needed — writeSessionSettings just needs the settings dir):
 //   LOOM_HOME=<temp> node test/comment-anchor-lint-hook.mjs
@@ -120,14 +122,16 @@ try {
     check("runHook (negative control): missing repoRoot arg exits 0 and stays silent", r.status === 0 && !(r.stdout || "").trim());
   }
 
-  // --- writeSessionSettings wiring: gated on the SAME docLint (vaultPath) signal as vault-lint -------
+  // --- writeSessionSettings wiring: gated on the explicit `docLint` param (card d92ec82b), independently
+  // of vaultPath (which stays vault-lint's own gate) -----------------------------------------------------
   ensureDirs();
   const perm = { mode: "acceptEdits", allow: [], deny: [] };
   const findGroup = (settings, needle) =>
     (settings.hooks.PostToolUse || []).find((g) => g.matcher === "Write|Edit" && g.hooks[0].command.includes(needle));
 
-  // ON-case FIRST (same DoD-4 ordering): docLint on (vaultPath given) + repoPath given → wired.
-  const on = JSON.parse(fs.readFileSync(writeSessionSettings("cal-on", perm, "test-hook-token", "/some/vault", REPO), "utf8"));
+  // ON-case FIRST (same DoD-4 ordering): docLint:true + vaultPath given + repoPath given → wired. (The
+  // realistic combination sessions/service.ts produces: vaultPath is only ever set when docLint is true.)
+  const on = JSON.parse(fs.readFileSync(writeSessionSettings("cal-on", perm, "test-hook-token", "/some/vault", REPO, true), "utf8"));
   const onGroup = findGroup(on, "comment-anchor-lint.mjs");
   check("writeSessionSettings(vaultPath+repoPath): comment-anchor-lint Write|Edit group present", !!onGroup);
   check("writeSessionSettings(vaultPath+repoPath): command uses --hook mode with the repo root",
@@ -140,6 +144,26 @@ try {
   check("writeSessionSettings(vaultPath, no repoPath): comment-anchor-lint group ABSENT", !findGroup(onNoRepo, "comment-anchor-lint.mjs"));
   check("writeSessionSettings(vaultPath, no repoPath): vault-lint's own group unaffected", !!findGroup(onNoRepo, "vault-lint.mjs"));
 
+  // --- card d92ec82b: docLint:true + repoPath + NO vaultPath (no Obsidian vault configured) ------------
+  // THE GAP THIS CARD FIXES: comment-anchor-lint targets SOURCE files, not vault notes, so it should wire
+  // regardless of whether a vault is configured. Before d92ec82b this hook was gated on `vaultPath`
+  // truthiness alone (a proxy for "docLint is on" that could not distinguish it from "a vault is
+  // configured") — this is the exact positive control that pre-change code FAILS: with no 6th `docLint`
+  // arg even accepted, the old code reads `vaultPath` (undefined here) and never wires the hook. Run this
+  // block against pre-fix code (git-stash the source changes, rebuild, rerun) to see it fail RED; against
+  // the fix, it must pass GREEN.
+  const onNoVault = JSON.parse(fs.readFileSync(writeSessionSettings("cal-on-novault", perm, "test-hook-token", undefined, REPO, true), "utf8"));
+  check("writeSessionSettings(docLint:true, repoPath, NO vaultPath): comment-anchor-lint group PRESENT (the fix)",
+    !!findGroup(onNoVault, "comment-anchor-lint.mjs"));
+  check("writeSessionSettings(docLint:true, repoPath, NO vaultPath): vault-lint's own group ABSENT (no vault to lint)",
+    !findGroup(onNoVault, "vault-lint.mjs"));
+
+  // docLint:false + repoPath given, vaultPath omitted → comment-anchor-lint absent even though repoPath is
+  // present (docLint itself must gate it, not just repoPath's presence).
+  const offNoVault = JSON.parse(fs.readFileSync(writeSessionSettings("cal-off-novault", perm, "test-hook-token", undefined, REPO, false), "utf8"));
+  check("writeSessionSettings(docLint:false, repoPath, no vaultPath): comment-anchor-lint group ABSENT",
+    !findGroup(offNoVault, "comment-anchor-lint.mjs"));
+
   // OFF-case (docLint off — no vaultPath), repoPath STILL given → must be byte-identical to today: absent.
   const off = JSON.parse(fs.readFileSync(writeSessionSettings("cal-off", perm, "test-hook-token", undefined, REPO), "utf8"));
   check("writeSessionSettings(no vaultPath / docLint off, repoPath given): comment-anchor-lint group ABSENT",
@@ -150,7 +174,7 @@ try {
     (off.hooks.PostToolUse || []).some((g) => g.matcher === "Read" && g.hooks[0].command.includes("decision-records.mjs")));
 } finally {
   try { fs.rmSync(REPO, { recursive: true, force: true }); } catch { /* ignore */ }
-  for (const s of ["cal-on", "cal-on-norepo", "cal-off"]) {
+  for (const s of ["cal-on", "cal-on-norepo", "cal-on-novault", "cal-off-novault", "cal-off"]) {
     try { fs.rmSync(path.join(SETTINGS_DIR, `${s}.json`), { force: true }); } catch { /* ignore */ }
   }
 }
@@ -158,7 +182,8 @@ try {
 console.log(failures === 0
   ? "\n✅ ALL PASS — comment-anchor-lint's per-file hook mode fires (with a genuine positive control) on an "
     + "in-scope violating file, stays silent on a clean file / wrong tool / out-of-scope file, and "
-    + "writeSessionSettings wires it only when docLint is on (vaultPath given) AND repoPath is given — a "
-    + "project with docLint off stays byte-identical to today."
+    + "writeSessionSettings wires it only when the explicit docLint param is true AND repoPath is given — "
+    + "independently of vaultPath (card d92ec82b), including the docLint:true+repoPath+NO-vaultPath case "
+    + "the old vaultPath-proxy gate missed — while docLint off stays byte-identical to today."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
