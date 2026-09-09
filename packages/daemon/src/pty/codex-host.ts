@@ -309,16 +309,42 @@ const CODEX_ASCII_FOLD_MAP: ReadonlyMap<number, string> = new Map([
   [0x2705, "[ok]"], [0x2713, "[ok]"], // check marks
   [0x274c, "[x]"], // cross mark
   [0x2b50, "[*]"], // star
+  // Card 7cbb3298 — box-drawing (U+2500 block): NFKC does NOT decompose these (measured), so without a
+  // curated entry every one falls to the generic '?' — a `tree` listing or an ASCII table/diagram in an
+  // agent-to-agent message becomes a wall of question marks. Light/heavy/double variants of the same glyph
+  // shape collapse to the same ASCII substitute (no ASCII weight distinction exists to preserve).
+  [0x2500, "-"], [0x2502, "|"], // horizontal / vertical line
+  [0x250c, "+"], [0x2510, "+"], [0x2514, "+"], [0x2518, "+"], // corners
+  [0x251c, "+"], [0x2524, "+"], [0x252c, "+"], [0x2534, "+"], [0x253c, "+"], // tees + cross
 ]);
+
+/**
+ * Card 7cbb3298 — the second, general-purpose tier between the curated map and the generic `?` fallback:
+ * Unicode NFKC compatibility normalization recovers a real subset of the drop class for free (fullwidth
+ * digits/letters, superscript/subscript digits, the "№" numero sign, ...) without hand-curating each one.
+ * **The "result is pure ASCII" guard is the load-bearing part** — NFKC on an arbitrary codepoint can just
+ * as easily normalize to ANOTHER non-ASCII codepoint (or to itself, unchanged), and that must still fall
+ * through to `?` rather than emit non-ASCII text, which is exactly the failure mode this whole fold exists
+ * to prevent. MEASURED (node, this codepoint set): fullwidth "１" -> "1", superscript "²" -> "2", "№" ->
+ * "No" all normalize to pure ASCII; section sign "§", degree "°", em dash "—", "≤", and the arabic-indic
+ * digits do NOT decompose under NFKC at all (normalize to themselves) and correctly return `null` here —
+ * they keep falling to the generic `?`, unchanged from before this tier existed.
+ */
+export function codexNfkcFold(ch: string): string | null {
+  const normalized = ch.normalize("NFKC");
+  return /^[\x00-\x7f]*$/.test(normalized) ? normalized : null;
+}
 
 /**
  * Card 0e83c855 round 4 — THE fix: fold ONLY {@link codexCharNeedsAsciiFold}'s measured drop class to a
  * plain-ASCII substitute — curated where {@link CODEX_ASCII_FOLD_MAP} names one; elided to nothing for a
  * {@link codexIsDefaultIgnorable} codepoint (carries no content of its own); folded to a plain space for
  * a {@link codexIsFoldableWhitespace} codepoint (NBSP and friends — a space is not "content" the way a
- * visible symbol is, so a `?` there would corrupt running text worse than the bug being fixed); else a
- * generic `?` — NEVER silently dropped, mirroring the file-delivery workaround's own now-reverted preview
- * convention: a visible placeholder beats a character vanishing with no trace. Every other codepoint —
+ * visible symbol is, so a `?` there would corrupt running text worse than the bug being fixed); else
+ * (card 7cbb3298) an NFKC-normalized substitute via {@link codexNfkcFold} IF that normalization happens to
+ * land on pure ASCII (fullwidth digits, superscripts, "№", ...); else a generic `?` — NEVER silently
+ * dropped, mirroring the file-delivery workaround's own now-reverted preview convention: a visible
+ * placeholder beats a character vanishing with no trace. Every other codepoint —
  * plain ASCII, any Unicode letter, any astral codepoint — passes through completely untouched, so this
  * can never corrupt Cyrillic/Greek/CJK text or emoji that codex's TUI already delivers correctly (see
  * {@link codexCharNeedsAsciiFold}'s own doc for the one disclosed exception: an abugida's combining
@@ -344,7 +370,7 @@ export function codexAsciiFold(text: string): string {
     if (!codexCharNeedsAsciiFold(cp)) { out += ch; continue; }
     if (codexIsDefaultIgnorable(ch)) continue; // elide — see its own doc
     if (codexIsFoldableWhitespace(ch)) { out += " "; continue; } // fold to a plain space — see its own doc
-    out += CODEX_ASCII_FOLD_MAP.get(cp) ?? "?";
+    out += CODEX_ASCII_FOLD_MAP.get(cp) ?? codexNfkcFold(ch) ?? "?";
   }
   return out;
 }

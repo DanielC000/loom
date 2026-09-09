@@ -15,7 +15,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 const {
   isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, CodexTrustDialogLock,
-  codexAsciiFold, codexCharNeedsAsciiFold,
+  codexAsciiFold, codexCharNeedsAsciiFold, codexNfkcFold,
 } = await import("../dist/pty/codex-host.js");
 const {
   TRUST_DIALOG_MARKER, BUSY_STATUS_MARKER, CODEX_READY_PLACEHOLDER, CODEX_MODEL_LOADED_RE, stripAnsiCsi, hashConfigBefore, diffConfigAfterSpawn,
@@ -385,9 +385,38 @@ check(
   // survives; the vowel sign is Mn and folds to '?'.
   check("codexAsciiFold: KNOWN LIMIT — a Devanagari base consonant (a LETTER) survives untouched", codexAsciiFold("कि").startsWith("क"));
   check("codexAsciiFold: KNOWN LIMIT — the dependent vowel sign after it (a combining MARK, not a letter) folds to '?', losing the vowel — disclosed in codexCharNeedsAsciiFold's own doc, not silently accepted", codexAsciiFold("कि") === "क?");
+
+  // --- card 7cbb3298: box-drawing curated entries + the NFKC tier -----------------------------------
+  // Each assertion checks what the codepoint folds TO, not merely that it needs folding — the same
+  // discipline POLARITY 3 above states, restated here because it is exactly the gap ("needsFold===true
+  // but nobody checked the output") that let NBSP->'?' slip past review on the parent card.
+
+  // Box-drawing: a `tree`/table/ASCII-diagram specimen folds to a legible ASCII approximation, not a wall
+  // of '?'.
+  check("codexAsciiFold: a box-drawing tree fragment folds every glyph to a curated ASCII substitute, never '?'", codexAsciiFold("┌─┬─┐\n├─┼─┤\n└─┴─┘") === "+-+-+\n+-+-+\n+-+-+");
+  check("codexAsciiFold: bare horizontal/vertical box-drawing lines fold to '-'/'|'", codexAsciiFold("─│") === "-|");
+
+  // NFKC tier, exercised through the full pipeline: an UNCURATED codepoint that NFKC happens to normalize
+  // to pure ASCII now recovers real text instead of falling to '?'.
+  check("codexAsciiFold: fullwidth digit '１' (uncurated) recovers via NFKC to '1'", codexAsciiFold("１") === "1");
+  check("codexAsciiFold: superscript '²' (uncurated) recovers via NFKC to '2'", codexAsciiFold("v²") === "v2");
+  check("codexAsciiFold: numero sign '№' (uncurated) recovers via NFKC to the two-character 'No'", codexAsciiFold("№4") === "No4");
+
+  // NFKC tier — the "does not over-reach" positive control the DoD asks for: every specimen that must
+  // stay '?' does so because codexNfkcFold ITSELF returns null for it (not merely because the curated map
+  // happens to intercept it first — em dash is a separate case, checked next).
+  check("codexNfkcFold: section sign '§' does not decompose under NFKC ⇒ null (still falls to '?')", codexNfkcFold("§") === null);
+  check("codexNfkcFold: degree sign '°' does not decompose under NFKC ⇒ null (still falls to '?')", codexNfkcFold("°") === null);
+  check("codexNfkcFold: em dash '—' does not decompose under NFKC ⇒ null — the curated map handles it FIRST in the real pipeline, but the tier itself must not silently over-reach on it either", codexNfkcFold("—") === null);
+  check("codexNfkcFold: less-than-or-equal '≤' does not decompose under NFKC ⇒ null (still falls to '?')", codexNfkcFold("≤") === null);
+  check("codexNfkcFold: arabic-indic digit U+0660 does not decompose to an ASCII digit under NFKC ⇒ null (still falls to '?')", codexNfkcFold("٠") === null);
+  check("codexAsciiFold: an uncurated codepoint whose NFKC tier returns null (section sign) still falls all the way through to the visible '?', end to end", codexAsciiFold("a§b") === "a?b");
+
+  // Byte-identical guarantee (DoD-3): none of the above changes anything for text with nothing to fold.
+  check("codexAsciiFold: pure ASCII text carrying digits/punctuation the NFKC tier could theoretically touch is still returned byte-identical via the early-return fast path", codexAsciiFold("v2 No4, a=1 (ok)") === "v2 No4, a=1 (ok)");
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — codex-host.ts's trust-dialog/busy-idle/ready-marker/model-loaded/MCP-arg decision logic is proven both ways (real markers fire, ordinary/malformed input doesn't); isCodexModelLoaded (card 448f1b4a) correctly reads false against the BYTE-EXACT real false-ready specimen (raw ANSI included, from the actual gate-output capture, not a stripped rendering) even though isCodexReadyMarkerPresent alone reads true against it, stays accumulation-safe against stale 'loading' bytes, and a RED proof confirms CODEX_MODEL_LOADED_RE tested WITHOUT stripAnsiCsi wrongly reads true against those same real bytes (the escape-swallowing bug a manager review caught before merge); the MCP-arg translation stays consistent with the REAL buildMcpServers routing table, the trust-dialog lock serializes FIFO and survives a rejecting holder, and diffConfigAfterSpawn's residual disclosure (Code Review M7) correctly fires even when the expected trust-block AND something else both changed; and (card 0e83c855 round 4, Code Review round 1 Major [2] fix included) codexAsciiFold/codexCharNeedsAsciiFold's measured letter/astral boundary is pinned across THREE polarities, every assertion checking what a codepoint folds TO rather than merely that it needs folding — the visible drop class folds to curated substitutions or a generic '?' fallback; Default_Ignorable_Code_Point codepoints (variation selectors, ZWJ including inside real multi-codepoint emoji sequences, ZWSP, soft hyphen, BOM, LRM) elide to nothing; White_Space codepoints (NBSP and friends) fold to a plain space rather than corrupting running text with a stray '?'; a bare combining mark still folds to '?' as a disclosed, deliberate limit (verified NOT swept into the elision set); and any Unicode letter (Latin/Cyrillic/Greek/CJK) or astral codepoint passes through completely byte-identical, including the exact specimens that falsified the prior byte-length and East-Asian-Width theories. See codex-queue-state-machine.mjs for coverage of the real stateful wiring this logic is delegated to from (including the WIRING assertion itself — that submitCodex actually calls this, not just that the pure function is correct in isolation), and codex-prompt-ascii-fold-real-spawn.mjs for the real-spawn proof that a real codex process actually receives the folded result."
+  ? "\n✅ ALL PASS — codex-host.ts's trust-dialog/busy-idle/ready-marker/model-loaded/MCP-arg decision logic is proven both ways (real markers fire, ordinary/malformed input doesn't); isCodexModelLoaded (card 448f1b4a) correctly reads false against the BYTE-EXACT real false-ready specimen (raw ANSI included, from the actual gate-output capture, not a stripped rendering) even though isCodexReadyMarkerPresent alone reads true against it, stays accumulation-safe against stale 'loading' bytes, and a RED proof confirms CODEX_MODEL_LOADED_RE tested WITHOUT stripAnsiCsi wrongly reads true against those same real bytes (the escape-swallowing bug a manager review caught before merge); the MCP-arg translation stays consistent with the REAL buildMcpServers routing table, the trust-dialog lock serializes FIFO and survives a rejecting holder, and diffConfigAfterSpawn's residual disclosure (Code Review M7) correctly fires even when the expected trust-block AND something else both changed; and (card 0e83c855 round 4, Code Review round 1 Major [2] fix included) codexAsciiFold/codexCharNeedsAsciiFold's measured letter/astral boundary is pinned across THREE polarities, every assertion checking what a codepoint folds TO rather than merely that it needs folding — the visible drop class folds to curated substitutions or a generic '?' fallback; Default_Ignorable_Code_Point codepoints (variation selectors, ZWJ including inside real multi-codepoint emoji sequences, ZWSP, soft hyphen, BOM, LRM) elide to nothing; White_Space codepoints (NBSP and friends) fold to a plain space rather than corrupting running text with a stray '?'; a bare combining mark still folds to '?' as a disclosed, deliberate limit (verified NOT swept into the elision set); and any Unicode letter (Latin/Cyrillic/Greek/CJK) or astral codepoint passes through completely byte-identical, including the exact specimens that falsified the prior byte-length and East-Asian-Width theories. See codex-queue-state-machine.mjs for coverage of the real stateful wiring this logic is delegated to from (including the WIRING assertion itself — that submitCodex actually calls this, not just that the pure function is correct in isolation), and codex-prompt-ascii-fold-real-spawn.mjs for the real-spawn proof that a real codex process actually receives the folded result. Card 7cbb3298 raises the substitution floor above the parent's bare '?': box-drawing (U+2500 block) now folds to a curated ASCII line/corner approximation instead of a wall of '?', and an uncurated drop-class codepoint gets one more chance via an NFKC-normalize-then-require-pure-ASCII tier (codexNfkcFold) before falling to '?' — recovering fullwidth digits, superscripts, and '№' for free while section sign/degree/em dash/<=/arabic-indic digits are proven (both via the isolated tier function and end to end) to correctly keep falling through, since none of them decompose to ASCII under NFKC."
   : `\n❌ ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);
