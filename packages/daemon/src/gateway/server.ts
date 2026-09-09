@@ -2747,28 +2747,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
 
   // --- Hook relay target (loopback only). DELIBERATELY excluded from the loopback-secret bearer guard
-  // above (card 93249b52 considered and rejected extending `isGuardedInternalWrite` here, alongside
-  // gating /internal/shutdown + /internal/update): this is the SessionStart hook relay
-  // (assets/hook-relay.mjs), invoked by a child of the vendor CLI on EVERY session start/resume —
-  // high-frequency, not human-driven, and the relay has no straightforward way to hold or present a
-  // SHARED secret the way a human-driven `loom stop`/browser caller can (it's a child of the vendor CLI,
-  // not something this project controls the invocation of). Gating it wrong breaks every spawn on the
-  // daemon — that alone is the reason it's excluded from THAT specific guard.
-  //
-  // Card a2407ed4: that exclusion left `body.sessionId` below CALLER-SUPPLIED with NO requirement at
-  // all — `deliverHook` (pty/host.ts) early-returns only on an unknown id or a non-"claude" kind, so ANY
-  // co-resident caller (loopback + a guessable/enumerable sessionId — 9ccedbee gates only non-GET
-  // `/api/*`, so `GET /api/sessions` stays open) could forge a hook against ANY live session it had no
-  // relationship to. `verifyHookToken` closes that ZERO-EFFORT path with a DIFFERENT mechanism than the
-  // bearer guard above: a per-session token minted at spawn (see Live.hookToken's doc), baked into the
-  // relay's own command line alongside the sessionId/port already there — so the relay never needs to
-  // hold or read a SHARED secret, only present the value it was already invoked with.
-  //
-  // ⛔ THIS IS NOT "HOOKS ARE NOW AUTHENTICATED" and does NOT achieve isolation — under same-OS-user
-  // co-residency with no sandbox, a caller that deliberately reads the TARGET session's own settings.json
-  // (where the token rides) can still extract it; that ceiling is inherited from 93249b52, not closed.
-  // What changed: targeting a session now requires a deliberate, per-target read instead of a bare guess,
-  // and a leaked token is scoped to the one session it belongs to — never a fleet-wide bypass.
+  // above — this is the SessionStart hook relay (assets/hook-relay.mjs), invoked by a child of the vendor
+  // CLI on EVERY session start/resume, with no straightforward way to hold/present that shared secret.
+  // @decision a2407ed4 — verifyHookToken (a per-session token, not the shared bearer secret) closes the
+  // forge-against-any-session gap this exclusion otherwise left open. See docs/decisions/ for the mechanism.
+  // ⛔ THIS IS NOT "HOOKS ARE NOW AUTHENTICATED" and does NOT achieve isolation — a co-resident caller that
+  // deliberately reads the TARGET session's own settings.json can still extract the token; that ceiling is
+  // inherited from 93249b52, not closed by this fix.
   app.post("/internal/hook", async (req, reply) => {
     if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
     const body = req.body as { sessionId?: string; hook?: Record<string, unknown>; token?: string };
@@ -2784,51 +2769,24 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
 
   // --- Graceful shutdown control hook (loopback only) — the cross-platform stop path for `loom stop`.
-  // Windows detached processes have NO real SIGTERM, so the management CLI can't signal a backgrounded
-  // daemon into its graceful teardown; it POSTs here instead. This triggers the SAME path the
-  // SIGINT/SIGTERM handlers run (snapshot live transcripts → stop every watcher → exit 0). Exits 0
-  // (clean stop), NOT 75 (75 is the supervisor's RESTART sentinel — a stop must never relaunch).
-  // Trust posture: loopback-gated (the explicit !LOOPBACK → 403 below), NOT an agent MCP tool,
-  // unreachable by any agent session (same boundary as the gate/vault/git writers) — AND (card 93249b52,
-  // closing the gap 9ccedbee's own Code Review flagged: this route fetches nothing but STOPS the daemon,
-  // a real capability an unauthenticated co-resident agent should not have) additionally covered by the
-  // SAME loopback-secret bearer guard as every /api/* write, via the `isGuardedInternalWrite` check in
-  // the onRequest hook above — this route's own `!LOOPBACK` check stays as the fail-closed backstop for a
-  // non-loopback caller and for the (test-only) case where `deps.loopbackSecret` is unset. `bin/loom.mjs`
-  // (`loom stop`) reads the SAME secret file the browser reads (`readLoopbackSecret`) and sends it as
-  // `Authorization: Bearer <secret>` — see that file's `postShutdown`.
-  //
-  // This is a DIFFERENT mechanism than /internal/hook's (card a2407ed4): that route is gated by a
-  // per-session token instead of this shared bearer secret, because its caller (a child of the vendor
-  // CLI, invoked on every hook of every session) has no straightforward way to hold or present a shared
-  // secret the way this human-driven (`loom stop`) / browser caller can — see that route's own comment
-  // for why. Neither implies the other; each caller shape got the mechanism that actually fits it.
-  //
-  // We ack 202 first and defer the exit one tick so the response flushes before the process dies (the
-  // CLI reads the ack, then polls the port until it stops answering).
+  // Windows detached processes have NO real SIGTERM, so the management CLI POSTs here instead; this
+  // triggers the SAME path the SIGINT/SIGTERM handlers run. Exits 0 (clean stop), NOT 75 (the
+  // supervisor's RESTART sentinel — a stop must never relaunch).
+  // @decision 93249b52 — loopback-IP alone is not enough; also covered by the loopback-secret bearer
+  // guard above (`isGuardedInternalWrite`) — stopping the daemon is too large a capability for a
+  // co-resident agent to reach unauthenticated. See docs/decisions/ for the full rationale.
   app.post("/internal/shutdown", async (req, reply) => {
     if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
     setTimeout(() => deps.requestShutdown(), 50);
     return reply.code(202).send({ ok: true, stopping: true });
   });
 
-  // --- Self-update control hook (Epic 2c-2, UI half) — the "Update & restart" button's target. Trust
-  // posture: loopback-gated (the explicit !LOOPBACK → 403 below), NOT an agent MCP tool, unreachable by
-  // any agent session (same boundary as gateCommand / the vault+git writers) — AND (card 93249b52) ALSO
-  // covered by the loopback-secret bearer guard, same as /internal/shutdown just above: this route
-  // FETCHES AND INSTALLS CODE on a packaged install, a strictly larger blast radius than any /api/* write
-  // the guard already covered, so leaving it on the old loopback-only posture was the larger gap. The
-  // browser is the only real-world caller (`packages/web/src/lib/api.ts`'s `triggerUpdate`) and already
-  // sends the same bearer header every other write does (`authHeaders()`) — `bin/loom.mjs`'s `loom
-  // update` CLI command does NOT call this route at all, it drives its own stop→npm-install→start cycle
-  // directly (verified by reading bin/loom.mjs: no `/internal/update` reference anywhere in it), so no
-  // CLI change was needed here (contrast /internal/shutdown, which the CLI DOES call). PACKAGED-ONLY
-  // (load-bearing): the npm reinstall is valid only for an npm-global `loomctl` install — npm-installing
-  // over a checkout would be wrong — so a from-source daemon REFUSES with 409 and a clear message (and
-  // its banner never shows anyway: GET /api/update-status reports packaged:false). On a packaged install
-  // we ack 202 and defer the spawn one tick so the response flushes first; the detached `loom update`
-  // (E2c-1) then runs stop→install→start. (A packaged end-user daemon runs NO supervisor, so the exit-75
-  // restart sentinel never applies here — the stop→install→start cycle is the restart path.) ---
+  // --- Self-update control hook (Epic 2c-2, UI half) — the "Update & restart" button's target.
+  // @decision 93249b52 — loopback-gated AND covered by the loopback-secret bearer guard (same as
+  // /internal/shutdown): this route FETCHES AND INSTALLS CODE on a packaged install, a strictly larger
+  // blast radius than any /api/* write. PACKAGED-ONLY: a from-source daemon REFUSES with 409 — the npm
+  // reinstall is valid only for an npm-global `loomctl` install. See docs/decisions/ for the full split
+  // vs. `loom update` (CLI, which never calls this route) and the ack/defer mechanics.
   app.post("/internal/update", async (req, reply) => {
     if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
     if (!isPackagedInstall()) {
@@ -2838,25 +2796,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return reply.code(202).send({ ok: true, updating: true });
   });
 
-  // --- Test-only data seeding (card 32fd6f4c, extended by card 0954ed9c for the Companion Manage e2e
-  // spec, by card d01311b6 for the unified terminal / sessions e2e spec — the `liveSessions` + `wakes`
-  // kinds seed a live-but-NO-PTY session row + a pending wake so the unified <TerminalCard> chrome + the
-  // SessionWakes sub-panel render with no real claude — and by card a53e6bc9, which adds `ptyGeometry`/
-  // `ptyBytes` to `liveSessions[]` so a WS attach can ALSO replay a pinned geometry + canned bytes via
-  // `deps.pty.seedCanned` (no real spawn, no in-browser monkeypatching) — closes the e2e seeding gap for
-  // write paths an isolated e2e spec cannot otherwise reach:
-  // `session_usage_samples` (written ONLY by the internal usage sampler), `runs` (filled ONLY by the
-  // real-spawn-triggering POST /api/runs above, forbidden in the e2e fixture), and now a companion's
-  // config/session/memory/reminders (writable in prod ONLY via `/api/companion/provision` — spawns a real
-  // assistant session — or `/api/companion/config` — calls `reconcile()` and ARMS the runtime — both
-  // forbidden in the e2e fixture's no-spawn-guard world). Gated on BOTH `inTestMode()` (LOOM_TEST=1,
-  // which the e2e fixture already sets) AND loopback, so this NEVER mounts against — and is unreachable
-  // even by IP against — a real daemon; zero prod surface, same posture as the other /internal/* routes
-  // with an extra fail-closed layer. Inserts rows directly via deps.db (insertUsageSample/insertRun/
-  // insertSession/upsertCompanionConfig/insertCompanionReminder) + the memory FILE store
-  // (authorCompanionMemory), bypassing SessionService.startRun/PTY and companion reconcile entirely — no
-  // agent ever spawns, no runtime ever arms. THE pattern for seeding daemon-only data from an e2e spec
-  // (see Projects/Loom/Design/E2E Test Suite Design.md). ---
+  // @decision 32fd6f4c — /internal/test/seed: direct deps.db/file writes for e2e-only data a spec cannot
+  // otherwise reach (usage samples, runs, live-no-PTY sessions, companion state) — gated on BOTH
+  // inTestMode() AND loopback, structurally unreachable on a real daemon. See docs/decisions/ for the
+  // per-kind history and the full seedable-field list.
   if (inTestMode()) {
     app.post("/internal/test/seed", async (req, reply) => {
       if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
@@ -3765,40 +3708,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     return t;
   });
-  // Memory — the read-only, per-project window into project_memory (the durable knowledge the fleet
-  // writes + recalls via the `memory` MCP: memory_write/read/list/forget). PROJECT-SCOPED: the db
-  // query filters by projectId (WHERE project_id = ?), so this ONLY ever returns THIS project's own
-  // memory — never another project's. Calls db.listProjectMemory DIRECTLY (raw rows, no
-  // `requestAnnotations`) rather than the memory_list MCP tool's business logic — that tool wraps the
-  // same rows with a live-resolved-request-link annotation (card e6d270b3); this route deliberately
-  // doesn't, since the owner viewing this page can already see a request's live state via the Requests
-  // UI directly. Returns full entries — pinned flag + retrievalCount + updatedAt + the note text — so a
-  // single list read backs BOTH the entry list and the note-detail body. HUMAN-only loopback read, same
-  // trust posture as the sibling /board + /vault project reads; READ-ONLY — no write/forget surface
-  // here (curation stays the memory MCP's job). **The "corpus is small by design: dozens to
-  // low-hundreds of short notes" premise this comment used to cite is stale** (card 41c3f546 — this
-  // project's own store already measured at 487 notes, 2026-09-03); see project-memory-backlinks.ts's
-  // `findInboundBacklinks` doc comment for the live reconciliation. This route stays safe at that scale
-  // ONLY because backlinks below are resolved via `findInboundBacklinksBulk` over one fetched corpus,
-  // not per row.
-  //
-  // `backlinks` (card d371a9bf, the human-UI half of card e4e180ad's agent-facing field) is resolved
-  // HERE, over the corpus this route already fetched — deliberately NOT by repointing this route at
-  // `mcp/memory.ts`'s `listProjectMemoryEntries` wrapper, which would also drag in `requestAnnotations`
-  // and `everDelivered`: d371a9bf's own decision block excludes both (the first is redundant with the
-  // Requests UI already shown above; the second is undecidable between never-matched and
-  // matched-then-evicted, so it would mislead a human reader). Shaped as structured
-  // `{ keys, totalFound }` (`ProjectMemoryBacklinks`), not the prose annotation LINES
-  // `ProjectMemoryEntryWithLinks.backlinks: string[]` renders for agents — the UI needs a bare key to
-  // link to, not text to parse. Capped at `findInboundBacklinksBulk`'s own default (`MAX_BACKLINKS`),
-  // same "N of M" truncation contract the agent-facing tools already use — never silent.
-  //
-  // `findInboundBacklinksBulk` (card 41c3f546), not one `findInboundBacklinks` call per row: the
-  // per-row shape used to mean N+1 `db.listProjectMemory` fetches and N full-corpus regex scans for a
-  // listing of N notes — measured at ~4.2s wall-clock (synchronous, blocking the daemon's single event
-  // loop for the whole request) against this project's own 487-note corpus, versus ~15ms for the bulk
-  // path over the identical corpus and cap. `corpus` here is fetched exactly once and reused for every
-  // row's backlink lookup.
+  // Memory — the read-only, per-project window into project_memory. PROJECT-SCOPED (WHERE project_id =
+  // ?). Calls db.listProjectMemory DIRECTLY (raw rows, no `requestAnnotations`), unlike the memory_list
+  // MCP tool. HUMAN-only loopback read; READ-ONLY — no write/forget surface here.
+  // @decision 41c3f546 — backlinks are resolved via findInboundBacklinksBulk over ONE fetched corpus,
+  // never per-row (N+1 fetches + N full-corpus scans measured ~4.2s vs ~15ms bulk on this project's
+  // corpus). @decision d371a9bf — the `backlinks` field is the structured {keys,totalFound} shape, never
+  // the agent-facing prose lines. See docs/decisions/ for both.
   app.get("/api/projects/:id/memory", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
@@ -5197,23 +5113,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { id } = req.params as { id: string };
     const { text } = (req.body as { text?: string }) ?? {};
     if (typeof text !== "string" || !text.trim()) return reply.code(400).send({ error: "text required" });
-    // SECURITY (card 018ce1db): a Companion (role:"assistant") session is REFUSED here, full stop — never
-    // even reaches enqueueStdin. This route's `ownerText:text` below (see the comment two lines down)
-    // makes it a Primitive-A owner-attestation writer, but that attestation is only trustworthy for THIS
-    // route's actual audience: whichever human/manager session the web UI's own Composer is bound to
-    // (Terminals.tsx deliberately excludes assistant-role sessions from ever rendering that Composer — "a
-    // companion is driven ONLY through its chat surface /ws/companion/:id, never a raw pty tile + STDIN
-    // Composer"). That client-side exclusion is NOT a security boundary — Loom's default (non-remote)
-    // gateway trusts loopback wholesale (gateway/trust-tier.ts's own doc: "there is no per-route auth"),
-    // and a loopback peer is any co-resident process, including a project MANAGER's own spawned Claude
-    // Code session with Bash — not only the human's browser. Before this fix, that manager could `curl`
-    // this exact route with the companion's sessionId and author words that land as `ownerText`, i.e. in
-    // the OWNER's role slot for the Companion's very next turn — the privilege-escalation path card
-    // 018ce1db exists to close. The Companion's OWN authenticated inbound path (chat-gateway.ts's
-    // handleInbound, reached via /ws/companion/:sessionId or an external channel adapter) is untouched by
-    // this check and keeps attesting ownerText exactly as before — this only removes a SECOND, unintended
-    // route into the same role slot. See gateway/server.ts's sibling fix on GET /ws/term/:sessionId's
-    // stdin path for the other inbound surface this same defect reached.
+    // @decision 018ce1db — a Companion (role:"assistant") session is REFUSED here, full stop — never even
+    // reaches enqueueStdin. Loopback trusts ANY co-resident process (incl. a manager's own Bash), so
+    // without this a manager could curl this route and author words that land as the Companion's own
+    // ownerText — a privilege-escalation path. See docs/decisions/ for the full rationale + sibling fix.
     if (deps.db.getSession(id)?.role === "assistant") {
       // Owner-facing wording (not internals-facing "assistant-role"/"generic composer route" jargon) —
       // sibling card 9ccedbee's client fix (api.ts's post/del/put parsing a REST {error} body via
@@ -5675,28 +5578,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
 
   // --- Live IN-APP companion chat: attach/detach (JSON chat + audio frames only) ---
-  // The DEFAULT companion transport. DELIBERATELY SEPARATE from /ws/term above (which streams raw pty bytes):
-  // a distinct route + a distinct JSON message channel, so the in-app chat multiplexes cleanly ALONGSIDE
-  // terminal-attach on the SAME session with no collision (the chat WS never touches the pty stream).
-  // SECURITY (card 351e89af, closing a gap card 9ccedbee deliberately left open): this route's doc comment
-  // used to claim "the loopback cockpit IS the authenticated local user — NO bot token, NO pairing, NO
-  // external authz". That conflated "safe for an authenticated REMOTE human" (trust-tier.ts's predicate)
-  // with "safe from an unauthenticated CO-RESIDENT agent" (the loopback human-only-write guard's own
-  // predicate, above) — on the default loopback-only daemon ANY co-resident process that can open a TCP
-  // connection, including an agent session's own Bash tool, could open this socket and inject a `{type:
-  // "chat"}` frame straight into the owner-role Companion slot, with no manager involved at all (unlike the
-  // alert-text path card 018ce1db fixes). The loopback human-only-write guard above now gates THIS upgrade
-  // exactly like `/ws/term`'s (same mechanism, same secret, reused verbatim — not a second scheme): reaching
-  // this handler at all already means the caller held the loopback secret, or the connection arrived on a
-  // non-loopback bind and already passed the remote tier's own token check. CEILING (inherited, not
-  // re-litigated): under same-OS-user co-residency with no sandbox, an agent that specifically goes looking
-  // for and reads the loopback secret file still gets a valid credential — this closes the casual/incidental
-  // bypass, not that stronger threat. INBOUND (a message typed in the cockpit) routes through the SAME
-  // bindings-authoritative gateway (companion.handleInAppInbound → gateway.handleInbound); a session with no
-  // in-app binding is rejected there (this carries traffic only for an already-provisioned in-app companion
-  // — it creates nothing). OUTBOUND companion replies arrive via the in-app hub (deps.inApp) pushing a
-  // { type:"chat" } frame here. ADDITIVE: with no in-app companion, attach is a no-op and inbound is
-  // rejected — every session unaffected.
+  // The DEFAULT companion transport. DELIBERATELY SEPARATE from /ws/term above (raw pty bytes): a distinct
+  // route + JSON message channel, multiplexing cleanly alongside terminal-attach with no collision.
+  // @decision 351e89af — gated by the SAME loopback human-only-write guard as /ws/term (not "loopback =
+  // authenticated human" — that conflates two different predicates). CEILING: this closes the
+  // casual/incidental bypass, NOT a co-resident agent that deliberately reads the loopback secret file.
+  // See docs/decisions/ for the full rationale.
   //
   // VOICE (Companion Voice epic, VOICE-P4 inbound): a { type:"audio", data, mimeType } frame carries a
   // web-mic recording as base64 — untrusted bytes, decoded here (decodeInAppAudioToTempFile) into a
