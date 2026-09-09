@@ -3624,3 +3624,16 @@ export function contextWindowForModel(model?: string | null): number {
   for (const { match, window } of CONTEXT_WINDOW_BY_MODEL) if (match.test(model)) return window;
   return DEFAULT_CONTEXT_WINDOW;
 }
+
+/**
+ * Card 808ee811: `ctxInputTokens` pre-divided by its model's context window, rounded to a whole
+ * percent — the SAME null-vs-measured discipline as the raw counter: `null` EXACTLY when `tokens` is
+ * null (never a measured `0`), so a reader can never mistake "not measured" for "empty" — the trap
+ * that inverts a recycle decision (a `0` reads as a fresh seat). Shared by worker_list/worker_status's
+ * `ctxPct` and worker_report's manager-facing notification/event, so the same rounding rule can't drift
+ * between the two surfaces.
+ */
+export function contextPercentFor(tokens?: number | null, model?: string | null): number | null {
+  if (tokens == null) return null;
+  return Math.round((tokens / contextWindowForModel(model)) * 100);
+}

@@ -4,7 +4,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import {
   resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig, resolveCodescapeIntegrationPath,
-  usesOrchestrationMcp,
+  usesOrchestrationMcp, contextPercentFor,
   type Session, type StopMode, type OrchestrationEvent, type Task, type Project,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
@@ -12657,6 +12657,14 @@ export class SessionService {
         ...(warning ? { warning } : {}), ...(report.noChanges ? { noChanges: true } : {}),
         ...(report.awaiting === "background" ? { awaiting: "background" } : {}),
         ...(managerSessionId ? { managerTurnSeqAtReport: this.db.getSession(managerSessionId)?.turnSeq ?? 0 } : {}),
+        // Card 808ee811: the worker's own context occupancy AT REPORT TIME — the exact "should this
+        // recycle?" moment named in that card — so a manager reading this event later (worker_report_get,
+        // or the [loom:worker-report] nudge below) never has to open a transcript or make a separate
+        // worker_list/worker_status call just to see it. Always present (never omitted), unconditionally
+        // null when unmeasured (a codex-harness worker structurally never sets ctxInputTokens — see
+        // codex-adapter.ts's own doc) — never a silent 0, which would misread as a fresh seat.
+        ctxInputTokens: worker.ctxInputTokens ?? null,
+        ctxPct: contextPercentFor(worker.ctxInputTokens, worker.model),
         // Card 8d158088: recorded ONLY on a positive confirmation — see this method's own doc on
         // `subagentAttribution` above for why "unknown"/"ambiguous"/"confirmed-main" are never surfaced.
         ...(isConfirmedSubagent(report.subagentAttribution?.state)
@@ -12674,6 +12682,13 @@ export class SessionService {
       if (report.prUrl) framed += ` | PR: ${report.prUrl}`;
       if (report.needs) framed += ` | needs: ${report.needs}`;
       if (warning) framed += ` | warning: ${warning}`;
+      // Card 808ee811: surfaced in the SAME nudge the manager reads at the clean-seam moment it decides
+      // continue-vs-recycle — never a bare 0 for an unmeasured (e.g. codex-harness) worker, which would
+      // misread as a fresh seat and invert that decision.
+      const ctxPctAtReport = contextPercentFor(worker.ctxInputTokens, worker.model);
+      framed += ctxPctAtReport != null
+        ? ` | ctx: ${ctxPctAtReport}% (${worker.ctxInputTokens} tokens)`
+        : " | ctx: unknown";
       // Card 8d158088: surfaced in the SAME nudge the manager already reads to decide whether to act on
       // this report — the action path, not a separate advisory log line (see this method's own doc above).
       if (isConfirmedSubagent(report.subagentAttribution?.state)) {
