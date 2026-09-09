@@ -47,39 +47,11 @@ const OUTPUT_TAIL_BYTES = 4096;
  *  {@link extractFailingTest} (kept for a caller holding only a raw string, e.g. a test double that bypasses
  *  the real runner). Recognizes cross-ecosystem failure markers: an uncaught-throw idiom (below), Loom's own
  *  `FAIL  <label>` convention, Jest/AVA/tap-style `FAIL`/`not ok`/✗/✖ markers, thrown `AssertionError`s, and
- *  `error TSxxxx` typechecker diagnostics.
- *
- *  Card 0e5b2045: the `UNCAUGHT` tier sits FIRST (highest priority), ABOVE `FAIL`/`not ok` — a deliberate
- *  priority decision, not an append. `result()` (below) returns the highest-priority tier with any match,
- *  so insertion position decides which line wins when a run prints both. A subset of this daemon's own
- *  test files report a genuine (non-`AssertionError`) thrown failure via `console.error("... UNCAUGHT ...")`
- *  — re-answer the live count yourself with `grep -rl UNCAUGHT packages/daemon/test/*.mjs` (an upper bound:
- *  a couple of hits are files that only mention the idiom in a comment or fixture, not files that use it for
- *  their own real failures) rather than trusting any number written here — card 63664129 measured ~12-14
- *  against this file's own stale "9", on 2026-09-04, and a hardcoded count is exactly the kind of thing that
- *  drifts silently on the next file added or removed. This daemon's own
- *  `test-daemon.mjs` `runLane` ALSO prints a `FAIL  <name>  (exit N)` wrapper line for every
- *  failing file, regardless of why it failed — a content-free summary (name + exit code only) that matched
- *  tier 0 and WON, in the incident that motivated this card, while the actual stack (only reachable via the
- *  `UNCAUGHT` line, printed later in the same stream, in `test-daemon.mjs`'s own end-of-run `FAILURES:`
- *  echo) matched no tier at all and was discarded. An explicit uncaught-exception marker names a real thrown
- *  error with a stack; a bare `FAIL`/`not ok` label is not reliably richer than that (this project's own
- *  convention proves it can be strictly poorer) — so when both are present, the uncaught-exception detail is
- *  the more useful line for a human diagnosing a rejection, and wins.
- *  ⚠️ DECOUPLED FROM RETRY ON PURPOSE (manager review, card 0e5b2045): {@link identifyRetriableTestFile}
- *  only recognizes a string shaped like `FAIL <name>` (its own bare-identifier regex) to drive the
- *  single-file merge retry — and `kickoff-real-spawn` (one of the `UNCAUGHT`-idiom files above) is this
- *  daemon's OWN measured source of both weaker-passes ever recorded, at roughly a 1-in-11 rate. Letting
- *  `result()`'s new UNCAUGHT-wins priority also decide retry eligibility would have turned every one of
- *  those self-healing retries into a hard merge rejection (~15 extra minutes each) as a SIDE EFFECT of a
- *  diagnostics fix — a real, recurring cost, and a policy change to fleet-wide merge-gate retry behavior
- *  that deserves its own deliberate decision, not an accidental one. So retry reads a SEPARATE accessor —
- *  {@link createFailingTestTracker.failTierResult}/`.failTierMatchCount` — independent of whichever tier
- *  `result()` picked for display. `result()`'s diagnostic value and identifyRetriableTestFile's retry
- *  target can now differ on the SAME run (by design) without either one losing information the other
- *  already had. **Card 6c84b87b:** these two accessors do NOT read this file's `FAILING_TEST_PATTERNS`
- *  tiers at all — see {@link HARNESS_FAIL_WRAPPER_RE}'s own doc for why the retry needs a narrower,
- *  differently-anchored match than the diagnostic tiers do. */
+ *  `error TSxxxx` typechecker diagnostics. `UNCAUGHT` ranks FIRST (highest priority) — `result()` (below)
+ *  returns the highest-priority tier with any match. Retry eligibility is DELIBERATELY DECOUPLED from this
+ *  priority: it reads {@link createFailingTestTracker.failTierResult}/`.failTierMatchCount` instead, never
+ *  `result()`'s tier.
+ *  @decision 0e5b2045 — see docs/decisions/0e5b2045-uncaught-tier-ranks-above-fail-not-ok-and-retry-is-decoupled.md */
 /** The `FAIL`/`not ok` tier of {@link FAILING_TEST_PATTERNS}, named separately so `scanLine` (below) can
  *  identify a match against THIS specific tier by reference (`===`), independent of its array position. */
 const FAIL_NOT_OK_TIER_RE = /^\s*(FAIL|✗|✖|not ok)\b.*/i;
@@ -90,26 +62,10 @@ const FAILING_TEST_PATTERNS: RegExp[] = [
   /error TS\d+:.*/,
 ];
 
-/**
- * Card 11737292 — a LIVE specimen (op `321a5e6b`'s `[loom:merge-rejected]` nudge) reported `failing: FAIL
- *  some_test.mjs` for a file that does not exist. Root cause: `gate-status.mjs`'s own tests inject a MOCK
- *  gate verdict (`outputTail: "FAIL  some_test.mjs"`) to exercise `sessions/service.ts`'s real
- *  `[gate opId=…] … passed=false …` diagnostic `console.log` — which dumps that mock's `outputTail`
- *  VERBATIM, unindented, as its own line. When `gate-status.mjs` itself later failed for an unrelated
- *  reason (an `exit timeout` in the specimen), `test-daemon.mjs`'s own `FAILURES:` epilogue re-echoed that
- *  captured line into the OUTER gate run's stream, where {@link createFailingTestTracker}'s `FAIL`/`not ok`
- *  tier matched it exactly like a real per-file marker.
- *
- *  A genuine per-file harness wrapper line always carries a trailing `(exit ` suffix
- *  ({@link HARNESS_FAIL_WRAPPER_RE}) and a `check()`-printed assertion line is always a multi-word prose
- *  label (see that helper's own convention, `gate-status.mjs`'s own `check` definition) — neither shape is
- *  a BARE single token. `FAIL  some_test.mjs` is: nothing follows the token, so this is the one shape that
- *  can never legitimately be either of those two real conventions. Cross-checking that token against the
- *  real filesystem (mirroring {@link identifyRetriableTestFile}'s own `fs.existsSync` gate, same fail-closed
- *  posture: a project without this daemon's own `packages/daemon/test/` layout skips the check entirely,
- *  same as that function's own no-op-elsewhere behavior) catches the exact specimen — `some_test.mjs` is a
- *  placeholder name that has never existed on disk — while leaving every genuine bare-name match (a real
- *  file, e.g. from a project that DOES use this convention) untouched. */
+/** Discards a bare `FAIL <token>` line (nothing else on it) whose token isn't a real file under
+ *  `packages/daemon/test/` — catches a mocked gate verdict's `outputTail` leaking into the real stream via
+ *  `test-daemon.mjs`'s own `FAILURES:` epilogue re-echo. A genuine per-file marker never has this bare shape.
+ *  @decision 11737292 — see docs/decisions/11737292-unverifiable-bare-fail-token-guards-a-mocked-verdict-leak.md */
 function isUnverifiableBareFailToken(line: string, cwd: string): boolean {
   const m = /^\s*(?:FAIL|✗|✖|not ok)\s+(\S+)\s*$/i.exec(line);
   if (!m) return false; // has prose/extra content beyond one token — not this shape, don't second-guess it
@@ -122,38 +78,14 @@ function isUnverifiableBareFailToken(line: string, cwd: string): boolean {
 }
 
 /**
- * Card 6c84b87b: the ONLY line shape {@link createFailingTestTracker.failTierResult}/`.failTierMatchCount`
- * — and therefore {@link identifyRetriableTestFile} — may ever count. This is `test-daemon.mjs`'s own
- * `runLane` wrapper line, verbatim: `` console.log(`${result.ok ? "PASS" : "FAIL"}  ${result.name}  (exit
- * ${statusLabel})`) `` (packages/daemon/scripts/test-daemon.mjs) — printed UNINDENTED, exactly once per
- * failing file, the moment that file's own child process settles.
- *
- * 🔴🔴 THE BUG THIS REPLACES: `failTierResult`/`failTierMatchCount` used to read `FAILING_TEST_PATTERNS`'
- * own `FAIL`/not-ok tier — an UNANCHORED, case-insensitive pattern with a leading optional-whitespace run —
- * a pattern shared with the general-purpose diagnostic scan (`result()`/`matchCount()`, still below). Its
- * leading whitespace run was written
- * for THAT purpose (a diagnostic marker can legitimately arrive indented inside another tool's own
- * output), but it ALSO matches `test-daemon.mjs`'s own end-of-run `FAILURES:` epilogue — which re-echoes
- * EVERY failing file's full captured stdout/stderr, indented 6 spaces (`console.log(f.stdout…
- * .map((l) => \`      ${l}\`)…)`) — and 815-of-848 of this daemon's own test files fail an assertion via a
- * `check()` helper that itself prints an unindented `FAIL  <label>` line (e.g.
- * `packages/daemon/test/gate-history.mjs:60`). A file that fails ONE such assertion therefore emits TWO
- * FAIL-tier hits under the old unanchored pattern — the `runLane` wrapper AND its own later echoed
- * `check()` line — so `failTierMatchCount()` read `2`, `identifyRetriableTestFile` required exactly `1`,
- * and the retry was refused for every assertion failure. Only a file that died by THROWING (zero failed
- * `check()`s, so nothing for the epilogue to echo that also matches this tier) ever produced exactly `1`.
- *
- * THE FIX: anchor on BOTH ends of what the wrapper line alone has and nothing else in the stream can fake:
- * (1) NO leading whitespace — every line the `FAILURES:` epilogue echoes is indented (2 spaces for the
- * per-file `  - <name> (exit N): …` header, 6 spaces for the echoed body) — so the epilogue's own echo of a
- * file's `FAIL  <label>` line can never satisfy this pattern; and (2) the trailing `  (exit ` suffix —
- * `check()`'s own per-assertion `FAIL  <label>` print (see the file cited above) never carries it, since
- * only `runLane`'s own per-FILE wrapper knows an exit status at all. Condition (2) is what ALSO closes card
- * `2a79a74c` finding #4 (a reduced-path static guard, run bare via `node <path>` with no `runLane` wrapper
- * at all — see `git/worktrees.ts`'s `buildReducedGateCommand` — prints an unindented `FAIL  <label>` line
- * on its own failed `check()`, satisfying condition (1) alone; requiring condition (2) too means a guard's
- * own bare assertion failure can never be mistaken for a real per-file wrapper line, so it never produces a
- * retry candidate at all, related or not).
+ * The ONLY line shape {@link createFailingTestTracker.failTierResult}/`.failTierMatchCount` — and therefore
+ * {@link identifyRetriableTestFile} — may ever count: `test-daemon.mjs`'s own `runLane` wrapper line,
+ * verbatim, printed UNINDENTED exactly once per failing file. Anchored on BOTH (1) NO leading whitespace and
+ * (2) a trailing `  (exit ` suffix — the two properties ONLY this wrapper line has; a `check()`-printed
+ * per-assertion `FAIL` line (indented when re-echoed by the `FAILURES:` epilogue, or printed bare by a
+ * reduced-path static guard) satisfies at most one, never both, so it can never be mistaken for a real
+ * per-file wrapper line.
+ * @decision 6c84b87b — see docs/decisions/6c84b87b-harness-fail-wrapper-anchors-on-no-indent-and-exit-suffix.md
  */
 export const HARNESS_FAIL_WRAPPER_RE = /^FAIL\s+\S+\s+\(exit /;
 
@@ -177,21 +109,11 @@ export const HARNESS_FAIL_WRAPPER_RE = /^FAIL\s+\S+\s+\(exit /;
  */
 export const HARNESS_NOT_EXECUTED_RE = /^❌ test-daemon\.mjs: \d+ discovered hermetic test file\(s\) were NOT actually executed/;
 
-/** Card 2f0b2e57 (two real merge-gate rejections, both from this daemon's OWN test suite): a line
- *  recording a PASSING assertion — this daemon's own `check()` convention, `PASS  <label>`, optionally
- *  indented — must never be mistaken for a failure, no matter what words the passing assertion's own
- *  LABEL happens to contain. `FAILING_TEST_PATTERNS`' `UNCAUGHT`/`AssertionError`/`error TS\d+` tiers are
- *  all UNANCHORED (they match the keyword ANYWHERE in a line, not just at its start) — a real specimen
- *  (op `5b2075db`) hit this exactly: `merge-gate-single-file-retry.mjs`'s own retry-decoupling assertion
- *  is LABELLED `"the retry call names flaky-j (from failTierTest), never anything derived from the
- *  UNCAUGHT diagnostic string"` — a line describing the UNCAUGHT idiom in prose, which PASSED, was
- *  reported as the failing test. Checked BEFORE any `FAILING_TEST_PATTERNS` tier is tried, so no tier —
- *  anchored or not, tier 0 or tier 3 — can ever win against a line that is itself a recorded PASS. The
- *  `FAIL`/`not ok` tier already can't match a PASS line on its own (it's anchored to the start of the
- *  line), but this guard makes the invariant FLAT and tier-independent rather than an accident of which
- *  tiers happen to be anchored today. Applied in `scanLine` before {@link HARNESS_FAIL_WRAPPER_RE} is
- *  tried too, for the same reason, even though a PASS line can never actually satisfy that pattern (it
- *  never starts with the literal word `FAIL`). */
+/** A line recording a PASSING assertion — this daemon's own `check()` convention, `PASS  <label>`,
+ *  optionally indented — must never be mistaken for a failure, whatever words its own LABEL contains.
+ *  Checked BEFORE any `FAILING_TEST_PATTERNS` tier (all unanchored, so a passing label's prose can
+ *  otherwise match one) and before {@link HARNESS_FAIL_WRAPPER_RE}.
+ *  @decision 2f0b2e57 — see docs/decisions/2f0b2e57-a-recorded-pass-line-is-never-a-failure.md */
 const PASS_LINE_RE = /^\s*PASS\b/i;
 
 /** Cap (bytes/UTF-16 code units) on `createFailingTestTracker`'s `carry` — the not-yet-newline-terminated
@@ -876,24 +798,13 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
 });
 
 /**
- * Force-kill a gate step's process TREE, not just the shell `spawn` returned as `child`. Root cause of
- * card 3564fd1e (the 2026-07-21 fleet-wide gate death spiral): `shell:true` makes `child` a `cmd.exe`
- * (win32) or `sh`/`bash` (posix) whose DESCENDANTS — e.g. `pnpm` → `vitest` → a forked test-worker pool —
- * a plain `child.kill()` never reaches. A gate timeout used to kill only that shell, leaving its
- * grandchildren running immortally; repeated timeouts/retries against the same hanging test each leaked
- * another survivor, and by the time enough had accumulated the host itself saturated, starving every
- * OTHER project's gate into timing out too.
- *  - win32: `taskkill /pid <child.pid> /T /F` kills the whole subtree rooted at the shell.
- *  - posix: the step is spawned with `detached:true` above, making `child.pid` the process GROUP id —
- *    `process.kill(-pid, "SIGKILL")` signals the whole group, not just the shell. A plain
- *    `process.kill(pid, "SIGKILL")` here would reproduce the SAME leak on posix. This is a DELIBERATE
- *    choice, not the accidental gap `killProcessById` (pty/host.ts) has on ITS posix branch — that
- *    function is fine for its own use (a worktree-path reap), where a survivor left behind is caught by
- *    the NEXT sweep regardless of which single pid was targeted; a gate timeout has no such backstop
- *    inside this file — only the caller's own worktree-path sweep (see sessions/service.ts) does, and
- *    only as a belt-and-suspenders catch for whatever already detached before THIS kill lands.
- * Resolves once the kill has been ISSUED (awaits the win32 `taskkill` helper's own exit, so a caller can
- * treat the tree as gone once this settles) — best-effort: an already-exited pid is a silent no-op.
+ * Force-kill a gate step's process TREE, not just the shell `spawn` returned as `child` — `shell:true`
+ * makes `child` a `cmd.exe`/`sh`/`bash` whose DESCENDANTS (e.g. `pnpm` → `vitest` → forked test workers) a
+ * plain `child.kill()` never reaches. win32: `taskkill /pid <child.pid> /T /F` kills the whole subtree.
+ * posix: spawned `detached:true` above so `child.pid` is the process GROUP id — `process.kill(-pid,
+ * "SIGKILL")` signals the whole group; a plain `process.kill(pid, ...)` would leak on posix too.
+ * Resolves once the kill has been ISSUED; best-effort — an already-exited pid is a silent no-op.
+ * @decision 3564fd1e — see docs/decisions/3564fd1e-kill-gate-process-tree-not-just-the-shell.md
  */
 function killGateProcessTree(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => {
@@ -1004,111 +915,14 @@ export function formatGateStepsDiagnostic(steps: GateStepDuration[]): string | u
 }
 
 /**
- * Card 3407caad: how close a step's `durationMs` came to consuming its own `gateCommandTimeoutMs`
- * budget — a WARN-BEFORE-BREACH signal, distinct from `gateExtended`/`anyExtended` (card 9f6598dd),
- * which only ever tells you a run ALREADY breached it (consumed its one-time auto-extend). This fires
- * earlier: a step can be well on its way to needing that extend, or to a hard timeout on a project with
- * `gateRetry` disabled, while still comfortably PASSING today — the whole point per the card's DoD is a
- * signal visible on a passing run, not just a failing one.
- *
- * ⛔⛔ WHICH CEILING THIS IS A FRACTION OF (manager review, card 3407caad — folded in, not a restart):
- * there are TWO different ceilings a step can be measured against, and they differ by ~2×:
- *   - a FIRST attempt's EFFECTIVE ceiling, once its one-time output-gated auto-extend is counted, is
- *     `gateCommandTimeoutMs` PLUS one more full `timeoutMs` window (`GATE_EXTEND_IDLE_MS`'s own doc) —
- *     roughly 2× `gateCommandTimeoutMs`, while the step keeps producing output.
- *   - a RETRY after a timeout runs `allowExtend:false` (card 24642c3d, deliberate — stacking two "one
- *     more chance" mechanisms would push the worst case to ~4×) — a HARD `gateCommandTimeoutMs`, no net.
- * This function's `fraction` is ALWAYS `durationMs / gateCommandTimeoutMs` — the RAW configured value,
- * i.e. the SMALLER, HARD retry ceiling, never the ~2× first-attempt-with-extension allowance. That is
- * the ceiling that actually bites: a step comfortably inside its first attempt's effective budget (it
- * extended once and still passed) can be structurally doomed on a retry, which gets no such net — so
- * `fraction` reads as "how close to the ceiling a RETRY would enforce", not "how close to what THIS run
- * was actually allowed". A `fraction` over `1.0` means exactly that: this step already needed more than
- * the hard ceiling to finish (it survived only because it was a first attempt and got the one-time
- * extend) — worth surfacing even though the run passed, because a subsequent retry of the SAME step
- * would have no such reprieve. Every caller-facing rendering of `fraction`/`nearBudget` (nudge text, tool
- * descriptions) must name this ceiling explicitly — "of budget" alone is genuinely ambiguous between two
- * numbers that differ by ~2×, and removing that ambiguity is the whole point of the signal.
- *
- * COMPOSES WITH, DOES NOT DUPLICATE, card 73a847f5: that card already skips a doomed retry (a timeout
- * that already consumed its auto-extend "reports budget-exceeded" and never re-runs, because a hard-
- * bounded rerun provably cannot pass) — but it fires AT THE MOMENT OF FAILURE, after the fact. This
- * signal is the pre-emptive counterpart: it fires WHILE THE GATE IS STILL GREEN, before there is
- * anything to skip a retry for.
- *
- * ⚠️ NOT the same comparison {@link formatGateStepsDiagnostic}'s own doc warns never to make. That
- * warning is about NOT inferring correctness/thoroughness from a step's absolute duration (a
- * silently-skipped step finishes EARLY, which is load-variable noise, not a signal). This function never
- * looks at that axis at all — it compares a step's duration against the fixed, absolute
- * `gateCommandTimeoutMs` ceiling every project already enforces, which is an operational capacity
- * question ("how much of the allotted runway is left"), not a correctness one. The two are orthogonal;
- * this does not license comparing {@link formatGateStepsDiagnostic}'s own numbers against each other or
- * an "expected" range for any OTHER purpose.
- *
- * THE THRESHOLD (`GATE_PROXIMITY_THRESHOLD`) — stamped number · condition · population · instrument ·
- * as-of, TWO INDEPENDENT SYSTEMS, deliberately NOT averaged or compared against each other (different
- * suites, different budgets, no transfer function — only the SHAPE below is meant to transfer):
- *   - Loom's own gate, a REAL measured WORST-STEP reading (manager review, card 3407caad, 2026-08-04 —
- *     supersedes an earlier revision of this doc that called the worst-step axis unmeasured on this
- *     repo): merge op `4e7e4123` (card `23471268`) settled with steps `pnpm build 3s · pnpm --filter
- *     @loom/daemon test:daemon 18m14s`. NUMBER: the worst step (the test step) ≈1,094s against the
- *     per-step 1,800,000ms `gateCommandTimeoutMs` ⇒ ~61%. CONDITION: a real merge gate, Windows host,
- *     daemon gate cap 2. POPULATION: 650 hermetic daemon test files, runner pool size 2 — ⚠️ the field
- *     that matters most here, since it MOVES (grows) over time with zero change to this threshold, which
- *     is the whole reason the threshold needs headroom rather than tracking today's number exactly.
- *     INSTRUMENT: the settled `gate_status` record + the `[loom:merge-done]` steps line, as read and
- *     reported by the manager (a worker-scoped `gate_status` call cannot see another session's op, so
- *     this reading could not be independently re-verified from this session) — that steps line is
- *     SECOND-ROUNDED; do NOT difference it against a separately-read ms-precise `totalDurationMs`, which
- *     measures the WHOLE OP (worktree prep + union-merge + gate + squash), not this one step — two
- *     different instruments measuring different things, never subtract one from the other. AS-OF:
- *     2026-08-04. This single reading (n=1) sits inside the ~47%-63% WHOLE-GATE band this doc previously
- *     cited from the card's own kickoff (build+test end-to-end, ~14-19 real minutes) — because `pnpm
- *     build` is only ~3s here, whole-gate (~1,097s) and worst-step (~1,094s) differ by ~0.3% on THIS
- *     project, so that earlier whole-gate figure was, in substance, already close to the worst-step axis.
- *     That coincidence is project-specific, not structural — a project whose build step is heavier would
- *     see the two axes diverge for real — so this reading is recorded as its own real,
- *     separately-instrumented data point rather than treated as proof the two axes are interchangeable in
- *     general.
- *   - A peer project's own gate: 60.4% · 65.4% · 73.1% · 76.6% of its configured 700,000ms
- *     `gateCommandTimeoutMs` — its OWN test STEP measured against its OWN budget (n=4 healthy runs), per
- *     manager review on this same card, 2026-08-04.
- * ⇒ BOTH systems independently sit in a HIGH band (Loom ~61%, the peer up to 76.6%) as their NORMAL,
- * HEALTHY state — that STRUCTURAL convergence, never either system's MAGNITUDE, is what does real work
- * here: it argues a single GLOBAL constant is the wrong SHAPE in the first place, because two real systems
- * already show meaningfully different healthy-state ceilings, so a threshold tuned close to either one's
- * own steady state would fire on ROUTINE healthy runs on THAT system. ⛔ This structural point does NOT
- * license using the peer's 76.6% as a magnitude 0.85 itself must clear — a DIFFERENT budget (700,000ms vs.
- * Loom's own 1,800,000ms), a different suite, a different host, no transfer function, exactly as the
- * no-averaging/no-comparison rule above already says; anchoring a Loom constant on another system's own
- * number would be the exact thing that rule forbids, caught in manager review on this same card,
- * 2026-08-04 (see [[the-qualifier-dies-in-the-summary-label]] in project memory for the general pattern:
- * a rule stated correctly can still die three paragraphs later, in the sentence that actually gets acted
- * on). **0.85 is anchored SOLELY on Loom's OWN measured worst-step reading above (~61%) — ~24 points of
- * headroom, comfortably quiet through Loom's own healthy runs.** The peer's numbers are kept, stamped and
- * attributed, purely as the SECOND independent system that makes the STRUCTURAL argument (a per-project
- * override may eventually be warranted) more than a one-system anecdote — not as evidence for 0.85's own
- * value. On top of Loom's own measured margin, the true margin is worse than that single reading alone
- * suggests: (a) a sibling project's suite can run real-ingest tests against Loom's own live corpus, so ITS
- * margin erodes as this repo grows with zero change to its own code, and (b) worker doctrine defaults a
- * worker's OWN DoD self-check to running tests directly rather than through `run_gate`, so up to
- * `maxConcurrentWorkers` semaphore-INVISIBLE test lanes can be competing with an admitted gate at the same
- * moment, invisible to the reading above. Both push real-world contention higher than what a single
- * admitted-gate reading can ever show — so a threshold "tuned" tighter against only what's currently
- * visible would UNDERSTATE true risk, not overstate it — while still leaving real warning room before the
- * HARD retry ceiling this fraction is measured against (see the ceiling doc above).
- * ⚠️ LIMITATION, NAMED RATHER THAN SILENTLY ACCEPTED: this is currently ONE GLOBAL constant, not a
- * per-project config value. Loom's own POPULATION (650 test files) is exactly the kind of number that
- * grows over time and erodes this margin with zero code change on either side — a project whose own
- * worst-step ceiling runs hotter than either system measured here (or whose build step is heavy enough
- * that whole-gate and worst-step meaningfully diverge, unlike the ~0.3% coincidence on Loom today) could
- * need a project-specific override this card does not build.
- * 📌 SECOND CONSUMER OF THE SAME HEALTHY-BAND EVIDENCE (card fd9edb87): the Gates page's own
- * `LONG_RUN_WARN_FRACTION` (`packages/web/src/pages/Gates.tsx`, 0.80) scales its LIVE lane cue off the same
- * measured band — but on a DIFFERENT AXIS: that one is the WHOLE RUN's elapsed since admission, this one is
- * a SINGLE STEP's duration. ⛔ They are deliberately not equal and must not be unified or averaged; whole-run
- * elapsed is always ≥ the worst step, so at equal fractions the live cue fires EARLIER, which is the safe
- * direction for a warning. Retuning the band above, or either constant, touches both — check the other.
+ * How close a step's `durationMs` came to consuming its own `gateCommandTimeoutMs` budget — a
+ * WARN-BEFORE-BREACH signal, distinct from `gateExtended`/`anyExtended`, which only tells you a run
+ * ALREADY breached it. `fraction` is ALWAYS `durationMs / gateCommandTimeoutMs` — the RAW configured
+ * value, the SMALLER HARD retry ceiling (a post-timeout retry gets no auto-extend), never the ~2× first-
+ * attempt-with-extension allowance; a `fraction` over `1.0` means a retry of this step would have no
+ * reprieve even though this run passed. Never compare these numbers against each other or an "expected"
+ * range for any other purpose — see {@link formatGateStepsDiagnostic}'s own doc.
+ * @decision 3407caad — see docs/decisions/3407caad-gate-proximity-threshold-anchored-on-looms-own-worst-step-reading.md
  */
 export const GATE_PROXIMITY_THRESHOLD = 0.85;
 
@@ -1525,52 +1339,13 @@ function isTimeoutKillEntry(retriedFile: string, outputTail: string | undefined)
 }
 
 /**
- * Card 6dcb9cd3: the ONE place the "⚠ WEAKER PASS" wording is authored — reused by BOTH the live
- * `[loom:merge-done]` nudge (`confirmWorkerMergeTracked`'s onSettle, sessions/service.ts) and the pull-based
- * `gate_status(opId)` settled-record read (`retryWarning`, same file). Before this card the nudge had its
- * own inline template literal and `gate_status` had no warning at all — a manager who missed the nudge and
- * polled `gate_status` instead saw `outcome:"pass"` next to a `steps[]` entry with a real failure and
- * nothing explaining it (the card's own measured finding, op `3954a69f`). A single formatter means the two
- * surfaces can never drift into two different tellings of the identical fact — exactly the two-hand-
- * maintained-copies drift card `6dcb9cd3`'s own DoD-2 calls out by name.
- *
- * Takes `retriedFile` as callers already store it — a bare name, or (card 67030bb9, bounded multi-file
- * retry) a comma-joined list of names, never containing a literal comma itself (the identifier guard in
- * {@link identifyRetriableTestFiles} makes that structurally impossible) — never call this when no retry
- * fired (every call site gates on a truthy `retriedFile` first, so this never has to branch on "was there
- * a retry"). Returns the warning text WITHOUT a leading space or the `⚠` glyph's own leading space —
- * callers that inline this into a larger nudge string prepend their own separator, mirroring
- * {@link formatGateStepsDiagnostic}'s own convention.
- *
- * Card 9966c52d: `outputTail` is OPTIONAL and additive — call sites already hold attempt 1's own
- * `outputTail` (the failed run's, per {@link isTimeoutKillEntry}'s own doc) alongside `retriedFile`, so
- * passing it through costs nothing new to plumb. Omitted (or not matching for every retried name), this
- * returns the ORIGINAL cross-test-pollution wording — the fail-safe default.
- *
- * Card 67030bb9: `batchBranchCount` is OPTIONAL and additive, passed only by the BATCH gate path — a batch
- * retry is a STRONGER claim than a solo one WHEN it lands (a green retry asserts every ASSEMBLED branch
- * will land together on the strength of this ONE retry, not just the retried file's own change), so a
- * manager reading this must be able to see the branch count a retry carried, not just the file(s).
- * CORRECTED (card 553ea58c): an earlier version of this doc claimed "a green retry lands EVERY branch in
- * the batch" unconditionally — false whenever the retry's own gate passes but the batch's fast-forward
- * afterward still forfeits or its post-gate HEAD read fails (nothing lands in either case, despite the
- * green retry). Every call site now passes `batchBranchCount:undefined` for exactly that shape (see
- * `MergeBatchResult.retryWarning`'s own three-case doc, sessions/service.ts), so this function itself never
- * has to know WHY the count is absent — it just omits the batch clause whenever the caller has none to
- * give. Omitted entirely for the solo path, byte-identical to before this card for the N=1/no-batch case —
- * every existing wording is preserved verbatim in that case.
- *
- * Card 9bdc8ea5: this function's signature and body are UNCHANGED by that card — see its sibling
- * {@link formatRetryAlsoFailedWarning} for the FAILED-retry case instead of a `passed` argument here. A
- * `passed: boolean = true` default was tried and reverted (Code Review): it recreates the exact defect the
- * card fixes for any FUTURE caller that forgets the 4th arg (silently renders THIS "⚠ WEAKER PASS …
- * passed only after retrying" text for a genuine rejection, and `tsc` cannot catch a missing defaulted
- * arg). Making `passed` REQUIRED instead was also rejected: `gate-status.mjs` alone has eight existing call
- * sites passing 1-2 args (a `.mjs` test file — zero `tsc` coverage), every one of which would start
- * passing `passed: undefined` at runtime and silently flip into a fail-branch, breaking all eight
- * assertions. A separate, distinctly-named function touches ZERO existing callers in `src` or `test` and
- * removes the forgettable-boolean footgun outright — there is no default left to forget, and a caller
- * choosing the wrong function name is a loud, visible choice, not a silent bit flip.
+ * The ONE place the "⚠ WEAKER PASS" wording is authored — reused by BOTH the live `[loom:merge-done]`
+ * nudge and the pull-based `gate_status(opId)` settled-record read, so the two surfaces can never drift
+ * into two different tellings of the same fact. Never call this when no retry fired. `outputTail` and
+ * `batchBranchCount` are both OPTIONAL/additive; see {@link formatRetryAlsoFailedWarning} for the sibling
+ * FAILED-retry case — this signature is deliberately NOT a `passed` boolean on that function instead (a
+ * defaultable/forgettable boolean previously produced a false claim with no compiler catch).
+ * @decision 6dcb9cd3 — see docs/decisions/6dcb9cd3-format-weaker-pass-warning-is-the-one-authored-place.md
  */
 export function formatWeakerPassWarning(retriedFile: string, outputTail?: string, batchBranchCount?: number): string {
   const names = retriedFile.split(",");
@@ -1589,31 +1364,13 @@ export function formatWeakerPassWarning(retriedFile: string, outputTail?: string
 }
 
 /**
- * Card 9bdc8ea5: the SIBLING of {@link formatWeakerPassWarning} for a retry that ALSO failed — see that
- * function's own doc for why this is a separate, distinctly-named function rather than a `passed` argument
- * on it (Code Review + manager override of the review's own first-offered remedy). Three defects code
- * review found in an earlier version that folded this case into `formatWeakerPassWarning` via a boolean —
- * all three are just this ONE return statement, which is why they're fixed together here rather than as
- * three separate patches:
- *
- *  [1] NO batch "ALL N land" clause: on a rejected batch retry NOTHING lands (`ok:false`, every candidate
- *      falls back to individual solo gating). `deriveBatchGateVerdict` (sessions/service.ts) stamps
- *      `batchBranchCount` on BOTH a pass and a fail — it's `landedCount`, branches assembled into the
- *      batch WORKTREE during assembly, not branches landed on main — so blindly reusing the pass-side
- *      batch clause here would relocate this very card's own defect class (prose contradicting
- *      `passed:false` on the same record) into this new branch. States the true fact instead.
- *  [2] "NOT an order-dependent/cross-test-pollution bug" is UNSOUND for N>1, scoped by `names.length`
- *      below: `identifyRetriableTestFiles` issues ONE `--only=a,b,c` command, and `test-daemon.mjs`'s
- *      sequential isolation phase (`ISOLATED_REAL_SPAWN_PHASE_ENABLED`) is opt-in and default OFF
- *      (`LOOM_GATE_ISOLATED_REAL_SPAWN_PHASE=1`) — so by default all N retried files run SIMULTANEOUSLY in
- *      one pool. A failure there rules out pollution from the REST of the suite, never pollution AMONG the
- *      N retried files themselves. Not hypothetical: both real specimens card 67030bb9 measured were N>1
- *      (2 and 3 files) — the single-file case (nothing else ran alongside it) keeps the unqualified claim.
- *  [4] The `allTimeoutKills` caveat (attempt 1's OWN classification, {@link isTimeoutKillEntry}) applies
- *      here exactly as it does on the pass side — a `"genuine"`-classified attempt 1 can still carry a
- *      per-file `(exit timeout` entry (card 9966c52d, two measured specimens); a still-failing retry under
- *      the same host-load conditions may be host contention, not a reproducing assertion bug, and this
- *      wording said so unconditionally without checking `outputTail` at all.
+ * The SIBLING of {@link formatWeakerPassWarning} for a retry that ALSO failed — a separate, distinctly-
+ * named function rather than a `passed` argument on it (see that function's own doc). The
+ * "NOT an order-dependent/cross-test-pollution bug" claim is scoped by `names.length` below: for N>1 a
+ * failure only rules out pollution from the REST of the suite, never pollution AMONG the retried files
+ * themselves (they run concurrently by default). The `allTimeoutKills`/{@link isTimeoutKillEntry} caveat
+ * applies here exactly as on the pass side.
+ * @decision 9bdc8ea5 — see docs/decisions/9bdc8ea5-format-retry-also-failed-warning-is-a-separate-function.md
  */
 export function formatRetryAlsoFailedWarning(retriedFile: string, outputTail?: string, batchBranchCount?: number): string {
   const names = retriedFile.split(",");
@@ -1688,40 +1445,13 @@ export interface ReducedGateWarningInput {
 }
 
 /**
- * Card d422e279 (Code Review blocker [2]): the SHARED builder for the "merge gate reduced: ..." warning a
- * reduced merge surfaces — extracted because the solo path (`confirmWorkerMergeTracked`, sessions/
- * service.ts) and the batch path (`mergeBatchTracked`, same file) had grown TWO hand-written copies of this
- * text that had ALREADY diverged: the batch copy's asset clause dropped the changed-path LIST and the "ran
- * the N certified asset-reading test(s) too" statement the solo copy carries, so a manager reading a
- * reduced BATCH's warning on an asset-touching diff saw "skipped the full daemon test suite" with no
- * mention that `ASSET_READING_TEST_REPO_PATHS` had actually run — wrong about what executed, not merely
- * less detailed. This is this repo's own named shared-unit-divergence anti-pattern (see CLAUDE.md) — one
- * builder, reused by both call sites, is what keeps the two texts from drifting apart again.
- *
- * `assetReadingTestCount` is a plain number (not the `ASSET_READING_TEST_REPO_PATHS` array itself) so this
- * file — spawn/process-timing plumbing — doesn't pick up a dependency on the git layer just to read
- * `.length`; both call sites already import that array for their own gate-command construction and pass its
- * length through.
- *
- * `batchLandedCount` is OPTIONAL and additive, mirroring {@link formatWeakerPassWarning}'s own convention
- * for the identical solo-vs-batch distinction: omitted (the solo path) renders "merge gate reduced: ..."
- * byte-identical to the pre-extraction text; passed (the batch path) renders "batch merge gate reduced
- * across N landed branch(es): ..." and scales the isolation caveat's own "this green is not evidence either
- * way" to name every landed branch, not just one — the same "claim about EVERY branch, not one" scope
- * `MergeBatchResult.reducedGateWarning`'s own doc already describes. The isolation caveat's own
- * singular/plural ("this changed test file was" / "these N changed test files were", "its" / "their") is
- * driven ENTIRELY by `changedTestFiles.length` in both modes — never hardcoded to "their" for a batch, which
- * would misreport a batch whose union touched exactly one test file.
- *
- * Two surfacing obligations preserved from the pre-extraction copies, load-bearing for BOTH callers: (1)
- * card 17cd1f30 — a NOT_HERMETIC-excluded file must be NAMED in `notHermeticExcluded`, not just counted; a
- * bare count would gate a diff while quietly verifying nothing for those specific files, leaving a reader no
- * way to tell WHICH changed test(s) went unrun. Not a coverage regression the reduction introduces (the full
- * gate never runs a NOT_HERMETIC file either), but it must never read as a silent, ordinary green. (2) card
- * 8ee4f11e — a skipped-as-inert path (e.g. `docs/**`) must be NAMED in `inertPathsSkipped` too, same
- * reasoning: before that card, a mixed diff (a transpile-identical compiled file plus an inert path)
- * reported only the compiled-file count, leaving the inert path unaccounted for and indistinguishable from a
- * silently dropped one.
+ * The SHARED builder for the "merge gate reduced: ..." warning a reduced merge surfaces — extracted
+ * because the solo and batch call sites had grown two hand-written copies that had ALREADY diverged (see
+ * decision record). Two surfacing obligations are load-bearing for BOTH callers: a NOT_HERMETIC-excluded
+ * file must be NAMED in `notHermeticExcluded`, not just counted (card 17cd1f30); a skipped-as-inert path
+ * must be NAMED in `inertPathsSkipped` too (card 8ee4f11e) — a bare count of either leaves a reader unable
+ * to tell WHICH file went unaccounted for.
+ * @decision d422e279 — see docs/decisions/d422e279-format-reduced-gate-warning-is-the-shared-builder.md
  */
 export function formatReducedGateWarning(
   result: ReducedGateWarningInput, assetReadingTestCount: number, batchLandedCount?: number,
