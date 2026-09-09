@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { PermissionPolicy } from "@loom/shared";
-import { SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, DECISION_RECORDS_SCRIPT, DECISION_RECORDS_DEDUPE_DIR, PORT } from "../paths.js";
+import { SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, DECISION_RECORDS_SCRIPT, DECISION_RECORDS_DEDUPE_DIR, COMMENT_ANCHOR_LINT_SCRIPT, PORT } from "../paths.js";
 
 /**
  * Card cd0c7fee: matcher for the correlation-only `PreToolUse` hook below. Deliberately scoped to the
@@ -194,6 +194,19 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  * When `vaultPath` is given (docLint on), a PostToolUse hook (matcher Write|Edit) runs the
  * mechanical vault-lint on .md writes under that vault (Pillar D). Advisory only — it never blocks.
  *
+ * Card 67621894: the SAME `vaultPath`-given condition (docLint on) also wires a second PostToolUse
+ * Write|Edit hook that runs `comment-anchor-lint.mjs` in its per-file `--hook` mode (never a repo-wide
+ * scan — see that script's own doc for the whole-repo cost this deliberately avoids), scoped to just the
+ * ONE file a Write/Edit just touched. Reuses `vaultPath` purely as the existing docLint on/off signal —
+ * it never reads `vaultPath`'s own value (the lint targets SOURCE files, not vault notes) — and reuses
+ * `repoPath` (passed through unconditionally by every caller that threads it, see its own param doc
+ * below) as the lint's actual repo root; a caller that omits `repoPath` entirely (pre-5244adc2 shape)
+ * never gets this hook wired, same "stays byte-identical" posture as the decision-records hook below.
+ * `vaultPath` given but `repoPath` omitted is the one gap this leaves: a project with docLint on but no
+ * `vaultPath` configured (no Obsidian vault) never sees this hook either, since there is currently no
+ * OTHER plumbed signal for "docLint is on" reaching this function — see `SpawnOpts.vaultPath`'s own doc
+ * in host.ts for the same coupling. Advisory only, same posture as vault-lint above — it never blocks.
+ *
  * A PostToolUse hook (matcher Read) runs `decision-records.mjs`, which appends any complete,
  * out-of-band decision record anchored in the range a `Read` call actually returned, so a range that
  * slices through a long comment block never delivers a fragment of a record without the rest of it.
@@ -325,6 +338,17 @@ export function writeSessionSettings(
       matcher: "Write|Edit",
       hooks: [{ type: "command", command: `node "${VAULT_LINT_SCRIPT}" "${vaultPath}"` }],
     });
+    // Card 67621894: same docLint gate as vault-lint above (see this function's own doc comment for why
+    // `vaultPath` is reused only as the on/off signal, never for its value here). Requires `repoPath` too
+    // — the lint needs the session's actual repo root, not the vault — so a caller that omits it (pre-
+    // 5244adc2 shape) never wires this hook; every other caller threads `repoPath` today (see its own
+    // param doc below).
+    if (repoPath !== undefined) {
+      postToolUse.push({
+        matcher: "Write|Edit",
+        hooks: [{ type: "command", command: `node "${COMMENT_ANCHOR_LINT_SCRIPT}" --hook "${repoPath}"` }],
+      });
+    }
   }
   hooks.PostToolUse = postToolUse;
   const settings = {

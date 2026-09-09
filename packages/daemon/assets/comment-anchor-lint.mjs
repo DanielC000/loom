@@ -1,10 +1,17 @@
 #!/usr/bin/env node
-// comment-anchor-lint.mjs — WARN-ONLY repo scan for the decision-anchor convention (card 5329a9af).
-// Standalone report tool, not a hook: invoke as `node comment-anchor-lint.mjs [repoRoot] [--min-lines=N]`
-// and it prints a JSON report to stdout. It never fails the process on a violation — "warn-only" is
-// realized as an exit-code contract, not a config flag, so wiring this into anything later can never
-// accidentally turn it blocking by omission. See the card's own Sequencing note for why blocking mode
-// waits on a separate step (extracting the comment-heaviest files first).
+// comment-anchor-lint.mjs — WARN-ONLY lint for the decision-anchor convention (card 5329a9af; wired as a
+// live hook by card 67621894). Two entry points, one script:
+//   1. CLI whole-repo scan: `node comment-anchor-lint.mjs [repoRoot] [--min-lines=N]` — prints the full
+//      JSON report (all three checks, see below) to stdout. Manual/reporting use only; NOT what the hook
+//      below invokes (a whole-repo scan on every Write/Edit would reintroduce the per-invocation hook cost
+//      card 5244adc2 just existed to remove — see COMMENT_ANCHOR_LINT_SCRIPT's own doc in paths.ts).
+//   2. PostToolUse hook: `node comment-anchor-lint.mjs --hook <repoRoot>` (matcher Write|Edit), reading the
+//      hook payload on stdin and linting ONLY the one file just written (`runHook`/`computeFileReport`
+//      below) — never a repo-wide scan. See `writeSessionSettings` (claude-settings.ts) for the wiring.
+// Neither mode ever fails the process on a violation — "warn-only" is realized as an exit-code contract,
+// not a config flag, so wiring this into anything later can never accidentally turn it blocking by
+// omission. See the card's own Sequencing note for why blocking mode waits on a separate step (extracting
+// the comment-heaviest files first).
 //
 // Three checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
 //   1. unanchoredLongBlocks — a contiguous comment block >= `minLines` (default DEFAULT_MIN_LINES) with
@@ -17,6 +24,11 @@
 //   3. orphanRecords — a record with no inbound anchor anywhere in the swept source. ADVISORY, never an
 //      error (see `advisory: true` on its report key) — a policy-level record can correctly have no single
 //      anchor site, and treating this as a hard violation trains people to ignore the whole lint.
+//      ⛔ NOT run by the hook (`runHook`/`computeFileReport` below), by design: it needs the WHOLE anchor
+//      corpus (every source file's anchors) to know whether a record has zero inbound sites anywhere — a
+//      single changed file can never answer that on its own, and re-scanning the whole repo to answer it
+//      per-Write is exactly the cost the hook exists to avoid (see this file's own header). CLI-scan mode
+//      only; a project wanting this check run stays on the manual/whole-repo path.
 //
 // A <= GUARD_MAX_LINES-line block that DOES carry an anchor is the convention's TARGET STATE (Class A: a
 // short guard/prohibition, permanently inline) and is counted separately as `guardClassBlocks` — it is
@@ -57,6 +69,10 @@ const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".mjs"]);
 // (aaaaaaaa, deadbeef, cafebabe, ...) with no matching record by design — sweeping them would report
 // fixture noise as real orphan-anchor violations. Measuring against real production source only.
 const EXCLUDE_SEGMENTS = new Set(["node_modules", "dist", ".turbo", "coverage", "test", "tests", "e2e", ".git"]);
+// `SOURCE_ROOTS`, posix-joined with a trailing slash, for the hook's cheap per-file "is this path even in
+// scope" prefix test (`isInScope` below) — the same roots `walkSourceFiles` walks for the CLI scan, just
+// tested against one relative path instead of driving a directory walk.
+const SOURCE_ROOT_PREFIXES = SOURCE_ROOTS.map((parts) => `${parts.join("/")}/`);
 
 const BUCKETS = [
   { key: "1-3", min: 1, max: 3 },
@@ -263,6 +279,131 @@ export function computeReport(repoRoot, opts = {}) {
   };
 }
 
+// --- per-file hook mode (card 67621894) -------------------------------------------------------------
+
+/**
+ * Cheap "is this path even worth linting" test — extension + SOURCE_ROOTS prefix + no excluded segment
+ * (mirrors `walkSourceFiles`'s own filters, tested against one relative path instead of a directory walk).
+ * Returns the repo-relative path on a match, else `null`. For a repo NOT shaped like this one (no
+ * `packages/{daemon,web,shared}/...` layout — i.e. every OTHER Loom-managed project) every write fails
+ * this prefix test and the hook is a fast no-op: the SOURCE_ROOTS list itself is what scopes this lint to
+ * this repo, the same way the CLI scan is already scoped by it — not a new limitation the hook introduces.
+ */
+export function isInScope(repoRoot, filePath) {
+  const rel = relPath(repoRoot, filePath);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return null; // outside repoRoot entirely
+  if (!SOURCE_EXTENSIONS.has(path.extname(filePath))) return null;
+  if (!SOURCE_ROOT_PREFIXES.some((p) => rel.startsWith(p))) return null;
+  if (rel.split("/").some((seg) => EXCLUDE_SEGMENTS.has(seg))) return null;
+  return rel;
+}
+
+/**
+ * The hook's actual per-file check: checks (1) unanchoredLongBlocks and (2) orphanAnchors — see this
+ * file's header for why (3) orphanRecords is deliberately excluded — scoped to ONE file's already-read
+ * `content`, never a repo walk. `listRecordIds` is the only filesystem cost beyond the one file read: a
+ * `readdirSync` of up to three small `docs/<kind>` directories (a handful of entries each in this repo
+ * today), not a source-tree scan — see this function's own doc in `computeReport` above for why it's cheap.
+ * Returns `null` for a file outside `isInScope`'s scope; otherwise a report shaped for `formatHookMessage`
+ * below (empty arrays when the file is in scope but has nothing to flag — a real, distinguishable "clean"
+ * result, not the same `null` as "not even scanned").
+ */
+export function computeFileReport(repoRoot, filePath, content, opts = {}) {
+  const rel = isInScope(repoRoot, filePath);
+  if (rel === null) return null;
+  const minLines = Number.isInteger(opts.minLines) && opts.minLines > 0 ? opts.minLines : DEFAULT_MIN_LINES;
+
+  const lines = content.split(/\r?\n/);
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  const unanchoredLong = blocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
+
+  const recordIdSet = new Set(listRecordIds(repoRoot).map((r) => r.id));
+  const orphanAnchorsById = new Map();
+  for (const a of anchors) {
+    if (!recordIdSet.has(a.id) && !orphanAnchorsById.has(a.id)) orphanAnchorsById.set(a.id, a);
+  }
+
+  return {
+    file: rel,
+    minLines,
+    unanchoredLongBlocks: unanchoredLong.map((b) => ({ startLine: b.startLine, endLine: b.endLine, length: b.length })),
+    orphanAnchors: [...orphanAnchorsById.values()].map((a) => ({ id: a.id, line: a.line })),
+  };
+}
+
+/** Render a non-empty `computeFileReport` result as the advisory text handed back to the agent. */
+export function formatHookMessage(report) {
+  const lines = [];
+  if (report.unanchoredLongBlocks.length) {
+    lines.push(`${report.unanchoredLongBlocks.length} unanchored long comment block(s) in ${report.file} (>= ${report.minLines} lines, no @decision anchor):`);
+    for (const b of report.unanchoredLongBlocks) lines.push(`  - ${report.file}:${b.startLine}-${b.endLine} (${b.length} lines)`);
+  }
+  if (report.orphanAnchors.length) {
+    lines.push(`${report.orphanAnchors.length} orphan @decision anchor(s) in ${report.file} (no record in docs/adr, docs/decisions, or docs/investigations):`);
+    for (const a of report.orphanAnchors) lines.push(`  - ${report.file}:${a.line} — @decision ${a.id}`);
+  }
+  return `comment-anchor-lint (CLAUDE.md comment taxonomy, card 90b19799) flagged ${report.file}:\n${lines.join("\n")}\n`
+    + `Advisory only: a long unanchored block may want "// @decision <id> — <the prohibition/consequence>" `
+    + `(<=3 lines) plus an out-of-band record in docs/adr or docs/decisions; an orphan anchor needs a matching record file.`;
+}
+
+/**
+ * Write `obj` as JSON to stdout and resolve only once the write has actually flushed (never before a
+ * following `process.exit()` races the OS-level flush) — same shape as decision-records.mjs's own `emit`,
+ * duplicated rather than imported for the same reason `ANCHOR_RE` is duplicated at the top of this file
+ * (see that comment): each asset ships as a standalone file invoked by a bare `node <path>` spawn.
+ */
+function emitHook(obj) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    process.stdout.write(JSON.stringify(obj), finish);
+    setTimeout(finish, 2000).unref();
+  });
+}
+
+/**
+ * `node comment-anchor-lint.mjs --hook <repoRoot>` — the PostToolUse hook entry point (matcher Write|Edit;
+ * see `writeSessionSettings` in claude-settings.ts for the wiring + its docLint gate). Reads the hook
+ * payload on stdin: `{tool_name, tool_input:{file_path}, cwd}`. `repoRoot` is handed in as an argv (the
+ * session's own `opts.cwd` from PtyHost — see paths.ts's `COMMENT_ANCHOR_LINT_SCRIPT` doc) rather than
+ * derived by walking up from `cwd` looking for `.git` (decision-records.mjs's approach) — cheaper, and
+ * this hook has no need to double-check the written file is inside the SAME repo the session booted in:
+ * `isInScope` already requires the file to resolve to a relative, non-`..` path under `repoRoot`, which a
+ * file outside it can never do. A non-Write/Edit/MultiEdit tool, a missing/unreadable file, or a file
+ * `isInScope` rejects are all fast, silent no-ops — byte-identical to a session with no hook wired at all.
+ * Always exits 0 (see the dispatcher at the bottom of this file): a bug here must never block a real Write.
+ */
+async function runHook(repoRootArg) {
+  if (!repoRootArg) return;
+  const repoRoot = path.resolve(repoRootArg);
+
+  let raw = "";
+  for await (const c of process.stdin) raw += c;
+  let payload;
+  try { payload = JSON.parse(raw); } catch { return; }
+
+  const tool = payload.tool_name;
+  if (tool !== "Write" && tool !== "Edit" && tool !== "MultiEdit") return;
+
+  let filePath = payload.tool_input?.file_path;
+  if (typeof filePath !== "string") return;
+  const cwd = typeof payload.cwd === "string" && payload.cwd ? payload.cwd : process.cwd();
+  if (!path.isAbsolute(filePath)) filePath = path.resolve(cwd, filePath);
+
+  if (isInScope(repoRoot, filePath) === null) return; // cheap reject before ever reading the file
+
+  let content;
+  try { content = fs.readFileSync(filePath, "utf8"); } catch { return; } // tool already ran → file is on disk
+
+  const report = computeFileReport(repoRoot, filePath, content);
+  if (!report || (report.unanchoredLongBlocks.length === 0 && report.orphanAnchors.length === 0)) return;
+
+  const msg = formatHookMessage(report);
+  await emitHook({ systemMessage: msg, hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: msg } });
+}
+
 function main() {
   const args = process.argv.slice(2);
   const positional = args.find((a) => !a.startsWith("--"));
@@ -273,8 +414,14 @@ function main() {
   process.stdout.write(JSON.stringify(report, null, 2) + "\n");
 }
 
-// Only run as a CLI when invoked directly (`node comment-anchor-lint.mjs ...`) — an import (the test file)
-// must be able to pull in the exported functions above without triggering a repo scan as a side effect.
+// Only run as a CLI/hook when invoked directly (`node comment-anchor-lint.mjs ...`) — an import (the test
+// file) must be able to pull in the exported functions above without triggering a scan as a side effect.
+// `--hook <repoRoot>` (first argv) dispatches to the per-file PostToolUse hook (`runHook`, always exits 0,
+// see its own doc); anything else stays the existing whole-repo CLI scan (`main`, unchanged).
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  main();
+  if (process.argv[2] === "--hook") {
+    runHook(process.argv[3]).catch(() => {}).finally(() => process.exit(0));
+  } else {
+    main();
+  }
 }

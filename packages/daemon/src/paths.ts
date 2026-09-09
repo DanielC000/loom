@@ -214,6 +214,14 @@ export const DECISION_RECORDS_SCRIPT = path.join(__dirname, "..", "assets", "dec
  */
 export const DECISION_RECORDS_DEDUPE_DIR = path.join(LOOM_HOME, "tmp", "decision-records");
 /**
+ * comment-anchor-lint.mjs (card 5329a9af's report tool, wired as a hook by card 67621894) — invoked here
+ * in its PER-FILE `--hook <repoRoot>` mode (matcher Write|Edit), never its whole-repo CLI scan mode (that
+ * mode stays reachable by hand, `node comment-anchor-lint.mjs [repoRoot]`, with no daemon involvement).
+ * Same asset file as the CLI tool — see that file's own `main()`/`runHook()` dispatch for why both modes
+ * live in one script rather than two.
+ */
+export const COMMENT_ANCHOR_LINT_SCRIPT = path.join(__dirname, "..", "assets", "comment-anchor-lint.mjs");
+/**
  * ensure-obsidian.mjs (Obsidian auto-start vault preflight) ships as an asset too. Injected into a
  * session's env as LOOM_OBSIDIAN_PREFLIGHT only when obsidian.autoStart is on, so a vault skill can run
  * `node "$LOOM_OBSIDIAN_PREFLIGHT"` before its `obsidian` CLI calls (self-heals or falls back to FS).

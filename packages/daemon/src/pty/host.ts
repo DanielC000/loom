@@ -4030,7 +4030,12 @@ export interface SpawnOpts {
    * spawn omits it and inherits the conversation's model from the engine transcript.
    */
   model?: string;
-  /** When set (docLint on), wires the vault-lint PostToolUse hook scoped to this vault (Pillar D). */
+  /**
+   * When set (docLint on), wires the vault-lint PostToolUse hook scoped to this vault (Pillar D). Card
+   * 67621894: the SAME condition also wires the per-file comment-anchor-lint PostToolUse hook (scoped by
+   * `repoPath` below, not this field's own value) — see `writeSessionSettings`'s own doc in
+   * claude-settings.ts for why `vaultPath` is reused purely as the docLint on/off signal there.
+   */
   vaultPath?: string;
   /**
    * Opt-in browser-automation (resolved from the session's Profile, gated). When true, inject a
