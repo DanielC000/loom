@@ -107,10 +107,16 @@ try {
   // POSITIVE CONTROL FIRST (DoD-4): prove the hook can actually see a violation before trusting silence.
   const hit = runHookProc(violatingPath, "Write");
   check("runHook (positive control): a Write on the violating file DOES fire", hit !== null);
-  check("runHook (positive control): systemMessage carries the orphan anchor id",
-    !!hit && /dddddddd/.test(hit.systemMessage));
+  check("runHook (positive control): additionalContext carries the orphan anchor id",
+    !!hit && /dddddddd/.test(hit.hookSpecificOutput?.additionalContext ?? ""));
   check("runHook (positive control): hookSpecificOutput.hookEventName === PostToolUse",
     !!hit && hit.hookSpecificOutput?.hookEventName === "PostToolUse");
+
+  // card 9b293b4b regression: the payload carries no systemMessage copy — additionalContext only
+  // (mirrors decision-records.mjs's own card da723d41 regression; see the asset's header for why).
+  check("card 9b293b4b: the payload carries NO systemMessage field at all", !!hit && !("systemMessage" in hit));
+  check("card 9b293b4b: hookSpecificOutput.additionalContext is the ONLY top-level key",
+    !!hit && Object.keys(hit).length === 1 && Object.keys(hit)[0] === "hookSpecificOutput");
 
   // NEGATIVE CONTROLS — each isolates ONE reason the hook should stay silent.
   check("runHook (negative control): a Write on a CLEAN in-scope file stays silent", runHookProc(cleanPath, "Write") === null);

@@ -15,9 +15,20 @@
 //     cross-project links a single-subfolder index can't resolve. Enable per-note with
 //     `doc-lint-links: true` in frontmatter. Append-scar + oversized checks stay default-on.
 //
-// Always exits 0. On a hit it writes a JSON object to stdout carrying the warning via both
-// `systemMessage` and PostToolUse `hookSpecificOutput.additionalContext` (whichever the running
-// Claude honors) — the non-blocking "flag" channel, NOT exit-2 (which is the blocking channel).
+// Always exits 0. On a hit it writes a JSON object to stdout carrying the warning via PostToolUse
+// `hookSpecificOutput.additionalContext` ONLY — the non-blocking "flag" channel, NOT exit-2 (which is
+// the blocking channel).
+//
+// FIELD DETERMINATION (card 9b293b4b, 2026-09-09) — do not reintroduce a `systemMessage` copy: this
+// script used to emit the warning via BOTH `systemMessage` and `additionalContext`, "whichever the
+// running Claude honors" — a hedge never actually checked. Card da723d41 checked it empirically for
+// decision-records.mjs (three controlled `claude -p` trials, incl. a swapped-values control) and found
+// `additionalContext` is the ONLY field the model ever sees; `systemMessage` is UI-only and never reaches
+// it. This hook's own warning is addressed to the AGENT ("surfaces an ADVISORY warning to the agent" —
+// see above; the agent self-corrects), not to the human at the terminal, so the same determination
+// applies here: emitting `systemMessage` bought nothing but double the byte cost. See project memory
+// `posttooluse-hook-honors-additionalcontext-not-systemmessage` and decision-records.mjs's own header for
+// the full method.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -128,7 +139,6 @@ async function main() {
   const msg = `loom-doc-hygiene (vault-lint) flagged ${path.basename(filePath)}:\n- ${warnings.join("\n- ")}\n`
     + `Advisory: rewrite in place (don't append UPDATE:/EDIT: notes), keep the note bounded, and fix or remove dead [[links]].`;
   process.stdout.write(JSON.stringify({
-    systemMessage: msg,
     hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: msg },
   }));
 }

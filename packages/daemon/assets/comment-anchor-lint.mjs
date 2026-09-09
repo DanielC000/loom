@@ -13,6 +13,17 @@
 // omission. See the card's own Sequencing note for why blocking mode waits on a separate step (extracting
 // the comment-heaviest files first).
 //
+// FIELD DETERMINATION (card 9b293b4b, 2026-09-09) — do not reintroduce a `systemMessage` copy on the
+// hook's emitted payload (see `emitHook`/`runHook` below): it used to carry the advisory via BOTH
+// `systemMessage` and `hookSpecificOutput.additionalContext`, "whichever the running Claude honors" — a
+// hedge never actually checked. Card da723d41 checked it empirically for decision-records.mjs (three
+// controlled `claude -p` trials, incl. a swapped-values control) and found `additionalContext` is the
+// ONLY field the model ever sees; `systemMessage` is UI-only and never reaches it. This hook's own
+// message is "the advisory text handed back to the agent" (see `formatHookMessage` below), not the human
+// at the terminal, so the same determination applies here. See project memory
+// `posttooluse-hook-honors-additionalcontext-not-systemmessage` and decision-records.mjs's own header for
+// the full method.
+//
 // Three checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
 //   1. unanchoredLongBlocks — a contiguous comment block >= `minLines` (default DEFAULT_MIN_LINES) with
 //      no `@decision <id>` anywhere in it. The "narrative is regrowing in source" signal.
@@ -401,7 +412,7 @@ async function runHook(repoRootArg) {
   if (!report || (report.unanchoredLongBlocks.length === 0 && report.orphanAnchors.length === 0)) return;
 
   const msg = formatHookMessage(report);
-  await emitHook({ systemMessage: msg, hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: msg } });
+  await emitHook({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: msg } });
 }
 
 function main() {

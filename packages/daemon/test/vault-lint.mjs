@@ -26,7 +26,8 @@ fs.mkdirSync(OUTSIDE, { recursive: true });
 fs.writeFileSync(path.join(VAULT, "Existing.md"), "# Existing\n\nA real note.\n");
 
 // Invoke the hook script as Claude would: payload JSON on stdin, vault path as argv. Returns the
-// parsed advisory object (with systemMessage) on a flag, or null when the hook stays silent.
+// parsed advisory object (hookSpecificOutput.additionalContext only — no systemMessage, card 9b293b4b)
+// on a flag, or null when the hook stays silent.
 function runHook(filePath, tool = "Write") {
   const payload = { hook_event_name: "PostToolUse", tool_name: tool, tool_input: { file_path: filePath }, cwd: VAULT };
   const r = spawnSync(process.execPath, [VAULT_LINT_SCRIPT, VAULT], { input: JSON.stringify(payload), encoding: "utf8" });
@@ -38,15 +39,21 @@ const writeNote = (rel, content) => { const p = path.join(VAULT, rel); fs.writeF
 try {
   // 1) append marker (UPDATE:) → flagged.
   const f1 = runHook(writeNote("update.md", "# Note\n\nThe value is 42.\n\nUPDATE: actually it is 43.\n"));
-  check("append marker (UPDATE:) → flagged", !!f1 && /append marker/i.test(f1.systemMessage));
+  check("append marker (UPDATE:) → flagged", !!f1 && /append marker/i.test(f1.hookSpecificOutput.additionalContext));
+
+  // card 9b293b4b regression: the payload carries no systemMessage copy — additionalContext only
+  // (mirrors decision-records.mjs's own card da723d41 regression; see this asset's header for why).
+  check("card 9b293b4b: the payload carries NO systemMessage field at all", !!f1 && !("systemMessage" in f1));
+  check("card 9b293b4b: hookSpecificOutput.additionalContext is the ONLY top-level key",
+    !!f1 && Object.keys(f1).length === 1 && Object.keys(f1)[0] === "hookSpecificOutput");
 
   // 2) broken wikilink WITH the opt-in flag → flagged (the check is opt-in / default-off now).
   const f2 = runHook(writeNote("links.md", "---\ndoc-lint-links: true\n---\n# Links\n\nSee [[Nonexistent]] for details.\n"));
-  check("broken [[wikilink]] + doc-lint-links: true → flagged", !!f2 && /broken wikilink/i.test(f2.systemMessage));
+  check("broken [[wikilink]] + doc-lint-links: true → flagged", !!f2 && /broken wikilink/i.test(f2.hookSpecificOutput.additionalContext));
 
   // 3) oversized note → flagged.
   const f3 = runHook(writeNote("big.md", Array.from({ length: 500 }, (_, i) => `line ${i}`).join("\n") + "\n"));
-  check("oversized note (>400 lines) → flagged", !!f3 && /oversized note/i.test(f3.systemMessage));
+  check("oversized note (>400 lines) → flagged", !!f3 && /oversized note/i.test(f3.hookSpecificOutput.additionalContext));
 
   // 4) clean bounded note with a RESOLVABLE wikilink → no flag.
   const f4 = runHook(writeNote("clean.md", "# Clean\n\nSee [[Existing]] — and [[Existing#section|an alias]] too.\n"));
@@ -64,7 +71,7 @@ try {
 
   // 6b) Edit tool (not just Write) is handled the same way.
   const f6b = runHook(writeNote("edited.md", "EDIT: bolted-on correction\n"), "Edit");
-  check("Edit tool on a vault .md with an append marker → flagged", !!f6b && /append marker/i.test(f6b.systemMessage));
+  check("Edit tool on a vault .md with an append marker → flagged", !!f6b && /append marker/i.test(f6b.hookSpecificOutput.additionalContext));
 
   // --- false-positive guards ---
 
@@ -77,13 +84,13 @@ try {
   const fbIn = runHook(writeNote("fenced.md", "# Meta\n\nA doc about scars:\n\n```\nUPDATE: this is quoted\nEDIT: also quoted\n```\n\nClean prose.\n"));
   check("append markers inside a ```fence``` → no flag", fbIn === null);
   const fbOut = runHook(writeNote("unfenced.md", "# Meta\n\n```\nUPDATE: quoted\n```\n\nUPDATE: but this one is real.\n"));
-  check("append marker outside the fence (with one also inside) → flagged", !!fbOut && /append marker/i.test(fbOut.systemMessage));
+  check("append marker outside the fence (with one also inside) → flagged", !!fbOut && /append marker/i.test(fbOut.hookSpecificOutput.additionalContext));
 
   // c) broken wikilink with NO opt-in → no flag (default off); same note with doc-lint-links: true → flagged.
   const fcOff = runHook(writeNote("redlink.md", "# Red\n\nSee [[Nonexistent]] and [[Fire Studio]].\n"));
   check("broken wikilink, no opt-in → no flag (default off)", fcOff === null);
   const fcOn = runHook(writeNote("redlink-on.md", "---\ndoc-lint-links: true\n---\n# Red\n\nSee [[Nonexistent]].\n"));
-  check("broken wikilink + doc-lint-links: true → flagged", !!fcOn && /broken wikilink/i.test(fcOn.systemMessage));
+  check("broken wikilink + doc-lint-links: true → flagged", !!fcOn && /broken wikilink/i.test(fcOn.hookSpecificOutput.additionalContext));
 
   // d) wikilink RESOLUTION matches Obsidian (regression guard for the false-positive flood, task 469ba89a):
   //    with doc-lint-links: true a VALID aliased / cross-folder / special-char (& / em-dash / spaces) link
@@ -105,8 +112,8 @@ try {
   const fdBad = runHook(writeNote("resolves-bad.md",
     "---\ndoc-lint-links: true\n---\n# Links\n\nSee [[Vision & Architecture]] (valid) and [[Totally Nonexistent Note]] (dangling).\n"));
   check("a genuinely dangling target STILL flags (among valid special-char links)",
-    !!fdBad && /broken wikilink/i.test(fdBad.systemMessage) && /Totally Nonexistent Note/.test(fdBad.systemMessage)
-      && !/Vision & Architecture/.test(fdBad.systemMessage));
+    !!fdBad && /broken wikilink/i.test(fdBad.hookSpecificOutput.additionalContext) && /Totally Nonexistent Note/.test(fdBad.hookSpecificOutput.additionalContext)
+      && !/Vision & Architecture/.test(fdBad.hookSpecificOutput.additionalContext));
 
   // 7) writeSessionSettings wires the PostToolUse Write|Edit entry pointing at the shipped script.
   ensureDirs();
