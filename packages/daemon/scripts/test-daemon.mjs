@@ -1365,6 +1365,48 @@ export function classifyFailureDetail({ status, stdout, stderr }) {
   return { failureType: "unclassified", messages: [], truncated: false };
 }
 
+// The single line of a failing run's OWN stdout/stderr worth surfacing inline on its `FAILURES:` bullet
+// line. Extracted to its own pure function (card 5e3ebc80) so a test can drive it — and the epilogue
+// renderer below that consumes its output — directly against a REAL `spawnWithTimeout` result, without
+// re-deriving this formula a second time and risking the two copies drifting apart.
+export function computeFailureTail(stdout, stderr) {
+  return stdout.split("\n").filter(Boolean).slice(-1)[0] || stderr.split("\n").filter(Boolean).slice(-1)[0];
+}
+
+// Card 5e3ebc80: names WHAT KIND of nonzero termination a failing run had — a numeric exit code, an
+// OS signal, or (rare) neither ever observed — so a reader of the `FAILURES:` epilogue doesn't have to
+// re-derive it from `f.status`/`f.signal` by hand. Only actually printed on the zero-output branch below
+// (see `buildFailureEntryLines`): the bullet line above it already shows a numeric exit code, so this
+// would be pure noise there; it earns its place only where there's no captured output to show instead.
+export function describeExitShape(f) {
+  if (f.status === "timeout") return "timeout";
+  if (typeof f.status === "number") return `exit code ${f.status}`;
+  if (f.signal) return `signal ${f.signal}`;
+  return "exit code null (no signal captured either)";
+}
+
+// Card 5e3ebc80: builds the `FAILURES:` epilogue lines for ONE failing run. Pure + exported so a test can
+// drive it directly (including with a REAL spawnWithTimeout result reshaped into this row) without running
+// the whole hermetic suite. Every non-empty-output branch is byte-identical to the code this replaced —
+// the ONLY new behaviour is the explicit marker on the branch where both streams are empty/whitespace-only:
+// before this card that branch emitted NOTHING, so "the child genuinely produced no output" and "we failed
+// to capture the output it produced" were the same bytes on the page (see this card for the full incident).
+export function buildFailureEntryLines(f) {
+  const statusLabel = f.status === "timeout" && f.timeoutDetail ? `timeout (${f.timeoutDetail})` : f.status;
+  const lines = [`  - ${f.name} (exit ${statusLabel}): ${f.tail ?? ""}`];
+  if (f.status === "timeout") {
+    lines.push(`      exit->close gap: ${f.exitToCloseGapMs != null ? `${f.exitToCloseGapMs}ms` : "n/a (child's own exit was never observed)"}`);
+  }
+  const hasStdout = !!f.stdout?.trim();
+  const hasStderr = !!f.stderr?.trim();
+  if (hasStdout) lines.push(f.stdout.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
+  if (hasStderr) lines.push(f.stderr.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
+  if (!hasStdout && !hasStderr) {
+    lines.push(`      (no output captured on either stream — ${describeExitShape(f)})`);
+  }
+  return lines;
+}
+
 // Runs one test file on a fixed pool "lane" (its port for the whole run, so concurrent lanes never
 // collide). Resolves to a result record; never rejects — a spawn error is captured as a failure.
 async function runOne(name, lane) {
@@ -1404,8 +1446,12 @@ async function runOne(name, lane) {
     // Card 237aa3a9: `failureDetail` IS added here, unlike those — the spawn-error message (captured onto
     // `r.stderr` by `spawnWithTimeout`'s own error handler) is the single most useful diagnostic available
     // for exactly this case, not a meaningless one.
+    // Card 5e3ebc80: `signal` IS also added here (unlike the fields the first sentence above names) —
+    // shape-consistency with the non-errored return below, even though it's always null in this branch
+    // (the child never started, so the 'exit' event that would populate it never fired either).
     return {
-      name, ok: false, status: r.status, stdout: r.stdout, stderr: r.stderr, lane, startTs, endTs, durationMs: endTs - startTs,
+      name, ok: false, status: r.status, stdout: r.stdout, stderr: r.stderr, signal: r.exitSignal ?? null,
+      lane, startTs, endTs, durationMs: endTs - startTs,
       failureDetail: classifyFailureDetail({ status: r.status, stdout: r.stdout, stderr: r.stderr }),
     };
   }
@@ -1414,7 +1460,11 @@ async function runOne(name, lane) {
     ok: r.ok,
     status: r.status,
     stdout: r.stdout, stderr: r.stderr,
-    tail: r.ok ? undefined : (r.stdout.split("\n").filter(Boolean).slice(-1)[0] || r.stderr.split("\n").filter(Boolean).slice(-1)[0]),
+    // Card 5e3ebc80: carried through so the FAILURES: epilogue's zero-output marker can name a signal kill
+    // (vs. a numeric exit code) — see `describeExitShape`. `r.exitSignal` is captured off the child's own
+    // 'exit' event (spawnWithTimeout), which fires even when a signal, not a numeric code, is why it died.
+    signal: r.exitSignal ?? null,
+    tail: r.ok ? undefined : computeFailureTail(r.stdout, r.stderr),
     // Card 237aa3a9: `undefined` (never computed) on a pass — JSON.stringify drops the key entirely, so a
     // passing row carries no `failureDetail` key at all (see the module-header doc above for why that
     // matters — key PRESENCE, not a valued-but-false field, is the failure signal).
@@ -2050,19 +2100,13 @@ if (isMain) {
     // process.exit() below tearing the process down before they reach the pipe. `epilogueLines.join("\n")
     // + "\n"` reproduces the SAME bytes the old per-call console.log sequence produced (each call wrote its
     // argument plus one trailing "\n"; join("\n") + a final "\n" is byte-identical to that).
+    // Card e26f3199: on a timeout, name WHICH of the two failure modes this was — before this card, the
+    // child's real exit status was discarded, so "completed successfully, 'close' was just late" printed
+    // identically to "genuinely wedged, killed, never exited". They must not print the same. Card 5e3ebc80:
+    // per-entry line-building moved to `buildFailureEntryLines` (above `runOne`) — same lines, same order,
+    // for every non-empty-output case; see that function's own doc for what's new (the zero-output marker).
     const epilogueLines = ["FAILURES:"];
-    for (const f of failed) {
-      // Card e26f3199: on a timeout, name WHICH of the two failure modes this was — before this card, the
-      // child's real exit status was discarded, so "completed successfully, 'close' was just late"
-      // printed identically to "genuinely wedged, killed, never exited". They must not print the same.
-      const statusLabel = f.status === "timeout" && f.timeoutDetail ? `timeout (${f.timeoutDetail})` : f.status;
-      epilogueLines.push(`  - ${f.name} (exit ${statusLabel}): ${f.tail ?? ""}`);
-      if (f.status === "timeout") {
-        epilogueLines.push(`      exit->close gap: ${f.exitToCloseGapMs != null ? `${f.exitToCloseGapMs}ms` : "n/a (child's own exit was never observed)"}`);
-      }
-      if (f.stdout?.trim()) epilogueLines.push(f.stdout.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
-      if (f.stderr?.trim()) epilogueLines.push(f.stderr.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
-    }
+    for (const f of failed) epilogueLines.push(...buildFailureEntryLines(f));
     writeFullySync(1, epilogueLines.join("\n") + "\n");
     process.exit(1);
   }
