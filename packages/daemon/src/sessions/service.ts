@@ -1726,26 +1726,9 @@ export function composeCodescapeInjectionStatus(
  *  mistook it for. */
 const FROM_MANAGER_HEADER_RE = new RegExp(`^\\[${FROM_MANAGER_TAG}(?::[a-z-]+)?\\]\\n`);
 
-/**
- * Card f907c8c4 DoD-1: matches `messagePeerManager`'s own peer-frame tag — the RICHER cross-project
- * variant (`[loom:from-manager · <name> · projectId:<id> · sessionId:<id>]`) — and ONLY that variant.
- * The TAG ITSELF is derived from {@link FROM_MANAGER_TAG} (same reason {@link FROM_MANAGER_HEADER_RE}
- * derives it, not a second hand-typed literal — a future change to the tag must not silently strand this
- * pattern behind it). What's deliberately distinct from `FROM_MANAGER_HEADER_RE` is the SHAPE after the
- * tag, not the tag: the plain worker-directed frame closes the bracket right after the tag/`:suffix` with
- * no ` · ` fields, so a worker_message/redirect frame never matches this pattern and a peer frame never
- * matches that one. Used by {@link carryPendingToSuccessor} to label a carried PEER message with a
- * successor-inheritance notice (below) — scoped to cross-project peer_message frames only, never a
- * worker/session/platform-directed carry.
- *
- * `[^\]]*` stops at the FIRST `]`, so a peer project literally named with a `]` in it (e.g. "Loom [dev]")
- * produces a frame this pattern won't match, and the inheritance label below is silently skipped for that
- * one delivery. Deliberately left as-is: under-labelling fails CLOSED (a successor loses some context, no
- * worse than before this fix), whereas widening the pattern to swallow an embedded `]` risks the opposite,
- * more dangerous direction — over-matching into an ordinary worker-directed frame and spuriously labelling
- * it, exactly what the discriminating negative control in peer-message-recycle-inheritance.mjs exists to
- * catch. Do not "fix" this without re-checking that control still holds.
- */
+// @decision f907c8c4 — matches ONLY messagePeerManager's richer cross-project peer-frame variant, never
+// a plain worker-directed frame; do not "fix" the [^\]]* first-] stop without re-checking
+// peer-message-recycle-inheritance.mjs's negative control (docs/decisions/f907c8c4-peer-message-frame-regex-is-distinct-from-worker-frame.md)
 const PEER_MESSAGE_FRAME_RE = new RegExp(`^\\[${FROM_MANAGER_TAG} · [^\\]]*\\]\\n`);
 
 /** Default run-webhook poster: one bounded `fetch` POST; the AbortController caps a hung endpoint. */
@@ -1852,24 +1835,9 @@ export class SessionService {
    * pid from the kill set — see the pre-gate call site's doc comment.
    */
   private readonly reapWorktreeProcesses: ((worktreePath: string, opts?: { excludePids?: number[] }) => Promise<{ killedPids: number[] }>) | undefined;
-  /**
-   * Per-branch consecutive-gate-TIMEOUT streak — the circuit breaker for card 3564fd1e (the fleet-wide
-   * gate-timeout death spiral): a genuinely hanging test can never pass no matter how many times the gate
-   * re-runs it, and each re-run risks leaking another process-tree survivor even with the tree-kill fix in
-   * gate-runner.ts. After {@link GATE_TIMEOUT_BREAKER_THRESHOLD} CONSECUTIVE `timedOut` results on the same
-   * branch AT THE SAME commit, `confirmWorkerMerge`/`runWorkerGate` stop spawning the gate for it (see
-   * {@link checkGateTimeoutBreaker}) and report a distinct "likely hanging test" failure instead.
-   *
-   * In-memory only, daemon-uptime-scoped: it only needs to survive long enough to break a LIVE spiral. A
-   * restart resetting it is an acceptable cold-start cost, not a correctness gap (worst case: one extra
-   * timeout before it re-trips) — not worth a DB table for a transient host-load guard.
-   *
-   * Keyed by branch, not workerSessionId: the failure is a property of the branch's CODE, so a worker
-   * resume/recycle on the same branch inherits the trip rather than getting a fresh budget for free.
-   * `sha` records the worktree HEAD the streak was last observed against; {@link checkGateTimeoutBreaker}
-   * clears the whole entry once that HEAD advances — a new commit is the plausible fix, so the breaker
-   * must give it a clean slate rather than locking the branch out for the rest of the daemon's uptime.
-   */
+  // @decision 3564fd1e — per-branch consecutive gate-TIMEOUT circuit breaker; in-memory/daemon-uptime-
+  // scoped on purpose (never persist), keyed by branch not workerSessionId, cleared only when the
+  // worktree HEAD advances (docs/decisions/3564fd1e-gate-timeout-circuit-breaker-streak.md)
   private readonly gateTimeoutStreak = new Map<string, { count: number; sha: string | null }>();
   /** Read-only accessor for {@link gateTimeoutStreak} (card fa359824 follow-up, escalation 4f151331) — the
    *  live registry a `gate_queue` entry is built from only ever reflects what {@link GateSemaphore} BELIEVES
@@ -1896,31 +1864,9 @@ export class SessionService {
    * harmless (nothing can attach to it after restart anyway — the op itself doesn't survive either).
    */
   private readonly gateStartStamps = new Map<string, WorktreeGateStamp>();
-  /**
-   * The worktree stamp {@link runWorkerGate} recorded at the moment its CURRENTLY-RUNNING gate op was
-   * ADMITTED past the semaphore (card a0d912f5 Code Review, `describeGateHeadCurrency`'s `admitStamp`) —
-   * a SIBLING of {@link gateStartStamps}, keyed the same way, but deliberately a DIFFERENT checkpoint.
-   * CLEARED alongside it, at the same site — but SET at a DELIBERATELY LATER, DIFFERENT site than
-   * `gateStartStamps` (which is set at FIRE time, before admission): this one is set only once `fn` is
-   * actually admitted and running, inside `runExclusive`'s callback. Do not "simplify" that gap away —
-   * collapsing the two set-sites back to one is exactly what would reintroduce the queued-op false
-   * refusal {@link runWorkerGate}'s own pre-emptive-refusal check (and `run-gate-result-consumption.mjs`
-   * scenario (D)) exists to prevent; see that check's own doc for the full argument.
-   *
-   * WHY A SEPARATE MAP, NOT A REUSE OF `gateStartStamps`: the pre-emptive stale-attach REFUSAL a re-call
-   * performs BEFORE ever attaching must distinguish "the worktree moved during the QUEUE WAIT" (benign —
-   * see `describeGateHeadCurrency`'s own RELABELED doc: the gate hasn't spawned yet, so it will build
-   * whatever's on disk at ADMISSION, commit included) from "the worktree moved while the gate was already
-   * admitted/running" (the only case a refusal is honest about). Comparing against `gateStartStamps` (fire
-   * time) instead would collapse exactly the distinction `describeGateHeadCurrency`'s own three-stamp
-   * design exists to preserve — a queued op's own eventual result WOULD cover a commit made after fire
-   * time, so refusing on that basis tells a caller to cancel a run that was going to validate exactly what
-   * it wanted. This map is read ONLY once the caller has independently confirmed (via a fresh
-   * `gateSemaphore.snapshot()` read) that the op is genuinely ADMITTED, not merely queued — never trust its
-   * mere presence as proof of that on its own, since a raced entry could theoretically outlive its own
-   * queued phase in this map's absence rather than its presence (in practice this is only ever written
-   * from inside the admitted branch, so this is belt-and-suspenders, not a known gap).
-   */
+  // @decision a0d912f5 — gateAdmitStamps is a deliberately SEPARATE, LATER checkpoint than
+  // gateStartStamps (fire-time vs admission-time); do not "simplify" the two set-sites back into one
+  // (docs/decisions/a0d912f5-gate-admit-stamps-is-a-separate-later-checkpoint-than-start-stamps.md)
   private readonly gateAdmitStamps = new Map<string, WorktreeGateStamp>();
   /** {@link LastWorkerGateCheck} per worker session — see that type's doc. Keyed by `workerSessionId`
    *  (not `gate:${workerSessionId}` like {@link gateStartStamps} — this outlives a single run_gate call's
@@ -2044,25 +1990,9 @@ export class SessionService {
    */
   private readonly platformMessageDedupe = new Map<string, { result: { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string }; atMs: number }>();
   private static readonly PLATFORM_MESSAGE_DEDUP_TTL_MS = 5 * 60_000;
-  /**
-   * Resume-half memory-recall dedup gate (card ea648f89, hardened by finding 0e08c0b7): every repeated
-   * turn-injection point for project memory (resume/fork, project-memory-recall.ts) and companion memory
-   * (resume, companion/memory-recall.ts) hashes its framed block (sha256 hex, `null` when nothing to
-   * inject) and compares it against the LAST digest actually delivered to that session, persisted on the
-   * `sessions` row itself (`last_project_memory_digest` / `last_companion_memory_digest` — see
-   * {@link Db.getLastProjectMemoryDigest}/{@link Db.setLastProjectMemoryDigest} and their companion-memory
-   * siblings). Unchanged ⇒ skip the enqueue entirely (the compare runs BEFORE `enqueueStdin`, so an
-   * unchanged digest never mints a standalone turn into a parked session); changed (incl. the very first
-   * resume, with nothing stored yet) ⇒ inject and persist the new hash.
-   *
-   * v1 of this gate (project memory only) kept the digest in an in-memory `Map`, which caught every
-   * SAME-PROCESS repeat (idle-nudge/wake resumes) but reset to empty on a daemon RESTART — assumed "rare
-   * and harmless" at the time, but Loom's own dev daemon (`tsx watch`) restarts on every merge touching
-   * `packages/daemon/src/**`, so for a self-hosting orchestrator this was routine, not rare (observed: a
-   * full block re-injected at kickoff + 3 daemon-restart resumes ≈ 30k+ redundant tokens in one session).
-   * The DB column survives a restart, closing that gap — and companion memory (which had NO dedupe at all
-   * — observed injecting the identical block 25+ times into one companion) now gets the identical guard.
-   */
+  // @decision ea648f89 — resume-half memory-recall dedup gate; hash the framed block and compare against
+  // the digest persisted on the session row (never an in-memory cache — must survive a daemon restart)
+  // (docs/decisions/ea648f89-dedupe-resume-time-memory-reinjection-by-digest.md)
   private stampProjectMemoryDigest(sessionId: string, framed: string | null): void {
     this.db.setLastProjectMemoryDigest(sessionId, framed ? createHash("sha256").update(framed).digest("hex") : null);
   }
@@ -2239,22 +2169,10 @@ export class SessionService {
     this.shutdownCleanup = fn;
   }
 
-  /**
-   * Card 0e4a859a — resolve whether THIS host is actually serving a codescape graph for `project`. MUST
-   * stay presence-gated on purpose (codescape is a private product): mirrors the SAME gate
-   * `codescapeHttpMcpServer` uses to decide whether to mount the MCP itself (the daemon-wide supervisor
-   * gate + the per-project opt-in + a LIVE port + `resolveProjectId` resolving an id for this repo) —
-   * never a looser/separate check, so {@link resolveCodescapeBlockText} can never tell a session to load
-   * a graph that isn't actually being served. `resolveProjectId` is THIS supervisor instance's own cached
-   * resolver (registration cache first, manifest fallback) — the SAME one `pty/host.ts` uses for the real
-   * mount. The freshness stamp is a SEPARATE, uncached manifest read (cheap — see
-   * `resolveCodescapeLastIngested`) that only runs once an id has already resolved, so a transient
-   * stamp-read hiccup degrades to an unstamped block rather than hiding the whole thing.
-   *
-   * Card badba5a8: now a DISCRIMINATED result (`ok:true|false`) instead of `{...}|undefined` — same four
-   * conditions, same order, GATE BEHAVIOR UNCHANGED — so {@link resolveCodescapeInjectionStatus} (and, via
-   * it, {@link resolveCodescapeBlockText}) can record WHICH condition failed rather than a bare miss.
-   */
+  // @decision 0e4a859a — MUST stay presence-gated on purpose (codescape is a private product): mirrors
+  // codescapeHttpMcpServer's own mount gate exactly, never a looser/separate check, so
+  // resolveCodescapeBlockText can never tell a session to load a graph that isn't actually served
+  // (docs/decisions/0e4a859a-resolve-codescape-graph-context-caching-and-degrade.md)
   private resolveCodescapeGraphContext(project: Project): { ok: true; lastIngestedAt: string | null } | { ok: false; reason: CodescapeGraphGateReason } {
     if (!this.codescape) return { ok: false, reason: "no-supervisor" };
     const codescapeEnabled = resolveCodescapeConfig(project.config).enabled;
@@ -2266,87 +2184,28 @@ export class SessionService {
     return { ok: true, lastIngestedAt: resolveCodescapeLastIngested(project.repoPath, this.codescape.getHomeDir()) };
   }
 
-  /**
-   * Card badba5a8 (observability-only — see the card for why): the SINGLE source of truth for both the
-   * rendered block text AND the three facts worth recording about how it was (or wasn't) produced. Thin
-   * wiring over the EXPORTED, pure {@link composeCodescapeInjectionStatus} (see its own doc for the
-   * actual reason/stamped/text logic) — kept pure and exported specifically so it can be unit-tested with
-   * literal `info`/`asset` fixtures, without ever touching the real, shared, tracked
-   * `CODESCAPE_PROMPT_BLOCK_ASSET` file (mutating that file mid-test would race every other codescape
-   * test in this repo's gate). `resolveCodescapeBlockText` is a THIN DELEGATOR over THIS method (see its
-   * own doc) so there is exactly one place that computes the text — never a second, parallel gate mirror
-   * that could drift from this one (the class doc above already warns about that risk for the FIRST
-   * mirror, `codescapeHttpMcpServer`; this method deliberately avoids creating a third).
-   *
-   * `taskTitle` (card bed49000, optional) is the dispatched task's title, when the caller has one — a
-   * worker dispatch (spawnWorker/recycleWorker) passes it; every manager-role caller (startNew's
-   * manager branch, startManager, recycleManager) has no task and omits it, so `isCodescapeExcludedTaskClass`
-   * always reads `undefined` as "keep" and those call sites are byte-identical to before this card.
-   */
+  // @decision badba5a8 — the SINGLE source of truth for the rendered block text + the three
+  // observability facts; thin wiring over composeCodescapeInjectionStatus, never a second gate mirror
+  // (docs/decisions/badba5a8-codescape-injection-status-is-pure-and-unit-testable-without-the-real-asset.md)
   private resolveCodescapeInjectionStatus(project: Project, taskTitle?: string | null): CodescapeInjectionStatus {
     const info = this.resolveCodescapeGraphContext(project);
     const asset = info.ok ? readCodescapePromptBlockAsset(CODESCAPE_PROMPT_BLOCK_ASSET) : undefined;
     return composeCodescapeInjectionStatus(info, asset, taskTitle);
   }
 
-  /**
-   * Card 0e4a859a — the FULLY-RENDERED codescape discovery block, ready to append verbatim via the
-   * generic {@link appendMemoryRecallToStartupPrompt} (the SAME primitive companion/project-memory blocks
-   * already reuse), or `null` to append nothing.
-   *
-   * PRIVACY GUARD (card f3ce53f1) — WHY THIS READS A FILE INSTEAD OF A STRING LITERAL: the block's PROSE
-   * ("Codescape is available for this project…") is NOT a source string anywhere in this codebase — it
-   * lives ONLY at {@link CODESCAPE_PROMPT_BLOCK_ASSET}, a dev-only asset file INSIDE the `codescape`
-   * skill dir, which is entirely omitted from a published `loomctl` release (one of `DEV_ONLY_SKILLS`,
-   * exactly like that dir's own SKILL.md). A compiled dist/ file can carry a `codescape`-NAMED IDENTIFIER
-   * (this method, its callers, `resolveCodescapeConfig`, …) — the owner ruled 2026-07-23 (Request
-   * `e685f273`) that compiled internals are not a user-visible leak — but it must never carry the PROSE
-   * ITSELF, which reads as a feature announcement an end user could find by grepping their install. This
-   * is also why `composeManagerStartupPrompt`/`composeWorkerStartupPrompt` know NOTHING about codescape:
-   * they just append an opaque pre-rendered block, so the concept never has to compile into those files.
-   *
-   * Never throws: a missing/unreadable asset (the expected shape on every non-dev/non-self-host host,
-   * where {@link resolveCodescapeGraphContext} already returned a `ok:false` result anyway since the
-   * daemon-wide gate is off there too) degrades to no block, same as any other clean-skip in this
-   * feature. Card badba5a8: a THIN delegator over {@link resolveCodescapeInjectionStatus} — the text
-   * output is UNCHANGED (same trim/empty-check/stamp-append, just computed once, in one place) — see that
-   * method's own doc for why this is one source of truth rather than a second, drift-prone gate mirror.
-   */
+  // @decision f3ce53f1 — PRIVACY GUARD: reads the block's prose from the dev-only codescape skill asset,
+  // NEVER a string literal in this source — the prose must never reach a published dist/ (a compiled
+  // identifier is fine, owner ruling Request e685f273, but the leaked-feature text is not)
+  // (docs/decisions/f3ce53f1-codescape-prose-lives-only-in-a-dev-only-asset-file.md)
+  // @decision badba5a8 — thin delegator over resolveCodescapeInjectionStatus, one source of truth
+  // (docs/decisions/badba5a8-codescape-injection-status-is-pure-and-unit-testable-without-the-real-asset.md)
   private resolveCodescapeBlockText(project: Project): string | null {
     return this.resolveCodescapeInjectionStatus(project).text;
   }
 
-  /**
-   * Phase-2 profile-driven spawn (Agents→Profiles P2): resolve an agent's OPTIONAL Profile into
-   * the effective spawn shape the "start a session in an agent" paths read — the role it confers, the
-   * startup prompt to inject, and the permission policy (config allow + the profile's allowDelta).
-   *
-   * Fully ADDITIVE — an agent with `profileId === null` (every agent today) resolves to EXACTLY
-   * today's behavior: role straight from the caller, the agent's OWN prompt, and the config's
-   * permission object UNCHANGED (same reference — no allow delta layered), so every existing spawn is
-   * byte-identical when no profile is involved.
-   *
-   * Role composition (the load-bearing rule): an EXPLICIT caller role — worker_spawn → worker,
-   * REST/scheduler → manager/platform — ALWAYS wins; the profile supplies role ONLY when the caller
-   * didn't specify one (the plain "+New" path) AND the agent has a profile.
-   *
-   * Phase-3 model wiring: the profile's `model` (when non-null) is now threaded through to the spawn
-   * recipe as a `--model <id>` arg. When null/absent it is byte-identical to today (no `--model`). This
-   * applies to the FRESH-start paths only (startNew/startManager/startPlatformLead/startAuditor) — a
-   * `--resume`/`--fork-session` spawn deliberately omits `--model` and inherits the conversation's model
-   * from the engine transcript, keeping every resume/fork byte-identical.
-   *
-   * Phase-3 skills wiring: the profile's `skills` subset is resolved here and PINNED on the session row
-   * at fresh spawn (like browserTesting), then read from the row on resume/fork/recycle/boot — NEVER
-   * re-resolved (the profile may have changed). injectSkills delivers only the pinned subset; null/empty
-   * ⇒ all skills (byte-identical to today). An empty subset is normalized to null at the pin sites.
-   *
-   * `forcePlain` (P3 spawn override): BYPASS the profile entirely so role + allow resolve via
-   * resolveProfile's backstop — i.e. spawn as if the agent had no profile (a vanilla "+New": role null,
-   * no allow delta; the injected prompt is the agent's own either way). The web "Spawn → force plain"
-   * menu uses this so a manager/platform-profile agent can still start a COHERENT plain session, not one
-   * carrying a manager role + allowlist it shouldn't have / can't use.
-   */
+  // @decision 547d5fc4 — profile-driven spawn resolution is fully additive: profileId===null is
+  // byte-identical to before; an explicit caller role always wins over the profile's role
+  // (docs/decisions/547d5fc4-profile-driven-spawn-resolution-is-fully-additive.md)
   private resolveAgentSpawn(
     agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false, companionName?: string,
   ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; connections: string[]; vaultWrite: boolean; harness: "claude" | "codex" | undefined } {
@@ -2427,23 +2286,9 @@ export class SessionService {
     };
   }
 
-  /**
-   * Compose the fresh-spawn-EQUIVALENT persona+recall prompt for an already-live companion session — the
-   * "/new" reinject (chat-gateway.ts's `resetConversation`, companion-persona-after-clear card). COMPOSE-ONLY
-   * / side-effect-free: reuses `resolveAgentSpawn` purely to extract the composed startup-prompt STRING
-   * (that method only READS `db.getProfile`, no writes) and appends the SAME memory-recall digest a fresh
-   * spawn/resume gets (`buildFramedMemoryRecall`/`appendMemoryRecallToStartupPrompt`) — this NEVER spawns,
-   * writes, or re-arms anything; it is called from a raw-enqueue reinject path, never a spawn path. Returns
-   * undefined for anything that isn't a live, still-assistant-role companion session (nothing to reinject).
-   *
-   * `companionName` — baked into the ORIGINAL startup prompt at creation-time only (startNew's
-   * `opts.companionName`) and never stored on the session/agent row — is re-sourced here from the durable
-   * `companion_config.name` column (the provision endpoint persists it there, gateway/server.ts) rather than
-   * threaded through some new session-row field, so a re-inject years after provisioning still gets the same
-   * name. `explicitRole:"assistant"` is passed (not re-resolved from the agent's CURRENT profile) mirroring
-   * resume()'s "carry session.role forward" pattern — a profile edited after this companion was created must
-   * not change what a reinject composes for it.
-   */
+  // @decision a92ea138 — companion "/new" reinject is COMPOSE-ONLY (never spawns/writes/re-arms) and
+  // reads the PINNED role, never re-resolving the agent's current profile
+  // (docs/decisions/a92ea138-companion-reinject-is-compose-only-and-role-pinned.md)
   composeCompanionReinjectPrompt(sessionId: string): string | undefined {
     const session = this.db.getSession(sessionId);
     if (!session || session.role !== "assistant") return undefined;
@@ -2603,22 +2448,9 @@ export class SessionService {
     return { ...session, processState: "live" };
   }
 
-  /**
-   * Start a NEW MANAGER session in an agent (phase-2 §A2). Mirrors startNew, but marks the
-   * session role 'manager' (so it gets the loom-orchestration MCP + allowlist at spawn) and
-   * runs in the project repo, NOT a worktree (managers coordinate; workers get the worktrees).
-   *
-   * `prompt` is an OPTIONAL per-schedule custom task description (the Scheduler passes a fired
-   * schedule's own `prompt` here) — appended via `appendScheduledPrompt` AFTER the composed manager
-   * prompt (identity/doctrine + "Where things live" block). Undefined/null (every non-scheduled caller,
-   * and every schedule with no prompt set) ⇒ byte-identical to today.
-   *
-   * `opts.scheduled` (card 53edd8d5) — true ONLY when index.ts's Scheduler wiring calls this; every
-   * other caller (REST "start manager", the generic profile-derived dispatch) omits `opts`, so the
-   * session's `scheduledSpawn` pins false and this is byte-identical to before the flag existed. Read
-   * back by `Db.countLiveScheduledManagers` — the Scheduler's OWN manager-cap budget, separate from the
-   * standing human/Lead-spawned fleet.
-   */
+  // @decision 53edd8d5 — a scheduled manager's custom prompt + scheduledSpawn flag are both additive;
+  // every non-Scheduler caller stays byte-identical to before either existed
+  // (docs/decisions/53edd8d5-scheduled-manager-prompt-and-cap-are-additive.md)
   startManager(agentId: string, prompt?: string | null, opts?: { scheduled?: boolean }): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
@@ -2714,25 +2546,11 @@ export class SessionService {
     return { ...session, processState: "live" };
   }
 
-  /**
-   * Start a NEW PLATFORM-LEAD session in an agent (phase-2 Pillar C). Mirrors startManager, but
-   * role 'platform' (so it gets the loom-platform MCP + allowlist at spawn, NOT orchestration).
-   * A platform-lead creates/configures projects + agents; it runs in its host project's repo.
-   *
-   * CREATE-ONLY (multiple concurrent Leads allowed): a manual Spawn ALWAYS mints a FRESH platform
-   * session — exactly like startAuditor below. The owner may run several live Leads at once; they
-   * coordinate via the shared Platform board. (The old "never two LIVE Leads" singleton short-circuit
-   * — reuse an already-live platform session instead of spawning a second — has been removed.)
-   *
-   * This is NOT the trust boundary. Platform-spawn is HUMAN-REST only: gateway POST
-   * /api/agents/:id/sessions {role:"platform"} reaches here, and an existing Lead's self-recycle
-   * (recyclePlatformLead) is the only other spawn surface — session_spawn REFUSES role:"platform", so
-   * no agent/MCP path can mint one. The singleton was an operational guarantee, never the boundary.
-   *
-   * On-demand RESUME of an EXITED Lead stays an explicit human action (the Lead/Auditor History
-   * "Resume" button → resumeSession); this path never resumes — it always INSERT+spawns. Restart-resume
-   * is independent: index.ts → resumeFleetOnBoot resumes captured live sessions by id on a daemon_restart.
-   */
+  // Card 26aa4322 — this is NOT the trust boundary: platform-spawn is HUMAN-REST only (+ self-recycle);
+  // session_spawn REFUSES role:"platform", so no agent/MCP path can mint one — the create-only/singleton
+  // shape below is an operational guarantee, never the boundary.
+  // @decision 8ddcf787 — create-only, multiple concurrent Leads allowed
+  // (docs/decisions/8ddcf787-platform-lead-spawn-is-create-only-multiple-concurrent-leads.md)
   startPlatformLead(agentId: string): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
@@ -2963,23 +2781,10 @@ export class SessionService {
     return { ...session, processState: "live" };
   }
 
-  /**
-   * Start a NEW SETUP-ASSISTANT session in an agent (Setup Assistant E1-5). Shaped like startManager but
-   * passes callerRole "setup" so the session is LOCKED to the curated, ungated loom-setup MCP surface
-   * (E1-3). Because an EXPLICIT caller role ALWAYS wins in resolveAgentSpawn, the session role is "setup"
-   * regardless of the agent's profile role — the gate is keyed off the SESSION role, never the profile role.
-   *
-   * SINGLETON GUARANTEE = "never two LIVE setup sessions" (NOT "one row ever"). UNLIKE the Platform Lead
-   * (startPlatformLead is now create-only — multiple live Leads may coexist), the Setup operator stays a
-   * singleton: if a setup session is already LIVE, reuse it as-is (its pty outlived the viewer) — never
-   * mint a 2nd. Otherwise FALL THROUGH and INSERT+spawn a brand-new setup session (never resume an exited
-   * one here). Uses db.liveSessions (the canonical live-over-recency query — filters to LIVE before any
-   * .find, so a recently-STOPPED setup session can't sort ahead of an idle-but-LIVE one; see its note + 0e40dde).
-   *
-   * HUMAN-REST only (gateway POST /api/agents/:id/sessions {role:"setup"}) — no agent/MCP path mints one
-   * (session_spawn on the setup surface itself REFUSES role "setup", so a setup session can't self-clone).
-   * The Setup Assistant agent lives in the reserved "Getting Started" home (E1-4).
-   */
+  // HUMAN-REST only (gateway POST /api/agents/:id/sessions {role:"setup"}) — no agent/MCP path mints one
+  // (session_spawn on the setup surface itself REFUSES role "setup", so a setup session can't self-clone).
+  // @decision ad131671 — SINGLETON = "never two LIVE", not "one row ever"
+  // (docs/decisions/ad131671-setup-assistant-singleton-is-never-two-live-not-one-row-ever.md)
   startSetup(agentId: string): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
@@ -3048,31 +2853,10 @@ export class SessionService {
     return { ...session, processState: "live" };
   }
 
-  /**
-   * Start a NEW ELEVATED OPERATOR session in an agent (Bucket 2b "Bounded Elevated Operator"). Shaped like
-   * startSetup but passes callerRole "operator" so the session is LOCKED to the curated, own-workspace-
-   * confined loom-operator MCP surface. Because an EXPLICIT caller role ALWAYS wins in resolveAgentSpawn,
-   * the session role is "operator" regardless of the agent's profile role — the gate is keyed off the
-   * SESSION role (+ the LIVE platform.operatorEnabled flag, re-checked by the router itself on every
-   * request), never the profile role.
-   *
-   * CREATE-ONLY, NOT a singleton (mirrors startWorkspaceAuditor's shape, deliberately NOT startSetup's
-   * live-reuse guard): an operator is a bounded, human-invoked tool session, not a standing assistant — the
-   * human may want several independent operator sessions live in the same agent (e.g. one per task), so
-   * this never collapses a fresh spawn into an already-live row.
-   *
-   * FLAG-GATED at the CALLER (gateway REST — see isOperatorEnabled), not here: this method itself does NOT
-   * re-check platform.operatorEnabled, mirroring startWorkspaceAuditor/startSetup (neither re-checks their
-   * own gating condition internally either — the REST route is the single enforcement point for "may this
-   * spawn happen at all"; the router's resolveRole is the SEPARATE, LIVE-read enforcement point for "may
-   * this session's surface be reached right now").
-   *
-   * HUMAN-REST only (gateway POST /api/agents/:id/sessions {role:"operator"}, flag-gated 403 when off) —
-   * no agent/MCP path mints one (session_spawn on every agent-facing surface refuses role "operator";
-   * setupRoleError excludes it from the mintable profile-role allowlist). The Elevated Operator agent lives
-   * wherever the human creates it (own-workspace-confined — NOT restricted to a reserved home, unlike
-   * setup/workspace-auditor, since an operator is meant to act on an ORDINARY project's own tree).
-   */
+  // HUMAN-REST only (gateway POST /api/agents/:id/sessions {role:"operator"}, flag-gated 403 when off) —
+  // no agent/MCP path mints one (session_spawn on every agent-facing surface refuses role "operator").
+  // @decision 89d8e17d — create-only (not a singleton), and flag-gated at the CALLER, not here
+  // (docs/decisions/89d8e17d-elevated-operator-is-create-only-and-caller-flag-gated.md)
   startOperator(agentId: string): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
@@ -3277,77 +3061,10 @@ export class SessionService {
     return { ...session, processState: "live", busy: false };
   }
 
-  /**
-   * Companion-specific CONVERSATION-PRESERVING respawn (Companion Capability & Permission-Lever Framework
-   * §6). `OrchestrationMcpRouter.buildServer` is stateless per MCP request — it re-resolves the companion's
-   * grants fresh on every tool call, so a revoke/downgrade is already live with no respawn needed. What
-   * ISN'T live without one is a newly-GRANTED tool-bearing lever (`sessions_status`/`decisions_list`/
-   * `board_list`/`vault_lookup`, and future ACT tools): the running companion PROCESS fetched `tools/list`
-   * only once, at OS-process-start (the SAME invariant `resume()`'s own comment documents —
-   * `resolveAgentSpawn` runs only inside `createPty`, only from `PtyHost.spawn()`), so it has no way to
-   * discover a tool it never asked for. This closes that gap WITHOUT losing the conversation: re-resolve the agent's CURRENT profile-driven
-   * capability surface (the exact shape a fresh spawn would resolve), re-pin it on the session ROW, stop
-   * the old OS process, then `resume(sessionId)` — which reads those SAME row fields (never re-resolving
-   * the Profile — see `resume()`'s own comment) and passes `--resume <engineSessionId>` to `pty.spawn`, so
-   * the SAME conversation transcript continues under the NEW tool surface.
-   *
-   * This is a DELIBERATE, human-triggered escape hatch (REST `POST /api/companion/:sessionId/upgrade`,
-   * NEVER auto-fired from a grant write) — it does NOT change `resume()`'s general pin-forward semantics:
-   * every OTHER resume/fork/recycle path still carries the row's EXISTING values forward untouched, exactly
-   * as before this method existed. Re-pinning here happens BEFORE the old pty is stopped (a pure DB write
-   * has no live effect on an already-running process — mirrors `setRestrictedTools`), so if an inbound chat
-   * message races the stop→respawn gap and trips `withCompanionSelfHeal`'s own auto-resume
-   * (companion/revive.ts, wired to this SAME `resume()`), that resume ALSO reads the already-updated row —
-   * whichever resume wins (this one or the self-heal's), the outcome is identical.
-   *
-   * IN-FLIGHT-TURN PRESERVATION (card d88163b7): if the companion is BUSY (mid-turn) when this runs, its
-   * drain surface is HELD (`pty.holdDrain`/`releaseDrain`) and it gets a short bounded wait
-   * (`UPGRADE_BUSY_WAIT_MS`, on a monotonic clock) to go idle on its own before `pty.stop` is called — see
-   * the wait loop's own comment below. Before this fix, a busy companion's turn was ALWAYS force-
-   * interrupted immediately, silently discarding whatever it hadn't yet delivered (including an in-flight
-   * `chat_reply` MCP call) with no recovery path — the AVAILABILITY-GAP fix above only ever covered a NEW
-   * message racing the stop, never one the pty was already mid-reply to. A first pass at this fix (waiting
-   * without holding the drain) reopened exactly that gap: the busy turn ending DURING the wait would let
-   * `drainPending`'s Stop-hook auto-drain (or `enqueueStdin`'s idle-submit path) promote a queued message
-   * into a fresh turn our own `pty.stop()` would then kill, uncapturable by `flushPending` since it was no
-   * longer sitting in `pending` by the time we called it (CR-caught). `holdDrain` closes that: while held,
-   * anything that would start a turn queues instead, so `drain()` below can always recover it.
-   *
-   * SCOPE (CR round 2 correction — read precisely): `holdDrain` protects MESSAGES, not the turn itself. It
-   * guarantees anything QUEUED or arriving during the wait is recoverable regardless of outcome. It does
-   * NOT guarantee the busy turn survives — a turn STILL busy when `UPGRADE_BUSY_WAIT_MS` expires is STILL
-   * force-interrupted below, and its own in-flight reply is STILL lost, same as pre-fix. The wait only
-   * helps when the turn finishes naturally within the bound; see the wait loop's own comment for that
-   * trade.
-   *
-   * AVAILABILITY-GAP MESSAGE PRESERVATION (CR fix): `pty.stop("graceful")` marks the pty `stopping` but
-   * leaves it alive for up to several seconds while it winds down — an inbound chat message that lands in
-   * that window is NOT treated as "session dead" (so `withCompanionSelfHeal` never fires), it's HELD in the
-   * pty's in-memory FIFO instead. Left alone, the old process's own exit unconditionally WIPES that FIFO
-   * (`pty/host.ts`'s `onExit`), silently losing the message — this mirrors `recycleWorker`'s own
-   * `flushPending`-before-stop pattern (same file), except the recipient session id is UNCHANGED here (a
-   * respawn, not a new session), so the captured entries are simply re-submitted onto the SAME session once
-   * it's live again. `flushPending` is drained repeatedly through the wait loop (not just once up front) so
-   * a message that arrives WHILE the pty is stopping-but-still-alive is caught too — bounding the genuinely
-   * unrecoverable loss window to under one poll tick (~100ms, immediately before the process actually
-   * exits) instead of the full multi-second graceful/hard-stop wait. A durable recipient message (one
-   * carrying `onDeliver` — e.g. a Platform Lead `session_message` mid-flight) is deliberately SKIPPED on
-   * redelivery: `resume()`'s own `redriveUndeliveredMessagesForRecipient` already re-delivers it, so
-   * redelivering it here too would double it (mirrors `getPersistablePendingSnapshot`'s dedup reasoning). If the pty
-   * never dies in time and this method aborts, `carried` is pushed BACK onto the still-alive old pty (every
-   * entry, durable or not — resume() never ran, so nothing else will redeliver them) rather than dropped.
-   *
-   * SELF-HEAL RACE (CR fix): `isAlive(sessionId)` is LATCHED, not re-read, once observed false. A fresh
-   * self-heal (companion/revive.ts's `withCompanionSelfHeal`, wired to this SAME `resume()`) runs OUTSIDE
-   * this controller's serialization and can respawn a NEW pty for this session the instant the OLD one dies
-   * — re-reading `isAlive()` afterward would see that fresh pty and wrongly conclude "still alive, needs a
-   * hard stop," killing it out from under an in-flight reply and respawning a THIRD time. Once `died` is
-   * latched true, every later decision (the hard-stop escalation, the "didn't stop in time" abort) is gated
-   * on that latch alone — never on another `isAlive()` call — so a concurrent self-heal is simply absorbed:
-   * our own `resume()` below short-circuits on ITS OWN isAlive check (service.ts's resume(), "already-live"
-   * guard) and returns the self-healed session as-is. That's what makes "whichever resume wins, identical
-   * outcome" (above) actually hold.
-   */
+  // @decision d88163b7 — companion-specific CONVERSATION-PRESERVING respawn: re-resolve + re-pin the
+  // capability surface, stop the old pty, then resume() into the SAME transcript; a deliberate,
+  // human-triggered escape hatch, never auto-fired from a grant write
+  // (docs/decisions/d88163b7-hold-drain-surface-and-bounded-busy-wait.md)
   async upgradeCompanionCapabilities(sessionId: string): Promise<Session> {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
@@ -3435,69 +3152,14 @@ export class SessionService {
     return resumed;
   }
 
-  /**
-   * Manager/platform-Lead-triggered daemon restart (the `daemon_restart` tool, registered on BOTH the
-   * manager's orchestration MCP and the Lead's platform MCP — card 39fcaad3) — for SELF-HOSTING
-   * (orchestrating Loom WITH Loom). After merging daemon-`src` worker branches, the new code isn't
-   * running until the daemon is rebuilt + restarted; this does that and brings the caller (+ its live
-   * workers, if any) back on the other side via the restart-intent file (consumed in index.ts boot).
-   *
-   * Safety: (1) refuses unless under the supervisor (LOOM_SUPERVISED) — otherwise nothing relaunches
-   * the daemon; (2) REBUILDS FIRST while still alive, so a broken build aborts the restart and leaves
-   * the caller running to fix it, instead of exiting into a daemon that won't boot. On a green build
-   * it records intent and exits with RESTART_EXIT_CODE; the supervisor relaunches. Both gates are
-   * ROLE-INDEPENDENT — a platform-Lead caller gets the identical supervisor-check/rebuild-first/
-   * full-fleet-capture behavior a manager gets, not a weaker path (card 39fcaad3's investigation: the
-   * real safety here lives in these structural gates, not in which role holds the tool).
-   *
-   * `deps` is a TEST-ONLY injection seam (mirrors {@link BuildDeps} on `buildDaemon` itself and
-   * `resumeOne` on `resumeFleetOnBoot`) — every real caller (mcp/orchestration.ts, mcp/platform.ts) omits
-   * it, so production behavior is byte-identical to before it existed. Without it, exercising the
-   * `writeRestartIntent` call below from a test would mean either a REAL `pnpm install`/turbo build (slow,
-   * heavy, wrong for a hermetic unit test) or a REAL `process.exit(75)` (which would kill the test's own
-   * process) — `deps.buildDeps` lets a test fake an instant green build, and `deps.exit` lets it capture
-   * the intended exit instead of actually calling it. `deps.mergeDangerGraceMs` similarly lets a test
-   * shrink the merge-danger-window grace ceiling (see below) below its real {@link MERGE_DANGER_SHUTDOWN_GRACE_MS}
-   * so a hermetic test can observe the wait actually elapsing without a multi-second sleep.
-   *
-   * Card f05e5a06: this exits via `process.exit()` directly (below), which emits NO signal — so
-   * `gracefulShutdown`'s own merge-danger-window guard (index.ts, bound only to SIGINT/SIGTERM/SIGHUP)
-   * never ran for THIS path, even though it's the one that fires in practice (a manager's routine deploy
-   * restart, not an owner's manual `loom stop`). This now awaits the SAME
-   * {@link waitForMergeDangerWindowsToClear} guard, with the same bounded, fail-open semantics
-   * `gracefulShutdown` uses — never a hard refusal; always resolves within the grace ceiling regardless of
-   * what the in-flight squash does.
-   *
-   * Card d671f1b8: the SAME bare `process.exit()` gap also meant this path never ran `gracefulShutdown`'s
-   * vault-flush / codescape-stop cleanup ({@link setShutdownCleanup}) — a vault edit still inside its
-   * debounce window at restart time was silently dropped from git (recoverable on the NEXT edit to that
-   * vault, but not before). Fixed by invoking that same shared cleanup from inside the exit-flush timer
-   * below, deliberately AFTER the 300ms MCP-response-flush delay rather than before it: the cleanup's vault
-   * half runs a bounded-but-potentially-multi-minute `execSync` git flush (`VaultVersioner.flushSync`,
-   * bounded at `VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS` = 5min for the working-tree-scale calls), and running
-   * it BEFORE `setTimeout` would delay the MCP response itself by however long that flush takes — the exact
-   * latency this path was written to protect (see the 300ms comment below). Running it AFTER means the
-   * caller's response is unaffected; only the actual process exit (which nobody is waiting synchronously
-   * on) is delayed by however long the flush takes, same trade `gracefulShutdown` already accepts for a
-   * manual `loom stop`. `shutdownCleanup` is `undefined` until index.ts registers it post-boot (see its own
-   * doc) — a restart requested in that brief window skips the flush, but there's nothing to flush yet
-   * either way (the vault watcher isn't running), so this degrades to today's pre-fix behavior, never worse.
-   *
-   * ⚠️ RESIDUAL RISK, accepted and documented rather than left unnoticed (card d671f1b8 follow-up): a
-   * timed-out `git add -A`/`git commit` inside `flushSync` does not stop the real `git.exe` child — it
-   * ABANDONS it, and the orphan keeps running and holding `.git/index.lock` for the rest of its own
-   * duration (project memory `[[execsync-timeout-kills-only-the-shell-on-windows]]`: one measured case
-   * landed its commit ~8s after the bound fired). THIS path is the one place that risk is sharpest: the
-   * supervisor relaunches almost immediately on exit 75, so a fresh daemon could boot straight into a
-   * lock an orphan from the PREVIOUS process still holds — unlike a crash exit (crashlog.ts's handlers,
-   * deliberately excluded from this same cleanup for exactly this reason) or a graceful `loom stop`,
-   * neither of which triggers an immediate relaunch to race against. Judged low rather than zero: this
-   * needs `git add -A` to actually exceed `VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS` (5min), which steady-state
-   * measurements put at ~100ms — only a pathological vault reaches it. No guard added here: `flushSync`'s
-   * own try/catch already degrades a lock-contention failure to a logged warn + `false` (never a throw or
-   * a hang) if a fresh boot's own flush attempt collides with a still-held lock, so the failure mode this
-   * risk produces is itself already bounded, just not eliminated.
-   */
+  // @decision 39fcaad3 — daemon_restart's safety gates (supervisor-check, rebuild-first) are ROLE-
+  // INDEPENDENT: a platform-Lead caller gets the identical path a manager gets, never a weaker one
+  // (docs/decisions/39fcaad3-daemon-restart-safety-is-role-independent.md)
+  // @decision f05e5a06 — must itself await the merge-danger-window guard before exiting; a bare
+  // process.exit() emits no signal, so the SIGINT/SIGTERM/SIGHUP-bound guard never fires for this path
+  // (docs/decisions/f05e5a06-daemon-restart-awaits-merge-danger-window-since-exit-emits-no-signal.md)
+  // @decision d671f1b8 — runs the shared vault-flush/codescape-stop cleanup, deliberately AFTER the
+  // 300ms response-flush delay, not before it (docs/decisions/d671f1b8-daemon-restart-runs-shared-vault-flush-cleanup-after-the-response-flush.md)
   async requestDaemonRestart(
     callerSessionId: string, reason: string,
     deps: { buildDeps?: BuildDeps; exit?: (code: number) => void; mergeDangerGraceMs?: number } = {},
@@ -3641,34 +3303,9 @@ export class SessionService {
     return { restarting: true, ...supervisorResponseFields, mergeDangerWait };
   }
 
-  /**
-   * Scoped per-project DEPLOY (the `deploy` orchestration tool; design [[Scoped Per-Project Deploy —
-   * Design]], 13235b62): a manager can deploy/push its OWN project without being promoted to a
-   * cross-project Lead. Mirrors `gateCommand`'s trust posture exactly:
-   *
-   *   - OWN-PROJECT ONLY, STRUCTURALLY: the caller passes no projectId/host/branch/repo — the project is
-   *     derived server-side from the caller's OWN session (`db.getSession(managerSessionId).projectId`),
-   *     so a manager can never deploy another project or an arbitrary host.
-   *   - HUMAN-ONLY TO ENABLE: `deployCommand` is settable only via the human REST config path (the
-   *     agent-facing validator REJECTS it — see `agentOrchestrationOverride` in mcp/platform.ts). Its
-   *     presence on the resolved project config IS the owner's opt-in-once trust decision; there is no
-   *     further per-deploy confirm gate here.
-   *   - SHIPS INERT: no `deployCommand` configured → refuses, no host exec.
-   *   - FIXED COMMAND, NO AGENT-SUPPLIED ARGS: `reason` is free text for the audit trail only; it is
-   *     NEVER interpolated into the shell command that runs.
-   *   - BOUNDED + NON-INTERACTIVE: runs via the SAME `runGateSequential` executor the merge gate uses
-   *     (spawn, shell:true, capped at `deployCommandTimeoutMs`), in the project's own `repoPath` — never
-   *     a worker worktree.
-   *   - RATE-LIMITED: a per-manager-session sliding-window cap (`checkDeployRateLimit`) so a looping/
-   *     compromised agent can't hammer the deploy command.
-   *
-   * ⚠️ TRUST BOUNDARY — HOST RCE BY DESIGN, same as confirmWorkerMerge's `gateCommand` run above:
-   * `deployCommand` is an arbitrary HOST shell command run with `shell:true`. That is intentional (a real
-   * deploy needs it — `git push`, a deploy script, a webhook curl) and is why it is HUMAN-set only.
-   *
-   * Every attempt that actually reaches host exec (i.e. wasn't refused for being unconfigured/rate-
-   * limited) emits a durable `deploy` audit event under the calling manager, carrying the outcome.
-   */
+  // ⚠️ TRUST BOUNDARY — HOST RCE BY DESIGN, same posture as confirmWorkerMerge's gateCommand: deployCommand
+  // is an arbitrary HOST shell command (shell:true), HUMAN-set only (card 13235b62), own-project-only,
+  // fixed (no agent-supplied args), rate-limited, ships inert with no command configured.
   async deployOwnProject(
     managerSessionId: string, reason: string,
   ): Promise<{ deployed: boolean; reason?: string; exitCode?: number | null; outputTail?: string; opId?: string }> {

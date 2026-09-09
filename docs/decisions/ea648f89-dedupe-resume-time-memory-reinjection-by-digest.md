@@ -10,11 +10,15 @@ Project memory (card 2fd9abf9, resume half) — a DELIBERATE, DOCUMENTED excepti
 
 Dedup gate (card ea648f89, hardened by finding 0e08c0b7): same shape as the companion-recall gate above — hash the framed block and compare against the digest persisted on the session row (see stampProjectMemoryDigest's doc comment for why this moved off an in-memory Map); skip the enqueue when unchanged. This still preserves the "sees notes written since last spawn" intent — a genuinely new/edited note changes the digest and is injected — it just stops re-blasting identical content, including across a daemon restart.
 
+## Incident that motivated the DB-column move (v1 was an in-memory Map)
+
+v1 of this gate (project memory only) kept the digest in an in-memory `Map`, which caught every SAME-PROCESS repeat (idle-nudge/wake resumes) but reset to empty on a daemon RESTART — assumed "rare and harmless" at the time, but Loom's own dev daemon (`tsx watch`) restarts on every merge touching `packages/daemon/src/**`, so for a self-hosting orchestrator this was routine, not rare (observed: a full block re-injected at kickoff + 3 daemon-restart resumes ≈ 30k+ redundant tokens in one session). The DB column (`last_project_memory_digest`/`last_companion_memory_digest`, via `Db.getLastProjectMemoryDigest`/`setLastProjectMemoryDigest` and their companion-memory siblings) survives a restart, closing that gap — and companion memory, which had NO dedupe at all before this fix, observed injecting the identical block 25+ times into one companion, now gets the identical guard. The compare runs BEFORE `enqueueStdin`, so an unchanged digest never mints a standalone turn into a parked session; changed (including the very first resume, with nothing stored yet) means inject and persist the new hash. `stampProjectMemoryDigest`/`stampCompanionMemoryDigest` are the write half of this gate, called at every fresh-spawn and reinject site so the FIRST resume after any of those compares against what was actually shown, not against "nothing stored".
+
 ## Do not
 
 - Do not re-enqueue the companion-memory-recall or project-memory block unconditionally on every resume — hash it and compare against the digest persisted on the session row; skip when unchanged.
-- Do not move this dedup state to an in-memory cache — it must survive a daemon restart, so it lives on the session row.
+- Do not move this dedup state to an in-memory cache — it must survive a daemon restart (self-hosting restarts on every merge touching `packages/daemon/src/**`, which is routine, not rare), so it lives on the session row.
 
 ## Source
 
-Two inline comments in `packages/daemon/src/sessions/service.ts` (`resume()`): lines 3996-4013 and 4022-4036, both as of commit `9818aa2627c6f58c26aaaec6fc33d70c468c3943`. Relocated by card `3c50eae9`; no wording changed. Both sites anchor to this one record — same mechanism, two call sites.
+Three inline comments in `packages/daemon/src/sessions/service.ts`: the `resume()` sites (lines 3996-4013 and 4022-4036, both as of commit `9818aa2627c6f58c26aaaec6fc33d70c468c3943`, relocated by card `3c50eae9`) plus the `stampProjectMemoryDigest`/`stampCompanionMemoryDigest` field doc (originally lines 2047-2065 as of tranche 7's HEAD, relocated by card `9f4f8e5a`, tranche 7). No wording changed on either addition; wrapped source lines joined into a flowing paragraph. All three sites anchor to this one record — same mechanism, three call sites.
