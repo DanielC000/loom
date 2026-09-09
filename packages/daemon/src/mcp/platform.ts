@@ -299,21 +299,11 @@ const projectConfigOverrideSchema = z.object({
 }).strict();
 
 /**
- * Agent-facing variant of the config schema. Three `orchestration` keys are TRUSTED/human-set ONLY and
- * MUST NOT be writable through the agent-facing loom-platform MCP path:
- *   - `gateCommand` — a STRING the daemon later runs via `spawnSync(..., { shell: true })` on the host
- *     (see `confirmWorkerMerge` in sessions/service.ts), i.e. host-RCE-capable by design.
- *   - `deployCommand` — the scoped per-project deploy's own outward-exec STRING, run in the project's
- *     repoPath by `deployOwnProject` (sessions/service.ts). Same host-RCE shape as `gateCommand`, so it
- *     gets the identical human-only treatment: setting it IS the owner's opt-in-once trust decision.
- *   - `alertWebhook` — an outbound URL the daemon POSTs orchestration data to, i.e. a DATA-EXFILTRATION
- *     vector: an agent that could set it would redirect the event stream to an attacker endpoint.
- * Their paired per-project timeouts (`gateCommandTimeoutMs`/`deployCommandTimeoutMs`/
- * `alertWebhookTimeoutMs`) are HUMAN-only too (lead decision) and dropped alongside them. We omit ALL
- * SIX from the orchestration shape; `.strict()` then makes any of them a REJECTED unknown key, so an
- * agent attempting to set one gets an error and the stored config is left unchanged. DRY: this reuses
- * the same base shapes — only `orchestration` is narrowed. The REST PATCH path keeps the full
- * `projectConfigOverrideSchema` (the human/trusted path), so all six stay human-settable there.
+ * Agent-facing config schema omits 6 orchestration keys — gateCommand/deployCommand (host-RCE via
+ * spawnSync; see confirmWorkerMerge/deployOwnProject in sessions/service.ts) and alertWebhook (a
+ * data-exfiltration vector), plus their 3 paired timeouts — so `.strict()` REJECTS an agent setting any
+ * of them (config left unchanged); the human REST PATCH path keeps the full schema, so all six stay
+ * human-settable there. DRY: only `orchestration` is narrowed, the rest reuses the same base shapes.
  */
 const agentOrchestrationOverride = orchestrationOverride
   .omit({
@@ -360,33 +350,11 @@ function redactRemoteAccessTls(remoteAccess: RedactableRemoteAccess): Record<str
 
 /**
  * Strip host-secret-adjacent fields from a platform config payload before it reaches an AGENT MCP tool
- * (`platform_config_get`) — the human REST `GET /api/platform/config` returns this same shape
- * UNREDACTED, but the human is the trust boundary there; the agent isn't (same reasoning as the
- * gateCommand/alertWebhook project-config split). Audited every `PlatformConfig`/`PlatformConfigOverride`
- * field (card 80b7a33b): the gateway TOKEN itself is never part of this shape — it's stored in a keyed
- * table, never in config (see `RemoteAccessConfig`'s own doc) — and no other field carries a literal
- * credential. Two fields are still host-path-shaped and stay off the agent surface:
- *   - `integrations.codescape.path` — DROPPED ENTIRELY. Codescape is a private product with NO
- *     user/agent-visible surface anywhere Loom ships (project memory
- *     `codescape-is-private-no-user-visible-surface`); `resolveConfig`'s own `ResolvedConfig` already
- *     omits `integrations` for the identical reason (card 3bd8ef17 — it flows into the web client
- *     bundle), so the RAW override blob — which still carries a human-set value there, validated
- *     independently of `ResolvedConfig` — is the one place this tool must not just forward verbatim.
- *   - `remoteAccess.tls.{certPath,keyPath}` — redacted by `redactRemoteAccessTls` above. Host filesystem
- *     paths to TLS private-key material; the path string itself isn't the secret, but handing an agent
- *     the exact on-disk location of key material is the same shape of exposure `gateCommand`/
- *     `obsidian.path`/`python.interpreterPath` are kept human-only for.
- * Every other field (rate-limit numbers, watcher cadences, timeouts, backup/gateRetry tuning, connections
- * bounds, `coalesceAgentMessages`/`companionVoiceEnabled`/`operatorEnabled`/`schedulerEnabled`, the
- * concurrency caps, usage-sample cadence/retention, `updateCheckIntervalMs`, `remoteAccess.enabled`/
- * `bindHost`/`rateLimit`) is plain operational tuning with no credential/secret shape — exposed as-is.
- *
- * This is a fail-OPEN denylist (spread-everything-else, minus the two fields named above) — correct only
- * as long as no FUTURE secret/host-path field is added to `PlatformConfigOverride` without a matching
- * redaction here. `test/platform-config-redaction-drift.mjs` is the backstop: it asserts
- * `PLATFORM_CONFIG_TOP_LEVEL_KEYS` (below) against a hand-authored expected list, so a new top-level key
- * fails that test until this function (and the expected list) are updated to make an explicit
- * redact-or-expose call on it (card 07ce7c0c).
+ * (`platform_config_get`) — the human REST path returns this UNREDACTED (human is the trust boundary
+ * there; the agent isn't). Only `integrations.codescape.path` and `remoteAccess.tls.{certPath,keyPath}`
+ * are host-path-shaped and redacted/dropped; everything else is plain operational tuning.
+ * @decision 80b7a33b — this is a FAIL-OPEN denylist (spread-everything-else): `test/platform-config-
+ * redaction-drift.mjs` is the backstop, forcing an explicit redact-or-expose call on any NEW top-level key.
  */
 function sanitizePlatformConfigForAgent(
   override: PlatformConfigOverride,
@@ -461,19 +429,14 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 /**
- * Deep-MERGE a config PATCH onto a project's existing stored override — the patch/merge write path
- * (card 28c21fe1) shared by project_configure on BOTH the platform (full-validator) and setup
- * (agent-validator) surfaces. Plain-object values RECURSE (so patching ONE `obsidian`/`orchestration`/
- * `permission` key preserves its siblings); arrays and scalars REPLACE (patching `kanbanColumns` swaps
- * the whole array — the only sensible column semantics; `permission.allow`/`deny` likewise replace).
- *
- * TRUST BOUNDARY (load-bearing): the caller validates the INCOMING PATCH with its OWN surface validator
- * BEFORE this runs (platform → full, setup/agent → agent), so an agent's patch can NEVER INTRODUCE a
- * human-only key (gateCommand/alertWebhook/obsidian.path/python.interpreterPath are rejected unknowns on
- * the agent shape). We deliberately do NOT re-validate the MERGED whole: config keys are independent and
- * both inputs are individually valid, so the merge of two valid configs is valid — AND re-running the
- * AGENT validator over a result that legitimately contains a PRE-EXISTING human-set key (e.g. a Lead-set
- * gateCommand the agent never touched) would FALSELY reject. Validate the partial, merge, store.
+ * Deep-MERGE a config PATCH onto a project's existing stored override (card 28c21fe1), shared by
+ * project_configure on both the platform (full-validator) and setup (agent-validator) surfaces.
+ * Plain-object values RECURSE (patching ONE `obsidian`/`orchestration`/`permission` key preserves its
+ * siblings); arrays/scalars REPLACE (patching `kanbanColumns` swaps the whole array; `permission.allow`/
+ * `deny` likewise). TRUST BOUNDARY: the caller validates the PATCH with its OWN surface validator BEFORE
+ * this runs, so an agent's patch can never introduce a human-only key, and we deliberately do NOT
+ * re-validate the merged whole — re-running the AGENT validator would FALSELY reject a result carrying a
+ * pre-existing human-only key (e.g. a Lead-set gateCommand) the agent's patch never touched.
  */
 function deepMergeRecord(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = { ...base };
@@ -485,39 +448,12 @@ function deepMergeRecord(base: Record<string, unknown>, patch: Record<string, un
 }
 export interface MergeConfigOverrideOptions {
   /**
-   * Card 1069c8e1, manager review (Q3, hardened by a code-review CRITICAL finding): when true, all
-   * THREE rotation-protection fields — `orchestration.rotationMarkers`, `rotationLiveCommitmentsFloor`,
-   * AND `rotationLiveCommitmentsHeading` — are merged ADDITIVE-ONLY instead of the plain replace-
-   * wholesale every other array/scalar gets. An existing protected marker can never be REMOVED, the
-   * floor can never be LOWERED, and — once a heading is configured — it can neither be CLEARED nor
-   * RE-POINTED to a different section (only the initial "unset -> some heading" transition is allowed);
-   * all three only ever move in the direction that ADDS protection, never the direction that removes it.
-   * (The code review that caught the missing heading leg found the exact hazard this whole guard exists
-   * for: clearing the heading leaves `configured` true — via non-empty markers — while the floor check
-   * silently goes inert, and re-pointing it can satisfy the floor against unrelated content, the same
-   * fail-open shape card `a681aed5` fixed in code, reintroduced here through config.)
-   *
-   * WHY: these two fields are the daemon's own copy of the "which markers/floor protect this seat's
-   * resume doc" decision — the exact thing card `1069c8e1` exists to protect. The Loom Orchestrator's
-   * historical marker-list edits (cards `bcd3f690`/`a681aed5`) went through a board card, a dispatched
-   * worker, a reviewed diff, and a full merge gate — a heavyweight, externally-reviewed path. A single
-   * unreviewed agent config-write call is the SAME authority at a fraction of that friction, and the
-   * friction was doing real work: under context pressure mid-rotation, hitting a refusal naming a marker
-   * it doesn't want to deal with, the cheapest path back to green for an agent is deleting the marker
-   * rather than restoring the rule it names — the guard itself becoming the casualty of the exact
-   * failure ("the rotation is where rules die") it exists to catch. Adding a marker only ever
-   * STRENGTHENS the guard (always safe); removing one WEAKENS it (the dangerous direction) — so only
-   * ADDING is left on the low-friction agent path.
-   *
-   * Set `true` on every AGENT-facing config-write call site (manager `project_update`, setup
-   * `project_configure`/`project_create`). Leave it unset (default false, plain replace) on the
-   * human-equivalent Platform Lead `project_configure` (this file, P3-elevated) and the human REST
-   * PATCH path — the latter being what the web UI's Settings › Resume Doc Rotation panel drives (card
-   * 2830748c), so the release valve below is a real control the owner can reach, not only a curl — a
-   * deliberate retirement of a commitment marker (e.g. the ceremony cut in
-   * `bcd3f690`/`a681aed5`) is exactly the class of decision that should reach a human, and under
-   * additive-only that legitimate case still works: it just goes through the human, which is where it
-   * already went.
+   * @decision 1069c8e1 — when true, all THREE rotation-protection fields (rotationMarkers,
+   * rotationLiveCommitmentsFloor, rotationLiveCommitmentsHeading) merge ADDITIVE-ONLY: a marker can never
+   * be REMOVED, the floor never LOWERED, and a configured heading never CLEARED or RE-POINTED — only the
+   * ADD/RAISE/"" -> non-empty directions are allowed. Set true on every AGENT-facing config-write call
+   * site (manager/setup); leave unset (plain replace) on the human-equivalent Lead + human REST PATCH
+   * paths, which stay the deliberate release valve for a legitimate human-initiated retirement.
    */
   additiveOnlyRotationGuard?: boolean;
 }
@@ -568,21 +504,9 @@ function applyAdditiveOnlyRotationGuard(
     mergedOrch.rotationLiveCommitmentsFloor = Math.max(existingFloor, patchOrch.rotationLiveCommitmentsFloor as number);
   }
 
-  // Code review (CRITICAL): rotationLiveCommitmentsHeading is the THIRD leg of this guard, not just the
-  // two above — it was missing entirely, and it is NOT a "grow only" field the way markers/floor are (a
-  // single string has no notion of monotonic growth). Two agent-reachable attacks if left unguarded:
-  // (1) clear it to "" — the floor check silently goes DISABLED while `configured` stays true (markers
-  //     are still non-empty), so the response reads as a fully-configured pass with the floor never
-  //     applied at all; (2) RE-POINT it to a DIFFERENT non-empty heading whose section happens to carry
-  //     enough numbered items to satisfy the floor against UNRELATED content — the exact fail-open shape
-  //     card `a681aed5` fixed in the CODE, reintroduced here through CONFIG (rotation-check.ts's
-  //     findHeadingLine matches ANY heading line containing the configured token as a substring, so it
-  //     has no way to know the re-pointed heading is "the wrong one" — that distinction only exists at
-  //     the human decision to point it there in the first place).
-  // FIX: once a seat has ANY heading configured (existing non-empty), an agent patch can neither clear
-  // nor re-point it — only the ONE-TIME "" -> non-empty transition (turning the floor check on for the
-  // first time) is additive in the sense this guard protects. A patch that re-submits the SAME value is
-  // an inert no-op either way.
+  // @decision 1069c8e1 — rotationLiveCommitmentsHeading is the THIRD guarded leg, NOT grow-only like
+  // markers/floor: once ANY heading is configured, an agent patch can neither clear it to "" (silently
+  // disables the floor check) nor re-point it to unrelated content — only "" -> non-empty is additive.
   if (patchOrch.rotationLiveCommitmentsHeading !== undefined) {
     const existingHeading = (existingOrch?.rotationLiveCommitmentsHeading as string | undefined) ?? "";
     mergedOrch.rotationLiveCommitmentsHeading = existingHeading === "" ? patchOrch.rotationLiveCommitmentsHeading : existingHeading;
@@ -691,24 +615,10 @@ const connectionsOverride = z.object({
   rateLimitMax: z.number().int().min(1).max(10000).optional(),
   rateLimitWindowMs: z.number().int().min(1000).max(3600000).optional(),
 }).strict();
-// Access-story Phase A (card 766f8b50), tightened in Phase C (card 6bc02f50, CR 77ade04c): the
-// remote-bind block. HUMAN-only by construction — like every other `platform` sub-group, there is no
-// agent-facing platform-config surface at all (see the function doc below), so `remoteAccess` reaches an
-// agent no differently than gateCommand reaches one via the project schema: it simply isn't reachable.
-// `.strict()` rejects unknown keys; the token itself is never part of this shape (Phase B stores it in a
-// keyed table, not config).
-//
-// `bindHost` shape validation (77ade04c): must be a valid IPv4/IPv6 literal (net.isIP) OR an RFC
-// 1123-shaped hostname (dot-separated 1-63-char alnum/hyphen labels, no leading/trailing hyphen per
-// label) — this is what a tailnet name (`foo.tailnet-name.ts.net`) and a plain LAN hostname both look
-// like. Rejects garbage (spaces, a URL, a CIDR) BEFORE it ever reaches gateway/trust-tier.ts's Host
-// comparison or a `.listen()` call.
-//
-// This deliberately ACCEPTS `0.0.0.0`/`::` (binds ALL interfaces, LAN in scope) — an owner-decided posture
-// call (P5b hardening follow-up, card 80e2093f, item 2), NOT an auth bypass (every non-loopback peer still
-// hits the same token+TLS wall). See RemoteAccessConfig.bindHost's doc (@loom/shared) for the full posture
-// note, and gateway/trust-tier.ts `isAllInterfacesBindHost` for where this mode is made VISIBLE (a boot log
-// line + a Settings UI hint) rather than silent.
+// HUMAN-only by construction (no agent-facing platform-config surface exists at all — see the function
+// doc below) — remoteAccess is as unreachable to an agent as gateCommand is via the project schema.
+// @decision 80e2093f — bindHost DELIBERATELY accepts 0.0.0.0/:: (LAN in scope): NOT an auth bypass, every
+// non-loopback peer still hits the same token+TLS wall; see RemoteAccessConfig.bindHost's doc.
 const HOSTNAME_RE = /^(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*$/;
 const isValidBindHostShape = (h: string): boolean => {
   if (h.length > 253) return false;
@@ -2210,24 +2120,10 @@ export class PlatformMcpRouter {
       },
     );
 
-    // --- cross-project task boarding (PL Auditor finding #4). The Lead stands ABOVE all boards, so it can
-    //     board a card DIRECTLY onto ANOTHER project's board instead of spawn-and-narrate (~24 cards + ~40
-    //     reconcile calls for a 12-fix batch). Uses createProjectTaskChecked (card 0ef0270b, Code Review
-    //     M1) — NOT the raw createProjectTask every other automated boarding path reuses — because the
-    //     Lead is itself an AGENT reading a tool result: it can act on a refusal (retry with
-    //     allowDuplicate/supersedes/relatedTo, or drop it), which is exactly the §SCOPE FENCE criterion in
-    //     createProjectTaskChecked's own doc (mcp/tasks.ts). This closes the one gap left in `5b221bf2`'s
-    //     original fence: it deduped the agent-facing in-project `tasks_create` but left the Lead's OWN
-    //     cross-project filing tool unchecked, so whichever side (a peer manager via `tasks_create`, or
-    //     the Lead via this tool) filed a duplicate SECOND was only ever caught if it happened to be the
-    //     peer manager — `project_task_create` is how the founding duplicate pairs on this very board were
-    //     actually filed. Checked against the DESTINATION project's board (the resolved `project.id`
-    //     below), never the Lead's own — a corpus mismatch here would be a silent no-op that looks like it
-    //     works. TRUST: cross-project WRITE is inherently a PLATFORM (cross-project admin) capability — it
-    //     lives ONLY on this platform-role-gated router. It is deliberately ABSENT from the agent-facing
-    //     surfaces (loom-orchestration manager/worker, loom-setup operator): a project
-    //     orchestrator/worker/setup-operator stays confined to its OWN board (those surfaces resolve the
-    //     projectId SERVER-SIDE and never take one), so none can gain cross-project write. ---
+    // @decision 5b221bf2 — cross-project task boarding (PL Auditor finding #4) uses createProjectTaskChecked
+    // (card 0ef0270b), never the raw createProjectTask, checked against the DESTINATION project's board.
+    // TRUST: cross-project WRITE is a PLATFORM-only capability, deliberately ABSENT from every agent-facing
+    // surface (manager/worker/setup resolve projectId server-side and never take one).
     /**
      * Resolve + validate a `resolvesEscalation` id against the reserved Platform home board — shared by
      * `project_task_create` and `project_task_update` (card 216be962, extracted from `de90f22a`'s
@@ -2637,27 +2533,10 @@ export class PlatformMcpRouter {
         } else {
           projectIds = db.listAllProjects().map((p) => p.id);
         }
-        // Card e9750bc2: this is the Lead's ACTUAL board-read anchor — `recordBoardRead`'s only call site
-        // used to be mcp/server.ts's tasks_list handler, which a Lead's own doctrine never calls (it reads
-        // through list_all_tasks instead), so the idle nudge's board-delta digest never computed for a
-        // platform session in practice. Recorded for EVERY project this call scanned (projectIds — every
-        // live project when unfiltered, or the single narrowed one), independent of `columns`/`includeDone`/
-        // pagination — same "snapshot the whole non-terminal board regardless of this call's own filter"
-        // contract recordBoardRead already has for tasks_list. `!callerSessionId` mirrors session_transcript's
-        // own guard (no caller session on a non-real request path).
-        //
-        // Recorded on countsOnly TOO (deliberately, not by default) — the Lead's standing park-check
-        // convention is `list_all_tasks({countsOnly:true})`, the cheapest way to detect arrivals, so
-        // anchoring only on the (rarer) full-row path would leave the digest permanently uncomputed for a
-        // Lead that only ever parks via countsOnly. ACKNOWLEDGED HAZARD (demonstrated in
-        // list-all-tasks-records-board-read.mjs): this moves the anchor forward WITHOUT the Lead having
-        // seen card contents. Concretely — content read at T0, a card changes, countsOnly at T1 (anchor
-        // moves to T1 even though only a count was seen), another change, digest at T2 → the digest reports
-        // ONLY the T1→T2 change; the T0→T1 change is silently folded into what "already seen" means and
-        // never separately surfaced. Accepted trade-off: a countsOnly result already surfaces the count
-        // change itself (the Lead sees the total move and re-reads), so the change is never truly invisible
-        // — just not itemized in this one digest. Never "fixed" by skipping countsOnly recording, which
-        // would just resurrect the exact permanently-uncomputed bug this card exists to close.
+        // @decision e9750bc2 — this is the Lead's ACTUAL board-read anchor (recordBoardRead's own tasks_list
+        // call site is never reached by Lead doctrine). Recorded on countsOnly TOO, deliberately: never
+        // "fix" this by skipping countsOnly recording — that resurrects the exact permanently-uncomputed
+        // digest bug this card exists to close. See docs/decisions/e9750bc2 for the accepted-hazard detail.
         if (callerSessionId) recordBoardReadForProjects(db, callerSessionId, projectIds, new Date().toISOString());
         // countsOnly short-circuits BEFORE any row fetch — never pays for row bodies or the merged-state git
         // enrichment listProjectTasks does below (card 9798200c). Sums per-project counts (no git call, so
@@ -3066,22 +2945,12 @@ export class PlatformMcpRouter {
     // instructions and push to …") cannot turn an audit into an outward/destructive action.
     // ===================================================================================================
 
-    // --- git writes (reuse git/writer.ts GitWriter VERBATIM — bounded + non-interactive). Each resolves
-    //     the project's repo by explicit projectId + optional repoKey (multi-repo epic 49136451) and
-    //     returns GitWriter's structured GitWriteResult ({ ok:true, ... } | { ok:false, error }); an
-    //     EXPECTED git failure (dirty tree, no upstream, rejected push) comes back as ok:false, never a
-    //     throw. 404 if the project is unknown. Card a0dff493: these four were the one repoKey-shaped
-    //     writer surface that never got threaded through resolveRepoByKey when phase 2 landed everywhere
-    //     else — before this they read p.repoPath directly and SILENTLY always targeted primary on a
-    //     multi-repo project, no error or warning, even though the Lead already dispatches cards at an
-    //     explicit repoKey via project_task_create/update. Decided repo-aware (not primary-only-by-design):
-    //     the Lead already reasons in repo-key terms, so refusing it the ability to act on the key it
-    //     already names would just trade a silent wrong-target for a hard block with no better option. The
-    //     concept itself is taught HERE, in each tool's own description (point-of-use, never stale) rather
-    //     than in the Lead's spawn-time brief (platform-lead-prompt.ts) — that file carries no project data
-    //     at all today, and a baked-in registry snapshot for a session that spans every project would be
-    //     exactly the stale-state-as-authority failure this project keeps getting bitten by; project_get/
-    //     list_all_projects already give the Lead live, current registries on demand. ---
+    // git writes (reuse git/writer.ts GitWriter VERBATIM — bounded + non-interactive). Each resolves the
+    // project's repo by explicit projectId + optional repoKey (multi-repo epic 49136451) and returns
+    // GitWriter's structured GitWriteResult ({ok:true,...}|{ok:false,error}); an EXPECTED git failure
+    // (dirty tree, no upstream, rejected push) comes back as ok:false, never a throw. 404 if unknown.
+    // @decision a0dff493 — resolve the target repo ONLY via the shared resolveRepoByKey (never a second
+    // path, and never a baked-in registry snapshot in the Lead's spawn brief) — see docs/decisions/a0dff493.
     const gitWriterFor = (repoPath: string) => new GitWriter(repoPath, gitWriteTimeouts);
 
     /**
