@@ -329,10 +329,23 @@ const CODEX_ASCII_FOLD_MAP: ReadonlyMap<number, string> = new Map([
  * "No" all normalize to pure ASCII; section sign "§", degree "°", em dash "—", "≤", and the arabic-indic
  * digits do NOT decompose under NFKC at all (normalize to themselves) and correctly return `null` here —
  * they keep falling to the generic `?`, unchanged from before this tier existed.
+ *
+ * ⚠️ Code Review follow-up: the guard regex uses `+` (one-or-more), not `*` (zero-or-more), DELIBERATELY.
+ * With `*`, a hypothetical codepoint whose NFKC form is the EMPTY string would pass the "pure ASCII" test
+ * and return `""` — and since the call site composes this with `??` (nullish coalescing), an empty string
+ * is NOT nullish, so it would NOT fall through to `?`; the character would vanish with no trace, exactly
+ * the silent-loss outcome this whole fold exists to prevent. MEASURED this is currently UNREACHABLE: swept
+ * every BMP codepoint above U+007F that is non-letter (fails `\p{L}`), non-`Default_Ignorable_Code_Point`,
+ * and non-`White_Space` (i.e. the full population that can ever reach this function through
+ * {@link codexAsciiFold}'s call chain, a strict superset of the curated-map-covered subset) — 14,358
+ * codepoints, excluding the UTF-16 surrogate range — and confirmed NONE of them normalizes to `""` under
+ * NFKC. `+` turns that measured-but-reverifiable-by-nobody property into a structural guarantee instead:
+ * even if some future Unicode version introduced such a codepoint, `+` rejects an empty `normalized`
+ * outright (falls through to `?`) rather than silently emitting it, at zero cost.
  */
 export function codexNfkcFold(ch: string): string | null {
   const normalized = ch.normalize("NFKC");
-  return /^[\x00-\x7f]*$/.test(normalized) ? normalized : null;
+  return /^[\x00-\x7f]+$/.test(normalized) ? normalized : null;
 }
 
 /**

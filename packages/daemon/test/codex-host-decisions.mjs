@@ -412,6 +412,26 @@ check(
   check("codexNfkcFold: arabic-indic digit U+0660 does not decompose to an ASCII digit under NFKC ⇒ null (still falls to '?')", codexNfkcFold("٠") === null);
   check("codexAsciiFold: an uncurated codepoint whose NFKC tier returns null (section sign) still falls all the way through to the visible '?', end to end", codexAsciiFold("a§b") === "a?b");
 
+  // MANAGER REVIEW FOLLOW-UP: the guard regex is `+` (one-or-more), not `*` (zero-or-more), so an
+  // empty-string `normalize("NFKC")` result is REJECTED (falls through to null/'?') rather than returned
+  // as-is — which would otherwise vanish silently past the `??` at the call site (`""` is not nullish).
+  // Swept the full reachable population (14,358 BMP codepoints above U+007F, non-letter/ignorable/
+  // whitespace) and found none that NFKC-normalizes to "" — so this is currently unreachable in practice —
+  // but the regex itself is asserted here directly, by monkey-patching String.prototype.normalize to force
+  // exactly that hypothetical, so this is a real regression test of the `+` fix, not just a restatement of
+  // the sweep's unreachability finding.
+  {
+    const originalNormalize = String.prototype.normalize;
+    String.prototype.normalize = function () { return ""; };
+    let forcedResult;
+    try {
+      forcedResult = codexNfkcFold("x");
+    } finally {
+      String.prototype.normalize = originalNormalize;
+    }
+    check("codexNfkcFold: STRUCTURAL GUARD — an empty NFKC result (forced via a patched normalize()) returns null, never '' — proves the regex is '+' not '*'; under the old '*' this would have returned '' and the caller's '??' would have let it through, silently dropping the character", forcedResult === null);
+  }
+
   // Byte-identical guarantee (DoD-3): none of the above changes anything for text with nothing to fold.
   check("codexAsciiFold: pure ASCII text carrying digits/punctuation the NFKC tier could theoretically touch is still returned byte-identical via the early-return fast path", codexAsciiFold("v2 No4, a=1 (ok)") === "v2 No4, a=1 (ok)");
 }
