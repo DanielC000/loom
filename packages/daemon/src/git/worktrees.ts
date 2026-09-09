@@ -344,23 +344,10 @@ export function formatTail(tail: string): string {
   return tail.trim() ? `\n--- output tail ---\n${tail.trim()}` : "";
 }
 
-/**
- * Run a BOUNDED, NON-INTERACTIVE `pnpm install --frozen-lockfile --prefer-offline` in `worktreePath`,
- * killing the child if it exceeds `timeoutMs`. ASYNC (child_process.spawn, NOT spawnSync) on purpose:
- * createWorktree is awaited on the worker-spawn hot path, and a synchronous spawnSync would freeze the
- * single-threaded daemon event loop (every session/WS/PTY) for the whole install — unacceptable. This
- * resolves a result object and NEVER rejects, so the caller's degrade-on-failure stays simple.
- *
- * The command is a HARDCODED constant (never agent input) ⇒ no gateCommand-style trust-boundary concern;
- * `shell:true` only lets the OS resolve `pnpm` (pnpm.cmd on Windows) from PATH, mirroring the gate runner.
- * `CI=1` keeps pnpm non-interactive (no update-notifier / prompts that could hang the child). Even if a
- * killed child orphans a lingering pnpm on the rare timeout path, it is merely finishing the install we
- * wanted; the function has already RETURNED within the bound, which is the load-bearing guarantee.
- *
- * stdout+stderr are PIPED (not ignored) and captured into a bounded {@link OUTPUT_TAIL_MAX_CHARS} tail
- * so a failure's `reason` carries the actual tool output, not just an exit code — {@link
- * provisionWorktreeDeps} logs it loudly instead of the old silent degrade.
- */
+/** Bounded, non-interactive `pnpm install --frozen-lockfile --prefer-offline`, killing the child past
+ *  `timeoutMs`. ASYNC (spawn, NEVER spawnSync) — createWorktree awaits this on the worker-spawn hot path,
+ *  and spawnSync would freeze the single-threaded daemon event loop for the whole install. Command is
+ *  HARDCODED (never agent input, no gateCommand-style trust concern); never rejects; output tail captured. */
 function pnpmInstall(worktreePath: string, timeoutMs: number): Promise<{ ok: boolean; reason?: string }> {
   return new Promise((resolve) => {
     const child = spawn("pnpm install --frozen-lockfile --prefer-offline", {
@@ -388,22 +375,10 @@ function pnpmInstall(worktreePath: string, timeoutMs: number): Promise<{ ok: boo
   });
 }
 
-/**
- * Run ONE bounded, non-interactive install `command` in `worktreePath`, killing the child past
- * `timeoutMs`. Shared by {@link npmInstall} and {@link yarnInstall}; structurally identical to
- * {@link pnpmInstall} (which keeps its OWN copy so the pnpm path stays byte-identical). ASYNC spawn
- * (NOT spawnSync) so the single-threaded daemon event loop never freezes mid-install; resolves a result
- * object and NEVER rejects, so the caller's degrade-on-failure stays simple. `command` is ALWAYS a
- * HARDCODED constant selected by lockfile marker — NEVER agent input — so `shell:true` (which only lets
- * the OS resolve npm/yarn[.cmd] from PATH, mirroring pnpmInstall + the gate runner) carries no
- * gateCommand-style trust-boundary concern. `CI=1` keeps the tool non-interactive (no prompts/notifiers
- * that could hang the child).
- *
- * Also used for the monorepo BUILD step ({@link WORKSPACE_BUILD_COMMANDS}) — same bounded, best-effort,
- * output-capturing shape applies to a build command as much as an install. stdout+stderr are PIPED (not
- * ignored) and captured into a bounded {@link OUTPUT_TAIL_MAX_CHARS} tail so a failure's `reason` carries
- * the actual tool output, not just an exit code.
- */
+/** Shared bounded, non-interactive install/build runner for {@link npmInstall}/{@link yarnInstall} and
+ *  the monorepo build step ({@link WORKSPACE_BUILD_COMMANDS}) — structurally identical to
+ *  {@link pnpmInstall}, which keeps its own copy so that path stays byte-identical. `command` is ALWAYS
+ *  hardcoded (never agent input); ASYNC spawn only; never rejects; output tail captured. */
 function runBoundedInstall(command: string, worktreePath: string, timeoutMs: number): Promise<{ ok: boolean; reason?: string }> {
   return new Promise((resolve) => {
     const child = spawn(command, {
@@ -518,38 +493,11 @@ const WORKSPACE_BUILD_COMMANDS: Record<PackageManager, string> = {
   yarn: "yarn build",
 };
 
-/**
- * Make a freshly-created worktree BUILD-READY: populate node_modules at creation (so the spawned worker
- * doesn't pay a full install before it can build), and — when the worktree root is a JS WORKSPACE
- * MONOREPO ({@link isWorkspaceMonorepo}) — additionally run a top-level build so sibling packages' `dist`
- * output exists too (e.g. this repo's own `shared` must build before `daemon`/`web` can import it). A
- * worker whose install/build would fail/time out is caught HERE (bounded) instead of wedging the worker
- * mid-task. (node_modules is gitignored, so `git worktree add` checks out the tree WITHOUT it.)
- *
- * SAFE-BY-CONSTRUCTION removal: every supported install (pnpm/npm/yarn) gives the worktree its OWN
- * independent node_modules WITHIN the worktree — pnpm hardlinks into the shared content-addressable store
- * plus an internal `.pnpm` virtual store; npm/yarn write a self-contained `./node_modules`. None is a
- * junction/symlink into the main checkout, so removeWorktree's recursive removal only ever deletes the
- * worktree's own tree and can NEVER recurse into the main checkout's node_modules (the skill-store-nuke /
- * junction-follow class of bug — see removeWorktree). The companion test proves this. NEVER
- * share/symlink/junction node_modules across worktrees — native modules + concurrent install-state across
- * parallel workers would break, and it reintroduces the landmine. This is load-bearing.
- *
- * BEST-EFFORT + BOUNDED, in TWO independently-bounded phases:
- *   1. INSTALL — acts only when a recognized JS lockfile marks the worktree root ({@link
- *      detectPackageManager} — pnpm-lock.yaml / package-lock.json / yarn.lock, in that deterministic
- *      precedence; a non-JS repo, incl. the bare temp repos in tests, is skipped silently).
- *   2. BUILD — only attempted after a SUCCESSFUL install (a build over incomplete/missing deps is
- *      pointless), only when {@link isWorkspaceMonorepo} detects a workspace root (a single-package
- *      repo skips this phase entirely), AND only when {@link ProvisionDeps.runBuild} isn't explicitly
- *      `false` (a spawn the caller decided doesn't need `dist/` gets install only — see {@link
- *      ProvisionDeps.runBuild} for how that decision is actually made, which is more than just `noCommit`).
- *      Runs on its OWN budget ({@link PROVISION_BUILD_TIMEOUT_MS}), independent of the install's.
- * Either phase's failure/timeout is CLASSIFIED and logged LOUDLY (see {@link logProvisionFailure} — the
- * specific reason plus a captured output tail, not a silent `console.warn`) and then SWALLOWED — the
- * worker simply falls back to installing/building itself. This function MUST NEVER throw past
- * createWorktree or wedge the spawn path.
- */
+/** Make a freshly-created worktree BUILD-READY: install deps, then (on a JS workspace monorepo) build so
+ *  sibling packages' `dist` exists — best-effort + bounded in two phases (install; build, only after a
+ *  successful install, only on a workspace root, only when `runBuild !== false`). ⛔ NEVER
+ *  share/symlink/junction node_modules across worktrees (native modules + concurrent install-state would
+ *  break) — see CLAUDE.md's "Worktree dep-provisioning". MUST NEVER throw past createWorktree. */
 export async function provisionWorktreeDeps(worktreePath: string, deps: ProvisionDeps = {}): Promise<void> {
   const manager = detectPackageManager(worktreePath);
   if (!manager) return; // no recognized JS lockfile → nothing to provision
@@ -1290,21 +1238,10 @@ export async function resolveMainlineBranch(repoPath: string, deps: BoundedGitDe
   }
 }
 
-/**
- * Every local `loom/*` branch that's an ancestor of `mainlineBranch` — `git branch --list 'loom/*'
- * --merged <mainlineBranch>`, the native ancestor check (the same primitive {@link isBranchMerged} uses
- * per-branch, here as one bulk pass). `mainlineBranch` MUST come from {@link resolveMainlineBranch}, never
- * a literal or `HEAD` — see its doc. FAILS SAFE to an empty `branches` array on any error/timeout: a sweep
- * that can't compute "which branches are safe" must delete nothing, not guess.
- *
- * Card f96b9d7c: the caught error is now LOGGED (repoPath + message) before failing safe, and the return
- * carries a `failed` discriminator — so a caller can tell "the read genuinely found 0 merged branches"
- * (`failed:false, branches:[]`) apart from "the read errored/timed out, so we don't actually know"
- * (`failed:true, branches:[]`). Both fail safe to an empty branches array (nothing is ever deleted on
- * uncertainty), but they used to be the SAME observable event with no log at all — indistinguishable from
- * a healthy zero-to-reclaim repo. `failed` does not change the safety contract; it only restores
- * visibility into which of the two silent-before cases actually happened.
- */
+/** @decision f96b9d7c — every local `loom/*` branch merged into `mainlineBranch` (which MUST come from
+ *  {@link resolveMainlineBranch}, never a literal/`HEAD`); fails safe to `{branches:[]}` on error, now with
+ *  a `failed` discriminator + logged cause so that's distinguishable from a genuine zero. See
+ *  docs/decisions/f96b9d7c-log-and-discriminate-failed-vs-empty-on-branch-safety-reads.md. */
 export async function listMergedLoomBranches(repoPath: string, mainlineBranch: string, deps: BoundedGitDeps = {}): Promise<{ branches: string[]; failed: boolean }> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
@@ -1367,23 +1304,11 @@ export async function countCommitsBehind(repoPath: string, branch: string, base 
   }
 }
 
-/**
- * Does `git status --porcelain` output represent REAL worker work, or only daemon-injected noise?
- * Loom mirrors its managed skills/settings into every worktree's `.claude/` (injectSkills); hideFromGit
- * resolves a linked worktree's `.git` file back to the shared main repo's common dir (resolveGitCommonDir
- * in skills/inject.ts) and writes there, so those untracked files ARE hidden via the SHARED
- * `.git/info/exclude` — but only for entries actually written into it (skill dirs, the manifest, and
- * `.claude/settings.local.json`); anything not yet in that shared exclude still surfaces as `?? .claude/…`.
- * That is NEVER the worker's product — the product is src/, package files,
- * tests, anything OUTSIDE the injected `.claude/` churn — so two daemon-noise classes are dropped:
- * (a) ANY UNTRACKED `.claude/` path (skill injection + Claude's own `.claude/settings.local.json`
- * permission writes), and (b) the daemon-injected `.claude/skills/` subtree at ANY status (a re-copy
- * over a repo that tracks a colliding skill name shows as a TRACKED modification, not `??`). Everything
- * else counts as work: tracked modifications elsewhere (incl. a tracked non-skills file under `.claude/`),
- * staged/unstaged changes, and untracked paths OUTSIDE `.claude/`. Without this discriminator the
- * injected noise would make a genuinely-merged worktree read dirty and block its legitimate cleanup
- * (the merge-recovery regression). Exported so the guard's behavior is unit-testable in isolation.
- */
+/** Does `git status --porcelain` represent REAL worker work, or only daemon-injected `.claude/` noise
+ *  (skill injection, Claude's own `settings.local.json` writes)? ⛔ Two noise classes are dropped — any
+ *  untracked `.claude/` path, and the injected `.claude/skills/` subtree at ANY status — everything else
+ *  (incl. a tracked non-skills `.claude/` file) counts as work; without this a merged worktree reads dirty
+ *  and blocks its own cleanup. Exported so the guard is unit-testable in isolation. */
 export function worktreeStatusHasWork(porcelain: string): boolean {
   return uncommittedWorkFiles(porcelain).length > 0;
 }
@@ -1458,27 +1383,10 @@ export interface DoneReportPrecheck {
   aheadCount?: number;
 }
 
-/**
- * worker_report(done) PRE-CHECK (board card 907b9f50): catch a worker that forgot to commit AT THE SOURCE,
- * before its task is moved to review. The merge gate only ever sees COMMITTED work on the assigned branch,
- * so a "done" with uncommitted work (or 0 commits) sails to review and bounces back a round-trip later —
- * this surfaces it immediately, to the worker that can still fix it.
- *
- *   - DIRTY working tree (real uncommitted/untracked changes, `.claude/` noise ignored) → {uncommitted:true,
- *     files} ⇒ the caller REFUSES the done and keeps the task in_progress so the worker commits + re-reports.
- *   - CLEAN but the assigned `branch` is 0 commits ahead of `base` → {zeroAhead:true} ⇒ the caller WARNS only
- *     (a genuine no-op task can legitimately report done — never a hard refusal).
- *   - otherwise (clean + ahead, the normal path) → all-false, `aheadCount` set to the verified count ⇒
- *     the done proceeds unchanged (the caller separately refuses a `report.noChanges:true` claim against
- *     this verified-positive `aheadCount` — see board card 6b605d15 — but that check lives in the caller,
- *     not here: this function only ever reports the git-verified facts).
- *
- * FAILS SAFE: every git op is bounded by the same block-timeout + {@link withTimeout} guard as the other
- * helpers, and ANY error/timeout/parse-failure degrades to {uncommitted:false, zeroAhead:false} (ALLOW) —
- * a flaky git call must NEVER wedge a worker on a legitimate done (mirrors {@link detectStrandedWork}). This
- * is INDEPENDENT of — and composes with — the divergent-branch stranded backstop at the merge gate. The git
- * seam is injectable ({@link BoundedGitDeps}) so a test can prove the detection AND the fail-safe bound.
- */
+/** @decision 907b9f50 — catch a worker's forgotten commit AT THE SOURCE, before `done` reaches review;
+ *  dirty tree ⇒ hard refusal, 0-ahead clean ⇒ warn-only, else reports the verified `aheadCount`. FAILS
+ *  SAFE (ALLOW) on any git error/timeout — never wedge a legitimate done. See
+ *  docs/decisions/907b9f50-precheck-worker-done-catches-a-forgotten-commit-at-source.md. */
 export async function precheckWorkerDone(
   repoPath: string,
   worktreePath: string,
@@ -1517,31 +1425,10 @@ export async function precheckWorkerDone(
   return { uncommitted: false, files: [], zeroAhead: false };
 }
 
-/**
- * SAFE-TO-DISCARD guard for boot-reconcile Pass B (P0 data-loss fix, 2026-06-05). Does this worktree
- * still hold work we'd LOSE by deleting it? "Work" = EITHER the working tree is DIRTY (real
- * uncommitted/untracked changes — see {@link worktreeStatusHasWork}, which ignores daemon-injected
- * `.claude/` noise) OR the branch is AHEAD OF `base` (commits not yet reachable from the canonical
- * HEAD — `git rev-list --count base..branch` > 0).
- *
- * THE BUG IT GUARDS: a `daemon_restart` marks EVERY prior-run session `exited` at boot, so an unrelated
- * manager's LIVE worker is misdetected at boot and its worktree deleted mid-task, pre-commit (confirmed
- * data loss, 2026-06-05). Originally TWO vectors were gated by this single guard: Pass B GC'ing any
- * exited+unprotected worktree (the branch-AHEAD case), and Pass A treating a 0-commit branch as a merged
- * orphan (its tip == HEAD). ⚠️ Card 9cb0287a (2026-08-29): the Pass A vector is STALE — under squash
- * (see {@link findLandedSquashCommit}), Pass A no longer calls this function at all; it now requires
- * POSITIVE proof of a landed squash via the deterministic `Loom-Worker-Branch` trailer before ever
- * finalizing, and deliberately does NOT re-apply this guard (see `reconcileOrchestrationOnBoot`'s own
- * comment on that call). A worker Pass A can't positively confirm landed simply falls through untouched
- * to Pass B, where THIS guard is the sole remaining line of defense — verified (card 9cb0287a) to be the
- * function's ONLY call site (`git grep -n "worktreeHasWork(" -- packages/daemon/src`).
- *
- * FAILS SAFE: every op is bounded by the same block-timeout + {@link withTimeout} guard as the other
- * reconcile ops, so the check itself can never wedge boot; on ANY timeout/error/parse-failure we return
- * TRUE (assume work) so a wedged or locked check can never CAUSE a delete. Worst case we keep a
- * discardable dir for the next pass — never the reverse. The git seam is injectable ({@link BoundedGitDeps})
- * so a test can prove both the work-detection and the fail-safe bound.
- */
+/** @decision 9cb0287a — SAFE-TO-DISCARD guard for boot-reconcile Pass B (the 2026-06-05 P0 data-loss fix);
+ *  "work" = dirty tree OR branch ahead of base; FAILS SAFE to TRUE (assume work) on any error. Pass A no
+ *  longer calls this (positive squash-trailer proof instead) — this is now its sole call site. See
+ *  docs/decisions/9cb0287a-isbranchmerged-is-test-only-since-the-squash-trailer-proof.md. */
 export async function worktreeHasWork(
   repoPath: string,
   worktreePath: string,
@@ -1592,24 +1479,9 @@ export interface StrandedWork {
   ahead?: number;
 }
 
-/**
- * MERGE-GATE BACKSTOP (2026-06-10): catch a worker whose commits are STRANDED on a self-created branch
- * instead of its assigned `loom/<key>`. The bug it guards: when a worker commits to a branch it cut
- * itself, the assigned branch stays 0 commits ahead of canonical main, so reviewWorkerMerge reads an
- * empty diff and confirmWorkerMerge does an empty squash merge (nothing staged) — the real work is
- * silently lost (incident: worker `712fd5aa`, commit `1309552` stranded).
- *
- * Logic: mainSha = canonical repo HEAD. If `rev-list --count mainSha..assignedBranch` > 0 the work is on
- * the assigned branch (the normal path) → NOT stranded. Otherwise read the WORKTREE's actually-checked-out
- * branch (`rev-parse --abbrev-ref HEAD`) and its `rev-list --count mainSha..HEAD`; if that count > 0 AND
- * the worktree branch != the assigned branch, the worker's commits live on a divergent branch → STRANDED,
- * returning the worktree branch, its short tip SHA, and the ahead-count for the warning/refusal.
- *
- * FAILS SAFE: every op is bounded by the same block-timeout + {@link withTimeout} guard as the other
- * helpers, and ANY error/timeout/parse-failure returns `{stranded:false}`. Only an AFFIRMATIVE stranded
- * signal ever warns or refuses — a check failure must NEVER block a legitimate merge. The git seam is
- * injectable ({@link BoundedGitDeps}) so a test can prove both the detection and the fail-safe bound.
- */
+/** MERGE-GATE BACKSTOP (2026-06-10): catches a worker whose commits are STRANDED on a self-created
+ *  branch instead of its assigned `loom/<key>` (incident: worker `712fd5aa`, commit `1309552` silently
+ *  lost via an empty squash merge). FAILS SAFE to `{stranded:false}` on any error — never blocks a merge. */
 export async function detectStrandedWork(
   repoPath: string,
   worktreePath: string,
@@ -1658,59 +1530,11 @@ export interface CanonicalDirtyOverlap {
   probeFailed?: boolean;
 }
 
-/**
- * ADMISSION-TIME PREFLIGHT (card 4b7ff996): catches, BEFORE the build/DoD gate ever runs (an ~8-17min cost
- * observed live on this repo), a branch whose squash can structurally never land — because the CANONICAL
- * repo already has unstaged tracked changes on a path the branch itself touches. `git merge --squash`
- * refuses to overwrite unstaged local modifications (it errors instead of silently clobbering them) —
- * {@link mergeBranchLocked} hits exactly this as a `rawError` deep inside the squash (see its own
- * `dirtyOverlap` signature-detection there), but only AFTER a full gate run has already paid for the
- * worktree build/test cost. This is the SAME question asked cheaply, up front.
- *
- * ⚠️ CR CORRECTION (card 4b7ff996, first-round review): "any unstaged status on a path in
- * `merge-base..branch`" is BROADER than what `git merge --squash` actually refuses on
- * (`ERROR_NOT_UPTODATE_FILE`, raised only for a path the squash must ACTUALLY WRITE whose worktree
- * content differs from the index) — the first draft's naive path-set intersection produced THREE confirmed
- * false refusals against real git 2.47, each now excluded by one of the three narrowing steps below:
- *
- * (i) ALREADY-LANDED CONTENT (the worst — this card's own `46ebf16e` out-of-band-resolution shape: main
- *     independently already carries the branch's exact content, canonical is separately re-dirtied on the
- *     SAME path). `git merge --squash` doesn't touch a path at all when applying the branch's diff would
- *     be a no-op against CURRENT `HEAD` (verified empirically: "Squash commit — not updating HEAD /
- *     Automatic merge went well", 0 staged) — so it never hits the unstaged file underneath. Excluded by
- *     dropping any candidate whose content is IDENTICAL between the CURRENT canonical `HEAD` and the
- *     branch tip (`changedPathsBetween(git, "HEAD", branch, …)` — deliberately `HEAD`, not `mergeBase`:
- *     `mergeBase..branch` only proves the branch changed the path RELATIVE TO ITS OWN FORK POINT, which
- *     says nothing about whether `HEAD` has since independently converged on identical content).
- * (ii) UNSTAGED DELETE (` D`). A deleted-but-unstaged path is NOT what `--squash` refuses on: git restores
- *      it from the index and stages the branch's own change cleanly — reproduced against real git.
- *      Excluded by restricting the dirty-candidate set to worktree status `Y === "M"` (a real content
- *      MODIFICATION) — the only `Y` value `ERROR_NOT_UPTODATE_FILE` actually fires for.
- * (iii) SUBMODULE GITLINK (` M`, mode `160000`). card `06b5c47f` already established that a submodule's
- *       checked-out commit sitting ahead of its recorded pointer is a NORMAL steady state, not residue —
- *       "could block a legitimately-configured repo's merges PERMANENTLY" (that doc, ~5030-5034) — and
- *       this preflight would have REINTRODUCED exactly that regression for the narrower "branch also bumps
- *       the pointer" case. `git merge --squash` does not error on it (proven both standalone and, now,
- *       specifically for the overlap case by this file's own test). Excluded via a `git ls-files --stage`
- *       mode check (`160000` = gitlink).
- *
- * These three checks run ONLY over the small overlap-candidate set (dirty ∩ branch-changed), never over
- * the whole repo, so the extra git calls stay cheap regardless of repo size.
- *
- * Only UNSTAGED TRACKED overlap is checked here — a STAGED-dirty canonical repo is checked by a SEPARATE
- * sibling, {@link detectCanonicalStagedDirt} (also called from the SAME admission preflight, card 4b7ff996
- * CR follow-up — see that function's own doc for why it needed its own admission-time hoist too), and an
- * UNTRACKED collision (this probe's `--untracked-files=no` is deliberately blind to it — see the comment
- * on `dirtyUnstaged` below) is checked by another separate sibling, {@link detectCanonicalUntrackedOverlap}
- * (card 98d6264d).
- *
- * FAILS SAFE like {@link detectStrandedWork}: any git error/timeout returns `{overlap:false,
- * probeFailed:true}` — a flaky probe must never itself block a legitimate merge; the branch simply
- * proceeds to the real gate/squash, which still catches (and explains) the genuine case if it's still
- * there by then. The `probeFailed` flag + the log line in the catch exist so a PERMANENTLY broken probe
- * (e.g. a git binary issue on this host) is at least observable, rather than silently indistinguishable
- * from "genuinely never has an overlap" forever.
- */
+/** @decision 4b7ff996 — admission-time preflight for a squash that can structurally never land (canonical
+ *  has unstaged TRACKED changes on a path the branch touches), asked cheaply before the ~8-17min gate.
+ *  Narrowed against 3 confirmed false-refusal repros (already-landed content, unstaged delete, submodule
+ *  gitlink); fails safe to `{overlap:false, probeFailed:true}`. See
+ *  docs/decisions/4b7ff996-admission-time-preflight-for-a-squash-that-can-never-land.md. */
 export async function detectCanonicalDirtyOverlap(
   repoPath: string,
   branch: string,
@@ -1791,47 +1615,11 @@ export interface CanonicalUntrackedOverlap {
   probeFailed?: boolean;
 }
 
-/**
- * Sibling admission-time preflight to {@link detectCanonicalDirtyOverlap} (card 98d6264d): that function's
- * probe is `git status --porcelain --untracked-files=no`, DELIBERATELY blind to untracked paths (see its
- * own comment on `dirtyUnstaged` — `--untracked-files=no` there is load-bearing against a DIFFERENT false
- * refusal, so it cannot simply be widened). `git merge --squash` refuses on an untracked collision too,
- * with a DIFFERENT git wording ("The following untracked working tree files would be overwritten by
- * merge") — {@link mergeBranchLocked} already catches this late, via the SAME `/would be overwritten by
- * merge/i` classifier that also matches the tracked wording (see that function's own doc), but only AFTER
- * a full build/DoD gate has already run. This hoists the untracked case to admission time too, the
- * identical "ask cheaply, up front" move `detectCanonicalDirtyOverlap` already makes for the tracked case.
- *
- * 🔴 CARD PREMISE REFUTED BY DIRECT REPRO (card 98d6264d's own DoD-3 claimed a "byte-identical untracked
- * collision does not refuse" counter-case, mirroring `detectCanonicalDirtyOverlap`'s narrowing (i) for the
- * TRACKED case — that claim is FALSE for the UNTRACKED case): verified directly against real git
- * `2.47.0.windows.2`, `git merge --squash` refuses on an untracked path collision REGARDLESS of whether the
- * on-disk content is byte-identical to what would be checked out — "error: The following untracked working
- * tree files would be overwritten by merge" fires unconditionally on path presence (both with
- * `core.autocrlf` true and explicitly false, ruling out a line-ending artifact). Unlike the tracked case,
- * git does NOT special-case identical untracked content — the tracked narrowing (i) does not transfer here,
- * and a content-identity check would have been WORSE than a no-op: it would have produced a FALSE NEGATIVE
- * (excluding a path git actually refuses on), reintroducing the exact late-failure gap this card exists to
- * close, just for the identical-content subcase. So NO content comparison is performed below.
- *
- * ⚠️ THE NARROWING THAT DOES APPLY (verified by a second, separate repro): a candidate the branch's OWN TIP
- * no longer carries — added then removed within the branch's own history, or deleted relative to the merge
- * base — is NOT a genuine collision: the squash writes NOTHING at that path in that case (confirmed: "Squash
- * commit -- not updating HEAD / Automatic merge went well", 0 refusal), so an untracked file merely sitting
- * at that path is never at risk. This mirrors `detectCanonicalDirtyOverlap`'s own reasoning for excluding a
- * path the squash never actually writes to, just via an EXISTENCE check (`git cat-file -e branch:path`)
- * rather than a content comparison, since existence — not content — is what determines whether git refuses
- * here.
- *
- * Only paths the branch's own commits actually touch (`mergeBase..branch`) are ever candidates — an
- * untracked file elsewhere in the canonical repo is never at risk, matching the tracked-path sibling's own
- * scoping.
- *
- * FAILS SAFE like {@link detectCanonicalDirtyOverlap}: any git error or timeout returns
- * `{overlap:false, probeFailed:true}` — a flaky probe must never itself block a legitimate merge; the
- * branch simply proceeds to the real gate/squash, which still catches (and explains) the genuine case via
- * the existing backstop if it's still there by then.
- */
+/** @decision 98d6264d — sibling admission-time preflight to {@link detectCanonicalDirtyOverlap} for an
+ *  UNTRACKED collision (a separate git error wording); unlike the tracked case, git refuses REGARDLESS of
+ *  content identity (verified against real git 2.47), so no content comparison is performed — only an
+ *  existence check against the branch tip. Fails safe to `{overlap:false, probeFailed:true}`. See
+ *  docs/decisions/98d6264d-untracked-collision-is-a-separate-preflight-from-tracked-overlap.md. */
 export async function detectCanonicalUntrackedOverlap(
   repoPath: string,
   branch: string,
@@ -1972,30 +1760,10 @@ export async function getWorktreeHeadSha(worktreePath: string, deps: BoundedGitD
   }
 }
 
-/**
- * The worktree's latest commit that the WORKER itself authored — the gate-timeout circuit breaker's
- * (card 3564fd1e) "did a real fix land" signal, INVARIANT to `mergeMainIntoWorktree`'s union-merge.
- *
- * THE BUG THIS CLOSES: `confirmWorkerMerge` runs the union-merge (a real `git merge --no-edit mainSha`,
- * FIRST-parent = the worktree's prior HEAD, second-parent = main's tip) BEFORE the breaker check/record —
- * so whenever main has advanced since the branch was cut, plain {@link getWorktreeHeadSha} returns the
- * NEW merge commit's sha every single confirm attempt, indistinguishable from the worker having pushed a
- * genuine fix. The breaker's clear-on-HEAD-advance was defeated: it cleared the streak on every confirm
- * and could never trip on the merge path — exactly the "hanging test while main keeps moving" case it
- * exists to catch.
- *
- * `git rev-list --first-parent --no-merges HEAD --max-count=1` walks the FIRST-parent chain from HEAD
- * (which — because `mergeMainIntoWorktree` always merges main INTO the worktree, never the reverse — is
- * always the worker's OWN branch history, not main's) and skips any merge commit in that chain, returning
- * the latest commit the worker actually authored. A union-merge only ever ADDS a merge commit on top; it
- * can't change this value. A genuine worker commit (fixing the hang) DOES change it. On the run_gate path
- * (no union-merge, so HEAD is never a merge commit to begin with) this returns the exact same sha
- * {@link getWorktreeHeadSha} would — fully backward-compatible there.
- *
- * Fail-safe like its sibling: any error/timeout (including a HEAD with no non-merge ancestor, e.g. an
- * all-merge-commits worktree, which `rev-list` simply returns empty for) returns `null` — the breaker
- * caller treats that as "can't tell, don't reset."
- */
+/** @decision 3564fd1e — the gate-timeout breaker's "did a real fix land" signal, INVARIANT to
+ *  `mergeMainIntoWorktree`'s union-merge (which otherwise makes plain {@link getWorktreeHeadSha} return a
+ *  new merge sha every confirm once main advances, permanently defeating the breaker). Fails safe to
+ *  `null`. See docs/decisions/3564fd1e-gate-timeout-circuit-breaker-streak.md (Decision C). */
 export async function getWorktreeLatestNonMergeSha(worktreePath: string, deps: BoundedGitDeps = {}): Promise<string | null> {
   try {
     const { git, timeoutMs } = boundedGit(worktreePath, deps);
@@ -2102,22 +1870,10 @@ export interface DiffstatFile {
   status?: "A" | "M" | "D" | "T" | "U" | "X" | "B";
 }
 
-/**
- * Translate a glob (supporting `**`, `*`, `?`) to an anchored RegExp matched against a POSIX,
- * repo-relative path. `**` (optionally `/`-bounded) crosses directories and may match zero segments;
- * `*`/`?` stay within a single segment. No `{a,b}` brace expansion — keep the surface small and
- * predictable. (Deliberately a small local copy rather than importing `mcp/repo-read.ts`'s equivalent —
- * this git-layer module shouldn't reach up into the mcp layer for a 15-line helper.)
- *
- * A BARE leading `*` with no `/` anywhere in the pattern (e.g. `*service.ts`) is auto-prefixed with a
- * `**` + `/` (zero-or-more-dirs) segment before translation: as written, `*` stays within one path
- * segment, so `*service.ts` only ever matches a ROOT-level file and silently misses
- * `packages/daemon/src/sessions/service.ts` — the "matched 0 files, indistinguishable from no changes"
- * trap (task 91d847db). A caller writing a bare filename glob almost always means "match this file
- * anywhere", so that's the least-surprising behavior. Patterns that already scope a directory (contain
- * `/`) or already cross boundaries (start with `**`) are left untouched — only the fully-bare,
- * single-segment case is rewritten.
- */
+/** @decision 91d847db — a bare leading `*` with no `/` anywhere (e.g. `*service.ts`) is auto-prefixed
+ *  with `**​/` before translation, since as written `*` stays within one path segment and would silently
+ *  match 0 files for a nested path (indistinguishable from "no changes"). See
+ *  docs/decisions/91d847db-bare-glob-auto-prefix-crosses-directories.md. */
 function pathGlobToRegExp(rawGlob: string): RegExp {
   const glob = rawGlob.startsWith("*") && !rawGlob.startsWith("**") && !rawGlob.includes("/")
     ? `**/${rawGlob}`
@@ -2283,24 +2039,9 @@ export function looksLikeTestFile(filePath: string): boolean {
   return /\.(test|spec)\.[^./]+$/i.test(base);
 }
 
-/**
- * Whether a REVIEW spawn's REVIEWED branch is worth building for, even though the review rig itself is
- * `noCommit` (see {@link ProvisionDeps.runBuild}). A build-free reviewer can still read and reason about
- * source, but it can never EXECUTE a test file that imports compiled `dist/` output — the incident this
- * closes (board card 503cd822): a real Code Reviewer session could not run 2 of 5 changed files under
- * review because they imported from `packages/daemon/dist/`, which a build-free worktree never populates.
- *
- * Building for EVERY review would defeat the entire point of `runBuild:false`'s latency win — most
- * reviews touch no test at all — so this keys the decision on the REVIEWED diff itself: build only when
- * it touches at least one test-shaped file ({@link looksLikeTestFile}), since that's the population that
- * can plausibly need to be executed. A docs/vault/source-only review still skips the build, unchanged
- * from before this card.
- *
- * FAILS OPEN (returns `true`, i.e. "build") on ANY diff error — a bad ref, a timeout, a git failure. An
- * undetectable diff must never silently degrade to the exact "reviewer can't run tests" bug this closes;
- * the cost of a false-positive build is bounded latency, the cost of a false-negative skip is a repeat of
- * the incident. `deps` mirrors {@link diffBranch}'s own injectable seam so a test can stub the diff.
- */
+/** @decision 503cd822 — build a review worktree only when the REVIEWED diff touches a test-shaped file
+ *  (a build-free reviewer can read source but never EXECUTE a `dist/`-importing test). FAILS OPEN (build)
+ *  on any diff error. See docs/adr/503cd822-build-review-worktrees-only-when-the-diff-needs-it.md. */
 export async function reviewDiffNeedsBuild(
   repoPath: string, branch: string, base = "HEAD", deps: DiffBranchDeps = {},
 ): Promise<boolean> {
@@ -2334,58 +2075,21 @@ function lineAnchoredMarker(phrase: string): RegExp {
  */
 const LEADING_DECORATION = "[^\\p{L}\\p{N}\\n]{0,16}";
 
-/**
- * Widened sibling of {@link lineAnchoredMarker}, for the "retracted" family only (card 299a33ae — see
- * `matchRetractedPremiseTitle`'s own doc comment for the corpus measurement this derives from). Still
- * anchored at the true START of a line — preceded by nothing but decoration, never by ordinary prose —
- * which is exactly what excludes both live false positives `637558ca` narrowed against (both bury the
- * word deep inside a sentence, nowhere near a line start: "...categorically different from the retracted
- * count-floor idea..." and "...and retracted before I'd checked."). But unlike `lineAnchoredMarker`, it no
- * longer requires the phrase to BE the whole line: reading the corpus's unmatched retraction bodies found
- * the overwhelming majority of real, deliberate declarations continue on the SAME line with an
- * explanation — "RETRACTED 2026-06-26 — DUPLICATE.", "RETRACTED: this card previously called...",
- * "RETRACTED — the card's WARRANT, not its numbers" — which the old whole-line-only shape rejected right
- * alongside the false positives it was built to reject.
- *
- * `excludeAfter` (optional) is a NEGATIVE-lookahead guard for a specific glued continuation that isn't a
- * declaration at all — found while measuring this widening (card 299a33ae) against card `637558ca`
- * (which discusses this very predicate): it quotes this file's own warning template verbatim, `` `RETRACTED
- * -PREMISE: this card's body carries…` ``, and an unconstrained trailing matched it as a false positive.
- * The glue is the tell — every genuine declaration in the corpus separates any qualifier from "retracted"
- * with a SPACE ("PREMISE RETRACTED", "RETRACTED BY THE MANAGER"), never a bare hyphen immediately after.
- */
+/** @decision 299a33ae — widened sibling of {@link lineAnchoredMarker} for the "retracted" family: still
+ *  anchored at a true line START (excludes mid-sentence false positives), but no longer requires the
+ *  phrase to be the WHOLE line. `excludeAfter` guards a glued continuation (e.g. this file's own
+ *  `RETRACTED-PREMISE:` template) that isn't a real declaration. See
+ *  docs/decisions/299a33ae-linestartmarker-widens-retracted-to-not-whole-line-only.md. */
 function lineStartMarker(phrase: string, excludeAfter?: string): RegExp {
   const guard = excludeAfter ? `(?!${excludeAfter})` : "";
   return new RegExp(`^${LEADING_DECORATION}${phrase}${guard}`, "imu");
 }
 
-/**
- * Deliberate markers a human writes to declare a card's premise dead — each must appear as its OWN
- * line in the body (see {@link lineAnchoredMarker}/{@link lineStartMarker}), NOT merely be mentioned
- * anywhere in prose. This was originally a bare `\bretracted\b` substring match over the whole body; two
- * live false positives (card `e7bcb0df`'s "the retracted count-floor idea", a discarded design option, and
- * card `66d91a11`'s "...and retracted before I'd checked", a person retracting a belief) proved that
- * "retraction" is an open vocabulary no keyword list converges on. Line-anchoring converts it to a closed
- * one: a human declaring a card's premise dead writes a dedicated line (e.g. a `RETRACTED` heading), they
- * don't rely on the word merely appearing somewhere in the body. Kept narrow on purpose (card cf60a32a,
- * narrowed `637558ca`): a heuristic here is only acceptable because it keys on a deliberate declaration a
- * human chose to write, never on inferred intent.
- *
- * `retracted`/`premise retracted` use {@link lineStartMarker} (card 299a33ae widened these — see above);
- * `won't-do`/`not a bug` stay on the original whole-line-only {@link lineAnchoredMarker}, unchanged — the
- * corpus read that justified widening the "retracted" family found no comparable unmatched specimens for
- * these two, so there is nothing to derive a widening FROM for them (widening without a corpus specimen is
- * exactly the "manufactured phrasing" this card's DoD forbids).
- *
- * DECLINED LEVER, same corpus read (card 299a33ae): the bare noun "RETRACTION" (vs. the participle
- * "retracted") is deliberately NOT added as its own marker. In this exact corpus, "RETRACTION" at a true
- * line start is used AT LEAST as often as a title-check CHECKLIST LABEL whose verdict is the OPPOSITE of a
- * retraction — "RETRACTION checked and did NOT fire", "RETRACTION ✅ — premise held", "RETRACTION — n/a,
- * the premise held" — as it is for a genuine declaration ("RETRACTION — A 'CARD DEFECT' I ACCEPTED THAT
- * WAS NEVER REAL"). Widening to it would trade the mid-sentence false-positive class this predicate was
- * built to avoid for an equally real line-start one, in the same corpus that justifies the rest of this
- * widening — so it stays out.
- */
+/** @decision cf60a32a — deliberate markers a human writes to declare a card's premise dead, each as its
+ *  OWN line, never merely mentioned in prose (a bare substring match had 2 confirmed false positives). A
+ *  bare "RETRACTION" noun marker was DECLINED — measured to fire at least as often on a checklist label
+ *  whose verdict is the OPPOSITE of a retraction. See
+ *  docs/decisions/cf60a32a-retraction-vs-title-merge-review-warning.md. */
 const RETRACTION_MARKER_RES: ReadonlyArray<{ label: string; re: RegExp }> = [
   { label: "retracted", re: lineStartMarker("retracted", "-premise\\b") },
   { label: "premise retracted", re: lineStartMarker("premise\\s+(?:partly\\s+|fully\\s+)?retracted") },
@@ -2393,48 +2097,11 @@ const RETRACTION_MARKER_RES: ReadonlyArray<{ label: string; re: RegExp }> = [
   { label: "not a bug", re: lineAnchoredMarker("not a bug") },
 ];
 
-/**
- * The retraction-vs-title merge-review warning's matching primitive (card cf60a32a — the mechanical half
- * of `0fa32321`; doctrine half merged as `514da7cf`). A card's BODY can be retracted after its TITLE was
- * already written (and already valid Conventional form, so `toConventionalSubject`/`coerced` — card
- * `b88704bb` — is a no-op passthrough and stays blind to this case entirely). Card title = squash-commit
- * subject on this project, so an un-retitled `fix(…)` merging over a retracted premise stamps a fix for a
- * bug that never existed into permanent mainline history.
- *
- * KNOWN BLIND SPOT (card `a29ee2a6`, measured 2026-08-29 against the live `loom.db`, read-only, positive-
- * controlled against the origin incident `c7bf65aa`): this reads the card's CURRENT title+body only — a
- * retraction stated solely in a session transcript, never written into the card, is invisible here. The
- * one confirmed real specimen of that exact shape (`c7bf65aa` itself) never actually merged, so it caused
- * no harm. But transcript-only silence turned out to be the RARE case, not the common one: of 314 tasks
- * (all projects on this daemon) whose title or body mentions "retract", 87 had a title currently starting
- * `fix(`; of THOSE, only 9 (~10%) matched the then-current regex and 78 (~90%) did not. Widening the input
- * surface to read transcripts is NOT supported by that measurement — see `a29ee2a6`.
- *
- * WIDENED (card `299a33ae`, measured 2026-09-02 against the SAME live `loom.db`, read-only): the
- * population had grown to 377 tasks mentioning "retract" / 110 `fix(`-titled among them by this date (the
- * board keeps moving; this is a later snapshot, not a re-run of `a29ee2a6`'s own count). Reading all ~100
- * bodies the regex still missed found the gap was PHRASING, not surface — free-form prose (left alone, on
- * purpose: widening to catch that would start matching mid-sentence mentions, the exact false-positive
- * class `637558ca` narrowed this predicate to avoid), decorated/emoji-prefixed headings ("❌ RETRACTED BY
- * THE MANAGER:", "🔴🔴 PREMISE PARTLY RETRACTED"), and a same-line trailing explanation the old
- * whole-line-only shape rejected ("RETRACTED 2026-06-26 — DUPLICATE.", "RETRACTED: this card previously
- * called…"). `lineStartMarker` (below `matchRetractedPremiseTitle`'s call site) widens exactly those two
- * axes for the "retracted"/"premise retracted" markers, while leaving `won't-do`/`not a bug` untouched (no
- * unmatched specimens were found for either) and deliberately declining to add a bare "retraction" noun
- * marker (see {@link RETRACTION_MARKER_RES}'s doc comment for why that lever is a net-negative in this
- * corpus). Measured on that SAME 110-card current population, with the compiled regex (i.e. including the
- * `-premise` exclusion below, found by this same measurement — see `lineStartMarker`'s doc comment): match
- * rate rose from 10/110 (~9%, old regex) to 21/110 (~19%, new regex) — both counts against the identical
- * set of 110 rows, one denominator. All 11 newly-matched rows were read individually and confirmed genuine
- * standalone declarations, not quoting artifacts. The remaining ~81% miss is overwhelmingly free-form
- * prose with no standalone declaration line at all — by design still unmatched, not a gap this widening
- * left behind.
- *
- * Returns the matched marker label when the TITLE still starts with the literal `fix(` (lowercase, this
- * project's Conventional Commits type casing) AND the BODY carries one of {@link RETRACTION_MARKER_RES}
- * as its OWN standalone line — else `null`. PURE (no I/O), so trivially unit-tested; mirrors
- * {@link matchAddedDenyGlobs}'s shape.
- */
+/** @decision cf60a32a — retraction-vs-title merge-review warning: an un-retitled `fix(…)` whose body
+ *  carries a standalone retraction marker stamps a fix for a bug that never existed into mainline history.
+ *  KNOWN BLIND SPOT: reads the card's CURRENT title+body only, never a transcript-only retraction (measured
+ *  rare, not common — card a29ee2a6). Widened 2026-09-02 (card 299a33ae), match rate 9%→19% on a measured
+ *  110-card corpus. See docs/decisions/cf60a32a-retraction-vs-title-merge-review-warning.md. */
 export function matchRetractedPremiseTitle(title: string, body: string): string | null {
   if (!title.trim().startsWith("fix(")) return null;
   for (const { label, re } of RETRACTION_MARKER_RES) {
@@ -2471,28 +2138,10 @@ async function branchExists(repoPath: string, branch: string, deps: BoundedGitDe
   }
 }
 
-/**
- * Content-reachability check (board card e076d2a2, item 2): does `sha`'s tree ACTUALLY contain `branch`'s
- * own changes, not merely carry its trailer text? Under the squash+commit race the per-repo mutex above
- * now closes, a commit can bear one branch's `Loom-Worker-Branch` trailer while its content belongs to a
- * DIFFERENT branch entirely (reproduced against real git — see test/merge-content-reachability.mjs) — a
- * `--grep` trailer match alone is a CLAIM, not proof. This verifies the claim: diff the branch's OWN
- * changed files (relative to its merge-base with `sha`) between `sha`'s tree and the branch tip's tree —
- * zero difference over EXACTLY that path set proves `sha` carries the branch's content verbatim.
- *
- * FAILS CLOSED, deliberately the OPPOSITE default from `findLandedSquashCommit`'s own fail-safe: any git
- * ERROR, or the two trees genuinely differing on the branch's own paths, returns `false` — NOT VERIFIED —
- * so the caller falls through to attempting a real merge instead of trusting an unproven "landed" claim. A
- * false `false` just costs a redundant (safe, idempotent) merge attempt; a false `true` is the exact
- * silent-data-loss bug this card exists to close, so ambiguity must never resolve to `true`.
- *
- * OUTPUT-based, NOT exit-code based (mirrors `mergeBranch`'s own `staged`/`conflicted` checks — see
- * {@link isBranchMerged}'s doc): simple-git's `raw()` does NOT reliably reject on a command whose nonzero
- * exit is a normal BOOLEAN signal rather than a real failure (`--is-ancestor`, `diff --quiet`) — a first
- * version of this check used `git diff --quiet`'s exit code and silently always resolved `true`, the exact
- * false-positive this function exists to prevent. `git diff --name-only` has no such ambiguity: any output
- * at all means a real difference.
- */
+/** @decision e076d2a2 — content-reachability check: does `sha`'s tree ACTUALLY contain `branch`'s own
+ *  changes, not merely carry its trailer text (a squash+commit race can bear one branch's trailer while
+ *  its content belongs to another)? FAILS CLOSED to `false` (unverified) on any ambiguity — never `true`.
+ *  See docs/decisions/e076d2a2-content-reachability-check-verifies-not-just-the-trailer-claim.md. */
 async function branchContentLandedInCommit(
   repoPath: string, branch: string, sha: string, mergeBase: string, deps: BoundedGitDeps,
 ): Promise<boolean> {
@@ -2515,56 +2164,16 @@ async function branchContentLandedInCommit(
 /** The `Loom-Worker-PathSet:` trailer {@link mergeBranchLocked} stamps — see {@link changedPathSetDigest}. */
 const LOOM_WORKER_PATHSET_TRAILER = /^Loom-Worker-PathSet:\s*(\S+)/m;
 
-/**
- * The `Loom-Worker-Base:` trailer (card d62dad73 phase 2) — a BATCHED landing's tip commit stamps this
- * alongside `Loom-Worker-PathSet` to record the explicit base its digest was computed against: the batch
- * tip as it stood immediately before this branch's own cherry-picks began (`batchHeadBefore` in {@link
- * landBranchCommitsIndividually}, `git/batch-merge.ts`) — a real commit in the LANDED history, equal to the
- * FIRST cherry-picked commit's own `sha^`, since that first commit lands directly onto it. It is NOT equal
- * to the TIP's own `sha^` once a branch contributes more than one commit — the tip's `sha^` is then the
- * branch's own PREVIOUS cherry-picked commit, not `batchHeadBefore` — which is exactly why this trailer
- * exists: without it, verification would have nothing but the tip's own too-narrow `sha^` to fall back to.
- *
- * A SOLO squash merge ({@link mergeBranchLocked}) stamps this too — originally (card 756a2cd8) as a
- * follow-up amend once the squash commit's real sha existed; since card c862f14c, computed from the
- * STAGED index before the single commit lands (see {@link stagedPathSetDigest}), which that card's own DoD
- * proves yields the identical value the amend used to. 🔴 **Its digest is NOT computed against `merge-base(HEAD, branch)`**
- * — an earlier version of this code was, and that was the bug: `merge-base(HEAD, branch)` is the branch's
- * PRE-landing fork point, and `sha^` (the LANDED base) coincides with it ONLY for an UP-TO-DATE branch (main
- * hasn't advanced past the branch's own fork point at squash time). When main HAS advanced, the two diverge
- * — the same rename-following divergence this card's batch investigation found (main renames a file the
- * branch also edits; the squash lands cleanly under the renamed path while a digest computed from the
- * branch's own pre-landing diff still names the original path) — and a genuinely landed commit could read as
- * unverified (fails closed, never a false green, but still a real degradation on the path that handles the
- * MAJORITY of merges). Fixed by stamping from the LANDED range instead: the base is `sha^` — canonical HEAD
- * as it stands immediately before the squash commit lands — read as plain `HEAD` one step BEFORE the commit
- * (card c862f14c; previously re-derived as `preAmendSha^` one step after), so it's trivially and
- * unconditionally identical to what {@link verifyPersistedPathSet}'s own `sha^` fallback already recomputes.
- * (Solo lands exactly one commit, so unlike the batched case above, this trailer is redundant with the
- * default `sha^` fallback by construction — it's stamped anyway to keep the two paths structurally uniform
- * and the base explicit rather than implicit.)
- *
- * {@link verifyPersistedPathSet} prefers this trailer's value when present and falls back to `sha^` when
- * absent — backward compatible by construction: every pre-756a2cd8 solo-squash and pre-phase-2 batched
- * commit lacks this trailer and keeps the exact `sha^`-based behavior it always had.
- */
+/** @decision d62dad73 — the `Loom-Worker-Base:` trailer stamps the LANDED base (`sha^`, or a batch's
+ *  `batchHeadBefore`), never `merge-base(HEAD, branch)` — that's the branch's pre-landing fork point, which
+ *  diverges once main has advanced (a rename-following case), degrading a genuinely landed commit to
+ *  unverified. See docs/decisions/d62dad73-loom-worker-base-trailer-stamps-the-landed-base-not-the-fork-point.md. */
 const LOOM_WORKER_BASE_TRAILER = /^Loom-Worker-Base:\s*(\S+)/m;
 
-/**
- * Returns the LAST match of a trailer regex in `body`, never the first (Code Review `c00a136c`, card
- * 1d3f500e). The real trailer block a stamp lands sits at the END of a commit message, appended after any
- * worker-authored text — on the BATCH path ({@link landBranchCommitsIndividually}, `git/batch-merge.ts`)
- * that worker-authored body passes through **verbatim** before `Loom-Worker-Branch`/`-PathSet`/`-Base` are
- * appended. A first-match `/^X:\s*(\S+)/m` regex would let a worker-authored line that merely starts with
- * the same shape at column 0 pre-empt the real, machine-stamped trailer — the reviewer's own specimen: a
- * future commit TO `batch-merge.ts` itself, whose body quotes an example `Loom-Worker-Base: <sha>` line at
- * column 0, would shadow its own real trailer under the old code. Taking the last match instead makes the
- * position in the message (not the first textual occurrence) the thing that resolves it, matching how a
- * real trailer block is actually located.
- *
- * `re` must carry the `m` flag and exactly one capture group (every `LOOM_WORKER_*_TRAILER` constant does);
- * this builds a `g`-flagged variant to scan every match in `body` and keeps only the last one found.
- */
+/** @decision 1d3f500e — returns the LAST regex match in `body`, never the first: the real trailer sits
+ *  at the message's END, and a worker-authored body passed through verbatim could otherwise pre-empt it
+ *  with a quoted example line at column 0. `re` needs the `m` flag + one capture group. See
+ *  docs/decisions/1d3f500e-trailer-regex-takes-the-last-match-not-the-first.md. */
 function lastTrailerMatch(body: string, re: RegExp): RegExpMatchArray | null {
   const globalRe = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
   let last: RegExpMatchArray | null = null;
@@ -2581,47 +2190,10 @@ function lastTrailerMatch(body: string, re: RegExp): RegExpMatchArray | null {
  */
 const NAME_ONLY_DIFF_FLAGS = ["-c", "core.quotePath=false", "diff", "--name-only", "--no-renames"] as const;
 
-/**
- * The raw changed-path list between `base` and `ref` — the single git-diff invocation {@link
- * changedPathSetDigest} and {@link isInertMergeDiff} BOTH build on (Code Review, card db9b0130: extracted
- * after the two calls were found to have drifted into byte-identical copies of the same `git diff` args —
- * two copies of a load-bearing flag is precisely the mechanism that makes losing one dangerous, see
- * `--no-renames` below).
- *
- * `--no-renames` is LOAD-BEARING for BOTH callers, for two DIFFERENT reasons — neither is optional:
- * - {@link changedPathSetDigest}: counts a rename as its two raw (deleted, added) paths rather than
- *   resolving it through git's own rename-detection heuristic, so the digest stays independent of that
- *   heuristic ever changing (its own similarity threshold, algorithm, etc.).
- * - {@link isInertMergeDiff}: PROVEN on git 2.47.0 (Code Review) — with git's default rename detection
- *   left ON, `git diff --name-only` after `git mv src/x.ts docs/x.ts` prints ONLY `docs/x.ts`; the deleted
- *   `src/x.ts` vanishes from the list entirely. Without `--no-renames`, a branch that RELOCATES a real
- *   source file into an allowlisted prefix would misclassify as an inert docs-only diff and the gate would
- *   be skipped while that source file silently leaves main un-gated — see `merge-gate-inert-diff.mjs`
- *   scenario (F), which pins this: it renames a source file committed on the BASE into `docs/` and
- *   asserts the diff still full-gates, so dropping `--no-renames` turns that arm RED.
- *
- * `-c core.quotePath=false` disables git's default C-style octal-escaping of non-ASCII path bytes (Code
- * Review, PROVEN: with the default `core.quotePath=true`, a path like `docs/café-findings.md` is emitted
- * quoted/escaped, e.g. `"docs/caf\303\251-findings.md"`). Without this, {@link isInertMergeDiff}'s own
- * `startsWith` allowlist check would silently miss a non-ASCII docs filename — FAILS CLOSED (safe: it just
- * forces an unnecessary full gate), but with no visible signal as to why, so disabling the quoting removes
- * the gap rather than merely tolerating it.
- *
- * Each raw line has only its trailing `\r` stripped (never a generic `.trim()`, which could in principle
- * widen an allowlist prefix match against a hypothetical directory literally named with leading/trailing
- * whitespace, e.g. `" docs"` — reasoned, not observed, but zero-cost to close): git's own `--name-only`
- * output uses `\n` line endings even on Windows, so this only ever strips a stray CR, never real path
- * content.
- *
- * A THIRD caller depends on the same two flags for the same reasons, without being built on this shared
- * helper: {@link computeEmitCompareGate} issues its own `git diff --name-status` invocation (it needs
- * per-path STATUS, which `--name-only` doesn't carry) with `--no-renames` and `-c core.quotePath=false` set
- * identically, and inline-only — a non-ASCII `docs/café-findings.md` must still match {@link
- * isInertMergePath}'s `startsWith("docs/")` check there too (card b97f643d added the second real
- * `startsWith` allowlist consumer of a diff this file produces). Not duplicated here as a THIRD copy of the
- * flag list to keep in sync — see that call site's own comment for why `--name-status` couldn't reuse this
- * function directly.
- */
+/** @decision db9b0130 — the ONE shared git-diff invocation {@link changedPathSetDigest} and
+ *  {@link isInertMergeDiff} both build on (extracted after the two drifted into byte-identical flag
+ *  copies). `--no-renames` and `-c core.quotePath=false` are BOTH load-bearing, for different reasons per
+ *  caller. See docs/decisions/db9b0130-shared-diff-flags-with-two-load-bearing-flags-two-different-reasons.md. */
 async function changedPathsBetween(
   git: Pick<SimpleGit, "raw">, base: string, ref: string, timeoutMs?: number,
 ): Promise<string[]> {
@@ -2652,73 +2224,11 @@ async function stagedPathsAgainstHead(
   return raw.split("\n").map((s) => s.replace(/\r$/, "")).filter(Boolean);
 }
 
-/**
- * Deterministic digest (sha256) over the SORTED set of paths changed between `base` and `ref` —
- * newline-joined after sorting so traversal order never matters. See {@link changedPathsBetween} for the
- * shared git invocation (incl. why `--no-renames` matters for this specific caller).
- *
- * WHY A PATH SET AND NOT A CONTENT HASH (card f621f185 — the deleted-branch residual of e076d2a2's
- * content-reachability check): the obvious next move — hash the branch's changed (path, blob-sha) pairs
- * and verify it later from `sha^..sha` alone (no branch ref needed, so it'd survive both branch deletion
- * AND `git gc`) — was PROTOTYPED and FALSIFIED against real git before landing here. It breaks on an
- * entirely HONEST merge: if main advances (after the branch was cut) with a non-conflicting edit to a file
- * the branch ALSO touches, the pre-image blob at that path differs between `mergeBase..branch` (recorded
- * at merge time) and `sha^..sha` (recomputed later, where `sha^` is main's ADVANCED tip, not the branch's
- * original fork point) — and the post-image blob is a 3-way-merged blend of both sides' edits, matching
- * neither side's own post-image either. Both compares disagree on a commit that landed PERFECTLY correctly,
- * which would fail closed (safe) but silently flip an honestly-merged task's board `merged` field to
- * null/unverified going forward — worse than the gap it closes on exactly the busiest, most-contended
- * files. Reproduced and confirmed dead in that exact shape before this function was written.
- *
- * The touched PATH SET does not have this failure mode: a non-conflicting edit to a shared file does not
- * change WHICH paths the squash's own diff touches on either side of the compare (the file was already
- * going to appear in both diffs regardless of whose edit is in it), so it stays stable under concurrent
- * main movement. The tradeoff this accepts (an explicit, narrower residual than the content-hash idea):
- * two DIFFERENT branches that happen to touch the exact same set of paths would not be told apart by this
- * check alone. That is deliberately judged acceptable — the incident this card responds to (`fb1dbb2`)
- * had completely disjoint path sets (`db.ts`/`gateway/server.ts` landed under a trailer claiming a `pty`
- * change), which a path-set digest catches cleanly, and Loom's own "one logical change per task" doctrine
- * makes two unrelated tasks sharing an identical touched-path set an unlikely coincidence rather than the
- * common case a content hash would otherwise need to guard against.
- *
- * A second, narrower false-negative (fails closed, so safe, just worth naming so a future reader doesn't
- * mistake it for a bug): if main independently lands the IDENTICAL change to a path the branch also
- * touches (not just a non-conflicting edit to the SAME file, but the exact same resulting content at that
- * path), that path drops OUT of the squash's own `sha^..sha` diff entirely — a no-op — while it remains in
- * a digest recorded from the branch's own PRE-landing diff (`mergeBase..branch`). The two path sets then
- * genuinely differ, an honest merge mismatches, and the caller falls through to null/a redundant merge
- * attempt. Rare (main and the branch would have to land the exact same bytes independently), never unsafe.
- *
- * 🔴 A THIRD, FAR MORE REACHABLE route to that exact same mismatch (card 756a2cd8): main RENAMING a path the
- * branch also edited — no identical bytes required, just a `git mv`. `git merge --squash`'s rename-following
- * 3-way merge lands the branch's edit cleanly under the renamed path, so `sha^..sha` names the NEW path while
- * a digest recorded from `mergeBase..branch` still names the OLD one. Same verdict as the identical-bytes
- * case above: fails closed, never unsafe, just a real degradation on the path that handles the majority of
- * merges. **Both routes share one root cause — a digest recorded from the branch's PRE-landing diff instead
- * of the LANDED range — and both are CLOSED by fixing that root cause, not by patching each route
- * separately.** As of card 756a2cd8, every fresh solo-squash commit whose `Loom-Worker-Base`/
- * `Loom-Worker-PathSet` capture succeeds (see {@link LOOM_WORKER_BASE_TRAILER}'s doc) stamps a digest equal
- * to `sha^..sha` — the LANDED range — same as the batched path's `batchHeadBefore..landedSha` already did
- * via `d62dad73`. (Card c862f14c changed HOW that value is obtained on the solo path — {@link
- * stagedPathSetDigest} over the staged index BEFORE the commit lands, in the single commit's own message,
- * rather than a follow-up `git commit --amend` recomputing it from `sha^..sha` AFTER — but not WHAT value
- * it is: that card's own DoD proves the staged-index digest and the `sha^..sha` digest are the same two
- * tree objects, so this paragraph's guarantee is unchanged.) Neither route above can occur against a digest
- * equal to that one: `sha^`/`batchHeadBefore` and `sha` are both fixed, immutable commit objects once
- * landed, so the range a stamp records and the range `verifyPersistedPathSet` later recomputes are the SAME
- * git objects, not merely usually-equal ones. Both routes remain real ONLY for a commit that predates this
- * fix, or whose best-effort trailer capture failed — there the caller sees the trailers simply ABSENT (not
- * a wrong digest) and degrades to the weaker `trailer-only` verification tier, which is an honest omission,
- * not a false negative.
- *
- * Exported for {@link batch-merge.ts}'s per-branch PathSet stamp (card d62dad73 phase 2) — that caller
- * computes this digest over `batchHeadBefore..landedSha`: the batch tip as it stood immediately before this
- * branch's OWN cherry-picks began, through its final landed commit — covering the branch's WHOLE
- * contribution regardless of commit count, never the tip commit's own `sha^` (which would only span its
- * last cherry-picked commit) and never the original un-landed branch's own diff. This is the only
- * invocation shape proven safe against a rename-following cherry-pick (see that file's own header doc for
- * why the original-branch range is NOT safe to reuse here).
- */
+/** @decision f621f185 — deterministic digest over the SORTED changed-path set (not a content hash — a
+ *  prototyped blob-hash approach was falsified against real git: it disagrees on an entirely honest merge).
+ *  Two named, fail-closed false-negative routes (identical-bytes, rename-following) are both closed by
+ *  digesting the LANDED range, never the branch's pre-landing diff. See
+ *  docs/decisions/f621f185-path-set-digest-not-content-hash-for-the-deleted-branch-residual.md. */
 export async function changedPathSetDigest(
   git: Pick<SimpleGit, "raw">, base: string, ref: string, timeoutMs?: number,
 ): Promise<string> {
@@ -2741,82 +2251,18 @@ function pathSetDigest(paths: string[]): string {
   return createHash("sha256").update([...paths].sort().join("\n")).digest("hex");
 }
 
-/**
- * Path prefixes PROVEN to hold nothing compiled, tested, or read at runtime by the LOOM daemon test suite
- * SPECIFICALLY — card db9b0130. Verified 2026-08-05: `grep -rnE "(readFileSync|existsSync|readdirSync|
- * createReadStream)\([^)]*docs" packages/daemon/test/*.mjs` ⇒ zero hits (the identical pattern against
- * `assets` ⇒ non-zero, so the zero is a real absence, not a broken pattern — see the card for the full
- * positive control), and the one `docs/` path a test file's own comment cites (`test-daemon-gate-
- * timing.mjs`) is a provenance citation, never a real read. Deliberately narrow and NOT extension-based:
- * `assets/**` is markdown too, and IS heavily tested (10 test files reference it) — an extension check
- * would wrongly classify a `SKILL.md` change as inert. ⛔ Do not widen this list without re-running that
- * same grep against the new prefix first — the whole point is that every entry here is a MEASURED
- * absence, not an assumption.
- *
- * ⭐ Card 9fcc29bb — WHY `assets/skills/**` IS DELIBERATELY EXCLUDED, NAMED: markdown under `assets/**` is
- * product behaviour, not incidental content, and it IS asserted on by name — `redirect-discoverability.mjs`
- * and `skills-seed-asset-override-default.mjs` both read real checked-in `assets/skills/<name>/SKILL.md` files
- * as their comparison oracle. `packages/daemon/test/merge-gate-inert-diff.mjs` scenario (B) is the guard
- * that ENFORCES this stays excluded — it commits a branch whose entire diff is one `SKILL.md` under
- * `assets/skills/**` and asserts the gate command still genuinely RAN (a call counter, not a trusted
- * return value). Extending this list to cover `assets/**` would require deliberately breaking that named
- * safety case; see this list's own doc above, not a fresh investigation, before ever proposing it again.
- * (The asymmetry is a deliberate trade, not an oversight: a merged `assets/skills/**` change isn't live
- * until a daemon restart anyway, and only auto-advances there for a `customized:false` skill — a faster
- * gate wouldn't make it ship any faster.)
- *
- * ⚠️ A future MULTI-SEGMENT entry (e.g. `"site/docs/"`) needs its OWN
- * re-measurement, not just a re-run of the same grep: {@link repoTreeReferencesInertPrefix}'s scan
- * requires `site/docs` to appear CONTIGUOUS on one line, which `path.join(__dirname, "site", "docs")` —
- * an entirely ordinary way to write that path — never produces, a silent false negative for exactly the
- * shape this list plausibly grows into (Code Review, card 1c0d4aa4).
- *
- * ⚠️ THAT MEASUREMENT IS LOOM-ONLY, BUT {@link isInertMergeDiff} RUNS FOR EVERY PROJECT THIS DAEMON
- * SERVES (card 1c0d4aa4, Code Review finding on `b97f643d`) — a consumer project whose own tests DO read
- * a top-level `docs/` must not have its gate silently skipped just because Loom's don't. This is why
- * `isInertMergeDiff` does not trust this list alone: it re-verifies PER-REPO, at gate time, via
- * {@link repoTreeReferencesInertPrefix} — this list stays a cheap first-pass allowlist (a path outside it
- * still fails closed immediately, no scan needed).
- *
- * 🔴 CORRECTION (card 0910531e, Code Review finding on `1c0d4aa4`): this doc used to claim the per-repo
- * scan ALONE "is the thing that actually makes a `true` result safe to trust for a project other than
- * Loom." That was false — {@link repoTreeReferencesInertPrefix}'s read-call/anchor vocabulary
- * (`readFileSync`, `__dirname`, `import.meta.url`, …) is JS/TS-only lexically, so it can NEVER match in a
- * Python/Go/Rust/Ruby repo; `git grep` there always returns its "no match" exit code, which the scan used
- * to treat as a CONFIRMED absence — a 100% false-negative for every non-JS/TS project, reproduced with a
- * paired-language control (identical dependency, differing only in language) in that card. The scan is now
- * safe to trust for a project other than Loom ONLY because it first proves it can even apply to this
- * repo's language — see {@link repoTreeHasJsTsSourceFile} — before ever treating a "no match" as meaning
- * anything.
- */
+/** @decision db9b0130 — path prefixes PROVEN (measured, not assumed) to hold nothing compiled/tested/read
+ *  by the Loom daemon suite; `assets/skills/**` is deliberately EXCLUDED (real tests read it as an
+ *  oracle). LOOM-ONLY measurement — {@link isInertMergeDiff} re-verifies PER-REPO via
+ *  {@link repoTreeReferencesInertPrefix}, itself gated on the repo being JS/TS first. See
+ *  docs/decisions/db9b0130-shared-diff-flags-with-two-load-bearing-flags-two-different-reasons.md. */
 const INERT_MERGE_PATH_PREFIXES = ["docs/"];
 
-/**
- * Root-level, EXACT-match file paths proven inert by the SAME `readFileSync`/`existsSync`/`readdirSync`/
- * `createReadStream` corpus measurement {@link INERT_MERGE_PATH_PREFIXES}'s own doc describes for `docs/`
- * (card 82662e98) — a `startsWith` PREFIX cannot express these at all: `"README.md"` has no directory
- * component to match, so a root file needs its own exact-equality list, not a wider prefix. Verified
- * (2026-09-04): zero real reads of any of these five names anywhere in `packages/daemon/test/*.mjs`. The
- * only `README.md` hits found were `path.join(<throwaway-fixture-repo>, "README.md")` in
- * `merge-gate.mjs`/`merge-union-gate.mjs`/`worker-prompt.mjs`/`worktrees.mjs` — a SYNTHETIC git fixture
- * repo each test builds itself (`makeProject(...)`), never this project's own root file — the identical
- * "synthetic fixture ≠ real content" distinction {@link ASSET_READING_TEST_REPO_PATHS}'s own membership
- * doc already draws for `assets/**`.
- *
- * 🔴 `CLAUDE.md` IS DELIBERATELY, PERMANENTLY EXCLUDED — do not add it here without re-deriving this
- * argument first: `test/kickoff-real-spawn.mjs` reads THIS repo's own real root `CLAUDE.md` and embeds
- * real content (`claudeMd.slice(0, 4000)`) into realistic kickoff payloads it uses to exercise the
- * bracketed-paste escaping path — a genuine, non-synthetic behavioral dependency on its actual bytes.
- * This exact case is already investigated and pinned as a regression test: card `5149c036`,
- * `merge-gate-inert-diff.mjs` scenario (M) and `emit-compare-gate.mjs` scenario (O) both assert a
- * CLAUDE.md-only (or CLAUDE.md-alongside-comment-only-.ts) diff must still force the full gate. Adding
- * CLAUDE.md here would directly regress both.
- *
- * Same per-repo re-verification requirement as {@link INERT_MERGE_PATH_PREFIXES} — {@link
- * isInertMergeDiff} re-checks each of these against THIS repo's own corpus (via {@link
- * repoTreeReferencesInertPrefix}) at gate time, never trusting this list alone for a project other than
- * Loom.
- */
+/** @decision 82662e98 — root-level EXACT-match inert files (a `startsWith` prefix can't express a
+ *  filename with no directory component), measured zero real test reads. `CLAUDE.md` is DELIBERATELY,
+ *  PERMANENTLY EXCLUDED — `test/kickoff-real-spawn.mjs` has a real behavioral dependency on its content;
+ *  two pinned regressions assert this. See
+ *  docs/decisions/82662e98-root-file-exact-match-inert-list-and-the-claude-md-exclusion.md. */
 const INERT_MERGE_EXACT_PATHS = ["README.md", "CHANGELOG.md", "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "SECURITY.md"];
 
 /** Escapes every ERE metacharacter in `s` so it can be interpolated into {@link
@@ -2847,31 +2293,10 @@ function isInertMergePath(p: string): boolean {
   return INERT_MERGE_PATH_PREFIXES.some((prefix) => p.startsWith(prefix)) || INERT_MERGE_EXACT_PATHS.includes(p);
 }
 
-/**
- * Whether every path changed between `baseSha` and `ref` falls under an {@link
- * INERT_MERGE_PATH_PREFIXES} prefix — a provable property of the changed file SET, not a prediction about
- * test coverage (card db9b0130; this is a strict, safe subset of the deferred "scope the gate to the
- * diff" idea, `1055f5e3`, which infers coverage and is NOT what this does). A `true` result means a merge
- * gate for this diff cannot change any test outcome, so running one is pure wasted lane time; `false`
- * means "not proven inert" and the caller must run the gate exactly as before this existed. See {@link
- * changedPathsBetween} for the shared git invocation this is built on, INCLUDING why `--no-renames` is
- * load-bearing here specifically (a rename that relocates a real source file into an allowlisted prefix
- * would otherwise misclassify as inert) — carried there, not duplicated here, so it can't silently drift
- * out of sync between this function and {@link changedPathSetDigest}'s own copy again.
- *
- * FAILS CLOSED on every uncertain case, deliberately — a false `false` costs one ordinary gate run (safe,
- * the status quo); a false `true` would land an un-gated change that could have broken tests:
- * - A git error or timeout (can't read the diff at all) ⇒ `false`.
- * - Zero changed paths ⇒ `false` — nothing to prove inert from; let the ordinary no-op-merge handling
- *   (STAGE_EMPTY/ALREADY_MERGED) deal with a genuinely empty diff rather than special-casing it here.
- * - Any single changed path outside the allowlist ⇒ `false`. A brand-new/unknown top-level directory is
- *   not on the allowlist by construction, so it fails closed too — satisfying "an unrecognized path gates"
- *   without a separate check for it.
- * - Every changed path IS on the allowlist, but this repo's own corpus (per {@link
- *   repoTreeReferencesInertPrefix}) references the matched prefix, or that scan itself couldn't confirm
- *   otherwise (a spawn error, a non-"no-match" exit, a timeout) ⇒ `false` (card 1c0d4aa4 — see
- *   {@link INERT_MERGE_PATH_PREFIXES}'s own doc for why this re-check exists).
- */
+/** @decision 1c0d4aa4 — whether every changed path falls under an inert allowlist prefix: a PROVABLE
+ *  property of the changed-path SET, not a coverage prediction. FAILS CLOSED to `false` on every uncertain
+ *  case (git error, zero paths, an unrecognized path, or a per-repo re-scan that can't confirm absence).
+ *  See docs/decisions/1c0d4aa4-per-repo-inert-prefix-rescan-is-fail-closed-on-exit-code-not-pattern.md. */
 export async function isInertMergeDiff(
   repoPath: string, baseSha: string, ref: string, deps: BoundedGitDeps = {},
 ): Promise<boolean> {
@@ -2913,75 +2338,12 @@ export async function isInertMergeDiff(
  *  revision, a corrupt object, git erroring) means the absence was never actually proven. */
 const GIT_GREP_NO_MATCH_EXIT_CODE = 1;
 
-/**
- * The SAME read-call NAMES {@link INERT_MERGE_PATH_PREFIXES}'s own measurement (card db9b0130) used to
- * prove Loom's corpus never reads `docs/` — reused here (card 1c0d4aa4) to make that same measurement
- * PER-REPO instead of Loom-only, PLUS one refinement db9b0130's own manual measurement needed a HUMAN to
- * apply and a mechanical scan cannot skip: that measurement's own 2026-08-27 re-verification (see this
- * card's provenance) found "exactly 2 hits, both `path.join(<tempRepo>, "docs", …)`" and judged them NOT
- * real reads BY HAND — both are `merge-gate-inert-diff.mjs` assertions against a THROWAWAY git repo the
- * test itself constructs at run time (`H.repo`, `wt2.worktreePath`, …), unrelated to this project's own
- * checked-out tree and structurally incapable of being affected by ANY diff under evaluation. A bare
- * "does the token 'docs' appear near a read-call anywhere" scan cannot tell that apart from a genuine
- * project-relative read and — measured directly — DOES regress Loom's own skip on exactly these 2 lines
- * (`inert-prefix-repo-scan.mjs` scenario (4) pins this as a live regression check, not a hypothetical).
- *
- * The fix: require the SAME call to ALSO reference a well-known REAL-SOURCE-TREE anchor (`__dirname`,
- * `__filename`, `process.cwd()`, `import.meta.url`, `import.meta.dirname`) somewhere in its argument
- * list — a fixture path built from a test-local variable (`H.repo`, `worktreePath`, an `os.tmpdir()`-
- * derived root) never carries one of these literally, while a test genuinely reading ITS OWN project's
- * `docs/` overwhelmingly does. Re-verified against the real Loom repo (`inert-prefix-repo-scan.mjs`
- * scenario (4), run AFTER committing — see that file's own header for why "before" doesn't prove
- * anything): with this anchor requirement, `docs` returns to a confirmed absence and `assets` (genuinely,
- * anchor-referenced, project-relative) still returns found.
- *
- * ANCHOR MAY APPEAR ON EITHER SIDE OF THE TOKEN (Code Review, card 1c0d4aa4) — `readFileSync(new
- * URL("../docs/x.md", import.meta.url))` puts the token FIRST, the ESM-idiomatic form for "a file next to
- * this module." An anchor-then-token-only match would silently miss it; {@link
- * repoTreeReferencesInertPrefix} matches `anchor…token` OR `token…anchor` for exactly this reason.
- *
- * NOT A PERFECT DISCRIMINATOR — THREE NAMED GAPS, NOT HIDDEN ONES (Code Review, card 1c0d4aa4, measured:
- * 11 realistic read shapes, 4 matched, 7 missed). TWO AXES HERE, AND ONLY ONE OF THEM IS FAIL-CLOSED:
- * the EXIT-CODE axis genuinely is — any outcome other than a confirmed no-match (a spawn error, a
- * nonzero-non-1 exit, a timeout) forces the full gate rather than trust an unproven scan (see {@link
- * repoTreeReferencesInertPrefix}'s own doc for that contract). The PATTERN-COVERAGE axis below is NOT
- * fail-closed: a miss is indistinguishable from a true absence — both surface as the SAME confirmed
- * no-match exit code — so each of the three named gaps below is fail-OPEN on this axis: it silently
- * SKIPS the gate on a repo that genuinely reads the prefix, which is precisely the harm card 1c0d4aa4
- * added this per-repo scan to prevent, not a safe direction for it to fail in.
- * 1. INDIRECTION: a real read anchored through a locally-defined constant (`const ROOT =
- *    path.resolve(__dirname, "..")`, used on a LATER line) is invisible to this single-line, single-call
- *    scan.
- * 2. NESTED PARENS IN THE ANCHOR ITSELF: `readFileSync(path.join(path.dirname(fileURLToPath(import.meta
- *    .url)), "docs", "x.md"))` — THE standard `__dirname` replacement in ESM — closes THREE parens
- *    between the anchor and the token; `[^)]*` cannot cross a real `)`, so the second half of the bridge
- *    never reaches "docs". Genuinely out of reach for a line-based single-call regex — a real parser
- *    would be needed, and this file's own `computeEmitCompareGate` doc (see its "A HAND-ROLLED SCANNER
- *    LOOP IS NOT A SAFE SUBSTITUTE" warning, above) is exactly why one isn't attempted here.
- * 3. MULTI-LINE CALLS: `git grep` matches per-line by default; a prettier-wrapped call whose anchor and
- *    token land on different lines is invisible to this scan regardless of pattern.
- * Accepted deliberately, not silently: the alternative (no anchor requirement at all) is a CONFIRMED,
- * demonstrated false positive against Loom's own corpus, which the DoD requires not regressing; this
- * mechanism NARROWS the pre-card gap (100% false-negative for every non-Loom project) without claiming
- * to CLOSE it. See `computeEmitCompareGate`'s own doc (this file, "WHY NOT... resolve a changed fixture's
- * consumers") for the same reasoning applied to a sibling mechanism: a resolver that can miss a case is
- * still preferred here to no check at all, because the asymmetry is the same — a missed reference costs
- * one wrongly-skipped gate (bad), but that is what this whole mechanism already risked pre-card for EVERY
- * non-Loom project.
- *
- * WHAT A CLEAN RUN IS THEREFORE WORTH: a confirmed no-match exit code is a strong signal — its known
- * miss-modes (the three gaps above) all cut toward that same answer — but it is NEVER a proof of absence.
- * Trust it accordingly: as good evidence the gate can safely skip, not as a guarantee it should.
- *
- * ⚠️ A FOURTH gap, NOT one of these three, WAS hidden until card 0910531e: all three above are missed
- * SHAPES within a JS/TS repo — occasional, and only ever costing one wrongly-skipped gate on an unusual
- * call shape. The fourth was a whole-LANGUAGE class: this scan's read-call names and anchor tokens are
- * ALL JS/TS vocabulary, so in a Python/Go/Rust/Ruby repo NEITHER half could ever match — making a "no
- * match" a 100%, not occasional, false confirmed-absence for every non-JS/TS project this daemon serves.
- * {@link repoTreeHasJsTsSourceFile} closes exactly that gap (by refusing to trust ANY "no match" result
- * from a repo the scan's vocabulary could never have matched in the first place) without touching these
- * three, which remain the accepted residual risk described above.
- */
+/** @decision 1c0d4aa4 — the per-repo read-call+anchor scan requires a real-source-tree anchor
+ *  (`__dirname` etc.) alongside the read-call name, or a throwaway test fixture path falsely reads as a
+ *  genuine project read. NOT a perfect discriminator — 3 named, accepted, fail-OPEN pattern-coverage gaps
+ *  (indirection, nested parens, multi-line calls) plus a 4th whole-language gap closed by
+ *  {@link repoTreeHasJsTsSourceFile}. See
+ *  docs/decisions/1c0d4aa4-per-repo-inert-prefix-rescan-is-fail-closed-on-exit-code-not-pattern.md. */
 const INERT_PREFIX_READ_CALL_NAMES = "(readFileSync|existsSync|readdirSync|createReadStream|readFile|opendirSync|globSync)";
 /** See {@link INERT_PREFIX_READ_CALL_NAMES}'s own doc — the anchor alternation checked on either side of
  *  the token. `import\\.meta\\.dirname` (Node ≥20.11; this repo targets 22) added alongside the original
@@ -3000,37 +2362,10 @@ const INERT_PREFIX_ANCHOR_PATTERN = "(__dirname|__filename|process\\.cwd\\(\\)|i
  */
 const JS_TS_SOURCE_EXTENSION_PATTERN = /\.(?:[cm]?[jt]sx?)$/i;
 
-/**
- * Whether `treeish` in `repoPath` has ANY tracked path ending in a {@link JS_TS_SOURCE_EXTENSION_PATTERN}
- * extension — i.e. whether {@link repoTreeReferencesInertPrefix}'s JS/TS-only read-call/anchor scan could
- * EVER match anything in this repo's tracked tree, independent of the `docs/`-specific token it searches
- * for. Card 0910531e (Code Review, finding on `1c0d4aa4`): the scan's own vocabulary (`readFileSync`,
- * `__dirname`, `import.meta.url`, …) is JS/TS-only lexically and can never appear in a Python/Go/Rust/Ruby
- * file — so in a repo with ZERO files at these extensions, `git grep`'s "no match" exit code is not
- * evidence of an absence, it is a TAUTOLOGY: the pattern was never capable of matching this repo's
- * corpus regardless of what that corpus actually reads. Reproduced with a paired-language control
- * (identical dependency, differing only in language: a Python project with a real `docs/`-reading test
- * still returned "no match" pre-fix) — see that card for the repro.
- *
- * This is a DIFFERENT question from "does this repo reference `docs/`" (what {@link
- * repoTreeReferencesInertPrefix}'s own grep answers) and is checked FIRST, before that grep's result is
- * ever trusted: `false` here means the grep result — whatever it is — carries no information, and the
- * caller must fail closed exactly as it already does for a git error or timeout. `true` here does not
- * assert the repo has NO other languages too (a mixed-language repo is common); it only asserts the scan
- * has SOMETHING to apply to, restoring it to the same trust level it already has for Loom itself and every
- * other JS/TS project.
- *
- * Lists the WHOLE tracked tree via `git ls-tree` (no content read, cheap) rather than scoping to the
- * `docs/`-adjacent paths specifically — deliberately: a project's JS/TS source is typically nowhere near
- * `docs/` (e.g. `src/`), so a scope restricted to the token's own directory would defeat the very thing
- * this checks. FAILS CLOSED on any git error/timeout (`applicable:false` ⇒ caller cannot trust an
- * absence), the identical asymmetry {@link repoTreeReferencesInertPrefix} already applies one level up —
- * `degradedReason` is set ONLY on that indeterminate path (a spawn error, a bad treeish, a timeout), never
- * on a genuine confirmed-empty result, so the caller can log an ACCURATE diagnostic instead of always
- * claiming "no JS/TS file found" even when the real cause was e.g. an unresolvable `treeish` (mirrors
- * {@link repoTreeReferencesInertPrefix}'s own `warnDegraded` distinguishing a confirmed no-match from
- * every other outcome).
- */
+/** @decision 0910531e — is the read-call/anchor scan's JS/TS vocabulary even APPLICABLE to this repo's
+ *  tracked tree? In a repo with zero JS/TS-extension files, a "no match" is a TAUTOLOGY, not evidence
+ *  (reproduced with a paired-language control). Checked FIRST; FAILS CLOSED on any git error/timeout. See
+ *  docs/decisions/0910531e-js-ts-applicability-gate-and-git-grep-exit-code-mechanics.md. */
 function repoTreeHasJsTsSourceFile(
   repoPath: string, treeish: string, timeoutMs: number,
 ): Promise<{ applicable: boolean; degradedReason?: string }> {
@@ -3065,59 +2400,12 @@ function repoTreeHasJsTsSourceFile(
   });
 }
 
-/**
- * Whether ANY file tracked at `treeish` in `repoPath` contains a call reading a path under `bareToken`
- * (e.g. `"docs"` for the `docs/` prefix) — i.e. whether THIS repo's own corpus, at the commit the diff is
- * based on, actually reads paths under that prefix, the same question card db9b0130's doc comment answers
- * for Loom by hand. Card 1c0d4aa4 (Code Review finding on `b97f643d`, "arguably the sharpest thing this
- * review surfaced"): {@link isInertMergeDiff} is applied to EVERY project this daemon serves, but
- * `INERT_MERGE_PATH_PREFIXES` was only ever measured against Loom's own corpus — a consumer project whose
- * OWN tests read a top-level `docs/` must not have its gate silently skipped just because Loom's don't.
- *
- * Uses `git grep` directly via `child_process.spawn` (not the `simple-git` `.raw()` wrapper the rest of
- * this file uses) SPECIFICALLY so the real process exit code is observable: `git grep`'s "no match" exit
- * code ({@link GIT_GREP_NO_MATCH_EXIT_CODE}) is the ONLY outcome this treats as a confirmed absence —
- * every other outcome (a spawn error, a non-1 nonzero exit, e.g. a bad `treeish`, or a timeout) resolves
- * `true` ("references it"), which forces {@link isInertMergeDiff} to run the full gate rather than trust
- * an unproven scan. This is the SAME fail-closed asymmetry {@link isInertMergeDiff} already applies to a
- * git error: a false `true` costs one ordinary gate run (safe); a false `false` would silently skip a
- * gate a project's own tests actually depend on.
- *
- * Scoped to `treeish` (the diff's own `baseSha`), never the repo's current working tree — deterministic
- * regardless of what happens to be checked out in `repoPath` at call time. NOTE: on a BLOBLESS PARTIAL
- * CLONE, `git grep <treeish>` is not unconditionally local — it fetches any missing blob content from the
- * promisor remote on demand (reproduced: a missing blob without network access fails the fetch, exit
- * 128, which is NOT {@link GIT_GREP_NO_MATCH_EXIT_CODE} and so still fails closed). Bounded by `timeoutMs`
- * like every other op in this file; never a wedge, just a new (small) network dependency this specific
- * call introduces that the rest of this file's bounded git reads don't have.
- *
- * ANY OUTCOME OTHER THAN A CONFIRMED MATCH (0) OR CONFIRMED NO-MATCH (1) IS LOGGED, not just fail-closed
- * silently — Code Review, card 1c0d4aa4: fail-closed alone made every degraded outcome (a missing `git`
- * on PATH, a `baseSha` that stops resolving, a partial-clone fetch failure) indistinguishable from an
- * ordinary gate run, with zero operator signal that the mechanism had silently stopped skipping ANYTHING,
- * forever, for that repo. `console.warn` (not `.error` — this isn't a request failure, the caller degrades
- * safely) with the captured stderr tail ({@link appendTail}/{@link formatTail}, same bounded ring the
- * provisioning helpers above use) so a persistently-broken scan is at least visible in the daemon's logs.
- *
- * POSITIVE-CONTROLLED by `inert-prefix-repo-scan.mjs`: that test proves this exact pattern fires against
- * a fixture repo built to trip it (a committed file whose body contains a real
- * `readFileSync(...docs...)`-shaped call) before trusting a zero result from it anywhere, and
- * `merge-gate-inert-diff.mjs` scenario (K) proves the end-to-end wiring: a repo whose own test file reads
- * `docs/` still forces the full gate on an otherwise docs/-only diff. ⚠️ Both fixtures deliberately build
- * their trigger text via string concatenation rather than a literal template — this file's OWN scan
- * would otherwise match the fixture-construction CODE in these very test files the moment they're
- * committed to THIS repo (Code Review, card 1c0d4aa4 — the Critical: a literal fixture body is
- * indistinguishable, byte-for-byte, from a real project read, and `isInertMergeDiff` scans this repo's
- * OWN tracked tree, its own tests included). See those files' own comments before changing either fixture.
- *
- * Exported (like {@link appendTail}/{@link formatTail}) for direct unit coverage independent of the full
- * {@link isInertMergeDiff}/`confirmWorkerMerge` call chain.
- *
- * 🔴 CARD 0910531e ADDITION: before trusting a `git grep` "no match" as a confirmed absence at all, this
- * now requires {@link repoTreeHasJsTsSourceFile} to have confirmed the scan's own JS/TS vocabulary could
- * even apply to this repo's tracked tree — see that function's doc for why a bare "no match" is otherwise
- * a tautology for a non-JS/TS project, never evidence.
- */
+/** @decision 0910531e — whether THIS repo's own corpus (at `treeish`) actually reads paths under
+ *  `bareToken`, via a direct `git grep` spawn (not simple-git) so the real exit code is observable: ONLY
+ *  a confirmed no-match (1) is trusted; every other outcome (spawn error, bad treeish, timeout, or a
+ *  blobless-partial-clone fetch 128) fails closed to `true` and is LOGGED. Requires
+ *  {@link repoTreeHasJsTsSourceFile} first. See
+ *  docs/decisions/0910531e-js-ts-applicability-gate-and-git-grep-exit-code-mechanics.md. */
 export async function repoTreeReferencesInertPrefix(
   repoPath: string, treeish: string, bareToken: string, timeoutMs: number,
 ): Promise<boolean> {
@@ -3173,31 +2461,10 @@ export async function repoTreeReferencesInertPrefix(
  *  never a gate-eligibility signal; an assets/skills/** diff still gates exactly as before this existed. */
 const SKILL_ASSET_PREFIX = "packages/daemon/assets/skills/";
 
-/**
- * Per-skill info for what a diff between `base` and `ref` touched under {@link SKILL_ASSET_PREFIX} — card
- * 64a30c79, reworded by card 13965c93 after a cross-project miscommunication showed the original
- * single-fact detector collapsed three DIFFERENT facts into one warning line:
- *
- * 1. `skills/inject.ts` delivers a session's skills from the STORE (`<LOOM_HOME>/skills/<name>/**`),
- *    never from `assets/` directly — a merge landing an `assets/skills/<name>/**` change is not in the
- *    store at merge time; only a daemon restart re-seeds it (pristine skills only — a customized one
- *    needs an explicit adopt, which a restart never does for it).
- * 2. Being in the store is not the same as a SESSION holding it: `injectSkills` runs on every
- *    resume/fork/recycle (not just first spawn), so a session already live across a restart only picks
- *    up the new content the NEXT time it resumes, not the instant the store updates.
- * 3. `SKILL.md` is read ambiently; `references/**` is read on demand. A `references/**`-only change can
- *    be seeded, injected, byte-correct on disk in a session's own copy — and still behaviourally absent
- *    indefinitely, because nothing makes an agent open it. `referencesOnly` below flags exactly this case
- *    so the caller's warning text can say so, instead of implying "restart/resume ⇒ live" the way the
- *    original one-line detector did.
- *
- * This function only DETECTS what a diff touched; it asserts nothing about store/session state (the
- * caller reads `customized` from the live skill store) and changes no skill-loading behavior itself.
- *
- * Sorted by name; empty for a diff that never touches this prefix. Fails closed to `[]` on any git
- * error/timeout, same posture as {@link isInertMergeDiff} — a missed detection costs one missing (never a
- * wrong) warning line.
- */
+/** @decision 13965c93 — per-skill info for what a diff touched under skill assets, split into THREE
+ *  distinct facts (store vs. a live session vs. an agent actually opening it) after a single collapsed
+ *  warning line caused a real cross-project miscommunication. Fails closed to `[]`. See
+ *  docs/decisions/13965c93-skill-warning-splits-three-different-facts-restart-resume-ambient.md. */
 export interface ChangedSkillInfo {
   name: string;
   /** `true` iff this diff touched `<name>/SKILL.md` itself (the ambiently-read file). */
@@ -3546,40 +2813,10 @@ export const ASSET_READING_TEST_REPO_PATHS = [
   "packages/daemon/test/vault-lint.mjs",
 ];
 
-/**
- * Card fd0d34da: a coarse, PATH-FREE classification of *why* {@link EmitCompareGateResult.notApplicable}
- * is `true` — set ONLY alongside `notApplicable:true`, never alongside a `notReducible` (`false`) verdict.
- * Exists because `reason` (the human-readable string this sits beside — for several of these reasons it
- * embeds a repo-relative path) is on `gate_status`'s cross-project redaction list, so a manager reading a
- * FOREIGN project's op cannot see `reason` at all: without this field a foreign `notApplicable:true` row
- * carries no more information than the bare boolean. This one is safe to leave VISIBLE cross-project —
- * every value names a CATEGORY of reason, never a path/filename/error string.
- *  - `"repo-out-of-domain"` / `"path-out-of-scope"`: the two ways the classification loop's own catch-all
- *    ("path outside emit-compare scope") can be reached (see that catch-all's own doc for the full
- *    ordering caveat). `"repo-out-of-domain"` is a claim about the REPO, not this diff: the repo's own tree
- *    at `ref` has NONE of the four scope directories {@link isEmitCompareInScopePath} tests, checked via a
- *    dedicated `git ls-tree` (Code Review, card fd0d34da — see the catch-all's own doc for why a diff-only
- *    check was insufficient and asserted this confidently wrong on a real Loom-shaped merge) — meaning the
- *    predicate can never decide ANY diff on this repo. `"path-out-of-scope"` covers BOTH remaining shapes,
- *    which share the identical actionable fact ("the predicate applies to this repo, just not — fully, or
- *    at all — to THIS diff"): the diff DOES touch an in-scope path elsewhere, OR the repo's tree has one of
- *    the four scope directories even though this particular diff doesn't touch it. This is the exact
- *    distinction card `fd0d34da` exists to make diagnosable without re-running the predicate by hand.
- *  - `"harness-config-unavailable"`: this diff's own `scripts/test-daemon.mjs` (`EXCLUDED_DIR_NAMES` /
- *    `NOT_HERMETIC`) couldn't be loaded — expected on a shipped end-user install, which never ships that
- *    script (see {@link loadExcludedTestDirNames}'s own doc).
- *  - `"typescript-unresolvable"`: this whole mechanism's own `typescript` dev-dependency isn't resolvable
- *    — also expected on a shipped end-user install.
- *  - `"git-operation-failed"`: a git read failed (the diff itself, a before/after `git show` for a changed
- *    compiled file, or the `"repo-out-of-domain"` `git ls-tree` check above) — a mechanism failure, proves
- *    nothing about reducibility either way. Deliberately reused here rather than a dedicated kind: an
- *    unresolvable domain check must NEVER fall back to a confident (and possibly wrong) `"repo-out-of-
- *    domain"` — see that check's own doc for the incident this closes.
- *  - `"empty-diff"`: the diff between the two refs is empty — nothing to prove inert from.
- *  - `"unparseable-diff"`: a `--name-status` line didn't parse into `<status>\t<path>` — the same
- *    mechanism-failure bucket as `"git-operation-failed"`, kept distinct because it names a different
- *    failure surface (a malformed line, not a failed git invocation).
- */
+/** @decision fd0d34da — a coarse, PATH-FREE classification of WHY `notApplicable:true`, safe to leave
+ *  unredacted cross-project (unlike the `reason` string it sits beside, which can embed a path). Every
+ *  value names a CATEGORY, never a path/filename/error string. See
+ *  docs/decisions/fd0d34da-notapplicablekind-is-a-cross-project-visible-category-not-a-path.md. */
 export type EmitCompareNotApplicableKind =
   | "repo-out-of-domain"
   | "path-out-of-scope"
@@ -3652,68 +2889,12 @@ export interface EmitCompareGateResult {
    *  not just this return value) for a distinction that's diagnostic wording only, not behavior. */
   identicalFileCount: number;
   reason?: string;
-  /** Card 2db8a3dd (introduced this field), CORRECTED by card 4def0708 (the operational-failure sites
-   *  below were originally documented — wrongly — as informative `false`; that was the exact bug 4def0708
-   *  fixed). Produced by one of two explicitly-named constructors in {@link computeEmitCompareGate}, never
-   *  a defaulted boolean param — see that function's own `notReducible`/`notApplicableHere` doc.
-   *  `false` (via `notReducible`) on `eligible:true` (trivially — a proven-eligible diff was, by
-   *  definition, evaluated against a repo this predicate applies to) and on every `eligible:false` reason
-   *  that is a REAL, REPRODUCIBLE verdict about THIS diff's own content on a repo the predicate DOES cover
-   *  (a non-modify status on a compiled file, an excluded-dir/underscore/shell-unsafe test path, "no
-   *  eligible changed path left to prove inert", an unverified soundness precondition, or a transpile
-   *  mismatch) — those are real, informative "ran, not reduced" verdicts.
-   *  `true` (via `notApplicableHere`) on every reason that is NOT a verdict about reducibility. ⚠️ CARD
-   *  4e6e1882: read the catch-all below as FIRST-TERMINAL-WINS, never as "any out-of-scope path ⇒
-   *  notApplicable" — the classification loop scans changed paths in git's own emitted order and returns
-   *  on the FIRST path that produces a terminal outcome. {@link isInertMergePath}'s own skip aside (it
-   *  `continue`s past an inert path rather than terminating), a DIFFERENT terminal can fire first and win:
-   *  the loop's `if (status !== "M") return notReducible(...)` on a compiled `.ts` path yields a real,
-   *  informative `false` the moment an EARLIER changed path is a non-modify status on a compiled file,
-   *  even when a LATER path in the very same diff is out of scope. Two real merges in this repo's own
-   *  history make the two outcomes concrete: `fdf1291f` (daemon `src`+`test` paths alongside `shared/` and
-   *  `web/` paths, whose only non-daemon-modify path was an ADDED `.mjs` test — nothing to trip that
-   *  terminal) read `null`; `2d8d2e42` (the same mixed shape, but its added file was a `.ts` under
-   *  `daemon/src`, tripping the non-modify-status terminal first) read `false`.
-   *  The catch-all itself — "path outside emit-compare scope" (every changed path up to and including
-   *  this one has failed `EMIT_COMPARE_SRC_PREFIX`/`EMIT_COMPARE_TEST_PREFIX`) — is reached by TWO
-   *  distinct diff shapes, not one: (1) a repo whose sources don't live under `packages/daemon/src|test/`
-   *  at all, which hits it on its FIRST changed path, always (the whole-repo case); and (2) a Loom-shaped
-   *  diff that ALSO touches a path this predicate simply doesn't cover (e.g. `packages/shared/**`,
-   *  `packages/web/**`) — equally `notApplicable`, for the identical reason (the predicate never had that
-   *  path in its domain) — but only if nothing EARLIER in the diff already tripped a different terminal,
-   *  per the ordering point above. An out-of-scope path that is ALSO inert (e.g. under `docs/`) never
-   *  reaches this catch-all at all: {@link isInertMergePath}'s skip, checked before either prefix test on
-   *  every path, removes it from consideration via `continue`, not a terminal return.
-   *
-   *  📌 OPERATIONAL NOTE (card 4e6e1882 DoD-5, updated by card 82662e98): this decline is an ORDINARY
-   *  commit shape on this repo, not an edge case. `INERT_MERGE_PATH_PREFIXES`/`INERT_MERGE_EXACT_PATHS`
-   *  name only `docs/` and five root filenames (`README.md`, `CHANGELOG.md`, `CODE_OF_CONDUCT.md`,
-   *  `CONTRIBUTING.md`, `SECURITY.md`) as inert — those five are now SKIPPED via `isInertMergePath` before
-   *  ever reaching this catch-all (same as `docs/**`). Every OTHER root-level path — most notably
-   *  `CLAUDE.md` (deliberately excluded, see {@link INERT_MERGE_EXACT_PATHS}'s own doc), plus
-   *  `package.json`, `bin/**`, `.github/**`, … — still sorts before `packages/` in git's own
-   *  `--name-status` ordering and, being non-inert, still reaches the catch-all on the SAME diff where
-   *  daemon source is also touched — before any daemon-src terminal ever gets a chance to fire. Editing
-   *  `CLAUDE.md` alongside daemon source (routine on this project) still declines to `null` regardless of
-   *  what the daemon change is. ⚠️ FRAGILE: inside `packages/`, an in-scope daemon path is only ever visited
-   *  before `packages/shared/**`/`packages/web/**` today because the string `daemon` happens to sort
-   *  first — an alphabetical accident, not a design property. Adding a `packages/api/`, `packages/cli/`,
-   *  or `packages/core/` directory would silently flip today's `false` (e.g. `2d8d2e42` above, which reads
-   *  `false` only because `daemon` sorts before `shared`) to `null` on the same diff shape, with no code
-   *  change and nothing to notice it.
-   *
-   *  The other `notApplicableHere` reasons: a failed load of `scripts/test-daemon.mjs`'s
-   *  `EXCLUDED_DIR_NAMES`/`NOT_HERMETIC` from this diff's own worktree (that script doesn't exist outside
-   *  Loom's own layout), an unresolvable `typescript` module (this whole mechanism's own dev-dependency,
-   *  absent on a shipped end-user install), AND — corrected by card 4def0708 — any OPERATIONAL/mechanism
-   *  failure (a git error reading the diff/base/branch content, an empty diff, an unparseable diff line):
-   *  a git error proves nothing about reducibility either way, so it must never be stamped as a decided
-   *  "not reduced". ⭐ THE SIGNAL COMES FROM THE PREDICATE, NOT RE-DERIVED BY A CALLER: a caller must never
-   *  re-sniff repo layout itself to guess this — `computeEmitCompareGate` already knows exactly which
-   *  reason it returned, and this field is that knowledge surfaced, once, at the source. The caller's job
-   *  is only to treat `notApplicable:true` the same way it already treats "the predicate never ran at
-   *  all" (never report a fabricated `false` for it) — see {@link EMIT_COMPARE_SRC_PREFIX}'s own doc /
-   *  `sessions/service.ts`'s `emitCompareNotApplicable`. */
+  /** @decision 2db8a3dd — `false` (`notReducible`) is a REAL, informative "ran, not reduced" verdict;
+   *  `true` (`notApplicableHere`) means the predicate doesn't apply at all (incl. every operational
+   *  failure — corrected by card 4def0708, which fixed those being wrongly stamped `false`). The catch-all
+   *  is FIRST-TERMINAL-WINS over changed paths in git's emitted order, not "any out-of-scope path wins" —
+   *  fragile to an alphabetical sort accident inside `packages/`. See
+   *  docs/decisions/2db8a3dd-notapplicable-vs-notreducible-first-terminal-wins.md. */
   notApplicable: boolean;
   /** Card fd0d34da: set IFF `notApplicable:true` — see {@link EmitCompareNotApplicableKind}'s own doc for
    *  the full per-value discipline. `undefined` whenever `notApplicable` is `false` (both on `eligible:true`
@@ -3722,149 +2903,18 @@ export interface EmitCompareGateResult {
   notApplicableKind?: EmitCompareNotApplicableKind;
 }
 
-/**
- * Whether a merge gate's ~668-test `test:daemon` runtime suite can be SKIPPED for this diff — card
- * 2154b6ad (owner-requested: two comment-only branches burned a full ~15min gate each). Distinct from
- * {@link isInertMergeDiff} above, which proves a diff can skip the gate ENTIRELY: this proves only that the
- * diff's COMPILED BEHAVIOR is unchanged, so `pnpm build` (real typecheck) and the static source-text guards
- * below still run UNCONDITIONALLY — only the runtime test suite itself is ever skipped, and only for
- * `packages/daemon/src/**\/*.ts`, `packages/daemon/scripts/**\/*.mjs` (card 82662e98 — proven inert the
- * SAME way as the compiled-file comparison below, just at a different compiler `target`; see {@link
- * EMIT_COMPARE_SCRIPTS_PREFIX}'s own doc), a changed `test/*.mjs` file, and a changed
- * `packages/daemon/assets/**` path
- * (card 3fbd95e0 — the last of these carries no proof of unchanged behavior, unlike the compiled-file
- * comparison above; it only widens the run to include {@link ASSET_READING_TEST_REPO_PATHS}, the certified
- * set of tests that actually read that tree, same "always run this fixed set, never predict a narrower one"
- * posture as the static guards); a path already
- * certified inert by {@link INERT_MERGE_PATH_PREFIXES} is SKIPPED from classification entirely rather than
- * gating (card b97f643d — see that skip's own doc, just above the classification loop below, for why this
- * is sound: {@link isInertMergeDiff} must prove nothing anywhere in the gate reads the path at all, while
- * this function needs only the weaker "no still-running check reads it" — build, every static guard, and
- * any changed test file all still run — so the stronger certification implies the weaker one); every OTHER
- * path fails this diff closed to the full gate.
- *
- * WHY NOT "skip when the diff is comments-only" (Code Review, card 2154b6ad §2): five of the six static
- * guards under `packages/daemon/test/` grep raw FILE CONTENT — e.g. `clock-path-regression-guard.mjs`'s
- * `/Date\.now\(\)/` scan. A comment-only edit CAN flip one of them: a real owner branch (`6d53b02b`)
- * introduced the literal string `Date.now()` inside an explanatory comment in a `test/*.mjs` file. So
- * "comments only" alone is unsafe as a gate-SKIP predicate — this function never uses it as one. It only
- * ever widens what may be skipped (the runtime suite); the guards below always run regardless of what this
- * function decides about any `test/*.mjs` path, which is exactly what makes that counterexample
- * STRUCTURALLY impossible to mis-skip here, not merely avoided by care.
- *
- * WHY NOT "byte-identical full compiled emit" (the design originally proposed for this card, falsified by
- * measurement before being built, not after): `packages/daemon/tsconfig.json` never sets `removeComments`,
- * and TypeScript's default is `false` — comments are emitted VERBATIM into `dist/**\/*.js` (verified:
- * `grep -n "PROVEN on git 2.47.0" packages/daemon/dist/git/worktrees.js` — a real JSDoc sentence found
- * sitting in compiled output). A comment-only diff therefore produces a NON-identical full-program emit
- * under this repo's real compiler settings — that check would never have fired for the exact branches that
- * prompted this card. Not a dangerous mechanism, a dead one. Fixed here by transpiling each CHANGED file
- * ALONE with `removeComments:true` set EXPLICITLY for this throwaway comparison only (never for the real
- * `dist/` build, which must keep its comments for anyone reading compiled output) — see
- * {@link transpileIgnoringCommentsAndWhitespace}.
- *
- * ⚠️ A HAND-ROLLED SCANNER LOOP IS NOT A SAFE SUBSTITUTE FOR `ts.transpileModule` — left as a warning, not
- * quietly avoided: an earlier draft of this comparison drove `ts.createScanner` directly in a `while` loop
- * (a plausible-looking "real tokenizer, not a regex"). It DESYNCED on a template literal containing `${...}`
- * interpolation elsewhere in the same file — the scanner needs `reScanTemplateToken`/`reScanSlashToken`
- * calls at the right points to track what the real parser would see, and a bare `scan()` loop never makes
- * them. Observed failure, reproduced against this file's own `changedPathsBetween` doc comment: a large
- * multi-line JSDoc block got silently swallowed into the middle of an unrelated template-literal token, so
- * an edit INSIDE that comment flipped the verdict by accident, not because of the comment. `transpileModule`
- * uses the real parser and does not have this failure mode — reach for it, never a hand-rolled scan loop,
- * for anything claiming to compare "real tokens." (This is the card's own regex-comment-stripper trap
- * wearing a more respectable disguise — same defect, one level up.)
- *
- * SOUNDNESS PRECONDITION (Code Review, card 2154b6ad): comparing each changed file's transpile output IN
- * ISOLATION is only sound if no OTHER (unchanged) file's compiled behavior can depend on a changed file's
- * TYPE-only content. Two known TS mechanisms could break that — `emitDecoratorMetadata` (reflects a
- * decorated member's TYPE into runtime metadata another file could read) and `const enum` (its members are
- * INLINED at every use site program-wide, so a value edit in the enum's own file silently changes every
- * OTHER file that references it). Neither exists in this repo today, but {@link emitCompareSoundnessOk}
- * RE-CHECKS BOTH LIVE on every call rather than trusting this comment — a future tsconfig edit or a newly
- * added `const enum` would otherwise silently reverse this precondition with no other signal (see also
- * `packages/daemon/test/emit-compare-soundness-guard.mjs`, the committed regression test for the same
- * precondition).
- *
- * NOT A BUG, WORTH NAMING SO IT ISN'T "FIXED" LATER: a TYPE-ONLY edit (e.g. widening a parameter's type,
- * with no runtime-observable change) also transpiles identically and is therefore also proven eligible for
- * the skip. That is CORRECT, not a gap — types are erased before this comparison ever runs, so a type-only
- * change cannot change what the ~668 runtime tests observe, and `pnpm build` (which still runs
- * unconditionally) is exactly what re-typechecks it.
- *
- * FAILS CLOSED on every uncertain case, same asymmetry as {@link isInertMergeDiff}: a git error, an
- * unresolvable `typescript` module (e.g. a shipped end-user install with no devDependencies — this whole
- * mechanism is Loom-repo-specific and simply never engages there), any changed path outside the two scoped
- * prefixes, any non-`M` status (added/deleted/renamed) on a compiled file, or a failed soundness
- * precondition all return `eligible:false`. A false `false` costs one ordinary gate run; a false `true`
- * would land unverified behavior on main — the same asymmetry that decided every judgement call here.
- *
- * ANY EXCLUDED-DIR (`fixtures/`, `census/`) TOUCH FAILS THIS DIFF CLOSED — card 44968963, the decision
- * between two candidates. `815b4b30` (above) stopped a `fixtures/`/`census/` path from being pushed into
- * {@link EmitCompareGateResult.changedTestFiles} and run AS a test — correct, since the full suite's own
- * discovery walk never descends there either. But that fix left a gap: a diff changing a shared fixture
- * PLUS one of its consumer test files still reached `eligible:true` (the consumer alone proves eligibility),
- * running only that one consumer while the fixture's OTHER consumers — outside the diff, unrun by either
- * gate — could equally have broken. Measured on this repo (card 44968963 DoD-1): `fake-codescape-cli.mjs`
- * has 6 consumers, `echo-env.mjs` has 3 — this is a real, reachable exposure, not a hypothetical one.
- *
- * The candidate that would have PRESERVED speed here — resolve a changed fixture's consumers and fold them
- * into `changedTestFiles` — was rejected. Every real consumer in this repo names its fixture the same way:
- * `path.join(__dirname, "fixtures", "<literal-basename>.mjs")` — a computed path, not an `import`, so a
- * resolver can only ever be a TEXTUAL heuristic (grep the fixture's basename across `test/**`), never a
- * structural one. That heuristic happens to find all of today's consumers, but "happened to find them all"
- * is exactly the standard this card's own DoD-3 rules out (a guessed resolver that misses a consumer is
- * WORSE than always running the full gate, because a clean `eligible:true` LOOKS precise while silently
- * proving nothing for the consumer it missed) — and nothing stops a future test file from referencing a
- * fixture through a shared constant, a computed/interpolated name, or an indirection this repo doesn't use
- * today, none of which a basename grep would ever see. There is no way to PROVE such a resolver cannot miss
- * a consumer, only ways to observe that it hasn't yet — so it fails the same asymmetry as everything else in
- * this file: a wrong skip is a bad merge, a wrong full-run is minutes. Unconditionally failing closed the
- * moment ANY excluded-dir path changes needs no resolver to trust, so it cannot have this failure mode.
- *
- * COST, NAMED: this also forces the full gate for the previously-reduced case where a fixture change ships
- * alongside a real test file change that has nothing to do with the fixture (`test/emit-compare-gate-scope.mjs`
- * case (J) — see that test's own updated expectation). That diff shape is not provably safe to reduce
- * without exactly the resolver this decision rejects, so the regression is accepted, not overlooked.
- *
- * ARG CONTRACT (card fe848bfc — this function used to also take a separate `repoPath`, dropped here):
- * `worktreePath` must be a checkout of `ref`, and `baseSha`/`ref` are git revisions resolved from
- * `worktreePath` itself — that precondition is STILL an unenforced caller obligation, exactly as before
- * this card. What's now structural is narrower: there is no longer a SECOND path argument that can
- * disagree with `worktreePath` about which checkout `ref` resolves against. The old two-path signature let
- * a caller pass a DIFFERENT repo as the git cwd than the one `ref` actually checks out — exactly the shape
- * that produced card `d422e279`'s bug (`mergeBatch` passed canonical `repoPath` with the literal ref
- * `"HEAD"`, so `"HEAD"` resolved against canonical's own checked-out branch rather than the batch
- * worktree, silently diffing a sha against itself).
- *
- * WHY DROPPING THE SECOND PATH IS SOUND — a REF-CLASS distinction, NOT "a linked worktree shares its
- * parent's object database so any ref resolves identically from either path" (that broader claim is
- * FALSE: shared OBJECTS ≠ shared refs — `HEAD`/`ORIG_HEAD`/`MERGE_HEAD`/`HEAD@{n}`/`@{-1}`/`@{u}` live
- * under `$GIT_DIR/worktrees/<name>/` and are PER-WORKTREE; `git rev-parse HEAD` from a worktree and from
- * its canonical repo can and do disagree, and that exact divergence is what card `d422e279`'s bug
- * depended on). What actually matters is which class each revision THIS FUNCTION resolves falls into:
- * `baseSha` is always a raw sha (repo-wide, identical from any path); the two solo call sites
- * (`sessions/service.ts`) pass a branch NAME as `ref` (an ordinary ref, shared and identical repo-wide,
- * not a per-worktree symref) — both were already behavior-identical from canonical before this card, and
- * stay so now; the batch call site passes the literal `"HEAD"` — the ONE per-worktree ref in play here —
- * and is now forced onto the only path that was ever correct for it, `worktreePath` itself.
- *
- * THE COUPLING THIS INTRODUCES (named, not hidden): before this card, a wrong `repoPath` could only ever
- * corrupt the git calls this function makes directly (`diff --name-status`/`git show`, via `boundedGit`).
- * `loadExcludedTestDirNames`/`loadNotHermeticNames`/`emitCompareSoundnessOk` were already pinned to
- * `worktreePath` through their OWN separate argument, independent of `repoPath` — a wrong `repoPath` alone
- * could never reach them. Now ONE argument drives all four (the git reads AND those three filesystem
- * reads), so a caller passing the wrong single path corrupts everything at once rather than just the git
- * half. This is a narrower failure surface (one argument left to get wrong, not two that can silently
- * disagree with each other) but not a smaller one at a given call site. At the two solo sites the mistake
- * is still CONSTRUCTIBLE — a `repoPath` local is in scope one line above the pre-wait classify call,
- * same `string` type, compiles clean — and would be near-silent there: `ref` is a branch name, so the
- * diff itself would stay correct even from the wrong repo, and only the three filesystem reads would
- * silently answer from the wrong checkout, diverging exactly on a diff touching `scripts/test-daemon.mjs`
- * or either tsconfig — both already called load-bearing by those helpers' own doc comments.
- * `emit-compare-branch-capture-order-guard.mjs` pins the first argument at all `computeEmitCompareGate`
- * call sites as `worktreePath` (never `repoPath`) as a static backstop against exactly this near-miss.
- */
+/** @decision 2154b6ad — skips the ~668-test RUNTIME SUITE only (never the whole gate): proven via
+ *  isolated transpile-comparison per changed file (a hand-rolled scanner desyncs on template literals;
+ *  never use one), not "comments-only" (a real comment can flip a static guard) or byte-identical full
+ *  emit (comments are emitted verbatim, so that never fires). Re-checks its soundness precondition LIVE.
+ *  FAILS CLOSED on every uncertain case. See
+ *  docs/decisions/2154b6ad-emit-compare-skips-the-runtime-suite-not-the-whole-gate.md.
+ *  @decision 44968963 — ANY `fixtures/`/`census/` touch fails the WHOLE diff closed; a fixture-consumer
+ *  resolver was deliberately rejected (can only ever observe it hasn't missed a consumer, never prove it).
+ *  See docs/decisions/44968963-any-excluded-dir-touch-fails-closed-no-fixture-consumer-resolver.md.
+ *  @decision fe848bfc — takes `worktreePath` only (no separate `repoPath`) — the old two-path signature
+ *  produced card d422e279's bug (a batch worktree's "HEAD" diffed against canonical's own checkout). See
+ *  docs/decisions/fe848bfc-drop-the-second-repopath-argument-a-ref-class-distinction.md. */
 export async function computeEmitCompareGate(
   worktreePath: string, baseSha: string, ref: string, deps: BoundedGitDeps = {},
 ): Promise<EmitCompareGateResult> {
@@ -3930,29 +2980,11 @@ export async function computeEmitCompareGate(
     if (tab < 0) return notApplicableHere(`unparseable diff line: ${line}`, "unparseable-diff");
     const status = line[0];
     const p = line.slice(tab + 1);
-    // Card b97f643d: a path already certified inert by {@link isInertMergePath} (e.g. `docs/**`) is
-    // SKIPPED here, before it can hit the `notEligible` catch-all below — REUSING that exact predicate
-    // (list AND matching logic), never a second hand-copied one (this file's own recurring shared-unit-
-    // divergence warning). Without this, a diff that is otherwise reducible (comment-only .ts, or a
-    // changed test file) but ALSO touches one provably-inert docs/ path fell to the FULL gate — strictly
-    // MORE expensive than either the docs/ path alone (which already skips the gate entirely via
-    // `isInertMergeDiff`, itself built on this same predicate) or the reducible part alone. This is purely
-    // NARROWING: it can only ever remove a path from consideration that would otherwise have forced
-    // `eligible:false`, never admit a path that isn't ALSO already provably inert by the same predicate the
-    // full-skip path trusts.
-    //
-    // DOES NOT, BY ITSELF, GUARANTEE AN ALL-INERT DIFF NEVER REACHES THIS FUNCTION — this function has TWO
-    // callers in sessions/service.ts, and they are NOT guarded the same way. The PRIMARY classification
-    // site (`~:12856`) is gated `!inertSkip`, with `inertSkip` freshly re-derived from `isInertMergeDiff`
-    // immediately above — so an all-inert diff structurally cannot reach this function through that site.
-    // The ADMISSION-TIME RECLASSIFICATION site (`~:13064`) is gated only on a PRIOR classification having
-    // been eligible and never re-consults `isInertMergeDiff` — so a diff that shrinks to all-inert paths
-    // between pre-wait classification and admission CAN reach this function that way. For THAT path, it is
-    // the pre-existing empty-set guard below (`no eligible changed path left to prove inert`) — not this
-    // skip — that fails the result closed; this skip only ensures the reason is that guard rather than the
-    // `path outside emit-compare scope` catch-all further down. Traced at card b97f643d; judged acceptable
-    // as-is (narrow window, fails toward the safe full-gate outcome either way) rather than widened to
-    // re-consult `isInertMergeDiff` a second time.
+    // @decision b97f643d — skip a path already certified inert by isInertMergePath, REUSING that exact
+    // predicate (never a hand-copied second one); purely narrowing. Does NOT by itself guarantee an
+    // all-inert diff never reaches this function via the admission-time reclassification call site — the
+    // empty-set guard below covers that narrow, judged-acceptable window. See
+    // docs/decisions/b97f643d-classification-loop-skips-a-provably-inert-path-first.md.
     if (isInertMergePath(p)) { inertPathsSkipped.push(p); continue; }
     if (p.startsWith(EMIT_COMPARE_SRC_PREFIX) && p.endsWith(".ts")) {
       if (status !== "M") return notReducible(`non-modify status "${status}" on compiled file ${p}`);
@@ -3970,29 +3002,11 @@ export async function computeEmitCompareGate(
       continue;
     }
     if (p.startsWith(EMIT_COMPARE_TEST_PREFIX) && p.endsWith(".mjs")) {
-      // Card 815b4b30: a path sitting inside an EXCLUDED_DIR_NAMES subtree (`fixtures/`, `census/`) is,
-      // by construction, not a test at all — scripts/test-daemon.mjs's own discovery walk never descends
-      // into either directory, so the full suite never runs it either. Checked FIRST, before the
-      // underscore/shell-safety checks below: those two checks exist only to protect what
-      // `buildReducedGateCommand` is about to interpolate into a shell-executed `&&` chain, and an
-      // excluded-dir path is never going to reach that chain at all, so subjecting it to those checks
-      // could only ever produce a spurious notEligible for a file this function is about to skip anyway.
-      // REUSE, not reimplementation (Code Review, card 815b4b30): two independent notions of "is this a
-      // test" is exactly the shared-unit divergence that produced this bug (a fixture/census path was
-      // treated as a real test here while test-daemon.mjs's own walk already excluded it) — so this loads
-      // the REAL `EXCLUDED_DIR_NAMES` Set by dynamically importing THIS DIFF'S OWN worktree copy of
-      // scripts/test-daemon.mjs (see `loadExcludedTestDirNames`), never a hand-copied second list that
-      // could silently drift from it. `loom:not-a-test:`/`loom:gate-exempt:` markers are NOT re-checked
-      // here: both only ever change how `findExcludedDirTestShapedFiles` ANNOTATES a file already inside
-      // an excluded dir for the full-suite banner — neither marker makes the full suite actually RUN that
-      // file, so there is nothing for a marker to change about whether this reduced gate runs it either.
-      //
-      // Card 44968963: a fixture/census file's OTHER consumers can sit anywhere else in `test/**`, entirely
-      // outside this diff, and this function has no sound way to enumerate them (see this function's own
-      // doc for why a consumer-resolver was rejected) — so ANY changed path landing here fails the WHOLE
-      // diff closed to the full gate immediately, rather than being silently dropped from consideration
-      // the way it was before this card. This is strictly narrower than before: it can only ever turn a
-      // past `eligible:true` into `eligible:false`, never the reverse.
+      // @decision 815b4b30 — an excluded-dir path (fixtures/, census/) isn't a test at all; reuses the
+      // REAL EXCLUDED_DIR_NAMES via a dynamic import of this diff's own test-daemon.mjs, never a
+      // hand-copied second list. @decision 44968963 — any such path then fails the WHOLE diff closed
+      // (a fixture's other consumers can't be enumerated soundly). See
+      // docs/decisions/815b4b30-excluded-dir-test-shaped-path-reuses-the-real-excluded-set.md.
       const relToTestDir = p.slice(EMIT_COMPARE_TEST_PREFIX.length);
       const dirSegments = relToTestDir.split("/").slice(0, -1);
       if (dirSegments.length > 0) {
@@ -4199,24 +3213,10 @@ export async function computeEmitCompareGate(
   };
 }
 
-/**
- * Loads the REAL `EXCLUDED_DIR_NAMES` Set from `scripts/test-daemon.mjs` — dynamically imported from
- * `worktreePath` itself (the diff's OWN checked-out copy of that script), not from this daemon process's
- * own installed copy: `emitCompareSoundnessOk` above already reads its two tsconfig files live from
- * `worktreePath` for the identical reason (a future edit to the script must be seen immediately, not
- * after a daemon restart), and `test/census/lib.mjs` already imports this same module the same way (for
- * its `NOT_HERMETIC` export) — `test-daemon.mjs` is deliberately import-safe (see its own `isMain` guard
- * doc: "an out-of-band harness ... needs to import this file's ... export without ALSO triggering a full
- * ... run as a side effect of that import"), so this is genuine reuse, not a new coupling.
- *
- * FAILS CLOSED to `null` on any error — an unreadable/unparseable script, a missing `scripts/` directory
- * (never shipped in the packaged `loomctl` npm install; see `scripts/build-npm-package.mjs`'s `files`
- * list — this whole emit-compare mechanism is Loom-repo-specific already and simply never engages on a
- * shipped install's own project, same posture as the `typescript`-unresolvable case below), or an export
- * that isn't actually a `Set`. Never resolve ambiguity to an empty-but-truthy Set — a caller that got
- * `null` here MUST fail the whole diff closed, exactly like the `typescript`-unresolvable case just
- * below in {@link computeEmitCompareGate}.
- */
+/** @decision 815b4b30 — loads the REAL `EXCLUDED_DIR_NAMES` Set, dynamically imported from the diff's OWN
+ *  `worktreePath` checkout (never this daemon's own installed copy, and never a hand-copied list). Fails
+ *  closed to `null` on any error — a caller getting `null` MUST fail the whole diff closed. See
+ *  docs/decisions/815b4b30-excluded-dir-test-shaped-path-reuses-the-real-excluded-set.md. */
 async function loadExcludedTestDirNames(worktreePath: string): Promise<Set<string> | null> {
   try {
     const scriptPath = path.join(worktreePath, "packages", "daemon", "scripts", "test-daemon.mjs");
@@ -4278,22 +3278,11 @@ function transpileIgnoringCommentsAndWhitespace(text: string, fileName: string, 
   });
 }
 
-/** Live re-check of {@link computeEmitCompareGate}'s soundness precondition — see that function's own doc
- *  for what these two TS mechanisms would break if either were present. Reads directly off `worktreePath`
- *  (the exact tree about to be gated): a plain, deterministic filesystem walk, not git — there is no
- *  "before" state to reconcile here since both properties are PROGRAM-WIDE, not diff-scoped, so the only
- *  question is whether they hold in the tree being tested right now. Any read/parse error fails closed
- *  (returns `false` — precondition NOT proven), same asymmetry as everywhere else in this file.
- *
- * Code Review (card 2154b6ad): `packages/daemon/tsconfig.json` `extends` `tsconfig.base.json` and carries
- * its OWN `compilerOptions` block (`outDir`/`rootDir`/`types` today) — the more natural place someone adds
- * a daemon-specific compiler option going forward. An earlier version of this function read ONLY the base
- * config, so `emitDecoratorMetadata:true` added to the PACKAGE file instead would have been invisible to
- * this check: `transpileIgnoringCommentsAndWhitespace` never sets that flag, so a type-only edit to a
- * decorated member would transpile identically while the REAL `pnpm build` emit's metadata silently
- * changed — `eligible:true` on a genuine behavior change, exactly the failure this precondition exists to
- * catch. Both files in the daemon's actual `extends` chain are checked below, each independently. If a
- * third config layer is ever added to that chain, this must widen to cover it too. */
+/** @decision 2154b6ad — live re-check of the soundness precondition (emitDecoratorMetadata / const enum),
+ *  reading BOTH files in the daemon's real tsconfig `extends` chain — an earlier version checked only the
+ *  base config, which would have missed a daemon-specific compiler option added to the package's own
+ *  tsconfig.json. Fails closed to `false` on any read/parse error. See
+ *  docs/decisions/2154b6ad-emit-compare-skips-the-runtime-suite-not-the-whole-gate.md. */
 async function emitCompareSoundnessOk(worktreePath: string): Promise<boolean> {
   for (const tsconfigRelPath of ["tsconfig.base.json", path.join("packages", "daemon", "tsconfig.json")]) {
     try {
@@ -4338,50 +3327,12 @@ function walkTsFiles(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-/** Builds the `&&`-chained reduced gate command for a diff {@link computeEmitCompareGate} proved eligible
- *  — `pnpm build` (unconditional, real typecheck+emit) + the static guards (unconditional, source-text
- *  scanners, run as bare `node <path>` — with NO env scrub, so they inherit this process's own ambient
- *  `LOOM_HOME`/`LOOM_PORT`, same as `scripts/run-static-guards.mjs`'s own bare spawns; card 49c50b80
- *  corrects a prior version of this comment that claimed these guards "never touch `LOOM_HOME`/a port" —
- *  false: `test/_guard.mjs`'s `exit` hook reads `LOOM_HOME` in every one of them. Safety against that now
- *  lives IN `_guard.mjs` itself — see `isTestCreatedHome` there — not in how these are invoked) + — only
- *  when a test file actually changed — ONE `pnpm --filter @loom/daemon test:daemon --only=<names>` step
- *  naming every changed file, so each runs THROUGH THE HARNESS (its own fresh temp `LOOM_HOME` +
- *  non-4317 `LOOM_PORT`, per `scripts/test-daemon.mjs`'s own header contract) instead of as a bare
- *  `node <path>` with neither.
- *
- *  Card dd4349ff: the prior bare invocation left any changed file that needed that env unable to even
- *  START (`test/_guard.mjs`'s `requireHermeticEnv` refuses at exit 99, 0s, no assertion ever run) —
- *  rejecting a release-critical merge for a defect in the INVOCATION, not the code under test.
- *
- *  Each `--only=` name is the harness's own bare test-daemon name for a changed file — its repo-relative
- *  path minus the `packages/daemon/test/` prefix and `.mjs` suffix, the exact shape
- *  `discoverHermeticTests` (scripts/test-daemon.mjs) keys `NOT_HERMETIC`/`TEST_TIMEOUT_OVERRIDES` on and
- *  returns as `hermetic`. `resolveSelection`'s own `--only=` validation REFUSES a name outside that
- *  discovered set rather than silently selecting nothing — so a path this function is handed that the
- *  harness doesn't actually discover as hermetic (excluded-dir, an underscore helper, a `looksLikeTest`
- *  violation) fails this reduced gate LOUDLY instead of quietly running zero tests. Never runs the
- *  ~668-test suite UNFILTERED — that omission is the entire saving this mechanism exists for; `--only=`
- *  is what lets a changed file's OWN behavior be exercised (not merely proven absent from `src/`) without
- *  paying for the rest of the suite.
- *
- *  Card 17cd1f30: `changedTestFiles` here is expected to ALREADY exclude any `NOT_HERMETIC` name —
- *  {@link computeEmitCompareGate} does that filtering (see its `notHermeticExcluded` field) before this
- *  function ever sees the list, exactly so a `NOT_HERMETIC` name can never reach `--only=` and trip
- *  `resolveSelection`'s refusal above (the merge op `5113c720` specimen: 4 `NOT_HERMETIC` names landed in
- *  `--only=` unfiltered and the gate failed identically on every re-fire). This function does not
- *  re-filter — it trusts its caller, same as it always has for excluded-dir/underscore/shell-safety, which
- *  are also enforced by the caller before a path ever reaches `changedTestFiles`. The caller is
- *  responsible for declaring any excluded name by name in the merge result (`emitCompareWarning` in
- *  sessions/service.ts) — a silent drop would gate a branch while quietly verifying nothing for those
- *  files.
- *
- *  `changedAssetPaths` (card 3fbd95e0), when non-empty, folds every name in {@link
- *  ASSET_READING_TEST_REPO_PATHS} into the SAME `--only=` list (de-duplicated against `changedTestFiles`,
- *  same harness invocation, no second `test:daemon` step) — unconditionally, regardless of which specific
- *  asset path(s) changed, same "run the fixed certified set" posture the static guards above already have.
- *  Defaults to `[]` so every pre-existing call site (none of which know about assets yet) stays
- *  byte-identical. */
+/** @decision dd4349ff — a changed test file runs THROUGH THE HARNESS (`test:daemon --only=`), never as
+ *  bare `node <path>` — a bare invocation left a hermetic-env-needing file unable to even start, exit 99,
+ *  0s, no assertion run, rejecting a merge for an invocation defect, not the code under test.
+ *  `changedTestFiles` must already exclude `NOT_HERMETIC` names (trusts the caller, never re-filters);
+ *  `changedAssetPaths` folds the certified asset-reading set into the SAME `--only=` list. See
+ *  docs/decisions/dd4349ff-reduced-gate-runs-changed-tests-through-the-harness-not-bare-node.md. */
 export function buildReducedGateCommand(changedTestFiles: string[], changedAssetPaths: string[] = []): string {
   const steps = ["pnpm build", ...STATIC_GUARD_REPO_PATHS.map((p) => `node ${p}`)];
   const testPaths = changedAssetPaths.length > 0
@@ -4394,39 +3345,11 @@ export function buildReducedGateCommand(changedTestFiles: string[], changedAsset
   return steps.join(" && ");
 }
 
-/**
- * Verifies a squash commit's persisted `Loom-Worker-PathSet` claim purely from the commit's OWN ancestry —
- * `sha` and its parent `sha^`, both permanently reachable from HEAD once landed, so unlike a branch-tip
- * check this needs no branch ref and survives `git gc` indefinitely (empirically confirmed: a genuine
- * match still holds after `git branch -D` + `git reflog expire --expire=now --all` + `git gc --prune=now`;
- * see test/merge-pathset-deleted-branch.mjs). FAILS CLOSED, same asymmetry as {@link
- * branchContentLandedInCommit}: any git error, or the digests genuinely disagreeing, returns `false` —
- * NOT VERIFIED — never resolve ambiguity to `true`. A false `false` costs one redundant, idempotent merge
- * attempt; a false `true` is the exact silent-data-loss bug this whole check exists to close.
- *
- * ⚠️ WHAT A `true` HERE ACTUALLY PROVES, AND WHAT IT DOESN'T: only that the landed commit touched the SAME
- * SET OF FILES the trailer declares — NOT that it carries the same CONTENT (see {@link
- * changedPathSetDigest}'s doc for why a content check doesn't survive a concurrent main advance, which is
- * why this is a path-set and not a content hash). Two DIFFERENT branches whose diffs happen to touch the
- * exact same path set produce IDENTICAL digests, and a content swap between them would pass this check.
- * That is not a hypothetical on this repo specifically: cards cluster hard on a handful of hot files (e.g.
- * `pty/host.ts`), so two concurrently-worked branches confined to the same one or two hot files are a
- * realistic, not exotic, way to hit this. Accepted deliberately (see the doc above) because it strictly
- * dominates the pre-f621f185 answer (trailer presence alone, no path check at all) and never introduces a
- * false positive it wouldn't already have produced — but a caller must not read a `true` here as "content
- * verified" the way {@link branchContentLandedInCommit}'s `true` (the branch-PRESENT path) actually is.
- *
- * `baseOverride`, when supplied (the commit's own `Loom-Worker-Base` trailer, if present — card d62dad73
- * phase 2 for a BATCHED landing's tip commit, card 756a2cd8 for a SOLO squash commit), is used as the base
- * instead of `sha^`. Load-bearing for a batched tip whose own `sha^` only spans its LAST cherry-picked
- * commit, not the branch's whole contribution (see `git/batch-merge.ts`'s header doc for the full "why the
- * digest is computed from the landed range" reasoning, and its own `landBranchCommitsIndividually` for
- * where `Loom-Worker-Base` is stamped); redundant-but-uniform for a solo squash, whose `sha^` already IS
- * that same base by construction (see `LOOM_WORKER_BASE_TRAILER`'s own doc for why). Omitted (every
- * pre-756a2cd8 solo-squash commit, and every pre-phase-2 batched commit), this is BYTE-IDENTICAL to the
- * original `sha^`-only behavior — backward compatible by construction, never a behavior change for
- * existing history.
- */
+/** @decision 756a2cd8 — verifies a squash commit's persisted path-set trailer purely from its OWN
+ *  ancestry (survives branch deletion + `git gc`). A `true` proves only the SAME FILE SET, never the same
+ *  CONTENT — never read it as content-verified. `baseOverride` uses the commit's own `Loom-Worker-Base`
+ *  trailer when present, else `sha^`. Fails closed to `false`. See
+ *  docs/decisions/756a2cd8-verifypersistedpathset-proves-file-set-not-content.md. */
 async function verifyPersistedPathSet(
   git: Pick<SimpleGit, "raw">, timeoutMs: number, sha: string, expectedDigest: string, baseOverride?: string,
 ): Promise<boolean> {
@@ -4441,48 +3364,11 @@ async function verifyPersistedPathSet(
   }
 }
 
-/**
- * Find the SQUASH-merge commit for `branch` reachable from `base` (default HEAD), identified by the
- * deterministic `Loom-Worker-Branch: <branch>` trailer {@link mergeBranch} writes. Returns the commit SHA,
- * or null if no such commit is in `base`'s history. This REPLACES the `Merge branch '<branch>'` grep
- * (workerDiff stage 3) and `isBranchMerged` (boot-reconcile Pass A) under squash, where the worker branch
- * is NOT in main's ancestry and there is NO merge commit to detect.
- *
- * RE-TASK GUARD (data-loss safety): the trailer lives in main's history FOREVER, so a branch RE-CUT onto a
- * prior squash (the SAME task re-spawned — createWorktree reuses `loom/<key>`) carries a HISTORICAL trailer
- * while holding NEW live work. To avoid treating such a live worker as a landed orphan (which would delete
- * its worktree), when the branch ref STILL EXISTS we confirm the trailer commit is NOT an ancestor of the
- * branch tip: a genuine orphaned squash-merge of the CURRENT branch DIVERGES from it (merge-base ≠ the
- * squash), whereas a re-cut branch DESCENDS FROM the prior squash (merge-base == the squash). Ancestry is
- * tested via merge-base equality — raw resolves it cleanly; we avoid `--is-ancestor`, whose exit-1 raw
- * misreads (see {@link isBranchMerged}). Branch gone ⇒ the trailer commit IS the landed diff (workerDiff
- * stage 3), returned directly, subject to the path-set verification below.
- *
- * VERIFIED in BOTH cases, by TWO DIFFERENT MEANS with two different strengths (card e076d2a2 for the
- * branch-present mode; card f621f185 for the branch-gone mode — read both docs, they prove different
- * things). While `branchPresent`, verified via {@link branchContentLandedInCommit} — an actual CONTENT
- * check (byte-for-byte, not just which files) — exactly as before, UNCHANGED, no regression to that path.
- * Once the branch is GONE, verified instead via the persisted `Loom-Worker-PathSet` trailer (see {@link
- * verifyPersistedPathSet}) — self-contained in the commit itself, so unlike a branch-tip-based check it
- * needs no branch ref and survives `git gc` indefinitely, but it ONLY proves the landed commit touched the
- * same set of FILES the trailer declares, not the same content — see verifyPersistedPathSet's own doc for
- * exactly what that does and doesn't rule out. A commit that predates this fix carries no such trailer; for
- * THOSE only, this degrades to the pre-f621f185 trailer-presence-only answer (logged, never silent) since a
- * trailer can't be retroactively added to already-landed history.
- *
- * FAILS SAFE in both branches, same asymmetry throughout this file: ANY error/timeout, or the verification
- * genuinely disagreeing, returns null (treated as NOT-landed) — never resolve ambiguity to a landed claim.
- * A false null just costs Pass A keeping the worktree / a caller retrying an idempotent merge; a false
- * landed sha is the exact silent-data-loss bug both cards exist to close. Injectable via {@link
- * BoundedGitDeps}.
- *
- * `onPreFixTrailerNotice`, when supplied, REPLACES the branch-gone-pre-pathset `console.info` below with a
- * callback instead — for a caller that invokes this in a loop (boot-reconcile Pass A's fallback path,
- * card 6ee48e4d) and wants to aggregate that notice ONCE PER PASS (mirroring how {@link
- * scanMergedCommitMap} already logs its own pre-fix-history count once per scan, not once per row)
- * instead of flooding the log per call. Omitted (the default, every other call site), this logs exactly
- * as before — no behavior change for a single decision-path caller.
- */
+/** @decision 6ee48e4d — locates the squash-merge commit via the deterministic `Loom-Worker-Branch:`
+ *  trailer. RE-TASK GUARD: if the branch ref still exists, confirms the trailer commit is NOT an
+ *  ancestor of the branch tip (else a re-spawned task's live work would be misdetected as a landed
+ *  orphan). Verified two different ways depending on branch presence; FAILS SAFE to `null` on any
+ *  ambiguity. See docs/decisions/6ee48e4d-find-landed-squash-commit-re-task-guard-and-batched-notice.md. */
 export async function findLandedSquashCommit(
   repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {},
   onPreFixTrailerNotice?: (branch: string, sha: string) => void,
@@ -4539,33 +3425,10 @@ export async function findLandedSquashCommit(
   }
 }
 
-/**
- * The orchestration-view diff for a worker — "what has this worker changed?" — robust across the
- * worker's WHOLE lifecycle. {@link diffBranch} alone only sees COMMITTED branch refs in the canonical
- * repo, so it reads EMPTY for a live worker mid-task (its work is uncommitted, in the worktree) and
- * ERRORS for a merged+deleted branch (`HEAD...<gone>` → "ambiguous argument") — that was the
- * "/orchestration diffs are all empty" bug. This resolves it in three lifecycle stages:
- *
- *  1. WORKTREE present (live or retained) → diff IN the worktree from the branch's spawn point
- *     (merge-base with the canonical HEAD) to the WORKING TREE, so committed AND uncommitted
- *     in-progress edits both show — the live-supervision case the view exists for. (`uncommitted`.)
- *  2. branch ref present, worktree gone   → the committed 3-dot branch diff ({@link diffBranch}).
- *  3. branch merged + deleted             → reconstruct the landed diff from the SQUASH commit, located
- *     by the deterministic `Loom-Worker-Branch:` trailer ({@link findLandedSquashCommit}; under squash
- *     there is no merge commit to grep for), diffed against its single parent. So a merged worker shows
- *     what it contributed instead of a 500. (`merged`.)
- *
- * Returns null only when there is genuinely nothing to show (no branch + no worktree, or a merged
- * branch whose merge commit can't be located) — the caller renders that as an honest "no diff".
- *
- * BOUNDED (card c6a6f405): every git call below now goes through the same {@link boundedDiffGit} +
- * {@link withTimeout} convention {@link diffBranch} already uses — a busy/locked repo now fails within
- * the file's normal ~{@link GIT_OP_TIMEOUT_MS} bound instead of hanging indefinitely. This still runs
- * on-demand per HTTP request (never at boot), so even before this fix a wedged child only ever blocked
- * that one request, never daemon boot — but "only one request" is not the same as "fine to hang
- * forever," which is why this now gets the same bound as every sibling git op in this file. Each stage
- * is still guarded so a failure falls through to the next rather than throwing the whole call.
- */
+/** @decision c6a6f405 — the orchestration-view diff for a worker, robust across its WHOLE lifecycle
+ *  (live worktree / committed branch / merged+deleted branch) — fixes the "/orchestration diffs are all
+ *  empty" bug. BOUNDED via {@link boundedDiffGit} + {@link withTimeout}; each stage falls through to the
+ *  next on failure. See docs/decisions/c6a6f405-removeworktree-stays-unlocked-by-design.md. */
 export async function workerDiff(
   repoPath: string,
   opts: { branch: string | null; worktreePath: string | null },
@@ -4614,89 +3477,10 @@ export async function workerDiff(
   return null;
 }
 
-// ── Diff cache for the polled orchestration-view endpoint (`GET /api/sessions/:id/diff`) ──────────
-//
-// workerDiff() always shells out to git (350-415ms/poll in the 2026-07-16 perf profile). This wraps
-// workerDiff with a cache keyed on a CHEAP, git-subprocess-free freshness proof, so a repeat poll on an
-// unchanged worker skips git entirely. ACTUAL client cadence (web/src, verified by grep — don't restate
-// a rounder number from memory, it drifts): `reviewQueue.tsx` polls every 8000ms, but only for the
-// review-queue cards (a worker awaiting merge); `Overview.tsx`'s `WorkerDiffPanel` and `ReviewPanel.tsx`
-// set NO `refetchInterval` at all, and the app's `QueryClient` has no default one either — react-query's
-// own default `staleTime: 0` means those refetch on every component MOUNT instead, so the actual hot path
-// is likely BURST mount traffic (re-expanding/re-rendering worker cards), not a steady interval. This
-// cache — and its TTL fast path below — help both shapes: a steady 8s poll less dramatically (see the
-// measured ~2x below), a mount-driven burst far more (a burst of near-simultaneous requests inside the
-// TTL costs one walk total instead of one per request).
-//
-// KEY DESIGN (correctness over hit-rate — a false HIT serves a stale diff, worse than the perf cost it
-// saves):
-//  - The canonical repo's HEAD sha, read via fs (not `git rev-parse`) — covers stage 2/3 (committed-only
-//    and merged-and-reconstructed diffs), whose result only changes if HEAD moves or the branch/worktree
-//    lifecycle transitions.
-//  - When a live worktree exists (stage 1 — the case that ALSO reflects UNCOMMITTED work), HEAD sha alone
-//    is NOT enough: a worker can edit a tracked file without staging or committing, which never touches
-//    any git ref or the index, only the file's own mtime. So stage 1 additionally fingerprints the
-//    worktree's actual file contents (path + mtime + size + mode) via a bounded, git-free recursive walk.
-//    `.git` (never diff-relevant) and `node_modules` (Loom-provisioned per worktree, never git-tracked —
-//    see CLAUDE.md "Worktree dep-provisioning") are skipped as a pure perf optimization; every other path
-//    is walked, so any tracked-file edit, add, delete, rename, or mode change is caught.
-//  - The walk is capped (DIFF_FINGERPRINT_MAX_ENTRIES) — past the cap we can't CHEAPLY prove the worktree
-//    is unchanged, so the key resolves to null and the caller always recomputes: a false MISS, which only
-//    costs perf, never correctness.
-//
-// TTL fast path (card 31552de1 — the walk itself was the real cost, not the git subprocess it replaces):
-// the walk IS the cache key, so it used to run BEFORE the cache was ever consulted — every poll paid the
-// full recursive stat walk (~94ms / ~1742 stats on a real pnpm-monorepo worktree), even a cache HIT. That
-// runs IN-DAEMON (event loop + libuv threadpool), unlike the git subprocess it replaces (a separate
-// process) — at N live workers, that's continuous fs-syscall churn on the daemon itself, whether it's
-// driven by a steady poll or a burst of near-simultaneous mount refetches (see the client-cadence note
-// above). `DIFF_FINGERPRINT_TTL_MS` bounds how often the walk actually runs: once a live worktree's
-// content fingerprint has been walked, a repeat poll within the TTL trusts that fingerprint WITHOUT
-// re-walking — it only re-reads the CANONICAL repo's HEAD (one or two small file reads — `.git/HEAD` then
-// `refs/heads/<branch>`, falling through to scan `packed-refs` when refs are packed — never a walk). That
-// re-read only ever catches the CANONICAL repo's own checked-out branch moving (e.g. another worker's PR
-// landing on main, which shifts the merge-base this diff is computed from) — it is caught immediately,
-// TTL or not.
-//
-// It does NOT, and does not need to, catch the worker's OWN commits as a separate case: `fingerprintWorktree`
-// walks the WORKING TREE, not `.git`, so a commit that writes no working-tree bytes (e.g. committing
-// content the walk already fingerprinted) is invisible to the walk too, at ANY TTL — correctly, because
-// workerDiff's own stage-1 diffs merge-base(canonical HEAD, branch) -> WORKING TREE, so a commit of
-// already-fingerprinted content changes nothing about the diff it would serve either. What the TTL actually
-// bounds is working-tree WRITES — the only thing that can change the stage-1 diff — whether or not those
-// writes are ever committed. A write inside the TTL window (staged, committed, or neither) is served stale
-// until the walk runs again; bounded staleness, acceptable for a DISPLAY read (the merge gate does its own
-// diff via `reviewWorkerMerge`, never through this cache). The TTL clock is anchored to the last REAL walk,
-// not the last served poll, so a fast-path hit never pushes the deadline out — continuous polling still
-// forces a re-walk at least once per TTL window instead of deferring it forever.
-//
-// Bounded via simple LRU eviction (DIFF_CACHE_MAX_ENTRIES) keyed by branch — branches come and go with
-// workers over the daemon's whole lifetime, so an unbounded map would leak.
-//
-// MEASURED, NOT ASSUMED (2026-07-17, throwaway script against this repo's own worktree — a real
-// pnpm-monorepo tree, real node_modules — not a synthetic fixture): the HIT path is NOT free, it still
-// walks the tree. 1566 files walked (excl `.git`/`node_modules`). HIT (fingerprintWorktree alone) ~94ms
-// avg across 8 warm runs (83-145ms range over two independent passes). MISS (the git subprocess trio
-// this replaces: merge-base + diff --stat + diff) ~235-253ms avg locally, vs 350-415ms/poll on the live
-// 2026-07-16 profile (a different/larger host — git's fixed spawn overhead plausibly dominates more
-// there, so the live win is likely larger in absolute ms, not smaller). Net: a real, repeatable ~2x
-// reduction, not an order-of-magnitude one. Threadpool contention (libuv's default pool is only 4
-// threads) was checked too: production deliberately runs `UV_THREADPOOL_SIZE=16` (see `bin/loom.mjs` /
-// `daemon-supervisor.mjs`, task dea6728e) for exactly this class of fs-heavy work; under that config,
-// N=4/8/16 concurrent fingerprintWorktree() calls (simulating several worker cards polling the same
-// ~4s tick) ran FASTER per-call than sequential, no contention degradation observed. Caveat: that test
-// repeated ONE worktree (favorable OS file-cache sharing) rather than N distinct ones, so fleet-scale
-// contention isn't fully ruled out — if it ever shows up in a future profile, the fix degrades gracefully
-// (still async, bounded, correct — just less speedup), it doesn't turn wrong.
-//
-// DECLINED ALTERNATIVE (don't build unless a future profile actually shows the walk itself is hot): a
-// cheaper key that fingerprints only git-TRACKED paths (a cached `git ls-files` result, invalidated when
-// the worktree's own index file's mtime moves) instead of walking the whole non-`.git`/non-`node_modules`
-// tree — on this same measurement, that's ~1566 files down to roughly the ~800 actually tracked, so
-// another ~2x on the HIT path alone. Declined 2026-07-17: not worth the added complexity and a NEW
-// invalidation-correctness risk against an already-real 2x — notably, index mtime does NOT move on an
-// UNSTAGED edit to an already-tracked file, so the ls-files cache would need its own separate
-// invalidation proof, layering exactly the kind of hazard this card exists to eliminate.
+// @decision 31552de1 — diff cache for the polled orchestration-view endpoint: correctness over hit-rate
+// (a false HIT serves a stale diff, worse than the perf cost it saves), plus a TTL fast path since the
+// fingerprint WALK itself (not the git subprocess it replaces) was the real cost. Measured ~2x reduction,
+// not an order-of-magnitude one. See docs/decisions/31552de1-diff-cache-correctness-over-hit-rate-and-the-ttl-fast-path.md.
 
 const DIFF_CACHE_MAX_ENTRIES = 500;
 const DIFF_FINGERPRINT_MAX_ENTRIES = 20_000;
@@ -4892,28 +3676,11 @@ export function __workerDiffCacheSizeForTest(): number {
   return diffCache.size;
 }
 
-/**
- * Which verification mode produced a {@link MergedCommitInfo} answer (card 52e978ad). Same field, same
- * shape, but the three values are NOT the same guarantee — a caller must not treat them interchangeably:
- *  - `"content"` — the branch ref was still LIVE; verified by an actual byte-for-byte diff of the
- *    branch's own changed paths between the candidate commit and the branch tip ({@link
- *    branchContentLandedInCommit}). The strongest guarantee this file produces.
- *  - `"pathset"` — the branch was already gone; verified from the landed commit's OWN ancestry against
- *    its persisted `Loom-Worker-PathSet` trailer ({@link verifyPersistedPathSet}). Survives `git gc`
- *    indefinitely, but only proves the SAME SET OF FILES landed, not the same CONTENT — see that
- *    function's own doc for exactly what it does and doesn't rule out. Weaker than `"content"`; do not
- *    render it with the same confidence.
- *  - `"trailer-only"` — the branch was gone AND the landed commit carries no `Loom-Worker-PathSet`
- *    trailer. TWO causes produce this, indistinguishable from this field alone: (1) pre-f621f185 legacy
- *    history — the commit predates the trailer's existence — or (2) a best-effort `Loom-Worker-Base`/
- *    `Loom-Worker-PathSet` stamp that failed to land (rare; logged at the stamp site itself when it
- *    happens — see {@link mergeBranchLocked} for the solo path, `landBranchCommitsIndividually` in
- *    git/batch-merge.ts for the batched one). As of card 9198c7a4, a BATCHED landing's tip commit stamps
- *    those trailers from its ENTIRE contribution (`batchHeadBefore..landedSha`, not just `sha^..sha`),
- *    same as a solo squash — it is no longer omitted by design; see git/batch-merge.ts's own header doc.
- *    The answer rests on `Loom-Worker-Branch:` trailer PRESENCE alone — no content or path
- *    check at all. The weakest of the three; render this qualified, not as a second confident tick.
- */
+/** @decision 52e978ad — the three verification modes are NOT interchangeable: `"content"` (byte-for-byte,
+ *  strongest), `"pathset"` (same file set only, survives branch deletion), `"trailer-only"` (trailer
+ *  PRESENCE alone, weakest — and two indistinguishable causes). Render with matching confidence, never as
+ *  one flat "verified". See
+ *  docs/decisions/52e978ad-merged-verification-mode-three-different-guarantees-not-interchangeable.md. */
 export type MergedVerificationMode = "content" | "pathset" | "trailer-only";
 
 /** A task's landed squash-merge commit on main, as surfaced by {@link getTaskMergedInfo}. */
@@ -4972,31 +3739,11 @@ export interface MergedCommitScan {
   truncated: boolean;
 }
 
-/**
- * One bounded `git log` pass over `base`'s history (default HEAD), extracting every commit's
- * `Loom-Worker-Branch: <branch>` trailer (plus its `Loom-Worker-PathSet` trailer, if present) into a
- * `branch -> {sha, date, pathSetDigest}` map — the batch-friendly sibling of {@link
- * findLandedSquashCommit}'s single-branch `--grep`. Building ONE map per repo (cached by {@link
- * getMergedCommitMapCached}) and looking a task's branch up in it is an O(1) map read per task instead of
- * one git subprocess per task, which is what bounds a `list_all_tasks` page's cost regardless of how many
- * cards it returns. First occurrence per branch wins (log is reverse-chronological, so that's the MOST
- * RECENT landing — matches findLandedSquashCommit's `--max-count=1` semantics).
- *
- * ALSO reports whether the scan was truncated (see {@link MergedCommitScan}) — the discriminator boot-
- * reconcile Pass A needs to tell "this branch never landed" (a complete scan, genuine miss) apart from
- * "this branch might have landed outside the window" (a truncated scan, inconclusive miss): two states
- * that used to share one signature (an empty `Map.get` result), the same collapse this card already fixed
- * once for map-hit-vs-miss itself. Truncation is detected from data the scan already computed — no new git
- * call: `git log -n LIMIT` returns AT MOST `LIMIT` commits, so seeing EXACTLY `LIMIT` non-blank records
- * means more history may exist beyond what was read; seeing fewer means `base`'s full history fit inside
- * the window. Counts EVERY commit record the scan saw, not just trailer matches — the vast majority of
- * commits carry no trailer at all, so counting only hits would never reach the limit and would falsely
- * report "complete" on a genuinely truncated scan.
- *
- * FAILS SAFE: any error/timeout returns an EMPTY map with `truncated: true` (every lookup then misses AND
- * is marked inconclusive -> a caller applying the authoritative-miss optimization must fall back, exactly
- * as if the scan had genuinely hit the limit) — never throws.
- */
+/** @decision 6ee48e4d — one bounded `git log` pass building a `branch -> {sha, date, pathSetDigest,
+ *  baseSha}` map (the batch-friendly sibling of {@link findLandedSquashCommit}), plus whether the scan
+ *  was TRUNCATED — the discriminator between a genuine miss and an inconclusive one. FAILS SAFE to an
+ *  empty map with `truncated: true` on any error. See
+ *  docs/decisions/6ee48e4d-find-landed-squash-commit-re-task-guard-and-batched-notice.md. */
 async function scanMergedCommitMap(
   repoPath: string, base = "HEAD", deps: BoundedGitDeps = {},
 ): Promise<MergedCommitScan> {
@@ -5037,21 +3784,9 @@ async function scanMergedCommitMap(
   } catch {
     return { map, truncated: true }; // fail safe: empty map + inconclusive -> every lookup misses AND must fall back
   }
-  // Log the no-PathSet-trailer count ONCE PER SCAN, not per lookup: getTaskMergedInfo runs per TASK on
-  // every polled board read (up to 100 rows/page), and a card merged before card f621f185, or one whose
-  // best-effort Loom-Worker-Base/Loom-Worker-PathSet stamp failed to land (rare; logged at the stamp site
-  // itself when it happens), lacks the trailer — a per-lookup log line would flood the daemon log on a
-  // path polled continuously by the web UI (worsens board-8dd1dd1c-class log-retention pressure). This
-  // scan is already cache-gated (rebuilt only on a HEAD move, not per poll), so logging here reports "how
-  // many landed branches in this repo carry no Loom-Worker-PathSet trailer" at the natural
-  // once-per-actual-scan cadence instead — still never silent, just not per row. As of card 9198c7a4 a
-  // BATCHED landing's tip commit stamps this trailer from its ENTIRE contribution same as a solo squash
-  // (renamed from `preFixCount`, card 6801c0a1, back when batching was itself a SECOND, deliberate cause —
-  // it no longer is) — this count (and its log line) cannot and does not try to tell a legacy-history
-  // absence apart from a failed stamp; see MergedVerificationMode's own `"trailer-only"` doc for the full
-  // breakdown.
-  // findLandedSquashCommit's OWN log (a decision path — merge/reconcile, not a polled read) is unaffected
-  // and stays per-call.
+  // @decision 6ee48e4d — log the no-PathSet-trailer count ONCE PER SCAN, not per lookup (getTaskMergedInfo
+  // runs per task on every polled board read). See
+  // docs/decisions/6ee48e4d-find-landed-squash-commit-re-task-guard-and-batched-notice.md.
   let noPathSetTrailerCount = 0;
   for (const entry of map.values()) if (entry.pathSetDigest === null) noPathSetTrailerCount++;
   if (noPathSetTrailerCount > 0) {
@@ -5196,33 +3931,11 @@ async function resolveMergedCommitMapHit(
   }
 }
 
-/**
- * Batch-primitive sibling of {@link findLandedSquashCommit} for a caller that wants to look `branch` up
- * against the shared {@link getMergedCommitMapCached} map (ONE bounded `git log` pass per repo, cached
- * and reused across every branch checked against it) instead of paying its own single-branch `--grep`
- * walk. Exists for boot-reconcile Pass A (card 6ee48e4d), which used to call findLandedSquashCommit once
- * PER historical worker session — up to thousands of sequential git subprocess spawns per boot.
- *
- * Returns `{ hit: true, sha }` when `branch` HAS an entry in the map — `sha` is the verified landed
- * commit (via {@link resolveMergedCommitMapHit}, the SAME re-task-guard + content/path-set check
- * findLandedSquashCommit itself applies), or `null` if that entry fails verification (mirrors
- * findLandedSquashCommit's own fail-safe null exactly, just reached via a shared map lookup instead of a
- * fresh grep — NOT a weaker answer).
- *
- * Returns `{ hit: false, scanComplete }` when `branch` has NO entry in the map — and `scanComplete` is
- * the discriminator a caller NEEDS before treating that miss as "not landed" (card 6ee48e4d): a plain
- * miss used to conflate two different states behind one signature — "genuinely never landed" vs "landed
- * outside the {@link MERGED_LOOKUP_SCAN_LIMIT} scan window" — which meant every miss had to be treated as
- * the weaker, inconclusive case. `scanComplete: true` (the scan read `base`'s ENTIRE history — see {@link
- * MergedCommitScan}) makes the miss AUTHORITATIVE: no fallback needed, `branch` provably has no
- * `Loom-Worker-Branch` trailer anywhere reachable from `base`. `scanComplete: false` (the scan was
- * truncated by the limit, OR errored/timed out — same fail-safe direction) means the miss is genuinely
- * inconclusive; a caller that needs the FULL-HISTORY guarantee (the ONLY guarantee findLandedSquashCommit
- * itself makes) MUST fall back to calling findLandedSquashCommit directly in that case — silently treating
- * every miss as authoritative would narrow detection to the scan window and let an old-enough landed
- * worker's worktree/branch linger forever undetected. See boot-reconcile Pass A for the canonical caller
- * shape (branch on `scanComplete`, not on `hit` alone).
- */
+/** @decision 6ee48e4d — batch-primitive sibling of {@link findLandedSquashCommit}: looks `branch` up
+ *  against the shared cached map instead of paying its own `--grep` walk. `{hit:false, scanComplete}` on
+ *  a miss — `scanComplete:false` means inconclusive (truncated/errored scan), and a caller needing the
+ *  full-history guarantee MUST fall back to {@link findLandedSquashCommit} directly. See
+ *  docs/decisions/6ee48e4d-find-landed-squash-commit-re-task-guard-and-batched-notice.md. */
 export async function findLandedSquashCommitViaMap(
   repoPath: string, branch: string, deps: BoundedGitDeps = {},
 ): Promise<{ hit: true; sha: string | null } | { hit: false; scanComplete: boolean }> {
@@ -5270,46 +3983,11 @@ export async function resolveWorkerBranchInfo(
   }));
 }
 
-/**
- * Is `taskId` merged + shipped on `repoPath`'s main line? Resolves the task's DETERMINISTIC branch
- * (`loom/<taskKey(taskId)>`) and looks it up in the cached {@link getMergedCommitMapCached} map — keyed
- * by the same `Loom-Worker-Branch:` trailer {@link findLandedSquashCommit} greps for, rather than by
- * TITLE TEXT: a card's title can be edited after merge, or coerced through `toConventionalSubject`
- * (`git/worktrees.ts` › mergeBranch), while the trailer never drifts. Applies the SAME re-task ancestry
- * guard as findLandedSquashCommit for the rare case the branch ref still exists (a re-spawned task
- * carrying NEW live work over a prior landed squash) — that guard's extra git calls are only paid for
- * an actual map hit, not for every task.
- *
- * Returns `null` when no landed trailer is found FOR ANY REASON: genuinely never merged, landed outside
- * the {@link MERGED_LOOKUP_SCAN_LIMIT} scan window, a re-task in progress, or any git error/timeout
- * (fail-safe). Treat `null` as "not proven merged (within this window)", NEVER as an authoritative
- * "never merged" — that distinction matters because this exists specifically to replace stale-handoff
- * claims with ground truth, and a false-confident null would just move the same failure elsewhere.
- *
- * The returned {@link MergedCommitInfo}'s `verification` field (card 52e978ad) names WHICH of the means
- * below actually answered — a caller that only reads `sha`/`date` can no longer tell a byte-verified
- * "content" landing apart from a weaker "pathset" or "trailer-only" one; a caller that cares about the
- * strength of the guarantee must read it.
- *
- * VERIFIED regardless of whether the branch ref is still live, but by TWO DIFFERENT MEANS of two different
- * strengths — same split as {@link findLandedSquashCommit} (card e076d2a2 for the live-branch mode, card
- * f621f185 for the branch-gone mode): `scanMergedCommitMap` keys on the trailer alone (NOT the subject — a
- * prior read of this incident's `merged:{sha}` false positive as a "subject match" doesn't hold up against
- * this code), so it is exposed to the identical claim-vs-proof gap either way. While `branchPresent`,
- * verified via {@link branchContentLandedInCommit} — an actual CONTENT check. Once the branch is gone,
- * verified via the persisted `Loom-Worker-PathSet` trailer ({@link verifyPersistedPathSet}) carried on the
- * map entry — self-contained in the landed commit itself, so it needs no live ref and survives `git gc`,
- * but (see that function's own doc) it only proves the same FILES landed, not the same CONTENT — two
- * different branches confined to the same file(s) (real on this repo: cards cluster on hot files like
- * `pty/host.ts`) would share a digest. Strictly still better than the pre-f621f185 answer (no path check at
- * all) and never a false positive it wouldn't already have produced, but a `null`-avoiding `true` here is
- * weaker evidence in the branch-gone mode than in the branch-present mode — don't read the two the same
- * way. A commit that predates this
- * fix carries no such trailer; for those only, this degrades to the pre-f621f185 trailer-presence-only
- * answer, since a trailer can't be retroactively added to already-landed history. That degradation is
- * logged, but NOT here — this runs per TASK on every polled board read, so {@link scanMergedCommitMap}
- * logs the pre-fix count once per actual map scan instead (see its own comment for why).
- */
+/** @decision 52e978ad — is `taskId` merged? Keyed by the `Loom-Worker-Branch:` trailer, NEVER by title
+ *  text (a title can be edited/coerced after merge; the trailer never drifts). `null` covers several
+ *  causes (never merged, outside scan window, re-task in progress, git error) — NEVER read as
+ *  authoritative "never merged". `verification` names which of three tiers actually answered. See
+ *  docs/decisions/52e978ad-merged-verification-mode-three-different-guarantees-not-interchangeable.md. */
 export async function getTaskMergedInfo(
   repoPath: string, taskId: string, deps: BoundedGitDeps = {},
 ): Promise<MergedCommitInfo | null> {
@@ -5386,24 +4064,10 @@ export function toConventionalSubject(raw: string): string {
   return `chore: ${subject}`;
 }
 
-/**
- * The taskless-merge counterpart to {@link mergeBranchLocked}'s subject derivation (card 7a1a76e9 DoD-3):
- * a taskless worker (`worker_spawn`'s ad-hoc no-card path) has no `taskTitle` to fall back to, so the
- * subject used to fall back to the branch NAME itself — `chore: loom/<branch>`, the one string guaranteed
- * NOT findable on main after a squash (the successor-check convention is `git log --grep "<subject>"`,
- * and a squash discards the branch ref). This derives a real subject from the branch's OWN history
- * instead: `git log -1 --format=%s <branch>` — the branch's TIP (most recent) commit's subject line.
- *
- * DECISION (the card requires this be made explicitly and documented — there is no obviously-right answer
- * for a multi-commit branch): TIP, not the first commit. A worker's tip commit is the one it most
- * recently chose to write — closer to "what actually shipped" than an early commit an later one may have
- * superseded — and it's also what a human skimming `git log <branch>` sees first. `-1` also needs no walk,
- * so this is a single cheap ref read either way.
- *
- * FAILS SAFE to `undefined` (never throws) on any git error/timeout/empty-branch — mirrors {@link
- * countCommitsBehind}'s own advisory-only discipline; every caller falls back to the branch name on
- * `undefined`, exactly as before this card.
- */
+/** @decision 7a1a76e9 — taskless-merge fallback subject: the branch TIP commit's subject (`git log -1`),
+ *  never the branch NAME — the name is guaranteed unfindable on main after a squash. Fails safe to
+ *  `undefined` on any error. See
+ *  docs/decisions/7a1a76e9-taskless-merge-subject-uses-the-branch-tip-not-the-branch-name.md. */
 export async function deriveTasklessSubject(repoPath: string, branch: string, deps: BoundedGitDeps = {}): Promise<string | undefined> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
@@ -5419,34 +4083,10 @@ export async function deriveTasklessSubject(repoPath: string, branch: string, de
 const WORKER_COMMIT_LOG_MAX_ENTRIES = 20;
 const WORKER_COMMIT_LOG_MAX_CHARS = 2000;
 
-/**
- * Card 8b7b81e0 DoD-3: a squash commit's SUBJECT is always the card title (never the worker's own commit
- * messages — that convention is load-bearing, see {@link mergeBranchLocked}'s own doc), but until this
- * card the worker's own per-commit messages were discarded entirely at the squash boundary. The incident
- * that exposed this: a card titled for ONE file, a worker whose OWN commit correctly said it touched FIVE
- * — and the squash kept the narrower title and threw the accurate message away, unrecoverable by `git log
- * --grep` forever after (pathspec-only, which nobody reaches for).
- *
- * This recovers that information into the squash commit's BODY (a real git commit body — the paragraph
- * between the subject and the `Loom-Worker-Branch:`/`Loom-Worker-PathSet:` trailers — not a new trailer;
- * trailers are for single-token machine-readable facts, not prose), so it survives on main by construction
- * instead of by a human remembering to write it in the card title. Returns `undefined` (caller omits the
- * body entirely, byte-identical to pre-8b7b81e0 behavior) when there is nothing worth adding:
- *  - no non-merge commits found on the branch (any git error/timeout also degrades here — best-effort,
- *    like {@link changedPathSetDigest}'s own capture, never blocks the commit), or
- *  - EXACTLY one commit whose subject already matches the squash `subject` (case/whitespace-insensitive)
- *    — the overwhelmingly common single-clean-commit case, where a body would be pure duplication.
- *
- * `--no-merges` excludes the real merge commit {@link mergeMainIntoWorktree} leaves on the branch when it
- * unions canonical main's tip in before the gate runs — that commit is main's own history replayed onto
- * the branch, never the worker's own work, and including it would misattribute main's commit messages to
- * this worker.
- *
- * BOUNDED two ways, deliberately: `WORKER_COMMIT_LOG_MAX_ENTRIES` (a branch with dozens of WIP commits
- * doesn't get a dozens-of-bullets body) and `WORKER_COMMIT_LOG_MAX_CHARS` (one very long commit message
- * doesn't blow the body past what a `git log --oneline`-skimming human tolerates) — either cap truncates
- * with a trailing count of what was omitted, so truncation is visible, never silent.
- */
+/** @decision 8b7b81e0 — recovers a worker's own per-commit messages into the squash BODY (never a
+ *  trailer — trailers are single-token facts, not prose), so a title narrower than the actual change no
+ *  longer discards the accurate detail. `--no-merges` excludes the union-merge commit; BOUNDED with
+ *  visible truncation. See docs/decisions/8b7b81e0-worker-commit-log-body-recovers-what-the-squash-title-drops.md. */
 async function deriveWorkerCommitLogBody(
   repoPath: string, branch: string, mergeBase: string, subject: string, deps: BoundedGitDeps = {},
 ): Promise<string | undefined> {
@@ -5482,25 +4122,10 @@ async function deriveWorkerCommitLogBody(
   return `Worker commits:\n${lines.join("\n")}`;
 }
 
-/**
- * Card 591906ae: `ownTipSubject`/`ownTipSubjectConventional` ({@link SessionService.reviewWorkerMerge} in
- * `sessions/service.ts`) answer for the branch's TIP commit only — but `merge_batch` (`git/batch-merge.ts`)
- * lands EVERY commit on a batched branch verbatim (a rebase/cherry-pick, never a squash: a 3-commit branch
- * puts 3 commits on main), so a bad subject on a NON-tip commit reaches mainline invisibly to those two
- * fields alone. This recovers the branch's own non-tip commit subjects — `<mergeBase>..<branch>`,
- * oldest-first, `--no-merges` for the same reason {@link deriveWorkerCommitLogBody} excludes them (a
- * union-merge replaying main's own history onto the branch is never the worker's own commit) — with the
- * LAST entry (the tip, already covered by `ownTipSubject`) dropped so this never duplicates that field.
- *
- * Returns `undefined` (field omitted entirely by the caller) whenever there is nothing to add beyond the
- * tip: no commits at all, or exactly one (the overwhelmingly common single-commit branch, where the tip IS
- * the whole contribution) — deliberately, so a single-commit branch's review result stays byte-identical
- * to before this card rather than getting noisier. Bounded by the SAME
- * {@link WORKER_COMMIT_LOG_MAX_ENTRIES}/{@link WORKER_COMMIT_LOG_MAX_CHARS} caps
- * {@link deriveWorkerCommitLogBody} already uses (one shared pair of knobs, not a second pair to drift out
- * of sync) — `truncated:true` says so explicitly rather than silently dropping the tail. Best-effort: any
- * git error/timeout degrades to `undefined`, exactly like every other advisory field on this review.
- */
+/** @decision 591906ae — recovers a batched branch's non-tip commit subjects, which `ownTipSubject` alone
+ *  misses (`merge_batch` lands every commit verbatim, never a squash). Drops the tip (already covered
+ *  elsewhere); shares the same truncation caps as {@link deriveWorkerCommitLogBody}. Best-effort:
+ *  degrades to `undefined`. See docs/decisions/591906ae-non-tip-commit-subjects-cover-what-a-batched-landing-can-hide.md. */
 export async function deriveOwnNonTipCommitSubjects(
   repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {},
 ): Promise<{ subjects: string[]; truncated: boolean } | undefined> {
@@ -5536,50 +4161,12 @@ export async function deriveOwnNonTipCommitSubjects(
   return { subjects, truncated };
 }
 
-/**
- * Merge a worker's branch into the repo's current branch as a SINGLE SQUASH COMMIT — `git merge --squash`
- * stages the combined diff WITHOUT committing, then a plain `git commit` lands it as ONE commit, so each
- * task = one clean commit on main (not a real-commit + a noise merge-commit). Returns the new squash
- * commit's SHA plus the exact `subject` it was committed with (post-{@link toConventionalSubject}) — so a
- * caller can echo what actually landed without a separate `git log`. FAIL-CLOSED.
- *
- * The commit message is a clean subject (the task `title`, falling back to the branch name) plus a
- * deterministic `Loom-Worker-Branch: <branch>` trailer — the SAME marker {@link workerDiff} stage 3 and
- * boot-reconcile Pass A key on ({@link findLandedSquashCommit}) to reconstruct / finalize a squashed merge
- * whose branch is NOT in main's ancestry (squash leaves no merge commit, so `git branch --merged` and a
- * `Merge branch` grep both go blind). Identity is a PLAIN `git commit` — repo-config identity, NO
- * `-c user.*` overrides and NO Co-Authored-By trailer (matches the project convention; the canonical repo
- * is expected to have a git identity configured).
- *
- * CONFLICT handling differs from `--no-ff`: `git merge --squash` leaves NO MERGE_HEAD, so `git merge
- * --abort` won't work. simple-git's `raw(["merge", …])` ALSO does NOT reliably reject on a conflict, so we
- * detect one EXPLICITLY via unmerged index entries and clean up with `git reset --hard HEAD`, leaving the
- * canonical repo UNTOUCHED — and if that cleanup reset ITSELF fails, we SURFACE it in `reason` rather than
- * asserting a clean conflict over a swallowed error (the repo may be left with unmerged residue).
- *
- * IDEMPOTENT (board card 2eddf573). The staged set is RE-DERIVED here, at merge time, from a clean index —
- * never trusted from a snapshot taken at the preceding review. A stale in-progress-merge residue (a
- * leftover `MERGE_HEAD` / partial index from an aborted op) makes the FIRST `git merge --squash` abort
- * ("You have not concluded your merge") and stage NOTHING, so the old code returned "nothing staged" on a
- * perfectly valid +N-commit branch and only a byte-identical RETRY (after its own reset --hard) merged.
- * We now CLEAR any affirmative residue up front, so the first call stages the real diff. And when the
- * index is GENUINELY empty after a clean (non-error) squash, the result DISTINGUISHES why via `emptyKind`:
- *   - `ALREADY_MERGED`   — the branch's work already landed in main (a prior squash carrying the
- *                          deterministic `Loom-Worker-Branch` trailer is reachable from HEAD).
- *   - `STAGE_EMPTY_RETRY` — no such landing: there is simply no diff to merge (an empty change).
- * so the caller can tell "already done" from "real no-op". A real squash failure still fails closed.
- *
- * REFUSES on ANY dirty tracked state (staged or unstaged) in the canonical repo AT ENTRY — even after the
- * MERGE_HEAD/unmerged clear above has run (card 9e77050f). That clear only sees an AFFIRMATIVE in-progress
- * real-merge signal; a `--squash` that staged a diff and then died before its commit step (the daemon
- * restarting mid-merge is the likeliest cause) sets neither MERGE_HEAD nor an unmerged entry, so it survives
- * that clear invisibly — and disjoint-path content from an unrelated LATER squash can land on top of it,
- * silently, under the LATER branch's own subject/trailer. Whatever is dirty at entry is indistinguishable
- * from a human's own uncommitted work in this same checkout (this repo self-hosts from it, unlike a worker's
- * isolated worktree) — `reset --hard` cannot tell the two apart, and guessing wrong destroys real work. So
- * this refuses loudly instead: `ok:false`, same as every other ambiguous case here — a false NOT-merged, safe
- * and idempotently retryable, never a silent absorption of someone else's content.
- */
+/** @decision 2eddf573 — `mergeBranchLocked`'s squash-merge is IDEMPOTENT: the staged set is re-derived at
+ *  merge time from a clean index (never trusted from a review-time snapshot), and a genuinely-empty
+ *  result distinguishes `"ALREADY_MERGED"` from `"STAGE_EMPTY_RETRY"` via `emptyKind`. REFUSES on any
+ *  dirty tracked state at entry (card 9e77050f) — indistinguishable from real human work in this
+ *  self-hosting checkout, so `reset --hard` is never attempted; `ok:false` instead. See
+ *  docs/decisions/2eddf573-squash-merge-is-idempotent-and-refuses-on-ambiguous-dirty-state.md. */
 export type MergeEmptyKind = "ALREADY_MERGED" | "STAGE_EMPTY_RETRY";
 
 // ── Canonical-repo index mutex ───────────────────────────────────────────────────────────────────────
@@ -5590,34 +4177,10 @@ export type MergeEmptyKind = "ALREADY_MERGED" | "STAGE_EMPTY_RETRY";
 // through the SAME `withCanonicalIndexLock` (git/repo-lock.ts — see that module for the full incident
 // history, the "no timeout here" reasoning, and the non-reentrancy trace for this exact function).
 
-/**
- * Merge canonical main's CURRENT tip (`repoPath`'s HEAD) INTO the worker's worktree, IN the worktree —
- * a REAL (non-squash) merge, run BEFORE the build/DoD gate and the squash-merge below (card c0aeb5b2).
- *
- * THE HOLE THIS CLOSES: the gate used to run against the worktree's PRE-merge state — the branch as it
- * was cut, with no knowledge of anything that landed on main afterward — so it validated a union that was
- * never actually tested. A branch cut before a main-side change that the branch's code now conflicts
- * with (textually) or is incompatible with (semantically, e.g. main removed a symbol the branch now
- * depends on) could sail through a green gate and land a broken union. Merging main's tip into the
- * worktree FIRST means the gate (run by the caller immediately afterward, in the same worktree) sees the
- * actual post-merge union, and a hard textual conflict is caught right here, fail-closed.
- *
- * Deliberately a MERGE, not a rebase or squash: the resulting worktree tip has `mainSha` as a direct
- * ancestor, so `merge-base(repoPath HEAD, branch)` — the base {@link mergeBranch}'s own `--squash` diffs
- * against — becomes `mainSha` itself. The squash below therefore still lands ONLY the branch's own net
- * changes; main's content is common ancestor, not re-applied.
- *
- * FAIL-CLOSED, mirroring `mergeBranch`'s own conflict handling: a real merge sets `MERGE_HEAD` (unlike
- * `--squash`), so a conflict is cleaned up with `git merge --abort` (equivalent to `mergeBranch`'s
- * `reset --hard HEAD`, but the more idiomatic call for a non-squash merge) — leaving the worktree exactly
- * as it was before this call. Any other failure (unresolvable main tip, a merge command error with no
- * conflict, a failed inspection of the merge state) also returns `ok:false` rather than assuming success —
- * this function is itself a gate, not a best-effort probe like {@link detectStrandedWork}, so an
- * inconclusive result must block, not wave through.
- *
- * A worktree that already contains `mainSha` (the common case for a freshly-cut, not-yet-drifted branch)
- * short-circuits to a no-op success (`merged:false`) without spawning a merge child at all.
- */
+/** @decision c0aeb5b2 — merges main's tip INTO the worktree BEFORE the gate (a REAL merge, not squash) —
+ *  closes the hole where the gate validated a never-actually-tested union. FAIL-CLOSED: any conflict or
+ *  inconclusive failure returns `ok:false`, this function is itself a gate. See
+ *  docs/decisions/c0aeb5b2-union-merge-runs-before-the-gate-not-after.md. */
 /** Generic, non-personal identity used ONLY when the host has no git identity configured at all —
  *  same rationale + mechanism as vault/versioner.ts's own fallback (duplicated, not shared: each
  *  commit-creating path in this codebase decides its own identity policy — git/writer.ts deliberately
@@ -5743,91 +4306,16 @@ async function mergeBranchLocked(
   // fix, `git = simpleGit(repoPath)` here had NEITHER — a hung git child (e.g. a wedged commit hook) never
   // settled, which (post-e076d2a2) wedged the per-repo merge mutex PERMANENTLY, not just this one op.
   const { git, timeoutMs } = boundedMergeGit(repoPath, deps);
-  // GATE-BASE RE-VERIFICATION (card e50600d2, generalized by card eda70da6): the squash below re-derives
-  // its result FRESH against whatever canonical HEAD is at the moment it runs (`git merge --squash
-  // <branch>` computes branch's diff against merge-base(HEAD, branch) and applies it to CURRENT HEAD) —
-  // it does NOT reuse the worktree's own already-unioned tree. So the squash is only provably the SAME
-  // thing the gate validated if canonical main hasn't moved between "the sha the gate's tree was actually
-  // built from" and this lock. `requireCanonicalHead`, when the caller passed one, IS that sha — either
-  // the main tip {@link mergeMainIntoWorktree} unioned into the worktree BEFORE the gate ran (the ordinary
-  // real-gate path, eda70da6), or the main tip a REUSED green self-check was proven to already contain
-  // (e50600d2). Main is a process-wide shared resource, and another writer (a sibling merge, or — outside
-  // this in-process mutex's reach — a human REST commit) can land any time between that sha being fixed
-  // and this lock being granted — including the whole of an unbounded SEMAPHORE QUEUE WAIT for the
-  // real-gate path, not just the gate's own run time. Do NOT "fix" this by holding the lock across the
-  // gate run (would serialize every merge on the repo behind each ~8-14min gate) or by re-running the gate
-  // once the lock is held (doubles gate cost and reopens the same window one level down) — this in-lock
-  // re-read is the intended shape. Re-read HERE, the FIRST thing after acquiring the lock and BEFORE
-  // touching anything (no residue-clear, no squash), so an invalidated premise is caught with ZERO side
-  // effects: canonical repo AND worktree stay completely untouched, and the caller gets a distinct
-  // `gateBaseInvalidated:true` it can surface as a benign race rather than a real merge failure. Absent
-  // whenever no gate ran at all (no gateCommand configured), in which case this check is skipped entirely
-  // — byte-identical to before either fix existed.
-  //
-  // ⚠️ THE ALREADY-LANDED CASE (card b0ab78d6, closing a gap this doc used to describe as open): when the
-  // branch's squash has ALREADY landed on main, confirmWorkerMerge SKIPS the union-merge entirely
-  // (`preLanded`, in the caller) — that skip predates this fix and exists to protect ALREADY_MERGED
-  // re-confirm classification, not to opt out of gating, so a REAL gate still runs (`gateRan:true`). This
-  // used to leave `requireCanonicalHead` unset for the whole duration of that gate, making this re-check
-  // vacuous for that path — NOT hypothetical: the concrete danger is a branch gaining a genuinely NEW
-  // commit WHILE that gate is in flight (a redirected/still-active worker keeps committing before being
-  // told to stand down — the worker's pty is not stopped until AFTER confirmWorkerMerge returns), which
-  // the eventual squash then stages and lands, un-verified against whatever main did in the same window.
-  // `confirmWorkerMerge` now threads a `requireCanonicalHead` through this path too, so this re-check DOES
-  // run here: it proves canonical main hasn't moved since the gate started, exactly like the ordinary union
-  // path above. What it does NOT prove, on this path specifically: the gate here validated the branch's own
-  // tree in isolation, never unioned with main (that union is exactly what's skipped, to protect
-  // classification), so a genuinely new commit's *integration* with main's current content is unverified
-  // either way — this re-check closes the "main moved" race, not the narrower "never union-tested" gap,
-  // which stays open by design (closing it would mean union-merging here, which is exactly what corrupts
-  // ALREADY_MERGED classification). See `confirmWorkerMerge`'s own `gateBaseMainHead` doc for the full
-  // three-producer picture (union / reuse / preLanded).
-  //
-  // ⚠️ REGRESSION FOUND AND CLOSED BEFORE MERGE (same card, second CR follow-up): enforcing
-  // `requireCanonicalHead` UNCONDITIONALLY on the preLanded path over-refuses. The COMMON case on this path
-  // is the opposite of the danger above — a pure re-confirm with genuinely NOTHING new to squash (a
-  // stale/racing confirm, see the early-idempotency doc further up) — and that case is IDEMPOTENT by
-  // design: main moving elsewhere during its gate is routine on an active fleet and harmless to it, since
-  // nothing from this branch is landing either way. Refusing every time main so much as twitches during an
-  // 8-14min gate turned that routine idempotent success into a routine refusal (empirically reproduced:
-  // same scenario, `{merged:true, emptyKind:"ALREADY_MERGED"}` before this fix, `{merged:false,
-  // gateBaseInvalidated:true}` after it, main's movement the only variable) — strictly worse than the gap
-  // this card exists to close, on the path's MORE common case.
-  //
-  // `gateBaseBranchHead`, when supplied, is the fix: it's the branch's OWN tip sha, captured by the
-  // preLanded producer at the exact same moment as `requireCanonicalHead` (see confirmWorkerMerge's own
-  // doc). Re-read fresh HERE, inside the lock — if the branch's CURRENT tip still matches it, the
-  // `requireCanonicalHead` enforcement below is SKIPPED entirely; only a branch that has itself moved since
-  // capture falls through to it. This is the correct discriminator, not merely a convenient one: the
-  // hazard above requires NEW content on the branch — main moving alone is harmless when the branch is
-  // provably unchanged. And it IS provable, not assumed: `preLanded` already established (via
-  // `branchContentLandedInCommit`) that this branch's content matched what's already landed AT the capture
-  // moment; a commit sha is content-addressed, so an UNCHANGED tip proves that match still holds now,
-  // regardless of anything main did meanwhile. Given that, the eventual squash below can only land as a
-  // true no-op (safe — proceeds to the ALREADY_MERGED classification ~200 lines down, unaffected by this
-  // skip) or hit a genuine line-level conflict on the branch's own already-landed paths (already handled
-  // separately below, fails loud, zero side effects) — never silently land unverified new content. An
-  // alternative considered and rejected: deferring the ENTIRE `requireCanonicalHead` check until the
-  // squash's staged set is known (only refuse when there's actually something to protect) — correct in
-  // spirit, but it would move this check out of its "first thing after the lock, zero side effects"
-  // position, a property this doc has leaned on since e50600d2/eda70da6 and true for EVERY caller, not just
-  // this one. Reading the branch's tip is cheaper and preserves that position untouched.
-  //
-  // FAIL-CLOSED: `gateBaseBranchHead` is `undefined` for the union and reuse producers (see
-  // confirmWorkerMerge's single call site) — this whole pre-check is skipped for them and
-  // `requireCanonicalHead` enforces exactly as it always has, byte-identical. On the preLanded producer, a
-  // failed fresh read of the branch's tip (a git error/timeout) is treated as "no stability proof
-  // available", NOT as "assume unchanged" — it falls through to the ordinary enforcement below, same as a
-  // branch that provably moved.
-  // SQUASH-TARGET RESOLUTION (card 7efc2bff item 1, TOCTOU closed): resolve the branch tip to an exact sha
-  // HERE, unconditionally, and squash THAT SHA below — never the branch NAME. `git merge --squash <branch>`
-  // re-resolves the ref at squash time, ~175 lines and several intervening git subprocess spawns after this
-  // point; the worker's own pty can still be alive on this path (see the preLanded doc above) and land a new
-  // commit on `branch` in that gap, which a name-based squash would then silently include even though it was
-  // never checked against `gateBaseBranchHead`/`requireCanonicalHead` above. Squashing the frozen sha instead
-  // means a branch that moves in that window simply doesn't contribute its new commit to THIS squash — the
-  // object squashed is provably the same object this function validates just below. A failed resolve (a git
-  // error/timeout) falls back to squashing by branch name, matching this function's behavior before this fix.
+  // @decision eda70da6 — the squash re-derives FRESH against canonical HEAD at run time, so it's only
+  // provably the same thing the gate validated if main hasn't moved since the gate's base sha was fixed.
+  // Re-checked HERE, first after the lock, zero side effects on mismatch (gateBaseInvalidated:true). The
+  // preLanded path (card b0ab78d6) needs its OWN discriminator (gateBaseBranchHead) to avoid over-refusing
+  // on a routine idempotent re-confirm (reproduced regression: {merged:true} -> {gateBaseInvalidated:true}
+  // purely from main moving). See
+  // docs/decisions/eda70da6-gate-base-re-verification-and-the-toctou-closed-squash-target.md.
+  // @decision 7efc2bff — the squash target is resolved to a frozen sha HERE, never the branch NAME, closing
+  // a TOCTOU where a still-committing worker's late commit could be silently squashed in unchecked. See
+  // docs/decisions/7efc2bff-squash-target-resolved-to-a-frozen-sha-closing-a-toctou.md.
   let resolvedBranchHead: string | undefined;
   try {
     resolvedBranchHead = (await withTimeout(
@@ -5853,32 +4341,10 @@ async function mergeBranchLocked(
       };
     }
   }
-  // ── residue clear ── (card c6a6f405 item 3: this block's own `git reset --merge HEAD` below is a real
-  // mutating git call that runs BEFORE `enterMergeDangerWindow` — see that function's own doc in
-  // merge-danger-window.ts for why it's deliberately left outside the danger window/latch instead of
-  // moving the window's entry earlier to cover it.)
-  // Re-derive from a CLEAN index: clear any AFFIRMATIVE in-progress-merge residue (a stale MERGE_HEAD or
-  // unmerged entries from an aborted op) BEFORE the squash, so a leftover state can't make the first
-  // --squash stage nothing (the idempotency bug). Gated on a positive signal so a clean canonical repo is
-  // never touched. The two probes are INDEPENDENT: `ls-files --unmerged` exits 0 on a clean repo (never
-  // throws), so it runs FIRST and unconditionally; the `rev-parse --verify MERGE_HEAD` check (which exits
-  // non-zero → throws when there is no in-progress merge) is isolated in its OWN try/catch so its throw
-  // can't skip the unmerged probe — unmerged residue WITHOUT a MERGE_HEAD is now auto-recovered up front too.
-  //
-  // The clear itself uses `--merge`, not `--hard` (card c78cbf5f, fast-follow to 9e77050f/06b5c47f): a
-  // precondition only licenses the operation over the state it actually observed, and the affirmative
-  // MERGE_HEAD/unmerged signal here licenses clearing THAT merge state, not discarding unrelated unstaged
-  // work elsewhere in the same tree — the gap this block used to have, sitting upstream of the dirty-tree
-  // refusal below (which only protects the squash itself, not this earlier clear). `git reset --merge
-  // <commit>` is the mechanism `git merge --abort` itself uses, generalized to run whether or not MERGE_HEAD
-  // is actually set (`merge --abort` requires it; `--squash` never sets it, so the bare-unmerged-without-
-  // MERGE_HEAD case this block also handles needs the same clear too, and plain `merge --abort` can't do
-  // that). Verified empirically (not just from docs): since this always resets to the CURRENT HEAD — never
-  // a different commit — every unmerged/conflicted path is unconditionally resettable (that IS what aborting
-  // a merge means), while a file with only an unstaged edit outside the conflict is never part of the
-  // HEAD→HEAD delta and so is left untouched, where `--hard` would have discarded it regardless. (Staged
-  // content to such a file is NOT protected by `--merge` either — same as `--hard` — but that is unchanged
-  // from before this fix and outside this card's scope, which is specifically the unstaged case.)
+  // @decision 2eddf573 — clear any AFFIRMATIVE in-progress-merge residue (stale MERGE_HEAD/unmerged) before
+  // the squash, via `reset --merge` (never --hard — an affirmative merge signal licenses clearing only that
+  // state, not unrelated unstaged work). Two independent probes, each in its own try/catch. See
+  // docs/decisions/2eddf573-squash-merge-is-idempotent-and-refuses-on-ambiguous-dirty-state.md.
   try {
     const unmerged = (await withTimeout(git.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (canonical, pre-check)")).trim() !== "";
     let inProgressMerge = false;
@@ -5897,38 +4363,10 @@ async function mergeBranchLocked(
     }
   } catch { /* ls-files failed (e.g. not a repo / no HEAD) ⇒ no residue to clear */ }
 
-  // ── Staged-but-not-unmerged residue (card 9e77050f — a SECOND, non-concurrent trigger for the same
-  // corruption `withCanonicalIndexLock` closes for concurrency: the mutex is in-process, this residue outlives
-  // the process). A `--squash` that stages a diff and then never reaches its commit step (the daemon dying
-  // between them — a `daemon_restart`, a supervisor kill, a crash) leaves the canonical index dirty WITHOUT
-  // setting MERGE_HEAD and WITHOUT any unmerged entry — the one state the clear above cannot see, because by
-  // the time we get here it has already handled every AFFIRMATIVE in-progress-merge signal there is.
-  //
-  // Whatever is STAGED at this point is therefore either (a) that dead squash's own leftover stage, or (b) a
-  // human's own staged work-in-progress in THIS SAME canonical checkout (this repo self-hosts from it —
-  // there is no worktree isolation here the way there is for a worker). Git state alone cannot distinguish
-  // (a) from (b) — so on ANY staged tracked state we REFUSE LOUDLY instead of guessing. This is a false
-  // NOT-merged, not a false landed: `ok:false` is what every other defensive path in this function already
-  // returns on ambiguity, and it's a safe, idempotent retry once a human resolves the canonical checkout by
-  // hand — never a silent absorption of someone else's content under our own subject/trailer.
-  //
-  // ⚠️ This precondition is deliberately SCOPED TO THE INDEX (card 06b5c47f, correcting an earlier draft of
-  // this fix that refused on ANY dirty tracked state — staged OR unstaged). Only staged content can actually
-  // produce the corruption this guard exists to prevent: `--squash` commits the INDEX, so unstaged
-  // working-tree edits are never committed by it and can never end up under this branch's subject/trailer.
-  // The earlier broad check refused 4-for-4 on real canonical repos whose only dirt was UNSTAGED (ordinary
-  // WIP, or a submodule gitlink whose checked-out commit sits ahead of its recorded pointer — a normal
-  // steady state for a repo with submodules, not residue, and NOT something a human can necessarily clear),
-  // which could block a legitimately-configured repo's merges PERMANENTLY. So the MERGE refusal below keys
-  // on the index alone (`diff --cached`).
-  //
-  // That narrowing does NOT license every `reset --hard` further down in this function — those have a
-  // WIDER blast radius (staged AND unstaged tracked state), so they get their OWN separate guard,
-  // `hadUnstagedDirtAtEntry` (computed right after this check, from the same broad `git status --porcelain`
-  // the old single check used), which skips the reset instead of running it whenever unstaged dirt predates
-  // this merge attempt. A precondition only licenses the operation over the state it actually observed — an
-  // index-only probe licenses index-only conclusions, not "the working tree is safe to reset". See
-  // `resetOrSkip`'s own doc below for how that guard stays scoped to what `reset --hard` actually touches.
+  // @decision 2eddf573 — staged-but-not-unmerged residue is a SECOND, non-concurrent trigger for the same
+  // corruption (outlives the process, invisible to the clear above); refuses loudly on ANY staged tracked
+  // state, scoped to the INDEX only (never unstaged — a wider `reset --hard` guard handles that separately).
+  // See docs/decisions/2eddf573-squash-merge-is-idempotent-and-refuses-on-ambiguous-dirty-state.md.
   let stagedAtEntry: string;
   try {
     stagedAtEntry = (await withTimeout(git.raw(["diff", "--cached", "--name-only"]), timeoutMs, "git diff --cached (canonical, entry check)")).trim();
@@ -5953,34 +4391,10 @@ async function mergeBranchLocked(
     return { ok: false, reason: `failed to inspect canonical repo working-tree state before merge: ${(e as Error).message}` };
   }
   const hadUnstagedDirtAtEntry = statusAtEntry !== "";
-  // Every `reset --hard HEAD` below this point in this function discards BOTH staged and unstaged tracked
-  // state — a wider blast radius than the staged-only entry check above proved safe. `resetOrSkip` is the
-  // guard scoped to that wider radius: when unstaged dirt predated this merge attempt, it SKIPS the reset
-  // (leaving whatever's on disk untouched) instead of risking a human's pre-existing unstaged edits, and
-  // reports why. What it leaves behind on skip is provably safe to leave: since the entry check above
-  // already proved the index was clean, and git itself refuses to let `--squash` silently overwrite
-  // unstaged local modifications (it errors instead), anything staged from this point on is this squash's
-  // OWN output — which the STAGED entry check above will refuse on loudly, not silently absorb, the next
-  // time a merge is attempted against this repo.
-  //
-  // ⚠️ REJECTED ALTERNATIVE (card 06b5c47f): a MIXED reset (`git reset HEAD`, no `--hard`) looks like a
-  // strictly better move here — it clears the staged residue without touching the working tree, so it
-  // reads as "auto-recover AND protect the human's edits" instead of "skip and make a human clean up".
-  // It is not. `--squash` applies its diff to the WORKING TREE as well as the index (this is a real merge,
-  // just uncommitted) — a mixed reset only unstages that diff, it does not undo it. The squash's output
-  // would keep sitting in the canonical working tree as unstaged noise, indistinguishable from ordinary
-  // WIP. That state is QUIETER than what this function ships, not safer: `diff --cached` would come back
-  // empty, so the NEXT merge attempt would proceed (not refuse) and `--squash` a new branch on top of a
-  // tree that already silently carries a previous branch's abandoned changes — trading a loud, correct
-  // refusal for a silent, ambiguous working tree. Silent-and-ambiguous around this exact function is what
-  // cost a reviewed p1 (see the file-level corruption-history doc above); this function does not
-  // reintroduce that shape to buy a nicer-looking auto-recovery.
-  //
-  // One real consequence of skipping instead: a genuine squash CONFLICT that lands on top of pre-existing
-  // unstaged dirt leaves the canonical repo needing HUMAN cleanup (conflict markers + the unstaged dirt,
-  // both left in place) rather than auto-resolving. That is the same `9e77050f` stance — refuse loudly,
-  // a human resolves — now correctly SCOPED to cases that are actually dangerous instead of firing on
-  // ordinary WIP. It is deliberate, not a regression.
+  // @decision 06b5c47f — resetOrSkip SKIPS the reset (never a mixed `git reset HEAD`) when unstaged dirt
+  // predated this merge attempt — a mixed reset would leave the squash's output as silent unstaged noise,
+  // letting the NEXT merge proceed onto a tree secretly carrying an abandoned branch's changes. See
+  // docs/decisions/06b5c47f-resetorskip-skips-rather-than-mixed-resets-on-pre-existing-unstaged-dirt.md.
   async function resetOrSkip(context: string): Promise<string | null> {
     if (hadUnstagedDirtAtEntry) {
       return `skipped automatic cleanup (${context}) because the canonical repo already had unstaged tracked changes before this merge attempt — resetting would risk discarding them; a human must resolve the canonical checkout by hand, and the next merge attempt will refuse loudly on any staged residue this left behind`;
@@ -6052,34 +4466,12 @@ async function mergeBranchLocked(
     // anything outside it.
     if (rawError) {
       const cleanupIssue = await resetOrSkip("rawError cleanup");
-      // DIRTY-OVERLAP SIGNATURE (card 4b7ff996): git's own error for "the canonical repo has unstaged
-      // local modifications to a path this squash would overwrite" is distinct and diagnostic — surface
-      // it as its own `dirtyOverlap:true` reason rather than the generic message below, because the
-      // correct remedy here is NOT a rebase (this branch's base is not the problem; no rebase of it
-      // touches the canonical repo's own working tree) — see confirmWorkerMerge's own use of this field
-      // for the caller-facing wording. {@link detectCanonicalDirtyOverlap} is the PRIMARY, cheap defense
-      // against this class (it refuses at admission, before the gate ever runs); this is a defense-in-
-      // depth backstop for the race window between that preflight and this squash — the gate itself can
-      // run for minutes in between, during which the canonical repo can newly go dirty on an overlapping
-      // path.
-      // Card 4b7ff996 CR follow-up: this ONE regex matches BOTH of git's "would be overwritten by merge"
-      // wordings — "Your local changes to the following files..." (an unstaged TRACKED modification, the
-      // case detectCanonicalDirtyOverlap's admission-time preflight actually detects) AND "The following
-      // untracked working tree files..." (an UNTRACKED collision — deliberately NOT detected at admission
-      // yet; card notes it as a follow-up, since `--untracked-files=no` there is load-bearing against a
-      // different false-refusal, see that function's own doc). Both land here as the SAME `dirtyOverlap`
-      // classification, so the wording below is worded generically enough to be true for either — "local
-      // content" / "commit/discard OR move/remove", not "unstaged changes" / "commit or discard" alone,
-      // which would be actively WRONG for the untracked case (an untracked file cannot be "unstaged").
+      // @decision 4b7ff996 — squash-time backstop for the residual race window between the admission-time
+      // dirty-overlap preflight and this squash: classifies a matching rawError as dirtyOverlap:true (never
+      // a generic failure) and ALWAYS includes rawErrorMessage's specific path names. See
+      // docs/decisions/4b7ff996-admission-time-preflight-for-a-squash-that-can-never-land.md.
       const dirtyOverlap = !!rawErrorMessage && /would be overwritten by merge/i.test(rawErrorMessage);
       if (dirtyOverlap) {
-        // `rawErrorMessage` is ALWAYS included — it's git's own diagnostic and the ONLY place the
-        // specific overwritten path(s) get named — even when `cleanupIssue` is also set (the ordinary
-        // case here: `resetOrSkip` skips its reset whenever unstaged dirt PREDATED this merge attempt,
-        // which is exactly what triggered this branch in the first place, so `cleanupIssue` is populated
-        // on nearly every real hit). An earlier draft of this fix used `cleanupIssue`'s presence to
-        // choose between the two messages and silently DROPPED `rawErrorMessage` — and with it the
-        // path name — whenever cleanup was skipped; caught by this file's own mutation-tested backstop.
         return {
           ok: false,
           dirtyOverlap: true,
@@ -6122,28 +4514,10 @@ async function mergeBranchLocked(
     const taskSubject = taskTitle ? taskTitle.trim().split(/\r?\n/)[0]!.trim() : undefined;
     const rawSubject = taskSubject || (await deriveTasklessSubject(repoPath, branch, deps)) || branch;
     const subject = toConventionalSubject(rawSubject);
-    // TITLE/SUBJECT ENTITY BACKSTOP (card f324e8fa Code Review follow-up) — the AUTHORITATIVE enforcement
-    // point, not merely a second copy of the pre-gate check `confirmWorkerMerge` (sessions/service.ts)
-    // already runs. `subject` here is the exact string `git commit -m` below is about to use, at the
-    // moment it is well and truly fixed — this sits AFTER the staged-diff noop check above (a genuine
-    // ALREADY_MERGED/STAGE_EMPTY_RETRY re-confirm returns before `subject` is ever built, via the `!staged`
-    // branch above, so it can never trip this) and INSIDE the canonical index lock, downstream of every
-    // subject source (`taskSubject`, the taskless `deriveTasklessSubject` fallback, and the branch-name
-    // last resort) — so it closes the taskless-merge gap too, as a side effect, at no extra cost.
-    //
-    // WHY THE PRE-GATE CHECK ISN'T ENOUGH ON ITS OWN: it reads the task's title once, before the gate
-    // runs — a SNAPSHOT. The title can be rewritten out from under it before this call ever lands: the
-    // human REST edit route (`POST /api/tasks/:id`, gateway/server.ts) writes `title` directly, with NO
-    // entity check at all (see checkTitleHtmlEntities's own scope — it guards createProjectTaskChecked/
-    // updateProjectTask, not that route). A gate can run for minutes; that's a real window. This check is
-    // what makes the invariant actually hold regardless of when/how the title last changed — the pre-gate
-    // check stays too, because refusing before a gate lane is spent is still strictly better when it
-    // catches the common case (see that check's own doc for why it isn't redundant to remove).
-    //
-    // Reuses the SAME predicate every other call site does ({@link checkTitleHtmlEntities},
-    // tasks/title-guard.ts) — never a second pattern. Unconditional (`allow:false`): this path has no
-    // caller-supplied override to honor, for the same reason the pre-gate check doesn't (see that check's
-    // own doc — nothing is persisted for either site to read).
+    // @decision f324e8fa — the AUTHORITATIVE entity-check enforcement point, not merely a copy of the
+    // pre-gate check (which reads a title SNAPSHOT that can be rewritten via the human REST edit route
+    // during the gate's multi-minute run). Reuses checkTitleHtmlEntities; covers all three subject sources
+    // uniformly. See docs/decisions/f324e8fa-title-entity-backstop-is-the-authoritative-enforcement-point.md.
     const subjectGuard = checkTitleHtmlEntities(subject, false);
     if (subjectGuard) {
       const cleanupIssue = await resetOrSkip("title-html-entity cleanup");
@@ -6171,23 +4545,10 @@ async function mergeBranchLocked(
     }
     const bodyBlock = workerCommitLogBody ? `\n\n${workerCommitLogBody}` : "";
     let message = `${subject}${bodyBlock}\n\nLoom-Worker-Branch: ${branch}\n`;
-    // Card c862f14c: stamp `Loom-Worker-Base` + `Loom-Worker-PathSet` into THIS message, from the STAGED
-    // index, instead of a follow-up `git commit --amend` (the pre-fix shape this replaces — see that
-    // card's own DoD for the three problems the amend caused: an orphan window, doubled hooks, and a
-    // `commit-msg` hook's own trailer work getting silently discarded because the amend rebuilds the
-    // message from this in-memory JS string). `base` = canonical `HEAD` as it stands RIGHT NOW, immediately
-    // before the squash lands — identical to the old `preAmendSha^` (a commit's parent IS whatever `HEAD`
-    // was before it was made), just read one step earlier. `digest` is computed from the CURRENTLY-STAGED
-    // index via {@link stagedPathSetDigest}, which card c862f14c's DoD-1 proves is byte-identical to what
-    // {@link changedPathSetDigest} would compute from `sha^..sha` after the commit: a commit's tree IS the
-    // index it was made from, and its parent IS whatever `HEAD` was before it — so the staged-vs-HEAD diff
-    // and the landed `sha^..sha` diff are the SAME two tree objects, not merely usually-equal ones.
-    // 🔴 LOAD-BEARING ADJACENCY (card c862f14c DoD, a proviso of the DoD-1 proof, not just today's code
-    // shape): no git call may land between this capture and the single `git commit` below that could move
-    // canonical `HEAD` or mutate the index — doing so would break the tree-identity the proof rests on. Do
-    // not insert one. Best-effort, matching the old amend's own posture: a failure here just omits both
-    // trailers (the commit still lands, degrading to the existing `trailer-only` tier) rather than failing
-    // an otherwise-successful merge.
+    // @decision c862f14c — stamps the path-set trailers from the STAGED index (never a follow-up amend,
+    // which caused an orphan window + doubled hooks). LOAD-BEARING ADJACENCY: no git call may land between
+    // this capture and the commit below, or it breaks the tree-identity the byte-identical-digest proof
+    // rests on. See docs/decisions/c862f14c-pathset-trailers-stamped-from-staged-index-not-a-followup-amend.md.
     try {
       const base = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, pathset base)")).trim();
       const digest = await stagedPathSetDigest(git, timeoutMs);
@@ -6223,34 +4584,10 @@ async function mergeBranchLocked(
   }
 }
 
-/**
- * Boot-time companion to the entry check in {@link mergeBranchLocked} (card 9e77050f, narrowed by card
- * 06b5c47f): READ-ONLY, scans each given canonical repo path for dirty tracked state — staged and/or
- * unstaged; untracked files excluded, same rationale as the merge-time check — nothing here is at risk
- * from a `reset --hard` no one is going to run). Reports BOTH kinds, but the caller is expected to word
- * them differently (see `staged` on each result): only STAGED content is the residue class the merge-time
- * check actually refuses on — unstaged-only dirt (ordinary WIP, or a submodule gitlink whose checked-out
- * commit sits ahead of its recorded pointer, a normal steady state for a repo with submodules) will NOT
- * block the next merge attempt. This does NOT close a hole by itself — the merge-time refusal already
- * makes the corruption impossible on its own, since a staged-residue-bearing repo now fails its NEXT merge
- * attempt closed instead of silently absorbing it. This exists only to shrink the detection window:
- * without it, residue left by a daemon dying mid-merge sits unnoticed until someone happens to attempt a
- * merge against that repo; with it, a boot-time scan surfaces it the moment the daemon comes back up.
- * NEVER resets, NEVER blocks boot, NEVER throws — same reasoning as the merge-time check for why it only
- * reports: this can't tell a dead squash's leftover stage apart from a human's own work-in-progress in
- * that checkout either, so touching it here would be exactly as unsafe as touching it at merge time. A
- * repo that isn't a real git checkout (e.g. a vault-only project's `repoPath`, or a deleted/unreadable
- * directory) is silently skipped, not surfaced as a failure — this is a best-effort courtesy scan, not a
- * boot gate.
- *
- * BOUNDED + NON-INTERACTIVE (board card 44c28799, same pass as {@link mergeBranchLocked}): this ran an
- * unbounded `simpleGit(repoPath)` with no block-timeout — a repo on a busy/locked disk (the same class of
- * hang that once wedged daemon boot for hours, see {@link GIT_OP_TIMEOUT_MS}'s doc) would hang this loop's
- * `await` forever, one repo blocking the scan of every repo after it. Fire-and-forget from the caller
- * (index.ts never awaits this before serving traffic) so the boot-blocking risk was always low, but the
- * fix is the same one-line convention as everywhere else in this file — no reason to leave a second
- * unbounded instance behind while fixing the first.
- */
+/** @decision 44c28799 — boot-time, READ-ONLY companion to {@link mergeBranchLocked}'s entry check: scans
+ *  for dirty tracked state to SHRINK THE DETECTION WINDOW (never closes the hole by itself — the
+ *  merge-time refusal already does that). NEVER resets, NEVER blocks boot, NEVER throws. BOUNDED, same
+ *  pass as mergeBranchLocked. See docs/decisions/44c28799-bound-every-git-op-in-this-file-to-15s.md. */
 export async function scanCanonicalReposForMergeResidue(
   repoPaths: string[], deps: BoundedGitDeps = {},
 ): Promise<{ repoPath: string; status: string; staged: boolean }[]> {

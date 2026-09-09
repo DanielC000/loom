@@ -1,9 +1,9 @@
-# 3564fd1e — the fleet-wide gate-timeout death spiral fix: TWO decisions, one card id
+# 3564fd1e — the gate-timeout breaker: THREE decisions, one card id
 
-This record anchors TWO distinct fixes for the SAME 2026-07-21 incident, at two different sites in the
-codebase, merged into one record because they share a card id (`decision-records.mjs`'s `resolveRecord`
+This record anchors THREE decisions for the SAME gate-timeout circuit breaker, at three different sites in
+the codebase, merged into one record because they share a card id (`decision-records.mjs`'s `resolveRecord`
 resolves exactly one record per id, via `.sort()[0]` over candidate filenames — a second `3564fd1e-*.md`
-file would silently shadow one of these two decisions rather than adding to them).
+file would silently shadow one of these three decisions rather than adding to them).
 
 ## Decision A: per-branch consecutive gate-timeout streak breaks the death spiral
 
@@ -43,3 +43,7 @@ Platform-specific mechanism: on win32, `taskkill /pid <child.pid> /T /F` kills t
 ### Source
 
 JSDoc comment in `packages/daemon/src/orchestration/gate-runner.ts`, above `killGateProcessTree`: originally lines 878-897, as of gate-runner.ts tranche 1's HEAD. Relocated by card `b80a2d76` (gate-runner.ts tranche 1); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped. Folded into this pre-existing Decision A record (rather than kept as a separate file) by the same card, after the merge-time discovery that `resolveRecord`'s `.sort()[0]` resolution means only one `3564fd1e-*.md` file can ever be live — see `docs/decisions/` convention notes.
+
+## Decision C: ignores the union-merge
+
+`getWorktreeLatestNonMergeSha` (`git/worktrees.ts`) walks first-parent, skipping merges, so a union-merge can't defeat Decision A. Fails safe to `null`.

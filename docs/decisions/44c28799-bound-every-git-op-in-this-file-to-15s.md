@@ -11,6 +11,20 @@ This is the fix for the boot-outage: a git op on a busy/locked dir (e.g. a direc
 - Do not leave a new git op in this file unbounded — route it through `boundedGit`/`boundedMergeGit` (or thread a `BoundedGitDeps`) so a wedged child can't hang the caller.
 - Do not lower the ceiling casually — 15s is deliberately generous for a real (sub-second) op and matches `git/writer.ts`'s own local-write timeout; it's sized to fail a genuinely wedged op fast, not to rush a slow-but-legitimate one.
 
+## `scanCanonicalReposForMergeResidue` — the boot-time, read-only companion scan
+
+Boot-time companion to `mergeBranchLocked`'s entry check: READ-ONLY, scans each given canonical repo path for dirty tracked state (staged and/or unstaged; untracked excluded, same rationale as the merge-time check). Reports BOTH kinds, worded differently — only STAGED content is the residue class the merge-time check actually refuses on (see [[06b5c47f-resetorskip-skips-rather-than-mixed-resets-on-pre-existing-unstaged-dirt]]); unstaged-only dirt (ordinary WIP, or a submodule gitlink ahead of its recorded pointer) will NOT block the next merge attempt. This does NOT close a hole by itself — the merge-time refusal already makes the corruption impossible on its own, since a staged-residue-bearing repo now fails its NEXT merge attempt closed instead of silently absorbing it. It exists only to SHRINK THE DETECTION WINDOW: without it, residue left by a daemon dying mid-merge sits unnoticed until someone happens to attempt a merge against that repo; with it, a boot-time scan surfaces it the moment the daemon comes back up.
+
+NEVER resets, NEVER blocks boot, NEVER throws — same reasoning as the merge-time check: this can't tell a dead squash's leftover stage apart from a human's own work-in-progress either, so touching it here would be exactly as unsafe as touching it at merge time. A repo that isn't a real git checkout (a vault-only project's `repoPath`, or a deleted/unreadable directory) is silently skipped, not surfaced as a failure — a best-effort courtesy scan, not a boot gate.
+
+BOUNDED + NON-INTERACTIVE, same pass as `mergeBranchLocked`: this ran an unbounded `simpleGit(repoPath)` with no block-timeout — a repo on a busy/locked disk would hang this loop's `await` forever, one repo blocking the scan of every repo after it. Fire-and-forget from the caller (`index.ts` never awaits this before serving traffic) kept the boot-blocking risk low even before this fix, but there was no reason to leave a second unbounded instance behind while fixing the first.
+
+## Do not
+
+- Do not have this scan reset or otherwise mutate anything — it can't distinguish a dead squash's leftover stage from real human WIP any better than the merge-time check can.
+- Do not surface a non-git-checkout repo as a scan failure — silently skip it; this is a best-effort courtesy scan, not a boot gate.
+- Do not leave this scan's `simpleGit` construction unbounded just because it's fire-and-forget — one busy/locked repo would still block every repo scanned after it.
+
 ## Consequences
 
 A hung git op (a locked/busy directory, a wedged commit hook) now fails within ~15s instead of hanging the daemon indefinitely — critical during boot-reconcile, which runs before any worker session exists to notice a stall. A try/catch alone was never sufficient here — a hang doesn't throw — so every caller must go through the bounded wrapper rather than relying on its own error handling.
