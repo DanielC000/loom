@@ -2698,25 +2698,8 @@ export class SessionService {
   }
 
   /**
-   * Start a NEW END-USER WORKSPACE-AUDITOR session in an agent (End-User Platform tier B5). Mirrors
-   * startAuditor EXACTLY — incl. its CREATE-ONLY (NON-singleton) shape — but passes callerRole
-   * "workspace-auditor", so the session role is LOCKED to "workspace-auditor" regardless of the agent's
-   * profile role (an EXPLICIT caller role always wins in resolveAgentSpawn). The locked role — NOT the
-   * profile role — drives the de-privileged loom-user-audit surface (buildMcpServers, B3): a
-   * workspace-auditor session gets loom-tasks + loom-user-audit ONLY and 404s on /mcp-platform,
-   * /mcp-orch, /mcp-audit and /mcp-setup, so a hostile transcript can never escape the read-and-suggest box.
-   *
-   * CREATE-ONLY, NOT a singleton (design gotcha #9): each on-demand "Review my workspace" run is a fresh
-   * ephemeral read-and-file session, exactly like the dev Auditor (startAuditor). Do NOT copy startSetup's
-   * live-reuse guard here — that would attach a repeated Review click to a stale, already-finished run.
-   *
-   * HUMAN-REST only (gateway POST /api/agents/:id/sessions {role:"workspace-auditor"}) — no agent/MCP path
-   * mints one (session_spawn refuses everything but manager|plain; the role is absent from the mintable
-   * profile enum + setupRoleError). The Workspace Auditor agent lives in the reserved "Getting Started" home (B4).
-   *
-   * `prompt` is an OPTIONAL per-schedule custom task description (mirrors startManager/startAuditor) —
-   * appended via `appendScheduledPrompt` AFTER the agent's own startupPrompt. Undefined/null ⇒
-   * byte-identical to today.
+   * @decision f9b47cd1 — CREATE-ONLY, not a singleton (design gotcha #9); do NOT copy startSetup's
+   * live-reuse guard here (docs/decisions/f9b47cd1-workspace-auditor-create-only-not-singleton.md)
    */
   startWorkspaceAuditor(agentId: string, prompt?: string | null): Session {
     const agent = this.db.getAgent(agentId);
@@ -3459,159 +3442,32 @@ export class SessionService {
   }
 
   /**
-   * Read-only LIVE-state lookup for ONE gate/merge run by its PendingOpRegistry `opId` (card edc1ec12's
-   * `gate_status` tool — Platform-Audit finding 7afa6ea9). A caller holding the `opId` a
-   * `run_gate`/`worker_merge_confirm` `{status:"pending"}` response returned can use this to find out
-   * whether that run is still queued behind the `GateSemaphore`'s cap or actually executing, and for how
-   * long — WITHOUT waiting for the eventual terminal nudge. This is exactly the visibility gap the audit
-   * finding names: "stuck 20 minutes inside vitest" would have instantly falsified the "gate is
-   * wedged/flaky" theory that led to an unsafe manual squash-merge past a gate that had never reported a
-   * terminal signal. Deliberately does NOT include a live output tail (see the card's scoping note): that
-   * would need new plumbing to expose `runGateStep`'s in-progress capture ring, a materially bigger change
-   * than this read-only status lookup; elapsed time alone already answers "is this actually stuck".
-   *
-   * PREFIX SUPPORT (card 225bc7bd — fixes a real false-negative bug): `opId` accepts EITHER the full id OR
-   * an unambiguous 8-char id-prefix, mirroring every sibling tool (`tasks_get`, `worker_spawn`'s `taskId`,
-   * `escalation_status`, `agent_get`) — `gate_status` used to be the one outlier doing an EXACT-match-only
-   * lookup, so pasting the short id Loom displays everywhere else silently missed a genuinely live op.
-   *
-   * TOMBSTONE FALLBACK (card e3e40167, superseding the original edc1ec12/fc243a43 `"not_found"` shape): a
-   * live-registry miss (`GateSemaphore.findByOpId` → `kind:"none"`) is no longer reported as `"not_found"`
-   * — it falls through to `Db.findPendingGateOpByOpId`, the SAME scoped id-or-prefix resolution over the
-   * PERMANENT `pending_gate_ops` tombstone table (never pruned — see its schema doc), and returns that
-   * row's OWN terminal state: `"settled"`, `"evicted-dead-owner"`, or `"orphaned-by-restart"` (see the
-   * schema doc for what each means). `"pending"` covers the genuinely-real window where a row was minted but
-   * is not yet visible in the live GateSemaphore (either about to register, or — after a real daemon restart
-   * — awaiting the next boot's `reconcileOrphanedGateOps`/`reconcileUnsurfacedPendingGateOps` sweep, card
-   * 7239c712): the op demonstrably EXISTS, so this must never collapse to `never_existed`. ⚠️ CORRECTED
-   * (card d5e67146 — this window used to be described as "narrow" here; it stopped being narrow the moment
-   * card 81d795de deferred `mergeBatch`'s own tombstone settle to full completion, so a healthy in-flight
-   * batch can now sit `"pending"` for tens of minutes, spanning its shared gate run plus every fallback
-   * candidate's own sequential solo merge): see `elapsedMs`'s/`ownerSessionAlive`'s own doc on the return
-   * type below for the real liveness signal this state now carries, so a caller no longer has to treat a
-   * long-lived `"pending"` batch row as indistinguishable from a genuinely stranded one. An AMBIGUOUS prefix at EITHER layer is a
-   * DISTINCT outcome, `state:"ambiguous"` with an `error` naming the matching opIds — it must never
-   * collapse into `never_existed`/`unknown` either: a miss that can't resolve is a different answer than a
-   * miss that means "gone" or "not visible to you", and none of the three may impersonate another.
-   *
-   * SETTLED VERDICT (card 4c5bf820 — reusing the SAME tombstone row this method already falls back to):
-   * for a `"settled"` **"gate"** (worker self-check) op whose row carries a recorded `verdict` (written by
-   * `runWorkerGate`'s `onSettle` — see `deriveWorkerGateVerdict`'s doc), the return ALSO spreads
-   * `passed`/`cancelled`/`reason`/`durationMs`/`validatedHead`/`headWarning`/`steps`/`outputTail`/
-   * `gateDetail` — essentially what `run_gate` itself would have returned inline, had it not degraded to
-   * pending. Every field is OMITTED (not `null`/`false`) when there's nothing recorded — a legacy row (from
-   * before either card below), a non-`"settled"` state, or a corrupt/unparseable stored payload (fails
-   * closed to "nothing recorded", never a throw — see `Db.toPendingGateOp`'s own try/catch). This is now the
-   * ONE exception to "this tool never reports a pass/fail outcome itself" — narrowly, for a settled gate
-   * (worker OR, since below, merge) with a verdict on file; the `[loom:gate-*]`/`[loom:merge-*]` nudge stays
-   * the primary, unprompted delivery, this is the queryable recovery path for a caller that missed it or
-   * wants to re-check. ⚠️ CORRECTED (card 3aec1df6 — the prior wording here read "the 'merge' kind is
-   * UNCHANGED: gate_status on a settled merge op still never reports pass/fail/rejected", which stopped
-   * being true the moment card 9f6598dd shipped and was never updated to say so): a settled `"merge"` row
-   * gets the SAME spread, via `deriveMergeGateVerdict` (`confirmWorkerMergeTracked`'s own `onSettle`) —
-   * `gate_status(opId)` on a rejected merge DOES carry `gateDetail.failingTest`/`gateDetail.stderrTail`/
-   * `outputTail` today. This is the surface `gate_history`'s own `opId` field (card 3aec1df6) exists to let
-   * a caller reach for the FULL diagnostic — `stderrTail`/`outputTail`/`phase`/`exitCode`/`signal`/
-   * `timedOut` still live only here, never on a `gate_history` row. ⚠️ CORRECTED (card eb9348b0):
-   * `gate_history`'s own `failingTest` is NO LONGER unconditionally `null` for a merge row — its mapper
-   * now also reads THIS SAME settled verdict payload (already joined in for `emitCompareReduced`) as a
-   * fallback, so the common "has this test failed before" scan doesn't need this pivot at all; see
-   * `GateHistoryRow.failingTest`'s own doc for the recovery rate and the cases still requiring it.
-   *
-   * FOUR TERMINAL "not live, not found" outcomes now, not three — `never_existed` alone is not enough
-   * once a scoped caller exists (see below): `"never_existed"` is a POSITIVE assertion the id was NEVER
-   * MINTED, provable ONLY over an UNSCOPED full-table/full-registry view (every manager call site — no
-   * candidate was ever filtered out, so a miss really does mean gone); `"unknown"` is the honest-ambiguity
-   * sink for a SCOPED caller's miss — it covers BOTH "this id genuinely never existed" AND "this id exists
-   * but isn't yours", and a scoped caller can never tell those apart (nor should it be able to).
-   *
-   * ⚠️ THIS POSITIVE ASSERTION HOLDS FOR `deploy` OPIDS TOO, as of card bed91595 (closing DoD-2 of card
-   * 8052977a, which shipped an in-process, restart-and-eviction-losing WORKAROUND instead — since removed
-   * from `mcp/orchestration.ts`): `deployOwnProject` now writes a `pending_gate_ops` row for every deploy
-   * it actually runs, the SAME table this unscoped scan already covers — so a `deploy` opId is no longer a
-   * silent third gate kind this positive assertion was blind to. The claim above was already true for
-   * "merge"/"gate" rows before this card; this closes the one remaining gap in "every manager call site",
-   * not a widening of the claim itself.
-   *
-   * `scopeSessionId`/`scopeProjectId` (card fc243a43 — the worker-facing `gate_status`, widened by
-   * e3e40167 to also cover the tombstone fallback) are threaded straight to BOTH
-   * `GateSemaphore.findByOpId`'s AND `Db.findPendingGateOpByOpId`'s own scoping: when set, EITHER lookup
-   * only ever considers ops OWNED by that session/project (see their docs for why this is a candidate-set
-   * filter, not a post-hoc check). CORRECTNESS NOTE (caught in review — an earlier version of this method
-   * collapsed a scoped caller's miss into `never_existed`, which is EXACTLY the conflation this card exists
-   * to remove, reintroduced one layer down: the op WAS minted, the row DOES exist, the scope filter merely
-   * hid it from THIS caller — `never_existed` would be a confident, specific, FALSE claim standing in for
-   * an honest "can't tell", the identical shape as the original `not_found` defect. A scoped miss returns
-   * `"unknown"` instead — nothing leaks (a stranger and a genuinely-bogus id are STILL indistinguishable,
-   * preserving `fc243a43`'s guarantee — the sink just isn't a false positive-nonexistence claim anymore).
-   * Omitted (every manager call site), behavior is an unscoped table scan that CAN honestly return
-   * `never_existed`, unchanged from before this card.
+   * @decision edc1ec12 — read-only live-state lookup for one gate/merge run by opId; opId accepts a
+   * full id or unambiguous prefix (docs/decisions/edc1ec12-gate-status-is-read-only-with-no-passfail-outcome.md)
+   * @decision e3e40167 — a live-registry miss falls through to the permanent tombstone table rather
+   * than "not_found"; a SCOPED caller's miss is "unknown", never a false "never_existed"
+   * @decision 7239c712 — tombstone "pending" also covers the pre-registration/boot-reconcile window
+   * (docs/decisions/7239c712-tombstone-pending-covers-the-pre-registration-and-boot-reconcile-window.md)
+   * @decision 4c5bf820 — a settled "gate" row's recorded verdict is spread onto the return inline
+   * (docs/decisions/4c5bf820-merge-gate-row-verdict-derivation-and-honest-null-payload.md)
+   * @decision 3aec1df6 — CORRECTION: a settled "merge" row carries the same verdict spread, since 9f6598dd
+   * (docs/decisions/3aec1df6-settled-merge-rows-now-carry-a-verdict-correction.md)
+   * @decision eb9348b0 — CORRECTION: gate_history.failingTest also reads this payload as a fallback
+   * (docs/decisions/eb9348b0-gate-history-failingtest-reads-the-settled-verdict-payload-as-fallback.md)
+   * @decision bed91595 — the "never_existed" positive assertion now covers deploy opIds too
+   * (docs/decisions/bed91595-deploy-tombstone-removes-the-in-process-workaround.md)
    */
   /**
-   * Card a16c580b, manager-review follow-up (WIDENED by card 5ef78900 — see below): `redactCrossProject` is
-   * DISTINCT from `scopeProjectId` above and never touches its FILTERING behavior — `scopeProjectId`
-   * narrows the SQL candidate set itself (the worker path's hard scope), while this one only decides
-   * whether to STRIP a handful of otherwise-full settled-result fields. It exists because the UNSCOPED
-   * manager call site (registerGateStatus's `scopeSessionId`/`scopeProjectId` both omitted — see
-   * mcp/orchestration.ts) can resolve ANY project's settled op by opId at all — this param is that same
-   * redaction: when the wrapper is given and its `callerProjectId` doesn't match the settled row's own
-   * `projectId`, the CROSS-PROJECT-SENSITIVE fields below are omitted from the response; every structural
-   * field (`passed`/`outcome`/`gateType`/`durationMs`/`validatedHead`/`gateCap`/etc.) is untouched.
-   *
-   * CARD 5ef78900 — WHAT'S REDACTED, AND WHY IT GREW: originally (card a16c580b) this covered `outputFile`
-   * ONLY — an absolute host path into another project's full gate output — leaving `outputTail` (a bounded
-   * excerpt of the SAME output) and `gateDetail` (whose `failingTest`/`stderrTail` can name another
-   * project's test file/paths verbatim) unredacted on the identical unscoped manager path. That was a real,
-   * unintentional gap, not a second deliberate posture: `outputTail`/`gateDetail` are the SAME field CLASS
-   * as `outputFile` (all three are ways to read another tenant's captured gate output/diagnostics) and get
-   * the SAME treatment now. `steps` (bare `{step,durationMs,status}` timings, no captured output) is lower
-   * risk but redacted too for consistency — a `step` label is a verbatim fragment of the OWNING project's
-   * configured `gateCommand`, itself project-specific text this caller has no legitimate reason to read
-   * cross-project. NOT touched: this is a `redact, don't refuse` fix (mirroring `gate_queue`'s own
-   * `redacted:true` precedent for that sibling tool) — a foreign read still resolves (`state`, `passed`/
-   * `outcome`, timing/concurrency fields all survive), only the payload fields above lose their content.
-   *
-   * ⚠️ SECOND MANAGER-REVIEW CATCH — WHY THIS IS A WRAPPER OBJECT, NOT A BARE `string | undefined`: a first
-   * version used a bare `redactOutputFileForProject?: string`, with `undefined` doing DOUBLE DUTY — "the
-   * worker call site, no redaction needed" (safe: the hard `scopeProjectId` filter already made a foreign
-   * row unreachable) AND "the manager call site, but `db.getSession(managerSessionId)` came back undefined
-   * so there was nothing to resolve" (NOT safe — no filter sits behind that path at all). Both collapsed to
-   * the identical `undefined` value, so a failed session lookup on the manager path silently inherited the
-   * worker path's "nothing to redact" meaning and returned these fields UNREDACTED — the exact fail-OPEN
-   * shape the sibling `t.record.projectId === null` case below was deliberately built to avoid. The wrapper
-   * removes the ambiguity structurally rather than by convention: `redactCrossProject === undefined` means
-   * ONLY "this call site never asked for redaction at all" (the worker path, which omits the argument
-   * entirely — never constructs a wrapper); `redactCrossProject.callerProjectId === undefined` means
-   * "redaction DOES apply here, but the caller's own project could not be resolved" — and since
-   * `t.record.projectId` (below) is typed `string | null`, it can never equal a bare `undefined`, so THAT
-   * comparison fails safe (redacts) automatically, with no sentinel string or extra branch required. The
-   * manager call site (mcp/orchestration.ts) always constructs the wrapper, even when its own getter
-   * resolves to `undefined`.
+   * @decision a16c580b — cross-project redaction of output/diagnostic fields uses a wrapper object,
+   * never a bare optional string; widened by 5ef78900 to cover outputTail/gateDetail/steps too
+   * (docs/decisions/a16c580b-cross-project-gate-redaction-uses-a-wrapper-object.md)
    */
   gateStatus(opId: string, scopeSessionId?: string, scopeProjectId?: string, redactCrossProject?: { readonly callerProjectId: string | undefined }): {
     state: "queued" | "running" | "pending" | "settled" | "evicted-dead-owner" | "orphaned-by-restart" | "never_existed" | "unknown" | "ambiguous";
     gateType: GateType | null;
-    /** Card d5e67146: for the LIVE (`queued`/`running`) states this is `Date.now() - entry.since` — see the
-     *  MCP tool description's own doc for its phase-scoped, re-basing-on-admission semantics; unchanged by
-     *  this card. For the tombstone `state === "pending"` case ONLY — a batch/merge op that has already
-     *  released its live `GateSemaphore` entry (see `mergeBatch`'s own `onSettle` deferral, card 81d795de)
-     *  but hasn't settled yet — this is now `Date.now() - Date.parse(startedAt)`, i.e. time since MINT,
-     *  never fabricated: the live queue/admission clock this field reads for `queued`/`running` no longer
-     *  exists once the op has fallen out of the semaphore, so there is no admission-scoped figure left to
-     *  report; mint time is the only clock the durable tombstone still carries (the SAME value `admittedAt`
-     *  below already exposes for every tombstone state — this is that same instant, just also surfaced
-     *  under the name every OTHER state already uses it under). ⚠️ CORRECTED (code review, same card): this
-     *  does NOT mean a reader can skip branching on `state` — `elapsedMs` STAYS phase-scoped to `state`,
-     *  exactly as the MCP tool description already says for `queued` vs `running`; tombstone-`pending` is
-     *  simply a THIRD origin for this same field (mint time), not an exemption from reading `state` first.
-     *  ⚠️ SAME TRAP `admittedAt`'s own doc names: this can silently include real queue wait from BEFORE the
-     *  op was ever admitted, so a large value here is not by itself evidence of a long RUNNING time — see
-     *  `ownerSessionAlive` below for the actual "is anyone still going to see the result" signal this field
-     *  cannot answer. A corrupt/legacy `startedAt` that fails to parse degrades to `null` here too — never a
-     *  fabricated `NaN` (which would otherwise round-trip through JSON as the literal string `"NaN"` or
-     *  silently vanish, either way a worse failure than an honest `null`). `null` for every settled/evicted/
-     *  orphaned tombstone state (unchanged — nothing "elapsed" is meaningful once the row carries its own
-     *  terminal disposition) and for the "unknown"/"never_existed"/"ambiguous" no-row cases (unchanged). */
+    /** @decision d5e67146 — for tombstone state:"pending", elapsedMs re-bases to time-since-MINT, a
+     *  third origin on top of the live queued/running phases, never an exemption from reading `state`
+     *  first (docs/decisions/d5e67146-tombstone-pending-liveness-signal.md) */
     elapsedMs: number | null;
     /** How long since the run's CURRENT step last showed a liveness event (started, or produced a
      *  stdout/stderr byte) — see {@link GateQueueEntry.idleMs}'s doc for why this (not `elapsedMs`) is the
@@ -3638,21 +3494,10 @@ export class SessionService {
      *  `queued`/`running` — a LIVE-entry-only concept, omitted for every settled/tombstone/no-row state,
      *  same population scope as `extended` immediately above. */
     attempt?: number | null; priorAttemptMs?: number | null;
-    /** Card 4c5bf820 — see the method doc's "SETTLED VERDICT" section. Present for a settled row (either
-     *  KIND) with a recorded verdict; every field below is independently optional and omitted (never a
-     *  fabricated `null`/`false`) when there's nothing to report. SCOPE VARIES PER FIELD, not uniformly
-     *  "gate-only": `durationMs`/`validatedHead`/`headWarning` stay "gate"-kind only (a "merge" row's
-     *  analogous timing lives in `totalDurationMs`/`settledAt` below instead); `passed`/`cancelled`/
-     *  `reason`/`outputTail`/`steps` (the last widened to "merge" rows by card 720bb7ad — see
-     *  `PendingGateOpVerdict`'s own doc) and `gateDetail` (fail-only either way) are populated for BOTH
-     *  "gate" and "merge" rows.
-     *  ⚠️ Card a228dfb5: `passed` reads `false` for a "merge" row whose `outcome` (below) is `"skipped"` —
-     *  an inert-diff merge (card db9b0130) that landed (`merged:true`) without ever spawning a gate — the
-     *  SAME "no verdict was ever reached" discipline `passed:false` already carries on a `"cancelled"` row.
-     *  Before this card a skipped merge's `verdict` column never held anything OTHER than `"pass"`/`"fail"`,
-     *  so this branch (and `passed`) read `true` for it — disagreeing with `gate_history`'s own
-     *  `outcome:"skipped"`/`passed:false` for the identical settled op; see `outcome`'s own doc below for
-     *  the full fix. */
+    /** @decision 4c5bf820 — settled-verdict fields are scoped PER FIELD, not uniformly "gate"-only
+     *  (docs/decisions/4c5bf820-merge-gate-row-verdict-derivation-and-honest-null-payload.md)
+     *  @decision a228dfb5 — passed reads false for a "merge" row with outcome:"skipped" (inert-diff,
+     *  no gate spawned) (docs/decisions/a228dfb5-skipped-merge-verdict-must-map-to-skipped-not-pass.md) */
     passed?: boolean; cancelled?: boolean; reason?: string; durationMs?: number;
     validatedHead?: string; headWarning?: string; steps?: GateStepDuration[]; outputTail?: string;
     /** Card a16c580b: absolute path to this op's FULL captured gate output — the recovery path for
@@ -3668,93 +3513,14 @@ export class SessionService {
      *  (never fabricated) for a gateless project, a REUSED self-check, or a settled row that predates this
      *  capability. Populated for BOTH "gate" and "merge" rows. */
     proximity?: PendingGateOpVerdict["proximity"];
-    /** Card 9f6598dd: the op's own mint instant (ISO) — present for EVERY tombstone-branch result (any
-     *  non-live state: settled, evicted-dead-owner, orphaned-by-restart, or the narrow real `pending`
-     *  window), not gated on a recorded verdict, since it's the row's own `started_at` column, always
-     *  known once a row exists at all. Absent only for the two "no row at all" outcomes
-     *  (`never_existed`/`unknown`) and the live `queued`/`running`/`ambiguous` returns above, which report
-     *  `since`/`elapsedMs` instead.
-     *
-     *  ⚠️⚠️ Card 720bb7ad DoD-4 — THE TRAP THE NAME INVITES: `admittedAt` READS as "the instant this op was
-     *  admitted past the gate concurrency cap" but is NOT that — it is MINT time (when the op was first
-     *  created/queued, before it ever competed for a slot). A queued op can sit for minutes before it's
-     *  actually admitted (routine at `maxConcurrentGates>=2` under fleet load), so `totalDurationMs`
-     *  (`settledAt - admittedAt`, see the sibling field below) SILENTLY INCLUDES that queue wait — it is
-     *  the REAL total op wall time (worktree prep + queue wait + gate + squash), never a
-     *  queue-wait-excluded "how long did the actual work take" figure. Measured: one op's `admittedAt` sat
-     *  ~7m16s before {@link GateQueueEntry.since} (the LIVE field that re-bases to the moment this SAME op
-     *  was actually admitted) read the op as `"running"` — a real, not hypothetical, gap. The field that
-     *  DOES re-base to true admission is `gate_queue`'s (or this same op's own live, pre-settle
-     *  `gate_status` read's) `since`/`elapsedMs` — but ONLY while the op is still live (`queued`/
-     *  `running`); once settled, that live view is gone and `admittedAt` (mint time) is the only admission-
-     *  adjacent timestamp left on the durable record. There is no settled-and-queue-wait-excluded field —
-     *  if you need queue wait specifically, read it from `gate_queue`/`gate_status` WHILE the op is still
-     *  live, before it settles. */
+    /** @decision 9f6598dd — admittedAt is the op's own mint instant, present for every tombstone-branch
+     *  result (docs/decisions/9f6598dd-mergeverdict-derivation-closes-the-settled-merge-gap.md)
+     *  @decision 720bb7ad — TRAP: admittedAt is MINT time, not admission time; totalDurationMs silently
+     *  includes queue wait (docs/decisions/720bb7ad-admittedat-is-mint-time-not-admission.md) */
     admittedAt?: string;
-    /** Card d5e67146 — THE LIVENESS SIGNAL for the tombstone `state === "pending"` case (Code Reviewer
-     *  `23ed6cda`'s follow-up on card 81d795de: once `mergeBatch` defers its tombstone settle to full
-     *  completion — worktree prep + gate + fast-forward + every fallback candidate's own solo merge, up to
-     *  tens of minutes — a healthy in-flight batch and a genuinely stranded row become BYTE-IDENTICAL under
-     *  the OLD `{state:"pending",elapsedMs:null,idleMs:null}` shape). Present ONLY while `state ===
-     *  "pending"` — `undefined` for every other state, where the question is either already answered by the
-     *  state name itself (`evicted-dead-owner` already says the owner is gone; a settled row already carries
-     *  a real verdict) or moot (no row at all). ALSO omitted on the SCOPED (worker) surface (code review
-     *  finding M1): a worker's own `opId` lookup only ever resolves ops IT owns (the scoping filter can't
-     *  see anyone else's), so its own lineage is trivially live for the entire duration of the call — `true`
-     *  there would be an unreachable-`false`, teach-nothing tautology, not a real discriminator; only the
-     *  UNSCOPED manager surface can actually observe `false`, so only it gets the field. Also omitted on a
-     *  CROSS-PROJECT read (same `crossProjectRedacted` this method already computes for the verdict fields
-     *  below) — see the MCP tool description's own cross-project section for why this one field, unlike
-     *  `admittedAt`/`gateCap`, is scoped that way despite carrying no path/test/error content of its own.
-     *
-     *  ⚠️ CORRECTED (code review, same card): the first shipped version derived this from
-     *  `!isManagerSessionDead(record.ownerSessionId)` — a WEAKER claim ("the MINTING session specifically
-     *  hasn't exited/archived") wearing a STRONGER doc ("nobody is left alive to ever see the result"). A
-     *  manager/worker recycle (`recycleManager`/`recycleWorker`) hard-stops the PREDECESSOR's pty and never
-     *  rewrites `pending_gate_ops.owner_session_id` — `carryPendingToSuccessor` moves queued messages and
-     *  durable message records only — so the tombstone keeps the retired predecessor's id forever. Every
-     *  settle-nudge push, though, resolves its target through `resolveSettleNudgeTarget` →
-     *  `liveLineageSuccessor`, which walks PAST a dead predecessor to whichever live successor actually
-     *  recycled it — so `isManagerSessionDead` alone said "dead" for a case where someone genuinely IS still
-     *  going to be told. Since card 81d795de made a mid-batch recycle an ORDINARY event (a tens-of-minutes
-     *  finalize routinely outlives one manager turn), this was not a corner case: it read a healthy,
-     *  successor-owned finalize as `false` — a FALSE STRANDED signal, the exact failure DoD-4 exists to rule
-     *  out, arriving by a route neither the card nor its first implementation anticipated.
-     *
-     *  DERIVATION (fixed): `liveLineageSuccessor(db, record.ownerSessionId) != null` — the SAME primitive
-     *  every settle nudge already resolves its own delivery target through (see
-     *  {@link SessionService.resolveSettleNudgeTarget}'s doc), so this field and "who will actually be
-     *  notified" can never drift apart from each other again. Walks `sessionId` itself (still live? done),
-     *  else its `recycledFrom`/successor chain, for a live end; `null` only when NO link anywhere in the
-     *  WHOLE lineage has `processState === "live"` — that is the only thing it checks (it never reads
-     *  `archivedAt` at all); an archived session's `processState` is already `"exited"` by the time it's
-     *  archived in every current caller, so this reads the same as a lineage-wide dead check in practice
-     *  without needing to consult that field separately. `ownerSessionId` is the manager for a
-     *  "merge"/"merge-batch" row, the worker for its own "gate" self-check row — whichever session
-     *  originally minted this op.
-     *
-     *  ⭐ WHAT THIS DOES AND DOES NOT PROVE (read before trusting either value):
-     *  - `false` (no live session anywhere in the lineage) IS a genuine stranded signal, derivable WITHOUT
-     *    already knowing the outcome: nobody is left alive to ever observe this op's eventual settle, even if
-     *    its `run()` is still nominally executing unreachable in the background — the exact condition
-     *    `reconcileDeadOwnerMergeOps`'s boot/dead-owner sweep exists to clean up, just readable HERE, before
-     *    that sweep ever runs. FIXED (card 257d534d): that eviction path, and `confirmWorkerMergeTracked`'s
-     *    own per-call defensive check, now key on this SAME `liveLineageSuccessor` walk too (via
-     *    {@link SessionService.isManagerLineageDead}) rather than a session-only check — so eviction and
-     *    this field can never disagree about the same op again. (The "gate" kind — a worker's own
-     *    `run_gate` self-check — needs no analogous eviction at all: its only possible caller IS the
-     *    session named by its own key, so there is no distinct owner to go dead out from under it; see
-     *    {@link SessionService.runWorkerGate}'s own doc.)
-     *  - `true` (a live session exists somewhere in the lineage) does NOT prove the op itself is healthy or
-     *    progressing — it only rules OUT the nobody-will-ever-see-it failure mode. A genuinely-healthy long
-     *    finalize and a hypothetical hung op whose lineage simply hasn't died both read `true` here,
-     *    indistinguishably. Never read `true` as "confirmed still working" — read it as "not yet proven
-     *    stranded".
-     *  - This is DELIBERATELY NOT a fabricated proxy for "the op is making progress" — no such signal is
-     *    honestly derivable from the tombstone alone once its live semaphore entry is gone (see DoD-3: that
-     *    entry is legitimately released the moment `runExclusive` returns, not a bug to work around). Where
-     *    this can't answer the question, it says so by being `undefined`/`true` rather than inventing a
-     *    positive. */
+    /** @decision d5e67146 — ownerSessionAlive: the liveness signal for tombstone state:"pending",
+     *  derived via liveLineageSuccessor (not a bare session-dead check); present only for the unscoped
+     *  manager surface, omitted cross-project (docs/decisions/d5e67146-tombstone-pending-liveness-signal.md) */
     ownerSessionAlive?: boolean;
     /** Card 9f6598dd — closes Finding 1 (a settled "merge" op used to report NEITHER of these three
      *  fields at all: `{state:"settled",gateType:"merge",elapsedMs:null,idleMs:null}`, nothing else).
@@ -3787,21 +3553,10 @@ export class SessionService {
      *  Populated for "merge" rows only, on the same two dominant outcomes `gateCap` above already covers. */
     emitCompareReduced?: boolean; emitCompareIdenticalCount?: number;
     emitCompareTestFiles?: string[]; emitCompareNotHermeticExcluded?: string[];
-    /** Card 9f6598dd: the SAME `pass`/`fail`/`error`/`cancelled` classification `passed`/`cancelled`
-     *  above already encode as two separate booleans — surfaced ALSO as one literal string so a caller
-     *  doesn't have to reconstruct it (`extended:true` paired with `outcome:"fail"` is the specific
-     *  "over-budget AND it failed" signal the card's DoD calls out as the whole point of pairing the two).
-     *  Present whenever a verdict was recorded at all (any of the five kinds, either gate/merge row) —
-     *  `undefined` only when nothing was ever recorded (a legacy row, a not-yet-settled row). Purely
-     *  additive: does not replace `passed`/`cancelled`, which stay exactly as before this card.
-     *  ⚠️ Card a228dfb5: `"skipped"` (a FIFTH kind, "merge" rows only) means this merge LANDED
-     *  (`merged:true` — a real new commit; see `commitSubject` above, still present) but NO gate ever
-     *  spawned, because the branch's entire changed-path set was proven inert (docs-only, card db9b0130).
-     *  `passed` reads `false` for it, exactly like `"cancelled"` — no gate verdict was ever reached, so
-     *  never read `merged`/a landed `commitSubject` as implying `outcome:"pass"`; check `outcome` itself.
-     *  This mirrors `gate_history`'s own `outcome:"skipped"` for the identical event (see `GateOutcome`'s
-     *  doc, shared/types.ts) — before this card `gate_status` had no way to express this and silently
-     *  collapsed it into `"pass"`/`passed:true`, disagreeing with `gate_history` for the SAME settled op. */
+    /** @decision 9f6598dd — outcome surfaces the same pass/fail/error/cancelled classification as one
+     *  literal string, purely additive (docs/decisions/9f6598dd-mergeverdict-derivation-closes-the-settled-merge-gap.md)
+     *  @decision a228dfb5 — "skipped" (merge rows only) means landed with no gate spawned (inert diff)
+     *  (docs/decisions/a228dfb5-skipped-merge-verdict-must-map-to-skipped-not-pass.md) */
     outcome?: PendingGateOpVerdictKind;
     /** Card 7a1a76e9 DoD-2: the landed squash subject (`ConfirmMergeResult.commitSubject`, card b88704bb) —
      *  the documented "if you need the answer sooner" poll for a QUEUED merge, which previously could not
@@ -3917,123 +3672,10 @@ export class SessionService {
       // row; the plain !== comparison already fails safe for both (docs/decisions/a16c580b-cross-project-gate-redaction-uses-a-wrapper-object.md)
       const crossProjectRedacted = redactCrossProject !== undefined && t.record.projectId !== redactCrossProject.callerProjectId;
       /**
-       * Code-review round 2 (card 5ef78900): a scattered per-line `&& !crossProjectRedacted` on each
-       * spread — the shape this method used until this round — has two failure modes, both found by
-       * executing a real cross-project read rather than reading the diff: (1) it's an ALLOWLIST-BY-OMISSION
-       * — a field spread with no `&& !crossProjectRedacted` silently defaults to VISIBLE, so adding a new
-       * field (or, historically, widening this fix from `outputFile` alone) requires remembering to gate
-       * EVERY new sensitive spread by hand; `reason`/`commitSubject`/`retriedFile`/`emitCompareTestFiles`/
-       * `emitCompareNotHermeticExcluded` (raw git/install error text with host paths, another tenant's
-       * landed commit subject, a foreign test file path, arrays of foreign test file paths) were missed
-       * exactly this way. (2) it can ONLY gate a field that's spread VERBATIM from `payload` — it cannot
-       * protect a DERIVED field computed from a raw (unredacted) input: `retryWarning` is computed via
-       * `formatWeakerPassWarning(payload.retriedFile, payload?.outputTail)` — reading the RAW payload
-       * directly, not whatever `outputTail`/`retriedFile` this object was about to expose — so gating the
-       * verbatim `outputTail`/`retriedFile` spreads does nothing to stop `retryWarning`'s own text (which
-       * itself regex-classifies the raw tail into one of two different sentences) from leaking a one-bit
-       * read of foreign content the redacted response otherwise withholds.
-       *
-       * FIX, PASS 1: filter the FULLY-ASSEMBLED verdict-fields object BY KEY, after every field — verbatim
-       * or derived — has already been computed. This closed the `retryWarning` bypass: membership in a
-       * `Set` became the one decision point, independent of how a field gets its value.
-       *
-       * ⚠️ FIX, PASS 2 (manager review, same card): a plain deny-`Set` is STILL a deny-list — it does not
-       * close the finding it was named for ("a new field opts OUT of redaction by silence"). A field added
-       * to `PendingGateOpVerdict` (db.ts) tomorrow and not ALSO added to the Set by hand is still visible
-       * cross-project, silently — exactly the failure mode that produced round 2's six leaks in the first
-       * place, just moved one level up (from "gate every spread" to "remember every Set entry"). Neither is
-       * a forcing function; both are a convention someone has to remember.
-       *
-       * REAL FIX: an EXHAUSTIVE, COMPILER-ENFORCED classification, `Record<GateVerdictFieldKey, "sensitive"
-       * | "structural">` over `GateVerdictFieldKey = keyof PendingGateOpVerdict | <the 4 fields gateStatus
-       * computes itself and never stores: "passed"/"cancelled"/"retryWarning"/"transientRetryWarning">`.
-       * TypeScript's excess-property + missing-property checks on an object literal assigned to a `Record`
-       * of a union-of-literal-keys type make this a REAL forcing function, not a comment asking someone to
-       * remember: add a field to `PendingGateOpVerdict` and DON'T classify it here, and this file fails to
-       * COMPILE (`Property '<x>' is missing`) — the next field genuinely cannot "make no choice" the way a
-       * `Set` entry could be forgotten. `validatedHead`/`headWarning` (a bare git sha / freeform text naming
-       * another project's branch or worktree state) are classified `"sensitive"` too — lower severity than a
-       * raw stderr tail, but still another tenant's repo state a foreign caller has no legitimate reason to
-       * read; classified deliberately, not omitted. `retryPassed`/`transientRetried`/`transientRetryWarning`
-       * are `"structural"` — they carry no foreign CONTENT of their own (a bare boolean, or — for
-       * `transientRetryWarning` — a fully generic, non-interpolated sentence with no filename), so leaving
-       * them visible discloses only "a retry happened", never what.
-       *
-       * RUNTIME FAIL-CLOSED TOO, not just compile-time: the filter below keeps a field ONLY when its
-       * classification is EXACTLY `"structural"` — an unrecognized key (should be impossible given the
-       * exhaustive type above, but this is the actual RUNTIME behavior stated in plain terms, per card
-       * `6cf1b174`'s lesson that a comment asserting a failure direction must match the code, not the
-       * intent) reads as `undefined !== "structural"` and is DROPPED, i.e. treated as sensitive. This is a
-       * genuine allowlist at runtime (option (a) the manager raised), layered under the compile-time
-       * exhaustiveness (option (b)) — not a deny-list with a compiler nudge on top.
-       *
-       * ⚠️ LIMITATION, worth writing down where the scheme itself lives: this classification governs FIELDS
-       * — it is structurally blind to a datum RE-EXPRESSED inside another field's own PROSE. Card 67030bb9's
-       * `batchBranchCount` is the concrete case: the same integer N it carries is ALSO interpolated, TWICE,
-       * into `retryWarning`'s own generated text (`formatWeakerPassWarning`) for a batch-merge retry — "this
-       * retry was for a BATCH of N branch(es)...". A key-based scheme (allowlist OR deny-list) cannot see
-       * that the two fields carry the SAME fact under two different names; it can only classify each field
-       * on its own. The fix here is not a smarter key scheme — it's that a DERIVED string field must be
-       * classified by everything it can ever CONTAIN across its own interpolations, not by what it's named:
-       * `retryWarning` is `"sensitive"` as a WHOLE (see its own entry below), which happens to already cover
-       * N as a side effect of covering the retried file name / timeout-kill classification it also encodes
-       * — not because N was separately reasoned about when `retryWarning` was first classified. Don't take
-       * that as evidence the scheme "just works" for a future derived field; the next one needs the SAME
-       * "what can this string ever say" check done deliberately, not assumed from this precedent.
-       *
-       * `batchBranchCount` (card 67030bb9, `service.ts:4791` post-rebase) is classified `"structural"` —
-       * DECIDED CONSISTENTLY with the LIMITATION above, not despite it: N's OTHER carrier, `retryWarning`,
-       * stays `"sensitive"` and fully redacted regardless — but for its OWN separate content (the retried
-       * file name, and the timeout-kill-vs-assertion-failure wording derived from `outputTail`), not because
-       * of N. So the standalone `batchBranchCount` field can be judged purely on ITS OWN merits without that
-       * decision silently doubling as a decision about `retryWarning`'s classification too — a bare COUNT of
-       * branches landed in one batch reveals no path, no test name, no error text, no commit message, no
-       * identifier, the same bucket as `concurrentGates`/`gateCap`/`emitCompareIdenticalCount` (all
-       * `"structural"`), already visible cross-project as ordinary fleet-operational magnitude, not tenant
-       * content. (Independently checked, NOT relied on for this: the OTHER worker's argument that
-       * `batchBranchCount` is already safe because `gate_history` exposes an equivalent count is UNSOUND —
-       * `gate_history` is scoped to the CALLER'S OWN project server-side, no `projectId` argument, no
-       * foreign-project row under any argument shape; `gate_status` is the ONLY cross-project reader of
-       * settled gate data on this daemon, a different trust boundary entirely.)
-       *
-       * ✅ APPLIED AT REBASE (card 67030bb9 landed first, as sequenced): before this line was added, both
-       * `tsc` (`error TS2741: Property 'batchBranchCount' is missing in type '{...}' but required in type
-       * 'Record<GateVerdictFieldKey, "sensitive" | "structural">'.`) and
-       * `gate-verdict-field-classification-exhaustive.mjs` (run directly, no build needed) independently
-       * refused/flagged the rebased tree with `batchBranchCount` still unclassified — the forcing function
-       * fired for real, against a genuinely new field from a sibling branch, not just against a synthetic
-       * mutation. That refusal is what confirmed this was the ONLY new key needing classification.
-       *
-       * ⚠️ CARD `753b9699` — THE GAP THIS CLASSIFICATION LEFT OPEN: all of the above governs only the
-       * `verdictFields` object (the per-verdict content assembled below into `rawVerdictFields`). The OUTER
-       * return fields — `state`/`gateType`/`elapsedMs`/`idleMs`/`admittedAt`/`ownerSessionAlive`/`outcome`,
-       * assembled below into `rawOuterFields` — used to be spread straight into the return literal, entirely
-       * OUTSIDE this classification, so a future outer field would default to VISIBLE on a cross-project
-       * read by the exact silent-omission shape this whole scheme exists to kill (found by Code Review,
-       * card `213fe600`, reviewing `d5e67146`'s addition of `ownerSessionAlive` — the first new outer field
-       * since this classification landed). FIX: `GateOuterFieldKey` folds into the SAME `GateVerdictFieldKey`
-       * union below, so `rawOuterFields` is filtered by the SAME `GATE_VERDICT_FIELD_CLASSIFICATION` Record,
-       * through the SAME single filter point, rather than a second parallel mechanism that could drift from
-       * this one. Every outer key is classified `"structural"` — see that Record's own per-key comment for
-       * why, and for why this is a PRESERVING change, not a disclosure decision (card `753b9699` DoD-2: this
-       * card adds the forcing function, it does not re-open what anything is set to).
-       *
-       * ⚠️ MANAGER REVIEW, same card — CORRECTING AN OVERCLAIM IN AN EARLIER VERSION OF THIS COMMENT: folding
-       * `GateOuterFieldKey` into this union does NOT by itself give the outer fields the SAME compile-time
-       * guarantee `verdictFields` gets. `GateVerdictFieldKey`'s `keyof PendingGateOpVerdict` half is derived
-       * from a REAL interface — add a member there and the `Record` below demands a matching entry, a true
-       * forcing function. `GateOuterFieldKey` is a HAND-WRITTEN literal union of 7 strings with no interface
-       * to derive from (same reason `gate-verdict-field-classification-exhaustive.mjs`'s `OUTER_KEYS` is
-       * hand-listed, not extracted) — adding an 8th field to `rawOuterFields` without also adding it to this
-       * union type-checks FINE; only the `_outerRawFieldsAreClassified` compile-time assertion just below
-       * `rawOuterFields`'s own declaration is what actually turns that omission into a build error, by
-       * checking `keyof typeof rawOuterFields extends GateVerdictFieldKey` (empirically confirmed to fire
-       * for BOTH an unconditionally-added field and one added inside a conditional spread — TS 5.9 widens a
-       * conditional object-literal spread to an optional property rather than dropping it from `keyof`, so
-       * this is not a narrower guarantee than it looks). Runtime is, and always was, safe either way: an
-       * unclassified key reads `undefined` from the Record, fails `=== "structural"`, and is filtered OUT —
-       * REDACTED, never leaked — so this whole paragraph is about closing a SILENT-BUT-SAFE gap to a LOUD
-       * one, not about a live disclosure bug.
+       * @decision 753b9699 — cross-project gate-verdict redaction is an exhaustive, compiler-enforced
+       * field classification (not a per-line guard or a deny-Set), covering the OUTER return fields
+       * too, not just verdictFields
+       * (docs/decisions/753b9699-gate-verdict-field-classification-is-exhaustive-and-covers-outer-fields-too.md)
        */
       type GateVerdictDerivedKey = "passed" | "cancelled" | "retryWarning" | "transientRetryWarning";
       type GateOuterFieldKey = "state" | "gateType" | "elapsedMs" | "idleMs" | "admittedAt" | "ownerSessionAlive" | "outcome";

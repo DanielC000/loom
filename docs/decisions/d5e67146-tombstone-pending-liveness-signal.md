@@ -1,0 +1,21 @@
+# d5e67146 — the tombstone `"pending"` case gets its own liveness signal (`ownerSessionAlive`), and `elapsedMs` gains a third, mint-time origin for it
+
+## Narrative
+
+Code Reviewer `23ed6cda`'s follow-up on card 81d795de: once `mergeBatch` defers its tombstone settle to full completion (worktree prep + gate + fast-forward + every fallback candidate's own solo merge, up to tens of minutes), a healthy in-flight batch and a genuinely stranded row became BYTE-IDENTICAL under the old `{state:"pending",elapsedMs:null,idleMs:null}` shape. Card d5e67146 fixes this two ways.
+
+**`elapsedMs`'s third origin:** for the LIVE (`queued`/`running`) states, `elapsedMs` is `Date.now() - entry.since`, phase-scoped and re-basing on admission (unchanged). For the tombstone `state === "pending"` case ONLY — a batch/merge op that has already released its live `GateSemaphore` entry but hasn't settled yet — `elapsedMs` is now `Date.now() - Date.parse(startedAt)`, i.e. time since MINT, never fabricated: the live queue/admission clock no longer exists once the op has fallen out of the semaphore, so mint time (the same instant `admittedAt` exposes for every tombstone state) is the only clock left to report. This does NOT mean a reader can skip branching on `state` — `elapsedMs` stays phase-scoped; tombstone-`pending` is simply a third origin for the same field, not an exemption from reading `state` first.
+
+**`ownerSessionAlive` (new field):** present ONLY while `state === "pending"` — omitted for every other state (either already answered by the state name itself, or moot for a no-row outcome). Also omitted on the SCOPED worker surface (a worker's own `opId` lookup only resolves ops it owns, so its own lineage is trivially live — `true` there would be an unreachable-`false` teaching nothing) and on a cross-project read. Derivation: `liveLineageSuccessor(db, record.ownerSessionId) != null` — the SAME primitive every settle nudge already resolves its delivery target through, so this field and "who will actually be notified" can never drift apart. `false` (no live session anywhere in the lineage) IS a genuine stranded signal, derivable without already knowing the outcome — the exact condition `reconcileDeadOwnerMergeOps` exists to clean up, readable here before that sweep runs (its eviction path, and `confirmWorkerMergeTracked`'s own defensive check, key on the same walk via `isManagerLineageDead`, so eviction and this field can never disagree). `true` does NOT prove the op is healthy or progressing — it only rules out the nobody-will-ever-see-it failure mode; never read it as "confirmed still working."
+
+CORRECTED during review: the first shipped version derived `ownerSessionAlive` from `!isManagerSessionDead(record.ownerSessionId)` — a WEAKER claim ("the minting session specifically hasn't exited/archived") wearing a STRONGER doc ("nobody is left alive to ever see the result"). A manager/worker recycle hard-stops the predecessor's pty and never rewrites `pending_gate_ops.owner_session_id`, so the tombstone keeps the retired predecessor's id forever — but every settle-nudge push resolves its target through `resolveSettleNudgeTarget` → `liveLineageSuccessor`, which walks past a dead predecessor to whichever live successor recycled it. Since card 81d795de made a mid-batch recycle an ordinary event, `isManagerSessionDead` alone read a healthy, successor-owned finalize as `false` — a false stranded signal.
+
+## Do not
+
+- Do not read a large tombstone-`pending` `elapsedMs` as evidence the op has been RUNNING that long — it is mint time, which silently includes real queue wait from before admission.
+- Do not derive `ownerSessionAlive` from a bare "is the minting session itself gone" check — use the same `liveLineageSuccessor` walk the settle nudge uses, or a healthy recycled-manager batch reads as falsely stranded.
+- Do not read `ownerSessionAlive:true` as "confirmed still working" — it only rules out the nobody-will-ever-see-it failure mode.
+
+## Source
+
+JSDoc comments in `packages/daemon/src/sessions/service.ts` (`gateStatus`'s `elapsedMs` and `ownerSessionAlive` return-type fields). Relocated by card `f05ca65c` (tranche 8); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
