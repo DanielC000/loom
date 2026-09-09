@@ -1,0 +1,18 @@
+# fa359824 — `gate_queue` is the one-read answer to "why is my gate queued, who holds the slot"
+
+## Narrative
+
+Card fa359824 (Codescape manager escalation 530e59a0; exposed to the WORKER surface too by card d04f9c76 — Codescape platform relay: a worker told "confirm a lane is free before firing" had no daemon-wide view of its own and could only ever fire `run_gate` blind into a saturated cap). `gate_status` only ever answers "what is MY op doing", so a caller with no op of its own to poll (or one whose op has been queued a long time) had no way to tell healthy contention apart from a leaked slot short of cross-project DB access no worker/manager surface grants. `gate_queue` is the ONE-read answer: cap + every running/queued gate run. READ-ONLY — it cannot mutate the cap, cancel, or reorder anything; it only reads the live GateSemaphore registry (see `SessionService.gateQueueForManager`'s doc for the cross-project scoping: card 1cf0ced1 — a row from a DIFFERENT project omits EXACTLY {taskId, branch, workerLabel}; everything else, including `opId` in full, still rides the wire — see the tool description for the full enumeration; an earlier comment here undercounted it as "project + kind + age only", the same understatement card 1cf0ced1's own DoD-1 fixed in the description itself).
+
+Privacy is keyed off the CALLER'S PROJECT (derived server-side from `sessionId`, same as every other tool here), never the caller's ROLE — `gateQueueForManager` takes only a `callerProjectId` and redacts by comparing each entry's OWN projectId against it, so a worker sees EXACTLY the same cross-project redaction a manager on the same project would (verified: `gate-queue.mjs`'s redaction checks run against BOTH a manager AND a worker session on the same project). `recentTimeoutStreak` (escalation 4f151331, filed while the manager card was in flight — a REAL incident: two concurrent daemon-executed gates under cap 1, one worktree's fixtures already running while its op still read "queued") is a SECOND, independently-tracked signal alongside the semaphore's own belief — see `SessionService.gateQueueForManager`'s doc for why the two are surfaced side by side, never merged. Card 80d54122: `recentTimeoutStreak` is now CROSS-PROJECT (unlike taskId/branch/workerLabel, which stay own-project only) — it's a bare integer with no task/branch identity, and the orphan hazard it flags is cross-project by nature; a foreign entry also now carries `redacted: true` so the omission of the other three fields is self-evident rather than an ambiguous gap.
+
+Card cffa71e6 (docs-only): the tool description now spells out that `since`/`elapsedMs` change MEANING (not just clock) across the queued→running transition, that a queued row's `since` is NOT `gate_status`'s `admittedAt`, and cross-references the three duration tiers (run-summary / gate_history / gate_status) so a caller doesn't difference a command-span field against itself expecting a queue-wait figure — the exact mistake that card's own investigation made and had to retract.
+
+## Do not
+
+- Do not merge `recentTimeoutStreak` into the semaphore's own `phase`/`queuePosition` belief — it is deliberately a second, independent signal, surfaced side by side.
+- Do not read a queued row's `since` as `gate_status`'s `admittedAt` — they are different clocks (card cffa71e6's own retracted mistake).
+
+## Source
+
+Inline comment in `packages/daemon/src/mcp/orchestration.ts`, above `registerGateQueue`. Relocated by card 210cd10c (tranche 1 on `mcp/orchestration.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `//` comment markers stripped.

@@ -159,75 +159,9 @@ const STALE_DIRECTIVE_TURN_THRESHOLD = 3;
  */
 const STALE_REPORT_TURN_THRESHOLD = 3;
 
-/**
- * `gate_status(opId)` (card edc1ec12, Platform-Audit finding 7afa6ea9; generalized by card e3e40167) — a
- * read-only status lookup. Registered on BOTH the manager and worker surfaces (card fc243a43 added the
- * worker variant), with the worker's own call SCOPED to opIds it owns (`scopeSessionId`/`scopeProjectId`,
- * threaded straight through to `SessionService.gateStatus` → BOTH `GateSemaphore.findByOpId` (the live
- * registry) AND `Db.findPendingGateOpByOpId` (the durable tombstone table it now falls back to) — see
- * their docs for why this is a candidate-set filter, not a post-hoc check: a worker's lookup never even
- * SEES another session's op at EITHER layer, so it cannot learn one exists). The manager call site
- * (scopes omitted) is unchanged from before this card. Still has NO PASS/FAIL outcome path of its own —
- * it only ever answers "still queued / still running / [a terminal CLASSIFICATION, never pass-or-fail] /
- * gone (worded differently by scope — see below) / ambiguous prefix" (see SessionService.gateStatus's doc
- * for the full state list and why there's no live output tail). `opId` accepts a full id or an unambiguous
- * 8-char prefix (card 225bc7bd).
- *
- * TWO DIFFERENT "gone" WORDS FOR TWO DIFFERENT CERTAINTY LEVELS (review-caught, card e3e40167): the
- * UNSCOPED manager path can honestly return `"never_existed"` — a POSITIVE assertion, since nothing was
- * ever filtered out of its view. The SCOPED worker path can NEVER honestly say that: a miss there could
- * mean the id genuinely never existed, OR that it exists but belongs to someone else — the scoping filter
- * deliberately can't tell those apart (that's what makes it safe), so claiming `never_existed` for a
- * scoped miss would be a confident, false, positive-nonexistence claim — the EXACT conflation this card
- * removed from `not_found`, reintroduced one layer down. The worker path instead returns `"unknown"` — see
- * SessionService.gateStatus's doc for the full reasoning.
- *
- * `elapsedMs` here and `gate_queue`'s `since`/`elapsedMs` read the SAME underlying value
- * (`GateSnapshotEntry.since`, set by `GateSemaphore.snapshot`'s `toEntry`) — both are PHASE-SCOPED, not a
- * fixed admission clock: `enqueuedAt` while `queued`, RE-BASING to `startedAt` the moment the entry is
- * admitted. Card 5450ed3e (Codescape peer mgr #5, corroborated from Loom's own reads of the same
- * transition): a reader who assumes `since`/`elapsedMs` measure time-since-admission will misread a
- * deeply-queued entry's large `elapsedMs` as "this has been running a long time" when it hasn't started —
- * the exact wrong-direction misread that invites cancelling a healthy gate. Both tools document this
- * explicitly in their descriptions below; keep them in sync if either changes. `elapsedMs` is `null` for
- * every SETTLED/evicted/orphaned tombstone-fallback state — there is no live admission clock to read once
- * the op is no longer in the live registry. ⚠️ CORRECTED (card d5e67146): the tombstone `"pending"` state
- * is the ONE exception — `elapsedMs` there is now `Date.now() - startedAt` (time since MINT, not admission;
- * see `SessionService.gateStatus`'s own doc on its return type for why no admission-scoped clock survives
- * once an op has fallen out of the live registry), and the row ALSO carries `ownerSessionAlive` — MANAGER
- * surface only (unreachable-`false` on a worker's own scoped op, so it's omitted there — see that doc), and
- * omitted on a foreign-project read too (redacted, not a bare fleet-magnitude fact like `admittedAt`/
- * `gateCap` — see the manager description's own cross-project section). See that same doc for what it does
- * and does not prove, and for why it's derived via the SAME lineage-successor walk every settle nudge
- * already resolves its delivery target through, never a bare "is the minting session itself gone" check
- * (the latter falsely reads a healthy batch as stranded the moment its manager recycles mid-finalize — an
- * ordinary event, not an edge case, for a run this long). This closes the gap card 81d795de opened: once
- * `mergeBatch` defers its tombstone settle to full completion, a healthy in-flight batch can sit
- * `"pending"` for tens of minutes, and until this card that state carried no way to tell it apart from a
- * genuinely stranded row.
- *
- * `idleMs`/`extended`: `elapsedMs` (however large) is frequently HEALTHY BY DESIGN and cannot by itself
- * answer "is this wedged?" — `gate-runner.ts`'s own `runGateStep` extends a step's timeout, rather than
- * killing it, precisely WHEN it's still producing output (see `GATE_EXTEND_IDLE_MS`'s doc), so a long
- * `elapsedMs` is routinely just "working hard", not "hung". `idleMs` (`Date.now() - lastOutputAt`, the
- * SAME liveness clock that extension decision itself reads — never a second, independently-computed one)
- * is the signal that actually tells the two apart; `extended` (whether the CURRENT step already used its
- * one-time auto-extend) is the directly-relevant fact about how much runway is left before a stall would
- * actually be killed. Both are documented on `gate_status`/`gate_queue` below; keep them in sync too.
- */
-/**
- * Card 8052977a shipped an in-process, best-effort WORKAROUND here (`noteDeployOpId`/`recentDeployOpIds`/
- * `resolveDeployOpId`) for `deploy`'s missing durable record — that card's own DoD-2 named the real fix
- * ("a durable `pending_gate_ops` tombstone for deploy") as its costlier option-b and explicitly left it
- * open. Card bed91595 ships that option-b (`SessionService.deployOwnProject` now writes a real
- * `pending_gate_ops` row, mint-then-settle, for every deploy it runs — see that method's own comment) and
- * REMOVES this workaround entirely: a `deploy` opId now resolves through `sessions.gateStatus`'s ordinary
- * tombstone fallback, exactly like a merge/worker gate op, so it never reaches the `never_existed` branch
- * below for a real id in the first place — there is nothing left for an in-process reclassification to
- * catch. This also closes BOTH gaps the removed workaround's doc used to name as acknowledged limits: the
- * tombstone is written to disk before `deploy` returns (survives a restart the in-process cache couldn't),
- * and `pending_gate_ops` is a permanent table (never evicted by count, unlike the removed 500-entry Set).
- */
+/** `gate_status(opId)` is a read-only lookup, scoped per-caller, with no pass/fail outcome path of its
+ *  own. @decision edc1ec12 — see docs/decisions/edc1ec12-gate-status-is-read-only-with-no-passfail-outcome.md
+ *  @decision bed91595 — see docs/decisions/bed91595-deploy-tombstone-removes-the-in-process-workaround.md */
 function registerGateStatus(server: McpServer, sessions: SessionService, db: Db, scopeSessionId?: string, getScopeProjectId?: () => string | undefined, getRedactCrossProjectCallerProjectId?: () => string | undefined): void {
   const forWorker = scopeSessionId != null;
   const description = forWorker
@@ -779,22 +713,9 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
           ? { callerProjectId: getRedactCrossProjectCallerProjectId() }
           : undefined;
         const result = sessions.gateStatus(opId, scopeSessionId, getScopeProjectId?.(), redactCrossProject);
-        // Card bed91595: `deploy` now writes a real `pending_gate_ops` tombstone (see
-        // `SessionService.deployOwnProject`), so `sessions.gateStatus` above already resolves a real
-        // deploy opId through the ordinary tombstone fallback — never `never_existed`. No reclassification
-        // needed here any more (card 8052977a's in-process cache/reclassification is removed).
-        // Card 19c0ef1e: only a settled row with a recorded verdict can even have a matching gate-timing
-        // NDJSON `run-summary` row to join against — best-effort and ADDITIVE (never fabricated, never
-        // able to fail this call): `computeGateTimingBand` itself already returns `undefined` on every
-        // "nothing to report" case (no NDJSON, opId outside the read window, a non-Loom gate command), and
-        // the outer catch here is belt-and-suspenders against an unexpected read/parse failure.
-        // Card 5ef78900: `timingBand` discloses a foreign project's test-file COUNT and gate-duration
-        // DISTRIBUTION — appended here, OUTSIDE `sessions.gateStatus`'s own return, so that method's own
-        // cross-project redaction can never see or gate it; `isCrossProjectGateOp` is the same fail-safe
-        // comparison `gateStatus` uses internally, exposed for exactly this case. A deliberate decision
-        // (not an oversight): lower severity than the content-bearing fields `gateStatus` itself redacts —
-        // aggregate numerics, not another tenant's paths/test names/error text — but still real cross-
-        // tenant telemetry a foreign caller has no need for.
+        // @decision bed91595 — see docs/decisions/bed91595-deploy-tombstone-removes-the-in-process-workaround.md
+        // @decision 19c0ef1e — see docs/decisions/19c0ef1e-gate-status-timing-band-is-best-effort-and-additive.md
+        // @decision 5ef78900 — see docs/decisions/5ef78900-timingband-cross-project-numeric-disclosure-is-deliberate.md
         if (result.state === "settled" && result.outcome !== undefined && !sessions.isCrossProjectGateOp(opId, redactCrossProject)) {
           let enriched: Record<string, unknown> = result;
           try {
@@ -852,35 +773,7 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
   );
 }
 
-// gate_queue (card fa359824 — Codescape manager escalation 530e59a0; exposed to the WORKER surface too by
-// card d04f9c76 — Codescape platform relay: a worker told "confirm a lane is free before firing" had no
-// daemon-wide view of its own and could only ever fire `run_gate` blind into a saturated cap). gate_status
-// only ever answers "what is MY op doing", so a caller with no op of its own to poll (or one whose op has
-// been queued a long time) had no way to tell healthy contention apart from a leaked slot short of
-// cross-project DB access no worker/manager surface grants. This is the ONE-read answer: cap + every
-// running/queued gate run. READ-ONLY — it cannot mutate the cap, cancel, or reorder anything; it only
-// reads the live GateSemaphore registry (see SessionService.gateQueueForManager's doc for the
-// cross-project scoping: card 1cf0ced1 — a row from a DIFFERENT project omits EXACTLY {taskId, branch,
-// workerLabel}; everything else, including `opId` in full, still rides the wire — see the tool
-// description below for the full enumeration; this comment previously undercounted it as "project + kind
-// + age only", the same understatement that card's DoD-1 fixed in the description itself).
-// Privacy is keyed off the CALLER'S PROJECT (derived server-side from `sessionId`,
-// same as every other tool here), never the caller's ROLE — `gateQueueForManager` takes only a
-// `callerProjectId` and redacts by comparing each entry's OWN projectId against it, so a worker sees
-// EXACTLY the same cross-project redaction a manager on the same project would (verified: gate-queue.mjs's
-// redaction checks now run against BOTH a manager AND a worker session on the same project, see (unit-worker)
-// below). `recentTimeoutStreak` (escalation 4f151331, filed while the manager card was in flight — a REAL
-// incident: two concurrent daemon-executed gates under cap 1, one worktree's fixtures already running while
-// its op still read "queued") is a SECOND, independently-tracked signal alongside the semaphore's own
-// belief — see SessionService.gateQueueForManager's doc for why the two are surfaced side by side, never
-// merged. Card 80d54122: `recentTimeoutStreak` is now CROSS-PROJECT (unlike taskId/branch/workerLabel,
-// which stay own-project only) — it's a bare integer with no task/branch identity, and the orphan hazard
-// it flags is cross-project by nature; a foreign entry also now carries `redacted: true` so the omission
-// of the other three fields is self-evident rather than an ambiguous gap. Card cffa71e6 (docs-only): the description below now spells out that `since`/`elapsedMs` change
-// MEANING (not just clock) across the queued->running transition, that a queued row's `since` is NOT
-// `gate_status`'s `admittedAt`, and cross-references the three duration tiers (run-summary / gate_history /
-// gate_status) so a caller doesn't difference a command-span field against itself expecting a queue-wait
-// figure — the exact mistake that card's own investigation made and had to retract.
+// @decision fa359824 — see docs/decisions/fa359824-gate-queue-is-the-one-read-answer-to-am-i-stuck.md
 function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, sessionId: string): void {
   server.registerTool(
     "gate_queue",
@@ -1091,25 +984,10 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
   );
 }
 
-// gate_intent_declare / gate_intent_withdraw (card a5d1ae04 — the structured replacement for a hand-written
-// peer-channel "I'm about to fire a merge gate" letter, whose measured delivery latency routinely exceeded
-// the coordination window it existed to protect). MANAGER-ONLY: registered only from the manager branch of
-// buildServer below, never from the worker branch — a worker's own gate-firing action is `run_gate` (its
-// own DoD self-check), which has no "I intend to" phase worth declaring, and adding either tool to the
-// worker surface would mean touching that role's tightly pinned depth-1 tool list (see the comment at this
-// file's worker-branch `registerGateQueue` call site) for no actual use case. `gate_queue`'s own
-// `declarations` array (registered on BOTH surfaces, unchanged) is how a WORKER — or a peer manager — reads
-// what a manager declared; only the manager that owns the declaration can create or remove it.
-//
-// ⛔ STRUCTURALLY DECOUPLED FROM EVERY GATE-FIRING PATH, ON PURPOSE (DoD-4: "a declaration must never
-// block, delay, or gate a fire"): neither handler below calls into `runWorkerGate`/`confirmWorkerMerge`/
-// `deployOwnProject`/`GateSemaphore`/`gate-runner.ts` at all — they only ever touch
-// `SessionService.declareGateIntent`/`withdrawGateIntent`, which themselves only ever touch
-// `GateIntentRegistry` (see that class's own file-level doc). `test/gate-intent-no-firing-coupling.mjs`
-// asserts the absence mechanically (a grep over the two files that actually execute/admit a gate,
-// `gate-runner.ts` and `gate-semaphore.ts`, neither of which has any legitimate reason to ever import or
-// reference this feature), with a positive control proving the grep itself has power to catch a planted
-// reference rather than passing vacuously.
+// @decision a5d1ae04 — see docs/decisions/a5d1ae04-gate-intent-is-manager-only-registered-off-the-worker-tool-list.md
+// ⛔ STRUCTURALLY DECOUPLED FROM EVERY GATE-FIRING PATH, ON PURPOSE (DoD-4): neither handler below may ever
+// call runWorkerGate/confirmWorkerMerge/deployOwnProject/GateSemaphore/gate-runner.ts — only declareGateIntent/
+// withdrawGateIntent. test/gate-intent-no-firing-coupling.mjs asserts this mechanically.
 function registerGateIntent(server: McpServer, sessions: SessionService, sessionId: string): void {
   server.registerTool(
     "gate_intent_declare",
@@ -1244,34 +1122,7 @@ export interface CompanionHooks {
 // derivation (orchestration/crash-orphaned-workers.ts, card 959a5fb7/db05e657) so the two surfaces can never
 // independently decide "resolved" in different ways. Called by `reportedProjection` below.
 
-/**
- * Card 3c39be30 — `resolveDirectiveOutcome` (below) has an UNDOCUMENTED, UNENFORCED precondition: the
- * `events` array it walks must actually be CAPABLE of containing the `session_message_delivered`/
- * `session_message_gave_up` rows for the msgId chain it's asked to resolve — i.e. it must come from a
- * query scoped to a session id that genuinely appears on that chain's events, via the SAME column the
- * query filters on. Get that wrong (e.g. filter `manager_session_id` on a worker's own id, which — bar
- * coincidence — never appears there) and the array is silently, permanently missing the one row that
- * would flip the answer: `resolveDirectiveOutcome` returns a CONFIDENT `"pending"` forever, never an
- * error. This tripped `peerMessageStatusByMsgId`'s first implementation (card 0f693dea) — fed
- * `db.listEvents(managerSessionId)` before `resolveQueuedMessage` (sessions/service.ts) threaded the real
- * sender through, so the one row that would have resolved a drained HELD send to "delivered" was filed
- * under nobody's session and a passing test suite never caught it (it asserted "pending" on a message it
- * never actually drained).
- *
- * FIX: fold stream selection OUT of every call site and into these three named constructors — the ONLY
- * way to produce a `DirectiveEventStream`. A caller can no longer freehand a query and hope it's scoped
- * right; it picks one of "this worker", "this worker's own recycle lineage", or "this manager's own
- * recycle lineage" and the constructor runs the correspondingly-correct `Db` query itself.
- * `resolveDirectiveOutcome` then REFUSES (throws) an array that didn't come from one of these — a real
- * runtime tag, not just a TS-erased phantom type, so the guard survives even a JS-level or manually-cast
- * call, not only a `tsc` pass. Chosen over a bare top-of-function assertion (the smallest diff, and the
- * one this card explicitly warns against defaulting to) because an assertion alone still leaves every call
- * site free to hand-assemble its own array the WRONG way and merely get caught after the fact; folding
- * selection into named constructors removes the freehand assembly step entirely — there is no longer a
- * "build the array yourself" path to get wrong. See `directiveByMsgId`/`peerMessageStatusByMsgId` below
- * for the shared resolver these streams feed (DoD-2's twins fold), and
- * `resolve-directive-outcome-stream-guard.mjs` for the regression proof this guard actually fires.
- */
+/** @decision 3c39be30 — see docs/decisions/3c39be30-directive-event-stream-branding-closes-the-freehand-query-hazard.md */
 const DIRECTIVE_STREAM_TAG: unique symbol = Symbol("directiveEventStream");
 type DirectiveEventStream = OrchestrationEvent[] & { readonly [DIRECTIVE_STREAM_TAG]: true };
 function tagDirectiveEventStream(events: OrchestrationEvent[]): DirectiveEventStream {
@@ -1291,23 +1142,7 @@ function managerLineageDirectiveStream(db: Db, managerSessionId: string): Direct
   return tagDirectiveEventStream(ownLineageIds(db, managerSessionId).flatMap((id) => db.listEvents(id)));
 }
 
-/**
- * Resolve ONE directive's (a `message_worker`/`redirect_worker` send's) current fate from durable event
- * history alone, walking its give-up/re-mint chain from `rootMsgId` forward. Card 35c96aa6: hoisted out of
- * `buildServer`'s `staleDirectiveProjection` closure to MODULE scope (unchanged logic — it never closed
- * over anything but its own three parameters; `events`' type was previously spelled via
- * `ReturnType<typeof db.listEventsForWorker>` purely for convenience, now the equivalent `OrchestrationEvent[]`)
- * so a second caller — the worker-facing `directive_status` tool below — can reuse the EXACT SAME walk
- * instead of a parallel reimplementation that could silently drift from it. `staleDirectiveProjection`'s own
- * call site is untouched; this is a pure scope move, not a behavior change.
- *
- * Each msgId gives up AT MOST ONCE (a give-up either re-mints to a brand-new msgId or parks terminally —
- * see handleGiveUpExhausted's doc) — so walking msgId -> its one give-up event -> the next msgId cannot
- * loop; `seen` is a cheap defensive bound, not a real cycle guard.
- *
- * Card 3c39be30: `events` is now the branded `DirectiveEventStream`, not a raw `OrchestrationEvent[]` —
- * see that type's own doc, immediately above, for the precondition this enforces and why.
- */
+/** @decision 35c96aa6 — see docs/decisions/35c96aa6-resolvedirectiveoutcome-hoisted-to-module-scope-for-reuse.md */
 export function resolveDirectiveOutcome(
   events: DirectiveEventStream, rootDirective: OrchestrationEvent, rootMsgId: string,
 ):
@@ -1376,28 +1211,7 @@ export function resolveDirectiveOutcome(
   return { state: "delivered", msgId, deliveredAt: delivery.ts, turnSeqAtDelivery: delivery.detail!.turnSeqAtDelivery as number };
 }
 
-/**
- * Card 3c39be30 DoD-2 — the SHARED engine behind `directiveByMsgId` and `peerMessageStatusByMsgId` below.
- * Both need exactly the same three steps: find an "origin" event matching some caller-specific predicate
- * (which differs — `message_worker`/`redirect_worker`'s own `msgId`/`queuedMsgId` field, vs a
- * `cross_project_message`'s own `msgId` field), resolve that origin's msgId chain via
- * `resolveDirectiveOutcome`, and project the outcome into the `{msgId, found, state, at}` shape both tools
- * actually return. Before this card those three steps were duplicated verbatim in each twin — "same
- * signature, same 4-way `at` ternary, same return shape" per this card's own body — and had ALREADY
- * drifted (see `peerMessageStatusByMsgId`'s own history below: prefix matching + lineage-widening landed
- * there but never here). Folding to one resolver means the outcome-projection logic, and the STREAM
- * PRECONDITION `resolveDirectiveOutcome` now enforces (see that function's own doc), are each stated once.
- *
- * `findOrigin` receives the ALREADY-SCOPED `DirectiveEventStream` (never a raw array) and returns the
- * origin event + the msgId to walk from it, or `undefined` on no match — callers never touch
- * `resolveDirectiveOutcome` directly, so they cannot feed it anything but the stream this function already
- * built via the correct constructor.
- *
- * `sentAt` (card af995d1d DoD-4) is the ORIGIN event's own timestamp — when the ROOT msgId a caller is
- * holding was actually sent — regardless of how far the chain has since walked (a remint changes `msgId`
- * but never the original send instant). Lets a `peer_message_status`/`directive_status` caller compute
- * its own elapsed-since-send for a still-`pending` read without holding a separate send-time stamp.
- */
+/** @decision 3c39be30 — see docs/decisions/3c39be30-resolvemsgidoutcome-is-the-shared-engine-behind-both-twins.md */
 function resolveMsgIdOutcome(
   events: DirectiveEventStream, ref: string,
   findOrigin: (events: DirectiveEventStream, ref: string) => { event: OrchestrationEvent; msgId: string } | undefined,
@@ -1413,31 +1227,7 @@ function resolveMsgIdOutcome(
   return { msgId: origin.msgId, found: true, state: outcome.state, at, sentAt: origin.event.ts };
 }
 
-/**
- * Card 867e64f1 DoD-3 — the manager-facing per-message consumed/not-consumed read, keyed to a SPECIFIC
- * `msgId` rather than "whichever directive is most recent" (`staleDirectiveProjection`'s own `directive`
- * field). Both `staleDirectiveProjection` and the worker-facing `directive_status` tool already resolve a
- * chain via `resolveDirectiveOutcome`; what neither offers is a way to re-check an OLDER root msgId once a
- * NEWER worker_message/worker_redirect has become "the tracked directive" — `staleDirectiveProjection`
- * scans backward and keeps only the LATEST `message_worker`/`redirect_worker` event by design (see its own
- * "latest wins" doc), so an earlier directive's own resolution is invisible there the moment a second one
- * is sent, even though its OWN durable event chain (give-up/re-mint/park/confirmed-after-park) keeps
- * existing and keeps resolving independently. That is exactly the incident shape this card measured: a
- * manager sent directive #2 before directive #1 had resolved, and had no way — while #2 was outstanding —
- * to re-ask "did #1 specifically land?"
- *
- * `msgId` here is the ROOT msgId a manager's own worker_message/worker_redirect call returned to it —
- * the SAME id `resolveDirectiveOutcome`'s callers already key on (see that function's own doc: a mid-chain
- * remint id is never handed to the sender and would be meaningless to query). `found:false` means this
- * worker has no `message_worker`/`redirect_worker` event carrying that exact root msgId at all — a
- * distinct signal from `state:null` on a msgId that WAS sent but has no further resolution (there is no
- * such case: every found root either resolves via `resolveDirectiveOutcome` or is defensively `pending`).
- *
- * Card 3c39be30: now takes `db` + `workerSessionId` rather than a pre-fetched `events` array — the caller
- * at `worker_status` used to build that array itself (`db.listEventsForWorker(w.id)`); it now can't, which
- * is the point (see `workerDirectiveStream`'s own doc for why a freehand-built array is the exact defect
- * class this closes).
- */
+/** @decision 867e64f1 — see docs/decisions/867e64f1-directivebymsgid-re-checks-an-older-root-after-a-newer-directive-supersedes-it.md */
 function directiveByMsgId(
   db: Db, workerSessionId: string, msgId: string,
 ): { msgId: string; found: boolean; state: "pending" | "delivered" | "parked" | "confirmed-after-park" | null; at: string | null; sentAt: string | null } {
@@ -1451,51 +1241,9 @@ function directiveByMsgId(
   });
 }
 
-/**
- * Card 0f693dea DoD-2 — the sender-facing per-msgId delivery read behind `peer_message_status`. A
- * `peer_message` sender has NO cross-project read into the target project's session at all (see
- * `handleGiveUpExhausted`'s `canCheckRecipient` doc, sessions/service.ts — the honest "no read exists"
- * clause a peer sender gets in a `[loom:redelivery-parked]` notice) — the actual gap this card exists to
- * close. Ownership is enforced BY CONSTRUCTION, with no exception: every event this function ever consults
- * comes from `managerLineageDirectiveStream` — `db.listEvents(id)` for `id` in the caller's OWN recycle
- * lineage (`ownLineageIds`) — NEVER a read into any other session's stream, peer or otherwise. This
- * function genuinely never reads the peer manager's own event stream; earlier drafts of this doc and of
- * this function's own body disagreed on that point (a real "the sentence asserting a policy is where it
- * breaches" instance, caught in Code Review) — fixed at the SOURCE instead, see below.
- *
- * THREE fixes landed here after Code Review on this card's first pass, all measured against the running
- * daemon rather than assumed from the shape of the code:
- *
- * (CRITICAL) A held/queued send that later drains normally used to read "pending" FOREVER. Root cause:
- * `resolveDirectiveOutcome`'s delivered-check for a NON-immediate hand-off looks for a
- * `session_message_delivered` event carrying this msgId — but `resolveQueuedMessage` (sessions/service.ts)
- * used to stamp that event with `managerSessionId:""` (never the sender), so it could never appear in a
- * sender-scoped stream. TWO candidate fixes were considered and REJECTED: (a) merge in the recipient's own
- * `db.listEventsForWorker` stream here — rejected because it reads the PEER MANAGER's own event stream
- * across a project trust boundary to answer a question about OUR OWN message, a genuinely weaker ownership
- * property than "scoped to the caller's own stream" for a PRIVATE product, even though the RETURNED shape
- * stays narrow; (b) `db.isQueuedMessageDelivered(msgId)` as a boolean existence check — rejected because it
- * has no timestamp, forcing `at:null` on a resolved "delivered" state and breaking this function's own
- * "`at` is null only while pending" contract. FIXED AT THE SOURCE INSTEAD: `resolveQueuedMessage` now
- * threads the real originating sender through (every call site updated, see that method's own doc) instead
- * of hard-coding `""` — the SAME sender its own paired `session_message_queued` event has ALWAYS carried.
- * The event simply appears in this function's existing sender-scoped read once stamped correctly; nothing
- * about this function's OWN scope needed to change.
- *
- * (MAJOR) `peer_message_status` is scoped to `managerSessionId`'s own RECYCLE LINEAGE (`ownLineageIds`,
- * same widening `directiveDeliveriesForCaller` already applies for the recipient side), not just its exact
- * live session id — a sender that recycles must still be able to resolve a msgId its PREDECESSOR minted;
- * this is, after all, the card about recycle-awareness.
- *
- * (MAJOR) Accepts an unambiguous id-PREFIX (`resolveIdPrefix`, `../id-prefix.js`), not just a full msgId —
- * the SAME `tasks_get`/`agent_get`/`worker_relink` convention used everywhere else Loom hands a truncated
- * id to a reader. The `[loom:redelivery-parked]` notice this tool exists to answer only ever prints an
- * 8-char slice of the msgId (mirrors every other id it slices the same way); requiring an exact full-id
- * match would make the notice's own prescribed action fail — this card's dead end, reintroduced inside its
- * own fix. An ambiguous prefix across the lineage returns `found:false` (same as a genuine miss — there is
- * no legitimate reason to distinguish them for this reader; unlike an id-scoped `*_get`, nothing here is
- * lost by not naming the candidates).
- */
+/** Ownership is enforced BY CONSTRUCTION — every event this function consults comes from
+ *  `managerLineageDirectiveStream` (the caller's OWN recycle lineage); NEVER a read into any other
+ *  session's stream, peer or otherwise. @decision 0f693dea — see docs/decisions/0f693dea-peer-message-status-three-code-review-fixes.md */
 function peerMessageStatusByMsgId(
   db: Db, managerSessionId: string, ref: string,
 ): { msgId: string; found: boolean; state: "pending" | "delivered" | "parked" | "confirmed-after-park" | null; at: string | null; sentAt: string | null } {
@@ -1530,60 +1278,7 @@ function ownLineageIds(db: Db, sessionId: string): string[] {
   return ids;
 }
 
-/**
- * Card 35c96aa6 — the read behind the worker-facing `directive_status` tool: "which durable, turn-
- * confirmed hand-offs, of a message whose root label matches `rootLabel` (or of ANY root, when
- * `rootLabel` is omitted), has `callerSessionId` — or a predecessor in its own recycle lineage — ever
- * received?" DELIVERY history only, never a claim about action — see the tool's own description for the
- * explicit non-claim.
- *
- * Reuses `resolveDirectiveOutcome` per directive event (same function `staleDirectiveProjection` calls,
- * see its own doc) rather than re-deriving chain state, applied to EVERY `message_worker`/`redirect_worker`
- * event found in scope — not just the latest one `staleDirectiveProjection` tracks — because a manual
- * resend (`resendOf`) can create a SEPARATE top-level directive event sharing the SAME true root, and each
- * must be walked on its own.
- *
- * LABEL, not internal id: a worker only ever sees the 8-hex-char label `framePossibleDuplicate` puts in a
- * `[loom:possible-duplicate root:…]` tag — never the raw internal `rootMsgId` — so matching must use
- * `possibleDuplicateRootLabel` (pty/host.ts), the SAME function that produced the tag, not a re-derived
- * approximation. A directive's TRUE internal root (needed to compute that label) is recovered from
- * `session_message_queued`/`session_message_gave_up` events' own `detail.rootMsgId` field — NOT from
- * `message_worker`/`redirect_worker`'s own `detail.msgId`/`detail.queuedMsgId`, which is always a FRESH
- * per-call mint (see `enqueueDurableMessage`, sessions/service.ts) and only coincidentally equals the true
- * root for a plain first-ever send with no `resendOf`. A directive event whose own msgId is absent from
- * that map (never queued, never gave up — a clean first-ever immediate delivery) self-roots to its own
- * msgId and is never tagged — but NOT because `framePossibleDuplicate` itself refuses a self-root (it
- * applies the tag UNCONDITIONALLY whenever called; there is no such guard inside it — see that function's
- * own doc, and card fb5d2220's gate-time audit). The real guarantee is CALL-SITE DISCIPLINE: every actual
- * caller (the `giveUpGen`-gated write in `joinSubmittedText`, `handleGiveUpExhausted`'s re-mint, the
- * kickoff give-up re-mint, and Path D's `redriveQueuedMessage`, pty/host.ts + sessions/service.ts) only
- * ever invokes it on a message that WAS queued or gave up. Path D's redrive (bcaeab8d) frames
- * UNCONDITIONALLY, but only ever redrives a row with an existing `session_message_queued` record — so the
- * "never queued" case stays unreachable through it too, and the guarantee survives, on that narrower basis
- * rather than the function-level one this comment used to cite. A real worker-supplied label can never
- * legitimately match one — harmless.
- *
- * Only `state: "delivered"` and `state: "confirmed-after-park"` outcomes ever produce a delivery record —
- * `"parked"`/`"pending"` never reached any turn, so they carry no information relevant to "have I seen
- * this before". A `confirmed-after-park` entry's `turnSeq` is `null` (no hand-off was ever cleanly
- * stamped — that's the whole shape of the bug it corrects) but is STILL a genuine, durably-recorded prior
- * delivery. CAUGHT IN SELF-AUDIT: an earlier draft of this doc claimed such an entry "always predates the
- * caller's current turn" — NOT verified. The confirming hook that produces it fires asynchronously off
- * engine-side evidence (see `onGiveUpConfirmed`'s own doc, pty/host.ts), and this function has no way to
- * establish it can never resolve mid-way through the very turn that's asking. The turnSeq-comparison
- * technique above simply does not apply to a null entry — its presence is evidence of a genuine delivery,
- * not evidence of WHEN relative to the caller's current turn; don't claim more than that.
- *
- * Each entry carries BOTH `fromSession` (the event's own `managerSessionId` — the actual SENDER) and
- * `receivedBy` (the event's own `workerSessionId` — which id in the CALLER's OWN lineage actually took the
- * hand-off; may be a predecessor, never anyone outside the lineage). Do not collapse these into one field:
- * `receivedBy` differing from the live caller's own sessionId is precisely the recycle-boundary signal
- * DoD-3 exists to make visible — "a predecessor of mine received this, not me."
- *
- * Bounded to the 20 MOST RECENT deliveries when `rootLabel` is omitted (an unfiltered call is meant to be
- * a cheap standing habit, not a full-history dump); a single-label filtered call returns its complete
- * history uncapped (inherently small — one logical chain's own deliveries).
- */
+/** @decision 35c96aa6 — see docs/decisions/35c96aa6-directive-deliveries-for-caller-label-not-internal-id.md */
 const UNFILTERED_DELIVERY_CAP = 20;
 function directiveDeliveriesForCaller(
   db: Db, callerSessionId: string, rootLabel?: string,
@@ -1697,26 +1392,9 @@ export class OrchestrationMcpRouter {
     return role === "manager" || role === "worker" || role === "assistant" ? { id: sessionId, role } : null;
   }
 
-  /**
-   * READ-ONLY projection of the caller's project RESOLVED gateCommand (the build/DoD gate run in a
-   * worker's worktree before merge), folded into `my_context` so a manager/worker can SEE the gate
-   * without a new tool. Resolved through the ONE config mechanism (`resolveConfig`) — never the default
-   * ad hoc — so a per-project override or human PATCH is reflected with no daemon restart.
-   *
-   * `timeoutMs` is resolved through the SAME `resolveConfig(...).orchestration.gateCommandTimeoutMs`
-   * path the gate itself enforces (`sessions/service.ts` confirmWorkerMerge + the worker `run_gate`
-   * call-site) — never re-derived or hardcoded — so it tracks a per-project override, not the platform
-   * default (card 89257222: an unreadable timeout was propagating as manager-to-manager folklore instead
-   * of being read from the artifact). Reported unconditionally, even when no gateCommand is configured,
-   * since the timeout still governs whatever gate a project later sets.
-   *
-   * TRUST BOUNDARY — this is READ-ONLY by design (PL Auditor finding #9, signed off on option (b)).
-   * `gateCommand` runs arbitrary host shell at daemon privilege, so it stays HUMAN-only-to-SET (same
-   * class as the vault/git writers + alertWebhook). NO set/propose/confirm-queue surface exists here.
-   * When NO gate is configured (the platform default is the empty string), this returns an explicit
-   * `configured:false` + a note so the manager ASKS THE OWNER to set one (a human action) rather than
-   * hand-rolling a gate string into a worker's DoD.
-   */
+  /** @decision 89257222 — see docs/decisions/89257222-resolved-gate-command-timeout-tracks-the-same-config-path-the-gate-itself-reads.md
+   *  TRUST BOUNDARY: this is READ-ONLY by design (PL Auditor finding #9). `gateCommand` runs arbitrary
+   *  host shell at daemon privilege — HUMAN-only-to-SET; NO set/propose/confirm-queue surface exists here. */
   private resolvedGateCommand(projectId: string | undefined):
     | { configured: true; command: string; timeoutMs: number }
     | { configured: false; command: null; note: string; timeoutMs: number } {
@@ -2693,56 +2371,7 @@ export class OrchestrationMcpRouter {
 
     this.registerMyContext(server, sessionId);
 
-    // Additive "reported / awaiting-review" projection (read-only — never touches report DELIVERY).
-    // A worker that called worker_report(done|blocked) ends its turn and sits at busy:false —
-    // indistinguishable in the raw session record from a plain idle-live worker. Derive it from the
-    // worker's orchestration_events so a manager can SEE "reported, awaiting review" in
-    // worker_status/worker_list without reading the transcript.
-    //
-    // Card 6641c3ab (fix): find this worker's MOST-RECENT `worker_report` event (any status — a LATER
-    // worker_report(progress) after a done/blocked one correctly means "not awaiting" here, same as
-    // before). If its status isn't done/blocked, nothing is awaiting. Otherwise, "still awaiting" iff NO
-    // event in REPORT_RESOLVED_EVENT_KINDS (see its own doc — an ALLOWLIST, not a denylist, and why)
-    // landed strictly after that report. This REPLACES the old "is the chronological LAST event of ANY
-    // kind a worker_report" check — that check went null the instant ANY later worker-keyed row landed,
-    // including a `merge_request` fired by a manager merely reviewing the diff (`worker_merge`) before
-    // ever deciding whether to merge — the actual cause of this card's false negatives on a LIVE,
-    // unmerged, never-messaged worker. reportedState carries the live state when awaiting, else null
-    // (kept consistent with awaitingReview so a non-null reportedState always means "waiting on my
-    // review right now"). Card db05e657: this scan itself now lives in the shared
-    // `deriveAwaitingReview` (orchestration/report-resolution.ts) — the crash/restart-recovery notice
-    // (`deriveCrashOrphanedWorkers`) calls the SAME function so the two can no longer independently decide
-    // "resolved" in different ways; this closure only adds the `staleReport` layer on top.
-    //
-    // `staleReport` (card 4491bd3b, DoD-1 — the reconciliation detector): the reverse-direction sibling
-    // of `staleDirective` below. While `awaitingReview` is true, compares the MANAGER's own turnSeq NOW
-    // against the baseline `managerTurnSeqAtReport` stamped on the report event itself (workerReport,
-    // sessions/service.ts) — both halves already stored, no transcript read, no claim about mechanism.
-    // Non-null once the manager has completed `STALE_REPORT_TURN_THRESHOLD`+ turns of its OWN since the
-    // report landed with this SAME report still unresolved: proof the manager's pty kept cycling (it is
-    // not merely idle-and-hasn't-looked-yet) while this specific report never got acted on. This is
-    // DELIBERATELY agnostic to WHY — it fires identically whether the report was rendered as a placeholder,
-    // evicted by context summarization, or something not yet named; it only asserts the observed gap. A
-    // pre-existing event (persisted before this card's stamp landed) has no `managerTurnSeqAtReport` key
-    // at all — reads as `undefined`, so `staleReport` stays `null` for it exactly as it did before this
-    // card, rather than misreading a missing stamp as turnsSinceReport:0 (falsely "not stale") or NaN.
-    //
-    // Card 456bf38a (false-positive fix): firing `worker_merge_confirm` IS the resolution of a `done`
-    // report — the most complete response available — but it doesn't append a `merge_done` event (and
-    // therefore doesn't land in REPORT_RESOLVED_EVENT_KINDS above) until the gate actually SETTLES, which
-    // on this project's real gate durations (~14 min) reliably outlasts `STALE_REPORT_TURN_THRESHOLD`
-    // manager turns. That made `staleReport` fire on the maximally-handled path — a merge already fired
-    // and actively running for this exact worker — teaching a reader to discount the one signal meant to
-    // catch a report nobody ever looked at. Fix: suppress (return null) while a `pendingMerge` for this
-    // SAME worker is still IN FLIGHT (`PendingOpView.state === "running"` — covers both a merge admitted
-    // and executing, and one still queued/prepping behind a same-repo sibling; see `withGatePhase`'s own
-    // doc above for why those two both read `state:"running"` at this layer). Deliberately does NOT touch
-    // `turnsSinceReport`'s own accumulation — only the returned `staleReport` is nulled — so once the op
-    // settles (`state` becomes `"done"`/`"failed"`, or the view evicts to `undefined`/`null` outside its
-    // brief retained window), the pre-existing threshold check resumes exactly where it left off: a
-    // successful merge lands `merge_done` and resolves the report for good (unchanged), while a
-    // rejected/cancelled merge lands neither `merge_done` nor any other REPORT_RESOLVED_EVENT_KINDS entry,
-    // so `staleReport` re-arms on the very next read — the true-positive case this must keep catching.
+    // @decision 6641c3ab — see docs/decisions/6641c3ab-reported-projection-scans-most-recent-worker-report-not-the-last-event.md
     const reportedProjection = (workerSessionId: string, pendingMerge: PendingOpView | null): {
       reportedState: "done" | "blocked" | null;
       awaitingReview: boolean;
@@ -2763,41 +2392,7 @@ export class OrchestrationMcpRouter {
       return { reportedState, awaitingReview: true, staleReport };
     };
 
-    // Card 343441bd: "delivered vs. apparently acted upon" — a manager-facing signal, distinct from the
-    // synchronous `{delivered:true}` a worker_message call returns, which only proves the text was
-    // submitted-or-durably-queued (see the card body's `39cbe5b5` incident: that receipt was truthful and
-    // useless — the fix-pass it described was never executed, and the manager only found out by grepping
-    // the branch HEAD). PULL, not a nudge (deliberately no watchdog here — see the card's own steer against
-    // reintroducing a false-alarm nudge class, `a4bfe6d9`→`8e0bd254`): a sibling of reportedProjection,
-    // read only when a manager actually looks at worker_list/worker_status.
-    //
-    // "Acknowledged" = the worker's next worker_report (ANY status) with a `ts` after the directive's
-    // recorded HAND-OFF (see the `deliveryState`/hand-off-vs-confirmation caveat below — "delivery" here
-    // means the recorded hand-off point, not an engine-confirmed receipt) — the cheapest of the card's own
-    // candidate definitions, deliberately NOT a semantic match against the directive's text. Only applies
-    // to the `delivered` outcome below — see Card 9da2a435's note on why a `parked` outcome can NEVER be
-    // acknowledged this way. Scoped to the LATEST `message_worker` OR `redirect_worker` event (mirrors
-    // reportedProjection's own "latest wins" scan, now widened across both kinds — card 0fbb0507). Before
-    // that widening this was `worker_message` ONLY; `worker_redirect` already carried a correlatable
-    // `queuedMsgId` on its held path (card 02621025) and the widening was deliberately deferred to keep
-    // 9da2a435 minimal — see staleDirectiveProjection's own doc below for how the two kinds correlate.
-    //
-    // turnSeqAtDelivery was stamped by messageWorker (immediate delivery) or resolveQueuedMessage (held —
-    // stamped at HAND-OFF, never at enqueue); see both call sites' docs. A directive still sitting in the
-    // queue (held, not yet delivered) has no turnSeqAtDelivery anywhere yet — nothing to judge staleness
-    // against, so it reads as null exactly like an acknowledged one.
-    //
-    // Card 9da2a435: hand-off is NOT confirmed delivery (see enqueueStdin's EnqueueResult doc) — a submit
-    // that hands off optimistically can still GIVE UP asynchronously, and `handleGiveUpExhausted`
-    // (sessions/service.ts) either re-mints it under a FRESH msgId (chainDepth+1) or terminally PARKS it,
-    // appending a `session_message_gave_up` event either way. The OLD version of this function never
-    // looked for that event: a parked directive never gets a worker_report (nothing was ever handed to the
-    // worker to act on) AND never advances the worker's own turnSeq (no turn ran), so `turnsSinceDelivery`
-    // stayed 0 forever and `staleDirective` read `null` — indistinguishable from "recently delivered, no
-    // problem yet". `resolveDirectiveOutcome` walks the give-up chain first so a parked directive is
-    // reported as parked, never silently as "no signal". Card 35c96aa6: hoisted to MODULE scope (was a
-    // closure-local `const` here) so the worker-facing `directive_status` tool can call the SAME chain
-    // walk instead of reimplementing it — this call site is unchanged, only where the function lives moved.
+    // @decision 343441bd — see docs/decisions/343441bd-stale-directive-is-a-pull-signal-not-a-watchdog.md
 
     // CR follow-up [2] (card 9da2a435): `directive` is the raw discriminator a manager can read
     // directly — "none" (never messaged) / "pending" (queued or mid give-up-retry, not yet resolved
