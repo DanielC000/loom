@@ -248,20 +248,23 @@ export function toCliPermissionMode(mode: PermissionPolicy["mode"]): CliPermissi
 }
 
 /**
- * Card 5244adc2 — whether `repoRoot` has adopted ANY of the three decision-record stores at all.
+ * Card 5244adc2 — the decision-record store kinds this daemon-side gate checks for under `docs/<kind>`.
  * Deliberately duplicated from `decision-records.mjs`'s own `anyStoreExists` (assets/decision-records.mjs)
  * rather than imported: that script ships as a standalone asset invoked via a bare `node <path>` spawn
  * (see DECISION_RECORDS_SCRIPT), independent of this package's compiled `dist/` — it has no way to import
  * from here, and this daemon-side copy exists purely to decide whether to WIRE the hook at all, not to
  * replace that script's own runtime bail (which stays, see its own doc, as the backstop for a store
  * deleted mid-session — DoD-5 on card 5244adc2). Same shape-drift risk as `PRE_TOOL_USE_ATTRIBUTION_MATCHER`
- * above: keep the store list (`docs/adr`, `docs/decisions`, `docs/investigations`) in sync with that
- * script's own `FLAT_STORES` + investigations-dir check if either ever changes.
+ * above — and card 0635f545's `test/decision-records.mjs` pins this list against the asset's own literal
+ * store-kind checks (parsed out of `anyStoreExists`'s source text, since that asset can't be imported —
+ * see the test's own comment) so a divergence fails loudly instead of silently. Exported for exactly that
+ * test to import; still no PRODUCTION-code coupling between the two files. Keep in sync with that script's
+ * own `FLAT_STORES` + investigations-dir check if either ever changes.
  */
+export const DECISION_RECORD_STORE_KINDS: readonly string[] = ["adr", "decisions", "investigations"];
+
 function anyDecisionRecordStoreExists(repoRoot: string): boolean {
-  return fs.existsSync(path.join(repoRoot, "docs", "adr"))
-    || fs.existsSync(path.join(repoRoot, "docs", "decisions"))
-    || fs.existsSync(path.join(repoRoot, "docs", "investigations"));
+  return DECISION_RECORD_STORE_KINDS.some((kind) => fs.existsSync(path.join(repoRoot, "docs", kind)));
 }
 
 export function writeSessionSettings(

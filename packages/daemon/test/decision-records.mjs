@@ -33,7 +33,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { DECISION_RECORDS_SCRIPT, SETTINGS_DIR, ensureDirs } from "../dist/paths.js";
-import { writeSessionSettings } from "../dist/pty/claude-settings.js";
+import { writeSessionSettings, DECISION_RECORD_STORE_KINDS } from "../dist/pty/claude-settings.js";
 
 if (!process.env.LOOM_HOME) { console.error("LOOM_HOME must be set."); process.exit(2); }
 
@@ -339,6 +339,49 @@ try {
   const readGroupOmitted = (omitted.hooks.PostToolUse || []).find((g) => g.matcher === "Read");
   check("writeSessionSettings(repoPath omitted): PostToolUse still carries a Read group (backward-compatible default)",
     !!readGroupOmitted);
+
+  // --- card 0635f545: pin DECISION_RECORD_STORE_KINDS (claude-settings.ts) against decision-records.mjs's
+  // OWN `anyStoreExists` store-kind literals — 5244adc2 had to duplicate that list because the compiled
+  // daemon cannot import the standalone asset. Asserting the two FUNCTIONS return the same ANSWER on the
+  // fixtures above would be the wrong test here: it can never detect a store kind neither fixture has,
+  // which is exactly the shape of the dangerous drift direction (see below) — so this compares the LISTS
+  // themselves. The asset can't be imported (out of scope to change, and the whole point of it staying a
+  // standalone/live-read asset — see the card), so its list is recovered by parsing the literal
+  // `"docs", "<kind>"` pairs out of `anyStoreExists`'s own source text; the settings side is read as a
+  // real compiled constant (DECISION_RECORD_STORE_KINDS), not re-parsed, so only ONE side of this
+  // comparison is ever textual.
+  //
+  // Drift directions this catches: BOTH, because it's true set equality, not a one-way subset/superset
+  // check. If the settings list falls behind the asset (gains fewer kinds) — the dangerous direction: a
+  // project whose only store is a kind the asset knows but the settings list doesn't would be judged
+  // store-less, the hook never gets wired, and decision records silently stop injecting for it, with no
+  // downstream backstop (the backstop lives INSIDE the un-wired hook) — this test fails. If the settings
+  // list runs ahead of the asset (gains an extra kind the asset doesn't check) — the benign, self-
+  // announcing direction (the hook wires when it need not) — this test fails too.
+  const assetSrc = fs.readFileSync(path.join(import.meta.dirname, "..", "assets", "decision-records.mjs"), "utf8");
+  const assetFnMarker = "function anyStoreExists(";
+  const assetFnStart = assetSrc.indexOf(assetFnMarker);
+  check("sanity: decision-records.mjs still defines anyStoreExists (source shape assumed by this test)", assetFnStart !== -1);
+  const assetBraceStart = assetSrc.indexOf("{", assetFnStart);
+  let depth = 0, i = assetBraceStart;
+  for (; i < assetSrc.length; i++) {
+    if (assetSrc[i] === "{") depth++;
+    else if (assetSrc[i] === "}") { depth--; if (depth === 0) break; }
+  }
+  const assetFnBody = assetSrc.slice(assetBraceStart, i + 1);
+  const assetKinds = new Set();
+  for (const m of assetFnBody.matchAll(/"docs"\s*,\s*"([a-zA-Z0-9_-]+)"/g)) assetKinds.add(m[1]);
+  // Positive control: prove the extraction pattern can actually find something, against the SAME asset
+  // text, before trusting its silence anywhere else — an empty result here would make the two-sides-agree
+  // check below pass vacuously if DECISION_RECORD_STORE_KINDS were also (wrongly) empty.
+  check("sanity: literal-parsing anyStoreExists's body finds all 3 currently-known store kinds "
+    + "(proves the extraction pattern works, not just that both sides happen to be empty)",
+    assetKinds.size === 3 && assetKinds.has("adr") && assetKinds.has("decisions") && assetKinds.has("investigations"));
+  const settingsKinds = new Set(DECISION_RECORD_STORE_KINDS);
+  const setsEqual = (a, b) => a.size === b.size && [...a].every((x) => b.has(x));
+  check("DECISION_RECORD_STORE_KINDS (claude-settings.ts, compiled) matches decision-records.mjs's own "
+    + "anyStoreExists store-kind literals exactly (set equality — catches EITHER divergence direction)",
+    setsEqual(assetKinds, settingsKinds));
 } finally {
   for (const d of [REPO, DEDUPE_DIR, FOREIGN_REPO, NO_STORE_REPO]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ } }
   for (const id of ["decrec-wiring-store", "decrec-wiring-nostore", "decrec-wiring-omitted"]) {
