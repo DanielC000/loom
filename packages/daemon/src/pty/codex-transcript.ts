@@ -3,6 +3,7 @@ import path from "node:path";
 import type { TranscriptTurn } from "./adapter.js";
 import { archivedTranscriptPath } from "../sessions/transcript.js";
 import { realCodexHome } from "./codex-doctrine.js";
+import { codexRolloutArchiveRoot } from "./codex-rollout-archive.js";
 
 /**
  * HarnessAdapter seam (multi-harness epic df1f94b0, Phase 1, card 353f6dc4): the codex adapter's
@@ -110,25 +111,13 @@ function rememberResolvedPath(conversationId: string, filePath: string): void {
   }
 }
 
-/**
- * Locate a conversation's rollout file. Unlike Claude's per-cwd-encoded-dir + `<id>.jsonl` scheme, a
- * Codex rollout filename is `rollout-<ISO-timestamp>-<uuid>.jsonl` nested under `sessions/YYYY/MM/DD/` —
- * the `cwd` isn't part of the path at all (confirmed: `session_meta.payload.cwd` carries it INSIDE the
- * file instead), so there is no direct/computed path to try first the way Claude's `engineTranscriptPath`
- * has. Every lookup is a scan; bounded to `depth:3` (YYYY/MM/DD) and cached by conversation id so a
- * repeat lookup (e.g. a live session's own liveness re-check) doesn't re-walk the tree.
- */
-export function resolveTranscriptFile(_cwd: string, conversationId: string): string | null {
-  const cachedHit = resolvedPathCache.get(conversationId);
-  if (cachedHit !== undefined) {
-    if (fs.existsSync(cachedHit)) return cachedHit;
-    resolvedPathCache.delete(conversationId);
-  }
-  let found: string | null = null;
+/** Walk one `YYYY/MM/DD`-shaped root looking for a `.jsonl` file whose name contains `conversationId` —
+ *  the shared tree-walk {@link resolveTranscriptFile} runs against BOTH the live sessions root and the
+ *  archive root (card b8124a1f, `codex-rollout-archive.ts`). */
+function scanForConversationId(root: string, conversationId: string): string | null {
   try {
-    const sessionsRoot = codexSessionsRoot();
-    for (const year of fs.readdirSync(sessionsRoot)) {
-      const yearDir = path.join(sessionsRoot, year);
+    for (const year of fs.readdirSync(root)) {
+      const yearDir = path.join(root, year);
       let months: string[];
       try { months = fs.readdirSync(yearDir); } catch { continue; }
       for (const month of months) {
@@ -140,13 +129,38 @@ export function resolveTranscriptFile(_cwd: string, conversationId: string): str
           let files: string[];
           try { files = fs.readdirSync(dayDir); } catch { continue; }
           const hit = files.find((f) => f.endsWith(".jsonl") && f.includes(conversationId));
-          if (hit) { found = path.join(dayDir, hit); break; }
+          if (hit) return path.join(dayDir, hit);
         }
-        if (found) break;
       }
-      if (found) break;
     }
-  } catch { /* sessions root missing — nothing to find */ }
+  } catch { /* root missing — nothing to find */ }
+  return null;
+}
+
+/**
+ * Locate a conversation's rollout file. Unlike Claude's per-cwd-encoded-dir + `<id>.jsonl` scheme, a
+ * Codex rollout filename is `rollout-<ISO-timestamp>-<uuid>.jsonl` nested under `sessions/YYYY/MM/DD/` —
+ * the `cwd` isn't part of the path at all (confirmed: `session_meta.payload.cwd` carries it INSIDE the
+ * file instead), so there is no direct/computed path to try first the way Claude's `engineTranscriptPath`
+ * has. Every lookup is a scan; bounded to `depth:3` (YYYY/MM/DD) and cached by conversation id so a
+ * repeat lookup (e.g. a live session's own liveness re-check) doesn't re-walk the tree.
+ *
+ * Card b8124a1f: falls back to {@link codexRolloutArchiveRoot} when not found live — an archived
+ * rollout (`codex-rollout-archive.ts`) is a byte-identical relocation, never a transform, so this
+ * fallback keeps every caller (worker_transcript, exit-time `snapshotTranscript`, `sessions/scratch-
+ * gc.ts`'s resumability check, `sessions/liveness.ts`'s watcher re-check) working unchanged for an
+ * archived session — see that file's own header doc for why archiving never needs to prove a rollout
+ * is safe against a live-or-resumable session before moving it.
+ */
+export function resolveTranscriptFile(_cwd: string, conversationId: string): string | null {
+  const cachedHit = resolvedPathCache.get(conversationId);
+  if (cachedHit !== undefined) {
+    if (fs.existsSync(cachedHit)) return cachedHit;
+    resolvedPathCache.delete(conversationId);
+  }
+  const found =
+    scanForConversationId(codexSessionsRoot(), conversationId) ??
+    scanForConversationId(codexRolloutArchiveRoot(), conversationId);
   if (found !== null) rememberResolvedPath(conversationId, found);
   return found;
 }

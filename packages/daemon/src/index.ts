@@ -25,6 +25,7 @@ import { createFasterWhisperTranscriber, prewarmStt } from "./companion/stt.js";
 import { createKokoroSynthesizer, prewarmTts } from "./companion/tts.js";
 import { checkCompanionReplyHealth } from "./companion/reply-watch.js";
 import { PtyHost } from "./pty/host.js";
+import { archiveOldCodexRollouts } from "./pty/codex-rollout-archive.js";
 import { SessionService } from "./sessions/service.js";
 import { CodescapeSupervisor, codescapeBootRepoPaths } from "./codescape/supervisor.js";
 import { UsageSampler } from "./sessions/usage-sampler.js";
@@ -618,6 +619,17 @@ async function main(): Promise<void> {
     if (runs.failed > 0) console.log(`[boot] failed ${runs.failed} interrupted run(s) (ephemeral — no resume) + swept run snapshots`);
   } catch (err) {
     console.warn(`[boot] run reconcile failed (continuing boot): ${(err as Error).message}`);
+  }
+  // Card b8124a1f: bound the otherwise-unbounded ~/.codex/sessions corpus — archive-not-delete, best-
+  // effort, boot-only (mirrors sweepUnresumableScratchDirs's own posture). Pure fs stat/rename over a
+  // bounded YYYY/MM/DD tree walk, never a hot path. See pty/codex-rollout-archive.ts's own header doc
+  // for why this never needs a DB/resumability check before moving a file.
+  try {
+    const archived = archiveOldCodexRollouts();
+    if (archived.archived.length > 0) console.log(`[boot] archived ${archived.archived.length} old codex rollout(s) out of ~/.codex/sessions`);
+    if (archived.failed.length > 0) console.warn(`[boot] failed to archive ${archived.failed.length} codex rollout(s) (left in place)`);
+  } catch (err) {
+    console.warn(`[boot] codex rollout archive sweep failed (continuing boot): ${(err as Error).message}`);
   }
   // WakeService (the `wake_me` primitive) needs SessionService.resume (auto-resume on fire), so it
   // comes after sessions. Always on — recovery/continuation, not autonomy-gated (like the rate-limit
