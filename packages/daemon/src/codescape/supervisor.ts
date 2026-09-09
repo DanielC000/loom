@@ -10,38 +10,17 @@ import { writeToolDriftState, writeBuildDriftState } from "./drift-notice.js";
 import { codescapeUnclassifiedTools } from "../pty/host.js";
 
 /**
- * Codescape fleet-daemon wiring epic (`369dde3c`), card C1 — FOUNDATION, updated by card 503a30a0. Under
- * `isCodescapeSupervisorEnabled()` (isLoomDev() + a codescape CLI actually detected on the host — see
- * paths.ts; codescape is a private internal tool, so this is a non-discoverable, config/host-driven gate,
- * not a hand-set env toggle), Loom starts + supervises ONE `codescape serve` process per host on a
+ * Codescape fleet-daemon wiring epic, foundation. @decision 369dde3c — see
+ * docs/decisions/369dde3c-codescape-fleet-daemon-wiring-epic-foundation.md for the design-mirrors
+ * rationale and why every method here is Loom-internal only, never an agent MCP tool. Under
+ * `isCodescapeSupervisorEnabled()`, Loom starts + supervises ONE `codescape serve` process per host on a
  * loopback port, bootstrapped by `codescape ingest <repoPath>` for each target project BEFORE serve starts
  * (v1: projects load from `.codescape/projects/index.json` at serve BOOT — a project ingested after serve
  * started isn't picked up until a restart).
  *
- * ★ CWD CONTRACT (load-bearing) — UPDATED, card 194d343d: `ingest` and `serve` no longer resolve their
- * `.codescape` state dir purely from `process.cwd()` — as of their `e23c2cb`, a missing `.git` in cwd
- * makes them WALK UP looking for one, which can silently re-anchor the store outside `homeDir` (this bit
- * us: our cwd, `<LOOM_HOME>/codescape`, has no `.git`, so the walk climbed to `<LOOM_HOME>` and anchored
- * there instead). We now pin the store explicitly via `CODESCAPE_HOME=<homeDir>` in the spawn env on
- * BOTH `ingest` and `serve` (their resolver checks the env var FIRST, ahead of any cwd walk) — that is
- * the load-bearing guarantee going forward. Running both spawns from the same `homeDir` as `cwd` is kept
- * as belt-and-braces, but is **not sufficient on its own**: cwd alignment cannot prevent an upstream
- * resolution change from walking past it. Every spawn — ingest and serve alike — must still carry the
- * SAME `homeDir` (default {@link CODESCAPE_HOME_DIR}, `<LOOM_HOME>/codescape`) as both `cwd` and
- * `CODESCAPE_HOME`, or serve will never see what ingest wrote.
- *
- * Mirrors, cited:
- *   - Async best-effort subprocess discipline (spawn not spawnSync, bounded, ~4KB output tail, never
- *     throws) — `python/venv.ts` `runAsync` (120-153) / `ensurePythonPackageAsync` (240-271).
- *   - Absolute/PATH binary resolution + the node-invocation special case for a JS entrypoint —
- *     `pty/resolve-bin.ts` `resolveExecutable`.
- *   - "Broken stays visibly down, never crash-loop" restart ethos — `scripts/daemon-supervisor.mjs`
- *     (its OUTER daemon-process supervision only restarts on an explicit sentinel; this INNER supervisor
- *     restarts on any death but gives up — and STAYS down — after a bounded number of attempts).
- *   - Boot singleton (gated, logs state) — `index.ts:680-692` Scheduler.
- *
- * Every method here is Loom-internal only — never registered on any agent MCP router (C1 is pure daemon
- * plumbing; C2/C3 wire the per-session MCP entry and the lifecycle hooks that call these methods).
+ * @decision 194d343d — `ingest` and `serve` must both pin `CODESCAPE_HOME=<homeDir>` in their spawn env;
+ * cwd alignment alone cannot prevent an upstream resolver from walking past it. See
+ * docs/decisions/194d343d-codescape-cwd-contract-pin-codescape-home-in-spawn-env.md
  */
 
 /** Cap (bytes) on the captured stdout+stderr tail kept for diagnostics — a bounded ring, mirrors OUTPUT_TAIL_BYTES in python/venv.ts. */
@@ -91,45 +70,13 @@ const DEFAULT_RESTART_BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000]
 /** A `serve` that ran at least this long before dying is treated as a fresh failure — resets the backoff. */
 const DEFAULT_HEALTHY_RUN_MS = 30_000;
 /**
- * Card 4e0df6ce: bound (ms) for the self-reporting `--port 0` capability probe embedded in the FIRST spawn
- * attempt of this instance's life (and any later attempt after {@link CodescapeSupervisor.port} goes back
- * to `null` — a `stop()`/restart-give-up). How long we wait for EITHER the reported-bound-port stdout line
- * (see {@link parsePortReportLine}) OR the child's own exit before concluding the attempt is ambiguous and
- * falling back to a scheduled restart (never left permanently unresolved).
- *
- * Card 44d45f81 RAISED this from the original 5_000: `4e0df6ce`'s reasoning ("a capable `serve` reports
- * essentially at bind time") was measured FALSE under real host contention and caused a live production
- * regression — two live, functioning `serve` attempts abandoned on the FIRST boot after deploying that
- * constant. Measured directly against the REAL installed binary (never the fixture, which reports
- * instantly and so cannot exercise this bound at all — same family as this project's standing real-spawn
- * rule): quiet host, n=8, 765-836ms; under SYNTHETIC CPU load oversubscribing 16 logical cores 18x, n=6,
- * 2442-3557ms; oversubscribing ~2.5x (40 workers), n=9 across two batches, 975-7942ms — several runs
- * already past the OLD 5_000ms bound. Stated plainly: this synthetic load is CPU starvation, a stand-in
- * that reproduces the SAME CLASS of failure on demand — it is NOT a measurement of the actual production
- * condition (a fleet-wide restart doing ingest + project registration, which is I/O- and
- * child-process-contention-heavy, different IN KIND, not just degree). Do not read the percentiles above
- * as the production distribution; treat them as a documented floor on how bad this gets, with real reason
- * to expect I/O contention could push higher.
- *
- * A byte-level trace under that same synthetic load showed essentially ALL of the elapsed time lands
- * BEFORE the child writes its first byte (module load + graph-store open); the gap from first byte to the
- * report line itself was consistently under 100ms — i.e. codescape is SILENT from spawn until it reports,
- * never chatty-but-stalled. That is the deciding fact for shape, not taste: an idle-reset bound (reset on
- * any child output) is indistinguishable from this absolute bound for a silent child — it buys nothing —
- * while an idle-reset bound WOULD be actively wrong if codescape ever became chatty-but-never-reporting
- * (steady startup logging, bind never completing), since idle-reset alone never fires against a live
- * stream of unrelated output and would violate `spawnServeSelfReporting`'s "never a permanently-stuck
- * attempt" commitment. Given the measured data says the child is silent, the simpler absolute bound is the
- * correct choice, not a cheaper stand-in for the more elaborate one.
- *
- * Sized generously rather than tightly against the measured synthetic ceiling (~7.9s), given the
- * CPU-vs-I/O gap above: the cost of an over-long bound is a slower give-up on a genuinely dead child
- * (already handled by the restart ladder below), while the cost of a too-short one is the exact regression
- * this card fixes. 30_000ms is chosen for that headroom, while still bounding a genuinely-stuck spawn to a
- * human-noticeable wait rather than removing the bound. Deliberately NOT mirroring the short
- * already-alive-server probe bounds elsewhere in this file ({@link DEFAULT_VERSION_PROBE_TIMEOUT_MS} et
- * al.) — those probe a server that's already up and answering fast; this one waits out a COLD START, a
- * fundamentally different cost that scales with host contention far more steeply.
+ * Bound (ms) for the self-reporting `--port 0` capability probe (@decision 4e0df6ce — see
+ * docs/decisions/4e0df6ce-codescape-serve-self-reporting-port-spawn-dispatch.md) embedded in the FIRST
+ * spawn attempt of this instance's life (and any later attempt after {@link CodescapeSupervisor.port}
+ * goes back to `null`). @decision 44d45f81 — raised from the original 5_000ms after a live production
+ * regression; see docs/decisions/44d45f81-port-report-timeout-raised-after-live-regression.md for the
+ * measured percentiles and reachability arithmetic. Do not lower this without re-measuring against the
+ * real installed binary under real host contention.
  */
 const DEFAULT_PORT_REPORT_TIMEOUT_MS = 30_000;
 /**
@@ -138,24 +85,10 @@ const DEFAULT_PORT_REPORT_TIMEOUT_MS = 30_000;
  */
 const DEFAULT_RESTART_WINDOW_MS = 60 * 60_000;
 /**
- * Card 4c7a337d: a SECOND, independent ceiling on restarts, measured over a sliding
- * {@link DEFAULT_RESTART_WINDOW_MS} — this one CANNOT be cleared by `ranHealthy`, unlike
- * `restartAttempts` above.
- *
- * THE BUG THIS CLOSES: `scheduleRestart`'s `if (ranHealthy) this.restartAttempts = 0` is legitimate
- * policy for a long-lived healthy process that dies once — it shouldn't be permanently penalised by
- * ancient restart history. But it has no notion of CADENCE: any kill that recurs on a period LONGER than
- * `healthyRunMs` (30s by default) sees `ranHealthy` true on essentially every single death, so
- * `restartAttempts` resets to 0 before it can ever reach `restartBackoffMs.length` — the give-up ceiling
- * becomes structurally unreachable, and the loud "codescape serve is DOWN … needs a human" diagnostic
- * never fires. Measured directly against this exact defect (card 4c7a337d): 12 -> 30 spawns over 3s with
- * zero give-ups, and separately 92 kill cycles over 30s with zero give-ups.
- *
- * This window-based count is orthogonal to `ranHealthy`/`restartAttempts` entirely — it just asks "how
- * many times has `serve` actually been restarted recently", independent of whether any individual run
- * happened to clear the `healthyRunMs` bar. A single isolated restart (the legitimate case the
- * `ranHealthy` reset exists to protect) never comes close to this ceiling; only a GENUINE, sustained
- * crash loop — on ANY cadence, not just one faster than `healthyRunMs` — does.
+ * @decision 4c7a337d — a SECOND, independent restart-rate ceiling (measured over a sliding
+ * {@link DEFAULT_RESTART_WINDOW_MS}) that CANNOT be cleared by `ranHealthy`, unlike `restartAttempts`
+ * above — without it, any crash loop recurring slower than `healthyRunMs` makes the give-up ceiling
+ * structurally unreachable. See docs/decisions/4c7a337d-restart-rate-ceiling-independent-of-healthy-run-reset.md
  */
 const DEFAULT_MAX_RESTARTS_PER_WINDOW = 10;
 /**
@@ -681,19 +614,10 @@ export class CodescapeSupervisor {
   private lastMismatchInstalledBuild: string | null = null;
   private lastMismatchRunningBuild: string | null = null;
   /**
-   * Card ebd755ab (Gap 1): the `(installedBuild, runningBuild)` pair — joined as a single string key —
-   * for which the exhausted-restart diagnostic (see the `installedBuild === lastDriftRestartInstalledBuild`
-   * branch in {@link checkBuildDrift}) was already announced, or `null` if none. Distinct from
-   * {@link lastDriftRestartInstalledBuild} (which gates the RESTART decision, one per installed build):
-   * this gates the DIAGNOSTIC decision, latched per distinct pair so a permanently-broken deploy (drift
-   * persists forever because its one restart is already spent) logs the "still unresolved" line ONCE, not
-   * on every ~30s probe tick forever — before this field existed, that path returned completely silently,
-   * making an unresolvable drift byte-identical in the log to a healthy no-drift steady state. Same
-   * discriminator-discipline reasoning as {@link lastInstalledBuildFailureReason}. Reset to `null` (and the
-   * reset is ANNOUNCED as a recovery — see the `installedBuild === runningBuild` branch) the moment the
-   * running side catches up to the installed build again; also reset (silently, matching every other
-   * drift-tracking field) on {@link stop}/{@link start} — a fresh supervisor lifetime starts with no
-   * diagnostic memory.
+   * @decision ebd755ab — latches the exhausted-restart diagnostic per distinct (installedBuild,
+   * runningBuild) pair, so a permanently-unresolved drift logs "still unresolved" ONCE, not every ~30s
+   * probe tick. Reset (and the reset announced as a recovery) once the running side catches up. See
+   * docs/decisions/ebd755ab-latch-exhausted-drift-diagnostic-per-distinct-pair.md
    */
   private lastExhaustedDriftAnnounced: string | null = null;
   /**
@@ -930,20 +854,13 @@ export class CodescapeSupervisor {
 
 
   /**
-   * Start supervision: no-op (a) when disabled (`isCodescapeSupervisorEnabled()` false — the negative
-   * case), or (b) when already running/starting. Ingests each of `repoPaths` in order (v1 bootstrap —
-   * see the CWD CONTRACT note above), reserves a loopback port, then spawns + supervises `serve`. Async,
-   * best-effort: an ingest failure is logged and does NOT abort the boot — serve still starts (an empty
-   * or stale project index there is a Codescape-side concern, not a reason to leave serve down).
-   *
-   * `dbPath` (card b8de5876): the DB-persisted `integrations.codescape.path` override, when the caller
-   * has DB access (index.ts boot does; this class itself has none). Remembered on {@link codescapePath}
-   * for the REST of this instance's life — not just this call — so the enablement check here, the actual
-   * `ingest`/`serve` spawn (this call AND every later restart-on-death spawn, which runs long after this
-   * call has returned), and the boot log line all resolve the SAME candidate. Before this, `start()` only
-   * ever checked env/bare-PATH, so a host configured via the DB path alone (no global install) logged
-   * "codescape off" here while the per-spawn seam (`pty/host.ts`) — which DID thread the DB path — went on
-   * to conclude "enabled", disagreeing within the same boot and leaving the feature unactivatable.
+   * Start supervision (no-op if disabled or already running/starting): ingests each of `repoPaths` in
+   * order (v1 bootstrap — see the CWD CONTRACT), reserves a loopback port, then spawns + supervises
+   * `serve`. Async, best-effort: an ingest failure is logged and does NOT abort the boot — serve still
+   * starts. @decision b8de5876 — `dbPath` is remembered on {@link codescapePath} for this instance's
+   * WHOLE lifetime (not just this call), so every later restart-on-death spawn and the boot log line all
+   * resolve the SAME candidate — a DB-only-configured host used to disagree with itself about enablement.
+   * See docs/decisions/b8de5876-codescape-start-remembers-dbpath-for-instance-lifetime.md
    */
   async start(repoPaths: string[] = [], dbPath?: string): Promise<void> {
     if (this.starting || this.child) return;
@@ -1047,32 +964,11 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * Spawn `serve` and wire up restart-on-death. Never throws. Card 4e0df6ce dispatch:
-   *  - {@link port} already known (an ordinary restart-on-death: the previously-live child released it on
-   *    exit, and NOTHING in between — us or anyone else — separately bound and closed it) — respawn with
-   *    that SAME explicit port, exactly as before this card. This path does not reproduce the bind-close-
-   *    rebind pattern above, and is unchanged by this card.
-   *
-   *    ⭐ Card 42f50ca1: reusing `this.port` here is DELIBERATE, not incidental. A live session's
-   *    Codescape MCP mount is a `http://127.0.0.1:<port>/mcp/...` URL captured ONCE at that session's own
-   *    spawn/resume/fork/recycle (see {@link codescapeHttpMcpServer} in `pty/host.ts`) and never re-read
-   *    afterward — port STABILITY across a restart-on-death is what keeps that baked URL valid. `42f50ca1`
-   *    considered re-deriving a fresh port on this path (via `--port 0`, mirroring the self-reporting path
-   *    below) and rejected it: that would trade this path's rare, detected failure (next paragraph) for a
-   *    certain, silent one — every already-live session with codescape mounted losing it on every restart,
-   *    invisibly, until each session happens to be resumed for an unrelated reason.
-   *
-   *    It is NOT window-free, though: the port sits unbound between the dying child's exit and the new
-   *    child's bind (at least {@link restartBackoffMs}'s own delay, so longer than {@link pickLoopbackPort}'s
-   *    own window). This is a KNOWN, ACCEPTED exposure, not a bug — its consequence is a DETECTED failure
-   *    (`serve` fails to bind, the health probe fails, a restart fires), never silent corruption. ⛔ No
-   *    observed instance; do not describe this as something that has happened.
-   *  - {@link port} is `null` (the FIRST spawn of this instance's life, or a fresh attempt after a
-   *    `stop()`/give-up nulled it — the ONE site the original TOCTOU actually lived at, see
-   *    {@link pickLoopbackPort}'s own doc): use the self-reporting path when the installed binary is
-   *    known- or maybe-capable ({@link portReportCapable} `true`/`null`), falling back to the legacy
-   *    pick-then-spawn path only once a `--port 0` rejection has confirmed it isn't (card 4e0df6ce
-   *    blocker 1 — an older codescape hard-exits on `--port 0` rather than falling back itself).
+   * Spawn `serve` and wire up restart-on-death. Never throws. @decision 4e0df6ce — dispatch: an
+   * already-known port reuses it (deliberate — see the record for why a fresh `--port 0` re-derivation
+   * was rejected, and for the accepted unbound-window exposure); `null` uses the self-reporting `--port 0`
+   * path unless a prior rejection confirmed the binary can't do that, in which case it falls back to the
+   * legacy pick-then-spawn path. See docs/decisions/4e0df6ce-codescape-serve-self-reporting-port-spawn-dispatch.md
    */
   private spawnServe(): void {
     if (this.stopped) return;
@@ -1149,29 +1045,11 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * Card 4e0df6ce: the self-reporting path — spawn with `--port 0` and let the child pick its own ephemeral
-   * port and report it back on stdout (see {@link parsePortReportLine}). Nobody but the child itself ever
-   * binds this port, so the original TOCTOU (bind, read, CLOSE, then a SEPARATE process rebinds the same
-   * number) cannot occur here. `this.port` stays `null` — so `getPort()`/`request()` correctly refuse
-   * ("codescape not running") rather than ever targeting port 0 — until the report line arrives and
-   * REASSIGNS it; this satisfies the card's mandatory latent-instance fix (`this.port` reassigned from the
-   * reported line before any `request()` can fire).
-   *
-   * `this.child`/`spawnCount`/`spawnedAt`/`consecutiveHealthFailures` ARE set immediately on a successful
-   * spawn, exactly like {@link spawnServeExplicit} — `getPid()`/`getSpawnCount()` stay synchronously
-   * accurate; only `port`/`alive` (and therefore `getPort()`) wait on the report.
-   *
-   * Three outcomes before a report ever arrives:
-   *  - the report line parses: confirm {@link portReportCapable}, set `this.port`, hand off to the SAME
-   *    {@link wireDeathHandling} an explicit-port spawn uses.
-   *  - the child exits/errors first: a CLEAN (no signal) non-zero exit, on a still-UNKNOWN capability, is
-   *    the old-binary `--port 0` rejection shape (card 4e0df6ce blocker 1) — confirms `portReportCapable
-   *    = false` so the NEXT attempt uses the legacy path. Anything else (a signal — e.g. this process or a
-   *    test killing the attempt directly — or a capability we've already confirmed) is an ordinary death,
-   *    never a capability verdict.
-   *  - neither arrives within {@link portReportTimeoutMs}: abandon this attempt (kill the child) without
-   *    concluding anything about capability, and let the normal backoff schedule retry.
-   * All three end in {@link scheduleRestart} — never a permanently-stuck attempt.
+   * @decision 4e0df6ce — the self-reporting path: spawn with `--port 0`, let the child pick + report its
+   * own ephemeral port on stdout ({@link parsePortReportLine}). `this.port` stays `null` (so `getPort()`/
+   * `request()` correctly refuse) until the report line arrives and reassigns it. See the record for the
+   * three possible outcomes before a report arrives — all three end in {@link scheduleRestart}, never a
+   * permanently-stuck attempt. See docs/decisions/4e0df6ce-codescape-serve-self-reporting-port-spawn-dispatch.md
    */
   private spawnServeSelfReporting(command: string, baseArgs: string[]): void {
     const args = [...baseArgs, "serve", "--port", "0"];
@@ -1269,25 +1147,12 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * Attempt `spawn()`, logging + scheduling a bounded restart on a SYNCHRONOUS failure (never a "healthy"
-   * run — no child ever came up) and returning `null`. Card 8c13a023 / d671f1b8: no `detached` option
-   * below — this child is spawned NON-detached, deliberately left that way rather than a gap. On Windows
-   * that means it's implicitly bound by Node/libuv to a Windows job object with kill-on-close tied to the
-   * PARENT (this daemon process)'s own lifetime, so any death of the parent — a clean exit, a restart, or
-   * an external hard-kill — already tears this child down with it, with no explicit stop() needed on that
-   * platform. Verified by isolating the ONE variable that flips the outcome: an identical spawn with
-   * `detached:true` survives the parent's death; without it (as here), the child dies every time, including
-   * when killed via `TerminateProcess` (an API with no console-signalling path at all — ruling out a
-   * console/`CTRL_CLOSE` explanation, which would also have taken the still-alive grandparent process with
-   * it). On POSIX a non-detached child is instead reparented on the parent's death and KEEPS RUNNING —
-   * unverified/predicted, not measured here (this repro is Windows-only) — which is why `index.ts`'s
-   * shutdown-cleanup path calls `stop()` explicitly rather than relying on this platform default:
-   * harmless-but-redundant on Windows, load-bearing on a POSIX host running this supervisor (`LOOM_DEV=1`-
-   * gated; never starts for a regular loomctl end user).
-   *
-   * Card 194d343d: pin CODESCAPE_HOME explicitly (same value as `cwd`) so serve's env-first resolver check
-   * wins over any upstream cwd-relative walk — must match ingest()'s own CODESCAPE_HOME, or ingest and
-   * serve can disagree about where the store lives.
+   * Attempt `spawn()`, logging + scheduling a bounded restart on a SYNCHRONOUS failure and returning
+   * `null`. @decision d671f1b8 — deliberately NON-detached (Windows job-object kill-on-close ties this
+   * child to the parent daemon's lifetime; POSIX instead reparents on death, which is why `index.ts`'s
+   * shutdown path calls `stop()` explicitly). See docs/decisions/d671f1b8-daemon-restart-runs-shared-vault-flush-cleanup-after-the-response-flush.md
+   * @decision 194d343d — pins `CODESCAPE_HOME` explicitly, must match `ingest()`'s own value. See
+   * docs/decisions/194d343d-codescape-cwd-contract-pin-codescape-home-in-spawn-env.md
    */
   private trySpawnChild(command: string, args: string[]): ChildProcess | null {
     try {
@@ -1332,40 +1197,15 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * Card 44d45f81 DoD-3: repeated `spawnServeSelfReporting` timeouts DO feed this same give-up arithmetic
-   * (each abandoned attempt calls `scheduleRestart(false)`, never "healthy") — a slow-but-genuinely-broken
-   * host CAN still reach the give-up arm below, this raised timeout does not make that structurally
-   * impossible, only much harder to reach. With {@link DEFAULT_PORT_REPORT_TIMEOUT_MS} at 30_000ms and the
-   * default {@link DEFAULT_RESTART_BACKOFF_MS} (6 entries), give-up via backoff exhaustion now needs 7
-   * consecutive attempts that EACH individually exceed 30s — worst case ~7*30s + the backoff sum
-   * (1+2+5+10+30+60=108s) ≈ 318s (~5.3 min) of sustained badness, versus ~143s (~2.4 min) at the old 5s
-   * bound. That is the DELIBERATE tradeoff: a transient slow start (measured up to ~7.9s under synthetic
-   * CPU-only heavy load — real production contention is I/O-heavy and unmeasured, see that constant's own
-   * doc — so 30s is sized with headroom above the measured ceiling, not AT it) now succeeds on the FIRST
-   * attempt instead of ever entering this path at all, which is what closes the production regression; a
-   * process that is genuinely, permanently unable to report still reaches the same loud "needs a human"
-   * diagnostic, just after a longer, bounded wait — never silently stuck (this only ever changes HOW LONG
-   * until give-up, never WHETHER it fires). Unmeasured against a real production host under real sustained
-   * badness (only synthetic CPU-contention data exists here, see `DEFAULT_PORT_REPORT_TIMEOUT_MS`'s own
-   * doc) — do not assume this arithmetic transfers 1:1 to a real crash loop; it is the reachable-in-
-   * principle analysis the card asked for, not a guarantee about wall-clock time on any specific host.
-   *
-   * Schedule a bounded-backoff restart; `ranHealthy` (computed by the caller, which alone knows whether
-   * THIS attempt ever came up) resets the backoff schedule — legitimate policy so a long-lived healthy
-   * process that dies once isn't permanently penalised by ancient restart history. Gives up (stays down,
-   * logs loudly) once EITHER of two independent ceilings is reached:
-   *   1. the backoff schedule ({@link restartBackoffMs}) is exhausted without a healthy run resetting it
-   *      in between — the ORIGINAL mechanism, unchanged; or
-   *   2. {@link restartTimestamps} shows {@link maxRestartsPerWindow} restarts already scheduled inside
-   *      the trailing {@link restartWindowMs} — a ceiling `ranHealthy` CANNOT clear.
-   * Card 4c7a337d: (1) alone left a hole — any kill that recurs on a cadence LONGER than `healthyRunMs`
-   * sees `ranHealthy` true on essentially every death, so `restartAttempts` resets to 0 before it can ever
-   * reach `restartBackoffMs.length`; the give-up ceiling became structurally unreachable and the loud
-   * "needs a human" diagnostic never fired, for ANY sustained crash loop on that cadence — not just the
-   * one specific 500-misclassification trigger `545ef479` fixed. (2) is what makes the diagnostic
-   * reachable again regardless of cadence, while leaving the legitimate `ranHealthy` reset itself intact
-   * for the isolated-single-restart case it exists to protect (one restart never comes close to the rate
-   * ceiling).
+   * Schedule a bounded-backoff restart; `ranHealthy` resets the backoff schedule so a long-lived healthy
+   * process that dies once isn't permanently penalised by ancient restart history. Gives up once EITHER
+   * of two independent ceilings is reached: (1) the backoff schedule ({@link restartBackoffMs}) is
+   * exhausted without a healthy run resetting it, or (2) the restart-RATE ceiling
+   * ({@link maxRestartsPerWindow} within {@link restartWindowMs}) is hit — a ceiling `ranHealthy` cannot
+   * clear. @decision 4c7a337d — why ceiling (2) exists: see
+   * docs/decisions/4c7a337d-restart-rate-ceiling-independent-of-healthy-run-reset.md, which also covers
+   * the reachable-in-principle worst-case timing for the raised port-report timeout, @decision 44d45f81
+   * (docs/decisions/44d45f81-port-report-timeout-raised-after-live-regression.md).
    */
   private scheduleRestart(ranHealthy: boolean): void {
     if (this.stopped) return;
@@ -1412,33 +1252,12 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * One `/graph/health` check. `spawnServe`'s `child.on("exit")` only ever catches a `serve` that DIES —
-   * a serve that's alive, port bound, and simply not answering (wedged) stays `alive:true` forever under
-   * that detector alone, and `getPort()` keeps handing sessions a port that will hang. This is what closes
-   * that gap.
-   *
-   * A single failed probe is NOT enough — a busy serve can miss one beat under load, and treating that as
-   * death would restart a perfectly healthy process. Only a SUSTAINED run of
-   * {@link healthProbeFailureThreshold} consecutive failures (reset to 0 by any success — see
-   * `spawnServe`'s own reset on a fresh spawn) counts as a wedge.
-   *
-   * Card 545ef479 (Defect 2): "failure" here means the request never got an answer at all (timeout /
-   * connection refused / network error — `res.status` absent). A response that DID arrive, even a 5xx, is
-   * proof the process is alive and serving — it is reported (once, latched) but never counted toward
-   * {@link consecutiveHealthFailures} and never kills the child. Before this, any non-2xx (including a 500
-   * meaning "I can't determine something") was scored as a wedge failure — three consecutive 500s killed a
-   * perfectly healthy process.
-   *
-   * On a sustained failure, this does NOT call `scheduleRestart`/`spawnServe` itself — it kills the live
-   * child. That kill is a REAL process death, so it fires the exact same `child.on("exit")` → `onDeath` →
-   * `scheduleRestart` path a crash would (same `restartAttempts` budget, same backoff, same give-up
-   * ceiling) — a health-driven restart can never resurrect a serve past an exhausted budget, because it
-   * never opens a second restart channel; it just triggers the existing one.
-   *
-   * Never runs when `!alive` (nothing to check) or after `stop()` (`this.stopped`) — no probe traffic on a
-   * dead, never-started, or intentionally-stopped serve. Also never runs while a PRIOR tick is still in
-   * flight ({@link probeInFlight}) — see that field's own doc for why the drift-detection addition below
-   * needs this (a slow subprocess spawn occasionally outruns a fast probe interval).
+   * One `/graph/health` check — closes the "alive but wedged" blind spot `child.on("exit")` alone can't
+   * see. @decision 545ef479 — an answered-but-not-ok response (e.g. a 5xx) is proof of life, NEVER wedge
+   * evidence; only a genuine no-answer counts, and only after {@link healthProbeFailureThreshold}
+   * CONSECUTIVE failures (a busy serve can miss one beat under load). A sustained wedge kills the child
+   * once and lets the existing exit → `scheduleRestart` path own the restart — never a second restart
+   * channel. See docs/decisions/545ef479-health-probe-wedge-vs-error-and-drift-state-latching.md
    */
   private async probeHealth(): Promise<void> {
     if (this.stopped || !this.alive || this.probeInFlight) return;
@@ -1498,28 +1317,11 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * Card `350bc307`: the ONE live-introspection caller of {@link codescapeUnclassifiedTools}
-   * (`pty/host.ts`) — a real `tools/list` round-trip against the RUNNING mounted server, not just the
-   * two in-memory arrays it partitions. Layered onto a SUCCESSFUL health probe, mirroring
-   * {@link checkBuildDrift}'s own placement and discipline: async, bounded ({@link toolsProbeTimeoutMs}),
-   * best-effort, NEVER throws, and NEVER blocks a spawn/boot/gate (DoD-3 — fail soft) — a probe failure
-   * just means "couldn't check this tick," identical in effect to a probe that never ran.
-   *
-   * Needs a resolvable Codescape PROJECT id to build the `/mcp/<id>` URL {@link probeAdvertisedTools}
-   * hits — `tools/list` is a property of the served MCP APPLICATION (which tools it registers), not of
-   * per-project graph DATA, so ANY currently-registered project id observes the same tool registration a
-   * genuinely drifted server would expose on every scope; this instance's own {@link projectIds} cache
-   * (populated by {@link registerProjectWithRetry} at boot) is reused rather than re-resolving anything.
-   * A no-args case (nothing registered yet — codescape just started, or every registration attempt so
-   * far has failed) is a clean skip: nothing to probe against yet, not a failure.
-   *
-   * On a successful round-trip, ALWAYS persists the result via `writeToolDriftState` (even an EMPTY
-   * unclassified set) — so the state file's `checkedAt` stays fresh and a since-cleared drift doesn't
-   * linger stale in what `readCodescapeToolDriftNote` reads back. The in-memory
-   * {@link lastToolDriftUnclassified} latch exists purely so a TRANSITION logs once (a new/changed
-   * finding, or a recovery back to clean) rather than spamming this line every ~30s tick forever — the
-   * persisted file (read by the Platform Lead's kickoff note, DoD-2) is the real addressed signal; this
-   * console line is a supplementary breadcrumb, not the mechanism itself.
+   * @decision 350bc307 — a real `tools/list` round-trip against the RUNNING mounted server (not just the
+   * in-memory partition), layered onto a successful health probe: async, bounded, best-effort, never
+   * blocks a spawn/boot/gate. Always persists on a successful round-trip (even an empty unclassified set)
+   * so `checkedAt` stays fresh; the in-memory latch only gates the CONSOLE line to once per transition.
+   * See docs/decisions/350bc307-tool-drift-probe-layered-on-health-tick.md
    */
   private async checkToolDrift(): Promise<void> {
     const port = this.getPort();
@@ -1566,80 +1368,24 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * Card 545ef479 (Defect 1): every exit path of this method — including its two silent no-op returns
-   * below (running build absent, installed build honestly `null`) — now latches a {@link DriftCheckState}
-   * via {@link announceDriftCheckState} before returning. Before this, those two no-ops and the ordinary
-   * steady-state MATCH were THREE code paths that all produced zero observable signal — "drift detection
-   * is running and finding nothing" was byte-identical, downstream, to "drift detection is inert". See
-   * {@link getDriftCheckState} for the diagnostic/test seam this exposes.
-   *
-   * Card 90550a97: build-id drift detection, layered onto a SUCCESSFUL health probe above. Compares the
-   * RUNNING serve's `build` (from THIS `/graph/health` response) against the INSTALLED binary's build
-   * (a fresh, bounded read below) — NEVER `healthJson`'s `version` field, which is the static
-   * `CODESCAPE_VERSION` semver and reads identically across commits; wiring drift to it would produce a
-   * detector that reports "no drift" forever. `version` is deliberately never even read here.
-   *
-   * THREE distinguishable outcomes on the installed side (agreed contract with the Codescape manager,
-   * not two): a real SHA (comparable), an HONEST `build: null` at exit 0 (a dist built outside a git
-   * checkout — a legitimate answer, never a failure), or a genuine couldn't-read (non-zero exit, or
-   * malformed/unparseable stdout at exit 0 — see {@link readInstalledBuild}'s own doc). The running side
-   * keeps its existing two-case fail-safe (absent from the response, or `build: null`). ALL FOUR of these
-   * non-comparable states mean "do nothing" — a restart only fires when BOTH sides resolve to non-empty,
-   * DIFFERING strings.
-   *
-   * On a genuine mismatch this does NOT call `scheduleRestart`/`spawnServe` directly — exactly like the
-   * wedge-kill above, it kills the live child ONCE and lets the EXISTING `child.on("exit")` -> `onDeath`
-   * -> `scheduleRestart` path own the actual restart, inheriting the same `restartAttempts` budget,
-   * backoff, and give-up ceiling (never a second restart channel that could resurrect a serve past an
-   * exhausted budget).
-   *
-   * One deliberate restart per detected drift: {@link lastDriftRestartInstalledBuild} remembers the
-   * installed build we already kicked a restart for, so a serve that keeps reporting a stale/failing
-   * `build` after that restart (the installed side hasn't moved) is never kicked again on every
-   * subsequent probe tick — that guard is what stops an endless restart cycle when the new build can't
-   * come up. A restart fires again once the installed build itself changes to something new — or once
-   * the daemon restarts: the guard is a private instance field reset in {@link start}/{@link stop} (see
-   * {@link lastDriftRestartInstalledBuild}'s own doc), so a fresh daemon process reopens the same
-   * one-restart allowance for the SAME installed build too.
-   *
-   * Card 9e6f984d — STABILITY WINDOW, a precondition layered ON TOP of the guard above (does not
-   * replace it): a genuine mismatch does not restart immediately. The installed build must first sit
-   * UNCHANGED for {@link driftStabilityMs} before a restart fires, tracked as `(build, firstSeenAt)` on
-   * {@link driftCandidateBuild}/{@link driftCandidateFirstSeenAt}. A NEW mismatched build (different from
-   * whatever was already being watched) replaces the candidate and restarts the window — so a burst of N
-   * distinct rebuilds inside the window collapses into exactly ONE eventual restart, fired only once the
-   * LAST build in the burst has been stable for the full window. This is what stops the codescape
-   * project's own rebuild cadence from becoming our serve-restart cadence: their build action drives our
-   * process lifecycle across a boundary where neither side can see the other's activity, so a quiet
-   * period is the cheap, coupling-free way to tell "mid-churn" apart from "settled". Deferral is LOGGED
-   * ONCE per new candidate (not once per tick while waiting) — a `console.warn` distinct from both the
-   * eventual restart line and total silence, so "serve didn't restart" is never indistinguishable from
-   * "no drift detected" (same discriminator discipline as the rest of this feature).
-   *
-   * Review follow-up (card 90550a97): a genuine couldn't-read on the installed side is loud, not silent —
-   * "no drift" and "can't tell if there's drift" must never look identical (the `16b7c38c` lesson: a
-   * `finish([])` that couldn't tell "enumeration failed" from "nothing found" silently disabled worktree
-   * reaping for months). An HONEST `build: null` answer is the OPPOSITE case — codescape successfully
-   * told us it has no build id — and stays silent, exactly like the running side's own absent/null
-   * fail-safe; only a genuine read FAILURE gets the loud diagnostic. See {@link readInstalledBuild}'s
-   * classified result and the {@link lastInstalledBuildFailureReason} latch below for how "loud" stays
-   * bounded to once per distinct reason, not once per 30s tick forever.
+   * @decision 545ef479 — every exit path (including the two silent no-ops: running build absent, honest
+   * installed `null`) latches a {@link DriftCheckState} via `announceDriftCheckState`, so "finding
+   * nothing" is never indistinguishable from "inert". See
+   * docs/decisions/545ef479-health-probe-wedge-vs-error-and-drift-state-latching.md
+   * @decision 90550a97 — compares `build` (a SHA), NEVER `healthJson.version` (a static semver); three
+   * distinguishable installed-side outcomes (real SHA / honest null / genuine read failure — only the
+   * last is loud); one restart per detected drift, delivered by killing the child once and letting the
+   * existing exit → `scheduleRestart` path own it. See
+   * docs/decisions/90550a97-build-id-drift-contract-and-restart-once-per-drift.md
+   * @decision 9e6f984d — a genuine mismatch waits for the installed build to sit stable for
+   * {@link driftStabilityMs} before restarting, so a burst of rebuilds collapses into one restart, not N.
+   * See docs/decisions/9e6f984d-drift-stability-window-collapses-rebuild-bursts.md
    */
   /**
-   * Card 545ef479 (Defect 1): latch-and-announce a {@link DriftCheckState} TRANSITION only — never on
-   * every ~30s probe tick, mirroring {@link lastInstalledBuildFailureReason}'s discipline. A steady-state
-   * `"match"` (or a steady `"not-checked:*"`) logs nothing further after its first announcement; only a
-   * genuine change of state (including into/out of an UNKNOWN bucket) is worth a human's attention.
-   * `console.log`, not `console.warn` — a mismatch is already loudly warned in detail by the caller's own
-   * existing branches (deferring/STABLE/UNRESOLVED); this line exists so the coarse three-way signal
-   * (match / mismatch / not-checked) is ALSO visible without reading those detailed lines.
-   *
-   * Card 23980bbf: a TRANSITION-only log is, on its own, indistinguishable from a low-frequency POLL log —
-   * both are sparse lines, and a reader who doesn't already know this line only fires on change can (and
-   * did — see the card) mis-derive a wait budget from the gaps between occurrences. Folding the RESOLVED
-   * {@link healthProbeIntervalMs} into the line itself (never the hardcoded default constant — this
-   * instance may have been constructed with a test/override seam) is what makes the true poll cadence
-   * derivable from the log output alone, without reading this source file.
+   * @decision 23980bbf — latch-and-announce a {@link DriftCheckState} TRANSITION only (never every
+   * probe tick), folding the RESOLVED {@link healthProbeIntervalMs} into the line itself so the true poll
+   * cadence is derivable from the log alone. See
+   * docs/decisions/23980bbf-drift-check-state-log-folds-in-resolved-interval.md
    */
   private announceDriftCheckState(state: DriftCheckState): void {
     if (state === this.driftCheckState) return;
@@ -1749,70 +1495,22 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * Read the INSTALLED codescape binary's own build id — bounded + async, via {@link runBoundedSplit}
-   * (NOT the shared `runBounded` `ingest()` uses — see that function's own doc for why stdout/stderr must
-   * stay separate here), never on any hot path (this only ever runs off the periodic {@link probeHealth}
-   * tick, itself off any request path). The ONLY place that knows how to ask the installed binary for its
-   * build — deliberately isolated here so a future change to the CLI's version-command surface is a
-   * one-function change with no ripple elsewhere.
-   *
-   * AGREED CONTRACT (with the Codescape manager, superseding an earlier wrong read of the CLI's failure
-   * shape): both `codescape version` and `codescape --version` will work, resolving THREE distinguishable
-   * outcomes, not two:
-   *   - exit 0, stdout `{"version":"<semver>","build":"<sha>"}` — normal; comparable for drift.
-   *   - exit 0, stdout `{"version":"<semver>","build":null}` — an HONEST answer (e.g. a dist built outside a
-   *     git checkout), never a failure.
-   *   - non-zero exit — reserved for a genuine failure to answer.
-   * Two guarantees this relies on: stdout is clean JSON ONLY (no banners/prefixes mixed in) when exit is
-   * 0, and the CLI reads the SAME `buildInfo.generated.ts` source `/graph/health` already serves, so there
-   * is no second resolution path that could disagree with the running side. Given that guarantee, parsing
-   * is STRICT (`JSON.parse` on the whole trimmed stdout) — never a lenient/substring/regex extraction. A
-   * banner leaking onto stdout at exit 0 would be a REAL defect on their side and must fail loudly here,
-   * not get silently rescued by a forgiving parser (that would hide exactly the class of bug this feature
-   * already cost a round of review to find).
-   *
-   * The real CLI implements this surface as of 2026-07-28: `codescape version`/`--version` returns
-   * `{"version":"<semver>","build":"<sha>"}` on stdout at exit 0 — confirmed live by `90550a97`, which
-   * validated the detector end-to-end against a genuine drift condition (installed != running,
-   * correctly classified). Do NOT read Codescape's internal `dist/buildInfo.generated.js` (or any other
-   * undocumented internal file) to make this "work" instead — that is an unversioned cross-project
-   * coupling that breaks silently the moment Codescape reshapes its build output, exactly the class of
-   * stale cross-project belief this project has already been burned by.
-   *
-   * Never throws; never fabricates a value. `failed` is true ONLY for a genuine read failure (spawn/exec
-   * failure or timeout — `runBoundedSplit`'s own `!ok` — or malformed/unparseable stdout at exit 0); it is
-   * FALSE for both a real build string AND an honest `build: null` — the two are deliberately kept
-   * distinguishable from a read failure. `reason` is set only alongside `failed:true`, for
-   * {@link checkBuildDrift}'s one-shot diagnostic.
+   * Read the INSTALLED codescape binary's own build id — bounded + async via {@link runBoundedSplit}
+   * (stdout/stderr must stay separate here, unlike `ingest()`'s shared `runBounded`). @decision 90550a97
+   * — the AGREED CONTRACT with the Codescape manager: strict JSON parsing only (never lenient/substring),
+   * and NEVER read their internal `dist/buildInfo.generated.js` directly — an unversioned coupling that
+   * breaks silently the moment they reshape their build output. See
+   * docs/decisions/90550a97-build-id-drift-contract-and-restart-once-per-drift.md
    */
   private async readInstalledBuild(): Promise<{ build: string | null; failed: boolean; reason?: string }> {
     const { command, args } = resolveCodescapeBin(this.codescapePath);
     let r: SplitRunResult = { ok: false, code: null, timedOut: false, stdout: "", stderr: "" };
     let attempt = 0;
-    // Card f0718488: retry ONLY a TIMED-OUT attempt (r.timedOut) — a non-zero exit or malformed stdout at
-    // exit 0 is a genuine failure of the installed binary, not host contention, so it breaks below on
-    // attempt 1 and is never retried (stays fast + latched, exactly as before this card). The dominant
-    // observed cause of a timeout is steady-state contention from a live fleet of workers + gates, not a
-    // boot-window blip — see the card for the measurement that overturned the original "boot only" theory.
-    //
-    // WORST-CASE BUDGET (every attempt hits the full timeout — do not "helpfully" retune any of these
-    // constants without redoing this arithmetic):
-    //   versionProbeMaxAttempts(3) * versionProbeTimeoutMs(5,000ms)
-    //   + (versionProbeMaxAttempts - 1)(2) * versionProbeRetryDelayMs(250ms)
-    //   = 15,500ms for this method alone.
-    // This only ever runs after a successful `/graph/health` fetch inside the SAME probeHealth() tick
-    // (sequential awaits — see checkBuildDrift's caller), so the full worst-case single-tick wall time also
-    // carries that fetch's own bound: +healthProbeTimeoutMs(5,000ms) = 20,500ms, ~68% of the default
-    // 30,000ms healthProbeIntervalMs tick interval — a real ~9.5s margin, on top of the `probeInFlight`
-    // guard (see that field's doc) which already makes a literal tick-overlap structurally impossible
-    // regardless. Under sustained contention this does mean ~20.5s of every 30s tick is spent spawning
-    // `--version` subprocesses — judged negligible next to the load actually causing the contention (live
-    // workers + gates), and the timedOut-only gate above means a genuinely broken binary never enters this
-    // path at all. Deliberately no adaptive/stateful backoff here — not warranted at this priority.
-    // A `for` loop's own post-body increment would still fire after a final, exhausted iteration breaks
-    // out below — leaving `attempt` one higher than the real count. Track it explicitly instead so the
-    // "(N attempts)" reason string below, and every test asserting on {@link getVersionProbeAttemptCount},
-    // see the true number actually made.
+    // @decision f0718488 — retry ONLY a TIMED-OUT attempt (a non-zero exit or malformed stdout is a real
+    // binary failure, not host contention, and is never retried). Worst-case budget for this method alone:
+    // versionProbeMaxAttempts(3) * versionProbeTimeoutMs(5000) + 2 * versionProbeRetryDelayMs(250) =
+    // 15,500ms; do not retune these without redoing that arithmetic against healthProbeIntervalMs. See
+    // docs/decisions/f0718488-version-probe-retry-only-on-timeout-worst-case-budget.md
     while (true) {
       attempt++;
       this.versionProbeAttempts++;
@@ -1934,24 +1632,13 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * Resolve codescape's project id for `repoRoot` — the ONE seam every caller (sessions/service.ts's
-   * lifecycle hooks, pty/host.ts's per-session MCP mount) should use, so swapping the resolution
-   * strategy later is a change in this one place. Checks THIS instance's own in-memory cache first
-   * (populated by a successful {@link registerProject} — the authoritative source for anything this
-   * boot has confirmed), falling back to the COLD manifest-by-path read
-   * (`codescape/manifest.ts` `resolveCodescapeProjectId`) on a cache miss (registration never ran,
-   * failed, or hasn't happened yet for this repo). The manifest fallback is DELIBERATELY kept, not
-   * retired: `POST /project` can fail transiently (serve mid-restart, a bad repoRoot, a genuine
-   * conflict), while the manifest still resolves an id for any repo codescape has EVER ingested — cache
-   * miss or not, restart or not. Never throws; `null` is an honest "cannot resolve right now", which
-   * every caller already treats as a clean skip.
-   *
-   * CR follow-up (card 088afc94): a manifest-read HIT is now cached into {@link projectIds} too (not just
-   * a {@link registerProject} success) — this is the SPAWN HOT PATH (per-session MCP mount resolution),
-   * and `CLAUDE.md` pins it to no blocking work, so the cold `readFileSync`+`JSON.parse` inside
-   * `resolveCodescapeProjectId` must run at most once per repo, not once per lookup. A MISS is also
-   * remembered, but only for {@link PROJECT_ID_NEGATIVE_CACHE_TTL_MS} — see that constant's doc for why a
-   * miss can't be cached forever the way a hit can.
+   * Resolve codescape's project id for `repoRoot` — the ONE seam every caller should use. Checks this
+   * instance's in-memory cache first, falling back to the COLD manifest-by-path read on a miss (kept
+   * deliberately, since `POST /project` can fail transiently while the manifest resolves any repo
+   * codescape has EVER ingested). @decision 088afc94 — a manifest HIT is cached forever (spawn hot path,
+   * no blocking work); a MISS is cached only for {@link PROJECT_ID_NEGATIVE_CACHE_TTL_MS}, since a repo
+   * enabled after boot must eventually be picked up without a restart. See
+   * docs/decisions/088afc94-codescape-http-mcp-clean-skip-and-stable-id-resolution.md
    */
   resolveProjectId(repoRoot: string): string | null {
     const key = repoKey(repoRoot);
