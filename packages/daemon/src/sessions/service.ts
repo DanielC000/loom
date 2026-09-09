@@ -12715,48 +12715,23 @@ export class SessionService {
   }
 
   /**
-   * SINGLE-SOURCED idle-worker classification (CR fold-in on board card b9d479b0/99efaab3): both
-   * notifyManagerOfIdleWorker (the busy→false edge nudge) AND IdleWatcher's periodic caller +
-   * manager-loop message (via isWorkerGenuinelyStranded below) key off this ONE reconciliation — a
-   * second, drifted copy is exactly how 99efaab3's false-alarm class reappears (a rate-limited worker
-   * re-nagged for the length of its cap; a message asserting "unreported" for a worker that's actually
-   * done-awaiting-merge or parked awaiting an ack).
+   * @decision b9d479b0 — notifyManagerOfIdleWorker and IdleWatcher's periodic/manager-loop check must
+   * share ONE idle-worker classification, never independently-drifting copies (docs/decisions/b9d479b0-single-sourced-idle-worker-classification.md)
    *
-   * - `not-evaluable` — SPURIOUS-NUDGE GUARD (card 6101d7f7): `redirectWorker` on a BUSY worker enqueues
-   *   its redirect into `live.pending` FIRST, then — in the SAME tick — clears busy and drains it. That
-   *   clear fires the caller synchronously, BEFORE the drain hands the redirect over, so at this instant
-   *   the worker looks stranded even though it has authoritative direction about to land as its very
-   *   next turn. Also covers a non-worker/parentless/taskless session (nothing to classify).
+   * - @decision 6101d7f7 — a busy worker's redirectWorker busy-clear-before-drain window is not a
+   *   strand (docs/decisions/6101d7f7-not-evaluable-spurious-nudge-guard-on-busy-redirect.md)
    * - `not-stranded` — legitimately NOT a strand:
    *     • RATE-LIMIT GUARD (CR blocker) — a usage-capped worker goes `busy=false` (setBusy(false) fires
    *       BEFORE the rate-limit park) with its task still active; it never failed to report, it's
    *       waiting out the cap and will auto-resume itself. Without this, a PERIODIC caller would re-nag
    *       for the entire cap window (up to a week on the weekly cap).
    *     • already reported/merged — its task left the `active` lane.
-   *     • QUEUED-REPORT GUARD (card a1f06bcc) — the task-column check above is a PROXY for "did the
-   *       worker report", blind to two real gaps: a board missing the active/review role mapping
-   *       (workerReport's move is a no-op, so the task never leaves `active` even though the report
-   *       fired), and a report whose manager-facing framed message is still sitting UNDELIVERED in the
-   *       manager's own pending FIFO (deliveryStatus "queued", manager mid-turn). Either way the report
-   *       is REAL. Detected directly off the manager's OWN pending queue — the exact
-   *       `[loom:worker-report] worker <id> …` text workerReport() enqueues (prefixed with THIS worker's
-   *       id, so it can only match its own report).
-   *     • WAKE GUARD (card dfa87343) — a worker that self-parked via `wake_me` (its task stays in the
-   *       `active` lane, no fresh `worker_report`) looks identical to a genuine strand. `listWakesForSession`
-   *       only ever returns wakes that are PENDING — a fired or cancelled wake is deleted (claim-first
-   *       tick, `wake_cancel`) — so any row present means a not-yet-fired wake will resume this worker on
-   *       its own; it never failed to report, it's deliberately waiting. Narrow by construction: a worker
-   *       with no pending wake falls straight through to the stranded check below.
-   * - `broken-spawn` — `busy` fell to false WITHOUT the worker ever running a turn (the fresh-spawn
-   *   kickoff race — host.ts's scheduleKickoffGuarantee / the short pre-first-turn healIfStuck window).
-   *   Two independent proofs feed this, checked in order: `engineSessionId` is captured ONLY on the
-   *   engine's own SessionStart hook, so `null` is definitive proof not even the kickoff ever started.
-   *   But `engineSessionId` being SET is NOT proof a turn ran (card 2281009d) — SessionStart can fire
-   *   while the kickoff sits unsent in the composer forever (card f91c8634's parked-Enter signature), so
-   *   this ALSO checks the same "did a turn actually start" fact `handleKickoffGiveUpExhausted` uses
-   *   (`hasFirstTurnStarted` OR a non-empty transcript) before falling through past this branch — keeping
-   *   both nudge paths agreeing on one fact instead of one keying off session-id presence and the other
-   *   off turn/transcript state. Either way: a DISTINCT failure, not a "did not report" stall.
+   *     • @decision a1f06bcc — the task-column check is only a PROXY for "did the worker report"; check
+   *       the manager's own pending queue for its `[loom:worker-report]` text (docs/decisions/a1f06bcc-queued-report-guard-detects-a-report-that-already-fired.md)
+   *     • @decision dfa87343 — a worker self-parked on a pending wake_me is not a strand
+   *       (docs/decisions/dfa87343-wake-guard-self-parked-worker-is-not-stranded.md)
+   * - @decision 2281009d — a non-null engineSessionId alone is not proof a turn ran; also check
+   *   hasFirstTurnStarted/a non-empty transcript (docs/decisions/2281009d-broken-spawn-needs-two-proofs-a-turn-actually-started.md)
    * - `parked-ack` — its LATEST `worker_report` (status `progress`, `done`, OR `blocked` — CR fold-in: a
    *   `done` report on a board with no review-role column never moves the task off `active`, so it looks
    *   identical to a progress-park; a `blocked` report is the same shape — the worker correctly stopped
@@ -12764,32 +12739,10 @@ export class SessionService {
    *   land since (the manager hasn't replied yet) — a healthy await-ack park, not a stall. Once the
    *   manager DOES reply and the worker goes idle again without a fresh report, this no longer holds — a
    *   real stall still classifies `stranded`, so an acked-then-stalled worker is never silently missed.
-   * - `parked-wake` — SAME reported-and-unacked shape as `parked-ack`, but the worker ALSO has a PENDING
-   *   self-scheduled wake (card 95b2abb3, follow-up to the WAKE GUARD below): it reported `progress`/
-   *   `done`/`blocked` and then parked itself on its OWN `wake_me`, not on the manager. The manager owes
-   *   it NO reply — it resumes itself when the wake fires — so this is reported with distinct wording
-   *   rather than folded into `parked-ack`'s "awaiting your reply" phrasing, which would be false here.
-   * - `parked-background` — card c36bac53: the worker's report itself SELF-ATTRIBUTED the park via
-   *   `worker_report({..., awaiting: "background"})` — it kicked off a backgrounded SHELL command (or any
-   *   other async continuation) and is relying on ITS OWN completion (or the harness's on-completion
-   *   re-invoke) to resume, not the manager. This is genuinely UNDETECTABLE from any daemon-observable
-   *   state otherwise: the daemon has no API into the engine's background-task registry (confirmed in
-   *   orchestration/resume-nudge.ts — a `claude --resume` kills any in-flight `run_in_background` shell
-   *   precisely because Loom has no visibility into it, only the OS process tree). The wired hook surface
-   *   (SessionStart/UserPromptSubmit/Stop/StopFailure; PreToolUse matcher-scoped to worker_report/
-   *   memory_write; SubagentStart/SubagentStop for the drift cross-check, card e6ef5062 — see
-   *   SubagentDriftTracker's own doc, pty/tool-attribution.ts; PostToolUse for the vault-lint matcher and
-   *   the always-on decision-records Read matcher, card 661b7d46)
-   *   STILL captures nothing here: SubagentStart/Stop only bound a SYNCHRONOUS, same-turn Task-tool
-   *   sub-agent call — Claude Code blocks the invoking turn until that tool call itself returns (see
-   *   tool-attribution.ts's own ORDERING GUARANTEE), so by the time a worker's OWN turn ends (Stop) any
-   *   sub-agent it invoked that turn has necessarily already stopped too. None of the wired hooks fire for,
-   *   or say anything about, a `run_in_background` shell or any other continuation that outlives its own
-   *   invoking turn. UNLIKE `parked-wake`, this
-   *   flag is a bare, self-reported claim with NO backing row and NO expiry of its own — checked AFTER the
-   *   wake lookup now (round-2 CR fix): a pending wake is Loom's OWN verifiable, bounded resume signal (it
-   *   drives the actual resume and names a concrete `wakeAt`), so it wins over the worker's unbacked
-   *   self-attribution whenever both are present, not the other way around.
+   * - @decision 95b2abb3 — parked-wake's wording must not claim the manager owes a reply, unlike
+   *   parked-ack (docs/decisions/95b2abb3-parked-wake-wording-differs-from-parked-ack.md)
+   * - @decision c36bac53 — a worker's self-reported awaiting:"background" flag has no backing row;
+   *   check the wake lookup FIRST (docs/decisions/c36bac53-parked-background-self-attributed-flag-is-unverifiable.md)
    * - `parked-background-stale` — round-2 CR Major: `parked-background` alone would let the flag promise
    *   "no reply owed; it will continue on its own" FOREVER if the background task dies silently and the
    *   worker never re-engages (no fresh report, no `wake_me`, nothing to decay it) — a SILENT, PERMANENT
@@ -12798,78 +12751,14 @@ export class SessionService {
    *   BOUNDED here: once `BACKGROUND_PARK_STALE_MINUTES` has elapsed since the flagged report with no
    *   ack/re-report, classification falls through to this actionable kind instead of repeating the "no
    *   reply owed" promise — nothing backs or bounds a bare self-attribution past that window.
-   * - `parked-gate` — card 8e0bd254, the STRUCTURAL replacement for a worker having to self-report
-   *   `awaiting:"background"` while parked on its OWN `run_gate` call: a pending `run_gate` is a
-   *   DAEMON-OWNED op, directly observable via `PendingOpRegistry.peek(\`gate:${workerSessionId}\`)` — no
-   *   self-report needed at all, so this is checked BEFORE the report-derived branches below and fires
-   *   even for a worker that went idle with NO `worker_report` in between (the exact self-report-reliance
-   *   gap that produced ~4-5 false `[loom:worker-idle]` "awaiting your reply" nudges per gate-running
-   *   worker per the origin finding — prior patches ab21da21/1c95a89b/cf94e19 only fixed the self-report
-   *   wording, not this). More trustworthy than a wake or a self-attributed `awaiting` flag: the daemon
-   *   itself started and is tracking this exact op, not merely a claim about it. Fresh (op still running,
-   *   started under `BACKGROUND_PARK_STALE_MINUTES` ago) → no reply owed, no manager turn. `peek()` never
-   *   consumes, so repeated ticks see the SAME running entry until it genuinely settles (evicted the
-   *   instant it does — see PendingOpRegistry's class doc), at which point this branch simply stops
-   *   matching and classification falls through to whatever the worker's own report (if any) says.
-   * - `parked-gate-stale` — mirrors `parked-background-stale`'s reasoning, with a card 422d3003 fix:
-   *   `minutesSinceStart` (elapsed since GateSemaphore ADMISSION — see the paragraph below) alone NEVER
-   *   establishes a wedge. `gate-runner.ts`'s own auto-extend keeps a step's timeout alive for as long as
-   *   the child keeps producing output (`GATE_EXTEND_IDLE_MS`), so a long-running gate is routinely just
-   *   working hard — origin finding: a real gate read `elapsedMs` 24.8min / `idleMs` 1.3s (actively
-   *   producing output) and the OLD elapsed-only rule here called it "may be wedged" and headlined
-   *   `worker_stop`, which would have destroyed genuinely in-progress work. `idleMs` — `Date.now() -
-   *   lastOutputAt`, the SAME liveness clock `gate_status`/`gate_queue` already expose and that mirrors
-   *   `gate-runner.ts`'s own internal auto-extend decision, never a second independently-computed number —
-   *   is the actual discriminator, so this only fires once idleMs has crossed `GATE_EXTEND_IDLE_MS`: the
-   *   SAME point past which the gate's OWN machinery would also stop rescuing it. `minutesSinceStart >=
-   *   BACKGROUND_PARK_STALE_MINUTES` stays as an ADDITIONAL, necessary-but-not-sufficient precondition (an
-   *   idle blip seconds into a run — e.g. a slow install step with no output yet — shouldn't alone read as
-   *   a wedge either); both must hold. `lastOutputAt` is null for a window between admission and the
-   *   runner's first liveness event that is PROVEN BOUNDED, not merely assumed brief (card 166ba5d9 closed
-   *   the open question this comment used to carry as an unproven assumption — see
-   *   {@link GateSnapshotEntry.lastOutputAt}'s own doc for the full proof: every git op in that window is
-   *   timeout-raced to a hard ≤120s ceiling, orders of magnitude under both `GATE_EXTEND_IDLE_MS` and
-   *   `BACKGROUND_PARK_STALE_MINUTES` below, and `runGateStep` stamps `lastOutputAt` as its first
-   *   synchronous statement before the gate's child even spawns — so a genuinely wedged gate can never
-   *   reproduce this null window past that bound). That means this branch correctly reads a null `idleMs`
-   *   here as "not yet evidence of a wedge" (never a fabricated 0) WITHOUT risking a false negative: by the
-   *   time `minutesSinceStart >= BACKGROUND_PARK_STALE_MINUTES` could ever hold, `lastOutputAt` is
-   *   guaranteed already non-null. **`minutesSinceStart` measured from GateSemaphore ADMISSION, never from
-   *   `PendingOpRegistry`'s own `startedAt`** (card 865c528e): the registry stamps `startedAt` the moment
-   *   `run_gate` is CALLED, which for a queued gate (the daemon-global `maxConcurrentGates` cap already
-   *   saturated) can be arbitrarily long before the gate is actually admitted and starts running —
-   *   comparing that against a threshold calibrated to RUN time misclassifies an unbounded, perfectly
-   *   healthy queue wait as a wedged gate. The live `GateSemaphore` registry (looked up by the op's own
-   *   `opId` via `findByOpId`, the same lookup `gate_status` uses) distinguishes "queued" (never admitted —
-   *   this branch never fires, no matter how long the wait) from "running" (admitted — `since` IS the
-   *   admission timestamp, exactly what the threshold is calibrated against).
-   * - `parked-merge` — card `0e5de8e6`, origin finding: a worker that had already reported `done`, been
-   *   told by its manager to stand by, and gone idle while ITS OWN branch sat inside a merge gate
-   *   (`worker_merge_confirm`, MANAGER-initiated) was classified `stranded` — the manager's "stand by"
-   *   `worker_message` counts as an ack (see `parked-ack` above), so once the worker went idle again with
-   *   no FRESH report, this classifier fell straight through to the generic "did NOT call worker_report …
-   *   may be stalled" nudge, recommending `worker_merge`/`worker_merge_confirm` on a branch that was
-   *   already mid-gate. `peekPendingMerge` (the SAME lineage-resolved lookup `worker_status`'s
-   *   `pendingMerge` field already surfaces) is DAEMON-OWNED state exactly like the PENDING-GATE GUARD's
-   *   own `run_gate` op above — not a claim the worker or its report has to make — so this is checked in
-   *   the same early, report-independent position. Scoped to `state === "running"` ONLY (`PendingOpState`
-   *   is `"running" | "done" | "failed"`; `"running"` here covers BOTH still-queued-behind-the-semaphore
-   *   and actually-executing — see `gatePhaseForOpId`'s own doc): a "done"/"failed" state is only ever
-   *   observable via `peek()` for the brief post-settle RETENTION window (`MERGE_OP_RETAIN_MS`), and is
-   *   deliberately left to fall through to the ordinary report-derived branches below rather than
-   *   suppressed — the op JUST settled, which is exactly the moment a manager may still need to reconcile
-   *   (e.g. a rejection needs fresh direction to the worker), so treating it as "still fine, no action
-   *   needed" would risk masking a state that genuinely does need attention. A cancelled/orphaned merge
-   *   never reaches this branch at all: `confirmWorkerMergeTracked` classifies that outcome and it too only
-   *   remains peek()-able for the same short retention window, past which `peekPendingMerge` returns
-   *   `undefined` and classification is unaffected by this guard either way.
-   *   UNLIKE `parked-gate`/`parked-gate-stale`, this deliberately has NO stale-escalation sibling: a merge
-   *   op already has its own dedicated staleness/timeout machinery (the gate-timeout circuit breaker,
-   *   `gate-runner.ts`'s own auto-extend, and `confirmWorkerMergeTracked`'s own terminal
-   *   `[loom:merge-done]`/`[loom:merge-failed]` push once it settles) — duplicating a wedge check here
-   *   would just be a second, independently-drifting copy of a check that already exists and already
-   *   notifies the SAME manager. This classifier's only job is to not mislabel a healthy in-flight merge as
-   *   "may be stalled."
+   * - @decision 8e0bd254 — check the daemon-owned run_gate op via PendingOpRegistry.peek, never rely on
+   *   a worker self-report (docs/decisions/8e0bd254-parked-gate-is-a-daemon-owned-structural-replacement.md)
+   * - @decision 422d3003 — a parked gate needs idleMs, not elapsed time alone, to call it stale
+   *   (docs/decisions/422d3003-parked-gate-stale-needs-idlems-not-elapsed-alone.md)
+   * - @decision 865c528e — measure minutesSinceStart from GateSemaphore admission, never
+   *   PendingOpRegistry's own startedAt (docs/decisions/865c528e-minutessincestart-measured-from-admission-not-registry-startedat.md)
+   * - @decision 0e5de8e6 — check peekPendingMerge's daemon-owned state before the report-derived
+   *   branches; no stale-escalation sibling needed (docs/decisions/0e5de8e6-parked-merge-checks-daemon-owned-merge-state-first.md)
    * - `stranded` — genuinely finished a turn, never (usefully) reported, and none of the above apply.
    */
   private classifyIdleWorker(workerSessionId: string):
