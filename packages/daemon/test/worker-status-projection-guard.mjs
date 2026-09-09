@@ -70,6 +70,9 @@ const EXPECTED_KEYS = [
   // `projectSessionRowFields`'s own doc comment in mcp/orchestration.ts for the full reasoning.
   "harness",
   // derived/computed fields layered on top by the worker_status handler
+  // Card 808ee811: `ctxInputTokens` pre-divided by this worker's own model context window, rounded to a
+  // whole percent (number | null — null EXACTLY when ctxInputTokens is null, never a measured 0).
+  "ctxPct",
   "neverCompletedTurn", "lastEngineOutputAt", "composerDirtyLen", "composerDirtyLenBelieved",
   "unconfirmedDeliveryMs", "lastMismatchReplay", "lastMismatchFusion", "lastMismatch",
   "lastMismatchNoticeSuppressed", "lastPasteTripwireGiveUp", "lastFlushAttribution", "pendingMerge", "worktreePathAliases",
