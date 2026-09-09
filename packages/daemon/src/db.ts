@@ -6139,25 +6139,15 @@ export class Db {
     return written;
   }
   /**
-   * Optimistic-concurrency-guarded upsert (card a5f98bb4, Lore audit F3) — the memory_write MCP tool's
-   * write path. Compare-and-sets against the existing row's monotonic `version` (NOT `updatedAt` — a
-   * timestamp is NOT a safe CAS token here: two distinct writes CAN legitimately compute the identical
-   * millisecond, either from OS clock-resolution coarseness or from two calls simply landing in the same
-   * tick, which would let a stale write masquerade as fresh and silently clobber; an integer counter,
-   * incremented atomically in SQL, cannot collide this way — see the dedicated
-   * project-memory-version-guard.mjs test, which forces exactly this updatedAt collision and proves the
-   * version-based guard is unaffected). This closes the failure OBSERVED live 2026-07-17: two writers 3
-   * min apart, neither aware of the other, last-write-wins silently ate the first write.
-   * `baseVersion` is the `version` the caller last read for this key (via memory_read/memory_list/a prior
-   * memory_write response):
+   * Optimistic-concurrency-guarded upsert (@decision a5f98bb4) — the memory_write MCP tool's write path.
+   * Compare-and-sets against the existing row's monotonic `version`, never `updatedAt` (see the decision
+   * record for why a timestamp is not a safe CAS token here). `baseVersion` is the `version` the caller
+   * last read for this key (via memory_read/memory_list/a prior memory_write response):
    *   - key doesn't exist yet → plain insert (starts at version 1); `baseVersion` is irrelevant (nothing
    *     to race against on a brand-new key).
    *   - key exists and `baseVersion` is `undefined` OR doesn't equal the row's current `version` →
    *     REJECTED: returns `{ok:false, current}` (the row as it stands right now) instead of writing, so
-   *     the caller can reconcile/merge and retry with the fresh version — omission is deliberately
-   *     treated the same as staleness, since an update to an EXISTING key with no base at all is
-   *     indistinguishable from a blind clobber (this is what actually closes the incident: neither writer
-   *     had read the other's version, so an *optional* check would not have caught it).
+   *     the caller can reconcile/merge and retry with the fresh version.
    *   - key exists and `baseVersion` equals the current version → proceeds exactly like the old upsert.
    * Wrapped in one `db.transaction()` so the read-current + conditional-write stays atomic even though
    * Node + better-sqlite3 are already single-threaded/synchronous within this call.
@@ -6913,30 +6903,16 @@ export class Db {
     })();
   }
   /**
-   * The manager/Lead pull/consume, scoped to an AGENT LINEAGE rather than one exact session id (bug
-   * f88e91f0): a FRESH (non-recycle) successor on the SAME agent must still see decisions its
-   * predecessor filed. `reparentQuestions` only rewrites a row's session_id on the recycle path — a
-   * manual stop + fresh spawn leaves it pointing at the dead predecessor, unreachable from
-   * `pullAnsweredQuestions(newSessionId, …)`. Joins through `sessions.agent_id` (a session row persists
-   * after exit — only `deleteSession`, which cascades its questions away first, removes it) rather than
-   * `project_id`: agent-scope is a strict SUBSET of project-scope, and the only one still correct when a
-   * project runs more than one manager/Lead agent concurrently — e.g. the Platform Lead's reserved
-   * project, where multiple Lead LINEAGES can be live at once (see recyclePlatformLead's "PER-LINEAGE
-   * REPLACEMENT" doc); project-scoping there would let one Lead's pull consume a sibling Lead's
-   * still-pending decision. Atomically flips every matched row to 'consumed' in the SAME transaction as
-   * the read, exactly like `pullAnsweredQuestions`.
-   *
-   * KNOWN LIMITATION (CR, non-blocking): agent-lineage reachability is bounded by the predecessor
-   * session ROW surviving. If `deleteSession` garbage-collects the exited predecessor before a
-   * successor ever pulls, its still-'answered' question is cascade-deleted right along with it (the FK
-   * on `questions.session_id` enforces this — see question-orphan-no-successor.mjs). Not a regression:
-   * before this fix the question was ALREADY unreachable from a fresh successor even with the row
-   * intact; this only narrows the window where recovery is *possible* down to "the predecessor row
-   * hasn't been GC'd yet," rather than closing it further. BOTH recycle paths — recycleManager and
-   * recyclePlatformLead — are immune: each calls reparentQuestions, which moves the row onto the
-   * successor's own session_id, so neither is ever at the mercy of the predecessor row's lifetime (card
-   * bb4ff73e added the call to recyclePlatformLead, which had silently omitted it — its own comment only
-   * named the worker re-parent as missing).
+   * The manager/Lead pull/consume, scoped to an AGENT LINEAGE rather than one exact session id
+   * (@decision f88e91f0): a FRESH (non-recycle) successor on the SAME agent must still see decisions its
+   * predecessor filed. Joins through `sessions.agent_id` (a session row persists after exit — only
+   * `deleteSession`, which cascades its questions away first, removes it) rather than `project_id`:
+   * agent-scope is a strict SUBSET of project-scope, and the only one still correct when a project runs
+   * more than one manager/Lead agent concurrently — e.g. the Platform Lead's reserved project, where
+   * multiple Lead LINEAGES can be live at once (see recyclePlatformLead's "PER-LINEAGE REPLACEMENT" doc);
+   * project-scoping there would let one Lead's pull consume a sibling Lead's still-pending decision.
+   * Atomically flips every matched row to 'consumed' in the SAME transaction as the read, exactly like
+   * `pullAnsweredQuestions`. See the decision record for the known GC-ordering limitation this leaves.
    */
   pullAnsweredQuestionsForAgent(agentId: string, consumedAt: string): Question[] {
     return this.db.transaction((): Question[] => {
@@ -6951,23 +6927,11 @@ export class Db {
     })();
   }
   /**
-   * Whether SESSION `sessionId` itself has ANY still-`pending` (unanswered) question_ask outstanding —
-   * the idle-watcher's session-level suppression predicate (card cb56cf80, narrowed by card 8e87f3b5): a
-   * manager/Lead correctly parked on its OWN open owner-facing Request should not be idle-nudged,
-   * regardless of whether that Request carries a `taskId` (owner Requests are often filed with
-   * `taskId:null`, invisible to the per-card `listQuestionsForTask` discount).
-   *
-   * SESSION-scoped, deliberately NOT agent-lineage-scoped (card 8e87f3b5 fixed a real incident): the prior
-   * `sessions.agent_id` join — the same ownership join `pullAnsweredQuestionsForAgent` uses to recover a
-   * predecessor's ANSWERED Request for a fresh successor — was reused here for a PENDING (still-unanswered)
-   * one, but a pending Request has no answer to recover; joining by agent_id instead let ONE unanswered
-   * Request permanently silence idle-nudging for the agent's entire lineage, including a fresh successor
-   * that never filed it and knows nothing about it. Scoping to `session_id = ?` means only the session
-   * that actually filed the pending Request is suppressed — or, on either recycle path (recycleManager
-   * or recyclePlatformLead), was reparented onto it via `reparentQuestions` (card bb4ff73e closed the gap
-   * where recyclePlatformLead didn't call it — a recycled Lead's successor is now suppressed by its
-   * predecessor's still-pending Request exactly like a recycled manager's successor). A fresh non-recycle
-   * successor is unaffected and nudges normally. Deliberately NON-CONSUMING (never touches `state`).
+   * Whether SESSION `sessionId` itself has ANY still-`pending` question_ask outstanding — the
+   * idle-watcher's session-level suppression predicate (@decision cb56cf80). SESSION-scoped, deliberately
+   * NOT agent-lineage-scoped — see the decision record before joining this off `session.agent_id` again.
+   * A fresh non-recycle successor is unaffected and nudges normally. Deliberately NON-CONSUMING (never
+   * touches `state`).
    */
   hasPendingQuestionForSession(sessionId: string): boolean {
     const row = this.db.prepare(
@@ -6987,18 +6951,13 @@ export class Db {
    * `getProjectTaskRequest`'s own `q.projectId !== projectId` check on the single-request get path. Uses
    * `idx_questions_task` (task_id-leading, so the extra project_id filter is applied post-index-lookup).
    *
-   * **Legacy prefix-linked rows (bug fixed post-`a3f1319f`):** a question created BEFORE that commit
-   * stored `task_id` as an 8-char id-PREFIX (e.g. `369dde3c`), not the full 36-char task UUID that every
-   * caller here resolves to before calling in. A plain `task_id = ?` equality never matches those legacy
-   * rows, so a manager reading a card's connected requests would see none even though the owner already
-   * answered one — invisible decisions. Board.tsx already tolerates this UI-side
-   * (`task.id.startsWith(q.taskId + "-")`); this mirrors that same prefix match server-side so the DB
-   * query behind `tasks_get`/`task_requests_list` stops being the one un-fixed path. The `length(task_id)
-   * = 8` guard cleanly distinguishes a legacy prefix from a full id (a UUID's first block is always
-   * exactly 8 hex chars) so an empty/short `task_id` can't accidentally match everything, and the
-   * trailing `-` in the LIKE pattern requires the match land on a UUID block boundary, not just a byte
-   * prefix. Non-sargable for the prefix branch (the column, not the literal, carries the wildcard), but
-   * the questions table is small enough that correctness wins over the index here.
+   * **Legacy prefix-linked rows** (@decision a3f1319f): also matches rows whose `task_id` is a legacy
+   * 8-char id-PREFIX, not the full 36-char task UUID — see the decision record for why. The
+   * `length(task_id) = 8` guard cleanly distinguishes a legacy prefix from a full id (a UUID's first
+   * block is always exactly 8 hex chars) so an empty/short `task_id` can't accidentally match everything,
+   * and the trailing `-` in the LIKE pattern requires the match land on a UUID block boundary, not just a
+   * byte prefix. Non-sargable for the prefix branch (the column, not the literal, carries the wildcard),
+   * deliberately — the questions table is small enough that correctness wins over the index here.
    */
   listQuestionsForTask(projectId: string, taskId: string): Question[] {
     return (this.db.prepare(
@@ -7092,15 +7051,10 @@ export class Db {
    * is a soft, non-FK link (see `Question.taskId`'s own doc), so a dangling id or a null `task_id` both
    * naturally yield `linked_task_column_key`/`linked_task_title` of `NULL` rather than dropping the row.
    *
-   * Card 24a8b8c3: `agent_name` is joined via `filed_by_session_id` (the IMMUTABLE filer), NOT
-   * `session_id` (the mutable routing target `reparentQuestions` rewrites on every recycle) — the same
-   * shape `5b22b262` fixed one layer up, in the UI's `RequestProvenance`. `session_process_state`/
-   * `session_resumability` (→ `sessionLive`/`sessionOrphaned`) stay joined off `session_id` on purpose:
-   * those legitimately describe the CURRENT seat this question is routed to, not who filed it. A legacy
-   * row with a null `filed_by_session_id` (unrecoverable — see that column's own doc) or a filer whose
-   * session/agent was since hard-deleted both naturally yield no match here, falling back to `agentName:
-   * "?"` in `toQuestionInboxItem` — never the routed session's agent, which would silently re-create the
-   * bug this card fixes.
+   * `agent_name` is joined via `filed_by_session_id` (the IMMUTABLE filer), NOT `session_id` (the mutable
+   * routing target `reparentQuestions` rewrites on every recycle) — @decision 24a8b8c3, before joining
+   * this off `session_id` again. `session_process_state`/`session_resumability` stay joined off
+   * `session_id` on purpose: those describe the CURRENT routed seat, not who filed it.
    */
   listOpenQuestions(includeConsumed = false): QuestionInboxItem[] {
     const rows = this.db.prepare(
@@ -7172,14 +7126,10 @@ export class Db {
    * `provision_target` JSON (SQL can't JOIN on it), so profile names are resolved via one `listProfiles`
    * map. Newest-answered first; a row without a binding profileId is skipped defensively.
    *
-   * Card e54996a4 (same shape as `cb7d6998`/`5b22b262`/`24a8b8c3`): `agent_name` is joined via
-   * `filed_by_session_id` (the IMMUTABLE filer), NOT `session_id` (the mutable routing target
-   * `reparentQuestions` rewrites on every recycle) — `PendingBinding.agentName`'s own doc calls this
-   * "the agent whose session asked for the credential (who requested the grant)", a provenance surface,
-   * and `PendingBinding` carries no session-liveness/routing field that would want the current seat
-   * instead. A legacy row with a null `filed_by_session_id` or a filer whose session/agent was since
-   * hard-deleted both naturally yield no match here, falling back to `agentName: "?"` below — never the
-   * routing target's agent, which would silently re-create the bug this card fixes.
+   * `agent_name` is joined via `filed_by_session_id`, NOT `session_id` (@decision e54996a4 — same shape
+   * as @decision 24a8b8c3; see that decision record for the fuller pattern). `PendingBinding` carries no
+   * session-liveness/routing field that would want the current seat instead, so there's no competing
+   * join to reconcile here.
    */
   listPendingBindings(): PendingBinding[] {
     const rows = this.db.prepare(
@@ -7377,20 +7327,16 @@ export class Db {
     this.db.prepare("DELETE FROM companion_conversations WHERE session_id = ? AND seq < ?").run(sessionId, minKeep);
   }
   /**
-   * The "/new"/"/reset" command's history-ARCHIVE half (replaces the old delete-everything
-   * `clearAllCompanionMessages`, card 85f62475): closes the session's currently-open conversation (sets
-   * ended_at=now) and opens the next one (seq=MAX+1), then evicts the oldest archived conversation(s) past
-   * the retention cap. Every existing/prior-conversation row is RETAINED, tagged with its now-closed
-   * conversation_seq — nothing here ever deletes a message that belongs to the conversation being closed.
-   * The web/Telegram panel still empties immediately (the caller's `pushCleared` fires unconditionally,
-   * regardless of this method's early return below) — only retention differs from the old delete.
+   * The "/new"/"/reset" command's history-ARCHIVE half (@decision 85f62475 — replaces the old
+   * delete-everything `clearAllCompanionMessages`): closes the session's currently-open conversation
+   * (sets ended_at=now) and opens the next one (seq=MAX+1), then evicts the oldest archived
+   * conversation(s) past the retention cap. Every prior-conversation row is RETAINED. The web/Telegram
+   * panel still empties immediately (the caller's `pushCleared` fires unconditionally) — only retention
+   * differs from the old delete.
    *
    * NO-OP GUARD: if the currently-open conversation has ZERO messages (or none is open yet), this returns
-   * WITHOUT closing/opening anything — an empty conversation is reused rather than abandoned. Without this,
-   * a burst of "/new" with nothing sent between each would mint a run of empty conversations that are never
-   * surfaced in the history list (listCompanionConversations excludes them) but STILL consume a retention
-   * slot each, so "/new"-spam could silently evict real, browsable history. The next actual message still
-   * lazily opens/reuses the right conversation via `currentConversationSeq` either way.
+   * WITHOUT closing/opening anything — see the decision record for why this guard exists. The next actual
+   * message still lazily opens/reuses the right conversation via `currentConversationSeq` either way.
    */
   startNewCompanionConversation(sessionId: string): void {
     const open = this.db.prepare("SELECT seq FROM companion_conversations WHERE session_id = ? AND ended_at IS NULL")
