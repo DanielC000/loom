@@ -1,0 +1,280 @@
+#!/usr/bin/env node
+// comment-anchor-lint.mjs — WARN-ONLY repo scan for the decision-anchor convention (card 5329a9af).
+// Standalone report tool, not a hook: invoke as `node comment-anchor-lint.mjs [repoRoot] [--min-lines=N]`
+// and it prints a JSON report to stdout. It never fails the process on a violation — "warn-only" is
+// realized as an exit-code contract, not a config flag, so wiring this into anything later can never
+// accidentally turn it blocking by omission. See the card's own Sequencing note for why blocking mode
+// waits on a separate step (extracting the comment-heaviest files first).
+//
+// Three checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
+//   1. unanchoredLongBlocks — a contiguous comment block >= `minLines` (default DEFAULT_MIN_LINES) with
+//      no `@decision <id>` anywhere in it. The "narrative is regrowing in source" signal.
+//   2. orphanAnchors — an `@decision <id>` whose id resolves to no record in ANY of the three stores this
+//      convention actually uses at runtime (docs/adr, docs/decisions, docs/investigations/<id>-*/
+//      findings.md — the same three `decision-records.mjs` resolves against; the card's own text says
+//      "either register" naming only the first two, but mirroring the shipped resolver's full three-store
+//      set is what avoids flagging an anchor that legitimately resolves via investigations).
+//   3. orphanRecords — a record with no inbound anchor anywhere in the swept source. ADVISORY, never an
+//      error (see `advisory: true` on its report key) — a policy-level record can correctly have no single
+//      anchor site, and treating this as a hard violation trains people to ignore the whole lint.
+//
+// A <= GUARD_MAX_LINES-line block that DOES carry an anchor is the convention's TARGET STATE (Class A: a
+// short guard/prohibition, permanently inline) and is counted separately as `guardClassBlocks` — it is
+// structurally excluded from `unanchoredLongBlocks` (that check only ever looks at blocks with NO anchor)
+// and must never appear there; `packages/daemon/test/comment-anchor-lint.mjs` asserts this directly.
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Comment-syntax-agnostic, byte-identical to decision-records.mjs's own ANCHOR_RE — kept as a separate
+// literal here (not imported) because assets ship as standalone files invoked by bare `node <path>`,
+// mirroring the same duplication already accepted between decision-records.mjs and claude-settings.ts's
+// `anyDecisionRecordStoreExists` (see that function's own doc for why, and the same "keep in sync" note
+// applies here).
+const ANCHOR_RE = /@decision\s+([0-9a-f]{8})\b/gi;
+const FLAT_STORES = ["adr", "decisions"];
+
+// Default N (DoD-3): justified against THIS repo's OWN measured block-length distribution (OBSERVED —
+// `node comment-anchor-lint.mjs .` against base commit 67e5c672, population = the 5 SOURCE_ROOTS below,
+// 326 files, 10663 blocks — never the card's second-hand figures, which are a DIFFERENT measurement).
+// Bucketed by share of total comment VOLUME (lines, not block count): 1-3 lines 11.8%, 4-10 lines 33.2%,
+// 11-25 lines 28.0%, 26+ lines 27.0%. 15 sits inside the "11-25" bucket — the largest non-trivial share —
+// and clear of the 1-3/4-10 range where the guard-class and ordinary short-comment population lives.
+export const DEFAULT_MIN_LINES = 15;
+// Class A guard/prohibition ceiling (CLAUDE.md comment taxonomy): "compressed to <=3 lines". A block at
+// or under this length that carries an anchor is the target state, never a violation.
+export const GUARD_MAX_LINES = 3;
+
+const SOURCE_ROOTS = [
+  ["packages", "daemon", "src"],
+  ["packages", "daemon", "assets"],
+  ["packages", "daemon", "scripts"],
+  ["packages", "web", "src"],
+  ["packages", "shared", "src"],
+];
+const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".mjs"]);
+// `test`/`tests`/`e2e` excluded deliberately: this repo's own test fixtures plant SYNTHETIC anchor ids
+// (aaaaaaaa, deadbeef, cafebabe, ...) with no matching record by design — sweeping them would report
+// fixture noise as real orphan-anchor violations. Measuring against real production source only.
+const EXCLUDE_SEGMENTS = new Set(["node_modules", "dist", ".turbo", "coverage", "test", "tests", "e2e", ".git"]);
+
+const BUCKETS = [
+  { key: "1-3", min: 1, max: 3 },
+  { key: "4-10", min: 4, max: 10 },
+  { key: "11-25", min: 11, max: 25 },
+  { key: "26+", min: 26, max: Infinity },
+];
+
+function relPath(repoRoot, p) {
+  return path.relative(repoRoot, p).replace(/\\/g, "/");
+}
+
+/**
+ * Group `lines` into maximal contiguous comment-only runs — a blank line or a non-comment line always
+ * breaks a block, mirroring `decision-records.mjs`'s own `expandStartToBlock` convention ("blank line =
+ * block boundary") so both tools agree on what counts as one block. Handles `//` line comments and
+ * `/* ... *\/` block comments (single- or multi-line); does not attempt to distinguish trailing code on
+ * the line a block comment closes on — this repo's own style never puts code there.
+ */
+export function extractCommentBlocks(lines) {
+  const blocks = [];
+  let start = null;
+  let anchors = new Set();
+  let inBlock = false;
+
+  const flush = (endLineNo) => {
+    if (start !== null) {
+      blocks.push({ startLine: start, endLine: endLineNo, length: endLineNo - start + 1, anchorIds: [...anchors] });
+    }
+    start = null;
+    anchors = new Set();
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const lineNo = i + 1;
+    const trimmed = lines[i].trim();
+    let isComment = false;
+
+    if (inBlock) {
+      isComment = true;
+      if (trimmed.includes("*/")) inBlock = false;
+    } else if (trimmed.startsWith("//")) {
+      isComment = true;
+    } else if (trimmed.startsWith("/*")) {
+      isComment = true;
+      if (!trimmed.includes("*/")) inBlock = true;
+    }
+
+    if (isComment) {
+      if (start === null) start = lineNo;
+      for (const m of lines[i].matchAll(ANCHOR_RE)) anchors.add(m[1].toLowerCase());
+    } else {
+      flush(lineNo - 1);
+    }
+  }
+  flush(lines.length);
+  return blocks;
+}
+
+/** Every `@decision <id>` site in `lines`, independent of comment-block grouping (an anchor is still an
+ * anchor even on a line this file's own block heuristic fails to classify as a comment). */
+export function findFileAnchors(lines) {
+  const found = [];
+  lines.forEach((line, i) => {
+    for (const m of line.matchAll(ANCHOR_RE)) found.push({ id: m[1].toLowerCase(), line: i + 1 });
+  });
+  return found;
+}
+
+/** True iff `nameLower` is `id` followed by a real boundary — mirrors decision-records.mjs's own
+ * `idBoundaryMatch` (same rationale: never let id `deadbeef` bare-prefix-match `deadbeefcafe-other.md`). */
+function idBoundaryMatch(nameLower, id) {
+  if (!nameLower.startsWith(id)) return false;
+  const rest = nameLower.slice(id.length);
+  return rest === "" || rest.startsWith("-") || rest.startsWith(".");
+}
+
+/** Every record this convention can actually resolve an anchor against, across all three stores
+ * `decision-records.mjs` resolves at runtime (see this file's header for why investigations is included
+ * despite the card text naming only two registers). */
+export function listRecordIds(repoRoot) {
+  const records = [];
+  for (const store of FLAT_STORES) {
+    const dir = path.join(repoRoot, "docs", store);
+    let entries;
+    try { entries = fs.readdirSync(dir); } catch { continue; }
+    for (const name of entries) {
+      const lower = name.toLowerCase();
+      if (!lower.endsWith(".md") || lower === "template.md") continue;
+      const m = /^([0-9a-f]{8})[-.]/.exec(lower);
+      if (m && idBoundaryMatch(lower, m[1])) records.push({ id: m[1], path: path.join(dir, name) });
+    }
+  }
+  const invDir = path.join(repoRoot, "docs", "investigations");
+  let entries;
+  try { entries = fs.readdirSync(invDir, { withFileTypes: true }); } catch { entries = []; }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const lower = e.name.toLowerCase();
+    const m = /^([0-9a-f]{8})-/.exec(lower);
+    if (!m) continue;
+    const findings = path.join(invDir, e.name, "findings.md");
+    if (fs.existsSync(findings)) records.push({ id: m[1], path: findings });
+  }
+  return records;
+}
+
+function walkSourceFiles(repoRoot) {
+  const files = [];
+  const walk = (dir) => {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (EXCLUDE_SEGMENTS.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) { walk(full); continue; }
+      if (!e.isFile()) continue;
+      if (SOURCE_EXTENSIONS.has(path.extname(e.name))) files.push(full);
+    }
+  };
+  for (const parts of SOURCE_ROOTS) walk(path.join(repoRoot, ...parts));
+  return files;
+}
+
+/** Bucket every block's LENGTH into the four card-cited ranges, reporting each bucket's share of total
+ * comment VOLUME (sum of block lengths in the bucket / sum over all blocks) — a block count would
+ * under-weight the few very long blocks that actually dominate how much narrative sits in source. */
+export function bucketDistribution(blocks) {
+  const totals = BUCKETS.map(() => ({ blocks: 0, lines: 0 }));
+  let totalLines = 0;
+  for (const b of blocks) {
+    totalLines += b.length;
+    const idx = BUCKETS.findIndex((bk) => b.length >= bk.min && b.length <= bk.max);
+    if (idx >= 0) { totals[idx].blocks += 1; totals[idx].lines += b.length; }
+  }
+  const out = {};
+  BUCKETS.forEach((bk, i) => {
+    out[bk.key] = {
+      blocks: totals[i].blocks,
+      lines: totals[i].lines,
+      pctOfCommentVolume: totalLines ? Number(((totals[i].lines / totalLines) * 100).toFixed(1)) : 0,
+    };
+  });
+  return out;
+}
+
+/**
+ * Scan `repoRoot` and compute all three checks plus the calibration distribution. Never throws on a
+ * violation being found — violations are just data in the returned report (DoD-1/2: warn-only, with the
+ * count reported). `opts.minLines` overrides `DEFAULT_MIN_LINES` (DoD-3: N is configurable).
+ */
+export function computeReport(repoRoot, opts = {}) {
+  const minLines = Number.isInteger(opts.minLines) && opts.minLines > 0 ? opts.minLines : DEFAULT_MIN_LINES;
+  const files = walkSourceFiles(repoRoot);
+  const allBlocks = [];
+  const allAnchors = [];
+
+  for (const file of files) {
+    let raw;
+    try { raw = fs.readFileSync(file, "utf8"); } catch { continue; }
+    const lines = raw.split(/\r?\n/);
+    for (const b of extractCommentBlocks(lines)) allBlocks.push({ file, ...b });
+    for (const a of findFileAnchors(lines)) allAnchors.push({ ...a, file });
+  }
+
+  const records = listRecordIds(repoRoot);
+  const recordIdSet = new Set(records.map((r) => r.id));
+  const anchorIdSet = new Set(allAnchors.map((a) => a.id));
+
+  const unanchoredLong = allBlocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
+  const guardClass = allBlocks.filter((b) => b.length <= GUARD_MAX_LINES && b.anchorIds.length > 0);
+
+  // One representative site per orphaned id (a repeated anchor id isn't a new violation each occurrence).
+  const orphanAnchorsById = new Map();
+  for (const a of allAnchors) {
+    if (!recordIdSet.has(a.id) && !orphanAnchorsById.has(a.id)) orphanAnchorsById.set(a.id, a);
+  }
+  const orphanRecords = records.filter((r) => !anchorIdSet.has(r.id));
+
+  return {
+    repoRoot,
+    minLines,
+    guardMaxLines: GUARD_MAX_LINES,
+    filesScanned: files.length,
+    totalCommentBlocks: allBlocks.length,
+    totalAnchorSites: allAnchors.length,
+    uniqueAnchorIds: anchorIdSet.size,
+    recordCount: records.length,
+    unanchoredLongBlocks: {
+      count: unanchoredLong.length,
+      items: unanchoredLong.map((b) => ({ file: relPath(repoRoot, b.file), startLine: b.startLine, endLine: b.endLine, length: b.length })),
+    },
+    guardClassBlocks: { count: guardClass.length },
+    orphanAnchors: {
+      count: orphanAnchorsById.size,
+      items: [...orphanAnchorsById.values()].map((a) => ({ id: a.id, file: relPath(repoRoot, a.file), line: a.line })),
+    },
+    orphanRecords: {
+      count: orphanRecords.length,
+      advisory: true, // DoD-2: never an error — a policy-level record may legitimately have no anchor site.
+      items: orphanRecords.map((r) => ({ id: r.id, path: relPath(repoRoot, r.path) })),
+    },
+    distribution: bucketDistribution(allBlocks),
+  };
+}
+
+function main() {
+  const args = process.argv.slice(2);
+  const positional = args.find((a) => !a.startsWith("--"));
+  const repoRoot = path.resolve(positional || process.cwd());
+  const minLinesArg = args.find((a) => a.startsWith("--min-lines="));
+  const minLines = minLinesArg ? Number(minLinesArg.slice("--min-lines=".length)) : undefined;
+  const report = computeReport(repoRoot, { minLines });
+  process.stdout.write(JSON.stringify(report, null, 2) + "\n");
+}
+
+// Only run as a CLI when invoked directly (`node comment-anchor-lint.mjs ...`) — an import (the test file)
+// must be able to pull in the exported functions above without triggering a repo scan as a side effect.
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  main();
+}
