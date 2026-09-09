@@ -10,8 +10,8 @@ import { resolveRepoKeyOrError } from "../projects/repos.js";
 import { checkTaskRepoKeyRebind } from "../projects/rebind.js";
 import { findSuspectedDuplicate } from "./duplicateDetection.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
-import { checkTitleHtmlEntities } from "../tasks/title-guard.js";
-export { checkTitleHtmlEntities } from "../tasks/title-guard.js";
+import { checkTitleHtmlEntities, checkTitleConventionalType } from "../tasks/title-guard.js";
+export { checkTitleHtmlEntities, checkTitleConventionalType } from "../tasks/title-guard.js";
 
 // Task-tool business logic. EVERY function takes the projectId resolved SERVER-SIDE from the
 // session id — the agent never passes a projectId, so cross-project access is impossible.
@@ -953,9 +953,16 @@ export function createProjectTaskChecked(
    *  escaped HTML. A separate param, not folded into `dedupe`: it skips a DIFFERENT refusal (the entity
    *  guard, not the duplicate-detection one `CreateTaskDedupeOptions`'s own doc scopes itself to). */
   allowHtmlEntitiesInTitle?: boolean,
+  /** Card 3a833d94 — bypasses {@link checkTitleConventionalType}'s rejection of a title carrying a
+   *  `type(scope):`-shaped prefix whose type isn't in the allowed Conventional Commits set. A third
+   *  separate param, same convention as `allowHtmlEntitiesInTitle`: it skips a THIRD, independent
+   *  refusal, not folded into either of the others. */
+  allowNonConventionalType?: boolean,
 ): Task | { error: string } {
   const titleGuard = checkTitleHtmlEntities(input.title, allowHtmlEntitiesInTitle);
   if (titleGuard) return titleGuard;
+  const typeGuard = checkTitleConventionalType(input.title, allowNonConventionalType);
+  if (typeGuard) return typeGuard;
   let body = input.body ?? "";
   let relationNote: string | undefined;
   let backlinkTarget: Task | undefined;
@@ -1146,6 +1153,10 @@ export async function updateProjectTask(
    *  irrelevant otherwise, same convention as `allowTruncate` above being irrelevant when `patch.body`
    *  is absent. */
   allowHtmlEntities?: boolean,
+  /** Card 3a833d94 — bypasses {@link checkTitleConventionalType}'s rejection of a `title` write carrying a
+   *  `type(scope):`-shaped prefix whose type isn't in the allowed Conventional Commits set. Same
+   *  only-consulted-when-`patch.title`-is-set convention as `allowHtmlEntities` above. */
+  allowNonConventionalType?: boolean,
 ): Promise<
   | (Task & { pendingRequestWarning?: PendingRequestWarning[] })
   | (TaskUpdateAck & { pendingRequestWarning?: PendingRequestWarning[] })
@@ -1165,6 +1176,8 @@ export async function updateProjectTask(
   if (patch.title !== undefined) {
     const titleGuard = checkTitleHtmlEntities(patch.title, allowHtmlEntities);
     if (titleGuard) return titleGuard;
+    const typeGuard = checkTitleConventionalType(patch.title, allowNonConventionalType);
+    if (typeGuard) return typeGuard;
   }
   if (appendBody !== undefined) {
     if (patch.body !== undefined) return { error: "pass either body or appendBody, not both" };

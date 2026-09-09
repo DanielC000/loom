@@ -86,3 +86,63 @@ export function checkTitleHtmlEntities(title: string, allow: boolean | undefined
       `genuinely ABOUT escaped HTML — not an accidental artifact — retry with allowHtmlEntities:true.`,
   };
 }
+
+/**
+ * Card 3a833d94 — the SINGLE source of truth for the Conventional Commits types Loom recognizes. Was a
+ * hand-copied local const in `git/worktrees.ts` (the ONLY prior code-level copy, used to build its own
+ * `toConventionalSubject` coercion regex); moved here and re-exported so `git/worktrees.ts` reads it
+ * back rather than the two ever drifting into independent lists. `CLAUDE.md`'s Conventional Commits
+ * section documents the SAME list in prose — this array is the code mirror of that prose, not a second
+ * independent policy, and there is deliberately no third copy anywhere (this file's own scope check below
+ * reuses it too).
+ */
+export const CONVENTIONAL_TYPES = [
+  "feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert",
+] as const;
+
+/**
+ * Shape of a title that READS as a Conventional Commits subject — a leading lowercase-and-hyphens word,
+ * optional `(scope)`, optional `!`, then `: ` and some content — WITHOUT regard to whether that leading
+ * word is actually one of {@link CONVENTIONAL_TYPES}. Deliberately narrower than "any word before a
+ * colon": requiring an all-lowercase (hyphens allowed) leading token is what lets `design(pty): …` (the
+ * card 3a833d94 specimen) match while ordinary prose beginning with a capitalized word and a colon (e.g.
+ * "Note: this still needs…") does NOT — that's the "no prefix at all" case {@link checkTitleConventionalType}
+ * must never touch (the bare-prose → `chore:` coercion net at merge time already handles it correctly, and
+ * two legitimate non-work cards on this board rely on that).
+ */
+const TYPE_PREFIXED_TITLE_RE = /^([a-z][a-z-]*)(?:\([^)]*\))?!?: .+/;
+
+/**
+ * Card 3a833d94 — rejects (returns `{error, type, allowed}`) a title carrying a `type(scope):`-shaped
+ * prefix whose `type` is NOT one of {@link CONVENTIONAL_TYPES}, unless `allow` is explicitly true. Mirrors
+ * {@link checkTitleHtmlEntities}'s shape exactly (same escape-hatch convention, same "never silently
+ * rewrite" posture) — this is the SAME argument (card 267fd215) applied to a second way a SOLO merge's
+ * verbatim-title-as-squash-subject turns an authoring slip into permanent mainline history: a title typed
+ * as `design(pty): …` is not bare prose to the merge-time coercion net (`toConventionalSubject`,
+ * `git/worktrees.ts`) — it already LOOKS conventional, so the net leaves it untouched-but-invalid rather
+ * than fixing it, and a caller who never inspects the merge review's `coerced`/`commitSubject` fields (as
+ * this card's own filer very nearly didn't) ships it as-is.
+ *
+ * Returns `null` (no rejection) when the title has NO type-shaped prefix at all (a different, already-
+ * handled case — see the doc above {@link TYPE_PREFIXED_TITLE_RE}), when the prefix's type IS allowed, or
+ * when `allow` was passed.
+ */
+export function checkTitleConventionalType(
+  title: string, allow: boolean | undefined,
+): { error: string; type: string; allowed: readonly string[] } | null {
+  if (allow) return null;
+  const match = TYPE_PREFIXED_TITLE_RE.exec(title.trim());
+  if (!match) return null;
+  const type = match[1]!;
+  if ((CONVENTIONAL_TYPES as readonly string[]).includes(type)) return null;
+  return {
+    type,
+    allowed: CONVENTIONAL_TYPES,
+    error: `title's leading "${type}:" is not a recognized Conventional Commits type — a SOLO merge uses ` +
+      `the card title VERBATIM as the squash commit subject, and an unrecognized type is invisible to the ` +
+      `merge-time coercion net (it only fixes BARE prose, not an already type-shaped-but-invalid prefix), ` +
+      `so this would ship as a permanent mainline artifact with a bogus type. Allowed types: ` +
+      `${CONVENTIONAL_TYPES.join(", ")}. Pick one of those, drop the "type:" prefix entirely, or retry ` +
+      `with allowNonConventionalType:true if this is deliberate.`,
+  };
+}

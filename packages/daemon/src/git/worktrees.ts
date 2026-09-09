@@ -11,7 +11,7 @@ import { withCanonicalIndexLock } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
 import { isDoctrineArtifactPath, isDoctrineSkillsPath } from "../pty/claude-doctrine.js";
 import { isCodexDoctrinePath } from "../pty/codex-doctrine.js";
-import { checkTitleHtmlEntities } from "../tasks/title-guard.js";
+import { checkTitleHtmlEntities, CONVENTIONAL_TYPES } from "../tasks/title-guard.js";
 
 export interface WorktreeInfo {
   worktreePath: string;
@@ -5700,12 +5700,11 @@ export function __resetMergedCommitMapCacheForTest(): void {
   mergedMapInFlight.clear();
 }
 
-/** The Conventional Commits types Loom recognizes (the allowed type list, documented once in CLAUDE.md). */
-const CONVENTIONAL_TYPES = [
-  "feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert",
-] as const;
-
-/** Already-conventional subject: `type` (optional `(scope)`) (optional `!`) `: ` + a non-empty description. */
+/** Already-conventional subject: `type` (optional `(scope)`) (optional `!`) `: ` + a non-empty description.
+ *  `CONVENTIONAL_TYPES` (the allowed type list, documented once in CLAUDE.md) now lives in
+ *  `tasks/title-guard.js` — card 3a833d94 moved it there so the write-boundary type guard
+ *  (`checkTitleConventionalType`) and this coercion regex read the SAME array instead of two
+ *  hand-maintained copies; imported above alongside `checkTitleHtmlEntities`. */
 const CONVENTIONAL_RE = new RegExp(
   `^(?:${CONVENTIONAL_TYPES.join("|")})(?:\\([^)]+\\))?!?: .+`,
 );
