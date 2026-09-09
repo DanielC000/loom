@@ -16,3 +16,5 @@ Card cffa71e6 (docs-only): the tool description now spells out that `since`/`ela
 ## Source
 
 Inline comment in `packages/daemon/src/mcp/orchestration.ts`, above `registerGateQueue`. Relocated by card 210cd10c (tranche 1 on `mcp/orchestration.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `//` comment markers stripped.
+
+Second site (same decision, restated at the implementation layer): JSDoc in `packages/daemon/src/sessions/service.ts`, above `SessionService.gateQueueForManager`: lines 3936-3977, as of this tranche's HEAD (tranche 9) — no new facts beyond this record; compressed to an anchor there.

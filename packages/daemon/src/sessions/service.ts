@@ -3751,28 +3751,12 @@ export class SessionService {
         ...(payload?.totalDurationMs !== undefined ? { totalDurationMs: payload.totalDurationMs } : {}),
         ...(payload?.extended !== undefined ? { extended: payload.extended } : {}),
       };
-      // Card a228dfb5: `"skipped"` joins this branch (never its own separate branch below) — a skipped
-      // inert-diff merge carries the exact same payload shape a pass/fail does (settledAt/totalDurationMs/
-      // commitSubject/retriedFile:null/etc.; most of the gate-specific fields below simply stay `undefined`
-      // since no gate ever spawned, same "nothing to report" discipline every other field here already
-      // follows). `passed` stays `t.record.verdict === "pass"` unchanged — this is the fix itself: it now
-      // correctly reads `false` for `"skipped"` instead of never reaching this branch at all (which used to
-      // mean the OUTER `t.record.verdict != null ? { outcome: t.record.verdict } : {}` below was the only
-      // thing surfacing anything, and `deriveMergeGateVerdict` never even WROTE `"skipped"` before this
-      // card — so this widening and that write land together, not independently).
-      // Card 5ef78900, round 2 (round 3 widened the mechanism, not this shape): every spread below is now
-      // VERBATIM/unconditional — no more per-line `&& !crossProjectRedacted`. Redaction happens exactly
-      // once, below, by filtering the fully-assembled object against `GATE_VERDICT_FIELD_CLASSIFICATION`
-      // — see that Record's own doc for why (and for why it's an exhaustive classification, not a Set).
-      //
-      // Card 553ea58c: the count that actually reaches `formatWeakerPassWarning`'s weaker-PASS batch
-      // clause — `undefined` whenever `payload?.batchLanded === false` (the gate/retry passed but the
-      // batch's fast-forward afterward forfeited or its post-gate HEAD read failed, so "ALL N land" would
-      // be false), else the real `payload?.batchBranchCount` unchanged. Computed ONCE, here, rather than
-      // inline inside the object literal below (a `const` cannot appear mid-object-literal) — see the
-      // `retryWarning` dispatch's own comment, below, for why this affects only that rendered prose and
-      // never the raw `batchBranchCount` field, and why the REJECTED-retry formatter deliberately does not
-      // use this local at all.
+      // @decision a228dfb5 — "skipped" shares this pass/fail branch too; `passed` reads false for it, not
+      // just the OUTER `outcome` field (docs/decisions/a228dfb5-skipped-merge-verdict-must-map-to-skipped-not-pass.md)
+      // @decision 5ef78900 — spreads below are unconditional; redaction is the ONE post-hoc filter, never
+      // per-spread gating (docs/decisions/5ef78900-timingband-cross-project-numeric-disclosure-is-deliberate.md)
+      // @decision 553ea58c — batchRenderCount is computed once here (a const can't sit mid-object-literal);
+      // see the retryWarning dispatch below for what it gates (docs/decisions/553ea58c-batchlanded-is-a-separate-later-fact.md)
       const batchRenderCount = payload?.batchLanded === false ? undefined : payload?.batchBranchCount;
       const rawVerdictFields = t.record.verdict === "pass" || t.record.verdict === "fail" || t.record.verdict === "skipped"
         ? {
@@ -3806,48 +3790,13 @@ export class SessionService {
           // Card 9966c52d: `payload.outputTail` (attempt 1's own captured tail, spread a few lines above)
           // is passed through so either formatter below can tell a genuine timeout kill apart from an
           // assertion failure — see `formatWeakerPassWarning`'s/`formatRetryAlsoFailedWarning`'s own doc.
-          // Code Review, card 67030bb9 finding [5]; CORRECTED, card 553ea58c: `payload?.batchBranchCount`
-          // is `undefined` on a plain solo merge (both formatters render their solo wording), and the
-          // assembled-branch count on a batch op — see `PendingGateOpVerdict.batchBranchCount`'s own doc.
-          // `batchRenderCount` below is what actually reaches `formatWeakerPassWarning`'s weaker-PASS
-          // branch: `undefined` whenever `payload?.batchLanded === false` (the gate/retry passed but the
-          // batch's fast-forward afterward forfeited or its post-gate HEAD read failed — nothing landed, so
-          // the "ALL N land" clause would be false), else the real `batchBranchCount` unchanged. This
-          // affects ONLY the rendered PROSE, never the raw `batchBranchCount` field spread below, which
-          // stays visible and accurate either way (card `b480dda9`'s "do NOT fix a forfeited row by zeroing
-          // branchCount instead" precedent — see `batchLanded`'s own doc for the full reasoning). The
-          // REJECTED-retry branch (`formatRetryAlsoFailedWarning`) is deliberately UNAFFECTED — `batchLanded`
-          // is never set on a "fail" verdict kind (only ever minted alongside a batch "pass"), so
-          // `payload?.batchBranchCount` reaches that formatter unchanged, exactly as it always did (Code
-          // Review finding [4]: that count is genuinely WANTED there, not a coincidental no-op).
-          // Card 9bdc8ea5: presence used to be gated on `payload?.retriedFile` alone, and rendered via ONE
-          // formatter that took no pass/fail argument at all — so a REJECTED op (`outcome:"fail"`,
-          // `retryPassed:false`) still carried a `retryWarning` whose text asserted "passed only after
-          // retrying". Presence itself requires `retryPassed` to be a STRICT boolean, not merely
-          // `retriedFile` truthy — `retryPassed` can be `null`/`undefined` alongside a non-null
-          // `retriedFile` (a retry that was identified but never reached a verdict — see
-          // `ConfirmMergeResult.retriedFile`'s own doc for the mechanism), and no formatter's wording is
-          // honest for that inconclusive case, so this suppresses the warning entirely rather than
-          // guessing. That mixed shape (`retriedFile` set, `retryPassed` absent) is NOT currently reachable
-          // on THIS payload — it occurs only on the separate `build_gate` AUDIT EVENT (this file's own
-          // cancelled-while-queued `evt("build_gate", {..., retriedFile})` call, which deliberately omits
-          // `retryPassed` — a `gate_history` row, read through a different tool entirely, never through
-          // `gate_status`); the strict-boolean check here is defensive, not a live gap being closed.
-          //
-          // CORRECTED, card 7ad12202 Code Review BLOCKING [1]: this used to dispatch on `payload.retryPassed`
-          // ALONE — `formatWeakerPassWarning` on `true`, `formatRetryAlsoFailedWarning` on `false` — which
-          // was sound only as long as a `true` `retryPassed` could ONLY ever coexist with a genuinely
-          // PASSED gate. Card 7ad12202's own resume mechanism broke that: a rescued single-file retry can
-          // pass while a LATER step (one the original `&&` chain never reached) is resumed afterward and
-          // genuinely fails — `retryPassed:true` alongside `outcome:"fail"`/`t.record.verdict === "fail"`.
-          // Dispatching on `retryPassed` alone rendered `formatWeakerPassWarning`'s "⚠ WEAKER PASS" text on
-          // a REJECTED record — prose asserting a pass that did not happen, the exact defect class card
-          // `9bdc8ea5` exists to remove, reopened by a different mechanism. Fixed by checking the GATE's own
-          // real verdict FIRST: `t.record.verdict === "pass"` (never `retryPassed`) decides whether the
-          // whole gate actually passed; `retryPassed` is consulted only WITHIN the rejected branch, to
-          // choose between `formatRetryAlsoFailedWarning` (the retry itself also failed) and {@link
-          // formatRetryRescuedButGateRejectedWarning} (the retry passed, but the resume then broke — see
-          // that function's own doc for why neither of the other two formatters is honest for this case).
+          // @decision 553ea58c — batchRenderCount hides landedCount from the weaker-PASS prose only when
+          // batchLanded===false; the raw field and the REJECTED-retry branch are both unaffected
+          // (docs/decisions/553ea58c-batchlanded-is-a-separate-later-fact.md)
+          // @decision 9bdc8ea5 — retryWarning's presence also requires retryPassed to be a strict boolean,
+          // not merely retriedFile truthy (docs/decisions/9bdc8ea5-format-retry-also-failed-warning-is-a-separate-function.md)
+          // @decision 7ad12202 — dispatch checks t.record.verdict==="pass" first, never retryPassed alone
+          // (docs/decisions/7ad12202-dispatch-on-gate-verdict-not-retrypassed.md)
           ...(payload?.retriedFile && typeof payload?.retryPassed === "boolean"
             ? { retryWarning: t.record.verdict === "pass"
               ? formatWeakerPassWarning(payload.retriedFile, payload?.outputTail, batchRenderCount)
@@ -3975,72 +3924,24 @@ export class SessionService {
       : { state: "never_existed", gateType: null, elapsedMs: null, idleMs: null };
   }
 
-  /**
-   * Card 5ef78900 (code-review round 2): whether `opId`'s settled row belongs to a DIFFERENT project than
-   * `redactCrossProject` declares — the EXACT SAME fail-safe comparison `gateStatus` above uses internally
-   * for its own cross-project redaction (see that method's `crossProjectRedacted`/
-   * `GATE_VERDICT_FIELD_CLASSIFICATION` docs). Exposed standalone because `gate_status`'s `timingBand`
-   * join (mcp/orchestration.ts) is appended to `gateStatus`'s return AFTER that method has already returned
-   * — a service-layer enumeration inside `gateStatus` itself structurally cannot see or gate a field a
-   * CALLER adds later, so that caller needs this same comparison available on its own to gate its own
-   * addition, rather than re-deriving (and risking drifting from) the fail-safe polarity by hand.
-   * `redactCrossProject === undefined` (the worker path, which never constructs the wrapper) returns
-   * `false` — "not asking, nothing to redact" — identical to `gateStatus`'s own discipline. A caller-project
-   * lookup that failed to resolve (`callerProjectId: undefined`) still compares unequal against any real
-   * `string | null` project id and so still redacts — the same fail-SAFE (not fail-open) shape. An opId
-   * that can't be resolved at all here returns `false` (nothing to compare against) rather than throwing —
-   * harmless, since `gateStatus` itself will independently and authoritatively report `never_existed`/
-   * `unknown` for that identical miss; this method is a gating aid for an ALREADY-settled, ALREADY-resolved
-   * op (checked by its own caller via `state === "settled"` first), never a resolution path of its own.
-   */
+  /** @decision 5ef78900 — standalone because `gate_status`'s `timingBand` join happens AFTER `gateStatus`
+   *  returns, so that method's own redaction can't gate it; reuses the same fail-safe comparison
+   *  (docs/decisions/5ef78900-timingband-cross-project-numeric-disclosure-is-deliberate.md) */
   isCrossProjectGateOp(opId: string, redactCrossProject?: { readonly callerProjectId: string | undefined }): boolean {
     if (redactCrossProject === undefined) return false;
     const t = this.db.findPendingGateOpByOpId(opId);
     return t.kind === "found" && t.record.projectId !== redactCrossProject.callerProjectId;
   }
 
-  /**
-   * `gate_queue()` (card fa359824) — a read-only, ONE-call answer to "why is my gate queued, who holds
-   * the slot, how deep am I" for a manager, so it never has to guess between healthy contention and a
-   * leaked slot the way Codescape's manager had to (escalation 530e59a0): today `gate_status(opId)` only
-   * answers "what is MY op doing", forcing a manager with no other op to correlate against to fall back to
-   * cross-project DB access no manager surface actually grants. This reads the SAME live GateSemaphore
-   * registry `snapshotGates` reads for the (human-only) Gates page, but is SCOPED for an agent-facing
-   * surface: `snapshotGates` is deliberately unscoped (see its own doc — human loopback REST only, never an
-   * agent MCP tool), so reusing it verbatim here would hand every manager task titles/branch names from
-   * EVERY project, well beyond what the owner's `project_links` cross-project trust boundary (peer_list/
-   * peer_message) actually grants. Here, a row for the CALLING manager's OWN project carries full detail
-   * (taskId/branch/workerLabel); a row from a DIFFERENT project is named only by project + gate kind + age
-   * + queue position — enough to self-diagnose "someone else legitimately holds it" (the card's own
-   * explicit scoping call) without leaking another project's task/branch identity.
-   *
-   * SECOND SOURCE OF TRUTH (escalation 4f151331, filed WHILE this card was in flight): the GateSemaphore
-   * registry `phase`/`queuePosition` above is a BELIEF — what the semaphore thinks is admitted/waiting. A
-   * real incident showed it can diverge from reality: a `runGateStep` timeout can resolve (settle, release
-   * the slot) without its process TREE actually dying, so a NEW op can be legitimately admitted (or shown
-   * "queued", correctly, since it hasn't started) while an ORPHANED process from an earlier, already-evicted
-   * attempt on the SAME worktree is still alive and consuming the box — invisible to this registry, since
-   * that earlier op's entry is long gone. Rather than have this tool silently repeat that blind spot, every
-   * entry WITH a `branch` also carries `recentTimeoutStreak` — {@link gateTimeoutStreakCount}, an
-   * INDEPENDENTLY-tracked signal (the existing gate-timeout circuit breaker's own counter) that survives
-   * exactly the eviction this registry doesn't. The two signals are surfaced SIDE BY SIDE, never merged into
-   * one verdict — a nonzero streak doesn't change `phase`, it's a second data point for the caller to weigh.
-   *
-   * CARD 80d54122 (was: "each OWN-project entry with a branch"): `recentTimeoutStreak` originally lived
-   * inside the `callerProjectId === e.projectId` branch below, alongside `taskId`/`branch`/`workerLabel`,
-   * so a cross-project entry never carried it either. Re-examined: that was never a deliberate decision
-   * that the STREAK ITSELF is sensitive — it landed there only because `gateTimeoutStreakCount` needs the
-   * raw branch string, which this function otherwise only ever reads inside that block (to populate the
-   * ALSO-redacted `entry.branch`). Unlike `taskId`/`branch`/`workerLabel` — each redacted for an explicit,
-   * stated reason (identity, a trust boundary `project_links` doesn't grant) — nothing here or on the
-   * `recentTimeoutStreak` field's own doc ever argued the bare integer discloses anything, and the hazard
-   * it exists to catch (an orphaned gate process consuming the shared host) is cross-project BY NATURE, so
-   * it is now read from the raw (never-exposed) `e.branch` and populated UNCONDITIONALLY, the same tier as
-   * `idleMs`/`extended`/`repoContended` above — never gated on `callerProjectId`. `taskId`/`branch`/
-   * `workerLabel` remain own-project only, per card 33aa0291's design for the fields that DO carry
-   * identity. A foreign entry also now carries `redacted: true` (see {@link GateQueueEntry.redacted}) so
-   * the three-field omission reads as a deliberate, self-explaining redaction rather than an ambiguous gap.
-   */
+  /** @decision fa359824 — gate_queue's ONE-read scoping: an own-project row carries full detail
+   *  (taskId/branch/workerLabel); a foreign row is named only by project + gate kind + age + queue position
+   *  (docs/decisions/fa359824-gate-queue-is-the-one-read-answer-to-am-i-stuck.md) */
+  /** @decision 4f151331 — recentTimeoutStreak is a second, independently-tracked signal surfaced beside
+   *  phase/queuePosition, never merged into them — a nonzero streak doesn't change phase
+   *  (docs/decisions/4f151331-recenttimeoutstreak-is-a-second-independent-signal.md) */
+  /** @decision 80d54122 — recentTimeoutStreak is unconditional/cross-project; only taskId/branch/
+   *  workerLabel stay own-project (a foreign row also carries redacted:true)
+   *  (docs/decisions/80d54122-recenttimeoutstreak-redaction-scope-resolved.md) */
   gateQueueForManager(callerProjectId: string): GateQueueSnapshot {
     const snap = this.gateSemaphore.snapshot();
     const cap = resolveConfig({}, this.db.getPlatformConfig()).orchestration.maxConcurrentGates;

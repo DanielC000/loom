@@ -19,3 +19,17 @@ Card 9bdc8ea5: `formatRetryAlsoFailedWarning` is the SIBLING of `formatWeakerPas
 ## Source
 
 JSDoc comment in `packages/daemon/src/orchestration/gate-runner.ts`, above `formatRetryAlsoFailedWarning`: originally lines 1591-1617, as of this tranche's HEAD. Relocated by card `b80a2d76` (tranche 1); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+
+## Caller side — `retryWarning` presence requires a STRICT boolean `retryPassed`, not merely truthy `retriedFile`
+
+### Narrative
+
+At `gateStatus`'s `retryWarning` dispatch (`sessions/service.ts`), presence used to be gated on `payload?.retriedFile` alone, rendered via ONE formatter that took no pass/fail argument — so a REJECTED op (`outcome:"fail"`, `retryPassed:false`) still carried a `retryWarning` whose text asserted "passed only after retrying". Presence now requires `retryPassed` to be a STRICT boolean, not merely `retriedFile` truthy — `retryPassed` can be `null`/`undefined` alongside a non-null `retriedFile` (a retry identified but never reached a verdict, e.g. cancelled while queued), and no formatter's wording is honest for that inconclusive case, so this suppresses the warning entirely rather than guessing. That mixed shape isn't currently reachable on THIS payload — it occurs only on the separate `build_gate` audit event (a `gate_history` row, read through a different tool than `gate_status`); the strict-boolean check here is defensive, not a live gap being closed.
+
+### Do not
+
+- Do not gate `retryWarning`'s presence on `retriedFile` truthy alone — require `retryPassed` to be a strict boolean too, or a cancelled-while-queued retry (real filename, no verdict) gets a dishonest warning.
+
+### Source
+
+Inline comment in `packages/daemon/src/sessions/service.ts` (`gateStatus`'s `retryWarning` dispatch): lines 3823-3836, as of this tranche's HEAD (tranche 9).

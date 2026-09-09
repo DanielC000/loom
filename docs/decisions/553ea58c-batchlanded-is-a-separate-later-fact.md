@@ -1,8 +1,8 @@
 # 553ea58c — `batchLanded` is a separate, LATER fact from `batchBranchCount`, never folded into it
 
-⚠️ Spans two decisions, both under this card's Code Review fold-in: this record (§1, `db.ts`) and
-`MergeBatchResult.landedCount` (§2, `sessions/service.ts`). `resolveRecord` serves one file per id;
-folded here rather than left as a second unreachable `553ea58c-*.md` file (card `6de8956e`).
+⚠️ Spans three decisions under one id: §1 (`db.ts`), `landedCount` (§2, `sessions/service.ts`), and
+`batchRenderCount` (§3, `sessions/service.ts`, tranche 9) — `resolveRecord` serves one file per id, so all
+three are folded here rather than left as unreachable second/third `553ea58c-*.md` files.
 
 ## §1 — Narrative
 
@@ -36,3 +36,20 @@ The REAL git-verified landed count (`result.landed.length` from `runBatchedMerge
 ### Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts` (`MergeBatchResult.landedCount`, lines 459-466; the batch verdict derivation's `batchBranchCount` correction, lines 871-942): as of commit `f9caa77e30d5c1a6dd994b6203261968c0dbf94f`. Relocated by card `8f4c8a8f`. Folded into this pre-existing record by card `6de8956e`.
+
+## §3 — `batchRenderCount` hides the count only for the rendered PROSE, never the raw field
+
+### Narrative
+
+`batchRenderCount` reaches `formatWeakerPassWarning`'s weaker-PASS batch clause: `undefined` whenever `batchLanded === false` (nothing landed, so "ALL N land" would be false), else the real `batchBranchCount` unchanged. Computed ONCE ahead of the object literal (a `const` can't sit mid-literal), not inline at the `retryWarning` dispatch that consumes it.
+
+Affects ONLY the rendered PROSE, never the raw `batchBranchCount` field spread separately — mirrors `b480dda9`'s "don't fix a forfeit by zeroing the count" precedent (§1). REJECTED-retry (`formatRetryAlsoFailedWarning`) is deliberately UNAFFECTED: `batchLanded` is never set on a "fail" verdict, so it keeps the raw count — genuinely WANTED there, not a coincidental no-op (Code Review [4], card 67030bb9).
+
+### Do not
+
+- Do not compute `batchRenderCount` inline at the dispatch site — a `const` can't sit mid-object-literal.
+- Do not apply the `batchLanded === false` hiding to the REJECTED-retry branch — it never sets `batchLanded`, so it must keep the raw count.
+
+### Source
+
+Inline comment in `packages/daemon/src/sessions/service.ts` (`gateStatus`'s `batchRenderCount` local + `retryWarning` dispatch): lines 3768-3775, 3809-3822, tranche 9 HEAD.
