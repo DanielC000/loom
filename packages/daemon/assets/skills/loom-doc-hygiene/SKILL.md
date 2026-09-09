@@ -12,6 +12,7 @@ Rules to apply on **every** documentation edit. Docs are a living source of trut
 1. **No contradictions.** A document must not assert two things that cannot both be true. Before adding a statement, scan the surrounding doc for anything it conflicts with and reconcile them in the same edit.
 
 2. **Rewrite in place — never append "UPDATE:" notes.** When information becomes outdated, debunked, or false, **edit the original sentence/section to be correct**. Do not leave the stale text and bolt on "UPDATE:", "EDIT:", "Note (2026):", "~~struck-through~~ now actually…", or a trailing correction. Replace the wrong content with the right content as if it had always been right. (Git history preserves what changed — the doc itself should read clean.)
+   **Exception — immutable decision records (`docs/adr/**`):** an Architecture Decision Record's entire value is the decision history, so this rule inverts for it. Never rewrite an existing ADR's decision to reflect new information. If a decision changes, **amend** the ADR by adding new information (e.g. a status update) or **supersede** it by writing a new ADR that records the new decision and marks the old one superseded. This exception is deliberately narrow: it applies only to files under `docs/adr/**`. A mutable decision register elsewhere (e.g. `docs/decisions/`) and every other design/architecture doc still follow this rule as written — rewrite them in place.
 
 3. **Tidy loose ends.** Resolve dangling references, half-finished sentences, TODOs that are now done, and links to things that moved or were deleted. If a section is now empty or redundant, remove it.
 
@@ -24,6 +25,7 @@ Rules to apply on **every** documentation edit. Docs are a living source of trut
 ## How to apply
 
 - **Editing an existing doc:** read the whole relevant section first, fold new information into it, and delete what the new information supersedes. The diff should show the doc moving from one correct state to another — not accreting.
+- **Editing an ADR (`docs/adr/**`):** never edit the recorded decision in place. Add an amendment, or write a new ADR that supersedes it and update the old record's status to point at the new one.
 - **Line breaks:** one physical line per paragraph or bullet; never wrap prose to a fixed column. Break lines only at real block boundaries (a blank line, a new heading, a new list item).
 - **Status/decision claims:** only state something is "done", "fixed", "verified", or "decided" if it is actually true right now; if you're changing a prior claim, overwrite it, don't annotate it.
 - **When unsure whether old content is still true:** verify before deleting; if it contradicts current reality, surface that rather than silently keeping both versions.
