@@ -12524,6 +12524,8 @@ export class PtyHost {
     this.logLandedMode(sessionId, () => { if (kickoff != null) this.scheduleKickoffGuarantee(sessionId, kickoff); });
   }
 
+  // @decision 0050a17e — kickoff text must never ride spawn argv (Windows CreateProcess's 32766-char
+  // ceiling); deliver post-ready via submit() instead. See docs/adr/0050a17e-deliver-kickoff-prompt-post-ready-not-via-argv.md.
   /**
    * KICKOFF DELIVERY (card 0050a17e — formerly a "guarantee" racing the vendor CLI's own auto-submit of a
    * positional prompt; that race no longer exists, since no role's boot ever carries a positional prompt
