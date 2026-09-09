@@ -417,13 +417,16 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
       "(a live-entry-only concept, same population scope as `extended`), and ONLY for a `merge`-kind op — " +
       "`undefined` on every ordinary first admission. `attempt:2` means this LIVE entry is `confirmWorkerMerge`'s " +
       "OWN single-file or transient-kill retry re-admitting for a SECOND time, not a first-time queue wait — " +
-      "the two are otherwise structurally identical on every other field. `priorAttemptMs` alongside it is how " +
-      "long attempt 1 actually ran before this retry was even queued, so a `state:\"queued\"` reading with " +
-      "`attempt:2` doesn't read as an unexplained zero-progress wait: this op has already done real work, " +
-      "just not on THIS admission. Read this before concluding a long-`queued` merge op is stuck — a re-queue " +
-      "for a real retry is routine, not evidence of a wedge (the SAME distinction the resolution half of card " +
-      "99a1cf6f itself was filed to close: a two-sample `gate_queue` read of a running→queued swap, with no " +
-      "`attempt` field to explain it, was mistaken for a lost verdict when it was actually this). " +
+      "the two are otherwise structurally identical on every other field. `attempt:3` (card 7ad12202, both " +
+      "the solo AND batch merge paths) means a single-file retry above already passed but the original gate " +
+      "short-circuited on a non-final step — this is a THIRD admission re-running whatever step(s) never got " +
+      "to run, so a pass can be reported without a configured step ever silently going unexecuted. `priorAttemptMs` alongside " +
+      "either is how long everything BEFORE this admission already ran, so a `state:\"queued\"` reading with " +
+      "`attempt:2`/`attempt:3` doesn't read as an unexplained zero-progress wait: this op has already done " +
+      "real work, just not on THIS admission. Read this before concluding a long-`queued` merge op is stuck — " +
+      "a re-queue for a real retry is routine, not evidence of a wedge (the SAME distinction the resolution " +
+      "half of card 99a1cf6f itself was filed to close: a two-sample `gate_queue` read of a running→queued " +
+      "swap, with no `attempt` field to explain it, was mistaken for a lost verdict when it was actually this). " +
       "`emitCompareNotApplicableKind` (card fd0d34da) is a coarse CATEGORY naming why `emitCompareReduced` " +
       "itself is `undefined` (e.g. `\"repo-out-of-domain\"`, `\"path-out-of-scope\"`) — it never carries a " +
       "path/filename/error string the way `reason` does, which is exactly why it's safe to leave visible " +
@@ -982,7 +985,10 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "first-time `queued` entry that has done zero seconds of work. `attempt:2` means this is that retry's " +
         "re-admission, and `priorAttemptMs` is how long attempt 1 actually ran before settling — so a `queued` " +
         "merge showing `attempt:2, priorAttemptMs:1129000` has already done real, substantial work and is " +
-        "waiting on its OWN retry, not sitting untouched. This is the exact instrument gap the RESOLVED half " +
+        "waiting on its OWN retry, not sitting untouched. `attempt:3` (card 7ad12202, both the solo AND batch " +
+        "merge paths) is a further, rarer re-admission: the single-file retry above already passed, but the original gate had " +
+        "short-circuited on a non-final step, so this is resuming whatever step(s) never ran before a pass " +
+        "can be reported. This is the exact instrument gap the RESOLVED half " +
         "of card 99a1cf6f identified: a `running`→`queued` transition read from two point-in-time samples, " +
         "with no `attempt` field available to explain it, was misread as a lost verdict when it was actually " +
         "a healthy retry re-queue — check `attempt` before concluding a `running`→`queued` swap needs " +

@@ -61,7 +61,7 @@ import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-wa
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, formatWeakerPassWarning, formatRetryAlsoFailedWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, remainingGateSteps, mergeResumedGateResult, formatWeakerPassWarning, formatRetryAlsoFailedWarning, formatRetryRescuedButGateRejectedWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
 import { gateSpillPath, pruneGateSpills } from "../orchestration/gate-spill.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
@@ -4912,24 +4912,37 @@ export class SessionService {
           // Card 9bdc8ea5: presence used to be gated on `payload?.retriedFile` alone, and rendered via ONE
           // formatter that took no pass/fail argument at all — so a REJECTED op (`outcome:"fail"`,
           // `retryPassed:false`) still carried a `retryWarning` whose text asserted "passed only after
-          // retrying". Fixed by dispatching to ONE OF TWO formatters based on `payload.retryPassed`:
-          // `formatWeakerPassWarning` on `true` (unchanged from before this card), `formatRetryAlsoFailedWarning`
-          // on `false` (its own distinct wording, never containing "passed" — see that function's own doc
-          // for why this is a separate function rather than a boolean argument on the first one). Presence
-          // itself now requires `retryPassed` to be a STRICT boolean, not merely `retriedFile` truthy —
-          // `retryPassed` can be `null`/`undefined` alongside a non-null `retriedFile` (a retry that was
-          // identified but never reached a verdict — see `ConfirmMergeResult.retriedFile`'s own doc for the
-          // mechanism), and neither formatter's wording is honest for that inconclusive case, so this
-          // suppresses the warning entirely rather than guessing. That mixed shape (`retriedFile` set,
-          // `retryPassed` absent) is NOT currently reachable on THIS payload — it occurs only on the
-          // separate `build_gate` AUDIT EVENT (this file's own cancelled-while-queued `evt("build_gate",
-          // {..., retriedFile})` call, which deliberately omits `retryPassed` — a `gate_history` row, read
-          // through a different tool entirely, never through `gate_status`); the strict-boolean check here
-          // is defensive, not a live gap being closed. `retriedFile` alone is NEVER read as "did it pass" again.
+          // retrying". Presence itself requires `retryPassed` to be a STRICT boolean, not merely
+          // `retriedFile` truthy — `retryPassed` can be `null`/`undefined` alongside a non-null
+          // `retriedFile` (a retry that was identified but never reached a verdict — see
+          // `ConfirmMergeResult.retriedFile`'s own doc for the mechanism), and no formatter's wording is
+          // honest for that inconclusive case, so this suppresses the warning entirely rather than
+          // guessing. That mixed shape (`retriedFile` set, `retryPassed` absent) is NOT currently reachable
+          // on THIS payload — it occurs only on the separate `build_gate` AUDIT EVENT (this file's own
+          // cancelled-while-queued `evt("build_gate", {..., retriedFile})` call, which deliberately omits
+          // `retryPassed` — a `gate_history` row, read through a different tool entirely, never through
+          // `gate_status`); the strict-boolean check here is defensive, not a live gap being closed.
+          //
+          // CORRECTED, card 7ad12202 Code Review BLOCKING [1]: this used to dispatch on `payload.retryPassed`
+          // ALONE — `formatWeakerPassWarning` on `true`, `formatRetryAlsoFailedWarning` on `false` — which
+          // was sound only as long as a `true` `retryPassed` could ONLY ever coexist with a genuinely
+          // PASSED gate. Card 7ad12202's own resume mechanism broke that: a rescued single-file retry can
+          // pass while a LATER step (one the original `&&` chain never reached) is resumed afterward and
+          // genuinely fails — `retryPassed:true` alongside `outcome:"fail"`/`t.record.verdict === "fail"`.
+          // Dispatching on `retryPassed` alone rendered `formatWeakerPassWarning`'s "⚠ WEAKER PASS" text on
+          // a REJECTED record — prose asserting a pass that did not happen, the exact defect class card
+          // `9bdc8ea5` exists to remove, reopened by a different mechanism. Fixed by checking the GATE's own
+          // real verdict FIRST: `t.record.verdict === "pass"` (never `retryPassed`) decides whether the
+          // whole gate actually passed; `retryPassed` is consulted only WITHIN the rejected branch, to
+          // choose between `formatRetryAlsoFailedWarning` (the retry itself also failed) and {@link
+          // formatRetryRescuedButGateRejectedWarning} (the retry passed, but the resume then broke — see
+          // that function's own doc for why neither of the other two formatters is honest for this case).
           ...(payload?.retriedFile && typeof payload?.retryPassed === "boolean"
-            ? { retryWarning: payload.retryPassed
+            ? { retryWarning: t.record.verdict === "pass"
               ? formatWeakerPassWarning(payload.retriedFile, payload?.outputTail, batchRenderCount)
-              : formatRetryAlsoFailedWarning(payload.retriedFile, payload?.outputTail, payload?.batchBranchCount) }
+              : payload.retryPassed
+                ? formatRetryRescuedButGateRejectedWarning(payload.retriedFile, payload?.batchBranchCount)
+                : formatRetryAlsoFailedWarning(payload.retriedFile, payload?.outputTail, payload?.batchBranchCount) }
             : {}),
           ...(payload?.batchBranchCount !== undefined ? { batchBranchCount: payload.batchBranchCount } : {}),
           // Card 553ea58c: `!== undefined` (not truthy) — a stored `false` IS the measured negative (the
@@ -16122,6 +16135,14 @@ export class SessionService {
         if (identification.eligible) {
           const candidate = identification;
           retriedFile = candidate.names.join(",");
+          // CARD 7ad12202: computed HERE, before the retry even runs — `remaining` depends only on
+          // ATTEMPT 1's own outcome (`effectiveGate`/`gateResult.steps.length`), never on whether the
+          // retry itself passes, so there is nothing to gain by waiting. Needed this early for one reason:
+          // deciding WHICH admission below is the last one before squash, so exactly one of them calls
+          // `holdRepoGuardOnExit()` — see the retry callback's own doc just below for why calling it
+          // unconditionally on a retry pass would deadlock a resume's own later admission for the SAME
+          // per-repo guard.
+          const remaining = gateResult.steps ? remainingGateSteps(effectiveGate, gateResult.steps.length) : [];
           let singleFileRetryStartedAt = 0;
           try {
             // Card 99a1cf6f: `attempt`/`priorAttemptMs` on a COPY of `gateDescriptor` (never mutating the
@@ -16161,9 +16182,33 @@ export class SessionService {
                 // out of this card's scope, and not needed to fix the liveness-visibility gap this closes.
                 const r = await runGateSeq(candidate.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), false, undefined, hooks, gateSpillFile);
                 // CARD c24dd48a / b9e07a4a: same "about to hand off to squash" hold as the first attempt —
-                // THIS is the fix: a pass here now keeps the per-repo guard held all the way to
-                // `mergeBranch`, instead of leaving the window this retry runs in unguarded.
-                if (r.passed) holdRepoGuardOnExit();
+                // a pass here keeps the per-repo guard held all the way to `mergeBranch`, instead of
+                // leaving the window this retry runs in unguarded.
+                //
+                // CARD 7ad12202 AMENDS THIS: hold here ONLY when nothing is left to resume (`remaining`,
+                // computed above BEFORE this admission started) — i.e. only when THIS pass really is the
+                // last word before squash. When a resume IS coming, holding here would mean the guard is
+                // already held by the time the resume's own `runExclusive` call tries to acquire the SAME
+                // per-repo guard for its own admission — a self-deadlock (measured directly while building
+                // this fix: the resume's admission never settles, because nothing ever releases a guard
+                // this same call chain is still holding). Deferring the hold to whichever admission is
+                // ACTUALLY last (the resume's own callback, below) keeps exactly one hold in flight at a
+                // time, covering the identical "about to hand off to squash" window for the resume→squash
+                // gap — the SAME guarantee this retry already gave attempt 1's own gap.
+                //
+                // Code Review NON-BLOCKING [5], CORRECTED (an earlier version of this comment overclaimed
+                // "either way," implying no new gap at all): a resume IS coming here means this retry's own
+                // pass DELIBERATELY does NOT hold — reopening the per-repo guard between THIS admission
+                // settling and the resume's own admission starting. `GateSemaphore`'s `grantNext()` runs
+                // SYNCHRONOUSLY on release, so a same-repo sibling already queued behind this op is admitted
+                // into that gap DETERMINISTICALLY, not as a rare race, if one exists. This is fail-closed
+                // and intentionally NOT restructured: a sibling landing there just means main moved, and the
+                // resume's own deliberate no-reunion (see its own callback's doc) already makes a moved base
+                // fail closed at squash time via `requireCanonicalHead`'s re-check — exactly the SAME
+                // conservative outcome the single-file retry itself already accepts for the sibling window
+                // between attempt 1 settling and ITS OWN admission (see this retry's own doc a few lines up
+                // for why that gap was already accepted, unchanged, before this card).
+                if (r.passed && remaining.length === 0) holdRepoGuardOnExit();
                 return r;
               },
               "high",
@@ -16234,8 +16279,101 @@ export class SessionService {
           // `retryPassed` (stamped on the SAME `build_gate` event below, and on this method's own return —
           // see `ConfirmMergeResult.retryPassed`'s own doc) are the ONLY thing keeping such a bug visible;
           // this absorbs the retry into `gateResult.passed` for the squash decision below but NEVER erases
-          // the fact that a retry happened. Never looped: this runs exactly once regardless of outcome.
-          if (retryPassed) gateResult = { ...gateResult, passed: true };
+          // the fact that a retry happened. The single-file retry itself is never looped — it runs exactly
+          // once regardless of outcome.
+          //
+          // CARD 7ad12202 — RESUME ANY STEPS THE ORIGINAL `&&` SHORT-CIRCUIT NEVER RAN: a multi-step
+          // `effectiveGate` whose failure was on a NON-FINAL step means `gateResult.steps` (attempt 1) is
+          // shorter than the full step list — a pass on the isolated retry above says nothing about
+          // whichever step(s) never even started. Promoting straight to `passed:true` here (the old
+          // behavior) is the exact defect: a merge could land with an entire configured step never
+          // executed, silently. `remainingGateSteps` (gate-runner.ts) is `[]` in the COMMON case — the
+          // failure WAS the last step — so this is a byte-identical no-op for every gate shape that isn't
+          // the defect's own. Only when something remains do we spend a THIRD, separately-admitted
+          // `runGateSeq` call (mirroring this retry's own admission pattern, never a re-entry into
+          // `runGateSequential`'s internal loop) to actually run it, then fold its result back in via
+          // `mergeResumedGateResult` so `gateResult.steps` finally accounts for EVERY step `effectiveGate`
+          // names — the exact visibility gap (`gate_status`/`gate_history` showing `outcome:"pass"` next
+          // to a `steps[]` shorter than the configured command) that let this bug ship silently. A failed
+          // or cancelled resume is a genuine new outcome (never re-promoted to `passed:true`, never given
+          // a second rescue) — this resumes at most once, exactly like the single-file retry it follows.
+          if (retryPassed) {
+            // `remaining` was already computed above, before the retry ran (see that computation's own
+            // doc) — reused here rather than re-derived, both because attempt 1's outcome hasn't changed
+            // and because the retry callback's own guard-hold decision already depended on this SAME value
+            // being fixed before either admission started.
+            if (remaining.length === 0) {
+              gateResult = { ...gateResult, passed: true };
+            } else {
+              let resumeStartedAt = 0;
+              let resumedResult: GateSequentialResult;
+              try {
+                resumedResult = await this.gateSemaphore.runExclusive(
+                  // Card 7ad12202: `attempt: 3` — a resumed-remaining-steps admission is a THIRD admission
+                  // cycle for the SAME op, distinct from the single-file retry's own `attempt: 2` above.
+                  // See GateDescriptor.attempt's own doc (gate-semaphore.ts) for why this no longer caps at
+                  // 2. `priorAttemptMs` covers everything spent so far (attempt 1 plus the single-file
+                  // retry), mirroring that field's own "how long before THIS admission was even queued"
+                  // contract.
+                  gateCap, { ...gateDescriptor, attempt: 3, priorAttemptMs: gateAttempt1DurationMs + (Date.now() - singleFileRetryStartedAt) },
+                  async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit) => {
+                    resumeStartedAt = startedAt;
+                    concurrentAtStart = this.gateSemaphore.snapshot().active;
+                    getConcurrentGatesMax = getMaxConcurrentGates;
+                    // Same reasoning as the single-file retry's own callback above for omitting
+                    // `reunionAtAdmission()`: this resumed run covers only the REMAINING steps, not the
+                    // whole `effectiveGate` — re-unioning here would let those steps alone re-observe a
+                    // moved main while the earlier (already-passed/rescued) steps never re-ran against it.
+                    // A moved base instead fails closed exactly as before, via `requireCanonicalHead`'s own
+                    // re-check at squash time.
+                    //
+                    // Card 7ad12202, Code Review NON-BLOCKING [7]: `allowExtend` is left at its default
+                    // (`undefined` → `true`), NOT copied from the single-file retry's own `false` a few
+                    // lines above. That `false` encodes "this file already got one full attempt-1 run
+                    // before now, don't extend it a second time" — a rationale that doesn't apply here:
+                    // every step in `remaining` has NEVER run before this exact call, so from ITS own
+                    // perspective this is a first attempt, same as attempt 1's own `runGateSeq` call
+                    // (which also passes `undefined`) — no reason to deny it the identical one-time
+                    // auto-extend leniency a slow trailing step would otherwise get.
+                    const rr = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(thisOpId, 1), undefined, undefined, hooks, gateSpillFile);
+                    if (rr.passed) holdRepoGuardOnExit();
+                    return rr;
+                  },
+                  "high",
+                );
+              } catch (err) {
+                // Same CANCELLED-WHILE-QUEUED shape as the single-file retry's own catch above — this
+                // resume mints its own brand-new admission cycle and can independently be withdrawn while
+                // queued, even though attempt 1 and the single-file retry both already ran.
+                if (err instanceof GateCancelledError) {
+                  concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
+                  evt("build_gate", {
+                    passed: false, cancelled: true, cancelKind: err.kind, cancelDetail: err.detail,
+                    durationMs: gateAttempt1DurationMs, gateSpawned: gateRan, gateCap, concurrentGates: concurrentAtStart,
+                    concurrentGatesMax, retriedFile, retryPassed,
+                  });
+                  evt("merge_cancelled", { cancelled: true, cancelKind: err.kind, cancelDetail: err.detail, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
+                  return { merged: false, cancelled: true, cancelKind: err.kind, reason: err.detail, opId: thisOpId };
+                }
+                throw err;
+              }
+              concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
+              // Card 7ad12202, Code Review NON-BLOCKING [3]: this reuses the `build_gate_single_file_retry`
+              // KIND rather than inventing a new one — but this is a SECOND ROW for the SAME op, not
+              // additional fields folded into the ONE row emitted a few lines above. `resumedSteps`/
+              // `resumedPassed` are additive WITHIN this second row (`undefined`/absent on every OTHER
+              // `build_gate_single_file_retry` row, since only a resume ever sets them), but a consumer
+              // COUNTING rows of this kind per `opId` must expect up to TWO when a resume fires (the
+              // overwhelming majority of ops still get exactly one — a non-final-step failure is the
+              // exception, not the rule) — never assume one row = one retry attempt for this event kind.
+              evt("build_gate_single_file_retry", {
+                retriedFile, retryPassed, priorFailingTest: gateResult.failingTest,
+                resumedSteps: remaining, resumedPassed: resumedResult.passed,
+                gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax, durationMs: Date.now() - resumeStartedAt,
+              });
+              gateResult = mergeResumedGateResult(gateResult, resumedResult);
+            }
+          }
         } else {
           retryDeclineReason = identification.declineReason;
         }
@@ -17557,10 +17695,24 @@ export class SessionService {
               const identification = identifyRetriableTestFiles(r.failTierAll, worktreePath, r.failTierTestCount, r.harnessNotExecutedDetected ?? false);
               if (identification.eligible) {
                 retriedFile = identification.names.join(",");
+                // CARD 7ad12202: computed BEFORE the retry runs, same reasoning as the solo path's own
+                // identical computation above — depends only on attempt 1's outcome, and is needed early
+                // to decide which admission below is the one that actually holds the per-repo guard
+                // through to squash (see the retry callback's own doc just below).
+                const remaining = r.steps ? remainingGateSteps(effectiveGate, r.steps.length) : [];
                 let batchRetryStartedAt = 0;
                 try {
                   const retryResult = await this.gateSemaphore.runExclusive(
-                    orchestration.maxConcurrentGates, { ...descriptor, batchLandedCount: landedCount },
+                    // Card 7ad12202, Code Review NON-BLOCKING [6]: `attempt: 2`/`priorAttemptMs` added
+                    // here (and `attempt: 3` on the resume admission below) — before this fix, EVERY batch
+                    // admission for one op (attempt 1, this retry, a later resume) carried the IDENTICAL
+                    // `{ ...descriptor, batchLandedCount }` descriptor, so `gate_queue`/`gate_status` could
+                    // not tell a first-time queue wait apart from a re-admission, contradicting
+                    // `GateDescriptor.attempt`'s own doc (which claims the batch path "keys on
+                    // `batchLandedCount` instead" — that was true only in the sense that `batchLandedCount`
+                    // is ALSO present on every admission, never as a discriminator between them). Now
+                    // mirrors the solo path's own `attempt`/`priorAttemptMs` convention exactly.
+                    orchestration.maxConcurrentGates, { ...descriptor, batchLandedCount: landedCount, attempt: 2, priorAttemptMs: batchGateAttempt1DurationMs },
                     async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit) => {
                       batchRetryStartedAt = startedAt;
                       concurrentAtStart = this.gateSemaphore.snapshot().active;
@@ -17571,7 +17723,11 @@ export class SessionService {
                       // to the SAME file in real execution order rather than leaving this retry's own
                       // output unspillable while every sibling gate call for this op already spills.
                       const rr = await runGateSeq(identification.command, worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), false, undefined, hooks, gateSpillPath(opId));
-                      if (rr.passed) holdRepoGuardOnExit();
+                      // CARD 7ad12202: hold ONLY when nothing is left to resume — same deadlock this
+                      // amends on the solo path (holding here unconditionally would block the resume's own
+                      // later admission for the SAME per-repo guard forever). See the solo path's identical
+                      // callback for the full reasoning.
+                      if (rr.passed && remaining.length === 0) holdRepoGuardOnExit();
                       return rr;
                     },
                     "high",
@@ -17618,7 +17774,74 @@ export class SessionService {
                 // Same non-negotiable absorb-but-never-erase discipline as the solo path: a pass-after-retry
                 // is WEAKER evidence than a clean pass. `retriedFile`/`retryPassed` (stamped below and on this
                 // closure's own return) are the only thing keeping that visible.
-                if (retryPassed) r = { ...r, passed: true };
+                //
+                // CARD 7ad12202 — same defect, same fix, as the solo path above (see that block's own doc
+                // for the full reasoning): `r.steps` (attempt 1) can be shorter than `effectiveGate`'s full
+                // step list when the failure was on a non-final step, and a batch retry landing EVERY
+                // assembled branch on the strength of a pass here makes this WORSE than the solo case, not
+                // better. `remaining.length === 0` (the failure WAS the last step) is a byte-identical no-op.
+                if (retryPassed) {
+                  // `remaining` was already computed above, before the retry ran — reused here, same
+                  // reasoning as the solo path's own identical reuse.
+                  if (remaining.length === 0) {
+                    r = { ...r, passed: true };
+                  } else {
+                    let batchResumeStartedAt = 0;
+                    let resumedResult: GateSequentialResult;
+                    try {
+                      resumedResult = await this.gateSemaphore.runExclusive(
+                        // Card 7ad12202, Code Review NON-BLOCKING [6]: `attempt: 3`, mirroring the solo
+                        // path's own resume admission — see the retry admission's own [6] doc just above.
+                        orchestration.maxConcurrentGates, { ...descriptor, batchLandedCount: landedCount, attempt: 3, priorAttemptMs: batchGateAttempt1DurationMs + (Date.now() - batchRetryStartedAt) },
+                        async (startedAt, _cancelSignal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit) => {
+                          batchResumeStartedAt = startedAt;
+                          concurrentAtStart = this.gateSemaphore.snapshot().active;
+                          getConcurrentGatesMax = getMaxConcurrentGates;
+                          // Same reasoning as this retry's own callback above for omitting a re-union: this
+                          // resumed run covers only the REMAINING steps, not the whole `effectiveGate`.
+                          //
+                          // Card 7ad12202, Code Review NON-BLOCKING [7]: `allowExtend` left at its default
+                          // (`undefined` -> `true`) — see the solo path's identical resume callback for the
+                          // full reasoning (every step in `remaining` is running here for the FIRST time,
+                          // same as attempt 1's own call, not a second chance for an already-run step).
+                          const rr = await runGateSeq(remaining.join(" && "), worktreePath, gateTimeoutMs, undefined, gateOpIdEnvOverride(opId, landedCount), undefined, undefined, hooks, gateSpillPath(opId));
+                          if (rr.passed) holdRepoGuardOnExit();
+                          return rr;
+                        },
+                        "high",
+                      );
+                    } catch (err) {
+                      // Mirrors the retry's own catch immediately above — a brand-new admission cycle can
+                      // independently be withdrawn while queued.
+                      const resumeCancelNowMs = Date.now();
+                      const resumeCancelSettledAt = new Date(resumeCancelNowMs).toISOString();
+                      const resumeCancelTotalDurationMs = resumeCancelNowMs - opMintedAtMs;
+                      if (err instanceof GateCancelledError) {
+                        batchGateVerdict = { kind: "cancelled", payload: { reason: `${err.kind}: ${err.detail}`, settledAt: resumeCancelSettledAt, totalDurationMs: resumeCancelTotalDurationMs } };
+                        evtBatch("build_gate", {
+                          passed: r.passed, cancelled: true, cancelKind: err.kind, cancelDetail: err.detail,
+                          batched: true, branchCount: landedCount, gateCap: orchestration.maxConcurrentGates,
+                          concurrentGates: concurrentAtStart, concurrentGatesMax: getConcurrentGatesMax?.() ?? concurrentAtStart,
+                          retriedFile, retryPassed, durationMs: batchGateAttempt1DurationMs, gateSpawned: true,
+                        });
+                        return { passed: false, reason: `gate cancelled (${err.kind}): ${err.detail}` };
+                      }
+                      batchGateVerdict = { kind: "error", payload: { reason: err instanceof Error ? err.message : String(err), settledAt: resumeCancelSettledAt, totalDurationMs: resumeCancelTotalDurationMs } };
+                      throw err;
+                    }
+                    // Card 7ad12202, Code Review NON-BLOCKING [3]: reuses `build_gate_single_file_retry`
+                    // rather than a new event kind — but this is a SECOND ROW for the same op (see the solo
+                    // path's identical resume emit for the full reasoning), not extra fields on the ONE row
+                    // emitted above. A consumer counting rows of this kind per op must expect up to two.
+                    evtBatch("build_gate_single_file_retry", {
+                      retriedFile, retryPassed, priorFailingTest: r.failingTest, batched: true, branchCount: landedCount,
+                      resumedSteps: remaining, resumedPassed: resumedResult.passed,
+                      gateCap: orchestration.maxConcurrentGates, concurrentGates: concurrentAtStart,
+                      concurrentGatesMax: getConcurrentGatesMax?.() ?? concurrentAtStart, durationMs: Date.now() - batchResumeStartedAt,
+                    });
+                    r = mergeResumedGateResult(r, resumedResult);
+                  }
+                }
               } else {
                 retryDeclineReason = identification.declineReason;
               }
@@ -17806,30 +18029,45 @@ export class SessionService {
               // sync return, read FIRST by the manager, used to carry the two raw fields above and NO prose
               // at all. Gated exactly like `gate_status`'s own dispatch (service.ts, the `gateStatus` reader):
               // `retriedFile` non-null AND `retryPassed` a strict boolean — a `null`/`undefined` retryPassed
-              // is the retry-cancelled-while-queued exception, where neither formatter's wording is honest,
-              // so it stays unrendered here too. Dispatches on `retryPassed` rather than assuming "failed" —
-              // `!result.ok` covers a genuine gate rejection (`batch-merge.ts`'s `gatePassed:false` return,
-              // where `retryPassed` can only be `false`/`undefined` by construction: a `true` retryPassed
-              // flips the gate's own `passed` before `runBatchedMerge` ever returns that branch) AND TWO
-              // OTHER `ok:false` returns on an already-PASSED, possibly retry-assisted gate (`gatePassed:true`
-              // — a post-gate HEAD-read failure, or a fast-forward failure/forfeit) — so a passing retry
-              // followed by one of those later failures still renders `formatWeakerPassWarning`, never the
-              // "ALSO FAILED" wording.
+              // is the retry-cancelled-while-queued exception, where no formatter's wording is honest, so it
+              // stays unrendered here too.
+              //
+              // CORRECTED, card 7ad12202 Code Review BLOCKING [1]: this used to dispatch on `retryPassed`
+              // ALONE, on the claimed invariant that `!result.ok` (this return) meant `retryPassed` "can
+              // only be `false`/`undefined` by construction: a `true` retryPassed flips the gate's own
+              // `passed` before `runBatchedMerge` ever returns that branch." **That claim is now FALSE**:
+              // card 7ad12202's own resume mechanism means the single-file retry can pass
+              // (`retryPassed:true`) while a LATER step (one the original `&&` chain never reached) is
+              // resumed afterward and genuinely fails — `result.gatePassed:false` alongside
+              // `retryPassed:true`, reaching this exact `!result.ok` return. Dispatching on `retryPassed`
+              // alone rendered `formatWeakerPassWarning`'s "⚠ WEAKER PASS" text on a rejected batch — prose
+              // asserting a pass that did not happen, the exact defect card `9bdc8ea5` exists to remove.
+              // Fixed by checking `result.gatePassed` FIRST — the real, ungamed record of whether the gate
+              // itself passed, set once in `batch-merge.ts` and never touched by `retryPassed` — then
+              // `retryPassed` only within the `gatePassed:false` branch, to choose between
+              // `formatRetryAlsoFailedWarning` (the retry itself also failed) and {@link
+              // formatRetryRescuedButGateRejectedWarning} (the retry passed, but the resume then broke).
+              // `result.gatePassed:true` still covers the TWO OTHER `ok:false` returns on an already-PASSED,
+              // possibly retry-assisted gate (a post-gate HEAD-read failure, or a fast-forward
+              // failure/forfeit) — so a passing retry followed by one of those later failures still renders
+              // `formatWeakerPassWarning`, exactly as before this correction.
               // CORRECTED (Code Review fold-in, card 4ad6ccfd): an earlier version of this passed
-              // `result.landed.length` to BOTH branches. That count is right for the FAIL branch (`retryPassed:
-              // false`, only reachable via the genuine-rejection return — see above — where the outer
-              // `landed: []` on THIS return and "NONE of them landed" are both true together). It is WRONG for
-              // the PASS branch on the other two `ok:false` returns: `formatWeakerPassWarning`'s batch clause
-              // asserts "ALL N land on the strength of this ONE retry" — false when the gate (and retry)
-              // passed but the fast-forward/HEAD-read afterward did NOT, which is exactly what `ok:false` means
-              // on those two returns (the outer `landed: []` here is the same reality check). Passing `undefined`
-              // there omits the batch clause entirely rather than assert a landing that didn't happen — the
-              // solo wording alone ("passed only after retrying") stays true regardless of what fast-forward
-              // did afterward.
+              // `result.landed.length` to BOTH non-`gatePassed:true` branches. That count is right for the
+              // genuine-rejection shapes (`gatePassed:false`, whether the retry or the resume is what
+              // finally broke) — where the outer `landed: []` on THIS return and "NONE of them landed" are
+              // both true together. It is WRONG for the `gatePassed:true` branch:
+              // `formatWeakerPassWarning`'s batch clause asserts "ALL N land on the strength of this ONE
+              // retry" — false when the gate (and retry) passed but the fast-forward/HEAD-read afterward did
+              // NOT, which is exactly what `gatePassed:true` + `ok:false` means (the outer `landed: []` here
+              // is the same reality check). Passing `undefined` there omits the batch clause entirely rather
+              // than assert a landing that didn't happen — the solo wording alone ("passed only after
+              // retrying") stays true regardless of what fast-forward did afterward.
               ...(result.gateDetail?.retriedFile && typeof result.gateDetail?.retryPassed === "boolean" ? {
-                retryWarning: result.gateDetail.retryPassed
+                retryWarning: result.gatePassed
                   ? formatWeakerPassWarning(result.gateDetail.retriedFile, result.gateDetail.outputTail, undefined)
-                  : formatRetryAlsoFailedWarning(result.gateDetail.retriedFile, result.gateDetail.outputTail, result.landed.length),
+                  : result.gateDetail.retryPassed
+                    ? formatRetryRescuedButGateRejectedWarning(result.gateDetail.retriedFile, result.landed.length)
+                    : formatRetryAlsoFailedWarning(result.gateDetail.retriedFile, result.gateDetail.outputTail, result.landed.length),
               } : {}),
             };
           }

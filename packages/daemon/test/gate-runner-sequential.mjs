@@ -9,7 +9,7 @@
 // same short-circuit/ordering logic without needing to spawn anything real.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/gate-runner-sequential.mjs
 import { performance } from "node:perf_hooks";
-import { splitGateSteps, runGateSequential } from "../dist/orchestration/gate-runner.js";
+import { splitGateSteps, runGateSequential, remainingGateSteps, mergeResumedGateResult } from "../dist/orchestration/gate-runner.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -105,6 +105,34 @@ check("(outputTail, green — THE FIX) a passing gate's result carries the LAST 
 const redWithTail = await runGateSequential("pnpm lint && pnpm test", "/work/tree", 5000, (command) => ({ status: command === "pnpm test" ? 1 : 0, outputTail: `stdout from ${command}` }));
 check("(outputTail, parity) a failing gate's result ALSO carries the failed step's outputTail — green and red are symmetric now, not just red",
   redWithTail.passed === false && redWithTail.outputTail === "stdout from pnpm test");
+
+// --- card 7ad12202: remainingGateSteps/mergeResumedGateResult — the pure step-arithmetic + result-merge
+// helpers a rescued single-file retry now uses to resume whatever step(s) the original `&&` short-circuit
+// never ran, instead of promoting `passed:true` with a configured step never executed. ---
+check("(remaining) failure on a non-final step leaves the trailing step(s) as 'remaining'",
+  JSON.stringify(remainingGateSteps("pnpm build && pnpm test && pnpm lint", 2)) === JSON.stringify(["pnpm lint"]));
+check("(remaining) failure on the LAST step — the common case — leaves nothing remaining ([], not undefined)",
+  Array.isArray(remainingGateSteps("pnpm build && pnpm test", 2)) && remainingGateSteps("pnpm build && pnpm test", 2).length === 0);
+check("(remaining) zero steps run yet returns the WHOLE step list",
+  JSON.stringify(remainingGateSteps("pnpm build && pnpm test", 0)) === JSON.stringify(["pnpm build", "pnpm test"]));
+check("(remaining) a single-step (no `&&`) gate has nothing remaining once it ran",
+  remainingGateSteps("pnpm build", 1).length === 0);
+
+const originalFailed = { passed: false, failedStep: "pnpm test", failedStatus: 1, failedSignal: null, steps: [{ step: "pnpm build", durationMs: 10, status: 0 }, { step: "pnpm test", durationMs: 20, status: 1 }] };
+const resumedPass = { passed: true, steps: [{ step: "pnpm lint", durationMs: 5, status: 0 }] };
+const merged = mergeResumedGateResult(originalFailed, resumedPass);
+check("(merge, pass) the resumed run's own verdict wins — passed:true", merged.passed === true);
+check("(merge, pass) steps is the ORIGINAL steps followed by the RESUMED steps, in that order — not just one side",
+  JSON.stringify(merged.steps.map((s) => s.step)) === JSON.stringify(["pnpm build", "pnpm test", "pnpm lint"]));
+check("(merge, pass) the merged steps[] entry for the originally-failed step still records its OWN real status — the merge never rewrites history",
+  merged.steps[1].status === 1);
+
+const resumedFail = { passed: false, failedStep: "pnpm lint", failedStatus: 1, failedSignal: null, outputTail: "boom", steps: [{ step: "pnpm lint", durationMs: 5, status: 1 }] };
+const mergedFail = mergeResumedGateResult(originalFailed, resumedFail);
+check("(merge, fail) a resumed run that ALSO fails is never silently promoted to a pass",
+  mergedFail.passed === false && mergedFail.failedStep === "pnpm lint" && mergedFail.outputTail === "boom");
+check("(merge, fail) steps STILL concatenate correctly even on a resumed failure — full accounting either way",
+  JSON.stringify(mergedFail.steps.map((s) => s.step)) === JSON.stringify(["pnpm build", "pnpm test", "pnpm lint"]));
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — a `&&`-chained gate runs as separate sequential processes (memory frees between steps) and still fails closed on the first non-zero/errored step."

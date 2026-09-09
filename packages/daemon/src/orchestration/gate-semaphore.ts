@@ -229,11 +229,28 @@ export interface GateDescriptor {
    * way to tell "waiting to start" from "attempt 1 already ran (and likely took minutes), this is
    * queued for a retry". `undefined`/absent (never a fabricated `1`) on a first admission — every ordinary
    * merge, worker self-check, and deploy gate is unaffected. `2` on either retry's own descriptor (both
-   * retries are each a SECOND admission cycle for the same op; neither can itself retry again, so no
-   * gate descriptor ever needs a higher number). See `priorAttemptMs` alongside this for how long attempt
-   * 1 actually took, and `NEVER_CACHED_OUTCOMES`'s sibling concern in `orchestration/pending-ops.ts` for
-   * the RELATED-but-distinct problem this does NOT solve (a stale-base rejection's own cache replay —
-   * that is DoD-5, a different mechanism; this field is purely descriptive/read-only).
+   * retries are each a SECOND admission cycle for the same op). See `priorAttemptMs` alongside this for
+   * how long attempt 1 actually took, and `NEVER_CACHED_OUTCOMES`'s sibling concern in
+   * `orchestration/pending-ops.ts` for the RELATED-but-distinct problem this does NOT solve (a stale-base
+   * rejection's own cache replay — that is DoD-5, a different mechanism; this field is purely
+   * descriptive/read-only).
+   *
+   * Card 7ad12202 CORRECTS an earlier version of this doc that claimed "no gate descriptor ever needs a
+   * higher number [than 2]" — false: when the single-file retry's own isolated run passes but the ORIGINAL
+   * `&&` chain short-circuited on a NON-FINAL step, `confirmWorkerMerge` resumes whatever step(s) never ran
+   * as a THIRD, separately-admitted `runExclusive` cycle for the same op — `attempt:3` on that descriptor.
+   * `3` is real but rare (only the failure shape this card fixes reaches it, not an ordinary single-file
+   * retry) — "at most 2" is no longer a safe assumption for a reader.
+   *
+   * Code Review NON-BLOCKING [6]: an earlier version of THIS correction itself claimed this was
+   * solo-merge-only, "the batch path's own retry/resume admissions key on `batchLandedCount` instead,
+   * never `attempt`" — also false, and fixed in the SAME pass rather than left to rot: `batchLandedCount`
+   * was never a discriminator between a batch's own attempt-1/retry/resume admissions (it's identical on
+   * all three, since it names the assembled branch count, not which admission this is) — a `gate_queue`/
+   * `gate_status` reader had no way to tell them apart. The batch path now stamps `attempt`/
+   * `priorAttemptMs` on its retry (`2`) and resume (`3`) admissions too, alongside its own
+   * `batchLandedCount` (both fields are present together on a batch descriptor, never either/or) —
+   * identical semantics to the solo path described above.
    */
   attempt?: number;
   /** Card 99a1cf6f — present iff `attempt` is, alongside it: attempt 1's own measured wall-clock run time

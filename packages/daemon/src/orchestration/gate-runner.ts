@@ -1223,6 +1223,75 @@ export async function runGateSequential(
 }
 
 /**
+ * Card 7ad12202: a `&&`-chained `gateCommand` whose NON-FINAL step fails short-circuits {@link
+ * runGateSequential} — steps AFTER the failing one never run, and `result.steps` only ever contains the
+ * steps actually attempted (see that function's own doc). If a caller then narrows the failure to a
+ * single re-runnable test file (via {@link identifyRetriableTestFiles}) and re-runs ONLY that file in
+ * isolation, a pass there says nothing about whether the steps that were never reached would ALSO have
+ * passed — reporting the whole gate `passed:true` at that point is the exact defect this card fixes.
+ *
+ * This is the discriminator: given the FULL command actually executed (`effectiveGate` — the reduced
+ * command when one applies, never the raw configured `gateCommand`, since a reduced run has its own,
+ * usually shorter, step count — see {@link runGateSequential}'s own "effectiveGate" callers) and how many
+ * steps a result already accounts for (`result.steps.length`), returns every step from `effectiveGate`
+ * that has not yet run, in order. Empty (`[]`, never `undefined`) when nothing is left — the common case,
+ * a failure on the LAST configured step — so a caller can gate on `.length > 0` alone with no separate
+ * "was there anything to resume" check.
+ *
+ * Pure step-string arithmetic only: this never inspects *why* a step failed (that's {@link
+ * classifyGateFailure}) or whether a retry is even eligible (that's {@link identifyRetriableTestFiles}) —
+ * a caller calls this only after both of those have already said "yes, proceed."
+ */
+export function remainingGateSteps(effectiveGate: string, stepsAlreadyRun: number): string[] {
+  return splitGateSteps(effectiveGate).slice(stepsAlreadyRun);
+}
+
+/**
+ * Card 7ad12202: folds a RESUMED run's result (produced by re-invoking {@link runGateSequential}/
+ * `runGateStep` against just the {@link remainingGateSteps} suffix, as its own separately-admitted gate
+ * call — mirroring the existing single-file isolated-retry's own admission pattern, never a re-entry into
+ * this file's own step-runner loop) back into the ORIGINAL result the caller already holds, so a caller
+ * never has to hand-splice the two `steps[]` arrays itself.
+ *
+ * `steps` is NEVER taken from either side alone, in EITHER branch below: `original.steps` covers
+ * everything up to and including the step that first failed; `resumed.steps` covers only the suffix
+ * {@link remainingGateSteps} named. Concatenating them (in that order) is what makes the merged result's
+ * `steps[]` finally equal to EVERY step `effectiveGate` names — the exact visibility gate_status/
+ * gate_history was missing when this bug shipped silently (card 7ad12202's own DoD-3).
+ *
+ * ⚠️ CODE REVIEW FINDING [4], card 7ad12202: every OTHER field is NOT simply "whichever side is newest" —
+ * which side wins depends on whether the resume itself passed, and conflating the two broke the retry-
+ * warning path this same card was fixing. Two branches:
+ *
+ *  - **`resumed.passed === true`** (the rescue is complete — attempt 1's failure was genuinely rescued,
+ *    and everything after it also ran clean): keeps `original`'s own `outputTail`/`outputFile`/
+ *    `failingTest`/`failTierTest`/etc. — mirrors EXACTLY what the plain, no-resume single-file retry has
+ *    always done on a pass (`sessions/service.ts`'s `gateResult = { ...gateResult, passed: true }` keeps
+ *    attempt 1's own diagnostic fields, never the retry step's). This is load-bearing, not cosmetic:
+ *    `formatWeakerPassWarning`'s own `isTimeoutKillEntry(retriedFile, outputTail)` check looks for
+ *    `retriedFile`'s OWN `(exit timeout` line — a line that can only ever appear in ATTEMPT 1's captured
+ *    tail (the resumed step is a different step entirely, and its tail never mentions `retriedFile` at
+ *    all). Taking `resumed`'s tail here would make that check silently always miss, mislabeling a genuine
+ *    timeout kill as an order-dependent/cross-test-pollution bug on every resumed pass.
+ *  - **`resumed.passed === false`** (or cancelled) — a DIFFERENT, later step genuinely broke, one attempt
+ *    1 never even reached: `resumed`'s own `failedStep`/`outputTail`/etc. win outright here, exactly like
+ *    the TRANSIENT-KILL AUTO-RETRY's own full-gate re-run already treats ITS new result as authoritative.
+ *    This is what a manager actually needs to fix the real, new problem — attempt 1's already-rescued
+ *    failure is no longer the useful diagnostic once something else has broken.
+ *
+ * Never invents a verdict: `resumed.passed`/`cancelled` themselves are never overridden — a caller must
+ * treat a `passed:false` merged result exactly like any other {@link GateSequentialResult} rejection/
+ * cancellation, including running it through {@link classifyGateFailure} again if it wants to. This
+ * function makes NO retry-eligibility decision of its own and must never be looped — a caller resumes
+ * once, exactly like the single-file retry it follows.
+ */
+export function mergeResumedGateResult(original: GateSequentialResult, resumed: GateSequentialResult): GateSequentialResult {
+  const steps = [...original.steps, ...resumed.steps];
+  if (resumed.passed) return { ...original, passed: true, steps };
+  return { ...resumed, steps };
+}
+
+/**
  * Sweep G3: whether the merge gate auto-retries ONCE on a transient-kill classification (see {@link
  * classifyGateFailure}) before reporting a rejection, and the settle delay before that retry, are NO
  * LONGER module-load constants here — they're promoted to a LIVE-resolvable daemon-global config
@@ -1562,6 +1631,36 @@ export function formatRetryAlsoFailedWarning(retriedFile: string, outputTail?: s
     ? "it is NOT an order-dependent/cross-test-pollution bug"
     : `it rules out pollution from the REST of the suite, but NOT pollution AMONG the ${names.length} retried files themselves — by default they ran concurrently in one pool, not isolated from each other (test-daemon.mjs's sequential isolation phase is opt-in, off unless LOOM_GATE_ISOLATED_REAL_SPAWN_PHASE=1)`;
   return `⚠ RETRY ALSO FAILED: the first gate attempt failed, and ${retryClause} failed too. This means the failure reproduces in isolation — ${poolClause}.${batchClause}`;
+}
+
+/**
+ * Card 7ad12202, Code Review BLOCKING [1]: the THIRD case neither {@link formatWeakerPassWarning} nor
+ * {@link formatRetryAlsoFailedWarning} can honestly render — the isolated single-file retry genuinely
+ * PASSED (`retryPassed:true`), but the gate is still REJECTED overall, because {@link
+ * mergeResumedGateResult}'s own resume (a step the original `&&` chain never reached before the rescue)
+ * then failed for real. Before this card, a caller dispatching purely on `retryPassed` (never checking the
+ * gate's own actual verdict) rendered `formatWeakerPassWarning`'s "⚠ WEAKER PASS" wording on a `passed:
+ * false` record — prose asserting a pass that did not happen, the exact defect class card `9bdc8ea5`
+ * exists to remove. A caller must dispatch on the GATE's real outcome first (e.g. `t.record.verdict ===
+ * "pass"` / `result.gatePassed`), THEN on `retryPassed` only to pick between {@link
+ * formatRetryAlsoFailedWarning} (retry itself failed) and THIS function (retry passed, something else
+ * broke afterward) — see this card's own two fixed dispatch sites in `sessions/service.ts` for the
+ * pattern.
+ *
+ * Deliberately takes NO `outputTail` — {@link isTimeoutKillEntry}'s classification is about whether
+ * `retriedFile`'s OWN failure was a timeout kill, which is no longer the actionable question once a
+ * DIFFERENT, later step is what actually rejected the gate; a caller holding the resumed step's own
+ * `outputTail` should surface THAT through the ordinary rejection/`gateDetail` fields, not through this
+ * warning's text.
+ */
+export function formatRetryRescuedButGateRejectedWarning(retriedFile: string, batchBranchCount?: number): string {
+  const names = retriedFile.split(",");
+  const single = names.length === 1;
+  const rescueClause = single ? `retrying '${names[0]}' in isolation passed` : `retrying ${names.length} files together in ONE isolated retry ('${names.join("', '")}') passed`;
+  const batchClause = batchBranchCount !== undefined
+    ? ` This retry was for a BATCH of ${batchBranchCount} branch(es) — NONE of them landed; all ${batchBranchCount} fall back to individual gating.`
+    : "";
+  return `⚠ RESCUED, THEN REJECTED: the first gate attempt's own failure was rescued — ${rescueClause} — but the gate is REJECTED anyway: a step the original run's own '&&' chain never reached was resumed afterward and failed for real. This is a genuine rejection, never a masked pass.${batchClause}`;
 }
 
 /**
