@@ -297,21 +297,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // deployment ever needs trustProxy:true, every `LOOPBACK.has(req.ip)` site in this file must be re-audited
   // (the trust-tier hook below instead reads `req.socket.remoteAddress` directly, so it stays correct
   // regardless of this setting — see gateway/trust-tier.ts).
-  // Access-story Phase C (card 6bc02f50): resolve `remoteAccess` ONCE, HERE, before Fastify() is even
-  // constructed — the https option (below) can only be set at construction time, so this can't wait until
-  // the trust-tier-hook block further down (where Phase A originally resolved it; that resolution is now
-  // just a reference to THIS one). SHIPS INERT: `isTrustTierHookActive` is false by default (enabled:false
-  // ⇒ loopback), so `httpsOptions` stays undefined and `Fastify({logger:false})` is byte-identical to today.
-  //
-  // `httpsActive` (CR follow-up on card 6bc02f50) is the ONE real signal for "did this server actually end
-  // up HTTPS" — reported to `deps.onHttpsResolved` below so a caller (index.ts) never has to independently
-  // re-derive it (a re-derivation using a cheaper check like `fs.existsSync` can diverge from what actually
-  // happened here: a present-but-unreadable key, a cert path that's a directory, or a present-but-invalid
-  // PEM file all pass `existsSync` yet fail HERE). Two failure points are both caught, independently, so
-  // EITHER one degrades to plain HTTP with httpsActive:false, never a silent throw out of buildServer:
-  //   (a) reading the files (ENOENT/EACCES/EISDIR/a delete-after-check race);
-  //   (b) Node's TLS layer rejecting the read bytes as invalid cert/key material (garbage or empty files) —
-  //       this only surfaces once `https.createServer` actually parses them, i.e. at Fastify construction.
+  // @decision 6bc02f50 — resolve `remoteAccess`/TLS HERE, before Fastify() construction (https is
+  // construction-time-only); ships inert by default. See docs/decisions/ for the httpsActive rationale.
   const remoteAccessConfig = resolveConfig(undefined, deps.db.getPlatformConfig()).remoteAccess;
   let httpsOptions: { cert: Buffer; key: Buffer } | undefined;
   if (isTrustTierHookActive(remoteAccessConfig) && remoteAccessConfig.tls) {
@@ -723,32 +710,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { gitLocalMs: t.gitLocalMs, gitPushMs: t.gitPushMs };
   })();
 
-  // Card cd0c7fee/8d158088: shared by both routes below that can carry a watched tool (worker_report is
-  // orchestration-only, memory_write is task-only, but one helper is simpler than two near-duplicates).
-  // `consumeToolAttribution` is DESTRUCTIVE/single-shot (see its own doc in pty/host.ts) — this computes
-  // each watched tool's attribution AT MOST ONCE per request, into a Map, and that SAME Map is threaded to
-  // BOTH the `[mcp]` log line below AND the router's `handle()` call, which passes it on to the enforcing
-  // tool handler (mcp/server.ts memory_write, mcp/orchestration.ts worker_report). Do NOT re-derive
-  // attribution a second time anywhere downstream — a second `consumeToolAttribution` call for the same
-  // (session, tool) always reads "unknown" (the entry is already gone), which would silently fail open
-  // FOREVER while looking fully operational — exactly the card's own silent-all-clear failure mode one
-  // level up. Optional-chained on consumeToolAttribution: several existing tests wire a minimal
-  // `{ markMcpSeen }`-only `deps.pty` stub, and a stub without the method stays a harmless no-op (empty
-  // Map) rather than a 500 — the real PtyHost always implements it.
-  //
-  // Card 3cc3b726: `server` is THIS route's own MCP server id (`LOOM_TASKS_SERVER_ID` /
-  // `LOOM_ORCHESTRATION_SERVER_ID` — the SAME constants host.ts's `buildMcpServers` registers the
-  // client's servers under, one shared definition rather than two independently-typed literal lists) —
-  // used to reconstruct the FULL `mcp__<server>__<tool>` key that `consumeToolAttribution` now expects
-  // (see its own doc, pty/host.ts). Two different routers can each register a tool with the same BARE
-  // name (`memory_write`: loom-tasks' project memory vs. loom-orchestration's companion-private memory),
-  // and a companion session mounts both routers on the SAME sessionId — a bare-name key let one router's
-  // call destructively consume the other's pending correlation entry. `test/tool-attribution-join.mjs`
-  // pins that this reconstruction actually agrees with what `deliverHook` records, across the two REAL
-  // routes below, with a mismatched-server-id negative control. The returned Map stays keyed by the BARE
-  // tool name (unchanged) — every downstream reader (`attributions?.get("memory_write")` etc.) is
-  // router-scoped by construction (it only ever runs inside ITS OWN router's handler), so it never needs
-  // the qualifier.
+  // @decision cd0c7fee — consume each watched tool's attribution AT MOST ONCE per (session, tool) per
+  // request; a 2nd `consumeToolAttribution` call reads "unknown" and silently fails open, not loud.
   const computeAttributions = (sid: string, server: string, body: unknown): Map<string, ToolAttributionResult> => {
     const map = new Map<string, ToolAttributionResult>();
     for (const tool of extractWatchedToolCalls(body, WATCHED_TOOL_NAMES)) {
@@ -1532,21 +1495,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return null;
   };
 
-  // --- Companion RUNTIME STATUS (card 8bda9fc6) — the zero-reply detector's NAMED READER. -------------
-  // A DEDICATED runtime read, deliberately SEPARATE from `/api/companion/config`: a caller must never have
-  // to read a config row to learn a runtime fact. `companion/reply-watch.ts` already writes a durable
-  // `companion_zero_reply_detected` event and a `console.warn` on detection, but both are internal — the
-  // warn goes to a rotating log nobody tails and the event was never queried. This is the pull side.
-  //
-  // ⛔ NOT folded into `maskCompanionConfig`. That is the CONFIG-masking edge — its shape is what a human
-  // edits and PUTs back to `PUT /api/companion/config/:sessionId` — and a settings row (read-modify-write)
-  // and a per-turn runtime counter have different lifetimes. Mixing them would also make every plain config
-  // read join runtime state it has no business touching.
-  //
-  // Adds NO persisted state: every field is derived from `companion_config`'s existing
-  // last_chat_reply_turn_seq / zero_reply_alert_turn_seq plus the bound session's `turn_seq`.
-  //
-  // Read-only, so Tier-1 in `gateway/trust-tier.ts` alongside the other companion GETs.
+  // @decision 8bda9fc6 — companion runtime status is a DEDICATED read, never folded into
+  // `maskCompanionConfig` — a config row and a per-turn runtime counter have different lifetimes.
   const replyStatusOf = (row: import("../db.js").CompanionConfigRow) =>
     buildCompanionReplyStatus(row, deps.db.getSession(row.sessionId)?.turnSeq ?? 0);
   app.get("/api/companion/status", async () => deps.db.listCompanionConfigs().map(replyStatusOf));
@@ -1639,23 +1589,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // printable name only. Without this, a name like "Aria\n\n## Untrusted input\n\n…" could inject
     // structure into the one region of the prompt that must never be user-editable.
     const name = typeof b.name === "string" ? sanitizeCompanionName(b.name) : "";
-    // (multi-companion runtime): the single-companion pre-spawn 409 that used to live here is GONE — the
-    // controller now arms every enabled config concurrently (resolveAllEnabledConfigs), so a 2nd (or Nth)
-    // companion provisioned while another is enabled gets its OWN gateway/session/heartbeat, not an
-    // inert/unrouted one. GUARD 2/3 below (chat-id-needs-token, assistant-role-rig) are unrelated to
-    // single-vs-multi and stay.
-    // Resolve the rig: an explicit agentId, else the bundled "Companion" agent in the reserved setup home —
-    // AUTO-CLONING a fresh agent when that default is already running a live enabled companion (card
-    // e6f68bc4, owner-chosen option A): "+ New companion" still "just works" with no picker, but a 2nd+
-    // companion gets bound to its OWN distinct agent/persona instead of racing a duplicate session onto the
-    // SAME agent as the first. The FIRST companion (default not yet occupied) still binds the bundled agent
-    // directly — existing single-companion users are unaffected.
-    //
-    // The clone itself is DEFERRED — minted only right before the spawn, well below — rather than performed
-    // here: minting it this early would insert an Agent row before the remaining pre-spawn guards (chatId,
-    // token collision, assistant-role) run, and none of their reject paths delete it, leaking a ghost agent
-    // on every rejected 2nd-companion attempt. `agentId` stays null while a clone is pending; `cloneSource`
-    // carries what to clone from once every guard below has passed.
+    // @decision e6f68bc4 — a 2nd+ companion auto-clones the default agent (owner-chosen option A); the
+    // clone is DEFERRED until right before spawn, after every pre-spawn guard below passes.
     let agentId: string | null = null;
     let cloneSource: { sourceAgentId: string; targetProjectId: string } | null = null;
     if (b.agentId !== undefined && b.agentId !== null) {
@@ -3814,27 +3749,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.get("/api/tasks/:id", async (req, reply) => {
     const t = deps.db.getTask((req.params as { id: string }).id);
     if (!t) return reply.code(404).send({ error: "task not found" });
-    // Lazy ship-state backfill (card 1eebc46a): a card merged BEFORE mergedSha started being persisted
-    // at merge-confirm time has no cached ship-state yet. Fill it in on this first open — ONE single-task
-    // git lookup (resolveMergedInfo), never the per-poll-scale cost the board LIST route avoids by
-    // design (measured ~40s at ~1200 cards; this route is a single row). BEST-EFFORT: resolveMergedInfo
-    // already fails safe to null internally, but this write-through cache-fill must never 500 the drawer
-    // — any failure here just falls through and returns the row unchanged.
-    //
-    // Two Code Review fixes over the original implementation:
-    //  - Uses setTaskMergedInfoNoTouch (NOT updateTask) so this pure GET-triggered cache-fill never bumps
-    //    `updatedAt` — the done lane sorts byRecentlyDone, so a plain updateTask() call here would jump an
-    //    old done card to the top of its lane the first time anyone opened its drawer.
-    //  - Stamps the repoKey resolveMergedInfo ACTUALLY scanned (`resolved.repoKey`), not `t.repoKey` — a
-    //    stale/since-retargeted task.repoKey can disagree with where the sha was actually found (e.g. a
-    //    stale key degrades to primary; stamping t.repoKey there would render "<key> — no longer
-    //    registered" for a sha that's really on primary).
-    //
-    // Also re-runs (mergedSha present but mergedVerification still null — card 52e978ad) for a card
-    // whose mergedSha was stamped by a write path that didn't itself know its verification mode
-    // (finishAlreadyMerged / boot-reconcile's landed-sha paths — see finalizeMerge's own doc) — so the
-    // board eventually shows the verification tier for EVERY merged card, not just the ones that went
-    // through the fresh-squash happy path or a pre-existing legacy backfill.
+    // @decision 1eebc46a — lazy single-task ship-state backfill; use setTaskMergedInfoNoTouch (never
+    // updateTask) and stamp resolved.repoKey (never t.repoKey); a failure here must fall through, not 500.
     if (!t.mergedSha || t.mergedVerification == null) {
       try {
         const resolved = await resolveMergedInfo(deps.db, t.projectId, t);
@@ -3932,26 +3848,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   app.get("/api/agents/:id/sessions", async (req) =>
     deps.db.listSessions((req.params as { id: string }).id));
-  // All running/known sessions across projects — for the global Live Terminals grid.
-  // Enrich each row with its in-flight (or just-settled) merge-gate op (`pendingMerge`), read straight
-  // from the in-memory PendingOpRegistry via the SAME read-only peek `worker_list` uses (never consumes;
-  // non-null while the gate is genuinely running, and briefly after it settles via the registry's RETAINED
-  // terminal view — see PendingOpRegistry's doc). Not a DB column — it lives in the registry, so it's
-  // folded on here rather than in listAllSessions. Subset to the shared `PendingMerge` shape {opId, state,
-  // startedAt, outcome, gatePhase}; null on every non-merging session (byte-identical). `outcome` is
-  // carried straight through — undefined while running, "merged"/"rejected"/"failed" once settled (see
-  // confirmWorkerMergeTracked's classifyOutcome) — so the Board can distinguish a rejected merge from a
-  // successful one instead of both reading as `state:"done"`.
-  // `gatePhase` (card 53ad9ed3, closing the divergence 008f33f1 deliberately left open on this REST path)
-  // disambiguates `state:"running"` the SAME way worker_list/worker_status's MCP `pendingMerge` already
-  // does: `state:"running"` is PendingOpRegistry's own coarse in-flight bit, set the instant the merge op
-  // is minted — well before it's ever submitted to GateSemaphore for admission — so a viewer reading
-  // `startedAt` as "the gate started running" can watch the Board's live M:SS timer count queue-wait as if
-  // it were execution time. Reusing `gatePhaseForOpId` (never reimplemented — see its own doc in
-  // sessions/service.ts) folds in the SAME live GateSemaphore.findByOpId lookup gate_status/gate_queue
-  // already read, so this can never disagree with either. Only computed while `state === "running"` (a
-  // settled row's `outcome` already answers the question unambiguously) — omitted (not merely null)
-  // otherwise, byte-identical to before this field existed.
+  // All running/known sessions across projects — for the global Live Terminals grid. Enriches each row
+  // with its in-flight merge-gate op (`pendingMerge`), read via the read-only peek `worker_list` uses.
+  // @decision 53ad9ed3 — reuse gatePhaseForOpId (never reimplement) so `state:"running"` disambiguates
+  // queue-wait from execution and can never disagree with gate_status/gate_queue.
   app.get("/api/sessions", async () =>
     deps.db.listAllSessions().map((s) => {
       const pm = deps.sessions.peekPendingMerge(s);
@@ -4526,22 +4426,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.patch("/api/platform/config", async (req, reply) => {
     const v = validatePlatformConfigPatch((req.body as { config?: unknown })?.config ?? req.body);
     if (!v.ok) return reply.code(400).send({ error: `invalid platform config: ${v.error}` });
-    // Shallow-merge the submitted top-level keys onto the PERSISTED config rather than replacing the
-    // whole blob — a PATCH carrying only one field (e.g. a single Settings toggle) must leave every
-    // sibling field the caller didn't touch byte-identical. An OMITTED key (not present in v.value)
-    // is left alone (today's/unchanged behavior); an explicit `null` (card fd55ac8a — the clear
-    // sentinel a blanked Settings toggle sends) DELETES the key instead, reverting it to inherit the
-    // resolved default.
-    //
-    // The deep-partial groups (card ba9ccd75; `backup` added sweep G4, `gateRetry` added sweep G3) get a
-    // DEEP merge instead of the shallow whole-key replace every other key uses: a submitted
-    // `rateLimit`/`watchers`/`timeouts`/`backup`/`gateRetry` object merges FIELD BY FIELD
-    // onto the persisted group rather than replacing it wholesale, so "omitted = leave alone" holds
-    // uniformly at both levels (top-level key AND a field nested inside a submitted group) — before this,
-    // `{"rateLimit":{"exhaustedThresholdPct":90}}` silently wiped every other persisted rateLimit field,
-    // since the shallow path below `merged[key] = val` replaces the entire group with just what was sent.
-    // A per-field `null` inside the group (accepted by platformConfigPatchSchema's nullable field
-    // variants) deletes just that field; whole-group `null` still deletes the whole group unchanged.
+    // Shallow-merge the submitted top-level keys onto the PERSISTED config; an omitted key is left
+    // alone, an explicit `null` (card fd55ac8a) deletes it. @decision ba9ccd75 — DEEP_MERGE_GROUPS get a
+    // FIELD-BY-FIELD merge instead — a shallow replace here silently wipes sibling fields in that group.
     const DEEP_MERGE_GROUPS = new Set(["rateLimit", "watchers", "timeouts", "backup", "gateRetry"]);
     const before = deps.db.getPlatformConfig();
     const merged: Record<string, unknown> = { ...before };
@@ -5374,27 +5261,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // must land as its own turn (not coalesced with a Loom operational nudge).
     return reply.send(deps.pty.enqueueStdin(id, text, "human", undefined, undefined, "agent"));
   });
-  // Human-initiated merge of a worker's branch (the Review panel / #18c). Runs the daemon's
-  // fail-closed build gate then squash-merges (one clean commit); manager is derived from the worker's
-  // parent so the existing ownership check holds. Returns { merged } or { merged:false, reason }, or —
-  // on the still-running ceiling path — { merged:null, pending:true, opId, reason } (see below).
-  // ROUTED THROUGH THE TRACKED PATH (card 361520a0, Half One): this used to call the raw, untracked
-  // `confirmWorkerMerge` directly — no PendingOpRegistry dedupe, no durable `pending_gate_ops` tombstone —
-  // so an owner clicking Merge here while a manager's own `worker_merge_confirm` was already running on the
-  // SAME worker minted a genuine second gate run instead of attaching to the first (the incident this card
-  // fixes). `confirmWorkerMergeUntilSettled` shares the same `merge:${id}` dedupe key the MCP tool uses AND
-  // preserves this route's long-standing "block until the real outcome is known" contract (see its own doc
-  // for the bounded-loop mechanics). A `{settled:false}` result means the ceiling was hit while the gate is
-  // STILL genuinely running.
-  //
-  // `merged:null`, NOT `merged:false` (Code Review, card 361520a0, Half Four): a still-running gate used to
-  // report `merged:false` here — the ONLY field either web consumer (reviewQueue.tsx's card, ReviewPanel.tsx)
-  // actually branches on — so a human polling mid-gate saw "rejected — gate/merge still running…" rendered
-  // in the SAME red "rejected" styling a genuine refusal gets. The natural response to a red "rejected" is to
-  // click Merge again — exactly the re-click this card's dedupe exists to prevent, and against a since-dead
-  // manager that re-click is the fleet-wide merge-lane DoS Half Four fixes. `null` is a real third state a
-  // strict `r.merged ? … : …` ternary can't collapse into "rejected" by accident — both consumers below now
-  // check `pending`/`merged === null` FIRST.
+  // Human-initiated merge of a worker's branch (the Review panel / #18c). Runs the daemon's fail-closed
+  // build gate then squash-merges; manager is derived from the worker's parent.
+  // @decision 361520a0 — route through confirmWorkerMergeUntilSettled (the merge:${id}-deduped tracked
+  // path), never raw confirmWorkerMerge, and report a still-running gate as merged:null, never false.
   app.post("/api/sessions/:id/merge", async (req, reply) => {
     const { id } = req.params as { id: string };
     const worker = deps.db.getSession(id);
