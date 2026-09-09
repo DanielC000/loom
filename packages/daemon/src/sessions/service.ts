@@ -4292,24 +4292,10 @@ export class SessionService {
     // captured — boot brings its pty live (so the rate-limit watcher can recover it) but withholds the
     // continuation nudge, honoring the park (see resumeFleetOnBoot).
     const resume: RestartResumeEntry[] = this.liveFleetResumeSet();
-    // Snapshot each resumed session's in-memory pending inbound FIFO so the undelivered queue survives
-    // the process death and is replayed on boot (index.ts) — the persisted analogue of recycle's
-    // in-process carriedPending. Grab it NOW, while the ptys are still alive (the queue dies with the
-    // process on exit). Only non-empty FIFOs are included. Defensive caps keep the intent JSON small:
-    // a real FIFO holds a handful of short messages, so clip a pathologically long queue and skip a
-    // single absurdly large message rather than bloat the persisted intent.
-    //   DEDUP (card 2ca18433): use getPersistablePendingSnapshot, NOT getPending — durable-tracked
-    //   messages (session_message / message_worker, persisted as `session_message_queued`) are EXCLUDED
-    //   here because the boot scan (recoverUndeliveredMessagesOnBoot) is their single re-enqueue owner.
-    //   Were they in BOTH stores, a normal daemon_restart would deliver them TWICE. Non-durable held
-    //   items (worker reports, idle/resume nudges) carry no callback → stay in the snapshot, replayed as
-    //   before. Card 9e27f4d2: an entry still within its post-give-up hold window carries a
-    //   `giveUpHeldUntil` deadline, returned in the snapshot's SEPARATE, additive `holds` half (see its
-    //   doc on RestartIntent for why `pending` itself must stay a bare `string[]`) rather than on the
-    //   entry. `holds` is keyed by each entry's INDEX into `texts` — the filter/truncate below has to
-    //   keep `rawHolds`' indices lined up against `rawTexts` before re-deriving them against the FINAL
-    //   (filtered + truncated) array, since a dropped-for-length or truncated-away entry must not leave a
-    //   stale index pointing at the wrong (or a nonexistent) surviving entry.
+    // @decision 2ca18433 — do not include durable-tracked messages in this restart-intent pending
+    // snapshot; recoverUndeliveredMessagesOnBoot is their sole re-enqueue owner (docs/decisions/2ca18433-restart-pending-snapshot-excludes-durable-messages.md)
+    // @decision 9e27f4d2 — do not put giveUpHeldUntil on the pending entry itself; carry it in
+    // RestartIntent's separate, additive `holds` map keyed by index (docs/decisions/9e27f4d2-giveupheldsuntil-rides-restart-intents-holds-map.md)
     const PENDING_MAX_MSGS = 50;
     const PENDING_MAX_MSG_LEN = 100_000;
     const pending: Record<string, string[]> = {};
@@ -4333,17 +4319,8 @@ export class SessionService {
         if (Object.keys(mintedAt).length > 0) pendingMintedAt[sessionId] = mintedAt;
       }
     }
-    // Card a1b79655: snapshot each captured manager's/platform's still-live cap-queued worker_spawn
-    // intents — the ONE restart flavor with a window to act before the process (and CapQueueRegistry's
-    // in-memory Map) dies. Public projection only (mirrors listByManager's own read contract) — this is
-    // purely so resumeFleetOnBoot can TELL each one what it lost; nothing here re-queues or re-admits
-    // anything (that's the persistence the card's DoD explicitly forbids — the loss is by design).
-    // Defensive cap on ENTRY COUNT, same reasoning as PENDING_MAX_MSGS three lines up: CapQueueRegistry is
-    // bounded per-DAEMON (CAP_QUEUE_MAX=200), not per-manager, so a pathological case (all 200 queued
-    // behind one manager) would otherwise balloon the intent JSON and that manager's resume turn. The
-    // truncation is surfaced (not silent) via a "(+N more not shown)" suffix appended to the LAST kept
-    // entry's own kickoffLabel — that field is already documented DISPLAY-ONLY (see CapQueuedSpawn's doc),
-    // so this stays within its existing contract rather than inventing a new one.
+    // @decision a1b79655 — do not re-queue/re-admit a cap-queued worker_spawn intent from this restart
+    // snapshot; it is informational only, the loss is deliberate by the card's own DoD (docs/decisions/a1b79655-restart-intent-snapshots-cap-queued-worker-spawn-intents.md)
     const CAP_QUEUED_SNAPSHOT_MAX = 20;
     const capQueuedSnapshot: Record<string, CapQueuedSpawn[]> = {};
     for (const { sessionId, role } of resume) {
@@ -4588,20 +4565,9 @@ export class SessionService {
         // itself is unreadable (deleted mid-run): a genuine unknown the client must not paper over with a
         // default. See GateRun.gateTimeoutMs's own doc for which ceiling this is (the RAW configured one).
         gateTimeoutMs: project ? resolveConfig(project.config, platformConfig).orchestration.gateCommandTimeoutMs : null,
-        // Card 4cacc6f9: the SECOND consumer of GateSnapshotEntry.fallbackOfBatchOpId (card 19256231
-        // plumbed it as far as `gate_queue`, the agent-facing read, and stopped there by its own DoD).
-        // Without it here, a HUMAN watching this page while a batch falls back sees up to K merge rows
-        // appear with no attribution at all — a fallback run is shaped EXACTLY like an ordinary solo
-        // merge (real taskId/branch/workerLabel), so nothing else on the row says where it came from.
-        //
-        // ⛔ DELIBERATELY NOT gated on the caller's project, unlike `gateQueueForManager`'s field of the
-        // same name (card 80d54122). That redaction exists because `gate_queue` is an AGENT MCP surface
-        // bounded by the owner's `project_links` trust boundary — see this method's own header and
-        // `gateQueueForManager`'s. THIS payload is the human-only loopback `/api/gates/active`, which is
-        // unscoped by design and already emits `taskId`/`branch`/`workerLabel` for every project above;
-        // an opId discloses strictly less than the branch name sitting next to it, so scoping it here
-        // would withhold nothing while breaking the one thing it exists to do — tie sibling rows from
-        // one batch together in a cross-project view.
+        // @decision 4cacc6f9 — do not redact/scope fallbackOfBatchOpId by caller project on this
+        // human-only /api/gates/active payload, unlike gateQueueForManager's agent-facing field of the
+        // same name (docs/decisions/4cacc6f9-gates-active-payload-leaves-fallback-batch-opid-unredacted.md)
         fallbackOfBatchOpId: e.fallbackOfBatchOpId,
       };
     });
@@ -5058,28 +5024,13 @@ export class SessionService {
       // silent `: "worker"` fallback would have mis-typed a "deploy" row's gateType as "worker" the moment
       // this card started writing deploy tombstones.
       const gateType: GateType = t.record.kind === "merge" ? "merge" : t.record.kind === "deploy" ? "deploy" : "worker";
-      // SETTLED VERDICT (card 4c5bf820, widened by 9f6598dd): populated for a "gate" row via
-      // deriveWorkerGateVerdict, and — since 9f6598dd — for a "merge" row too, via deriveMergeGateVerdict
-      // (previously a "merge" row's verdict/verdictPayload stayed NULL by construction; that was exactly
-      // Finding 1). A legacy row (from before either card) predates the columns entirely, and a
-      // not-yet-settled row never has one either. `payload` itself is honest-null on a corrupt/unparseable
-      // stored blob (see `Db.toPendingGateOp`) — either way this spreads nothing rather than a fabricated
-      // shape. `settledAt`/`totalDurationMs`/`extended` (card 9f6598dd) are independently optional on
-      // `payload` regardless of `verdict` kind — currently only ever set by the merge-kind derivation, so
-      // they spread through for "pass"/"fail" today and are simply absent for "cancelled"/"error"/a "gate"
-      // row, never fabricated.
+      // @decision 4c5bf820 — do not leave a merge-kind row's verdict/verdictPayload NULL by construction;
+      // derive it, and never fabricate payload/settledAt/totalDurationMs/extended when absent
+      // (docs/decisions/4c5bf820-merge-gate-row-verdict-derivation-and-honest-null-payload.md)
       const payload = t.record.verdictPayload;
-      // Card a16c580b, widened by card 5ef78900: cross-project REDACTION for the output/diagnostic fields
-      // (`outputFile`, `outputTail`, `steps`, `gateDetail`) — see `redactCrossProject`'s own doc above for
-      // why this is a wrapper object, not a bare `string | undefined`, and separate from `scopeProjectId`'s
-      // FILTERING. `redactCrossProject === undefined` (the worker call site never constructs the wrapper at
-      // all) means "nothing to redact" — that path's hard filter already made a foreign project's row
-      // unreachable before this line runs. Whenever the wrapper IS present (every manager call),
-      // `t.record.projectId` (typed `string | null`) is compared against `redactCrossProject.callerProjectId`
-      // (`string | undefined`) — a `string | null` value can never equal a bare `undefined`, so an
-      // UNRESOLVED caller project (a failed `db.getSession` lookup) fails safe to `true` (redacted)
-      // automatically, with no separate branch or sentinel value needed. The SAME `!==` also correctly
-      // redacts the legacy `projectId:null` row for the identical reason.
+      // @decision a16c580b — use the redactCrossProject wrapper object for this redaction, not a bare
+      // optional string, and do not special-case an unresolved caller project or a legacy projectId:null
+      // row; the plain !== comparison already fails safe for both (docs/decisions/a16c580b-cross-project-gate-redaction-uses-a-wrapper-object.md)
       const crossProjectRedacted = redactCrossProject !== undefined && t.record.projectId !== redactCrossProject.callerProjectId;
       /**
        * Code-review round 2 (card 5ef78900): a scattered per-line `&& !crossProjectRedacted` on each
