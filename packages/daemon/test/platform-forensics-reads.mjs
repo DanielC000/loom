@@ -424,9 +424,19 @@ try {
   // own dedicated cross-project + unknown-kind proof; this check only asserts REGISTRATION placement.
   check("(4) events_search IS on loom-platform AND on the manager surface, still ABSENT from setup/worker/in-project",
     platformTools.includes("events_search") && mgrTools.includes("events_search") && !setupTools.includes("events_search") && !workerTools.includes("events_search") && !taskTools.includes("events_search"));
-  // Negative control: prove the absence assertions have teeth (the gate would catch a leak).
-  check("(4) negative control: a tool that DOES exist on orchestration is detected (proves teeth)",
+  // Positive control per surface (card a52eedf3): each surface's OWN defining tool, proving that
+  // surface's list is genuinely non-empty before its absence assertions above are trusted — otherwise
+  // every `!xTools.includes(...)` in this block passes vacuously if that surface's buildServer() ever
+  // returns an empty/minimal server. Picked to survive any plausible refactor (a surface's own
+  // reason-to-exist tool, not one that might itself move to another surface).
+  check("(4) positive control: setup's own defining tool is present (proves setupTools isn't empty)",
+    setupTools.includes("project_create"));
+  check("(4) positive control: manager's own defining tool is present (proves mgrTools isn't empty)",
     mgrTools.includes("worker_spawn"));
+  check("(4) positive control: worker's own defining tool is present (proves workerTools isn't empty)",
+    workerTools.includes("worker_report"));
+  check("(4) positive control: the task board's own defining tool is present (proves taskTools isn't empty)",
+    taskTools.includes("tasks_list"));
 } finally {
   db.close();
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
