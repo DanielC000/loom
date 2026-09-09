@@ -690,7 +690,14 @@ export function auditDiscoveryAgainstGit(testDir) {
 // Pure classifier, exported so a test can exercise every outcome directly against the REAL flag set —
 // never a hand-copied duplicate that could drift — without spawning this script as a subprocess (which
 // for the "no flags" case would nest an entire hermetic-suite run inside a test).
-export const KNOWN_CLI_FLAGS = new Set(["--count", "--list", "--help", "-h"]);
+// Card ce02e7e5: `--codex-real-spawn`/`--no-codex-real-spawn` are PRESETS over the codex real-spawn
+// family (`CODEX_REAL_SPAWN_BASENAMES`, the single source of truth in `test/_codex-real-spawn-lock.mjs`)
+// — shorthand for `--only=<that list>`/`--exclude=<that list>` that reads the array itself at run time
+// (see `resolveSelectionForCliMode` below) rather than a second, hardcoded copy of the 7 (as of this
+// writing) basenames that could silently drift from it the way a hand-authored `gateCommand` string
+// already had (card 3791b14e's own history of this exact array growing unnoticed). Exact-match, so they
+// belong in this Set, not KNOWN_CLI_VALUE_PREFIXES below.
+export const KNOWN_CLI_FLAGS = new Set(["--count", "--list", "--help", "-h", "--codex-real-spawn", "--no-codex-real-spawn"]);
 
 // Card 6185fbfc: a SEPARATE selection capability, decoupled from any change to the real gate command
 // (this card's own resolution left the gate command unchanged — see its body). `--only=`/`--exclude=`
@@ -726,10 +733,20 @@ export function classifyCliArgs(argv) {
     // 05724a32's own point) — name the whole token so the reader sees exactly what was rejected.
     unrecognized.push(`--concurrency=${concurrencyRaw} (must be a positive integer)`);
   }
-  if (unrecognized.length) return { mode: "error", unrecognized };
 
   const onlyRaw = parseValueFlag(argv, "--only=");
   const excludeRaw = parseValueFlag(argv, "--exclude=");
+  const wantsCodexOnly = argv.includes("--codex-real-spawn");
+  const wantsCodexExclude = argv.includes("--no-codex-real-spawn");
+  // Card ce02e7e5: fail loudly on an ambiguous combination rather than silently picking a winner — same
+  // "a recognized token can still be rejected" posture as the --concurrency= value check above.
+  if (wantsCodexOnly && wantsCodexExclude) {
+    unrecognized.push("--codex-real-spawn and --no-codex-real-spawn (mutually exclusive)");
+  } else if ((wantsCodexOnly || wantsCodexExclude) && (onlyRaw !== undefined || excludeRaw !== undefined)) {
+    unrecognized.push("--codex-real-spawn/--no-codex-real-spawn cannot be combined with --only=/--exclude=");
+  }
+  if (unrecognized.length) return { mode: "error", unrecognized };
+
   const only = onlyRaw ? onlyRaw.split(",").map((s) => s.trim()).filter(Boolean) : null;
   const exclude = excludeRaw ? excludeRaw.split(",").map((s) => s.trim()).filter(Boolean) : null;
   return {
@@ -737,6 +754,10 @@ export function classifyCliArgs(argv) {
     only,
     exclude,
     concurrency,
+    // Card ce02e7e5: "only" | "exclude" | null — resolved against the REAL CODEX_REAL_SPAWN_BASENAMES
+    // array by `resolveSelectionForCliMode` below, never hardcoded here (this classifier stays pure/sync
+    // and has no access to that array — see that function's own doc for why).
+    codexRealSpawnPreset: wantsCodexOnly ? "only" : wantsCodexExclude ? "exclude" : null,
   };
 }
 
@@ -774,6 +795,27 @@ export function resolveSelection(hermetic, { only, exclude } = {}) {
     return { selected: null, error: "--only/--exclude selected ZERO tests — refusing to report a green run that ran nothing" };
   }
   return { selected, error: null };
+}
+
+// Card ce02e7e5: resolves `cliMode` (from `classifyCliArgs` above) into the actual `resolveSelection`
+// call, applying the `--codex-real-spawn`/`--no-codex-real-spawn` presets when set. `codexRealSpawnBasenames`
+// is an explicit PARAMETER — never closed over a module-level constant — which is what makes a preset
+// PROVABLY read the array rather than a re-hardcoded copy: a test can pass a synthetic array (with a
+// planted fake member) and observe the resulting selection change accordingly, without spawning this
+// script or touching the real `test/_codex-real-spawn-lock.mjs`. The real caller (isMain, below) passes
+// the REAL, dynamically-imported `CODEX_REAL_SPAWN_BASENAMES`.
+// `--codex-real-spawn` is exactly `--only=<codexRealSpawnBasenames>`; `--no-codex-real-spawn` is exactly
+// `--exclude=<codexRealSpawnBasenames>` — so `resolveSelection`'s own unknown-name/empty-selection
+// refusals (card 6185fbfc) apply unchanged: a `codexRealSpawnBasenames` entry that isn't in `hermetic`
+// (e.g. a lock-file basename with no matching test/ file) is refused loudly, exactly like a typo'd --only=.
+export function resolveSelectionForCliMode(hermetic, cliMode, codexRealSpawnBasenames) {
+  if (cliMode.codexRealSpawnPreset === "only") {
+    return resolveSelection(hermetic, { only: codexRealSpawnBasenames });
+  }
+  if (cliMode.codexRealSpawnPreset === "exclude") {
+    return resolveSelection(hermetic, { exclude: codexRealSpawnBasenames });
+  }
+  return resolveSelection(hermetic, { only: cliMode.only, exclude: cliMode.exclude });
 }
 
 // Card e6e55f7a: a sibling harness (Codescape) prints a whole-run peak-RSS + max-inter-event-gap summary
@@ -1587,18 +1629,26 @@ if (isMain) {
     console.log([
       "Usage: node scripts/test-daemon.mjs [--count | --list | --help]",
       "                                    [--only=name,name] [--exclude=name,name] [--concurrency=N]",
+      "                                    [--codex-real-spawn | --no-codex-real-spawn]",
       "",
-      "  (no flags)       run the full hermetic daemon suite — this is what the merge gate,",
-      "                   package.json's test:daemon, and CI/release all invoke; unaffected by",
-      "                   any flag below unless you actually pass one",
-      "  --count          print discovery counts only (no tests run)",
-      "  --list           alias for --count",
-      "  --only=a,b       run ONLY these discovered hermetic test(s), by bare name",
-      "  --exclude=a,b    run every discovered hermetic test EXCEPT these, by bare name",
-      "  --concurrency=N  override the pool size for just this invocation (still clamped to",
-      "                   the MAX_CONCURRENCY ceiling); LOOM_GATE_TEST_CONCURRENCY still applies",
-      "                   when this is omitted",
-      "  --help, -h       print this usage and exit",
+      "  (no flags)             run the full hermetic daemon suite — this is what the merge gate,",
+      "                         package.json's test:daemon, and CI/release all invoke; unaffected by",
+      "                         any flag below unless you actually pass one",
+      "  --count                print discovery counts only (no tests run)",
+      "  --list                 alias for --count",
+      "  --only=a,b             run ONLY these discovered hermetic test(s), by bare name",
+      "  --exclude=a,b          run every discovered hermetic test EXCEPT these, by bare name",
+      "  --concurrency=N        override the pool size for just this invocation (still clamped to",
+      "                         the MAX_CONCURRENCY ceiling); LOOM_GATE_TEST_CONCURRENCY still applies",
+      "                         when this is omitted",
+      "  --codex-real-spawn     run ONLY the codex real-spawn family (CODEX_REAL_SPAWN_BASENAMES —",
+      "                         see test/_codex-real-spawn-lock.mjs, the single source of truth for",
+      "                         its membership); equivalent to --only=<that list>, but always derived",
+      "                         from the array itself, never a hardcoded copy",
+      "  --no-codex-real-spawn  run every discovered hermetic test EXCEPT the codex real-spawn family;",
+      "                         equivalent to --exclude=<that list>, same array-derived guarantee",
+      "                         (mutually exclusive with each other and with --only=/--exclude=)",
+      "  --help, -h             print this usage and exit",
     ].join("\n"));
     process.exit(0);
   }
@@ -1698,20 +1748,6 @@ if (isMain) {
     console.warn(`⚠ test-daemon.mjs: ${gitAudit.walkedNotInGit.length} .mjs file(s) seen by the discovery walk are untracked by git (fine for a local run; invisible to the merge gate's own tracked-files-only check): ${gitAudit.walkedNotInGit.join(", ")}`);
   }
 
-  // Card 6185fbfc: resolve --only=/--exclude= against the discovered set, fail loudly on an unknown name
-  // or an empty resulting selection (never silently run nothing). `SELECTED` is the SAME array reference
-  // as `HERMETIC` when neither flag is given, so the zero-argv default path — package.json's test:daemon,
-  // ci.yml, release.yml, the merge gate itself — prints no extra line and behaves byte-identically to
-  // before this card.
-  const selectionResult = resolveSelection(HERMETIC, { only: cliMode.only, exclude: cliMode.exclude });
-  if (selectionResult.error) {
-    console.error(`❌ test-daemon.mjs: ${selectionResult.error}`);
-    process.exit(1);
-  }
-  const SELECTED = selectionResult.selected;
-  if (SELECTED !== HERMETIC) {
-    console.log(`ℹ selection active: running ${SELECTED.length}/${HERMETIC.length} discovered hermetic test files (--only/--exclude applied)`);
-  }
   // Card 3791b14e (gate `39331d61` — my own merge-gate rejection, root-caused and fixed here): a
   // TOP-LEVEL static import of CODEX_REAL_SPAWN_BASENAMES/SET from `../test/_codex-real-spawn-lock.mjs`
   // broke `loadExcludedTestDirNames`/`loadNotHermeticNames` (git/worktrees.ts) — both dynamically
@@ -1722,16 +1758,38 @@ if (isMain) {
   // reduced one (confirmed via a two-arm control: same fixture repo, only that one file present vs.
   // absent). Fixed the SAME way `compactGateTimingLogIfNeeded`'s import a few hundred lines down already
   // is (see `_emit-compare-fixtures.mjs`'s own comment on that precedent): a LAZY, call-site
-  // `await import()`, placed HERE — inside `isMain`, at the one place it's actually used — never at
-  // module top. This is safe by construction, not merely lucky for today's fixtures: `isMain` can only be
-  // true when `process.argv[1]` resolves to THIS file's own path, i.e. when this script is the real
+  // `await import()`, placed HERE — inside `isMain`, at the earliest point it's actually needed — never
+  // at module top. This is safe by construction, not merely lucky for today's fixtures: `isMain` can only
+  // be true when `process.argv[1]` resolves to THIS file's own path, i.e. when this script is the real
   // process entry point — an external dynamic-import consumer like those two loaders is, by definition,
   // some OTHER running process (the daemon) importing this file as a module, so `isMain` is false for
   // them unconditionally and this line can never even be reached in that scenario, regardless of whether
   // the importing repo happens to carry `test/_codex-real-spawn-lock.mjs`. (Rejected: moving the array
   // into a new shared leaf module — this needs no new file, and reuses an already-proven pattern in this
   // exact file for this exact hazard class rather than adding a second one.)
+  // Card ce02e7e5: moved earlier than the phase-split use further below (this import's original call
+  // site) so `resolveSelectionForCliMode` (see its own doc) can resolve `--codex-real-spawn`/
+  // `--no-codex-real-spawn` FROM this same array — the single source of truth — instead of a second,
+  // hardcoded copy of the basename list.
   const { CODEX_REAL_SPAWN_BASENAMES, CODEX_REAL_SPAWN_SET } = await import("../test/_codex-real-spawn-lock.mjs");
+
+  // Card 6185fbfc: resolve --only=/--exclude= against the discovered set, fail loudly on an unknown name
+  // or an empty resulting selection (never silently run nothing). `SELECTED` is the SAME array reference
+  // as `HERMETIC` when neither flag is given, so the zero-argv default path — package.json's test:daemon,
+  // ci.yml, release.yml, the merge gate itself — prints no extra line and behaves byte-identically to
+  // before this card. Card ce02e7e5: `resolveSelectionForCliMode` ALSO resolves the
+  // `--codex-real-spawn`/`--no-codex-real-spawn` presets here, from `CODEX_REAL_SPAWN_BASENAMES` above —
+  // every other cliMode shape (plain --only=/--exclude=, or neither) is byte-identical to the old direct
+  // `resolveSelection` call it replaces.
+  const selectionResult = resolveSelectionForCliMode(HERMETIC, cliMode, CODEX_REAL_SPAWN_BASENAMES);
+  if (selectionResult.error) {
+    console.error(`❌ test-daemon.mjs: ${selectionResult.error}`);
+    process.exit(1);
+  }
+  const SELECTED = selectionResult.selected;
+  if (SELECTED !== HERMETIC) {
+    console.log(`ℹ selection active: running ${SELECTED.length}/${HERMETIC.length} discovered hermetic test files (--only/--exclude${cliMode.codexRealSpawnPreset ? "/--codex-real-spawn preset" : ""} applied)`);
+  }
   // Card 3791b14e: split off the real-codex-spawn family FIRST, unconditionally — before the
   // ISOLATED_REAL_SPAWN_PHASE_ENABLED-gated split below even sees the selection. `nonCodexSelected`
   // (not `SELECTED`) feeds that split so a codex real-spawn file can never ALSO land in `concurrentNames`

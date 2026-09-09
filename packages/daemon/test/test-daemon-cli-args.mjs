@@ -8,7 +8,7 @@
 // spawning it (even to kill it quickly) would nest an entire hermetic test run inside this one test.
 // `discoverHermeticTests`/`auditDiscoveryAgainstGit` in test-daemon-discovery.mjs already establish this
 // import-without-triggering-isMain pattern for this exact file.
-import { classifyCliArgs, KNOWN_CLI_FLAGS, KNOWN_CLI_VALUE_PREFIXES, resolveSelection } from "../scripts/test-daemon.mjs";
+import { classifyCliArgs, KNOWN_CLI_FLAGS, KNOWN_CLI_VALUE_PREFIXES, resolveSelection, resolveSelectionForCliMode } from "../scripts/test-daemon.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -58,9 +58,10 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 // KNOWN_CLI_FLAGS is exported so the error message can name the real, current flag set — assert it's
 // exactly the set this test exercises above, so a future flag addition can't silently drift the two apart.
+// Card ce02e7e5 added --codex-real-spawn/--no-codex-real-spawn — see the dedicated block below.
 check(
-  "KNOWN_CLI_FLAGS is exactly {--count, --list, --help, -h}",
-  KNOWN_CLI_FLAGS.size === 4 && ["--count", "--list", "--help", "-h"].every((f) => KNOWN_CLI_FLAGS.has(f)),
+  "KNOWN_CLI_FLAGS is exactly {--count, --list, --help, -h, --codex-real-spawn, --no-codex-real-spawn}",
+  KNOWN_CLI_FLAGS.size === 6 && ["--count", "--list", "--help", "-h", "--codex-real-spawn", "--no-codex-real-spawn"].every((f) => KNOWN_CLI_FLAGS.has(f)),
 );
 
 // Card 6185fbfc: --only=/--exclude=/--concurrency= — a standalone selection capability, decoupled from
@@ -128,6 +129,74 @@ check(
   check("[positive control] a selection that empties to zero is refused, not silently reported green", (() => {
     const r = resolveSelection(HERM, { only: ["a"], exclude: ["a"] });
     return r.selected === null && r.error?.toLowerCase().includes("zero");
+  })());
+}
+
+// Card ce02e7e5: --codex-real-spawn/--no-codex-real-spawn — presets over the codex real-spawn family
+// (CODEX_REAL_SPAWN_BASENAMES), resolved via resolveSelectionForCliMode FROM that array, never a second
+// hardcoded copy. See test-daemon-codex-real-spawn-preset.mjs for the union/intersection-over-the-real-
+// corpus proof and the "genuinely reads the array" positive control (a synthetic array with a planted
+// fake member changes the resulting selection) — this file only covers CLI classification.
+{
+  check("--codex-real-spawn classifies as mode:run with codexRealSpawnPreset:'only'", (() => {
+    const r = classifyCliArgs(["--codex-real-spawn"]);
+    return r.mode === "run" && r.codexRealSpawnPreset === "only";
+  })());
+  check("--no-codex-real-spawn classifies as mode:run with codexRealSpawnPreset:'exclude'", (() => {
+    const r = classifyCliArgs(["--no-codex-real-spawn"]);
+    return r.mode === "run" && r.codexRealSpawnPreset === "exclude";
+  })());
+  check("neither flag given -> codexRealSpawnPreset:null (byte-identical default path)", classifyCliArgs([]).codexRealSpawnPreset === null);
+  check("[positive control] --codex-real-spawn + --no-codex-real-spawn together is rejected (mutually exclusive)", (() => {
+    const r = classifyCliArgs(["--codex-real-spawn", "--no-codex-real-spawn"]);
+    return r.mode === "error" && r.unrecognized.some((u) => u.includes("mutually exclusive"));
+  })());
+  check("[positive control] --codex-real-spawn combined with --only= is rejected (ambiguous)", (() => {
+    const r = classifyCliArgs(["--codex-real-spawn", "--only=a"]);
+    return r.mode === "error" && r.unrecognized.some((u) => u.includes("cannot be combined"));
+  })());
+  check("[positive control] --no-codex-real-spawn combined with --exclude= is rejected (ambiguous)", (() => {
+    const r = classifyCliArgs(["--no-codex-real-spawn", "--exclude=a"]);
+    return r.mode === "error" && r.unrecognized.some((u) => u.includes("cannot be combined"));
+  })());
+  check("--count alongside --codex-real-spawn still classifies as mode:count (--count/--list take priority, unchanged)", classifyCliArgs(["--count", "--codex-real-spawn"]).mode === "count");
+
+  // resolveSelectionForCliMode: pure, exercised directly against a synthetic hermetic set + a synthetic
+  // codexRealSpawnBasenames array (never the real one) — no subprocess, no dynamic import.
+  const HERM2 = ["p", "q", "r", "s"];
+  const CODEX_LIKE = ["q", "s"];
+  check("codexRealSpawnPreset:'only' selects EXACTLY codexRealSpawnBasenames, in its given order", (() => {
+    const r = resolveSelectionForCliMode(HERM2, { codexRealSpawnPreset: "only", only: null, exclude: null }, CODEX_LIKE);
+    return r.error === null && r.selected.length === 2 && r.selected[0] === "q" && r.selected[1] === "s";
+  })());
+  check("codexRealSpawnPreset:'exclude' selects the complement of codexRealSpawnBasenames", (() => {
+    const r = resolveSelectionForCliMode(HERM2, { codexRealSpawnPreset: "exclude", only: null, exclude: null }, CODEX_LIKE);
+    return r.error === null && r.selected.length === 2 && r.selected.includes("p") && r.selected.includes("r");
+  })());
+  check("codexRealSpawnPreset:null falls through to plain --only=/--exclude= (unchanged existing behavior)", (() => {
+    const r = resolveSelectionForCliMode(HERM2, { codexRealSpawnPreset: null, only: ["p", "q"], exclude: null }, CODEX_LIKE);
+    return r.error === null && r.selected.length === 2 && r.selected.includes("p") && r.selected.includes("q");
+  })());
+
+  // DoD-1: the two presets are EXACT COMPLEMENTS over the hermetic set — union == full set, intersection
+  // == empty — asserted here as a general property (any hermetic/basenames pair), and again in
+  // test-daemon-codex-real-spawn-preset.mjs against the REAL discovered corpus + the REAL
+  // CODEX_REAL_SPAWN_BASENAMES array.
+  {
+    const onlySel = resolveSelectionForCliMode(HERM2, { codexRealSpawnPreset: "only", only: null, exclude: null }, CODEX_LIKE).selected;
+    const excludeSel = resolveSelectionForCliMode(HERM2, { codexRealSpawnPreset: "exclude", only: null, exclude: null }, CODEX_LIKE).selected;
+    const union = new Set([...onlySel, ...excludeSel]);
+    const intersection = onlySel.filter((n) => excludeSel.includes(n));
+    check("union of the two preset selections equals the full hermetic set", union.size === HERM2.length && HERM2.every((n) => union.has(n)));
+    check("intersection of the two preset selections is empty", intersection.length === 0);
+  }
+
+  // DoD-2 (CLI-classification half): --codex-real-spawn refuses loudly if codexRealSpawnBasenames names a
+  // file NOT in the discovered hermetic set — same "typo'd --only= is refused" discipline (card 6185fbfc),
+  // proving this preset does not silently no-op when the array and the hermetic set disagree.
+  check("[positive control] codexRealSpawnPreset:'only' with an unknown basename is refused, not silently narrowed", (() => {
+    const r = resolveSelectionForCliMode(HERM2, { codexRealSpawnPreset: "only", only: null, exclude: null }, ["q", "not-a-real-test"]);
+    return r.selected === null && r.error?.includes("not-a-real-test");
   })());
 }
 
