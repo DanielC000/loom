@@ -36,44 +36,17 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/**
- * Per-git-op ceiling for the three bounded call sites in this module (card 509716cc):
- * `resolveVaultRepoContext`'s checkIsRepo/revparse, `VaultVersioner.start()`'s checkIsRepo/init, and
- * `gitTrackedTopLevelNames`'s ls-files — all reachable from `startVaultVersioners`, which is AWAITED at
- * boot (index.ts, ahead of `sessions.resumeFleetOnBoot`). A hang on any of these previously blocked the
- * whole daemon's post-restart fleet resume, invisibly (HTTP stays up — `app.listen` runs earlier). Same
- * value + same convention as `GIT_OP_TIMEOUT_MS` (git/worktrees.ts) and `GIT_LOCAL_TIMEOUT_MS`
- * (git/writer.ts) — a local plumbing op is normally sub-second, this is generous headroom, but bounded
- * so a wedged child (a repo on a busy/locked disk) can't hang the caller forever.
- *
- * Not imported FROM those modules: neither exports its bounding helpers, and git/writer.ts already
- * imports FROM this module (`recordGitPushOutcome`, `pauseVaultAutoCommit`, …) — importing back would be
- * circular. git/writer.ts itself already carries its own independent copy of the identical
- * block-timeout + race pattern rather than importing git/worktrees.ts's, so this module doing the same
- * is the established convention, not a new mechanism.
- */
+/** @decision 509716cc — per-git-op ceiling for this module's plumbing-tier bounded calls; a hang here
+ *  previously blocked the whole daemon's post-restart fleet resume, invisibly (HTTP stays up). Same
+ *  value/convention as git/worktrees.ts's GIT_OP_TIMEOUT_MS and git/writer.ts's GIT_LOCAL_TIMEOUT_MS. See
+ *  docs/decisions/509716cc-bound-the-three-vault-plumbing-git-calls-to-avoid-a-boot-hang.md. */
 const VAULT_GIT_OP_TIMEOUT_MS = 15_000;
 
-/**
- * Ceiling for `VaultVersioner.flushSync()`'s two WORKING-TREE-SCALE `execSync` calls (`git add -A`, which
- * hashes every new/changed blob across the whole vault, and `git commit`, which runs the user's own
- * hooks — the actual named hang vector in card 816f0056 — plus writes tree objects). Deliberately much
- * larger than {@link VAULT_GIT_OP_TIMEOUT_MS}: the goal on this path is "no INFINITE hang", not "fail
- * fast" — flushSync's timeout throwing lands in its own best-effort `catch` and SILENTLY DROPS the
- * commit (now at least logged — see `flushSync`'s own doc), so a bound tight enough to fail a real,
- * still-progressing flush on a large or network-backed vault would trade a rare hang risk for a routine,
- * guaranteed data-loss failure. See `flushSync`'s own doc for why the THIRD call (`git status
- * --porcelain`, a cheap stat-based comparison) is bound by {@link VAULT_GIT_OP_TIMEOUT_MS} instead.
- *
- * **Sizing (card 816f0056 review round 2 — corrects an earlier, wrong appeal to convention): this is NOT
- * sized to match `git checkout`.** This repo's own `GIT_LOCAL_TIMEOUT_MS` (git/writer.ts) bounds
- * `checkout` at the SAME 15s as {@link VAULT_GIT_OP_TIMEOUT_MS} — citing it as precedent for "5 min is
- * generous" was backwards. The real basis: a cold `git add -A` over a 20k-file vault measured ~11.6s on
- * local NVMe ALONE — comfortably eating a 15s bound with zero margin left for a slower disk or a bigger
- * vault — so this needs to be in the same league as this codebase's OTHER genuinely-large working-tree
- * op, `git/worktrees.ts`'s `PROVISION_TIMEOUT_MS` (3 min, for a full dependency install into a fresh
- * worktree). 5 minutes sits comfortably above both.
- */
+/** @decision 816f0056 — ceiling for flushSync()'s working-tree-scale execSync calls (git add -A / git
+ *  commit — the actual named hang vector). Deliberately loose ("no infinite hang", not "fail fast"): a
+ *  tight bound here trades a rare hang for a guaranteed, silent commit-drop. NOT sized to match `git
+ *  checkout` — see the record for the real basis (a measured ~11.6s git add -A on a 20k-file vault). See
+ *  docs/decisions/816f0056-vault-flush-working-tree-timeout-sizing.md. */
 const VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS = 5 * 60_000;
 
 /**
@@ -415,21 +388,10 @@ export function buildIgnoredMatcher(commitPath: string, extraSafeNames: string[]
  */
 const warnedOversizedFiles = new Set<string>();
 
-/**
- * Unstage any staged file whose on-disk size exceeds `maxFileBytes` (deletions are skipped — nothing to
- * stat, and a deletion can never re-introduce a giant blob), console.warn a `.gitignore` suggestion once
- * per path, and return the list of paths actually unstaged (possibly empty). `git reset -- <path>` is
- * used rather than `git reset HEAD -- <path>` so this also works on a brand-new repo's very first commit
- * (verified: `reset -- <path>` unstages cleanly even with no HEAD yet; `reset HEAD -- <path>` would fail
- * there). Swallows a reset failure per-file (leaves that one file staged) rather than aborting the whole
- * commit — refusing to commit ANYTHING because one file couldn't be unstaged would be a worse outcome
- * than the rare case of a stray oversized commit slipping through, and the failure itself is still logged.
- *
- * Narrowed to `Pick<SimpleGit, "raw">` and `timeoutMs`-bounded (card 54b839c5) — a `git reset` here is
- * cheap plumbing (local index manipulation, no hooks), so it shares {@link VAULT_GIT_OP_TIMEOUT_MS} with
- * this module's other plumbing-tier calls rather than the working-tree-scale ceiling `commitVault`'s
- * `add`/`commit` use.
- */
+/** @decision 54b839c5 — unstage any staged file over `maxFileBytes`, warn once per path, return what was
+ *  unstaged. Uses `git reset -- <path>` (not `HEAD`-qualified — works on a repo with no HEAD yet) and
+ *  swallows a reset failure per-file rather than aborting the whole commit. See
+ *  docs/decisions/54b839c5-bound-vault-git-plumbing-calls-and-unstageoversizedfiles-reset-semantics.md. */
 async function unstageOversizedFiles(
   git: Pick<SimpleGit, "raw">,
   root: string,
@@ -748,21 +710,13 @@ function pauseLeasePath(commitPath: string): string {
  *  {@link resumeVaultAutoCommit} so a resume only ever clears the lease IT holds. */
 export type VaultPauseToken = string;
 
-/**
- * Advisory pause (card 614dfbef, origin finding 4ae8a3c9): create a short-lived lease telling this repo
- * root's `VaultVersioner` to skip its commits — for an agent doing SANCTIONED git surgery on a vault repo
- * (untracking files, rewriting `.gitignore`, mid-sequence state) that would otherwise race the background
- * auto-committer. Purely advisory: a plain file the versioner checks before it commits, not an OS-level
- * lock — nothing else is blocked from touching the repo. `durationMs` is clamped to
- * `[0, MAX_VAULT_PAUSE_MS]`. Best-effort: never throws (a failed write just means "not paused").
- *
- * **Per-op token (card 237d1899, follow-up to 614dfbef):** the lease is NOT ref-counted — two concurrent
- * same-repo callers (e.g. two `GitWriter` ops on one repo, reachable from the REST/Platform/companion
- * git-write surfaces with no cross-surface mutex) can overlap. Each call writes a fresh random `token`
- * into the lease file (last writer wins the `until`/`token` pair) and returns it; the caller must pass
- * that SAME token to {@link resumeVaultAutoCommit} so a resume only clears the lease it actually holds
- * — see that function's doc for the "resume-only-if-mine" check this enables.
- */
+/** @decision 614dfbef — advisory pause lease telling this repo root's VaultVersioner to skip its commits,
+ *  for sanctioned git surgery that would otherwise race the background auto-committer; advisory only (a
+ *  checked file, not an OS lock), clamped duration, best-effort. See
+ *  docs/decisions/614dfbef-advisory-vault-auto-commit-pause-lease.md.
+ * @decision 237d1899 — the lease is per-op TOKENED (not ref-counted), so a resume only clears the lease
+ *  it actually holds even when a second op re-paused it concurrently. See
+ *  docs/decisions/237d1899-per-op-token-for-the-vault-pause-lease.md. */
 export function pauseVaultAutoCommit(commitPath: string, durationMs = DEFAULT_VAULT_PAUSE_MS): VaultPauseToken {
   const clamped = Math.max(0, Math.min(durationMs, MAX_VAULT_PAUSE_MS));
   const token = randomUUID();
@@ -813,15 +767,11 @@ function isVaultAutoCommitPaused(commitPath: string): boolean {
  * while a vault folder that is its own repo root (or has no repo) is watched/committed in place. Backs
  * off ONLY for an Obsidian-Git-managed repo (a real external auto-committer owns its history).
  *
- * **Commit-only by design — this never pushes, and that is intentional, not a gap.** (Investigated under
- * task f48ee77d: a vault observed 172 `loom: auto-commit` commits ahead of `origin/main`.) Pushing a repo
- * is a HUMAN-only trust-boundary action in Loom (see `git/writer.ts` `GitWriter.push()` + the human-only
- * git-write REST surface) — this versioner runs unattended in the daemon, triggered by any filesystem
- * event (including an ordinary agent's doc rewrite), so it must never perform outbound network git
- * operations itself; doing so would silently widen that boundary. For a vault whose governing repo DOES
- * have a configured upstream, the resulting backlog is made VISIBLE instead of silent via
- * {@link checkVaultPushStatus} / {@link VaultPushStatusWatcher} below (read-only `rev-list --count`, no
- * writes) — push stays a manual action the human takes through the existing git-write surface.
+ * @decision f48ee77d — vault auto-commit is COMMIT-ONLY by design, and never pushes: pushing is a
+ *  HUMAN-only trust boundary in Loom (git/writer.ts's GitWriter.push()), and this versioner runs
+ *  unattended off any filesystem event, so it must never touch the network itself. An unpushed backlog
+ *  is surfaced (not silenced) via checkVaultPushStatus/VaultPushStatusWatcher below. See
+ *  docs/decisions/f48ee77d-vault-auto-commit-is-commit-only-by-design.md.
  */
 /** Above this many watched entries, `start()` logs a one-time visibility warning (card 39ceb732 Lever 4) —
  *  see {@link VaultVersioner.warnIfLarge}. Not a cap: nothing is skipped or throttled at this size. */
