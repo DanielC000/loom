@@ -1989,9 +1989,9 @@ export type DeferredUntilEventKind = "gate-fail-naming" | "request-answered";
  * Card 74716cfb — a STRUCTURED annotation naming the exact event a deferred card is waiting on, so a
  * gate-outcome nudge can point a reader at it the moment that event fires (see `sessions/service.ts`'s
  * `[loom:merge-rejected]`/`[loom:gate-failed]` composition — the two sites named in the card's own
- * "binding" note). This is DELIBERATELY never scanned from `deferredReason` prose — proven unsound on
- * this board's own data (a reason can NAME a file it swept with a NEGATIVE result, which a prose scanner
- * would misattribute) — so it exists only as this separate, agent-set field.
+ * "binding" note).
+ * @decision 74716cfb — DELIBERATELY never scanned from `deferredReason` prose (proven unsound on this
+ * board's own data) — see docs/decisions/74716cfb-deferreduntilevent-never-scanned-from-prose.md
  *
  * 🔴 NEVER AUTO-CLEARS — unlike {@link Task.deferredUntilTaskId}, this field only ANNOTATES which event
  * to watch for; it carries no release semantics of its own; `deferred`/`deferredReason` are completely
@@ -2042,12 +2042,9 @@ export interface Task {
    * Card 0ad1ca68 — a STANDING annotation naming WHICH owner Request this card's hold traces back to,
    * independent of `held`/`deferred` themselves and independent of that Request's OWN `taskId` (a
    * project-wide owner "decision" Request is very often filed with `taskId:null`, or tied to a sibling/
-   * epic card rather than this one — see `Question.taskId`'s own single-task limitation). The gap this
-   * closes: `held`/`deferred` are the brake, but neither says WHY — and once the gating Request is
-   * answered/consumed, it stops showing up as a live pending question anywhere, so a manager reading a
-   * still-held card long afterward has no mechanical way back to the decision that explains it, only
-   * body prose (real specimen: session `bb707b3f` — a multi-harness epic held by an already-consumed
-   * 2026-08-27 answer, with the owner unable to find "which request is related to multi-harness epic").
+   * epic card rather than this one — see `Question.taskId`'s own single-task limitation).
+   * @decision 0ad1ca68 — closes the gap where an answered/consumed Request stops showing up as a live
+   * pending question anywhere — see docs/decisions/0ad1ca68-heldrequestid-traces-a-hold-back-after-the-request-is-consumed.md
    *
    * Deliberately NOT auto-populated and NOT auto-cleared: nothing infers this from `question_ask`'s own
    * (single, optional) `taskId` — a manager/agent sets it explicitly via `tasks_update` when it recognizes
@@ -2949,14 +2946,9 @@ export interface PollJob {
  * (task mutations emit no events today) and companion-internal mechanics (heartbeat/reminder/alert-push
  * — those are the companion's own watchers' output, not general orchestration lifecycle).
  *
- * DECISION (card e955b5d8, 2026-08-05): `rate_limit_bailed` is included, ALONE among the usage-limit
- * kinds `33d5aef1` added. `session_rate_limited` (the park) was already here — a park is self-healing
- * (the watcher resumes it), while a bail is the terminal failure where auto-resume was abandoned past
- * its give-up deadline and the fleet silently stops recovering: the single most invisible/consequential
- * case that card names. If the park is worth an automation waking someone for, the bail is worth it
- * more. Its siblings — `rate_limit_resumed`, `rate_limit_recovered`, `usage_latch_armed`/`_cleared`,
- * `worker_spawn_usage_blocked` — stay OUT: they are episode MECHANICS (routine resume/latch bookkeeping
- * an operator doesn't need paged for), not attention-worthy signals. Don't add them without a fresh case.
+ * @decision e955b5d8 — `rate_limit_bailed` is included, its usage-limit siblings deliberately stay out;
+ * don't add one back without a fresh case — see
+ * docs/decisions/e955b5d8-event-trigger-kinds-rate-limit-bailed-included-siblings-not.md
  */
 export const EVENT_TRIGGER_EVENT_KINDS = [
   "merge_rejected", "merge_request",
