@@ -1994,65 +1994,18 @@ export interface ContextNudgeState {
  *  for what each value means and which call site writes it. Never re-mutated once terminal. */
 export type PendingGateOpState = "pending" | "settled" | "evicted-dead-owner" | "orphaned-by-restart";
 
-/** How a settled "gate" (worker self-check) OR "merge" op actually resolved — the `verdict` column's own
- *  value (card 4c5bf820; widened to "merge" rows by 9f6598dd). `"pass"`/`"fail"` are a real, completed
- *  `run_gate` verdict (a "gate" row) or a real, completed `confirmWorkerMerge` verdict (a "merge" row);
- *  `"cancelled"` mirrors {@link WorkerGateResult.cancelled} (a manager's `gate_cancel`, or
- *  auto-supersede-on-merge — no verdict was ever reached, must never be read as a failure — "gate" rows
- *  only, a merge is never itself cancelled this way); `"error"` means the run() closure itself threw (an
- *  unexpected exception, not an ordinary gate failure). A `null` `verdict` column value is the ONLY thing
- *  meaning "no verdict recorded" — every legacy row (from before 4c5bf820), or either kind's row that
- *  hasn't settled yet.
- *  Card a228dfb5: `"skipped"` — "merge" rows ONLY — is a DISTINCT non-verdict for a merge that landed
- *  (`merged:true`) without ever spawning a gate because its entire changed-path set was proven inert (card
- *  db9b0130's `isInertMergeDiff`; mirrors {@link GateOutcome}'s own `"skipped"` member in shared/types.ts,
- *  which `gate_history` already derived correctly from the raw event detail — this is the SAME fact, now
- *  ALSO recorded on the `pending_gate_ops.verdict` column so `gate_status(opId)` stops collapsing it into
- *  `"pass"`, card a228dfb5). Checked in `deriveMergeGateVerdict` BEFORE the plain `merged` branch, exactly
- *  like `gateOutcomeFromDetail` checks `detail.skipped` before `detail.passed` — a skip stamps `merged:true`
- *  too (the code did land), but must never be read as an ordinary gate PASS: no gate ever validated it.
- *  Distinct from a REUSED self-check (`reusedOpId` present, `gateRan:false` too) — a reuse is a REAL prior
- *  verdict and stays `"pass"`, only a genuine skip reads `"skipped"`. */
+/** The `verdict` column's own value. `"cancelled"` is never a rejection (@decision 361520a0); `"skipped"`
+ *  is a merge that landed via a proven-inert diff, never collapsed into `"pass"` (@decision a228dfb5); see
+ *  @decision 4c5bf820 for the full derivation + honest-null-payload discipline. */
 export type PendingGateOpVerdictKind = "pass" | "fail" | "error" | "cancelled" | "skipped";
 
 /**
- * The `verdict_payload_json` column's parsed shape (card 4c5bf820; widened to "merge" rows by 9f6598dd,
- * a1a8c5c4, 720bb7ad, and e2b6f900) — everything about a settled "gate"/"merge" op's outcome that doesn't need its
- * own queryable column (see the `pending_gate_ops` schema doc for why this is one JSON blob, not one
- * column per field). Every field is optional because which ones are meaningful depends on BOTH `verdict`
- * and which KIND of row this is: a "gate" row's `"pass"`/`"fail"` carries `durationMs`/`validatedHead`
- * too, which stay "gate"-kind only, never populated for a "merge" row; a "merge" row's `"pass"`/`"fail"`
- * instead carries `settledAt`/`totalDurationMs`/`extended` (see those fields' own docs). `outputTail`
- * (a1a8c5c4) and `steps` (card 720bb7ad — BEFORE this card `steps` was "gate"-kind only, exactly the
- * `outputTail` gap a1a8c5c4 had already closed; see that card's DoD for why a PASSING merge is the one
- * outcome this closes the last hole for) are the two fields BOTH kinds populate, on BOTH `"pass"` and
- * `"fail"` — `outputTail` is the last-step tail, bounded to ~4KB (`OUTPUT_TAIL_BYTES`) on a `"pass"` — a
- * passing step never needs content-selection — but on a `"fail"` (card 6ffee3e2) it's CONTENT-SELECTED
- * rather than positional, and can run up to ~16KB (`FAILURE_BLOCK_CAP_BYTES`) when that recovers a real
- * per-file assertion body from a `test-daemon.mjs` `FAILURES:` block a plain trailing tail would have
- * truncated off; `steps` is the
- * sub-ms-precision per-step `{step, durationMs, status}` breakdown. For a "gate" row `steps` is
- * unconditional whenever a gate ran; for a "merge" row it's populated whenever `ConfirmMergeResult.
- * gateSteps` was — the SAME "nothing to report" scope `outputTail`/`extended` already follow (gateless
- * project, REUSED self-check, or a pre-gate rejection all read back `undefined`). `gateDetail.steps`
- * (below) is a SEPARATE, fail-only, pre-existing copy of the identical bytes for a "merge" row — kept
- * for back-compat with `card 361520a0`'s own consumers rather than removed, but this top-level `steps`
- * field is the ONE location a reader should prefer, since it's the only one populated on a PASS too.
- * `outputTail` is populated ONLY on the two dominant return paths — a plain gate-fail rejection and a
- * plain successful merge — and stays `undefined` on every OTHER path too, not just "no gate spawned": a
- * gateless project, a REUSED self-check, a pre-gate rejection, AND a rarer post-gate-PASS rejection
- * (`gate_base_invalidated`, a merge conflict, an orphaned/stage-empty no-op) all read back `undefined`
- * here even though a gate may have genuinely run and produced output in that last case (the SAME rarer
- * gap `steps` inherits, since both derive from the same `ConfirmMergeResult` fields). ⚠️ A missing
- * `outputTail`/`steps` on a "merge" row is therefore NOT proof that no gate spawned — `extended`
- * (`undefined` ONLY when no gate spawned) is the field that proves that; never infer it from
- * `outputTail`/`steps`' absence. `"fail"` additionally carries `gateDetail` (the SAME rich diagnostic —
- * phase/failedStep/failingTest/exitCode/signal/timedOut — the `[loom:gate-failed]`/`[loom:merge-rejected]`
- * nudge already embeds); `"cancelled"`/`"error"` carry `reason` only. A row written before 4c5bf820 (or a
- * "merge" row written before 9f6598dd) has NO payload at all — `verdictPayload` reads back `null`, never
- * a fabricated shape. `gateCap`/`concurrentGates`/`concurrentGatesMax` (card e2b6f900) are a THIRD field
- * trio "merge" rows populate on both `"pass"` and `"fail"`, same two-dominant-paths scope as `outputTail`/
- * `steps` — see those three fields' own doc, just below, for the span caveat each one carries.
+ * The `verdict_payload_json` column's parsed shape (@decision 4c5bf820) — one JSON blob, not one column
+ * per field, since every field's meaning depends on BOTH `verdict` and which KIND ("gate" vs "merge") of
+ * row this is. `outputTail`/`steps` are the two fields both kinds populate on both "pass"/"fail"
+ * (@decision a1a8c5c4); a fail-path tail is content-selected, not positional (@decision 6ffee3e2).
+ * `gateCap`/`concurrentGates`/`concurrentGatesMax` are a third such trio (@decision e2b6f900). A row
+ * written before 4c5bf820/9f6598dd has NO payload at all — `null`, never a fabricated shape.
  */
 export interface PendingGateOpVerdict {
   reason?: string;
@@ -2083,23 +2036,10 @@ export interface PendingGateOpVerdict {
     exitCode?: number | null;
     signal?: string | null;
     timedOut?: boolean;
-    /** Card 361520a0, Half Three: a stdout+stderr tail — CONTENT-SELECTED since card 6ffee3e2, not
-     *  positional: ~4KB (`OUTPUT_TAIL_BYTES`) as a plain trailing tail, or up to ~16KB
-     *  (`FAILURE_BLOCK_CAP_BYTES`) when it instead recovers a real per-file assertion body from a
-     *  `test-daemon.mjs` `FAILURES:` block. This field is fail-only (see below), so — unlike the top-level
-     *  `outputTail` above — there is no separate pass-path/~4KB-only case to distinguish here. The SAME
-     *  diagnostic the push `[loom:merge-rejected]` nudge already carries (see `ConfirmMergeResult.detailText`'s own tail block)
-     *  but, until this card, never written here — leaving the pull-based `gate_history`/`gate_status` read
-     *  path with strictly less detail than the push notify for the identical rejection. Populated for a
-     *  "merge" row only (mirrors this whole `gateDetail` sub-object's current scope); a "gate" (worker
-     *  self-check) row keeps carrying its own tail via the top-level `outputTail` field above instead.
-     *  ⚠️ DELIBERATE DUPLICATION vs. the top-level `outputTail` field (card a1a8c5c4): on a settled "merge"
-     *  REJECTION, this field and the top-level `outputTail` carry the IDENTICAL bytes — both derive from
-     *  the SAME sanitized gate-output-tail local in `confirmWorkerMerge`. They are independently motivated
-     *  (`outputTail` exists so a PASS also retains a tail, which this sub-object never covers; this field
-     *  exists to mirror the rejection's own push-notify text 1:1) and MUST NOT be treated as two
-     *  independent signals to cross-check or reconcile — a future "fix" that makes one follow the other
-     *  would silently couple two fields that were never meant to be coupled. */
+    /** A fail-only stdout+stderr tail, content-selected not positional (@decision 6ffee3e2). Fail-only, so
+     *  unlike the top-level `outputTail` it has no separate pass-path case. On a "merge" rejection this and
+     *  the top-level `outputTail` deliberately carry IDENTICAL bytes (@decision a1a8c5c4) — independently
+     *  motivated, never two signals to cross-check or reconcile. */
     stderrTail?: string;
     /** Card 361520a0, Half Three: per-step `{step, durationMs, status}` — originally the ONLY place a
      *  "merge" rejection's step timings lived, since the top-level `steps` field above was "gate"-kind
@@ -2135,66 +2075,15 @@ export interface PendingGateOpVerdict {
    *  discipline as `extended`; otherwise always populated, `nearBudget:false` included, on BOTH "pass"
    *  and "fail" — this is not a failure-only signal. Populated for both "gate" and "merge" rows. */
   proximity?: { nearBudget: boolean; step: string; fraction: number };
-  /** Card e2b6f900: the gate concurrency triple this op's gate ran under — the CONDITION channel, distinct
-   *  from `steps`/`outputTail` above (the OUTPUT channel a1a8c5c4/720bb7ad already closed for "merge"
-   *  rows). Before this card a FAILING "merge" row's rejection baked this triple as TEXT ONLY into its
-   *  `[loom:merge-rejected]` nudge (`detailBits`, in `confirmWorkerMerge`) — never reaching THIS durable
-   *  store, so `gate_status(opId)` could not recover it after the fact; a PASSING "merge" row carried it
-   *  in NEITHER the nudge nor this store. (`gate_history` — a SEPARATE, audit-event-backed series, fed by
-   *  the pre-existing `build_gate` event, which stamps this triple unconditionally on both outcomes and
-   *  predates this card — already served the multi-row dataset question; this closes the opId-keyed
-   *  per-op read that event was never wired to, not a total absence.) Populated for "merge" rows only, on the same two dominant outcomes
-   *  `outputTail`/`steps` already cover (a plain gate-fail rejection, a plain successful merge) — `undefined`
-   *  on the rarer post-gate-PASS rejections those two fields also leave unwired, and on a "gate" (worker
-   *  self-check) row (that kind's own `deriveWorkerGateVerdict` doesn't set it yet — a narrower, deliberate
-   *  gap, not an oversight; the card this closes is specifically about the MERGE-gate asymmetry).
-   *  `gateCap` is the resolved `orchestration.maxConcurrentGates` in force at admission — a plain cap
-   *  number, no span ambiguity. `concurrentGates` is INSTANT-AT-ADMISSION — "how many gates were admitted
-   *  together the moment THIS one started" — and UNDERSTATES true contention: a second gate joining
-   *  seconds (or minutes) later never moves this number, so a run that spent most of its wall time
-   *  contended can still read back as if it ran alone. `concurrentGatesMax` is the TRUE max-over-run figure
-   *  (derived from `GateSemaphore`'s own admit/release bookkeeping, never a polling sample) and OVERSTATES
-   *  a brief overlap as full contention — it cannot distinguish "contended for the entire run" from "joined
-   *  for the last 3 minutes of an 18-minute run". Both fields are real and both mislead if read alone as
-   *  "the condition this run ran under" rather than as two different, imperfect lenses on it — this is the
-   *  SAME caveat `gate_history`'s own tool description already states for these two field names on that
-   *  (separate, audit-event-backed) read path; repeated here because a `gate_status(opId)` reader may never
-   *  see that other tool's description. Never combine these into a single derived "contention score" — that
-   *  would hide exactly the span ambiguity this doc exists to name. ⚠️ FOURTH CAVEAT, CORRECTED (card
-   *  b9e07a4a — an earlier version of this doc claimed the single-file retry does NOT re-admit through the
-   *  gate semaphore; that gap was FIXED, so the claim is now FALSE): on a "merge" row that carries
-   *  `retriedFile` (card 344ce950's single-file retry), the retry now re-admits through `runExclusive`
-   *  exactly like the TRANSIENT-KILL auto-retry, so on a resulting pass OR a resulting (still-failing)
-   *  retry this triple correctly describes the retry's OWN admission — the one the final verdict is
-   *  actually about, not the first failed one. The one remaining exception (card 318ac7b2): if the retry
-   *  itself is cancelled WHILE QUEUED, its own admission never happens, and this triple still describes
-   *  attempt 1 — the separate, earlier admission that genuinely ran and failed before the retry was ever
-   *  queued — see `ConfirmMergeResult.gateCap`'s own doc for the full detail. */
+  /** The gate concurrency triple this op's gate ran under — two imperfect lenses, not the condition
+   *  itself (@decision e2b6f900). On a "merge" row carrying `retriedFile`, the single-file retry now
+   *  re-admits through `runExclusive` so this correctly describes the retry's OWN admission, except when
+   *  the retry itself is cancelled while queued (@decision b9e07a4a; card 318ac7b2). */
   gateCap?: number;
   concurrentGates?: number;
   concurrentGatesMax?: number;
-  /** Card 725dc89a — the RETROSPECTIVE half of `65336570` (which echoed this same declaration into the
-   *  `[loom:merge-done]` nudge TEXT only — see `ConfirmMergeResult.reducedGateWarning`'s own doc). The
-   *  durable `build_gate` audit event has always persisted `emitCompareReduced`/`emitCompareIdenticalCount`/
-   *  `emitCompareTestFiles`/`emitCompareNotHermeticExcluded` unconditionally (card 17cd1f30), but nothing
-   *  read it back on a settled op — a manager investigating a PAST merge after the nudge scrolled away had
-   *  to go read raw audit events. This closes that: the STRUCTURED facts (not `reducedGateWarning`'s
-   *  rendered sentence — see card 725dc89a's DoD-2) land here too.
-   *  ⭐ TRI-STATE, on purpose (card 725dc89a DoD-3 — the `composerDirtyLen` null-vs-0 discipline, one field
-   *  over): `true` means this merge's gate genuinely ran REDUCED (card 2154b6ad); `false` means a REAL gate
-   *  spawned for this op and was PROVEN NOT reduced (the positive control — a non-reduced merge must read
-   *  as genuinely non-reduced, never as missing data); `undefined` means EITHER no gate spawned for this op
-   *  (gateless project, a REUSED self-check, a pre-gate rejection — same "nothing to report" discipline as
-   *  `gateExtended`) OR this row predates card 725dc89a entirely. Populated on the same two dominant return
-   *  paths `gateCap`/`outputTail` already cover (a plain gate-fail rejection, a plain successful merge) —
-   *  `undefined`, not fabricated `false`, on the rarer post-gate-PASS rejections those two fields also leave
-   *  unwired. `emitCompareIdenticalCount`/`emitCompareTestFiles`/`emitCompareNotHermeticExcluded` are set
-   *  ONLY alongside `emitCompareReduced:true` — mirroring the `build_gate` event's own `emitCompareSkip ?
-   *  {...} : {}` gating exactly — and are `undefined` (never `[]`/`0`) whenever `emitCompareReduced` isn't
-   *  `true`, so an empty array can never be misread as "reduced, but nothing was excluded" vs "not reduced
-   *  at all". `emitCompareNotHermeticExcluded` (card 17cd1f30) names the specific changed test file(s) that
-   *  were excluded from `--only=` (same NOT_HERMETIC exclusion the full suite also never gates) — the file
-   *  names, not just a count, so a reader can tell WHICH changed test(s) went unrun without re-deriving it. */
+  /** Retrospective, tri-state persistence of the reduced-gate facts on the settled op. `true`/`false` are
+   *  both measured; only `undefined` means unrecoverable/not-applicable. (@decision 725dc89a) */
   emitCompareReduced?: boolean;
   emitCompareIdenticalCount?: number;
   emitCompareTestFiles?: string[];
@@ -2217,21 +2106,9 @@ export interface PendingGateOpVerdict {
    *  `commitSubject` on — broader than `gateCap`/`outputTail`'s two-dominant-paths scope, since the subject
    *  is set unconditionally on every landed squash regardless of which return branch is taken. */
   commitSubject?: string;
-  /** Card 6dcb9cd3: plumbs card 344ce950's single-file-retry fact onto this durable payload — before this
-   *  card, `gate_history` (the `build_gate` audit event) already carried `retriedFile`/`retryPassed` on
-   *  BOTH outcomes, but a `gate_status(opId)` read of a settled "merge" row carried neither, so a caller
-   *  who polled `gate_status` instead of `gate_history` saw `outcome:"pass"` sitting beside a `steps[]`
-   *  entry with a real failure and no way to tell "a failing gate merged code" from "the retry worked".
-   *  ⭐ DELIBERATE MEASURED-NEGATIVE DISCIPLINE, NOT the `undefined`-means-omit pattern every other field on
-   *  this interface uses: `deriveMergeGateVerdict` sets this to a real filename OR `null` — NEVER leaves it
-   *  `undefined` — on every "pass"/"fail" row it writes going forward, so `null` here is a POSITIVE
-   *  assertion ("no such retry fired for this row"), not silence. `undefined` still means what it means
-   *  everywhere else on this interface: a settled row that predates this card, or a "cancelled"/"error" row
-   *  (this pairing was never computed on those branches — see `ConfirmMergeResult.retriedFile`'s own doc for
-   *  why attempt 1's own retry facts don't carry onto a cancel-while-queued return). Same
-   *  present-with-null-vs-absent-key contract this codebase already applies to `composerDirtyLen`/
-   *  `recentTimeoutStreak` (mcp/orchestration.ts) — an absent key must never be read as "no retry", only a
-   *  literal `null` may be. */
+  /** Plumbs card 344ce950's single-file-retry fact onto this durable payload, with a DELIBERATE
+   *  measured-negative discipline (@decision 6dcb9cd3): `null` is a positive "no retry fired" assertion,
+   *  never conflate it with `undefined` (predates this card / a cancelled/error row). */
   retriedFile?: string | null;
   /** Card 6dcb9cd3, sibling of `retriedFile` immediately above — same measured-negative discipline: `null`
    *  whenever `retriedFile` is `null` (no retry at all). When `retriedFile` IS a real filename, this is
@@ -2241,58 +2118,15 @@ export interface PendingGateOpVerdict {
    *  `gate_history` tool description). A reader must never assume a non-null `retriedFile` implies
    *  `retryPassed:true`. */
   retryPassed?: boolean | null;
-  /** Card a0d1165c, sibling of `retriedFile`/`retryPassed` immediately above — durable persistence for the
-   *  OTHER retry that can produce a `merged:true` verdict, the TRANSIENT-KILL AUTO-RETRY (card bcba83a1,
-   *  `ConfirmMergeResult.transientRetried`). SAME "measured negative" discipline as `retriedFile`/
-   *  `retryPassed`: `deriveMergeGateVerdict` writes a real boolean here (`v.transientRetried ?? false`),
-   *  NEVER `undefined`, on every "pass"/"fail" row it writes going forward — `undefined` here means only
-   *  "this row predates card a0d1165c" or "a cancelled/error row, where this pairing was never computed",
-   *  never "no such retry fired". Mirrors `ConfirmMergeResult.transientRetried`'s OWN scope exactly (not
-   *  widened here): that field is set `true` ONLY on a `merged:true` return reached via this retry — a
-   *  still-failing transient retry rejects instead, and `v.transientRetried` stays `undefined` on THAT
-   *  return (the rejection's own `detailBits`/`reason` text already names the retry by other means, same
-   *  as `ConfirmMergeResult.transientRetried`'s own doc states) — so `?? false` on a rejection row records
-   *  `false` here too, by the SAME design choice the source field already made, not a new gap introduced by
-   *  this plumbing. Mutually exclusive with `retriedFile` being non-null on the SAME row, by construction
-   *  (a first attempt is classified either "genuine" — eligible for the single-file retry — or
-   *  "kill"/"timeout" — eligible for THIS retry — never both; see gate-runner.ts's `classifyGateFailure`). */
+  /** `retriedFile`/`retryPassed`'s sibling for the OTHER retry, the transient-kill auto-retry — same
+   *  measured-negative discipline, and mutually exclusive with `retriedFile` being non-null on the same
+   *  row by construction (@decision a0d1165c). */
   transientRetried?: boolean;
-  /** Code Review, card 67030bb9 finding [5]: the count of branches ASSEMBLED into the batch worktree during
-   *  assembly (`landedCount` at `deriveBatchGateVerdict`'s call site, `mergeBatch`'s own `runGate` closure)
-   *  — CORRECTED (Code Review, card 553ea58c): an earlier version of this doc called it "the batch's own
-   *  landed branch count", which was FALSE on a batch whose gate (and any retry) passed but whose
-   *  fast-forward later forfeited or whose post-gate HEAD read failed — see `batchLanded`, immediately
-   *  below, for that separate, later fact. This count is stored so a `gate_status(opId)` read of a
-   *  retry-assisted batch pass, made after the live `[loom:merge-batch-done]` nudge that already renders
-   *  `formatWeakerPassWarning`'s batch-specific wording was missed (a recycle, a restart, a successor
-   *  reading history later), can render that same wording rather than the solo-shaped fallback. Populated
-   *  for "merge" rows produced by `mergeBatch` only (a plain solo merge or a "gate" self-check row has no
-   *  batch to count); `undefined` for every other row, including one that predates this field. Present
-   *  (and accurate) REGARDLESS of `batchLanded` — an earlier fix zeroed this field instead of adding
-   *  `batchLanded`, which silently destroyed a true datum on the dominant no-retry case and made a
-   *  forfeited batch op indistinguishable from a solo merge; see `batchLanded`'s own doc for why the two
-   *  facts are now kept separate, mirroring `GateHistoryRow.batchForfeited`'s own precedent (card
-   *  `b480dda9`): "do NOT 'fix' a forfeited row by zeroing branchCount instead ... the forfeit is a
-   *  separate, later fact and belongs in its own field, not a falsified count." */
+  /** The count of branches ASSEMBLED into the batch worktree — corrected naming: it is NOT necessarily
+   *  the landed count (@decision 553ea58c, reusing the record already covering this exact correction). */
   batchBranchCount?: number;
-  /** Card 553ea58c: the separate, LATER fact `batchBranchCount`'s own doc (above) points to — whether this
-   *  batch's gate (and any single-file retry) passing actually resulted in the assembled branches landing
-   *  on main. Unlike `GateHistoryRow.batchForfeited` (card `b480dda9`, sourced from a correlated subquery
-   *  against a sibling `batch_merge_forfeited` orchestration event, scoped to ONLY the canonical-main-
-   *  advanced forfeit shape), this field is set directly by `mergeBatchTracked` once `runBatchedMerge`
-   *  resolves — so it covers BOTH real `ok:false` shapes reachable on an already-passed batch gate: a
-   *  fast-forward forfeit (`batch-merge.ts`'s `:813` return) AND a post-gate HEAD-read failure (`:806`) —
-   *  see `MergeBatchResult.retryWarning`'s own three-case doc for the identical two-shape enumeration.
-   *  Written UNCONDITIONALLY (never silence) whenever this verdict is a batch "pass" — the SAME
-   *  present-with-`false`-is-a-measured-negative convention `retryPassed`/`transientRetried` already use on
-   *  this payload: a stored `false` positively asserts "the gate passed but nothing landed", not merely
-   *  "nothing to report". `undefined` on a non-batch ("solo") row, on a "fail"/"cancelled"/"error" verdict
-   *  kind (a genuine gate rejection has nothing to land regardless — `formatRetryAlsoFailedWarning`'s own
-   *  batch clause already states this correctly off `batchBranchCount` alone, unaffected by this field), or
-   *  on a row that predates this field. `gate_status`'s own render consults this to omit the "ALL N land on
-   *  the strength of this ONE retry" clause exactly when `batchLanded === false` — WITHOUT touching the
-   *  underlying `batchBranchCount`, which stays visible and accurate either way (see that render's own
-   *  doc, sessions/service.ts, for the dispatch). */
+  /** The separate, LATER fact `batchBranchCount` doesn't cover: whether the batch's assembled branches
+   *  actually landed on main (@decision 553ea58c — see this id's second record, on this field). */
   batchLanded?: boolean;
 }
 
@@ -2904,23 +2738,11 @@ export class Db {
     });
   }
   /**
-   * Partial STRUCTURAL edit of a project (name / vaultPath / repoPath / referenceRepos). Provided fields
-   * are written; omitted are left as-is. Deliberately does NOT touch config (that goes through the
-   * validated setProjectConfig path). `repoPath` is editable ONLY via the elevated platform MCP
-   * project_update + the human REST PATCH path, both fronted by checkRepoRebind (isGitRepo +
-   * live-worktree guard) — it is NEVER exposed on any agent-facing surface (loom-setup / loom-orchestration).
-   * `referenceRepos` (reference-repos epic Phase 2, card f4888775) is editable ONLY via the HUMAN-only
-   * REST create/update paths, fronted by `validateReferenceRepos` (absolute path + isGitRepo per entry) —
-   * same trust posture as repoPath, and likewise never exposed on any agent-facing surface.
-   * `noGateByDesign` (card 58b0bb60) is editable ONLY via the HUMAN-only REST create/update paths — same
-   * trust posture as repoPath/referenceRepos: it silences a merge-integrity warning, so no agent MCP
-   * tool (setup or the elevated Platform Lead) ever declares this key.
-   * `denyGlobs` (card d5d3bdc9) is editable ONLY via the HUMAN-only REST create/update paths — same
-   * trust posture as the fields above: it controls a merge-review warning, so no agent MCP tool ever
-   * declares this key.
-   * `repos` (multi-repo epic 49136451) is editable ONLY via the HUMAN-only REST create/update paths —
-   * same trust posture as the fields above: each entry carries its own `gateCommand` (host-RCE), so no
-   * agent MCP tool (setup or the elevated Platform Lead) ever declares this key.
+   * Partial STRUCTURAL edit of a project. Deliberately does NOT touch config (see setProjectConfig).
+   * ⛔ TRUST BOUNDARY: `repoPath` (card f4888775 for `referenceRepos`), `noGateByDesign` (card 58b0bb60),
+   * `denyGlobs` (card d5d3bdc9), and `repos` (host-RCE via each entry's own `gateCommand`, epic 49136451)
+   * are editable ONLY via elevated platform MCP / human-only REST — NEVER exposed on any agent-facing
+   * surface (loom-setup / loom-orchestration). Do not add an agent MCP path for any of these five fields.
    */
   updateProject(id: string, patch: { name?: string; vaultPath?: string; repoPath?: string; referenceRepos?: string[]; noGateByDesign?: boolean; denyGlobs?: string[]; repos?: RepoRegistryEntry[] }): void {
     const cols: Record<string, unknown> = {
@@ -3174,21 +2996,9 @@ export class Db {
     const escaped = prefix.replace(/[\\%_]/g, "\\$&");
     return this.db.prepare("DELETE FROM app_meta WHERE key LIKE ? ESCAPE '\\'").run(`${escaped}%`).changes;
   }
-  /** Purge every board-read snapshot a session left behind (card 15bdb031) — see {@link
-   *  BOARD_READ_META_PREFIX}'s doc for why this is a prefix delete rather than one exact key. Called from
-   *  every real per-session removal point (archiveSession/deleteSession/deleteProject/deleteAgent) so a
-   *  retired session's snapshot never outlives it, regardless of which of those a caller used. Idempotent
-   *  (a session with no recorded read matches nothing). Returns the count removed, for tests.
-   *
-   *  Deliberately called from `archiveSession` too, even though that's a SOFT archive (row retained,
-   *  `restoreSession` can bring it back) — not an oversight. Purging only on the hard-delete paths
-   *  (deleteSession/deleteProject/deleteAgent) would leave the leak in place for nearly every session,
-   *  since most sessions are archived on exit and never hard-deleted; that would largely defeat the
-   *  point of this card. An archived-then-restored session simply comes back with NO board-read
-   *  baseline — its next computeBoardDelta reads `computed:false` exactly like a brand-new session, and
-   *  the one after that just has a WIDER delta (more cards read as "created" than actually were) until it
-   *  re-records on its own next genuine board read. Never wrong, only momentarily less precise — the
-   *  same bounded, benign cost this whole card accepts in exchange for not leaking forever. */
+  /** Purge every board-read snapshot a session left behind, at every real per-session removal point
+   *  including the soft archive path, deliberately (@decision 15bdb031). Idempotent; returns the count
+   *  removed. */
   private purgeBoardReadSnapshots(sessionId: string): number {
     return this.deleteMetaPrefix(`${BOARD_READ_META_PREFIX}${sessionId}:`);
   }
@@ -4676,24 +4486,8 @@ export class Db {
     return this.db.prepare("DELETE FROM session_usage_samples WHERE ts < ?").run(beforeIso).changes;
   }
 
-  /**
-   * Best-effort ACTIVITY signal for ContextWatcher's blind-turn detector (card fdf1291f): sums this
-   * session's `session_usage_samples` rows recorded at/after `sinceIso` — a feed the UsageSampler fills
-   * on its OWN 5-minute timer, independent of the engine's turn boundary (Stop), which is exactly the
-   * blind spot this exists to see through (see UsageSampler's own doc: it reads the live transcript's
-   * cumulative usage off disk, which keeps growing through tool calls that never reach Stop).
-   *
-   * ⚠️ These columns are per-interval BILLED-USAGE deltas (input/output/cache tokens actually sent to
-   * the model across API calls), NOT context occupancy — see `readContextStats`' doc for that distinction
-   * (occupancy ≈ the LAST turn's input+cache tokens; these are a SUM across many turns). Composing them
-   * into a numeric occupancy estimate would need the turn-to-turn prompt-cache hit rate to be known and
-   * stable, which this table cannot tell you (a broken cache prefix re-pays the whole context as
-   * `cache_creation` every turn — see `cacheHitRatio`'s doc — silently inflating any such estimate by an
-   * unknown, unbounded factor). So this is used ONLY to confirm a blind manager is genuinely still
-   * WORKING (real token flow during the gap, ruling out a merely-hung `busy=1` session — a different,
-   * already-covered failure), never to estimate a % of window. Returns null when no sample has landed yet
-   * for this session at/after `sinceIso` (can't yet distinguish "burning tokens" from "hung idle").
-   */
+  /** Best-effort ACTIVITY signal for ContextWatcher's blind-turn detector — a per-interval billed-usage
+   *  SUM, never a context-occupancy estimate (@decision fdf1291f). `null` means no sample has landed yet. */
   getUsageActivitySince(sessionId: string, sinceIso: string): { totalTokens: number; sampleCount: number } | null {
     const r = this.db.prepare(
       `SELECT COUNT(*) AS n,
@@ -4947,23 +4741,9 @@ export class Db {
     ).all() as Row[];
     return rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string }));
   }
-  /**
-   * BOUNDED page of a project's archived sessions, newest-archived first, plus the TOTAL row count (for
-   * a "N of total — Load more" list UI). `limit` is clamped into [1, MAX_ARCHIVED_PAGE]; `offset` defaults
-   * to 0. Backs the paginated `GET /api/projects/:id/archive` route; the unbounded `listArchivedSessions`
-   * above stays as-is for internal full-set callers (cascade restore/delete, tests) that aren't rendering
-   * a page. Returns the EFFECTIVE (post-clamp) `limit` too — a caller that requested more than
-   * MAX_ARCHIVED_PAGE must be able to tell it was silently capped (code review finding on the first pass
-   * of this card: an oversized requested limit with no way to observe the clamp made a client's own
-   * "load more until done" logic dead-end forever at the cap while `total` kept claiming more existed).
-   *
-   * Optional `q` (card b9161ad2) filters server-side by a case-insensitive substring match against
-   * session id / agent name / role / task id / branch — the same fields Archive.tsx's own client-side
-   * search used to match — applied BEFORE the LIMIT/OFFSET, so a query reaches the FULL archived set for
-   * this project rather than only the pages already fetched. `total` is recomputed under the SAME filter
-   * so paging/`hasMore` stay correct while a query is active. Omitted/blank ⇒ unfiltered, byte-identical
-   * to the pre-filter behavior (the no-search COUNT below is untouched, still the original join-free query).
-   */
+  /** BOUNDED page of a project's archived sessions + total; effective (post-clamp) `limit` returned so a
+   *  client can detect the server cap. Optional `q` filters server-side, BEFORE limit/offset.
+   *  (@decision b9161ad2) */
   listArchivedSessionsPage(projectId: string, limit: number, offset = 0, q?: string | null): { rows: SessionListItem[]; total: number; limit: number } {
     const lim = Math.max(1, Math.min(limit, MAX_ARCHIVED_PAGE));
     const search = q?.trim();
@@ -4988,21 +4768,9 @@ export class Db {
     ).all(rowParams) as Row[];
     return { total, limit: lim, rows: rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string })) };
   }
-  /** BOUNDED page across ALL projects, newest-archived first, plus total + the effective (clamped) limit
-   * — the cross-project mirror of listArchivedSessionsPage above, backing the paginated
-   * `GET /api/archived-sessions` route. An optional `role` filter scopes the page to one SessionRole
-   * (e.g. `manager`) BEFORE the limit/offset apply, so a role-scoped caller (MissionControl's Run Replay
-   * picker, which only ever shows managers) spends its whole page budget on rows it actually wants,
-   * instead of the bound being diluted by unrelated worker/setup/etc. rows that share the same
-   * cross-project archived_at ordering (card 9f010283 — an archived manager older than the newest 300
-   * archived sessions GLOBALLY was unreachable in the picker even though far fewer than 300 managers
-   * existed). Omitted ⇒ unfiltered, byte-identical to the pre-filter behavior.
-   *
-   * Optional `q` (card b9161ad2) is the same server-side substring filter as listArchivedSessionsPage's
-   * own `q`, plus project name (this route spans projects, so project identity is part of what a search
-   * here needs to distinguish) — applied BEFORE limit/offset alongside any `role` filter, `total`
-   * recomputed under the SAME filters. Omitted/blank ⇒ unfiltered; the no-search/no-role COUNT below stays
-   * the original join-free query, so an existing caller passing neither is byte-identical. */
+  /** Cross-project mirror of listArchivedSessionsPage. `role` filter applies BEFORE limit/offset
+   *  (@decision 9f010283); `q` is the same server-side substring filter, plus project name.
+   *  (@decision b9161ad2) */
   listAllArchivedSessionsPage(limit: number, offset = 0, role?: SessionRole | null, q?: string | null): { rows: SessionListItem[]; total: number; limit: number } {
     const lim = Math.max(1, Math.min(limit, MAX_ARCHIVED_PAGE));
     const roleClause = role ? " AND s.role = @role" : "";
@@ -5052,23 +4820,8 @@ export class Db {
     return (this.db.prepare("SELECT * FROM sessions WHERE parent_session_id = ? AND archived_at IS NOT NULL ORDER BY created_at")
       .all(managerSessionId) as Row[]).map(toSession);
   }
-  /**
-   * The `limit` most-recently-created archived worker-role sessions in a project that still carry a
-   * `branch` — the candidate pool for {@link SessionService.getDanglingWorkers} (card ba41b402).
-   * Deliberately PROJECT-scoped, not manager-scoped like {@link listArchivedWorkers} above: a stopped
-   * worker's `parent_session_id` may point at a recycled predecessor manager, and the caller applies its
-   * own lineage-tolerant filter on top of this broad set (mirrors orchestration.ts's `archivedUnreported`
-   * category, which does the same "broad candidate query, then lineage-filter in the caller" split for
-   * the identical reason).
-   *
-   * BOUNDED (mgr review, card ba41b402): this set only ever GROWS — every worker a project has ever
-   * archived stays in it forever, and `worker_list`/`worker_status({})` call this on every read, so an
-   * unbounded scan is a real, ever-worsening cost on the manager's most-polled tool. `LIMIT` +
-   * `ORDER BY created_at DESC` caps it to the newest N regardless of the project's total archived-worker
-   * history. TRADE-OFF, stated plainly: a genuinely-dangling branch OLDER than the newest `limit` archived
-   * workers stops being surfaced by this view. Accepted deliberately — the incident this card documents
-   * was hours old, not months — but it is a real coverage loss, not just a performance tweak.
-   */
+  /** The dangling-worker candidate pool ({@link SessionService.getDanglingWorkers}): bounded to the
+   *  newest `limit`, accepting a real coverage loss on an older dangling branch (@decision ba41b402). */
   listArchivedWorkersInProject(projectId: string, limit = 50): Session[] {
     return (this.db.prepare(
       "SELECT * FROM sessions WHERE project_id = ? AND role = 'worker' AND archived_at IS NOT NULL AND branch IS NOT NULL ORDER BY created_at DESC LIMIT ?",
@@ -5085,30 +4838,8 @@ export class Db {
     this.db.prepare("UPDATE sessions SET archived_at = NULL WHERE id = ?").run(id);
     this.notifySessionChanged(id);
   }
-  /**
-   * One-time boot backfill: sessions that EXITED before auto-archive-on-exit (card b37750a4) shipped never
-   * got `archived_at` stamped, so they're invisible in BOTH the live rail (exited rows are pruned) AND the
-   * project Archive tab (listArchivedSessions filters `archived_at IS NOT NULL`). Stamp `archived_at` on
-   * every such legacy row so the trees appear.
-   *
-   * Uses each row's REAL end-time — `COALESCE(last_activity, created_at)`, NOT `now()` — so the Archive's
-   * `archived_at DESC` ordering keeps these in chronological position rather than collapsing them all to the
-   * migration instant at the top. (Both columns are NOT NULL; last_activity is the session's last observed
-   * activity, the closest proxy for when it stopped. COALESCE is a belt-and-suspenders fallback.)
-   *
-   * Predicate `process_state = 'exited'` ONLY: the ProcessState union is `none|starting|live|exited` — there
-   * is NO 'dead' (that's a Resumability value), so 'exited' is the whole terminal set. 'none' is EXCLUDED —
-   * it's a shell / non-engine placeholder row, never a real stopped session (mirrors onExit, which archives
-   * only real DB engine rows). `role='run'` is EXCLUDED — ephemeral Agent Run sessions must never clutter
-   * the Archive (same exclusion as onExit). Already-archived rows (archived_at NOT NULL) are untouched, so
-   * the 6.5/6.6 auto-archived sessions keep their original archived_at.
-   *
-   * One-shot via an app_meta marker (same fire-exactly-once pattern as the first-run setup flag / column-role
-   * backfill): marker checked FIRST, stamped LAST — a second invocation is a clean no-op (returns 0). SAFE
-   * re: resumeFleetOnBoot — a session it resumes is un-archived by restoreSession regardless, and this matches
-   * only already-'exited' rows (a crashed session about to be recovered+resumed is still 'live'/'starting' at
-   * this point, so it isn't touched here). Returns the count of rows stamped (0 if the marker was already set).
-   */
+  /** One-time boot backfill of `archived_at` for legacy pre-auto-archive rows, stamped with each row's
+   *  REAL end-time, never `now()` (@decision b37750a4). One-shot via an app_meta marker. */
   backfillArchivedAtOnce(): number {
     if (this.getMeta(ARCHIVED_AT_BACKFILL_KEY) !== undefined) return 0; // guard: already run (one-shot)
     const affectedIds = (this.db.prepare(
@@ -5298,22 +5029,9 @@ export class Db {
       .run(enabled ? 1 : 0, new Date().toISOString(), id);
     this.notifySessionChanged(id);
   }
-  /**
-   * Re-pin the FULL companion capability-shaping surface on the session ROW directly (Companion Capability
-   * & Permission-Lever Framework §6, the conversation-preserving respawn) — the generalized sibling of
-   * {@link setRestrictedTools} above, covering every field `resolveAgentSpawn` resolves that a resume/fork/
-   * recycle path reads straight off the ROW rather than re-resolving from the Profile (see that method's
-   * comment in sessions/service.ts). Same posture as {@link setRestrictedTools}: a write here has NO live
-   * effect on an already-running pty — its MCP tool surface/allowlist was fixed at ITS OWN OS-process-start
-   * — the caller (SessionService.upgradeCompanionCapabilities) is responsible for actually respawning the
-   * process for it to take effect. Partial-patch shape mirrors {@link updateProfile}: an omitted (`undefined`)
-   * field is left untouched; `skills: null` explicitly clears to "deliver all". `connections`/`vaultWrite`
-   * ARE part of this patch (card 1a048349) despite being spawn-independent — unlike every other field here,
-   * `mcp/server.ts`'s TaskMcpRouter re-resolves them off THIS ROW fresh on every request (it never threads
-   * them through `pty.spawn`/`resume()` at all), so a plain write here takes effect on the companion's very
-   * next tool call — no respawn needed. They're still written through this same partial-patch helper because
-   * the caller re-pins the whole surface from one `resolveAgentSpawn` result in one row write.
-   */
+  /** Re-pin the FULL companion capability-shaping surface on the session ROW directly. Most fields need a
+   *  respawn to take live effect (caller's job); `connections`/`vaultWrite` are the exception — they're
+   *  re-resolved off this row fresh on every request, for a stateless-router reason (@decision 1a048349). */
   setSessionCapabilitySurface(id: string, patch: {
     browserTesting?: boolean; documentConversion?: boolean;
     capabilities?: CapabilityGrant[]; restrictedTools?: boolean; noCommit?: boolean;
@@ -5706,23 +5424,9 @@ export class Db {
     return this.db.prepare("UPDATE wakes SET session_id = ? WHERE session_id = ?")
       .run(newSessionId, oldSessionId).changes;
   }
-  /**
-   * Move a manager's decision-inbox questions (card 8701bdbb) to its recycle successor — the SAME
-   * recycle-changes-session-id class card 93609ef3 fixed for worker reads (there via lineage-walking;
-   * here, consistent with reparentWakes just above, by moving the row itself). Moves EVERY state
-   * (pending/answered/consumed) unconditionally, exactly like reparentWakes — a still-'pending'
-   * question's eventual answer must also nudge the successor, not the retired predecessor's dead pty.
-   * A FAST PATH, not the only mechanism (card f88e91f0): `pullAnsweredQuestionsForAgent` /
-   * `getLiveSessionForAgent` read by agent lineage, so a question is reachable even when this never ran
-   * (a manual stop + fresh, non-recycle spawn). Keeping this means the recycle path still gets an
-   * immediate, explicit handoff rather than relying solely on the lineage read.
-   *
-   * ⚠️ Card cb7d6998: this is WHY `session_id` is a routing target, not provenance — every recycle walks
-   * it forward again, so a row's `session_id` after N recycles is the Nth successor, not the filer.
-   * Deliberately touches ONLY `session_id` — `filed_by_session_id` (set once at insert) must NEVER be
-   * written here; that immutability is the entire fix. Do not add a second column to this UPDATE without
-   * re-reading that card first.
-   */
+  /** Move a manager's decision-inbox questions to its recycle successor, every state, unconditionally
+   *  (@decision 8701bdbb). ⛔ Touches ONLY `session_id` — NEVER write `filed_by_session_id` here; that
+   *  immutability is the entire fix (card cb7d6998). Do not add a second column without re-reading it first. */
   reparentQuestions(oldSessionId: string, newSessionId: string): number {
     return this.db.prepare("UPDATE questions SET session_id = ? WHERE session_id = ?")
       .run(newSessionId, oldSessionId).changes;
@@ -5832,36 +5536,9 @@ export class Db {
     return r ? toOrchestrationEvent(r) : undefined;
   }
 
-  /**
-   * Card a1c86452 — the HISTORY half of the Gates page: a bounded, newest-first page of settled gate
-   * RUNS across every project (or one, when `projectId` is set), reconstructed from the gate-run
-   * orchestration_events (see {@link GATE_HISTORY_KINDS}).
-   *
-   * ENRICHMENT IS A JOIN, NOT AN N+1 LOOP: orchestration_events is session-keyed with no project_id, so
-   * the project name, agent name, worker branch, and task title are resolved in ONE query by joining the
-   * SUBJECT session — `COALESCE(worker_session_id, manager_session_id)` (a merge/worker gate keys the
-   * worker; a deploy keys only the manager) — out to sessions → projects/agents and the task. A per-row
-   * lookup loop on the synchronous in-process SQLite would block the event loop; this stays a single
-   * SELECT + a single COUNT, both paginated. LEFT JOINs so a gate whose session/task was since-removed
-   * still lists (with null enrichment) rather than vanishing.
-   *
-   * `limit` is clamped into [1, MAX_GATE_HISTORY_PAGE] and returned as the EFFECTIVE page size so a
-   * "load more" client can detect a server cap (mirrors the archived-sessions pagination contract).
-   * Ordered by `seq DESC` (the never-reused monotonic sequence) so recency is stable across same-ts ties.
-   *
-   * Card 6ca4b1a0: ALSO left-joins `pending_gate_ops` by this row's own `opId` (extracted from
-   * `detail_json`) to project `emitCompareReduced`/`emitCompareIdenticalCount`/`emitCompareTestFiles` — see
-   * `GateEventJoinRow.verdictPayloadJson`'s own doc for why that table, not `detail_json` directly, is the
-   * one place the real true/false tri-state survives.
-   *
-   * Card b480dda9: a correlated subquery (not a JOIN — a `batch_merge_forfeited` event has no dedicated
-   * table to join, and a subquery sidesteps any fan-out risk from a hypothetical duplicate) checks whether
-   * a sibling `batch_merge_forfeited` event shares this row's own `opId`, projected as `GateHistoryRow
-   * .batchForfeited`. Cheap in practice: `orchestration_events.kind` is indexed (`idx_orch_events_kind`),
-   * so the subquery filters to the (normally zero, always small — see that field's own doc) set of
-   * forfeit events before ever comparing `opId`, and it only evaluates for the page actually returned
-   * (after `LIMIT`/`OFFSET`), never the full matching set.
-   */
+  /** The HISTORY half of the Gates page. Enrichment is one JOIN, never a per-row lookup (@decision a1c86452).
+   *  The emit-compare fields join `pending_gate_ops` by `opId`, not `detail_json` directly.
+   *  (@decision 6ca4b1a0) `batchForfeited` is a correlated subquery, deliberately (@decision b480dda9). */
   listGateEvents(opts: { projectId?: string | null; limit: number; offset: number }): GateHistoryPage {
     const limit = Math.max(1, Math.min(opts.limit, MAX_GATE_HISTORY_PAGE));
     const offset = Math.max(0, opts.offset);
@@ -5894,28 +5571,9 @@ export class Db {
     ).all(...filterParams, limit, offset) as GateEventJoinRow[];
     return { items: rows.map(toGateHistoryRow), total, limit };
   }
-  /**
-   * Card 80b7a33b — a BOUNDED, kind-filterable, newest-first page of orchestration_events across the
-   * whole platform (or scoped to one project/session/task), plus the total matching count. Generalizes
-   * `listGateEvents`' own bounded/paginated/JOIN-enriched shape (SAME project/agent/branch/task-title
-   * enrichment, SAME clamp-and-report-effective-limit contract) to an ARBITRARY caller-supplied `kind`
-   * set instead of the hardcoded `GATE_HISTORY_KINDS` — the read that closes the gap a Lead's forensics
-   * repeatedly fell back to raw sqlite for: a fleet-down incident isn't limited to gate-run kinds (it may
-   * need `kill_switch`/`recycle_begin`/`merge_rejected`/`platform_escalate`/etc.).
-   *
-   * `kind` here is CALLER-supplied (an agent/Lead argument), unlike `GATE_HISTORY_KINDS` (a trusted
-   * internal constant) — so unlike that call site's plain string interpolation, every kind value is bound
-   * as a query PARAMETER (`?` placeholders), never interpolated into the SQL text. AT THIS LAYER an
-   * unrecognized kind still just matches zero rows (it can never reach the query as raw text, so it is
-   * not an injection vector no matter what a caller passes) — but the SHARED `eventsSearchQuery` helper
-   * (mcp/eventsSearch.ts, card 39f79291, widened to a second caller by card 60c1fff8) validates `kind`
-   * against the real `OrchestrationEventKind` set BEFORE it ever reaches this function, rejecting an
-   * unrecognized value with an explicit error instead of letting it fall through to a silent empty page —
-   * shared verbatim by BOTH the `events_search` MCP tool on the platform surface (mcp/platform.ts) and its
-   * manager-surface sibling (mcp/orchestration.ts), so neither can drift from the other's validation. Don't
-   * read this function's own zero-rows behavior as "events_search returns [] on a bad kind" — that gap is
-   * closed one layer up, here.
-   */
+  /** Generalizes `listGateEvents`' bounded/paginated/JOIN-enriched shape to an ARBITRARY caller-supplied
+   *  `kind` set (@decision 80b7a33b). ⛔ `kind` is caller-supplied: every value is bound as a query
+   *  PARAMETER, never interpolated into SQL text — it can never reach the query as raw text. */
   listOrchestrationEventsBounded(opts: {
     kind?: string[]; projectId?: string | null; sessionId?: string | null; taskId?: string | null;
     limit: number; offset: number;
@@ -5941,24 +5599,9 @@ export class Db {
       params.push(opts.taskId);
     }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-    // Card ab1d1129: several emitters stamp "" (never NULL — manager_session_id is NOT NULL, so "" is
-    // their only option when no real session id is available) rather than omitting the field. COALESCE
-    // treats "" as present and picks it over a real id in the OTHER field, so the session join below
-    // misses the session entirely, and the row's project comes back NULL — invisible to every
-    // project-scoped read. Two independent fallbacks, both additive (they only ever fill in a NULL,
-    // never override a value the OLD query already produced):
-    //  1. NULLIF normalizes "" to NULL before COALESCE choses between worker/manager, restoring the
-    //     intended prefer-worker-else-manager fallback — without touching which id wins when BOTH are
-    //     real (that's a separate, deliberate attribution choice; see `sessionId` below, left untouched).
-    //     Recovers `cross_project_message`/`assistant_relay_message`'s routine BOARDED-delivery case
-    //     (a real sending manager session, no live target worker session).
-    //  2. When NEITHER session field is resolvable at all (a REST-origin/actorless emitter — e.g.
-    //     `task_held_cleared`/`escalation_triaged` writing "" with no session in scope to fall back to
-    //     — see memory note empty-session-sentinel-hides-events-from-scoped-reads), fall back to the
-    //     ALREADY-JOINED task's own `project_id`: a task belongs to exactly one project by construction
-    //     (`tasks.project_id NOT NULL`), so this is an unambiguous, safe source of truth, never a guess.
-    //     Does NOT recover `session_message_delivered`, whose event carries no taskId at all in this
-    //     shape — a real remaining gap; see this fix's own report/commit for why that one is out of scope.
+    // An empty-string session-id sentinel must be NULLIF-normalized before COALESCE, or it wins wrongly
+    // over a real id in the other field (@decision ab1d1129). Two independent, additive fallbacks below;
+    // does NOT recover `session_message_delivered`, whose event carries no taskId in this shape.
     const from =
       `FROM orchestration_events oe
        LEFT JOIN sessions s ON s.id = COALESCE(NULLIF(oe.worker_session_id, ''), NULLIF(oe.manager_session_id, ''))
@@ -6029,21 +5672,9 @@ export class Db {
     return (this.db.prepare("SELECT * FROM orchestration_events WHERE worker_session_id = ? ORDER BY ts, rowid")
       .all(workerSessionId) as Row[]).map(toOrchestrationEvent);
   }
-  /**
-   * Card 7d492f8b: every durable audit event stamped with a given gate/merge op's `opId` (see
-   * confirmWorkerMerge's/runWorkerGate's own `evt` closures, which now merge `opId` into every emitted
-   * `detail` unconditionally) — the join `SessionService.reconcileOrphanedGateOps` needs to recover a
-   * genuinely-settled op's REAL outcome from durable history instead of misreporting it as
-   * `orphaned-by-restart` purely because its `pending_gate_ops` tombstone row never reached
-   * `state:'settled'` before a crash. `opId` is a UUID minted once per op (`PendingOpRegistry.attach`'s
-   * `onOpMinted`), so an exact `json_extract` match is unambiguous — no `kind` filter needed; a "merge" op
-   * can log more than one event under the same opId (e.g. `build_gate` then `merge_rejected`), so this
-   * returns ALL of them, ordered `seq ASC` (chronological, the never-reused monotonic sequence — see its
-   * own schema doc) so a caller reading them in event order sees them in the order they actually happened.
-   * Unindexed `json_extract` scan over the whole table — accepted: this is called ONLY from a boot-time
-   * sweep, only for the (normally zero, always small) set of rows still `state:'pending'` after a restart,
-   * never a hot path (mirrors `listScheduleHistory`'s own precedent for an unindexed `json_extract` filter).
-   */
+  /** Every durable audit event stamped with a given op's `opId`, `seq ASC` — recovers a genuinely-settled
+   *  op's real outcome from durable history (@decision 7d492f8b). Unindexed scan, accepted: boot-time
+   *  sweep only, never a hot path. */
   findGateOpEventsByOpId(opId: string): OrchestrationEvent[] {
     return (this.db.prepare(
       "SELECT * FROM orchestration_events WHERE json_extract(detail_json, '$.opId') = ? ORDER BY seq ASC",
@@ -6247,21 +5878,8 @@ export class Db {
       // mentions this field at all, and better-sqlite3 cannot bind a raw JS object as a parameter.
       deferredUntilEvent: serializeDeferredUntilEvent(next.deferredUntilEvent) });
   }
-  /**
-   * Optimistic-concurrency-guarded wrapper around {@link updateTask} (card d0978321) — mirrors
-   * `upsertProjectMemoryChecked`'s exact shape: wrapped in one `db.transaction()` so the read-current +
-   * conditional-write stays atomic, compares `baseVersion` against the row's CURRENT `version` (a stale
-   * OR omitted base against an existing row is rejected — omission is deliberately treated the same as
-   * staleness, same reasoning as memory: an update to an EXISTING row with no base at all is
-   * indistinguishable from a blind clobber), and returns `{ok:false, current}` (the row as it stands
-   * right now) instead of writing, so the caller can reconcile/merge and retry with the fresh version.
-   *
-   * The CALLER (mcp/tasks.ts `updateProjectTask`) decides WHEN to reach for this instead of the plain,
-   * blind `updateTask` above — exactly when the patch touches `title`/`body` (DoD: field-only moves must
-   * never be gated). This function itself has no opinion on that; it always gates against whatever
-   * `baseVersion` it's given, using `updateTask`'s own bump-on-content-change rule to decide whether the
-   * version actually needed to match.
-   */
+  /** Optimistic-concurrency-guarded wrapper around {@link updateTask} — `version` bumps only on
+   *  title/body writes, and only THIS wrapper gates on it, never a field-only move (@decision d0978321). */
   updateTaskChecked(
     id: string,
     patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "heldRequestId" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason" | "deferredUntilEvent">>,
