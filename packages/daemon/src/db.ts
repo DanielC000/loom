@@ -5929,7 +5929,7 @@ export class Db {
       params.push(...opts.kind);
     }
     if (opts.projectId) {
-      conditions.push("s.project_id = ?");
+      conditions.push("COALESCE(s.project_id, t.project_id) = ?");
       params.push(opts.projectId);
     }
     if (opts.sessionId) {
@@ -5941,18 +5941,36 @@ export class Db {
       params.push(opts.taskId);
     }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    // Card ab1d1129: several emitters stamp "" (never NULL — manager_session_id is NOT NULL, so "" is
+    // their only option when no real session id is available) rather than omitting the field. COALESCE
+    // treats "" as present and picks it over a real id in the OTHER field, so the session join below
+    // misses the session entirely, and the row's project comes back NULL — invisible to every
+    // project-scoped read. Two independent fallbacks, both additive (they only ever fill in a NULL,
+    // never override a value the OLD query already produced):
+    //  1. NULLIF normalizes "" to NULL before COALESCE choses between worker/manager, restoring the
+    //     intended prefer-worker-else-manager fallback — without touching which id wins when BOTH are
+    //     real (that's a separate, deliberate attribution choice; see `sessionId` below, left untouched).
+    //     Recovers `cross_project_message`/`assistant_relay_message`'s routine BOARDED-delivery case
+    //     (a real sending manager session, no live target worker session).
+    //  2. When NEITHER session field is resolvable at all (a REST-origin/actorless emitter — e.g.
+    //     `task_held_cleared`/`escalation_triaged` writing "" with no session in scope to fall back to
+    //     — see memory note empty-session-sentinel-hides-events-from-scoped-reads), fall back to the
+    //     ALREADY-JOINED task's own `project_id`: a task belongs to exactly one project by construction
+    //     (`tasks.project_id NOT NULL`), so this is an unambiguous, safe source of truth, never a guess.
+    //     Does NOT recover `session_message_delivered`, whose event carries no taskId at all in this
+    //     shape — a real remaining gap; see this fix's own report/commit for why that one is out of scope.
     const from =
       `FROM orchestration_events oe
-       LEFT JOIN sessions s ON s.id = COALESCE(oe.worker_session_id, oe.manager_session_id)
-       LEFT JOIN projects p ON p.id = s.project_id
-       LEFT JOIN agents a ON a.id = s.agent_id
+       LEFT JOIN sessions s ON s.id = COALESCE(NULLIF(oe.worker_session_id, ''), NULLIF(oe.manager_session_id, ''))
        LEFT JOIN tasks t ON t.id = oe.task_id
+       LEFT JOIN projects p ON p.id = COALESCE(s.project_id, t.project_id)
+       LEFT JOIN agents a ON a.id = s.agent_id
        ${where}`;
     const total = (this.db.prepare(`SELECT COUNT(*) AS c ${from}`).get(...params) as { c: number }).c;
     const rows = this.db.prepare(
       `SELECT oe.id AS id, oe.ts AS ts, oe.kind AS kind, oe.detail_json AS detailJson, oe.task_id AS taskId,
               COALESCE(oe.worker_session_id, oe.manager_session_id) AS sessionId,
-              s.project_id AS projectId, p.name AS projectName, a.name AS agentName,
+              COALESCE(s.project_id, t.project_id) AS projectId, p.name AS projectName, a.name AS agentName,
               s.branch AS branch, t.title AS taskTitle
        ${from}
        ORDER BY oe.seq DESC

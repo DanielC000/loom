@@ -73,7 +73,7 @@ function seed(db) {
   try {
     const db = new Db();
     dbs.push(db);
-    const { P1, P2, mgr1, w1, w2, t1, t2 } = seed(db);
+    const { P1, P2, mgr1, mgr2, w1, w2, t1, t2 } = seed(db);
 
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {});
@@ -141,6 +141,46 @@ function seed(db) {
     const goodKind = await mgr.call("events_search", { kind: ["kill_switch"] });
     check("(3) POSITIVE CONTROL: a known-good kind with a known-present event returns it", goodKind.total === 1 && goodKind.events[0].kind === "kill_switch");
 
+    // ── (5) card ab1d1129: the empty-session sentinel no longer hides a row from a project-scoped read ────
+    // Three distinct emitter shapes, each on a kind NOT seeded above, so they can be isolated by `kind`
+    // alone. Appended directly via db.appendEvent (not through the router) to construct the exact byte
+    // shapes real emitters write, independent of any particular call path.
+    // (a) worker-sentinel shape (cross_project_message/assistant_relay_message's routine BOARDED case): a
+    // REAL manager session, workerSessionId stamped "" because no live target worker session existed.
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgr1, workerSessionId: "", taskId: t1, kind: "cross_project_message", detail: { note: "worker-sentinel" } });
+    // (b) fully-actorless shape WITH a linked task (task_held_cleared/escalation_triaged's real shape): no
+    // resolvable session at all — managerSessionId stamped "" (the column is NOT NULL, so "" is the only
+    // option a REST-origin/actorless emitter has) — but a real taskId to fall back to.
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", workerSessionId: null, taskId: t1, kind: "task_held_cleared", detail: { note: "actorless-with-task" } });
+    // (c) fully-actorless shape with NO linked task (session_message_delivered's real shape) — the ONE
+    // named emit site this fix does NOT recover. Asserted as a KNOWN, STILL-OPEN gap below, never silently
+    // assumed fixed just because (a)/(b) now pass.
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", workerSessionId: null, taskId: null, kind: "session_message_delivered", detail: { note: "actorless-no-task" } });
+    // P2 counterpart of (b) — proves the task-fallback stays project-scoped (resolves via the task's OWN
+    // `project_id`, never leaks a foreign task's events into P1's read).
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", workerSessionId: null, taskId: t2, kind: "task_held_cleared", detail: { note: "actorless-with-task-foreign" } });
+
+    const workerSentinel = await mgr.call("events_search", { kind: ["cross_project_message"] });
+    check("(5a) FIRES: a worker-sentinel row (real manager, \"\" worker) is now VISIBLE to P1's scoped read", workerSentinel.total === 1 && workerSentinel.events[0]?.detail?.note === "worker-sentinel");
+
+    const actorlessWithTask = await mgr.call("events_search", { kind: ["task_held_cleared"] });
+    check("(5b) FIRES: an actorless row (\"\" manager, no worker) WITH a linked P1 task is now VISIBLE via the task fallback", actorlessWithTask.total === 1 && actorlessWithTask.events[0]?.detail?.note === "actorless-with-task");
+    check("(5b) NEGATIVE CONTROL: the SAME kind's P2-linked counterpart does NOT leak into P1's scoped read", !actorlessWithTask.events.some((e) => e.detail?.note === "actorless-with-task-foreign"));
+
+    const actorlessNoTask = await mgr.call("events_search", { kind: ["session_message_delivered"] });
+    check("(5c) KNOWN GAP, asserted not assumed: an actorless row with NO linked task is STILL invisible to a project-scoped read (session_message_delivered's real shape) — 0 here is the current, documented behavior", actorlessNoTask.total === 0);
+    // Positive control for (5c): the same row IS present on an unscoped db-level read, proving the 0 above
+    // is the scoping join's own doing (a real, documented gap), not an absent fixture / broken appendEvent.
+    const unscopedSessionDelivered = db.listOrchestrationEventsBounded({ projectId: null, kind: ["session_message_delivered"], limit: 100, offset: 0 });
+    check("(5c) POSITIVE CONTROL: the same actorless/no-task row IS present on an unscoped read (proves it was written; the scoped 0 is the real gap, not a fixture miss)", unscopedSessionDelivered.total === 1);
+
+    // Positive control for (5b): the task-fallback mechanism is symmetric, not a P1-only special case — P2's
+    // OWN manager sees ITS OWN actorless-with-task row through the identical mechanism.
+    const mgrP2 = await connect(mgr2, "manager");
+    const p2ActorlessWithTask = await mgrP2.call("events_search", { kind: ["task_held_cleared"] });
+    check("(5d) POSITIVE CONTROL: P2's own manager sees its OWN actorless-with-task row via the identical task-fallback mechanism", p2ActorlessWithTask.total === 1 && p2ActorlessWithTask.events[0]?.detail?.note === "actorless-with-task-foreign");
+    await mgrP2.client.close();
+
     await mgr.client.close();
 
     // ── role gate: events_search is a MANAGER-ONLY read, absent from the worker's pinned depth-1 surface —
@@ -157,6 +197,6 @@ function seed(db) {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — events_search is registered on the manager surface, project-scoped SERVER-SIDE (no projectId argument exists, and every other input the tool accepts still cannot surface a foreign project's row), reuses the SAME query/validation code the Platform surface uses (an unknown kind is rejected here too), and stays off the worker's pinned depth-1 surface."
+  ? "\n✅ ALL PASS — events_search is registered on the manager surface, project-scoped SERVER-SIDE (no projectId argument exists, and every other input the tool accepts still cannot surface a foreign project's row), reuses the SAME query/validation code the Platform surface uses (an unknown kind is rejected here too), stays off the worker's pinned depth-1 surface, and (card ab1d1129) an empty-session sentinel row is now visible to its owning project's scoped read via either fallback (worker-sentinel/real-manager, or fully-actorless/real-task) without leaking cross-project — while the one named shape neither fallback can reach (no session AND no task) stays a documented, asserted-not-assumed gap."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

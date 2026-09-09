@@ -4805,14 +4805,15 @@ export class OrchestrationMcpRouter {
     // `projectId` parameter, the project is always the CALLER's own, resolved from this session. A manager
     // cannot request another project's rows through any input this tool accepts, and a foreign-project row
     // is never returned at all (not merely redacted).
-    // ⚠️ KNOWN GAP, PRE-EXISTING in `listOrchestrationEventsBounded` (db.ts) — surfaced by review, not
-    // introduced here: project-scoping joins through `COALESCE(worker_session_id, manager_session_id)`,
-    // but several emitters stamp an empty string rather than NULL for an absent worker session
-    // (sessions/service.ts:11759/:11915/:10805, mcp/tasks.ts:1567, mcp/platform.ts:2321/:2564) — COALESCE
-    // still picks that "" over the real manager id, the join matches nothing, and the row is invisible to
-    // EVERY project-scoped read. The Platform surface's optional `projectId` lets a Lead fall back to an
-    // unscoped read and still see these; this manager tool has no such escape hatch. See the tool's own
-    // description for the caller-facing consequence (this comment is why, not what).
+    // Card ab1d1129: the KNOWN GAP once recorded here — `listOrchestrationEventsBounded`'s scoping join
+    // missing a row entirely because an emitter stamped "" (never NULL — manager_session_id is NOT NULL)
+    // instead of a real session id — is fixed at the join (db.ts): NULLIF normalizes "" to NULL before
+    // COALESCE picks between worker/manager, and a SECOND fallback covers the fully-actorless emit sites
+    // (no resolvable session at all) via the already-joined task's own project. `session_message_delivered`
+    // (no taskId in its shape) is the one named site this does NOT recover — see db.ts's own comment. The
+    // SEPARATE, still-live quirk this does NOT touch — COALESCE prefers the worker/target session for
+    // attribution even when it resolves, so a `cross_project_message` sender can't see its own outbound
+    // sends here — is documented on the tool description below (this comment is why, not what).
     server.registerTool(
       "events_search",
       {
@@ -4838,13 +4839,14 @@ export class OrchestrationMcpRouter {
           "); the result is ALWAYS the {events, total, returned, offset, nextOffset} envelope (never a bare " +
           "array) since this read is inherently a forensics page, not a small enumerable set — page " +
           "deterministically via offset:nextOffset until it is null, same contract as `gate_history`. " +
-          "⚠️ KNOWN GAP: a row whose event was recorded with an empty-string (never NULL) worker/manager " +
-          "session id is EXCLUDED from every project-scoped read, this tool included — a small number of " +
-          "emitters stamp \"\" rather than omitting the field, and the scoping join treats that \"\" as a " +
-          "real, non-matching session, not an absence to fall back past. One concrete consequence: for a " +
-          "`cross_project_message` event, the SENDING manager's own project resolves through the OTHER " +
-          "(worker/target) session id, not its own — so a manager can be structurally unable to see its own " +
-          "outbound peer messages here. Never read a `0`/missing result on this class as \"never happened\".",
+          "⚠️ For a `cross_project_message` event, project-scoping prefers the WORKER/target session over " +
+          "the sending manager's own (by design, when the target session resolves) — so a manager can be " +
+          "structurally unable to see its own outbound peer messages here; they scope to the RECIPIENT " +
+          "project instead. Never read a `0`/missing result on this class as \"never happened\" — check " +
+          "the recipient project's own read. ⚠️ `session_message_delivered` events carry no project " +
+          "attribution at all (no resolvable session, no linked task) and are structurally invisible to " +
+          "EVERY project-scoped read, this one included — a `0`/missing result on that kind specifically " +
+          "is likewise never proof it didn't happen (card ab1d1129).",
         inputSchema: strictShape({
           kind: z.array(z.string()).optional(),
           sessionId: z.string().optional(),
