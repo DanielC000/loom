@@ -8,11 +8,11 @@ Card b9e07a4a Code Review: one repo-guard-only holder/waiter in `GateQueueSnapsh
 
 ## `opId` is the Map identity `activeMergeRepos` stores against `repoPath`, not merely forensics
 
-Card b9e07a4a Critical: `GateDescriptor.opId` was purely optional forensics (also what makes a run findable via card edc1ec12's `gate_status(opId)`). For a `merge`-kind descriptor with `repoPath`, `opId` is now the IDENTITY `activeMergeRepos` stores. Omitting it doesn't break admission (`repoHolderId` has a safe fallback), but the hold then can't be matched by an external `beginSquash`/`endSquash` call — a descriptor calling `holdRepoGuardOnExit` MUST supply a real, stable `opId`.
+Card b9e07a4a Critical: `GateDescriptor.opId` was purely optional forensics (also what makes a run findable via card edc1ec12's `gate_status(opId)`). For a `merge`-kind descriptor with `repoPath`, `opId` is now the IDENTITY `activeMergeRepos` stores. Omitting it doesn't break admission (`repoHolderId` has a safe fallback), but the hold can't then be matched by an external `beginSquash`/`endSquash` call — a descriptor calling `holdRepoGuardOnExit` MUST supply a real, stable `opId`.
 
 ## `RepoGuardOnlyEntry` — no process, no `repoContended` of its own
 
-Card b9e07a4a: one repo-guard-only holder/waiter in `repoGuardOnlySnapshot()` (the `db9b0130` inert-diff skip's own descriptor). Before this, an operator could see a queued merge report `repoContended:true` with ZERO running merges visible on that repo (the holder was invisible to `snapshot()`), no way to see or cancel a wedged wait. Deliberately NOT merged into `GateSnapshotEntry`: no process runs here, so no `lastOutputAt`/`extended`/`liveness`/`repoContended` (an entry here IS the contention that field would otherwise report).
+Card b9e07a4a: one repo-guard-only holder/waiter in `repoGuardOnlySnapshot()` (the `db9b0130` inert-diff skip's own descriptor). Before this, an operator could see a queued merge report `repoContended:true` with ZERO running merges visible on that repo (the holder was invisible to `snapshot()`), no way to even see, let alone cancel, a wedged repo-guard-only wait. Deliberately NOT merged into `GateSnapshotEntry`: no process runs here, so no `lastOutputAt`/`extended`/`liveness`/`repoContended` (an entry here IS the contention that field would otherwise report).
 
 ## `activeMergeRepos` is `Map<repoPath, holderId>`, not a bare `Set` — the cascade a Set allowed
 
@@ -28,4 +28,4 @@ Card b9e07a4a CRITICAL: a bare `Set<string>` couldn't tell "free" from "held by 
 
 ## Source
 
-`packages/daemon/src/sessions/service.ts` (`RepoGuardOnlyQueueEntry` doc, lines 183-199; single-file-retry fix, lines 587-609), commit `f9caa77e30d5c1a6dd994b6203261968c0dbf94f`, relocated by card `8f4c8a8f`. Also `packages/daemon/src/orchestration/gate-semaphore.ts` (`GateDescriptor.opId`, 155-169; `RepoGuardOnlyEntry`, 380-394; `activeMergeRepos`, 524-547), commit `5f6d9fd981336bfafd530fada633b229677aa081`, relocated by card `9641742e`. No wording changed beyond joining wrapped source lines into flowing paragraphs and stripping `*` comment markers.
+`sessions/service.ts` (`RepoGuardOnlyQueueEntry` doc, 183-199; single-file-retry fix, 587-609), commit `f9caa77e30d5c1a6dd994b6203261968c0dbf94f`, relocated by card `8f4c8a8f`. Also `orchestration/gate-semaphore.ts` (`GateDescriptor.opId`, 155-169; `RepoGuardOnlyEntry`, 380-394; `activeMergeRepos`, 524-547), commit `5f6d9fd981336bfafd530fada633b229677aa081`, relocated by card `9641742e`. No wording changed beyond joining wrapped lines into flowing paragraphs and stripping `*` markers.
