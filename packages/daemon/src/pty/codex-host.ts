@@ -207,9 +207,13 @@ export const codexTrustDialogLock = new CodexTrustDialogLock();
  * be the site — it only ever receives already-constructed `char` values), not the OpenAI crossterm fork's
  * Windows key-event parser (same reason — ordinary printable codepoints pass through unconditionally,
  * with no keyboard-layout lookup). The loss happens inside Windows conpty's own closed-source translation
- * of the raw VT/UTF-8 byte stream into synthesized `KeyEventRecord`s — evidenced, not merely inferred, by
- * three independently-implemented pty backends (system conpty, winpty, node-pty's bundled conpty.dll)
- * each dropping a DIFFERENT, non-overlapping character class when swapped against the identical specimen.
+ * of the raw VT/UTF-8 byte stream into synthesized `KeyEventRecord`s — but only the translation triggered
+ * by a live codex/crossterm-style console-input read requesting those records, ⛔ not conpty use in
+ * general: a plain raw-mode-reading child process receiving the identical bytes via the identical conpty
+ * sees them intact (docs/design/multi-harness-parity-matrix.md:152-181 is the actual determination this
+ * paraphrases). Evidenced, not merely inferred, by three independently-implemented pty backends (system
+ * conpty, winpty, node-pty's bundled conpty.dll) each dropping a DIFFERENT, non-overlapping character
+ * class when swapped against the identical specimen.
  *
  * THE MEASURED BOUNDARY (25/25 against a wide, ground-truthed specimen set — Python `unicodedata`, not
  * memorized categories): a Unicode LETTER codepoint (`\p{L}`: Ll/Lu/Lo/Lt/Lm — covers Latin, Cyrillic,
