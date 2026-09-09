@@ -136,37 +136,13 @@ export interface GateDescriptor {
    *  gate (solo merge, worker self-check, deploy), which is what keeps those runs byte-identical. */
   batchBranches?: string[] | null;
   batchLandedCount?: number | null;
-  /** Card 19256231 — set ONLY on a per-branch MERGE gate that `mergeBatchTracked`'s own `runFallback`
-   *  spawned (via `confirmWorkerMergeTracked`) after that batch's own shared gate genuinely ran and
-   *  produced an outcome the manager needs individually gated candidates for (a RED gate, a forfeit, or
-   *  a green batch's own dropped/overflow/stranded candidates) — carries that batch's OWN `opId` (the
-   *  same id its `[loom:merge-batch-*]` settle nudge already names). A fallback descriptor otherwise
-   *  looks IDENTICAL to an ordinary solo `worker_merge_confirm` (real `taskId`, real `branch`, a real
-   *  `workerLabel` — never the batch's own `taskId:null`/`branch:null` shape `batchBranches` marks), so
-   *  the documented "look for taskId:null/branch:null/workerLabel:Orchestrator" workaround for finding a
-   *  live batch op is structurally blind to these rows: it was written to find the BATCH's own gate, and
-   *  filters out exactly the rows a rejected batch spawns. This field is what lets a caller reading
-   *  `gate_queue` recognize one of those rows as "spawned by MY batch op X" rather than mistaking it for
-   *  an unrelated, ordinary merge. `undefined`/absent on every batch's OWN gate descriptor (that one
-   *  self-identifies via `batchBranches` instead) and on every genuinely ordinary solo merge — never set
-   *  on the two early-return batch fallback paths (too few eligible candidates, no `gateCommand`
-   *  configured) either, since neither ever mints a batch op to point back to. */
+  /** @decision 19256231 — set only on a batch's per-branch fallback merge, carrying the batch's own
+   *  opId; the "taskId:null/branch:null/workerLabel:Orchestrator" trick for finding a live batch op
+   *  is structurally blind to these rows (docs/decisions/19256231-fallbackofbatchopid-marks-a-batch-fallback-merge.md) */
   fallbackOfBatchOpId?: string | null;
-  /** The PendingOpRegistry opId this gate run belongs to (card edc1ec12's `gate_status(opId)` read tool) —
-   *  a caller holding the opId a `run_gate`/`worker_merge_confirm` pending response returned can look this
-   *  run up in {@link GateSemaphore.snapshot}'s entries without needing the semaphore's own internal `id`.
-   *  Optional: a call site with no correlating op (there are none today — every `runExclusive` caller has
-   *  one) simply omits it and that entry is un-lookup-able by opId, exactly as before this field existed.
-   *
-   *  Card b9e07a4a Code Review (Critical): for a `merge`-kind descriptor carrying `repoPath` — the ONLY
-   *  case that ever touches {@link GateSemaphore}'s `activeMergeRepos` — `opId` is now the IDENTITY that
-   *  Map stores against `repoPath`, not merely forensics. Omitting it here does NOT break admission (a
-   *  safe internal fallback applies — see `GateSemaphore.repoHolderId`'s own doc), but it DOES mean this
-   *  hold can never be matched by an EXTERNAL `beginSquash`/`endSquash`/`releaseMergeRepoGuard(repoPath,
-   *  opId)` call, since those only ever have an `opId` to present, never the semaphore's own internal id —
-   *  a merge descriptor that intends to call `holdRepoGuardOnExit` MUST supply a real, stable `opId`
-   *  (every real `confirmWorkerMerge` call already does: `gateDescriptor.opId` and the later
-   *  `beginSquash`/`endSquash(repoPath, thisOpId)` calls are the SAME value by construction). */
+  /** @decision b9e07a4a — opId is the IDENTITY activeMergeRepos stores against repoPath, not merely
+   *  forensics; also what makes a run findable by gate_status(opId) (card edc1ec12)
+   *  (docs/decisions/b9e07a4a-repoguardonlyqueueentry-exists-and-hides-repopath.md) */
   opId?: string;
   /**
    * Card 8d585277: the worktree this run is bound to, when it's bound to one at all — a worker self-check
@@ -183,75 +159,13 @@ export interface GateDescriptor {
    * worktree-less ops must co-run at cap headroom).
    */
   worktreePath?: string | null;
-  /**
-   * Card 92e960d1: the CANONICAL repo path this MERGE gate targets — set ONLY at the merge-gate call
-   * site (`confirmWorkerMerge`, resolved via `resolveRepoByKey(project, worker.repoKey).path`, never a
-   * bare `projectId`, so two DIFFERENT repos registered on the same multi-repo project are never
-   * cross-serialized). NEVER set on a `worker`-kind (`runWorkerGate`) or `deploy`-kind
-   * (`deployOwnProject`) descriptor — see {@link GateSemaphore.mergeRepoFree}'s own doc for why those two
-   * gate types are structurally unaffected by this field regardless.
-   *
-   * THE HAZARD THIS CLOSES: two `merge`-kind gates admitted concurrently for the SAME repo race to
-   * squash — at most one lands (canonical main is a single shared resource), and the other burns its
-   * full gate run before `mergeBranchLocked`'s `requireCanonicalHead` re-check (git/worktrees.ts) fails
-   * closed and aborts it. This field is what lets the semaphore refuse to ADMIT the second one at all,
-   * queueing it instead — see {@link GateSemaphore.mergeRepoFree}/`activeMergeRepos`.
-   *
-   * ⚠️ AT THE TIME THIS FIELD WAS ADDED, it was NOT a fix for the second merge's own odds of landing: its
-   * `gateBaseMainHead` (the union-merge's captured main sha) was fixed BEFORE it ever reached this
-   * semaphore, so if the FIRST same-repo merge landed while the second was queued, the second's captured
-   * base was already stale by the time it was admitted — it still ran its own gate and then still
-   * self-aborted via the fail-closed check, needing a manager re-confirm despite the throughput win this
-   * field buys (no more SIMULTANEOUS double-lane loss, and the other cap lane staying free for unrelated
-   * cross-project work during the first merge's run). PARTIALLY addressed by card b798e706 (fast-follow):
-   * the merge gate's own `runExclusive` callback RE-DERIVES `gateBaseMainHead` the instant it is admitted
-   * here (`confirmWorkerMerge`'s `reunionAtAdmission`), re-unioning against canonical main's then-current
-   * tip when it moved during the queue wait — but b798e706, by itself, left the HEADLINE same-repo-sibling
-   * scenario open: this field's own `release()` used to free the admission guard the MOMENT a running
-   * merge's gate settled, strictly BEFORE that merge's own squash (`mergeBranch`, called outside
-   * `runExclusive`). CLOSED FOR REAL by card c24dd48a: `runExclusive`'s `fn` can now call the
-   * `holdRepoGuardOnExit` callback it's handed (see `runExclusive`'s own doc) to keep THIS field's guard
-   * held past the gate's own settle, and `confirmWorkerMerge` extends that hold across its own squash call
-   * via `beginSquash`/`endSquash` below — so a queued same-repo sibling is not admitted until the holder's
-   * squash commit has actually landed (or failed), closing the exact gap this comment used to describe. A
-   * residual TOCTOU window remains BY DESIGN — a landing at the exact instant a run IS admitted (before
-   * this field's guard is even checked) can still invalidate a freshly-re-derived base — caught fail-closed
-   * by `requireCanonicalHead`'s own in-lock re-check at squash time, same as ever; this field only ever
-   * narrows the ADMISSION window, it was never meant to replace that fail-closed check.
-   */
+  /** @decision 92e960d1 — repoPath serializes same-repo merge gates; only partially closed by
+   *  b798e706, closed for real by c24dd48a's holdRepoGuardOnExit hold-past-settle
+   *  (docs/decisions/92e960d1-per-repo-merge-admission-guard.md) */
   repoPath?: string | null;
-  /**
-   * Card 99a1cf6f — set ONLY when this admission cycle is a RE-admission of a merge that already ran a
-   * genuine first attempt: `confirmWorkerMerge`'s single-file retry and its transient-kill retry both
-   * reuse the SAME `gateDescriptor` object (same `opId`, same everything) for their OWN, separate
-   * `runExclusive` call — so, before this field existed, a manager reading `gate_queue`/`gate_status`
-   * mid-retry saw a `phase:"queued"` entry structurally IDENTICAL to a first-time admission wait, with no
-   * way to tell "waiting to start" from "attempt 1 already ran (and likely took minutes), this is
-   * queued for a retry". `undefined`/absent (never a fabricated `1`) on a first admission — every ordinary
-   * merge, worker self-check, and deploy gate is unaffected. `2` on either retry's own descriptor (both
-   * retries are each a SECOND admission cycle for the same op). See `priorAttemptMs` alongside this for
-   * how long attempt 1 actually took, and `NEVER_CACHED_OUTCOMES`'s sibling concern in
-   * `orchestration/pending-ops.ts` for the RELATED-but-distinct problem this does NOT solve (a stale-base
-   * rejection's own cache replay — that is DoD-5, a different mechanism; this field is purely
-   * descriptive/read-only).
-   *
-   * Card 7ad12202 CORRECTS an earlier version of this doc that claimed "no gate descriptor ever needs a
-   * higher number [than 2]" — false: when the single-file retry's own isolated run passes but the ORIGINAL
-   * `&&` chain short-circuited on a NON-FINAL step, `confirmWorkerMerge` resumes whatever step(s) never ran
-   * as a THIRD, separately-admitted `runExclusive` cycle for the same op — `attempt:3` on that descriptor.
-   * `3` is real but rare (only the failure shape this card fixes reaches it, not an ordinary single-file
-   * retry) — "at most 2" is no longer a safe assumption for a reader.
-   *
-   * Code Review NON-BLOCKING [6]: an earlier version of THIS correction itself claimed this was
-   * solo-merge-only, "the batch path's own retry/resume admissions key on `batchLandedCount` instead,
-   * never `attempt`" — also false, and fixed in the SAME pass rather than left to rot: `batchLandedCount`
-   * was never a discriminator between a batch's own attempt-1/retry/resume admissions (it's identical on
-   * all three, since it names the assembled branch count, not which admission this is) — a `gate_queue`/
-   * `gate_status` reader had no way to tell them apart. The batch path now stamps `attempt`/
-   * `priorAttemptMs` on its retry (`2`) and resume (`3`) admissions too, alongside its own
-   * `batchLandedCount` (both fields are present together on a batch descriptor, never either/or) —
-   * identical semantics to the solo path described above.
-   */
+  /** @decision 99a1cf6f — attempt/priorAttemptMs distinguish a retry re-admission from a first wait;
+   *  CORRECTED by 7ad12202 — attempt can reach 3, not capped at 2
+   *  (docs/decisions/99a1cf6f-gatebaseinvalidated-is-a-real-verdict-never-cache-it.md) */
   attempt?: number;
   /** Card 99a1cf6f — present iff `attempt` is, alongside it: attempt 1's own measured wall-clock run time
    *  (`gateAttempt1DurationMs`, `sessions/service.ts`, captured the instant attempt 1's own admission
@@ -290,63 +204,18 @@ export interface GateSnapshotEntry {
   queuePosition: number | null;
   /** Echoed from {@link GateDescriptor.opId} — see its doc; null when the run's descriptor didn't carry one. */
   opId: string | null;
-  /** Epoch-ms of the CURRENT step's last liveness event — the SAME `lastOutputAt` clock
-   *  {@link GateLivenessHooks} mirrors from `gate-runner.ts`'s own auto-extend decision, never a second,
-   *  independently-derived one (see that file's `GateLivenessHooks` doc for why). Stamped the instant a
-   *  step actually STARTS (`onStepStart`, mirroring `runGateStep`'s own `lastOutputAt = performance.now()`
-   *  at the top of its promise body — i.e. before the child even spawns), then advanced forward on every
-   *  `onOutput` — never null merely because no output has arrived yet once the step has genuinely begun (a
-   *  step that hasn't printed anything is legitimately "idle since it started", which is real information,
-   *  not an absence). Null while `queued` (no step has started at all) AND, for a caller with real async
-   *  work between admission and its OWN `runGateSequential` call (e.g. `run_gate`'s pre-flight git-stamp
-   *  read in `runWorkerGate`, or a merge gate's `reunionAtAdmission` — `deployOwnProject` has no such gap,
-   *  it invokes the runner synchronously on admission), for that window — this entry is genuinely
-   *  `phase:"running"` with NOTHING yet to report, which is exactly why `null` (not a fabricated `0`) is
-   *  correct there too. **PROVEN BOUNDED, not merely assumed brief (card 166ba5d9):** every git op inside
-   *  that pre-flight window (`computeWorktreeGateStamp`/`resolveGitRef`/`mergeMainIntoWorktree`, all in
-   *  `git/worktrees.ts`) is raced against a real `setTimeout` via that file's own `withTimeout` — "the
-   *  FUNCTION returns within the window regardless" per its own doc — bounded by `gitOpMs`
-   *  (`GIT_OP_TIMEOUT_MS = 15_000` default, human-configurable up to a hard `max(120_000)` in
-   *  `mcp/platform.ts`'s `gitOpMs` schema). `computeWorktreeGateStamp`'s own outer try/catch means the
-   *  FIRST git call to hit that bound ends the function immediately (never sums indefinitely across
-   *  retries) — so this window is capped at roughly one `gitOpMs` budget, ≤120s even under a maximally
-   *  raised config and 15s by default, ORDERS OF MAGNITUDE under `GATE_EXTEND_IDLE_MS` (60s) and
-   *  `BACKGROUND_PARK_STALE_MINUTES` (20min, `sessions/service.ts`) — the two preconditions
-   *  `classifyIdleWorker`'s `parked-gate-stale` branch needs before it would ever read this field. By the
-   *  time `minutesSinceStart >= BACKGROUND_PARK_STALE_MINUTES` could ever hold, `lastOutputAt` is
-   *  GUARANTEED already non-null — `runGateStep` (`gate-runner.ts`) stamps it as its very FIRST synchronous
-   *  statement, before the gate's child process is even spawned, so a hung/never-spawning child can never
-   *  reproduce this null window either. Directly measured too, not just bounded in theory:
-   *  `gate-idle-liveness.mjs`'s card 33aa0291 note instrumented a real `runWorkerGate` run and clocked this
-   *  exact gap at max 209ms (quiet host, n=15) / max 1717ms (host under 15 concurrent CPU-saturating
-   *  children, n=12), 27/27 trials ≥140ms — sub-2-second in practice, nowhere near the theoretical ceiling
-   *  above. A caller computes idle time as
-   *  `Date.now() - lastOutputAt` when non-null, matching how `since`/`elapsedMs` are derived elsewhere in
-   *  this codebase (raw epoch-ms here, `now - stamp` at the read site). A LARGE elapsed time (`since`) is
-   *  frequently HEALTHY (see `GATE_EXTEND_IDLE_MS`'s doc: a gate still producing output gets its timeout
-   *  extended rather than killed) — idle time, not elapsed time, is what actually distinguishes "working
-   *  hard" from "hung". */
+  /** @decision 166ba5d9 — the null-while-running window before lastOutputAt is first stamped is
+   *  proven bounded by gitOpMs, and separately MEASURED at sub-2s (card 33aa0291)
+   *  (docs/decisions/166ba5d9-lastoutputat-null-window-is-bounded-and-measured.md) */
   lastOutputAt: number | null;
   /** True once the CURRENT step's timeout has already been auto-extended once (see `GATE_EXTEND_IDLE_MS`'s
    *  doc — the extension is `!extended`-gated and fires AT MOST ONCE per step). Resets to `false` at the
    *  start of every new step in a multi-step `gateCommand`, mirroring `runGateStep`'s own per-step
    *  `extended` flag exactly — this is per-STEP state, not a whole-run total. Always `false` while queued. */
   extended: boolean;
-  /**
-   * Card 92e960d1: while `phase:"queued"`, whether THIS entry's per-repo merge-admission guard (see
-   * {@link GateDescriptor.repoPath}/{@link GateSemaphore.mergeRepoFree}) is CURRENTLY the reason (or one
-   * of the reasons — cap contention can hold simultaneously) it isn't admitted: another `merge`-kind gate
-   * for the same repo is already RUNNING. Always `false` while `phase:"running"` (nothing is blocking an
-   * already-admitted entry) and always `false` for a non-merge or repoPath-less descriptor. A LIVE,
-   * point-in-time read — recomputed fresh on every `snapshot()` call, never cached at enqueue time, so it
-   * can flip between two reads of the same still-queued entry as sibling ops settle (e.g. a second
-   * same-repo waiter queued behind this one gets admitted first, freeing the repo before this one is).
-   * Named for exactly ONE cause: before card 92e960d1, "queued" only ever meant cap contention (or the
-   * pre-existing per-worktree guard, card 8d585277 — this field does NOT cover that one, only the
-   * repo-level guard this card added) — without this, a caller reading `gate_queue` with a free cap slot
-   * and a queued merge would see something that looks like a bug instead of the new, deliberate
-   * repo-exclusivity wait.
-   */
+  /** @decision 92e960d1 — repoContended:true names ONE specific queued cause (a same-repo merge
+   *  guard), so a free cap slot with a queued merge doesn't read as a bug
+   *  (docs/decisions/92e960d1-per-repo-merge-admission-guard.md) */
   repoContended: boolean;
 }
 
@@ -378,19 +247,9 @@ export interface RepoGuardOnlyDescriptor {
 }
 
 /**
- * One repo-guard-only holder/waiter in {@link GateSemaphore.repoGuardOnlySnapshot}'s result — the
- * `acquireRepoGuardOnly` counterpart to {@link GateSnapshotEntry}. Card b9e07a4a Code Review: BEFORE this
- * existed, a repo-guard-only hold/wait was invisible to `gate_queue` entirely — an operator reading it
- * could see a queued `merge`-kind gate reporting `repoContended:true` while the live registry showed ZERO
- * running merges on that repo (the contending holder was a repo-guard-only op, which `snapshot()` never
- * counted), and had no way to even SEE, let alone cancel, a wedged repo-guard-only wait (unlike every other
- * way to hold this guard, which is at minimum visible via `snapshot()`/`gate_cancel`). This type — and
- * `repoGuardOnlySnapshot()`/`findRepoGuardOnlyByOpId()`/`cancelRepoGuardOnlyWait()` below — close that gap.
- * Deliberately NOT merged into {@link GateSnapshotEntry}/`snapshot()`: this is not a cap-admitted
- * `RegistryEntry` (see `acquireRepoGuardOnly`'s own doc for why it structurally can't be one), so it
- * carries no `lastOutputAt`/`extended`/`liveness` (nothing runs here — there is no process, no gate
- * command) and no `repoContended` (that field answers "is something ELSE blocking me"; an entry here IS
- * the contention another `merge`-kind `GateSnapshotEntry` might be reporting).
+ * @decision b9e07a4a — RepoGuardOnlyEntry exists because a repo-guard-only hold/wait was otherwise
+ * invisible to gate_queue (a queued merge could report repoContended:true with zero running merges
+ * visible anywhere) (docs/decisions/b9e07a4a-repoguardonlyqueueentry-exists-and-hides-repopath.md)
  */
 export interface RepoGuardOnlyEntry {
   /** The waiter's OWN id (an internally-minted `rgo-N` token, never a caller-supplied value) — pass this,
@@ -521,30 +380,9 @@ export class GateSemaphore {
    *  worktree-less run never touches this set at all, which is exactly what keeps `undefined` from ever
    *  behaving like a shared group (see `GateDescriptor.worktreePath`'s own doc). */
   private readonly activeWorktrees = new Set<string>();
-  /** Card 92e960d1: repoPath -> the identity of whichever holder CURRENTLY holds the per-repo
-   *  merge-admission guard for it — the structural per-repo merge-admission guard. Only ever
-   *  populated/consulted for a `merge` descriptor carrying a non-null `repoPath` (see every read/write
-   *  site below, all guarded via {@link mergeRepoFree}) — a `worker`/`deploy` gate, or a `merge` gate
-   *  with no `repoPath`, never touches this map at all. Deliberately SEPARATE from
-   *  {@link activeWorktrees}: a worktree identifies one worker's own checkout, a repo path identifies the
-   *  shared canonical repo two DIFFERENT workers' merges can both target — the two guards protect
-   *  different resources and compose independently.
-   *
-   *  IDENTITY-AWARE (card b9e07a4a Code Review, CRITICAL): was a bare `Set<string>` — membership alone
-   *  could not tell "genuinely free" apart from "held by someone else". The reproduced cascade: op A's
-   *  real gate FAILS (`holdRepoGuardOnExit` never called) → `release(holdRepoGuard:false)` frees/hands off
-   *  `repoPath` to a queued op B → but `confirmWorkerMerge`'s OUTER `finally` still unconditionally calls
-   *  `endSquash(repoPath, A's opId)` (gated on `gateRan`, which was set BEFORE the gate ever ran — true
-   *  regardless of pass/fail, see that flag's own doc) — an unconfined `Set.delete` there would DELETE B's
-   *  now-live hold, a real regression of "at most one running merge gate per repo" (op C could then be
-   *  admitted while B is mid-squash), and B's OWN later release would then delete C's hold in turn. The
-   *  identical shape hits the cancelled-while-queued path too: a `gateRan:true` op cancelled before it was
-   *  ever admitted (`GateCancelledError`, thrown before `fn` runs) never touched this map at all, yet its
-   *  `finally` still fires `endSquash`. A `Map<repoPath, holderId>` closes BOTH: every release-side call
-   *  ({@link freeRepoPath}, {@link releaseMergeRepoGuard}/{@link endSquash}) must present the SAME
-   *  `holderId` that was stored at acquisition and is REFUSED — a safe no-op, logged distinctly — if it
-   *  doesn't match, so an op can only ever touch its OWN hold, never a sibling's, REGARDLESS of pass/fail/
-   *  cancel timing. See {@link repoHolderId}'s own doc for exactly what that identity value is. */
+  /** @decision b9e07a4a — activeMergeRepos is IDENTITY-aware (Map<repoPath,holderId>), not a bare Set —
+   *  a Set couldn't tell "free" from "held by someone else", letting a failed/cancelled op's release
+   *  delete a live sibling's hold (docs/decisions/b9e07a4a-repoguardonlyqueueentry-exists-and-hides-repopath.md) */
   private readonly activeMergeRepos = new Map<string, string>();
   // Live metadata registry, keyed by a per-run id. Iteration order is enqueue order; the snapshot re-orders
   // queued entries by (priority, enqueuedAt) to match the real admission order below.
@@ -557,22 +395,9 @@ export class GateSemaphore {
   // boot's own initial cap never logs a spurious "transition" from nothing.
   private lastKnownCap: number | undefined;
 
-  /** Card 96d5f76b: forensics for `activeMergeRepos`'s add/delete lifecycle — this Map's membership AND
-   *  identity together are the ENTIRE per-repo merge-admission guard (card b9e07a4a widened this from
-   *  membership alone, once a plain Set was shown unable to tell "free" apart from "held by someone
-   *  else" — see `activeMergeRepos`'s own doc for the cascade that gap allowed). The incident THIS card
-   *  investigates (a holder's guard vanishing ~10 minutes into its own still-running gate, with no known
-   *  caller responsible) went unexplained for as long as it did because no mutation of this Map was ever
-   *  logged with a timestamp taken AT the mutation itself — every timing argument had to be reconstructed
-   *  after the fact from a
-   *  LATER stamp (an op's own `settledAt`), which is measurably not the same instant (confirmed during
-   *  that investigation: a sibling op's `settledAt` postdates its own `endSquash` call, the actual
-   *  `activeMergeRepos` mutation, by an unmeasured margin). `performance.now()` (monotonic — immune to
-   *  wall-clock adjustment, and the same clock `gate-runner.ts`'s own liveness tracking already uses) is
-   *  the ordering-authoritative value; the ISO `Date.now()` string rides alongside it purely so a reader
-   *  can correlate this line against `pending_gate_ops`/`orchestration_events`, which are wall-clock only.
-   *  `opId` is `undefined` for a call site that has none to offer (none exist today — every caller of the
-   *  four mutation points below has one) rather than a fabricated placeholder. */
+  /** @decision 96d5f76b — every activeMergeRepos mutation is logged with a monotonic timestamp taken
+   *  AT the mutation, never reconstructed later from a settledAt that measurably postdates it
+   *  (docs/decisions/96d5f76b-repo-guard-mutations-are-logged-at-the-mutation-not-reconstructed.md) */
   private logRepoGuardMutation(action: "add" | "delete", repoPath: string, opId: string | undefined, callSite: string): void {
     console.log(`[gate:repo-guard] ${action} repoPath=${repoPath} opId=${opId ?? "?"} site=${callSite} t=${performance.now().toFixed(3)} iso=${new Date().toISOString()}`);
   }
