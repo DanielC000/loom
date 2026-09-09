@@ -101,7 +101,7 @@ export const ORCH_ASSISTANT_TOOLS: readonly string[] = ["my_context", "notify_le
 // 0d4bc3f0's tasks_defer_item/tasks_defer_item_ack register in the SAME session?.role!=="assistant"
 // block as tasks_create/tasks_update in mcp/server.ts, so they share that role's exact carve-out).
 export const TASKS_UNIVERSAL_TOOLS: readonly string[] = [
-  "memory_forget", "memory_list", "memory_read", "memory_write", "task_request_get",
+  "decisions_for", "memory_forget", "memory_list", "memory_read", "memory_write", "task_request_get",
   "task_requests_list", "tasks_create", "tasks_defer_item", "tasks_defer_item_ack", "tasks_get",
   "tasks_list", "tasks_update", "wake_cancel", "wake_list", "wake_me",
 ];

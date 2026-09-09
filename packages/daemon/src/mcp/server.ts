@@ -12,6 +12,7 @@ import {
   spillableTaskGet, spillableTaskUpdateResult, pickFields,
 } from "./tasks.js";
 import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory } from "./memory.js";
+import { registerDecisionTools } from "./decisions.js";
 import { performAuthenticatedRequest } from "../connections/request.js";
 import { writeVaultFile } from "../vault/writer.js";
 import { isConfirmedSubagent, type ToolAttributionResult } from "../pty/tool-attribution.js";
@@ -562,6 +563,12 @@ export class TaskMcpRouter {
       },
       async ({ key }) => ok(readProjectMemory(db, projectId, key)),
     );
+
+    // The @decision anchor index (card dbad4b59) — universal, every project session, read-only. See
+    // decisions.ts's own module doc for the escape-hatch design constraint. `repoPath` is re-read from
+    // `db` on every call (never cached at buildServer time — this router is already stateless per
+    // request, so there's no staleness window even without this, but the resolver itself stays honest).
+    registerDecisionTools(server, () => db.getProject(projectId)?.repoPath);
 
     // Self-scheduled wake-ups (universal — every session, any role). Keyed to THIS session id.
     server.registerTool(
