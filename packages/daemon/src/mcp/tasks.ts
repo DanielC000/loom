@@ -134,17 +134,10 @@ export interface ResolvedDeferredState {
  * costs nothing extra when `deferred` is about to auto-clear anyway (that path returns `stuck:false`,
  * since a merged blocker was never stuck).
  *
- * ⚠️ `includeMerged:false` (the companion board's latency-sensitive skip — {@link resolveMergedInfo}'s
- * own doc) means the blocker's merged state was NEVER RESOLVED on THIS read: `stuck` is UNKNOWN here,
- * not `false`. This is handled as its OWN branch, separate from `!raw`/`!deferredUntilTaskId` (those two
- * ARE genuine "not stuck" determinations, independent of merged state, and correctly self-heal a stale
- * persisted `deferredStuck`) — collapsing all three into one "return not-stuck" path would assert a
- * measurement that was never taken, and the write-through below would then PERSIST that false assertion,
- * silently clearing a genuinely-stuck card's flag the next time anything reads with `includeMerged:false`
- * (review finding on card 93669813: the companion board's `listProjectTasks`/`getProjectTask` calls do
- * exactly this — a routine companion board read must never be able to un-stick a stuck card). So the
- * `includeMerged:false` branch PRESERVES whatever `stuck` was already persisted and reports
- * `stuckChanged:false` unconditionally — never writes, whichever way the stored value happens to read.
+ * ⚠️ `includeMerged:false` means `stuck` was NEVER MEASURED on this read, not `false` — never collapse
+ * that into the genuine `!raw`/`!deferredUntilTaskId` "not stuck" branches: it would silently un-stick a
+ * genuinely-stuck card the next time a latency-sensitive caller (the companion board) reads with it.
+ * @decision 93669813
  *
  * Card 022659ac — MULTIPLE blockers: `deferredUntilTaskId` may be a bare id (legacy/single-blocker,
  * unchanged behavior below) or an array of ids. `deferred` auto-clears only once EVERY named blocker's
@@ -200,15 +193,11 @@ export async function resolveDeferredEffective(
  * failed — the caller already computed the correct in-memory value from `resolveDeferredEffective` and
  * returns that regardless of whether this write lands.
  *
- * On an `autoCleared` transition, also clears `deferredUntilTaskId` to `null` in the SAME write (card
- * cf62c1ef) — once a named blocker's merge has been observed and acted on, the companion field has served
- * its purpose. Leaving it set was a footgun: a LATER, unrelated `tasks_update(deferred:true)` (with no new
- * `deferredUntilTaskId`) would silently inherit the stale blocker reference, and since that blocker is
- * already merged, the very next read would auto-clear the manager's fresh, deliberate re-defer without
- * ever reporting it. Clearing the companion here means a re-defer always starts clean — it lands on the
- * plain "deferred with no blocker" path (never auto-clears, see resolveDeferredEffective) unless the
- * caller explicitly names a NEW blocker. A `stuckChanged`-only write (deferred stays true) leaves
- * `deferredUntilTaskId` untouched — the blocker reference is still exactly what made it stuck.
+ * On an `autoCleared` transition, also clears `deferredUntilTaskId` to `null` in the SAME write — leaving
+ * it set was a footgun (see docs/decisions/cf62c1ef-....md): a stale blocker reference would silently
+ * re-arm and swallow a future, unrelated manual re-defer. A `stuckChanged`-only write (deferred stays
+ * true) leaves `deferredUntilTaskId` untouched — the blocker reference is still exactly what made it stuck.
+ * @decision cf62c1ef
  *
  * Card c90e9525: an `autoCleared` transition ALSO nulls `deferredAt`/`deferredReason` in the same write —
  * once `deferred` flips false, a stale reason/date left behind would misdescribe a card that is no longer
@@ -222,25 +211,11 @@ function persistDeferredStateBestEffort(
 ): void {
   if (!state.autoCleared && !state.stuckChanged) return;
   try {
-    // Card 1d27c3cd Code Review follow-up: `state` was computed by the CALLER (listProjectTasks/
-    // getProjectTask) from a task snapshot read BEFORE it awaited resolveMergedInfo/resolveDeferredEffective
-    // — and that chain does a REAL git-log child process on a cache miss (resolveMergedInfo →
-    // getTaskMergedInfo → getMergedCommitMapCached → getOrStartMergedMapScan), a genuine event-loop yield on
-    // a READ path any board list can trigger. Trusting the caller's stale body/deferredReason across that
-    // gap would let a concurrent tasks_update({body,...}) land in the window and get silently clobbered by
-    // this blind write. Re-fetching HERE, immediately before folding, shrinks the window to a single
-    // synchronous SQLite read-then-write — the SAME guarantee `updateProjectTask`'s own blind writes
-    // (heldByPatch/deferredAtPatch) already rely on, not a new or weaker one.
-    //
-    // CONSEQUENCE, verified against the code (not assumed): this also makes two near-simultaneous
-    // autoCleared reads (A and B, both racing on the SAME still-deferred row) structurally unable to fold
-    // TWICE. Each read's own re-fetch-fold-write is one uninterruptible synchronous JS stretch — whichever
-    // of A/B runs it first clears `deferredReason` to null in the SAME write that applies the fold; the
-    // other's re-fetch then observes `fresh.deferredReason === null` and its `fresh.deferredReason ? … : {}`
-    // guard skips the fold entirely. (The loser still performs a harmless redundant scalar-only rewrite —
-    // deferred/deferredUntilTaskId/deferredStuck/deferredAt/deferredReason all re-written to the SAME
-    // values already on the row, bumping `updatedAt` again but never `version` — it just never touches
-    // `body` a second time.)
+    // Re-fetch immediately before folding, rather than trusting the caller's snapshot: closes the
+    // git-log-scan-shaped race window and, as a proven consequence, makes two near-simultaneous
+    // autoCleared reads on the same row structurally unable to fold twice. See
+    // docs/decisions/1d27c3cd-....md (site 1) for the full argument.
+    // @decision 1d27c3cd
     const fresh = db.getTask(taskId);
     if (!fresh) return; // deleted concurrently — nothing left to persist
     const patch: Parameters<Db["updateTask"]>[1] = state.autoCleared
@@ -270,26 +245,19 @@ function persistDeferredStateBestEffort(
 }
 
 /**
- * Card 1d27c3cd: `deferredReason` is cleared the moment a deferral ends — both on an explicit manual
- * `deferred:false` (updateProjectTask below) and on the designed `deferredUntilTaskId` auto-release path
- * (persistDeferredStateBestEffort above) — and that clear is CORRECT (a stale "blocked on X" left on a
- * card that's no longer blocked is its own defect). But the REASON itself is a closure record, not
- * disposable state, so it's folded into the card BODY — the durable surface a future reader already
- * looks at — as its own paragraph, before the field is nulled.
+ * `deferredReason` is cleared the moment a deferral ends — both on an explicit manual `deferred:false`
+ * and on the designed `deferredUntilTaskId` auto-release path — and that clear is CORRECT. But the REASON
+ * itself is a closure record, not disposable state, so it's folded into the card BODY first, as its own
+ * paragraph. See docs/decisions/1d27c3cd-....md (site 2).
+ * @decision 1d27c3cd
  *
  * IDEMPOTENT across repeated defer/release cycles: strips any PRIOR "Previously deferred" paragraph
  * before appending the new one, so a card that defers and releases many times over its life keeps only
- * the LATEST release's reasoning in its body, never a growing pile of stale ones. `reason` has its
- * BLANK-LINE (paragraph) breaks collapsed to a single newline first — in practice `deferredReason` is
- * often multi-KB structured markdown (headings, lists), not the "short string" the field is documented
- * as, so collapsing to a SPACE ran every section together into one unreadable blob with headings
- * surviving as literal inline `## text` (card 595fe28f). Collapsing to a single `\n` instead keeps every
- * line/heading/section on its own physical line — this repo's own board (Board.tsx's TaskDrawer /
- * SessionTaskCard's ReadOnlyTaskDrawer) renders `body` as plain pre-wrap text with no markdown engine
- * involved, so a real line break is the entire readability fix; no heading-escaping trick is needed on
- * top of it. Never collapse to `\n\n` (2+) — that is exactly what the strip-before-append split below
- * keys off of, and reintroducing it here would fragment this note into multiple paragraphs on a LATER
- * fold and break idempotence, which is the one non-negotiable constraint on this function.
+ * the LATEST release's reasoning in its body, never a growing pile of stale ones. `reason`'s BLANK-LINE
+ * breaks are collapsed to a single `\n` first, never a space and never `\n\n` — see
+ * docs/decisions/595fe28f-....md for a real specimen of what a space does to a structured reason, and why
+ * `\n\n` specifically would break this function's idempotence.
+ * @decision 595fe28f
  */
 export const DEFERRED_RELEASE_NOTE_PREFIX = "**Previously deferred:**";
 
@@ -724,12 +692,9 @@ export async function getProjectTask(
 
 /**
  * Wraps a single full task read (`getProjectTask` / `project_task_get`'s single-id path) with the same
- * Loom-controlled spill treatment `tasks_list`/`task_requests_list` already get via `spillTextIfLarge`
- * (card 7aeea78b), instead of falling through — for an oversized `body` — to the HOST ENGINE's own opaque
- * overflow-spill, which JSON-escapes embedded newlines into one unpageable line (`spill.ts`'s own doc
- * comment names this exact failure mode). Hands the primitive ALREADY-SHAPED plain text — `title`, a
- * blank line, then `body`, real line breaks — NEVER `JSON.stringify(task)`, which would re-escape the
- * very newlines this exists to preserve and reproduce the defect through Loom's own writer instead.
+ * Loom-controlled spill treatment `tasks_list`/`task_requests_list` already get — never the HOST ENGINE's
+ * own opaque overflow-spill, which mangles embedded newlines. See docs/decisions/7aeea78b-....md.
+ * @decision 7aeea78b
  *
  * BELOW the cap: returns `task` untouched — byte-identical to before this existed.
  * ABOVE the cap: returns `task` with `body` replaced by `bodyFile`/`bodyChars` (mirrors `okLinesSpillable`'s
@@ -753,13 +718,12 @@ export function spillableTaskGet<T extends { title: string; body: string }>(
 }
 
 /**
- * Card f651aff0 — {@link spillableTaskGet}'s sibling for a WRITE result, applied to whatever
- * {@link updateProjectTask} returned. Shared by both writers of THAT function's return shape — the
- * in-project `tasks_update` (mcp/server.ts) and the cross-project `project_task_update` (mcp/
- * platform.ts) — so the two callers that share `updateProjectTask` also share this one spill wiring
- * rather than growing two independently-drifting copies (the shared-unit-divergence rule card 7aeea78b
- * was built to satisfy, and the exact reason THIS card exists: `7aeea78b`'s own sweep was scoped to
- * `*_get` tools and could never have found a write-path gap by construction).
+ * {@link spillableTaskGet}'s sibling for a WRITE result, applied to whatever {@link updateProjectTask}
+ * returned. Shared by both writers of THAT function's return shape — `tasks_update` (mcp/server.ts) and
+ * `project_task_update` (mcp/platform.ts) — so the two callers don't grow independently-drifting spill
+ * copies. This needed its OWN card rather than folding into 7aeea78b — see docs/decisions/f651aff0-....md
+ * for why that card's own sweep could never have found this gap.
+ * @decision f651aff0
  *
  * `updateProjectTask` returns FIVE shapes, and only two of them carry an unbounded body:
  *  - `TaskUpdateAck` (a field-only patch that never touched title/body) — no `body` key at all present
@@ -908,20 +872,14 @@ export interface CreateTaskDedupeOptions {
 }
 
 /**
- * ⛔ §SCOPE FENCE (board card 5b221bf2, widened by card 0ef0270b) — this wraps {@link createProjectTask}
- * with a cross-channel duplicate check, and is called from EXACTLY TWO places: the agent-facing
- * `tasks_create` MCP tool (mcp/server.ts) and the Platform Lead's cross-project `project_task_create`
- * (mcp/platform.ts). Both satisfy the fence's own criterion — the caller is an AGENT reading a tool
- * result and can ACT on a refusal (retry with `allowDuplicate`/`supersedes`/`relatedTo`, or drop it) —
- * unlike every OTHER path that reaches `createProjectTask`, which must NEVER be substituted for the raw
- * helper. `createProjectTask` itself is a SHARED helper — reached not only from those two callers but
- * also from the companion's `board_create` (companion/capabilities.ts) — and, transitively through it,
- * from every automated BOARDING path that calls `db.insertTask` directly with a delivery guarantee
- * (`peer_message` boarding, platform-escalation landing, workspace-audit suggestions, project seeding,
- * human REST card creation). A refusal on any of those silently drops a message instead of failing an
- * agent call an agent can read and retry — see the card for the full enumeration. Do not "simplify" this
- * by moving the check into `createProjectTask` or `db.insertTask`; that would be exactly the
- * regression DoD 8 (`5b221bf2`) / M1-regression (`0ef0270b`) tests guard against.
+ * ⛔ §SCOPE FENCE — called from EXACTLY TWO places: the agent-facing `tasks_create` MCP tool and the
+ * Platform Lead's `project_task_create`. Never substitute this for the raw {@link createProjectTask}
+ * helper on any OTHER path that reaches it (companion `board_create`, and transitively every automated
+ * boarding path) — those silently drop a message instead of failing a retryable agent call. Do not
+ * "simplify" by moving the duplicate check into `createProjectTask`/`db.insertTask` — that is exactly the
+ * regression these cards' DoD guards against. See docs/decisions/5b221bf2-....md for the full path
+ * enumeration.
+ * @decision 5b221bf2
  *
  * Refuses (returns `{error}`, inserts nothing) when {@link findSuspectedDuplicate} flags an existing
  * task as a likely duplicate of `input`, UNLESS `dedupe.allowDuplicate`/`supersedes`/`relatedTo` is
@@ -931,19 +889,9 @@ export interface CreateTaskDedupeOptions {
  * that is the DESTINATION project, never the Lead's own) and noted on the new card's body; an
  * unresolvable target is rejected (whole create rejected, nothing written) rather than silently ignored.
  *
- * m7 (card 0ef0270b): a `supersedes`/`relatedTo` relationship is recorded on BOTH cards, not just the new
- * one — the superseded/related (loser) card's body is back-noted with a pointer to the new card
- * ("Superseded by: <id>" / "Related to: <id>") once the create actually succeeds. Without this, only the
- * new card names the relationship; a reader who lands on the loser card directly (the exact failure mode
- * `5b221bf2` was filed about) has no way to discover it's been superseded. The back-note write happens
- * strictly AFTER the new card is created — if the create itself failed, no back-note is written for a
- * card that doesn't exist (a race with the target being deleted between resolution and insert isn't
- * possible: this function is synchronous end-to-end — no `await` between `resolveProjectTaskId` and
- * `createProjectTask`, and better-sqlite3 is sync — so nothing can interleave between them; this stops
- * being true the day this function gains an `await` in that span). The back-note `db.updateTask` call's
- * result is NOT inspected — a failed update here degrades to a one-directional link (visible on read: the
- * new card's body still names the target, just not vice versa) rather than silently losing the relation
- * entirely, but it is not itself checked or retried.
+ * m7: a `supersedes`/`relatedTo` relationship is recorded on BOTH cards, not just the new one — see
+ * docs/decisions/0ef0270b-....md for the back-note mechanism and its race-freedom argument.
+ * @decision 0ef0270b
  */
 export function createProjectTaskChecked(
   db: Db, projectId: string,
@@ -1131,21 +1079,15 @@ export async function updateProjectTask(
    */
   allowTruncate?: boolean,
   /**
-   * Card 8636f761 (DoD-1) — an ADDITIVE alternative to `body`: appends a timestamped "## Triage note —
-   * <ts>" section instead of replacing the whole body. Exists because `body` is a full replace with no
-   * undo (see its own doc above) and a Lead triaging a `platform_escalate` card was clobbering the
-   * reporter's original evidence with its verdict — the Lead's own doctrine ("preserve the original
-   * verbatim below") was a manual workaround for exactly this default. Mutually exclusive with `body`
-   * (both together is a whole-patch REJECT, nothing written — same convention as every other guard in
-   * this function): a replace and an append are different intents and mixing them is never correct.
-   * DELIBERATELY UNVERSIONED — unlike a caller-authored `body` replace, an append can never destructively
-   * clobber a concurrent edit; the worst case under a race is two sections landing in a nondeterministic
-   * order, never data loss (same reasoning `bodyFoldPatch` below already relies on for its own additive
-   * write). The version used for the actual write is computed HERE, from a fresh read taken immediately
-   * before appending, not from the caller — see the re-fetch below. This does NOT disable the destructive-
-   * truncation guard: the computed body still flows through `patch.body` and the ordinary guard below, so
-   * a BUGGY append implementation that somehow shrinks the body is still caught — a guard that can never
-   * fire on a correct append costs nothing, and removing it would blind the exact case it exists for.
+   * An ADDITIVE alternative to `body`: appends a timestamped "## Triage note — <ts>" section instead of
+   * replacing the whole body. See docs/decisions/8636f761-....md for why this exists.
+   * @decision 8636f761
+   * ⛔ Mutually exclusive with `body` (both together is a whole-patch REJECT, nothing written) — a replace
+   * and an append are different intents and mixing them is never correct. DELIBERATELY UNVERSIONED: the
+   * write's version is computed from a fresh read taken immediately before appending, not from the
+   * caller — see the re-fetch below. This does NOT disable the destructive-truncation guard: the computed
+   * body still flows through `patch.body` and the ordinary guard below, so a BUGGY append implementation
+   * that somehow shrinks the body is still caught.
    */
   appendBody?: string,
   /** Card 267fd215 — bypasses {@link checkTitleHtmlEntities}'s rejection of a `title` write carrying an
@@ -1190,23 +1132,12 @@ export async function updateProjectTask(
     patch = { ...patch, body: appendTaskBodySection(fresh.body, "Triage note", [appendBody], new Date().toISOString()) };
   }
   const project = db.getProject(projectId);
-  // Column-move guard: a move must target a column that EXISTS on this project's board, so a move can never
-  // orphan a card onto a non-existent key (the HARD INVARIANT board-column lifecycle code upholds). Applied
-  // in the SHARED backing function, so the in-project tasks_update and the cross-project project_task_update
-  // honor it identically. Resolved columns (override merged over defaults), so a custom/renamed column works.
-  // Terminal-lane pending-Request warning (card c4355598): computed here, alongside the column guard
-  // above, since both need the SAME resolved `cols` for the SAME `patch.columnKey` — never a second
-  // resolveConfig call. Additive-only (see PendingRequestWarning's own doc) — this never rejects the
-  // patch, so it must be computed strictly AFTER the unknown-column reject above returns, never instead
-  // of it. `owned.id` (not the raw `taskId`, which may be an 8-char prefix) so listQuestionsForTask's own
-  // prefix-tolerant match has a full id to compare against, matching every other caller of that method.
-  //
-  // Code Review follow-up: this runs BEFORE the db.updateTask write below, so a throw here (a future
-  // widening of listQuestionsForTask — a JOIN, a throw-on-missing) would otherwise kill the WRITE, not
-  // merely the warning — silently converting an advisory into a blocker, which is exactly what this
-  // card's hard constraint ("must NEVER block") forbids. try/catch makes that true BY CONSTRUCTION rather
-  // than by audit: a failure here drops the WARNING only, never the write. Logged (not swallowed) so a
-  // broken advisory is still visible — mirrors persistDeferredStateBestEffort's own best-effort catch above.
+  // Column-move guard: a move must target a column that EXISTS on this project's board — the HARD
+  // INVARIANT board-column lifecycle code upholds. Shared backing function, so tasks_update and
+  // project_task_update honor it identically; resolved columns, so a custom/renamed column works.
+  // Terminal-lane pending-Request warning is computed alongside it — see docs/decisions/c4355598-....md
+  // for why it's wrapped in its own try/catch and can never block the move.
+  // @decision c4355598
   let pendingRequestWarning: PendingRequestWarning[] | undefined;
   if (patch.columnKey !== undefined) {
     const cols = resolveConfig(project?.config).kanbanColumns;
@@ -1317,27 +1248,13 @@ export async function updateProjectTask(
       return { error: `heldRequestId "${patch.heldRequestId}" does not resolve to a request in this project` };
     }
   }
-  // Manual-deferral self-explaining guard (card c90e9525, delta-scoped by card 57f346e6) —
-  // whole-patch-reject, same convention as the guards above: `deferred` is a stored verdict with no
-  // reason/date attached is exactly the defect this card fixes, so a write that would LEAVE the card
-  // manually deferred (deferred:true, no deferredUntilTaskId — route (a) has its own release condition,
-  // the named blocker task, and is untouched here) with no reason recorded either before or after this
-  // patch is refused outright. A date alone would not satisfy this (the card's own DoD-1 is explicit) —
-  // hence a REASON is the thing gated, never just a timestamp. `deferredAt` is never a caller-suppliable
-  // field (not in this function's patch type) — it is stamped SERVER-SIDE only, below, so it can never be
-  // forged to a false start time.
-  //
-  // 57f346e6: this guard must fire on the PATCH'S DELTA, not on the RESULTING state alone — the original
-  // form evaluated `isManualDeferral` from the resulting state unconditionally, so it re-validated (and
-  // rejected) a patch that never touched deferred/deferredUntilTaskId/deferredReason at all, the moment
-  // it landed on a card that happened to ALREADY be a manual deferral with no reason. That made every
-  // legacy pre-c90e9525 no-reason-deferred row reject EVERY future patch — including a bare columnKey
-  // move — forever, since nothing about such a patch could ever supply the missing reason. `touchesDeferralFields`
-  // scopes both the reason guard AND the deferredAt backfill below to patches that actually touch one of
-  // the three deferral fields, so an unrelated field-only patch passes through a legacy row UNCHANGED
-  // (deferred/deferredReason/deferredAt all untouched) — while a patch that DOES touch deferred/
-  // deferredUntilTaskId/deferredReason and would still leave the card manually-deferred-with-no-reason is
-  // refused exactly as before (the real case c90e9525 exists to catch).
+  // Manual-deferral self-explaining guard (card c90e9525): a write that would LEAVE the card manually
+  // deferred (deferred:true, no deferredUntilTaskId) with no reason recorded either before or after this
+  // patch is refused outright — a date alone does not satisfy this, a REASON is the thing gated.
+  // `deferredAt` is never caller-suppliable; it's stamped server-side only, below.
+  // Gated on the PATCH'S DELTA (`touchesDeferralFields`), never on the resulting state alone — see
+  // docs/decisions/57f346e6-....md for the regression this closes.
+  // @decision 57f346e6
   const resultingDeferred = patch.deferred !== undefined ? patch.deferred === true : owned.deferred === true;
   const resultingDeferredUntilTaskId = patch.deferredUntilTaskId !== undefined ? patch.deferredUntilTaskId : (owned.deferredUntilTaskId ?? null);
   const isManualDeferral = resultingDeferred && resultingDeferredUntilTaskId == null;
@@ -1375,13 +1292,13 @@ export async function updateProjectTask(
       return { error: "a manual deferral (deferred:true with no deferredUntilTaskId) needs a reason — pass deferredReason explaining why it's parked and what would release it, so a future reader can tell it apart from a forgotten card" };
     }
   }
-  // Destructive-deferredReason-truncation guard (card a53b24ce, mirrors the body guard below — card
-  // 09d68835 — same allowTruncate override, same whole-patch-reject convention): `deferredReason` is a
-  // field-only patch (see the baseVersion gate below), so unlike `title`/`body` it gets NEITHER protection
-  // that guard offers — yet it routinely carries a card's entire decision surface (the specimen: a Lead
-  // wrote a one-word placeholder into `deferredReason` just to read the ack's `version` back, silently
-  // destroying a multi-thousand-character reason with no undo). Checked against the FINAL
-  // `deferredReasonPatch` computed above (post the `deferred:false` auto-clear override) — never the raw
+  // Destructive-deferredReason-truncation guard (mirrors the body guard below — card 09d68835, same
+  // allowTruncate override, same whole-patch-reject convention): unlike `title`/`body`, `deferredReason`
+  // is a field-only patch with NEITHER protection that guard offers, yet it routinely carries a card's
+  // entire decision surface. See docs/decisions/a53b24ce-....md for the specimen this guards against.
+  // @decision a53b24ce
+  // Checked against the FINAL `deferredReasonPatch` computed above (post the `deferred:false` auto-clear
+  // override) — never the raw
   // `patch.deferredReason` — so this guard fires ONLY on an actual REPLACE-with-a-sliver, never on:
   //  - a bare `{deferred:false}` (or any other flag-only patch that never touches deferredReason) —
   //    deferredReasonPatch stays `undefined`, DoD-2's regression case, byte-identical to today;
@@ -1469,12 +1386,13 @@ export async function updateProjectTask(
   // demanding one whenever the card happens to carry a reason, which this card must not change. Same
   // residual risk persistDeferredStateBestEffort documents for its own fold.
   const dbPatch = bodyFoldPatch !== undefined ? { ...dbPatch1, body: bodyFoldPatch } : dbPatch1;
-  // Destructive-body-truncation guard (card 09d68835, whole-patch-reject like every guard above): `body`
-  // is a FULL REPLACE with no undo (see the tool description) — that is CORRECT, field-level PATCH
-  // semantics are not what's wrong here. What's missing is friction in front of the one catastrophic
-  // shape: a substantial existing body reduced to a sliver in one silent, successful write (the
-  // specimen: ~13,300 chars replaced by one sentence, recovered only because a scratch copy happened to
-  // exist). Fires ONLY when (a) the CURRENT body is substantial (≥MIN_SUBSTANTIAL_BODY_CHARS — a short
+  // Destructive-body-truncation guard (whole-patch-reject like every guard above): `body` is a FULL
+  // REPLACE with no undo — that is CORRECT, field-level PATCH semantics are not what's wrong here. What's
+  // missing is friction in front of the one catastrophic shape: a substantial existing body reduced to a
+  // sliver in one silent, successful write. See docs/decisions/09d68835-....md for the specimen this
+  // guards against.
+  // @decision 09d68835
+  // Fires ONLY when (a) the CURRENT body is substantial (≥MIN_SUBSTANTIAL_BODY_CHARS — a short
   // body has little to lose) AND (b) the PROPOSED body keeps less than MAX_SURVIVING_FRACTION of it (a
   // genuine rewrite that merely trims some prose stays well above this) AND (c) the caller hasn't passed
   // the explicit `allowTruncate:true` override. Checked against `owned.body` — the body as read FRESH at
