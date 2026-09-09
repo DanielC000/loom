@@ -1,0 +1,18 @@
+# 78a16dc5 — the warning-kind shape guard sanitizes or logs, and never drops
+
+## Narrative
+
+Card 78a16dc5: `sanitizeLoneSurrogates`/`isUntaggedSystemNudge` are shape guards applied ONLY to a `kind:"warning"` queued entry (Loom's own operational nudges — idle/context/busy-stuck watchdogs, restart/boot continuation notes, memory-recall injection); an `"agent"`-kind entry (worker report, manager direction, human composer turn, replayed kickoff) is legitimately free-form text and neither check ever applies to it.
+
+An earlier version of the lone-surrogate guard DROPPED a "warning" entry outright when it carried a lone (unpaired) UTF-16 surrogate. A Code Reviewer catch on this same card found that dropping is a real stall hazard, not just defense-in-depth: the async `run_gate` FAILURE nudge (`sessions/service.ts`, `kind:"warning"`) embeds `gateDetail.stderrTail`, a raw CODE-UNIT slice of captured gate stdout/stderr (`gate-runner.ts`). If that stderr contains a non-BMP character (an emoji in a test name/assertion/diff) split exactly at the slice boundary, the tail begins with a lone surrogate — and the durable `pending_gate_ops` row is already marked `state:"settled"` (via `PendingOpRegistry.attach`'s `onSettle` hook) BEFORE this enqueue, so a dropped nudge here is the ONLY remaining path to the result: a worker parked on its gate-completion nudge would stall indefinitely with no way back — the exact silent-stall class the `/worker` doctrine warns about, in the very machinery this card exists to harden. Sanitizing (replacing the lone surrogate with U+FFFD) removes the hazard entirely while still fixing the byte-level corruption, so dropping was replaced with sanitize-and-deliver. The actual corruption this card was filed over: two genuinely different source texts spliced together mid-word — a lone surrogate is exactly the string-level signature bytes leave behind when they were split mid multi-byte UTF-8 sequence and then decoded/concatenated anyway.
+
+`isUntaggedSystemNudge` went through the same correction in the opposite direction: a missing `[loom:` prefix (every real call site — resume-nudge.ts, the idle/context watchers, …) was INITIALLY treated as a hard DROP condition too, but that turned out to be an invariant the codebase does not actually hold everywhere — a "warning"-kind sender with legitimate untagged text (the companion persona-reinject path, before it was tagged) surfaced immediately once the guard shipped, and a static audit could not prove no OTHER untagged sender exists uncaught. So a missing tag is now LOG-ONLY (an anomaly for someone to go tag the sender properly), never a drop or a rewrite.
+
+## Do not
+
+- Do not drop a `kind:"warning"` entry on shape alone, however corrupted — sanitize or log, never drop; a dropped gate-completion nudge after its `pending_gate_ops` row settles is the only remaining path to the result and strands the parked recipient.
+- Do not restore a hard DROP for a missing `[loom:` prefix on `isUntaggedSystemNudge` — a legitimate untagged "warning" sender is known to exist (the companion persona-reinject path) and a static audit could not prove there are no others.
+
+## Source
+
+Inline comment in `packages/daemon/src/pty/host.ts` (`sanitizeLoneSurrogates`/`isUntaggedSystemNudge`'s function doc), as of commit f81f9c1108773e559efe78b7166cbf78b6201480. Relocated by card 614a9fef (tranche 3 on `pty/host.ts`); reworded into flowing narrative (every concrete specimen — the `gateDetail.stderrTail` mechanism, the companion persona-reinject specimen, the "spliced together mid-word" root cause — carried over verbatim), `*` comment markers stripped.

@@ -1231,13 +1231,12 @@ const RECENT_OWNER_TURNS_WINDOW = 5;
  * playwright-core's bundled classes; no `Config` field or CLI flag redirects it, so it is NOT something
  * Loom's spawn config can fix — omit the filename (auto-names into `outputDir`) or pass an absolute path
  * under `LOOM_SCRATCH_DIR` (see `scratchDirEnv` below) to actually land in scratch. `outputDir` also
- * governs the DEFAULT (implicit,
- * no-filename) artifact for every snapshot-bearing tool response, not just an explicit screenshot — the
- * MCP's default `snapshot.mode` writes the page's ARIA snapshot to `page-{timestamp}.yml` in `outputDir`
- * on essentially every browser tool call, so `outputDir` is a HIGH-FREQUENCY write target, not an
- * occasional one (card 61ab62e3: this is why an earlier `outputDir = vaultPath` default littered the
- * user's Obsidian vault with `page-*.yml` on every browser turn — `buildMcpServers` now always passes the
- * scratch dir, never the vault). Omit `outputDir` and the flag is absent (byte-identical to the
+ * governs the DEFAULT (implicit, no-filename) artifact for every snapshot-bearing tool response, not just
+ * an explicit screenshot — the MCP's default `snapshot.mode` writes the page's ARIA snapshot to
+ * `page-{timestamp}.yml` in `outputDir` on essentially every browser tool call, so `outputDir` is a
+ * HIGH-FREQUENCY write target, not an occasional one. @decision 61ab62e3 — never default `outputDir` to
+ * `vaultPath` (or omit it); see docs/decisions/61ab62e3-playwright-outputdir-must-never-default-to-vault.md
+ * Omit `outputDir` and the flag is absent (byte-identical to the
  * pre-output-dir spawn) — the caller (`buildMcpServers`) always supplies a dir.
  *
  * Returns null if the package can't be resolved (it's a pinned daemon dependency, so this is a
@@ -2143,36 +2142,22 @@ export type EnqueueStdinTail = {
  * manager's direction, a human composer turn, a replayed kickoff) is legitimately free-form text, so
  * NEITHER check below is ever applied there — not sanitized, not logged, delivered byte-identical.
  *
- * Both tiers SANITIZE-OR-LOG, they NEVER DROP. An earlier version of this guard DROPPED a "warning"
- * entry with a lone surrogate — a Code Reviewer catch on this same card found that a drop there is a
- * real stall hazard, not just defense-in-depth: the async `run_gate` FAILURE nudge (sessions/service.ts,
- * kind:"warning") embeds `gateDetail.stderrTail`, a raw CODE-UNIT slice of captured gate stdout/stderr
- * (gate-runner.ts). If that stderr contains a non-BMP character (an emoji in a test name/assertion/diff)
- * split exactly at the slice boundary, the tail begins with a lone surrogate — and the durable
- * `pending_gate_ops` row is already marked `state:"settled"` (via `PendingOpRegistry.attach`'s `onSettle`
- * hook) BEFORE this enqueue, so a dropped nudge here is the ONLY remaining path to the result: a worker
- * parked on its gate-completion nudge would stall indefinitely with no way back. That is the exact
- * silent-stall class the `/worker` doctrine warns
- * about, in the very machinery this card exists to harden — so dropping is never an acceptable outcome
- * for this guard, however corrupted the shape. Sanitizing removes the hazard entirely while still fixing
- * the byte-level corruption (the delivered message is always well-formed).
+ * Both tiers SANITIZE-OR-LOG, they NEVER DROP — dropping is never an acceptable outcome for this guard,
+ * however corrupted the shape: a dropped "warning" nudge (e.g. a gate-completion notice once its durable
+ * `pending_gate_ops` row is already `state:"settled"`) is the ONLY remaining path to the result, stranding
+ * a parked recipient with no way back. @decision 78a16dc5 — sanitize or log, never drop, a warning-kind
+ * entry on shape alone; see docs/decisions/78a16dc5-warning-kind-guard-sanitizes-never-drops.md
  *
  * `sanitizeLoneSurrogates` — replaces any LONE (unpaired) UTF-16 surrogate (`LONE_SURROGATE_RE`) with
  * U+FFFD (the replacement character): exactly the string-level signature of BYTES that were split mid
- * multi-byte UTF-8 sequence and then decoded/concatenated anyway — the actual corruption this card was
- * filed over (two genuinely different source texts spliced together mid-word). Logs the anomaly (with a
+ * multi-byte UTF-8 sequence and then decoded/concatenated anyway. Logs the anomaly (with a
  * short excerpt) and returns the SANITIZED (now well-formed) text; a caller with nothing to sanitize gets
  * the identical string back (cheap to check via `!==`). Equivalent in spirit to the ES2024
  * `String.prototype.isWellFormed()`/`toWellFormed()`, hand-rolled via regex so this doesn't require
  * bumping the repo's shared `lib` target off ES2023 for one call site.
  *
- * `isUntaggedSystemNudge` — LOG-ONLY, never drops or modifies the text. Missing the `[loom:` prefix every
- * REAL call site (resume-nudge.ts, the idle/context watchers, …) happens to use today is NOT itself
- * corruption — it was initially treated as a hard DROP condition, but that turned out to be an invariant
- * the codebase does not actually hold everywhere (a "warning"-kind sender with legitimate untagged text —
- * e.g. the companion persona-reinject path before it was tagged — surfaced immediately once the guard
- * shipped, and a static audit could not prove no OTHER untagged sender exists uncaught). So a missing tag
- * is logged as an anomaly (for someone to go tag the sender properly) but the message is delivered as-is.
+ * `isUntaggedSystemNudge` — LOG-ONLY, never drops or modifies the text: a missing `[loom:` prefix is
+ * logged as an anomaly (for someone to go tag the sender properly) but the message is delivered as-is.
  */
 const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 function sanitizeLoneSurrogates(text: string, kind: QueuedMessageKind): { text: string; sanitized: boolean } {
