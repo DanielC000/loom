@@ -40,6 +40,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import { fileURLToPath } from "node:url";
 
 // Deliberately comment-syntax-agnostic: matches the literal token regardless of what precedes it (`//`,
 // `#`, `--`, `/*`, ...), so the SAME anchor format works in .ts/.mjs/.py/.sql/.md source alike. Global
@@ -57,7 +58,15 @@ const FLAT_STORES = ["adr", "decisions"];
 // and the full path to read directly) — this is a real, load-bearing limit, not just an implementation
 // detail; keep records under it, or accept the truncation and expect it may be re-raised. See CLAUDE.md's
 // "Comment taxonomy — the source-vs-record split" for the docs/adr and docs/decisions convention.
-const PER_RECORD_MAX_BYTES = 6000;
+// Exported (card d0d0401b): comment-anchor-lint.mjs imports this so its over-cap census reads the SAME
+// constant this injector actually truncates against — one source of truth, so raising the cap here can
+// never leave that lint silently checking a stale number. Safe to import despite the "assets are
+// standalone, invoked by bare `node <path>`" duplication convention used elsewhere in this file (see
+// ANCHOR_RE's own doc): both scripts always ship together under this same `assets/` dir (paths.ts derives
+// every asset path from one shared `assets` root), and this module's own top-level `main()` call is
+// guarded (see the dispatch at the bottom of this file) so importing it for just this constant never runs
+// the hook's stdin-reading entrypoint as a side effect.
+export const PER_RECORD_MAX_BYTES = 6000;
 const TOTAL_MAX_BYTES = 12000; // once the total for this call would exceed this, further WHOLE records are dropped (never partially).
 const BLOCK_EXPAND_MAX = 40; // bounds the blank-line-delimited "enclosing block" upward lookback below.
 const DEFAULT_READ_LIMIT = 2000; // the real Read tool's own default line cap when offset/limit are omitted.
@@ -351,4 +360,10 @@ async function main() {
   });
 }
 
-main().catch(() => {}).finally(() => process.exit(0));
+// Only run as the hook entrypoint when invoked directly (`node decision-records.mjs <dedupeDir>`) — an
+// import (comment-anchor-lint.mjs, for PER_RECORD_MAX_BYTES above — see that constant's own doc) must be
+// able to pull in the exported constant without triggering a stdin-reading main() as a side effect. Mirrors
+// comment-anchor-lint.mjs's own identical dispatch guard at the bottom of that file.
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  main().catch(() => {}).finally(() => process.exit(0));
+}

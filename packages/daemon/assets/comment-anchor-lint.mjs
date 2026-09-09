@@ -2,7 +2,7 @@
 // comment-anchor-lint.mjs — WARN-ONLY lint for the decision-anchor convention (card 5329a9af; wired as a
 // live hook by card 67621894). Two entry points, one script:
 //   1. CLI whole-repo scan: `node comment-anchor-lint.mjs [repoRoot] [--min-lines=N]` — prints the full
-//      JSON report (all three checks, see below) to stdout. Manual/reporting use only; NOT what the hook
+//      JSON report (all five checks, see below) to stdout. Manual/reporting use only; NOT what the hook
 //      below invokes (a whole-repo scan on every Write/Edit would reintroduce the per-invocation hook cost
 //      card 5244adc2 just existed to remove — see COMMENT_ANCHOR_LINT_SCRIPT's own doc in paths.ts).
 //   2. PostToolUse hook: `node comment-anchor-lint.mjs --hook <repoRoot>` (matcher Write|Edit), reading the
@@ -24,7 +24,7 @@
 // `posttooluse-hook-honors-additionalcontext-not-systemmessage` and decision-records.mjs's own header for
 // the full method.
 //
-// Three checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
+// Five checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
 //   1. unanchoredLongBlocks — a contiguous comment block >= `minLines` (default DEFAULT_MIN_LINES) with
 //      no `@decision <id>` anywhere in it. The "narrative is regrowing in source" signal.
 //   2. orphanAnchors — an `@decision <id>` whose id resolves to no record in ANY of the three stores this
@@ -40,6 +40,19 @@
 //      single changed file can never answer that on its own, and re-scanning the whole repo to answer it
 //      per-Write is exactly the cost the hook exists to avoid (see this file's own header). CLI-scan mode
 //      only; a project wanting this check run stays on the manual/whole-repo path.
+//   4. brokenAnchors (card ad3a9a85) — a `@decision` keyword NOT followed by a valid 8-hex id on the SAME
+//      line: the shape a JSDoc line wrap produces when it breaks between the keyword and the id (`@decision`
+//      on one continuation line, the id on the next). `ANCHOR_RE`/`findFileAnchors` match per-line, so a
+//      wrapped anchor is invisible to every other check here — it looks like ordinary prose, never like an
+//      orphan anchor (there is no anchor id to resolve) and never like an unanchored long block if the
+//      surrounding block happens to be short. This is the ONLY check that catches it. Runs in BOTH the CLI
+//      scan and the per-file hook (unlike orphanRecords above) — it needs only the one file already being
+//      scanned, same as unanchoredLongBlocks/orphanAnchors.
+//   5. oversizedRecords (card d0d0401b) — a record file (docs/adr, docs/decisions) whose byte size exceeds
+//      `PER_RECORD_MAX_BYTES` (imported from decision-records.mjs — the SAME constant that script truncates
+//      against at read time, never a second copy of the number). CLI-scan mode only: records live under
+//      `docs/`, outside SOURCE_ROOTS, so the per-file hook (which only ever sees a write under
+//      packages/{daemon,web,shared}) structurally never observes a record file being authored or edited.
 //
 // A <= GUARD_MAX_LINES-line block that DOES carry an anchor is the convention's TARGET STATE (Class A: a
 // short guard/prohibition, permanently inline) and is counted separately as `guardClassBlocks` — it is
@@ -48,13 +61,33 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { PER_RECORD_MAX_BYTES } from "./decision-records.mjs";
 
 // Comment-syntax-agnostic, byte-identical to decision-records.mjs's own ANCHOR_RE — kept as a separate
 // literal here (not imported) because assets ship as standalone files invoked by bare `node <path>`,
 // mirroring the same duplication already accepted between decision-records.mjs and claude-settings.ts's
 // `anyDecisionRecordStoreExists` (see that function's own doc for why, and the same "keep in sync" note
-// applies here).
+// applies here). `PER_RECORD_MAX_BYTES` above is the one EXCEPTION to that duplication convention (see its
+// own doc in decision-records.mjs): card d0d0401b's DoD requires this lint to read the cap from a single
+// source of truth, not a hand-copied number, and that script's `main()` is import-safe (guarded — see its
+// own dispatch at the bottom of that file), so importing just the constant carries none of the "standalone
+// invocation" risk the regex/function duplication above exists to avoid.
 const ANCHOR_RE = /@decision\s+([0-9a-f]{8})\b/gi;
+// Card ad3a9a85: a `@decision` keyword that is the LAST thing on its line (only trailing whitespace may
+// follow) — the exact shape a JSDoc continuation wrap leaves behind when it breaks the keyword from its
+// id onto the next line. Deliberately NARROWER than "not followed by a valid id anywhere on the line":
+// a first pass used `/@decision\b(?!\s+[0-9a-f]{8}\b)/` (any `@decision` not immediately followed by a
+// valid id) and, swept against this repo, flagged 26 sites — EVERY ONE a false positive, never a real
+// wrapped anchor: this file's own doc comments describing the convention (`` `@decision <id>` `` as
+// prose), the `ANCHOR_RE`/ANCHOR_RE-equivalent regex LITERAL definitions in this file, decision-records.mjs
+// and mcp/decisions.ts (the regex source text itself contains the bare string "@decision" followed by
+// `\s+(` — not real whitespace+hex), and this lint's own `formatHookMessage` output strings ("... no
+// @decision anchor)", "— @decision ${a.id}"). The mid-line mention of the literal token "@decision" is
+// common and legitimate; only a keyword with NOTHING after it on the line is the actual defect signature
+// — a real wrap always leaves the keyword dangling alone at end-of-line. See `findBrokenAnchors` below.
+// ⛔ Narrower scope, stated plainly: this does NOT catch a same-line malformed id (e.g. `@decision 12ab`,
+// too short) — that's a different, rarer shape outside this card's DoD, which is specifically the wrap.
+const BROKEN_ANCHOR_RE = /@decision\b\s*$/i;
 const FLAT_STORES = ["adr", "decisions"];
 
 // Default N (DoD-3): justified against THIS repo's OWN measured block-length distribution (OBSERVED —
@@ -153,6 +186,20 @@ export function findFileAnchors(lines) {
   return found;
 }
 
+/** Every `@decision` keyword site in `lines` with NOTHING else after it on the same line (card ad3a9a85) —
+ * the shape a JSDoc continuation wrap leaves behind when it splits the keyword from its id onto the next
+ * line. See `BROKEN_ANCHOR_RE`'s own doc for why this is deliberately narrower than "not followed by a
+ * valid id anywhere on the line" (that broader shape false-positives on every mid-line mention of the
+ * token). Independent of comment-block grouping, same as `findFileAnchors` above (a broken anchor is
+ * still broken even on a line this file's block heuristic fails to classify as a comment). */
+export function findBrokenAnchors(lines) {
+  const found = [];
+  lines.forEach((line, i) => {
+    if (BROKEN_ANCHOR_RE.test(line)) found.push({ line: i + 1 });
+  });
+  return found;
+}
+
 /** True iff `nameLower` is `id` followed by a real boundary — mirrors decision-records.mjs's own
  * `idBoundaryMatch` (same rationale: never let id `deadbeef` bare-prefix-match `deadbeefcafe-other.md`). */
 function idBoundaryMatch(nameLower, id) {
@@ -189,6 +236,24 @@ export function listRecordIds(repoRoot) {
     if (fs.existsSync(findings)) records.push({ id: m[1], path: findings });
   }
   return records;
+}
+
+/** Every record in `records` (as returned by `listRecordIds`) whose file exceeds `maxBytes` — measured the
+ * SAME way `decision-records.mjs`'s own `truncateRecord` measures it (UTF-8 byte length of the raw file
+ * text, never a character/UTF-16 count — this repo's house typography is multi-byte, so the two diverge).
+ * Card d0d0401b: this is the visible, authoring-time half of the size constraint; read-time truncation
+ * (decision-records.mjs) stays the last-resort safety net, unchanged. An unreadable record is skipped
+ * (never crashes the sweep) — a record that can't be read can't be injected either, so it's not this
+ * check's problem to report. */
+export function findOversizedRecords(records, maxBytes) {
+  const oversized = [];
+  for (const r of records) {
+    let text;
+    try { text = fs.readFileSync(r.path, "utf8"); } catch { continue; }
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes > maxBytes) oversized.push({ id: r.id, path: r.path, bytes });
+  }
+  return oversized;
 }
 
 function walkSourceFiles(repoRoot) {
@@ -231,7 +296,7 @@ export function bucketDistribution(blocks) {
 }
 
 /**
- * Scan `repoRoot` and compute all three checks plus the calibration distribution. Never throws on a
+ * Scan `repoRoot` and compute all five checks plus the calibration distribution. Never throws on a
  * violation being found — violations are just data in the returned report (DoD-1/2: warn-only, with the
  * count reported). `opts.minLines` overrides `DEFAULT_MIN_LINES` (DoD-3: N is configurable).
  */
@@ -240,6 +305,7 @@ export function computeReport(repoRoot, opts = {}) {
   const files = walkSourceFiles(repoRoot);
   const allBlocks = [];
   const allAnchors = [];
+  const allBroken = [];
 
   for (const file of files) {
     let raw;
@@ -247,11 +313,13 @@ export function computeReport(repoRoot, opts = {}) {
     const lines = raw.split(/\r?\n/);
     for (const b of extractCommentBlocks(lines)) allBlocks.push({ file, ...b });
     for (const a of findFileAnchors(lines)) allAnchors.push({ ...a, file });
+    for (const b of findBrokenAnchors(lines)) allBroken.push({ ...b, file });
   }
 
   const records = listRecordIds(repoRoot);
   const recordIdSet = new Set(records.map((r) => r.id));
   const anchorIdSet = new Set(allAnchors.map((a) => a.id));
+  const oversizedRecords = findOversizedRecords(records, PER_RECORD_MAX_BYTES);
 
   const unanchoredLong = allBlocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
   const guardClass = allBlocks.filter((b) => b.length <= GUARD_MAX_LINES && b.anchorIds.length > 0);
@@ -286,6 +354,15 @@ export function computeReport(repoRoot, opts = {}) {
       advisory: true, // DoD-2: never an error — a policy-level record may legitimately have no anchor site.
       items: orphanRecords.map((r) => ({ id: r.id, path: relPath(repoRoot, r.path) })),
     },
+    brokenAnchors: {
+      count: allBroken.length,
+      items: allBroken.map((b) => ({ file: relPath(repoRoot, b.file), line: b.line })),
+    },
+    oversizedRecords: {
+      count: oversizedRecords.length,
+      maxBytes: PER_RECORD_MAX_BYTES,
+      items: oversizedRecords.map((r) => ({ id: r.id, path: relPath(repoRoot, r.path), bytes: r.bytes })),
+    },
     distribution: bucketDistribution(allBlocks),
   };
 }
@@ -310,9 +387,9 @@ export function isInScope(repoRoot, filePath) {
 }
 
 /**
- * The hook's actual per-file check: checks (1) unanchoredLongBlocks and (2) orphanAnchors — see this
- * file's header for why (3) orphanRecords is deliberately excluded — scoped to ONE file's already-read
- * `content`, never a repo walk. `listRecordIds` is the only filesystem cost beyond the one file read: a
+ * The hook's actual per-file check: checks (1) unanchoredLongBlocks, (2) orphanAnchors, and (4) brokenAnchors
+ * — see this file's header for why (3) orphanRecords and (5) oversizedRecords are deliberately excluded —
+ * scoped to ONE file's already-read `content`, never a repo walk. `listRecordIds` is the only filesystem cost beyond the one file read: a
  * `readdirSync` of up to three small `docs/<kind>` directories (a handful of entries each in this repo
  * today), not a source-tree scan — see this function's own doc in `computeReport` above for why it's cheap.
  * Returns `null` for a file outside `isInScope`'s scope; otherwise a report shaped for `formatHookMessage`
@@ -327,6 +404,7 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
   const lines = content.split(/\r?\n/);
   const blocks = extractCommentBlocks(lines);
   const anchors = findFileAnchors(lines);
+  const broken = findBrokenAnchors(lines);
   const unanchoredLong = blocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
 
   const recordIdSet = new Set(listRecordIds(repoRoot).map((r) => r.id));
@@ -340,6 +418,7 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
     minLines,
     unanchoredLongBlocks: unanchoredLong.map((b) => ({ startLine: b.startLine, endLine: b.endLine, length: b.length })),
     orphanAnchors: [...orphanAnchorsById.values()].map((a) => ({ id: a.id, line: a.line })),
+    brokenAnchors: broken.map((b) => ({ line: b.line })),
   };
 }
 
@@ -354,9 +433,14 @@ export function formatHookMessage(report) {
     lines.push(`${report.orphanAnchors.length} orphan @decision anchor(s) in ${report.file} (no record in docs/adr, docs/decisions, or docs/investigations):`);
     for (const a of report.orphanAnchors) lines.push(`  - ${report.file}:${a.line} — @decision ${a.id}`);
   }
+  if (report.brokenAnchors.length) {
+    lines.push(`${report.brokenAnchors.length} broken @decision anchor(s) in ${report.file} (the keyword is not followed by a valid 8-hex id on the SAME line — likely a line wrap; the anchor is NOT detected and its record silently becomes an orphan):`);
+    for (const b of report.brokenAnchors) lines.push(`  - ${report.file}:${b.line} — @decision with no valid id on this line`);
+  }
   return `comment-anchor-lint (CLAUDE.md comment taxonomy, card 90b19799) flagged ${report.file}:\n${lines.join("\n")}\n`
     + `Advisory only: a long unanchored block may want "// @decision <id> — <the prohibition/consequence>" `
-    + `(<=3 lines) plus an out-of-band record in docs/adr or docs/decisions; an orphan anchor needs a matching record file.`;
+    + `(<=3 lines) plus an out-of-band record in docs/adr or docs/decisions; an orphan anchor needs a matching `
+    + `record file; a broken anchor needs "@decision <id>" kept together on one line, never wrapped.`;
 }
 
 /**
@@ -409,7 +493,7 @@ async function runHook(repoRootArg) {
   try { content = fs.readFileSync(filePath, "utf8"); } catch { return; } // tool already ran → file is on disk
 
   const report = computeFileReport(repoRoot, filePath, content);
-  if (!report || (report.unanchoredLongBlocks.length === 0 && report.orphanAnchors.length === 0)) return;
+  if (!report || (report.unanchoredLongBlocks.length === 0 && report.orphanAnchors.length === 0 && report.brokenAnchors.length === 0)) return;
 
   const msg = formatHookMessage(report);
   await emitHook({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: msg } });
