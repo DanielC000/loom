@@ -4861,9 +4861,13 @@ export class OrchestrationMcpRouter {
           "projectId, projectName, agentName, branch} — `detail` is the raw kind-specific payload (already-" +
           "durable operational metadata, not a dump of session transcript content). limit/offset paginate " +
           "(default " + DEFAULT_EVENTS_SEARCH_CAP + " when omitted, clamped to " + MAX_EVENTS_SEARCH_PAGE +
-          "); the result is ALWAYS the {events, total, returned, offset, nextOffset} envelope (never a bare " +
-          "array) since this read is inherently a forensics page, not a small enumerable set — page " +
+          "); the result is ALWAYS the {events, total, returned, offset, nextOffset, limit} envelope (never " +
+          "a bare array) since this read is inherently a forensics page, not a small enumerable set — page " +
           "deterministically via offset:nextOffset until it is null, same contract as `gate_history`. " +
+          "`limit` echoes the EFFECTIVE, already-clamped limit actually applied (never the raw request) — " +
+          "if it differs from the `limit` you passed (or from " + DEFAULT_EVENTS_SEARCH_CAP + " when you " +
+          "omitted one), your request was clamped and `returned` rows are NOT the whole matching set even " +
+          "though `total` may say otherwise; page via `offset`/`nextOffset` to see the rest. " +
           "⚠️ For a `cross_project_message` event, project-scoping prefers the WORKER/target session over " +
           "the sending manager's own (by design, when the target session resolves) — so a manager can be " +
           "structurally unable to see its own outbound peer messages here; they scope to the RECIPIENT " +

@@ -189,8 +189,9 @@ try {
   check("(2) with no filter, returns an envelope carrying every seeded event",
     Array.isArray(allEvents.events) && allEvents.total >= 4 &&
     ["ev-gate", "ev-kill", "ev-merge-rej", "ev-home"].every((id) => allEvents.events.some((e) => e.id === id)));
-  check("(2) envelope shape is always {events,total,returned,offset,nextOffset} — never a bare array",
-    !Array.isArray(allEvents) && typeof allEvents.total === "number" && "nextOffset" in allEvents);
+  check("(2) envelope shape is always {events,total,returned,offset,nextOffset,limit} — never a bare array",
+    !Array.isArray(allEvents) && typeof allEvents.total === "number" && "nextOffset" in allEvents &&
+    typeof allEvents.limit === "number");
 
   // Card 39f79291 DoD-4 — POSITIVE control (a known-good kind with known-present events returns them)
   // run in the SAME test as the NEGATIVE case right below it: a caller who only ever sees the negative
@@ -253,16 +254,25 @@ try {
     clampDefault.returned === DEFAULT_EVENTS_SEARCH_CAP && clampDefault.events.length === DEFAULT_EVENTS_SEARCH_CAP &&
     clampDefault.total === CLAMP_TOTAL && clampDefault.nextOffset === DEFAULT_EVENTS_SEARCH_CAP);
 
+  // Card 5a05ec17: the envelope now echoes the EFFECTIVE clamped `limit` (previously dropped even though
+  // `listOrchestrationEventsBounded` already computed it) — a caller can tell `limit:5000` was clamped
+  // rather than silently reasoning about `returned` rows as if they were the whole request.
   const clampOverMax = await call("events_search", { kind: ["idle_report"], limit: 999999 });
   check(`(2) clamp: a limit far past the ceiling clamps to MAX_EVENTS_SEARCH_PAGE (${MAX_EVENTS_SEARCH_PAGE}), never returns unbounded rows`,
     clampOverMax.returned === MAX_EVENTS_SEARCH_PAGE && clampOverMax.events.length === MAX_EVENTS_SEARCH_PAGE &&
     clampOverMax.nextOffset === MAX_EVENTS_SEARCH_PAGE);
+  check("(2) clamp: NEGATIVE control — when clamping fires, the echoed `limit` differs from the requested 999999 and reports the true effective ceiling",
+    clampOverMax.limit === MAX_EVENTS_SEARCH_PAGE && clampOverMax.limit !== 999999);
 
   const clampAtMax = await call("events_search", { kind: ["idle_report"], limit: MAX_EVENTS_SEARCH_PAGE });
   check("(2) clamp: a limit exactly at the ceiling is honored unclamped", clampAtMax.returned === MAX_EVENTS_SEARCH_PAGE);
+  check("(2) clamp: POSITIVE control — the un-clamped case echoes the requested limit unchanged (MAX_EVENTS_SEARCH_PAGE)",
+    clampAtMax.limit === MAX_EVENTS_SEARCH_PAGE);
 
   const clampUnderCap = await call("events_search", { kind: ["idle_report"], limit: 5 });
   check("(2) clamp: a limit well under both caps is honored exactly (not silently bumped)", clampUnderCap.returned === 5);
+  check("(2) clamp: POSITIVE control — the un-clamped case (limit:5, well under both caps) echoes the requested limit unchanged",
+    clampUnderCap.limit === 5);
 
   // ===================== (3) agent_prompt_search — cross-project, bounded, snippeted =====================
   check("(3) loom-platform registers agent_prompt_search", platToolNames.includes("agent_prompt_search"));

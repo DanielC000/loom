@@ -42,7 +42,7 @@ export function eventsSearchQuery(
      *  `pickFields`'s own doc (mcp/tasks.ts) for its three deliberate properties. */
     fields?: string[];
   },
-): { error: string } | { events: EventForensicsRow[] | Partial<EventForensicsRow>[]; total: number; returned: number; offset: number; nextOffset: number | null } {
+): { error: string } | { events: EventForensicsRow[] | Partial<EventForensicsRow>[]; total: number; returned: number; offset: number; nextOffset: number | null; limit: number } {
   const { kind, projectId, sessionId, taskId, limit, offset, fields } = args;
   if (kind && kind.length > 0) {
     const unrecognized = kind.filter((k) => !EVENT_SEARCH_VALID_KINDS_SET.has(k));
@@ -59,5 +59,10 @@ export function eventsSearchQuery(
   // projection — fields narrows what's IN each event, never how many events there are (tasks_list's rule).
   const nextOffset = off + page.items.length < page.total ? off + page.items.length : null;
   const events = pickFields(page.items as unknown as Record<string, unknown>[], fields) as EventForensicsRow[] | Partial<EventForensicsRow>[];
-  return { events, total: page.total, returned: page.items.length, offset: off, nextOffset };
+  // Card 5a05ec17: echo page.limit (the EFFECTIVE, already-clamped limit `listOrchestrationEventsBounded`
+  // computed) so a caller who requests past MAX_EVENTS_SEARCH_PAGE can tell it was clamped rather than
+  // silently reasoning about `returned` rows as if they were the whole request — matches `gate_history`'s
+  // own clamp-and-report-effective-limit contract (db.ts's `listOrchestrationEventsBounded` doc), which
+  // this envelope previously failed to honor even though the underlying query already computed it.
+  return { events, total: page.total, returned: page.items.length, offset: off, nextOffset, limit: page.limit };
 }
