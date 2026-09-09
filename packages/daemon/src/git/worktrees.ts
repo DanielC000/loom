@@ -621,6 +621,8 @@ export async function provisionWorktreeDeps(worktreePath: string, deps: Provisio
   }
 
   if (!installOk || !isWorkspaceMonorepo(worktreePath, manager)) return;
+  // @decision 503cd822 — do not build every no-commit review worktree unconditionally; gate the build
+  // phase on the reviewed diff touching a test file. See docs/adr/503cd822-build-review-worktrees-only-when-the-diff-needs-it.md.
   if (deps.runBuild === false) return; // build-free rig (e.g. a noCommit review role) — install only, skip the monorepo build
 
   const buildTimeoutMs = deps.buildTimeoutMs ?? PROVISION_BUILD_TIMEOUT_MS;

@@ -49,6 +49,9 @@ only if so, even though the reviewer itself never commits. INSTALL still runs un
 - READ-IN-SOURCE: `packages/daemon/src/git/worktrees.ts` — `ProvisionDeps.runBuild`'s own doc comment
   (~line 357) and `reviewDiffNeedsBuild`'s own doc comment (~line 2651) state this decision and cite card
   `503cd822` verbatim (read directly in this worktree, 2026-09-09).
-- No inline source anchor added: `git/worktrees.ts` is held by a concurrent worker (card `8ea85329`) for
-  the duration of this task — this is the exact collision named in this task's own kickoff. Reported as a
-  remainder rather than edited.
+- No inline source anchor added by the `92cfc09e` task: `git/worktrees.ts` was held by a concurrent
+  worker (card `8ea85329`) at that task's kickoff — the exact collision that task's own kickoff named.
+  Reported as a remainder rather than edited.
+- OBSERVED (card `f42c545f`, 2026-09-09): that hold had since cleared. A `// @decision 503cd822` anchor
+  was added at `provisionWorktreeDeps`'s `if (deps.runBuild === false) return;` line (~line 624) — the
+  actual behavioral chokepoint that skips the build phase.

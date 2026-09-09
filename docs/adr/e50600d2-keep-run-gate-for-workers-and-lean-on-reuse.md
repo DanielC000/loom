@@ -54,7 +54,11 @@ never consulted by the merge gate's own re-gate was false, and is retracted).
 - READ-IN-SOURCE: project memory note `gate-cap-is-2-is-owner-decision-never-change-silently` (this
   project's shared memory, read at this session's kickoff) records the 2026-07-15 unpinned-gate-spike
   incident that motivated admitting worker self-checks through the shared semaphore in the first place.
-- No inline source anchor added: the natural sites for this decision (`run_gate`'s own registration under
-  `packages/daemon/src/mcp/**`, and the merge-time reuse check in `git/worktrees.ts`/`sessions/service.ts`)
-  are all held by concurrent workers (cards `40f4cae9`, `8ea85329`, `bed49000`) for the duration of this
-  task; reported as a remainder.
+- No inline source anchor added by the `92cfc09e` task: the natural sites for this decision (`run_gate`'s
+  own registration under `packages/daemon/src/mcp/**`, and the merge-time reuse check in
+  `git/worktrees.ts`/`sessions/service.ts`) were all held by concurrent workers (cards `40f4cae9`,
+  `8ea85329`, `bed49000`) at that task's kickoff; reported as a remainder.
+- OBSERVED (card `f42c545f`, 2026-09-09): that fence had since cleared. `packages/daemon/src/sessions/
+  service.ts`'s merge-time reuse check — the `if (freshHead && !freshStamp.dirty && stampDiffers ===
+  false && freshBehindMain === 0)` branch that skips the merge gate's own re-run — was unheld. A
+  `// @decision e50600d2` anchor was added there.

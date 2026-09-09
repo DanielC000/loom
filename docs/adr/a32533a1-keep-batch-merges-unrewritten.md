@@ -49,5 +49,9 @@ a solo confirm.
 - `ownTipSubject`/`ownTipSubjectConventional` and `toConventionalSubject` live in
   `packages/daemon/src/sessions/service.ts`, `packages/daemon/src/mcp/orchestration.ts`, and
   `packages/daemon/src/git/worktrees.ts` — all three held by concurrent workers (cards `bed49000`,
-  `40f4cae9`, `8ea85329`) for the duration of this task, so no inline source anchor was added for this
-  record; reported as a remainder.
+  `40f4cae9`, `8ea85329`) for the duration of the `92cfc09e` task, so that worker reported no inline
+  source anchor as a remainder.
+- OBSERVED (card `f42c545f`, 2026-09-09): the batch-landing worktree fence had since cleared, and
+  `packages/daemon/src/git/batch-merge.ts` (the per-commit cherry-pick loop, where every commit lands
+  with `--no-commit` and its message passes through unmodified) was unheld. A `// @decision a32533a1`
+  anchor was added there.

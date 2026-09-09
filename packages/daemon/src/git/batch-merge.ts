@@ -357,6 +357,8 @@ async function landBranchCommitsIndividually(
   for (let i = 0; i < commitShas.length; i++) {
     const sha = commitShas[i]!;
     const isLast = i === commitShas.length - 1;
+    // @decision a32533a1 — do not coerce or rewrite a batched commit's subject to the card title; it
+    // lands verbatim, unlike a solo merge's title-coerced squash. See docs/adr/a32533a1-keep-batch-merges-unrewritten.md.
     // EVERY commit cherry-picks with `--no-commit` (never auto-commits) so its message passes through
     // `stripClaudeSessionTrailer` before the one manual `git commit` that lands it — see this function's
     // own doc for why that can't be limited to just the tip.

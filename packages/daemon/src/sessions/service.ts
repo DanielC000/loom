@@ -15973,6 +15973,8 @@ export class SessionService {
       // nothing to compare against, so the reasons list below can tell "genuinely unchanged" apart from
       // "no prior stamp to compare".
       const stampDiffers = hasLastCheck ? gateStampsDiffer(lastCheck.stamp, freshStamp) : undefined;
+      // @decision e50600d2 — a green run_gate self-check is reused here at merge time; do not remove
+      // run_gate to cut shared gate load, only widen/tighten reuse. See docs/adr/e50600d2-keep-run-gate-for-workers-and-lean-on-reuse.md.
       if (hasLastCheck && branchMatches && checkPassed && checkHeadCurrent) {
         if (freshHead && !freshStamp.dirty && stampDiffers === false && freshBehindMain === 0) {
           // TOCTOU NOTE (CR follow-up): `freshBehindMain === 0` only proves main hadn't moved AS OF
