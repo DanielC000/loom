@@ -361,6 +361,10 @@ export function findConversationIdForSpawn(cwd: string, sinceMs: number, exclude
  * deliberately point back here rather than repeating this, so it can't drift out of sync. Do not read this
  * function's own certainty about the sequential case as covering the concurrent one too.
  *
+ * @decision 184fd82e — do not adopt a per-cwd spawn lock off the ~120s retry-ladder ceiling alone;
+ * `captureCodexEngineSessionId` (`pty/host.ts`) now logs the real exposure instead. See
+ * `docs/adr/184fd82e-defer-serializing-fresh-codex-spawns-per-cwd.md`.
+ *
  * Reads every matching file's `session_meta` (not just `stat`s it, unlike the freshness scan above) since
  * cwd is only knowable from content — cached and read incrementally, never the whole file (see
  * `readSessionMeta`'s own doc) — bounded to the same `depth:3` (YYYY/MM/DD) tree walk; never throws. A

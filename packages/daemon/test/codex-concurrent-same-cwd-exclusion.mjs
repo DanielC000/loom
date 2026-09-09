@@ -36,6 +36,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // covered there and proves nothing about two SIBLINGS spawned close together, each still mid capture-ladder
 // when the other's rollout file appears.
 //
+// Card 184fd82e (decision on this residual): rather than sizing a per-cwd spawn lock off the retry ladder's
+// unmeasured ~120s worst-case ceiling, `captureCodexEngineSessionId` (host.ts) now logs a
+// CONCURRENT-RACE-WINDOW diagnostic on every capture where another live, same-cwd codex entry is still
+// unresolved — the real exposure precondition, observable in production without waiting for a real
+// misattribution to occur. This fixture, already manufacturing the exact collision above, is extended below
+// to assert that diagnostic fires on A's mis-capture and does NOT false-positive on B's later correct one —
+// see docs/adr/184fd82e-defer-serializing-fresh-codex-spawns-per-cwd.md for the full decision + evidence.
+//
 // Run: 1) build (turbo builds shared first), 2) node test/codex-concurrent-same-cwd-exclusion.mjs
 import fs from "node:fs";
 import path from "node:path";
@@ -50,6 +58,13 @@ const check = (label, cond, diag) => {
     if (diag) console.log(`      ${diag}`);
   }
 };
+
+// Card 184fd82e: capture real console.log output too, so the checks below can assert on the NEW
+// concurrent-race-window diagnostic (`captureCodexEngineSessionId`, host.ts) that this same fixture now
+// also exercises — real console.log still fires underneath (so PASS/FAIL lines still print).
+const capturedLogs = [];
+const originalConsoleLog = console.log;
+console.log = (...args) => { capturedLogs.push(args.map(String).join(" ")); originalConsoleLog(...args); };
 
 process.env.LOOM_CODEX_ENGINE_ID_RETRY_MS = "40"; // fast retry ladder for this test only
 process.env.LOOM_CODEX_ENGINE_ID_MAX_ATTEMPTS = "30"; // ~1.2s total budget — ample for a hermetic fixture
@@ -148,6 +163,15 @@ function writeRollout(conversationId, cwd, mtimeMs) {
     liveA.engineSessionId === victimRealId,
     `liveA.engineSessionId=${liveA.engineSessionId}`);
 
+  // Card 184fd82e: this is exactly the precondition the new concurrent-race-window diagnostic exists to
+  // surface — B is still live, same cwd, and B's own engineSessionId is still unresolved at the instant A
+  // captures. MEASURED here, not asserted from the source: the diagnostic fires on the manufactured
+  // collision itself, not merely on the code path existing.
+  check("NEW INSTRUMENTATION (card 184fd82e): A's capture logged a CONCURRENT-RACE-WINDOW warning — the " +
+    "real precondition (B still live, same cwd, uncaptured) held at A's capture instant",
+    capturedLogs.some((l) => l.includes("[codex-engine-id] concurrent-a") && l.includes("CONCURRENT-RACE-WINDOW")),
+    `logs=${JSON.stringify(capturedLogs.filter((l) => l.includes("codex-engine-id")))}`);
+
   // B's ready fires next. Nothing in the unmitigated capture path reads or writes any cross-session state,
   // so B's own scan is entirely unaffected by A's earlier (wrong) capture — B independently finds and
   // adopts its OWN real file too.
@@ -159,6 +183,15 @@ function writeRollout(conversationId, cwd, mtimeMs) {
   check("B correctly captured ITS OWN real id, unaffected by A's earlier wrong capture",
     liveB.engineSessionId === victimRealId,
     `liveB.engineSessionId=${liveB.engineSessionId}`);
+
+  // Card 184fd82e: B captures AFTER A already resolved, so at B's own capture instant A no longer counts
+  // as "still capturing" (A.engineSessionId is set) — the diagnostic must NOT falsely flag B's own correct,
+  // unremarkable capture. Guards against a version of the check that fires on ANY same-cwd sibling rather
+  // than specifically an UNRESOLVED one.
+  check("NEW INSTRUMENTATION: B's own later, correct capture logged NO race-window warning (A had already " +
+    "resolved by the time B captured)",
+    !capturedLogs.some((l) => l.includes("[codex-engine-id] concurrent-b") && l.includes("CONCURRENT-RACE-WINDOW")),
+    `logs=${JSON.stringify(capturedLogs.filter((l) => l.includes("codex-engine-id")))}`);
 
   check("END STATE: A and B now share ONE real id (one wrong capture + one correct one) — " +
     "a detectable collision (a uniqueness sweep across live engineSessionIds would catch this), " +
@@ -174,4 +207,5 @@ function writeRollout(conversationId, cwd, mtimeMs) {
     liveA.engineSessionId === victimRealId && !engineSessionIdEvents.some((e) => e.sessionId === "concurrent-a" && e.engineId === "grabber-a-real-id"));
 }
 
+console.log = originalConsoleLog;
 await finishAndExit(failures === 0 ? 0 : 1);

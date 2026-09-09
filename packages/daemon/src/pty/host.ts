@@ -6767,6 +6767,15 @@ export class PtyHost {
       live.engineSessionId = found;
       this.events.onEngineSessionId(sessionId, found, null);
       this.broadcastControl(live, { type: "sessionId", id: found });
+      // @decision 184fd82e — do not size the per-cwd-lock decision off the ~120s ladder ceiling; measure
+      // the real exposure instead. `sameCwdStillCapturing`: other live codex entries sharing this cwd
+      // whose OWN id is still unresolved right now — the actual race precondition, not a proxy for it.
+      // See docs/adr/184fd82e-defer-serializing-fresh-codex-spawns-per-cwd.md.
+      const sameCwdStillCapturing = Array.from(this.liveCodex.values())
+        .filter((other) => other !== live && other.alive && other.cwd === cwd && !other.engineSessionId).length;
+      const elapsedMs = Date.now() - live.startedAt;
+      // eslint-disable-next-line no-console
+      console.log(`[codex-engine-id] ${sessionId} captured after ${elapsedMs}ms (attempt ${attempt + 1}/${CODEX_ENGINE_ID_MAX_ATTEMPTS})${sameCwdStillCapturing > 0 ? ` — CONCURRENT-RACE-WINDOW: ${sameCwdStillCapturing} other live codex session(s) sharing cwd=${cwd} still mid-capture (card 184fd82e)` : ""}`);
       return;
     }
     if (attempt < CODEX_ENGINE_ID_MAX_ATTEMPTS - 1) {
