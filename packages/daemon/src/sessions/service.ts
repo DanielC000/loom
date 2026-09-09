@@ -249,7 +249,7 @@ export interface SquashQueueEntry {
 
 /** @decision a5d1ae04 — `GateIntentEntry` deliberately omits `sessionId` on both sides of the redaction
  *  boundary; the dead-seat check runs server-side before this entry is built, so residue is structurally
- *  absent, not merely tagged (docs/decisions/a5d1ae04-gateintententry-omits-sessionid-deliberately.md) */
+ *  absent, not merely tagged (docs/decisions/a5d1ae04-gate-intent-is-manager-only-registered-off-the-worker-tool-list.md, §2) */
 export interface GateIntentEntry {
   projectId: string;
   projectName: string;
@@ -458,7 +458,7 @@ type MergeBatchResult = {
   landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number }[];
   /** @decision 553ea58c — `landedCount` is the real git-verified total; `landed.length` can under-report
    *  if a worker session row was hard-deleted between selection and finalize
-   *  (docs/decisions/553ea58c-landedcount-is-the-real-git-verified-total.md) */
+   *  (docs/decisions/553ea58c-batchlanded-is-a-separate-later-fact.md, §2) */
   landedCount?: number;
   fallback: { workerSessionId: string; reason: string }[];
   reason?: string;
@@ -670,7 +670,7 @@ const MERGE_OP_RETAIN_MS = 5_000;
  *  @decision 39196378 — `headCurrent`/`headWarning` catch the queued-gate-validates-a-stale-tree trap
  *  (docs/decisions/39196378-headcurrent-catches-the-queued-gate-validates-stale-tree-trap.md)
  *  @decision 4c5bf820 — `steps`/`outputTail` are forwarded on a passing self-check too, not just a
- *  failure (docs/decisions/4c5bf820-steps-outputtail-forwarded-on-pass-too.md) */
+ *  failure (docs/decisions/4c5bf820-merge-gate-row-verdict-derivation-and-honest-null-payload.md, §2) */
 type WorkerGateResult = {
   ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string;
   validatedHead?: string | null; durationMs?: number; headCurrent?: boolean; headWarning?: string;
@@ -692,7 +692,7 @@ type WorkerGateResult = {
 
 /** @decision 4c5bf820 — the durable tombstone write derives from the SAME four shapes (error/cancelled/
  * pass/fail) the completion-nudge builder branches on, or the two can tell different stories
- * (docs/decisions/4c5bf820-steps-outputtail-forwarded-on-pass-too.md) */
+ * (docs/decisions/4c5bf820-merge-gate-row-verdict-derivation-and-honest-null-payload.md, §3) */
 function deriveWorkerGateVerdict(
   outcome: { ok: true; value: WorkerGateResult } | { ok: false; error: unknown },
 ): { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } | undefined {
@@ -874,7 +874,7 @@ function deriveDeployGateVerdict(
  * @decision 67030bb9 — `attempt1DurationMs` must be the pre-captured attempt-1-bounded duration, never
  * recomputed at settle (finding [1]) (docs/decisions/67030bb9-retrywarning-three-cases-corrected-present-on-fail-too.md)
  * @decision 553ea58c — `batchBranchCount` is ASSEMBLED count, never necessarily landed (finding [5],
- * corrected) (docs/decisions/553ea58c-landedcount-is-the-real-git-verified-total.md) */
+ * corrected) (docs/decisions/553ea58c-batchlanded-is-a-separate-later-fact.md, §2) */
 function deriveBatchGateVerdict(
   result: GateSequentialResult, attempt1DurationMs: number, opMintedAtMs: number, nowMs: number,
   gateCap: number, concurrentGates: number, concurrentGatesMax: number, batchBranchCount: number,
@@ -910,7 +910,7 @@ function deriveBatchGateVerdict(
 /** @decision 7d492f8b — recovers a settled gate/merge op's verdict from durable audit events when its
  *  own tombstone was lost to a crash; "merge" deliberately does NOT recover a bare passing gate as a
  *  merge pass (the unlogged squash step could still have failed) — see
- *  docs/decisions/7d492f8b-recover-gate-op-verdict-from-durable-audit-events.md */
+ *  docs/decisions/7d492f8b-find-gate-op-events-is-an-unindexed-boot-only-scan.md (§2) */
 function recoverGateOpVerdict(
   kind: "gate" | "merge", events: OrchestrationEvent[],
 ): { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } | undefined {
@@ -1044,7 +1044,7 @@ function formatRecoveredGateOpNudge(
 /** @decision e50600d2 — records a worker's most recent SETTLED run_gate outcome for merge-time reuse;
  *  in-memory only, so a daemon restart loses it and the reuse check must fail closed, never assume
  *  "nothing changed" — see
- *  docs/decisions/e50600d2-lastworkergatecheck-stamp-equivalence-and-restart-loss.md */
+ *  docs/adr/e50600d2-keep-run-gate-for-workers-and-lean-on-reuse.md */
 type LastWorkerGateCheck = { passed: boolean; headCurrent: boolean; stamp: WorktreeGateStamp; opId: string; branch: string };
 
 /** How long a settled `run_gate` op stays `peek()`-able (as a RETAINED terminal view) — and, more to the

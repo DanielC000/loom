@@ -1447,7 +1447,7 @@ export type OrchestrationEventKind =
   // daemon-side only — this file ships in full to every end-user install. `detail` carries
   // { injected: boolean, reason: string | null, stamped: boolean | null }.
   // @decision badba5a8 — three deliberately separate facts, never collapsed into one boolean — see
-  //  docs/decisions/badba5a8-discovery-block-injection-three-separate-facts.md
+  //  docs/decisions/badba5a8-codescape-injection-status-is-pure-and-unit-testable-without-the-real-asset.md (§2)
   | "discovery_block_injection";
 
 /**

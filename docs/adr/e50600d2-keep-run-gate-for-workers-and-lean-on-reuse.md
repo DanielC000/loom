@@ -1,5 +1,10 @@
 # e50600d2 — Keep `run_gate` as every worker's DoD self-check; relieve its cost by reuse, not by removing the gate
 
+⚠️ Spans two decisions, both anchored in `sessions/service.ts`: this ADR (why `run_gate` stays mandatory,
+relieved by reuse not removal), and `LastWorkerGateCheck` (the record that makes the reuse possible — see
+the section at the end). `resolveRecord` serves exactly one file per id, so a second `e50600d2-*.md` file
+would have been silently unreachable; folded here (card `6de8956e`).
+
 ## Status
 
 accepted
@@ -36,29 +41,55 @@ never consulted by the merge gate's own re-gate was false, and is retracted).
 ## Consequences
 
 - Easier: a worker whose branch stays current with main until merge gets its self-check reused, paying
-  for the gate once instead of twice (observed ~35 minutes of gate time saved for one case, per the
-  tool's own cost-model text).
-- Harder / accepted: reuse is forfeited the moment the branch falls behind main between self-check and
-  merge — **not** by a busy or contended gate lane, which does not by itself defeat reuse (measured: reuse
-  still fired while a sibling merge gate held the other lane slot for the entire run).
-- The targeted-test-file default — not `run_gate` — stays the common case for an ordinary, narrowly-scoped
-  change; `run_gate` is an escalation judgement call, never a blanket requirement on every task.
+  for the gate once instead of twice (observed ~35 minutes of gate time saved for one case).
+- Harder / accepted: reuse is forfeited the moment the branch falls behind main — **not** by a busy or
+  contended gate lane, which does not by itself defeat reuse (measured: reuse still fired while a sibling
+  merge gate held the other lane slot for the entire run).
+- The targeted-test-file default — not `run_gate` — stays the common case; `run_gate` is an escalation
+  judgement call, never a blanket requirement.
 
 ## Evidence
 
-- READ-IN-SOURCE: `CLAUDE.md` line 30 ("Worker DoD test-gate" bullet, current `main`, read via this
-  worktree's checkout) states the targeted-test default + `run_gate` escalation verbatim.
-- READ-IN-SOURCE: the `run_gate` MCP tool's own live description (read this session, 2026-09-09) states
-  the reuse cost model, the `e50600d2`/`b3c04b89` card ids, the `freshBehindMain === 0` forfeit condition,
-  and the "a saturated lane does NOT by itself defeat reuse" measurement verbatim.
-- READ-IN-SOURCE: project memory note `gate-cap-is-2-is-owner-decision-never-change-silently` (this
-  project's shared memory, read at this session's kickoff) records the 2026-07-15 unpinned-gate-spike
-  incident that motivated admitting worker self-checks through the shared semaphore in the first place.
-- No inline source anchor added by the `92cfc09e` task: the natural sites for this decision (`run_gate`'s
-  own registration under `packages/daemon/src/mcp/**`, and the merge-time reuse check in
-  `git/worktrees.ts`/`sessions/service.ts`) were all held by concurrent workers (cards `40f4cae9`,
-  `8ea85329`, `bed49000`) at that task's kickoff; reported as a remainder.
-- OBSERVED (card `f42c545f`, 2026-09-09): that fence had since cleared. `packages/daemon/src/sessions/
-  service.ts`'s merge-time reuse check — the `if (freshHead && !freshStamp.dirty && stampDiffers ===
-  false && freshBehindMain === 0)` branch that skips the merge gate's own re-run — was unheld. A
-  `// @decision e50600d2` anchor was added there.
+- READ-IN-SOURCE: `CLAUDE.md`'s "Worker DoD test-gate" bullet + `run_gate`'s own live tool description
+  state the targeted-test default, the reuse cost model, the `e50600d2`/`b3c04b89` card ids, the
+  `freshBehindMain === 0` forfeit condition, and "a saturated lane does NOT by itself defeat reuse",
+  verbatim.
+- READ-IN-SOURCE: project memory `gate-cap-is-2-is-owner-decision-never-change-silently` records the
+  2026-07-15 unpinned-gate-spike incident that motivated admitting worker self-checks through the shared
+  semaphore.
+- No inline anchor added by the `92cfc09e` task that wrote this ADR: the natural sites were held by
+  concurrent workers (`40f4cae9`, `8ea85329`, `bed49000`) at kickoff; reported as a remainder.
+- OBSERVED (card `f42c545f`, 2026-09-09): that fence cleared. `sessions/service.ts`'s merge-time reuse
+  check — `if (freshHead && !freshStamp.dirty && stampDiffers === false && freshBehindMain === 0)` — was
+  unheld; a `// @decision e50600d2` anchor was added there.
+
+## Second decision: `LastWorkerGateCheck` records a worker's most recent settled self-check for reuse
+
+### Narrative
+
+A worker's most recent settled `run_gate` self-check outcome (reuse a green self-check instead of
+re-running the identical gate at merge). Recorded by `SessionService.runWorkerGate` on every settled
+(`ran:true`) outcome, pass or fail — overwriting whatever was there before — so a later failing (or racy)
+self-check at the exact same commit always supersedes an earlier green one; a stale green can never be
+resurrected by this record alone.
+
+`stamp` is the same `WorktreeGateStamp` `runWorkerGate` took at settle (equivalent to its start/admit
+stamps whenever `headCurrent` is true — see `describeGateHeadCurrency`) — `confirmWorkerMerge` compares a
+fresh stamp against this one via `gateStampsDiffer` to prove (or refute) the worktree is byte-identical to
+what this run validated.
+
+In-memory only, same posture as `gateStartStamps`: a restart between self-check and merge confirm loses
+this record, which is fine — the reuse check fails closed on a missing record (re-runs the gate), never
+on a false "nothing changed" guess.
+
+### Do not
+
+- Do not resurrect a stale green `LastWorkerGateCheck` after a later self-check at the same commit
+  overwrote it, and do not treat a missing record (e.g. post-restart) as proof nothing changed —
+  `confirmWorkerMerge` must fail closed and re-run the gate either way.
+
+### Source
+
+Inline comment in `sessions/service.ts` (`LastWorkerGateCheck` type's top-of-type doc), originally lines
+1044-1061 as of tranche 6's HEAD. Relocated by card `5dcc1e98` (tranche 6). Folded into this pre-existing
+ADR by card `6de8956e`.

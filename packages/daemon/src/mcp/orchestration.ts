@@ -1142,7 +1142,7 @@ function managerLineageDirectiveStream(db: Db, managerSessionId: string): Direct
   return tagDirectiveEventStream(ownLineageIds(db, managerSessionId).flatMap((id) => db.listEvents(id)));
 }
 
-/** @decision 35c96aa6 — see docs/decisions/35c96aa6-resolvedirectiveoutcome-hoisted-to-module-scope-for-reuse.md */
+/** @decision 35c96aa6 — see docs/decisions/35c96aa6-directive-deliveries-for-caller-label-not-internal-id.md (§2) */
 export function resolveDirectiveOutcome(
   events: DirectiveEventStream, rootDirective: OrchestrationEvent, rootMsgId: string,
 ):
@@ -1211,7 +1211,7 @@ export function resolveDirectiveOutcome(
   return { state: "delivered", msgId, deliveredAt: delivery.ts, turnSeqAtDelivery: delivery.detail!.turnSeqAtDelivery as number };
 }
 
-/** @decision 3c39be30 — see docs/decisions/3c39be30-resolvemsgidoutcome-is-the-shared-engine-behind-both-twins.md */
+/** @decision 3c39be30 — see docs/decisions/3c39be30-directive-event-stream-branding-closes-the-freehand-query-hazard.md (§2) */
 function resolveMsgIdOutcome(
   events: DirectiveEventStream, ref: string,
   findOrigin: (events: DirectiveEventStream, ref: string) => { event: OrchestrationEvent; msgId: string } | undefined,

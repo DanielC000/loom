@@ -163,7 +163,7 @@ function fnv1a32(s: string): string {
 
 /** @decision d005f55b — extends a hash over prefix A with trailing B into fnv1a32(A + B) WITHOUT A's own
  *  bytes; lets recentReportedTurns retain only length+hash — see
- *  docs/decisions/d005f55b-fnv1a32continue-extends-a-hash-without-the-prefix-bytes.md */
+ *  docs/decisions/d005f55b-diverged-prior-reported-chain-candidate.md (§3) */
 function fnv1a32Continue(priorHash: string, s: string): string {
   let h = parseInt(priorHash, 16) | 0;
   for (let i = 0; i < s.length; i++) {
@@ -259,7 +259,7 @@ function detectComposerAccumulationOverDivergedPrior(
 
 /** @decision d005f55b — names a recognized write, confirms nothing; NEVER pass the current gen's own
  *  just-pushed entry inside `window` (it would trivially self-match) — see
- *  docs/decisions/d005f55b-findrecognizedsubstring-names-not-confirms.md */
+ *  docs/decisions/d005f55b-diverged-prior-reported-chain-candidate.md (§2) */
 function findRecognizedSubstring(
   reported: string,
   window: ReadonlyArray<{ gen: number; text: string }>,
@@ -327,7 +327,7 @@ export function stripPossibleDuplicateFrame(text: string): string {
 
 /** ⛔ NOT an accumulation/fusion — do not fold into detectComposerAccumulation/…OverDivergedPrior.
  *  ⛔ Do NOT chase the wrapper's delivery path from here — tracked separately (card 854d1632).
- *  @decision d005f55b — see docs/decisions/d005f55b-wrapper-deficit-is-not-a-fusion.md */
+ *  @decision d005f55b — see docs/decisions/d005f55b-diverged-prior-reported-chain-candidate.md (§4) */
 function detectPossibleDuplicateWrapperDeficit(reported: string, intended: string): { strippedTag: string } | null {
   const stripped = stripPossibleDuplicateFrame(intended);
   if (stripped === intended) return null; // no tag was present to strip
@@ -480,7 +480,8 @@ export const HUMAN_SUBMIT_CONFIRM_HOLD_MS = Number(process.env.LOOM_HUMAN_SUBMIT
 
 /** @decision f9b1ea00 — sized past the measured p95 engine-confirmation lag (342s), deliberately not the
  *  median; env override MUST be bounded on both sides (0, 2^31-1] or it reproduces the instant-false-alarm
- *  bug from either direction — see docs/decisions/f9b1ea00-prompt-mismatch-resolve-window-sized-past-p95.md */
+ *  bug from either direction — see
+ *  docs/decisions/f9b1ea00-orchestrationevent-prompt-mismatch-unresolved-ts-correction.md (§2) */
 const rawPromptMismatchResolveWindowMs = Number(process.env.LOOM_PROMPT_MISMATCH_RESOLVE_WINDOW_MS);
 export const PROMPT_MISMATCH_RESOLVE_WINDOW_MS =
   Number.isFinite(rawPromptMismatchResolveWindowMs) && rawPromptMismatchResolveWindowMs > 0 && rawPromptMismatchResolveWindowMs <= 2_147_483_647
