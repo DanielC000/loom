@@ -38,4 +38,6 @@ as of this tranche's HEAD (tranche 11). Cross-referenced (read-only) against `se
 investigation whose evidence data happens to cite this same card's fix, commit `bbe1970b`, as a
 specimen — that investigation is keyed on a DIFFERENT id, 8126f1a0, and is not a record for this one).
 Also anchored at a second, restating site inside the same function's `isNoOpManagerWake` branch: lines
-4682-4690, as of this tranche's HEAD (tranche 12).
+4682-4690, as of tranche 12's HEAD (see `service.ts` line 4625 as of this tranche's HEAD for its
+current location). And a third, restating site inside the affected/full-re-orient branch itself: line
+4631, as of this tranche's HEAD (tranche 13).

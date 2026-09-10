@@ -4626,28 +4626,9 @@ export class SessionService {
           if (draftNote || capNote) this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} You were resumed.${draftNote}${capNote}`);
         } else {
           // Affected (workers resumed, queued I/O replayed, an unconsumed answer, or stranded board work)
-          // → the full re-orient, with a one-line classification of WHAT this restart touched so the
-          // manager re-checks precisely. Card 11b847e1: this branch's enqueued text now names
-          // `intent.reason` (and therefore the SHA) ONLY for a SAME-project MANAGER recipient
-          // (`reasonClauseFor` above) — so the SHA-delivered record below must follow the SAME condition,
-          // not fire unconditionally for the whole branch as it used to when this really was the only
-          // branch that ever named the reason. Recording it for a cross-project recipient that was never
-          // actually shown the reason would reintroduce the exact bug card 066d317c fixed one level up (a
-          // later "X COMPLETE + DEPLOYED" escalation for that SHA getting suppressed against a session
-          // that, in truth, was never told).
-          //
-          // The Platform Lead is carved OUT of that scoping (manager-review follow-up to 11b847e1): the
-          // isolation boundary this redaction protects is specifically "one project's MANAGER must not
-          // learn what another project is doing" (card 5a9a963b) — the Lead is not a party to that
-          // boundary. It sits ABOVE all projects by design and already holds cross-project reads
-          // elsewhere (list_all_sessions and friends), so withholding the reason from it is pure
-          // capability degradation for the one recipient whose job actually requires cross-project
-          // context, not isolation. The Lead arm therefore ALWAYS gets the raw reason — computed here,
-          // not folded into `reasonClauseFor` itself, so that helper stays a pure same-project-manager
-          // check reusable elsewhere without a role special-case baked in. Keeping `reasonClause` (not
-          // `reasonClauseFor(e.sessionId)`) as the single value both arms below AND the SHA-delivered
-          // gate read from is what keeps the two in lockstep for the Lead case too — the record must
-          // fire whenever, and only whenever, the enqueued text actually named the reason.
+          // → the full re-orient, with a one-line classification of WHAT this restart touched.
+          // @decision 11b847e1 — reasonClause names intent.reason only for a same-project MANAGER recipient (Lead exempt, @decision 5a9a963b); the SHA-delivered record below must follow the identical condition.
+          // @decision 066d317c — recordDeployShasDelivered fires here only because this branch's reasonClause CAN be non-empty (unlike the silent/minimal branches above).
           const reasonClause = e.role === "platform" ? ` (reason: ${intent.reason})` : reasonClauseFor(e.sessionId);
           if (reasonClause) this.recordDeployShasDelivered(e.sessionId, reasonShas);
           const affected = [
@@ -4729,27 +4710,8 @@ export class SessionService {
         // Card a1b79655: the requester can ALSO have had its own cap-queued intent(s) dropped by the very
         // restart it triggered — same additive treatment as reqDraftNote.
         const reqCapNote = capQueuedNote(reqId);
-        // card 90058589: the deploy REQUESTER is NEVER FYI-short-circuited — initiating a deploy is active
-        // work, so it always gets the full "code is live — continue/verify" nudge (even at 0 live workers
-        // with a stale done/waiting idle-policy, the case the old converged-FYI branch wrongly stalled).
-        // Card 39fcaad3: the requester is no longer ALWAYS a manager — the platform Lead can now request
-        // its own restart too (RestartIntent.managerSessionId is kept named for on-disk compat; read it as
-        // "the requester" — see its doc in orchestration/restart.ts). Dispatch via the role-aware
-        // `enqueueDurableNudge` (already used for the non-requester manager/platform branch above): for
-        // role "manager" it defers on `waitForMcpSeen` (see `usesOrchestrationMcp`), so the manager path
-        // stays byte-identical; a platform-Lead requester never mounts loom-orchestration, so
-        // `waitForMcpSeen` could never see it — `enqueueDurableNudge` correctly delivers immediately
-        // instead of waiting out the MCP-ready timeout for a signal that would never fire.
-        // Derive from the DB (the authoritative, live source), NOT from `entries` alone: `entries` comes
-        // from `liveFleetResumeSet()`'s capture-time snapshot, which filters on `fs.existsSync(s.cwd)` —
-        // a platform Lead whose project home is transiently unreachable (network/removable path, an
-        // in-flight rename) would be dropped from `entries` at capture time yet still resumed here
-        // (`resumeOne(reqId)` runs unconditionally, un-gated on entries membership), and mis-derived as
-        // "manager" by the old `entries`-only lookup — reinstating exactly the pointless MCP-ready wait
-        // this fix removes. `entries` stays as a fast-path fallback (it's the pre-existing lookup, still
-        // correct whenever the requester's own row IS present), with "manager" as the final fallback for
-        // anything falling through both — the OLD-format resumeSetFromIntent path always is one (its
-        // synthesized requester entry is always role:"manager", so this default matches it exactly).
+        // @decision 90058589 — the deploy requester is never FYI-short-circuited; it always gets the full "code is live" nudge, even at 0 live workers with a stale idle-policy.
+        // @decision 39fcaad3 — (Decision B) the requester's role is derived from the DB, not `entries` alone, because the platform Lead can be transiently absent from that capture-time snapshot; enqueueDurableNudge is role-aware so a Lead requester isn't blocked on an MCP-ready signal it never mounts.
         const reqRole = this.db.getSession(reqId)?.role ?? entries.find((e) => e.sessionId === reqId)?.role ?? "manager";
         // Card b2dcf930: `failed` (populated by the per-entry resume loop above, ~:4298) is the
         // ready-made falsifier for "the rest of the fleet ... was resumed too" — it used to go
@@ -4757,24 +4719,7 @@ export class SessionService {
         // flatly false. Render it from `failed.length` instead: true in the (overwhelmingly common)
         // zero-failure case, keeping today's wording byte-identical; named otherwise.
         const fleetOk = failed.length === 0;
-        // Card 5a9a963b: the old wording here told the REQUESTER to "check worker_list across
-        // projects" — an instrument `worker_list` (scoped server-side to the caller's own direct
-        // children) can NEVER run cross-project, and the platform Lead has no `worker_list` either (it
-        // isn't on PLATFORM_TOOLS). The one recipient told to investigate was structurally unable to.
-        //
-        // ⭐ DELIBERATE BOUNDARY DECISION (settle this once, don't re-derive it): a cross-project
-        // session identity (project id, session id, task) must NEVER appear in a PROJECT MANAGER's own
-        // notice — `fleetParenthetical`/`fleetSentence` below. That would leak another project's
-        // internals across an isolation boundary a project manager has no standing to see (the
-        // specimen behind this card would have disclosed a private Codescape session to a Loom
-        // manager). So a manager requester gets, at most, an accurate COUNT plus "the Lead has been
-        // notified" — never identity, and never an instruction it can't run.
-        //
-        // The platform Lead is NOT bound by that same restriction — `list_all_sessions` already grants
-        // it cross-project visibility, so it's the correct, sole owner of the identifying detail. It is
-        // notified with the full detail (project/session/role/task/in-flight state) via `enqueueDurableNudge`
-        // below, using the SAME role-branching (`reqRole === "platform"` vs. not) this site already
-        // uses elsewhere.
+        // @decision 5a9a963b — a manager requester's fleet-resume-failure notice gets at most a count + "the Lead has been notified", NEVER cross-project session identity; the Lead alone gets the full detail.
         let leadNotified = false;
         let leadOwnFailureDetail: string | null = null;
         if (!fleetOk) {
@@ -4817,23 +4762,8 @@ export class SessionService {
           : leadNotified
             ? `${failed.length} session(s) elsewhere in the fleet failed to resume. The Lead has been notified.`
             : `${failed.length} session(s) elsewhere in the fleet failed to resume.`;
-        // Card db2179f6: "your merged daemon code is now LIVE" is unconditional today, but false for the
-        // one case this restart path already detects and returns from requestDaemonRestart —
-        // `intent.supervisorChanged` (see its own doc) — a deploy touching the supervisor script leaves
-        // those lines inert until a human runs `pnpm daemon:stable`. Absent/false in the common case,
-        // where the wording is unchanged. (The skill-store adopt half of the same finding is left
-        // out-of-scope here — plumbing `skillStoreStaleness` to this notice-building site was judged not
-        // worth its cost; see the card.)
-        //
-        // Card 062fa934 — `deploySignatureMismatch` is checked FIRST, ahead of `supervisorChanged`: it is
-        // a strictly stronger doubt (a turbo cache-replay signature — see deploy-staleness.ts's module
-        // doc — means this process's OWN build identity can't be trusted, so a caveated "code is live
-        // EXCEPT the supervisor" would still be asserting the one thing now in question). This gates the
-        // CLAIM, not the restart itself — WHO reads this and WHEN: the requesting manager/platform Lead,
-        // in this exact post-`daemon_restart` nudge, every time this process's own resumeFleetOnBoot runs
-        // (the only place this codebase asserts "your merged code is live" to an agent). Per the card's
-        // DoD, this must NOT become a refusal — the restart already happened; only the ASSURANCE that
-        // follows it is withheld.
+        // @decision db2179f6 — "your merged daemon code is now LIVE" is caveated when intent.supervisorChanged (the supervisor script's own lines stay inert until a human re-runs `pnpm daemon:stable`).
+        // @decision 062fa934 — deploySignatureMismatch is checked BEFORE supervisorChanged: a cache-replay signature mismatch is the strictly stronger doubt, so it must win the ladder; this gates the CLAIM text only, never the restart itself.
         const liveClaim = deployStaleness.deploySignatureMismatch
           ? `what this daemon process is now executing could NOT be confirmed as your merged code — its ` +
             `own build artifact's baked commit sha disagrees with what the derived build clocks imply (a ` +

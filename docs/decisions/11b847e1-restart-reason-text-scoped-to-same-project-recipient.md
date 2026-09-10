@@ -28,6 +28,13 @@ Because the SHA-delivered-dedup record (card `066d317c`) must follow the same co
 actually shown, a cross-project manager recipient that gets the redacted (reason-free) branch must NOT
 have its SHA recorded either — recording it there would reintroduce exactly the bug `066d317c` fixed.
 
+The Lead's raw reason is computed at the call site (a local `reasonClause` in the affected-branch
+handler), not folded into `reasonClauseFor` itself — so that helper stays a pure same-project-manager
+check, reusable elsewhere without a role special-case baked in. Keeping `reasonClause` (rather than
+re-deriving `reasonClauseFor(e.sessionId)`) as the single value both the enqueued text AND the
+SHA-delivered gate read from is what keeps the two in lockstep for the Lead case too — the SHA record
+must fire whenever, and only whenever, the enqueued text actually named the reason.
+
 ## Do not
 
 - Do not pass `intent.reason` (or any SHA extracted from it) to a manager recipient outside the
@@ -40,4 +47,6 @@ have its SHA recorded either — recording it there would reintroduce exactly th
 
 JSDoc comment in `packages/daemon/src/sessions/service.ts`, above `resumeFleetOnBoot`: lines 4410-4411,
 as of this tranche's HEAD (tranche 11). Cross-referenced (read-only) against `service.ts` lines
-4601-4612 and 4744-4761, which implement/document the same scoping and carve-out.
+4601-4612 and 4744-4761, which implement/document the same scoping and carve-out. A second, restating
+site — the one that also introduced the "computed here, not folded into `reasonClauseFor`" nuance
+above — anchors at line 4630, as of this tranche's HEAD (tranche 13).
