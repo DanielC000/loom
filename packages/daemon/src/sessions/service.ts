@@ -6777,41 +6777,10 @@ export class SessionService {
   }
 
   /**
-   * Shared redirect core for {@link redirectWorker} and {@link redirectSessionAsCompanion} — the mechanics
-   * common to BOTH (see redirectWorker's original doc comment, preserved below, for the full ordering
-   * rationale). Parameterized by exactly what differs between the two callers: the wire framing (a `frame`
-   * function — card aa4e24ff CR follow-up: was a raw `tag` string this core interpolated itself, which let
-   * a hand-typed `[loom:from-manager...]` copy drift from `messageWorker`'s own; now the CALLER supplies
-   * the complete framing, so redirectWorker's frame is produced by the SAME {@link frameFromManager} helper
-   * messageWorker calls — one function, not two independently-typed literals), the durable-enqueue sender
-   * attribution, the `redirect_worker` event's `managerSessionId` attribution, and any extra event detail
-   * (the companion path stamps `via: "companion"`). Callers pre-resolve the target session and any
-   * parent-scope gate (redirectWorker's "not your worker" check) BEFORE calling this — this core never
-   * re-derives or re-checks scope.
-   *
-   * ORDER IS LOAD-BEARING (so the redirect deterministically lands as the next turn):
-   *   (a) FLUSH the target's pending FIFO and SUPERSEDE each flushed durable record (fire its onDeliver
-   *       with reason "superseded" → a session_message_delivered marker), so the worker_report done-guard
-   *       and the boot-recovery scan never later re-drive the direction we're replacing. Plain
-   *       (non-durable) held nudges carry no callback and are simply dropped — the redirect supersedes
-   *       them too.
-   *   (b) ENQUEUE the authoritative redirect (framed via `opts.frame`) via the SAME durable channel as
-   *       messageWorker: a busy target HOLDS it (delivered:false, persisted) — it is now the only entry in
-   *       the freshly-flushed queue; an idle target submits it immediately (delivered:true).
-   *   (c) ONLY IF it was HELD (delivered:false ⇒ the target was busy) do we interrupt: pty.interruptForRedirect
-   *       writes a single Esc to cancel the in-flight turn, then after a bounded settle clears the (stale)
-   *       busy and drains — delivering the redirect we enqueued in (b). The enqueue is SYNCHRONOUS and
-   *       precedes the interrupt's settle timer, so the message is always in the queue before the
-   *       settle-drain fires (if it were idle there's no turn to cancel, so we skip the Esc and the
-   *       redirect already went out as a turn).
-   *
-   * Returns the enqueue status ({delivered, position?, ...}). On the HELD path (delivered:false) this
-   * does NOT reuse `enqueueDurableMessage`'s `queued:true, landsAt:"next-turn-boundary"` fields verbatim —
-   * doing so would recreate the exact confusion this card exists to fix, just moved sideways: worker_message
-   * and worker_redirect would then report an IDENTICAL-looking `{delivered:false, queued:true,
-   * landsAt:"next-turn-boundary"}` for two outcomes that are NOT the same thing (a plain FIFO hold vs. a
-   * hold that is about to have its current turn interrupted with an Esc). So a HELD redirect overrides
-   * `landsAt` to `"after-interrupt"` and adds `interrupting:true` — additive, `delivered` still unchanged.
+   * @decision aa4e24ff — deliverRedirect is the shared enqueue-then-interrupt core for redirectWorker and
+   *  redirectSessionAsCompanion; callers pre-resolve scope, and a HELD result's return shape must not
+   *  collapse into a plain next-turn-boundary hold
+   *  (docs/decisions/aa4e24ff-redirect-advisory-triggers-on-observable-hold-time-not-message-text.md)
    */
   private deliverRedirect(
     target: Session, text: string,
@@ -6853,32 +6822,9 @@ export class SessionService {
       ? { ...r0, discarded: flushed.length }
       : { ...r0, landsAt: "after-interrupt", interrupting: true, discarded: flushed.length };
     if (!r.delivered) this.pty.interruptForRedirect(target.id);
-    // `queuedMsgId` is `r.msgId` — minted by `enqueueDurableMessage` and returned UNCONDITIONALLY (see its
-    // own doc) — stamped here on BOTH paths (card 99339bcd; previously held-only):
-    //  - HELD: links this event to its OWN sibling session_message_queued record (card 02621025). Without
-    //    this linkage a later staleness check has ONLY `ts` to tell "this redirect's own record" apart from
-    //    "a genuinely different, later redirect" — and this event's ts is computed by a SEPARATE `new Date()`
-    //    call strictly after enqueueDurableMessage's own, so it is not just possible but TYPICAL for this
-    //    event to land at or after its own record's ts. Without the explicit id, that self-comparison would
-    //    retire the redirect's own just-queued record as "superseded by itself" — the exact silent-drop
-    //    failure this card exists to prevent, just relocated to the redirect arm.
-    //  - IMMEDIATE: no `session_message_queued` record ever exists for this msgId (enqueueDurableMessage
-    //    only appends one `if (!r.delivered)`), so there is nothing for the id to collide with here —
-    //    stamping it is safe (staleQueuedMessageReason's self-match exclusion, service.ts ~3298-3310, only
-    //    ever matches against a REAL `session_message_queued` event's own msgId). What it buys: an
-    //    immediately-delivered redirect's hand-off can still silently GIVE UP async (card 04de8bbf) exactly
-    //    like a held one can, and `session_message_gave_up` is keyed on this msgId regardless of whether a
-    //    queued record ever existed — so this is the ONLY way that outcome becomes auditable at all.
-    // `turnSeqAtDelivery` mirrors messageWorker's own immediate-path stamp (above) — `target.turnSeq` was
-    // read by the caller (redirectWorker/redirectSessionAsCompanion) before this call and nothing between
-    // then and here touches turn_seq (flushPending/submit don't), so it's still current AT HAND-OFF. Without
-    // this, an immediate redirect that never gives up would stamp a real msgId that
-    // `resolveDirectiveOutcome` (mcp/orchestration.ts) can never resolve to "delivered" — the ROOT msgId's
-    // delivered-check requires `turnSeqAtDelivery` on THIS event, and no OTHER event ever stamps one for an
-    // immediate redirect (`resolveQueuedMessage`'s `session_message_delivered` marker only fires via
-    // `onDeliver`, which is never invoked on the immediate-submit path) — it would misread as `"pending"`
-    // forever instead of `"delivered"`. A populated id that never resolves is worse than the null id it
-    // replaces, so this stamp is not optional.
+    // @decision 99339bcd — queuedMsgId + turnSeqAtDelivery are stamped on BOTH the held and immediate
+    //  redirect paths (not held-only), so session_message_gave_up stays auditable either way
+    //  (docs/decisions/99339bcd-redirect-queuedmsgid-stamped-on-both-paths-not-held-only.md)
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: opts.eventManagerId, workerSessionId: target.id, taskId: target.taskId ?? null, kind: "redirect_worker",
@@ -6956,35 +6902,12 @@ export class SessionService {
   }
 
   /**
-   * Manager-driven ABSOLUTE permission-mode override (worker_set_mode, card 610abe29) — the manual
-   * recovery affordance for a worker landed in (or pushed into) a bad mode: a worker can never change its
-   * own mode (Shift+Tab is a human TUI keystroke; ExitPlanMode/EnterPlanMode are disallowed for a worker —
-   * see disallowedToolsForRole), so mode changes must be daemon-driven. Parent-scoped exactly like
-   * stopWorker/messageWorker/redirectWorker (mirrors their "not your worker" gate).
-   *
-   * SECURITY BOUNDARY — fails closed: `mode` must be one of `WORKER_SETTABLE_MODES`
-   * (acceptEdits|auto|plan) or this throws before touching the pty. In particular `bypassPermissions` must
-   * NEVER reach `pty.setPermissionMode` — it disables the acceptEdits+allowlist sandbox a worker is spawned
-   * into, and an agent (a manager calling this tool) must never be able to escalate a worker out of that
-   * sandbox. `default`/`unknown`/any other string is rejected the same way.
-   *
-   * SECOND BOUNDARY (card 9c03f5a6) — `plan` is further rejected for a role that CANNOT self-exit it: a
-   * Loom-driven role with `ExitPlanMode` disallowed (`disallowedToolsForRole(worker.role).includes(
-   * "ExitPlanMode")` — the SAME predicate `buildSpawnArgs` uses to strip the human-prompt tools at spawn,
-   * reused here so the two can never drift) has no tool to leave plan mode and no human on its stdin to
-   * answer the "not this tool" TUI nudge either. Worse: Claude Code's own permission engine gates ANY
-   * non-read-only MCP tool call while in plan mode behind an interactive "ask" — including the worker's
-   * OWN `worker_report` escape hatch — so a worker pushed into plan can neither act nor report up; it
-   * silently occupies a concurrency slot until a human notices and intervenes by hand. A manager that
-   * wants "investigate first" gets it via the kickoff prompt, never by parking a worker in a mode it can't
-   * leave. (`manager`/`platform`/plain sessions are unaffected — that predicate never disallows
-   * ExitPlanMode for them, so a human legitimately Shift+Tabbing one of THOSE into plan is untouched.)
-   *
-   * Drives the footer via `pty.setPermissionMode`, which reuses the SAME feedback-verified `cycleToMode`
-   * primitive the spawn/resume convergence uses (press Shift+Tab, wait for the footer to actually change) —
-   * pure keystroke injection, bypassing the busy/turn queue (~0 worker tokens). Returns the FEEDBACK-
-   * VERIFIED landed mode, which may differ from `mode` if the cycle gave up early (the caller sees the
-   * truth, not an assumed success).
+   * @decision 610abe29 — worker_set_mode is the ONLY way a worker's permission mode changes, and fails
+   *  closed (bypassPermissions/any string outside acceptEdits|auto|plan must never reach setPermissionMode)
+   *  (docs/decisions/610abe29-worker-set-mode-is-the-only-mode-change-path-fails-closed.md)
+   * @decision 9c03f5a6 — plan is further rejected for a role that cannot self-exit it (ExitPlanMode
+   *  disallowed), since it would then be unable to act OR report up via worker_report
+   *  (docs/decisions/9c03f5a6-auto-mode-entry-warning-suppressed-via-reverse-engineered-flag.md)
    */
   async setWorkerMode(managerSessionId: string, workerSessionId: string, mode: string): Promise<LandedMode> {
     if (!WORKER_SETTABLE_MODES.has(mode)) {
@@ -7009,27 +6932,9 @@ export class SessionService {
   }
 
   /**
-   * Card 3e76ecad — the manager-facing submit-only/flush affordance: press Enter on one of your workers'
-   * OWN composer without writing any new text. See `pty.flushComposer`'s own doc for the mechanics
-   * (genuinely non-writing, no-ops on an empty composer, a remedy to TRY not a guaranteed recovery, reuses
-   * the existing give-up-redelivery Enter-retry ladder). This wrapper only adds the "not your worker"
-   * ownership gate (mirrors setWorkerMode/reapWorkerStrays above) and appends `worker.resumability` —
-   * `dead` vs `resumable`/`unknown` — as a SECOND discriminator alongside the flush outcome: a `dead`
-   * session (its process/transcript already confirmed gone) makes a submit-only retry moot regardless of
-   * what `ok`/`confirmed` report. The parent card (b9b8f8db) flagged this as possibly useful but left it
-   * unverified — surfaced here as an ADDITIONAL signal, not a replacement for `ok`/`reason`/`confirmed`.
-   * Card 29b3c396 adds `recovered`: `confirmed:false` alone no longer distinguishes "still genuinely
-   * running, just slow to confirm" from "was stuck and this flush just cleared it" — `recovered:true`
-   * means THIS call's own give-up ladder fell through to GIVE-UP RECOVERY (busy cleared, the original
-   * message requeued for redelivery on the next natural drain), so the caller should stop retrying.
-   *
-   * Card ac7884e3 adds `lastFlushAttribution` (always present, `null` when nothing has ever resolved) —
-   * see `Live.lastFlushAttribution`'s own doc (pty/host.ts) for the full reading guide. Read fresh from
-   * `pty.getLastFlushAttribution` AFTER the flush call resolves, not taken from `result` itself: it is
-   * STICKY (survives past any one call's own bounded wait), so this is the read that answers "did an
-   * EARLIER flush on this worker eventually turn out to be attributable" — the case `result.attributable`
-   * (see `flushComposer`'s own doc) cannot cover, because that field only ever reflects THIS call's own
-   * generation resolving within THIS call's own window.
+   * @decision 3e76ecad — flushWorkerComposer is a submit-only affordance (press Enter, write no new
+   *  text); resumability/recovered/lastFlushAttribution are additional signals, never replacements for
+   *  ok/reason/confirmed (docs/decisions/3e76ecad-flush-worker-composer-submit-only-affordance.md)
    */
   async flushWorkerComposer(managerSessionId: string, workerSessionId: string): Promise<{
     ok: boolean; reason?: string; confirmed?: boolean; recovered?: boolean; attributable?: boolean; resumability: string;

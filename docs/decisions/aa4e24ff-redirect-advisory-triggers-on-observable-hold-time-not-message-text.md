@@ -49,3 +49,25 @@ carries, so a manager who hits either one never has to go discover the other hal
 Inline comment in `packages/daemon/src/sessions/service.ts`, above `redirectWorker`: lines 6707-6736, as
 of main `055e96ce`. Relocated by card `c7ca6c08` (tranche 16); no wording changed, wrapped source lines
 joined into a flowing paragraph and the `*` comment markers stripped.
+
+## `deliverRedirect`: the shared core extraction, and its return-value shape
+
+`deliverRedirect` is the mechanics shared by `redirectWorker` and `redirectSessionAsCompanion`,
+parameterized by the framing (a `frame` function — CR follow-up to `aa4e24ff`: was a raw `tag` string
+interpolated here, letting a hand-typed tag drift; callers now supply the whole framing via the SAME
+`frameFromManager` helper), the enqueue sender, and the event's `managerSessionId`. Callers pre-resolve
+target/scope first — the core never re-derives it. A HELD result overrides the plain
+`landsAt:"next-turn-boundary"` to `"after-interrupt"`+`interrupting:true` — reusing the plain shape would
+just move this card's tag-drift confusion sideways, relocated to the return value instead of fixed.
+
+### Do not (3)
+
+- Do not let `deliverRedirect` re-derive/re-check scope — callers do that first.
+- Do not report a HELD redirect as plain `landsAt:"next-turn-boundary"` — override it so it's
+  distinguishable from an ordinary hold.
+
+### Source (3)
+
+Inline comment in `packages/daemon/src/sessions/service.ts`, above `deliverRedirect`: lines 6779-6815,
+as of main `fbb3555c`. Relocated by card `1acde858` (tranche 17); wrapped lines joined, `*` markers
+stripped.
