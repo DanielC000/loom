@@ -28,7 +28,7 @@ markers) rename on the receiving side — main renames a file the branch also ed
 shared-renamed.txt`), then a cherry-pick of the branch's edit to `shared.txt` lands cleanly as an edit to
 `shared-renamed.txt` (git's rename-following 3-way merge). The original branch's own `mergeBase..branchTip`
 diff says `shared.txt`; the landed `batchHeadBefore..landedSha` diff says `shared-renamed.txt` — genuinely
-different digests for the identical logical change, with no conflict involved. `test/batch-merge.mjs` case
+different digests for the identical logical change, with no conflict involved. `test/batch-merge-robustness.mjs` case
 (7e) keeps this exact scenario as a permanent regression guard: the landed-range digest verifies GREEN
 there, in precisely the case where a pre-landing digest would have gone red.
 
