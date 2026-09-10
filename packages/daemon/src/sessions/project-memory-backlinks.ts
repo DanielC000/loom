@@ -2,22 +2,16 @@ import type { ProjectMemoryEntry } from "@loom/shared";
 import type { Db } from "../db.js";
 
 /**
- * Resolve INBOUND `[[wikilink]]` backlinks for a memory note — the fix for card e4e180ad's one-way-link
- * gap: when an overflow note is split off a capped canonical note (the store's own too-long rejection in
- * mcp/memory.ts recommends exactly this remedy), the overflow links FORWARD to the canonical note, but the
- * canonical note — being at its cap, which is precisely why the split happened — has no room left to add
- * the back-pointer. A reader who lands on the canonical note is then never led to the overflow.
- *
- * Mirrors project-memory-request-links.ts's shape deliberately: resolved fresh, at READ time, from every
+ * Resolve INBOUND `[[wikilink]]` backlinks for a memory note — resolved fresh, at READ time, from every
  * surface that shows a note (memory_read/memory_list via mcp/memory.ts's `withLinks`, the kickoff digest
- * via project-memory-recall.ts's `annotate` callback) — never stored on the note itself, so it can NEVER
- * count against that note's own stored `text` byte cap (MAX_TEXT_BYTES / MAX_NEVER_DROP_TEXT_BYTES).
+ * via project-memory-recall.ts's `annotate` callback), never stored on the note itself, so it can NEVER
+ * count against that note's own stored `text` byte cap. Mirrors project-memory-request-links.ts's shape
+ * deliberately. A "backlink" is a plain-substring `[[key]]` match — deliberately not Obsidian's
+ * `[[key|alias]]` piping syntax, since no note observed in this project's own store has ever used it.
  *
- * A "backlink" here is any OTHER note in the same project whose `text` contains a literal `[[key]]`
- * wikilink referencing this note's key — a plain-substring scan, deliberately not Obsidian's `[[key|alias]]`
- * piping syntax: every memory note observed in this project's own store links with bare `[[key]]` (the
- * store's own too-long-rejection message in mcp/memory.ts recommends exactly that form), so a plain
- * key-token regex is sufficient and this doesn't invent syntax the store has never actually used.
+ * @decision e4e180ad — see docs/decisions/e4e180ad-project-memory-backlinks-one-way-link-gap.md: closes
+ * the one-way-link gap where a byte-capped canonical note has no room left to add a back-pointer to the
+ * notes that already link to it.
  */
 
 /** Mirrors mcp/memory.ts's `KEY_RE` character class exactly (letters/digits/-/_, 1-64 chars) — a wikilink
@@ -52,23 +46,14 @@ export const MAX_BACKLINKS = 20;
  * A MUCH tighter cap for the ONE path where this cost is NOT a one-off: ANY note's backlinks, as rendered
  * into the KICKOFF DIGEST (project-memory-annotations.ts's `annotateNote`, which mcp/memory.ts's
  * `computeNeverDropStatus` mirrors for its byte estimate) — every note the digest packs is SIZED against
- * the shared budget on EVERY kickoff, whether or not it ends up surviving the pack (an ordinary pinned
- * note that later gets dropped for budget still paid this sizing cost first) — this is not a `never-drop`-
- * specific concern, it's a "does the digest render this note at all" one.
+ * the shared budget on EVERY kickoff, whether or not it ends up surviving the pack — this is not a
+ * `never-drop`-specific concern, it's a "does the digest render this note at all" one. `memory_read`/
+ * `memory_list` keep the full {@link MAX_BACKLINKS}, since an on-demand pull isn't paying this cost on
+ * every OTHER session's kickoff too.
  *
- * Measured live against this project's real corpus (2026-08-28, 400 notes / 31 pinned): at the general
- * `MAX_BACKLINKS=20`, the project's 8 real floor-tier (`pinned && never-drop`) notes would add ≈10,370
- * bytes / ≈2,593 estimated tokens COMBINED — but the 23 ORDINARY pinned notes add a comparable ≈10,594
- * bytes / ≈2,649 estimated tokens too (all pinned combined: ≈20,964 bytes / ≈5,241 est tokens), on a
- * project whose digest is ALREADY reported dropping 21 pinned notes for budget. An earlier version of this
- * cap applied only to the floor tier; that predicate was an unexamined default (it happened to be the tier
- * this card's evidence led with), not a reasoned boundary — the actual line is DIGEST vs ON-DEMAND, and
- * every digest-rendered note sits on the same side of it regardless of tier. At `cap=5` the SAME 31 pinned
- * notes add only ≈8,586 bytes / ≈2,147 est tokens combined — roughly a 59% reduction. The goal here is only
- * "tell the reader an overflow companion exists" (card e4e180ad's own bound — never the content), which a
- * handful of names satisfies as well as twenty. `memory_read`/`memory_list` keep the full {@link
- * MAX_BACKLINKS}, since an agent pulling one note on demand isn't paying this cost on every OTHER
- * session's kickoff too.
+ * @decision e4e180ad — see docs/decisions/e4e180ad-project-memory-backlinks-one-way-link-gap.md (Digest
+ * cap section): the line is DIGEST vs ON-DEMAND, not floor-tier vs ordinary — measured, ordinary pinned
+ * notes cost as much as floor-tier ones at the general cap.
  */
 export const MAX_BACKLINKS_DIGEST = 5;
 
@@ -106,32 +91,17 @@ function matchesFor(withKeys: EntryWithKeys[], targetKey: string, cap: number): 
 /**
  * Every OTHER note in the project whose text wikilinks to `targetKey`, most-recently-updated first,
  * capped at `cap` (default {@link MAX_BACKLINKS}), alongside the TRUE total found (before the cap). A
- * full-corpus scan per call — not indexed. **Card 41c3f546 reconciliation:** the "dozens to
- * low-hundreds of short notes" premise this used to cite was already false by the time {@link
- * MAX_BACKLINKS_DIGEST}'s own neighbouring comment recorded a real corpus at 400 notes (2026-08-28) —
- * the two comments contradicted each other. (project-memory-recall.ts, cited by the old wording as
- * sharing this premise, does NOT actually carry it as of this reconciliation — re-checked directly,
- * not assumed.) Measured directly against this project's own live corpus (2026-09-03: 487 notes, ~1.5MB
- * of text): ONE call here is genuinely cheap (~10-15ms, dominated by the SQL fetch/row-map, not the
- * regex scan) — a single on-demand call (`memory_read`, one row of the kickoff digest) is fine exactly
- * as this function is written, index or no index. The cost this comment used to gloss over is calling
- * this ONCE PER ROW of a listing: that turns a ~15ms query into an O(N²) ~4.2s wall-clock cost on this
- * corpus, run SYNCHRONOUSLY on the daemon's single event loop. A LIST caller must never call this per
- * row — use {@link findInboundBacklinksBulk}, which amortizes the corpus fetch and the per-note regex
- * extraction ONCE across every row instead of paying for either N times.
+ * full-corpus scan per call — not indexed; genuinely cheap for a single on-demand call (`memory_read`,
+ * one row of the kickoff digest).
  *
- * **Card d305f1a2 — still O(N²), by measurement, deliberately:** re-measured live against this
- * project's own real corpus (2026-09-04: 502 notes, ~1.5MB) — `findInboundBacklinksBulk` (below) over
- * the WHOLE corpus runs in ~22ms; a uniform-key-length synthetic scaling series (1x/2x/4x/8x that same
- * corpus) put the empirical growth exponent at ~1.75-1.90, consistent with the O(N²) shape this comment
- * already predicted. Left unindexed anyway: this project's OWN `memory.maxNotes` config caps the
- * UNPINNED population at 500 (owner decision #2, `evictProjectMemoryOverCap`) — live-checked the same
- * day, 494 of 502 notes are unpinned and sitting right at that cap, with only 8 pinned (pinned notes are
- * exempt from eviction and are the only unbounded growth path). Even at the platform-wide hard ceiling
- * (`MEMORY_CONFIG_MAX.maxNotes` = 1000, i.e. ~2x today's corpus) the SAME scaling series measured only
- * ~31ms. An inverted index would remove the asymptotic risk entirely, but the risk is currently bounded
- * by config, not by luck — re-measure before reaching for it if `maxNotes` is ever raised meaningfully
- * past its current default, or if the pinned population grows into the hundreds.
+ * A LIST caller must never call this per row — that turns a cheap single call into an O(N²) cost run
+ * SYNCHRONOUSLY on the daemon's single event loop. Use {@link findInboundBacklinksBulk} instead, which
+ * amortizes the corpus fetch and the per-note regex extraction ONCE across every row.
+ *
+ * @decision 41c3f546 — see docs/decisions/41c3f546-project-memory-route-bulk-backlinks.md: the "dozens
+ * to low-hundreds" corpus-size premise this used to cite is stale (487 notes measured).
+ * @decision d305f1a2 — see docs/decisions/d305f1a2-inbound-backlinks-on2-unindexed.md: still O(N²)
+ * overall even with the bulk path, left unindexed anyway — bounded by `memory.maxNotes`, not luck.
  */
 export function findInboundBacklinks(
   db: Db,

@@ -6,11 +6,16 @@
 
 The "corpus is small by design: dozens to low-hundreds of short notes" premise this route's own comment used to cite is stale (this project's own store already measured at 487 notes, 2026-09-03; see `project-memory-backlinks.ts`'s `findInboundBacklinks` doc comment for the live reconciliation). This route stays safe at that scale ONLY because backlinks are resolved via `findInboundBacklinksBulk` over one fetched corpus, not per row: the per-row shape used to mean N+1 `db.listProjectMemory` fetches and N full-corpus regex scans for a listing of N notes — measured at ~4.2s wall-clock (synchronous, blocking the daemon's single event loop for the whole request) against this project's own 487-note corpus, versus ~15ms for the bulk path over the identical corpus and cap. `corpus` here is fetched exactly once and reused for every row's backlink lookup.
 
+The same stale premise had also drifted, independently, into `project-memory-backlinks.ts`'s own `findInboundBacklinks` doc comment — producing two comments in that one file that contradicted each other about corpus size (one already reconciled at 400 notes via `MAX_BACKLINKS_DIGEST`'s neighbouring comment, the other still citing the stale "dozens to low-hundreds" figure). Reconciled together at the `project-memory-backlinks.ts` site. `project-memory-recall.ts`, cited by the old `findInboundBacklinks` wording as sharing the same stale premise, was directly re-checked at that reconciliation and does NOT actually carry it.
+
+That same reconciliation re-measured the SINGLE on-demand call this bulk route's per-row alternative would have made: one `findInboundBacklinks` call, on its own (`memory_read`, one row of the kickoff digest), is genuinely cheap — ~10-15ms, dominated by the SQL fetch/row-map, not the regex scan — and is fine exactly as written, index or no index, at 487 notes. That single-call cost is not what makes the per-row LIST shape dangerous; it's calling it once per row of a listing that turns a ~15ms query into the ~4.2s O(N²) cost above.
+
 ## Do not
 
 - Do not resolve `backlinks` per row (one `findInboundBacklinks` call per note) — that reintroduces the N+1-fetch, N-full-corpus-scan cost measured at ~4.2s (vs ~15ms bulk) against a 487-note corpus, blocking the daemon's single event loop for the whole request.
 - Do not assume the corpus stays "dozens to low-hundreds" — that premise is already stale (487 notes measured); this route's safety at scale depends on the bulk path, not on corpus size staying small.
+- Do not assume `project-memory-recall.ts` shares this stale corpus-size premise — checked directly, it does not.
 
 ## Source
 
-Inline comment in `packages/daemon/src/gateway/server.ts` (`GET /api/projects/:id/memory`, lines 3768-3801 as of commit `a9b55042`). Relocated by card `2bf0b41d`; wording condensed, no substantive detail dropped.
+Inline comment in `packages/daemon/src/gateway/server.ts` (`GET /api/projects/:id/memory`, lines 3768-3801 as of commit `a9b55042`). Relocated by card `2bf0b41d`; wording condensed, no substantive detail dropped. Extended by card `6c7d80e1` (tranche 1 on `packages/daemon/src/sessions/project-memory-backlinks.ts`) with the cross-file reconciliation, from that file's `findInboundBacklinks` doc comment, lines 106-121 as of commit `dcbd50bc`.
