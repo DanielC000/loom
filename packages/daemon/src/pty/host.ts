@@ -2404,75 +2404,9 @@ interface Live {
   // resend can only ever carry ONE member's own text, never the joined text of a batch the sender never
   // knew was coalesced. See `hasAmbiguousMatch`'s own doc for why both are tried.
   ambiguousDispatches: Map<string, { len: number; hash: string; writtenAt: number; batchId: number; memberSig: { len: number; hash: string } }>;
-  // Card dbc7ffea: logicalId → every EARLIER give-up cycle's own signature for a message whose "current"
-  // `ambiguousDispatches` slot has SINCE been superseded — retired so that slot can safely move on to a
-  // fresh signature without losing the ability to recognize an EARLIER write's confirmation arriving LATE.
-  //
-  // ⚠️ THREE PATHS feed/drain this archive — corrected here after the ORIGINAL card body mis-stated the
-  // mechanism as a single one, and after an earlier draft of this doc under-counted at two:
-  //   (1) `drainPending`'s delete-at-redrain, via `archiveAmbiguousDispatch` — the ordinary self-retry/
-  //       exhaustion case the production specimen (96c6afb8) and this card's own repro test actually
-  //       exercise. Pre-fix, a `giveUpGen`-tagged entry being redrained for its retry had its "current"
-  //       entry DELETED outright (never overwritten — by the time the redrained retry itself could give up
-  //       and call `requeueGiveUpOrigin` a SECOND time, the map was already empty for that logicalId), so a
-  //       late confirmation of the FIRST cycle's own bare write had nothing left to content-match against.
-  //   (2) `requeueGiveUpOrigin`'s own `.set()`, via the SAME `archiveAmbiguousDispatch` helper — a genuine
-  //       OVERWRITE (not merely a fresh create), for the auto-joined-resend case `capAmbiguousDispatches`'s
-  //       own doc already names (card a9e4240f): a manual resend gets joined via `hasAmbiguousMatch` to an
-  //       EXISTING still-ambiguous logicalId, and if THAT resend itself later gives up, this call runs
-  //       while the ORIGINAL dispatch's entry is still sitting there live — a different trigger
-  //       (cross-message, not self-retry) hitting the SAME "current slot only" limitation.
-  //   (3) `capAmbiguousDispatches`'s own count eviction of `ambiguousDispatches` DELETES without archiving
-  //       — deliberately: that eviction is a memory-safety BACKSTOP for a "current" entry nobody has
-  //       resolved in a very long time (see that cap's own doc), not a "supersede" event worth preserving
-  //       — archiving an entry that's already about to be evicted from an ALREADY-bounded structure would
-  //       just relocate the same unbounded-growth risk into this one instead of solving it.
-  // (1) and (2) are now covered by the SAME archive, so "every prior cycle's signature survives" holds
-  // regardless of which path superseded it. See `purgeConfirmedGiveUpRequeue`'s own doc, and project memory
-  // `card-66649a90-duplicate-write-residual-measured` for the production specimen path (1) closes.
-  //
-  // Archiving forward (never overwriting the archive itself) means EVERY prior cycle's signature for a
-  // logicalId survives, not merely the first or the immediately-prior one — this generalizes past the
-  // default GIVE_UP_REQUEUE_LIMIT=1 (two cycles) to however many a configured limit allows, PROVIDED
-  // `purgeConfirmedGiveUpRequeue`'s own batch-provenance check groups by logicalId before it ever looks at
-  // batchId (Code Review Major 2: an earlier version of that check counted DISTINCT BATCHIDS alone, which
-  // broke at limit>=2 — two of one message's OWN successive cycles can share byte-identical tagged text
-  // since the tag embeds only `rootMsgId`, never the generation, so they were wrongly read as two
-  // GENUINELY DISTINCT give-up events and declined instead of resolved; see that method's own doc for the
-  // fix). Consulted ONLY by `purgeConfirmedGiveUpRequeue`'s content-match, ADDITIONALLY to (never instead
-  // of) `ambiguousDispatches`'s own current entry — a match here can therefore only ever purge a write
-  // PROVEN by a real engine confirmation to have landed, never a merely-suspected one, which is why this
-  // cannot reopen the loss-safety guard `purgeConfirmedGiveUpRequeue`'s FIFO-fallback still separately
-  // protects (see that method's own doc; that decline branch is DELIBERATELY left untouched by this card)
-  // — verified directly by `pty-giveup-retired-signature-safety.mjs` (cross-logicalId isolation +
-  // batch-provenance discrimination spanning this exact archive) and
-  // `pty-giveup-retired-signature-autojoin-overwrite.mjs` (path (2) specifically), not merely argued.
-  // ⭐ THE INVARIANT THAT MAKES `hasAmbiguousMatch` SAFE TO LEAVE UNTOUCHED (Code Review, confirmed correct
-  // — and MORE clearly right after Major 1 below): this archive MAY contain resolved/dead chains (see
-  // `retireResolvedArchiveEntries`'s own doc for exactly how that happens); only a PROVEN engine
-  // confirmation (this method's content-match) may ever consult it. `hasAmbiguousMatch` is a GUESS (it
-  // auto-joins a fresh manual resend to a chain it merely SUSPECTS is still open) — feeding it entries the
-  // archive demonstrably cannot vouch for as still-live would be strictly worse than its own existing
-  // staleness discipline, not merely redundant with it.
-  // MEMORY-SAFETY: bounded the same way as `ambiguousDispatches` — by COUNT, never time — see
-  // `capRetiredGiveUpSignatures` (outer map, keyed by logicalId, capped at `AMBIGUOUS_DISPATCH_CAP`
-  // distinct logicalIds) and `RETIRED_GIVEUP_SIG_CAP` (each logicalId's own array of cycles, capped at 8) —
-  // worst case for a long-lived session is bounded at 20 × 8 tiny signature records (~16KB), never
-  // unbounded. An entry is removed on: a successful content-match purge (either store, see
-  // `purgeConfirmedGiveUpRequeue`), the FIFO-fallback's own purge, either count-cap above, OR (Code Review
-  // Major 1) `retireResolvedArchiveEntries` at the next genuine turn-end once a logicalId's chain is no
-  // longer in flight by ANY of those means — see that method's own doc for why a session's ordinary,
-  // no-give-up-needed confirmation of a later cycle can otherwise leave a DEAD entry here indefinitely,
-  // which is a real false-ambiguity hazard against later, unrelated collisions, not a harmless leftover.
-  // A plain session exit (crash or deliberate stop) does NOT itself discard this map — a `kind:"claude"`
-  // Live entry is never removed from `this.live` on exit, it survives with `alive:false` instead, so a
-  // dead session's archive sits frozen exactly as it was at the moment of death. It is discarded only
-  // LATER: at that same sessionId's next resume/fork/recycle (all route through `spawn()`, which
-  // unconditionally constructs a brand-new `Live` — see that method's own comments) or at a full daemon
-  // restart (neither map is ever persisted). This is not a new leak — `ambiguousDispatches` (pre-existing)
-  // already has the identical posture; this map just inherits it, bounded the same way. No cross-session
-  // risk either: both maps are strictly per-sessionId, so a dead session's frozen archive can only ever be
-  // consulted again by that SAME sessionId resuming, which wipes it fresh first.
+  // @decision dbc7ffea — archives every superseded give-up cycle's signature (3 paths feed it; only a
+  // PROVEN engine confirmation may ever consult it). Bounded by count, never time. See dbc7ffea's record:
+  // docs/decisions/dbc7ffea-retiredgiveupsignatures-archives-superseded-cycles.md
   retiredGiveUpSignatures: Map<string, Array<{ len: number; hash: string; writtenAt: number; batchId: number; memberSig: { len: number; hash: string } }>>;
   // Card 1bd1f045: monotonic per-session sequence number for the `[pty-write]` byte/call-sequence log —
   // bumped by `ptyWrite()` on every REAL `live.pty.write()` call (see that method's doc). THE load-bearing
@@ -2507,21 +2441,9 @@ interface Live {
   // mirrors lastPromptRoute so a rate-limit-killed companion turn replays with its attestation intact.
   activeTurnOwnerText: string | null;
   lastPromptOwnerText: string | null;
-  // Companion injection-guard Primitive A WIDENING (card 2b26035c, "recent-turns verbatim acceptance"): a
-  // BOUNDED, most-recent-first ring of the last RECENT_OWNER_TURNS_WINDOW authenticated owner-turn texts.
-  // Pushed alongside activeTurnOwnerText in submit() whenever a turn carries real ownerText — so it is
-  // built from the EXACT SAME server-attested owner inbound bytes as Primitive A, just retained across
-  // turn boundaries instead of being cleared at Stop. A proactive/heartbeat/system turn (ownerText
-  // undefined) never pushes an entry, so this can never accumulate model-authored or injected text —
-  // only the TURN SCOPE widens, never the source. Lets a lever accept a candidate that's a verbatim
-  // substring of a RECENT turn (e.g. a cross-turn correction/re-phrase), not just the one in flight.
-  // GROUP companion note: in a group-scope route, each turn's ownerText is already whichever ALLOWLISTED
-  // sender's message formed it (chat-gateway.ts's per-turn sender-authz gate, unchanged by this card) —
-  // so this window can span MULTIPLE allowlisted senders' recent turns, not just one person's. This is
-  // intentional, not an escalation: every entry is still an authenticated, authorized-user turn (never
-  // model-authored/injected), and a lever committing content still separately requires the COMMITTING
-  // turn's own current-turn owner-auth (Primitive A) plus the trust window/confirm round-trip — the
-  // widened quote-source never substitutes for either of those.
+  // @decision 2b26035c — Primitive A widening: recentOwnerTurns retains only real, authenticated ownerText
+  // (never a proactive/system turn), and a match here never substitutes for the committing turn's own
+  // owner-auth + confirm round-trip. See 2b26035c's record, "Decision B" section.
   recentOwnerTurns: string[];
   // Card c2c750a9: a BOUNDED, oldest-first ring of the last `COMPOSER_ACCUM_WINDOW` submitted turns'
   // (`gen`, text) — pushed once per `submit()` call, at the same point `gen` itself is minted, so it
@@ -2573,22 +2495,9 @@ interface Live {
   // sender id of the IN-FLIGHT turn's inbound message, for a GROUP-scope companion route — null for a DM
   // route (the chatId alone already identifies the single owner, mirroring VoicePrefRoute's own group-only
   // senderId rule).
-  // ⚠️ Card e01687ea CORRECTION: this field is NO LONGER null for "every non-companion-inbound turn" in
-  // general — since that card, `enqueueDurableMessage`'s single funnel threads a REAL sender id into this
-  // SAME `senderId` param for worker_message/redirect/session_message/peer-letters/settle-nudges too (the
-  // coalescing/reorder identity DoD-1 wires up), so a non-companion turn (e.g. a `session_message` landing
-  // on a session that also happens to be a companion) can now carry a non-null value here as well. A
-  // non-null read alone therefore no longer PROVES "this was a GROUP-scope companion-route turn" — it only
-  // means SOME real sender was attributed to this turn. It is STILL true, unconditionally, for the
-  // companion-INBOUND path itself (a group route sets it, a DM route never does). Any consumer that needs
-  // the narrower "authenticated GROUP-companion turn" fact (e.g. `transcript_read`'s DM-only co-gate, see
-  // companion/capabilities.ts) must keep pairing this with `activeTurnOwnerText`/Primitive A, which IS
-  // still exclusive to companion-inbound turns — see that lever's own doc for why the pairing, not this
-  // field alone, is what still holds.
-  // Mirrors activeTurnOwnerText's lifecycle exactly: set alongside it in submit(), CLEARED at the Stop/
-  // StopFailure hook (a stale prior turn's sender must never be attributed to a later turn), with
-  // lastPromptSenderId mirroring lastPromptOwnerText so a rate-limit-killed companion turn's replay keeps
-  // the same sender identity.
+  // @decision e01687ea — a non-null read here no longer PROVES a GROUP-scope companion turn (other agent-
+  // message producers now thread a real senderId too); pair with activeTurnOwnerText/Primitive A for that
+  // narrower fact. See e01687ea's record, "Decision B" section.
   activeTurnSenderId: string | null;
   lastPromptSenderId: string | null;
   startupModeCycles: number; // Shift+Tab presses to inject once, after SessionStart, to reach the target mode
@@ -2634,87 +2543,14 @@ interface Live {
   // (called + emptied) by markMcpSeen on success and by pty.onExit on death, so a waiter never outlives
   // its pty instance.
   mcpSeenWaiters: Array<(seen: boolean) => void>;
-  // Card 68459420 (sender-directed arm for [loom:prompt-mismatch]): set the instant a mismatch is
-  // identified as a REPLAY of a prior generation — `reported` matched an entry in `recentWrittenTurns`
-  // byte-for-byte. A recipient can never verify this half itself (it only ever sees what arrived, not what
-  // was intended for it) — this is a PULL surface (see getLastMismatchReplay) for the party who CAN act,
-  // read at the point it already looks (worker_list/worker_status), rather than a longer session-facing
-  // notice: a precondition at the point of use beats an advisory in the attention path (see pinned
-  // memory `shipping-a-detector-is-not-someone-reading-it`). Deliberately never cleared once set — a
-  // manager that hasn't yet looked should still see it on a LATER read; this is a discovery aid, not a
-  // live/transient flag, and overwritten (not accumulated) on a subsequent occurrence.
-  // Card b7158b99 — CORRECTION: this field does NOT establish a loss, and never did reliably — a replay
-  // at this generation is compatible with the composer still holding this generation's own intended text,
-  // which a LATER generation's own submission can fuse back in whole (see `lastMismatchFusion` below,
-  // which would then name THIS generation in its own `spanGens`); whether that happens is unknowable until
-  // that later generation, if any, actually occurs (see `detectComposerAccumulation`'s own coverage-limit
-  // doc, this file). Read as "a replay was detected, possibly recoverable by a later fusion", never as "an
-  // established loss" — the session-facing notice's own wording carries the same correction.
-  // Card e1ac691b: also read by `worker_merge_confirm`'s `composerIntegrityWarning` (sessions/service.ts)
-  // — one of FOUR sibling candidate fields (this, `lastMismatchFusion`, `lastMismatchUnmatched`,
-  // `lastPasteTripwireGiveUp`). NOT a selection among them: whichever of the four are currently set are
-  // ALL surfaced together, chronologically ordered by `detectedAt` — an earlier design there picked only
-  // the single most-recent-by-`detectedAt` field and was corrected (manager review, same card), because
-  // that could hide a SEVERE candidate (e.g. `lastMismatchUnmatched`'s "a possible LOSS") behind a
-  // merely more-recent BENIGN one (e.g. this field's own "not an established loss" reading). A
-  // non-blocking `warning` surfaced at merge-confirm time (an ACTION a manager was already taking),
-  // additive to this worker_list/worker_status pull surface, never a replacement for it.
-  // Card d0952a73: `explainedBenign` threads the SAME `confirmedWrapperDeficit`/`confirmedAnsiStripDeficit`/
-  // `confirmedWrapperAwareFusion` verdict the session-facing notice below already branches on
-  // (deliverHook, ~host.ts:6012-6036) onto this manager-facing pull surface — until this card that
-  // classification was computed and then DISCARDED: `worker_status`/`worker_list` showed only the raw
-  // replay (the alarm) with no way to tell it apart from a genuinely UNEXPLAINED one (the same alarm with
-  // no acquittal). `null` means no independent classifier explained this replay as benign — it stays exactly
-  // as loud as an established/possible loss, unchanged from before this field existed. Set at the SAME
-  // detection point as the rest of this object, once the three `confirmed*` locals it reads are available
-  // (see the assignment site's own doc for why the assignment moved rather than the locals).
+  // @decision 68459420 — a manager-facing PULL surface (never cleared, see getLastMismatchReplay), not an
+  // advisory. @decision b7158b99 — does NOT establish a loss; a later fusion may recover it.
+  // @decision d0952a73 — explainedBenign threads the session notice's own verdict, never discards it.
+  // @decision e1ac691b — one of FOUR sibling candidates surfaced together, chronologically; see that record.
   lastMismatchReplay: { gen: number; replayedGen: number; reportedLen: number; intendedLen: number; detectedAt: number; explainedBenign: "wrapper-deficit" | "ansi-strip" | "wrapper-aware-fusion" | null } | null;
-  // Card f5f6515a DoD-4: the SENDER-directed arm for a FUSED match — `lastMismatchReplay` above only ever
-  // fires on a byte-for-byte match against ONE single prior generation's own write; it stays null for a
-  // mismatch whose reported text is a CONCATENATION of more than one generation's writes (the composer
-  // accumulated instead of clearing — the exact shape `detectComposerAccumulation` exists to confirm). Set
-  // ONLY when `detectComposerAccumulation` CONFIRMS (sum AND hash both match) — ANY confirmed span, no
-  // upper bound (Code Reviewer HIGH + §RESOLVED, card f5f6515a): an earlier version of this field capped at
-  // `spanGens.length <= 2`, reasoned from "every hash-confirmed specimen measured so far is span=2" — that
-  // reasoning does not survive scrutiny. This card's own MOTIVATING gen=4 specimen (a stale CLI paste-
-  // collapse placeholder + the preceding generation's full text + the current generation's own text,
-  // 26+4819+1123=5968) is NOT a member of this population at all: a stale placeholder is not text Loom
-  // itself wrote, so it is never in `recentWrittenTurns`, and no contiguous suffix of that ring can ever
-  // sum to a placeholder-inclusive reported length (span=[gen3,gen4] sums to 4819+1123=5942, short by
-  // exactly the 26-char placeholder) — `detectComposerAccumulation` structurally cannot confirm that
-  // specimen at ANY span. That leaves exactly ONE real specimen (the manager's own live gen=9, span=2) —
-  // not a principled basis for a hard cutoff at 2 rather than 3 or 8. The detector's own CONFIRMED result
-  // is equally rigorous at any span up to its window cap (exact length-sum AND exact fnv1a32 hash, over a
-  // window of at most 8 ⇒ at most 7 candidate spans checked — independently audited by Code Review, which
-  // could not force a false positive at any span tried) — a CONFIRMED result is a CONFIRMED result
-  // regardless of how many generations it spans. Capping this field below what the notice itself now
-  // honors (see the `confirmedFusion` local, this file) would silently reintroduce the exact two-surface
-  // disagreement (Code Reviewer CRITICAL+HIGH) this doc was rewritten to remove.
-  // `replayedEntry === undefined` guards against setting this for a shape `lastMismatchReplay` already
-  // covers — NOT because a single-entry match is itself producible by `detectComposerAccumulation` (it only
-  // ever tries spans of 2+ entries, so a length-1 span is structurally impossible here), but because a
-  // CONCATENATION could coincidentally equal some OTHER single prior entry's own text (e.g. an intervening
-  // empty/short write) — exactly the shape `replayedEntry` already claims more precisely, so this guard
-  // keeps the two fields mutually exclusive even in that coincidence, rather than double-firing.
-  // ⚠️ THE CONTRACT IS DUPLICATION, NOT LOSS (Code Reviewer CRITICAL, card f5f6515a — shipped wrong once
-  // already, do not restate `lastMismatchReplay`'s "ESTABLISHED loss / re-send" language here). A confirmed
-  // fusion's span is a CONTIGUOUS SUFFIX whose LAST entry is always the current generation's own write
-  // (`recentWrittenTurns.push` happens at submit() time, before this turn's own hook ever fires — see that
-  // call site) — the content Loom intended for THIS turn therefore ALWAYS arrived; it is the tail of the
-  // fused turn, never missing. The risk runs the OPPOSITE direction from `lastMismatchReplay`'s: an EARLIER
-  // `spanGens` entry's own content may have been ACTED ON A SECOND TIME if its own turn already ran — the
-  // remedy is checking for a duplicate action, never re-sending (there is nothing to re-send).
-  // `spanGens` is oldest-first (mirrors `detectComposerAccumulation`'s own return shape) so a reader can see
-  // which generations were involved without a second lookup. CO-TRIGGERED with the session-facing notice's
-  // own fusion branch — the SAME `confirmedFusion` expression, in the SAME synchronous block, always
-  // together, never independently (an earlier draft of this card's own kickoff said "independently"; that
-  // was wrong and corrected here) — what differs between the two is the READER, not the trigger: this
-  // field serves the session's own WATCHING manager (worker_list/worker_status); the notice serves the
-  // session learning about ITSELF. Same PULL-surface posture as `lastMismatchReplay` otherwise — never
-  // cleared once set, overwritten (not accumulated) by a later occurrence.
-  // Card e1ac691b: also read by `worker_merge_confirm`'s `composerIntegrityWarning` (sessions/service.ts)
-  // — one of FOUR sibling candidate fields; ALL currently-set siblings are surfaced together,
-  // chronologically, NEVER a selection among them — see `lastMismatchReplay`'s own note above for why.
+  // @decision f5f6515a — accepts ANY confirmed span, no upper bound; the contract is DUPLICATION, not loss
+  // (the fused span's last entry is always this turn's own write — never restate this as an "established
+  // loss"). @decision e1ac691b — one of FOUR sibling candidates surfaced together; see that record.
   lastMismatchFusion: { gen: number; spanGens: number[]; reportedLen: number; intendedLen: number; detectedAt: number } | null;
   // Card f9b1ea00 — CONSUMED by `checkPromptMismatchUnresolved`'s bounded-window follow-up, NOT a reader-
   // facing pull surface like its siblings above. Every gen a CONFIRMED fusion's own `spanGens` has ever
@@ -2745,136 +2581,24 @@ interface Live {
   // `UserPromptSubmit`'s mismatch detector) so this never grows past the session's own count of currently
   // still-unresolved mismatches.
   pendingMismatchUnresolvedTimers: Set<NodeJS.Timeout>;
-  // Card 340b9dbe — PER-GEN DEDUP for `checkPromptMismatchUnresolved`'s own fired event, orthogonal to
-  // `pendingMismatchUnresolvedTimers` just above (that Set tracks live TIMER HANDLES so they can be
-  // cancelled on exit/resume; this one tracks which GENS have already produced a durable
-  // `onPromptMismatchUnresolved` event, so a second one for the SAME gen is a silent no-op instead of a
-  // duplicate alarm). THE GAP THIS CLOSES: the `UserPromptSubmit` detector's own arming site (this file,
-  // `isRecognizedReplayAwaitingResolution`) sits BEFORE the exact-repeat suppression guard
-  // (`isExactRepeatNotice`, same case, further down) and arms independently of it — so a detector
-  // re-entry for an already-notified `(gen, writtenHash, reportedHash)` triple gets its NOTICE correctly
-  // suppressed but still arms a SECOND `setTimeout` for the same gen. `checkPromptMismatchUnresolved`
-  // used to consult only `mismatchResolvedGens` (a real fusion resolving the gen), which has no way to
-  // stop a second timer that fires for a gen that was never resolved, only already reported — this field
-  // is that missing per-gen "already fired" memory, checked/set at the single call site inside
-  // `checkPromptMismatchUnresolved` itself, so it protects against ANY arming path that can produce two
-  // timers for one gen, not just the one currently reachable. Same never-shrinks posture as
-  // `mismatchResolvedGens` (reset only at spawn/resume/fork, alongside it — see those init sites) — no
-  // `onExit` clear needed the way `pendingMismatchUnresolvedTimers` gets one, since a stale entry here can
-  // only ever suppress a duplicate, never fire a false one.
+  // @decision 340b9dbe — per-gen "already fired" memory; without it, a suppressed-notice re-entry still
+  // arms a second timer for the same gen. See 340b9dbe's record.
   firedMismatchUnresolvedGens: Set<number>;
-  // Card 59757189 DoD-1/3 — the UNMATCHABLE counterpart to `lastMismatchReplay`/`lastMismatchFusion` above:
-  // set the instant a mismatch matches NONE of the recognized/confirmed shapes above (not a single-entry
-  // replay, not a confirmed fusion, not a diverged-prior fusion, not a wrapper-deficit or ANSI-strip
-  // benign shape) — the exact population `3ff61275` left unaddressed (that card shipped only DoD-7's
-  // WHICH-payload identity floor, never the content itself). CAPTURED AT THE MOMENT OF DETECTION,
-  // directly from `intended` (the local in this same synchronous block) — deliberately NOT a later lookup
-  // into `recentWrittenTurns` (this file, `COMPOSER_ACCUM_WINDOW`=8 above): that ring is a BOUNDED,
-  // oldest-first window that will have rotated past this generation by the time any reader asks (the
-  // reporter's own correction on the predecessor card: "the content was in hand at detection time and
-  // discarded milliseconds later"). Stored IN FULL, no head-bounding — mirrors `recentWrittenTurns`'s own
-  // existing precedent of retaining full per-generation text with no length cap, rather than inventing an
-  // unmotivated new size bound here.
-  // DoD-3 (decidability): `null` (the field's own type) combined with `getLastMismatchUnmatched`'s own
-  // `undefined` for an unknown/not-live session are the ONLY "not captured" states. An unmatchable
-  // mismatch, once it fires, ALWAYS populates a real object here — so a reader can never confuse
-  // "captured, here it is" (a non-null object — even one whose `intendedText` happens to be the empty
-  // string) with "nothing was ever captured" (`null`/`undefined`). Never cleared once set (same posture as
-  // `lastMismatchReplay`/`lastMismatchFusion`); overwritten — not accumulated — by a later unmatchable
-  // occurrence, so this always reflects the MOST RECENT one.
-  // Card e1ac691b: also read by `worker_merge_confirm`'s `composerIntegrityWarning` (sessions/service.ts)
-  // — one of FOUR sibling candidate fields; ALL currently-set siblings are surfaced together,
-  // chronologically, NEVER a selection among them — see `lastMismatchReplay`'s own note above for why.
+  // @decision 59757189 — captures content AT DETECTION time from `intended`, never a later lookup into the
+  // bounded recentWrittenTurns ring (which will have rotated past it). @decision e1ac691b — one of FOUR
+  // sibling candidates surfaced together; see that record.
   lastMismatchUnmatched: { gen: number; intendedLen: number; intendedText: string; detectedAt: number } | null;
-  /**
-   * Card c0323f8a — the SIGNATURE of the last `[loom:prompt-mismatch]` session-facing notice actually
-   * enqueued (see the `setTimeout(() => this.enqueueStdin(...))` call site below). Unlike
-   * `lastMismatchReplay`/`lastMismatchFusion` above (read-only PULL surfaces for a WATCHING manager,
-   * overwritten unconditionally on every detection, never gating anything), this field's ONLY job is
-   * SUPPRESSING an exact repeat: if the underlying `UserPromptSubmit` hook fires more than once for the
-   * SAME logical turn, this whole detection block re-runs from scratch and, before this field existed,
-   * re-enqueued a BYTE-IDENTICAL notice as a genuinely fresh turn — never tagged, since it is a fresh
-   * mint, not a redrive of an already-queued entry (the `[loom:possible-duplicate root:…]` machinery
-   * only ever tags a REDELIVERY of a message that was already durably queued or gave up; this notice is
-   * neither).
-   *
-   * ⚠️ THIS IS A DATA-LOSS ALARM — suppressing a genuinely NEW mismatch here would hide a real loss,
-   * silently. The soundness of suppressing on an exact `(gen, writtenHash, reportedHash)` triple match
-   * rests entirely on `gen` (`Live.submitGeneration`) being unable to repeat across two DIFFERENT
-   * underlying events, which is a stronger property than merely "gen advances". PROOF, established by
-   * READING THE CODE, not by observing a production incident:
-   * 1. `submitGeneration` is mutated ONLY by `++`, at exactly FOUR sites in this file, all monotonic
-   *    increments, none a reset/decrement: `submit()` itself (`const gen = ++live.submitGeneration;`),
-   *    `healIfStuck`'s out-of-band stale-busy bump, `stop()`'s bump on graceful/hard stop, and
-   *    `interruptForRedirect`'s bump on an Esc-cancel.
-   * 2. The ONLY place it is ever set to a value OTHER than an increment is `submitGeneration: 0` at Live
-   *    construction — and for a real Claude session there is exactly ONE construction site, `spawn()`
-   *    (this file). Every `SessionService` spawn path (fresh spawn, resume, fork, a `worker_recycle`
-   *    successor, boot-reconcile resume) calls `this.pty.spawn(...)` — the SAME method, unconditionally —
-   *    so a resume does NOT reuse an existing Live and dodge the reset; `isResume: !!opts.resumeId` is a
-   *    flag on THIS SAME constructor literal, not a separate code path.
-   * 3. This field is initialized to `null` at the SAME construction site (see the three `Live` literals
-   *    below) — so it resets in lockstep with `submitGeneration` across every boundary that resets gen. A
-   *    stale signature can never survive into a fresh gen sequence.
-   * 4. The specific case this project has ON RECORD as a real engine quirk — card 8a5bd0d0, the engine
-   *    firing a second `SessionStart` under a rotated `session_id` for the SAME live pty (see that
-   *    handling above) — does NOT construct a new Live and does NOT touch `submitGeneration`; it mutates
-   *    only `live.engineSessionId` in place. Checked specifically because it was the most plausible way
-   *    this proof could be wrong; it isn't.
-   * ⇒ Within one Live's lifetime, two reads of the identical `gen` can only happen if no `submit()` ran
-   * between them — meaning `live.lastPrompt` (Loom's own intended write for that generation) is STILL the
-   * same string both times. There is no way for a second, genuinely-distinct loss to exist "at gen=N"
-   * without a new submit() first, and a new submit() always bumps gen — so a full triple match cannot
-   * represent two different events.
-   * ⚠️ WHAT THIS DOES NOT PROVE: it does not establish HOW, in production, the detection block gets
-   * re-entered a second time with an unchanged `gen`. A literal synchronous double `deliverHook`
-   * (`UserPromptSubmit`) call for one turn is itself structurally blocked from reaching this a second
-   * time (`submitWasOutstanding = !live.enterConfirmed`, and this same case sets `enterConfirmed = true`
-   * before the detector runs, so a genuine back-to-back duplicate takes a different, harmless branch) —
-   * the real trigger for the specimens that motivated this field is UNCONFIRMED. This field guards
-   * against the symptom regardless of the trigger; it is not evidence the trigger is understood.
-   *
-   * Never cleared, overwritten (not accumulated) by the next notice actually sent — mirrors the
-   * PULL-surface fields' own "last one wins" posture. See `lastMismatchNoticeSuppressed` below for the
-   * durable, manager-visible record of when this field's match actually suppressed something — this field
-   * alone is not manager-visible.
-   */
+  // @decision c0323f8a — suppresses an exact-repeat notice on a (gen, writtenHash, reportedHash) triple
+  // match; sound because submitGeneration cannot repeat across two distinct events (4-point proof in the
+  // record — checked specifically against the card 8a5bd0d0 rotated-session_id quirk). This is a
+  // DATA-LOSS ALARM: do not loosen the match. See c0323f8a's record.
   lastMismatchNoticeSignature: { gen: number; writtenHash: string; reportedHash: string } | null;
-  /**
-   * Card c0323f8a (manager review) — the durable, PULL-surface counterpart to a suppression decided by
-   * `lastMismatchNoticeSignature` above. A suppressed alarm and no alarm are indistinguishable to any
-   * future reader unless something records that a suppression actually happened — a `console.log` line is
-   * fine for a human tailing the daemon's own stdout, but invisible to a manager, which is who actually
-   * needs to know an alarm was swallowed. Mirrors `lastMismatchReplay`/`lastMismatchFusion`'s own posture
-   * (read-only, never gates anything, overwritten — not accumulated as a struct — by the next SUPPRESSED
-   * occurrence) with one addition: `count` accumulates across repeated suppressions of the SAME signature,
-   * so "suppressed once" and "suppressed five times in a row" read differently. Reset to a fresh `count:1`
-   * the moment a DIFFERENT signature suppresses (which cannot happen without an intervening real notice —
-   * see `lastMismatchNoticeSignature`'s own proof), so `count` is always "how many repeats of the CURRENT
-   * signature have been suppressed", never a lifetime total across unrelated events.
-   */
+  // @decision c0323f8a — durable, manager-visible counterpart; count resets to 1 on a different signature,
+  // never a lifetime total. See c0323f8a's record, "lastMismatchNoticeSuppressed" section.
   lastMismatchNoticeSuppressed: { gen: number; writtenHash: string; reportedHash: string; count: number; detectedAt: number } | null;
-  /**
-   * Card 72cab648 — the SENDER pull-surface for the bare-paste-placeholder tripwire's own GIVE-UP: its
-   * one-shot auto-recovery re-injection (`isPasteRecoveryAttempt`, this file) ALSO collapsed, and Loom will
-   * not retry a third time. Before this field, the give-up's only channels were a bare `console.warn` (card
-   * eef4883c) and, since card 47c11741, an attention-path `enqueueSystemNudge` to the session and its
-   * sender — pinned memory `shipping-a-detector-is-not-someone-reading-it` measured an advisory in that
-   * attention path at ZERO acted-on across every instance tracked, versus a precondition/pull-surface read
-   * at the point of use, which is what actually gets checked. This is that pull-surface — read at the SAME
-   * `worker_list`/`worker_status` point a manager already reads `lastMismatchReplay`/`lastMismatchFusion` —
-   * purely additive on top of both existing channels (the `console.warn` and the nudge are untouched).
-   * Same PULL-surface mechanics as its siblings: `null` = no give-up has fired yet since this session went
-   * live, `undefined` (see the getter) = session not live in this process, never cleared once set,
-   * overwritten (not accumulated) by a later occurrence — always reflects the LATEST give-up only.
-   *
-   * Card e1ac691b: also read by `worker_merge_confirm`'s `composerIntegrityWarning` (sessions/service.ts)
-   * — one of FOUR sibling candidate fields; ALL currently-set siblings are surfaced together,
-   * chronologically, NEVER a selection among them — see `lastMismatchReplay`'s own note (this file)
-   * for why. A DIFFERENT family from the other three (give-up/redelivery, not composer-accumulation —
-   * see card e1ac691b's own DoD-2 closure) but the same actionable "check before trusting this worker's
-   * turns were each acted on exactly once" signal from a manager's point of view at merge-confirm time.
-   */
+  // @decision 72cab648 — a PULL surface, additive to the existing console.warn + attention-nudge channels
+  // (never a replacement). @decision e1ac691b — one of FOUR sibling candidates surfaced together,
+  // chronologically; a DIFFERENT family (give-up/redelivery, not composer-accumulation). See both records.
   lastPasteTripwireGiveUp: { gen: number; token: string | null; engineSessionId: string | null; detectedAt: number } | null;
 }
 
