@@ -3,40 +3,15 @@ import path from "node:path";
 import type { PermissionPolicy } from "@loom/shared";
 import { SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, DECISION_RECORDS_SCRIPT, DECISION_RECORDS_DEDUPE_DIR, COMMENT_ANCHOR_LINT_SCRIPT, PORT } from "../paths.js";
 
-/**
- * Card cd0c7fee: matcher for the correlation-only `PreToolUse` hook below. Deliberately scoped to the
- * exact `mcp__<server>__<tool>` names of the two tools `tool-attribution.ts`'s `WATCHED_TOOL_NAMES`
- * tracks (`worker_report`, `memory_write`) — mirrors the existing vault-lint `PostToolUse` matcher's own
- * narrow-scoping precedent (Write|Edit, not every tool) rather than firing this hook on every tool call
- * in every turn.
- *
- * ⚠️ NOT hand-sync-only any more (round-2 review): if this ever drifts from `WATCHED_TOOL_NAMES` — e.g. a
- * tool gets added to one and not the other — the failure is SILENT and fails toward the reassuring side:
- * the un-matched tool's PreToolUse hook simply never fires, `consume()` reads "unknown" for it forever,
- * and nothing breaks or logs. `test/tool-attribution.mjs` has a mechanical assertion (not just this
- * comment) that derives this matcher's alternatives, strips the `mcp__<server>__` prefix from each, and
- * asserts the resulting set equals `WATCHED_TOOL_NAMES` exactly — run it after editing either side.
- * Exported for exactly that test to import; still no PRODUCTION-code coupling between the two files (the
- * daemon itself never cross-references them at runtime — only the test does).
- */
+/** @decision cd0c7fee — narrow-scoped to `worker_report`/`memory_write` (`WATCHED_TOOL_NAMES`); a
+ *  drift between the two fails SILENTLY (the un-matched tool's hook just never fires) —
+ *  `test/tool-attribution.mjs` asserts they stay in sync, run it after editing either side. */
 export const PRE_TOOL_USE_ATTRIBUTION_MATCHER = "mcp__loom-orchestration__worker_report|mcp__loom-tasks__memory_write";
 
-/**
- * Loom NEVER wants Claude Code's "resume from summary / as-is" gate (isResumeSummaryGate in host.ts) to
- * render at all — the DEFAULT option silently compacts a resumed session's full context, which is
- * exactly what happened to three managers simultaneously in the 2026-07-10 incident when the pty-side
- * Down/Enter guard raced and lost. The gate (`Ifa`/`U1p` in the shipped CLI, confirmed against 2.1.206 by
- * inspecting the bundled binary) only renders when BOTH the session's age exceeds
- * `CLAUDE_CODE_RESUME_THRESHOLD_MINUTES` (default 70) AND its estimated tokens exceed
- * `CLAUDE_CODE_RESUME_TOKEN_THRESHOLD` (default 100_000) — both read via `process.env` at the moment the
- * gate would show. Overriding either to a value no real session will ever reach suppresses it
- * unconditionally; both are overridden for defense-in-depth. This is settings.json's documented `env`
- * key (confirmed in the same binary: `env:v.record(v.string())`, merged into `process.env` at CLI
- * startup — the exact mechanism Claude Code itself uses to apply per-session env), so it rides the
- * SAME per-session `--settings` file this function already writes — no new spawn plumbing. The pty-side
- * `resolveResumeGate` verify-retry (host.ts) stays as a belt-and-suspenders fallback in case a future
- * CLI version changes this threshold logic.
- */
+/** @decision sha:29b22e7e — both resume-gate env thresholds are overridden so Claude Code's "resume
+ *  from summary" gate (whose DEFAULT option force-compacted three managers at once, 2026-07-10) never
+ *  renders; keep the pty-side `resolveResumeGate` verify-retry (host.ts) as a fallback, don't rely on
+ *  this alone — see docs/decisions/29b22e7e-resume-gate-confirms-down-before-risking-enter.md */
 const RESUME_GATE_ENV_OVERRIDE: Record<string, string> = {
   // ~100 years — no real session is ever that old; suppresses the gate via the age check alone.
   CLAUDE_CODE_RESUME_THRESHOLD_MINUTES: String(60 * 24 * 365 * 100),
@@ -44,72 +19,20 @@ const RESUME_GATE_ENV_OVERRIDE: Record<string, string> = {
   CLAUDE_CODE_RESUME_TOKEN_THRESHOLD: "999999999",
 };
 
-/**
- * BEST-EFFORT suppression of Claude Code's "auto mode" first-run entry-warning dialog (card 9c03f5a6) —
- * a SEPARATE interactive gate from the `--dangerously-skip-permissions`/bypassPermissions acceptance
- * dialog this file already avoids (see `writeSessionSettings`'s own doc comment: a gate-free boot +
- * allowlist over `--dangerously-skip-permissions` specifically to dodge THAT gate). This key closes the
- * residual risk that auto mode's OWN one-time consent dialog could fire the first time a machine/profile
- * ever reaches auto, which would be exactly the kind of unattended boot hang this whole card exists to
- * eliminate — now that the widened auto-heal (host.ts's `logLandedMode`) reliably drives every
- * Loom-driven role all the way to auto, this residual risk is reachable more often than before.
- *
- * Card 51926260: WHEN a session reaches auto has changed — `computeBootMode` (host.ts) now boots most
- * Loom-driven roles (the platform/worker default) DIRECTLY at `--permission-mode auto`, rather than
- * booting gate-free at `acceptEdits` and feedback-cycling to `auto` POST-boot (host.ts's `cycleToMode`,
- * still the fallback for a target that isn't directly expressible). This key is written to the settings
- * file BEFORE either kind of boot, so it's positioned to matter either way — but whether the underlying
- * CLI's entry-warning dialog is gated on a runtime TRANSITION into auto (the case this key was
- * originally reasoned about) versus firing identically for a COLD boot already sitting in auto has not
- * been separately re-verified against the new direct-boot shape; that live-probe gap is tracked
- * separately, not resolved here.
- *
- * UNVERIFIED / reverse-engineered (found by inspecting the installed CLI binary's own gating logic:
- * `skipAutoPermissionPrompt===true` on ANY of a few named settings scopes suppresses the dialog) — the
- * exact settings-SCOPE our per-session `--settings <file>` maps to was NOT confirmed live (no real-CLI
- * harness to probe it against in the environment this was written in). Purely ADDITIVE and safe even if
- * the guess is wrong: an unrecognized settings key is simply ignored by both an older CLI and (if the
- * scope mapping turns out wrong) this CLI too — worst case is a no-op, never a regression. Does NOT touch
- * the spawn argv or whichever `--permission-mode` value this session actually boots with (see
- * `computeBootMode`) — settings-file key only. Treat as a belt on top of the proven gate-free boot
- * (direct-at-target or acceptEdits-then-cycle) recipe, not a replacement for it.
- */
+/** @decision 9c03f5a6 — BEST-EFFORT, reverse-engineered suppression of Claude Code's auto-mode
+ *  first-run entry-warning dialog (`skipAutoPermissionPrompt`); the settings-scope mapping was never
+ *  confirmed against a real CLI. Purely additive — a wrong guess is a no-op, never a regression. Treat
+ *  as a belt on the proven gate-free boot recipe, not a replacement for it — see
+ *  docs/decisions/9c03f5a6-auto-mode-entry-warning-suppressed-via-reverse-engineered-flag.md */
 const AUTO_MODE_ENTRY_WARNING_OVERRIDE = { skipAutoPermissionPrompt: true } as const;
 
-/**
- * Card ea2fbcca — the CLASS fix for the cd0c7fee/8d158088 double-wrap incident (that ONE-LINE instance
- * fix is already on main; see `PreToolUse` below, which is correctly shaped). Loom generates a settings
- * file the `claude` CLI must accept, and nothing checked that it does — the only detector was the CLI's
- * OWN runtime rejection, which raises a BLOCKING INTERACTIVE DIALOG inside an unattended session nobody
- * is watching, presenting as a spawn hanging forever with an empty transcript and `SessionStart` never
- * firing (indistinguishable from a PTY/spawn fault).
- *
- * ⛔ Deliberately NOT a shell-out to `claude doctor`: measured, in a controlled probe (card ea2fbcca,
- * 3 CLI versions × 2 arms, 2026-08-25), to REPORT an invalid settings file and still EXIT 0 in all six
- * arms. An rc-based check
- * would pass every malformed file forever — silently, confidently, indistinguishable from a genuinely
- * clean one. This instead asserts the OBJECT SHAPE directly, in-process: every hook-event key must map
- * to an array of "matcher groups", `{matcher?: string, hooks: [{type: "command", command: string}, ...]}`
- * — the exact invariant the 2026-08-25 incident violated (a well-formed JSON document with the wrong
- * NESTING DEPTH; a bare "is it JSON" check would have passed it clean).
- *
- * Returns a list of violations (empty ⇒ valid). ONE definition, shared by production
- * (`assertValidHooksShape`/`writeSessionSettings` below) and its regression test
- * (`test/settings-hooks-shape.mjs`, which imports this from `dist/`) — a hand-duplicated second copy is
- * exactly the drift risk `PRE_TOOL_USE_ATTRIBUTION_MATCHER`'s own doc comment above warns about.
- *
- * 📌 MOVING TARGET (card DoD item 6): this models the ONE nesting-depth invariant the 2026-08-25 incident
- * actually violated, reverse-engineered from the CLI's own observed rejection message — not the CLI's
- * full settings schema, which is undocumented and can tighten on any auto-update (the CLI auto-updates on
- * a schedule nobody controls — see the card's own timeline). It WILL miss a future CLI-side tightening
- * this shape doesn't cover (e.g. a new required field, a stricter `matcher` type): that is a known,
- * accepted gap, not an oversight — hand-mirroring the CLI's full upstream schema would chase a target
- * this daemon doesn't own and would itself drift silently. When the CLI changes what it accepts in a way
- * this check doesn't model, the failure mode reverts to today's (a blocking dialog nobody sees) until
- * this validator is deliberately widened against the NEW rejection message — the same way this one was
- * built from the 2026-08-25 incident's exact error string (`hooks.PreToolUse.0.hooks.0.type: Invalid
- * input`).
- */
+/** @decision ea2fbcca — validates settings.hooks OBJECT SHAPE in-process rather than shelling out to
+ *  `claude doctor` (measured to REPORT an invalid file and still EXIT 0, 3 CLI versions × 2 arms,
+ *  2026-08-25). Models only the ONE nesting-depth invariant the 2026-08-25 double-wrap incident
+ *  violated — a known, accepted gap against the CLI's undocumented, auto-updating full schema, not an
+ *  oversight. Returns a list of violations (empty ⇒ valid); ONE definition shared with
+ *  `test/settings-hooks-shape.mjs`. See
+ *  docs/decisions/ea2fbcca-settings-hooks-shape-validated-fail-closed.md */
 export function hooksShapeViolations(hooksObj: unknown): string[] {
   const errors: string[] = [];
   if (typeof hooksObj !== "object" || hooksObj === null) return ["settings.hooks is not an object"];
@@ -141,30 +64,12 @@ export function hooksShapeViolations(hooksObj: unknown): string[] {
   return errors;
 }
 
-/**
- * Enforce `hooksShapeViolations` — logs distinctively (`[pty][settings-invalid]`, so this never reads as
- * generic PTY/spawn noise — DoD item 4) and throws (DoD item 5) when the shape is invalid. Called TWICE by
- * `writeSessionSettings` below: once on the in-memory object BEFORE it reaches disk (DoD item 1), and once
- * on a READ-BACK of what actually landed on disk (DoD item 4's "read-back check") — the second catches
- * anything that could go wrong between construction and disk (a stray JSON.stringify replacer added
- * later, a corrupted write) that the first can't see, and validates the exact bytes the CLI will read.
- *
- * ⚠️ FAIL POSTURE, decided deliberately (DoD item 5): REFUSE (throw) rather than write/hand back a bad
- * file. Today's only detector for this defect class is the CLI's own blocking dialog — the process never
- * crashes, `SessionStart` never fires, and the transcript stays empty forever, indistinguishable from a
- * hung PTY/spawn fault until a human happens to attach and see the dialog. Throwing HERE instead converts
- * that SILENT hang into an immediate, loud, SYNCHRONOUS failure — and this throw shape already has a
- * graceful landing spot: `writeSessionSettings` is called from `PtyHost.createPty`, which is called from
- * `PtyHost.spawn()`, which `SessionsService.spawnWorker` wraps in a try/catch that reconciles a
- * synchronous `createPty` throw to `processState:'exited'` + a logged `lastError` (see that catch's own
- * doc in sessions/service.ts — the SAME reconciliation an OS-level process-creation failure already gets).
- * So refusing here doesn't introduce a new failure mode; it converts an INVISIBLE one (a hang with nothing
- * to grep) into the SAME visible one every other hard spawn failure already produces. The alternative —
- * writing the bad file anyway and letting the CLI's own dialog eventually catch it — is strictly worse:
- * it's the exact failure this card exists to eliminate. (Not every spawn call site has that same catch —
- * an uncaught throw elsewhere still surfaces as a loud MCP/REST error rather than a silent daemon crash,
- * since Node's async/request error boundaries catch it; still preferable to a silent hang either way.)
- */
+/** @decision ea2fbcca — REFUSE (throw), never write/hand back a bad settings file: the only other
+ *  detector is the CLI's own BLOCKING dialog inside an unattended session, indistinguishable from a
+ *  hung PTY/spawn fault until a human happens to attach. `SessionsService.spawnWorker`'s existing
+ *  try/catch around `createPty` already reconciles this throw the same way an OS-level spawn failure
+ *  is reconciled. Called TWICE: pre-write on the in-memory object, and on a read-back of what actually
+ *  landed on disk. See docs/decisions/ea2fbcca-settings-hooks-shape-validated-fail-closed.md */
 export function assertValidHooksShape(hooksObj: unknown, context: string): void {
   const violations = hooksShapeViolations(hooksObj);
   if (violations.length) {
@@ -196,19 +101,14 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  * gated on the path itself rather than on the `docLint` flag below — a project with docLint on but no
  * vault configured correctly never gets this hook (nothing to lint). Advisory only — it never blocks.
  *
- * Card 67621894 (gate reworked by card d92ec82b): a SEPARATE PostToolUse Write|Edit hook runs
- * `comment-anchor-lint.mjs` in its per-file `--hook` mode (never a repo-wide scan — see that script's own
- * doc for the whole-repo cost this deliberately avoids), scoped to just the ONE file a Write/Edit just
- * touched. This hook targets SOURCE files, not vault notes, so it has no legitimate need for a vault at
- * all — it is gated on the explicit `docLint` param below (see {@link SpawnOpts.docLint} in host.ts for
- * where that boolean is threaded from) AND `repoPath` (the lint's actual repo root, passed through
- * unconditionally by every caller that threads it, see its own param doc below); a caller that omits
- * `repoPath` entirely (pre-5244adc2 shape) never gets this hook wired, same "stays byte-identical" posture
- * as the decision-records hook below. Before card d92ec82b this was gated on `vaultPath` truthiness
- * (a proxy for "docLint is on" that could not distinguish it from "a vault is configured") — a project
- * with docLint on but no vault never got this hook even though it targets source, not vault content; the
- * explicit `docLint` param closes that gap. Advisory only, same posture as vault-lint above — it never
- * blocks.
+ * Card 67621894: a SEPARATE PostToolUse Write|Edit hook runs `comment-anchor-lint.mjs` in its per-file
+ * `--hook` mode (never a repo-wide scan — see that script's own doc for the whole-repo cost this
+ * deliberately avoids), scoped to just the ONE file a Write/Edit just touched — gated on the explicit
+ * `docLint` param (see {@link SpawnOpts.docLint} in host.ts) AND `repoPath` (a caller that omits
+ * `repoPath` entirely never gets this hook wired). @decision d92ec82b — do not re-couple this gate to
+ * `vaultPath` truthiness, a proxy that silently skipped a docLint-on/no-vault project even though this
+ * hook targets source, not vault content — see
+ * docs/decisions/d92ec82b-comment-anchor-lint-gated-on-explicit-doclint.md. Advisory only — never blocks.
  *
  * A PostToolUse hook (matcher Read) runs `decision-records.mjs`, which appends any complete,
  * out-of-band decision record anchored in the range a `Read` call actually returned, so a range that
@@ -217,18 +117,12 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  *
  * Card 5244adc2 (the remaining half of `661b7d46` DoD-2's "no injection, no overhead"): this hook group
  * is wired ONLY when `repoPath` resolves to a project that has adopted at least one of the three record
- * stores (`docs/adr`, `docs/decisions`, `docs/investigations` — see `anyDecisionRecordStoreExists`
- * below, which mirrors `decision-records.mjs`'s own runtime `anyStoreExists` bail — keep both in sync).
- * A project with none of the three never spawns the hook's node process on ANY `Read`, meeting "no
- * overhead" literally rather than via the script's own fast in-process bail (still left in place as the
- * backstop for a store deleted mid-session — see that script's own doc). `repoPath` OMITTED (not every
- * caller threads it — see the test population in test/*.mjs) falls back to the pre-5244adc2 behavior of
- * always wiring the hook, so every existing caller stays byte-identical without change.
- * ⚠️ STALENESS WINDOW: this function runs at every `createPty` (fresh/resume/fork/recycle), so the
- * decision re-evaluates on every respawn — a project that later adopts a record store picks the hook up
- * on its NEXT session with no daemon restart needed. A session already LIVE when the first store
- * appears will NOT have the hook wired until its own next resume; this is an accepted, documented gap,
- * not a bug (see the card).
+ * stores (see `anyDecisionRecordStoreExists` below, which mirrors `decision-records.mjs`'s own runtime
+ * `anyStoreExists` bail — keep both in sync). `repoPath` OMITTED falls back to the pre-5244adc2 behavior
+ * of always wiring the hook, so every existing caller stays byte-identical. @decision 5244adc2 — a
+ * session already LIVE when the first store appears will NOT get this hook wired until its own next
+ * resume; this is an accepted, documented gap, not a bug — see
+ * docs/decisions/5244adc2-decision-records-hook-gated-on-store-existence.md
  *
  * `hookToken` (card a2407ed4) rides as a 4th argv on the relay command, alongside the sessionId/port
  * already there — `hook-relay.mjs` forwards it in the POST body, and `/internal/hook` requires it to
@@ -237,15 +131,11 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  * `PtyHost.verifyHookToken`'s doc for exactly what this does and does not close. Placed BEFORE the
  * optional `vaultPath`/`repoPath` — TypeScript disallows a required param after an optional one.
  */
-/**
- * Card 016ee373 — the CLI's ACTUALLY-accepted `--permission-mode` values (and, byte-for-byte, the only
- * values `settings.json`'s `permissions.defaultMode` may carry, since the CLI reads both against the same
- * vocabulary). Probe-verified: `claude --help` on the installed `claude` (2.1.246) lists exactly these six
- * as `--permission-mode`'s choices. VERSION-PINNED, not derived — re-run `claude --help` and read
- * `--permission-mode`'s choices list to re-verify this set against a newer CLI; do NOT hand-copy this list
- * anywhere else — this file's own `writeSessionSettings` below and host.ts's `DIRECT_BOOT_MODES`/
- * `computeBootMode` both import this type rather than re-declaring it.
- */
+/** @decision 016ee373 — the CLI's ACTUALLY-accepted `--permission-mode` values, probe-verified against
+ *  the installed CLI (2.1.246); VERSION-PINNED, re-verify against `claude --help` on a newer CLI. Do
+ *  NOT hand-copy this list anywhere else — `writeSessionSettings` below and host.ts's
+ *  `DIRECT_BOOT_MODES`/`computeBootMode` both import this type. See
+ *  docs/decisions/016ee373-direct-boot-modes-typed-as-compile-time-guard.md */
 export type CliPermissionMode = "acceptEdits" | "auto" | "bypassPermissions" | "manual" | "dontAsk" | "plan";
 
 /**

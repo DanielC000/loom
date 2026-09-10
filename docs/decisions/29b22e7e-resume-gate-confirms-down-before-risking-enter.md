@@ -8,10 +8,29 @@ This closes the 2026-07-10 incident: the old handler wrote a blind, unverified D
 
 The fix reads the cursor position back from `resumeGateScan` — a CUMULATIVE rolling buffer (each re-render is appended, not substituted, since the TUI repaints via cursor-repositioning escapes that `collapseBoot` strips, leaving every prior frame's text still concatenated in front of the current one) — and takes the LAST `❯N.` match, confirming the Down press actually landed before risking Enter. Same "last occurrence wins" reasoning as `detectPermissionMode`'s footer-mode `lastIndexOf` scan.
 
+**Same commit's second half — `pty/claude-settings.ts`'s `RESUME_GATE_ENV_OVERRIDE`:** the SAME commit
+(`29b22e7e25de03c2c2dc51b4069160eb5453c112`) that lands the keystroke-confirmation fix above also adds a
+belt-and-suspenders fix at a different layer: it overrides both `CLAUDE_CODE_RESUME_THRESHOLD_MINUTES`
+(to ~100 years) and `CLAUDE_CODE_RESUME_TOKEN_THRESHOLD` (to 999999999) via `settings.json`'s documented
+`env` key, so the resume-summary gate (`isResumeSummaryGate` in `host.ts`) never renders at all for any
+real session — closing the race entirely rather than just handling it correctly when it occurs. The gate
+(`Ifa`/`U1p` in the shipped CLI, confirmed against 2.1.206 by inspecting the bundled binary) only renders
+when BOTH the session's age exceeds the minutes threshold (default 70) AND its estimated tokens exceed
+the token threshold (default 100_000) — both read via `process.env` at the moment the gate would show;
+overriding either alone would suppress it, both are overridden for defense-in-depth. This rides the SAME
+per-session `--settings` file `writeSessionSettings` already writes (confirmed in the same CLI binary:
+`env: v.record(v.string())`, merged into `process.env` at CLI startup) — no new spawn plumbing needed.
+
 ## Do not
 
 - Do not fire Enter against the resume-summary gate without first confirming, via a fresh cursor-position read, that the preceding Down press actually landed — a blind Down+Enter pair can confirm the wrong (default) option under restart load.
+- Do not remove the `RESUME_GATE_ENV_OVERRIDE` env thresholds (`pty/claude-settings.ts`) on the strength
+  of the keystroke-confirmation fix above alone, or vice versa — they are two independent layers closing
+  the same incident: one prevents the gate from ever rendering, the other handles it correctly if it
+  somehow still does. Removing either narrows the defense, it doesn't make the other redundant.
+- Do not lower either overridden threshold back toward a value a real long-running session could reach —
+  that reopens the race the override exists to close entirely, not just narrow it.
 
 ## Source
 
-Inline comment in `packages/daemon/src/pty/host.ts` (the resume-gate cursor-detection function doc), as of this tranche's HEAD (commit `1d2e8e78`). No card id anywhere in the block, the file, or `git blame`'s introducing commit — sourced via the `sha:` grammar. Whole block introduced by commit `29b22e7e25de03c2c2dc51b4069160eb5453c112` (2026-07-10). Relocated by card `60cd72ad` (tranche 5 on `pty/host.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+Inline comment in `packages/daemon/src/pty/host.ts` (the resume-gate cursor-detection function doc), as of this tranche's HEAD (commit `1d2e8e78`). No card id anywhere in the block, the file, or `git blame`'s introducing commit — sourced via the `sha:` grammar. Whole block introduced by commit `29b22e7e25de03c2c2dc51b4069160eb5453c112` (2026-07-10). Relocated by card `60cd72ad` (tranche 5 on `pty/host.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped. Extended by the `pty/claude-settings.ts` tranche-1 extraction (card `34ab92af`) with `RESUME_GATE_ENV_OVERRIDE`'s own doc comment, same introducing commit `29b22e7e25de03c2c2dc51b4069160eb5453c112` — a `find` before writing missed this file on the first pass; the near-duplicate `docs/decisions/29b22e7e-resume-gate-suppressed-via-settings-env-override.md` this produced was deleted and folded in here instead.
