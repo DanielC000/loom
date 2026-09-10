@@ -1,0 +1,23 @@
+# 49d43ef9 — `MTIME_SKEW_TOLERANCE_MS`: measured clock skew, the rejected 2000ms value, and what the tolerance does and doesn't bound
+
+## Narrative
+
+`findConversationIdForSpawn`'s freshness filter compares a candidate rollout file's `mtimeMs` (filesystem-reported) against `sinceMs` (a `Date.now()` wall-clock reading captured BEFORE the spawn). Those two clocks are not guaranteed to agree — measured on this host, n=3000, no induced load: a just-written file's `mtimeMs` read BELOW `sinceMs` in 4.37% of writes (min observed −1.97ms). A strict `mtimeMs < sinceMs` therefore permanently rejects a valid, just-written rollout file a few percent of the time — permanently, because mtime never changes between retries, so every subsequent attempt in the retry ladder rejects the same file identically.
+
+**Why the tolerance is 100ms, not 2000ms** (the first draft's value): this is NOT a FAT/exFAT-granularity justification — this project's target filesystems (NTFS/ext4/APFS) don't run at 2s granularity, and the measured skew above was sub-2ms, well inside even NTFS's ~15.6ms system-clock-tick granularity. `sessions/service.ts`'s `recycleWorker` hard-stops a worker and spawns its successor into the SAME `cwd` (worktreePath, `fresh: Session = { ..., cwd: worktreePath, ... }`, `worktreePath = old.worktreePath ?? old.cwd`) with NO `--resume` — a genuinely fresh spawn, so `captureCodexEngineSessionId` scans again from scratch. The predecessor's own rollout file (same cwd ⇒ same `session_meta.payload.cwd` match) can therefore be SITTING RIGHT THERE when the successor's scan runs, and if its mtime lands within the tolerance of the successor's `sinceMs`, a naive (wide) tolerance could hand the successor the PREDECESSOR's conversation id — a correctness failure (silent identity adoption) far worse than the missed-capture bug this tolerance fixes.
+
+Two things bound (not eliminate) that risk, deliberately kept SMALL to leave as little as possible to the second:
+
+1. The newest-mtime tiebreak in the scan (`best && mtimeMs <= best.mtimeMs → skip`) already prefers a strictly-fresher candidate over a stale-but-in-tolerance one whenever BOTH are present at scan time — and codex writes `session_meta` "well before any TUI output," while the FIRST scan only fires once the ready marker has rendered (`pty/host.ts`), so the successor's OWN rollout file should normally already exist by then. This is an empirical observation, not a code-enforced ordering guarantee across codex CLI versions — it narrows the risk, it does not close it.
+2. The tolerance itself is kept to the smallest value that comfortably swamps the MEASURED skew (100ms ≈ 50× the observed −1.97ms max) rather than a round, "safe-feeling" number — a wide tolerance widens the SAME window that lets the recycle race through, since this filter cannot distinguish "the true new file, mildly skewed" from "the predecessor's leftover file, genuinely stale by a similar margin."
+
+Card `cbae4520` CLOSES the SEQUENTIAL-reuse shape of the residual race these two layers only bounded — the recycle case, where a predecessor's rollout file is already sitting on disk before this spawn's own process is ever created: `findConversationIdForSpawn` takes an optional `excludeSessionIds` set — every rollout file already on disk for a cwd, snapshotted by `pty/host.ts`'s `spawnCodexProcess` BEFORE the new codex process is spawned for a genuinely fresh (non-`resume`) spawn — which closes THAT shape BY CONSTRUCTION (identity, not mtime) rather than merely narrowing it further. It does NOT close a DIFFERENT, pre-existing shape: two fresh spawns into the SAME cwd within the ~120s capture window — narrower in kind than what this tolerance alone ever bounded, but real, and left open by design rather than silently unaddressed (card `184fd82e`, `docs/adr/184fd82e-defer-serializing-fresh-codex-spawns-per-cwd.md`).
+
+## Do not
+
+- Do not raise this tolerance to a round "safe-feeling" number (e.g. the first draft's 2000ms) — the measured skew is sub-2ms; a wide tolerance widens the same window that lets the recycle race through.
+- Do not read this tolerance as closing the recycle race on its own — it only bounds the sequential-reuse shape; `excludeSessionIds` (card `cbae4520`) is what closes that shape by construction, and the concurrent-same-cwd shape remains open by design (card `184fd82e`).
+
+## Source
+
+Inline comment in `packages/daemon/src/pty/codex-transcript.ts` (`MTIME_SKEW_TOLERANCE_MS`'s top-of-const doc), as of this tranche's HEAD. Relocated by card `b038b5a8` (tranche 1 on `pty/codex-transcript.ts`); source lines joined into flowing paragraphs and `*` comment markers stripped, with no change to the facts, numbers, or the argument's structure.

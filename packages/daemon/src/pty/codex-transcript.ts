@@ -52,47 +52,13 @@ function codexSessionsRoot(): string {
 }
 
 /**
- * Card 49d43ef9: `findConversationIdForSpawn`'s freshness filter compares a candidate rollout file's
- * `mtimeMs` (filesystem-reported) against `sinceMs` (a `Date.now()` wall-clock reading captured BEFORE
- * the spawn). Those two clocks are not guaranteed to agree — measured on this host, n=3000, no induced
- * load: a just-written file's `mtimeMs` read BELOW `sinceMs` in 4.37% of writes (min observed −1.97ms).
- * A strict `mtimeMs < sinceMs` therefore permanently rejects a valid, just-written rollout file a few
- * percent of the time — permanently, because mtime never changes between retries, so every subsequent
- * attempt in the retry ladder rejects the same file identically.
+ * Tolerates mtime/wall-clock skew when matching a just-written codex rollout file's `mtimeMs` against
+ * `sinceMs` in {@link findConversationIdForSpawn}'s freshness filter.
  *
- * ⚠️ WHY THIS IS NOT 2000ms (the first draft's value, and NOT a FAT/exFAT-granularity justification —
- * this project's target filesystems (NTFS/ext4/APFS) don't run at 2s granularity; the measured skew above
- * was sub-2ms, well inside even NTFS's ~15.6ms system-clock-tick granularity): `sessions/service.ts`'s
- * `recycleWorker` hard-stops a worker and spawns its successor into the SAME `cwd` (worktreePath, `fresh:
- * Session = { ..., cwd: worktreePath, ... }`, `worktreePath = old.worktreePath ?? old.cwd`) with NO
- * `--resume` — a genuinely fresh spawn, so `captureCodexEngineSessionId` scans again from scratch. The
- * predecessor's own rollout file (same cwd ⇒ same `session_meta.payload.cwd` match) can therefore be
- * SITTING RIGHT THERE when the successor's scan runs, and if its mtime lands within this tolerance of the
- * successor's `sinceMs`, a naive tolerance could hand the successor the PREDECESSOR's conversation id — a
- * correctness failure (silent identity adoption) far worse than the missed-capture bug this card fixes.
- * Two things bound (not eliminate) that risk here, deliberately kept SMALL to leave as little as possible
- * to the second:
- *  1. The newest-mtime tiebreak below (`best && mtimeMs <= best.mtimeMs → skip`) already prefers a
- *     strictly-fresher candidate over a stale-but-in-tolerance one whenever BOTH are present at scan time
- *     — and this file's own header states codex writes `session_meta` "well before any TUI output", while
- *     the FIRST scan only fires once the ready marker has rendered (`pty/host.ts`), so the successor's OWN
- *     rollout file should normally already exist by then. This is an empirical observation, not a code-
- *     enforced ordering guarantee across codex CLI versions — it narrows the risk, it does not close it.
- *  2. The tolerance itself is kept to the smallest value that comfortably swamps the MEASURED skew
- *     (100ms ≈ 50× the observed −1.97ms max) rather than a round, "safe-feeling" number — a wide tolerance
- *     widens the SAME window that lets the recycle race through, since this filter cannot distinguish
- *     "the true new file, mildly skewed" from "the predecessor's leftover file, genuinely stale by a
- *     similar margin."
- * Card `cbae4520` CLOSES the SEQUENTIAL-reuse shape of the residual race these two layers only bounded —
- * the recycle case this card targets, where a predecessor's rollout file is already sitting on disk before
- * this spawn's own process is ever created: {@link findConversationIdForSpawn} now takes an optional
- * `excludeSessionIds` set — every rollout file already on disk for a cwd, snapshotted by `pty/host.ts`'s
- * `spawnCodexProcess` BEFORE the new codex process is spawned for a genuinely fresh (non-`resume`) spawn —
- * see that snapshot's own doc ({@link snapshotExistingConversationIdsForSpawn}) for why this closes THAT
- * shape BY CONSTRUCTION (identity, not mtime) rather than merely narrowing it further. It does NOT close a
- * DIFFERENT, pre-existing shape: two fresh spawns into the SAME cwd within the ~120s capture window (see
- * that same doc's own caveat) — narrower in kind than what this tolerance alone ever bounded, but real, and
- * left open by design rather than silently unaddressed.
+ * @decision 49d43ef9 — keep this SMALL: it bounds (does not close) the sequential recycle-race window;
+ * `excludeSessionIds` (card cbae4520) closes that shape by construction instead. See
+ * docs/decisions/49d43ef9-mtime-skew-tolerance-measured-and-bounded-not-closed.md.
+ *
  * Env-overridable so a hermetic test can exercise the boundary without waiting on real skew (mirrors this
  * project's `LOOM_CODEX_*_MS` convention in `pty/host.ts`).
  */
@@ -176,14 +142,9 @@ export function transcriptExists(cwd: string, conversationId: string): boolean {
  * read it can be trusted indefinitely; the `mtimeMs`+`size` stamp is a defensive staleness check only (it
  * should never actually fire for a real rollout file — nothing this project does ever rewrites one).
  *
- * Card `cbae4520` code review [1]: without this, `snapshotExistingConversationIdsForSpawn`'s whole-corpus
- * scan `readFileSync`s EVERY matching-cwd-candidate rollout file on EVERY fresh (non-resume) codex spawn —
- * measured 74.2ms on a real 242-file/13.76MB `~/.codex/sessions` tree, entirely synchronous on the codex
- * spawn hot path (`spawn()` → `spawnCodexProcess()`), the exact shape `CLAUDE.md`'s Python-venv invariant
- * bans ("the spawn HOT PATH does NO blocking work"). With this cache warm, the SAME scan measures ~5.7ms
- * (stat-only after the first pass). Bounded like `resolvedPathCache` so a host with an ever-growing
- * sessions tree can't grow this cache without limit either (code review's own addition, beyond what the
- * reviewer measured).
+ * @decision cbae4520 — without this cache, the corpus-wide spawn-hot-path scan re-reads every candidate
+ * rollout file's content on every fresh codex spawn (measured 74.2ms vs ~5.7ms cached, 242-file corpus).
+ * See docs/decisions/cbae4520-sessionmetacache-avoids-reading-every-rollout-file-per-spawn.md.
  */
 const SESSION_META_CACHE_MAX = 500;
 const sessionMetaCache = new Map<string, { mtimeMs: number; size: number; sessionId: string; cwd: string }>();
