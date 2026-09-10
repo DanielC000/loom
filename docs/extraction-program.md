@@ -105,6 +105,17 @@ exactly where a second record file gets created by accident; recency doesn't exe
 worker misread its own `find` output once, and that misreading is precisely how a duplicate
 record got created.
 
+That warning guards the collision hazard: don't create a second file for the same
+decision. A related but distinct case is content duplication inside a file that already
+exists: a card id can have sites in several source files, and an earlier tranche may
+already have recorded the decision in full at one of them. Measured on one tranche:
+roughly half the apparently-new content in three blocks was already captured under
+the same ids by an earlier tranche on a different file, restated at the new site's own
+derivation point — an avoidable append that is also a real byte-cap driver, not just
+duplicate prose. When the existing record already says what you were about to write,
+the correct outcome is usually to anchor the new site to it and edit nothing, not to
+extend the record with a near-duplicate section.
+
 When two genuinely unrelated decisions legitimately share one card id, append a clearly-labelled
 section rather than create a second file: the heading names it *"(unrelated decision, same card
 id, `<file>`)"* and carries its own `Source (this section only)` line stating it is **not** the
