@@ -10,17 +10,17 @@ import { writeToolDriftState, writeBuildDriftState } from "./drift-notice.js";
 import { codescapeUnclassifiedTools } from "../pty/host.js";
 
 /**
- * Codescape fleet-daemon wiring epic, foundation. @decision 369dde3c — see
- * docs/decisions/369dde3c-codescape-fleet-daemon-wiring-epic-foundation.md for the design-mirrors
- * rationale and why every method here is Loom-internal only, never an agent MCP tool. Under
- * `isCodescapeSupervisorEnabled()`, Loom starts + supervises ONE `codescape serve` process per host on a
- * loopback port, bootstrapped by `codescape ingest <repoPath>` for each target project BEFORE serve starts
- * (v1: projects load from `.codescape/projects/index.json` at serve BOOT — a project ingested after serve
- * started isn't picked up until a restart).
+ * Codescape fleet-daemon wiring epic, foundation. Under `isCodescapeSupervisorEnabled()`, Loom starts +
+ * supervises ONE `codescape serve` process per host on a loopback port, bootstrapped by
+ * `codescape ingest <repoPath>` for each target project BEFORE serve starts (v1: projects load from
+ * `.codescape/projects/index.json` at serve BOOT — a project ingested after serve started isn't picked up
+ * until a restart).
+ *
+ * @decision 369dde3c — no method on this class is ever registered as an agent MCP tool; every method
+ * here is Loom-internal only.
  *
  * @decision 194d343d — `ingest` and `serve` must both pin `CODESCAPE_HOME=<homeDir>` in their spawn env;
- * cwd alignment alone cannot prevent an upstream resolver from walking past it. See
- * docs/decisions/194d343d-codescape-cwd-contract-pin-codescape-home-in-spawn-env.md
+ * cwd alignment alone cannot prevent an upstream resolver from walking past it.
  */
 
 /** Cap (bytes) on the captured stdout+stderr tail kept for diagnostics — a bounded ring, mirrors OUTPUT_TAIL_BYTES in python/venv.ts. */
@@ -49,13 +49,16 @@ const DEFAULT_RESTART_BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000]
 /** A `serve` that ran at least this long before dying is treated as a fresh failure — resets the backoff. */
 const DEFAULT_HEALTHY_RUN_MS = 30_000;
 /**
- * Bound (ms) for the self-reporting `--port 0` capability probe (@decision 4e0df6ce — see
- * docs/decisions/4e0df6ce-codescape-serve-self-reporting-port-spawn-dispatch.md) embedded in the FIRST
- * spawn attempt of this instance's life (and any later attempt after {@link CodescapeSupervisor.port}
- * goes back to `null`). @decision 44d45f81 — raised from the original 5_000ms after a live production
- * regression; see docs/decisions/44d45f81-port-report-timeout-raised-after-live-regression.md for the
- * measured percentiles and reachability arithmetic. Do not lower this without re-measuring against the
- * real installed binary under real host contention.
+ * Bound (ms) for the self-reporting `--port 0` capability probe embedded in the FIRST spawn attempt of
+ * this instance's life (and any later attempt after {@link CodescapeSupervisor.port} goes back to
+ * `null`).
+ *
+ * @decision 4e0df6ce — if neither the report line nor the child's exit arrives within this bound, the
+ * attempt is abandoned without concluding anything about port-report capability; the normal backoff
+ * schedule retries.
+ *
+ * @decision 44d45f81 — raised from the original 5_000ms after a live production regression; do not lower
+ * this without re-measuring against the real installed binary under real host contention.
  */
 const DEFAULT_PORT_REPORT_TIMEOUT_MS = 30_000;
 /**
@@ -943,11 +946,11 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * Spawn `serve` and wire up restart-on-death. Never throws. @decision 4e0df6ce — dispatch: an
-   * already-known port reuses it (deliberate — see the record for why a fresh `--port 0` re-derivation
-   * was rejected, and for the accepted unbound-window exposure); `null` uses the self-reporting `--port 0`
-   * path unless a prior rejection confirmed the binary can't do that, in which case it falls back to the
-   * legacy pick-then-spawn path. See docs/decisions/4e0df6ce-codescape-serve-self-reporting-port-spawn-dispatch.md
+   * Spawn `serve` and wire up restart-on-death. Never throws.
+   *
+   * @decision 4e0df6ce — dispatch: an already-known port reuses it via explicit-port respawn (an
+   * accepted, always-DETECTED unbound-window exposure, never silent corruption); `null` uses the
+   * self-reporting `--port 0` path unless a confirmed rejection already forced the legacy fallback.
    */
   private spawnServe(): void {
     if (this.stopped) return;
@@ -1024,11 +1027,9 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * @decision 4e0df6ce — the self-reporting path: spawn with `--port 0`, let the child pick + report its
-   * own ephemeral port on stdout ({@link parsePortReportLine}). `this.port` stays `null` (so `getPort()`/
-   * `request()` correctly refuse) until the report line arrives and reassigns it. See the record for the
-   * three possible outcomes before a report arrives — all three end in {@link scheduleRestart}, never a
-   * permanently-stuck attempt. See docs/decisions/4e0df6ce-codescape-serve-self-reporting-port-spawn-dispatch.md
+   * @decision 4e0df6ce — self-reporting path: spawn with `--port 0`; `this.port` stays `null` (refusing
+   * `getPort()`/`request()`) until the report line arrives. Every outcome — parsed, child-death-first, or
+   * timeout — ends in {@link scheduleRestart}, never a permanently-stuck attempt.
    */
   private spawnServeSelfReporting(command: string, baseArgs: string[]): void {
     const args = [...baseArgs, "serve", "--port", "0"];
@@ -1127,11 +1128,13 @@ export class CodescapeSupervisor {
 
   /**
    * Attempt `spawn()`, logging + scheduling a bounded restart on a SYNCHRONOUS failure and returning
-   * `null`. @decision d671f1b8 — deliberately NON-detached (Windows job-object kill-on-close ties this
+   * `null`.
+   *
+   * @decision d671f1b8 — deliberately NON-detached (Windows job-object kill-on-close ties this
    * child to the parent daemon's lifetime; POSIX instead reparents on death, which is why `index.ts`'s
-   * shutdown path calls `stop()` explicitly). See docs/decisions/d671f1b8-daemon-restart-runs-shared-vault-flush-cleanup-after-the-response-flush.md
-   * @decision 194d343d — pins `CODESCAPE_HOME` explicitly, must match `ingest()`'s own value. See
-   * docs/decisions/194d343d-codescape-cwd-contract-pin-codescape-home-in-spawn-env.md
+   * shutdown path calls `stop()` explicitly).
+   *
+   * @decision 194d343d — pins `CODESCAPE_HOME` explicitly, must match `ingest()`'s own value.
    */
   private trySpawnChild(command: string, args: string[]): ChildProcess | null {
     try {
@@ -1181,10 +1184,15 @@ export class CodescapeSupervisor {
    * of two independent ceilings is reached: (1) the backoff schedule ({@link restartBackoffMs}) is
    * exhausted without a healthy run resetting it, or (2) the restart-RATE ceiling
    * ({@link maxRestartsPerWindow} within {@link restartWindowMs}) is hit — a ceiling `ranHealthy` cannot
-   * clear. @decision 4c7a337d — why ceiling (2) exists: see
-   * docs/decisions/4c7a337d-restart-rate-ceiling-independent-of-healthy-run-reset.md, which also covers
-   * the reachable-in-principle worst-case timing for the raised port-report timeout, @decision 44d45f81
-   * (docs/decisions/44d45f81-port-report-timeout-raised-after-live-regression.md).
+   * clear.
+   *
+   * @decision 4c7a337d — this rate ceiling exists because `ranHealthy` resets `restartAttempts` on
+   * essentially every death for a crash loop slower than {@link DEFAULT_HEALTHY_RUN_MS}, making
+   * backoff-exhaustion alone unreachable; the rate-window ceiling must stay in place alongside it.
+   *
+   * @decision 44d45f81 — repeated `spawnServeSelfReporting` timeouts (each a non-healthy death) DO feed
+   * this same give-up arithmetic; the raised port-report timeout only makes reaching it much harder,
+   * never impossible.
    */
   private scheduleRestart(ranHealthy: boolean): void {
     if (this.stopped) return;
@@ -1213,8 +1221,7 @@ export class CodescapeSupervisor {
    * Start the periodic `GET /graph/health` liveness probe — idempotent, and ARMED UNCONDITIONALLY
    * whenever {@link start} spawns `serve`, including with ZERO codescape-enabled projects.
    * @decision sha:e2d23231 — a prior project-count gate left a zero-project boot with this probe
-   * never armed at all for its entire lifetime. See
-   * docs/decisions/e2d23231-codescape-health-probe-arms-unconditionally.md
+   * never armed at all for its entire lifetime.
    */
   private startHealthMonitor(): void {
     if (this.healthProbeTimer) return;
@@ -1349,7 +1356,6 @@ export class CodescapeSupervisor {
    * docs/decisions/90550a97-build-id-drift-contract-and-restart-once-per-drift.md
    * @decision 9e6f984d — a genuine mismatch waits for the installed build to sit stable for
    * {@link driftStabilityMs} before restarting, so a burst of rebuilds collapses into one restart, not N.
-   * See docs/decisions/9e6f984d-drift-stability-window-collapses-rebuild-bursts.md
    */
   /**
    * @decision 23980bbf — latch-and-announce a {@link DriftCheckState} TRANSITION only (never every
