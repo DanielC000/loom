@@ -158,37 +158,20 @@ export function deleteConnection(db: ConnectionsDbStore, id: string): void {
  * auto-provisioning v1's core write (card 193de09e), called ONLY from the human-only answer boundary
  * (`POST /api/questions/:id/answer`'s credential branch in `gateway/server.ts`), never from an agent path.
  *
- * REFUSES (throws) if a connection by this EXACT name already exists, of ANY auth scheme — v1 deliberately
- * does NOT rotate-in-place (CR finding on this card): `getConnectionByName`'s lookup is GLOBAL and
- * scheme-agnostic, so silently rotating whatever it finds had two live failure modes — (a) provisioning an
- * api-key secret over an EXISTING `oauth2` connection of the same name would overwrite its token-bundle
- * blob with an api-key envelope while `authScheme` stayed `"oauth2"`, so a later `getOAuthTokenBundle`
- * (`JSON.parse` on now-api-key ciphertext) throws — a silent, hard-to-diagnose break; (b) connections have
- * no scope yet, so ANY manager could overwrite an UNRELATED project's api-key connection's secret just by
- * naming it, consent the human never gave. Refusing collision entirely closes both. `updateConnectionSecret`
- * stays on the db layer for a FUTURE scoped-rotation path once card f2abce7e (project-scoped connections)
- * makes "the connection I own" well-defined — a human can always rotate an existing connection today via
- * the Connections settings UI/REST in the meantime. Validates via the SAME `validateConnectionInput` bounds
- * `createConnection` enforces — throws a descriptive Error on invalid input, mirroring `createConnection`'s
- * own structural backstop. The plaintext `secret` is encrypted only inside the delegated `createConnection`
- * call, never here.
+ * REFUSES (throws) if a connection by this EXACT name already exists, of ANY auth scheme — deliberate,
+ * not a bug.
+ * @decision 193de09e — never turn this refusal into rotate-in-place: it can clobber an oauth2
+ * token-bundle blob or silently overwrite another project's secret without consent.
  *
- * Concurrency: a race between two answers naming the same new connection (both pass the collision check,
- * both create) is left unhandled in v1 — a single-human loopback daemon makes concurrent answers to the
- * SAME question effectively impossible, and this create-only refusal narrows the window further to two
- * DIFFERENT questions racing to create the identical name at the identical instant. Not worth a transaction
- * for that.
+ * SCOPED ROTATION: a caller passing a `projectId` matching the existing same-name row's scope may
+ * rotate its secret in place via `updateConnectionSecret` instead of being refused; every OTHER
+ * collision still refuses exactly as before.
+ * @decision f2abce7e — scoped rotation must stay gated to an exact-same-project api-key row; never
+ * widen it to a non-api-key row — that would clobber an oauth2 token bundle.
  *
- * SCOPED ROTATION (card f2abce7e unlocks this): when the caller passes `projectId` AND the existing
- * same-name row is scoped to that EXACT project, "the connection I own" is now well-defined — rotate its
- * secret in place via `updateConnectionSecret` (the reserved db-layer seam) instead of refusing. Every
- * OTHER collision still refuses exactly as before: a GLOBAL existing row, a row scoped to a DIFFERENT
- * project, or a caller with no `projectId` at all — so a project can never rotate a connection it doesn't
- * itself own, and the original create-only posture is unchanged for every caller that omits `projectId`.
- * Still guards failure mode (a) from the original design: rotation is refused (same collision error) when
- * the existing same-scope row isn't `api-key` — an `oauth2` row's secret_blob is a JSON token bundle, and
- * overwriting it with a plain api-key envelope while `authScheme` stayed `"oauth2"` would break the next
- * `getOAuthTokenBundle` (`JSON.parse` on now-api-key ciphertext).
+ * Validates via the SAME `validateConnectionInput` bounds `createConnection` enforces — throws a
+ * descriptive Error on invalid input, mirroring `createConnection`'s own structural backstop. The
+ * plaintext `secret` is encrypted only inside the delegated `createConnection` call, never here.
  */
 export function provisionConnection(
   db: ConnectionsDbStore,
