@@ -4849,17 +4849,14 @@ export class PtyHost {
   }
 
   /**
-   * Card 2ec60d9c DoD-1: discover + report a codex session's engine-session identity — see
+   * Discovers + reports a codex session's engine-session identity — see
    * `pty/codex-transcript.ts#findConversationIdForSpawn`'s own doc for WHY a discovery scan (rather than a
-   * hook report) is the only mechanism available. Fires `onEngineSessionId` the SAME way claude's
-   * SessionStart-hook branch does (above, `deliverHook`) so every downstream consumer (DB persistence,
-   * `worker_transcript`, dead-session sweeping) treats a codex session identically once this lands — no
-   * separate codex-only plumbing needed past this one call. `previousEngineId` is always null here (codex
-   * has no rotation concept to report). Retries up to `CODEX_ENGINE_ID_MAX_ATTEMPTS` times,
-   * `CODEX_ENGINE_ID_RETRY_MS` apart — see both constants' own docs for why a single retry proved
-   * insufficient against a real spawn (the rollout file is created lazily, around first-turn time, not at
-   * boot). Best-effort throughout: never gates kickoff/busy-detection either way (both already latch/fire
-   * off `screenScan` alone, independent of this), and stops retrying the instant the pty exits.
+   * hook report) is the only mechanism available. `previousEngineId` is always null here (codex has no
+   * rotation concept to report).
+   *
+   * @decision 2ec60d9c — fires `onEngineSessionId` identically to claude's SessionStart path (above,
+   * `deliverHook`) so every downstream consumer treats a codex session the same; best-effort throughout —
+   * never gates kickoff/busy-detection, stops retrying the instant the pty exits.
    *
    * @decision ece98bd8 — this scan's own surprising failure (exhausted, still alive) is latched HERE, the
    * instant it's known; the other two capture-end outcomes are pty-dead-only, resolved at pty.onExit — an
@@ -5005,22 +5002,9 @@ export class PtyHost {
         // queue stranded behind codex's own pre-submit MCP-startup busy episode (that episode's own
         // `enterWrittenAt` is still `0`, its init value, so this comparison is trivially true for it too).
         //
-        // Card 361a5520: this is ALSO codex's ONLY genuine turn-completion chokepoint — the counterpart of
-        // claude's `deliverHook` Stop/StopFailure case, which never fires for a codex session (no hook
-        // relay at all — `CodexLive.hookToken` is permanently `""`). Before this fix, `turnSeq` stayed
-        // structurally `0` forever for every codex session while being reported to managers as an OBSERVED
-        // fact. Mirrors claude's own ordering (`deliverHook`, this file: bump the counter immediately
-        // before drain).
-        //
-        // Round 2 (Code Reviewer's blocking Critical): round 1 wired the completion signal to THIS edge
-        // unconditionally — but this edge is ALSO where the pre-submit boot episode above lands (its own
-        // `enterWrittenAt:0` trivially satisfies `lastBusyMarkerAt >= enterWrittenAt`), so a codex session
-        // could get `onTurnCompleted`/`firstTurnStarted:true` fired for a turn that was never submitted at
-        // all — reproduced empirically (a boot-episode-only marker, zero pty writes, still incremented
-        // `turnSeq`). `live.submitOutstanding` (set by `submitCodex`, see its own doc) is what a real
-        // submitted turn carries and the boot episode does not — gating the completion signal on it (never
-        // the drain itself, which must stay unconditional) closes that gap without touching the
-        // busy->idle/drain behavior at all.
+        // @decision 361a5520 — codex's ONLY genuine turn-completion chokepoint (no hook relay: `hookToken`
+        // is permanently ""); gate `firstTurnStarted`/`onTurnCompleted` on `submitOutstanding` to exclude
+        // the pre-submit boot episode, whose `enterWrittenAt:0` would otherwise satisfy this check too.
         if (live.submitOutstanding) {
           live.firstTurnStarted = true;
           this.events.onTurnCompleted?.(sessionId);
@@ -5090,12 +5074,9 @@ export class PtyHost {
    * unconditional call, but `armCodexBusyStaleTimer`'s CASE 0 no-ops any such fire while `enterPending` is
    * true, rather than confirming against this turn's still-stale `enterWrittenAt`.
    *
-   * Card 0e83c855 round 4: `text` is ASCII-folded (`codex-host.ts#codexAsciiFold`) before it reaches the
-   * pty — see that function's own doc for the measured drop class this closes and why it is deliberately
-   * NOT a blanket non-ASCII gate. Every OTHER caller of `text` in this codebase (durable records, the
-   * `session_message_queued`/`session_message_delivered` audit trail, a manager's own view of what it
-   * sent) still holds the ORIGINAL, unfolded text — only the bytes actually typed into codex's TUI are
-   * folded, so nothing durable or manager-visible is ever silently rewritten.
+   * @decision 0e83c855 — `text` is ASCII-folded (`codex-host.ts#codexAsciiFold`) before it reaches the pty;
+   * every OTHER caller of `text` (durable records, the `session_message_queued`/`session_message_delivered`
+   * audit trail, a manager's own view of what it sent) still holds the ORIGINAL — only TUI bytes fold.
    *
    * @decision 02e42746 — codex's write path shares claude's un-truncation-guarded node-pty .write() (verified
    * in node-pty's own source, no per-harness branching) — chunk it identically via writeChunkedCodex, reusing

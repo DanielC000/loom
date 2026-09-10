@@ -10,6 +10,12 @@ It IS cleared by `interruptForRedirectCodex`'s `enterPending` branch — a turn 
 
 It is deliberately NOT cleared by `interruptForRedirectCodex`'s common (already-confirmed) path — a redirect-interrupted turn that already had a confirmed marker before the interrupt is still the same outstanding turn, now settling via its own re-armed timer. This differs from claude's own `interruptForRedirect` settle-site exclusion (`onTurnCompleted`'s own contract doc) — a reasoned, disclosed divergence, not a defect.
 
+## CASE 2 is codex's only turn-completion chokepoint (second site, same decision)
+
+CASE 2 of `armCodexBusyStaleTimer` (the falling busy→idle edge) is codex's ONLY genuine turn-completion chokepoint — the counterpart of claude's `deliverHook` Stop/StopFailure case, which never fires for a codex session at all (no hook relay: `CodexLive.hookToken` is permanently `""`). Before this fix, `turnSeq` stayed structurally `0` forever for every codex session while being reported to managers as an OBSERVED fact. Mirrors claude's own ordering (`deliverHook`, same file: bump the counter immediately before drain).
+
+The Round 2 false positive this record's Narrative section already describes was reproduced empirically at this site: a boot-episode-only marker, zero pty writes, still incremented `turnSeq`.
+
 ## Do not
 
 - Do not clear `submitOutstanding` on CASE 3 (retry) or CASE 4 (exhausted) in `armCodexBusyStaleTimer` — a later marker sighting can still resolve an exhausted turn into a genuine completion.
@@ -17,4 +23,4 @@ It is deliberately NOT cleared by `interruptForRedirectCodex`'s common (already-
 
 ## Source
 
-Inline comment in `packages/daemon/src/pty/host.ts` (the `Live.submitOutstanding` field doc), as of `main` `8d9fe59d`. Extracted by card `a2a6b2ad` (tranche 11 on `pty/host.ts`); wording unchanged beyond joining wrapped lines and stripping `*` markers.
+Inline comment in `packages/daemon/src/pty/host.ts` (the `Live.submitOutstanding` field doc), as of `main` `8d9fe59d`. Extracted by card `a2a6b2ad` (tranche 11 on `pty/host.ts`); wording unchanged beyond joining wrapped lines and stripping `*` markers. The "CASE 2 is codex's only turn-completion chokepoint" section above is a second site, same card: `armCodexBusyStaleTimer`'s own CASE 2, extracted by tranche 18.
