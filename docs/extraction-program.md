@@ -169,20 +169,29 @@ new id just to dodge the cap. Never delete content to get under the cap.
 **Rung 3 (explicit accept) is legal for exactly one of two cases — check which one you're in
 before you reach for it:**
 
-1. **The record was already over cap before your edit** (or a brand-new record can't fit even
-   reflowed/split). Accepting costs nothing that was previously delivered in full — a reader
-   already got a truncated view before your edit, and still gets one after it.
+1. **The record was already over cap before your edit, and your edit doesn't extend it** (a
+   reflow-only pass, or a brand-new record that can't fit even reflowed/split). Accepting costs
+   nothing that was previously delivered in full — a reader already got a truncated view before
+   your edit, and still gets one after it.
 2. **The record was at-or-under cap before your edit, and your edit is what pushes it over.**
    Accepting here is not neutral: the truncation window is computed against the record's *new*,
    larger size, so the elided middle can land squarely inside content that predates your change —
    bytes that were delivered **in full on every injection** go dark because of an edit that had
    nothing to do with them.
 
-**Rung 3 is closed to case 2.** The correct move there is the ladder's own first two rungs
-(reflow, or split under a different legal key) — and if neither fits, **leave your new content
-inline and say so in the report**, the same move an earlier tranche already made for this exact
-record (specimen below). Extending an existing record is not licence to accept an overage it
-didn't have before you touched it.
+**Extending an already-over-cap record — adding bytes at either its head or its tail — is not
+case 1, however over cap it already was.** `truncateRecord` (`packages/daemon/assets/decision-records.mjs`)
+keeps a fixed-size head window and a fixed-size tail window and elides the middle — read it there
+for the split, don't restate it here. Growing the record moves both windows: prepending pushes old
+head bytes into the elided middle, and appending pushes old tail bytes into it just as surely — so
+previously-delivered content goes dark exactly as in case 2. Bytes landing strictly in the elided
+middle are never delivered, so they don't help either.
+
+**Rung 3 is closed to case 2, and to extending an already-over-cap record as above.** The correct
+move in both is the ladder's own first two rungs (reflow, or split under a different legal key) —
+and if neither fits, **leave your new content inline and say so in the report**, the same move an
+earlier tranche already made for this exact record (specimen below). Extending an existing record
+is not licence to accept an overage it didn't have before you touched it.
 
 **The one-line check, before you write:** *was the record ≤ `PER_RECORD_MAX_BYTES` on main before
 your edit? If yes, your edit must leave it ≤ the cap — reflow or split, not accept.*
