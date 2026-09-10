@@ -8827,13 +8827,9 @@ export class SessionService {
    * SAFE when the reserved home is absent: returns {error} (no throw-crash of the surface) rather than
    * filing anywhere else. Returns {taskId, projectId, deliveryStatus} on a genuine file.
    *
-   * HANDOFF (board card 5eb8438a — the owner's #1 complaint: the auditor could SUGGEST but never reach an
-   * actor to ACTION its findings): after filing, it does a CONFINED best-effort live nudge to the user's
-   * home operator (nudgeHomeOperator) — mirroring platformEscalate's Lead nudge. The board card is the
-   * DURABLE source of truth, so the FLOOR is `boarded` (no live operator); a live operator upgrades it to
-   * delivered-live/queued. This is NOT the generic harness SendMessage (which has no Loom routing — the
-   * very reason the auditor's "message Platform" attempts failed "not addressable"); it can reach ONLY the
-   * home operator, never arbitrary cross-session messaging.
+   * @decision 5eb8438a — after filing, does a CONFINED best-effort live nudge to the user's home
+   * operator (mirroring platformEscalate's Lead nudge); the board task is the DURABLE floor
+   * (`boarded`) — never the generic, unrouted harness SendMessage; reaches ONLY that operator.
    */
   workspaceAuditSuggest(
     auditorSessionId: string,
@@ -9463,24 +9459,12 @@ export class SessionService {
           managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "stop_worker",
           detail: { reason: "no-commit-auto-retire", trigger: autoRetireTrigger },
         });
-        // Fire-and-forget (never awaited — the report above is already durably recorded and must not
-        // wait on this). Board card ce7d99bb: this used to be a flat `setTimeout(..., 3000)` straight to
-        // `pty.stop`, deferred only so THIS tool call's own MCP response (worker_report's reply, still in
-        // flight over the MCP transport back to the worker's CLI) could flush before the pty's Ctrl-C×2
-        // landed (card f46f4b0d). That guarded the immediate race but NOT a slower one: a noCommit
-        // worker's `worker_report(done)` call is itself mid-turn, and the model often keeps generating a
-        // post-report recap for LONGER than 3s afterward — so the flat timer routinely fired while the
-        // worker was still busy, Ctrl-C'ing an in-flight generation. That (a) skipped the worker's own
-        // Stop hook, which is what normally captures ctx metrics (readContextStats/setContextCounters —
-        // see host.ts's Stop-hook handler), permanently leaving model/ctxInputTokens/ctxTurns null; and
-        // (b) is what stamps Claude Code's own generic "[Request interrupted by user]" line into the
-        // transcript — the CLI can't tell a daemon-sent Ctrl-C from a real keypress, so an auto-retired
-        // session's transcript falsely reads as a human interrupt. `autoRetireStopWhenIdle` replaces the
-        // flat timer with a bounded wait for the turn to end NATURALLY first (see its own doc).
-        // `.catch` is defensive, not currently load-bearing: every await inside is a bare setTimeout
-        // and every fallible call is already wrapped in its own try/catch, so nothing in there can
-        // reject today — this just future-proofs against a later refactor introducing one, so it can
-        // never surface as an unhandled rejection off this fire-and-forget call.
+        // @decision ce7d99bb — a BOUNDED wait for the worker's turn to end NATURALLY, never a flat
+        // setTimeout — a flat timer routinely Ctrl-C'd an in-flight generation, skipped the Stop hook
+        // (ctx metrics stayed null), and stamped a false "[Request interrupted by user]" line.
+        // `.catch` here is defensive, not load-bearing — every awaited call is a bare setTimeout or a
+        // fallible call already wrapped in its own try/catch, so nothing here can reject; this just
+        // future-proofs a later refactor that adds one, so it can never surface as an unhandled rejection.
         void this.autoRetireStopWhenIdle(workerSessionId).catch(() => { /* see comment above */ });
       } catch { /* never let auto-retire disturb the already-recorded report */ }
     }
@@ -9491,35 +9475,9 @@ export class SessionService {
   }
 
   /**
-   * Board card ce7d99bb: the auto-retire path's deferred graceful-stop, replacing a flat `setTimeout`
-   * with a BOUNDED wait for the worker's own in-flight turn to end naturally first — mirrors the
-   * companion-upgrade busy-wait shape (`isBusy`, a monotonic-clock bound; see `UPGRADE_BUSY_WAIT_MS`'s
-   * doc for the sibling pattern) rather than inventing a new one. `isBusy` reads the LIVE in-memory pty
-   * flag (no DB round-trip) — deliberately NOT the DB row's `busy` column, which this same auto-retire
-   * branch already stamped `false` moments ago (to free the concurrency slot deterministically) and so
-   * would always read as idle here regardless of the pty's real state.
-   *
-   * COMMON PATH: the worker's `worker_report(done)` tool call is itself mid-turn, and the model often
-   * keeps talking (a redundant post-report recap) afterward — this wait gives that turn up to
-   * `AUTO_RETIRE_IDLE_WAIT_MS` to finish on its own. Once it does, the worker's own Stop hook has ALREADY
-   * fired (that's what busy=false means), so ctx metrics are already captured through the normal path —
-   * the read below just reconfirms it — and `pty.stop`'s Ctrl-C×2 lands on an already-IDLE session (a
-   * clean exit; see `stop()`'s own comment that this is "the whole story" for an idle session). No
-   * interrupted-turn artifact, no false "[Request interrupted by user]" line.
-   *
-   * FALLBACK PATH: a turn still busy when the bound expires is STILL force-interrupted, exactly as
-   * before this fix (a genuinely long or wedged final turn — the interrupt, and the CLI's own generic
-   * marker, are unavoidable there, same residual every other graceful-stop escalation in this codebase
-   * already accepts). This is also the ONLY case where the read below is load-bearing rather than
-   * belt-and-suspenders: the interrupt about to fire prevents that worker's Stop hook from ever running
-   * for the still-in-flight turn, so without this explicit capture its ctx metrics would stay null.
-   *
-   * Either way, the capture is keyed off the DURABLE `cwd`/`engineSessionId` on the session row (the
-   * SAME whole-file transcript read the Stop hook itself does — `readContextStats` + `setContextCounters`,
-   * see readContextStats' own doc / card 21a77e85 for why this is NOT a tail-read),
-   * never the live pty state the interrupt below is about to disturb — so it's identical on both paths,
-   * no divergence in WHAT gets captured. Best-effort throughout: a dead/gone session, or any read/write
-   * hiccup, never blocks the stop itself.
+   * @decision ce7d99bb — a BOUNDED wait for the worker's own in-flight turn to end NATURALLY (never a
+   * force-interrupt) before the graceful-stop; `isBusy` reads the LIVE pty flag, never the DB `busy`
+   * column (already stamped `false` to free the concurrency slot) — that column always reads idle here.
    */
   private async autoRetireStopWhenIdle(workerSessionId: string): Promise<void> {
     if (!this.pty.isAlive(workerSessionId)) return; // already gone — nothing to wait on or stop
@@ -9530,6 +9488,7 @@ export class SessionService {
     }
     try {
       const s = this.db.getSession(workerSessionId);
+      // @decision 21a77e85 — whole-file transcript read, deliberately NOT tail-bounded (see pty/host.ts).
       const stats = s?.engineSessionId ? readContextStats(s.cwd, s.engineSessionId) : null;
       if (stats) this.db.setContextCounters(workerSessionId, { ctxInputTokens: stats.inputTokens, ctxTurns: stats.turns, model: stats.model });
     } catch { /* best-effort — never let a metrics-capture hiccup block the stop below */ }
@@ -9537,19 +9496,9 @@ export class SessionService {
   }
 
   /**
-   * A manager PULLS its own inbound inbox: returns AND removes every queued (busy-gated, not-yet-
-   * delivered) inbound message for the manager's OWN session. The manager's id is derived server-side
-   * from the URL path (no id to spoof), so this only ever drains the caller's own queue. Manager-only —
-   * mirrors recordIdleReport's role gate.
-   *
-   * WHY: a worker report enqueued while the manager is mid-turn sits in `live.pending` (delivered:false)
-   * and otherwise drains on the next turn boundary via drainPending (coalesced — the whole queue lands as
-   * one turn). A manager that has already handled the work proactively (it read each worker's transcript
-   * directly) would then get those stale queued copies re-surfaced as a wasted turn. inbox_pull lets it
-   * consume the whole inbox at once and discard/act as it
-   * sees fit. The underlying worker_report (and other) events stay recorded in the DB — this only clears
-   * the in-memory delivery queue, never the audit log. The auto-drain remains the safety net for a manager
-   * that doesn't pull; a pulled message is removed from the same FIFO, so it can't also drain later.
+   * @decision sha:3675b6a7 — inbox_pull lets a manager consume+clear its own busy-gated inbox in one
+   * call (mirrors recordIdleReport's role gate) instead of waiting for drainPending's coalesced turn;
+   * the audit log (worker_report events) is untouched — only the in-memory delivery queue is cleared.
    */
   pullManagerInbox(managerSessionId: string): { messages: string[] } {
     const session = this.db.getSession(managerSessionId);
