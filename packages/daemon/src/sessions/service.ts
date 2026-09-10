@@ -9588,36 +9588,13 @@ export class SessionService {
     // finishes; the retention window doesn't make a just-settled gate misread as still in progress here.
     const pendingGate = this.pendingOps.peek(`gate:${workerSessionId}`);
     if (pendingGate && pendingGate.state === "running") {
-      // QUEUE-VS-RUN FIX (card 865c528e): `pendingGate.startedAt` is PendingOpRegistry's own bookkeeping —
-      // stamped when `run_gate` was CALLED, i.e. op REGISTRATION, not when the gate was actually ADMITTED
-      // by GateSemaphore. Comparing that against a threshold calibrated to real gate RUNTIME misclassifies
-      // an unbounded, perfectly healthy queue wait (the daemon-global `maxConcurrentGates` cap saturated by
-      // another project's gate) as a wedged gate — verified directly: an op can show `state:"running"` here
-      // while `gate_status` reports the SAME op still `state:"queued"`, zero seconds actually executed. Look
-      // the op up in the LIVE GateSemaphore registry (by its own `opId` — the same lookup `gate_status`
-      // uses) to get the real phase and, for a running gate, its true admission timestamp (`since`).
+      // @decision 865c528e — measure minutesSinceStart from GateSemaphore admission, never
+      // PendingOpRegistry's own startedAt; the two CAN disagree while genuinely still queued.
       const liveGate = this.gateSemaphore.findByOpId(pendingGate.opId, workerSessionId);
       if (liveGate.kind === "found" && liveGate.record.phase === "running") {
         const minutesSinceStart = (Date.now() - liveGate.record.since) / 60_000;
-        // IDLE-VS-ELAPSED FIX (card 422d3003, origin finding: elapsedMs 24.8min / idleMs 1.3s misread as
-        // "may be wedged"): elapsed time alone never establishes a wedge — gate-runner.ts's own auto-extend
-        // keeps a step's timeout alive for as long as it keeps producing output. `idleMs` (`Date.now() -
-        // lastOutputAt`, the SAME liveness clock gate_status/gate_queue already expose, mirroring
-        // gate-runner.ts's own internal decision) is the actual discriminator — only suspect a wedge once
-        // idleMs has crossed GATE_EXTEND_IDLE_MS, the SAME point past which the gate's own machinery would
-        // also stop rescuing it. `lastOutputAt` (and so idleMs) is null for a window between admission and
-        // the runner's first liveness event that is PROVEN BOUNDED — not merely assumed brief (card
-        // 166ba5d9; see GateSnapshotEntry.lastOutputAt's own doc for the full proof: every git op in that
-        // window is timeout-raced to a hard ≤120s ceiling, orders of magnitude under GATE_EXTEND_IDLE_MS
-        // and BACKGROUND_PARK_STALE_MINUTES below, and runGateStep stamps lastOutputAt as its first
-        // synchronous statement before the gate's child even spawns — so a genuinely wedged gate can never
-        // reproduce this null window past that bound). That's "not yet evidence of a wedge", not a
-        // fabricated 0 — and, because the window is bounded well under both thresholds below, this can
-        // never mask a real 20+-minute wedge: by the time `minutesSinceStart >= BACKGROUND_PARK_STALE_MINUTES`
-        // could hold, lastOutputAt is guaranteed already non-null.
-        // `minutesSinceStart >= BACKGROUND_PARK_STALE_MINUTES` stays as an ADDITIONAL precondition (an idle
-        // blip seconds into a run — e.g. a slow install step with nothing printed yet — shouldn't alone
-        // read as a wedge either); both must hold.
+        // @decision 422d3003 — idleMs, not elapsed time alone, calls a parked gate stale; a null
+        // lastOutputAt here is a proven-bounded window, never fabricated-0 wedge evidence (166ba5d9).
         const idleMs = liveGate.record.lastOutputAt != null ? Date.now() - liveGate.record.lastOutputAt : null;
         if (minutesSinceStart >= BACKGROUND_PARK_STALE_MINUTES && idleMs != null && idleMs >= GATE_EXTEND_IDLE_MS) {
           return { kind: "parked-gate-stale", minutesSinceStart: Math.round(minutesSinceStart), idleMs: Math.round(idleMs) };
@@ -9651,33 +9628,8 @@ export class SessionService {
       return pastBrokenSpawnHoldoff(this.pty, workerSessionId) ? { kind: "broken-spawn" } : { kind: "not-stranded" };
     }
 
-    // Card 2281009d: `engineSessionId` being SET only proves the SessionStart hook fired (an engine
-    // session was established) — it does NOT prove a turn ever actually ran. The genuine spawn-broken
-    // signature (turnSeq 0, empty transcript, kickoff parked unsent in the composer — see card f91c8634)
-    // can leave engineSessionId captured while turn 1 never starts, which used to fall through this
-    // check straight into the report-derived branches below and land on the generic "finished a turn and
-    // is idle" wording — factually false for a session that never ran one, AND directly contradicting the
-    // `[loom:worker-spawn-broken]` notice `handleKickoffGiveUpExhausted` (above) can independently fire
-    // for the identical session, since that path already discriminates the SAME state correctly. Mirror
-    // its exact discriminator (hasFirstTurnStarted OR non-empty transcript) here so both nudge paths agree
-    // on ONE fact instead of two disagreeing ones. ALSO OR'd with "has this worker ever called
-    // worker_report" — a real worker_report event is itself definitive proof a turn ran (an MCP tool call
-    // can only be made from within a live engine turn), which makes it strictly stronger evidence than the
-    // other two signals for a worker whose report already reconciles it as parked-ack/wake/background below;
-    // without this OR, a worker that reported and is legitimately parked would be wrongly reclassified as
-    // broken-spawn.
-    //
-    // ORDER IS DELIBERATE, cheapest-and-most-decisive first — all three reads are side-effect-free, so
-    // reordering this `&&` chain can never change the result, only its cost:
-    //   1. hasFirstTurnStarted — free, in-memory Map read.
-    //   2. listEventsForWorker — a local sqlite query, sub-ms.
-    //   3. readTranscript — SYNCHRONOUS filesystem I/O. For the exact case this branch targets (a worker
-    //      whose transcript genuinely doesn't exist yet), resolveTranscriptFile's fast existsSync path
-    //      always misses by construction, so this hits its full recursive fallback scan every time — that
-    //      function's own doc (sessions/transcript.ts) cites a MEASURED worst case of ~169-239ms on this
-    //      repo's own ~/.claude/projects (5778 dirs; that repo's own historical measurement, not remeasured
-    //      here). Do NOT "tidy" this back into declaration order — that silently reintroduces a sync FS
-    //      scan on a path that a cheap sqlite check would already have skipped.
+    // @decision 2281009d — engineSessionId alone isn't proof a turn ran; OR in hasFirstTurnStarted,
+    // a real worker_report, or a non-empty transcript, cheapest-and-most-decisive check ordered first.
     if (
       !this.pty.hasFirstTurnStarted(workerSessionId) &&
       !this.db.listEventsForWorker(workerSessionId).some((e) => e.kind === "worker_report") &&
