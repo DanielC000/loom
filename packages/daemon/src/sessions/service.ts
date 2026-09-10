@@ -6139,18 +6139,25 @@ export class SessionService {
       // advisory's own git read) that used to leave this spawn double-counted against a concurrent
       // spawn's cap check (docs/decisions/16637a9e-worker-spawn-cap-claim-released-on-live-not-finally.md)
       releaseCapSlotClaim();
-      // Project memory (card 2fd9abf9, fresh-spawn half) appended LAST, searched against the manager's
-      // own kickoff text (which typically carries the task description — the richest match source of any
-      // spawn path); null (no notes) ⇒ byte-identical to today. Card ea648f89: stamp the dedup map so this
-      // worker's FIRST resume compares against what this fresh spawn just showed it.
-      const workerProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, opts.kickoffPrompt);
-      this.stampProjectMemoryDigest(worker.id, workerProjectMemoryFramed);
-      // Card badba5a8: computed ONCE, before the spawn call, so both the composition inside it and the
-      // observability event after it (only fired on a SUCCESSFUL spawn — see the catch below) read the
-      // SAME result. Card bed49000: `taskTitle` (captured above, tasked spawns only — null for a taskless
-      // spawn) gates the block on task class; see isCodescapeExcludedTaskClass's doc for the boundary.
-      const codescapeStatus = this.resolveCodescapeInjectionStatus(project, taskTitle);
+      // Card fa1b77c1: the try below starts HERE, not at `pty.spawn` — the statements ahead of it
+      // (project-memory retrieval/digest, codescape status) are synchronous, unguarded, and run after the
+      // row is already 'live'; an uncaught throw from any of them used to strand the row phantom-live.
+      // `releaseCapSlotClaim()` stays OUTSIDE this try, unmoved — widening the try below it doesn't touch
+      // its own synchronous, no-`await`-before-it placement right after the live flip (card 16637a9e).
+      let workerProjectMemoryFramed: string | null;
+      let codescapeStatus: CodescapeInjectionStatus;
       try {
+        // Project memory (card 2fd9abf9, fresh-spawn half) appended LAST, searched against the manager's
+        // own kickoff text (which typically carries the task description — the richest match source of any
+        // spawn path); null (no notes) ⇒ byte-identical to today. Card ea648f89: stamp the dedup map so this
+        // worker's FIRST resume compares against what this fresh spawn just showed it.
+        workerProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, opts.kickoffPrompt);
+        this.stampProjectMemoryDigest(worker.id, workerProjectMemoryFramed);
+        // Card badba5a8: computed ONCE, before the spawn call, so both the composition inside it and the
+        // observability event after it (only fired on a SUCCESSFUL spawn — see the catch below) read the
+        // SAME result. Card bed49000: `taskTitle` (captured above, tasked spawns only — null for a taskless
+        // spawn) gates the block on task class; see isCodescapeExcludedTaskClass's doc for the boundary.
+        codescapeStatus = this.resolveCodescapeInjectionStatus(project, taskTitle);
         this.pty.spawn({
           sessionId: worker.id,
           cwd: worktreePath,
@@ -6194,21 +6201,21 @@ export class SessionService {
           sessionName: composeWorkerSessionName(project.name, workerAgent.name, taskTitle, worker.id, this.siblingWorkerSessionNames(managerSessionId, project.name, new Set([worker.id]))),
         });
       } catch (e) {
-        // createPty (node-pty's own spawn) can throw SYNCHRONOUSLY — before any Live entry is ever
-        // registered — on a genuine process-creation failure (e.g. Windows CreateProcess `error code:
-        // 206` from an oversized command line, card bc91e86c). Without this catch the row stamped
-        // 'live' above NEVER gets reconciled: the pty's own onExit chokepoint (which normally flips a
-        // dead session back to 'exited') can only fire for a process that actually started, so this
-        // path is the ONLY way such a failure is ever observed. Left uncaught, it's a phantom —
-        // engineSessionId stays null, turnSeq stays 0 — that holds liveSessionIdForTask's per-task
-        // mutex forever (that guard keys on process_state alone) and that pty.stop() can't touch
-        // (it no-ops on a session with no Live entry — see PtyHost.stop), so a stale
-        // {stopped:true} from worker_stop would report success without having stopped anything.
+        // Anything in the try above — the pre-pty steps (card fa1b77c1) or createPty (node-pty's own
+        // spawn, e.g. Windows CreateProcess `error code: 206` from an oversized command line, card
+        // bc91e86c) — can throw SYNCHRONOUSLY, before any Live entry is ever registered. Without this
+        // catch the row stamped 'live' above NEVER gets reconciled: the pty's own onExit chokepoint
+        // (which normally flips a dead session back to 'exited') can only fire for a process that
+        // actually started, so this catch is the ONLY way such a failure is ever observed. Left
+        // uncaught, it's a phantom — engineSessionId stays null, turnSeq stays 0 — that holds
+        // liveSessionIdForTask's per-task mutex forever (that guard keys on process_state alone) and
+        // that pty.stop() can't touch (it no-ops on a session with no Live entry — see PtyHost.stop), so
+        // a stale {stopped:true} from worker_stop would report success without having stopped anything.
         // Reconciling to 'exited' HERE — the one place that knows the spawn never produced an
         // engine — releases the mutex immediately and lets a re-spawn (or worker_recycle, which
         // reuses this same worktree/branch and never checks processState) proceed normally.
         this.db.setProcessState(worker.id, "exited");
-        this.db.setLastError(worker.id, `process creation failed: ${e instanceof Error ? e.message : String(e)}`);
+        this.db.setLastError(worker.id, `worker spawn failed before it could start: ${e instanceof Error ? e.message : String(e)}`);
         throw e;
       }
       // Move the task into the `active` lane (role-resolved off the manager-project config, not the
