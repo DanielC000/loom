@@ -7755,20 +7755,18 @@ export class PtyHost {
    * Deliver queued messages when it's safe (idle + composer free). Shared by Stop + reconcile + the
    * markReady / box-free transitions.
    *
-   * ONE-PER-TURN ACROSS SENDERS for AGENT messages, COALESCE for WARNING messages (owner-directed,
-   * 2026-07-03; AMENDED 2026-08-28 by card eac3464d — see QueuedMessageKind's own doc for the full
-   * framing of the trade). A queued entry's `kind` (see QueuedMessageKind) decides whether it may share
-   * a turn with its neighbors. When `coalesceAgentMessages` is OFF (the default), an `"agent"`-kind head
-   * entry coalesces ONLY with a CONSECUTIVE run from the SAME sender (same route + same `senderId`,
-   * bounded by `AGENT_COALESCE_MAX_COUNT`/`AGENT_COALESCE_MAX_BYTES`, excluding any give-up/re-mint
-   * `giveUpGen`-tagged entry — see the branch below) — a DIFFERENT sender (or a route/kind/bound
-   * mismatch) still breaks the run exactly as a route mismatch always did, so submit() re-arms busy
-   * SYNCHRONOUSLY (M1) and the NEXT, different-sender agent message drains on the next Stop hook
-   * (self-chaining); the reconcile timer is the backstop, so nothing is stranded. A `"warning"`-kind head
-   * entry still coalesces the leading run of same-route WARNING entries exactly as before — Loom's own
-   * operational nudges are safe to concatenate regardless of sender. A run NEVER mixes kinds: it stops at
-   * the first differently-kinded entry (in addition to the existing route-key break), so a turn is either
-   * all-agent (from exactly one sender) or all-warning, never both.
+   * @decision eac3464d — ONE-PER-TURN ACROSS SENDERS for AGENT messages, COALESCE for WARNING messages
+   * (owner-directed, 2026-07-03; amended 2026-08-28); `kind` (QueuedMessageKind) decides whether a queued
+   * entry may share a turn with its neighbors. When `coalesceAgentMessages` is OFF (the default), an
+   * `"agent"`-kind head entry coalesces ONLY with a CONSECUTIVE same-sender run (bounded by
+   * `AGENT_COALESCE_MAX_COUNT`/`AGENT_COALESCE_MAX_BYTES` — the branch below excludes any giveUpGen-
+   * tagged entry). A DIFFERENT sender still breaks the run exactly as a route mismatch always did, so
+   * submit() re-arms busy SYNCHRONOUSLY (M1) and the NEXT, different-sender agent message drains on the
+   * next Stop hook (self-chaining); the reconcile timer is the backstop, so nothing is stranded. A
+   * `"warning"`-kind head entry still coalesces the leading run of same-route WARNING entries exactly as
+   * before — Loom's own operational nudges are safe to concatenate regardless of sender. A run NEVER
+   * mixes kinds: it stops at the first differently-kinded entry (in addition to the existing route-key
+   * break), so a turn is either all-agent (from exactly one sender) or all-warning, never both.
    *
    * When `coalesceAgentMessages` is ON (legacy, opt-in via Settings), `kind` is ignored entirely and the
    * ENTIRE leading same-route run coalesces into ONE concatenated turn — byte-identical to the
@@ -7782,15 +7780,10 @@ export class PtyHost {
    * STILL one submit per drain in EITHER mode: the splice + concat + submit are SYNCHRONOUS in one tick,
    * so the load-bearing M1/M2 busy-gate invariants are untouched. Daemon-wide, no role special-casing.
    *
-   * Card 73d5c34a: a GIVE-UP-requeued entry that is still `isGiveUpHeld` (see that method) is skipped when
-   * choosing what to drain — it stays in `pending` at its current position, untouched, while the search
-   * for an eligible head continues past it. This is what stops a held entry (unshifted to the FRONT by
-   * `requeueGiveUpOrigin`) from stalling every unrelated queued message behind it: the FIRST non-held
-   * entry becomes this drain's effective head, and the same route/kind run-collection below additionally
-   * stops at the next held entry it meets (never folding a still-ambiguous entry into a run). If EVERY
-   * pending entry is held, this call is a no-op — exactly as if the queue were empty — and the reconcile
-   * tick that called us will simply find the same thing next time until a hook purges the hold or it
-   * expires (`GIVE_UP_HOLD_MS`).
+   * @decision 73d5c34a — a still-`isGiveUpHeld` entry (see that method) is skipped as this drain's head
+   * candidate and stays in `pending`, untouched, so one held entry can never stall unrelated queued
+   * messages behind it; if EVERY pending entry is held, this call is a no-op until a hook purges the hold
+   * or `GIVE_UP_HOLD_MS` expires.
    */
   private drainPending(sessionId: string): void {
     const live = this.live.get(sessionId);
