@@ -166,13 +166,10 @@ export interface CompanionReminder {
  * chat-gateway.ts's resetConversation). `senderId` (Companion Trust Window, optional trailing arg —
  * existing callers omit it, byte-identical) is the AUTHENTICATED sender id for a GROUP-scope route only
  * (mirrors {@link VoicePrefRoute}'s own group-only senderId rule — null/omitted for a DM route), read back
- * via `pty.getActiveTurnSenderId` to key a group route's trust window per-sender. Card f286919e: this is
- * this SUBMIT's own senderId, not necessarily what a later read-back reflects — the pty host can coalesce
- * several queued submits into one turn (drainPending), and when that batch spans MORE THAN ONE sender
- * (only reachable via the legacy `coalesceAgentMessages:true` full-coalesce; the default per-sender
- * coalescing never mixes senders), `submit()` nulls BOTH `activeTurnSenderId` and the owner-text primitive
- * together rather than reading back one member's id under another member's words — never a single
- * "whichever member drained first" id. Returns the primitive's contract:
+ * via `pty.getActiveTurnSenderId` to key a group route's trust window per-sender. @decision f286919e — on a
+ * multi-sender coalesced batch, `submit()` nulls BOTH `activeTurnSenderId` and the owner-text primitive
+ * together, never attributing one member's words to another's id; see
+ * docs/decisions/f286919e-submitturn-nulls-senderid-on-multisender-coalesce.md. Returns the primitive's contract:
  *   { delivered:true }               → submitted immediately as a turn
  *   { delivered:false, position:N }  → HELD in the session's FIFO (busy/not-ready) — still accepted
  *   { delivered:false }              → session not alive (DEAD) — nothing queued
@@ -250,8 +247,9 @@ export interface CompanionHistoryExport {
 }
 
 /**
- * The injected CHAT HISTORY recorder (unified cross-channel chat, card 7d63e200) - generalizes the
- * original in-app-only "reload loses history" fix (bug 0f01f234) to every channel the gateway routes.
+ * The injected CHAT HISTORY recorder. @decision 7d63e200 — generalizes an earlier in-app-only "reload
+ * loses history" fix (bug 0f01f234) to every channel the gateway routes; see
+ * docs/decisions/7d63e200-unified-cross-channel-chat-history-recorder.md.
  * `record` is called for BOTH an accepted inbound turn (author:"user") and a delivered/voiced outbound
  * reply (author:"companion"); `viaVoice` is true for an inbound turn whose text is itself a voice-note STT
  * transcript, OR for an outbound reply actually DELIVERED as a synthesized voice clip (Companion Delivery
