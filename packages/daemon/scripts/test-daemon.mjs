@@ -7,29 +7,25 @@
 //
 // Run after a build (the tests import dist/):  pnpm --filter @loom/daemon build && pnpm --filter @loom/daemon test:daemon
 //
-// Tests are DISCOVERED by an explicit ALLOWLIST (card b122c7d4), not by "everything not positively
-// excluded": a recursive walk of test/ (skipping the established non-test containers `fixtures/` and
-// `census/` — child-process fixtures and the out-of-band census harness, neither ever hermetic tests)
-// collects every `.mjs` file, then splits it two ways. A leading `_` on ANY path segment — the file's own
-// name, or any containing directory (e.g. _guard.mjs, _tmp-fixture.mjs, or a whole _scratch/ directory) —
-// marks an intentional helper and is silently excluded, same as before (card e7bcb0df: this used to check
-// only the file's basename, which let a file inside an underscore-prefixed DIRECTORY through as a
-// candidate — see GAP 2 in that card). Everything else MUST look like a real test — carry an assertion
-// marker (`check(`/`assert`/`throw new Error`/`process.exit(1)`) — or discovery REFUSES LOUDLY, naming
-// the file, instead of silently spawning it and recording a pass: a non-test `.mjs` that merely imports
-// cleanly and exits 0 is indistinguishable from a real pass by exit code alone (measured on `node:test`
-// too — a zero-test file reports `# tests 1, # pass 1`), so "unexpected but ran anyway" is not a safe
-// default here. This is on top of, and does not replace, the small NOT_HERMETIC denylist below for
-// genuine tests that need a human-started isolated daemon and/or a real `claude` login — run those
-// manually per the header comment in each file. Adding a new ordinary hermetic test file still needs no
-// edit here: the allowlist is a derivation rule, not a static list.
+// Tests are DISCOVERED by an explicit ALLOWLIST, not by "everything not positively excluded": a
+// recursive walk of test/ (skipping the established non-test containers `fixtures/` and `census/` —
+// child-process fixtures and the out-of-band census harness, neither ever hermetic tests) collects every
+// `.mjs` file, then splits it two ways. A leading `_` on ANY path segment — the file's own name, or any
+// containing directory (e.g. _guard.mjs, _tmp-fixture.mjs, or a whole _scratch/ directory) — marks an
+// intentional helper and is silently excluded. Everything else MUST look like a real test — carry an
+// assertion marker (`check(`/`assert`/`throw new Error`/`process.exit(1)`) — or discovery REFUSES
+// LOUDLY, naming the file, instead of silently spawning it and recording a pass. This is on top of, and
+// does not replace, the small NOT_HERMETIC denylist below for genuine tests that need a human-started
+// isolated daemon and/or a real `claude` login — run those manually per the header comment in each file.
+// Adding a new ordinary hermetic test file still needs no edit here: the allowlist is a derivation rule,
+// not a static list.
+// @decision b122c7d4 — a non-test file that merely imports cleanly and exits 0 is graded a silent PASS
+// by this harness's exit-code grading (and by `node:test`, measured); discovery must REFUSE such a file
+// loudly, never run it silently, and membership must stay an explicit allowlist, never inverted.
 //
-// Card e7bcb0df: the walk above cannot audit itself — `HERMETIC` and the executed-path-set assertion
-// below both derive from the SAME walk, so a file the walk fails to discover is silently absent from
-// both sides and never noticed. `auditDiscoveryAgainstGit` (below) cross-checks the walk's TRAVERSAL
-// against git's own tracked-file list — a genuinely independent second opinion — and runs in the real
-// gate path before any test spawns. See that function's own doc comment for the anchoring/validation/
-// raw-layer constraints and its tracked-files-only blind spot.
+// @decision e7bcb0df — the walk above cannot audit itself: `HERMETIC` and the executed-path-set
+// assertion below both derive from the SAME walk, so a file it fails to discover is silently absent
+// from both and never noticed. `auditDiscoveryAgainstGit` (below) is the independent cross-check.
 //
 // Runs in a BOUNDED, port-safe worker pool (each test file is already hermetically isolated — own
 // temp LOOM_HOME, own port — so this is embarrassingly-parallel). Pool size, in order:
@@ -673,38 +669,17 @@ function runGitReadOnly(args, cwd) {
   return result.stdout;
 }
 
-// Card e7bcb0df — an INDEPENDENT cross-check of the discovery walk's TRAVERSAL against git's own
-// tracked-file list. GAP 1: `HERMETIC` and the executed-path-set assertion further below both derive from
-// the SAME `walkMjsFiles` call, so a file the walk never discovers is missing from both sides and compares
-// equal — an under-discovering walk runs fewer tests and reports GREEN. `git ls-files` is a genuinely
-// independent second opinion on which files exist under test/, so this is the only thing that can catch
-// that class of bug.
+// An INDEPENDENT cross-check of the discovery walk's TRAVERSAL against git's own tracked-file list —
+// `git ls-files` is a genuinely independent second opinion on which files exist under test/, catching a
+// class of under-discovery bug the post-run executed-path-set assertion cannot (see its own doc above).
+// @decision e7bcb0df — anchor via `git rev-parse --show-toplevel` with an explicit `cwd` (an unanchored,
+// unvalidated reference can pass VACUOUSLY from a wrong cwd); a zero-size reference is a hard error, not
+// an empty comparison; compare at the RAW enumeration layer only — filtering by this walk's own
+// classification rules re-shares its bug one layer down. Tracked-files-only: no cover for an untracked
+// new test.
 //
-// Three deliberate constraints, each closing a real hole found while designing this check:
-// (i) ANCHORED, not cwd-dependent. `git rev-parse --show-toplevel` and `git ls-files` both run with an
-//     EXPLICIT `cwd` (never relying on `process.cwd()`), so calling this from the wrong working directory
-//     can never silently change the answer. (`git ls-files` itself IS cwd-dependent — from the wrong cwd
-//     it can return nothing at all, and an empty reference set would otherwise pass VACUOUSLY: `∅ ⊆
-//     executedNames` is trivially true, both sides "fail" together and the check reports success. See (ii).)
-// (ii) VALIDATED reference. A zero-size reference set (git reported no tracked files at all under
-//      testDir) is a HARD ERROR — thrown, never silently treated as "nothing to compare". This is a floor
-//      on the instrument's INPUT (does the yardstick exist at all), not on the measurement itself.
-// (iii) RAW-LAYER comparison. `walkAllMjsFiles` applies NO exclusions (not even EXCLUDED_DIR_NAMES), and
-//       the git reference is filtered to `.mjs` files only — nothing about underscore-prefixing,
-//       NOT_HERMETIC, or assertion markers. Filtering the git list by those same classification rules
-//       would make the reference inherit the walk's own classification logic, and a classification bug
-//       would then sit on both sides and compare equal — independence lost again, one layer down. Only
-//       TRAVERSAL is cross-checked here: does the walk see the same FILES git sees, full stop.
-//
-// BLIND SPOT: `git ls-files` sees TRACKED files only. A brand-new, never-`git add`-ed test file is
-// invisible to this check — it protects the MERGE criterion (nothing tracked is silently dropped by the
-// walk), NOT a worker's own local run with a genuinely new, not-yet-staged file. Never read a clean
-// result here as total coverage.
-//
-// Reports both directions, named: `inGitNotWalked` (git-tracked, walk never saw it — the real GAP-1 class
-// of bug; the caller treats this as fatal) and `walkedNotInGit` (walk saw it, git doesn't track it — an
-// untracked stray; the caller treats this as a warning, not a failure — an untracked file is a normal
-// local-development state, not evidence of a broken walk).
+// Reports both directions, named: `inGitNotWalked` (git-tracked, walk never saw it — fatal) and
+// `walkedNotInGit` (walk saw it, git doesn't track it — a normal untracked local-dev state, a warning).
 export function auditDiscoveryAgainstGit(testDir) {
   const realTestDir = fs.realpathSync.native(testDir);
   const repoRootRaw = runGitReadOnly(["rev-parse", "--show-toplevel"], realTestDir).trim();
@@ -1650,22 +1625,17 @@ async function runLane(lane, names, nextIndex, results, completionTimestamps, ga
 //
 // This guard is the single highest-blast-radius line in the repo: if it is EVER false on the real gate
 // invocation, the merge gate runs ZERO tests and exits 0 — a silent green indistinguishable from a real
-// pass. Neither a correct guard nor a totally broken one can be told apart by the gate itself (both look
-// like a green gate) — verified instead by directly running the real invocation and watching test output
-// appear (see card d39db2db's report). Two defences against a future regression:
-//   1. Compare RESOLVED REAL paths (`fs.realpathSync.native`), not raw URL strings — normalises drive-
-//      letter case, 8.3 short-name components, and symlinks/junctions in one step (all three are
-//      concrete, non-exotic ways a raw string compare can silently diverge on Windows).
-//   2. If argv[1] LOOKS like a direct invocation of this exact file (same basename) but the resolved
-//      paths still differ, that is precisely the dangerous mismatch — fail loudly and non-zero instead
-//      of silently falling through. A genuinely different importer (a different basename entirely, e.g.
-//      the census harness importing NOT_HERMETIC) stays silent — that path is intentional, not a guard
-//      failure, and must not be treated as one.
-//   3. Card b122c7d4: a THROWN resolution is its own loud state, not folded into "not main". Before this,
-//      if `realpathSync.native` threw on either side, both `selfPath`/`argvPath` could end up null,
-//      `isMain` was false, and the mismatch branch (which needs both non-null) could never fire either —
-//      a silent skip with no output at all. Track whether each side THREW, separately from whether it
-//      resolved to null for an ordinary reason (e.g. no argv[1]), and fail loudly on a real throw.
+// pass, verified only by directly running the real invocation and watching test output appear (neither a
+// correct guard nor a totally broken one is otherwise distinguishable — both look like a green gate).
+// Two defences: (1) compare RESOLVED REAL paths (`fs.realpathSync.native`), never raw URL strings —
+// normalises drive-letter case/8.3 short-name components/symlinks-and-junctions, all concrete ways a
+// raw string compare can silently diverge on Windows; (2) a same-basename-but-different-resolved-path
+// mismatch fails loudly and
+// non-zero, never silently falls through (a genuinely different importer, e.g. the census harness, stays
+// silent on purpose).
+// @decision b122c7d4 — a THROWN `realpathSync.native` resolution on either side is its own loud failure
+// state, never folded into "not main": letting both sides go null would also suppress defence (2)'s
+// mismatch branch, a silent skip with no output at all.
 function resolveReal(p) {
   try { return { path: fs.realpathSync.native(p), threw: false }; } catch { return { path: null, threw: true }; }
 }
