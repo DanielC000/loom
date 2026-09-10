@@ -1,8 +1,8 @@
 /**
  * Loom Companion — the HOT LIFECYCLE controller (Companion epic Phase 3 backend, generalized to
- * MULTI-companion by the multi-companion runtime card). Closes the "no .env, no restart" headline of the
- * PL ruling: it makes the REST config writes (POST/PUT/DELETE at /api/companion/config) drive the RUNNING
- * gateway(s) LIVE, instead of applying only on the next daemon boot.
+ * MULTI-companion by the multi-companion runtime card).
+ * @decision sha:262ecfbc — why (the PL ruling) and what it closes; see
+ * docs/decisions/262ecfbc-pl-ruling-live-config-writes.md.
  *
  * It owns — as ONE stable facade the REST + MCP hooks hold across gateway rebuilds — ONE live ChatGateway
  * (Telegram long-poll) + ONE proactive CompanionHeartbeatWatcher + ONE CompanionReminderWatcher PER ENABLED
@@ -131,15 +131,11 @@ export interface CompanionControl {
    * REST path drives indirectly by deleting the row first. Serialized on the same chain as reconcile/stop.
    * A no-op for any session with no live entry (non-companion sessions, or an already-torn-down one).
    *
-   * Also closes the SAME-HOME suppression's known residual latency (store.ts's
-   * `suppressDuplicateHomeHeartbeats`): if this exited session was the WINNER of a same-home group, any
-   * still-LIVE sibling(s) sharing its home are re-armed as part of this same call — see `teardownOne`'s
-   * caller below — instead of staying silently suppressed until the next boot or an unrelated config write.
-   * The exited session itself is NEVER re-resolved/reconciled (that would re-START its now-dead gateway) —
-   * UNLESS it has ALREADY come back alive by the time this (serialized, possibly delayed) op actually runs,
-   * in which case it's a STALE exit event and this is a no-op (CR fix) — see the implementation's comment.
-   * That's what makes `upgrade()` below safe: its own pty.stop() triggers exactly this same exit path, but
-   * by the time it's this op's turn on the chain the fresh pty is already live again.
+   * @decision 134368ac — also re-arms any still-LIVE same-home sibling this exited session's heartbeat
+   * win was suppressing; see docs/decisions/134368ac-same-home-heartbeat-rearm-on-exit.md.
+   * @decision sha:5a9ad7fd — a STALE exit event (the session already came back alive by the time this
+   * runs) is a no-op instead, which is what makes `upgrade()` below safe; see
+   * docs/decisions/5a9ad7fd-conversation-preserving-respawn-consequences.md.
    */
   onSessionExit(sessionId: string): Promise<void>;
   /**
@@ -159,10 +155,9 @@ export interface CompanionControl {
    * throwing — a bad request (unknown session, wrong role, no engine id, the pty didn't stop in time) is a
    * normal, expected outcome for a REST caller to relay, not an exceptional one.
    *
-   * KNOWN TRADE-OFF (CR-confirmed acceptable, by design): `this.chain` is GLOBAL, not per-session — a slow
-   * upgrade (worst case ~13s: up to `UPGRADE_BUSY_WAIT_MS` [card d88163b7's busy-turn wait, ~3s] plus ~10s
-   * if the pty then won't die) briefly blocks every OTHER live companion's reconcile behind it too, not
-   * just this session's.
+   * @decision sha:5a9ad7fd — KNOWN TRADE-OFF (CR-confirmed acceptable): `this.chain` is GLOBAL, not
+   * per-session, so a slow upgrade briefly blocks every OTHER live companion's reconcile too; see
+   * docs/decisions/5a9ad7fd-conversation-preserving-respawn-consequences.md.
    */
   upgrade(sessionId: string): Promise<{ ok: true; session: Session } | { ok: false; error: string }>;
 }
@@ -384,15 +379,11 @@ export class CompanionController implements CompanionControl {
    * "companion-off" when that session has no live gateway (chat_reply is gated to enabled sessions, so this
    * is only reachable in a brief window; it never throws).
    *
-   * NOTE (stateless-MCP tool discovery): adding/removing a session in `hooks.companionSessionIds`
-   * (un)registers chat_reply at the ROUTER for THAT session, but an ALREADY-CONNECTED companion `claude`
-   * session won't re-list tools until its next MCP (re)connect — so a LIVE enable used to be able to leave
-   * chat_reply silently undiscoverable on an already-running session until its next reconnect/resume. Card
-   * dbba993f: `startOne` now detects exactly that transition (a session already live before it was armed —
-   * see its own doc) and auto-triggers the SAME conversation-preserving respawn `POST
-   * /api/companion/:sessionId/upgrade` exposes, so the gap no longer needs a human to notice and retrigger
-   * it by hand. A lingering chat_reply call on a running session AFTER its teardown still routes HERE and
-   * no-ops with "companion-off" (its map entry is cleared) — never a cross-wire or a throw.
+   * A lingering chat_reply call on a torn-down session still routes HERE and no-ops with "companion-off"
+   * (never a cross-wire or a throw).
+   * @decision dbba993f — a LIVE enable used to leave chat_reply silently undiscoverable on an already-live
+   * session (stateless-MCP tool discovery); startOne now auto-respawns to close it; see
+   * docs/decisions/dbba993f-auto-respawn-chat-reply-discoverable-on-enable.md.
    */
   async deliverReply(sessionId: string, text: string, voice?: boolean): Promise<DeliverResult | { delivered: false; reason: "companion-off" }> {
     const gateway = this.gateways.get(sessionId);
@@ -574,14 +565,11 @@ export class CompanionController implements CompanionControl {
    *   - a session in `desired` that's ALREADY live → UPDATE (apply only what changed, exactly like the
    *     single-companion ON→ON diff below, now scoped to that one map entry).
    *
-   * `onlySessionId`, when given, narrows BOTH the STOP scan and the START/UPDATE pass to that one session —
-   * `desired` is still the freshly-resolved FULL set (resolveEffective has no per-session variant), but every
-   * other live session's map entry is left completely untouched: no teardownOne, no startOne/updateOne, no
-   * rearmRemindersFor/rearmHeartbeatFor call. This is the fix for the cross-companion rearm-all bug — a
-   * single config/reminder write for session A used to re-run updateOne (and its unconditional
-   * rearmRemindersFor) for EVERY OTHER live session B, C, … too, resetting their reminder watchers' tick
-   * phase for no reason. Omitted (boot / no known origin) ⇒ every live+desired session is visited, exactly
-   * as before.
+   * @decision sha:b2ff5b8c — `onlySessionId`, when given, narrows BOTH the STOP scan and the START/UPDATE
+   * pass to that one session, leaving every other live session's map entry completely untouched (the fix
+   * for the cross-companion rearm-all bug). Omitted (boot / no known origin) ⇒ every live+desired session
+   * is visited, exactly as before; see
+   * docs/decisions/b2ff5b8c-cross-companion-rearm-scoped-to-one-session.md.
    */
   private async applyDesired(desired: CompanionConfig[], onlySessionId?: string): Promise<void> {
     const desiredBySid = new Map(desired.map((c) => [c.sessionId, c]));
@@ -605,22 +593,9 @@ export class CompanionController implements CompanionControl {
   /**
    * OFF → ON for one session: full start (build+start its gateway, arm its heartbeat/reminders, gate it in).
    *
-   * Card dbba993f: a companion armed on a session whose `claude` process was ALREADY live never surfaces
-   * `chat_reply` on its own (see `deliverReply`'s doc) — that process fetched `tools/list` once, at ITS OWN
-   * startup, before this session ever entered `companionSessionIds`, and has no way to discover a tool it
-   * never asked for (the identical mechanism already fixed for capability grants — gateway/server.ts's
-   * ADD/upgrade comment). Left alone, that companion can never reply, silently, for the rest of that
-   * process's life. `engineSessionId` is captured on SessionStart and is therefore ALREADY SET, at this
-   * point, for exactly the sessions that were live before now — a session spawned fresh as part of THIS
-   * same provisioning call has not yet reached its own first SessionStart when `startOne` runs (config is
-   * written and reconciled synchronously, well before the newly-spawned `claude` process finishes booting),
-   * so it reads `null` here and is correctly left alone: its own first `tools/list` still has `chat_reply`
-   * in it. Reusing the existing conversation-preserving respawn (Framework §6, `upgradeCompanionSession`)
-   * rather than inventing a second one — same primitive `POST /api/companion/:sessionId/upgrade` already
-   * exercises. Real, honest cost, paid ONLY on this previously-silently-broken path: worst case ~13s, and it
-   * briefly blocks every OTHER live companion's reconcile via `this.chain` (see `upgrade()`'s own doc).
-   * Best-effort — a failed auto-respawn is logged, not thrown; the session stays enabled either way (the
-   * owner can retry via the same REST upgrade route), matching `reconcile`'s own best-effort contract.
+   * @decision dbba993f — a companion armed on an already-live session never surfaces chat_reply on its
+   * own; auto-respawns via the existing conversation-preserving respawn to close the gap, best-effort; see
+   * docs/decisions/dbba993f-auto-respawn-chat-reply-discoverable-on-enable.md.
    *
    * The "was it already live" read goes through the injected `deps.wasSessionAlreadyLive` — see that
    * field's own doc for why this is NOT a direct `deps.db.getSession(...)` call.
@@ -758,15 +733,10 @@ export class CompanionController implements CompanionControl {
    *  this path makes — no watcher is built or started, so DEFAULT-OFF stays truly byte-identical. NEVER
    *  touches another session's reminder watcher.
    *
-   *  KNOWN TRADE-OFF (intra-session only): this rearm is UNGATED (unlike rearmHeartbeatFor's cfg-diff gate)
-   *  and stop+rebuilds the watcher on every visit of THAT session, resetting ITS OWN in-memory tick PHASE
-   *  (the next setInterval tick is a fresh tickMs away, not continuous from the prior watcher's cadence) —
-   *  never lost due-ness (seedLastFired reseeds lastFiredAt from durable fired-events either way), just
-   *  possible jitter of up to one tick for the session actually being reconciled. Acceptable because
-   *  reconciles are rare (a human config write or a reminder_create/cancel MCP call), not a hot path.
-   *  FIXED (was a cross-companion bug): applyDesired's `onlySessionId` scoping means a config/reminder
-   *  write for session A visits (and can rearm) ONLY A's updateOne — an UNRELATED live sibling B is never
-   *  passed through updateOne at all for that reconcile, so B's tick phase is never perturbed by A's write.
+   *  @decision sha:b2ff5b8c — this rearm is UNGATED and resets ITS OWN in-memory tick PHASE on every visit
+   *  (accepted, intra-session-only jitter); applyDesired's `onlySessionId` scoping means an UNRELATED live
+   *  sibling's tick phase is never perturbed by another session's write (the cross-companion bug this
+   *  fixed); see docs/decisions/b2ff5b8c-cross-companion-rearm-scoped-to-one-session.md.
    */
   private rearmRemindersFor(sessionId: string): void {
     this.stopRemindersFor(sessionId);
@@ -821,37 +791,11 @@ export class CompanionController implements CompanionControl {
   }
 
   /**
-   * `teardownOne` PLUS the same-home rearm (store.ts's KNOWN RESIDUAL LATENCY, closed): if the exited
-   * session shared its home with a still-LIVE sibling, that sibling may currently be SUPPRESSED (its
-   * heartbeat zeroed by `suppressDuplicateHomeHeartbeats` because the exited session was the group's
-   * winner) — re-resolving + reconciling just that sibling re-arms it promptly instead of leaving it
-   * disarmed until the next boot or an unrelated config write.
-   *
-   * ONE SOURCE OF TRUTH for the same-home match (CR fix): both the exited session's home AND the
-   * candidate-sibling homes are read from the freshly-`resolve`d set — the SAME authoritative source
-   * `suppressDuplicateHomeHeartbeats`'s own winner-pick uses (`db.getCompanionHome` via `buildConfigFromRow`)
-   * — never from the `this.cfgs` CACHE. A home REST write (`PUT /api/companion/home`) mutates app_meta
-   * WITHOUT calling `reconcile()`, so a live sibling's cached `cfgs` entry can go stale on a home change;
-   * matching against the cache could then MISS a survivor whose home just changed — exactly the latency
-   * class this card exists to close, in a home-changed sub-case. `desired` already includes the exited
-   * session's own (still-enabled) row — resolving liveness has no bearing on `buildConfigFromRow`, only on
-   * the suppression step — so its home is read off `desired` too, before `teardownOne` clears its `cfgs`
-   * entry (order doesn't matter functionally here, since `resolve` is a pure DB read, but reading it up
-   * front keeps the "one resolve, one source" property obvious).
-   *
-   * A non-companion session (absent from `desired` — no enabled row at all) or one with no same-home LIVE
-   * sibling is a no-op — `siblingIds` is simply empty (still-live is checked against `this.cfgs`, the
-   * controller's own liveness truth, which `desired` alone can't tell — an enabled-but-long-dead row would
-   * otherwise wrongly count as a "sibling"). Each sibling is reconciled via `applyDesired` DIRECTLY (not
-   * `reconcile()`/`enqueue()`, which would recursively await this very op's own place in the serialization
-   * chain and deadlock) — this method already runs serialized inside that chain via `onSessionExit`'s
-   * `enqueue`, so a plain sequential `applyDesired` call preserves the same ordering guarantee for free. The
-   * exited session's id is NEVER passed to `applyDesired` here — only its still-live siblings — so its
-   * now-dead gateway is never re-started (see `onSessionExit`'s doc on the CompanionControl interface). With
-   * ≥2 surviving same-home siblings, `desired`'s own suppression pass has already picked the NEW winner
-   * among them (the exited session is excluded from that competition via `isLiveSession`, since its
-   * `processState`/`archivedAt` are set BEFORE `onSessionExit` is ever called — see index.ts's `onExit`) —
-   * so re-arming every sibling here converges on exactly one winner armed, the rest still suppressed.
+   * `teardownOne` plus re-arming any still-LIVE same-home sibling suppressed by the exited session's
+   * heartbeat win.
+   * @decision 134368ac — the fix, and why it reads homes from a fresh `resolve()` (never the `this.cfgs`
+   * cache) and dispatches siblings via `applyDesired` directly (never `reconcile()`/`enqueue()`); see
+   * docs/decisions/134368ac-same-home-heartbeat-rearm-on-exit.md.
    */
   private async teardownOneAndRearmSameHomeSiblings(sessionId: string): Promise<void> {
     const resolve = this.deps.resolveEffective ?? resolveAllEnabledConfigs;
