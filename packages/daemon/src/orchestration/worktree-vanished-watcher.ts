@@ -24,9 +24,12 @@ export type WorktreeVanishReason = "gone" | "git_file_missing" | "gitdir_target_
 
 /**
  * Three-way classification of a worktree's fs-observable state — the discriminating primitive behind
- * both {@link detectVanishedWorktree} (below, unchanged contract) and any OTHER caller (e.g. a
- * restart/crash-recovery notice, card ab8b2cc6) that needs to tell "confirmed intact" apart from
- * "unclaimable shape" instead of collapsing both into the same `null`.
+ * both {@link detectVanishedWorktree} (below, unchanged contract) and any OTHER caller that needs to
+ * tell "confirmed intact" apart from "unclaimable shape" instead of collapsing both into the same
+ * `null`.
+ *
+ * @decision ab8b2cc6 — a caller that folds "indeterminate" into "intact" repeats the exact mistake
+ * this type exists to prevent; see the record for why.
  *
  *  - `{ status: "at-risk", reason }`: gone, or structurally broken, per the same three fs checks
  *    `detectVanishedWorktree` has always run (see its own doc for what each `reason` means).
@@ -34,9 +37,7 @@ export type WorktreeVanishReason = "gone" | "git_file_missing" | "gitdir_target_
  *    the ONLY case that actually earns "looks fine."
  *  - `{ status: "indeterminate", detail }`: `worktreePath` itself is missing/empty, OR `.git` is a real
  *    directory (not a worktree-pointer shape), OR its content doesn't match the `gitdir:` pattern — none
- *    of these are a confirmed-broken state, but none of them are confirmed-intact either; a caller that
- *    folds this into "fine" is making the SAME "TRUE, REASSURING, IRRELEVANT" mistake this whole
- *    detector exists to avoid (card ab8b2cc6).
+ *    of these are a confirmed-broken state, but none of them are confirmed-intact either.
  */
 export type WorktreeIntegrity =
   | { status: "at-risk"; reason: WorktreeVanishReason }
@@ -68,8 +69,12 @@ export function classifyWorktreeIntegrity(worktreePath: string | null | undefine
 
 /**
  * Detects whether a worktree at `worktreePath` is gone or structurally broken, using fs calls ONLY — no
- * git subprocess (card 652d312f priced a periodic full `git worktree list`/`git branch --list` sweep
- * over every live worker as real host cost; this needs neither). Three states, in the order checked:
+ * git subprocess.
+ *
+ * @decision 652d312f — priced a periodic full git sweep over every live worker as real host cost;
+ * this needs neither. See the record for the pricing and for what "vanished" does and doesn't cover.
+ *
+ * Three states, in the order checked:
  *
  *  - "gone": the directory itself no longer exists.
  *  - "git_file_missing": the directory exists but its `.git` pointer file is gone. Covers a fully OR
@@ -91,10 +96,8 @@ export function classifyWorktreeIntegrity(worktreePath: string | null | undefine
  * {@link classifyWorktreeIntegrity} directly instead — this function's own null-collapsing return shape
  * is UNCHANGED (existing callers, incl. {@link WorktreeVanishedWatcher} below, depend on it).
  *
- * NOT covered, by design: a branch deleted while the tree is otherwise intact (state 4 from the card).
- * Reliably telling "deleted" from "packed" needs enumerating loose + packed refs, which is meaningfully
- * more than a stat call and — unlike the states above — matches nothing in the n=1 originating incident.
- * Named here so the gap travels with the code, not just the card.
+ * NOT covered, by design: a branch deleted while the tree is otherwise intact.
+ * @decision 652d312f — why that state is out of scope here.
  */
 export function detectVanishedWorktree(worktreePath: string): WorktreeVanishReason | null {
   const c = classifyWorktreeIntegrity(worktreePath);
@@ -102,14 +105,18 @@ export function detectVanishedWorktree(worktreePath: string): WorktreeVanishReas
 }
 
 /**
- * DETECT-AND-SURFACE ONLY (card 652d312f) — structural twin of BusyWorkerWatcher, for a different
- * silent failure: a live worker whose worktree has vanished or gone git-broken out from under it (the
- * cause of one such incident is already fixed by 40b63f1c/163877b5 — boot-reconcile worktree protection
- * now keys on PATH, not session row — this watcher covers every OTHER route to the same silent state).
+ * DETECT-AND-SURFACE ONLY — structural twin of BusyWorkerWatcher, for a different silent failure: a
+ * live worker whose worktree has vanished or gone git-broken out from under it. This watcher covers
+ * every route to that silent state OTHER than the one already fixed at its cause.
+ * @decision 652d312f — the incident this watcher exists to close, and why detection stops at
+ * surfacing rather than auto-recovering.
+ * @decision 40b63f1c — the causal fix already landed (commit 163877b5); see the record for the
+ * two-pass cascade it closed.
  *
  * Detection is keyed on EACH live session's OWN `worktreePath` field, never re-derived from taskId — so
  * this can never confuse one session row's state with a sibling row's that happens to share a path
  * (multiple session rows routinely share one deterministic `worktreePath`, see worktrees.ts `taskKey`).
+ * @decision 40b63f1c — the exact row-vs-path aliasing shape this keying avoids.
  *
  * Fires AT MOST ONCE per live session id (not per turn/episode — a vanished worktree doesn't self-heal
  * the way a long turn resolves on its own, so there is no "progress advanced past it" reset to watch
