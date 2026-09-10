@@ -1664,27 +1664,14 @@ export interface GateHistoryRow {
   durationMs: number | null;
   /** ISO timestamp the run settled. */
   endedAt: string;
-  /** ⚠️ Card 3aec1df6 (ORIGINAL DESIGN, PARTIALLY SUPERSEDED by card eb9348b0 — read the correction
-   *  below before trusting the first half of this doc): a merge gate's own `build_gate`/`build_gate_retry`
-   *  event never carries a failing test inline — that diagnostic is written to a separate
-   *  `merge_rejected` event this history read doesn't include, and this remains true: `gate_history` is
-   *  still the settled-run INDEX (outcome/duration/concurrency trend across many rows), never the raw
-   *  event's own detail store for this field. The RAW-EVENT split above was deliberate and stays as-is —
-   *  do not read the correction below as reversing it.
-   *  ⭐ CARD eb9348b0 CORRECTION: for a `gateType:"merge"` row, this field is no longer unconditionally
-   *  `null`. Card 6ca4b1a0 already LEFT JOINs `pending_gate_ops.verdict_payload_json` into this same query
-   *  (for `emitCompareReduced`, below) — the mapper now ALSO reads that already-joined payload's
-   *  `gateDetail.failingTest` as a fallback whenever the raw event itself has none, at ZERO extra JOIN/
-   *  column cost (measured: recovers ~70% of recent merge-rejection rows this way, vs ~10% for rows
-   *  recorded before the opId-stamping/verdict-widening cards landed). Still `null` when the fallback has
-   *  nothing to offer: a `"worker"`/`"deploy"` row whose own event lacks `failingTest` (rare — a worker
-   *  self-check embeds it inline on failure), a row/op predating opId-stamping (card 78214063) or the
-   *  merge-verdict-payload widening (card 9f6598dd), a `"pass"`/`"cancelled"`/`"skipped"` verdict
-   *  (`gateDetail` is fail-only), or a genuine rejection whose output carried no recognizable marker
-   *  (`gateDetail` present but its own `failingTest` absent — see `PendingGateOpVerdict.gateDetail`'s doc).
-   *  For any of those remaining gaps, `opId` (below) is still the reachability key to `gate_status(opId)`
-   *  for the FULL diagnostic (`phase`/`stderrTail`/`outputTail`/`exitCode`/`signal`/`timedOut`) — this
-   *  field alone was never meant to replace that pivot, only to make the common case (an aggregate scan
+  /** @decision eb9348b0 — the raw-event split stays deliberate (`gate_history` is the settled-run INDEX,
+   *  never `merge_rejected`'s own detail store); a `gateType:"merge"` row now ALSO falls back to the
+   *  settled verdict payload for this field at zero extra JOIN/column cost — see
+   *  docs/decisions/eb9348b0-gate-history-failingtest-reads-the-settled-verdict-payload-as-fallback.md
+   *  for the measured recovery rate and the full list of remaining null cases.
+   *  `opId` (below) is still the reachability key to `gate_status(opId)` for the FULL diagnostic
+   *  (`phase`/`stderrTail`/`outputTail`/`exitCode`/`signal`/`timedOut`) whenever this field comes back
+   *  null — it was never meant to replace that pivot, only to make the common case (an aggregate scan
    *  for "has test X failed before" across many rows) not need it. */
   failingTest: string | null;
   /** Card 3aec1df6 — the reachability key `gate_history` was missing entirely: feed this to `gate_status`
@@ -1698,43 +1685,19 @@ export interface GateHistoryRow {
    *  asked for a pass/fail flag rather than deriving it from the outcome enum themselves). A `false` row
    *  is exactly the rejected-run case that carries `durationMs` too (recorded unconditionally, before any
    *  pass/fail branching) — this field never being true for a rejection is the whole point.
-   *  ⚠️ Card 3a6f04cc: `passed:false` on a `outcome:"cancelled"` row does NOT mean the same thing as
-   *  `passed:false` on a `outcome:"reject"` row — a cancelled run reached NO VERDICT (withdrawn, not
-   *  failed), it is simply also not a pass. A caller computing a rejection RATE must filter on
-   *  `outcome === "reject"`, never on `passed === false` alone, or a cancellation is silently counted as
-   *  a failure — exactly the defect this card fixes. This field's own boolean shape is deliberately left
-   *  unchanged (still just `outcome === "pass"`) rather than widened to a tri-state; `outcome` is where
-   *  the real granularity lives.
-   *  ⚠️ Card db9b0130: `outcome:"skipped"` (an inert-diff merge that never spawned a gate) lands in this
-   *  IDENTICAL trap — its underlying event stamps `detail.passed:true` (so the merge could proceed to
-   *  squash), but THIS field reads `false` for it too (derived from `outcome`, not from that raw
-   *  `detail.passed`), for the same reason `cancelled` does: no gate verdict was ever reached, so it must
-   *  never be counted as a pass OR a rejection. The same "filter on `outcome`, never on `passed` alone"
-   *  rule from the paragraph above applies here without modification. */
+   *  @decision 3a6f04cc — `passed:false` means something different on a `"cancelled"` row than on a
+   *   `"reject"` row, and the SAME trap catches `"skipped"` too — a rejection-rate caller must filter on
+   *   `outcome`, never on `passed` alone. See
+   *   docs/decisions/3a6f04cc-gateoutcome-cancelled-and-skipped-are-not-verdicts.md */
   passed: boolean;
-  /** Card 3a6f04cc: whether a gate PROCESS actually spawned for this op — `false` for a merge that
-   *  REUSED an already-green worker self-check (no process spawned at merge time), a worker self-check
-   *  cancelled BEFORE it was ever admitted past the queue (also no process spawned), or (card db9b0130) a
-   *  merge whose ENTIRE changed-path set was proven inert (`outcome:"skipped"` — see that field's own doc;
-   *  same "no process spawned" fact as the reuse case, for a different reason: nothing to reuse, the gate
-   *  was never even attempted); `true` for every other row, INCLUDING one cancelled WHILE running that DID
-   *  spawn a step (real wall time consumed,
-   *  even though no verdict was reached). Exists so a duration series built from this table can exclude
-   *  non-runs without a per-row pivot to `gate_status(opId)` — a reused/never-spawned row's `durationMs`
-   *  reflects bookkeeping overhead, not real gate work, and biases a naive average toward "getting
-   *  faster" if left in.
-   *  ⚠️ Code Review correction: this is DERIVED, not a raw stamp everywhere, and its accuracy depends on
-   *  WHICH signal was available when the row was written. It is EXACT for `reused:true` rows and for any
-   *  row carrying an explicit `gateSpawned` producer stamp (both worker-gate cancel sites — queued and
-   *  running — stamp this explicitly as of the Code Review follow-up). For an OLDER cancelled row with no
-   *  such stamp (written in the narrow window between this card's original fix and that follow-up), it
-   *  falls back to "did this admit before it was cancelled" (`durationMs` presence) — admission is NOT
-   *  the same fact as a process having spawned (a cancel landing between admission and the gate runner's
-   *  own first-step check settles with zero steps run despite a real `durationMs`), so that fallback can
-   *  read `true` for a row where nothing actually ran. Defaults `true` when no positive non-run signal
-   *  exists at all (a real pass/fail/timeout/kill/error, or a deploy) — never `null`, but "never null"
-   *  is not the same claim as "always exact"; treat it as reliable, not guaranteed, for the fallback case
-   *  above. */
+  /** Whether a gate PROCESS actually spawned for this op — exists so a duration series can exclude
+   *  non-runs (a reused/never-spawned row's `durationMs` reflects bookkeeping overhead, not real gate
+   *  work) without a per-row pivot to `gate_status(opId)`.
+   *  @decision sha:cc086436 — DERIVED, not a raw stamp everywhere; exactness depends on which signal was
+   *   available when the row was written (exact for `reused:true` and any explicitly-stamped row, a
+   *   `durationMs`-presence heuristic otherwise, which can read `true` for a row where nothing actually
+   *   spawned). See
+   *   docs/decisions/cc086436-gateran-derived-not-raw-stamp-accuracy-depends-on-available-signal.md */
   gateRan: boolean;
   /** The resolved `maxConcurrentGates` cap in effect when this run was recorded, and how many gates were
    *  concurrently active at its admission — both read straight from the event's own `detail_json` (every
@@ -1791,80 +1754,35 @@ export interface GateHistoryRow {
    *  mechanism was never even invoked (the row's own gate failure wasn't the "genuine" shape that gate would
    *  ever be called for) OR this row predates this field — never conflate either with "eligible". */
   retryDeclineReason: string | null;
-  /** Card a0d1165c, sibling of `retriedFile`/`retryPassed` above — the SAME durable exposure for the OTHER
-   *  retry that can produce a `passed:true` merge row, the TRANSIENT-KILL AUTO-RETRY (card bcba83a1): a
-   *  killed/timed-out attempt 1 auto-retries the WHOLE gate once, mutually exclusive with the single-file
-   *  retry per attempt (a first attempt is classified either "genuine" — eligible for `retriedFile` — or
-   *  "kill"/"timeout" — eligible for THIS retry — never both). Before this card a transient-kill-retry-
-   *  assisted pass was "nudge text only": `[loom:merge-done]` rendered `formatTransientRetryWarning()` live,
-   *  but nothing durable recorded it, so a reader who missed that one nudge (a recycle, a restart, a
-   *  successor reading history later) saw an ordinary `outcome:"pass"` with no way to tell it apart from a
-   *  clean first-attempt pass.
-   *  DERIVED, not a raw detail-field read: `true` iff this row's underlying event is `kind:"build_gate_retry"`
-   *  (the transient-kill retry's OWN admission and verdict — a SEPARATE row from attempt 1's `"build_gate"`
-   *  row, unlike the single-file retry which folds `retriedFile`/`retryPassed` onto the SAME row instead of
-   *  emitting a second one); `false` for every `"build_gate"`/`"worker_gate"`/`"deploy"` row, including one
-   *  that carries a non-null `retriedFile` — the two fields can never both be truthy on the same row, since
-   *  a `"build_gate"` row is never a transient-kill retry's own row and a `"build_gate_retry"` row never
-   *  carries `retriedFile` (the single-file retry has no mechanism that emits this kind). Populated on BOTH
-   *  a resulting pass and a resulting rejection of the retry itself — this row's own `outcome`/`passed`
-   *  already state which; `transientRetried:true` only flags that THIS row IS the retry, not that it
-   *  passed. */
+  /** @decision a0d1165c — sibling of `retriedFile`/`retryPassed` above, the SAME durable exposure for the
+   *  OTHER retry that can produce a `passed:true` merge row, the TRANSIENT-KILL AUTO-RETRY (card
+   *  bcba83a1), mutually exclusive with `retriedFile` per attempt and DERIVED (not a raw stamp) from the
+   *  row's own event kind — see
+   *  docs/decisions/a0d1165c-transientretried-mutually-exclusive-with-retriedfile.md for the full
+   *  derivation and how this differs from `PendingGateOpVerdict.transientRetried`. */
   transientRetried: boolean;
-  /** Card 6ca4b1a0 — the RETROSPECTIVE, `gate_history`-native read of the SAME emit-compare-reduction fact
-   *  `gate_status(opId)` already exposes for a settled merge op (see the daemon's `PendingGateOpVerdict
-   *  .emitCompareReduced` doc for the full tri-state discipline this mirrors exactly): `true` = this merge
-   *  gate genuinely ran REDUCED (build + static guards, ± the changed test files — NOT the full daemon test
-   *  suite); `false` = a real gate spawned for this op and was PROVEN not reduced (a genuine full run — the
-   *  positive control, never conflate with "nothing to report"); `null` = no gate spawned for this op, this
-   *  row predates card 6ca4b1a0, or this is a `"worker"`/`"deploy"` row (the reduction feature is
-   *  MERGE-ONLY). ⛔ NEVER `false` for an unmeasured row — that would assert "this was a full run" about a
-   *  row nobody measured.
-   *  ⚠️ Sourced from `pending_gate_ops.verdict_payload_json` (via this row's own `opId`), NOT from this
-   *  event's own raw detail — the merge-gate event only ever stamps this key when `true` (a conditional
-   *  spread, never an explicit `false`), so the raw event alone cannot distinguish "genuinely not reduced"
-   *  from "reduction never computed"; the pending-ops tombstone is the one place the real tri-state
-   *  survives. A caller building a duration series MUST bucket on this field — pooling a `true` row's
-   *  reduced run with a `false`/`null` row's full run silently averages two different populations into one
-   *  meaningless number (card 6ca4b1a0's own measured evidence: a 12.9× duration gap with zero observations
-   *  inside it). Never pool a `null` row with a `false` row either — `null` means "not determinable", not
-   *  "known full run". */
+  /** @decision 6ca4b1a0 — the RETROSPECTIVE, `gate_history`-native read of the SAME emit-compare-reduction
+   *  fact `gate_status(opId)` already exposes for a settled merge op; a true/false/null tri-state sourced
+   *  from `pending_gate_ops.verdict_payload_json`, NEVER the raw event detail (which cannot distinguish
+   *  "genuinely not reduced" from "reduction never computed"). See
+   *  docs/decisions/6ca4b1a0-gate-history-emit-compare-fields-come-from-pending-gate-ops-not-detail-json.md
+   *  for the full tri-state discipline and the measured 12.9× duration-gap evidence for why a caller
+   *  building a duration series must bucket on this field rather than pooling populations. */
   emitCompareReduced: boolean | null;
-  /** Card fd0d34da — the coarse, PATH-FREE reason `emitCompareReduced` above reads `null` FOR THIS ROW
-   *  because the reduce-predicate itself said "not applicable" (as opposed to the row simply never having
-   *  a gate spawn, or predating this feature entirely — this field is present ONLY when the predicate
-   *  actually ran and decided `notApplicable:true`, `null` for every other cause of a `null`
-   *  `emitCompareReduced`, including a genuine `false`). One of `"repo-out-of-domain"` (a REPO-LEVEL fact,
-   *  checked via a dedicated `git ls-tree` against the repo's own tree rather than inferred from this diff
-   *  alone — none of the four scope directories exist anywhere in this repo, so the predicate could never
-   *  decide ANY diff for it), `"path-out-of-scope"` (covers BOTH remaining shapes, sharing the identical
-   *  actionable fact that the predicate applies to this repo fine, just not — fully, or at all — to THIS
-   *  diff: either this diff touched a path outside the predicate's scope while the SAME diff also touches
-   *  an in-scope path elsewhere, or the repo's own tree DOES have one of the four scope directories even
-   *  though this particular diff doesn't touch it — see `merge_batch`'s own tool description
-   *  for the batch-size degradation this specific shape drives), `"harness-config-unavailable"`,
-   *  `"typescript-unresolvable"`, `"git-operation-failed"`, `"empty-diff"`, or `"unparseable-diff"` —
-   *  typed loosely as `string` here rather than importing the daemon-internal union into this shared
-   *  package (same posture as `retryDeclineReason`'s own doc, above, for the identical reason). Before
-   *  this card, EVERY one of these seven causes collapsed onto the same bare `null` `emitCompareReduced`,
-   *  indistinguishable from each other and from "no gate spawned at all" without re-running the predicate
-   *  by hand against the diff. */
+  /** @decision fd0d34da — the coarse, PATH-FREE reason `emitCompareReduced` above reads `null` because the
+   *  reduce-predicate said "not applicable" (present ONLY alongside that cause, never a genuine `false`);
+   *  typed loosely as `string` rather than importing the daemon-internal union (same posture as
+   *  `retryDeclineReason`'s own doc, above). See
+   *  docs/decisions/fd0d34da-notapplicablekind-is-a-cross-project-visible-category-not-a-path.md for every
+   *  value's meaning and why each is safe to leave unredacted cross-project. */
   emitCompareNotApplicableKind: string | null;
-  /** Card 6ca4b1a0 — present (non-null) ONLY alongside `emitCompareReduced: true`; `null` whenever
-   *  `emitCompareReduced` is `false` or `null` (nothing reduced to report).
-   *  ⚠️ VACUOUS ON ONE OF TWO ARMS — never read this alone, always alongside `emitCompareTestFiles`
-   *  (below): `identicalCount: 0` paired with a NON-EMPTY `emitCompareTestFiles` means the
-   *  changed-test-files arm — a test-only diff has no compiled files to compare, so `0` means "nothing to
-   *  check", NOT "the check found nothing". `identicalCount` non-zero paired with an EMPTY
-   *  `emitCompareTestFiles` means the emit-identity arm, fully informative — zero test files ran, build +
-   *  static guards only.
-   *  🔴 Card 0984260f — THE TWO ARMS ARE NOT MUTUALLY EXCLUSIVE: a diff can touch a compiled file AND a
-   *  changed test file in the same commit, firing BOTH at once — `identicalCount` non-zero paired with a
-   *  NON-EMPTY `emitCompareTestFiles` (measured live, merge gate op `b145371d`). That row is the MIXED
-   *  case: the count is fully INFORMATIVE (a compiled file really was proven byte-identical) AND the named
-   *  test files ran. ⛔ NEVER infer vacuity from `emitCompareTestFiles` being non-empty alone —
-   *  `identicalCount` is vacuous ONLY when it is `0` AND the diff contained no compiled file; a non-empty
-   *  `emitCompareTestFiles` sitting alongside a non-zero `identicalCount` does not make the count vacuous. */
+  /** @decision 6ca4b1a0 — present (non-null) ONLY alongside `emitCompareReduced: true`; VACUOUS ON ONE OF
+   *  TWO ARMS — never read alone, always alongside `emitCompareTestFiles` (below). See
+   *  docs/decisions/6ca4b1a0-gate-history-emit-compare-fields-come-from-pending-gate-ops-not-detail-json.md
+   *  for the two-arm discipline, and
+   *  docs/decisions/0984260f-emitcompareidenticalcount-two-arms-are-not-mutually-exclusive.md for the
+   *  MIXED-case correction — the two arms are NOT mutually exclusive, and a non-zero count alongside a
+   *  non-empty `emitCompareTestFiles` does not make the count vacuous. */
   emitCompareIdenticalCount: number | null;
   /** Card 6ca4b1a0 — the changed `test/*.mjs` file(s) this reduced run ran instead of the full suite.
    *  Present (as an array — possibly EMPTY on the emit-identity arm) whenever `emitCompareReduced: true`;
@@ -2066,127 +1984,47 @@ export interface Task {
    */
   deferred?: boolean;
   /**
-   * Card 793ac76d: an OPTIONAL companion to `deferred` — "deferred until THIS task merges." When set,
-   * the daemon re-derives `deferred` on every `tasks_get`/`tasks_list` read by checking the named
-   * task's git-derived `merged` state (the SAME live check `TaskWithMerged.merged` already performs,
-   * never a new cached flag) and clears `deferred` to `false` — persisted back via a normal
-   * `db.updateTask`, so `Task.deferred` itself stays the single source of truth downstream (e.g. the
-   * idle watchdog, which reads `deferred` directly and has no knowledge of this field). `null`/absent
-   * (the default) is the byte-identical today's-behavior case: a deferral with no named blocker is
-   * NEVER auto-cleared — this is load-bearing for an owner-gated or external-upstream deferral, which
-   * must stay manually managed. Validated at SET time (`updateProjectTask`, mcp/tasks.ts): must resolve
-   * to a real task on THIS board (full id or unambiguous prefix, normalized to the full id since the
-   * read-time check does an exact-id lookup) and a self-reference is rejected. A blocker that's since
-   * been deleted (dangling reference) degrades to "stays deferred" at read time — never throws, never
-   * silently drops the card. Meaningless while `deferred` is false.
-   *
-   * Cleared to `null` in the SAME write-through that auto-clears `deferred` (card cf62c1ef) — once the
-   * named blocker's merge has been observed and acted on, this field has served its purpose. This is
-   * DELIBERATE, not incidental: leaving it set after the clear was a footgun — a LATER, unrelated
-   * `tasks_update(deferred:true)` with no new `deferredUntilTaskId` would silently inherit the stale,
-   * already-merged blocker reference, and the very next read would auto-clear that fresh, deliberate
-   * re-defer without ever reporting it. Clearing it means a re-defer always starts clean: it lands on the
-   * plain "deferred with no blocker" path (never auto-clears) unless the caller names a NEW blocker. NOTE:
-   * an explicit `tasks_update(deferred:false)` — i.e. a MANUAL clear, not an auto-clear — does NOT touch
-   * this field; only the auto-clear write-through does.
-   *
-   * Card 022659ac — MULTIPLE blockers: pass an array of task ids/prefixes (each resolved to a full id,
-   * same rules as the single-id form: must exist on this board, self-reference rejected) instead of one
-   * string. `deferred` auto-clears only once ALL named blockers have a non-null `merged` — see
-   * `resolveDeferredEffective`'s own doc for why (a card genuinely blocked on two things is not unblocked
-   * by one of them landing). `deferredStuck` (below) is the OR across all of them: ANY one dangling or
-   * closed-with-no-merge makes the whole deferral stuck, even while the others are still cleanly pending.
-   * Read/write ALWAYS collapses a single resolved id back to a bare string (never a 1-element array) —
-   * this keeps every existing single-blocker caller (and every persisted single-blocker row) byte-
-   * identical; the array shape is reserved for a genuine 2+-blocker deferral. Storage note (db.ts): a
-   * single id is still persisted as the bare TEXT value it always was (this is also why a PRE-existing
-   * legacy row — written before this card, always a bare id string — needs no migration and no format
-   * change); 2+ ids are persisted as a JSON array in the same TEXT column, distinguished on read by
-   * whether the stored text starts with `[` (a real id never does).
+   * @decision 793ac76d — an OPTIONAL companion to `deferred`: "deferred until THIS task merges," which
+   * auto-clears `deferred` on the named task's observed `merged` state. `null`/absent (default) means no
+   * auto-clear at all — load-bearing for an owner-gated or external-upstream deferral. See
+   * docs/decisions/793ac76d-deferreduntiltaskid-auto-clears-deferred-on-observed-merge.md for the
+   * mechanism, validation, and dangling-reference handling.
+   * @decision 022659ac — widens to an array of blockers: `deferred` auto-clears only once ALL have merged
+   * (AND), while `deferredStuck` (below) is the OR across all of them. See
+   * docs/decisions/022659ac-deferreduntiltaskid-multiple-blockers-and-are-across-all.md for the storage
+   * format and why release/stuck use opposite quantifiers.
    */
   deferredUntilTaskId?: string | string[] | null;
   /**
-   * Card 93669813 — a DERIVED (but persisted, self-healing) signal that `deferred`'s own release
-   * condition ("until `deferredUntilTaskId` MERGES") can no longer be reached: the blocker is gone
-   * (deleted, or cross-project — a dangling reference), OR the blocker has already reached the
-   * project's `terminal`-role column while its `merged` is still null (the doctrine-sanctioned
-   * 0-commit `done` outcome — no squash commit ever lands, so `merged` never resolves). Meaningless
-   * while `deferred` is false. Card 022659ac (multiple blockers): this is the OR across every named
-   * blocker — ANY one of them being dangling/closed-with-no-merge sets this true, even while the
-   * others are still cleanly, reachably pending; it never waits for all of them to independently go bad.
-   *
-   * ⚠️ DOES NOT REDEFINE WHEN `deferred` CLEARS — `deferred` stays keyed on `merged` exactly as
-   * before (see `deferredUntilTaskId`'s own doc); a 0-commit close is a legitimate outcome and this
-   * field must never auto-clear `deferred`, only make the stuck state VISIBLE (previously: nothing
-   * surfaced it anywhere, and `deferred:true` is independently discounted from the idle watchdog's
-   * actionable count — see idle-watcher.ts — so the card was invisible in exactly the direction that
-   * would reveal the problem).
-   *
-   * ⚠️ `merged === null` has THREE causes per `getTaskMergedInfo`'s contract: never merged, landed
-   * outside the git scan window, or a git read failure — so a blocker sitting in the terminal column
-   * that genuinely DID ship (just outside the scan window, or during a transient git failure) can
-   * still read `deferredStuck:true`. This is a DELIBERATE fail-toward-VISIBLE choice, not a proof of
-   * unreachability: a card wrongly surfaced is noticed and dismissed in seconds, while a card wrongly
-   * hidden stays invisible forever (the original defect). Read this field as "cannot currently be
-   * SHOWN to have shipped, and its blocker has already closed" — never as "proven unreachable."
-   *
-   * Computed in `resolveDeferredEffective` (mcp/tasks.ts) off the SAME blocker + merged-state lookup
-   * already performed for the `deferred` auto-clear — no extra git call. Write-through persisted on a
-   * genuine transition only (mirrors `deferred`'s own auto-clear guard), so a raw-DB reader (the idle
-   * watchdog, `hasPendingBoardWork`) self-heals without knowing anything about `deferredUntilTaskId`.
+   * @decision 93669813 — a DERIVED, persisted, self-healing signal that `deferred`'s own release
+   * condition can no longer be reached (dangling blocker, or a blocker closed with no merge). A
+   * DELIBERATE fail-toward-VISIBLE choice, not proof of unreachability — never auto-clears `deferred`
+   * itself. See docs/decisions/93669813-includemerged-false-stuck-is-unknown-not-false.md for the full
+   * semantics, the three causes of `merged === null`, and the multi-blocker OR behavior.
    */
   deferredStuck?: boolean;
   /**
-   * Card c90e9525 — the MANUAL-deferral self-explaining pair, companion to `deferredReason`. The instant
-   * a MANUAL deferral (no `deferredUntilTaskId` — see that field's own doc for the route-(a) case, which
-   * this does NOT cover) most recently STARTED: stamped server-side (`updateProjectTask`, mcp/tasks.ts) on
-   * a genuine `false → true` transition, or the first time a reason lands on a legacy row that had none —
-   * never on a later edit that only touches the reason text (that's what `updatedAt` is for; this field
-   * answers "since when has it actually been deferred", which `updatedAt` cannot, since it moves on ANY
-   * unrelated edit — see the card's own §WHAT THE DEFECT ACTUALLY IS). `null` = never recorded: either
-   * genuinely not deferred, OR a manual deferral that predates this column (a legacy row) — the migration
-   * NEVER backfills a fabricated start time (there is none to recover), so `null` here means exactly
-   * "unknown," not "just now." Reset to `null` on an explicit manual clear (`deferred:false`), mirroring
-   * `heldBy`'s own reset-on-clear. Untouched by route-(a) deferrals (`deferredUntilTaskId` set) — those
-   * already carry their own self-explaining release condition (the named blocker task) by a different
-   * mechanism, so this field is deliberately never populated for them.
+   * @decision c90e9525 — the MANUAL-deferral self-explaining pair with `deferredReason`: the instant a
+   * manual deferral most recently started. `null` means "unknown" (never recorded, or a legacy row), NOT
+   * "just now" — never backfilled. Untouched by a route-(a) deferral (`deferredUntilTaskId` set), which
+   * self-explains a different way. See
+   * docs/decisions/c90e9525-deferredat-deferredreason-manual-deferral-self-explaining-pair.md
    */
   deferredAt?: string | null;
   /**
-   * Card c90e9525 — the human-readable REASON / release condition for a MANUAL deferral, paired with
-   * `deferredAt`. `updateProjectTask` (mcp/tasks.ts) REJECTS a write that would leave the card manually
-   * deferred (`deferred:true`, no `deferredUntilTaskId`) with no reason recorded either before or after the
-   * patch — a date alone does not satisfy this field's purpose (the card's own DoD-1 is explicit: "a date
-   * alone does NOT satisfy"). `null` = no reason recorded: a legacy row that predates this column (never
-   * invented — see the card's DoD-4) or a card that has never been manually deferred. Reset to `null` on an
-   * explicit manual clear (`deferred:false`). Not required for a route-(a) deferral (`deferredUntilTaskId`
-   * set) — that route's release condition is the named blocker task itself.
+   * @decision c90e9525 — the human-readable REASON for a MANUAL deferral, paired with `deferredAt`; a
+   * write that would leave the card manually deferred with no reason recorded is REJECTED. See
+   * docs/decisions/c90e9525-deferredat-deferredreason-manual-deferral-self-explaining-pair.md
    */
   deferredReason?: string | null;
   /**
-   * Card 0d4bc3f0 — sub-items THIS card's own DoD deferred onto ANOTHER card, recorded structurally (see
-   * {@link DeferredItem}'s own doc) alongside — never instead of — a `Related:`/prose note in the body.
-   * Default `[]`/absent: BEHAVIOR is unchanged for the overwhelming majority of cards that never defer
-   * anything — this is NOT byte-identical-to-today at the serialized-row level, though: the always-present
-   * `[]` adds a small constant (~19 bytes as `"deferredItems":[]`) to EVERY full Task row, which measurably
-   * ate into the NDJSON inline-vs-spill headroom (SPILL_INLINE_BUDGET_CHARS, spill.ts) on the two tests
-   * closest to that budget (`platform-cross-project-task.mjs`'s bulk-pagination section, `mcp-scope.mjs`'s
-   * tool-list assertion) when this field shipped. Deliberately NOT omit-when-empty (a uniform always-
-   * present array is the more predictable consumer shape, and the cost lands only on full-body reads —
-   * `TaskSummary`/tasks_list's hot path stays clean, verified by `task-summary-inline-capacity.mjs`) — the
-   * next field that erodes spill headroom should cost bytes here again, not dodge measurement by omitting
-   * itself. Written ONLY via the dedicated `tasks_defer_item`/`tasks_defer_item_ack` tools
-   * (mcp/tasks.ts `deferTaskItem`/`updateDeferredItemStatus`) — never a raw `tasks_update` patch field;
-   * see `deferTaskItem`'s own doc for why an append needs its own choke point rather than a client-
-   * constructed full-array replace. This is the OUTBOUND view (what this card handed to others); the
-   * INBOUND view — "what has been handed to THIS card and not yet acknowledged" — is a different,
-   * DERIVED thing computed at read time by scanning every OTHER task's own `deferredItems` for an entry
-   * whose `toTaskId` names this card: see `TaskWithRequests.incomingDeferredItems` (mcp/tasks.ts
-   * `getProjectTask`), surfaced by `tasks_get` the same way `requests` already is — so a card can be on
-   * the RECEIVING end of a hand-off without ever having been told the donor's id in advance. THIS is the
-   * mechanism that makes a dropped hand-off detectable (card DoD-4): reading the recipient's OWN card
-   * surfaces a still-`"open"` item structurally, instead of requiring anyone to go re-read the donor
-   * card's prose to notice nothing ever answered it.
+   * @decision 0d4bc3f0 — sub-items THIS card's own DoD deferred onto ANOTHER card, recorded structurally
+   * alongside — never instead of — a `Related:`/prose note in the body. This is the OUTBOUND view; the
+   * INBOUND view (what's been handed to THIS card) is `TaskWithRequests.incomingDeferredItems`, a
+   * different, derived read-time scan. Written ONLY via `tasks_defer_item`/`tasks_defer_item_ack`, never
+   * a raw `tasks_update` patch. See
+   * docs/decisions/0d4bc3f0-deferreditems-outbound-view-and-the-inline-vs-spill-byte-cost.md for the
+   * measured NDJSON spill-budget cost of the always-present `[]` default.
    */
   deferredItems?: DeferredItem[];
   /**
@@ -2210,21 +2048,12 @@ export interface Task {
    */
   repoKey?: string | null;
   /**
-   * Ship-state persisted at merge-confirm time (card 1eebc46a) — WHICH repo the branch's squash-merge
+   * @decision 1eebc46a — ship-state persisted at merge-confirm time: WHICH repo the branch's squash-merge
    * commit actually landed on, so a multi-repo project's web board/drawer can answer "did this land, and
-   * where" from a plain column read instead of a per-poll git scan (measured ~40s at ~1200 cards — the
-   * per-hit `git branch --list` verification cost is NOT bounded by caching; see the card's checkpoint).
-   * `mergedSha` is the landed commit's short (7-char) sha. `mergedRepoKey` is the SAME convention as
-   * `repoKey` (a key into `Project.repos`, or `null` = primary) — recorded from the merging session's own
-   * pinned `repoKey` (or, for boot-reconcile, the session row's own), never re-derived from a path, so it
-   * can't drift from the repo the worktree was actually cut from. `mergedDate` is a best-effort ISO
-   * date — the commit's own author date when a write path already has it for free (the lazy backfill's
-   * git lookup), else the instant Loom recorded the ship-state (merge-finalize, which doesn't fetch the
-   * commit's date separately to avoid an extra git call in that hot path). All three are null until a
-   * merge finalizes — or, for a card that landed before this shipped, until its drawer is first opened
-   * (`GET /api/tasks/:id` lazily backfills, best-effort). This is a CACHE, not the ground truth: the MCP
-   * `tasks_get`/`tasks_list` `merged` field (`TaskWithMerged`, mcp/tasks.ts) stays the live-verified
-   * answer agents rely on — these columns exist purely so the web board/drawer never pay that scan's cost.
+   * where" from a plain column read instead of a per-poll git scan. A CACHE, not the ground truth — the
+   * MCP `tasks_get`/`tasks_list` `merged` field (`TaskWithMerged`) stays the live-verified answer agents
+   * rely on. See docs/decisions/1eebc46a-lazy-ship-state-backfill-on-task-get.md for the full field
+   * contract (`mergedSha`/`mergedRepoKey`/`mergedDate`) and the measured scan-cost this cache avoids.
    */
   mergedSha?: string | null;
   mergedRepoKey?: string | null;
@@ -2246,19 +2075,11 @@ export interface Task {
   createdAt: string;
   updatedAt: string;
   /**
-   * Card d0978321 — optimistic-concurrency CAS token, mirroring {@link ProjectMemoryEntry.version}
-   * (same monotonic-INTEGER rationale: never derived from `updatedAt`, which can collide across two
-   * distinct writes on a coarse clock). `tasks_update`/`project_task_update` require `baseVersion` to
-   * match this before writing `title`/`body`; a stale-or-omitted base is rejected with the current task
-   * returned, so the caller can reconcile (mirrors `memory_write` exactly).
-   *
-   * ⚠️ UNLIKE `ProjectMemoryEntry.version` — which bumps on every write, because a memory note IS its
-   * content — this ADVANCES ONLY WHEN `title` OR `body` ACTUALLY CHANGES. A field-only move (columnKey,
-   * priority, held, deferred, position, repoKey, deferredUntilTaskId, deferredAt, deferredReason —
-   * including the read-time
-   * deferred-auto-clear write-through) leaves it untouched. Do NOT read an unchanged `version` across two
-   * reads as "the card is unchanged" — it only means "the title/body haven't changed"; the card may have
-   * moved column, changed priority, been held, or auto-cleared its deferral in between.
+   * @decision d0978321 — optimistic-concurrency CAS token, mirroring {@link ProjectMemoryEntry.version}'s
+   * monotonic-INTEGER rationale but UNLIKE it in one load-bearing way: this advances ONLY when `title` or
+   * `body` actually changes, never on a field-only move (column/priority/held/deferred/etc). Do NOT read
+   * an unchanged `version` as "the card is unchanged" overall. See
+   * docs/decisions/d0978321-task-version-is-a-content-counter-not-a-row-counter.md
    */
   version: number;
 }
@@ -2315,23 +2136,13 @@ export interface ProjectMemoryEntry {
    */
   requestIds: string[] | null;
   /**
-   * Card aeec1880 — an OPTIONAL trigger predicate that gates a `pinned:true` note's delivery to kickoffs
-   * whose text names a matching path, instead of pinning it globally. `null` (the default, and every
-   * pre-existing note) means "no predicate" — behaves EXACTLY as `pinned` always has. A non-null value is
-   * a path glob (same `*`/`**`/`?` semantics used elsewhere in this codebase for path matching, e.g.
-   * `git/worktrees.ts`'s deny-glob matcher) tested against path-like tokens found in the kickoff/task text
-   * — see `sessions/project-memory-recall.ts`'s `triggerMatchesKickoff` for the match + the doc comment
-   * arguing this mechanism over the two rejected alternatives (tool name, card label).
-   *
-   * Only meaningful on a `pinned:true` note that is NOT also tagged `"never-drop"` — a never-drop note
-   * always bypasses its own trigger (that floor is a guarantee; a predicate must never silently weaken
-   * it), and an unpinned note was never gated by `pinned` in the first place, so a trigger on it is inert.
-   * `memory_write`'s response reports which of these applies (see mcp/memory.ts's `TriggerGateSignal`).
-   *
-   * Unlike an ordinary pinned note (excluded from the FTS "related" tier — see `db.ts`'s
-   * `searchProjectMemory` doc comment), a trigger-gated note stays FTS-reachable on a kickoff where its
-   * predicate does NOT fire — the whole point of gating is that the note competes on relevance instead of
-   * riding for free, so it must never become LESS reachable than an ordinary unpinned note would be.
+   * @decision aeec1880 — an OPTIONAL trigger predicate that gates a `pinned:true` note's delivery to
+   * kickoffs whose text names a matching PATH glob, instead of pinning it globally. `null` (default)
+   * behaves EXACTLY as `pinned` always has. Inert on an unpinned note, and always bypassed by
+   * `"never-drop"` (that floor must never be silently weakened). Stays FTS-reachable even when its
+   * predicate doesn't fire, unlike an ordinary pinned note. See
+   * docs/decisions/aeec1880-triggerglob-gates-pinned-delivery-to-a-matching-kickoff-path.md for the two
+   * rejected alternatives (tool name, card label) and the full gating contract.
    */
   triggerGlob: string | null;
 }

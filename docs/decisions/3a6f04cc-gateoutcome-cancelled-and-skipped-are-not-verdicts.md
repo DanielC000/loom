@@ -10,13 +10,20 @@ CORRECTED (card 518e7ff6): the SIBLING transient-kill-retry cancel-while-queued 
 
 Card db9b0130: `"skipped"` is likewise a DISTINCT non-verdict, not a `"pass"` — a merge whose diff was proven inert (see `isInertMergeDiff`) never spawned a gate process at all, so recording it as a pass would reintroduce the exact defect `gateRan` was added to fix, via a new door: a rate computed from `outcome === "pass"` alone would silently count a non-run as a measurement. Always paired with `gateRan:false` on the same row.
 
+### `GateHistoryRow.passed` carries the identical trap under a different name
+
+`passed` (card 753d9911, a plain `outcome === "pass"` boolean sibling added so agent-facing consumers don't have to derive pass/fail from the outcome enum themselves) is `false` for BOTH a genuine `"reject"` row and a `"cancelled"`/`"skipped"` row — but `passed:false` means something different on each: a cancelled run reached no verdict at all (withdrawn, not failed), and a skipped row's underlying event actually stamps `detail.passed:true` internally (so the merge could proceed to squash) even though this derived field still reads `false` for it. A caller computing a rejection RATE must filter on `outcome === "reject"`, never on `passed === false` alone, or a cancellation/skip is silently counted as a failure — the same rule as the `outcome` field itself, restated because `passed`'s own boolean shape invites exactly this shortcut. `passed`'s shape is deliberately left unchanged (still just `outcome === "pass"`) rather than widened to a tri-state; `outcome` is where the real granularity lives.
+
 ## Do not
 
 - Do not count `outcome === "cancelled"` as a failure/rejection when computing a pass/fail or rejection rate — a cancelled run reached no verdict at all.
 - Do not count `outcome === "skipped"` as a pass — an inert-diff merge that never spawned a gate process; always paired with `gateRan:false`.
 - Do not read a single-file-retry cancel-while-queued row's `cancelled:true` as losing attempt 1's real failure — it's recorded on the sibling `build_gate` event.
 - Do not read a transient-kill-retry `"reject"` row in isolation — a rejection-rate consumer must pair it (same `opId`) with any immediately-following `cancelled` `build_gate_retry` row and treat the pair as one unresolved op, not a rejection.
+- Do not compute a rejection rate off `GateHistoryRow.passed === false` alone — it is `false` for a cancelled/skipped row too; filter on `outcome === "reject"` instead.
 
 ## Source
 
 Inline comment in `packages/shared/src/types.ts` (`GateOutcome`'s type doc). Relocated by card 35d90c4e (tranche 1 on `packages/shared/src/types.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+
+The "`GateHistoryRow.passed`" section above was appended by tranche 3 on `packages/shared/src/types.ts` (card 555f817f), extracted from `GateHistoryRow.passed`'s own doc comment — same decision, a second field it governs, folded into this existing file per the one-record-per-id rule rather than a new one.
