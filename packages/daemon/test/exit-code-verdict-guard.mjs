@@ -149,12 +149,20 @@ check("sanity: a process.exit( mentioned only in a comment is NOT recognised",
 
 // ── Real historical specimen control, run against the ACTUAL current (fixed) file: strip the fix back off
 // and confirm the guard would have caught the real, shipped defect — not a synthetic stand-in for it.
+//
+// Anchor (card 3a403028): locate the fix by the fix MECHANISM ITSELF — the literal `process.exit(` call
+// this guard's own PROCESS_EXIT_RE already recognises — never a prose comment above it. A comment can be
+// reworded or deleted with zero build/behavioral consequence, silently invalidating an indexOf anchor
+// (the exact fragility that made 7/9 checks spuriously fail in card b4721c06, rejecting an innocent
+// branch). This call cannot be removed or relocated without also flipping the "CURRENT (fixed) file IS
+// recognised as safe" check immediately below, which depends on that exact same mechanism being present
+// in the file — so any accidental loss of the anchor surfaces as an expected, legible failure instead of
+// a silent garbage slice.
 {
   const fixedPath = path.join(TEST_DIR, "merge-confirm-verdict-cache.mjs");
   const fixedSource = fs.readFileSync(fixedPath, "utf8");
-  const FIX_MARKER = "// Card 82bb198a:";
-  const markerIdx = fixedSource.indexOf(FIX_MARKER);
-  check("historical control: the fix marker is present in the current (fixed) file", markerIdx !== -1);
+  const markerIdx = fixedSource.search(PROCESS_EXIT_RE);
+  check("historical control: the fix mechanism (a process.exit( call) is present in the current (fixed) file", markerIdx !== -1);
   const preFixSource = markerIdx === -1 ? fixedSource : fixedSource.slice(0, markerIdx);
   check("historical control: the CURRENT (fixed) file IS recognised as safe",
     classifyExitMechanism(stripComments(fixedSource)).safe);
