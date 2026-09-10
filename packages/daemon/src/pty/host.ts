@@ -1961,11 +1961,10 @@ export type QueuedMessage = { id: string; text: string; source: QueueSource; onD
  */
 export type EnqueueDeliveryReason = "session-dead" | "held";
 /**
- * `enqueueStdin`'s full return shape (card `13e32e1d`, phase 2 of `7acee6d4`). `delivered` NEVER changes
- * meaning — callers and tests read it as-is (delivered now vs not-yet). The problem this type fixes is
- * that a `held` outcome (a SUCCESSFUL, durable enqueue — it WILL be RETRIED until land) used to report
- * through `delivered:false` ALONE, reading identically to an actual drop. These fields are ADDITIVE,
- * present ALONGSIDE `delivered`/`reason`, and only meaningful on the `held` path:
+ * `enqueueStdin`'s full return shape. `delivered` NEVER changes meaning — callers and tests read it
+ * as-is (delivered now vs not-yet). @decision 13e32e1d — why these fields exist (a `held` outcome used
+ * to be indistinguishable from a drop). These fields are ADDITIVE, present ALONGSIDE `delivered`/
+ * `reason`, and only meaningful on the `held` path:
  *   - `queued: true` — this text is durably recorded and will be retried at the recipient's next turn
  *     boundary; this is success, not failure. NOT an unconditional delivery guarantee though — a message
  *     that keeps giving up (the recipient's Enter never confirms) can still exhaust its redelivery budget
@@ -1982,22 +1981,14 @@ export type EnqueueDeliveryReason = "session-dead" | "held";
  * `position` and `msgId` are unchanged in meaning (msgId is added by the higher-level durable-message
  * wrapper in sessions/service.ts, not by enqueueStdin itself — see `enqueueDurableMessage`).
  *
- * `deliveryState` (card 9da2a435, additive; CR follow-up [3] on top of an earlier `confirmed:boolean` that
- * was rejected for carrying zero bits — it was present only alongside `delivered:true` and NEVER varied,
- * so it discriminated nothing a caller could act on): `"handed-off" | "queued" | "dropped"`, ALWAYS
- * present, one-to-one with which branch of this function actually ran — the honest per-call outcome,
- * spelled out instead of left to be inferred by cross-referencing `delivered`/`reason`/`queued`.
- * `"handed-off"` (the immediate-submit branch) makes explicit what `delivered:true` has always actually
- * meant and never stopped meaning: the text was HANDED to `submit()` as a turn attempt — NOT that the
- * engine confirmed receiving it. That confirmation (`fireEnterAndVerify`'s hook round-trip) is asynchronous
- * and can still GIVE UP after this call already returned — the live specimen behind this card was exactly
- * that: `worker_message` returned `{delivered:true}` for a message that never reached the worker's
- * transcript. A caller that needs to know the real outcome must correlate `msgId` against a later
- * `worker_list`/`worker_status` read (`staleDirective`/`parkedDirective` — see `staleDirectiveProjection`
- * in mcp/orchestration.ts), which DOES read the durable `session_message_gave_up` trail this synchronous
- * return value cannot see yet. `"queued"` (the held branch) and `"dropped"` (the `session-dead` branch)
- * are the SAME per-branch identity `delivered`/`reason`/`queued` already convey — `deliveryState` doesn't
- * add new information there, it just gives a caller one field to read instead of three.
+ * `deliveryState`: `"handed-off" | "queued" | "dropped"`, ALWAYS present, one-to-one with which branch of
+ * this function actually ran — the honest per-call outcome, spelled out instead of left to be inferred by
+ * cross-referencing `delivered`/`reason`/`queued`. `"handed-off"` (the immediate-submit branch) means the
+ * text was HANDED to `submit()` as a turn attempt — NOT that the engine confirmed receiving it; a caller
+ * that needs the real outcome must correlate `msgId` against a later `worker_list`/`worker_status` read
+ * (`staleDirective`/`parkedDirective` — see `staleDirectiveProjection` in mcp/orchestration.ts). `"queued"`
+ * and `"dropped"` are the SAME per-branch identity `delivered`/`reason`/`queued` already convey.
+ * @decision 9da2a435 — why `deliveryState` exists alongside `delivered` instead of replacing it.
  */
 export type EnqueueResult = {
   delivered: boolean;
@@ -2217,11 +2208,8 @@ interface Live {
   // real shape), and `busy` deliberately stays true afterward — so `healIfStuck` can ALSO observe the SAME
   // still-unconfirmed generation later (its own backstop for a suppression staleness itself never
   // resolves). `.has(gen)` is the guard against marking the identical abandoned text twice.
-  // ⛔ Card a6c1d413 (the bug this replaces): a SINGLE scalar `composerDirtyMarkedForGen: number | null`
-  // used to hold only the MOST RECENT contributor — a confirm of THAT generation blindly zeroed the WHOLE
-  // additive total, with no way to tell "the whole total is resolved" from "only the latest contributor
-  // is." A Map lets `clearComposerDirtyOnConfirm` (see its own doc) resolve exactly the contribution(s) a
-  // given confirmation actually proves, and leave the rest genuinely dirty.
+  // @decision a6c1d413 — replaces a single scalar that couldn't tell partial resolution from total
+  // resolution; see docs/decisions/a6c1d413-composerdirtymarkedgens-replaces-a-single-scalar-that-lost-partial-resolution.md
   composerDirtyMarkedGens: Map<number, number>;
   // Card b9b8f8db: the `submitGeneration` whose submit() actually wrote FRESH body bytes (the plain paste,
   // or the full defensive clear+repaste) — null/mismatched for a generation that took the Enter-only
@@ -2247,14 +2235,11 @@ interface Live {
                         // drain/submit (mirror of `stopping`) so the ~10s reconcile drain can't submit pending
                         // into the capped account and CLOBBER lastPrompt — the killed turn resumeAfterRateLimit
                         // must replay. Set when the StopFailure is detected as rate_limit; cleared on resume.
-  // Card 2521bf51 (a human Enter never arms busy, so the drain races the turn it just started): epoch ms
-  // deadline until which drainPending SUPPRESSES a queued turn after a genuine human Enter-SUBMIT
-  // (`nextRawDraftState`'s `draft.submitted !== null`) — set by writeStdin instead of draining promptly,
-  // because unlike `busy` (only ever armed by submit()'s own M1 optimistic set), nothing tells Loom a
-  // human-typed turn is genuinely in flight until claude's OWN `UserPromptSubmit` hook actually fires,
-  // asynchronously, after it has processed the Enter. Draining on local byte-counting alone (composerLen
-  // hitting 0) would submit the queued turn into a composer claude may still be transitioning out of —
-  // the exact race this card fixes. Cleared to `null` the instant a confirming hook (UserPromptSubmit or
+  // @decision 2521bf51 — closes a race between a human's own Enter and the queue drain; see
+  // docs/decisions/2521bf51-humansubmitheldeuntil-closes-a-race-between-a-human-enter-and-the-drain.md
+  // epoch ms deadline until which drainPending SUPPRESSES a queued turn after a genuine human Enter-SUBMIT
+  // (`nextRawDraftState`'s `draft.submitted !== null`) — set by writeStdin instead of draining promptly.
+  // Cleared to `null` the instant a confirming hook (UserPromptSubmit or
   // Stop — either is proof the turn genuinely started, see the Stop handler's own reasoning) arrives, so
   // the common case resolves promptly. The DEADLINE is a bounded backstop only, for the rare case BOTH
   // hooks are lost for this turn: past it, drainPending treats the hold as expired and proceeds — so a
