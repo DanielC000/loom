@@ -2,39 +2,26 @@ import type { Agent, Profile, Project } from "@loom/shared";
 
 /**
  * Shared MCP-layer row projections for the platform + setup routers' Project/Agent/Profile
- * single-record reads/writes and cross-project lists (card 4f2b2da7, same class as f8d53712's
- * `projectSessionRowFields` for Session). A handler that returns `db.getProject()` / `db.getAgent()` /
- * `db.getProfile()` (spread or bare) ships every column on those tables to the calling agent
- * automatically — an OPT-OUT shape where the next column added there reaches the wire with no code
- * change and no review step.
+ * single-record reads/writes and cross-project lists — never spread a raw `db.getProject()` /
+ * `db.getAgent()` / `db.getProfile()` row into a tool response; use the `xFields()` helpers below,
+ * which name every field explicitly.
+ * @decision 4f2b2da7 — a raw spread is an OPT-OUT shape: the next column added to that table reaches
+ * the wire with no code change and no review step.
  *
- * COMPILE-TIME TOTALITY, both REQUIRED and OPTIONAL fields: each type's field list below is written
- * once, as a `Record<keyof T, 1>` sentinel (`PROJECT_FIELDS` etc.) — `keyof T` includes OPTIONAL
- * keys too, unlike a hand-typed `const x: T = {...}` object literal, which TypeScript only forces to
- * name REQUIRED fields (an added `newThing?: X` on `T` compiles fine against a literal that never
- * mentions it, so that shape alone would silently DROP a future optional field from the projection —
- * caught the hard way on `Profile`, which is 7-of-15 fields optional: see git history for the version
- * of this file that had that gap, and the guard's own history for how it was proven). A field added to
- * `Project`/`Agent`/`Profile` in `@loom/shared` — required OR optional — now breaks the build at the
- * matching sentinel below until it's a deliberate, reviewed addition. ONE list per type, not two: the
- * sentinel's own keys ARE the field list the runtime projection iterates, so there is nothing to keep
- * in sync by hand.
+ * Each type's field list below is written ONCE, as a `Record<keyof T, 1>` sentinel (`PROJECT_FIELDS`
+ * etc.), not a hand-typed object literal — `keyof T` forces BOTH required and optional keys, so a
+ * field added to `Project`/`Agent`/`Profile` in `@loom/shared`, required OR optional, breaks the build
+ * at the matching sentinel below until it's a deliberate, reviewed addition.
+ * @decision sha:529b6f41 — do not replace with a hand-typed `const x: T = {...}` literal; TypeScript
+ * only forces such a literal to name REQUIRED fields, so it would compile fine while silently
+ * dropping a future OPTIONAL field from the projection.
  *
- * ⚠️ THE SENTINEL VALUE IS THE NUMBER `1`, NOT THE BOOLEAN LITERAL — DELIBERATELY, and this comment
- * deliberately never spells out the colon-then-boolean sequence it's warning about, since
- * `test/agent-runs-keys.mjs` (G3) textually scans every compiled `dist/mcp/*.js` file's raw source
- * (comments included — it has no idea what a comment is) for that exact sequence on the `endpoint`
- * field (an Agent Runs trust-boundary guard: no MCP path may flip an agent's `endpoint` field or mint an
- * API key, only the loopback REST surface may). This sentinel's `endpoint` entry used to hold that
- * boolean literal, and TypeScript compiles a `Record` object literal's key/value pairs straight into the
- * `.js` output as literal text — so the sentinel's own meaning ("this field is projected") collided,
- * purely textually, with the guard's real question ("does any MCP path SET that field to that value").
- * The guard is right to be this blunt (a false positive here is far cheaper than a false negative on a
- * real trust-boundary leak) — so the fix is on this side: a numeric marker carries the exact same
- * compile-time exhaustiveness guarantee (still `Record<keyof T, ...>`, still forces every key) without
- * colliding with G3's pattern. If you're tempted to "tidy" the value back to a boolean to match the other
- * sentinels' apparent style, don't — that silently re-breaks the gate on the next merge, and won't even
- * show up locally unless you happen to run G3.
+ * ⚠️ THE SENTINEL VALUE IS THE NUMBER `1`, NOT THE BOOLEAN LITERAL — DELIBERATELY: `test/agent-runs-
+ * keys.mjs` (G3) textually scans every compiled `dist/mcp/*.js` file's raw source for a colon-then-
+ * boolean sequence on the `endpoint` field (an Agent Runs trust-boundary guard: no MCP path may flip
+ * an agent's `endpoint` field or mint an API key). Never "tidy" this value back to a boolean.
+ * @decision sha:529b6f41 — a boolean sentinel here collides, purely textually, with G3's pattern and
+ * silently re-breaks that guard on the next merge, with nothing failing locally unless you run G3.
  *
  * BEHAVIOUR-PRESERVING, not a trim: every field on each type is projected, including ones no tool
  * description currently names by name (e.g. Profile's `connections`/`capabilities`/`vaultWrite` — the
@@ -100,41 +87,8 @@ type ProfileWireView = Omit<Profile, "harness"> & { harness: "claude" | "codex" 
 export function profileFields(row: Profile | undefined): ProfileWireView | undefined {
   if (row === undefined) return row;
   const picked = pickFields(row, PROFILE_KEYS);
-  // Card 3edf6ef7: an unset `harness` (a NULL column becomes `undefined` per db.ts's `toProfile`) and a
-  // field this projection simply doesn't carry are INDISTINGUISHABLE once this router's `ok()` envelope's
-  // `JSON.stringify` drops the undefined-valued key — `profile_get`/`list_all_profiles` could not answer
-  // "has this profile's harness been set" without querying the `profiles` table directly.
-  //
-  // The fix has to answer a SEMANTIC question, not just a structural one: what should an unset harness
-  // serialize as? Resolving it to the shipped default literal ("claude") only trades one ambiguity for
-  // another — a reader could no longer tell "never touched" from "explicitly set to claude", which is
-  // exactly the property this card exists to make readable (a human write path now exists with no
-  // trustworthy read-back). `null` is the right value: it mirrors what the DB column itself already
-  // means (NULL = unset; insertProfile's own comment: "NULL = 'claude' (absent ⇒ today's only harness)"),
-  // so `null` = unset, `"claude"`/`"codex"` = explicitly set — three distinguishable, always-present wire
-  // states from two DB states plus the resolved default.
-  //
-  // Widening a LOCAL, wire-only return type (ProfileWireView, above) — never `Profile` itself — deliberately
-  // sidesteps the type constraint this card also flags (`Profile.harness` is `?: "claude" | "codex"` with
-  // NO `null` member): nothing downstream treats `profileFields()`'s result as a real `Profile` (every
-  // call site pipes it straight into `ok(...)` for the wire), so this widening has zero blast radius
-  // outside this one function's return value.
-  //
-  // Deliberately NOT fixed by changing db.ts's `toProfile()` (or the analogous `toSession()`) to stop
-  // returning `undefined` for an unset harness: that shared object is reused UNWRAPPED as the merge base
-  // in `profile_update`/`PUT /api/profiles/:id` (`{...existing, ...patch}` → `validateProfile` →
-  // `updateProfile`), whose partial-edit semantics treat an `undefined` `harness` as "leave the column
-  // as-is" (validate.ts's own doc comment on this field). Resolving it to ANY concrete value at that
-  // shared layer — `null` included — would silently persist it into a previously-NULL column on ANY
-  // unrelated profile edit — a write-path side effect this READ-only card must not introduce.
-  // `Session.harness` (db.ts's other mapper, `toSession`) does NOT have this hazard, despite sharing the
-  // identical `?: "claude" | "codex"` type shape: no `UPDATE sessions SET` statement in db.ts touches the
-  // `harness` column at all, and the fork/recycle "carry the pinned vendor CLI forward" call sites
-  // (sessions/service.ts) each build a brand-new `Session` literal (never a partial update) via
-  // `old.harness ?? undefined`, which `insertSession`'s own binding (`s.harness ?? null`) collapses to the
-  // same NULL regardless of whether the source was `undefined` or an explicit `null` — so there is no
-  // "leave-as-is" semantic on the Session side to disturb. The real blocker on `toSession()` is a TYPE
-  // one instead: `Session.harness` has no `null` member, so returning an explicit `null` there wouldn't
-  // compile without widening that shared type — out of scope here.
+  // @decision 3edf6ef7 — unset `harness` resolves to `null` here (LOCAL wire type only, never `Profile`
+  // itself); never fix this in db.ts's toProfile()/toSession() instead — that breaks profile_update's
+  // partial-edit "leave the column as-is" semantics on unrelated writes.
   return { ...picked, harness: picked.harness ?? null };
 }
