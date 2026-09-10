@@ -6822,10 +6822,8 @@ export class PtyHost {
    *   - composer-dirty: writing onto the human's half-typed raw-terminal text concatenates the two
    *     into one garbled message (the observed manager/worker collision) — so we HOLD until the human
    *     frees their box (Enter/Ctrl-C/Esc/kill-line, or backspaces it empty). See deferForHumanDraft.
-   *   - human-submit-unconfirmed (card 2521bf51): a genuine human Enter-submit frees the box locally
-   *     (composerLen hits 0) before claude's own engine has confirmed it actually started the turn — a
-   *     message ARRIVING in that gap must HOLD too, not just one already queued before the Enter, or it
-   *     races into a composer claude may still be transitioning out of. See `isHumanSubmitHeld`.
+   *   - @decision 2521bf51 — human-submit-unconfirmed: HOLD a message arriving before claude's engine
+   *     confirms a human Enter-submit actually started the turn, same as one queued before the Enter.
    * Also self-heals a STUCK-busy session first, so a report can't strand behind a phantom 'busy'.
    * Returns whether it went out now, or its 1-based queue position. A `delivered:false` result also
    * carries `reason` (see EnqueueDeliveryReason) so a caller can tell a dead-drop (`"session-dead"` —
@@ -6863,35 +6861,27 @@ export class PtyHost {
    * `true`, so their fired turn's `getActiveTurnIsProactive` reads true and the companion's chat_reply can
    * tag its outbound frame + persisted history row for the web chat's amber event-line render.
    *
-   * `giveUpHeldUntil` (card 9e27f4d2) is an OPTIONAL trailing arg, appended last for the same byte-
-   * identical-by-default reason — every existing caller omits it by default. `resumeFleetOnBoot`'s
-   * restart-intent replay passes it, restoring a give-up-requeued entry's hold deadline (see
-   * `getPersistablePendingSnapshot`) onto the freshly re-enqueued entry so a restart
-   * landing mid-hold-window doesn't skip the hold entirely. Card f25bf3bf's companion capability re-pin
-   * respawn (`SessionService.upgradeCompanionCapabilities`) passes it too, for the same reason — it also
-   * reconnects the SAME engine session via `--resume`. `SessionService.carryPendingToSuccessor` (the
-   * recycle carry path, same card) deliberately does NOT — see its own doc for why a fresh, non-resumed
-   * successor doesn't need the hold. `stillGiveUpHeld` below pushes that
-   * invariant into THIS shared unit rather than leaning on caller ordering: code review on this same
-   * card flagged that safety here depended only on `replayPending` always running before readiness (true
-   * today, but nothing enforces it) — a still-in-the-future `giveUpHeldUntil` now forces the held-push
-   * path even if the session happens to already be idle-ready, so the hold can never silently evaporate
-   * just because some future caller/reorder takes the immediate branch instead.
+   * `giveUpHeldUntil` is an OPTIONAL trailing arg, appended last for the same byte-identical-by-default
+   * reason — every existing caller omits it by default.
    *
-   * `onGiveUpExhausted` (card ccb407eb) is likewise an OPTIONAL trailing arg, appended last for the same
-   * byte-identical-by-default reason — every existing caller omits it. `enqueueDurableMessage` is the one
-   * caller that supplies it, on BOTH the immediate-submit synthesized origin and the held push below, so a
-   * durable "agent"/settle-nudge message that later exhausts its give-up budget always has a hook to park
-   * or re-mint through, however it happened to be delivered. See {@link QueuedMessage}'s own doc for why
-   * this is a distinct hook from `onDeliver`.
+   * @decision 9e27f4d2 — `resumeFleetOnBoot`'s restart replay and (card f25bf3bf) the companion re-pin
+   * respawn both pass this to restore a give-up hold across their own reconnect; `carryPendingToSuccessor`
+   * deliberately does not — a fresh, non-resumed successor doesn't need it.
    *
-   * Card 3f09f9ce: the tail (`giveUpHeldUntil` onward) also accepts a SINGLE OPTIONS OBJECT ({@link
-   * EnqueueStdinTail}) in place of the five trailing positional params, via the overload below — additive,
-   * so every existing positional call site (and every `.mjs` test double standing in for this method —
-   * untyped, so nothing here typechecks them; see the card for the test-double audit this required) keeps
-   * working byte-identical. New call sites should prefer the options form: a miscount among 5 same-typed
-   * trailing positions typechecks cleanly and fails silently — which is exactly how two call sites
-   * silently dropped `logicalId`/`mintedAtGen`/`mintedAtWallClock` before (card 02baa3a5).
+   * @decision 9e27f4d2 — `stillGiveUpHeld` below enforces the hold HERE, in this shared unit, never by
+   * trusting caller ordering: a still-future deadline forces the held-push path even when the session is
+   * already idle-ready, so the hold can never silently evaporate on a future caller/reorder.
+   *
+   * `onGiveUpExhausted` is likewise an OPTIONAL trailing arg, appended last for the same byte-identical-
+   * by-default reason — every existing caller omits it.
+   *
+   * @decision ccb407eb — `enqueueDurableMessage` is the only caller supplying `onGiveUpExhausted`, on
+   * both the immediate-submit and held-push paths, so an exhausted durable message always has a park/
+   * re-mint hook; deliberately not a reuse of `onDeliver` — see {@link QueuedMessage}'s own doc.
+   *
+   * @decision 3f09f9ce — the tail also accepts a single options object ({@link EnqueueStdinTail}) in
+   * place of 5 trailing positional params, additive alongside every existing (typed and untyped test-
+   * double) call site; prefer it for new call sites — a positional miscount fails silently (02baa3a5).
    */
   enqueueStdin(sessionId: string, text: string, source?: QueueSource, onDeliver?: () => void, route?: TurnRoute, kind?: QueuedMessageKind, questionId?: string, ownerText?: string, proactive?: boolean, senderId?: string | null, tail?: EnqueueStdinTail): EnqueueResult;
   enqueueStdin(sessionId: string, text: string, source?: QueueSource, onDeliver?: () => void, route?: TurnRoute, kind?: QueuedMessageKind, questionId?: string, ownerText?: string, proactive?: boolean, senderId?: string | null, giveUpHeldUntil?: number, onGiveUpExhausted?: () => void, logicalId?: string, mintedAtGen?: number, mintedAtWallClock?: number): EnqueueResult;

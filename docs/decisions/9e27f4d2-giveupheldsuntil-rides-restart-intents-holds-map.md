@@ -34,3 +34,17 @@ the log is what makes that duplicate identifiable to an operator instead of myst
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts` (`requestDaemonRestart`): lines 4306-4312, as of commit `6faf27824c7f550d57bfdeb9e4724c7070b82315`. Relocated by card `5b8d2b0c`; no wording changed, wrapped source lines joined into a flowing paragraph and the `//` comment markers stripped. "The snapshot" this paragraph continues is `docs/decisions/2ca18433-restart-pending-snapshot-excludes-durable-messages.md` (the immediately preceding paragraph at this same site). The replay-side section above sources a second, related site: `resumeFleetOnBoot`'s `replayPending`, lines 4427-4436, as of this tranche's HEAD (tranche 12).
+
+## `enqueueStdin`'s own `giveUpHeldUntil` param enforces the hold itself, never trusts caller ordering
+
+`resumeFleetOnBoot`'s restart replay and (card `f25bf3bf`) the companion capability re-pin respawn both pass a restored `giveUpHeldUntil` into `enqueueStdin`; `carryPendingToSuccessor` (same card) deliberately does not — see that record for why.
+
+Code review found safety here depended only on `replayPending` running before readiness (true then, but unenforced) — so `enqueueStdin` itself now checks `stillGiveUpHeld` and forces the held-push path for any still-future deadline, even when the session is already idle-ready, so the invariant can't evaporate on a future caller/reorder.
+
+## Do not (2)
+
+- Do not rely on caller ordering to keep a restored `giveUpHeldUntil` honored — `enqueueStdin` enforces it itself via `stillGiveUpHeld`.
+
+## Source (2)
+
+Inline comment in `packages/daemon/src/pty/host.ts` (`enqueueStdin`'s `giveUpHeldUntil` paragraph), as of `main` `7c501c6d`. Extracted by card `17eee9f0` (tranche 25).
