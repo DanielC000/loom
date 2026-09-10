@@ -96,41 +96,11 @@ export interface VaultGitDeps {
   flushCommitTimeoutMs?: number;
 }
 
-/**
- * **`GIT_TERMINAL_PROMPT=0` is DELIBERATELY NOT SET here — a finding, not an oversight (card 54b839c5).**
- * The obvious shape, `simpleGit(p, {...}).env({ ...process.env, GIT_TERMINAL_PROMPT: "0" })` (the shape
- * `restart.ts`'s `defaultGitLogSince` USED TO use — card 469b5e67 removed it there, and that call site now
- * points back at this doc for the same reasoning instead of carrying its own copy), was tried and
- * REVERTED after it broke two real things, verified live rather than assumed:
- *  1. It throws outright the instant an ambient editor/pager var is set (`GitPluginError: Use of
- *     "GIT_EDITOR" is not permitted without enabling allowUnsafeEditor` — reproduced in the very shell
- *     this fix was developed in; this repo's own worker/session spawn recipe additionally sets
- *     `GIT_PAGER`/`PAGER` — see root CLAUDE.md). This alone is fixable by stripping that family, same as
- *     `git/writer.ts`'s `nonInteractiveEnv()` does — but:
- *  2. `simpleGit(...).env(obj)` REPLACES the instance's whole env with `obj` (verified against the
- *     installed package: `Git2.prototype.env` sets `this._executor.env = obj` outright, not a merge)
- *     — so `obj` must ALSO carry `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` whenever the CALLER has them set,
- *     to preserve a caller's legitimate config redirection. But simply having those two keys PRESENT in
- *     an explicitly-supplied `.env()` object trips simple-git's `blockUnsafeOperationsPlugin` too (a
- *     DIFFERENT category, `allowUnsafeConfigPaths` — the exact one `commitVault`'s own identity fallback,
- *     two sections below, already avoids reopening, via `-c` args instead of env, for the same reason).
- *     STRIPPING those two keys instead of passing them through is not a safe alternative either — verified
- *     live: `test/vault-write-tool.mjs`'s hermetic identity-fallback case (f1) sets
- *     `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` to nonexistent paths SPECIFICALLY so `commitVault` sees NO
- *     resolvable identity and exercises its Loom-fallback path; stripping those keys from the child's env
- *     instead lets git fall back to this HOST's real `~/.gitconfig` — this dev host has one configured
- *     (`git config --global user.name` → a real identity), which would make that test silently commit
- *     under the WRONG (real, non-fallback) identity instead of throwing — a worse failure than a loud
- *     crash, since it passes or fails depending on the runner's own host config rather than the code.
- *
- * Given neither path is safe, and `commitVault` performs NO network operation (no fetch/push/clone —
- * `checkIsRepo`/`revparse`/`init`/`add`/`status`/`commit` are all local), `GIT_TERMINAL_PROMPT` has no
- * live effect here regardless: it only governs git's OWN credential-prompt logic during HTTP(S) auth,
- * which this function can never trigger. The timeout bounding below (the actual, functionally load-bearing
- * fix for the hang this card is about) does not depend on `.env()` at all. `CLAUDE.md`'s "every git write
- * is bounded + non-interactive" invariant is satisfied here by the bound; the terminal-prompt half is
- * moot for a call sequence that never touches the network.
- */
+/** @decision 54b839c5 — `GIT_TERMINAL_PROMPT=0` is deliberately NOT set here: the obvious `.env()` shape
+ *  that would add it was tried and reverted (it broke two real things — GitPluginError on an ambient
+ *  editor/pager var, and `.env()` replacing rather than merging the whole child env); moot anyway since
+ *  `commitVault` never touches the network. See
+ *  docs/decisions/54b839c5-bound-vault-git-plumbing-calls-and-unstageoversizedfiles-reset-semantics.md. */
 
 /** Build the bounded git instance + resolve the timeout for one vault-versioner op, applying the seam's
  *  defaults. No `.env()` override (see the doc immediately above for why — card 54b839c5). */
@@ -144,64 +114,20 @@ function boundedVaultGit(
 }
 
 /**
- * Card 39ceb732 (chokidar opens one OS handle per watched entry, no cap): CANDIDATE top-level entries a
- * repo's own root `.gitignore` lists — a bare, non-root-anchored name or `name/`, no wildcards, no
- * negation, no nested path (e.g. `_external/`). **These are CANDIDATES ONLY, not yet safe to exclude from
- * the watcher** — see {@link safeToExcludeNames}, which is the function that actually decides what to
- * exclude. `.gitignore` has NO effect on an already-TRACKED path (confirmed live: committing a file, then
- * adding its directory to `.gitignore`, then editing it — `git add .` still stages the edit, and
- * `git check-ignore` reports the tracked file as NOT ignored), so a name straight out of this function is
- * NOT provably safe to stop watching on its own; excluding one that turns out to have tracked content
- * under it would silently stop auto-committing edits to real, history-bearing files.
- *
- * Deliberately narrow, NOT full gitignore semantics: no negation (`!`), no glob syntax, no nested paths,
- * no ROOT-ANCHORED entries (a leading `/`, e.g. `/dist` — anchoring means "top-level only", which is
- * narrower than the any-depth match this module's `ignored` pattern makes, so honoring it correctly would
- * need a second, differently-anchored regex; simpler and safer to just leave it watched, matching the
- * "unknown pattern → leave alone" fail-safe below), no LEADING whitespace (git treats it as SIGNIFICANT —
- * a line like ` scratch/` does NOT ignore `scratch/`; `.trim()`ing it away used to generate a candidate git
- * never actually excludes — the one place this parser broke its own fail-safe doctrine, in the UNSAFE
- * direction, live-verified), no TRAILING whitespace after removing a directory-marker slash (git strips
- * unescaped trailing spaces but honors an escaped one — rather than replicate that, any leftover trailing
- * whitespace is treated as "not understood"), and no BACKSLASH (an escape sequence we don't interpret —
- * e.g. an escaped leading `#`/`!`, or an escaped trailing space — so we cannot know what the real pattern
- * means; leave it watched rather than guess). A pattern we don't understand is simply left alone — we keep
- * watching it (today's status quo) — so a false negative here only costs us the handles we already had; it
- * can never mis-translate into excluding something that WOULD have been committed. Best-effort: a
- * missing/unreadable `.gitignore` returns `[]`.
- *
- * **A `:`-leading line is NOT specially rejected here (card 687d2a47 finding 1) — see
- * {@link gitTrackedTopLevelNames}'s doc for why the fix lives at the git-query SINK instead.** A one-line
- * `if (lineRaw.startsWith(":")) continue;` here was considered (cheapest, matches this parser's own
- * "unknown → leave watched" doctrine) and rejected: finding 3 (below) independently forces
- * `gitTrackedTopLevelNames` to wrap every candidate in git pathspec magic anyway (`:(icase)`, to get
- * case-insensitive matching), and folding `,literal` into that SAME wrapper closes finding 1 for free, at
- * the one place that actually talks to git, with no separate parser rule to keep in sync. Prefer this
- * over a source-side skip that would become the odd one out once the sink already treats candidate text
- * as opaque literal data.
- *
- * **A `name/`-form line is git's DIRECTORY-ONLY pattern (card 687d2a47 finding 2), live-verified:** with
- * `.gitignore` = `thing/` and a top-level FILE named `thing`, `git check-ignore -v thing` exits 1 — NOT
- * ignored; only a same-named DIRECTORY is ignored by that pattern. This parser strips the trailing slash
- * unconditionally, and the exclusion regex built from the result (`buildIgnoredPattern`) matches a bare
- * file of that name too (its `([/\\]|$)` alternative), which would over-exclude a top-level, extension-less
- * FILE sharing a `name/` entry's name. Requiring `name` to CURRENTLY be a real directory on disk before
- * emitting the candidate closes the plain-file case, but "real directory" must be judged by
- * **`fs.lstatSync`, not `fs.statSync`** (round-4 review, live-verified on WSL Ubuntu 22.04/git 2.34.1,
- * Windows can't create the fixture): an UNTRACKED **symlink to a directory** is NOT ignored by a `name/`
- * pattern (`git check-ignore -v thing` exits 1 for `thing` → `realdir/`, vs. exit 0 for a real directory)
- * and `git add .` DOES stage it — but `fs.statSync` (which follows symlinks) reports it as a directory,
- * so a `statSync`-based check would emit the candidate anyway and over-exclude live, staged content.
- * `fs.lstatSync` (which does NOT follow symlinks) correctly reports the symlink as not-a-directory, so the
- * candidate is left un-generated for it — matching git's own real behavior. **Accepted, priced-out cost:**
- * a Windows **junction** IS ignored by git's `name/` pattern (behaves like a real directory to git) but
- * `lstatSync` also reports it as not-a-directory, so a junction's candidate is never generated either —
- * under-generating (leaves it watched, a few extra handles), never the reverse. Do not special-case
- * junctions back in to reclaim those handles; that reopens the exact symlink-to-dir over-generation this
- * fix closes, since Node's `fs` has no portable way to tell "junction" (git-ignorable) apart from "symlink
- * to dir" (NOT git-ignorable) without shelling out. A bare `name` line (no trailing slash) is unaffected —
- * git already matches it against both a file and a directory of that name, which is exactly what the
- * existing regex does.
+ * @decision 39ceb732 — CANDIDATE top-level entries a repo's own root `.gitignore` lists (a bare,
+ *  non-root-anchored name or `name/`, no wildcards/negation/nested paths). **CANDIDATES ONLY, not yet
+ *  safe to exclude from the watcher** — see {@link safeToExcludeNames}, the function that actually
+ *  decides. `.gitignore` has NO effect on an already-TRACKED path, so a name straight out of this
+ *  function is not provably safe to stop watching on its own. See
+ *  docs/decisions/39ceb732-chokidar-handle-cap-watch-exclusion-and-size-warning.md.
+ * @decision 687d2a47 — deliberately narrow, not full gitignore semantics (no negation/glob/nested/
+ *  root-anchored, no leading/trailing-whitespace or backslash-escape handling beyond what git itself
+ *  treats as significant); an unrecognized pattern is left watched, never guessed at — a false negative
+ *  here only costs handles already held, it can never mis-translate into excluding real content. A
+ *  `name/`-form line is git's directory-only pattern, so its candidate requires `fs.lstatSync` (not
+ *  `fs.statSync`) confirming a real directory — see the record for why, and for the `:`-leading-line and
+ *  Windows-junction findings behind this shape. Best-effort: a missing/unreadable `.gitignore` returns
+ *  `[]`. See docs/decisions/687d2a47-gitignore-parser-and-tracked-check-over-generation-fixes.md.
  */
 export function gitignoredTopLevelNames(repoRoot: string): string[] {
   let raw: string;
@@ -233,68 +159,22 @@ export function gitignoredTopLevelNames(repoRoot: string): string[] {
  * tracked FILE of that name, or a tracked file somewhere under a same-named directory. ONE batched
  * `git ls-files` call covers every candidate (a single git invocation, not one per name).
  *
- * **No trailing slash on the pathspec — verified live this matters:** `git ls-files -- foo/` (trailing
- * slash) returns EMPTY for a tracked FILE literally named `foo` — a trailing slash restricts the pathspec
- * to matching WITHIN a directory, silently missing the exact-file case. `git ls-files -- foo` (bare)
- * correctly matches both the exact file AND anything under a `foo/` directory.
+ * Do not add a trailing slash to the pathspec (`git ls-files -- foo/` misses a tracked FILE literally
+ * named `foo`) and do not newline-split instead of using `-z` (NUL-separated) — `core.quotePath`
+ * octal-quotes a non-ASCII tracked path, e.g. a tracked `Café/note.md` prints as `"Caf\303\251/note.md"`
+ * (literal backslashes in the output), which a naive newline+`/`-split shreds into garbage. `-z`
+ * sidesteps quoting entirely rather than needing a `-c core.quotePath=false` override. Getting either
+ * wrong makes a genuinely-tracked path silently report as untracked and offered for exclusion.
  *
- * **`-z` (NUL-separated), not newline-split — verified live this matters too:** `core.quotePath` defaults
- * TRUE, so plain `git ls-files` QUOTES any path containing non-ASCII (or `"`/`\`) as a backslash-escaped
- * octal string, e.g. a tracked `Café/note.md` prints as `"Caf\303\251/note.md"` — literal backslashes in
- * the output, which a naive newline+`/`-split shreds into garbage that doesn't match the real candidate
- * name at all (so the real, tracked `Café` directory was wrongly reported as UNTRACKED, and offered as
- * safe to exclude — a narrower-triggering recurrence of the exact same "tracked content silently loses
- * history" defect, and an ordinary personal-vault folder name, not an exotic input). `-z` sidesteps
- * quoting entirely (raw bytes, NUL-terminated) rather than merely disabling it — verified live to emit the
- * literal `Café/note.md` — so it's used INSTEAD OF `-c core.quotePath=false`, not just in addition to it:
- * no config override is applied to the shared `git` client, and there is nothing left to parse quoting out
- * of at all.
+ * Fails SAFE: any git error treats every candidate as tracked — i.e. excludes NOTHING — rather than risk
+ * dropping history for a name it couldn't verify; a bound timeout (`timeoutMs`, card 509716cc) lands in
+ * the same catch, the same way.
  *
- * Fails SAFE: any git error (a corrupt repo, git not on PATH, whatever) treats every candidate as tracked
- * — i.e. excludes NOTHING — rather than risk silently dropping history for a name we couldn't verify.
- * A call that exceeds `timeoutMs` (card 509716cc — this ls-files call previously had no bound at all)
- * lands in the exact same catch, the exact same way: a hung git child fails safe identically to any
- * other git error.
- *
- * **Each candidate is queried via `:(icase,literal)<name>` pathspec magic (card 687d2a47, findings 1 + 3).
- * `icase` is what actually closes BOTH findings; `literal` is additional, currently-unreachable
- * belt-and-braces — see finding 1 below for why it doesn't get sole credit:**
- *
- * - **Finding 3 — `core.ignorecase` (default TRUE on Windows, the owner's own platform, and macOS):**
- *   `.gitignore` matching honors it; plain `git ls-files` pathspec matching does NOT, live-verified —
- *   `.gitignore` = `Notes`, tracked `notes/b.md`: `git check-ignore -v notes/new.md` exits 0 (git DOES
- *   ignore it), but `git ls-files -z -- Notes` returns EMPTY (`git ls-files -z -- notes` finds it).
- *   **Also verified a scoped `git -c core.ignorecase=true ls-files -- Notes` still returns EMPTY** — the
- *   config knob does not reach pathspec matching at all, so a config override can't fix this; only pathspec
- *   magic can. `:(icase)Notes` DOES match `notes/b.md`, live-verified. A directory case-renamed on a
- *   case-insensitive filesystem — index holds `Notes/b.md`, disk shows `notes/`, `.gitignore` names it
- *   `notes` — would otherwise make this tracked-check MISS while the (itself case-sensitive) exclusion
- *   regex still matches the on-disk `notes` path, silently dropping history for tracked content. No exotic
- *   `.gitignore` line needed — an ordinary folder rename triggers it.
- * - **Finding 1 — `:`-leading candidate text:** without this wrapper, a candidate is fed to git as a bare
- *   pathspec, and any pathspec starting with `:` is git "magic" (`:!foo`, `:(exclude)foo`, …), not a
- *   literal name — live-verified: with `_external/a.md` tracked, `git ls-files -- _external ':!'` returns
- *   EMPTY (exit 0, no error) for the WHOLE batched call, because `:!` deselects everything. A `.gitignore`
- *   containing both `_external/` and `:!` would silently report the genuinely-tracked `_external` as
- *   untracked and offer it for exclusion — Critical-1's failure shape, a new trigger. **The long-form
- *   `:(icase)` wrapper alone is what actually closes this** — live-verified batched: `_external` and
- *   `Notes` (case-differing) both still resolve correctly with a bogus `:!` candidate present in the same
- *   call, with or without `,literal`, because each `:(...)`-wrapped pathspec's magic is scoped to that one
- *   pathspec, not the whole batch. `,literal` is kept anyway as unreachable belt-and-braces (round-4
- *   review, live-verified): it disables WILDCARD reinterpretation of the candidate text, but the parser
- *   already rejects any line containing `* ? [ ] \`, so no wildcard can ever reach this call — it cannot
- *   over-generate (git docs: `literal` only affects glob-vs-literal matching), so there is no cost to
- *   keeping it, but finding 1 itself is closed by `icase` alone.
- *
- * Lowercasing the returned first-segment names (paired with lowercasing the candidate at the
- * {@link safeToExcludeNames} comparison) is still needed ALONGSIDE `:(icase)`: icase makes the QUERY find
- * a case-differing tracked entry, but the returned path keeps its OWN on-disk casing (e.g. `notes/b.md`
- * for a `Notes` candidate) — the set-membership check still needs both sides folded to the same case. On a
- * case-SENSITIVE filesystem this can only ever mark MORE candidates "tracked" than an exact compare would
- * — i.e. leave MORE watched, never less — so it is strictly under-generating on every platform. A
- * `:`-leading candidate that fails to resolve to anything real (the overwhelmingly common case, since `:`
- * is not a legal filename character on Windows) simply isn't added to `tracked` — same under-generating
- * direction as every other branch here.
+ * @decision 687d2a47 — each candidate is queried via `:(icase,literal)<name>` pathspec magic (findings
+ *  1 + 3); `icase` closes both, `literal` is unreachable belt-and-braces. Lowercasing the returned
+ *  first-segment names (alongside the candidate, at {@link safeToExcludeNames}) is still needed
+ *  ALONGSIDE `:(icase)` — icase finds a case-differing tracked entry, but the returned path keeps its
+ *  own on-disk casing. See docs/decisions/687d2a47-gitignore-parser-and-tracked-check-over-generation-fixes.md.
  */
 async function gitTrackedTopLevelNames(
   git: Pick<SimpleGit, "raw">,
@@ -481,86 +361,34 @@ function hasConfiguredGitIdentitySync(opts: { cwd: string; stdio: "pipe"; timeou
  * **Identity fallback:** unlike `git/writer.ts` (which commits with NO identity override, by
  * deliberate convention — the Loom repo itself always has one configured), this path runs
  * unattended on an arbitrary end-user's machine, which may have no global/system git identity at
- * all. When the repo has one configured (global, system, or local), we commit exactly as before —
- * their identity, un-overridden. Only when EITHER `user.name` or `user.email` is unresolved do we
- * fall back to a generic, non-personal `Loom <loom@localhost>` identity for that single commit, via
- * `-c user.name=`/`-c user.email=` passed as ARGS on the commit invocation (never as an env-var
- * override): simple-git's `blockUnsafeOperationsPlugin` rejects an explicit `.env()` call that
- * carries `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` (a real config-injection vector it guards
- * against) — a call we'd otherwise make by spreading `process.env` to preserve PATH/HOME for the
- * child process. Scoped `-c` args sidestep that entirely (git itself only applies them to this one
- * invocation) and `user.name`/`user.email` are not among simple-git's blocklisted config keys.
+ * all. When the repo has one configured, we commit exactly as before — their identity, un-overridden.
+ * Only when EITHER `user.name` or `user.email` is unresolved do we fall back to a generic, non-personal
+ * `Loom <loom@localhost>` identity for that single commit, via `-c user.name=`/`-c user.email=` passed
+ * as ARGS on the commit invocation, never as an env-var override — see the `GIT_TERMINAL_PROMPT` doc
+ * above `boundedVaultGit` for why an `.env()` override is unsafe here.
  *
  * **Oversized-file guard** (card 614dfbef): before committing, any staged file above `opts.maxFileBytes`
  * (default `DEFAULT_MAX_VAULT_FILE_BYTES`, ~95MB) is unstaged and warned about instead of committed — see
- * {@link unstageOversizedFiles}. Applies to every caller of this shared path (the auto-committer below AND
- * `vault/writer.ts`'s UI writes), so a giant file is unstaged before it can enter vault history through
- * either route — UNLESS the per-file `git reset` itself fails, which leaves that one file staged (a
- * documented, rare exception swallowed per-file rather than aborting the whole commit; see
- * {@link unstageOversizedFiles}'s own doc). This is an AUTOMATIC, unattended path (no human in the loop),
- * which is why it silently unstages rather than warning — contrast `git/writer.ts`'s `GitWriter.commit`,
- * a DELIBERATE human/agent act on the project's code repo, which instead WARNS on the same threshold
- * without unstaging or refusing (see that method's own doc for the reasoning).
+ * {@link unstageOversizedFiles}. Applies to every caller of this shared path, so a giant file is unstaged
+ * before it can enter vault history through either route. This is an AUTOMATIC, unattended path (no human
+ * in the loop), which is why it silently unstages rather than warning — contrast `git/writer.ts`'s
+ * `GitWriter.commit`, a DELIBERATE human/agent act, which instead WARNS on the same threshold without
+ * unstaging (see that method's own doc for the reasoning).
  *
- * **Bounded, card 54b839c5 (the Code Reviewer's finding 4 on card 816f0056's branch).** This used to
- * construct a plain `simpleGit(vaultPath)` — no block timeout, no `GIT_TERMINAL_PROMPT=0` — and run
- * `add`/`status`/`commit` through the user's own `git commit` (and therefore any pre-commit hook) with
- * nothing bounding any of it: the exact hang vector `816f0056` hardened on `flushSync`'s SHUTDOWN path,
- * left open here on the path a human's HTTP request (`vault/writer.ts`) actually blocks on. Every call
- * now goes through {@link boundedVaultGit} — the SAME seam this module's other bounded call sites use,
- * never a second mechanism — via two instances at two ceilings (the load-bearing half of this fix —
- * `GIT_TERMINAL_PROMPT=0` is deliberately NOT added here; see the doc immediately above `boundedVaultGit`
- * for why, and for why its absence doesn't matter — this function never touches the network):
- *  - **Cheap plumbing** (`checkIsRepo`/`revparse`/`init`/`status`/the identity `config` reads/
- *    `unstageOversizedFiles`'s `reset` calls): {@link VAULT_GIT_OP_TIMEOUT_MS} (15s) — measured on this
- *    host at 43-59ms steady-state, so 15s is generous headroom, not a tight fit.
- *  - **Working-tree-scale** (`add`, and `commit` — the actual named hang vector, since `commit` runs the
- *    hook): {@link VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS} (5 min) — the SAME constant `flushSync` uses for
- *    its own `add`/`commit`, sized off the SAME measurement (a cold `git add -A` over a 20k-file vault
- *    measured ~11.6s on local NVMe alone). ⛔ A single tight ceiling across both tiers would mean a
- *    genuinely-still-working large-vault flush fails EVERY time — on this path, a failed commit attempt
- *    means a DROPPED user edit stays uncommitted, so sizing the working-tree tier tight is not a safe
- *    default. `status`/`checkIsRepo`/`revparse` stay on the cheap tier deliberately (matching `flushSync`'s
- *    own `git status --porcelain`, not its `add`/`commit`) — none of them touch the working tree at scale.
- *
- * **Mechanism, verified rather than assumed (the card's own instruction):** simple-git's `block` timeout
- * is a NO-OUTPUT timer (it resets on every stdout/stderr `data` event from the child; verified by reading
- * the installed `simple-git@3.36.0` package's bundled `timeoutPlugin` — it re-arms via `spawned.stdout.on
- * ("data", wait)`/`stderr` the same way) — the right shape for a silent hung hook (e.g. `sleep`), not a
- * hard wall-clock cap on a verbose one. On expiry it calls `spawned.kill("SIGINT")` on the DIRECTLY
- * spawned child — simple-git calls `child_process.spawn(command, args, spawnOptions)` with no `shell:
- * true` anywhere in the package, so unlike `flushSync`'s shell-string `execSync` calls (where a timeout
- * only kills the wrapping `cmd.exe`, not the real `git.exe` grandchild — see that method's own doc), a
- * timeout HERE kills `git.exe` itself directly. On Windows, `child.kill()` ignores the signal argument
- * and forcibly terminates that immediate process regardless. **This still does not guarantee the pre-commit
- * hook's own child (a `sh`/`sleep` `git.exe` already spawned) dies with it** — no job object, no tree
- * kill, same abandonment risk `flushSync` already documents — so, as there, a bound here means "how long
- * THIS FUNCTION waits", not a guarantee about what the hook process does afterward, and whether a killed
- * `git commit` still lands its commit object is the same kind of race `flushSync`'s own doc describes
- * (not asserted either way by this function or its test).
- *
- * **No `maxBuffer` ceiling applies here (card 816f0056 review round 2, finding 1, re-checked for this
- * path rather than assumed to carry over):** that finding was about the Node.js `execSync`/`execFileSync`
- * family's `maxBuffer` option (a large `git add -A` under `core.autocrlf=true` can emit enough per-file
- * stderr warnings to hit Node's default 1 MiB cap and throw ENOBUFS). simple-git does not use that family
- * at all — it spawns via `child_process.spawn` and accumulates stdout/stderr itself with no size cap and
- * no `maxBuffer`-shaped option anywhere in the package (verified: zero occurrences of `maxBuffer` in the
- * installed `simple-git@3.36.0` source). So this path cannot ENOBUFS the way `flushSync`'s did; it has no
- * matching ceiling to add.
- *
- * **What a bound expiring on the REST path (`vault/writer.ts`) means — the design decision this card asks
- * for, made explicit rather than left implicit:** `writeVaultFile`/`createVaultFile`/`deleteVaultFile` all
- * write the file to disk FIRST and call this function SECOND — so a timeout (or any other commit failure)
- * here never drops the user's edit; the edit is already durable on disk, only the git commit of it is
- * delayed. Every real caller (those three, and `VaultVersioner`'s own debounced `commit()` below) already
- * treats a rejection from this function as "not committed this round" (`writer.ts`'s `.catch(() => false)`
- * turns it into `{ ok: true, committed: false }`, never a hard REST error), and that stays correct: the
- * still-uncommitted file remains on disk under the watched root, so the NEXT debounced auto-commit tick
- * (or a later retry) picks it back up and commits it then — self-healing, not a permanent loss. This
- * function therefore still REJECTS on a bound expiry (unchanged from today's behavior for any other git
- * error on these calls, which already propagated uncaught) rather than swallowing it to `false` — what
- * changes is that it no longer HANGS, and a timeout is no longer SILENT: see the `console.warn` below,
- * closing the same observability gap `flushSync`'s own review already closed on its path.
+ * @decision 54b839c5 — bounded (the Code Reviewer's finding 4 on card 816f0056's branch): this used to
+ *  construct a plain `simpleGit(vaultPath)` with nothing bounding `add`/`status`/`commit` — the exact hang
+ *  vector `816f0056` hardened on `flushSync`'s shutdown path, left open here on the path a human's HTTP
+ *  request (`vault/writer.ts`) actually blocks on. Every call now goes through {@link boundedVaultGit} at
+ *  two ceilings: cheap plumbing (`checkIsRepo`/`revparse`/`init`/`status`/identity reads/`reset`) gets
+ *  {@link VAULT_GIT_OP_TIMEOUT_MS} (15s); working-tree-scale (`add`, `commit` — the actual hang vector,
+ *  since `commit` runs the hook) gets {@link VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS} (5min, same constant
+ *  `flushSync` uses) — a single tight ceiling across both tiers would fail a genuinely-still-working
+ *  large-vault flush every time, and on this path a failed commit means a dropped user edit stays
+ *  uncommitted. See
+ *  docs/decisions/54b839c5-bound-vault-git-plumbing-calls-and-unstageoversizedfiles-reset-semantics.md
+ *  for the verified block-timeout kill mechanism, the `maxBuffer` finding, and the REST-path bound-expiry
+ *  design (a timeout here never drops the user's edit — it's already durable on disk before this is
+ *  called; only the commit is delayed, and the next debounced tick or retry picks it back up).
  */
 export async function commitVault(
   vaultPath: string,
@@ -634,17 +462,9 @@ export async function commitVault(
  *  - **Obsidian-Git-managed repo** → a real external auto-committer already owns history, so we
  *    BACK OFF (`externallyManaged: true`) to avoid double-committing.
  *
- * We detect the Obsidian-Git case DISTINCTLY — by the presence of the `.obsidian/plugins/obsidian-git`
- * marker directory under the repo root — NOT by "subfolder ≠ root" (the old, wrong proxy that backed
- * off for EVERY subfolder, including subfolders of plain repos). The marker is deterministic (it exists
- * iff the Obsidian Git plugin — the thing that creates the external committer — is installed for that
- * vault) and is one cheap `fs.existsSync`; preferred over a commit-message heuristic, which is fragile
- * (depends on the user's message template, reads empty on a fresh repo, false +/-).
- *
- * **Bounded (card 509716cc)** — this is reached from `startVaultVersioners`, AWAITED at boot ahead of
- * `sessions.resumeFleetOnBoot`. A timeout on either op lands in the SAME `.catch(() => false/"")` the
- * pre-existing git-error path already used, so a hung repo degrades exactly like a non-repo/no-toplevel
- * one does today — "no governing repo, commit at the vault folder itself" — never a hang.
+ * @decision 509716cc — bounded; detects the Obsidian-Git case by the `.obsidian/plugins/obsidian-git`
+ *  marker, not by "subfolder ≠ root" — see the record for why that proxy was wrong. See
+ *  docs/decisions/509716cc-bound-the-three-vault-plumbing-git-calls-to-avoid-a-boot-hang.md.
  */
 async function resolveVaultRepoContext(
   vaultPath: string,
@@ -955,28 +775,18 @@ export class VaultVersioner {
   }
 
   /**
-   * Card 39ceb732's Lever 4 ("do nothing to the mechanism; add a startup size warning"): logs ONCE, when
-   * the initial scan completes, if this watcher ended up tracking an unusually large number of entries.
-   * Chokidar opens one native OS handle PER entry with no cap, so a vault this large is a real, uncapped
-   * resource cost on a local-first desktop product — this makes that cost VISIBLE instead of silent until
-   * someone reads a crashlog, without changing what gets watched or committed.
-   *
-   * Also warns (the DISCRIMINATING form, not a naive one) when the watcher tracks exactly ZERO entries —
-   * the signature of the Critical-2 dead-watcher class (now structurally prevented, see
-   * {@link buildIgnoredMatcher}). **This is NOT a tripwire for "any future cause of the same failure
-   * shape" (card 687d2a47 finding 4) — it only catches a scan that dies while the MATCHER STILL ADMITS
-   * top-level content.** It has a real, named blind spot: an OVER-BROAD matcher (one that itself excludes
-   * every top-level name) defeats it completely, because {@link hasUnexcludedTopLevelEntry} below reuses
-   * that SAME matcher to decide whether to warn — chokidar reporting zero entries AND the discriminator
-   * agreeing "nothing unexcluded exists" produces total, silent agreement, not a warning. An over-broad
-   * matcher is exactly this card family's own primary failure class, so don't read this tripwire as a
-   * backstop against it. A naive "count===0 ⇒ warn" false-positives on a legitimately brand-new, empty
-   * vault (no notes yet) — so this only warns when the count is zero AND `commitPath` actually has
-   * top-level content the matcher does NOT exclude (i.e. content that SHOULD have produced at least one
-   * watched entry).
-   *
-   * Best-effort: swallows any error from `getWatched()`/`watchedEntryCount`/the zero-entry directory read
-   * rather than risking the ready handler itself.
+   * @decision 39ceb732 — Lever 4 ("do nothing to the mechanism; add a startup size warning"): logs ONCE,
+   *  when the initial scan completes, if this watcher ended up tracking an unusually large number of
+   *  entries — making that uncapped-handle cost visible instead of silent, without changing what gets
+   *  watched or committed. See
+   *  docs/decisions/39ceb732-chokidar-handle-cap-watch-exclusion-and-size-warning.md.
+   * @decision 687d2a47 — also warns (the DISCRIMINATING form) on exactly ZERO watched entries — the
+   *  dead-watcher signature. **NOT a tripwire for any future cause of the same failure shape — it only
+   *  catches a scan that dies while the matcher still admits top-level content.** An OVER-BROAD matcher
+   *  (excludes every top-level name) defeats it completely, because {@link hasUnexcludedTopLevelEntry}
+   *  reuses that same matcher — do not read this warning's silence as proof of watcher health. A naive
+   *  `count===0 ⇒ warn` would also false-positive on a legitimately empty, brand-new vault. Best-effort.
+   *  See docs/decisions/687d2a47-gitignore-parser-and-tracked-check-over-generation-fixes.md.
    */
   private warnIfLarge(): void {
     try {
@@ -1053,61 +863,20 @@ export class VaultVersioner {
    * synchronous by necessity. Also honors the advisory pause lease (card 614dfbef) — a shutdown mid
    * sanctioned git surgery must not force a commit the lease was meant to prevent.
    *
-   * **Bounded (card 816f0056):** unlike the async git calls elsewhere in this file, `execSync` can't use
-   * the `withTimeout` Promise race above — it's synchronous by necessity (see the class doc above for
-   * why `flushSync` can't be made async). `execSync`'s own native `timeout` option is the bound instead,
-   * plus `GIT_TERMINAL_PROMPT=0` so a credential prompt can't hang either, plus a generous
-   * {@link VAULT_FLUSH_MAX_BUFFER_BYTES} (a large vault's `git add -A` can emit megabytes of per-file
-   * `autocrlf` warnings on Windows — see that constant's own doc; a too-small `maxBuffer` drops a commit
-   * exactly like a too-small timeout does). **`execSync` THROWS on timeout expiry, same as any other
-   * execSync failure** — it lands in the `catch` below and returns `false` exactly like a missing
-   * identity or a plain git error would. That is the intended trade: a dropped shutdown auto-commit beats
-   * a wedged `gracefulShutdown` (which would otherwise hang `loom stop` and, worse, `daemon_restart`'s
-   * exit `75` — see the card for why that stalls the whole fleet). The pre-existing `try/catch` here
-   * guards THROWN errors, not hangs — it's the timeout option above that turns a hang into a throw.
-   *
-   * **A timeout here ABANDONS the child, it does not always STOP it (card 816f0056 review round 2,
-   * finding 4) — and this differs between the shell-string calls and the argument-array one (round 3).**
-   * `git add -A`/`git status --porcelain` still run via shell-string `execSync` (`cmd.exe` on Windows,
-   * spawned by Node as the immediate child); a timeout kills only THAT shell — there is no job object, no
-   * tree kill — so the REAL `git.exe` it launched (a grandchild of Node) survives and keeps running in the
-   * background. Measured against `git add -A` this way: a `git commit` blocked in a `sleep` hook, timed
-   * out at 500ms via a shell-wrapped call, still landed its commit ~8 seconds later. `git commit` itself
-   * is different: it now runs via `execFileSync` (no shell — see the "Identity fallback" paragraph below
-   * for why), so `git.exe` IS the immediate child Node kills directly on timeout. A hook grandchild it had
-   * already spawned (a real `sh`/`sleep`) can still survive and run to completion harmlessly, with nothing
-   * left alive to receive its result. **Whether the commit OBJECT itself lands is a RACE, not a fixed
-   * outcome (card 816f0056, test/vault-flush-sync-hang-bound.mjs) — it depends on how far `git.exe` had
-   * progressed (had it already written the commit object and updated the ref?) before the kill signal
-   * reached it.** Observed both ways on this exact test: in an ordinary worktree run the commit did not
-   * land; under merge-gate conditions (different host/scheduling timing) it did. Neither outcome is
-   * assertable, and this file does not claim either. Either way, "bounds a true hang" means bounds how
-   * long THIS FUNCTION waits, not a guarantee about what the underlying git process does afterward — and a
-   * warn saying a commit "may have been dropped" stays the honest framing rather than a certainty, since
-   * the shell-wrapped calls can still complete moments later, racing whatever touches the repo next.
-   *
-   * **The three calls are deliberately NOT all bound by the same ceiling.** The goal here is "no INFINITE
-   * hang", not "fail fast" — a bound whose only job is to stop a wait that would otherwise never end does
-   * not need to be tight, and a TIGHT one is actively worse: it converts a slow-but-working flush into a
-   * GUARANTEED failure, and on this path failure means the commit is silently DROPPED (the timeout throws
-   * into the same best-effort `catch` a real git error would) — the exact data loss this function exists
-   * to prevent. `git status --porcelain` is a cheap, stat-based comparison (no hashing), the same cost
-   * class as this module's other bounded plumbing (`ls-files`/`checkIsRepo`/`revparse`), so it keeps their
-   * existing {@link VAULT_GIT_OP_TIMEOUT_MS} (15s) ceiling. `git add -A` and `git commit` (runs the
-   * user's hooks — e.g. a pre-commit hook — the actual named hang vector in this card, plus writes tree
-   * objects) are working-tree-scale and get {@link VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS} (5 min) instead —
-   * see that constant's own doc for the sizing basis (a real measurement, NOT "same class as checkout" —
-   * that appeal to convention was wrong, see the correction there).
-   *
-   * **Identity fallback (card 816f0056 review round 2, finding 2):** mirrors `commitVault`'s fallback (see
-   * that function's own doc for why `-c` ARGS, not an env override) via {@link hasConfiguredGitIdentitySync}
-   * — this path never had one at all, so a host with no configured git identity silently failed EVERY
-   * shutdown flush, forever, while the async `commit()` path succeeded. **Genuinely ARGS, not a shell
-   * string (round 3 correction):** the first cut of this fix interpolated the fallback identity into a
-   * shell-string `execSync` call — safe only BY COINCIDENCE, because {@link FALLBACK_GIT_IDENTITY} happens
-   * to contain no spaces today. `execFileSync("git", [...])` passes each piece as a real argument instead,
-   * so a future edit to that constant (e.g. adding a space) can never re-open the exact silent-drop failure
-   * this card exists to close.
+   * @decision 816f0056 — bounded via `execSync`'s native `timeout` (can't use the async `withTimeout`
+   *  race — this is synchronous by necessity), plus `GIT_TERMINAL_PROMPT=0` and a generous
+   *  {@link VAULT_FLUSH_MAX_BUFFER_BYTES} (see that constant's own doc). **A timeout here ABANDONS the
+   *  child, it does not always STOP it** — the shell-string `execSync` calls (`add -A`/`status`) only
+   *  kill the wrapping shell, not the real `git.exe` grandchild, so a killed op can still land moments
+   *  later; `git commit` runs via `execFileSync` (no shell) so `git.exe` IS killed directly, but whether
+   *  its commit OBJECT lands is still a race, not a fixed outcome — never assert either way. The three
+   *  calls are deliberately NOT all on the same ceiling: `status` stays on the cheap
+   *  {@link VAULT_GIT_OP_TIMEOUT_MS}, `add`/`commit` (the actual hang vector — `commit` runs the user's
+   *  hooks) get {@link VAULT_FLUSH_WORKING_TREE_TIMEOUT_MS} — a tight ceiling there would convert a
+   *  slow-but-working flush into a guaranteed, silent commit-drop. Identity fallback (mirrors
+   *  `commitVault`'s) uses `execFileSync` with real args, never a shell-string interpolation of
+   *  {@link FALLBACK_GIT_IDENTITY} — that was tried and was safe only by coincidence (no spaces today).
+   *  See docs/decisions/816f0056-vault-flush-working-tree-timeout-sizing.md.
    */
   flushSync(): boolean {
     if (this.externallyManaged) return false;
@@ -1351,9 +1120,9 @@ function isOperationalVaultDir(dir: string): boolean {
 
 /**
  * Boot wiring for the vault auto-committer: start ONE `VaultVersioner` per UNIQUE live project vault.
- * Factored out of index.ts so the boot wiring is itself testable (the gap this fixes existed precisely
- * because the class was unit-tested in isolation while NEVER wired). index.ts calls this at boot; the
- * test calls it against a temp project + temp vault.
+ * @decision sha:de33d76e — factored out of index.ts so the boot wiring is itself testable. See
+ *  docs/decisions/de33d76e-wire-vaultversioner-at-boot.md. index.ts calls this at boot; the test calls
+ *  it against a temp project + temp vault.
  *
  * - DEDUPE by GOVERNING REPO ROOT (resolved via `resolveVaultRepoContext`), not the raw vaultPath: the
  *   owner's real layout is ONE git repo at the vault root with each project's vaultPath a SUBFOLDER, so N
