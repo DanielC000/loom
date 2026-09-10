@@ -160,8 +160,10 @@ const STALE_DIRECTIVE_TURN_THRESHOLD = 3;
 const STALE_REPORT_TURN_THRESHOLD = 3;
 
 /** `gate_status(opId)` is a read-only lookup, scoped per-caller, with no pass/fail outcome path of its
- *  own. @decision edc1ec12 — see docs/decisions/edc1ec12-gate-status-is-read-only-with-no-passfail-outcome.md
- *  @decision bed91595 — see docs/decisions/bed91595-deploy-tombstone-removes-the-in-process-workaround.md */
+ *  own. @decision edc1ec12 — a scoped (worker) miss must never claim `never_existed`; the scoping filter
+ *  can't tell "never existed" from "belongs to someone else" apart, so it returns `"unknown"` instead.
+ *  @decision bed91595 — never reintroduce an in-process opId cache/reclassification for `deploy`; the
+ *  durable `pending_gate_ops` tombstone already covers restart-survival and unbounded retention. */
 function registerGateStatus(server: McpServer, sessions: SessionService, db: Db, scopeSessionId?: string, getScopeProjectId?: () => string | undefined, getRedactCrossProjectCallerProjectId?: () => string | undefined): void {
   const forWorker = scopeSessionId != null;
   const description = forWorker
@@ -713,9 +715,12 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
           ? { callerProjectId: getRedactCrossProjectCallerProjectId() }
           : undefined;
         const result = sessions.gateStatus(opId, scopeSessionId, getScopeProjectId?.(), redactCrossProject);
-        // @decision bed91595 — see docs/decisions/bed91595-deploy-tombstone-removes-the-in-process-workaround.md
-        // @decision 19c0ef1e — see docs/decisions/19c0ef1e-gate-status-timing-band-is-best-effort-and-additive.md
-        // @decision 5ef78900 — see docs/decisions/5ef78900-timingband-cross-project-numeric-disclosure-is-deliberate.md
+        // @decision bed91595 — this resolves through the ordinary tombstone fallback now; never resurrect
+        // the removed in-process deploy-opId cache/reclassification workaround on top of it.
+        // @decision 19c0ef1e — a `timingBand` read/parse failure must never propagate as a `gate_status`
+        // error; let it fall through to the plain result, same as any other advisory-only enrichment.
+        // @decision 5ef78900 — never fold `timingBand`'s cross-project numeric disclosure into
+        // `gateStatus`'s own redaction; gate it separately via `isCrossProjectGateOp` instead.
         if (result.state === "settled" && result.outcome !== undefined && !sessions.isCrossProjectGateOp(opId, redactCrossProject)) {
           let enriched: Record<string, unknown> = result;
           try {
@@ -773,7 +778,9 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
   );
 }
 
-// @decision fa359824 — see docs/decisions/fa359824-gate-queue-is-the-one-read-answer-to-am-i-stuck.md
+// @decision fa359824 — never merge `recentTimeoutStreak` into the semaphore's own phase/queuePosition
+// belief (a second, independent signal, surfaced side by side); never read a queued row's `since` as
+// `gate_status`'s `admittedAt` — they are different clocks.
 function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, sessionId: string): void {
   server.registerTool(
     "gate_queue",
@@ -984,7 +991,8 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
   );
 }
 
-// @decision a5d1ae04 — see docs/decisions/a5d1ae04-gate-intent-is-manager-only-registered-off-the-worker-tool-list.md
+// @decision a5d1ae04 — never register gate_intent_declare/withdraw on the worker surface; a worker has
+// no "intend to fire" phase (its only gate action is `run_gate`) and there is no use case for either.
 // ⛔ STRUCTURALLY DECOUPLED FROM EVERY GATE-FIRING PATH, ON PURPOSE (DoD-4): neither handler below may ever
 // call runWorkerGate/confirmWorkerMerge/deployOwnProject/GateSemaphore/gate-runner.ts — only declareGateIntent/
 // withdrawGateIntent. test/gate-intent-no-firing-coupling.mjs asserts this mechanically.
@@ -1122,7 +1130,9 @@ export interface CompanionHooks {
 // derivation (orchestration/crash-orphaned-workers.ts, card 959a5fb7/db05e657) so the two surfaces can never
 // independently decide "resolved" in different ways. Called by `reportedProjection` below.
 
-/** @decision 3c39be30 — see docs/decisions/3c39be30-directive-event-stream-branding-closes-the-freehand-query-hazard.md */
+/** @decision 3c39be30 — never hand-assemble a `DirectiveEventStream` from a freehand `Db` query; always go
+ *  through workerDirectiveStream/workerLineageDirectiveStream/managerLineageDirectiveStream — anything
+ *  else and `resolveDirectiveOutcome` throws, by design. */
 const DIRECTIVE_STREAM_TAG: unique symbol = Symbol("directiveEventStream");
 type DirectiveEventStream = OrchestrationEvent[] & { readonly [DIRECTIVE_STREAM_TAG]: true };
 function tagDirectiveEventStream(events: OrchestrationEvent[]): DirectiveEventStream {
@@ -1142,7 +1152,8 @@ function managerLineageDirectiveStream(db: Db, managerSessionId: string): Direct
   return tagDirectiveEventStream(ownLineageIds(db, managerSessionId).flatMap((id) => db.listEvents(id)));
 }
 
-/** @decision 35c96aa6 — see docs/decisions/35c96aa6-directive-deliveries-for-caller-label-not-internal-id.md (§2) */
+/** @decision 35c96aa6 — never reimplement the give-up/re-mint chain walk at a second call site; reuse this
+ *  function itself — a parallel reimplementation is exactly the drift risk this hoist closes. */
 export function resolveDirectiveOutcome(
   events: DirectiveEventStream, rootDirective: OrchestrationEvent, rootMsgId: string,
 ):
@@ -1211,7 +1222,9 @@ export function resolveDirectiveOutcome(
   return { state: "delivered", msgId, deliveredAt: delivery.ts, turnSeqAtDelivery: delivery.detail!.turnSeqAtDelivery as number };
 }
 
-/** @decision 3c39be30 — see docs/decisions/3c39be30-directive-event-stream-branding-closes-the-freehand-query-hazard.md (§2) */
+/** @decision 3c39be30 — never let a caller of directiveByMsgId/peerMessageStatusByMsgId call
+ *  `resolveDirectiveOutcome` directly; always go through this function's `findOrigin`, which guarantees a
+ *  correctly-scoped stream — never re-duplicate the three-step walk in a future twin. */
 function resolveMsgIdOutcome(
   events: DirectiveEventStream, ref: string,
   findOrigin: (events: DirectiveEventStream, ref: string) => { event: OrchestrationEvent; msgId: string } | undefined,
@@ -1227,7 +1240,9 @@ function resolveMsgIdOutcome(
   return { msgId: origin.msgId, found: true, state: outcome.state, at, sentAt: origin.event.ts };
 }
 
-/** @decision 867e64f1 — see docs/decisions/867e64f1-directivebymsgid-re-checks-an-older-root-after-a-newer-directive-supersedes-it.md */
+/** @decision 867e64f1 — never conflate `found:false` (no event carries this root msgId at all) with
+ *  `state:null` on a found root — the latter never actually occurs; every found root resolves via
+ *  `resolveDirectiveOutcome` or defensively reads `pending`. */
 function directiveByMsgId(
   db: Db, workerSessionId: string, msgId: string,
 ): { msgId: string; found: boolean; state: "pending" | "delivered" | "parked" | "confirmed-after-park" | null; at: string | null; sentAt: string | null } {
@@ -1243,7 +1258,8 @@ function directiveByMsgId(
 
 /** Ownership is enforced BY CONSTRUCTION — every event this function consults comes from
  *  `managerLineageDirectiveStream` (the caller's OWN recycle lineage); NEVER a read into any other
- *  session's stream, peer or otherwise. @decision 0f693dea — see docs/decisions/0f693dea-peer-message-status-three-code-review-fixes.md */
+ *  session's stream, peer or otherwise. @decision 0f693dea — never merge in the recipient's own event
+ *  stream to answer this sender-side question; a weaker cross-project ownership property, rejected. */
 function peerMessageStatusByMsgId(
   db: Db, managerSessionId: string, ref: string,
 ): { msgId: string; found: boolean; state: "pending" | "delivered" | "parked" | "confirmed-after-park" | null; at: string | null; sentAt: string | null } {
@@ -1278,7 +1294,9 @@ function ownLineageIds(db: Db, sessionId: string): string[] {
   return ids;
 }
 
-/** @decision 35c96aa6 — see docs/decisions/35c96aa6-directive-deliveries-for-caller-label-not-internal-id.md */
+/** @decision 35c96aa6 — never match a worker-supplied `rootLabel` against the internal `rootMsgId`
+ *  directly; always compute the comparison label via `possibleDuplicateRootLabel`. Never collapse
+ *  `fromSession`/`receivedBy` into one field — their difference IS the recycle-boundary signal. */
 const UNFILTERED_DELIVERY_CAP = 20;
 function directiveDeliveriesForCaller(
   db: Db, callerSessionId: string, rootLabel?: string,
@@ -1392,7 +1410,9 @@ export class OrchestrationMcpRouter {
     return role === "manager" || role === "worker" || role === "assistant" ? { id: sessionId, role } : null;
   }
 
-  /** @decision 89257222 — see docs/decisions/89257222-resolved-gate-command-timeout-tracks-the-same-config-path-the-gate-itself-reads.md
+  /** @decision 89257222 — never re-derive or hardcode `timeoutMs` here; always read it through the same
+   *  `resolveConfig(...).orchestration.gateCommandTimeoutMs` path the gate itself enforces, or a
+   *  per-project override silently stops tracking.
    *  TRUST BOUNDARY: this is READ-ONLY by design (PL Auditor finding #9). `gateCommand` runs arbitrary
    *  host shell at daemon privilege — HUMAN-only-to-SET; NO set/propose/confirm-queue surface exists here. */
   private resolvedGateCommand(projectId: string | undefined):
@@ -2371,7 +2391,9 @@ export class OrchestrationMcpRouter {
 
     this.registerMyContext(server, sessionId);
 
-    // @decision 6641c3ab — see docs/decisions/6641c3ab-reported-projection-scans-most-recent-worker-report-not-the-last-event.md
+    // @decision 6641c3ab — never derive `awaitingReview` from "is the last event of any kind a
+    // worker_report" — that false-negatives the instant ANY later worker-keyed row lands (e.g. a manager
+    // merely reviewing the diff via `worker_merge`), even on a live, unmerged, never-messaged worker.
     const reportedProjection = (workerSessionId: string, pendingMerge: PendingOpView | null): {
       reportedState: "done" | "blocked" | null;
       awaitingReview: boolean;
@@ -2392,7 +2414,9 @@ export class OrchestrationMcpRouter {
       return { reportedState, awaitingReview: true, staleReport };
     };
 
-    // @decision 343441bd — see docs/decisions/343441bd-stale-directive-is-a-pull-signal-not-a-watchdog.md
+    // @decision 343441bd — never add a watchdog nudge on top of this signal; it is a deliberate PULL-only
+    // read a manager makes on `worker_list`/`worker_status` — a nudge class was already tried and
+    // retracted (`a4bfe6d9`→`8e0bd254`).
 
     // CR follow-up [2] (card 9da2a435): `directive` is the raw discriminator a manager can read
     // directly — "none" (never messaged) / "pending" (queued or mid give-up-retry, not yet resolved
@@ -2590,9 +2614,13 @@ export class OrchestrationMcpRouter {
     // The fleet view — the manager's direct children as a compact list. Shared by worker_list and the
     // no-arg worker_status call (a manager's reflexive `worker_status({})` aliases to this rather than
     // throwing a schema-validation error).
-    // @decision fb8df559 — see docs/decisions/fb8df559-worker-list-pendingmerge-is-additive-with-a-placeholder-spawn-row.md
+    // @decision fb8df559 — never read `pendingMerge.state:"running"` as "the gate is executing"; it flips
+    // the instant the op is minted, well before admission. Represent a pending spawn as an additive
+    // placeholder row, never a breaking change to worker_list's bare-array shape.
     //
-    // @decision b16320bc — see docs/decisions/b16320bc-ratelimiteduntil-ratelimitdeadline-close-the-looks-idle-blind-spot.md
+    // @decision b16320bc — never treat a row with `busy:false` and no rate-limit context as proof a
+    // worker is genuinely idle; check `rateLimitedUntil`/`rateLimitDeadline` first — a rate-limited park
+    // reads identically to healthy idle without them.
     //
     // `lastEngineOutputAt`: an INTRA-TURN liveness signal, additive alongside the DB-persisted
     // `lastActivity` (which only moves at turn boundaries — hook events). Reads pty/host.ts's in-memory
@@ -2601,7 +2629,9 @@ export class OrchestrationMcpRouter {
     // engine truly stops producing. Lets a manager tell "busy and emitting" (recent) from "silent, possibly
     // wedged" (stale) at a glance, without spending a worker_transcript pull.
     //
-    // @decision a1916267 — see docs/decisions/a1916267-lastengineoutputat-reads-claude-only-a-codex-worker-always-projects-null.md
+    // @decision a1916267 — never widen `pty.getLastOutputAt` back to read every harness's live state; on
+    // codex that resurrects a false "busy and emitting" reading driven by pure TUI repaint, worse than
+    // the current absent (`null`) signal.
     //
     // WHAT IT DOES NOT PROVE: liveness is a property of the PROCESS, not the WORK — a retry loop, or a worker
     // re-reading the same file, moves this field identically to real progress. `lastActivity` advancing
@@ -2622,15 +2652,18 @@ export class OrchestrationMcpRouter {
     //
     // `composerDirtyLen`: a PULL read of possibly-unsubmitted composer text, set synchronously at
     // give-up/heal-if-stuck.
-    // @decision dcd8659c — see docs/decisions/dcd8659c-composerdirtylen-is-a-pull-read-set-synchronously-at-give-up-heal-if-stuck.md
+    // @decision dcd8659c — never conflate `composerDirtyLen: 0` (measured clean) with `null` (session not
+    // live in this process); treating an absent signal as a measured zero is the exact bug this closes.
     // ⚠️ CONSERVATIVE reading only — cannot tell "a clear was attempted and failed" from "a clear worked
     // but hasn't confirmed yet"; read together with `composerDirtyLenBelieved`.
-    // @decision c148f118 — see docs/decisions/c148f118-composerdirtylen-is-the-conservative-reading-pair-with-composerdirtylenbelieved.md
+    // @decision c148f118 — never read `composerDirtyLen` alone as proof a clear-prefix failed; always pair
+    // it with `composerDirtyLenBelieved`. Never reset the latter outside its three decisive-confirm sites.
     // WHAT THIS DOES NOT COVER: a MANAGER's own composer going dirty mid-session (no third-party
     // read surface reaches a manager the way this reaches its workers — see `my_context`, which folds in
     // the same getter for self-checking), and a human glancing at the web UI (no REST/web surface exists
     // yet — unscoped, deliberately left as a follow-up card rather than bundled here).
-    // @decision 008f33f1 — see docs/decisions/008f33f1-gatephase-disambiguates-minted-from-executing.md
+    // @decision 008f33f1 — never read a `null` `gatePhase` as an error or "not in flight" — it just means
+    // this disambiguation has nothing to add right now; check `pendingMerge.state` for in-flight status.
     const withGatePhase = (
       pm: (PendingOpView & { predecessorSessionId?: string }) | null,
     ): (PendingOpView & { predecessorSessionId?: string; gatePhase?: "queued" | "running" | null }) | null =>
@@ -2661,7 +2694,9 @@ export class OrchestrationMcpRouter {
       return candidates.reduce((latest, c) => (c.at > latest.at ? c : latest));
     };
 
-    // @decision f797affb — see docs/decisions/f797affb-unresolved-cascade-flags-a-parked-directive-cooccurring-with-a-mismatch.md
+    // @decision f797affb — never add a "likely lost"/"likely fine" verdict here; both readings are live
+    // possibilities for the identical signature — flag the co-occurrence, never guess which is true. Never
+    // shrink the correlation window assuming instant resolution; confirmation can lag minutes under load.
     const UNRESOLVED_CASCADE_WINDOW_MS = 10 * 60 * 1000;
     const deriveUnresolvedCascade = (
       parkedDirective: { msgId: string; parkedAt: string } | null,
@@ -2703,9 +2738,11 @@ export class OrchestrationMcpRouter {
     const lastFlushAttribution = (workerId: string): { gen: number; attributable: boolean; reason: string; resolvedAt: number } | null =>
       typeof pty?.getLastFlushAttribution === "function" ? (pty.getLastFlushAttribution(workerId) ?? null) : null;
 
-    // @decision f8d53712 — see docs/decisions/f8d53712-worker-status-stopped-spreading-the-raw-session-row.md
+    // @decision f8d53712 — never spread a raw `Session` row (`...w`) into a tool response; name every
+    // returned field explicitly, so a future `Session` column can't reach an agent unreviewed.
     //
-    // @decision 2961dd3b — see docs/decisions/2961dd3b-session-row-fields-sentinel-forces-every-key-required-and-optional.md
+    // @decision 2961dd3b — never write this sentinel's values as the boolean literal; use the numeric `1`,
+    // so this file's compiled output can't collide with `agent-runs-keys.mjs`'s G3 endpoint-flip scan.
     const SESSION_ROW_FIELDS: Record<Exclude<keyof Session, "pendingMerge">, 1> = {
       id: 1, projectId: 1, agentId: 1, engineSessionId: 1, title: 1, cwd: 1, processState: 1,
       resumability: 1, busy: 1, createdAt: 1, lastActivity: 1, lastError: 1, role: 1,
@@ -2728,7 +2765,9 @@ export class OrchestrationMcpRouter {
     // ONE list, not two: the sentinel's own keys ARE the field list this projects, so there is nothing to
     // keep in sync by hand. Behaviour-preserving against the prior object literal (same 39 keys) except
     // for card 41f35bfe's `harness` resolution below.
-    // @decision 41f35bfe — see docs/decisions/41f35bfe-sessionwireview-widens-harness-to-null-for-worker-status-only.md
+    // @decision 41f35bfe — never widen `Session` itself to carry `harness: null`; widen only this LOCAL,
+    // wire-only view — `Session.harness` has no `null` member, and no Session UPDATE has a "leave as-is"
+    // hazard the way `Profile.harness` does to justify touching the shared type.
     const projectSessionRowFields = (w: Session): SessionWireView => {
       const picked = pickKeys(w, SESSION_ROW_KEYS);
       return { ...picked, harness: picked.harness ?? null };
@@ -2860,7 +2899,9 @@ export class OrchestrationMcpRouter {
         unresolvedCascade: null,
         archivedWithoutReport: false,
       }));
-      // @decision ae0b7891 — see docs/decisions/ae0b7891-archived-without-report-workers-surface-a-vanished-worker-by-lineage.md
+      // @decision ae0b7891 — never scope this category by exact `parentSessionId` match; an
+      // archived-without-report worker keeps its now-retired predecessor's id after a manager recycle, so
+      // exact match would silently hide the exact finding this category exists to surface.
       const archivedUnreported = db.listWorkerSessionIdsWithEventKind(["worker_exited_without_report"])
         .map((id) => db.getSession(id))
         .filter((w): w is Session => !!w && workerReadableByManager(w) && sessions.isArchivedWithoutReport(w.id))
@@ -3706,9 +3747,11 @@ export class OrchestrationMcpRouter {
       async ({ questionId, reason }) => ok(cancelQuestionForAgent(db, managerSessionId, questionId, reason)),
     );
 
-    // @decision 308259e5 — see docs/decisions/308259e5-question-resolve-lets-a-conversational-owner-reply-answer-a-pending-request.md
+    // @decision 308259e5 — never resolve a pending request this way with agent-authored text; the note is
+    // always server-captured owner text. Never cancel-and-refile a conversationally-answered question_ask.
     //
-    // @decision ca341979 — see docs/decisions/ca341979-question-resolve-falls-back-to-the-most-recent-owner-authored-turn.md
+    // @decision ca341979 — never scan the whole owner-turn window for a match, and never concatenate
+    // multiple owner turns into one string; always take the single most-recent turn (`[0]`) alone.
     server.registerTool(
       "question_resolve",
       {
@@ -3993,14 +4036,17 @@ export class OrchestrationMcpRouter {
         }
       },
     );
-    // @decision a16c580b — see docs/decisions/a16c580b-cross-project-gate-redaction-uses-a-wrapper-object.md (§2)
+    // @decision a16c580b — never scope this call site to the caller's own project; deliberately unscoped
+    // so a manager can resolve any project's settled op by opId, with redaction doing the access control.
     registerGateStatus(server, sessions, db, undefined, undefined, () => db.getSession(managerSessionId)?.projectId);
     registerGateQueue(server, sessions, db, managerSessionId);
     registerGateIntent(server, sessions, managerSessionId);
 
-    // @decision 753d9911 — see docs/decisions/753d9911-gate-history-gives-a-manager-a-read-path-to-the-already-recorded-gate-series.md
+    // @decision 753d9911 — never add a `projectId` argument to `gate_history`; the project is resolved
+    // server-side from the caller's own session, so no argument shape can name a different project.
     //
-    // @decision bb134d3e — see docs/decisions/bb134d3e-gate-history-manager-only-was-decided-twice.md
+    // @decision bb134d3e — never add `gate_history` to the worker tool surface; a worker resolves an opId
+    // it already holds via the self-scoped `gate_status` — this is a manager-only concern, decided twice.
     server.registerTool(
       "gate_history",
       {
@@ -4243,8 +4289,11 @@ export class OrchestrationMcpRouter {
       },
     );
 
-    // @decision 60c1fff8 — see docs/decisions/60c1fff8-events-search-is-the-kind-unrestricted-sibling-of-gate-history.md
-    // @decision ab1d1129 — see docs/decisions/ab1d1129-empty-session-sentinel-must-be-normalized-before-coalesce.md
+    // @decision 60c1fff8 — never hand-copy the unknown-`kind` rejection predicate here; reuse
+    // `eventsSearchQuery` verbatim, the same query path the Platform surface's own registration uses.
+    // Never add a `projectId` parameter — the project is always the caller's own, resolved server-side.
+    // @decision ab1d1129 — never COALESCE two session-id columns that can independently hold `""` without
+    // `NULLIF`-normalizing first — `""` is treated as present and wins over a real id in the other column.
     // ⚠️ A SEPARATE, still-live quirk this does NOT touch — COALESCE prefers the worker/target session for
     // attribution even when it resolves, so a `cross_project_message` sender can't see its own outbound
     // sends here — is documented on the tool description below (this comment is why, not what).
@@ -5187,7 +5236,8 @@ export class OrchestrationMcpRouter {
     );
 
     // --- Manager↔manager cross-project channel ------------------------------------------------------
-    // @decision 2349d90c — see docs/decisions/2349d90c-peer-message-is-the-owner-gated-manager-to-manager-cross-project-channel.md
+    // @decision 2349d90c — never give an agent an MCP path to create/modify a `project_links` row; links
+    // are owner-declared, human-only — a manager can only USE a link the owner already made.
     if (hasPeerLinks) {
       server.registerTool(
         "peer_message",
