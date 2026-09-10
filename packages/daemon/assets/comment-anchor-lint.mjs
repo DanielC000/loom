@@ -24,7 +24,7 @@
 // `posttooluse-hook-honors-additionalcontext-not-systemmessage` and decision-records.mjs's own header for
 // the full method.
 //
-// Eight checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
+// Nine checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
 //   1. unanchoredLongBlocks — a contiguous comment block >= `minLines` (default DEFAULT_MIN_LINES) with
 //      no `@decision <id>` anywhere in it. The "narrative is regrowing in source" signal.
 //   2. orphanAnchors — an `@decision <id>` whose id resolves to no record in ANY of the three stores this
@@ -88,6 +88,19 @@
 //      scanned. ⛔ Does NOT catch a same-line id that's too SHORT after/before the space (a different,
 //      rarer shape, the same carve-out every other check in this file already states) — requires 8+ hex
 //      chars, mirroring `overlongAnchorIds`'s own `{8,}`-vs-well-formed-length distinction.
+//   9. bareCommitAnchors (card a2fc4031) — a BARE `@decision <id>` (never `sha:`-sigil'd) whose id ALSO
+//      resolves as a real commit object in this repo's git history. CLAUDE.md's comment-taxonomy convention
+//      is unconditional: a bare 8-hex id always means a board card, and the commit id-space REQUIRES the
+//      `sha:` sigil (card 969b0e1c) — but `orphanAnchors` never verifies a bare (`ns === "card"`) id against
+//      git at all (only a `sha:`-sigil'd id is), so a commit sha typed into the bare grammar resolves
+//      totally normally (against a same-named record, if one exists) and orphanAnchors stays silent. This
+//      check is the backstop: every bare anchor site whose id happens to ALSO be a real commit is reported,
+//      one entry per SITE (not deduped by id, unlike orphanAnchors — the originating specimen cited the
+//      same sha at two separate sites, and both need the fix). Resolution is via `git cat-file
+//      --batch-check` (`batchResolveCommits` below), ONE batched call for every distinct bare id in the
+//      whole sweep rather than one `execFileSync` per id — this repo's own measured population is in the
+//      hundreds. Runs in BOTH the CLI scan and the per-file hook, same ground as orphanAnchors — it needs
+//      only the file's own anchors plus one repo-scoped git call.
 //
 // A <= GUARD_MAX_LINES-line block that DOES carry an anchor is the convention's TARGET STATE (Class A: a
 // short guard/prohibition, permanently inline) and is counted separately as `guardClassBlocks` — it is
@@ -153,6 +166,50 @@ function anchorResolves(repoRoot, a, recordIdSet, shaCache) {
   if (a.ns !== "sha") return true;
   if (!shaCache.has(a.id)) shaCache.set(a.id, verifyCommitSha(repoRoot, a.id));
   return shaCache.get(a.id);
+}
+
+/** Batch-resolve every id in `ids` (bare 8-hex ids) against `repoRoot`'s git history, returning the
+ * subset that resolves as a real COMMIT object (card a2fc4031) — ONE `git cat-file --batch-check` call
+ * for the whole set rather than one `execFileSync` spawn per id (this repo's own measured bare-id
+ * population is in the hundreds; batching is the difference between one process and hundreds of them).
+ * `--batch-check` emits exactly one output line per input line, IN THE SAME ORDER (documented git
+ * behavior) — so this pairs each output line with `ids[i]` by INDEX, never by parsing the object name a
+ * "found" line echoes back (the full resolved oid, not necessarily byte-identical to the possibly-
+ * abbreviated input string). A "missing"/ambiguous line and a "found, but not a commit" line both fail
+ * the `=== "commit"` check identically, so neither needs separate handling. Any failure (git missing, a
+ * non-git `repoRoot`, the bounded `timeout` firing) returns an empty set rather than throwing — mirroring
+ * `verifyCommitSha`'s own "any failure reads as unverified" posture: a git failure here must never crash
+ * the whole sweep, and must never falsely report a bare id as a commit-collision either.
+ */
+function batchResolveCommits(repoRoot, ids) {
+  if (ids.length === 0) return new Set();
+  let out;
+  try {
+    out = execFileSync("git", ["cat-file", "--batch-check"], {
+      cwd: repoRoot,
+      input: ids.join("\n") + "\n",
+      timeout: 15000,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+  } catch {
+    return new Set();
+  }
+  const lines = out.split("\n");
+  const commits = new Set();
+  ids.forEach((id, i) => {
+    const type = (lines[i] || "").trim().split(/\s+/)[1];
+    if (type === "commit") commits.add(id);
+  });
+  return commits;
+}
+
+/** Every BARE (`ns === "card"`) anchor in `anchors` whose id is present in `commitIds` (as returned by
+ * `batchResolveCommits`) — the `bareCommitAnchors` check's own filter (card a2fc4031). Every matching SITE
+ * is returned, not deduped by id (unlike `orphanAnchors`'s one-per-id dedup) — the originating specimen
+ * cited the same commit sha at two separate anchor sites, and both need the fix, not just one. */
+function findBareCommitAnchors(anchors, commitIds) {
+  return anchors.filter((a) => a.ns === "card" && commitIds.has(a.id));
 }
 
 /** Render one anchor's id for a human-facing report line — `sha:<id>` for a commit-namespaced anchor,
@@ -523,7 +580,7 @@ export function bucketDistribution(blocks) {
 }
 
 /**
- * Scan `repoRoot` and compute all eight checks plus the calibration distribution. Never throws on a
+ * Scan `repoRoot` and compute all nine checks plus the calibration distribution. Never throws on a
  * violation being found — violations are just data in the returned report (DoD-1/2: warn-only, with the
  * count reported). `opts.minLines` overrides `DEFAULT_MIN_LINES` (DoD-3: N is configurable).
  */
@@ -566,6 +623,10 @@ export function computeReport(repoRoot, opts = {}) {
     if (!anchorResolves(repoRoot, a, recordIdSet, shaCache) && !orphanAnchorsById.has(key)) orphanAnchorsById.set(key, a);
   }
   const orphanRecords = records.filter((r) => !anchorIdSet.has(r.id));
+
+  const cardIds = [...new Set(allAnchors.filter((a) => a.ns === "card").map((a) => a.id))];
+  const commitResolvedIds = batchResolveCommits(repoRoot, cardIds);
+  const bareCommitAnchors = findBareCommitAnchors(allAnchors, commitResolvedIds);
 
   return {
     repoRoot,
@@ -613,6 +674,10 @@ export function computeReport(repoRoot, opts = {}) {
       count: collidingRecords.length,
       items: collidingRecords,
     },
+    bareCommitAnchors: {
+      count: bareCommitAnchors.length,
+      items: bareCommitAnchors.map((a) => ({ file: relPath(repoRoot, a.file), line: a.line, id: a.id })),
+    },
     distribution: bucketDistribution(allBlocks),
   };
 }
@@ -638,12 +703,14 @@ export function isInScope(repoRoot, filePath) {
 
 /**
  * The hook's actual per-file check: checks (1) unanchoredLongBlocks, (2) orphanAnchors, (4) brokenAnchors,
- * (7) overlongAnchorIds, and (8) sigilSpaceAnchors — see this file's header for why (3) orphanRecords,
- * (5) oversizedRecords, and (6) collidingRecords are deliberately excluded (all three need the whole repo's
- * record/anchor corpus, not just this one file) — scoped to ONE file's already-read `content`, never a
- * repo walk. `listRecordIds` is the only filesystem cost beyond the one file read: a
+ * (7) overlongAnchorIds, (8) sigilSpaceAnchors, and (9) bareCommitAnchors — see this file's header for why
+ * (3) orphanRecords, (5) oversizedRecords, and (6) collidingRecords are deliberately excluded (all three
+ * need the whole repo's record/anchor corpus, not just this one file) — scoped to ONE file's already-read
+ * `content`, never a repo walk. `listRecordIds` is the only filesystem cost beyond the one file read: a
  * `readdirSync` of up to three small `docs/<kind>` directories (a handful of entries each in this repo
  * today), not a source-tree scan — see this function's own doc in `computeReport` above for why it's cheap.
+ * `bareCommitAnchors` adds one `git cat-file --batch-check` call scoped to this file's own (usually tiny)
+ * set of bare-anchor ids — the same cost model `orphanAnchors`' sha-verification already pays per file.
  * Returns `null` for a file outside `isInScope`'s scope; otherwise a report shaped for `formatHookMessage`
  * below (empty arrays when the file is in scope but has nothing to flag — a real, distinguishable "clean"
  * result, not the same `null` as "not even scanned").
@@ -669,6 +736,10 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
     if (!anchorResolves(repoRoot, a, recordIdSet, shaCache) && !orphanAnchorsById.has(key)) orphanAnchorsById.set(key, a);
   }
 
+  const cardIds = [...new Set(anchors.filter((a) => a.ns === "card").map((a) => a.id))];
+  const commitResolvedIds = batchResolveCommits(repoRoot, cardIds);
+  const bareCommitAnchors = findBareCommitAnchors(anchors, commitResolvedIds);
+
   return {
     file: rel,
     minLines,
@@ -677,6 +748,7 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
     brokenAnchors: broken.map((b) => ({ line: b.line })),
     overlongAnchorIds: overlong.map((o) => ({ line: o.line, ns: o.ns, match: o.match })),
     sigilSpaceAnchors: sigilSpace.map((s) => ({ line: s.line, match: s.match })),
+    bareCommitAnchors: bareCommitAnchors.map((a) => ({ line: a.line, id: a.id })),
   };
 }
 
@@ -703,13 +775,18 @@ export function formatHookMessage(report) {
     lines.push(`${report.sigilSpaceAnchors.length} @decision anchor(s) in ${report.file} with whitespace adjacent to the sha sigil's colon, before it, after it, or both (e.g. "sha: deadbeef" or "sha :deadbeef") — the anchor is NOT detected and its record silently becomes an orphan:`);
     for (const s of report.sigilSpaceAnchors) lines.push(`  - ${report.file}:${s.line} — ${s.match}`);
   }
+  if (report.bareCommitAnchors.length) {
+    lines.push(`${report.bareCommitAnchors.length} bare @decision anchor(s) in ${report.file} whose id resolves as a REAL GIT COMMIT in this repo (CLAUDE.md: a bare id always means a board card; the commit id-space requires the "sha:" sigil — card 969b0e1c):`);
+    for (const a of report.bareCommitAnchors) lines.push(`  - ${report.file}:${a.line} — @decision ${a.id} (resolves as a commit — did you mean "sha:${a.id}"?)`);
+  }
   return `comment-anchor-lint (CLAUDE.md comment taxonomy, card 90b19799) flagged ${report.file}:\n${lines.join("\n")}\n`
     + `Advisory only: a long unanchored block may want "// @decision <id> — <the prohibition/consequence>" `
     + `(<=3 lines) plus an out-of-band record in docs/adr or docs/decisions; an orphan anchor needs a matching `
     + `record file; a broken anchor needs "@decision <id>" kept together on one line, never wrapped; an `
     + `over-long anchor id needs trimming to the 8-hex prefix (\`git rev-parse --short=8\`, or manually take `
     + `the first 8 chars of the full sha); a sigil-space anchor needs the whitespace after "sha:" removed so `
-    + `it directly precedes the hex id.`;
+    + `it directly precedes the hex id; a bare-commit anchor needs the "sha:" sigil added if a commit was `
+    + `genuinely intended, or a real board card id if one was.`;
 }
 
 /**
@@ -764,7 +841,7 @@ async function runHook(repoRootArg) {
   const report = computeFileReport(repoRoot, filePath, content);
   if (!report || (report.unanchoredLongBlocks.length === 0 && report.orphanAnchors.length === 0
     && report.brokenAnchors.length === 0 && report.overlongAnchorIds.length === 0
-    && report.sigilSpaceAnchors.length === 0)) return;
+    && report.sigilSpaceAnchors.length === 0 && report.bareCommitAnchors.length === 0)) return;
 
   const msg = formatHookMessage(report);
   await emitHook({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: msg } });

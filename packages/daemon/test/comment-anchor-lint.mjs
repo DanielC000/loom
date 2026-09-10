@@ -41,6 +41,12 @@
 //      — is flagged, in both the CLI scan and the live per-file hook; a well-formed sigil'd anchor (no
 //      space either side), a well-formed bare anchor, a too-short same-line id (either side), the EOL-wrap
 //      shape, and mid-line mentions of the literal token are all confirmed NOT flagged.
+//  12. bareCommitAnchors (card a2fc4031): a BARE `@decision <id>` (never `sha:`-sigil'd) whose id ALSO
+//      resolves as a real commit object in this repo's git history — the exact silent mis-anchor
+//      `CLAUDE.md`'s comment-taxonomy convention forbids (a bare id always means a board card; the commit
+//      id-space requires the `sha:` sigil, card 969b0e1c) — is flagged, in both the CLI scan and the live
+//      per-file hook; the SAME id in correctly-sigil'd `sha:` form, and a bare id that is NOT a real
+//      commit, are both confirmed NOT flagged.
 // Run: `node test/comment-anchor-lint.mjs` from packages/daemon (no build, no LOOM_HOME needed).
 import fs from "node:fs";
 import os from "node:os";
@@ -456,6 +462,61 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
       byId.cccccccc?.darkPaths.length === 2
       && byId.cccccccc.darkPaths.includes("docs/decisions/cccccccc-aaa-decisions.md")
       && byId.cccccccc.darkPaths.includes("docs/investigations/cccccccc-third-collider/findings.md"));
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+// --- bareCommitAnchors (card a2fc4031) -------------------------------------------------------------
+
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-bare-commit-anchor-"));
+  try {
+    fs.mkdirSync(path.join(dir, "packages", "daemon", "src"), { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    fs.writeFileSync(path.join(dir, "SEED.md"), "seed\n");
+    commitAll(dir, "seed", "-c user.email=bare-commit-fixture@loom -c user.name=bare-commit-fixture");
+    const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim().slice(0, 8);
+
+    const srcPath = path.join(dir, "packages", "daemon", "src", "fixture.ts");
+
+    // RED/GREEN: a BARE @decision anchor whose id is a REAL commit sha — the exact defect card a2fc4031
+    // exists to catch. CLAUDE.md: a bare id always means a board card; the commit id-space REQUIRES the
+    // "sha:" sigil (card 969b0e1c). Written TWICE (two sites) to also prove sites aren't deduped by id —
+    // mirrors the originating specimen, which cited the same sha at two separate anchor sites.
+    fs.writeFileSync(srcPath, `// @decision ${sha} — bare form citing a real commit, site one\n\nconst x = 1;\n\n// @decision ${sha} — bare form citing a real commit, site two\n`);
+    const reportBare = computeReport(dir, { minLines: 15 });
+    check("bareCommitAnchors: a bare anchor whose id is a real commit sha is flagged, once per site (count 2)",
+      reportBare.bareCommitAnchors?.count === 2
+      && reportBare.bareCommitAnchors.items.every((a) => a.id === sha && a.file === "packages/daemon/src/fixture.ts"));
+    check("bareCommitAnchors: the two sites report their own distinct line numbers",
+      reportBare.bareCommitAnchors.items[0]?.line === 1 && reportBare.bareCommitAnchors.items[1]?.line === 5);
+
+    // GREEN: the SAME id, in the correctly-sigil'd sha: form — must NOT be flagged.
+    fs.writeFileSync(srcPath, `// @decision sha:${sha} — sigil'd form, correctly namespaced\n`);
+    const reportSigiled = computeReport(dir, { minLines: 15 });
+    check("bareCommitAnchors: the SAME id in sha: form is not flagged, count 0",
+      reportSigiled.bareCommitAnchors?.count === 0);
+
+    // Negative control: a bare anchor whose id is NOT a real commit must not be flagged either — proves
+    // the check discriminates on "is a real commit", not just "is a bare anchor".
+    fs.writeFileSync(srcPath, "// @decision deadbeef — bare form, not a real commit in this repo\n");
+    const reportNotCommit = computeReport(dir, { minLines: 15 });
+    check("bareCommitAnchors: a bare anchor whose id is NOT a real commit is not flagged, count 0",
+      reportNotCommit.bareCommitAnchors?.count === 0);
+
+    // computeFileReport (the live PostToolUse hook path) must ALSO catch it, at authoring time — same
+    // ground as brokenAnchors/overlongAnchorIds/sigilSpaceAnchors above.
+    fs.writeFileSync(srcPath, `// @decision ${sha} — bare form citing a real commit\n`);
+    const fileReportBare = computeFileReport(dir, srcPath, fs.readFileSync(srcPath, "utf8"));
+    check("computeFileReport (the live PostToolUse hook path): the bare-commit anchor is flagged too",
+      fileReportBare?.bareCommitAnchors?.length === 1 && fileReportBare.bareCommitAnchors[0]?.id === sha
+      && fileReportBare.bareCommitAnchors[0]?.line === 1);
+
+    fs.writeFileSync(srcPath, `// @decision sha:${sha} — sigil'd form, correctly namespaced\n`);
+    const fileReportSigiled = computeFileReport(dir, srcPath, fs.readFileSync(srcPath, "utf8"));
+    check("computeFileReport: the sigil'd form of the same id is not flagged",
+      fileReportSigiled?.bareCommitAnchors?.length === 0);
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
   }

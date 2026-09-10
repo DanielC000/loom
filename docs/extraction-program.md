@@ -277,7 +277,8 @@ thing it exists to do.
 5. **Lint before/after: `orphanAnchors` must not grow, *and* `collidingRecords` must not grow.**
    Checking only `orphanAnchors` is unsafe — a same-id sibling record satisfies "the id still
    resolves" while the other file sharing that id goes permanently dark, and `orphanAnchors` stays
-   at 0 throughout.
+   at 0 throughout. Also check `bareCommitAnchors` stays at 0 — a bare `@decision <id>` you sourced
+   off `git blame`/`git log` needs the `sha:` sigil (card `a2fc4031`).
 6. **Commit your changes first, then run `pnpm --filter @loom/daemon guards`.** `guards` is not
    `run_gate`. A `git add` short of a commit does not put your work through the diff-scoped core
    scan the merge gate itself re-runs — the guard list lives in `STATIC_GUARD_REPO_PATHS` in
