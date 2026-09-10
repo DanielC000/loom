@@ -9,17 +9,13 @@ import { nonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
  * docs/decisions/dbc6f660-batch-merge-forfeited-is-the-one-failure-mode-batching-worsens.md for the
  * owner-specified design and the forfeit failure mode.
  *
- * @decision 6801c0a1 — each candidate branch's own commits land INDIVIDUALLY (cherry-picked, one commit at
- * a time, oldest first), never squashed into one commit per branch — this module deliberately does NOT
- * reuse {@link mergeBranch}. See
- * docs/decisions/6801c0a1-batch-landing-preserves-each-branchs-own-commits-not-a-squash.md for the
- * original (wrong) shape and the trailer-placement rationale.
+ * @decision 6801c0a1 — each candidate branch's own commits land individually (cherry-picked, oldest
+ * first), never squashed via {@link mergeBranch}; the tip's Loom-Worker-Branch trailer is written only
+ * after that commit is cherry-picked, never inherited from the pre-rebase sha.
  *
- * @decision d62dad73 — `Loom-Worker-Base`/`Loom-Worker-PathSet` are stamped on EVERY batched branch's tip,
- * regardless of commit count. See
- * docs/decisions/d62dad73-loom-worker-base-trailer-stamps-the-landed-base-not-the-fork-point.md for the
- * rename-following bug this fixes and why the digest is computed from the LANDED range, never the
- * branch's own pre-landing diff.
+ * @decision d62dad73 — the Loom-Worker-Base/PathSet digest is computed against `batchHeadBefore` (the
+ * landed base), never `merge-base(HEAD, branch)` (the pre-landing fork point) nor the tip's own `sha^`
+ * once a branch lands more than one commit — both diverge once main has advanced past the fork point.
  *
  * ⚠️ A branch whose own commit range contains a MERGE commit (e.g. a stale-base auto-forward that unioned
  * main into the worker's worktree mid-work — `mergeMainIntoWorktree`) is DROPPED, not cherry-picked:
@@ -40,10 +36,9 @@ import { nonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
  *  - Canonical main is FORFEITED (refused, not partially advanced) if it moved between the batch being cut
  *    and the fast-forward — the batch's single gate never validated whatever main became in the meantime.
  *
- * @decision 8ea85329 — this module has no HTML-entity backstop on a batched commit subject (unlike the
- * solo squash path's `mergeBranchLocked`). See
- * docs/decisions/8ea85329-batched-landing-has-no-entity-backstop-warn-only-advisory-instead.md for why a
- * hard refusal here was considered and rejected. Do not read this file's silence on entities as coverage.
+ * @decision 8ea85329 — this module has no HTML-entity backstop on a batched commit subject (unlike
+ * the solo squash path's `mergeBranchLocked`) — a warn-only advisory covers it instead. Do not add a
+ * hard refusal here, and do not read this file's silence on entities as coverage.
  */
 
 const GIT_OP_TIMEOUT_MS = 15_000;
@@ -288,7 +283,7 @@ async function landBranchCommitsIndividually(
     const sha = commitShas[i]!;
     const isLast = i === commitShas.length - 1;
     // @decision a32533a1 — do not coerce or rewrite a batched commit's subject to the card title; it
-    // lands verbatim, unlike a solo merge's title-coerced squash. See docs/adr/a32533a1-keep-batch-merges-unrewritten.md.
+    // lands verbatim, unlike a solo merge's title-coerced squash (toConventionalSubject never runs here).
     // EVERY commit cherry-picks with `--no-commit` (never auto-commits) so its message passes through
     // `stripClaudeSessionTrailer` before the one manual `git commit` that lands it — see this function's
     // own doc for why that can't be limited to just the tip.
@@ -308,9 +303,8 @@ async function landBranchCommitsIndividually(
         : { ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} failed: ${(e as Error).message}` };
     }
     // @decision 2eb78eb2 — detect an ALREADY-PRESENT (redundant) commit's empty stage EXPLICITLY, before
-    // the manual commit below, so a redundant-content drop reads distinctly from an opaque git failure.
-    // Uses `git diff --cached --name-only` (not `--quiet`) — exit-code ambiguity at this call site. See
-    // docs/decisions/2eb78eb2-detect-empty-stage-explicitly-before-the-manual-commit.md.
+    // the manual commit below, via `git diff --cached --name-only` (not `--quiet`, whose exit-code signal
+    // is indistinguishable from any other `.raw()` failure here) — so a redundant drop reads distinctly.
     let stagedPaths: string;
     try {
       stagedPaths = await withTimeout(
@@ -503,9 +497,9 @@ async function sortCandidatesByEarliestAuthorDate(
  * {@link landBranchCommitsIndividually} for the per-branch mechanism (cherry-pick, not squash — card
  * 6801c0a1) and this file's own header doc for why.
  *
- * @decision 4763432b — the landing ORDER is `candidates` sorted oldest-author-date-first (see
- * {@link sortCandidatesByEarliestAuthorDate}), never caller-supplied order. See
- * docs/decisions/4763432b-batch-landing-order-is-oldest-author-date-first.md for why.
+ * @decision 4763432b — landing order is `candidates` sorted oldest-author-date-first (see
+ * {@link sortCandidatesByEarliestAuthorDate}), never caller-supplied order; branches never reorder their
+ * own commits, and ties break on original index, never assumed `Array.prototype.sort` stability alone.
  *
  * A candidate that won't land cleanly (a real conflict on any of its own commits against an earlier
  * candidate in this same batch, or any other cherry-pick/commit failure) is DROPPED — recorded with its
@@ -609,9 +603,8 @@ export async function fastForwardCanonicalMain(
 export interface BatchGateResult {
   passed: boolean;
   /** @decision d422e279 — this field's earlier doc asserted a RETRACTED measured claim about how often a
-   *  batch's union is reducible, and the field itself is RECORD-ONLY (nothing reads it back —
-   *  `gate_history` is populated independently, from the same local variables the caller's `runGate`
-   *  closure already computes). See docs/decisions/d422e279-format-reduced-gate-warning-is-the-shared-builder.md. */
+   *  batch's union is reducible. The field itself is RECORD-ONLY: nothing reads it back — `gate_history`
+   *  is populated independently, from the same local variables the caller's `runGate` closure computes. */
   emitCompareReduced?: boolean;
   /** Card d422e279: present ONLY when `emitCompareReduced` is `true` — the SAME surfacing obligation
    *  `EmitCompareGateResult`'s own doc (git/worktrees.ts) mandates for a solo reduced merge

@@ -5,9 +5,9 @@ import { LOOM_HOME } from "../paths.js";
 import { canonicalRepoLockKey } from "./repo-lock.js";
 
 /**
- * @decision 5a7692a4 — DURABLE counterpart to the in-memory tracker in merge-danger-window.ts, for a hard
- * death that tracker doesn't survive; one hash-keyed file per canonical repo, since several can be
- * independently mid-squash at once. See the record for why the boot-time residue scan can't substitute.
+ * @decision 5a7692a4 — DURABLE counterpart to the in-memory tracker in merge-danger-window.ts, which a
+ * hard death wipes; one hash-keyed file per repo. The boot residue scan answers a STATE question (is
+ * the tree dirty now), never this file's EVENT question (did THIS process die mid-squash) — it can't substitute.
  *
  * Written/removed SYNCHRONOUSLY and NEVER throws (same discipline as shutdown-marker.ts's
  * `writeShutdownMarker`) — the write lands on the hot path right before `git merge --squash` (NOT
@@ -107,15 +107,15 @@ export function readAndClearMergeDangerLatches(): MergeDangerLatchRecord[] {
 }
 
 /**
- * @decision b272d215 — PURE classification of a latch found at boot against
- * `scanCanonicalReposForMergeResidue`'s result (`dirty`) and the actual scanned set (`scannedRepoPaths`):
- * `dirty` alone can't tell "scanned and clean" from "never scanned at all" — see the record for why those
- * two must never share a message. Extracted as its own function so it is independently testable without
- * driving the whole boot sequence — see test/merge-danger-latch.mjs. Never throws (pure string formatting).
+ * @decision b272d215 — PURE classification of a latch against `dirty`/`scannedRepoPaths`: `dirty` alone
+ * can't tell "scanned and clean" from "never scanned at all" — those two must never share one message;
+ * a repo absent from `scannedRepoPaths` gets its own "tree state UNKNOWN" wording, never the clean-tree one.
+ * Extracted as its own function so it is independently testable without driving the whole boot
+ * sequence — see test/merge-danger-latch.mjs. Never throws (pure string formatting).
  *
- * @decision b272d215 — both comparisons key through `canonicalRepoLockKey`, not raw string equality: the
- * latch and a `dirty`/`scannedRepoPaths` entry can name the SAME directory with a different case or
- * separator spelling (notably on Windows) — see the record for the three-way message split this feeds.
+ * @decision b272d215 — both comparisons key through `canonicalRepoLockKey`, not raw string equality:
+ * the latch and a `dirty`/`scannedRepoPaths` entry can name the SAME directory with a different case
+ * or separator spelling (notably on Windows) — a raw `===` would wrongly take the "different repo" branch.
  */
 export function describeMergeDangerLatchAtBoot(
   latch: MergeDangerLatchRecord,

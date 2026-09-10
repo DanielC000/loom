@@ -72,10 +72,9 @@ const NONINTERACTIVE_ENV: Record<string, string> = {
  * it, and (2) would any op in this file (log/branches/show/checkout/commit/push — all captured stdio,
  * never a real TTY) ever legitimately need it.
  *
- * @decision f7a80d76 — STRIPPED (delegated to {@link scrubGitEnv} — see its own doc for the exact list;
- * includes GIT_PAGER/PAGER, which proved a real 500, card 42544916) vs PASSED-THROUGH-EXPLICITLY-ALLOWED
- * (the config-path family, via `boundedSimpleGit`'s `unsafe.allowUnsafeConfigPaths`) categorization +
- * rationale. See docs/decisions/f7a80d76-git-write-child-env-categorization.md.
+ * @decision f7a80d76 — STRIPPED (delegated to {@link scrubGitEnv}: includes GIT_PAGER/PAGER, proved to
+ * 500 every git op, card 42544916) vs PASSED-THROUGH-EXPLICITLY-ALLOWED (the config-path family, via
+ * `unsafe.allowUnsafeConfigPaths`) — never re-add GIT_PAGER/PAGER, never blanket-strip config-paths.
  *
  * DELIBERATELY LEFT BLOCKED (simple-git's guard staying active is the intended behavior, not a gap):
  *  - GIT_ASKPASS / SSH_ASKPASS — pre-existing decision (see {@link NONINTERACTIVE_ENV}'s comment):
@@ -253,9 +252,10 @@ export class GitWriter {
 
   /**
    * Hold the vault auto-commit pause lease for the duration of one git-surgery op on `this.repoPath`.
-   * @decision 614dfbef — see docs/decisions/614dfbef-advisory-vault-auto-commit-pause-lease.md.
-   * @decision 237d1899 — the per-op token that makes a resume "mine-only" under overlap; see
-   * docs/decisions/237d1899-per-op-token-for-the-vault-pause-lease.md.
+   * @decision 614dfbef — advisory only: this stops `VaultVersioner`'s own commit tick, nothing else is
+   * blocked from touching the repo; always resumed in `finally` so a lease never outlives this call.
+   * @decision 237d1899 — the per-op token makes a resume "mine-only" under overlap: never resume a
+   * lease by its bare presence — a DIFFERENT still-running op may have re-paused it with a new token.
    */
   private async withVaultPauseLease<T>(fn: () => Promise<T>): Promise<T> {
     const pauseToken = pauseVaultAutoCommit(this.repoPath);
@@ -327,17 +327,15 @@ export class GitWriter {
    * A clean tree is an EXPECTED no-op failure ("nothing to commit") — surfaced, not thrown. Identity is
    * the repo's configured user (no overrides, no trailer).
    *
-   * @decision 237d1899 — oversized-staged-file handling: WARN, never refuse/unstage (unlike
-   * `commitVault`'s automatic path) — this call is a deliberate human/agent act. See
-   * docs/decisions/237d1899-per-op-token-for-the-vault-pause-lease.md.
+   * @decision 237d1899 — oversized-staged-file handling: WARN, never refuse or silently unstage (unlike
+   * `commitVault`'s fully-automatic path) — this call is a deliberate human/agent act on the code repo.
    *
    * `opts.maxFileBytes` overrides the shared default — a TEST seam only (mirrors `commitVault`'s own
    * `opts.maxFileBytes`: writing a real ~95MB fixture per test run would be slow and wasteful). Every
    * real caller omits it and gets {@link DEFAULT_MAX_VAULT_FILE_BYTES}.
    *
-   * @decision e41dbb58 — admitted through {@link withCanonicalIndexLock}, so this races neither an
-   * in-progress squash-merge nor createBranch/checkout. See
-   * docs/decisions/e41dbb58-gitwriter-write-ops-admitted-through-the-canonical-index-lock.md.
+   * @decision e41dbb58 — admitted through {@link withCanonicalIndexLock}, so this never races an
+   * in-progress squash-merge or createBranch/checkout landing under the wrong message or branch.
    */
   async commit(
     message: string,
@@ -408,8 +406,8 @@ export class GitWriter {
    * mismatch) so the human who just published sees if their email is wrong for this remote. It never
    * blocks the push and a detection failure is silently swallowed — see {@link identityWarning}.
    *
-   * @decision 614dfbef — durably records the outcome via `recordGitPushOutcome`; see
-   * docs/decisions/614dfbef-advisory-vault-auto-commit-pause-lease.md.
+   * @decision 614dfbef — durably records the outcome via `recordGitPushOutcome`, on success AND
+   * failure — never skip it; surfacing a rejected remote durably is the origin finding this closes.
    */
   async push(): Promise<GitWriteResult<{ branch: string; warning?: string }>> {
     return this.withVaultPauseLease(async () => {
