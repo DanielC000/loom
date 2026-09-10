@@ -101,6 +101,27 @@ second file. Never overwrite what's already there — another lane's landed work
 earlier in this same session.** A block that re-cites an id you anchored twenty minutes ago is
 exactly where a second record file gets created by accident; recency doesn't exempt it.
 
+**"Every id, every time" covers a `sha:`-derived key exactly like a card id — and it is easy to
+miss precisely because a `sha:` key is never grepped from the file's text up front.** A card id is
+something you can gather into a pre-check set by reading the block; a `sha:` key is **derived at
+write time**, via `git blame`, from a block that cites no id at all. A worker who pre-checks only
+the card ids visible in the file's own text never adds that blame-derived sha to the set, so the
+`find` silently never runs against it — the gap is in *when* the key exists, not in the rule.
+
+**Why it matters: one commit can fix two files.** Commit `29b22e7e25de03c2c2dc51b4069160eb5453c112`
+fixed both the `pty/host.ts` keystroke-confirmation bug and the `pty/claude-settings.ts` resume-gate
+env thresholds — one commit, two files, two blocks. An earlier tranche had already recorded it from
+the `host.ts` side as `docs/decisions/29b22e7e-….md`. A later `claude-settings.ts` worker blamed its
+own id-less block, derived the same sha, and — having pre-checked only the card ids gathered from
+its own file's text — wrote a second file for it. `collidingRecords` went **2→3**. The worker's own
+DoD-5 lint caught it; it deleted the duplicate, folded the content in as a new section of the
+existing record, repointed the anchor's `see` path, and the count returned to **2**.
+
+⇒ **Run the same `find` for a `sha:` key too, at the moment you derive it from `git blame` — before
+you write anything, exactly as for a card id.** The obligation is unconditional on *how* the key was
+obtained; only the moment it enters the picture differs — a card id is checkable up front, a
+blame-derived sha only exists once you've already read the id-less block.
+
 **A `find` hit is not enough — read the returned path before concluding it's unrelated.** A
 worker misread its own `find` output once, and that misreading is precisely how a duplicate
 record got created.
