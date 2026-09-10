@@ -1,0 +1,15 @@
+# 7c2a6dc0 — guard the trust-dialog two-part write against a session dying mid-write
+
+## Narrative
+
+Code Review audit (card `7c2a6dc0`) on the trust-dialog answer write (card `353f6dc4`'s two-part `"1"` / delay / `"\r"` split, `pty/host.ts`'s `spawnCodexProcess` onData handler): the two-part write previously had NO alive/killed guard at all. A session that died or was hard-stopped between the two writes — or during the delay between them — would still be written to: the exact `Live.killed`-documented crash risk on a destroyed `_inSocket`.
+
+Fix: guard both writes independently (`if (live.alive && !live.killed) pty.write(...)`) rather than guarding once before the pair, since the delay between them is a real gap the session can die or be killed in.
+
+## Do not
+
+- Do not guard the two-part trust-dialog write with a single check before both writes — the delay between them is a real window for the session to die or be killed; each write needs its own guard.
+
+## Source
+
+Inline comment in `packages/daemon/src/pty/host.ts` (the `codexTrustDialogLock.withLock` callback inside `spawnCodexProcess`'s onData handler), as of commit 624ec86b6. Extracted by card `5bf5327f` (tranche 16 on `pty/host.ts`).

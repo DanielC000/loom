@@ -4693,21 +4693,13 @@ export class PtyHost {
         // interleaving with the two-part answer write below until the real "\r" has actually gone out.
         live.trustDialogPending = true;
         codexTrustDialogLock.withLock(async () => {
-          // ⚠️ REAL BUG FOUND BY THE REAL-SPAWN TEST (card 353f6dc4): a SINGLE combined `pty.write("1\r")`
-          // never registered against a real codex TUI — the process sat at "Press enter to continue"
-          // indefinitely (confirmed: config.toml never changed, no further output ever arrived). Splitting
-          // into TWO separate writes — "1", then a delay, then "\r" — mirrors `submitCodex`'s own
-          // independently-OBSERVED two-write recipe (see that method's own doc) and resolved it
-          // immediately (confirmed: codex advanced past the dialog to its own ready state on the very next
-          // run). `trustDialogAnswer()`/`TRUST_DIALOG_ANSWER` still document the LOGICAL answer as a single
-          // "1\r" for readability; only the WRITE MECHANICS split it — this reuses the same
-          // CODEX_SUBMIT_ENTER_DELAY_MS gap for consistency, not because it was independently measured for
-          // this specific dialog (the probe never observed a menu-selection Enter's own timing).
-          // Card 7c2a6dc0 (Code Review audit): this two-part write previously had NO alive/killed guard at
-          // all — a session that died or was hard-stopped between the two writes (or during the delay
-          // between them) would still be written to, the exact `Live.killed`-doc'd crash risk on a
-          // destroyed `_inSocket`. Guard both writes independently since the delay below is a real gap the
-          // session can die/be killed in.
+          // @decision 353f6dc4 — write the trust-dialog answer as TWO separate writes ("1", delay, "\r"),
+          // never one combined `pty.write("1\r")` — the combined form never registers against a real codex
+          // TUI (confirmed by the real-spawn test; stuck at "Press enter to continue" forever).
+          //
+          // @decision 7c2a6dc0 — guard EACH of the two writes independently (`live.alive && !live.killed`)
+          // — the delay between them is a real window for the session to die or be killed under an
+          // unguarded write into a destroyed `_inSocket`.
           if (live.alive && !live.killed) pty.write(trustDialogAnswer().slice(0, -1)); // "1" (drop the trailing \r — see the comment above)
           await new Promise<void>((r) => setTimeout(r, CODEX_SUBMIT_ENTER_DELAY_MS));
           if (live.alive && !live.killed) pty.write("\r");

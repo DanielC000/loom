@@ -14,6 +14,10 @@ Multi-harness epic (`df1f94b0`) Phase 1, this same card `353f6dc4`: the original
 
 The shape that resulted: `PtyHost#spawnCodexProcess`/`submitCodex`/`enqueueStdinCodex`/`drainCodexPending`/`stopCodex`/`interruptForRedirectCodex` in `pty/host.ts` are the real, wired, real-spawn-tested stateful runtime. `packages/daemon/src/pty/codex-host.ts` ships ONLY the pure decision logic those methods delegate to — trust-dialog detect/answer, busy/idle detection, kickoff-ready detection, MCP-url→codex-argv translation — proven by direct unit tests (`test/codex-host-decisions.mjs`) plus the scripted fake-pty queue/turn-state-machine test (`test/codex-queue-state-machine.mjs`). It holds no state of its own and is never itself what a real session's `Live`/`CodexLive` entry points at.
 
+## The trust-dialog answer is written as two separate writes, never one combined write
+
+The real-spawn test found a single combined `pty.write("1\r")` never registers against a real codex TUI — stuck at "Press enter to continue" indefinitely (`config.toml` never changes, no further output arrives). Splitting into TWO writes — `"1"`, a delay, then `"\r"` — mirrors `submitCodex`'s own independently-observed two-write recipe and resolves it immediately (codex advances past the dialog on the very next run). `trustDialogAnswer()`/`TRUST_DIALOG_ANSWER` still document the LOGICAL answer as a single `"1\r"` for readability; only the WRITE MECHANICS are split — reusing `CODEX_SUBMIT_ENTER_DELAY_MS` for consistency, not because this dialog's own timing was independently measured (the probe never observed a menu-selection Enter's own timing).
+
 ## Do not
 
 - Do not widen `Live` itself with a `kind:"codex"` variant to add codex support — ruling #3's original shape, superseded by this card because it forces sentinel values onto ~60 fields codex doesn't actually have.
@@ -25,3 +29,5 @@ The shape that resulted: `PtyHost#spawnCodexProcess`/`submitCodex`/`enqueueStdin
 Inline comment in `packages/daemon/src/pty/host.ts` (the JSDoc above `export interface CodexLive`), as of commit 41336cdba9e3c80849be6c64c84a8d52c3c06dce. Relocated by card a2604faf (tranche 4 on `pty/host.ts`); no wording changed beyond joining wrapped source lines into flowing paragraphs and stripping `*` comment markers.
 
 A second site records the companion half of the same ruling: the module-level doc comment at the top of `packages/daemon/src/pty/codex-host.ts` (lines 3-24), as of commit 41336cdba9e3c80849be6c64c84a8d52c3c06dce. Relocated by card e5ee79bb (tranche 1 on `pty/codex-host.ts`); no wording changed beyond joining wrapped source lines and stripping `*` markers.
+
+A third site records the two-part write: `pty/host.ts`, inside `spawnCodexProcess`'s onData handler (the `codexTrustDialogLock.withLock` callback), as of commit ab549920b. Extracted by card `5bf5327f` (tranche 16).
