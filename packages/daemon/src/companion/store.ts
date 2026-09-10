@@ -19,8 +19,8 @@
  *
  * Home is NOT stored in the config row — it stays in app_meta, PER SESSION (get/setCompanionHome(sessionId)),
  * with `resolveAllEnabledConfigs` resolving each row's OWN home.
- * @decision e849a487 — why it must be per-session, never one shared value; see
- * docs/decisions/e849a487-multi-companion-home-not-a-shared-value.md.
+ * @decision e849a487 — never reintroduce a single, daemon-wide home lookup here: every row must resolve
+ * its own home from its own session id, or multi-companion messages cross-deliver to the wrong owner.
  */
 import { createHash } from "node:crypto";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
@@ -140,8 +140,8 @@ export function resolveAllEnabledConfigs(
  * session's app_meta home) — but two DIFFERENT enabled sessions can resolve their home to the SAME route,
  * and `CompanionHeartbeatWatcher` is armed 1-per-session with no cross-session scoping (controller.ts), so
  * both would otherwise fire and duplicate a proactive message.
- * @decision f1d7a22b — the investigation; see
- * docs/decisions/f1d7a22b-same-home-collision-guard-investigation.md.
+ * @decision f1d7a22b — deliberately narrow: suppress ONLY the heartbeat, ONLY among LIVE members —
+ * widening scope or dropping the liveness filter below reopens the orphan-silence this guard prevents.
  *
  * Mirrors the token-fingerprint guard's shape (group by a fingerprint, keep exactly one) — but narrower:
  * only the HEARTBEAT is suppressed on the losing session(s) (by zeroing `heartbeatIntervalMinutes`, the
@@ -153,9 +153,8 @@ export function resolveAllEnabledConfigs(
  * this guard exists to prevent. Winner selection: see `mostActive` below. Mutates
  * `heartbeatIntervalMinutes` of the losing config(s) in place.
  *
- * @decision 134368ac — re-arming a suppressed survivor when the WINNER itself later exits is handled in
- * controller.ts's `onSessionExit`, not here; see
- * docs/decisions/134368ac-same-home-heartbeat-rearm-on-exit.md.
+ * @decision 134368ac — re-arming a suppressed survivor when the WINNER itself later exits is handled
+ * in controller.ts's `onSessionExit`, not here — do not duplicate that re-arm logic in this function.
  */
 function suppressDuplicateHomeHeartbeats(db: CompanionConfigStore, configs: CompanionConfig[]): void {
   const byHome = new Map<string, CompanionConfig[]>(); // "channel\0chatId" -> every armed config on it

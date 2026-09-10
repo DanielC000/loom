@@ -116,8 +116,8 @@ export interface SetupTemplate {
 export interface TemplateApplyResult { agents: Agent[]; tasks: Task[]; }
 
 // @decision 9ccedbee — every non-GET /api/* write (+ /ws/term) needs this token as
-// `Authorization: Bearer <token>`, delivered once via `?token=` in the URL and captured below into
-// localStorage. Dev-proxy origin split is a known, not-fixable-here gap — see the record.
+// `Authorization: Bearer <token>`, captured below into localStorage. Under pnpm web's dev proxy the
+// SPA is a DIFFERENT origin with its own localStorage — a token captured elsewhere is invisible here.
 const LOOPBACK_TOKEN_STORAGE_KEY = "loom.loopbackToken";
 
 (function captureLoopbackToken() {
@@ -1158,7 +1158,7 @@ export const workerDiffQuery = (sessionId: string) => ({
 
 // @decision sha:a1a89b72 — LOAD-BEARING: keeps a cold orchestration-status load at ONE request
 // instead of two (seed-vs-mount-fetch race; ~1000x measured margin). Don't raise for more margin;
-// don't drop to 0 assuming ordering alone covers it — see the record.
+// don't drop to 0 assuming ordering alone covers it — mechanism 2 (seed after mount fetch) is real.
 export const ORCH_STATUS_STALE_MS = 10_000;
 
 // The single source of the orchestration-status query: its cache key, its fetcher, and its freshness

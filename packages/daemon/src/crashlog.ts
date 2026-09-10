@@ -19,7 +19,7 @@ export const CRASHLOG_PATH = path.join(LOOM_HOME, "crash.log");
 export const CRASHLOG_PREV_PATH = `${CRASHLOG_PATH}.prev`;
 
 /**
- * @decision 2f146782 — distinguishes "killed from outside" from a real JS crash; see the record for why.
+ * @decision 2f146782 — false with no shutdownMarker means killed from outside, never a JS "crash".
  * Must be called BEFORE {@link installCrashHandlers} rotates {@link CRASHLOG_PATH} away, and only
  * `env.LOOM_PRIOR_CRASHLOG` (never `fs.existsSync`) is trustworthy on the SUPERVISED (`daemon:stable`) path.
  */

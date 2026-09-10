@@ -9,9 +9,8 @@ import type { Db } from "../db.js";
  * deliberately. A "backlink" is a plain-substring `[[key]]` match — deliberately not Obsidian's
  * `[[key|alias]]` piping syntax, since no note observed in this project's own store has ever used it.
  *
- * @decision e4e180ad — see docs/decisions/e4e180ad-project-memory-backlinks-one-way-link-gap.md: closes
- * the one-way-link gap where a byte-capped canonical note has no room left to add a back-pointer to the
- * notes that already link to it.
+ * @decision e4e180ad — closes the one-way-link gap where a byte-capped canonical note has no room left
+ * to add a back-pointer to the notes that already link to it.
  */
 
 /** Mirrors mcp/memory.ts's `KEY_RE` character class exactly (letters/digits/-/_, 1-64 chars) — a wikilink
@@ -51,9 +50,8 @@ export const MAX_BACKLINKS = 20;
  * `memory_list` keep the full {@link MAX_BACKLINKS}, since an on-demand pull isn't paying this cost on
  * every OTHER session's kickoff too.
  *
- * @decision e4e180ad — see docs/decisions/e4e180ad-project-memory-backlinks-one-way-link-gap.md (Digest
- * cap section): the line is DIGEST vs ON-DEMAND, not floor-tier vs ordinary — measured, ordinary pinned
- * notes cost as much as floor-tier ones at the general cap.
+ * @decision e4e180ad — the line is DIGEST vs ON-DEMAND, not floor-tier vs ordinary — measured, ordinary
+ * pinned notes cost as much as floor-tier ones at the general cap.
  */
 export const MAX_BACKLINKS_DIGEST = 5;
 
@@ -98,10 +96,10 @@ function matchesFor(withKeys: EntryWithKeys[], targetKey: string, cap: number): 
  * SYNCHRONOUSLY on the daemon's single event loop. Use {@link findInboundBacklinksBulk} instead, which
  * amortizes the corpus fetch and the per-note regex extraction ONCE across every row.
  *
- * @decision 41c3f546 — see docs/decisions/41c3f546-project-memory-route-bulk-backlinks.md: the "dozens
- * to low-hundreds" corpus-size premise this used to cite is stale (487 notes measured).
- * @decision d305f1a2 — see docs/decisions/d305f1a2-inbound-backlinks-on2-unindexed.md: still O(N²)
- * overall even with the bulk path, left unindexed anyway — bounded by `memory.maxNotes`, not luck.
+ * @decision 41c3f546 — the "dozens to low-hundreds" corpus-size premise this used to cite is stale
+ * (487 notes measured).
+ * @decision d305f1a2 — still O(N²) overall even with the bulk path, left unindexed anyway — bounded
+ * by `memory.maxNotes` (config), not luck; re-measure before reaching for an index if that cap is raised.
  */
 export function findInboundBacklinks(
   db: Db,

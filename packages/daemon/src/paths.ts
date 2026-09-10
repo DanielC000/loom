@@ -91,7 +91,7 @@ export function sessionScratchDir(sessionId: string): string {
  * can itself be a live git repo (the self-hosting setup), so nesting worktrees there let a worker's
  * relative `cd ..` + git op mutate the daemon home's own working tree — this actually happened once.
  * `path.dirname`/`path.basename` (not string concatenation) avoid a malformed path on a trailing separator.
- * @decision sha:e1c6ef65 — do not nest worktrees back inside LOOM_HOME; see the record for the incident.
+ * @decision sha:e1c6ef65 — this actually happened once; never nest worktrees back inside LOOM_HOME.
  */
 export const WORKTREES_DIR = path.join(path.dirname(LOOM_HOME), `${path.basename(LOOM_HOME)}-worktrees`);
 /**
@@ -374,7 +374,8 @@ export const CODESCAPE_HOME_DIR = path.join(LOOM_HOME, "codescape");
  * Whether the Codescape fleet-daemon supervisor should start at boot. `isLoomDev()` is a HARD
  * prerequisite — Codescape supervision NEVER runs for a regular `loomctl` user, flag or not. Read at
  * CALL time (like `isLoomDev`) so a single test process can exercise both states within one run.
- * @decision 503a30a0 — gated on HOST-CLI PRESENCE, not a hand-set env toggle; see the record for why.
+ * @decision 503a30a0 — gated on HOST-CLI PRESENCE, never a hand-set env toggle: a vanilla end-user host
+ * has no `codescape` binary on PATH, so this resolves false with zero configuration and no toggle.
  */
 export function isCodescapeSupervisorEnabled(dbPath?: string): boolean {
   return isLoomDev() && hostToolBinExists(codescapeBinCandidate(dbPath));

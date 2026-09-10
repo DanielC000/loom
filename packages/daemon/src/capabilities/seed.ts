@@ -26,8 +26,8 @@
  * signal) and the rejected alternatives.
  *
  * @decision a4058e7a — the package is technically MULTI-provider (also OpenAI/BFL FLUX), but only
- * `GEMINI_API_KEY` is ever injected (never `OPENAI_API_KEY`/`GPT_IMAGE_API_KEY`/`BFL_API_KEY`), so no
- * code path to any other provider is ever reachable in practice — see the record before widening this.
+ * `GEMINI_API_KEY` is ever injected. Do not add `OPENAI_API_KEY`/`GPT_IMAGE_API_KEY`/`BFL_API_KEY`
+ * without revisiting this decision — it reopens a multi-provider surface deliberately left unused.
  *
  * Its own output-dir confinement is an ENV VAR (`NANO_BANANA_OUTPUT_DIR`), not a CLI flag like
  * Playwright's `--output-dir` — see `outputDirEnvVar` on `registry.ts`'s "bundled" provision kind

@@ -29,7 +29,7 @@ export type WorktreeVanishReason = "gone" | "git_file_missing" | "gitdir_target_
  * `null`.
  *
  * @decision ab8b2cc6 — a caller that folds "indeterminate" into "intact" repeats the exact mistake
- * this type exists to prevent; see the record for why.
+ * this type exists to prevent: only "intact" means confirmed fine; "indeterminate" means unknown.
  *
  *  - `{ status: "at-risk", reason }`: gone, or structurally broken, per the same three fs checks
  *    `detectVanishedWorktree` has always run (see its own doc for what each `reason` means).
@@ -72,7 +72,7 @@ export function classifyWorktreeIntegrity(worktreePath: string | null | undefine
  * git subprocess.
  *
  * @decision 652d312f — priced a periodic full git sweep over every live worker as real host cost;
- * this needs neither. See the record for the pricing and for what "vanished" does and doesn't cover.
+ * this three-state fs-only check replaces it entirely — see the "NOT covered" note below for scope.
  *
  * Three states, in the order checked:
  *
@@ -110,8 +110,8 @@ export function detectVanishedWorktree(worktreePath: string): WorktreeVanishReas
  * every route to that silent state OTHER than the one already fixed at its cause.
  * @decision 652d312f — the incident this watcher exists to close, and why detection stops at
  * surfacing rather than auto-recovering.
- * @decision 40b63f1c — the causal fix already landed (commit 163877b5); see the record for the
- * two-pass cascade it closed.
+ * @decision 40b63f1c — the causal fix already landed (commit 163877b5): two boot-reconcile passes,
+ * each correct alone, composed into destroying a live recycled worker's worktree.
  *
  * Detection is keyed on EACH live session's OWN `worktreePath` field, never re-derived from taskId — so
  * this can never confuse one session row's state with a sibling row's that happens to share a path

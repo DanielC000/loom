@@ -3,9 +3,8 @@ import path from "node:path";
 
 /**
  * @decision 350bc307 — persisted state here is the ADDRESSED signal for a non-empty
- * `codescapeUnclassifiedTools` result; `readCodescapeToolDriftNote` below is its ONLY reader. Deliberately
- * NOT routed through `platform_escalate` (no headless entry point) — reuses the Platform Lead `[loom:*]`
- * kickoff channel instead. See docs/decisions/350bc307-tool-drift-probe-layered-on-health-tick.md
+ * `codescapeUnclassifiedTools` result; `readCodescapeToolDriftNote` below is its ONLY reader. Never
+ * routed through `platform_escalate` — no headless entry point; reuses the Lead's kickoff channel.
  */
 
 /** Basename of the persisted tool-drift state file, written under the codescape home dir
@@ -84,8 +83,7 @@ export function readCodescapeToolDriftNote(loomHomeDir: string): string {
 /**
  * @decision ce1bed6e — same ADDRESSED-signal shape as {@link ToolDriftState} above, for drift-restart
  * starvation (see `9e6f984d`'s debounce, `545ef479`'s state machine); reaches the same Platform Lead
- * channel, remediation-only — not a fix for the party doing the rebuilding. See
- * docs/decisions/ce1bed6e-drift-restart-starvation-remediation-note.md
+ * channel, remediation-only — never a fix for the party actually causing the drift-restart starvation.
  */
 export const BUILD_DRIFT_STATE_BASENAME = "build-drift-state.json";
 

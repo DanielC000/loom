@@ -36,9 +36,9 @@ const MAX_TITLE_CHARS = 200;
  * in project-memory-recall.ts) — such a note rides EVERY future kickoff unconditionally, so its byte
  * cost is fixed overhead every session pays, not just a cost to the note's own author.
  *
- * @decision 046c721e — see
- * docs/decisions/046c721e-never-drop-floor-tier-gets-a-lower-blocking-byte-cap.md for the `5469ec08`
- * investigation this implements and why the cap REJECTS at write time instead of just advising.
+ * @decision 046c721e — REJECTS at write time rather than just advising: the pre-existing
+ * `neverDropStatus` signal is computed strictly AFTER a write succeeds, so it could inform but never
+ * prevent this problem.
  *
  * Applies only when the post-write state is genuinely `pinned && never-drop` — a `never-drop` tag on an
  * unpinned note is INERT in the packer (confirmed by reading project-memory-recall.ts directly, not the
@@ -422,10 +422,11 @@ export function forgetProjectMemory(db: Db, projectId: string, key: string): { o
  *
  *  `backlinks` — every OTHER note in this project whose text `[[wikilink]]`s to THIS note's key, resolved
  *  fresh at read time exactly like `requestAnnotations` (see sessions/project-memory-backlinks.ts).
- *  @decision e4e180ad — see docs/decisions/e4e180ad-project-memory-backlinks-one-way-link-gap.md for the
- *  one-way-link gap this closes. Kept as its OWN field, deliberately never merged into `requestAnnotations`
- *  — the two are unrelated kinds of link. ALWAYS an array (never omitted), so an empty `backlinks: []` is
- *  a MEASURED zero — "this note has no inbound links" — structurally distinguishable from absent. */
+ *  @decision e4e180ad — closes the ONE-WAY-LINK gap: a byte-capped note often has no room left to list
+ *  every note that already links TO it. Kept as its OWN field, deliberately never merged into
+ *  `requestAnnotations` — the two are unrelated kinds of link. ALWAYS an array (never omitted), so
+ *  an empty `backlinks: []` is a MEASURED zero — "this note has no inbound links" — structurally
+ *  distinguishable from absent. */
 export type ProjectMemoryEntryWithLinks = ProjectMemoryEntry & { requestAnnotations: string[]; everDelivered: boolean; backlinks: string[] };
 
 /** `backlinks` is a REQUIRED, already-resolved value — never an optional override with a per-note
@@ -447,7 +448,7 @@ function withLinks(db: Db, projectId: string, entry: ProjectMemoryEntry, backlin
 
 /**
  * Full listing — pinned first, then most-recently-updated. Use `memory_forget`/re-`memory_write` to
- * curate. @decision 41c3f546 — see docs/decisions/41c3f546-project-memory-route-bulk-backlinks.md: the
+ * curate. @decision 41c3f546 — the
  * "dozens to low-hundreds of short notes" corpus-size premise is stale, and this function stays safe at
  * that scale ONLY because it resolves `backlinks` via the bulk path ({@link annotateBacklinksBulk}), not
  * per row — see its own doc comment below.
@@ -458,7 +459,7 @@ function withLinks(db: Db, projectId: string, entry: ProjectMemoryEntry, backlin
  *
  * `backlinks` are resolved via {@link annotateBacklinksBulk} over the SAME fetched corpus — not per row
  * via {@link annotateBacklinks} — for the same N+1-fetch/N-full-corpus-scan cost @decision 41c3f546
- * measured and rejected; see the record above for the numbers.
+ * measured at ~4.2s (bulk: ~15ms) against a 487-note corpus, and rejected as the per-row default.
  */
 export function listProjectMemoryEntries(db: Db, projectId: string): ProjectMemoryEntryWithLinks[] {
   const corpus = db.listProjectMemory(projectId);

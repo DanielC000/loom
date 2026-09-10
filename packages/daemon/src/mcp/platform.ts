@@ -2536,7 +2536,7 @@ export class PlatformMcpRouter {
         // @decision e9750bc2 — this is the Lead's ACTUAL board-read anchor (recordBoardRead's own tasks_list
         // call site is never reached by Lead doctrine). Recorded on countsOnly TOO, deliberately: never
         // "fix" this by skipping countsOnly recording — that resurrects the exact permanently-uncomputed
-        // digest bug this card exists to close. See docs/decisions/e9750bc2 for the accepted-hazard detail.
+        // digest bug this card exists to close — a countsOnly result already surfaces the total-count move.
         if (callerSessionId) recordBoardReadForProjects(db, callerSessionId, projectIds, new Date().toISOString());
         // countsOnly short-circuits BEFORE any row fetch — never pays for row bodies or the merged-state git
         // enrichment listProjectTasks does below (card 9798200c). Sums per-project counts (no git call, so
@@ -2950,7 +2950,8 @@ export class PlatformMcpRouter {
     // GitWriter's structured GitWriteResult ({ok:true,...}|{ok:false,error}); an EXPECTED git failure
     // (dirty tree, no upstream, rejected push) comes back as ok:false, never a throw. 404 if unknown.
     // @decision a0dff493 — resolve the target repo ONLY via the shared resolveRepoByKey (never a second
-    // path, and never a baked-in registry snapshot in the Lead's spawn brief) — see docs/decisions/a0dff493.
+    // path, and never a baked-in registry snapshot in the Lead's spawn brief — it goes stale the moment
+    // a project's repos change; read it live via project_get/list_all_projects instead).
     const gitWriterFor = (repoPath: string) => new GitWriter(repoPath, gitWriteTimeouts);
 
     /**

@@ -259,8 +259,8 @@ Your audit + suggestion tools and the "Review my workspace" trigger are live —
  * the operator (one home, two agents), SEED-IF-ABSENT BY AGENT-NAME. Run at boot AFTER seedSetupHome.
  *
  * @decision sha:aecc6551 — scoped to the reserved home by NAME, never a name-agnostic reserved lookup
- * (gotcha #1); seeded by its own separate boot-time name-presence check, never folded into seedSetupHome
- * (gotcha #2) — see the record for why both matter.
+ * (gotcha #1, more than one reserved project can exist); seeded by its own separate boot-time
+ * name-presence check, never folded into seedSetupHome (gotcha #2, which no-ops once the home exists).
  *
  * Idempotent + non-clobbering: if an agent named SETUP_AUDITOR_AGENT_NAME already lives in the home this
  * no-ops (returns null), so reboots never duplicate it and a user's edits to that agent (prompt, profile)
@@ -368,8 +368,8 @@ Your replies may be read aloud as a voice message, so write in short, natural sp
  * (B4). Run at boot AFTER seedSetupHome.
  *
  * @decision sha:aecc6551 — scoped to the reserved home by NAME, never a name-agnostic reserved lookup
- * (gotcha #1); seeded by its own separate boot-time name-presence check, never folded into seedSetupHome
- * (gotcha #2) — see the record for why both matter.
+ * (gotcha #1, more than one reserved project can exist); seeded by its own separate boot-time
+ * name-presence check, never folded into seedSetupHome (gotcha #2, which no-ops once the home exists).
  *
  * TEMPLATE ONLY — this seeds the rig (the assistant-role Companion profile + a Companion agent bound to it)
  * so a "New companion" provision has an author-free default spawn target. It creates NO session and writes

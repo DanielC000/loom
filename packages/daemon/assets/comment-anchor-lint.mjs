@@ -82,12 +82,14 @@
 //      text "sha" isn't hex) — so, exactly like `overlongAnchorIds` above, this shape produces no anchor,
 //      no orphanAnchors entry, no brokenAnchors entry (EOL-only, a different shape), no overlongAnchorIds
 //      entry (that pattern also requires the hex to immediately follow the sigil): silent, total no-op.
-//      See @decision e708670b for the fix history (a sibling shape its own originating card named but
-//      shipped unhandled) and the measured zero-hit sweep. Runs in BOTH the CLI scan and the per-file
-//      hook, same ground as brokenAnchors/overlongAnchorIds — it needs only the one file already being
-//      scanned. ⛔ Does NOT catch a same-line id that's too SHORT after/before the space (a different,
-//      rarer shape, the same carve-out every other check in this file already states) — requires 8+ hex
-//      chars, mirroring `overlongAnchorIds`'s own `{8,}`-vs-well-formed-length distinction.
+//      @decision e708670b widened this from catching only whitespace AFTER the colon, once a sibling
+//      shape shipped unhandled the first time (see SIGIL_SPACE_RE below). Runs in BOTH the CLI scan
+//      and the per-file hook, same ground as brokenAnchors/overlongAnchorIds — it needs only the one
+//      file already being scanned. ⛔ Does NOT catch a same-line id that's too SHORT after/before the
+//      space (a different, rarer shape, the same carve-out every other check in this file already
+//      states) — requires 8+ hex chars, mirroring `overlongAnchorIds`'s own
+//      `{8,}`-vs-well-formed-length distinction.
+//
 //   9. bareCommitAnchors (card a2fc4031) — a BARE `@decision <id>` (never `sha:`-sigil'd) whose id ALSO
 //      resolves as a real commit object in this repo's git history. CLAUDE.md's comment-taxonomy convention
 //      is unconditional: a bare 8-hex id always means a board card, and the commit id-space REQUIRES the
@@ -260,8 +262,8 @@ const BROKEN_ANCHOR_RE = /@decision\b\s*$/i;
 // so this never matches it: silent, total no-op (no anchor, no orphanAnchors/brokenAnchors entry, no
 // error). Deliberately the NARROW shape, not the broader "@decision not followed by a valid id anywhere on
 // the line" form — that broader form was tried and rejected (card ad3a9a85, 26 false positives on this
-// repo's own mid-line "@decision" mentions). See the record for the measured zero-hit sweep proving this
-// narrower pattern's result is real, not an artifact of a broken pattern.
+// repo's own mid-line "@decision" mentions). Positive-controlled, measured ZERO real hits against every
+// `@decision` occurrence in this repo — a proven-able zero, not an artifact of a broken pattern.
 // ⛔ Scope, stated plainly (mirrors BROKEN_ANCHOR_RE's own carve-out): does NOT catch the EOL-wrap shape
 // (that's BROKEN_ANCHOR_RE above) and does NOT catch a same-line id that's merely too SHORT (e.g.
 // "@decision 12ab") — a different, rarer shape outside this card's DoD.
@@ -275,9 +277,9 @@ const OVERLONG_ANCHOR_ID_RE = /@decision\s+(sha:)?([0-9a-f]{9,})\b/gi;
 // is no position in the line the global scan can match: silent, total no-op (no anchor, no
 // orphanAnchors/brokenAnchors/overlongAnchorIds entry, no error). Matches ANY hex run of 8+ chars
 // adjacent to the malformed sigil (not just exactly 8), so a combined space-AND-overlong paste is also
-// caught by this one pattern rather than needing a second. See the record for this shape's fix history
-// (a sibling defect its originating card named but shipped unhandled, and the widening that closed it)
-// and the measured zero-hit sweep across every whitespace placement.
+// caught by this one pattern rather than needing a second. A sibling defect its own originating card
+// named but shipped unhandled once already — never loosen the whitespace requirement to `\s*` on both
+// sides, that also matches the well-formed form. Measured ZERO real hits across every placement.
 // ⛔ Scope, stated plainly: does NOT catch a same-line id that's too SHORT after/before the space (a
 // different, rarer shape — mirrors every other too-short carve-out in this file, and mirrors
 // `overlongAnchorIds`'s own `{8,}` cutoff for the identical reason).

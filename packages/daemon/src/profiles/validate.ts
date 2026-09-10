@@ -173,8 +173,8 @@ export function capabilityGrantBindingError(
 
 /**
  * @decision 8feb55b8 — `restrictedTools` must never resolve to `false` for an assistant-role profile by
- * silent omission (must be a RECORDED decision), and deliberately does NOT enforce `true` either. See
- * docs/decisions/8feb55b8-*.md.
+ * silent omission (must be a RECORDED decision), and deliberately does NOT enforce `true` either — the
+ * owner explicitly declined that (Request `34923f42`); only requiring a stated value is correct.
  *
  * Fires when the profile is BECOMING assistant-role for the first time — a fresh CREATE, or an UPDATE
  * whose patch transitions `role` INTO "assistant" from something else — and the caller's OWN submission
@@ -229,7 +229,7 @@ function codexRestrictedToolsUnsupportedError(harness: string | undefined, restr
  *
  * @decision 7fa73e2c — `browserTesting`/`documentConversion`/`capabilities` are unconditionally
  * incompatible with `harness:"codex"` (all resolve to stdio; codex mounts only {type:"http"}) — reject
- * at validation time, never let it reach spawn silently. See docs/decisions/7fa73e2c-*.md.
+ * at validation time, where the human editing the profile sees it, never let it reach spawn silently.
  */
 function codexStdioCapabilityUnsupportedError(
   harness: string | undefined,

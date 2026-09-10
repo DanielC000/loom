@@ -28,8 +28,7 @@ export interface RunSnapshotGitDeps {
  * Agent Runs R2 — the disposable, read-only cwd for an ephemeral `run` session.
  *
  * @decision sha:8d49d2dd — never set a run's cwd to the live repoPath; it would let the run silently
- * write into the live working tree instead of a disposable copy. See
- * docs/decisions/8d49d2dd-run-snapshot-cwd-isolation.md for the full owner-approved rationale.
+ * write into the live working tree instead of a disposable copy (owner-approved Option A, 2026-06-05).
  *
  * Extraction is pure git plumbing (read-tree + checkout-index into a throwaway index, no `tar` dep,
  * tracked files only ⇒ no `.git`; untracked/gitignored DATA files would need a separate "run data
@@ -102,8 +101,7 @@ export interface RunSnapshotRemoveDeps {
  * is swept on the next boot.
  *
  * @decision 26c661cd — never retry a hung `fs.promises.rm` in-process; a wedged handle leaks a libuv
- * threadpool slot forever. Removal runs in a separate, force-killable OS process instead. See
- * docs/decisions/26c661cd-run-snapshot-removal-killable-child-process.md
+ * threadpool slot forever. Removal runs in a separate, force-killable OS process instead.
  */
 export async function removeRunSnapshot(sessionId: string, deps: RunSnapshotRemoveDeps = {}): Promise<void> {
   const dir = runSnapshotDir(sessionId);
@@ -125,8 +123,7 @@ export async function removeRunSnapshot(sessionId: string, deps: RunSnapshotRemo
  *
  * @decision 26c661cd — runs async, never a synchronous retry loop; a synchronous `fs.rmSync` retry here
  * once blocked the WHOLE daemon at boot on a single wedged dir. The caller fires this WITHOUT awaiting
- * it, deliberately, so boot never blocks on it. See
- * docs/decisions/26c661cd-run-snapshot-removal-killable-child-process.md
+ * it, deliberately, so boot never blocks on it.
  */
 export async function sweepAllRunSnapshots(deps: RunSnapshotRemoveDeps = {}): Promise<void> {
   let entries: string[];

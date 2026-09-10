@@ -7686,7 +7686,7 @@ function gateOutcomeFromDetail(detail: Record<string, unknown>): GateOutcome {
 /** Derive {@link GateHistoryRow.gateRan} (@decision 3a6f04cc). Checked in order: explicit `gateSpawned`
  *  wins when present; else `reused:true`; else, for a cancelled worker-gate row with no explicit stamp,
  *  `durationMs` being a number as a FALLBACK (an honest "was this admitted before it was cancelled", not
- *  "did a process spawn" — see the linked record for why that distinction is load-bearing). Every other
+ *  "did a process spawn" — a cancel-before-first-step still stamps a real `durationMs`). Every other
  *  row falls through to `true`. */
 function gateRanFromDetail(detail: Record<string, unknown>): boolean {
   if (typeof detail.gateSpawned === "boolean") return detail.gateSpawned;

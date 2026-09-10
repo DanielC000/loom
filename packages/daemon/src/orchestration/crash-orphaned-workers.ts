@@ -9,7 +9,7 @@ import { deriveAwaitingReview } from "./report-resolution.js";
  *  the crash-recovery nudge and the "awaiting your review/merge" summary count.
  * @decision db05e657 — computed by the SAME {@link deriveAwaitingReview} predicate `worker_list`'s
  *  own projection uses; also deleted this interface's former report-existence-only `reportedDone`
- *  field as an easily-confused near-duplicate of `reportedState` (see the record's "ALSO FIX").
+ *  field, an easily-confused near-duplicate of `reportedState` with zero functional readers of its own.
  */
 export interface CrashOrphanedWorker {
   workerSessionId: string;

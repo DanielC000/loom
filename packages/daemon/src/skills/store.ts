@@ -830,7 +830,7 @@ export function deleteSkill(name: string): boolean {
  *
  * @decision 75a0755d — mine = base = shipped for the WHOLE directory, not just SKILL.md: a reset that
  * only re-synced SKILL.md's base left every other tracked file's base stuck pre-reset, reading
- * customized+updateAvailable forever after (see the record for the reintroduction story). Binary files
+ * customized+updateAvailable forever after — the one action meant to discard-and-resync. Binary files
  * are skipped (see isBinaryFile) — cpSync already copied their real bytes correctly; there is simply no
  * safe base to RECORD for them without a utf8-mangling read, so (consistent with the rest of this
  * module) they stay untracked.
