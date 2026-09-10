@@ -4,15 +4,14 @@
  * (crash-recovery-watcher.ts). ONE source of the string (DRY): any `claude --resume` hits the SAME
  * engine-state-reset facts, so the resumed agent acts deliberately instead of being surprised.
  *
- * @decision a305669e — a `--resume` tears down the OLD pty's whole process tree (in-flight background
- *  shells + file-read tracking) with no daemon API to checkpoint/drain either
- *  (docs/decisions/a305669e-resume-kills-in-flight-background-shells.md)
+ * @decision a305669e — `--resume` starts on a NEW pty; the OLD one's whole process tree (background
+ *  shells + file-read tracking) dies with it, host-wide on ANY restart/crash-resume — no daemon API
+ *  exists to checkpoint or restore either, so this nudge discloses the loss instead of recovering it.
  *  @decision 0edda303 — the background-shells-killed claim above excludes a DELIBERATELY DETACHED child
- *  (e.g. the tracked dev-server helper) — it is not part of the torn-down process tree
- *  (docs/decisions/0edda303-resume-nudge-kill-claim-excludes-detached-children.md)
- *  @decision 5d8dea5f — no bare-"Continue" disclaimer here: the daemon sends exactly ONE resume turn, so
- *  there is nothing for the agent to reconcile against
- *  (docs/decisions/5d8dea5f-resume-nudge-tail-drops-bare-continue-disclaimer.md)
+ *  (e.g. the tracked dev-server helper) — narrow the CLAIM to the old pty's tree, never widen what gets
+ *  killed to include detached children; the detachment is deliberate and such a child can survive.
+ *  @decision 5d8dea5f — no bare-"Continue" disclaimer here: the daemon sends exactly ONE resume turn
+ *  (this nudge itself), so there is nothing else to reconcile against — never reintroduce one.
  */
 export const RESUME_NUDGE_TAIL =
   ' (Note: this restart reset your file-read tracking — Read a file again before you Edit it, or the edit ' +
@@ -32,8 +31,8 @@ export const RESUME_NUDGE_TAIL =
  * it already states an unambiguous non-agent cause in its own prose.
  *
  * @decision 7d3899cb — the notice states an ORIGINATOR CLASS (agent-initiated vs unknown), never a
- *  project/session/agent identity — a bare no-intent boot must read as unknown, never as an invented
- *  `owner-initiated` label (docs/decisions/7d3899cb-restart-notice-names-originator-class-not-identity.md)
+ *  project/session/agent identity: a bare no-intent boot reads as unknown, never an invented
+ *  `owner-initiated` label — it can never be distinguished from a genuine crash at boot.
  */
 export const RESTART_ORIGIN_AGENT = "(origin: agent-initiated — a daemon_restart tool call)";
 export const RESTART_ORIGIN_UNKNOWN =
@@ -47,13 +46,13 @@ export const RESTART_ORIGIN_UNKNOWN =
  * every resume), this one is true only for THAT session, so it is NOT folded into the shared tail.
  *
  * @decision sha:79af3725 — a SUBMITTED paste is durable across `--resume`; only a never-submitted draft
- *  is genuinely, silently lost (docs/decisions/79af3725-pasted-text-durability-vs-genuinely-lost-draft.md)
- *  @decision 16c50cdd — that durability claim was re-validated against the REAL companion/system delivery
- *  path (`enqueueStdin`→`submit()`→`writeChunked()`), not just a raw-terminal write
- *  (docs/decisions/16c50cdd-paste-durability-revalidated-against-real-delivery-path.md)
+ *  is genuinely, silently lost — never conflate the two, and never guess at what a lost draft said.
+ *  @decision 16c50cdd — durability re-validated against the REAL companion/system delivery path
+ *  (`enqueueStdin`→`submit()`→`writeChunked()`), not just a raw-terminal write — the raw-write probe
+ *  alone was not proof this path holds too; treat it as settled, not needing re-litigation.
  *  @decision 94721f95 — RETRACTED: the paste-tripwire race is a RECURRING upstream CLI issue across
- *  engine versions (measured: 53 recurrences at claude 2.1.220), not a closed 2.1.212 incident
- *  (docs/decisions/94721f95-paste-tripwire-recurrence-not-a-closed-incident.md)
+ *  engine versions (measured: 53 recurrences at claude 2.1.220), not a closed 2.1.212 incident — if it
+ *  resurfaces, suspect this same upstream race before assuming a new Loom write-path regression.
  */
 export const DRAFT_LOSS_NOTE =
   ' (Note: at the moment of this restart you had an UNSENT draft sitting in your raw-terminal input box — ' +
@@ -83,14 +82,12 @@ export const DRAFT_LOSS_NOTE =
  * RESUME_NUDGE_TAIL to the built note afterward rather than inline).
  *
  * @decision cfffeda6 — this function exists so the blocked-resume sentence is written in exactly ONE
- *  place; a loose `/re-state your blocker/i` test cannot catch wording drift between call sites, only a
- *  pin on this constant/function can (docs/decisions/cfffeda6-blocked-resume-nudge-text-unified-into-one-function.md)
+ *  place; never re-word it at an individual call site or add a new site with its own literal copy —
+ *  edit `buildBlockedResumeNudgeBody` here, the one place it's written, not a loose regex elsewhere.
  *  @decision db05e657 — the underlying ruling this text implements: a recovered `blocked` worker gets
- *  this distinct nudge, never the generic continue-nudge, and never silence
- *  (docs/decisions/db05e657-blocked-worker-gets-a-distinct-restate-blocker-nudge.md)
+ *  this distinct nudge, never the generic continue-nudge, and never silence.
  *  @decision 24ed1edc — the SAME ruling reaches the crash-recovery watchdog's RUNTIME resume path too,
- *  not just the two boot paths
- *  (docs/decisions/24ed1edc-crash-watcher-runtime-resume-applies-blocked-worker-ruling-too.md)
+ *  not just the two boot paths — never re-implement it independently there.
  */
 export function buildBlockedResumeNudgeBody(prefix: string, extra = ""): string {
   return `${prefix} Your last report to your manager was worker_report(blocked) — you are still waiting ` +
