@@ -260,18 +260,14 @@ function isProfileValuePresent(v: unknown): boolean {
  *   - "unwritable" — the declared target can never be observed: `key` doesn't name a real `Profile` field
  *     (checked LIVE against `PROFILE_FIELD_NAMES`, the schema-derived enumeration — never hand-copied, so
  *     this can't itself drift from the real schema), or `profileId` no longer resolves to an existing
- *     profile. `detail` names which. NOTE (verified against commit 635e347e, not inferred from its
- *     subject): the ORIGINAL harness specimen's failure mode — a real schema field silently dropped from
- *     `validateProfile`'s own return literal — is now compile-time impossible on THAT path (the `satisfies
- *     Record<keyof Omit<Profile,"id">, unknown>` in `profiles/validate.ts`). It does NOT cover every write
- *     path to a profile field, though — `Db.insertProfile`/`updateProfile`'s manual per-column SQL binding
- *     has no equivalent compile-time totality check, so a field silently dropped THERE would still read
- *     "not_yet_done" forever with no way for this function to tell — a real, separate, still-open gap this
- *     card's design does not attempt to close (see the card's own final report for why).
+ *     profile. `detail` names which.
  *   - "not_yet_done" — the target resolves and was checked, but the live value doesn't (yet) match: an
  *     `expectedValue` was given and the live value differs, or none was given and `isProfileValuePresent`
  *     is false. A MEASURED false, never conflated with "unknown".
  *   - "fulfilled" — the live value matches.
+ *
+ * @decision 3880f783 — "unwritable" does NOT cover every profile write path (a real, still-open gap); see
+ * docs/decisions/3880f783-computefulfillment-unwritable-does-not-cover-every-profile-write-path.md.
  */
 export function computeFulfillment(db: Db, q: Question): { state: "unknown" | "unwritable" | "not_yet_done" | "fulfilled"; detail: string | null } {
   if (q.type !== "permission" || !q.fulfillmentTarget) return { state: "unknown", detail: null };
@@ -401,15 +397,15 @@ function provisioningAudit(q: Question): Record<string, unknown> {
  * identity fields (`projectId`/`loomSessionId`/`agentId`/`taskId`) a cross-project triage needs that a
  * single-project caller already knows from context. NON-CONSUMING; shares `questionAnswerByType` with
  * `taskRequestGetItem` so the credential never-echo guarantee (never `secret_blob`, only `ack`) can never
- * drift between the two read surfaces. `sessionId` → `loomSessionId` (card 7fcb586a — the asking session's
- * own DAEMON id, see `Session`'s session-id naming policy doc in `@loom/shared`): the only consumer asserting the OLD field name,
- * `test/audit-requests-list.mjs`, was updated in lockstep with this rename.
+ * drift between the two read surfaces. `sessionId` → `loomSessionId` (the asking session's own DAEMON id,
+ * see `Session`'s session-id naming policy doc in `@loom/shared`).
+ * @decision 7fcb586a — see docs/decisions/7fcb586a-session-id-naming-policy.md (addendum: the one other
+ * consumer of the pre-rename field name was updated in lockstep with this rename).
  *
- * ⚠️ Card cb7d6998: `loomSessionId` is the CURRENT routing target (`Question.sessionId`), NOT provenance
- * — `reparentQuestions` walks it onto every manager/Lead recycle successor, so it answers "which seat
- * currently owns this," not "who filed it." A reader wanting the filer must use `filedBySessionId`
- * instead, which is set once at ask time and never rewritten (null on a row that predates this field —
- * that history is genuinely unrecoverable, not just unmigrated).
+ * `loomSessionId` here is the CURRENT routing target (`Question.sessionId`), NOT provenance — a reader
+ * wanting the filer must use `filedBySessionId` instead.
+ * @decision cb7d6998 — why, and what's unrecoverable on a pre-field row; see
+ * docs/decisions/cb7d6998-loomsessionid-is-routing-not-provenance.md.
  */
 export function auditRequestItem(q: Question & { agentId: string | null }, db: Db): Record<string, unknown> {
   return {
@@ -568,12 +564,10 @@ export function resolveQuestionForAgent(
 }
 
 /**
- * `question_ask`'s optional `supersedes:<questionId>` handling (card feat(orchestration): add an explicit
- * supersedes:<id> param to question_ask that auto-cancels the named prior pending ask). The originating
- * card floated an AUTO-supersede heuristic ("this new ask obviously replaces that old one") — deliberately
- * REJECTED, because "obviously replaces" eventually guesses wrong and silently cancels a live owner ask.
- * This is the safe, non-heuristic version: the asker names the exact prior ask it's replacing, explicitly,
- * at the moment it knows.
+ * `question_ask`'s optional `supersedes:<questionId>` handling — the asker names the exact prior ask
+ * it's replacing, explicitly, at the moment it knows; never an auto-detected "obviously replaces" guess.
+ * @decision sha:fe2c1c6b — why the auto-detected alternative was rejected; see
+ * docs/decisions/fe2c1c6b-supersedes-param-rejects-the-auto-supersede-heuristic.md.
  *
  * Reuses `cancelQuestionForAgent` VERBATIM — the identical agent-lineage ownership check, pending-only
  * constraint, and atomic answer-race refusal as the standalone `question_cancel` tool; this never forks a

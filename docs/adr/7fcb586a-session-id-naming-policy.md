@@ -20,6 +20,10 @@ Known examples, NOT an exhaustive list; other pre-existing sites may carry a bar
 - `GateHistoryRow.sessionId` — `gate_history`'s output. Deliberately UNCHANGED: it's test-pinned by `packages/daemon/test/gate-history.mjs`, and renaming a settled, widely-consumed history feed for a naming-only fix wasn't judged worth the churn.
 - The peer-relay frames `[loom:from-manager · <name> · projectId:<id> · sessionId:<id>]` (`packages/daemon/src/sessions/service.ts:8881`) and `[loom:from-assistant · <name> · sessionId:<id>]` (`packages/daemon/src/sessions/service.ts:9056`) — prose an agent reads, not a JSON key; both carry a Loom id under a bare `sessionId` label. Left untouched by this card (that file is outside this card's edit scope) and flagged for separate sequencing.
 
+## Addendum — a rename site cross-check (`mcp/questionTool.ts` tranche 1)
+
+`auditRequestItem` (`packages/daemon/src/mcp/questionTool.ts`) is one of the sites this policy governs. When its `sessionId` output field was renamed to `loomSessionId`, `test/audit-requests-list.mjs` — the only OTHER consumer asserting the old field name — was updated in lockstep with the rename, so no stale assertion was left pinning the pre-rename name.
+
 ## Source
 
-Inline comment in `packages/shared/src/types.ts` (the SESSION-ID NAMING POLICY block, immediately above `Session`). Relocated by card 35d90c4e (tranche 1 on `packages/shared/src/types.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+Inline comment in `packages/shared/src/types.ts` (the SESSION-ID NAMING POLICY block, immediately above `Session`). Relocated by card 35d90c4e (tranche 1 on `packages/shared/src/types.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped. Addendum above relocated from `packages/daemon/src/mcp/questionTool.ts`'s `auditRequestItem` doc (lines 395-413, pre-tranche-1 numbering) by card `8691d4a0` (tranche 1 on that file).
