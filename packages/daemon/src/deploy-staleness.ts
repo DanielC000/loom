@@ -205,10 +205,11 @@ export interface DeployStalenessResult {
    * whenever `stale` is already `true` (ordinary staleness isn't a "disagreement" — both signals already
    * agree something needs a rebuild). */
   deploySignatureMismatch: boolean;
-  /** Card 3d7dccb9 — the CONTENT-based fallback `processBuiltShaMatchesHead` cannot give you: a sha
+  /** @decision 3d7dccb9 — the CONTENT-based fallback `processBuiltShaMatchesHead` cannot give you: a sha
    * comparison alone can never distinguish "different commit, identical shipped tree" from "genuinely
    * stale" — and the former is exactly what a squash-merged card looks like from the vantage of its own
-   * unsquashed worktree form (see the module doc's mechanism section for the incident this answers).
+   * unsquashed worktree form (see the module doc's mechanism section for the incident this answers)
+   * (docs/decisions/3d7dccb9-stamp-rides-the-deploy-builds-own-turbo-invocation.md).
    * Computed ONLY when `processBuiltSha` is resolvable AND is NOT an ancestor of `mainlineHeadSha` (a
    * `git merge-base --is-ancestor` check) — the one case a plain sha/date comparison is structurally
    * unable to answer; when `processBuiltSha` IS an ancestor (the ordinary case — ordinary commit history,
@@ -326,16 +327,10 @@ export interface BuildInfo {
  * substitute (card f26339d7 DoD #1). Exported so `served-status.ts` can reuse this exact parsing for its
  * OWN "once at process start" capture (`processBuiltSha`/`processBuiltDirty`) — one parser, not two
  * hand-maintained copies.
- * ⚠️ FROM-SOURCE INVARIANT (card 119fd301): the baked `build-info.json` this reads must exist ONLY inside a
- * build OUTPUT dir (`packages/daemon/dist`, `packages/web/dist`) — NEVER anywhere a from-source run's own
- * `__dirname` chain can reach (`src/`, the repo root). A dev boot runs from source (`tsx watch`), so a
- * from-source caller's `__dirname` naturally misses the file and this correctly degrades to
- * `{sha:null, dirty:null}` — an HONEST gap, not a wrong answer. That safety holds by STRUCTURE, not by a
- * guard here: nothing stops a future edit from breaking it — (1) making this function walk UP looking for
- * the file, (2) writing `build-info.json` outside `dist/`, or (3) defaulting a distDir override to a
- * resolved `dist` path regardless of runtime — any of which would make a from-source run silently report a
- * STALE BAKE as if it were current: present, well-formed, and WRONG, which reads as MORE trustworthy than
- * an honest gap. Do not do any of those three without re-deriving this invariant first. */
+ * @decision 119fd301 — the baked `build-info.json` this reads must exist ONLY inside a build OUTPUT dir,
+ * never reachable from a from-source run's own `__dirname` — breaking that turns an honest "not built" gap
+ * into a silently WRONG stale bake, present and well-formed
+ * (docs/decisions/119fd301-readbuildinfo-must-read-only-from-a-build-output-dir.md). */
 export function readBuildInfo(distDir: string): BuildInfo {
   try {
     const raw = fs.readFileSync(path.join(distDir, "build-info.json"), "utf8");
@@ -387,14 +382,10 @@ function isAncestor(repoRoot: string, sha: string, of: string): boolean | null {
  * directory or a file that vanishes between listing and stat (a build racing this read) is skipped, not
  * fatal — this best-effort scan only ever needs to find the max mtime, not certify every file.
  *
- * ⚠️ Card c241d54b — a `null` return is ambiguous on ITS OWN: it means "this dir has no files right now",
- * which covers both "legitimately never built" AND "existed moments ago but vanished/emptied mid-scan
- * (a build racing this read)". This function cannot and does not disambiguate those — the guard above
- * only covers an individual FILE vanishing between listing and stat, not the whole tree being transiently
- * unreadable across two separate calls into this module. A CALLER that already confirmed the dir's
- * presence moments earlier must treat a `null` here as "unreadable now", never coerce it to a default
- * "very old" value — see `computeDeployStaleness`'s handling of `distDir` for the caller that got this
- * wrong once already.
+ * @decision c241d54b — a `null` return here is ambiguous (never-built vs. transiently unreadable); a
+ * caller that already confirmed the dir's presence must treat it as "unreadable now", never coerce it to a
+ * default "very old" value
+ * (docs/decisions/c241d54b-null-mtime-is-unreadable-now-not-very-old.md).
  */
 export function newestMtimeMs(dir: string): number | null {
   let max: number | null = null;
@@ -507,15 +498,9 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
   }
 
   const sharedDistDir = sharedDistOverride ?? path.join(repoRoot, "packages", "shared", "dist");
-  // Card c241d54b — distDir was just confirmed to exist via the statSync on distIndex above, so a null
-  // return from newestMtimeMs(distDir) here means the tree became unreadable/vanished in the window
-  // between that check and this scan (a build racing this read), NOT "very old". The prior code coerced
-  // that null to `?? 0` (epoch) alongside sharedDistDir's — but unlike sharedDistDir below, distDir is NOT
-  // "legitimately absent" at this point, and "unreadable right now" is a different fact than "very old":
-  // coercing it to epoch silently corrupted every downstream reader of this clock (commitsBehind counted
-  // almost every restart-relevant commit ever, since runningCodeBuiltAt clamps to the same epoch; a test
-  // then fed the resulting epoch-derived date into GIT_AUTHOR_DATE, which git rejected outright). Surface
-  // it as unavailable instead of guessing.
+  // @decision c241d54b — distDir is confirmed to exist above; a null here means "unreadable now" (a build
+  // racing this read), never "very old" — do not coerce to epoch
+  // (docs/decisions/c241d54b-null-mtime-is-unreadable-now-not-very-old.md).
   const distMaxMs = newestMtimeMs(distDir);
   if (distMaxMs === null) {
     return unavailable("this daemon's own dist directory became unreadable while deriving its build clock (a build likely raced this read) — cannot derive a build time", "could-not-measure", baked);
