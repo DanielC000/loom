@@ -1,11 +1,10 @@
 /**
- * Card d34dd208 — the "structured field that lies" class: a Profile field the validator accepts (and
- * the UI shows as set) that has NO real consumer on some supported harness's spawn/runtime path. Three
- * instances (`cb7d6998`, `6d5a6280`, and codex silently dropping `model`/`restrictedTools`) were each
- * caught by a HUMAN reading the artifact, none by CI. This registry is the machine-readable declaration
- * `test/profile-field-consumer-guard.mjs` reads to decide, PER FIELD × PER HARNESS, whether a real
- * consumer exists, a legitimate exemption, or an already-tracked open gap — so a fourth instance can no
- * longer ship as silence. See that guard's own header for the exact mechanism and the current bound.
+ * @decision d34dd208 — the "structured field that lies" class: a Profile field the validator accepts
+ * (and the UI shows as set) that has NO real consumer on some supported harness's spawn/runtime path.
+ * This registry is the machine-readable declaration `test/profile-field-consumer-guard.mjs` reads to
+ * decide, PER FIELD × PER HARNESS, whether a real consumer exists, a legitimate exemption, or an
+ * already-tracked open gap — so a fourth instance can no longer ship as silence. See that guard's own
+ * header for the exact mechanism and the current bound.
  *
  * ⚠️ THE DEFECT THIS CLOSES IS SILENCE, NOT ASYMMETRY (the card's own DoD-4 hardening). A field that is
  * genuinely claude-only (or codex-only) is fine — but the "it's fine" judgment must live HERE, in code
