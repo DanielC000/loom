@@ -8,11 +8,19 @@ It needs a resolvable Codescape PROJECT id to build the `/mcp/<id>` URL `probeAd
 
 On a successful round-trip, it ALWAYS persists the result via `writeToolDriftState` (even an EMPTY unclassified set) — so the state file's `checkedAt` stays fresh and a since-cleared drift doesn't linger stale in what `readCodescapeToolDriftNote` reads back. The in-memory `lastToolDriftUnclassified` latch exists purely so a TRANSITION logs once (a new/changed finding, or a recovery back to clean) rather than spamming this line every ~30s tick forever — the persisted file (read by the Platform Lead's kickoff note) is the real addressed signal; the console line is a supplementary breadcrumb, not the mechanism itself.
 
+## Narrative — the read side (`drift-notice.ts`)
+
+`readCodescapeToolDriftNote` is the ONLY reader of the persisted state file, called from `composeResumeDocOperationalNotes` (`sessions/platform-lead-prompt.ts`) — the SAME `[loom:*]` operational-note channel that already carries the resume-doc size/staleness warnings into EVERY Platform Lead spawn's own kickoff prompt. Named actor: the Platform Lead — the standing, human-driven operator whose doctrine already owns "platform-wide concerns" (`CLAUDE.md`) and already reads `[loom:*]` kickoff nudges as directives, not FYI. When: every Lead spawn (fresh or recycle-successor) while the finding is non-empty — not a one-time notice a restart can silently outlive.
+
+This is deliberately NOT a board-card escalation (`platform_escalate`): that surface requires a live MANAGER session as its caller (`sessions/service.ts`, off-limits to card `350bc307` — see its own `caller.role !== "manager"` guard) and has no headless/daemon-internal entry point. Reusing this already-established prompt-injection channel avoids either reimplementing that machinery's dedupe/severity/attention-push wiring by hand from unrelated code, or bypassing it.
+
 ## Do not
 
 - Do not skip persisting the tool-drift state file just because the unclassified set is empty — always persist on a successful round-trip, so `checkedAt` stays fresh.
 - Do not log the drift-finding line on every probe tick — only on a TRANSITION (new/changed finding, or recovery to clean).
+- Do not read the persisted tool-drift state file anywhere except `readCodescapeToolDriftNote` — it is the ONLY reader by design.
+- Do not route this notice through `platform_escalate` — that surface needs a live manager caller and has no headless/daemon-internal entry point; reuse the `[loom:*]` Platform Lead kickoff channel instead.
 
 ## Source
 
-JSDoc method comment in `packages/daemon/src/codescape/supervisor.ts`, above `checkToolDrift`: originally lines 1500-1523, as of this tranche's HEAD. Relocated by card `725511f2` (tranche 1); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+JSDoc method comment in `packages/daemon/src/codescape/supervisor.ts`, above `checkToolDrift`: originally lines 1500-1523, as of this tranche's HEAD. Relocated by card `725511f2` (tranche 1); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped. The read-side section above was relocated from a top-of-file block comment in `packages/daemon/src/codescape/drift-notice.ts` (originally lines 4-19, as of this tranche's HEAD) by card `e8798881` (tranche 1); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.

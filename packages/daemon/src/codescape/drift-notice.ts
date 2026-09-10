@@ -2,20 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 
 /**
- * Card `350bc307` DoD-2: the ADDRESSED signal for a non-empty `codescapeUnclassifiedTools` result — NOT
- * a log line. `CodescapeSupervisor.checkToolDrift` (`supervisor.ts`) persists its latest finding here
- * (a small, best-effort state file under the codescape home dir); `readCodescapeToolDriftNote` below is
- * the ONLY reader, called from `composeResumeDocOperationalNotes` (`sessions/platform-lead-prompt.ts`) —
- * the SAME `[loom:*]` operational-note channel that already carries the resume-doc size/staleness
- * warnings into EVERY Platform Lead spawn's own kickoff prompt. Named actor: the Platform Lead — the
- * standing, human-driven operator whose doctrine already owns "platform-wide concerns" (CLAUDE.md) and
- * already reads `[loom:*]` kickoff nudges as directives, not FYI. When: every Lead spawn (fresh or
- * recycle-successor) while the finding is non-empty — not a one-time notice a restart can silently
- * outlive. This is deliberately NOT a board-card escalation (`platform_escalate`): that surface requires
- * a live MANAGER session as its caller (`sessions/service.ts`, off-limits to this card — see its own
- * `caller.role !== "manager"` guard) and has no headless/daemon-internal entry point; reusing this
- * already-established prompt-injection channel avoids either reimplementing that machinery's dedupe/
- * severity/attention-push wiring by hand from unrelated code, or bypassing it.
+ * @decision 350bc307 — persisted state here is the ADDRESSED signal for a non-empty
+ * `codescapeUnclassifiedTools` result; `readCodescapeToolDriftNote` below is its ONLY reader. Deliberately
+ * NOT routed through `platform_escalate` (no headless entry point) — reuses the Platform Lead `[loom:*]`
+ * kickoff channel instead. See docs/decisions/350bc307-tool-drift-probe-layered-on-health-tick.md
  */
 
 /** Basename of the persisted tool-drift state file, written under the codescape home dir
@@ -92,21 +82,10 @@ export function readCodescapeToolDriftNote(loomHomeDir: string): string {
 }
 
 /**
- * Card `ce1bed6e`: the SAME ADDRESSED-signal shape as {@link ToolDriftState} above, for the drift-restart
- * starvation problem — a build-drift restart deferred (or its one allowance already spent) with nobody
- * told the actual remaining window, so the party doing the rebuilding has no way to know a further rebuild
- * would replace the stability-window candidate and starve the restart indefinitely (card `9e6f984d`'s
- * debounce, `545ef479`'s state machine). Reaches the SAME Platform Lead kickoff channel as the tool-drift
- * note above, for the SAME reason: private by construction (no REST field, no MCP tool response, no
- * description text — the Platform Lead session type itself does not exist without `LOOM_DEV=1`), so this
- * needed zero new disclosure surface and (per the accepted-baseline provenance notes in
- * codescape-privacy-guard.mjs) zero new entry there — this file and `sessions/platform-lead-prompt.ts` are
- * already on it (card `350bc307`).
- *
- * ⚠️ Deliberately NOT a fix for the PREVENTION audience (the party actually doing the rebuilding, on a
- * codescape-enabled project) — that is a shared channel reaching ordinary sessions and needs its own
- * `CODESCAPE_PROMPT_BLOCK_ASSET`-style review; out of scope here. This is the REMEDIATION audience only,
- * and only reaches it WHEN a Platform Lead actually spawns — see this note's own caller for that bound.
+ * @decision ce1bed6e — same ADDRESSED-signal shape as {@link ToolDriftState} above, for drift-restart
+ * starvation (see `9e6f984d`'s debounce, `545ef479`'s state machine); reaches the same Platform Lead
+ * channel, remediation-only — not a fix for the party doing the rebuilding. See
+ * docs/decisions/ce1bed6e-drift-restart-starvation-remediation-note.md
  */
 export const BUILD_DRIFT_STATE_BASENAME = "build-drift-state.json";
 
