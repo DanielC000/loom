@@ -4,26 +4,9 @@ import type { OrchestrationEvent } from "@loom/shared";
  * Event kinds that genuinely CLOSE a standing `worker_report(done|blocked)` — i.e. actually move the
  * manager past "this worker needs my review", not merely "some worker-keyed row landed after it."
  *
- * Card db05e657 (DoD-1..3): this used to be a SHARED ALLOWLIST feeding two independently-written
- * predicates — `worker_list`'s own `reportedState`/`awaitingReview` projection (`mcp/orchestration.ts`)
- * and the boot-time crash/restart-recovery notice's `awaitingReview` derivation
- * (`orchestration/crash-orphaned-workers.ts`, card 959a5fb7) — and the two disagreed on two inputs, each
- * pinned by its own tests. {@link deriveAwaitingReview} below is now the ONE predicate BOTH consumers call;
- * they can no longer independently decide "resolved" in different ways. The two former divergences, and
- * the ruling that closed each:
- *   - **`blocked` reports**: RULED to count exactly like `done` (mcp/orchestration.ts's pre-existing
- *     answer). A worker that reported `blocked` stopped and asked its manager for something — it is the
- *     worker that most needs to be seen, not the one a restart notice should stay silent about. See
- *     `test/worker-reported-state.mjs` and `test/crash-orphaned-workers.mjs` for the pinned case.
- *   - **`merge_rejected`**: RULED to NOT resolve a report, in either caller. It is an event kind — never a
- *     `worker_report` status — fired by the merge/gate machinery itself, not by any action directed at the
- *     worker; treating it as a resolution assumes a follow-up (a redirect telling the worker what to fix)
- *     that may never have actually been sent. A genuine follow-up already resolves the report through its
- *     OWN allowlisted event (`message_worker`/`redirect_worker`); a bare `merge_rejected` with no such
- *     follow-up is exactly the "worker silently un-flagged, nobody actually told it anything" shape this
- *     allowlist exists to prevent. This OVERTURNED `crash-orphaned-workers.ts`'s old early-break-on-
- *     `merge_rejected` special case (and the test pinning it) — `worker_list`'s answer is the one that
- *     survived, not a new third answer.
+ * @decision db05e657 — was a shared allowlist feeding two independently-written predicates that
+ *  disagreed on two inputs (a `blocked` report counts exactly like `done`; a bare `merge_rejected`
+ *  never resolves). {@link deriveAwaitingReview} below is now the ONE predicate both consumers call.
  *
  * An ALLOWLIST, not a denylist, and deliberately so (card 6641c3ab): `orchestration_events.
  * worker_session_id` is reused across this codebase as a generic "subject of this event" column by
@@ -47,9 +30,9 @@ import type { OrchestrationEvent } from "@loom/shared";
  *
  * OTHER sites read related-but-narrower shapes and deliberately do NOT call {@link deriveAwaitingReview}
  * or this allowlist — each answers a genuinely different question, so none is a candidate to fold in, but
- * each is a place a change to what "resolves" a report here is worth checking against (card cfffeda6:
- * this used to name only the first of these three, which read as an exhaustive list and wasn't — exactly
- * the drift this card family exists to catch; enumerate here rather than re-claim completeness):
+ * each is a place a change to what "resolves" a report here is worth checking against
+ * (@decision cfffeda6 — this enumeration must stay exhaustive; it once silently named only one of
+ * three sites):
  *   - `SessionService.classifyIdleWorker`'s `ackedSince` local (sessions/service.ts) — answers "has this
  *     worker's report been directly acknowledged", for STRANDED-worker detection, not "is a manager still
  *     awaiting review". It also treats `progress` as a reportable status (this allowlist's callers only
@@ -76,14 +59,9 @@ import type { OrchestrationEvent } from "@loom/shared";
  * actually resumed, yet this would still read as resolved. Known, accepted gap — building
  * parked-message detection into this projection is out of scope here.
  *
- * `stop_worker`/`recycle_begin` narrow race (card 959a5fb7 review round, accepted): if a report is
- * "resolved" by one of these — the manager stopped/recycled the worker — but the daemon dies before that
- * worker session actually exits, `deriveCrashOrphanedWorkers` now reads `awaitingReview:false` and the
- * worker gets the ordinary "continue your assigned task" nudge, where before this card it would have
- * gotten silence (reportedDone withheld the nudge unconditionally). This ADDS a nudge to a worker that
- * may be on its way out, never a resurrection of a session that's actually gone — `resume()`'s own
- * liveness re-check is what would actually stop a genuinely-dead session from receiving anything. Accepted
- * as a strict improvement over the prior silent-parking behavior, not a new risk.
+ * @decision 959a5fb7 — `stop_worker`/`recycle_begin` resolving a report just before a daemon crash
+ *  adds the ordinary continue-nudge to a worker possibly on its way out; accepted as a strict
+ *  improvement over the prior unconditional silence, not a new risk.
  */
 export const REPORT_RESOLVED_EVENT_KINDS: ReadonlySet<OrchestrationEvent["kind"]> = new Set<OrchestrationEvent["kind"]>([
   "merge_done", "message_worker", "redirect_worker", "recycle_begin", "stop_worker",

@@ -14,6 +14,12 @@ By the time this card shipped, `24ed1edc` had already landed and been forced to 
 - Do not add a new resume-nudge call site with its own literal copy of this sentence — call `buildBlockedResumeNudgeBody` instead.
 - Do not rely on a loose `/re-state your blocker/i` regex to catch wording drift between call sites — pin the shared constant/function itself in any new test.
 
+## The `deriveAwaitingReview` OTHER-sites enumeration must stay exhaustive (unrelated decision, same card id, `orchestration/report-resolution.ts`)
+
+The same commit also fixed a different, unrelated omission in `report-resolution.ts`'s own header doc-comment: the "OTHER sites read related-but-narrower shapes" list — the three predicates that deliberately do NOT call `deriveAwaitingReview`/`REPORT_RESOLVED_EVENT_KINDS` (`SessionService.classifyIdleWorker`'s `ackedSince`, `SessionService.workerReportedComplete`, and the auto-recovery re-report dedupe scan) — used to name only the first of these three, reading as an exhaustive list when it wasn't. Fixed by enumerating all three explicitly, so a future change to what "resolves" a report gets checked against the real set of related-but-narrower predicates, not an accidentally-truncated one.
+
+**Source (this section only):** JSDoc comment in `packages/daemon/src/orchestration/report-resolution.ts`, above `REPORT_RESOLVED_EVENT_KINDS`, line 34 as of this tranche's HEAD (extraction tranche 1). Not the same decision as the section above — see `## Narrative` for the actual `cfffeda6` (resume-nudge unification) decision.
+
 ## Source
 
 JSDoc comment above `buildBlockedResumeNudgeBody` in `packages/daemon/src/orchestration/resume-nudge.ts`, lines 115-133 as of this tranche's HEAD (tranche 1). Card merged as commit `3f0c269`. Related: `db05e657`, `24ed1edc`.
