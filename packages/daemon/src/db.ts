@@ -6328,6 +6328,14 @@ export class Db {
   deleteWake(id: string): void {
     this.db.prepare("DELETE FROM wakes WHERE id = ?").run(id);
   }
+  /** @decision 08320d02 — bulk-cancel every pending wake for a session, for the ONE case where a session
+   *  is being permanently retired with no live successor to `reparentWakes` onto (a `recycleWorker`
+   *  pre-spawn failure: the predecessor was hard-killed before the spawn attempt, and its failed
+   *  successor's `recycled_from` link is unlinked in the same catch — so a due wake would otherwise
+   *  auto-`resume()` the exact worker the manager just tried to retire). Returns the count deleted. */
+  cancelWakesForSession(sessionId: string): number {
+    return this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sessionId).changes;
+  }
   /** Wakes whose wake_at is at/earlier than nowIso — the WakeService's due set. */
   listDueWakes(nowIso: string): Wake[] {
     return (this.db.prepare("SELECT * FROM wakes WHERE wake_at <= ? ORDER BY wake_at").all(nowIso) as Row[]).map(toWake);

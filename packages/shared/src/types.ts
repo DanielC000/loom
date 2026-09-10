@@ -894,7 +894,21 @@ export type OrchestrationEventKind =
   // redirect delivered live or queued. The flushed durable messages resolve as session_message_delivered
   // with reason "superseded" (so the done-guard + boot-recovery never re-drive them).
   | "redirect_worker"
-  | "recycle_begin" | "recycle_complete" | "merge_request" | "merge_done"
+  | "recycle_begin" | "recycle_complete"
+  // A recycle's fresh successor row failed to spawn (a synchronous pre-pty throw, card 6ca4155f) — the
+  // audit trail `recycle_begin`/`recycle_complete` alone don't cover: a `recycle_begin` with no matching
+  // `recycle_complete` is ambiguous between "still running" and "failed", and nothing records the error
+  // or which successor id it was. `detail` carries { recycledFrom, failedSuccessorId, error }, plus
+  // `cancelledWakes` (worker recycle only — the count of the hard-killed predecessor's own pending wakes
+  // cancelled in the same catch, see this kind's own `@decision 08320d02` note below). Filed under
+  // whichever identity stays LIVE and queryable after the failure — the owning MANAGER for a
+  // worker recycle (workerSessionId = the failed successor, taskId set), or the PREDECESSOR itself for a
+  // manager/Lead self-recycle (its own row is restored to/stays `live`; the failed successor row is
+  // archived off the rail and never becomes a queryable identity) — never the failed successor, which
+  // would make this discoverable only by timestamp proximity to a bare `recycle_begin`.
+  // @decision 08320d02 — never file this under the failed (never-live, archived) successor's own id.
+  | "recycle_failed"
+  | "merge_request" | "merge_done"
   | "merge_rejected"
   // A queued merge-gate confirm was CANCELLED before it was ever admitted (`gate_cancel`, card 8d585277,
   // or the automatic superseded-by-merge path) — card 361520a0, Half Four. Deliberately DISTINCT from
@@ -1460,7 +1474,7 @@ export type OrchestrationEventKind =
  */
 const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> = {
   spawn_worker: true, message_worker: true, worker_report: true, stop_worker: true,
-  redirect_worker: true, recycle_begin: true, recycle_complete: true, merge_request: true,
+  redirect_worker: true, recycle_begin: true, recycle_complete: true, recycle_failed: true, merge_request: true,
   merge_done: true, merge_rejected: true, merge_cancelled: true, build_gate: true,
   kill_switch: true, schedule_fired: true, build_gate_retry_attempt: true, build_gate_retry: true,
   build_gate_single_file_retry: true, schedule_fire_failed: true, schedule_fire_deferred: true,

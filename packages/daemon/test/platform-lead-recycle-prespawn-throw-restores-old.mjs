@@ -81,6 +81,12 @@ try {
   const pred = svc.startPlatformLead("agentLead");
   check("(setup precondition) the predecessor Lead is live before recycle", pred.processState === "live");
 
+  // card 08320d02: a pending wake on the PREDECESSOR, scheduled before the recycle attempt — proves the
+  // catch does NOT cancel it (unlike recycleWorker's): the old Lead's pty is never stopped before a
+  // pre-spawn throw here (the atomic handoff's own row-flip back to 'live', asserted below, is the
+  // proof its process was never touched), so its wakes must keep firing normally.
+  db.insertWake({ id: "wakeOldLead1", sessionId: pred.id, wakeAt: now, note: "self-note", createdAt: now });
+
   throwOnNextSpawn = true;
   let recycleError;
   try {
@@ -95,11 +101,12 @@ try {
     throwOnNextSpawn === false);
 
   // The fresh successor row exists (insertSession ran before the throw, per the atomic-handoff ordering)
-  // — find it via listSessions(agentId) rather than db.getSuccessor (card 4be56c33: reconcileFailedSpawn
-  // now NULLS the failed row's own recycled_from, so a post-failure getSuccessor(pred.id) no longer finds
-  // it — that's the fix under test, not a regression; listSessions is unaffected since it keys off
-  // agent_id, not recycled_from).
-  const successor = db.listSessions("agentLead").find((s) => s.id !== pred.id);
+  // — find it via listAllSessionsIncludingArchived rather than db.getSuccessor (card 4be56c33:
+  // reconcileFailedSpawn now NULLS the failed row's own recycled_from, so a post-failure
+  // getSuccessor(pred.id) no longer finds it — that's the fix under test, not a regression) or
+  // listSessions(agentId) — card 08320d02 now archives this same failed row (see the item-1 assertion
+  // below), and listSessions filters archived_at IS NULL.
+  const successor = db.listAllSessionsIncludingArchived().find((s) => s.agentId === "agentLead" && s.id !== pred.id);
   check("(setup precondition) a fresh successor row was created for the predecessor despite the throw", !!successor);
 
   check("successor row ends processState:'exited', NOT stranded 'live', after the pre-spawn throw (reconcileFailedSpawn)",
@@ -110,6 +117,26 @@ try {
     successor?.recycledFrom === null);
   check("the OLD Lead is no longer hasSuccessor()-superseded once its failed successor is unlinked",
     db.hasSuccessor(pred.id) === false);
+
+  // --- card 08320d02, item 1: the failed successor is archived off the live rail ---
+  check("(1) the failed successor is archived (archivedAt set)", !!successor?.archivedAt);
+  check("(1) listSessions(agentLead) no longer shows the archived, failed successor",
+    !db.listSessions("agentLead").some((s) => s.id === successor?.id));
+
+  // --- card 08320d02, item 2: a recycle_failed audit event, filed under the PREDECESSOR (still live) ---
+  const failedEvents = db.listEventsForSession(pred.id).filter((e) => e.kind === "recycle_failed");
+  check("(2) exactly one recycle_failed event was appended, filed under the predecessor", failedEvents.length === 1);
+  const failedDetail = failedEvents[0]?.detail ?? {};
+  check("(2) recycle_failed.detail.recycledFrom names the predecessor", failedDetail.recycledFrom === pred.id);
+  check("(2) recycle_failed.detail.failedSuccessorId names the dead successor",
+    failedDetail.failedSuccessorId === successor?.id);
+  check("(2) recycle_failed.detail.error carries the injected error message",
+    typeof failedDetail.error === "string" && failedDetail.error.includes(INJECTED_MESSAGE));
+
+  // --- card 08320d02, item 3 (negative): UNLIKE recycleWorker, the predecessor's own pending wake is
+  // NOT cancelled here — its process never stopped, so the wake is a real, still-relevant reminder. ---
+  check("(3) the predecessor's pending wake is UNTOUCHED (its process was never stopped)",
+    db.listWakesForSession(pred.id).length === 1);
 
   // THE DEFECT THIS TEST GUARDS: the old Lead's row was flipped 'exited' by the atomic handoff BEFORE
   // the throw — but its real pty was NEVER stopped (recyclePlatformLead only schedules that 3s-deferred

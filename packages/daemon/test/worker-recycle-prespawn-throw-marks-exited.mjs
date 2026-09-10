@@ -105,12 +105,14 @@ try {
   check("(setup precondition) the injected pre-spawn throw actually propagated out of recycleWorker",
     !!recycleError && String(recycleError.message).includes(INJECTED_MESSAGE));
 
-  // The fresh successor row exists (insertSession ran before the throw) — find it via listWorkers
+  // The fresh successor row exists (insertSession ran before the throw) — find it via listChildSessions
   // rather than trusting a returned Session (recycleWorker rejected, so it never returned one) or
   // db.getSuccessor (card 4be56c33: reconcileFailedSpawn now NULLS the failed row's own recycled_from,
   // so a post-failure getSuccessor(oldWorkerId) no longer finds it — that's the fix under test, not a
-  // regression; listWorkers is unaffected since it keys off parent_session_id, not recycled_from).
-  const successor = db.listWorkers("mgr1").find((w) => w.id !== oldWorkerId);
+  // regression). NOT db.listWorkers — card 08320d02 now archives this same failed row (see
+  // worker-recycle-retry-after-prespawn-failure.mjs for that assertion), and listWorkers filters
+  // archived_at IS NULL; listChildSessions is the "complete tree, including archived" read.
+  const successor = db.listChildSessions("mgr1").find((w) => w.id !== oldWorkerId);
   check("(setup precondition) a fresh successor row was created for the old worker despite the throw", !!successor);
 
   check("successor row ends processState:'exited', NOT stranded 'live', after a pre-spawn throw",

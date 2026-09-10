@@ -93,6 +93,12 @@ SessionService.prototype.stampProjectMemoryDigest = function (...args) {
   return originalStamp.apply(this, args);
 };
 
+// card 08320d02: a pending wake on the PREDECESSOR, scheduled before the attempt — proves recycleManager's
+// catch does NOT cancel it (unlike recycleWorker's — see worker-recycle-retry-after-prespawn-failure.mjs):
+// the old manager's pty is never touched before a pre-spawn failure here, so it's still genuinely alive
+// and its wakes must keep firing normally.
+db.insertWake({ id: "wakeOldMgr1", sessionId: oldManagerId, wakeAt: now, note: "self-note", createdAt: now });
+
 try {
   let firstError;
   try {
@@ -109,13 +115,36 @@ try {
   check("(1) the OLD manager's row is completely UNTOUCHED — still processState:'live'",
     oldRow?.processState === "live");
 
-  // (2) the dead successor: find it via listSessions(agentId), not getSuccessor (this fix nulls
-  // recycledFrom, so a post-failure getSuccessor(oldManagerId) legitimately finds nothing).
-  const deadSuccessor = db.listSessions("agentMgr").find((s) => s.id !== oldManagerId);
+  // (2) the dead successor: find it via listAllSessionsIncludingArchived, not getSuccessor (this fix
+  // nulls recycledFrom, so a post-failure getSuccessor(oldManagerId) legitimately finds nothing) and NOT
+  // listSessions (agentId) — card 08320d02 now archives this same failed row (see
+  // manager-recycle-prespawn-throw-unlinks-predecessor's own sibling assertions below), and listSessions
+  // filters archived_at IS NULL just like listWorkers does.
+  const deadSuccessor = db.listAllSessionsIncludingArchived().find((s) => s.agentId === "agentMgr" && s.id !== oldManagerId);
   check("(2) a fresh (now-dead) successor row was minted despite the throw", !!deadSuccessor);
   check("(2) that successor ends 'exited', not phantom-live", deadSuccessor?.processState === "exited");
   check("(2) that successor's own recycledFrom is NULLED by its recycle catch (this card's fix)",
     deadSuccessor?.recycledFrom === null);
+
+  // --- card 08320d02, item 1: the failed successor is archived off the live rail ---
+  check("(2a) the failed successor is archived (archivedAt set)", !!deadSuccessor?.archivedAt);
+  check("(2a) listSessions(agentMgr) no longer shows the archived, failed successor",
+    !db.listSessions("agentMgr").some((s) => s.id === deadSuccessor?.id));
+
+  // --- card 08320d02, item 2: a recycle_failed audit event, filed under the PREDECESSOR (still live) ---
+  const failedEvents = db.listEventsForSession(oldManagerId).filter((e) => e.kind === "recycle_failed");
+  check("(2b) exactly one recycle_failed event was appended, filed under the predecessor", failedEvents.length === 1);
+  const failedDetail = failedEvents[0]?.detail ?? {};
+  check("(2b) recycle_failed.detail.recycledFrom names the predecessor", failedDetail.recycledFrom === oldManagerId);
+  check("(2b) recycle_failed.detail.failedSuccessorId names the dead successor",
+    failedDetail.failedSuccessorId === deadSuccessor?.id);
+  check("(2b) recycle_failed.detail.error carries the injected error message",
+    typeof failedDetail.error === "string" && failedDetail.error.includes(INJECTED_MESSAGE));
+
+  // --- card 08320d02, item 3 (negative): UNLIKE recycleWorker, the predecessor's own pending wake is
+  // NOT cancelled here — its process never stopped, so the wake is a real, still-relevant reminder. ---
+  check("(2c) the predecessor's pending wake is UNTOUCHED (recycleManager's predecessor never stopped)",
+    db.listWakesForSession(oldManagerId).length === 1);
 
   // (3)
   check("(3) hasSuccessor(oldManager) is FALSE — no longer permanently superseded by a dead successor",

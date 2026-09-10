@@ -44,7 +44,7 @@ between (verified per path). The unlink can never race a caller that already rea
 resume of a real `gen>=1` successor keeps its lineage link as before.
 
 **recycleWorker's own behaviour consequence:** it hard-kills the predecessor's pty BEFORE the fresh spawn
-attempt, so after a failed retry the predecessor is genuinely dead — but onExit→archiveOnExit
+attempt, so after a failed recycle the predecessor is genuinely dead — but onExit→archiveOnExit
 unconditionally archives a `worker` role on exit while keeping its captured `engineSessionId`. Unlinking
 it (`hasSuccessor()` flips back to `false`) makes it `resume()`-eligible again — the predecessor becomes
 resumable, not just delinked. `recycleManager`'s predecessor is untouched by a pre-spawn failure (never

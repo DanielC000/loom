@@ -10536,8 +10536,19 @@ export class SessionService {
       } catch (e) {
         this.reconcileFailedSpawn(fresh.id, e);
         // @decision 4be56c33 — unlink only here: `fresh` was inserted in this same synchronous
-        // call and never went live.
+        // call and no process for it ever existed.
         this.db.setOrchestration(fresh.id, { recycledFrom: null });
+        // @decision 08320d02 — archive the failed successor (worker_list excludes archived rows) and
+        // cancel the predecessor's own pending wakes: `old` was hard-killed above, before this spawn
+        // attempt, and hasSuccessor(old) is now false (just unlinked above) — a due wake would otherwise
+        // auto-resume the exact worker the manager just tried to retire.
+        this.db.archiveSession(fresh.id);
+        const cancelledWakes = this.db.cancelWakesForSession(workerSessionId);
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(),
+          managerSessionId, workerSessionId: fresh.id, taskId, kind: "recycle_failed",
+          detail: { recycledFrom: old.id, failedSuccessorId: fresh.id, cancelledWakes, error: e instanceof Error ? e.message : String(e) },
+        });
         throw e;
       }
       // Hand the carried queue + scheduled wakes to the successor: re-point the old worker's wakes (so a
@@ -10691,8 +10702,18 @@ export class SessionService {
     } catch (e) {
       this.reconcileFailedSpawn(fresh.id, e);
       // @decision 4be56c33 — unlink only here: `fresh` was inserted in this same synchronous
-      // call and never went live.
+      // call and no process for it ever existed.
       this.db.setOrchestration(fresh.id, { recycledFrom: null });
+      // @decision 08320d02 — archive the failed successor (listAllSessions excludes archived rows) and
+      // file the failure under the PREDECESSOR: it's the one still live (never flipped off `live` before
+      // this attempt) — `fresh` never was, so filing there would be discoverable only by timestamp
+      // proximity.
+      this.db.archiveSession(fresh.id);
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: oldManagerId, kind: "recycle_failed",
+        detail: { recycledFrom: old.id, failedSuccessorId: fresh.id, error: e instanceof Error ? e.message : String(e) },
+      });
       throw e;
     }
 
@@ -10901,8 +10922,17 @@ export class SessionService {
       // reality; card 6ca4155f.
       this.db.setProcessState(old.id, "live");
       // @decision 4be56c33 — unlink only here: `fresh` was inserted in this same synchronous
-      // call and never went live.
+      // call and no process for it ever existed.
       this.db.setOrchestration(fresh.id, { recycledFrom: null });
+      // @decision 08320d02 — archive the failed successor and file the failure under the PREDECESSOR
+      // (restored to `live` above, the still-queryable identity) — same reasoning as recycleManager's
+      // identical catch.
+      this.db.archiveSession(fresh.id);
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: oldLeadId, kind: "recycle_failed",
+        detail: { recycledFrom: old.id, failedSuccessorId: fresh.id, error: e instanceof Error ? e.message : String(e) },
+      });
       throw e;
     }
     // === END ATOMIC LINEAGE HANDOFF ===============================================================

@@ -38,6 +38,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // re-run this file, then `git apply <scratch>.patch` to restore.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/worker-recycle-retry-after-prespawn-failure.mjs
+//
+// EXTENDED by card 08320d02 (Code Review pass 1+2 on 4be56c33) with more assertions against the SAME
+// attempt-1 failure, proving: (1) the dead successor is ARCHIVED — off `db.listWorkers`/`listAllSessions`
+// (the live rail), NOT off MCP `worker_list` altogether: that tool's own dangling-worker pool
+// (getDanglingWorkers) still surfaces an archived-but-unmerged worker as processState:"dangling" (a
+// SEPARATE, not-yet-carded gap this card deliberately leaves alone) — listChildSessions, which includes
+// archived rows, is used to find the row for these assertions instead of listWorkers; (2) a
+// `recycle_failed` event records {recycledFrom, failedSuccessorId, cancelledWakes, error}, with the right
+// workerSessionId/taskId; (3) a wake pending on the predecessor BEFORE the recycle attempt is CANCELLED
+// (counted, not silently dropped), not left to auto-resume the hard-killed worker once hasSuccessor(old)
+// flips false — with a negative control proving the cancel is scoped to the predecessor's OWN wakes, not
+// every wake in the table. RED/GREEN for each: revert 08320d02's own hunks in recycleWorker's catch (the
+// archiveSession/appendEvent/cancelWakesForSession calls) via the same worker-doctrine revert recipe
+// above, rebuild, re-run.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -119,6 +133,16 @@ SessionService.prototype.stampProjectMemoryDigest = function (...args) {
   return originalStamp.apply(this, args);
 };
 
+// card 08320d02: a pending wake on the PREDECESSOR, scheduled before attempt 1 — proves the catch
+// cancels it (item 3) rather than leaving it to auto-resume the hard-killed worker once its
+// recycledFrom link is cleared (hasSuccessor(old) would otherwise read false, and resume()'s only
+// resurrection guard IS hasSuccessor — no archivedAt gate).
+db.insertWake({ id: "wakeOld1", sessionId: oldWorkerId, wakeAt: now, note: "self-note", createdAt: now });
+// NEGATIVE CONTROL (Code Review finding 3b): a wake owned by the MANAGER, not the predecessor — proves
+// cancelWakesForSession(oldWorkerId) is scoped to that one session's own wakes, not an indiscriminate
+// wipe of the wakes table.
+db.insertWake({ id: "wakeMgr1", sessionId: "mgr1", wakeAt: now, note: "manager self-note", createdAt: now });
+
 const worktrees = [[repo, worktreePath]];
 try {
   // --- ATTEMPT 1: forced pre-spawn failure ---
@@ -133,9 +157,44 @@ try {
   check("(setup precondition) throwOnNextRecycle was consumed (the throw fired exactly once, on attempt 1)",
     throwOnNextRecycle === false);
 
-  const deadSuccessor = db.listWorkers("mgr1").find((w) => w.id !== oldWorkerId);
+  // listChildSessions (NOT listWorkers) — card 08320d02 now archives the failed successor, so
+  // listWorkers (which filters archived_at IS NULL) no longer finds it; listChildSessions still does
+  // (it's the "complete tree, including archived" read).
+  const deadSuccessor = db.listChildSessions("mgr1").find((w) => w.id !== oldWorkerId);
   check("(setup precondition) attempt 1 minted a fresh (now-dead) successor row", !!deadSuccessor);
   check("(setup precondition) that successor ends 'exited', not phantom-live", deadSuccessor?.processState === "exited");
+
+  // --- card 08320d02, item 1: the failed successor is off the LIVE RAIL — NOT off MCP worker_list
+  // altogether (that tool's own dangling-worker pool still surfaces an archived-but-unmerged worker as
+  // processState:"dangling"; a separate, not-yet-carded gap this card deliberately leaves alone — see
+  // its own decision record). Claim only what's actually true: db.listWorkers/listAllSessions. ---
+  check("(1) the failed successor is archived (archivedAt set)", !!deadSuccessor?.archivedAt);
+  check("(1) db.listWorkers (the live rail) no longer shows the archived, failed successor — NOT a claim about MCP worker_list, which still surfaces it via the dangling-worker pool",
+    !db.listWorkers("mgr1").some((w) => w.id === deadSuccessor?.id));
+
+  // --- card 08320d02, item 2: a recycle_failed audit event records the attempt ---
+  const failedEvents = db.listEventsForSession("mgr1").filter((e) => e.kind === "recycle_failed");
+  check("(2) exactly one recycle_failed event was appended", failedEvents.length === 1);
+  const failedEvent = failedEvents[0];
+  const failedDetail = failedEvent?.detail ?? {};
+  check("(2) recycle_failed.workerSessionId names the dead successor (mirrors recycle_complete's own convention)",
+    failedEvent?.workerSessionId === deadSuccessor?.id);
+  check("(2) recycle_failed.taskId names the task", failedEvent?.taskId === taskA);
+  check("(2) recycle_failed.detail.recycledFrom names the predecessor",
+    failedDetail.recycledFrom === oldWorkerId);
+  check("(2) recycle_failed.detail.failedSuccessorId names the dead successor",
+    failedDetail.failedSuccessorId === deadSuccessor?.id);
+  check("(2) recycle_failed.detail.error carries the injected error message",
+    typeof failedDetail.error === "string" && failedDetail.error.includes(INJECTED_MESSAGE));
+
+  // --- card 08320d02, item 3: the hard-killed predecessor's own pending wake is cancelled (counted,
+  // not silently dropped), not left to auto-resume it once hasSuccessor(old) flips false (below) ---
+  check("(3) the predecessor's pending wake was cancelled (not left to auto-resume it)",
+    db.listWakesForSession(oldWorkerId).length === 0);
+  check("(3) recycle_failed.detail.cancelledWakes counts exactly the one predecessor wake cancelled",
+    failedDetail.cancelledWakes === 1);
+  check("(3, negative control) the MANAGER's own unrelated wake is UNTOUCHED — the cancel is scoped to the predecessor's own wakes, not a wipe of the whole table",
+    db.listWakesForSession("mgr1").length === 1 && db.listWakesForSession("mgr1")[0].id === "wakeMgr1");
 
   // --- FINDING (b): crash-recovery must NOT treat the predecessor as superseded by a successor that
   // never actually ran. This is the exact guard crash-recovery-watcher.ts's onExit hook calls. ---

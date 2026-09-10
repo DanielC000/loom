@@ -18,14 +18,16 @@ import type { PendingOpView } from "../orchestration/pending-ops.js";
  * Platform Lead's own recycle) insert a brand-new successor ROW rather than mutating the predecessor's.
  * This is EMERGENT, not enforced by any DB trigger/constraint or by this module.
  *
- * `Db.setOrchestration` now HAS exactly one production caller of `recycledFrom`: each of the three
- * recycle paths' OWN pre-spawn-failure catch nulls its OWN just-inserted, never-went-live successor's
- * `recycledFrom` — synchronously, in the SAME tick as the `insertSession` that set it (no `await`
- * between), before that row is ever returned to a caller or read by anything outside the recycle method
- * itself. This does NOT reopen the immutability gap above: no OTHER caller mutates `recycledFrom` after
- * insert, and this one caller only ever mutates a row that (a) was inserted THIS SAME synchronous call,
- * (b) never went live, and (c) is unlinked before any other code path (a lineage walk, `getSuccessor`, a
- * caller-supplied seed) could ever have observed the old value.
+ * `Db.setOrchestration` now HAS exactly one production caller SHAPE of `recycledFrom` — three call sites
+ * (one per recycle path), each identical in structure: each of the three recycle paths' OWN pre-spawn-
+ * failure catch nulls its OWN just-inserted successor's `recycledFrom` — synchronously, in the SAME tick
+ * as the `insertSession` that set it (no `await` between), before that row is ever returned to a caller
+ * or read by anything outside the recycle method itself. This does NOT reopen the immutability gap
+ * above: no OTHER caller mutates `recycledFrom` after insert, and this one caller only ever mutates a row
+ * that (a) was inserted THIS SAME synchronous call, (b) never had a process — it reads `processState:
+ * 'live'` in the DB throughout this window, but `pty.spawn()` never returned successfully for it, and
+ * (c) is unlinked before any other code path (a lineage walk, `getSuccessor`, a caller-supplied seed)
+ * could ever have observed the old value.
  *
  * @decision 4be56c33 — a FUTURE `setOrchestration({recycledFrom})` caller outside that exact shape
  * (mutating a live or already-observed row) reopens this invariant — re-examine every seed-accepting
