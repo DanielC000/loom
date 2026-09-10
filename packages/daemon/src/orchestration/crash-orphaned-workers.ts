@@ -5,27 +5,11 @@ import { deriveAwaitingReview } from "./report-resolution.js";
 
 /**
  * A worker session identified as crash-orphaned at boot — see {@link deriveCrashOrphanedWorkers}.
- * `reportedState`/`awaitingReview` (card 959a5fb7, unified with `worker_list`'s own projection by card
- * db05e657) is the question `SessionService.recoverCrashOrphanedWorkers` actually gates on — both for
- * withholding the "continue your task" nudge AND for the summary notice's "N of those already reported
- * done and are awaiting your review/merge" count. A near-miss on a real owner-fired restart motivated it:
- * the restart notice told a manager "1 of your workers already reported done and are awaiting your
- * review/merge" from report EXISTENCE alone — but that same report had already been read and answered
- * with a follow-up directive 68 minutes earlier, and the worker was actively mid-fix on a BLOCKING
- * code-review finding. A manager who trusted the notice would have merged a branch still carrying that
- * defect. `reportedState`/`awaitingReview` are computed by the SAME {@link deriveAwaitingReview} predicate
- * `worker_list`'s own projection calls (`orchestration/report-resolution.ts`) — see its doc for the two
- * rulings (a `blocked` report counts like `done`; a bare `merge_rejected` never resolves) that made this
- * a single shared predicate instead of two independently-written, occasionally-contradicting scans.
- *
- * There used to be a THIRD field here, `reportedDone` — a narrower, report-EXISTENCE-only check
- * (true even for a report the manager already consumed) kept as a "diagnostic" alongside `reportedState`.
- * Card db05e657 review round (ALSO FIX): it had zero functional readers outside this module, yet sat on
- * this EXPORTED interface next to `reportedState` under an inviting, easily-confused name — exactly the
- * shape of surface that caused the original 959a5fb7 near-miss (a consumer reading the wider
- * existence-only signal instead of the narrower "still genuinely awaiting" one). Deleted rather than kept
- * dead: nothing needs "does a report merely exist" once `reportedState`/`awaitingReview` answer the
- * question anyone actually asks.
+ * @decision 959a5fb7 — `reportedState`/`awaitingReview` (not the wider report-EXISTENCE signal) gate
+ *  the crash-recovery nudge and the "awaiting your review/merge" summary count.
+ * @decision db05e657 — computed by the SAME {@link deriveAwaitingReview} predicate `worker_list`'s
+ *  own projection uses; also deleted this interface's former report-existence-only `reportedDone`
+ *  field as an easily-confused near-duplicate of `reportedState` (see the record's "ALSO FIX").
  */
 export interface CrashOrphanedWorker {
   workerSessionId: string;
@@ -35,11 +19,9 @@ export interface CrashOrphanedWorker {
 }
 
 /**
- * Boot-time crash recovery (card 9fc41af5) — the DB-derived complement to
- * SessionService.resumeFleetOnBoot. That path only recovers a manager's in-flight workers when a
- * RestartIntent was captured (the exit-75 self-restart, orchestration/restart.ts); a genuine daemon
- * CRASH leaves no intent at all, so those same workers sat exited + auto-archived (boot-backstop.ts)
- * with no non-lossy recovery path — the manager's worker_list went empty and it had to re-dispatch fresh.
+ * @decision 9fc41af5 — the DB-derived complement to `SessionService.resumeFleetOnBoot`, covering a
+ *  genuine daemon CRASH (no captured `RestartIntent`) where in-flight workers used to sit exited +
+ *  auto-archived with no non-lossy recovery path otherwise.
  *
  * `recovered` MUST be the exact Session[] `db.recoverStaleSessions()` returns at boot (index.ts), read
  * BEFORE the boot-backstop archive pass runs — every session that was actually `live`/`starting` the
@@ -48,7 +30,7 @@ export interface CrashOrphanedWorker {
  * by that same backstop pass and recover nothing.
  *
  * Recovers a worker iff: it's a `worker` with a captured, non-dead engine id (a cached 'dead' stamp is
- * RE-VERIFIED live rather than trusted outright — see DIAGNOSIS below); wasn't archived BEFORE this
+ * RE-VERIFIED live rather than trusted outright — see below); wasn't archived BEFORE this
  * crash; has no recycle successor (never resurrect a superseded row — its successor owns the work);
  * its parent is a manager/platform session; and its
  * task still exists and is NOT on the project's resolved terminal/done lane. A worker that reported
@@ -60,31 +42,16 @@ export interface CrashOrphanedWorker {
  * VISIBILITY — reappearing in the manager's worker_list instead of sitting silently archived where the
  * manager has no reason to look for it.
  *
- * DIAGNOSIS (inconsistent boot recovery, board evidence: "[watch] marked N session(s) dead" then an
- * Orchestrator + its Web-Designer worker sat exited-and-unresumed while a sibling project's identical
- * shape came back clean): this used to gate on the cached `resumability` column instead of a live
- * check. `resumability:'dead'` is written by TWO places — this module's own transcript-missing branch
- * below, and `sessions/liveness.ts`'s `sweepDeadSessions` (the boot sweep AND the continuous
- * `watchClaudeProjects` chokidar watcher, debounced 1500ms off ANY `.jsonl` unlink anywhere under
- * `~/.claude/projects`) — and it is STICKY: nothing ever clears it back once set except a brand-new
- * `setEngineSessionId` capture. The debounced watcher re-sweeps EVERY resume candidate on an unrelated
- * file event, so a transient TOCTOU miss (Claude's own atomic rewrite of a DIFFERENT session's
- * transcript, an AV/indexer lock, a concurrent `--resume` spawn touching the same directory tree) can
- * permanently stamp a perfectly-healthy worker `dead` at some point during normal operation — long
- * before any crash. On the NEXT crash, this function used to trust that stale stamp and silently
- * exclude the worker with no logged reason. Because {@link CrashOrphanedWorker}s are grouped BY MANAGER
- * downstream (`SessionService.recoverCrashOrphanedWorkers`), a manager whose ONLY worker got excluded
- * this way never even got a resume ATTEMPT — not because the manager itself was unresumable, but
- * because it had no surviving worker to ride along on. `resume()` (service.ts) never trusted the cached
- * column to begin with — it always re-verifies live — so this function now uses the SAME real-time
- * source of truth instead of a second, staler one.
+ * @decision sha:a9c9a342 — a cached `resumability:'dead'` stamp used to be trusted outright and could
+ *  silently exclude a perfectly-healthy worker (and its whole manager) from crash recovery; it is now
+ *  always re-verified live instead (see the self-heal below).
  */
 export function deriveCrashOrphanedWorkers(db: Db, recovered: Session[]): CrashOrphanedWorker[] {
   const out: CrashOrphanedWorker[] = [];
   for (const w of recovered) {
     if (w.role !== "worker") continue;
     if (!w.engineSessionId) continue;
-    // A cached 'dead' stamp is RE-VERIFIED now rather than trusted outright (see DIAGNOSIS above) — it
+    // A cached 'dead' stamp is RE-VERIFIED now rather than trusted outright (see @decision sha:a9c9a342 above) — it
     // may be stale from an earlier watcher race on a transcript that's actually fine. A worker that was
     // NEVER flagged dead skips this fs hit entirely (unchanged from before); `resume()` itself still
     // re-checks live at resume time regardless, so this only closes the "silently excluded on a stale
@@ -129,13 +96,12 @@ export function deriveCrashOrphanedWorkers(db: Db, recovered: Session[]): CrashO
 }
 
 /**
- * Manager/platform sessions crash-orphaned in their OWN right, with NO surviving worker candidate to
- * ride along on. `recoverCrashOrphanedWorkers` groups its resume targets BY MANAGER, keyed off
- * `orphanedWorkers` — so a manager whose entire worker set is legitimately excluded (all landed, all
- * recycled, all archived pre-crash) never gets a resume attempt at all, even though it was just as much
- * a live/starting victim of the SAME crash as any manager that happens to still have a worker. Every
- * manager/platform row in `recovered` not already covered by `orphanedWorkers` gets ONE independent
- * attempt via this list — see `SessionService.recoverCrashOrphanedWorkers`'s `soloManagerIds` option.
+ * @decision sha:a9c9a342 — a manager crash-orphaned in its own right, with no surviving worker to
+ *  ride along on, used to never get a resume attempt at all; every manager/platform row in `recovered`
+ *  not covered by `orphanedWorkers` now gets ONE independent attempt via this list (`soloManagerIds`).
+ *
+ * `recoverCrashOrphanedWorkers` groups its resume targets BY MANAGER, keyed off `orphanedWorkers` — see
+ * `SessionService.recoverCrashOrphanedWorkers`'s `soloManagerIds` option for how this list is consumed.
  *
  * `recoverStaleSessions()` selects `recovered` purely on `process_state IN ('live','starting')` — it does
  * NOT filter on a missing engine id, archived, or recycle-superseded rows (that's exactly why the WORKER
