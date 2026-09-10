@@ -7,7 +7,7 @@ correction, `shared/src/types.ts`) and the resolve-window's own sizing/bounding 
 
 ## §1 — Narrative
 
-`PtyHostEvents.onPromptMismatchUnresolved` fired — a "recognized replay" `[loom:prompt-mismatch]` detection (the `UserPromptSubmit` mismatch detector's `replayedEntry !== undefined` branch) never resolved within `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` — no later generation's own submission fused that gen's content back in whole. Distinct from `paste_length_loss`: that fires when Loom never wrote the lost text at all; this fires when Loom DID write it, the engine's echo mismatched it, and the follow-up window to prove recovery has elapsed.
+`PtyHostEvents.onPromptMismatchUnresolved` fired — a "recognized replay" `[loom:prompt-mismatch]` detection (the `UserPromptSubmit` mismatch detector's `replayedEntry !== undefined` branch) never resolved within `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` — no later generation's own submission fused that gen's content back in whole. Distinct from `paste_length_loss`: that fires when Loom never wrote the lost text at all; this fires when Loom DID write it, the engine's echo mismatched it, and the follow-up window to prove recovery has elapsed. An independent worker, on a different specimen, later converged on this same sibling-asymmetry diagnosis on its own.
 
 `detail` carries `{ gen, writtenHash, reportedHash, intendedLen, recognizedGen, matchedLen, leadingRemainderLen, trailingRemainderLen }`, plus an OPTIONAL `messageExcerpt` (card `a419a7e6`) — present only when `LOOM_LOG_MESSAGE_CONTENT=1` (default OFF), OMITTED otherwise, never an empty placeholder. This is the durable audit trail for a mismatch whose own notice promised a follow-up either way but, until this card, only ever delivered on the SUCCESS half.
 

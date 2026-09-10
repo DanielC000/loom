@@ -2790,22 +2790,10 @@ export interface CodexLive {
    *  never contain this pty's own eventual file, AND for the narrower, still-open case (with its own
    *  tracking card id) this field does NOT close. */
   excludeEngineSessionIds: ReadonlySet<string> | null;
-  /** Card 361a5520 round 2: latched `true` at the top of `submitCodex` (a turn Loom actually submitted is
-   *  now outstanding) and cleared the instant `armCodexBusyStaleTimer`'s CASE 2 confirms it — the gate
-   *  that gives `firstTurnStarted`/`onTurnCompleted` their PROVEN false-positive fix (see both fields'/
-   *  events' own docs for the reproduced boot-episode specimen this closes). Deliberately NOT cleared by
-   *  CASE 3 (retry) or CASE 4 (exhausted) — a retry ladder or a fail-loud exhaustion is still the SAME
-   *  outstanding submitted turn, and per `armCodexBusyStaleTimer`'s own doc a LATER marker sighting can
-   *  still resolve a CASE-4-exhausted turn into a genuine CASE-2 completion; clearing this early would
-   *  wrongly suppress that resolution. Also cleared by `interruptForRedirectCodex`'s `enterPending` branch
-   *  (a turn redirected before its own Enter ever went out — nothing was actually sent, so nothing is
-   *  outstanding; that branch drains directly and never reaches CASE 2 at all, so if this weren't cleared
-   *  there it would wrongly validate a LATER, unrelated marker sighting as if it confirmed this abandoned
-   *  turn). Deliberately NOT cleared by `interruptForRedirectCodex`'s common (already-confirmed) path — a
-   *  redirect-interrupted turn that already had a confirmed marker before the interrupt is still the SAME
-   *  outstanding turn, now settling via its own re-armed timer; see that method's own doc for why codex
-   *  counting this (unlike claude's own `interruptForRedirect` settle-site exclusion — `onTurnCompleted`'s
-   *  own contract doc) is a reasoned, disclosed divergence rather than a defect. */
+  /** @decision 361a5520 — submitOutstanding: NOT cleared by CASE 3 (retry) or CASE 4 (exhausted) in
+   *  armCodexBusyStaleTimer, since a later marker sighting can still resolve it; IS cleared by
+   *  interruptForRedirectCodex's enterPending branch (nothing was sent), never its common path — see
+   *  docs/decisions/361a5520-submitoutstanding-cleared-only-on-confirmed-completion.md */
   submitOutstanding: boolean;
 }
 
@@ -2953,96 +2941,20 @@ export interface PtyHostEvents {
   onBusy(sessionId: string, busy: boolean): void;
   /** Persist measured engine-context occupancy, refreshed at each turn boundary (Stop). */
   onContextStats(sessionId: string, stats: ContextStats): void;
-  /**
-   * Card 343441bd: a real worker turn just completed — bump the persisted turn counter (staleDirective's
-   * "opportunities to act" clock). For a CLAUDE session, fired EXACTLY ONCE per GENUINE Stop/StopFailure
-   * completion, from inside that case's try block, immediately before `drainPending` — deliberately NOT at
-   * the `setBusy(false, "stop-hook")` falling edge itself, and deliberately NOT from any of the other FIVE
-   * setBusy(false) sites in this file (this paragraph, through the "never zero, never twice" sentence
-   * below, describes CLAUDE'S call site specifically):
-   *   - `healIfStuck`'s two sites and `sendEnterAndVerify`'s give-up-recovery two — a submit that was
-   *     NEVER CONFIRMED to have started; the worker had no real opportunity to act, so counting them would
-   *     inflate turnsSinceDelivery for non-opportunities and could FALSE-FIRE the no-false-alarm-critical
-   *     staleDirective signal.
-   *   - `interruptForRedirect`'s settle site — a real turn that WAS running, cut short by a manager's own
-   *     `worker_redirect`; skipping it only UNDER-counts, which can make staleDirective fire later or not
-   *     at all, never earlier/falsely, so it's safe to exclude.
-   *   - the two usage-cap PARK `break`s inside the Stop/StopFailure case itself (the §19c rate-limit
-   *     StopFailure park, and the weekly-cap text-sentinel park) — a capped/parked turn is EQUALLY a
-   *     non-opportunity (the worker never got to act; a rate-limited worker is a different signal, owned
-   *     by the rate-limit park), so the call site sits AFTER both breaks, not at the setBusy(false) edge
-   *     they also pass through. Every OTHER path between that edge and drainPending (a failed/successful
-   *     context-stats read, the paste-placeholder tripwire) falls through to the call site, so it still
-   *     fires for every turn that reaches drain — never zero, never twice.
-   * A future edit must NOT wire claude's call site to any of those five setBusy(false) sites, and must NOT
-   * move it back above the two park breaks — doing either reintroduces exactly the false-alarm risk this
-   * scoping was designed to avoid. A wedged/stuck worker is a DIFFERENT signal, owned by the busy-stuck
-   * watchdog.
-   *
-   * CODEX has its own, SEPARATE call site (card 361a5520): `armCodexBusyStaleTimer`'s CASE 2, the ONLY
-   * genuine turn-completion chokepoint for codex (it has no hook relay at all, so claude's Stop/StopFailure
-   * case structurally never fires for it). That site carries its OWN analogous exclusion, gated on
-   * `CodexLive.submitOutstanding` rather than a `live.kind` check: a busy-marker sighting with NO submit
-   * ever having happened (codex's own MCP-startup work can render one before `bootReady` even latches —
-   * see that field's own doc for the reproduced false-positive this closes) is the SAME "no real
-   * opportunity to act" exclusion claude's first bullet above states, just reached via a different signal
-   * (no confirming hook to check "never confirmed to have started" against). This is a DELIBERATE, already-
-   * guarded second call site, not a violation of the "must NOT wire claude's call site to a sixth site"
-   * rule above — that rule is scoped to claude's own five exclusions, not to codex adding its own.
-   *
-   * OPTIONAL (unlike its siblings above) so the many existing test doubles that construct a `PtyHostEvents`
-   * object (the shared `SeamHost` fake-pty double in test/_seam-host-fixture.mjs, used across 115 daemon
-   * tests) don't all need updating just to add a no-op for a callback their scenario never exercises —
-   * the call site below uses `?.`. Production (index.ts) always wires a real implementation.
-   */
+  /** @decision 343441bd — onTurnCompleted fires once per turn, excluded from the file's other 5
+   *  setBusy(false) sites (never-confirmed-started, redirect settle, 2 usage-cap parks) to avoid a false
+   *  staleDirective fire; codex has its own site (@decision 361a5520). See Decision B in
+   *  docs/decisions/343441bd-stale-directive-is-a-pull-signal-not-a-watchdog.md */
   onTurnCompleted?(sessionId: string): void;
-  /**
-   * Card 417cea0a: a confirming hook proved, BY CONTENT MATCH, that a give-up-tracked message actually
-   * landed — fired from `purgeConfirmedGiveUpRequeue`'s single-`batchId` CONFIRMED branch, right where
-   * the "CONFIRMED logicalId=… latencyMs=…" log line already fires (this is that same signal, exposed to
-   * a caller instead of only ever reaching stdout). `logicalId` is the chain's `rootMsgId` (see
-   * `QueuedMessage.logicalId`'s own doc — stable across every re-mint). PtyHost itself cannot tell whether
-   * `logicalId` was ever terminally PARKED (`session_message_gave_up` outcome:"parked") vs. still
-   * mid-chain when this confirmation arrived — that needs the DB, which this class deliberately does not
-   * hold (mirrors `getCapabilityCatalog`/`getIntegrationPaths` above) — so the implementer (sessions/
-   * service.ts) is the one that decides whether this is news (a previously-parked message, worth a
-   * `[loom:redelivery-confirmed]` sender notice) or a no-op (an ordinary mid-chain confirmation).
-   * ⛔ NEVER fired from the `batchIds.size > 1` branch just above (see that branch's own doc, card
-   * bc0774c4) — a content match spanning more than one give-up batch is left completely unresolved by
-   * design, so a message parked under a colliding signature will NOT produce a confirmed-after-park
-   * notice; there is nothing here to attribute the confirmation to. OPTIONAL, same rationale as
-   * `onTurnCompleted` above — every existing `PtyHostEvents` test double is unaffected until it opts in.
-   */
+  /** @decision 417cea0a — onGiveUpConfirmed: content-match confirmation only; PtyHost has no DB, so the
+   *  implementer (sessions/service.ts) decides "news vs no-op". NEVER fired from the batchIds.size > 1
+   *  branch (@decision bc0774c4 — unresolved by design). See
+   *  docs/decisions/417cea0a-ongiveupconfirmed-defers-news-vs-noop-to-the-db-holding-implementer.md */
   onGiveUpConfirmed?(sessionId: string, logicalId: string, latencyMs: number): void;
-  /**
-   * Card a8f8a8f2: `scheduleKickoffGuarantee`'s synthetic turn-1 origin (the DIRECT `submit()` that
-   * delivers a fresh session's startup prompt) exhausted `GIVE_UP_REQUEUE_LIMIT` on that ONE message —
-   * the entire task dispatch (the session's brief/kickoff) is about to be dropped with nothing further
-   * PtyHost itself can do about it (no DB, no manager/task lookup — same layering boundary as
-   * `onGiveUpConfirmed` above). OPTIONAL, same rationale as `onGiveUpConfirmed`/`onTurnCompleted`: every
-   * existing `PtyHostEvents` test double is unaffected until it opts in. The implementer (sessions/
-   * service.ts, via index.ts) decides how to park + notify — see `handleKickoffGiveUpExhausted`'s own doc.
-   *
-   * Card 00bd3b4a: `msgId`/`rootMsgId` are the synthetic origin's OWN `id`/`logicalId` (see
-   * `QueuedMessage.logicalId`'s doc) — passed through so the implementer can record the SAME durable
-   * `session_message_gave_up` (outcome:"parked") event every OTHER give-up-exhausted path already records
-   * (`handleGiveUpExhausted`'s park branch), keyed the same way `onGiveUpConfirmed`'s `logicalId` above
-   * already correlates against. Without this, a late confirming hook that content-matches this exact
-   * `rootMsgId` (line 5490's `requeueGiveUpOrigin` seeds `Live.ambiguousDispatches` for this message
-   * REGARDLESS of which branch it took, so a late match fires `onGiveUpConfirmed` even after exhaustion)
-   * has no durable "parked" record to retract — `handleGiveUpConfirmed`'s lookup finds nothing and silently
-   * no-ops, so the notice this hook already sent can never be corrected. This was the structural gap card
-   * 00bd3b4a's incident exposed: a healthy, 35-turn-deep worker whose kickoff confirmed LATE (per pinned
-   * memory `engine-confirmation-can-lag-minutes-timeouts-assume-seconds`) got a categorical
-   * "nothing began at all" notice with no way for Loom to ever say otherwise once the confirmation caught up.
-   *
-   * Card 7772176d: `kickoffText` (the pristine `live.startupPrompt` this synthetic origin was built from)
-   * is now passed through too — the implementer needs the actual text to give the kickoff the SAME
-   * cross-turn-boundary re-mint an ordinary durable message gets from `handleGiveUpExhausted` before ever
-   * parking (see that method's doc for why park-only, with no retry at all, under-serves a kickoff exactly
-   * as it would any other message). Nothing upstream of `scheduleKickoffGuarantee`'s own closure ever
-   * persisted this text anywhere else this handler could read it back from, so it must ride the event.
-   */
+  /** @decision a8f8a8f2 — onKickoffGiveUpExhausted: PtyHost has no DB/manager access; implementer decides
+   *  park+notify. @decision 00bd3b4a — msgId/rootMsgId let a LATE confirming hook find a "parked" record
+   *  to retract. @decision 7772176d — kickoffText gives it the same cross-turn re-mint an ordinary message
+   *  gets. See docs/decisions/{a8f8a8f2,00bd3b4a,7772176d}-onkickoffgiveupexhausted-*.md */
   onKickoffGiveUpExhausted?(sessionId: string, msgId: string, rootMsgId: string, kickoffText: string): void;
   /**
    * §19c: the turn ended in a usage-limit StopFailure. `until` is the ISO resume instant; the
@@ -3097,177 +3009,33 @@ export interface PtyHostEvents {
    * on top of the one being reported (the call site already wraps this in try/catch for that reason).
    */
   onCodexSubmitUnconfirmed?(sessionId: string, info: { attempts: number; maxAttempts: number }): void;
-  /**
-   * Card 448f1b4a — `live.bootReady`'s own fail-loud ceiling (armed at spawn, see `CodexLive.bootReadyTimer`'s
-   * own doc) fired: this codex session never reached full boot readiness (ready marker + model-loaded +
-   * trust-dialog-resolved, all together) within `info.timeoutMs`. Before this card, `enqueueStdinCodex`/
-   * `submitCodex` had NO readiness awareness at all, so any of this codebase's ~56 real `enqueueStdin`
-   * callers could submit into a not-yet-ready codex TUI; the fix queues everything until `bootReady`
-   * latches — which is correct, but it also means a codex session that NEVER becomes ready now queues
-   * every caller's message forever with no signal, unless something reports it. This is that report.
-   * `info.pendingCount` is a snapshot of `live.pending.length` at fire time — informational only (more
-   * may have queued by the time a reader acts on this). PtyHost itself cannot persist a durable event or
-   * notify a manager (no DB, same layering boundary as `onCodexSubmitUnconfirmed` above); the implementer
-   * (sessions/service.ts, via index.ts) decides how to record + notify, mirroring
-   * `handleCodexSubmitUnconfirmed`'s established two-recipient shape rather than inventing a new one.
-   *
-   * ⚠️ Deliberately ONE-SHOT, unlike `onCodexSubmitUnconfirmed`'s retry ladder — there is no retry action
-   * for Loom to take here (see `CodexLive.bootReadyTimer`'s own doc). A LATE boot-readiness (codex was
-   * merely very slow, not genuinely stuck) still resolves normally the moment the onData handler's own
-   * composite check next passes — this signal does not disable that, it only reports that the wait has
-   * already exceeded `info.timeoutMs` once. OPTIONAL, same rationale as its siblings: every existing
-   * `PtyHostEvents` test double is unaffected until it opts in. Called best-effort from a pty data-path
-   * timer callback — never let an implementer's own failure here become a second failure mode on top of
-   * the one being reported (the call site already wraps this in try/catch for that reason).
-   *
-   * Card 4babeb43: `info.readyMarker`/`info.modelLoaded`/`info.trustDialogResolved` name WHICH of
-   * the three composite conditions were true/false at the instant this fired (re-evaluated fresh against
-   * live state at report time, the SAME predicates the onData handler's own composite check uses) — mirrors
-   * `CodexLive.engineSessionIdCaptureEndReason`'s own split (card ece98bd8) into a distinguishable diagnosis
-   * rather than one undifferentiated "never all held together" report. All three `true` here is itself a
-   * genuinely distinct, real outcome — not a contradiction — meaning every condition held INDIVIDUALLY at
-   * some point but was never observed simultaneously in one single onData tick (the composite is only ever
-   * evaluated inside the onData handler, never on a standalone timer of its own).
-   */
+  /** @decision 448f1b4a — onCodexBootStuck: bootReadyTimer's one-shot fail-loud ceiling (never retried,
+   *  unlike onCodexSubmitUnconfirmed); a late boot still resolves normally via the onData composite check.
+   *  info.readyMarker/modelLoaded/trustDialogResolved (card 4babeb43) name which condition(s) held; all-true
+   *  is a real outcome, not a contradiction. See docs/decisions/448f1b4a-*.md */
   onCodexBootStuck?(sessionId: string, info: { timeoutMs: number; pendingCount: number; readyMarker: boolean; modelLoaded: boolean; trustDialogResolved: boolean }): void;
-  /**
-   * Card `b987f086`: a codex spawn declared one or more capabilities that this harness structurally cannot
-   * mount, and the only signal before this card was a `console.warn` into a shared multi-tenant log —
-   * project memory `shipping-a-detector-is-not-someone-reading-it` measures that exact shape (passive
-   * notice, nobody polling) at 0-acted-on on this project, against 3/3 for a blocking precondition and 4/4
-   * for an addressed directive. Fired from `createCodexPty` (`pty/host.ts`) for two independent reasons,
-   * both real and both worth naming distinctly in `info.items[].reason` rather than one blended sentence:
-   *  - an MCP server this session resolved (`buildMcpServers`) is not `{type:"http"}` — codex has no stdio-
-   *    MCP-server concept at all (`codex-host.ts#unsupportedCodexMcpServers`, the companion to
-   *    `mcpServersToCodexArgs` that this call site also runs). `profiles/validate.ts` now rejects a NEW
-   *    `harness:"codex"` profile that sets `browserTesting`/`documentConversion`/a non-empty `capabilities`
-   *    array at SAVE time (`codexStdioCapabilityUnsupportedError`) — this event is defense-in-depth for a
-   *    profile that predates that guard, or a slug added to the catalog after the profile was saved, not
-   *    the primary enforcement point.
-   *  - `opts.codescapeEnabled` is true for this project — codescape is deliberately never even attempted
-   *    for codex (no per-tool allow/disallow mechanism to pair with its write-tool restriction; see
-   *    `createCodexPty`'s own doc) and there is no profile-level save-time gate for this: `codescape.enabled`
-   *    lives on the PROJECT, not the profile, so the mismatch can only ever be detected at spawn time.
-   * Reuses `onCodexBootStuck`'s established two-recipient (session + manager) durable-event shape rather
-   * than inventing a new one. PtyHost itself cannot persist a durable event or notify a manager (no DB, same
-   * layering boundary as every sibling above); the implementer (sessions/service.ts, via index.ts) decides
-   * how to record + notify. OPTIONAL, same rationale as its siblings: every existing `PtyHostEvents` test
-   * double is unaffected until it opts in. Called best-effort from the spawn path — never let an
-   * implementer's own failure here become a second failure mode on top of the one being reported (the call
-   * site wraps this in try/catch for that reason, same as every sibling event above).
-   */
+  /** @decision b987f086 — onCodexUnsupportedCapability: two independent reasons (a stdio-only MCP server;
+   *  codescapeEnabled for codex), named distinctly in info.items[].reason, never blended. See
+   *  docs/decisions/b987f086-oncodexunsupportedcapability-two-independent-reasons-named-distinctly.md */
   onCodexUnsupportedCapability?(sessionId: string, info: { items: { id: string; reason: string }[] }): void;
-  /**
-   * Card 47c11741: the bare-placeholder tripwire's own one-shot RECOVERY re-injection (`PASTE_RECOVERY_TAG`,
-   * paste-tripwire.ts) ALSO collapsed — the give-up path, right where the combined `[paste-tripwire]`
-   * console.warn (this file's Stop-hook call site) already fires. Distinct from `onPasteLengthLoss` above:
-   * that one fires when Loom never wrote the lost text at all (the human/raw-paste gap); THIS one fires
-   * when Loom DID write it (twice) and DID detect both collapses, but the automatic-recovery budget is
-   * exhausted (one-shot by design — see the call site's own doc for why a second automatic attempt isn't
-   * warranted). PtyHost itself cannot notify beyond the session (no DB, no manager lookup — same layering
-   * boundary as `onPasteLengthLoss`/`onKickoffGiveUpExhausted` above); the implementer (sessions/
-   * service.ts) decides how to fail loud to both the recipient and — where one exists — the sender,
-   * reusing `handlePasteLengthLoss`'s established shape rather than inventing a second one. `token` is
-   * whatever `matchEmbeddedPlaceholderToken` found in this turn's recorded text (may be `null` — the
-   * give-up itself never depends on a token match). OPTIONAL, same rationale as its siblings above: every
-   * existing `PtyHostEvents` test double is unaffected until it opts in.
-   */
+  /** @decision 47c11741 — onPasteTripwireGiveUp: fires when Loom DID write the text (twice) and the
+   *  one-shot automatic RECOVERY re-injection itself also collapsed — distinct from onPasteLengthLoss
+   *  (never wrote it at all). See
+   *  docs/decisions/47c11741-onpastetripwiregiveup-fires-when-the-recovery-injection-itself-collapsed.md */
   onPasteTripwireGiveUp?(sessionId: string, info: { token: string | null; engineSessionId: string | null }): void;
-  /**
-   * Card f9b1ea00 — `checkPromptMismatchUnresolved` fired: a "recognized replay" `[loom:prompt-mismatch]`
-   * detection (the `replayedEntry !== undefined` branch of the `UserPromptSubmit` mismatch detector) never
-   * resolved within `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` — no later generation's own submission fused this
-   * gen's content back in whole (see `Live.mismatchResolvedGens`' own doc). That original notice promised
-   * its reader a SEPARATE follow-up either way ("wait one generation and re-check ... if that happens you
-   * will see a separate, later notice saying plainly that nothing was lost"); until this card, only the
-   * SUCCESS half of that promise had a mechanism behind it — the failure half emitted nothing at all, so
-   * "no second notice arrived" was structurally indistinguishable from "not yet". PtyHost itself cannot
-   * notify beyond the session (no DB, no manager lookup — same layering boundary as `onPasteLengthLoss`/
-   * `onKickoffGiveUpExhausted` above); the implementer (sessions/service.ts, via index.ts) decides how to
-   * fail loud to both the recipient and — where one exists — the sender, reusing `handlePasteLengthLoss`'s
-   * established two-recipient, durable-event shape rather than inventing a second one (this card's own
-   * board body: an independent worker, on a different specimen, converged on the SAME sibling-asymmetry
-   * diagnosis — `paste_length_loss` persists an event and fails loud to the sender; `prompt_mismatch` did
-   * neither, until now). `gen`/`writtenHash`/`reportedHash`/`intendedLen` are the ORIGINAL detection's own
-   * captured values (see the `UserPromptSubmit` call site's own doc for why they're captured in a closure
-   * rather than re-read off `live` at fire time). OPTIONAL, same rationale as its siblings above: every
-   * existing `PtyHostEvents` test double is unaffected until it opts in.
-   *
-   * Card c23e2869 DoD-2 (non-content half only — never the matched/remainder TEXT itself, only lengths and
-   * a gen number, same posture as `intendedLen`/`writtenHash` above): `recognizedGen`/`matchedLen` name
-   * WHICH earlier generation this mismatch replayed and how much of it matched — `replayedEntry`, already
-   * computed at the `UserPromptSubmit` call site for this exact branch (this branch is reachable only when
-   * `replayedEntry !== undefined` — see `isRecognizedReplayAwaitingResolution`'s own doc), so this is
-   * pass-through of data already in scope, not a new detector. Because `replayedEntry` is by construction a
-   * WHOLE-string match (`reported === entry.text` exactly — see its own `.findLast` definition), there is
-   * never anything left unaccounted for on this branch: `leadingRemainderLen`/`trailingRemainderLen` are
-   * always `0` here. Named the same as `findRecognizedSubstring`'s own result fields (pty/host.ts) so a
-   * future widening of WHICH mismatches reach this event (a durability-boundary policy call this card
-   * explicitly defers — see its own DoD-3) can populate non-zero remainders under the same field names
-   * without a schema change.
-   *
-   * Card a419a7e6: `messageExcerpt` is a bounded HEAD slice (`PROMPT_MISMATCH_EXCERPT_MAX_LEN` chars — see
-   * that constant's own doc) of the ORIGINAL `intended` text, passed RAW and UNCONDITIONALLY here — this is
-   * an in-process call chain with exactly one implementer (SessionService.handlePromptMismatchUnresolved,
-   * via index.ts), never logged or serialized on its own. The `LOOM_LOG_MESSAGE_CONTENT` gate this content
-   * is subject to lives at THAT method, the one place it can become a durable, queryable row — not here.
-   *
-   * Card 280309d9 — `writtenAt` is the REAL Enter-write wall-clock instant for `gen` (`live.
-   * currentGenFirstWrittenAt` at the ORIGINAL detection's own call site — the SAME field the mismatch
-   * notice's own `writeWallClockAt` text already reads for this identical generation), an ISO string, or
-   * `null` in the defensive case that generation's write was never recorded. THIS EVENT'S OWN `ts` (stamped
-   * by the consumer, at fire time — see SessionService.handlePromptMismatchUnresolved) is NOT this instant:
-   * it is the GIVE-UP instant, `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` (a hard 600s) LATER — that gap went
-   * undocumented long enough that two independent parties both read `ts` as the write time and got every
-   * time-correlation they built on it wrong by exactly ten minutes (board card 280309d9's own finding).
-   * `writtenAt` makes the true instant recoverable BY CONSTRUCTION instead of requiring a manual, hash-keyed
-   * join against the `[prompt-echo]` log line that happens to carry it today.
-   */
+  /** @decision f9b1ea00 — onPromptMismatchUnresolved: durable follow-up for an unresolved "recognized
+   *  replay" notice; ts is give-up time, not write time (see writtenAt). @decision c23e2869 — recognizedGen/
+   *  matchedLen field-naming rationale (2nd site, see that record). See
+   *  docs/decisions/f9b1ea00-orchestrationevent-prompt-mismatch-unresolved-ts-correction.md */
   onPromptMismatchUnresolved?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number; messageExcerpt: string; writtenAt: string | null }): void;
-  /**
-   * Card 38d68b8d — DoD-2 of `59757189`'s UNMATCHABLE-mismatch population (the structural TWIN of
-   * `onPromptMismatchUnresolved` above, fired on the OPPOSITE `isUnmatchableMismatch` branch — see that
-   * local's own doc at its call site: none of the recognized/confirmed shapes claimed this mismatch). A
-   * pull surface (`getLastMismatchUnmatched`) already lets a session that KNOWS to ask retrieve this text
-   * (card `59757189` DoD-1/3, shipped); this event is the PUSH half that was deliberately left for a
-   * later card once the content-in-durable-records ruling (`0eb43216`) landed — a recipient can never
-   * self-diagnose (card `68459420`), and a pull surface only ever helps someone who already suspects a
-   * mismatch. Fires once per genuinely-sent notice (gated behind the SAME `isExactRepeatNotice` check the
-   * recipient's own `[loom:prompt-mismatch]` notice already goes through — no separate dedup invented
-   * here). `intendedText` is the FULL captured text (`Live.lastMismatchUnmatched.intendedText`), passed
-   * RAW and UNCONDITIONALLY — same posture as `onPromptMismatchUnresolved`'s `messageExcerpt` above:
-   * PtyHost stays DB-agnostic (no DB, no manager/sender lookup), and the implementer
-   * (SessionService.handlePromptMismatchUnmatched, via index.ts) decides who the sender is and applies
-   * the `LOOM_LOG_MESSAGE_CONTENT` gate at the one place this content can become durable/queryable — not
-   * here. OPTIONAL, same rationale as every sibling above.
-   */
+  /** @decision 38d68b8d — onPromptMismatchUnmatched: the PUSH half getLastMismatchUnmatched's pull surface
+   *  (card 59757189) can't cover — a recipient can never self-diagnose (@decision 68459420). See
+   *  docs/decisions/38d68b8d-onpromptmismatchunmatched-is-the-push-half-a-pull-surface-cannot-cover.md */
   onPromptMismatchUnmatched?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; intendedText: string; detectedAt: number }): void;
-  /**
-   * The pty exited. `intended` distinguishes a DELIBERATE Loom termination (any pty.stop() — graceful/
-   * idle/user-stop/recycle/merge-stop/run-teardown, which set `live.stopping`) from an UNEXPECTED process
-   * death (the process died without a stop() — a crash / clean self-exit). It is the load-bearing
-   * discriminator the crash-recovery watchdog keys off (recorded at onExit time; a whole-daemon
-   * restart/crash never reaches here, so those are excluded for free). See PtyHost.stop / Live.stopping.
-   *
-   * `signal`/`codexStopDiag` (card 176bdb0c) are DIAGNOSTIC-ONLY additions, both OPTIONAL and both
-   * currently populated ONLY by the codex spawn path — claude's own call site (and the pre-existing
-   * `{ intended }`-only test/production call sites) are untouched and remain valid callers. Neither field
-   * changes what counts as a successful/intended stop; `code`'s own discard-by-every-consumer behavior
-   * (see `index.ts`'s `onExit` implementer, historically named `_code`) is UNCHANGED for every harness —
-   * this only adds visibility, never a new success/failure branch. `signal` is node-pty's own
-   * `onExit`-event field (`{exitCode, signal?}`) passed through verbatim — ⚠️ on this project's Windows/
-   * conpty target it is ALWAYS `undefined` (confirmed by reading `node-pty`'s own
-   * `windowsTerminal.ts`: `this.emit('exit', this._agent.exitCode)` passes only ONE argument, so the
-   * `(exitCode, signal) => ...` listener in `terminal.ts` never receives a second one on this platform) —
-   * do not expect it to discriminate anything here; it is carried through only because it is free and may
-   * be useful on a POSIX host. `codexStopDiag` records what `stopCodex`'s own graceful sequence actually
-   * did: whether its SECOND `\x03` was sent at all (a fast-enough exit from the FIRST alone means it never
-   * was), and, if sent, how long it had been outstanding when the process actually died — see
-   * `CodexLive.secondSigintWrittenAt`'s own doc for why this is the field the earlier measurement
-   * campaign on that card identified as most valuable. `engineSessionIdCaptureEndReason` (card ece98bd8)
-   * is a LATER, independent addition to the same diagnostic bag — it says nothing about the stop
-   * sequence; see `CodexLive.engineSessionIdCaptureEndReason`'s own doc for what it records.
-   */
+  /** @decision 176bdb0c — onExit: intended stays the load-bearing crash-recovery discriminator; signal/
+   *  codexStopDiag (+ ece98bd8's engineSessionIdCaptureEndReason) are diagnostic-only additions that never
+   *  change what counts as a successful/intended stop. signal is ALWAYS undefined on Windows/conpty. See
+   *  docs/decisions/176bdb0c-onexit-codexstopdiag-signal-are-diagnostic-only.md */
   onExit(sessionId: string, code: number | null, info: {
     intended: boolean;
     signal?: number;
@@ -3306,32 +3074,9 @@ export const HUMAN_PROMPT_TOOLS: readonly string[] = ["AskUserQuestion", "ExitPl
  */
 export const TASK_TRACKING_TOOLS: readonly string[] = ["TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate"];
 
-/**
- * The set of roles whose stdin is Loom-driven and which must NEVER block on a human — so they spawn with
- * {@link HUMAN_PROMPT_TOOLS} disallowed:
- *   - `worker`            — driven by its manager (worker_message/redirect); channel up is worker_report.
- *   - `setup`             — the user-facing "Platform" operator; acts on the user's behalf, never blocks.
- *   - `auditor`           — the Platform Auditor (scheduled, read-mostly transcript reviewer).
- *   - `workspace-auditor` — the Workspace Auditor (read-mostly reviewer of the user's own workspace).
- *   - `run`               — a fully autonomous, human-LESS, Loom-driven session; nobody can answer a
- *                           prompt, so a model that called one would block until the hard run-timeout
- *                           reaped it (a wasted full-timeout window + a `timed_out` run).
- *   - `assistant`         — the long-lived Loom Companion; its "human" reaches it over a CHAT channel and
- *                           it answers via `chat_reply`, so its stdin is never a live TUI human — an
- *                           interactive prompt would block on input that never comes.
- * DELIBERATELY EXCLUDED (left byte-identical): `manager`/orchestrator + `platform` (the human-driven
- * Platform Lead) legitimately surface decisions to the human; a plain (role-less) session is out of
- * scope.
- *
- * SEPARATELY, the set of BOARD-DRIVEN roles — `manager`/orchestrator, `platform`, `auditor` — spawn with
- * {@link TASK_TRACKING_TOOLS} disallowed (a disjoint concern from the human-prompt disallow above; `auditor`
- * gets BOTH sets, unioned). `workspace-auditor`/`setup`/`worker`/`run`/`assistant`/plain are left
- * byte-identical on this dimension: their real task surface isn't the loom-tasks board the same way, and
- * scoping narrowly avoids suppressing a signal a role might still find useful.
- *
- * Pure + exported so the spawn-args test asserts the per-role mapping with no real claude. (board card
- * 8dd1dd1c; task-tracking-tools split: Platform card 33f9f181)
- */
+/** @decision 8dd1dd1c — human-prompt disallow: Loom-driven roles only (worker/setup/auditor/
+ *  workspace-auditor/run/assistant), NEVER manager/platform. Task-tracking disallow (card 33f9f181) is
+ *  separate/disjoint. See docs/decisions/8dd1dd1c-role-scoped-human-prompt-disallow.md */
 export function disallowedToolsForRole(role?: SessionRole | null): string[] {
   const out: string[] = [];
   switch (role) {
@@ -3421,49 +3166,12 @@ export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedToo
   return merged;
 }
 
-/**
- * Card ac90ca8e (extended by 44fa586a to `auditor`/`workspace-auditor`, and by d78f8217 to
- * `manager`/`platform`/`setup` BLANKET + `worker` PROJECT-SCOPED — see that card's own paragraph below;
- * moved HERE — the single spawn chokepoint — by card 3388be4d): closes the native-Read/Glob/Grep bypass
- * of the MCP-mediated read gates (companion `transcript_read`: owner-turn + DM-scope + project-scope;
- * auditor/workspace-auditor `repo_read_*`; manager `worker_transcript`; platform `session_transcript`) by
- * denying these roles native read access to the engine transcript root (`~/.claude/projects/**`) via a
- * role-scoped `permissions.deny` entry — see
- * {@link TRANSCRIPT_ROOT_READ_DENY_RULE}'s own doc (claude-transcript.ts) for why that literal is owned
- * there, not here.
- *
- * PRE-3388be4d this was applied inside `resolveAgentSpawn` (sessions/service.ts) — exactly ONE of the
- * (at the time) ten `pty.spawn` call sites, so `startRun`, resume/fork/recycleWorker/recycleManager/
- * recycleLead's agent-row-MISSING fallback (`agent ? resolveAgentSpawn(...).permission :
- * config.permission`) all silently dropped the deny. Keying off `opts.role` HERE instead fixes every
- * path structurally in one place: `role` is the session's PINNED value (the DB row's own `role` column,
- * carried across every resume/fork/recycle regardless of whether the agent row still exists — see
- * SpawnOpts.role's own doc), never re-derived from the agent, so this is immune to the exact class of
- * defect that made the old call site droppable. Mirrors {@link disallowedToolsForRole}'s own
- * chokepoint shape (computed from the pinned role at the single `createPty` boundary, not per-caller).
- *
- * `run` is DELIBERATELY excluded (`runs/prompt.ts` — it ingests untrusted input by design, and never
- * reached the old call site either) — 3388be4d is a MOVE of the existing rule, not a widening; `run`'s
- * exclusion is decided there and is NOT reopened by card d78f8217 below.
- *
- * UNIONS the rule into `.deny` rather than replacing it — a per-project `permission.deny` override
- * REPLACES the default wholesale (`shared/config.ts`), unlike `allow` (which unions), so without this
- * union-at-the-spawn-boundary step a project's own custom deny would silently strip this protection.
- * Byte-identical (same reference) for every role outside {@link TRANSCRIPT_ROOT_DENY_ROLES}, and a no-op
- * (same reference) when the rule is already present — no duplicate entries.
- *
- * Card d78f8217 (implementing 31613c1e's LEAD RULING, the approved split): `manager`/`platform`/`setup`
- * join the BLANKET set here — the reviewer swept `packages/daemon/assets/**` + `.claude/skills/**` for
- * `.claude/projects` and found ZERO hits (positive-controlled: the same pattern returns 10 hits under
- * `src/`+`test/`), so nothing shipped depends on any of these three roles reading the transcript root
- * natively. `worker` is DELIBERATELY NOT added here — a worker legitimately reads its OWN project's
- * transcripts (six in-tree investigations depend on it), so the blanket rule would regress shipped
- * behavior. It instead gets a PROJECT-SCOPED deny via the `workerProjectDenyRules` param below — see
- * {@link otherProjectTranscriptDenyRules}'s own doc (claude-transcript.ts) for the two rule shapes and
- * why both are needed, and 31613c1e's LEAD RULING for why the one-knob "blanket for all four" alternative
- * was rejected (weaker exactly where exposure is highest — `platform` holds git push + `vault_write`
- * alongside cross-project `session_transcript`).
- */
+/** @decision ac90ca8e — role-scoped transcript-root deny (extended by 44fa586a; moved to this chokepoint
+ * by @decision 3388be4d): closes the native Read/Glob/Grep bypass of the MCP-mediated read gates; keyed off
+ * the PINNED opts.role, UNIONed into .deny (never replaces); run is deliberately excluded.
+ * @decision 31613c1e — LEAD RULING (implemented by @decision d78f8217): manager/platform/setup get the
+ * BLANKET deny, worker gets a PROJECT-SCOPED one — the one-knob "blanket for all four" was rejected.
+ * See docs/decisions/ac90ca8e-*.md and docs/decisions/31613c1e-*.md */
 export const TRANSCRIPT_ROOT_DENY_ROLES: ReadonlySet<SessionRole> = new Set(["assistant", "auditor", "workspace-auditor", "manager", "platform", "setup"]);
 export const TRANSCRIPT_ROOT_DENY_RULES: readonly string[] = [TRANSCRIPT_ROOT_READ_DENY_RULE];
 export function withTranscriptRootDenyForSpawn(

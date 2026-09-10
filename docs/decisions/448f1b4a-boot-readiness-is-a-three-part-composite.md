@@ -8,12 +8,22 @@ A real merge gate (op `43cd9ec1`) captured exactly that: `isCodexReadyMarkerPres
 
 `isCodexModelLoaded`'s own regex must be a POSITIVE match ("model:" followed by something that is not "loading"), not a negated one, to stay safe against the same accumulating scan buffer both functions read. `screen` is stripped via `stripAnsiCsi` BEFORE testing it — never tested raw. This was confirmed against gate `43cd9ec1`'s own real captured bytes (`stripAnsiCsi`'s own doc has the `od -c` verification): codex styles the `model:` line's VALUE token with its own CSI span, separate from the label, and the UNSTRIPPED pattern demonstrably swallows that escape sequence as part of its own `\S+` match — returning TRUE while the model is still genuinely loading, i.e. silently reintroducing this exact card's own defect through the fix meant to close it. This is not a hypothetical: it was reproduced against the real bytes before the strip was added.
 
+`onCodexBootStuck` (also card 448f1b4a, `pty/host.ts`) is `bootReadyTimer`'s fail-loud ceiling firing: this session never reached full boot readiness (ready marker + model-loaded + trust-dialog-resolved, together) within `info.timeoutMs`. Before this card, `enqueueStdinCodex`/`submitCodex` had no readiness awareness, so any of ~56 real `enqueueStdin` callers could submit into a not-yet-ready TUI; the fix queues everything until `bootReady` latches — correct, but a session that never becomes ready now queues forever with no signal unless something reports it. `info.pendingCount` snapshots `live.pending.length` at fire time (informational only). `PtyHost` has no DB; the implementer (`sessions/service.ts`) decides how to record + notify, mirroring `handleCodexSubmitUnconfirmed`'s two-recipient shape.
+
+Deliberately ONE-SHOT, unlike `onCodexSubmitUnconfirmed`'s retry ladder (card `fedef6a0`) — no retry action exists here. A LATE boot-readiness (merely slow, not stuck) still resolves normally once the onData handler's own composite check next passes; this only reports the wait already exceeded `info.timeoutMs` once.
+
+Card 4babeb43: `info.readyMarker`/`info.modelLoaded`/`info.trustDialogResolved` name which of the three composite conditions were true/false at the instant `onCodexBootStuck` fired (re-evaluated fresh against live state, the same predicates the onData handler's composite check uses) — mirrors `CodexLive.engineSessionIdCaptureEndReason`'s own split (card ece98bd8) into a distinguishable diagnosis rather than one undifferentiated report. All three `true` is itself a genuinely distinct outcome, not a contradiction — every condition held individually at some point but was never observed simultaneously in one onData tick (the composite is only evaluated inside the onData handler, never a standalone timer).
+
 ## Do not
 
 - Do not treat `isCodexReadyMarkerPresent` alone as a readiness signal — it answers "has the TUI rendered at least once," not "is codex ready for a submit."
 - Do not test `isCodexModelLoaded`'s regex against a raw, unstripped `screen` buffer — codex's own CSI styling around the `model:` value can make an unstripped positive-match regex return true while the model is still loading, reintroducing the exact defect this card fixed.
 - Do not negate `CODEX_MODEL_LOADED_RE` into a "not loading" pattern — it must stay a positive "model: <resolved>" match to stay safe against the accumulating scan buffer.
+- Do not treat `onCodexBootStuck` as retryable the way `onCodexSubmitUnconfirmed` is — it's deliberately one-shot; a late boot-readiness still resolves normally via the onData handler's own composite check.
+- Do not read all-three-true in `onCodexBootStuck`'s info as a contradiction — every condition held individually at some point, just never simultaneously in one onData tick.
 
 ## Source
 
 Inline comments in `packages/daemon/src/pty/codex-host.ts`: the JSDoc above `isCodexReadyMarkerPresent` and the JSDoc above `isCodexModelLoaded`, as of commit 41336cdba9e3c80849be6c64c84a8d52c3c06dce. Relocated by card e5ee79bb (tranche 1 on `pty/codex-host.ts`); no wording changed beyond joining wrapped source lines into flowing paragraphs and stripping `*` comment markers.
+
+The `onCodexBootStuck` paragraphs above are from a second inline comment, the `onCodexBootStuck` field doc on `PtyHostEvents` in `packages/daemon/src/pty/host.ts`, as of `main` `8d9fe59d`. Extracted by card `a2a6b2ad` (tranche 11 on `pty/host.ts`); wording unchanged beyond joining wrapped lines and stripping `*` markers.
