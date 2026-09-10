@@ -154,13 +154,9 @@ export interface PythonConfig {
  * vanilla install ever has the CLI). Benign on/off boolean (no host-launch capability of its own — it only
  * conditionally mounts an HTTP MCP entry pointing at the ALREADY-running daemon-owned supervisor).
  *
- * Type-only here (card 3bd8ef17): the runtime default+merge for this shape lives in
- * `resolveCodescapeConfig` below, deliberately OUTSIDE `ResolvedConfig`/`resolveConfig()` — that function
- * is what `packages/web` calls client-side (Settings/ColumnManager/Companion effective-value hints), and
- * `PLATFORM_DEFAULTS`'s literal keys ship verbatim into the built browser bundle whenever they're part of
- * that object. Codescape is a PRIVATE product end-user agents must never learn exists (project memory
- * `codescape-is-private-no-user-visible-surface`) — packages/web MUST NEVER import `resolveCodescapeConfig`
- * or `resolveCodescapeIntegrationPath`.
+ * Type-only here — kept OUTSIDE `ResolvedConfig`/`resolveConfig()` deliberately. `packages/web` MUST
+ * NEVER import `resolveCodescapeConfig` or `resolveCodescapeIntegrationPath`.
+ * @decision 3bd8ef17 — see docs/decisions/3bd8ef17-keep-codescape-config-outside-resolveconfig.md
  */
 export interface CodescapeConfig {
   enabled: boolean;
@@ -222,13 +218,8 @@ export const MEMORY_CONFIG_MAX = {
  * Settings UI reads the same table to state each field's permitted range — and to reject an
  * out-of-range entry — IN THE UNIT THE FIELD IS ENTERED IN.
  *
- * Why it's exported rather than left inline in the zod schema (card 48365fda): those Settings fields are
- * labelled and entered in SECONDS and multiply by 1000 on submit, so the server's own rejection quoted a
- * raw millisecond figure into a seconds field — a user who typed `2000` was told "expected number to be
- * <=1800000" and had no way to derive "max 1800s" from it. Two different project owners hit that the same
- * night and both concluded the validator was broken. Translating the bound into the field's unit needs
- * the bound to be READABLE from the web package; duplicating the literal there would just move the drift
- * risk one layer up, so both sides consume this.
+ * @decision 48365fda — exported so the bound is READABLE from the web package too, for unit translation;
+ * see docs/decisions/48365fda-export-orchestration-timeout-bounds-for-unit-translation.md.
  *
  * ⚠️ These ceilings are deliberate platform-wide caps, not tuning knobs — a gate/deploy command holds a
  * shared gate lane for its whole timeout, and a webhook POST blocks the best-effort event path. Raising
@@ -342,23 +333,20 @@ export interface OrchestrationConfig {
    */
   maxConcurrentWorkers: number;
   /**
-   * Safety rail (§19a hardening, narrowed by card 53edd8d5): hard cap on concurrently-LIVE manager
-   * sessions the cron Scheduler ITSELF has spawned — counted via `Db.countLiveScheduledManagers`
-   * (`Session.scheduledSpawn`), NOT the daemon-wide live-manager count. Standing human/Lead-spawned
-   * managers do NOT count against this cap and can never block a cadence, however large the standing
-   * fleet grows — only OTHER scheduler-spawned managers compete for this budget. maxConcurrentWorkers
-   * caps workers PER manager; this caps the Scheduler's OWN concurrent manager spawns, so a burst of
-   * simultaneously-due schedules can't launch an unbounded fleet in one tick. At the cap the Scheduler
-   * defers the remaining due schedules to the next tick (next_fire_at untouched; the deferral is
-   * recorded on the schedule row + a `schedule_fire_deferred` event — see Schedule.lastDeferredAt).
-   * Default 3.
-   *
-   * **Fleet-wide since card 52ab5d45**: the Scheduler is ONE daemon-wide service (never scoped to a
-   * project), so the value that actually reaches it comes only from the daemon-global
-   * `PlatformConfigOverride.maxConcurrentManagers` (see the merge below, which mirrors
-   * `maxConcurrentGates`'s daemon-global resolution) — a per-project override of THIS field is still
-   * accepted by the per-project schema for backward compat, but is NOT read by the merge and has no
-   * effect on the Scheduler.
+   * Safety rail (§19a hardening): hard cap on concurrently-LIVE manager sessions the cron Scheduler
+   * ITSELF has spawned — counted via `Db.countLiveScheduledManagers` (`Session.scheduledSpawn`), NOT
+   * the daemon-wide live-manager count. maxConcurrentWorkers caps workers PER manager; this caps the
+   * Scheduler's OWN concurrent manager spawns, so a burst of simultaneously-due schedules can't launch
+   * an unbounded fleet in one tick. At the cap the Scheduler defers the remaining due schedules to the
+   * next tick (next_fire_at untouched; the deferral is recorded on the schedule row + a
+   * `schedule_fire_deferred` event — see Schedule.lastDeferredAt). Default 3.
+   * @decision 53edd8d5 — narrowed to scheduler-spawned managers only; standing human/Lead-spawned
+   * managers never count against this cap. See
+   * docs/decisions/53edd8d5-scheduled-manager-prompt-and-cap-are-additive.md.
+   * @decision 52ab5d45 — the Scheduler is ONE daemon-wide service, so only the daemon-global
+   * `PlatformConfigOverride.maxConcurrentManagers` reaches it; a per-project override of THIS field is
+   * accepted for backward compat but has no effect. See
+   * docs/decisions/52ab5d45-maxconcurrentmanagers-is-daemon-global-not-per-project.md.
    */
   maxConcurrentManagers: number;
   /**
@@ -731,9 +719,8 @@ export interface PlatformConfig {
   timeouts: TimeoutConfig;
   /** P2 authenticated-request bounds + per-connection rate guard. See ConnectionsGuardConfig. */
   connections: ConnectionsGuardConfig;
-  // NOTE: no `integrations` key here (card 3bd8ef17) — same reasoning as `ResolvedConfig`'s dropped
-  // `codescape` field just above: `PlatformConfig` flows through `resolveConfig()`, which `packages/web`
-  // calls client-side, so any field here ships into the browser bundle. See `resolveCodescapeIntegrationPath`.
+  // @decision 3bd8ef17 — no `integrations` key here either; same reasoning as `resolveCodescapeConfig`
+  // above. See docs/decisions/3bd8ef17-keep-codescape-config-outside-resolveconfig.md.
   /**
    * Message-delivery behavior toggle (owner-directed, 2026-07-03): when a recipient is busy and
    * inbound messages queue, should an AGENT/human-authored message (a manager→worker direction, a
@@ -784,27 +771,19 @@ export const COMPANION_VOICE_ENABLED_DEFAULT = false;
 export const OPERATOR_ENABLED_DEFAULT = false;
 
 /**
- * Access-story Phase A (card 766f8b50) — daemon-global remote-bind config. NOT per-project — like
- * `backup`/`platform`, the daemon shares ONE of these. Ships INERT: `enabled:false` + `bindHost:
- * "127.0.0.1"` by default, so today's loopback-only bind is byte-identical. `enabled` is the master
- * switch a future phase reads before ever attempting a non-loopback `.listen()`; `bindHost` is the
- * interface that later bind targets (still ignored while a boot-time token guard refuses it — see
- * gateway/trust-tier.ts `canOpenRemoteListener`). `tls`/`rateLimit` are Phase C concerns (TLS material +
- * a remote-request limiter), actually consumed starting Phase C (card 6bc02f50). The gateway TOKEN
+ * Access-story Phase A — daemon-global remote-bind config. NOT per-project — like `backup`/`platform`,
+ * the daemon shares ONE of these. Ships INERT: `enabled:false` + `bindHost: "127.0.0.1"` by default, so
+ * today's loopback-only bind is byte-identical. `enabled` is the master switch a future phase reads
+ * before ever attempting a non-loopback `.listen()`; `bindHost` is the interface that later bind targets
+ * (still ignored while a boot-time token guard refuses it — see gateway/trust-tier.ts
+ * `canOpenRemoteListener`). `tls`/`rateLimit` are Phase C concerns, not yet consumed. The gateway TOKEN
  * itself does NOT live here — Phase B stores it in a keyed table, never in config.
+ * @decision 766f8b50 — the phased design + why the token is kept out of this shape; see
+ * docs/decisions/766f8b50-remoteaccessconfig-ships-inert-daemon-global-not-per-project.md.
  *
- * **Token rotation (P5b hardening follow-up, card 80e2093f, item 1):** rotating a gateway token
- * (`Db.rotateGatewayToken`) is an IMMEDIATE cutover — the old token's salt+hash is overwritten in place, so
- * it stops verifying the instant rotation happens, breaking any remote client still presenting it until it
- * picks up the new one. This is INTENTIONAL, not a bug — the store deliberately does not do a dual-accept
- * grace TTL, keeping the auth surface simple (exactly one valid secret per token row at a time). If a
- * live remote client needs to switch tokens without a connectivity gap, use the store's existing
- * multi-token support as a manual grace procedure instead: mint a SECOND gateway token, distribute it to
- * every remote client, confirm they've all switched over, THEN revoke/delete the OLD token (rather than
- * rotating it) — every other token stays valid throughout. See `Db.rotateGatewayToken`'s own doc comment.
- *
- * **`bindHost` all-interfaces mode (item 2):** `0.0.0.0` (and its IPv6 counterpart `::`) is an explicit,
- * OWNER-DECIDED supported bind target — see `bindHost`'s own doc below.
+ * @decision 80e2093f — gateway-token rotation is an immediate cutover (item 1), and `bindHost`
+ * deliberately accepts `0.0.0.0`/`::` (item 2, see `bindHost`'s own doc below); see
+ * docs/decisions/80e2093f-bindhost-deliberately-accepts-all-interfaces.md.
  */
 export interface RemoteAccessConfig {
   /** Master switch — a non-loopback bind is only ever attempted when true. Default false. */
