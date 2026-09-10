@@ -1,9 +1,10 @@
 # a5d1ae04 — `gate_intent_declare`/`withdraw` are manager-only, kept off the worker's pinned tool list
 
-⚠️ Spans two decisions under this card: this record (§1, `mcp/orchestration.ts`) and
-`GateIntentEntry`'s deliberate `sessionId` omission (§2, `sessions/service.ts`). `resolveRecord` serves
-one file per id; folded here rather than left as a second unreachable `a5d1ae04-*.md` file (card
-`6de8956e`).
+⚠️ Spans four decisions under this card: this record (§1, `mcp/orchestration.ts`), `GateIntentEntry`'s
+deliberate `sessionId` omission (§2, `sessions/service.ts`), and two more from `gate-intent.ts` itself
+(§3 module design, §4 `snapshot()`'s dead-seat check). `resolveRecord` serves one file per id; folded
+here rather than left as separate unreachable `a5d1ae04-*.md` files (card `6de8956e`; §3/§4 added by
+card `66b04631`).
 
 ## §1 — Narrative
 
@@ -32,3 +33,33 @@ NO `sessionId` FIELD, ON EITHER SIDE OF THE REDACTION BOUNDARY — this is delib
 ### Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts` (`GateIntentEntry`'s top-of-interface doc): lines 250-266, as of commit `f9caa77e30d5c1a6dd994b6203261968c0dbf94f`. Relocated by card `8f4c8a8f`. Folded into this pre-existing record by card `6de8956e`.
+
+## §3 — `gate-intent.ts` module design: measured ANNOUNCE-letter latency; storage, redeclare, reaping
+
+### Narrative
+
+The ANNOUNCE letter this class replaces had measured delivery latency of 2.0-23.3 min (one outlier at 107 min) — routinely exceeding the 7-15 min coordination floor it exists to protect (full measurement: this card's DoD/PROVENANCE).
+
+ONE LIVE ROW PER SESSION: a redeclare fully replaces the prior row, `declaredAt` included — never preserved. This is why `withdraw()` takes no identifying arg: there is never more than one row to disambiguate.
+
+STORAGE is a bare in-memory `Map`, no persistence, same posture as `GateSemaphore`'s registry — bounded lifetime (`INTENT_MAX_LEAD_MS + INTENT_EXPIRE_GRACE_MS`) means nothing durable is lost on restart; a still-relevant manager redeclares.
+
+REAPING IS LAZY: no `setInterval`/`setTimeout`. Every stale/dead row drops inside `snapshot()`, the one read path — every read is a sweep, no separate schedule to keep in sync, nothing here needs a fixed-wait test to poll for.
+
+### Do not
+
+- Do not add a timer-driven reap, or persist declarations across a restart — both deliberate omissions.
+
+### Source
+
+`gate-intent.ts` module header, lines 1-30 as of commit `edd40205`. Relocated by card `66b04631` (tranche 1).
+
+## §4 — `GateIntentRegistry.snapshot()`: the recycle-notice case behind dead-seat detection
+
+### Narrative
+
+`isSessionLive` in `snapshot()` answers this card's measured 17.7-min-late recycle notice from the letter this class replaced: a declaration is gone on the very next read once `processState` leaves `"live"`, unbounded by either clock-based drop condition — no TTL wait to learn a seat is dead.
+
+### Source
+
+`gate-intent.ts`, `GateIntentRegistry.snapshot`'s doc, lines 127-143 as of commit `edd40205`. Relocated by card `66b04631` (tranche 1).

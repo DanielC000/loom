@@ -1,32 +1,12 @@
 /**
- * Daemon-global, in-memory, ADVISORY-ONLY registry of "I intend to fire a gate at ~T" declarations (card
- * a5d1ae04 — the structured replacement for a hand-written peer-channel "ANNOUNCE" letter, whose measured
- * delivery latency — 2.0-23.3 min, one outlier at 107 min — routinely exceeds the 7-15 min coordination
- * floor it exists to protect; see that card's own DoD/PROVENANCE for the full measurement).
+ * Daemon-global, in-memory, ADVISORY-ONLY registry of "I intend to fire a gate at ~T" declarations.
  *
- * ⛔ THIS NEVER GATES, BLOCKS, OR DELAYS AN ACTUAL GATE ADMISSION (card a5d1ae04 DoD-4). That is not a
- * policy documented on the tools below — it is a structural fact: nothing in `gate-runner.ts` or
- * `gate-semaphore.ts` (the two files that actually execute/admit a gate) imports or references this class
- * at all, and `test/gate-intent-no-firing-coupling.mjs` asserts that absence by grepping those two files
- * directly, with a positive control proving the grep itself has power to catch a planted reference. A
- * declaration is pure disclosure — a caller reads it, or doesn't; nothing here can ever change what a gate
- * does.
+ * @decision a5d1ae04 — never restore the peer-channel ANNOUNCE letter this replaced; its measured
+ * delivery latency routinely blew the coordination window a declaration exists to protect.
  *
- * ONE LIVE ROW PER DECLARING SESSION — a redeclare fully replaces the prior row (including `declaredAt`,
- * which is NOT preserved across a redeclare; each `declare()` call is a fresh declaration, full stop). This
- * is why `withdraw()` takes no identifying argument beyond the session itself: there is never more than one
- * row to disambiguate.
- *
- * STORAGE: a bare in-memory `Map`, no persistence — resets on daemon restart, same posture as
- * `GateSemaphore`'s own live registry (see that class's file-level doc). A declaration is inherently
- * short-lived (bounded lifetime `INTENT_MAX_LEAD_MS + INTENT_EXPIRE_GRACE_MS` regardless of anything else,
- * see {@link GateIntentRegistry.snapshot}), so there is nothing durable to lose across a restart — a
- * still-relevant manager just redeclares.
- *
- * REAPING IS LAZY, NOT TIMER-DRIVEN: there is no `setInterval`/`setTimeout` anywhere in this class. Every
- * stale or dead row is dropped inside {@link GateIntentRegistry.snapshot}, the ONE place any caller ever
- * reads this registry — so every read is also a sweep, there is no separate schedule to keep in sync, and
- * (deliberately) nothing here is the kind of thing a fixed-wait test could ever need to poll for.
+ * ⛔ THIS NEVER GATES, BLOCKS, OR DELAYS AN ACTUAL GATE ADMISSION (card a5d1ae04 DoD-4) — a structural
+ * fact: `gate-runner.ts`/`gate-semaphore.ts` never import or reference this class, asserted by
+ * `test/gate-intent-no-firing-coupling.mjs` with a positive control. A declaration is pure disclosure.
  */
 
 import type { GateType } from "@loom/shared";
@@ -131,11 +111,11 @@ export class GateIntentRegistry {
    *     — bounds worst-case lifetime regardless of the other two conditions below), OR
    *   - `now > firesAt + INTENT_EXPIRE_GRACE_MS` (the ordinary case: the declared fire time passed, plus
    *     the grace window — see {@link INTENT_EXPIRE_GRACE_MS}'s own doc for why this isn't zero), OR
-   *   - `isSessionLive(sessionId)` returns `false` — the DEAD-SEAT detection this feature exists to add
-   *     over the letter it replaces: the instant the declaring session recycles/exits, its declaration is
-   *     gone on the very next read, unbounded by either clock above (this is what directly answers card
-   *     a5d1ae04's own measured 17.7-min-late recycle notice — a peer never has to wait out a TTL to learn
-   *     a declaring seat no longer exists).
+   *   - `isSessionLive(sessionId)` returns `false` — gone on the very next read once the declaring session
+   *     recycles/exits, unbounded by either clock above.
+   *
+   * @decision a5d1ae04 — do not replace this per-read dead-seat check with a TTL-only scheme; the letter
+   * it replaced left a measured multi-minute late-notice gap this closes.
    *
    * `isSessionLive` is supplied by the caller (`SessionService`, via `db.getSession(id)?.processState ===
    * "live"`) rather than looked up here — this class has no `Db` reference of its own, deliberately, so it
