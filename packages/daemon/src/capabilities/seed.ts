@@ -1,14 +1,10 @@
 /**
  * Loom's bundled registry-capability catalog rows — the capabilities analog of profiles/seed.ts's
- * BUNDLED_PROFILES. Ships two: GitHub (agent-tooling P4 follow-on, board card 3b0c4aef) — the FIRST real
- * credential-tied capability, proving the `requiresConnection`/`{slug, connectionId}` connection-bind path
- * end-to-end — and "image-gen" (board card b93cfd10, provider decided a4058e7a), the SECOND. Both are
- * seeded as ordinary `capability_defs` ROWS — not a third/fourth hardcoded builtin slug like
- * browser-testing/document-conversion, which bypass the credential-tie injection entirely (see
- * `buildMcpServers` in `pty/host.ts`) — so binding either exercises the SAME generic node-package/
- * python-venv/bundled/command/github-binary dispatch + spawn-time secret-env-injection an owner-added row
- * gets. Nothing in `pty/host.ts` needed to change: `getCapabilityCatalog`/`resolveConnectionSecret` already
- * read every `capability_defs` row generically.
+ * BUNDLED_PROFILES. Ships two: GitHub (kind "github-binary") and "image-gen" (kind "bundled").
+ *
+ * @decision 3b0c4aef — both seeded as ordinary `capability_defs` rows, not a hardcoded builtin slug,
+ * so binding either exercises the SAME generic dispatch + spawn-time secret-env-injection an
+ * owner-added row gets; no `pty/host.ts` change needed.
  *
  * kind "github-binary" (migrated off the archived `@modelcontextprotocol/server-github` npx package):
  * GitHub's maintained `github/github-mcp-server` is provisioned as a Loom-managed, checksum-verified Go
@@ -23,22 +19,20 @@
  * shape at boot — see its own doc for the narrow-match/idempotency contract.
  *
  * "image-gen" (kind "bundled", NOT github-binary — that kind is github-specific and seed-only): a plain
- * `npx`-resolved MCP, `mcp-imagenate` (npm, MIT, github.com/mimo-3/mcp-imagenate) — chosen over several
- * other Gemini-image MCPs surveyed because (a) it writes generated images to DISK unconditionally
- * (`fs.promises.writeFile`, returning file paths — never base64/URL-only in its response), the hard
- * requirement for this capability to be reviewable/feedable to a separate session at all, (b) its output
- * path is sandboxed against symlink/traversal escape when `NANO_BANANA_OUTPUT_DIR` is set (real
- * `fs.realpathSync` containment checks, not a string-prefix check alone), (c) it's actively maintained (MIT,
- * ~15 GitHub stars, ~1k npm downloads/mo, last published within the month) unlike several
- * higher-profile-looking alternatives whose GitHub source had gone 404 or sat unstarred/templated. It's
- * technically MULTI-provider (also supports OpenAI/BFL FLUX models) — but its model registry only exposes
- * whichever providers have a configured key (`initRegistry` in the package's own `providers/registry.js`),
- * so injecting ONLY `GEMINI_API_KEY` (never `OPENAI_API_KEY`/`GPT_IMAGE_API_KEY`/`BFL_API_KEY`) makes it a
- * pure Gemini/Imagen ("nano-banana") image generator in practice — the OWNER-DECIDED provider (a4058e7a),
- * with no code path to any other provider ever reachable. Its own output-dir confinement is an ENV VAR
- * (`NANO_BANANA_OUTPUT_DIR`), not a CLI flag like Playwright's `--output-dir` — see `outputDirEnvVar` on
- * `registry.ts`'s "bundled" provision kind (a small additive extension added alongside this row) for the
- * generic env-var-based scratch-dir injection that requires.
+ * `npx`-resolved MCP, `mcp-imagenate` (npm, MIT, github.com/mimo-3/mcp-imagenate).
+ *
+ * @decision b93cfd10 — chosen over several other Gemini-image MCPs surveyed at the time; see the
+ * record for the full comparison (unconditional disk-write, output-dir sandboxing, maintenance
+ * signal) and the rejected alternatives.
+ *
+ * @decision a4058e7a — the package is technically MULTI-provider (also OpenAI/BFL FLUX), but only
+ * `GEMINI_API_KEY` is ever injected (never `OPENAI_API_KEY`/`GPT_IMAGE_API_KEY`/`BFL_API_KEY`), so no
+ * code path to any other provider is ever reachable in practice — see the record before widening this.
+ *
+ * Its own output-dir confinement is an ENV VAR (`NANO_BANANA_OUTPUT_DIR`), not a CLI flag like
+ * Playwright's `--output-dir` — see `outputDirEnvVar` on `registry.ts`'s "bundled" provision kind
+ * (a small additive extension added alongside this row) for the generic env-var-based scratch-dir
+ * injection that requires.
  */
 import type { Db } from "../db.js";
 import type { CapabilityDefRow } from "./registry.js";
