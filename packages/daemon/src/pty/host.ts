@@ -2169,26 +2169,8 @@ interface Live {
   // recheck BEFORE trusting it or reaching for a destructive remedy (worker_recycle/worker_stop) — see
   // worker_list/worker_status/my_context's own tool descriptions and the `/orchestrate` doctrine.
   composerDirtyLen: number;
-  // Card c148f118: the OPTIMISTIC counterpart to `composerDirtyLen` above — same additive write-side
-  // bookkeeping (every add mirrors a `composerDirtyLen` add, at the SAME sites, same amounts), EXCEPT
-  // that the defensive clear-prefix branch (submit(), the `composerDirtyLen > 0 && composerLen === 0`
-  // case) zeroes THIS field the moment it issues the backspace burst — optimistically ASSUMING that burst
-  // actually empties the composer, rather than leaving the prior total to keep compounding the way
-  // `composerDirtyLen` deliberately does. `composerDirtyLen` never makes that assumption (see its own
-  // doc — always the conservative "what if no clear I've ever attempted actually landed" reading); this
-  // field always does. Read TOGETHER, not as alternatives: `composerDirtyLenBelieved === composerDirtyLen`
-  // means no clear attempt is currently unresolved (either nothing's dirty, or everything has already
-  // been decisively confirmed) — nothing to doubt. `composerDirtyLenBelieved < composerDirtyLen` means a
-  // defensive clear WAS attempted and its outcome is still unverified; the gap between the two is exactly
-  // how many characters are in doubt, bounding the truth between "the clear worked" (this field) and "the
-  // clear did nothing" (`composerDirtyLen`) instead of collapsing both possibilities onto one identical
-  // number the way the pre-c148f118 code did (see the specimen recorded in submit()'s own comment, card
-  // 2960c3bf). Reset to 0 by the SAME three decisive-confirm sites that reset `composerDirtyLen` (the
-  // `composerDirtyLenClearedByGen`-gated UserPromptSubmit/Stop hooks, and `clearComposerDirtyOnConfirm`'s
-  // `composerDirtyMarkedGens` gate) — a genuine confirmation proves the WHOLE ordered byte stream
-  // landed, so both readings collapse back to the same true zero together. Like `composerDirtyLen`, this
-  // is pure write-side bookkeeping, never a readback of real terminal content — "optimistic" describes
-  // the ASSUMPTION, not a verification.
+  // @decision c148f118 — the OPTIMISTIC counterpart to `composerDirtyLen` above: read the two TOGETHER,
+  // never alone (see `composerDirtyLen`'s own doc and c148f118's record for the full mechanics/reset gates).
   composerDirtyLenBelieved: number;
   // Card 3ce3fa39: the `submitGeneration` whose submit() most recently issued a defensive clear-prefix for
   // `composerDirtyLen` — null when no clear-prefix is currently outstanding. GATES the reset: a confirming
@@ -2350,32 +2332,9 @@ interface Live {
   // Epoch ms `flushMarkerGen` above was stamped. Diagnostic only (folded into `lastFlushAttribution`'s own
   // `resolvedAt - flushMarkerWrittenAt` once resolved) — never itself gates anything.
   flushMarkerWrittenAt: number | null;
-  // Card ac7884e3: the STICKY record (never cleared, only overwritten by a later resolution — same
-  // convention as `lastMismatchReplay`/`lastMismatchFusion`/`lastPasteTripwireGiveUp`) of how the MOST
-  // RECENT `flushMarkerGen` above resolved. This is the actual fix this card ships: before it existed,
-  // "did worker_flush work, and when?" had NO answer for the case that matters most — a confirmation
-  // landing well AFTER `flushComposer`'s own bounded wait (`awaitFlushConfirmSettle`) had already returned
-  // `confirmed:false` to its caller (the measured production case: composerDirtyLen cleared, confirmation
-  // ~60s later) — because that confirmation is invisible to the call that already returned.
-  // `null`: no flush attribution has ever been resolved on this session — either `worker_flush` was never
-  // called, or one was called and its outcome genuinely has not resolved yet (a real, honest "don't know
-  // yet," not conflated with either verdict below).
-  // `{attributable:true, reason:"confirmed-while-flush-marker-live", gen, resolvedAt}`: the confirming hook
-  // that proved `gen` started fired while `flushMarkerGen` still named that SAME generation — no other
-  // generation-bumping event (a fresh submit(), healIfStuck, interruptForRedirect, stop) intervened. Read
-  // this as "worker_flush was the last thing done for this generation, and it went on to confirm" — see
-  // `flushMarkerGen`'s own doc for exactly what this does and does not rule out (a concurrent natural
-  // retry for the same generation cannot be excluded; it CAN be told apart from a flush issued when no
-  // natural retry was racing, because in that case nothing else was outstanding to have caused it).
-  // `{attributable:false, reason:"marker-superseded-before-confirm", gen, resolvedAt}`: a flush marker WAS
-  // outstanding, but the generation it targeted (`gen`, NOT the generation now confirming) was abandoned —
-  // superseded by a newer submit()/heal/redirect/stop — before it ever confirmed. This is a definitive
-  // "not this flush" for `gen`, distinct in kind from the `null` case above: it is not "we don't know",
-  // it is "we know this specific attempt never got the chance to confirm."
-  // Deliberately NEVER touched when `flushMarkerGen` is already null at a confirming hook (the overwhelming
-  // majority of ordinary turns have nothing to do with worker_flush at all) — only the two resolution
-  // branches above ever write here, so a `null` reading is never manufactured by an unrelated turn quietly
-  // clobbering a real prior verdict.
+  // @decision ac7884e3 — the STICKY record of how the most recent `flushMarkerGen` resolved; a gen-match
+  // verdict is the best available signal, never proof of causation. See `flushMarkerGen`'s own doc /
+  // ac7884e3's record for the null case and the two resolution-branch shapes.
   lastFlushAttribution: { gen: number; attributable: boolean; reason: string; resolvedAt: number } | null;
   // Card 441499ee: the exact QueuedMessage entry/entries this IN-FLIGHT submit()'s text came from — set
   // in submit(), read ONLY by `fireEnterAndVerify`'s GIVE-UP RECOVERY branch so a give-up can put the
