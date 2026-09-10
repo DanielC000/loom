@@ -307,12 +307,26 @@ function relPath(repoRoot, p) {
  * block boundary") so both tools agree on what counts as one block. Handles `//` line comments and
  * `/* ... *\/` block comments (single- or multi-line); does not attempt to distinguish trailing code on
  * the line a block comment closes on — this repo's own style never puts code there.
+ *
+ * Card 01e09f28 — a SECOND boundary, independent of blank lines: a `*\/` that closes a `/* ... *\/`
+ * comment (single- or multi-line), immediately followed (no blank line) by a fresh `//`, `/*`, or `/**`
+ * starting the NEXT comment, also splits — two abutting doc comments are two blocks, never one merged
+ * run. Without this, anchoring the FIRST of two abutting doc comments makes the SECOND vanish from
+ * `unanchoredLongBlocks` entirely (it's contiguous with an anchored neighbour, not because it was itself
+ * anchored) — see project memory `doc-comment-boundary-split-01e09f28` for the measured before/after.
+ * Deliberately narrow: two abutting `//` lines (a normal multi-line `//` run) never split on their own,
+ * since neither line "closes a `/* ... *\/` comment" — only a transition OUT of `/* ... *\/` form
+ * triggers this.
  */
 export function extractCommentBlocks(lines) {
   const blocks = [];
   let start = null;
   let anchors = new Set();
   let inBlock = false;
+  // True iff the PREVIOUS line was the line a `/* ... */` comment closed on (single- or multi-line) —
+  // the doc-comment-boundary predicate above. Reset every iteration; only ever consulted the instant a
+  // fresh comment line starts (see `isNewCommentStart` below), never while still inside an open block.
+  let prevClosedBlockComment = false;
 
   const flush = (endLineNo) => {
     if (start !== null) {
@@ -326,18 +340,26 @@ export function extractCommentBlocks(lines) {
     const lineNo = i + 1;
     const trimmed = lines[i].trim();
     let isComment = false;
+    let isNewCommentStart = false; // this line freshly opens a comment (// or /*), not a continuation
+    let closesBlockComment = false; // this line is the line a /* ... */ comment closes on
 
     if (inBlock) {
       isComment = true;
-      if (trimmed.includes("*/")) inBlock = false;
+      if (trimmed.includes("*/")) { inBlock = false; closesBlockComment = true; }
     } else if (trimmed.startsWith("//")) {
       isComment = true;
+      isNewCommentStart = true;
     } else if (trimmed.startsWith("/*")) {
       isComment = true;
-      if (!trimmed.includes("*/")) inBlock = true;
+      isNewCommentStart = true;
+      if (trimmed.includes("*/")) closesBlockComment = true;
+      else inBlock = true;
     }
 
     if (isComment) {
+      // Doc-comment boundary: a fresh comment start immediately following a line that closed a
+      // `/* ... */` comment splits the run, even though nothing here (yet) breaks contiguity.
+      if (isNewCommentStart && prevClosedBlockComment && start !== null) flush(lineNo - 1);
       if (start === null) start = lineNo;
       // `anchorIds` stays a plain set of bare hex ids, namespace-blind — this block-level check only ever
       // asks "does this block carry ANY anchor" (guardClassBlocks / unanchoredLongBlocks), which doesn't
@@ -347,6 +369,8 @@ export function extractCommentBlocks(lines) {
     } else {
       flush(lineNo - 1);
     }
+
+    prevClosedBlockComment = isComment && closesBlockComment;
   }
   flush(lines.length);
   return blocks;

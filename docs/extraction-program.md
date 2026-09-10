@@ -318,6 +318,11 @@ node packages/daemon/assets/comment-anchor-lint.mjs .
 
 (an asset, not under `scripts/`) — filter its `unanchoredLongBlocks.items` payload to your file.
 
+**Card `01e09f28`** changed how blocks are grouped (splits at a doc-comment boundary, `*/`
+immediately followed by a fresh `/**`/`/*`/`//`) — a count that moves against an older tranche's
+own note, in *either* direction, is this change, not a regression or a broken lint; see card
+`01e09f28`'s own findings and memory `comment-anchor-lint-measured-corpus` before assuming otherwise.
+
 ## File-specific doctrine — not in this document
 
 Some clauses on individual extraction-tranche cards are deliberately narrow to the file that

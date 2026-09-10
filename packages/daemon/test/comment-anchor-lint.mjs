@@ -125,6 +125,81 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   check("single-line block comments: two separate one-line blocks", blocks.length === 2 && blocks.every((b) => b.length === 1));
 }
 
+// --- doc-comment boundary split (card 01e09f28 — anchoring the first of two abutting doc comments used to
+// make the second vanish from unanchoredLongBlocks) ------------------------------------------------------
+
+{
+  // A `*/` closing a `/** */` comment, immediately followed (no blank line) by a SECOND `/** */` comment
+  // starting — the shape memory `extraction-adjacent-anchor-merges-hides-next-block` measured: anchoring
+  // only the FIRST doc must never hide the SECOND. Two blocks, not one merged run; each carries only its
+  // OWN anchor.
+  const firstDoc = ["/**", " * @decision aaaaaaaa — a short anchored doc, the convention's target state", " */"];
+  const secondDoc = [
+    "/**",
+    ...Array.from({ length: 16 }, (_, i) => ` * regrowing narrative line ${i}, no anchor anywhere in this doc`),
+    " */",
+  ];
+  const lines = [...firstDoc, ...secondDoc, "function f() {}"];
+  const blocks = extractCommentBlocks(lines);
+  check("doc-comment boundary: an anchored /** */ immediately followed by a second /** */ splits into TWO blocks (not one merged run)",
+    blocks.length === 2);
+  check("doc-comment boundary: the first block carries ONLY its own anchor",
+    blocks[0]?.anchorIds.length === 1 && blocks[0].anchorIds.includes("aaaaaaaa"));
+  check("doc-comment boundary: the second block carries NO anchor of its own",
+    blocks[1]?.anchorIds.length === 0);
+  check("doc-comment boundary: the second block is long enough to flag on its own (>= DEFAULT_MIN_LINES)",
+    blocks[1]?.length >= DEFAULT_MIN_LINES);
+  check("doc-comment boundary: the second block starts exactly where the second /** opens",
+    blocks[1]?.startLine === firstDoc.length + 1);
+
+  // Live per-file hook path (computeFileReport) must ALSO see the second doc as an independent,
+  // unanchored, long block — not swallowed by the first doc's anchor.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-doc-boundary-split-"));
+  try {
+    fs.mkdirSync(path.join(dir, "packages", "daemon", "src"), { recursive: true });
+    const filePath = path.join(dir, "packages", "daemon", "src", "fixture.ts");
+    const content = lines.join("\n");
+    fs.writeFileSync(filePath, content);
+    const fileReport = computeFileReport(dir, filePath, content);
+    check("doc-comment boundary (live hook path): the second, unanchored doc IS reported in unanchoredLongBlocks",
+      fileReport?.unanchoredLongBlocks?.length === 1 && fileReport.unanchoredLongBlocks[0]?.startLine === firstDoc.length + 1);
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+{
+  // Positive control, reconstructed from the real specimen (memory `extraction-adjacent-anchor-merges-
+  // hides-next-block`, card 5b001dde's own tranche-19 finding): `handleGiveUpExhausted`'s doc (card
+  // ccb407eb) and `suppressMootParkNotice`'s doc (card 085d9422) in sessions/service.ts sat back-to-back.
+  // FIRST_DOC below is the real, currently-committed compressed anchor comment (verbatim, `service.ts`
+  // lines 7131-7135 as of HEAD `8d9fe59d`). SECOND_DOC_LINES is the real, PRE-extraction narrative for
+  // `suppressMootParkNotice` — verbatim, from `git show fb53a9f6:packages/daemon/src/sessions/service.ts`
+  // lines 7177-7223 (before this card's own tranche compressed it too) — reconstructing the exact
+  // mid-tranche shape: first doc already compressed + anchored, second still long + unanchored, abutting.
+  const firstDoc = [
+    "  /**",
+    "   * @decision ccb407eb — handleGiveUpExhausted's give-up terminal-branch policy: never-discard,",
+    "   * re-mint-then-park (giveUpHeldUntil forces the HELD branch, also fixing a durable-record gap),",
+    "   * AUDITABLE rootMsgId chain, and \"system\"-sender safety — fully recorded, docs/decisions/ccb407eb-*.md",
+    "   */",
+  ];
+  const secondDocLines = ["  /**","   * Card 085d9422 — a MOOT `[loom:redelivery-parked]` notice costs far more than its own ~1.1KB: the","   * owner measured FOUR duplicate/moot notices in one 40-minute window, each forcing a full manager","   * verification turn (worker_status + worker_transcript + reasoning, ~2-5K tokens) to learn what THIS","   * check can rule out for free — suppressing one is worth roughly 10x shortening it. Called at the PARK","   * site, BEFORE the notice is built, so a suppressed case costs nothing beyond this query.","   *","   * THREE checks, each a real way this exact notice goes stale before it's even sent — NOT the notice's","   * OWN re-mint recursion, which this card's own investigation found is already safe (see","   * give-up-exhausted-durable.mjs scenario (7): the sentinel `\"system\"` sender never resolves to a live","   * session, so a notice that itself gives up terminates with zero follow-on dispatch, proven both ways).","   * That was this card's OWN leading hypothesis for the duplication and it does NOT hold — measured here","   * instead:","   *  (1) DUPLICATE PARK FOR THE SAME ROOT — established by this card's own reproduction (see the card body","   *      for the exact repro): `enqueueDurableMessage`'s auto-join (`hasAmbiguousMatch`, card 4a0af485)","   *      lets a SECOND, independent dispatch of matching content join an existing chain's `rootMsgId` —","   *      but the join only shares the LABEL; each dispatch still runs its OWN independent chainDepth","   *      counter and can reach PARK entirely on its own. Two independently-parking chains sharing one","   *      rootMsgId produce two BYTE-IDENTICAL notices (neither carrying a possible-duplicate tag, since","   *      each is a fresh, self-rooted send to the sender, not a re-mint of the other) — exactly the \"two","   *      byte-identical pairs\" this card's measured evidence describes. Once any chain has already parked","   *      this root, a second parking of the SAME root tells the sender nothing new.","   *  (2) SUPERSEDED BY A NEWER DIRECTIVE — mirrors `staleDirectiveProjection`'s own \"latest wins\" rule","   *      (mcp/orchestration.ts): if `sender` has since dispatched ANOTHER `message_worker`/`redirect_worker`","   *      to this SAME `recipientId` after the one that produced this `rootMsgId`, that newer directive is","   *      now the one worker_list/worker_status tracks — `parkedDirective` for the OLD root is no longer","   *      reachable from there either, so a notice about it describes a directive the sender has already","   *      moved past.","   *  (3) ALREADY CONFIRMED-AFTER-PARK — a late confirming hook (`handleGiveUpConfirmed`) can resolve this","   *      exact rootMsgId to `confirmed-after-park` in a narrow race before this PARK branch's own notice","   *      goes out; that path already sends its own `[loom:redelivery-confirmed]` retraction, so a","   *      `[loom:redelivery-parked]` notice for a chain already known to have landed would just contradict","   *      it moments later.","   *","   * Deliberately does NOT check \"does the recipient's transcript already contain the message\" (the","   * card's third candidate): no cross-session transcript-CONTENT read exists at this layer for the","   * general sender (see `canCheckRecipient`'s own honesty split in the caller, just below), and (3) above","   * already covers \"already landed\" via the durable confirmed-after-park signal for the one case that's","   * checkable without one. Also deliberately does NOT add a settle-delay before evaluating these checks","   * (the card floated one, since a late-arriving confirmation can beat a notice sent immediately) — that","   * would delay reporting a message that is GENUINELY lost, which the card's own DoD calls the","   * load-bearing half; the (3) check plus `handleGiveUpConfirmed`'s existing retraction already cover the","   * \"landed a little late\" case without adding latency to the \"actually lost\" case.","   *","   * Never suppresses a genuinely first, unresolved, un-superseded park — a message that is actually lost","   * still gets reported, at the same latency as before this card.","   */"];
+  check("positive control setup: the real SECOND_DOC specimen is 47 lines, matching the measured fb53a9f6 range",
+    secondDocLines.length === 47);
+  check("positive control setup: the real SECOND_DOC specimen carries no @decision anchor of its own (this IS the defect shape)",
+    findFileAnchors(secondDocLines).length === 0);
+
+  const lines = [...firstDoc, ...secondDocLines, "  private suppressMootParkNotice() {}"];
+  const blocks = extractCommentBlocks(lines);
+  check("positive control (ccb407eb/085d9422 shape): splits into TWO blocks, not one merged run",
+    blocks.length === 2);
+  check("positive control: the first (compressed, real) block carries ONLY the ccb407eb anchor",
+    blocks[0]?.anchorIds.length === 1 && blocks[0].anchorIds.includes("ccb407eb"));
+  check("positive control: the second (real, pre-extraction) block carries NO anchor and is well above minLines",
+    blocks[1]?.anchorIds.length === 0 && blocks[1]?.length >= DEFAULT_MIN_LINES);
+}
+
 {
   const lines = ["// @decision 11111111 — first  // @decision 22222222 — second"];
   const anchors = findFileAnchors(lines);
