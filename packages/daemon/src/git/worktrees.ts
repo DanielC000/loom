@@ -2538,7 +2538,8 @@ function isEmitCompareInScopePath(p: string): boolean {
     || p.startsWith(EMIT_COMPARE_ASSETS_PREFIX) || p.startsWith(EMIT_COMPARE_SCRIPTS_PREFIX);
 }
 
-/** The static source-TEXT guards (Code Review, `docs/investigations/c4ccae66-.../findings.md`) — these
+/** The static source-TEXT guards (Code Review, card 2154b6ad — see
+ *  docs/decisions/2154b6ad-emit-compare-skips-the-runtime-suite-not-the-whole-gate.md) — these
  *  grep raw file content rather than compiled behavior, so {@link computeEmitCompareGate}'s emit-compare
  *  proof does not cover them; a reduced gate built from {@link buildReducedGateCommand} always runs them
  *  unconditionally, same as it always runs `pnpm build`. Repo-root-relative: the real `gateCommand` (e.g.
