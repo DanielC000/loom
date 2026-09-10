@@ -172,12 +172,9 @@ export function capabilityGrantBindingError(
 }
 
 /**
- * Blast-radius gate for card 8feb55b8: `restrictedTools` must never resolve to `false` for an
- * assistant-role profile by silent omission — a companion is driven by untrusted inbound chat, so
- * whether its raw-shell/host-write blast radius is withdrawn has to be a RECORDED decision, not an
- * accident of a field nobody set. This deliberately does NOT enforce `true` (the owner explicitly
- * declined that for their own Companion, Request 34923f42 / card ccd0d05f WON'T-DO) — it only requires
- * the caller state a value, either one, so the stored `false` this normalizes to is provably a choice.
+ * @decision 8feb55b8 — `restrictedTools` must never resolve to `false` for an assistant-role profile by
+ * silent omission (must be a RECORDED decision), and deliberately does NOT enforce `true` either. See
+ * docs/decisions/8feb55b8-*.md.
  *
  * Fires when the profile is BECOMING assistant-role for the first time — a fresh CREATE, or an UPDATE
  * whose patch transitions `role` INTO "assistant" from something else — and the caller's OWN submission
@@ -227,29 +224,12 @@ function codexRestrictedToolsUnsupportedError(harness: string | undefined, restr
 }
 
 /**
- * Card `7fa73e2c` (a sibling of card `0770d916`'s `restrictedTools` fix above, same remedy shape:
- * "no-mechanism-reject-or-warn"): `browserTesting`/`documentConversion` both resolve to a
- * `{type:"stdio"}` MCP entry (Playwright/markitdown — see `pty/host.ts`'s `playwrightMcpServer`/
- * `markitdownMcpServer`), and codex's `mcpServersToCodexArgs` (codex-host.ts) can only translate
- * `{type:"http"}` entries — codex has no stdio-MCP-server concept at all. Silently accepting
- * `harness:"codex"` + either flag `true` would leave a profile that reads the capability ON in the UI
- * while a codex session mounts nothing for it (FAIL-OPEN for what a human reads as an enabled feature).
- * Reject the combination here, where the human editing the profile sees it, rather than a codex session
- * discovering it missing only via a spawn-time log line.
+ * Sibling of card `0770d916`'s `restrictedTools` fix above, same remedy shape:
+ * "no-mechanism-reject-or-warn".
  *
- * Card `b987f086`: `capabilities` (the P4 registry-grant array) gets the SAME rejection, for the SAME
- * reason, and it is NOT a narrower case of the two booleans above — it's a WIDER one. Every capability
- * the registry can ever produce is `transport:"stdio"` STRUCTURALLY, not just today's two builtins:
- * `validateCapabilityDefInput` (capabilities/registry.ts) rejects any transport other than `"stdio"` at
- * catalog-CREATION time ("the 'http' transport is not yet supported"), and `resolveCapabilityServer`'s own
- * return type (`CapabilityMcpServer`) hardcodes `type: "stdio"` — there is no code path, today or by any
- * currently-declared shape, that could ever produce an `{type:"http"}` registry capability. So a non-empty
- * `capabilities` array is unconditionally incompatible with `harness:"codex"`, for every present and future
- * catalog entry alike — not something that needs re-checking per-slug. Before this fix, `field-consumers.ts`
- * wrongly declared this field fully "consumed" on codex (a `proofs` entry pointing at `createCodexPty`
- * THREADING `opts.capabilities` into `buildMcpServers` — the exact "threading is not mounting" trap
- * `createCodexPty`'s own doc names as the lesson from the `browserTesting`/`documentConversion` fix); that
- * entry is corrected alongside this one.
+ * @decision 7fa73e2c — `browserTesting`/`documentConversion`/`capabilities` are unconditionally
+ * incompatible with `harness:"codex"` (all resolve to stdio; codex mounts only {type:"http"}) — reject
+ * at validation time, never let it reach spawn silently. See docs/decisions/7fa73e2c-*.md.
  */
 function codexStdioCapabilityUnsupportedError(
   harness: string | undefined,
