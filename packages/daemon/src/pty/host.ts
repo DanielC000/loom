@@ -7112,32 +7112,23 @@ export class PtyHost {
   }
 
   /**
-   * Card cd0c7fee: consume this session's correlation queue for `toolName` — called ONCE per request from
-   * gateway/server.ts at MCP-request time, BEFORE the request is dispatched to its router (mirrors
-   * markMcpSeen's own "before dispatch" placement just below). Read-mostly: only the unambiguous
-   * single-candidate case actually removes an entry — see ToolAttributionTracker.consume's own doc.
-   * A tool name outside WATCHED_TOOL_NAMES always reads "unknown" (nothing was ever recorded for it) —
-   * cheap and harmless to call unconditionally.
+   * @decision cd0c7fee — a second independent `consumeToolAttribution` call for the same (session, tool)
+   * per request always reads "unknown" (the entry is already gone) and silently fails open forever while
+   * looking fully operational — never re-derive attribution a second time anywhere downstream.
    *
-   * ⚠️ Card 3cc3b726: `toolName` here is the FULL qualified `mcp__<server>__<tool>` form, matching what
-   * `deliverHook`'s PreToolUse case now records it under — NOT the bare tool name. Two different routers
-   * can register a tool with the same bare name (`memory_write`: loom-tasks' project memory vs.
-   * loom-orchestration's companion-private memory), and a companion session mounts both on the SAME
-   * sessionId; a bare-name key let one router's call destructively consume the other's pending entry.
-   * gateway/server.ts's `computeAttributions` reconstructs this qualified form itself, from the SAME
-   * LOOM_TASKS_SERVER_ID/LOOM_ORCHESTRATION_SERVER_ID constants (tool-attribution.ts) this file's own
-   * `buildMcpServers` mints the client's servers under — do not pass a bare name here. Don't take this
-   * comment's word that the two sides agree: `test/tool-attribution-join.mjs` drives a real PreToolUse
-   * hook through `deliverHook` and then consumes through the REAL `/mcp/:sessionId` HTTP route (so
-   * gateway/server.ts's own reconstruction is what actually runs), with a mismatched-server-id negative
-   * control — that test is what pins the join.
+   * Called ONCE per request from gateway/server.ts at MCP-request time, BEFORE the request is dispatched
+   * to its router (mirrors markMcpSeen's own "before dispatch" placement just below). Read-mostly: only
+   * the unambiguous single-candidate case actually removes an entry — see ToolAttributionTracker.consume's
+   * own doc. A tool name outside WATCHED_TOOL_NAMES always reads "unknown" (nothing was ever recorded for
+   * it) — cheap and harmless to call unconditionally.
    *
-   * ⚠️ Card 8d158088: this result is now ALSO threaded into `memory_write`/`worker_report`'s own
-   * enforcement (mcp/server.ts, mcp/orchestration.ts) — no longer purely observational. `consume()` is
-   * destructive/single-shot, so gateway/server.ts calls this AT MOST ONCE per request and threads the
-   * SAME result to both the `[mcp]` log line and the enforcing handler; a second independent call here
-   * would always read "unknown" and silently fail open forever while looking fully operational (see this
-   * method's own call site in gateway/server.ts for the thread-don't-requery discipline this relies on).
+   * @decision 3cc3b726 — `toolName` here is the FULL qualified `mcp__<server>__<tool>` form, matching what
+   * `deliverHook`'s PreToolUse case records it under, never the bare tool name — a bare-name key would let
+   * two routers mounted on the same session destructively consume each other's pending correlation entry.
+   *
+   * @decision 8d158088 — this result is now ALSO threaded into `memory_write`/`worker_report`'s own
+   * enforcement, no longer purely observational; a second independent call here would always read
+   * "unknown" and silently fail open forever while looking fully operational.
    */
   consumeToolAttribution(sessionId: string, toolName: string): ToolAttributionResult {
     const result = this.toolAttribution.consume(sessionId, toolName);
@@ -7297,41 +7288,30 @@ export class PtyHost {
    * lived only in a doc comment and was never enforced — this method makes misalignment structurally
    * impossible instead of a documented caution).
    *
-   * The daemon_restart intent snapshot uses THIS (card 2ca18433): the durable boot scan
-   * (recoverUndeliveredMessagesOnBoot) owns re-enqueueing durable messages on boot, so snapshotting them
-   * into intent.pending too would deliver them TWICE on a normal restart. Non-durable held items (worker
-   * reports, idle/resume nudges) carry no callback and stay in `texts`, replayed exactly as before.
+   * @decision 2ca18433 — the daemon_restart intent snapshot uses THIS, never getPending: durable-tracked
+   * messages are excluded because the boot scan is their sole re-enqueue owner, so snapshotting them here
+   * too would double-deliver them on a normal restart.
    *
-   * `texts` is a bare `string[]` — DELIBERATELY, not `{text, giveUpHeldUntil}[]` (card 9e27f4d2 code
-   * review, first attempt at that card's fix did exactly that and was rejected): `RestartIntent.pending`
-   * is un-versioned JSON on disk (`readRestartIntent` is a bare `JSON.parse(...) as RestartIntent`, no
-   * schema check) that an OLDER daemon can read — a second stable daemon sharing `~/.loom` from a
-   * separate checkout (this project's own documented pattern), or a rollback landing between this
-   * daemon's exit-75 and the supervisor's relaunch. An older daemon's `replayPending` calls
-   * `enqueueStdin(id, m, ...)` expecting `m` to be a plain string; handed `{text, giveUpHeldUntil}`
-   * instead, `kind:"agent"` short-circuits BOTH shape guards (`sanitizeLoneSurrogates`/
-   * `isUntaggedSystemNudge`) before either inspects the value, and the object is silently string-coerced
-   * to `"[object Object]"` by the eventual `.map(m=>m.text).join()` — the actual message TEXT is gone,
-   * no throw, no log. That is the exact LOSS class card 9e27f4d2's own constraint forbids ("fail toward
-   * a duplicate, never a loss"), reintroduced by a fix for a duplicate. Keeping the persisted `pending`
-   * field a bare `string[]` and carrying holds on `RestartIntent.pendingHolds`, a wholly separate
-   * additive field, means an older daemon reading a newer intent sees only strings it already knows how
-   * to handle — an unheld duplicate (bad, but the ALREADY-ACCEPTED pre-9e27f4d2 behavior), never a
-   * garbled loss. This method's own in-process return shape carries no such on-disk constraint — `holds`
-   * sits alongside `texts` right here even though the caller must still write them to SEPARATE
-   * `RestartIntent` fields when persisting (see `requestDaemonRestart`).
+   * @decision 9e27f4d2 — `texts` stays a bare `string[]`, never `{text, giveUpHeldUntil}[]`: an older
+   * daemon reading a newer, un-versioned RestartIntent expects a plain string, and a richer shape here
+   * silently coerces to `"[object Object]"` — the message text is gone, with no throw and no log.
+   *
+   * This method's own in-process return shape carries no such on-disk constraint — `holds` sits alongside
+   * `texts` right here even though the caller must still write them to SEPARATE `RestartIntent` fields
+   * when persisting (see `requestDaemonRestart`).
    *
    * `holds` is `{index: giveUpHeldUntil}` for every entry in `texts` that is currently `isGiveUpHeld`,
    * keyed by that entry's position in `texts`. An ordinary entry has no key at all (byte-identical-by-
    * omission for the common case). Returns `{ texts: [], holds: {}, mintedAt: {} }` for a dead/unknown
    * session or one with nothing queued/held.
    *
-   * `mintedAt` (card 1c47454b) is `{index: mintedAtWallClock}`, the SAME additive-sibling-field shape as
-   * `holds` and for the identical on-disk-compat reason (see `RestartIntent.pendingHolds`'s doc — an
-   * older daemon reading a newer intent must see only strings in `pending`, never a richer shape folded
-   * into `texts` itself). This is what lets a still-pending paste-recovery notice's age evidence survive
-   * a `daemon_restart`: without it, the notice's `mintedAtWallClock` would die with this process exactly
-   * like `mintedAtGen` already (correctly) does not attempt to survive it.
+   * @decision 1c47454b — `mintedAt` is the SAME additive-sibling-field shape as `holds`, for the
+   * identical on-disk-compat reason (an older daemon reading a newer intent must see only strings in
+   * `pending`, never a richer shape folded into `texts` itself).
+   *
+   * This is what lets a still-pending paste-recovery notice's age evidence survive a `daemon_restart`:
+   * without it, the notice's `mintedAtWallClock` would die with this process exactly like `mintedAtGen`
+   * already (correctly) does not attempt to survive it.
    */
   getPersistablePendingSnapshot(sessionId: string): { texts: string[]; holds: Record<number, number>; mintedAt: Record<number, number> } {
     const texts: string[] = [];
@@ -7394,13 +7374,13 @@ export class PtyHost {
    * that never pulls still gets every message delivered the normal way; a pulled message is gone from
    * the same `live.pending`, so it can't also drain.
    *
-   * DELIBERATELY splices EVERY entry, including one still `isGiveUpHeld` (card 9e27f4d2 assessed this
-   * against `drainPending`'s hold-respecting skip and left it as-is): the hold exists to keep a
-   * BACKGROUND drain/reconcile tick from resubmitting a possibly-already-delivered entry before a late
-   * confirming hook can prove it. `inbox_pull` is not a background tick — it is the recipient itself
-   * explicitly asking for its own inbox right now, which is exactly the kind of affirmative act the hold
-   * is meant to yield to, not protect against. Treating a held entry as delivered here is therefore a
-   * reasoned choice, not an accidental bypass.
+   * @decision 9e27f4d2 — DELIBERATELY splices EVERY entry, including one still `isGiveUpHeld` (assessed
+   * against `drainPending`'s hold-respecting skip and left as-is): the hold exists to keep a BACKGROUND
+   * drain/reconcile tick from resubmitting a possibly-already-delivered entry before a late confirming
+   * hook can prove it. `inbox_pull` is not a background tick — it is the recipient itself explicitly
+   * asking for its own inbox right now, which is exactly the kind of affirmative act the hold is meant
+   * to yield to, not protect against. Treating a held entry as delivered here is therefore a reasoned
+   * choice, not an accidental bypass.
    */
   consumePending(sessionId: string): string[] {
     const live = this.findAnyLive(sessionId);
@@ -7433,14 +7413,15 @@ export class PtyHost {
   }
 
   /**
-   * Drop still-queued entries TAGGED to any of the given `questionIds` (see QueuedMessage.questionId) —
-   * the decision-inbox's OWN targeted purge (card bbc46336 follow-up), called from `question_pull` right
-   * after it atomically consumes those questions: any OTHER queued answer-nudge for a question that same
-   * batch just consumed is now obsolete — left queued, it would drain as its own turn and trigger a
-   * wasted empty `question_pull`. UNLIKE flushPending (which empties the WHOLE queue for a supersede), this
-   * is a SELECTIVE filter: every entry whose `questionId` is not in the set — including unrelated nudges
-   * and manager direction — keeps its slot and relative order untouched, exactly like deleteQueued leaves
-   * every entry but the one it targets alone.
+   * @decision bbc46336 — drop still-queued entries TAGGED to any of the given `questionIds` (see
+   * QueuedMessage.questionId): any OTHER queued answer-nudge for a question a batch `question_pull`
+   * just consumed is now obsolete and would otherwise drain as a wasted empty `question_pull`.
+   *
+   * Called from `question_pull` right after it atomically consumes those questions. UNLIKE flushPending
+   * (which empties the WHOLE queue for a supersede), this is a SELECTIVE filter: every entry whose
+   * `questionId` is not in the set — including unrelated nudges and manager direction — keeps its slot
+   * and relative order untouched, exactly like deleteQueued leaves every entry but the one it targets
+   * alone.
    *
    * SYNCHRONOUS BY CONSTRUCTION — only splices `live.pending` (no `await`, no submit(), no pty write), so
    * it never enters deliverHook's M2 lower-busy→drain window and can never observe or touch a message
