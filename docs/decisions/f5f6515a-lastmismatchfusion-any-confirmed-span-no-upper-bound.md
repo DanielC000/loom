@@ -12,11 +12,14 @@ Card `f5f6515a` DoD-4: `Live.lastMismatchFusion` is the SENDER-directed arm for 
 
 `spanGens` is oldest-first (mirrors `detectComposerAccumulation`'s own return shape). CO-TRIGGERED with the session-facing notice's own fusion branch — the SAME `confirmedFusion` expression, in the SAME synchronous block, always together, never independently (an earlier kickoff draft said "independently"; corrected here). What differs between the two is the READER, not the trigger: this field serves the session's own WATCHING manager (`worker_list`/`worker_status`); the notice serves the session learning about itself. Same PULL-surface posture as `lastMismatchReplay` otherwise — never cleared once set, overwritten (not accumulated) by a later occurrence.
 
+**Code Reviewer HIGH follow-up:** the session-facing fusion notice names EVERY earlier generation in the span (`earlierFusedGens`), not just the first — now that the span cap is removed, a confirmed fusion can legitimately cover 3+ generations, and naming only the first would silently under-report which turns may have been acted on twice.
+
 ## Do not
 
 - Do not cap `spanGens.length` — a CONFIRMED result (exact sum AND hash) is equally rigorous at any span up to `detectComposerAccumulation`'s own window cap (8), regardless of how many generations it spans.
 - Do not word this field's meaning as a loss — the fused span's last entry is always the current turn's own write, so the content Loom intended for this turn always arrived; the risk is duplicate action on an earlier entry, never a missing one.
 - Do not trigger this field's warning independently of the session-facing notice's own `confirmedFusion` branch — they are co-triggered from the same synchronous block.
+- Do not name only `spanGens[0]` in the session-facing fusion notice — a span can legitimately cover 3+ generations, and naming only the first under-reports which turns may have been duplicated.
 
 ## Source
 

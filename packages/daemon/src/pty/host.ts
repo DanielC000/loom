@@ -6152,50 +6152,25 @@ export class PtyHost {
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-notice-self-exempt] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} — this generation's own intended text IS one of Loom's own prompt-mismatch-family notices ([loom:prompt-mismatch] or [loom:prompt-mismatch-unresolved]); skipping mismatch detection/re-notification/timer-arming for it entirely so a notice can never mint a follow-up notice about its own confirmation (card 87d2dc95, the self-sustaining "notice delivered -> submit -> mismatches -> another notice" feedback loop observed on session 67568eba).`);
               } else if (!isBenignWhitespaceRerender && !isStalePlaceholderPrefix && !isChunkSeamFormFeed) {
-                // Card 68459420 — DoD-3: a Platform sweep (2026-08-05) found a FOURTH population outside
-                // the three characterized above: reported LONGER than intended AND matching NO recent
-                // write of this session (first specimen: gen=12, wrote 2985 reported 3829 — the notice's
-                // OWN replayNote text below already flags this shape as unusual, since every OTHER
-                // measured occurrence replayed the immediately preceding generation). Characterize it
-                // ONLY — tag it so it can be swept and counted, exactly like the sweep note above this
-                // block already does for the replay shape. Do NOT fold it into that shape (it explicitly
-                // failed the replay match) and do NOT invent a suppression for it: this population is not
-                // yet understood, and cf2fef73's own worker set the precedent for refusing to guess here
-                // (card 2b57b5a9, the form-feed specimen).
-                // Card f5f6515a (Code Reviewer MEDIUM): `!accumulation?.confirmed` added — this tag's own
-                // condition (`reported.length > intended.length`, no recentWrittenTurns match via
-                // `replayedEntry`) is satisfied by EVERY confirmed fusion too (a fusion is, by construction,
-                // longer than the current turn's own intended text and never matches a SINGLE ring entry).
-                // Left unguarded, every confirmed fusion inflated this "UNCHARACTERIZED" count while the
-                // `[composer-accumulation]` line logged one statement earlier already disproves the claim —
-                // a Platform sweep grepping/counting this tag to gauge whether the population needs a card
-                // would be counting events this file already has a full, hash-confirmed answer for.
-                // `accumulation` (not `confirmedFusion`) — this check runs before `confirmedFusion` is
-                // computed further down, and doesn't need its `replayedEntry === undefined` re-check here
-                // (already the leading condition on this same line).
-                // Card d005f55b: `!divergedPriorAccumulation` added for the SAME reason `!accumulation?.confirmed`
-                // was — a confirmed diverged-prior fusion is, by the same construction, reported LONGER than
-                // intended and never matches a single ring entry, so left unguarded it would ALSO inflate this
-                // UNCHARACTERIZED count for a shape `[composer-accumulation-diverged-prior]` one statement
-                // earlier already has a full, hash-confirmed answer for.
+                // @decision 68459420 — DoD-3: a FOURTH, uncharacterized mismatch population (reported
+                // LONGER than intended, matching no recent write). Characterize/tag only — never fold
+                // into the replay shape or invent a suppression for it; not yet understood.
+                // @decision d005f55b — the `!accumulation?.confirmed && !divergedPriorAccumulation`
+                // guard: a confirmed fusion or diverged-prior fusion also satisfies this tag's own
+                // condition and would otherwise inflate this UNCHARACTERIZED count for a shape the
+                // `[composer-accumulation]`/`[composer-accumulation-diverged-prior]` sweep lines
+                // already fully answer. `accumulation` (not `confirmedFusion`) since this check runs
+                // before `confirmedFusion` is computed further down.
                 if (replayedEntry === undefined && reported.length > intended.length && !accumulation?.confirmed && !divergedPriorAccumulation) {
                   // eslint-disable-next-line no-console
                   console.log(`[prompt-mismatch-unmatched-longer] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} lenDelta=${reported.length - intended.length} — UNCHARACTERIZED population (card 68459420): reported LONGER than intended, matches none of this session's recent writes, and is neither of the two known benign prefix/whitespace shapes above. Distinct from the measured replay-of-immediately-preceding-generation regularity — do not assume a mechanism or fold this into that shape.`);
                 }
-                // Card 68459420 — DoD-1: the SENDER-directed arm. When `replayedEntry` is found, the
-                // notice's own replayNote below already asserts this as a replay of a prior generation —
-                // an ESTABLISHED loss, not a possible one — but the RECIPIENT can never verify that: it
-                // only ever sees what arrived, never what was intended for it. Record it (read-only
-                // PULL surface, see getLastMismatchReplay) so the party who CAN act — this session's
-                // manager/parent, via worker_list/worker_status — learns of it the next time it already
-                // looks, per DoD-4 (a precondition at the point of use beats a longer advisory).
-                // Card d0952a73: the ACTUAL `live.lastMismatchReplay` assignment moved past
+                // @decision 68459420 — DoD-1: the SENDER-directed arm — record a replay as a
+                // read-only PULL surface (getLastMismatchReplay) for the party who CAN act, since
+                // the RECIPIENT can never verify a replay itself.
+                // @decision d0952a73 — `live.lastMismatchReplay`'s write moved PAST
                 // `confirmedWrapperDeficit`/`confirmedAnsiStripDeficit`/`confirmedWrapperAwareFusion`
-                // below (it used to fire right here, unconditionally on `replayedEntry !== undefined`,
-                // BEFORE any of those three locals existed) — this pull surface needs their verdict to
-                // populate its own `explainedBenign` discriminant, and none of the three exists yet at
-                // this point in the block. Nothing between here and there reads `live.lastMismatchReplay`,
-                // so moving the write is safe; see the assignment's own new site for the field it sets.
+                // below; `explainedBenign` needs their verdict, unavailable this early.
                 // Card f5f6515a DoD-4: the FUSED counterpart to the single-entry replay above — reuses the
                 // SAME `accumulation` result `detectComposerAccumulation` already computed (no second
                 // matcher), captured ONCE here and reused below for BOTH the pull-surface field and the
@@ -6234,32 +6209,15 @@ export class PtyHost {
                 // Card d005f55b — manager-supplied LIVE evidence: same precedence posture as
                 // `confirmedDivergedPrior` above (a stronger exact match, were one to also apply, wins) —
                 // reuses `wrapperDeficit`, already computed above alongside its own diagnostic log.
-                // Card 854d1632 v5 (measured, not a guess): deliberately does NOT require
-                // `replayedEntry === undefined`, unlike `confirmedFusion`/`confirmedDivergedPrior` above.
-                // A benign wrapper deficit IS, essentially by construction, a recognized replay — the stale,
-                // out-of-order confirmation of an EARLIER bare write naturally matches that earlier write's
-                // own recorded text byte-for-byte, so `replayedEntry` is non-null in exactly the case this
-                // verdict exists to explain. Gating on it here reproduced the card's live incident: the
-                // classifier fired (see the diagnostic log above) but the session-facing notice below still
-                // took the `lossClause`'s "ESTABLISHED loss" branch, because `replayedEntry !== undefined`
-                // nulled this verdict first. Safe to reorder past `confirmedFusion`/`confirmedDivergedPrior`
-                // without touching their own `replayedEntry === undefined` guards: both are ALREADY always
-                // null whenever `replayedEntry !== undefined` (it's baked into their own conditions), so
-                // `!confirmedFusion && !confirmedDivergedPrior` alone still correctly defers to either when
-                // one applies — nothing here changes their own precedence. The real-loss case (a verbatim
-                // replay with NO wrapper on this generation's own intended text) stays unaffected:
-                // `detectPossibleDuplicateWrapperDeficit` returns null immediately when `intended` carries no
-                // possible-duplicate tag to strip, regardless of `replayedEntry` — see its own doc.
+                // @decision 854d1632 — deliberately does NOT require `replayedEntry === undefined`:
+                // a benign wrapper deficit IS, by construction, almost always a recognized replay, so
+                // gating on that condition nulled this verdict in exactly the case it exists to
+                // explain (the card's own live incident).
                 const confirmedWrapperDeficit = (!confirmedFusion && !confirmedDivergedPrior && wrapperDeficit) ? wrapperDeficit : null;
-                // Card a640c110 — same precedence posture as `confirmedWrapperDeficit` just above (a
-                // stronger exact match, were one to also apply, wins) — reuses `ansiStripDeficit`, already
-                // computed above alongside its own diagnostic log. Also deliberately does NOT require
-                // `replayedEntry === undefined` (mirrors `confirmedWrapperDeficit`'s own reasoning): an
-                // exact ANSI-stripped match is strictly MORE informative than the ambiguous replay framing
-                // the fallback below would otherwise give it, so it should win precedence whenever it fires,
-                // regardless of whether `reported` also happens to coincide with some earlier recorded
-                // write. Guarded against `confirmedWrapperDeficit` too so the two exact-strip shapes stay
-                // mutually exclusive in the vanishingly-unlikely case both matched.
+                // @decision a640c110 — an exact ANSI-stripped match wins precedence whenever it
+                // fires (does not require `replayedEntry === undefined`), same posture as
+                // `confirmedWrapperDeficit`; guarded against it too so both exact-strip shapes
+                // stay mutually exclusive.
                 const confirmedAnsiStripDeficit = (!confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && ansiStripDeficit) ? ansiStripDeficit : null;
                 // Card c23e2869 — same precedence posture as `confirmedAnsiStripDeficit` just above (a
                 // stronger exact match, were one to also apply, wins) — reuses `wrapperAwareFusion`,
@@ -6276,15 +6234,10 @@ export class PtyHost {
                   live.mismatchResolvedGens.add(confirmedWrapperAwareFusion.recognizedGen);
                   live.mismatchResolvedGens.add(live.submitGeneration);
                 }
-                // Card d0952a73: the actual `live.lastMismatchReplay` write, moved here (see the DoD-1
-                // comment above, where it used to fire) so `explainedBenign` can read the SAME three
-                // `confirmed*` verdicts the session-facing notice below already branches on
-                // (`confirmedWrapperDeficit`/`confirmedAnsiStripDeficit`/`confirmedWrapperAwareFusion`) —
-                // no new detection, just threading an already-computed classification onto a field that
-                // used to discard it. `confirmedFusion`/`confirmedDivergedPrior` are deliberately excluded
-                // from this discriminant: both REQUIRE `replayedEntry === undefined` (see their own
-                // conditions above), so on this `replayedEntry !== undefined` branch they are always null
-                // and could never be the explanation for THIS replay. `null` — no independent classifier
+                // @decision d0952a73 — the actual `live.lastMismatchReplay` write: threads the
+                // already-computed `confirmed*` classification into `explainedBenign` instead of
+                // discarding it; `confirmedFusion`/`confirmedDivergedPrior` excluded since both
+                // require `replayedEntry === undefined`, always false on this branch. `null` — no independent classifier
                 // fired — leaves this exactly as loud as before the field existed: an unexplained replay
                 // still reads as an unresolved possible/established loss on every consumer of this field.
                 if (replayedEntry !== undefined) {
@@ -6295,36 +6248,15 @@ export class PtyHost {
                     : null;
                   live.lastMismatchReplay = { gen: live.submitGeneration, replayedGen: replayedEntry.gen, reportedLen: reported.length, intendedLen: intended.length, detectedAt: Date.now(), explainedBenign };
                 }
-                // Card 68459420 — DoD-2: split the two claims and address each to the party that can act
-                // on it, rather than asking the RECIPIENT to verify a loss only the SENDER can see. The
-                // duplicate-check advice in `replayNote` was correct and used correctly (per the card's
-                // own live specimen) — kept unchanged.
+                // @decision 68459420 — DoD-2: split the two claims and address each to the party
+                // that can act on it, rather than asking the RECIPIENT to verify a loss only the
+                // SENDER can see; `replayNote`'s own duplicate-check advice kept unchanged.
                 //
-                // Card b7158b99 — CORRECTION: the `replayedEntry !== undefined` branch below used to state
-                // the loss as ESTABLISHED here, at THIS generation's own detection time. That is FALSE in
-                // general and was measured false on a real specimen (a manager's own session, gen=8/9/10):
-                // `reported` at gen=9 was a verbatim replay of gen=8 (exactly what this branch detects), but
-                // gen=9's own 5313-char intended text was never actually gone — it was still sitting in the
-                // composer, uncleared, and gen=10's own submission fused it back in whole
-                // (`detectComposerAccumulation` CONFIRMED spanGens=[8,9,10], sum 1083+5313+579=6975 matching
-                // the engine's own reported length and hash exactly). The `confirmedFusion` branch below
-                // fires ITS OWN "ESTABLISHED — nothing was lost" notice for gen=10 when that happens — so by
-                // the time this generation's OWN notice fires, whether ITS content will be recovered by a
-                // later fusion is not a knowable fact yet, it is a FUTURE EVENT that has not happened. This
-                // is not merely unmeasured — `detectComposerAccumulation`'s own doc (this file, ~line 152)
-                // states the coverage limit structurally: recovery is detectable ONLY at the NEXT write on
-                // this session, and is "structurally invisible" if no next write ever comes. So the honest
-                // framing at THIS point in time is "cannot yet be established either way" — never "possible"
-                // (that undersells a real, measured recurring shape) and never "ESTABLISHED loss" (that
-                // overclaims a fact the code cannot know yet). The prescribed action changes to match: do
-                // NOT tell the reader to get a re-send now — a re-send composed on top of a later fusion
-                // recovery would hand the recipient the same content twice. Tell them to wait one generation
-                // and re-check (a `[loom:prompt-mismatch]` fusion notice, or `lastMismatchFusion` naming this
-                // generation in its own `spanGens`, means it was recovered) before asking anyone to re-send.
-                // The unmatched, NON-offset-reconcilable branch below is UNCHANGED — it already used the
-                // cautious "possible LOSS" framing pre-existing this card, which this reasoning does not
-                // contradict (an unmatched mismatch has no known prior entry to ever be fused back from, so
-                // there is no pending-recovery half to name for it the way there is for a recognized replay).
+                // @decision b7158b99 — a recognized replay is NOT an established loss: the composer
+                // may still hold the content, and a LATER generation's own submission may fuse it
+                // back in whole. Wait one generation and re-check before treating as a confirmed
+                // loss; the genuinely-unmatched branch below is unaffected (no prior entry to fuse
+                // back from).
                 // Card 00b5066e adds the two OFFSET-reconcilable branches below it — see `isOffsetInsertion`/
                 // `isOffsetOmission`'s own doc above for why they only fire when `replayedEntry` did NOT
                 // already match (their `intended.startsWith(reported)`/`reported.endsWith(intended)` checks
@@ -6359,61 +6291,23 @@ export class PtyHost {
                   : (isOffsetOmission && !unmatchedRecognized)
                     ? `This is NOT a loss in the usual sense — the engine's report is an exact, contiguous PREFIX of this turn's own full intended text: every byte up to that point matches exactly, and only the final ${intended.length - reported.length} char(s) are missing from the echo (most likely a trailing character, such as a newline, that the engine did not echo back). This is far too small an omission to be the kind of large-tail loss this notice otherwise exists to catch.`
                     : `This means the text Loom intended for this turn may not have reached you at all — a possible LOSS, though (unlike a confirmed replay) this content could not be matched to any of this session's own recent writes, so it is not established the way a recognized replay is.`;
-                // Card f5f6515a DoD-4 (manager review 5eef504d): a confirmed fusion gets its OWN complete
-                // notice text rather than a patched `lossClause`/`replayNote` — those two are built around a
-                // loss/replay dichotomy with no "possible LOSS" branch that's safe to reuse for a case where
-                // NOTHING was lost. REQUIRED (manager, card f5f6515a): the phrase "possible LOSS" must never
-                // appear here — that phrase is what sent a real reader (the manager's own gen=9) chasing a
-                // loss that never happened. Reuses `confirmedFusion` — the exact SAME `accumulation` result
-                // captured above, no new matcher. The genuinely-unmatched and single-entry-replay branches
-                // below are BYTE-IDENTICAL to before this change; only the new branch is added.
-                // Card f5f6515a (Code Reviewer HIGH follow-up): named EVERY earlier generation in the span,
-                // not just `spanGens[0]` — now that the span cap is removed (see `confirmedFusion`'s own
-                // comment), a confirmed fusion can legitimately cover 3+ generations, and naming only the
-                // first would silently under-report which turns may have been acted on twice.
+                // @decision f5f6515a — a confirmed fusion gets its OWN complete notice text (never
+                // patched onto `lossClause`/`replayNote`'s loss/replay dichotomy; "possible LOSS"
+                // must never appear here), naming EVERY earlier generation in the span, not just `spanGens[0]`.
                 const earlierFusedGens = confirmedFusion ? confirmedFusion.spanGens.slice(0, -1) : [];
-                // Card 59757189 DoD-1/3 — CAPTURE AT DETECTION, for the UNMATCHABLE case only: none of the
-                // confirmed/recognized shapes above claimed this mismatch (not a single-entry replay, not a
-                // confirmed fusion, not a diverged-prior fusion, not a wrapper-deficit or ANSI-strip benign
-                // shape) — this is exactly the generic fallback branch further below (the final arm of the
-                // `mismatchText` ternary). `3ff61275` (predecessor, DoD-7) deliberately left this population
-                // unaddressed, shipping only the WHICH-payload identity clause. `recentWrittenTurns` (this
-                // file, `COMPOSER_ACCUM_WINDOW`=8 above) is NOT a substitute for capturing HERE: it is a
-                // bounded, oldest-first ring that a later reader (via `getLastMismatchUnmatched`) may find
-                // has already rotated past this generation — `intended`, still in scope in this exact
-                // synchronous block, is the only place this content still exists once detection has passed
-                // (the reporter's own correction on the predecessor card: "the content was in hand at
-                // detection time and discarded milliseconds later"). See `Live.lastMismatchUnmatched`'s own
-                // doc for the storage/decidability contract (stored in full, no head-bounding; `null`/
-                // `undefined` are the only "not captured" states).
+                // @decision 59757189 — CAPTURE AT DETECTION, for the generic fallback (UNMATCHABLE)
+                // case: `recentWrittenTurns` will have rotated past this generation by the time any
+                // reader asks, so `intended`, still in scope here, is the only place this content
+                // still exists once detection has passed.
                 const isUnmatchableMismatch = replayedEntry === undefined && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit && !confirmedWrapperAwareFusion;
                 if (isUnmatchableMismatch) {
                   live.lastMismatchUnmatched = { gen: live.submitGeneration, intendedLen: intended.length, intendedText: intended, detectedAt: Date.now() };
                 }
-                // Card 3ff61275 DoD-7 (MINIMUM VIABLE FIX — scoped floor beneath DoD-1's still-pending
-                // content-retention question, request 0eb43216): every branch below narrates THIS turn's
-                // own write (gen=${live.submitGeneration}) but, until now, identified it by that bare gen
-                // number alone — no wall-clock anchor, no message identity. THE THIRD FIELD INSTANCE
-                // (escalation f1a8dce1) is exactly this gap: a gen=1 mismatch notice, delivered at gen=2,
-                // was read by its recipient ~16 minutes later with an unrelated gen=3 approval already in
-                // hand — nothing in the notice text let it tell "this happened 19 minutes ago" apart from
-                // "this is about what I'm holding right now", so it misattributed the alarm to the wrong
-                // payload and escalated a false total-data-loss report. All FIVE branches below (fusion,
-                // divergedPrior, wrapperDeficit, ansiStripDeficit, and the generic fallback) share this
-                // EXACT lead-in sentence and are equally exposed to the same failure mode regardless of
-                // their own conclusion — an "ESTABLISHED, nothing lost" notice is just as mis-attributable
-                // as a "possible LOSS" one if the recipient can't tell which payload it's about, so the
-                // identity clause is added once here, to the shared lead-in, rather than to only the
-                // fallback branch that happened to be the one hit so far.
-                // `writeWallClockAt`: the SAME field the `[submit] CONFIRMED` log line a few dozen lines
-                // above already reads for this identical generation (`live.currentGenFirstWrittenAt`) — the
-                // real Enter-write timestamp for THIS generation, not a detection-time `Date.now()` that
-                // would silently drift from when the content actually landed.
-                // `writeMsgId`: the SAME `live.giveUpOrigin?.[0]?.logicalId` pattern that same log line
-                // already uses for this identical generation — the originating message's stable id, where
-                // one is recorded.
-                // DoD-2 (decidability): both are rendered as an explicit "unrecorded"/"none recorded" word
-                // when absent — never an empty/blank field a reader could misread as "there was no write".
+                // @decision 3ff61275 — every mismatch-notice branch shares ONE lead-in identifying
+                // THIS turn by wall-clock time + message id, not just a bare gen number — a reader
+                // holding a later, unrelated generation cannot otherwise tell how stale the alarm is.
+                // Both fields render as an explicit "unrecorded"/"none recorded" word when absent,
+                // never a blank a reader could misread as "there was no write".
                 const writeWallClockAt = live.currentGenFirstWrittenAt !== null ? new Date(live.currentGenFirstWrittenAt).toISOString() : "an unrecorded time";
                 const writeMsgId = live.giveUpOrigin?.[0]?.logicalId ?? "none recorded";
                 const writeIdentity = `written at ${writeWallClockAt}, msgId=${writeMsgId}`;
@@ -6443,28 +6337,17 @@ export class PtyHost {
                     ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}, ${positionInfo}). ESTABLISHED, DISTINCT FROM A CLEAN FUSION — nothing of THIS turn's own content was lost: the engine's report is a CONFIRMED accumulation over generation ${confirmedDivergedPrior.priorGen}'s own REPORTED echo, NOT what Loom wrote for that generation — generation ${confirmedDivergedPrior.priorGen}'s own submission had ALREADY diverged from what Loom intended before this turn ever ran (see [composer-accumulation-diverged-prior] above; card d005f55b). If generation ${confirmedDivergedPrior.priorGen}'s own turn already ran, you may be about to act on UNVERIFIED content a second time — that generation's own reported content was never confirmed to be what Loom actually sent it, so treat it with more caution than an ordinary duplicate. ` +
                       `What YOU can check yourself: your own artifacts for whether you've now acted on any of generation ${confirmedDivergedPrior.priorGen}'s own content twice. There is no loss half to verify for THIS turn specifically — this turn's own intended text is in what arrived.`
-                  // Card 854d1632 (manager measurement, 2026-08-06, SUPERSEDES an earlier "the tag itself
-                  // did not reach you" / "TREAT THIS TURN'S CONTENT AS A POSSIBLE DUPLICATE ANYWAY" draft
-                  // of this branch — that draft was WRONG about the mechanism and has been corrected):
-                  // verified via `[submit-write]`/`[prompt-echo]` pairs that a wrapped write DOES reach the
-                  // engine and IS echoed back byte-identically in the ordinary case. This shape is best
-                  // explained as a STALE, out-of-order confirmation — the hook belongs to an EARLIER, bare
-                  // write, arriving after `live.lastPrompt` already advanced to a LATER, wrapped re-mint of
-                  // the same content — an ATTRIBUTION/ORDERING artifact, NOT corruption or loss. Must NOT
-                  // claim anything is missing or unreached; must NOT reuse `lossClause`'s "possible LOSS"
-                  // framing (card d005f55b's own explicit instruction, same reasoning as the two branches
-                  // above). Does not chase the wrapper's actual delivery path — that question is answered
-                  // and tracked separately, card 854d1632.
+                  // @decision d005f55b — §4: verified via `[submit-write]`/`[prompt-echo]` pairs that
+                  // a wrapped write DOES reach the engine — a STALE, out-of-order confirmation of an
+                  // EARLIER bare write, not corruption or loss. Must NOT reuse `lossClause`'s
+                  // "possible LOSS" framing.
                   : confirmedWrapperDeficit
                     ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}, ${positionInfo}). NOT A LOSS — this looks like a STALE, out-of-order confirmation: the engine's report matches this turn's own intended text with a possible-duplicate tag ("${confirmedWrapperDeficit.strippedTag.trim()}") stripped, byte-for-byte — best explained as confirmation of an EARLIER, unwrapped write arriving after Loom had already moved on to this later, wrapped generation, not as anything failing to reach you. Every byte of that earlier content did arrive; this is an attribution/ordering artifact, not corruption. ` +
                       `What YOU can check yourself: if that earlier write's own turn already ran, this stale confirmation may be describing IT, not this generation — check your own artifacts for whether you've now acted on the same underlying content twice.`
-                  // Card a640c110 — its OWN complete notice text, same posture as `confirmedWrapperDeficit`'s
-                  // own branch just above (never patched onto `lossClause`/`replayNote`, never worded as a
-                  // possible LOSS): a DIFFERENT benign shape (the engine's own echo stripping ANSI/CSI
-                  // styling out of this generation's own intended text), not the wrapper-deficit shape's
-                  // stale-confirmation-of-an-earlier-write mechanism — so worded on its own terms, not
-                  // borrowed from that branch's "EARLIER write" framing.
+                  // @decision a640c110 — its own complete notice text, worded on its own terms
+                  // (a rendering artifact, not the wrapper-deficit shape's stale-confirmation
+                  // mechanism) — never patched onto `lossClause`/`replayNote`.
                   : confirmedAnsiStripDeficit
                     ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}, ${positionInfo}). NOT A LOSS — this looks like the engine's own echo stripping ANSI/CSI escape sequences: the engine's report matches this turn's own intended text with all ANSI/CSI escape sequences (${confirmedAnsiStripDeficit.strippedAnsiLen} char(s) of escape codes) removed, byte-for-byte. Every byte of the actual content did arrive; this is a rendering/echo artifact, not corruption or content loss. ` +
@@ -6522,27 +6405,18 @@ export class PtyHost {
                   const pendingWrittenHash = sigWritten.hash;
                   const pendingReportedHash = sigReported.hash;
                   const pendingIntendedLen = intended.length;
-                  // Card c23e2869 DoD-2: `replayedEntry` is non-undefined on this branch by construction
-                  // (`isRecognizedReplayAwaitingResolution`'s own condition, just above) — carry WHICH
-                  // earlier generation this mismatch replayed into the durable event too, not just that a
-                  // replay happened (see `PtyHostEvents.onPromptMismatchUnresolved`'s own doc).
+                  // @decision c23e2869 — carry WHICH earlier generation this mismatch replayed into
+                  // the durable event too, not just that a replay happened.
                   const pendingRecognizedGen = replayedEntry.gen;
                   const pendingMatchedLen = replayedEntry.text.length;
-                  // Card a419a7e6: bounded HEAD slice of THIS generation's own intended text — see
-                  // PROMPT_MISMATCH_EXCERPT_MAX_LEN's own doc for why this is captured raw, unconditionally,
-                  // and why it's genuinely the best available evidence for this branch (always a whole-
-                  // string replay, never a remainder).
+                  // @decision a419a7e6 — bounded HEAD slice of THIS generation's own intended text,
+                  // genuinely the best available evidence for this branch (always a whole-string
+                  // replay, never a remainder).
                   const pendingMessageExcerpt = intended.slice(0, PROMPT_MISMATCH_EXCERPT_MAX_LEN);
-                  // Card 280309d9 — the REAL Enter-write instant for `pendingGen`, the SAME field
-                  // `writeWallClockAt` above (this identical generation's own notice text) already reads
-                  // from `live.currentGenFirstWrittenAt` — captured here, now, because by the time this
-                  // event's own `ts` is stamped (`checkPromptMismatchUnresolved`, PROMPT_MISMATCH_RESOLVE_
-                  // WINDOW_MS later) that event's `ts` is the GIVE-UP instant, not this one, and nothing
-                  // downstream could otherwise recover which instant this was without an external, manual
-                  // `[prompt-echo]` log join. `null` only in the defensive case this generation's own write
-                  // was never recorded (mirrors `writeWallClockAt`'s "an unrecorded time" case, but as a
-                  // real null here rather than a prose sentinel — this travels into a structured `detail`,
-                  // not human-facing notice text).
+                  // @decision 280309d9 — captured HERE, at classification time, not at the later
+                  // `checkPromptMismatchUnresolved` timer fire (whose own `ts` is the GIVE-UP
+                  // instant, not this one). Real `null` (not a prose sentinel) since this travels
+                  // into a structured `detail`.
                   const pendingWrittenAt = live.currentGenFirstWrittenAt !== null ? new Date(live.currentGenFirstWrittenAt).toISOString() : null;
                   // Card f9b1ea00 — Code Review HIGH (confirmed): the handle is stored on `live.
                   // pendingMismatchUnresolvedTimers` (see that field's own doc) so `spawn()`/`onExit` can
@@ -6560,27 +6434,18 @@ export class PtyHost {
                   }, PROMPT_MISMATCH_RESOLVE_WINDOW_MS);
                   live.pendingMismatchUnresolvedTimers.add(timer);
                 }
-                // Deferred via setTimeout(0), same reason as the paste-recovery injection above (card 0f9268cc):
-                // this must land as the notice's OWN pty submission, never appended to another payload — the
-                // standing rule this very finding established, since the whole point is that a payload can
-                // itself be substituted — and must run OUTSIDE this hook handler's own synchronous call stack.
-                // kind:"warning" (an operational nudge, not agent-authored content) so it coalesces like other
-                // Loom watchdog notices rather than competing for the one-per-turn "agent" delivery slot.
+                // @decision 0f9268cc — deferred via setTimeout(0), same reason as the paste-recovery
+                // injection: must land as the notice's OWN pty submission, never appended to another
+                // payload, and run OUTSIDE this hook handler's own synchronous call stack.
+                // kind:"warning" (an operational nudge, not agent-authored content) so it coalesces
+                // like other Loom watchdog notices rather than competing for the one-per-turn
+                // "agent" delivery slot.
                 //
-                // SELF-REFERENCE, NOTED AND BOUNDED — manager review, card 201d0d95: this notice is ITSELF
-                // delivered as a pty submission, which sets `live.lastPrompt` for ITS OWN generation exactly
-                // like any other turn — so a substituted mismatch-notice is structurally possible ("a mismatch
-                // notice about a mismatch notice"), and nothing downstream can currently tell a replayed NOTICE
-                // apart from a replayed ordinary payload. Deliberately NOT guarded (no recursion cap, no
-                // dedup): at the measured 0.39%-of-submissions base rate (see the sweep note above), the
-                // expected chain length is ~1/(1-0.0039) ≈ 1.004 — a guard would be defending against a event
-                // this arithmetic says essentially never compounds — and `kind:"warning"` coalescing further
-                // dampens any chain that did start by merging with whatever else is already queued, rather than
-                // stacking. If a cheap, non-invasive way to let a recipient distinguish "this IS a
-                // prompt-mismatch notice, replayed" from "this is a replayed ordinary message" turns up (e.g. a
-                // recognizable tag check mirroring `isPasteRecoveryAttempt`), that is a follow-up, not scope
-                // creep here — this comment exists so a future reader who spots the recursion finds this
-                // reasoning instead of re-deriving it or reaching for an unneeded guard.
+                // @decision 201d0d95 — SELF-REFERENCE, NOTED AND BOUNDED: this notice's own delivery
+                // can itself mismatch ("a mismatch notice about a mismatch notice"). Deliberately NOT
+                // guarded (no recursion cap, no dedup) — the measured 0.39% base rate makes the
+                // expected chain length ~1.004, and `kind:"warning"` coalescing dampens any chain
+                // that did start.
                 // Card c0323f8a — EXACT-REPEAT SUPPRESSION, orthogonal to the SELF-REFERENCE note above
                 // (that one is about this notice's OWN delivery mismatching; this one is about the
                 // DETECTION that produced `mismatchText` re-running for the SAME underlying event). A
@@ -6630,12 +6495,9 @@ export class PtyHost {
                 if (isExactRepeatNotice) {
                   // eslint-disable-next-line no-console
                   console.log(`[prompt-mismatch-notice-suppressed] ${sessionId} gen=${noticeSignature.gen} writtenHash=${noticeSignature.writtenHash} reportedHash=${noticeSignature.reportedHash} — exact repeat of the last notice already sent for this event; not re-sending a byte-identical turn.`);
-                  // Card c0323f8a (manager review) — DURABLE, manager-visible record of the suppression
-                  // (see `lastMismatchNoticeSuppressed`'s own doc): a console line alone is invisible to
-                  // the manager who actually needs to know an alarm was swallowed. `count` accumulates
-                  // across repeats of the SAME signature (guaranteed to be this one — `isExactRepeatNotice`
-                  // already proved the match), reset to 1 whenever a genuinely different signature is
-                  // recorded (the `else` branch below, which can only run after a real notice fired).
+                  // @decision c0323f8a — DURABLE, manager-visible record of the suppression: `count`
+                  // accumulates across repeats of the SAME signature, reset to 1 whenever a
+                  // genuinely different signature is recorded.
                   const prior = live.lastMismatchNoticeSuppressed;
                   const sameAsPrior = prior !== null && prior.gen === noticeSignature.gen
                     && prior.writtenHash === noticeSignature.writtenHash && prior.reportedHash === noticeSignature.reportedHash;
@@ -6643,12 +6505,9 @@ export class PtyHost {
                 } else {
                   live.lastMismatchNoticeSignature = noticeSignature;
                   setTimeout(() => { this.enqueueStdin(sessionId, mismatchText, "system", undefined, undefined, "warning"); }, 0);
-                  // Card 38d68b8d DoD-1/2: push this UNMATCHABLE mismatch to the SENDER/parent too, not
-                  // just the recipient above — `mismatchText`'s own final fallback arm already says why:
-                  // "only the sender can tell whether their content actually arrived." Gated on the SAME
-                  // `isExactRepeatNotice` suppression the recipient notice just went through (this `else`
-                  // branch only runs for a genuinely new signature) rather than a second, independently
-                  // driftable dedup check.
+                  // @decision 38d68b8d — push this UNMATCHABLE mismatch to the SENDER/parent too,
+                  // not just the recipient above: only the sender can tell whether their content
+                  // actually arrived.
                   if (isUnmatchableMismatch) {
                     this.events.onPromptMismatchUnmatched?.(sessionId, { gen: live.submitGeneration, writtenHash: sigWritten.hash, reportedHash: sigReported.hash, intendedLen: intended.length, intendedText: intended, detectedAt: live.lastMismatchUnmatched?.detectedAt ?? Date.now() });
                   }

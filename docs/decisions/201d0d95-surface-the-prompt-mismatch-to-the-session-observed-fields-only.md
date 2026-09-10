@@ -43,6 +43,10 @@ also written at an earlier, non-adjacent generation, that would mislabel a genui
 notice itself cites. `findLast` returns the MOST RECENT matching generation, which is the one an actual
 replay-of-the-immediately-preceding-submission would produce.
 
+### Self-reference, noted and bounded
+
+This notice is ITSELF delivered as a pty submission, which sets `live.lastPrompt` for its OWN generation exactly like any other turn — so a substituted mismatch-notice is structurally possible ("a mismatch notice about a mismatch notice"), and nothing downstream can currently tell a replayed NOTICE apart from a replayed ordinary payload. Deliberately NOT guarded (no recursion cap, no dedup): at the measured 0.39%-of-submissions base rate (see above), the expected chain length is `~1/(1-0.0039) ≈ 1.004` — a guard would be defending against an event this arithmetic says essentially never compounds — and the notice's own `kind:"warning"` coalescing further dampens any chain that did start, by merging with whatever else is already queued rather than stacking. If a cheap, non-invasive way to let a recipient distinguish "this IS a prompt-mismatch notice, replayed" from "this is a replayed ordinary message" turns up (e.g. a recognizable tag check), that is a follow-up, not scope creep here.
+
 ## Do not
 
 - Do not assert a CLI-internal cause in the session-facing notice — only observed fields (lengths, hashes,
