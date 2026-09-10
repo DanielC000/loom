@@ -156,7 +156,8 @@ export interface PythonConfig {
  *
  * Type-only here — kept OUTSIDE `ResolvedConfig`/`resolveConfig()` deliberately. `packages/web` MUST
  * NEVER import `resolveCodescapeConfig` or `resolveCodescapeIntegrationPath`.
- * @decision 3bd8ef17 — see docs/decisions/3bd8ef17-keep-codescape-config-outside-resolveconfig.md
+ * @decision 3bd8ef17 — never fold this into `ResolvedConfig`/`resolveConfig()`; that would ship the
+ * `codescape` key, and Codescape's existence, into the browser bundle `packages/web` pulls it into.
  */
 export interface CodescapeConfig {
   enabled: boolean;
@@ -218,8 +219,8 @@ export const MEMORY_CONFIG_MAX = {
  * Settings UI reads the same table to state each field's permitted range — and to reject an
  * out-of-range entry — IN THE UNIT THE FIELD IS ENTERED IN.
  *
- * @decision 48365fda — exported so the bound is READABLE from the web package too, for unit translation;
- * see docs/decisions/48365fda-export-orchestration-timeout-bounds-for-unit-translation.md.
+ * @decision 48365fda — never duplicate these bounds as a second literal in `packages/web`; read this
+ * table from `shared` so a rejection can translate raw ms into the field's own entered unit.
  *
  * ⚠️ These ceilings are deliberate platform-wide caps, not tuning knobs — a gate/deploy command holds a
  * shared gate lane for its whole timeout, and a webhook POST blocks the best-effort event path. Raising
@@ -340,13 +341,10 @@ export interface OrchestrationConfig {
    * an unbounded fleet in one tick. At the cap the Scheduler defers the remaining due schedules to the
    * next tick (next_fire_at untouched; the deferral is recorded on the schedule row + a
    * `schedule_fire_deferred` event — see Schedule.lastDeferredAt). Default 3.
-   * @decision 53edd8d5 — narrowed to scheduler-spawned managers only; standing human/Lead-spawned
-   * managers never count against this cap. See
-   * docs/decisions/53edd8d5-scheduled-manager-prompt-and-cap-are-additive.md.
-   * @decision 52ab5d45 — the Scheduler is ONE daemon-wide service, so only the daemon-global
-   * `PlatformConfigOverride.maxConcurrentManagers` reaches it; a per-project override of THIS field is
-   * accepted for backward compat but has no effect. See
-   * docs/decisions/52ab5d45-maxconcurrentmanagers-is-daemon-global-not-per-project.md.
+   * @decision 53edd8d5 — scoped to scheduler-spawned managers only; never fold this into the standing
+   * human/Lead-spawned fleet's cap — a large standing fleet can never starve or block a schedule.
+   * @decision 52ab5d45 — daemon-global only; a per-project override of this field is accepted for
+   * backward compat but never reaches the Scheduler, and must not be removed on the strength of that.
    */
   maxConcurrentManagers: number;
   /**
@@ -719,8 +717,8 @@ export interface PlatformConfig {
   timeouts: TimeoutConfig;
   /** P2 authenticated-request bounds + per-connection rate guard. See ConnectionsGuardConfig. */
   connections: ConnectionsGuardConfig;
-  // @decision 3bd8ef17 — no `integrations` key here either; same reasoning as `resolveCodescapeConfig`
-  // above. See docs/decisions/3bd8ef17-keep-codescape-config-outside-resolveconfig.md.
+  // @decision 3bd8ef17 — no `integrations` key here either; adding one would ship it (and Codescape's
+  // existence) into the browser bundle `packages/web` pulls `resolveConfig()` into.
   /**
    * Message-delivery behavior toggle (owner-directed, 2026-07-03): when a recipient is busy and
    * inbound messages queue, should an AGENT/human-authored message (a manager→worker direction, a
@@ -778,12 +776,12 @@ export const OPERATOR_ENABLED_DEFAULT = false;
  * (still ignored while a boot-time token guard refuses it — see gateway/trust-tier.ts
  * `canOpenRemoteListener`). `tls`/`rateLimit` are Phase C concerns, not yet consumed. The gateway TOKEN
  * itself does NOT live here — Phase B stores it in a keyed table, never in config.
- * @decision 766f8b50 — the phased design + why the token is kept out of this shape; see
- * docs/decisions/766f8b50-remoteaccessconfig-ships-inert-daemon-global-not-per-project.md.
+ * @decision 766f8b50 — never add the gateway token itself to this shape (or any config); Phase B's
+ * keyed table holds it instead, off the general config read/write surface.
  *
- * @decision 80e2093f — gateway-token rotation is an immediate cutover (item 1), and `bindHost`
- * deliberately accepts `0.0.0.0`/`::` (item 2, see `bindHost`'s own doc below); see
- * docs/decisions/80e2093f-bindhost-deliberately-accepts-all-interfaces.md.
+ * @decision 80e2093f — item 2: `0.0.0.0`/`::` is a deliberate posture, not an auth-bypass bug — never
+ * "fix" it by rejecting; every peer still hits the token+TLS wall. Item 1: rotation is an immediate
+ * cutover — never add a grace TTL; mint a second token instead of rotating one a live client still needs.
  */
 export interface RemoteAccessConfig {
   /** Master switch — a non-loopback bind is only ever attempted when true. Default false. */
