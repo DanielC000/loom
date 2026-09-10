@@ -592,28 +592,14 @@ function pendingResolveKey(sessionId: string, route: CompanionRoute | null): str
  * would always fail; the validated note is instead carried in the pending-proposal payload and used
  * verbatim on commit.
  *
- * CR HARDENING (post-review fix): the confirm prompt is delivered DIRECTLY to the owner's chat via
- * `ctx.outbound.deliverToOwner` — the SAME outbound rail `chat_reply` uses, resolved from the ACTIVE
- * TURN's own origin, never a lever-guessed destination — and the tool NEVER returns `promptText`/the
- * token to the companion (a bare `{status:'proposed'}`). The companion is the exact untrusted component
- * Primitive C exists to defend against: if the token were handed back for the companion to "relay", a
- * hijacked companion could propose a DIFFERENT action than the one it tells the owner about, receive the
- * REAL token, and render its OWN false-labeled message — the owner would still be typing a token that
- * really matches, but for an action they never actually chose. Delivering server-side and withholding the
- * token from the tool's return value makes that structurally impossible: the companion cannot construct a
- * valid confirm message it never received. Primitive B alone is a substring check (insufficient against
- * negation/context-stripping, e.g. "approve" is a substring of "do NOT approve") — Primitive C, delivered
- * this way, is the actual defense: the owner sees the EXACT daemon-authored action description and only
- * their own reply (which the daemon re-derives server-side via Primitive A) can commit it.
+ * @decision a8ddd6d2 — the confirm prompt goes DIRECTLY to the owner via `ctx.outbound.deliverToOwner`;
+ * the tool NEVER returns the confirm token to the companion (a bare `{status:'proposed'}`) — see
+ * docs/decisions/a8ddd6d2-decision-resolve-token-withholding.md for the hijacked-companion relay attack this closes.
  */
 /**
- * Decisions-relay dedup signature (card 0c1365d0): deterministic "as of this state" fingerprint used to
- * tell a genuine re-alert (state/answer changed) apart from a repeat read of an unchanged pending decision.
- * Only the answer tuple is folded in — a question's title/body/options/recommendation are set once at
- * `question_ask` and NEVER mutated afterward (confirmed: db.ts's only `UPDATE questions` statements touch
- * session_id/project_id reparenting or the state/chosen_option/note/answered_at/consumed_at/provision_*
- * columns — never title/body/options_json/recommendation), so folding those in would never change the
- * signature and would just be dead weight.
+ * @decision 0c1365d0 — this dedup signature folds in ONLY the answer tuple (state/chosenOption/answeredAt/
+ * consumedAt); title/body/options/recommendation are immutable post-creation, see
+ * docs/decisions/0c1365d0-decisions-relay-dedup-signature.md.
  */
 function decisionSurfaceSignature(q: Pick<Question, "state" | "chosenOption" | "answeredAt" | "consumedAt">): string {
   return `${q.state}|${q.chosenOption ?? ""}|${q.answeredAt ?? ""}|${q.consumedAt ?? ""}`;
@@ -965,14 +951,9 @@ export function pendingProposalCountForSession(sessionId: string): number {
  * SKIPPED for title/body there, and only there (never a collapsed/scope-wide read — always read via
  * `ctx.scope.configFor(projectId)` for the SPECIFIC project being written).
  *
- * SAFETY (state per the card, CR will verify): with `authoredContent` ON, an injected/attacker turn on a
- * WARM trust window could create/update a card with arbitrary authored text — this is the design's
- * OWNER-ACCEPTED Tier-A residual (design §4.5): the safety floor there is grant-scoping + the verify-once
- * trust window + Tier-X-on-catastrophic, NOT per-action verbatim. That is WHY this opt-in is fail-closed
- * PER-PROJECT (default OFF) and why the flag is human-REST-only (gateway/server.ts's grant config
- * validator runs only on the human grant-write path — an agent can never set it on its own grant).
- * `authoredContent` never widens scope, bypasses Primitive A, or waives the reply-to-route requirement —
- * it ONLY conditions the Primitive-B verbatim-content check.
+ * @decision ccdb1e0c — an owner-accepted Tier-A residual risk, fail-closed default OFF, human-REST-only —
+ * see docs/decisions/ccdb1e0c-authored-content-tier-a-residual.md. `authoredContent` never widens scope,
+ * bypasses Primitive A, or waives the reply-to-route requirement — it ONLY conditions Primitive B.
  */
 function authoredContentAllowed(cfg: { authoredContent?: unknown }): boolean {
   return cfg.authoredContent === true;
@@ -995,8 +976,9 @@ function authoredContentAllowed(cfg: { authoredContent?: unknown }): boolean {
  * this grant's projects is act-mode (`hasActGrant`, exactly like `decision_resolve`'s own gate), so a
  * read-only grant's tool surface stays byte-identical. Both relay into the EXISTING loom-tasks write
  * path (`createProjectTask`/`updateProjectTask`, mcp/tasks.ts) rather than reimplementing board
- * mutation — same posture as `decision_resolve` reusing `db.answerQuestion`. There is deliberately NO
- * delete tool at all (card + owner sign-off 1039e892: no cross-project delete from chat).
+ * mutation — same posture as `decision_resolve` reusing `db.answerQuestion`.
+ * @decision 1039e892 — NO delete tool at all, and Primitive C is MANDATORY (not optional) for every
+ * board write — see docs/decisions/1039e892-companion-board-write-sign-off.md.
  *
  * Both tools copy `decision_resolve`'s exact proven shape (its CR-hardened Primitive-C round-trip in
  * particular — see that lever's doc for the full rationale): every call (propose OR confirm) re-runs
@@ -1006,9 +988,7 @@ function authoredContentAllowed(cfg: { authoredContent?: unknown }): boolean {
  * via `ctx.outbound.deliverToOwner` — never returned to the companion) and returns a bare
  * `{status:'proposed'}`; only a SECOND identical call, on the owner's own next turn containing that
  * token, actually calls into `createProjectTask`/`updateProjectTask`. A failed delivery fails closed
- * (nothing left pending). Owner sign-off 1039e892 made Primitive C MANDATORY for every board write
- * (not merely recommended, as the design note's own open fork initially had it) — both tools always
- * propose-then-confirm, with no lighter-weight path.
+ * (nothing left pending); both tools always propose-then-confirm, with no lighter-weight path.
  *
  * `title`/`body` content is the one place this lever's guards diverge from `decision_resolve`: by default
  * Primitive B applies to `board_create`'s `title`/(if given) `body` and to `board_update`'s optional
@@ -1517,11 +1497,10 @@ const BOARD_REACH: CompanionCapability = {
     );
 
     /**
-     * `authored_content_grant` (Direction (a), card 2b26035c — "inline authored-content grant"). Lets the
-     * owner grant board_create/board_update permission to author real card text on ONE project, from
-     * chat itself, instead of hunting the project's Settings "authored content" toggle. This tool ITSELF
-     * NEVER authors or commits any card content — it only ever flips the grant used by board_create/
-     * board_update's own `contentIsVerbatim` check above.
+     * @decision 2b26035c — Direction (a), "inline authored-content grant" — see
+     * docs/decisions/2b26035c-inline-authored-content-grant.md. This tool ITSELF NEVER authors or commits
+     * any card content — it only ever flips the grant used by board_create/board_update's own
+     * `contentIsVerbatim` check above.
      *
      * ALWAYS Tier-X-shaped: unlike board_create/board_update's Tier A, there is NO low-friction direct-
      * commit path here at all, even inside an otherwise-warm trust window — granting authored-content
@@ -1908,19 +1887,14 @@ const VAULT_READ: CompanionCapability = {
  * `config_json.roots: string[]`, union-merged across every granted project's own grant row (mirrors
  * attention-push's `alertClasses` union — see its `resolveConfig`) — an absent/empty roots list on EVERY
  * granted project admits NOTHING (conservative default, matching decisions-relay's own absent-allowlist
- * posture): the owner must explicitly configure at least one root before anything is deliverable. (Owner
- * sign-off 1039e892 named the recommended defaults for that config — vault `Assets/`, the session scratch
- * dir — but this lever's own code applies no implicit fallback: an empty configured
- * allowlist delivers nothing, exactly like an empty `decisionClasses`.)
+ * posture): the owner must explicitly configure at least one root before anything is deliverable.
+ * @decision 1039e892 — recommended default roots (vault `Assets/`, session scratch dir) are a
+ * recommendation only; an empty configured allowlist still delivers nothing — see
+ * docs/decisions/1039e892-companion-board-write-sign-off.md.
  *
- * DELIVERY was TELEGRAM-FIRST v1 (owner decision 2026-07-09): `ctx.outbound.deliverMediaToOwner` resolves
- * the active turn's own route + adapter SERVER-SIDE (never a lever-guessed destination — mirrors
- * `deliverToOwner`). The in-app fast-follow (card 9ec79b52) closed the gap — the in-app channel now
- * delivers too (`InAppChannel.adapter.sendMedia`, companion/in-app.ts: a base64-inlined WS frame the web
- * chat renders inline). A channel with no media support at all still degrades GRACEFULLY
- * (`status:"unsupported-channel"`, naming the resolved path) rather than erroring, so the companion can
- * still tell the owner where the file lives instead of the call just failing — this is now future-proofing
- * for a channel that doesn't implement `sendMedia`, not the expected in-app path.
+ * @decision 9ec79b52 — delivery was Telegram-only in v1; in-app delivery + the graceful
+ * "unsupported-channel" degrade for a future channel were a later fast-follow — see
+ * docs/decisions/9ec79b52-media-out-in-app-delivery-fast-follow.md.
  */
 const MEDIA_OUT: CompanionCapability = {
   slug: "media-out",
@@ -1997,14 +1971,15 @@ const MEDIA_OUT: CompanionCapability = {
 };
 
 /**
- * `session-steer` (Framework §4, card 305a54fb) — the session-control ACT lever, REFRAMED by owner
- * redirect (decisions `47532bd0` + `71509fd5`) from a verbatim-relay "steer" into a full OPERATOR
- * surface: on the owner's intent, the companion messages/steers/stops/resumes sessions in granted scope
- * — composed from owner intent, NOT a verbatim quote (Primitive B does NOT apply here, unlike
- * `board_create`'s title/body). Decision `71509fd5` = FULLY FRICTION-FREE: all four actions commit
- * IMMEDIATELY, on the first call — NO Primitive C propose/confirm round-trip (unlike `decision_resolve`/
- * `board_create`/`board_update`). This is deliberate, owner-accepted residual risk on Loom's most
- * injection-exposed surface — the safety model is NOT structural prevention of a bad action, it's:
+ * `session-steer` (Framework §4, card 305a54fb) — the session-control ACT lever: on the owner's intent,
+ * the companion messages/steers/stops/resumes sessions in granted scope, composed from owner intent, NOT
+ * a verbatim quote (Primitive B does NOT apply here, unlike `board_create`'s title/body).
+ * @decision 47532bd0 — reframed from a verbatim-relay "steer" into this full operator surface — see
+ * docs/decisions/47532bd0-session-steer-reframed-as-operator.md.
+ * @decision 71509fd5 — FULLY FRICTION-FREE (no Primitive C round-trip) and a PERMISSIVE roleFilter
+ * default, both deliberate accepted residual risk — see
+ * docs/decisions/71509fd5-session-steer-friction-free.md. The safety model is NOT structural prevention
+ * of a bad action, it's:
  *
  *   - **Primitive A, MANDATORY, on every call**: `ctx.attest.getActiveTurnOwnerText` must be non-null —
  *     a proactive/heartbeat/reminder-originated turn can never reach `sessions`. This is the ONE
@@ -2016,10 +1991,7 @@ const MEDIA_OUT: CompanionCapability = {
  *     target whose project was never granted, or was granted read-only, is rejected before `ctx.sessions`
  *     is ever called.
  *   - **Optional per-project `config_json.roleFilter`** (e.g. `["manager"]`) narrowing which session
- *     ROLES are controllable within a granted project. DEFAULT = no restriction (an absent or empty
- *     roleFilter admits every role) — the OPPOSITE default of `decisionClasses`' conservative
- *     admit-nothing, because the owner explicitly wants "whatever I want" here (card, decision
- *     `71509fd5`) once scope + Primitive A already hold.
+ *     ROLES are controllable within a granted project — an absent/empty roleFilter admits every role.
  *
  * `resolveControlTarget` is the ONE place all four tools run this shared validation — a lever-internal
  * mirror of `registerCompanionCapabilities`' own "one enforcement point" discipline, so a future 5th
@@ -2535,13 +2507,12 @@ function truncateSubject(s: string): string {
  *
  * `git_commit` is Tier **A** — flows inside a warm session-trust window with no per-call confirm (a cold
  * window, or `friction:"per-action"`, runs one step-up first, exactly like `decision_resolve`'s "general"
- * path). `message` defaults to requiring Primitive B (a verbatim owner quote) — mirroring `board_create`'s
- * own default-verbatim posture — UNLESS this project's grant config sets `authoredContent:true` (the SAME
- * reused key/semantics as `board-reach`'s own Tier-A residual opt-in), in which case the companion may
- * author a real commit message. This is deliberate hardening beyond the card's own explicit spec: without
- * it, a warm Tier-A window would let an injected turn commit fabricated local history with ZERO owner
- * disclosure (nothing is shown to the owner on the low-friction direct-commit path) — the same class of
- * risk `board_create`'s own `authoredContent` gate already defends against. Only ever touches the target
+ * path). `message` defaults to requiring Primitive B (a verbatim owner quote) UNLESS this project's grant
+ * config sets `authoredContent:true` (the SAME reused key/semantics as `board-reach`'s own Tier-A residual
+ * opt-in).
+ * @decision a3c3ade8 — this authoredContent gate is deliberate hardening BEYOND the card's own spec,
+ * closing a zero-owner-disclosure injection risk — see
+ * docs/decisions/a3c3ade8-git-push-authoredcontent-hardening.md. Only ever touches the target
  * `resolveGitPushTarget` resolves — never an agent-supplied path.
  *
  * `git_push` is Tier **X** — ALWAYS steps up, even inside an otherwise-warm window (mirrors
