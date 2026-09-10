@@ -644,13 +644,18 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     homeDir,
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
-    // Same margin rule as scenarios (1)/(2) above: intervalMs/timeoutMs must stay safely above real
-    // child-process startup latency (~70-85ms observed, more under host load), or a restart can be killed
-    // (by an unrelated wedge probe failure, or miscounted by a test racing its own diagnostic window)
-    // before it ever gets a fair chance to run.
+    // healthProbeIntervalMs/healthProbeTimeoutMs UNCHANGED at the file's usual 300/180 (checkBuildDrift
+    // rides the same tick — see scenario (9)'s identical comment for why retiming either would change
+    // more than just health timing). Card 8c056b70: line 699 below ("recovery with a MATCHING build does
+    // not restart either") is the same negative "never restarts" shape as (9)/(8c) and can't tell a
+    // drift-triggered restart from a health-probe-triggered one (same shared restart path — see
+    // scenario (9)'s comment); healthProbeFailureThreshold is widened so a spurious health-kill is
+    // structurally unreachable within this scenario's short lifetime. This scenario tests the
+    // installed-build-unresolved/recovery diagnostic, never the health-kill path — that coverage
+    // belongs to scenarios (1)/(2)/(16).
     healthProbeIntervalMs: 300,
     healthProbeTimeoutMs: 180,
-    healthProbeFailureThreshold: 3,
+    healthProbeFailureThreshold: 1000,
     versionProbeTimeoutMs: 2000,
   });
   const warnings = captureWarnings();
@@ -715,13 +720,17 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     homeDir,
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
-    // Same margin rule as scenarios (1)/(2) above: intervalMs/timeoutMs must stay safely above real
-    // child-process startup latency (~70-85ms observed, more under host load), or a restart can be killed
-    // (by an unrelated wedge probe failure, or miscounted by a test racing its own diagnostic window)
-    // before it ever gets a fair chance to run.
+    // healthProbeIntervalMs/healthProbeTimeoutMs UNCHANGED at the file's usual 300/180 (checkBuildDrift
+    // rides the same tick — see scenario (9)'s identical comment for why retiming either would change
+    // more than just health timing). Card 8c056b70: this scenario's own negative "never restarts"
+    // assertion below can't tell a drift-triggered restart from a health-probe-triggered one (same
+    // shared restart path — see scenario (9)'s comment); healthProbeFailureThreshold is widened so a
+    // spurious health-kill is structurally unreachable within this scenario's short lifetime. This
+    // scenario tests the drift/installed-build-null signal, never the health-kill path — that coverage
+    // belongs to scenarios (1)/(2)/(16).
     healthProbeIntervalMs: 300,
     healthProbeTimeoutMs: 180,
-    healthProbeFailureThreshold: 3,
+    healthProbeFailureThreshold: 1000,
     versionProbeTimeoutMs: 2000,
   });
   const warnings = captureWarnings();
@@ -767,13 +776,24 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     homeDir,
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
-    // Same margin rule as scenarios (1)/(2) above: intervalMs/timeoutMs must stay safely above real
-    // child-process startup latency (~70-85ms observed, more under host load), or a restart can be killed
-    // (by an unrelated wedge probe failure, or miscounted by a test racing its own diagnostic window)
-    // before it ever gets a fair chance to run.
+    // healthProbeIntervalMs/healthProbeTimeoutMs UNCHANGED at the file's usual 300/180 — checkBuildDrift
+    // rides the SAME probe tick as the health check (supervisor.ts's probeHealth calls it inline on a
+    // successful health round trip), so retiming either would change how many completed ticks this
+    // scenario's own waitForCompletedCondition(driftCheckState==="match", ...) needs, not just health
+    // timing. Card 8c056b70: this scenario's own negative assertion below ("never restarts") cannot tell
+    // a DRIFT-triggered restart from a HEALTH-PROBE-triggered one — both route through the identical
+    // child.on("exit")->scheduleRestart path (supervisor.ts:1284-1289 vs :1465; see decision 545ef479).
+    // A forced reproduction (healthProbeFailureThreshold:1 + an engaged wedge, drift-check state
+    // confirmed staying "match" throughout) reliably trips this exact assertion via the HEALTH path
+    // alone — and a live gate failure on 2026-09-10 shows the same signature (drift-check state: match,
+    // no drift-mismatch ever logged, then the FAIL). healthProbeFailureThreshold is widened here (this
+    // scenario tests the drift/version signal, never the health-kill path — scenarios (1)/(2)/(16) own
+    // that coverage) so a spurious health-kill is structurally unreachable within this scenario's short
+    // lifetime: reaching even 1000 consecutive REAL no-answer timeouts would take far longer than this
+    // scenario, or the file's own per-test stall ceiling, ever runs.
     healthProbeIntervalMs: 300,
     healthProbeTimeoutMs: 180,
-    healthProbeFailureThreshold: 3,
+    healthProbeFailureThreshold: 1000,
     versionProbeTimeoutMs: 2000,
   });
   await sup.start(["/fake/repo/drift-version-unused"]);
@@ -794,13 +814,22 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   // tick progress for the generous default ceiling) times it out.
   await waitForCompletedCondition(() => sup.getDriftCheckState() === "match", () => sup.getCompletedProbeTickCount());
   await sleep(400); // deliberate flood-catch window (same shape as (8b) above), not a completion guess — the match is already confirmed by the line above
-  check("(9) `build` matching never restarts even when `version` differs — `version` is not the drift signal",
-    readServeCalls(callsFile).length === 1 && sup.getPid() === pidBefore);
-  // Card 545ef479 (Defect 1): the fourth distinguishable state — a genuine, comparable MATCH — completing
-  // the RED case from today's code: (a)/(b)/(c) were all silent and indistinguishable; this proves they
-  // are now separable.
-  check("(9) drift-check state reads match for a genuine, comparable MATCH",
+  // Card 8c056b70: this is the ACTUAL "`version` is not the drift signal" claim — a restart COUNT (below)
+  // can't discriminate a drift-triggered restart from a health-probe-triggered one (both share one
+  // restart path), but the drift-check STATE can: the drift path only ever reaches "mismatch" by reading
+  // `version` as a signal, so state staying "match" throughout directly disproves that, independent of
+  // whether any restart occurred for some unrelated reason.
+  // Card 545ef479 (Defect 1): also the fourth distinguishable state — a genuine, comparable MATCH —
+  // completing the RED case from today's code: (a)/(b)/(c) were all silent and indistinguishable; this
+  // proves they are now separable.
+  check("(9) drift-check state stays MATCH throughout — `version` is not the drift signal",
     sup.getDriftCheckState() === "match");
+  // Broader safety net, NOT the drift-signal claim itself (see above): no restart of ANY kind (drift or
+  // health-probe-triggered) occurred. healthProbeFailureThreshold is widened above specifically so a
+  // health-probe-triggered restart can't happen here — if this ever fails while the check above still
+  // reads "match", that combination itself proves the cause was NOT the drift/version logic.
+  check("(9) `build` matching never restarts (no restart of any kind observed)",
+    readServeCalls(callsFile).length === 1 && sup.getPid() === pidBefore);
 
   sup.stop();
   delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
