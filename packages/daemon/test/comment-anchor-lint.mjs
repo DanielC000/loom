@@ -33,6 +33,14 @@
 //      the CLI scan and the live per-file hook; a well-formed 8-hex anchor (bare or sigil'd), a too-short
 //      same-line id, the EOL-wrap shape (a DIFFERENT defect — brokenAnchors' own concern), and mid-line
 //      mentions of the literal token are all confirmed NOT flagged.
+//  11. sigilSpaceAnchors (card e708670b): a same-line `sha` sigil with whitespace adjacent to its colon on
+//      EITHER side or both (e.g. "@decision sha: deadbeef", "@decision sha :deadbeef", or
+//      "@decision sha : deadbeef") — the SECOND defect shape card afc56dcc named but whose original fix
+//      (overlongAnchorIds) never covered, widened mid-review after the lead independently re-verified
+//      that the space-before-colon shape was ALSO silent and NOT caught by the first (after-only) version
+//      — is flagged, in both the CLI scan and the live per-file hook; a well-formed sigil'd anchor (no
+//      space either side), a well-formed bare anchor, a too-short same-line id (either side), the EOL-wrap
+//      shape, and mid-line mentions of the literal token are all confirmed NOT flagged.
 // Run: `node test/comment-anchor-lint.mjs` from packages/daemon (no build, no LOOM_HOME needed).
 import fs from "node:fs";
 import os from "node:os";
@@ -44,6 +52,7 @@ import {
   findFileAnchors,
   findBrokenAnchors,
   findOverlongAnchorIds,
+  findSigilSpaceAnchors,
   findOversizedRecords,
   findCollidingRecords,
   listRecordIds,
@@ -273,6 +282,107 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   check("mid-line mentions of the token are never flagged as overlong", findOverlongAnchorIds(lines).length === 0);
 }
 
+// --- findSigilSpaceAnchors (card e708670b — the "sha: deadbeef" / "sha :deadbeef" silent-failure --------
+// defect, on EITHER side of the sigil's colon)
+
+{
+  // The exact real-world shape the card names first: a space AFTER the sigil's colon, before its 8-hex id.
+  // RED/GREEN: findFileAnchors (the pre-existing check) finds NOTHING — this IS the defect card afc56dcc
+  // was filed to end but whose shipped fix (overlongAnchorIds) never covered — and findSigilSpaceAnchors
+  // flags it.
+  const lines = ["// @decision sha: deadbeef — a space after the sigil's colon"];
+  const anchors = findFileAnchors(lines);
+  const spaced = findSigilSpaceAnchors(lines);
+  check("sigil space (after colon): findFileAnchors (the pre-existing check) finds NOTHING — this IS the defect",
+    anchors.length === 0);
+  check("sigil space (after colon): findSigilSpaceAnchors flags it, exactly once, with the full match text",
+    spaced.length === 1 && spaced[0].line === 1 && spaced[0].match === "@decision sha: deadbeef");
+}
+
+{
+  // The lead's own re-verification, card e708670b: a space BEFORE the sigil's colon — a shape the FIRST
+  // version of this check (after-the-colon-only) did NOT catch, confirmed independently by the lead in
+  // the same session that approved widening this check to cover it. RED/GREEN against the widened pattern.
+  const lines = ["// @decision sha :deadbeef — a space before the sigil's colon"];
+  const anchors = findFileAnchors(lines);
+  const spaced = findSigilSpaceAnchors(lines);
+  check("sigil space (before colon): findFileAnchors (the pre-existing check) finds NOTHING — this IS the defect",
+    anchors.length === 0);
+  check("sigil space (before colon): findSigilSpaceAnchors flags it, exactly once, with the full match text",
+    spaced.length === 1 && spaced[0].line === 1 && spaced[0].match === "@decision sha :deadbeef");
+}
+
+{
+  // Whitespace on BOTH sides of the colon at once — must also flag, exactly once.
+  const lines = ["// @decision sha : deadbeef — whitespace on both sides of the colon"];
+  const spaced = findSigilSpaceAnchors(lines);
+  check("sigil space (both sides): findSigilSpaceAnchors flags it, exactly once, with the full match text",
+    spaced.length === 1 && spaced[0].match === "@decision sha : deadbeef");
+}
+
+{
+  // A double space, and a tab, on EITHER side — must all flag; proves \s+ (not a fixed single space) is
+  // doing the matching on both sides of the alternation, not just the after-colon side.
+  const doubleAfter = ["// @decision sha:  deadbeef — two spaces after the sigil"];
+  const doubleBefore = ["// @decision sha  :deadbeef — two spaces before the sigil"];
+  const tabAfter = ["// @decision sha:\tdeadbeef — a tab after the sigil"];
+  const tabBefore = ["// @decision sha\t:deadbeef — a tab before the sigil"];
+  check("sigil space (double space, after): findSigilSpaceAnchors flags it", findSigilSpaceAnchors(doubleAfter).length === 1);
+  check("sigil space (double space, before): findSigilSpaceAnchors flags it", findSigilSpaceAnchors(doubleBefore).length === 1);
+  check("sigil space (tab, after): findSigilSpaceAnchors flags it", findSigilSpaceAnchors(tabAfter).length === 1);
+  check("sigil space (tab, before): findSigilSpaceAnchors flags it", findSigilSpaceAnchors(tabBefore).length === 1);
+}
+
+{
+  // The space-AND-overlong combination: a verbatim 40-hex paste that's ALSO separated from the sigil by a
+  // space. One pattern catches both malformations at once (SIGIL_SPACE_RE matches 8+ hex chars, not just
+  // exactly 8) — must flag as a sigil-space defect (the space alone already makes this unresolvable).
+  const lines = ["// @decision sha: 1234567890abcdef1234567890abcdef12345678 — space AND overlong"];
+  const spaced = findSigilSpaceAnchors(lines);
+  check("sigil space + overlong combination: findSigilSpaceAnchors flags it",
+    spaced.length === 1 && spaced[0].match === "@decision sha: 1234567890abcdef1234567890abcdef12345678");
+}
+
+{
+  // Boundary: a space followed OR preceded by fewer than 8 hex chars is a DIFFERENT, out-of-scope shape
+  // (too short) — mirrors the identical carve-out already tested for overlongAnchorIds/brokenAnchors above.
+  const afterTooShort = ["// @decision sha: dead — too short to be a real id, even with the space"];
+  const beforeTooShort = ["// @decision sha :dead — too short to be a real id, even with the space"];
+  check("sigil space + too-short id, after (out of this check's scope): findSigilSpaceAnchors does NOT flag it",
+    findSigilSpaceAnchors(afterTooShort).length === 0);
+  check("sigil space + too-short id, before (out of this check's scope): findSigilSpaceAnchors does NOT flag it",
+    findSigilSpaceAnchors(beforeTooShort).length === 0);
+}
+
+{
+  // Positive control: well-formed anchors (bare AND sha:-sigil'd, no space) must never be flagged.
+  const bareWellFormed = ["// @decision 725dc89a — the prohibition, all on one line"];
+  const sigilWellFormed = ["// @decision sha:725dc89a — the prohibition, all on one line"];
+  check("well-formed bare anchor: findSigilSpaceAnchors reports nothing", findSigilSpaceAnchors(bareWellFormed).length === 0);
+  check("well-formed sha:-sigil'd anchor (no space): findSigilSpaceAnchors reports nothing", findSigilSpaceAnchors(sigilWellFormed).length === 0);
+  check("well-formed bare anchor: findFileAnchors still finds it (sanity)", findFileAnchors(bareWellFormed).length === 1);
+  check("well-formed sha:-sigil'd anchor: findFileAnchors still finds it (sanity)", findFileAnchors(sigilWellFormed).length === 1);
+}
+
+{
+  // Scope boundary: the EOL-wrap shape is brokenAnchors' concern, not this check's.
+  const lines = [" * @decision", " * 725dc89a — the prohibition"];
+  check("EOL-wrap shape (brokenAnchors' concern, a DIFFERENT defect): findSigilSpaceAnchors does NOT flag it",
+    findSigilSpaceAnchors(lines).length === 0);
+}
+
+{
+  // Measured false-positive guard, same shape as the existing negative controls above: mid-line mentions of
+  // the literal token "@decision" must never be flagged — none of them carry a real "sha:" sigil followed
+  // by whitespace and a real hex run.
+  const lines = [
+    "/** `@decision <id>` — the convention's own canonical example syntax, written as prose. */",
+    "const ANCHOR_RE = /@decision\\s+([0-9a-f]{8})\\b/gi; // a regex LITERAL containing the bare token",
+    "lines.push(`  - ${file}:${line} — @decision ${id}`); // a message string, not an anchor",
+  ];
+  check("mid-line mentions of the token are never flagged as a sigil-space anchor", findSigilSpaceAnchors(lines).length === 0);
+}
+
 // --- bucketDistribution -----------------------------------------------------------------------------
 
 {
@@ -479,6 +589,74 @@ try {
     && report.overlongAnchorIds.items[0]?.ns === "sha"
     && report.overlongAnchorIds.items[0]?.match === "@decision sha:1234567890abcdef1234567890abcdef12345678");
 
+  // --- DoD-4 (card e708670b): a THIRD before/after step — add the sigil-space malformed anchor ON TOP of
+  // the already-overlong-included fixture, and confirm ONLY sigilSpaceAnchors moves; every other field
+  // (including overlongAnchorIds itself and totalAnchorSites) stays byte-identical to `report` above.
+  {
+    const sigilSpaceLine = "\n\n// @decision sha: cafebabe — card e708670b: a space between the sigil colon and its id";
+    fs.writeFileSync(fixturePath, buildSrc(true) + sigilSpaceLine);
+    const reportWithSigilSpace = computeReport(REPO, { minLines: 15 });
+
+    check("DoD-4 (e708670b) before/after: totalAnchorSites is UNCHANGED by adding the sigil-space anchor (it was never a real anchor site)",
+      reportWithSigilSpace.totalAnchorSites === report.totalAnchorSites);
+    check("DoD-4 (e708670b) before/after: orphanAnchors is UNCHANGED",
+      reportWithSigilSpace.orphanAnchors.count === report.orphanAnchors.count
+      && JSON.stringify(reportWithSigilSpace.orphanAnchors.items) === JSON.stringify(report.orphanAnchors.items));
+    check("DoD-4 (e708670b) before/after: brokenAnchors is UNCHANGED",
+      reportWithSigilSpace.brokenAnchors.count === report.brokenAnchors.count
+      && JSON.stringify(reportWithSigilSpace.brokenAnchors.items) === JSON.stringify(report.brokenAnchors.items));
+    check("DoD-4 (e708670b) before/after: overlongAnchorIds is UNCHANGED (this is a DIFFERENT defect shape)",
+      reportWithSigilSpace.overlongAnchorIds.count === report.overlongAnchorIds.count
+      && JSON.stringify(reportWithSigilSpace.overlongAnchorIds.items) === JSON.stringify(report.overlongAnchorIds.items));
+    check("DoD-4 (e708670b) before/after: collidingRecords is UNCHANGED",
+      JSON.stringify(reportWithSigilSpace.collidingRecords) === JSON.stringify(report.collidingRecords));
+    check("DoD-4 (e708670b) before/after: oversizedRecords is UNCHANGED",
+      JSON.stringify(reportWithSigilSpace.oversizedRecords) === JSON.stringify(report.oversizedRecords));
+    check("DoD-4 (e708670b) before/after: sigilSpaceAnchors moves from 0 to exactly 1 — the new signal, and ONLY it, moved",
+      report.sigilSpaceAnchors.count === 0 && reportWithSigilSpace.sigilSpaceAnchors.count === 1);
+    check("computeReport: the sigil-space anchor is reported with the correct file and full matched text",
+      reportWithSigilSpace.sigilSpaceAnchors.items[0]?.file === "packages/daemon/src/fixture.ts"
+      && reportWithSigilSpace.sigilSpaceAnchors.items[0]?.match === "@decision sha: cafebabe");
+
+    // Restore the fixture to the (overlong-only) AFTER state — every remaining check below assumes
+    // `report`'s exact fixture content, re-read from disk (e.g. the computeFileReport hook-path checks).
+    fs.writeFileSync(fixturePath, buildSrc(true));
+  }
+
+  // Card e708670b (lead-requested widening): the IDENTICAL before/after step, but with the space BEFORE
+  // the sigil's colon instead — the shape the lead independently re-verified was still silent under the
+  // FIRST version of this check. Proves the widened computeReport-level detection, not just the pure
+  // findSigilSpaceAnchors unit above, and re-asserts every DoD-4 invariant against the real fixture.
+  {
+    const sigilSpaceBeforeLine = "\n\n// @decision sha :cafebabe — card e708670b: a space before the sigil colon";
+    fs.writeFileSync(fixturePath, buildSrc(true) + sigilSpaceBeforeLine);
+    const reportWithSigilSpaceBefore = computeReport(REPO, { minLines: 15 });
+
+    check("DoD-4 (e708670b widening) before/after: totalAnchorSites is UNCHANGED by adding the before-colon sigil-space anchor",
+      reportWithSigilSpaceBefore.totalAnchorSites === report.totalAnchorSites);
+    check("DoD-4 (e708670b widening) before/after: orphanAnchors is UNCHANGED",
+      reportWithSigilSpaceBefore.orphanAnchors.count === report.orphanAnchors.count
+      && JSON.stringify(reportWithSigilSpaceBefore.orphanAnchors.items) === JSON.stringify(report.orphanAnchors.items));
+    check("DoD-4 (e708670b widening) before/after: brokenAnchors is UNCHANGED",
+      reportWithSigilSpaceBefore.brokenAnchors.count === report.brokenAnchors.count
+      && JSON.stringify(reportWithSigilSpaceBefore.brokenAnchors.items) === JSON.stringify(report.brokenAnchors.items));
+    check("DoD-4 (e708670b widening) before/after: overlongAnchorIds is UNCHANGED (this is a DIFFERENT defect shape)",
+      reportWithSigilSpaceBefore.overlongAnchorIds.count === report.overlongAnchorIds.count
+      && JSON.stringify(reportWithSigilSpaceBefore.overlongAnchorIds.items) === JSON.stringify(report.overlongAnchorIds.items));
+    check("DoD-4 (e708670b widening) before/after: collidingRecords is UNCHANGED",
+      JSON.stringify(reportWithSigilSpaceBefore.collidingRecords) === JSON.stringify(report.collidingRecords));
+    check("DoD-4 (e708670b widening) before/after: oversizedRecords is UNCHANGED",
+      JSON.stringify(reportWithSigilSpaceBefore.oversizedRecords) === JSON.stringify(report.oversizedRecords));
+    check("DoD-4 (e708670b widening) before/after: sigilSpaceAnchors moves from 0 to exactly 1 for the before-colon shape too",
+      report.sigilSpaceAnchors.count === 0 && reportWithSigilSpaceBefore.sigilSpaceAnchors.count === 1);
+    check("computeReport: the before-colon sigil-space anchor is reported with the correct file and full matched text",
+      reportWithSigilSpaceBefore.sigilSpaceAnchors.items[0]?.file === "packages/daemon/src/fixture.ts"
+      && reportWithSigilSpaceBefore.sigilSpaceAnchors.items[0]?.match === "@decision sha :cafebabe");
+
+    // Restore the fixture to `report`'s exact content for every remaining check below.
+    fs.writeFileSync(fixturePath, buildSrc(true));
+  }
+
   check("computeReport: fixture-test.mjs under test/ is excluded from the sweep (filesScanned === 1)", report.filesScanned === 1);
   check("computeReport: the 20-line unanchored block is flagged", report.unanchoredLongBlocks.count === 1
     && report.unanchoredLongBlocks.items[0]?.length === 20);
@@ -565,6 +743,33 @@ try {
       !("collidingRecords" in fileReport));
   }
 
+  // Card e708670b DoD-3: does the LIVE per-file hook also surface a sigil-space anchor (either side of the
+  // colon), or only the CLI scan? Answer: both — computeFileReport runs the same per-line
+  // findSigilSpaceAnchors over the file.
+  {
+    const fixturePath = path.join(REPO, "packages", "daemon", "src", "fixture.ts");
+    const sigilSpaceLine = "\n\n// @decision sha: cafebabe — card e708670b: a space after the sigil colon";
+    fs.writeFileSync(fixturePath, buildSrc(true) + sigilSpaceLine);
+    const fileReport = computeFileReport(REPO, fixturePath, fs.readFileSync(fixturePath, "utf8"));
+    check("computeFileReport (the live PostToolUse hook path): the after-colon sigil-space anchor is flagged too",
+      fileReport?.sigilSpaceAnchors?.length === 1
+      && fileReport.sigilSpaceAnchors[0]?.match === "@decision sha: cafebabe");
+    // Restore the fixture to `report`'s exact content for anything else that re-reads it below.
+    fs.writeFileSync(fixturePath, buildSrc(true));
+  }
+
+  {
+    const fixturePath = path.join(REPO, "packages", "daemon", "src", "fixture.ts");
+    const sigilSpaceBeforeLine = "\n\n// @decision sha :cafebabe — card e708670b widening: a space before the sigil colon";
+    fs.writeFileSync(fixturePath, buildSrc(true) + sigilSpaceBeforeLine);
+    const fileReport = computeFileReport(REPO, fixturePath, fs.readFileSync(fixturePath, "utf8"));
+    check("computeFileReport (the live PostToolUse hook path): the before-colon sigil-space anchor is flagged too",
+      fileReport?.sigilSpaceAnchors?.length === 1
+      && fileReport.sigilSpaceAnchors[0]?.match === "@decision sha :cafebabe");
+    // Restore the fixture to `report`'s exact content for anything else that re-reads it below.
+    fs.writeFileSync(fixturePath, buildSrc(true));
+  }
+
   // DoD-3: N is configurable — a smaller minLines flags what the default doesn't, a larger one flags less.
   const strict = computeReport(REPO, { minLines: 5 });
   const lax = computeReport(REPO, { minLines: 100 });
@@ -583,8 +788,11 @@ console.log(failures === 0
     + "wrapped) anchor in both the CLI scan and the live per-file hook, flags a record over "
     + "PER_RECORD_MAX_BYTES (read from decision-records.mjs, not a hand-copied number), flags two "
     + "record files sharing an id, naming every candidate and which one resolveRecord() actually wins "
-    + "(store precedence, then alphabetically-first within that store), and flags a same-line over-long "
-    + "hex anchor id (a verbatim 40-hex sha paste) in both the CLI scan and the live per-file hook, with "
-    + "orphanAnchors/brokenAnchors/collidingRecords/oversizedRecords/totalAnchorSites unmoved by it."
+    + "(store precedence, then alphabetically-first within that store), flags a same-line over-long "
+    + "hex anchor id (a verbatim 40-hex sha paste) in both the CLI scan and the live per-file hook, and "
+    + "flags a sha sigil with whitespace adjacent to its colon on either side or both (e.g. \"sha: deadbeef\", "
+    + "\"sha :deadbeef\", or \"sha : deadbeef\") in both the CLI scan and the live per-file hook, with "
+    + "orphanAnchors/brokenAnchors/overlongAnchorIds/collidingRecords/oversizedRecords/totalAnchorSites "
+    + "unmoved by any of it."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

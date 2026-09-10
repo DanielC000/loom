@@ -24,7 +24,7 @@
 // `posttooluse-hook-honors-additionalcontext-not-systemmessage` and decision-records.mjs's own header for
 // the full method.
 //
-// Seven checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
+// Eight checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
 //   1. unanchoredLongBlocks — a contiguous comment block >= `minLines` (default DEFAULT_MIN_LINES) with
 //      no `@decision <id>` anywhere in it. The "narrative is regrowing in source" signal.
 //   2. orphanAnchors — an `@decision <id>` whose id resolves to no record in ANY of the three stores this
@@ -75,6 +75,23 @@
 //      scan and the per-file hook, same ground as brokenAnchors — it needs only the one file already being
 //      scanned. ⛔ Does NOT catch a same-line id that's merely too SHORT (e.g. "@decision 12ab") — a
 //      different, rarer shape outside this card's DoD, the same carve-out `BROKEN_ANCHOR_RE` already states.
+//   8. sigilSpaceAnchors (card e708670b) — a `sha:` sigil with one or more whitespace characters adjacent
+//      to its colon, on EITHER side (or both): after the colon, before it, or both. `ANCHOR_RE`'s `sha:`
+//      alternative requires the colon to sit directly between the literal `sha` and the hex run with NO
+//      intervening whitespace on either side, and the bare alternative can't match either (the literal
+//      text "sha" isn't hex) — so, exactly like `overlongAnchorIds` above, this shape produces no anchor,
+//      no orphanAnchors entry, no brokenAnchors entry (EOL-only, a different shape), no overlongAnchorIds
+//      entry (that pattern also requires the hex to immediately follow the sigil): silent, total no-op.
+//      Filed after card afc56dcc's own worker fixed only the over-long-id shape and the lead approved it
+//      without noticing the same card had named a second shape too; WIDENED from an after-the-colon-only
+//      check to cover both sides after the lead independently re-verified, first-party, that a space
+//      BEFORE the colon is ALSO silent and was left uncaught by the first version of this check — closing
+//      that gap in the same pass rather than leaving a second documented-but-unhandled shape on a card
+//      about exactly that failure mode. Runs in BOTH the CLI scan and the per-file hook, same ground as
+//      brokenAnchors/overlongAnchorIds — it needs only the one file already being scanned. ⛔ Does NOT
+//      catch a same-line id that's too SHORT after/before the space (a different, rarer shape, the same
+//      carve-out every other check in this file already states) — requires 8+ hex chars, mirroring
+//      `overlongAnchorIds`'s own `{8,}`-vs-well-formed-length distinction.
 //
 // A <= GUARD_MAX_LINES-line block that DOES carry an anchor is the convention's TARGET STATE (Class A: a
 // short guard/prohibition, permanently inline) and is counted separately as `guardClassBlocks` — it is
@@ -187,6 +204,41 @@ const BROKEN_ANCHOR_RE = /@decision\b\s*$/i;
 // (that's BROKEN_ANCHOR_RE above) and does NOT catch a same-line id that's merely too SHORT (e.g.
 // "@decision 12ab") — a different, rarer shape outside this card's DoD.
 const OVERLONG_ANCHOR_ID_RE = /@decision\s+(sha:)?([0-9a-f]{9,})\b/gi;
+
+// Card e708670b: a FOURTH anchor-shape defect, named in the SAME originating card (afc56dcc) as
+// OVERLONG_ANCHOR_ID_RE above but shipped unhandled the first time — the lead approved that fix without
+// noticing the card had listed two shapes. This one is a `sha:` sigil with one or more whitespace
+// characters adjacent to its colon — AFTER it, BEFORE it, or both (e.g. a decision-anchor line reading,
+// right after the keyword, "sha" then a space then the colon, or the colon then a space then the hex run,
+// instead of the colon sitting directly between "sha" and the hex with nothing in between).
+// `ANCHOR_RE`'s `sha:` alternative requires the colon to sit directly between the literal "sha" and the
+// hex run with NO intervening whitespace on either side, and the bare alternative can't match either (the
+// literal text "sha" isn't hex) — so there is no position in the line the global scan can match, and the
+// anchor vanishes: no anchor, no orphanAnchors entry, no brokenAnchors entry (EOL-only, a different
+// shape), no overlongAnchorIds entry (that pattern also requires the hex to immediately follow the
+// sigil): silent, total no-op.
+// Matches ANY hex run of 8+ chars adjacent to the malformed sigil (not just exactly 8), so a combined
+// space-AND-overlong paste is also caught by this one pattern rather than needing a second.
+// WIDENED (still card e708670b) from an after-the-colon-only check to cover BOTH sides: the lead
+// independently re-verified my original after-only version, first-party, in the same Node session
+// (positive-controlled against the two well-formed forms) and found the space-BEFORE-the-colon shape is
+// ALSO silent under `ANCHOR_RE` and was NOT caught by the after-only version — leaving a second
+// documented-but-unhandled silent shape on a card filed specifically because a documented shape shipped
+// unhandled once already. Requiring at least one whitespace character adjacent to the colon (never
+// `\s*` on both sides, which would also match the well-formed form) is what keeps a well-formed `sha:`
+// anchor resolving normally while catching every whitespace placement around it.
+// Repo-wide sweep (worker card e708670b DoD-1, base sha 6550f347 for the after-only version; re-swept
+// after widening, 2026-09-10): this pattern returns ZERO real hits against every one of this repo's 484
+// `@decision` occurrences across 328 SOURCE_ROOTS files, both before and after the widening — MEASURED,
+// not inferred (matches this card's own hypothesis: both shapes need a hand-typed space, so neither has
+// existing damage to repair). Positive-controlled first (this exact pattern, run against synthetic
+// fixture lines) in every configuration required by the card: space-after-only, space-before-only, space
+// both sides, a tab either side, double-space either side, and space-plus-overlong all matched; a
+// well-formed sigil'd anchor (no space either side) and a well-formed bare anchor did not.
+// ⛔ Scope, stated plainly: does NOT catch a same-line id that's too SHORT after/before the space (a
+// different, rarer shape — mirrors every other too-short carve-out in this file, and mirrors
+// `overlongAnchorIds`'s own `{8,}` cutoff for the identical reason).
+const SIGIL_SPACE_RE = /@decision\s+sha(?:\s+:\s*|:\s+)([0-9a-f]{8,})\b/gi;
 const FLAT_STORES = ["adr", "decisions"];
 
 // Default N (DoD-3): justified against THIS repo's OWN measured block-length distribution (OBSERVED —
@@ -318,6 +370,23 @@ export function findOverlongAnchorIds(lines) {
   lines.forEach((line, i) => {
     for (const m of line.matchAll(OVERLONG_ANCHOR_ID_RE)) {
       found.push({ line: i + 1, ns: m[1] ? "sha" : "card", match: m[0] });
+    }
+  });
+  return found;
+}
+
+/** Every same-line `sha`-sigil'd anchor with whitespace adjacent to its colon, on either side or both
+ * (card e708670b) — invisible to every other check (see `SIGIL_SPACE_RE`'s own doc for the full mechanism
+ * and scope carve-outs). `match` carries the full matched text (verbatim), same convention as
+ * `findOverlongAnchorIds`. There is no `ns` field here (unlike `findOverlongAnchorIds`) — every match is
+ * necessarily a malformed `sha` sigil by construction (the pattern requires the literal `sha` token plus a
+ * colon with adjacent whitespace), so there's nothing to discriminate. Independent of comment-block
+ * grouping, same as the other per-line finders above. */
+export function findSigilSpaceAnchors(lines) {
+  const found = [];
+  lines.forEach((line, i) => {
+    for (const m of line.matchAll(SIGIL_SPACE_RE)) {
+      found.push({ line: i + 1, match: m[0] });
     }
   });
   return found;
@@ -490,7 +559,7 @@ export function bucketDistribution(blocks) {
 }
 
 /**
- * Scan `repoRoot` and compute all seven checks plus the calibration distribution. Never throws on a
+ * Scan `repoRoot` and compute all eight checks plus the calibration distribution. Never throws on a
  * violation being found — violations are just data in the returned report (DoD-1/2: warn-only, with the
  * count reported). `opts.minLines` overrides `DEFAULT_MIN_LINES` (DoD-3: N is configurable).
  */
@@ -501,6 +570,7 @@ export function computeReport(repoRoot, opts = {}) {
   const allAnchors = [];
   const allBroken = [];
   const allOverlong = [];
+  const allSigilSpace = [];
 
   for (const file of files) {
     let raw;
@@ -510,6 +580,7 @@ export function computeReport(repoRoot, opts = {}) {
     for (const a of findFileAnchors(lines)) allAnchors.push({ ...a, file });
     for (const b of findBrokenAnchors(lines)) allBroken.push({ ...b, file });
     for (const o of findOverlongAnchorIds(lines)) allOverlong.push({ ...o, file });
+    for (const s of findSigilSpaceAnchors(lines)) allSigilSpace.push({ ...s, file });
   }
 
   const records = listRecordIds(repoRoot);
@@ -565,6 +636,10 @@ export function computeReport(repoRoot, opts = {}) {
       count: allOverlong.length,
       items: allOverlong.map((o) => ({ file: relPath(repoRoot, o.file), line: o.line, ns: o.ns, match: o.match })),
     },
+    sigilSpaceAnchors: {
+      count: allSigilSpace.length,
+      items: allSigilSpace.map((s) => ({ file: relPath(repoRoot, s.file), line: s.line, match: s.match })),
+    },
     oversizedRecords: {
       count: oversizedRecords.length,
       maxBytes: PER_RECORD_MAX_BYTES,
@@ -598,9 +673,11 @@ export function isInScope(repoRoot, filePath) {
 }
 
 /**
- * The hook's actual per-file check: checks (1) unanchoredLongBlocks, (2) orphanAnchors, and (4) brokenAnchors
- * — see this file's header for why (3) orphanRecords and (5) oversizedRecords are deliberately excluded —
- * scoped to ONE file's already-read `content`, never a repo walk. `listRecordIds` is the only filesystem cost beyond the one file read: a
+ * The hook's actual per-file check: checks (1) unanchoredLongBlocks, (2) orphanAnchors, (4) brokenAnchors,
+ * (7) overlongAnchorIds, and (8) sigilSpaceAnchors — see this file's header for why (3) orphanRecords,
+ * (5) oversizedRecords, and (6) collidingRecords are deliberately excluded (all three need the whole repo's
+ * record/anchor corpus, not just this one file) — scoped to ONE file's already-read `content`, never a
+ * repo walk. `listRecordIds` is the only filesystem cost beyond the one file read: a
  * `readdirSync` of up to three small `docs/<kind>` directories (a handful of entries each in this repo
  * today), not a source-tree scan — see this function's own doc in `computeReport` above for why it's cheap.
  * Returns `null` for a file outside `isInScope`'s scope; otherwise a report shaped for `formatHookMessage`
@@ -617,6 +694,7 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
   const anchors = findFileAnchors(lines);
   const broken = findBrokenAnchors(lines);
   const overlong = findOverlongAnchorIds(lines);
+  const sigilSpace = findSigilSpaceAnchors(lines);
   const unanchoredLong = blocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
 
   const recordIdSet = new Set(listRecordIds(repoRoot).map((r) => r.id));
@@ -634,6 +712,7 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
     orphanAnchors: [...orphanAnchorsById.values()].map((a) => ({ id: a.id, ns: a.ns, line: a.line })),
     brokenAnchors: broken.map((b) => ({ line: b.line })),
     overlongAnchorIds: overlong.map((o) => ({ line: o.line, ns: o.ns, match: o.match })),
+    sigilSpaceAnchors: sigilSpace.map((s) => ({ line: s.line, match: s.match })),
   };
 }
 
@@ -656,12 +735,17 @@ export function formatHookMessage(report) {
     lines.push(`${report.overlongAnchorIds.length} over-long @decision anchor id(s) in ${report.file} (9+ hex chars on the SAME line — likely a verbatim 40-hex git sha pasted where an 8-hex prefix belongs; the anchor is NOT detected and its record silently becomes an orphan):`);
     for (const o of report.overlongAnchorIds) lines.push(`  - ${report.file}:${o.line} — ${o.match}`);
   }
+  if (report.sigilSpaceAnchors.length) {
+    lines.push(`${report.sigilSpaceAnchors.length} @decision anchor(s) in ${report.file} with whitespace adjacent to the sha sigil's colon, before it, after it, or both (e.g. "sha: deadbeef" or "sha :deadbeef") — the anchor is NOT detected and its record silently becomes an orphan:`);
+    for (const s of report.sigilSpaceAnchors) lines.push(`  - ${report.file}:${s.line} — ${s.match}`);
+  }
   return `comment-anchor-lint (CLAUDE.md comment taxonomy, card 90b19799) flagged ${report.file}:\n${lines.join("\n")}\n`
     + `Advisory only: a long unanchored block may want "// @decision <id> — <the prohibition/consequence>" `
     + `(<=3 lines) plus an out-of-band record in docs/adr or docs/decisions; an orphan anchor needs a matching `
     + `record file; a broken anchor needs "@decision <id>" kept together on one line, never wrapped; an `
     + `over-long anchor id needs trimming to the 8-hex prefix (\`git rev-parse --short=8\`, or manually take `
-    + `the first 8 chars of the full sha).`;
+    + `the first 8 chars of the full sha); a sigil-space anchor needs the whitespace after "sha:" removed so `
+    + `it directly precedes the hex id.`;
 }
 
 /**
@@ -715,7 +799,8 @@ async function runHook(repoRootArg) {
 
   const report = computeFileReport(repoRoot, filePath, content);
   if (!report || (report.unanchoredLongBlocks.length === 0 && report.orphanAnchors.length === 0
-    && report.brokenAnchors.length === 0 && report.overlongAnchorIds.length === 0)) return;
+    && report.brokenAnchors.length === 0 && report.overlongAnchorIds.length === 0
+    && report.sigilSpaceAnchors.length === 0)) return;
 
   const msg = formatHookMessage(report);
   await emitHook({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: msg } });
