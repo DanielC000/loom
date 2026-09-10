@@ -17,3 +17,5 @@ fold-with-notice was costed and found NOT cheap before choosing this: no per-til
 ## Source
 
 Inline comment in `packages/daemon/src/pty/host.ts` (`writeStdinCodex`'s method doc): lines 6906-6932, as of commit `1974444dc94618d380f474192e22edff20215ec5`. Relocated by card `de94a415`; no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+
+A second, mirror site states the same decision from the OTHER side: `codexAsciiFold`'s own JSDoc in `packages/daemon/src/pty/codex-host.ts` (card `0e83c855`'s Code Review [3] scoping note) explains why the fold is applied on `submitCodex`'s write and deliberately NOT on `writeStdinCodex`, even though both write through the identical `live.pty.write()` -> conpty -> TUI composer path — a human watching their own keystrokes can see and retype a corrupted paste within seconds; an unattended agent turn cannot. As of commit `41336cdba9e3c80849be6c64c84a8d52c3c06dce`. Relocated by card `e5ee79bb` (tranche 1 on `pty/codex-host.ts`); no wording changed beyond joining wrapped source lines and stripping `*` markers.

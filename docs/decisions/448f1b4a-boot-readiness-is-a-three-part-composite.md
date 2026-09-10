@@ -1,0 +1,19 @@
+# 448f1b4a — codex boot-readiness is a three-part composite, never one function alone
+
+## Narrative
+
+`isCodexReadyMarkerPresent` (Code Review C1 fix) answers only "has codex rendered its main TUI at least once since boot" — a one-time latch checked against the same rolling, multi-chunk `screen` buffer trust-dialog detection uses. It is correctly immune to one trap named in `CODEX_READY_PLACEHOLDER`'s own doc (the placeholder is present during busy too — "landmine #2" — but this function never re-evaluates it as an ongoing idle signal, so that trap cannot fire here) but says nothing about a second, distinct trap: the SAME placeholder also renders in the very first boot frame while the header still reads `model: loading`.
+
+A real merge gate (op `43cd9ec1`) captured exactly that: `isCodexReadyMarkerPresent` alone returned `true` while codex was still genuinely loading, and a submit landed on it. `isCodexModelLoaded` (also this card's fix) closes State 1 by checking whether codex's header has finished resolving its model, i.e. is NOT still showing the transient "model: loading" boot-skeleton text (probe findings.md State 1 vs State 3). `pty/host.ts#spawnCodexProcess`'s onData handler combines BOTH of these with `!live.trustDialogPending` into the full boot-readiness composite (`live.bootReady`) that gates the one-time kickoff delivery AND every other submit — never either function alone. `enqueueStdinCodex`/`drainCodexPending` structurally gate every submit on this composite.
+
+`isCodexModelLoaded`'s own regex must be a POSITIVE match ("model:" followed by something that is not "loading"), not a negated one, to stay safe against the same accumulating scan buffer both functions read. `screen` is stripped via `stripAnsiCsi` BEFORE testing it — never tested raw. This was confirmed against gate `43cd9ec1`'s own real captured bytes (`stripAnsiCsi`'s own doc has the `od -c` verification): codex styles the `model:` line's VALUE token with its own CSI span, separate from the label, and the UNSTRIPPED pattern demonstrably swallows that escape sequence as part of its own `\S+` match — returning TRUE while the model is still genuinely loading, i.e. silently reintroducing this exact card's own defect through the fix meant to close it. This is not a hypothetical: it was reproduced against the real bytes before the strip was added.
+
+## Do not
+
+- Do not treat `isCodexReadyMarkerPresent` alone as a readiness signal — it answers "has the TUI rendered at least once," not "is codex ready for a submit."
+- Do not test `isCodexModelLoaded`'s regex against a raw, unstripped `screen` buffer — codex's own CSI styling around the `model:` value can make an unstripped positive-match regex return true while the model is still loading, reintroducing the exact defect this card fixed.
+- Do not negate `CODEX_MODEL_LOADED_RE` into a "not loading" pattern — it must stay a positive "model: <resolved>" match to stay safe against the accumulating scan buffer.
+
+## Source
+
+Inline comments in `packages/daemon/src/pty/codex-host.ts`: the JSDoc above `isCodexReadyMarkerPresent` and the JSDoc above `isCodexModelLoaded`, as of commit 41336cdba9e3c80849be6c64c84a8d52c3c06dce. Relocated by card e5ee79bb (tranche 1 on `pty/codex-host.ts`); no wording changed beyond joining wrapped source lines into flowing paragraphs and stripping `*` comment markers.
