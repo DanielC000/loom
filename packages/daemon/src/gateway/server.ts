@@ -2044,30 +2044,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true, grants: deps.db.listCompanionCapabilityGrantsForSession(sessionId) };
   });
 
-  // --- Companion CONVERSATION-PRESERVING RESPAWN (Framework §6): a grant write above takes effect on the
-  // companion's NEXT respawn — NOT because the server is stale (`OrchestrationMcpRouter.buildServer` is
-  // stateless per MCP request and re-reads the grant table fresh on every call, so a revoke/downgrade is
-  // already live with no respawn), but because the running companion PROCESS only ever fetches `tools/list`
-  // once, at startup, so it has no way to discover a newly-granted tool it never asked for. This is that
-  // respawn, on demand: stop the OLD process and `--resume <engineSessionId>` a fresh one under the
-  // re-resolved capability surface, so the SAME conversation thread continues. HUMAN-ONLY loopback REST, INTENTIONALLY NO MCP path (same trust
-  // posture as every other companion writer above) — an injection-exposed companion agent must never
-  // trigger its OWN respawn. NOT auto-fired from a grant write above: a respawn has a brief availability
-  // gap (the old process stopping before the new one is ready), so the owner picks WHEN. That gap is
-  // handled gracefully: CompanionController.upgrade serializes on the SAME reconcile chain as every other
-  // companion lifecycle op (so it can't interleave with a concurrent teardown/start of this session — and,
-  // load-bearing, so the exit event the respawn itself triggers doesn't leave the companion's gateway/
-  // heartbeat/reminders/chat_reply torn down once the fresh pty comes back — see onSessionExit's stale-exit
-  // guard). An inbound chat message that lands mid-gap is captured and redelivered onto the fresh process
-  // (SessionService.upgradeCompanionCapabilities' flushPending drain), not lost to the old process's FIFO
-  // wipe on exit. Card d88163b7 (CR fix): that gap now starts EARLIER than the old process actually
-  // stopping — a BUSY turn first gets a short bounded wait (up to `UPGRADE_BUSY_WAIT_MS`, ~3s) to finish on
-  // its own, with the pty's drain surface HELD (`holdDrain`/`releaseDrain`) for the wait's full duration so
-  // neither the turn ending mid-wait nor a fresh inbound message can slip into an active turn the
-  // subsequent `pty.stop()` would then kill uncapturably. So the recoverable window is now the WHOLE
-  // upgrade sequence (wait + stop), not just the post-stop teardown — the one genuinely unrecoverable
-  // sliver left is the same as before: a message landing in the exact instant the old process actually
-  // dies, well under a second, never "never."
+  // Companion CONVERSATION-PRESERVING RESPAWN (Framework §6). HUMAN-ONLY loopback REST, INTENTIONALLY NO
+  // MCP path (same trust posture as every other companion writer above) — an injection-exposed companion
+  // agent must never trigger its OWN respawn; the owner alone picks WHEN (never auto-fired from a grant
+  // write above). LOAD-BEARING: CompanionController.upgrade serializes on the SAME reconcile chain as every
+  // other companion lifecycle op, so it can't interleave with a concurrent teardown/start of this session —
+  // the exit event the respawn itself triggers must not leave the companion's gateway/heartbeat/reminders/
+  // chat_reply torn down once the fresh pty comes back (see onSessionExit's stale-exit guard).
+  // @decision d88163b7 — the stop-old/resume-new mechanism, the availability-gap message preservation, and
+  // the busy-wait/drain-hold CR fix are recorded there (sourced from sessions/service.ts); this route's own
+  // comment restated the same facts and added nothing new, so nothing here extends that record.
   app.post("/api/companion/:sessionId/upgrade", async (req, reply) => {
     const sessionId = (req.params as { sessionId: string }).sessionId;
     const r = resolveCompanionAgent(sessionId);
@@ -5034,10 +5020,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // (mcp/questionTool.ts's resolveQuestionForAgent), which calls getActiveTurnOwnerText directly. And
     // (card 018ce1db) it can no longer reach a Companion session's own ownerText slot at all — see the
     // role-gate immediately above.
-    // senderId:HUMAN_COMPOSER_SENDER_ID (card 4458dd9e) — so consecutive composer entries queued while the
-    // recipient is busy coalesce into one turn, matching CLAUDE.md's claim for "a human composer turn" (see
-    // that constant's own doc, pty/host.ts, for why a fixed sentinel is correct here and why it's safe
-    // w.r.t. the Companion Trust Window — this route already refused role:"assistant" above).
+    // @decision 4458dd9e — senderId:HUMAN_COMPOSER_SENDER_ID lets consecutive composer entries queued
+    // while the recipient is busy coalesce into one turn; safe w.r.t. the Companion Trust Window since
+    // this route already refused role:"assistant" above before ever reaching enqueueStdin.
     return reply.send(deps.pty.enqueueStdin(id, text, "human", undefined, undefined, "agent", undefined, text, undefined, HUMAN_COMPOSER_SENDER_ID));
   });
   // One-click graceful wrap-up (card f55bd338). Injects ONE wrap-up turn that tells the session to run
