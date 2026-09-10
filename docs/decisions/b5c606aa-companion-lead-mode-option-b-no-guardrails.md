@@ -16,6 +16,8 @@ Per-capability config is synthesized only where a lever actually reads one (ever
 
 Returns `null` (never an empty-but-truthy scope, mirroring `resolveCompanionGrant`'s own contract) when there are zero live projects, or when `db` doesn't implement `listAllProjects` at all (the same minimal test-double tolerance `resolveCompanionGrant` extends to `listCompanionCapabilityGrantsForSession`).
 
+**`FLEET_OPS_ALERT_CLASSES` (attention-push.ts):** the exclusion above is scoped to the WILDCARD expansion alone, nothing broader. An owner — or any non-lead-mode grant — who explicitly enumerates a fleet-ops class (`merge-gate`/`worker-blocked`/`worker-crashed`/`manager-idle`) in their OWN `alertClasses` config still gets it pushed; only the no-guardrails wildcard flood is trimmed. A future owner opt-back-in toggle would hook exactly where this set is consulted in `resolveConfig` — not built as of this decision, per owner direction: "no toggle now."
+
 ## Do not
 
 - Do not treat lead mode as a mutation of the grant rows — it is a pure runtime supersede; toggling it off must instantly revert to whatever was actually granted.
@@ -25,3 +27,5 @@ Returns `null` (never an empty-but-truthy scope, mirroring `resolveCompanionGran
 ## Source
 
 Inline comments in `packages/daemon/src/companion/capabilities.ts`: `resolveCompanionGrant`'s lead-mode paragraph (was lines 162-169) and `synthesizeLeadModeScope`'s whole top-of-function doc (was lines 216-252), as of this tranche's HEAD. Relocated by card `2e703a3d` (tranche on `companion/capabilities.ts`); no wording changed beyond joining wrapped source lines into flowing paragraphs and stripping `*`/bullet comment markers.
+
+The `FLEET_OPS_ALERT_CLASSES` paragraph above adds `attention-push.ts`'s own doc comment on that constant (commit `ffb9309839`), relocated by card `dc0459d8` — same `d024eda7` ruling, viewed from the consuming file.

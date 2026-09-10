@@ -10,10 +10,9 @@
  * other lever, WITHOUT being mounted by `registerCompanionCapabilities`.
  *
  * MECHANISM: a tail-poll over the durable `orchestration_events` log keyed on `Db.listEventsSince`'s `seq`
- * cursor — NOT sqlite's own `rowid` (CR-caught correctness bug: rows are hard-deleted by
- * deleteProject/deleteSession, and sqlite REUSES a rowid once the row holding the table's current max is
- * gone, which would silently retire the watermark past a reused id and drop a real alert forever; `seq` is
- * a genuine, never-reused, monotonic column — see its doc in db.ts's SCHEMA). Also NOT the single-slot
+ * cursor — NEVER sqlite's own `rowid` (a hard-deleted row's rowid can be REUSED, which would silently
+ * retire the watermark past a reused id and drop a real alert forever; `seq` is never-reused and monotonic
+ * — see its doc in db.ts's SCHEMA). @decision sha:31ca9b5d. Also NOT the single-slot
  * `Db.setEventListener` the alert-webhook emitter (orchestration/alert-webhook.ts) already occupies — that
  * slot can hold only one subscriber, and this watcher needs its OWN per-session watermark anyway (a
  * listener callback has no natural per-companion cursor). Each tick: resolve the grant, gate on
@@ -47,19 +46,11 @@ export const ATTENTION_ALERT_CLASSES = [
 export type AttentionAlertClass = (typeof ATTENTION_ALERT_CLASSES)[number];
 
 /**
- * FLEET-OPS classes — routine day-to-day fleet operations a manager handles autonomously; the owner
- * doesn't need a phone/chat push for each one. Distinct from the remaining OWNER-SIGNAL classes
- * (decision-pending/context-overflow/escalation/usage-limit), which genuinely need the owner's attention.
- *
- * Owner ruling (2026-07-21, escalated via request d024eda7): Companion "lead mode"'s `"*"` wildcard PUSH
- * subscription (synthesizeLeadModeScope, capabilities.ts) excludes these by default — see the `"*"` branch
- * in `resolveConfig` below, the ONE place this list is consulted. Fleet-ops stays fully visible IN-APP:
- * nothing here touches the underlying `orchestration_events` log, board reads, or any other surface — this
- * ONLY narrows what lead mode's wildcard pushes to chat/phone. Deliberately scoped to the WILDCARD
- * expansion alone — an owner (or a non-lead-mode grant) who explicitly enumerates a fleet-ops class in
- * their OWN `alertClasses` config still gets it pushed; only the no-guardrails wildcard flood is trimmed.
- * (A future owner opt-back-in toggle would hook right where this set is consulted below — not built here,
- * per owner direction: "no toggle now.")
+ * FLEET-OPS classes — routine day-to-day fleet operations a manager handles autonomously, distinct from
+ * the remaining OWNER-SIGNAL classes, which genuinely need the owner's attention. Excluded ONLY from
+ * Companion "lead mode"'s `"*"` wildcard PUSH subscription (the `"*"` branch in `resolveConfig` below, the
+ * ONE place this list is consulted) — an explicit `alertClasses` entry naming one of these classes always
+ * still gets pushed, wildcard or not. @decision b5c606aa
  */
 export const FLEET_OPS_ALERT_CLASSES: ReadonlySet<AttentionAlertClass> = new Set(["merge-gate", "worker-blocked", "worker-crashed", "manager-idle"]);
 
@@ -487,12 +478,10 @@ export class AttentionPushWatcher {
    * Every row in `scanned` is TERMINAL by the time this runs — a qualifying row is delivered, a
    * non-qualifying row (wrong class or out of scope) is a PERMANENT skip (never re-classifies differently on
    * a later tick) — so the watermark always advances to the LAST SCANNED row's seq, even when `qualifying`
-   * is empty. Build-review fix: the prior version only advanced past DELIVERED rows, so a run of
-   * ≥EVENT_TAIL_LIMIT consecutive non-qualifying events (routine on a fleet the companion only subscribes a
-   * slice of) left `qualifying` permanently empty and the watermark permanently stuck re-scanning the same
-   * stalled window — attention-push would go silent forever. Only a TRANSIENT defer (rate-limit park /
-   * no-stacking) may hold the watermark, and both of those bail the whole tick BEFORE `scanned` is ever read
-   * (see `tick()`) — so every row that reaches this method is unconditionally consumed.
+   * is empty. Never revert to advancing only past DELIVERED rows — @decision sha:31ca9b5d. Only a TRANSIENT
+   * defer (rate-limit park / no-stacking) may hold the watermark, and both of those bail the whole tick
+   * BEFORE `scanned` is ever read (see `tick()`) — so every row that reaches this method is unconditionally
+   * consumed.
    */
   private tickImmediate(now: Date, qualifying: Qualifying[], scanned: EventWithSeq[]): void {
     if (qualifying.length > IMMEDIATE_BURST_CAP) {
@@ -576,10 +565,9 @@ export class AttentionPushWatcher {
    * Restart-safe watermark seed: the MAX `sourceSeq` across this session's own durable
    * `companion_alert_pushed` events (never replay an alert already pushed), else — a companion that has
    * NEVER pushed one — the current global max event seq (`Db.getMaxEventSeq`), so a brand-new grant fires
-   * nothing for pre-existing backlog and only reacts to activity from this point forward. (KNOWN, ACCEPTED
-   * per Code Review — a companion that has NEVER pushed AND is re-armed after a restart re-seeds to
-   * whatever the CURRENT max is at that moment, not the max at its original start() — a narrow, rare window
-   * mirroring the reminder/heartbeat watchers' own conservative-restart posture; not fixed here.)
+   * nothing for pre-existing backlog and only reacts to activity from this point forward. A never-pushed
+   * companion re-armed after a restart re-seeds to the CURRENT max, not its original start() max — a
+   * narrow, accepted window (@decision sha:31ca9b5d).
    *
    * Also reconstructs `escalationSurfaced` from the SAME scan (no second read, no new table): each
    * `companion_alert_pushed` row's `escalationTaskId`/`escalationSignature` (stamped by `stampEscalation` at
