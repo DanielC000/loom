@@ -55,3 +55,7 @@ The registry block in `composeManagerStartupPrompt` (multi-repo epic `49136451` 
 ### Source (3)
 
 Inline comment in `packages/daemon/src/sessions/manager-prompt.ts` (the `repoBlock` derivation), as of commit `0c32bca8991bf7f8ba387012f7a0ad0c673fda24`. Relocated by card `4c6a1edf` ("manager-prompt.ts, tranche 1"); no wording changed, `//`-prefixed lines joined into a flowing paragraph.
+
+## `repoKey` retarget guard
+
+`repoKey` WRITE is manager/platform-only (`tasks_create`'s is deliberately ungated — a worker's own follow-up is fine). Retargeting is blocked by `checkTaskRepoKeyRebind` while a session holds this task's worktree/branch — wider than a live-process check (`worker_stop`/a rejected merge retains it by design) — else a later confirm could merge into the OLD repo while ship-state scans the NEW, reading permanently never-merged. (`mcp/tasks.ts`, `updateProjectTask`'s repoKey guard, lines 1156-1175.)

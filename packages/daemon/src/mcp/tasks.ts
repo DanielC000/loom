@@ -377,16 +377,13 @@ export function toBoardTasks(tasks: Task[], terminalKey: string | undefined): Bo
  * dropped rows, and (when this call is given an offset/limit) bounds the merged-state enrichment below
  * to whatever rows this call actually returns.
  *
- * Every row (summary or full) also carries `merged` (card 9983eed6) — the task's git-derived ship state,
- * or `null` if not proven merged; see {@link getTaskMergedInfo}'s fail-safe contract. ASYNC because that
- * lookup shells out to git, but stays cheap even over an unpaginated per-project call: ONE bounded,
- * cached git-log scan backs every task's O(1) map lookup here, not one git subprocess per task.
+ * Every row (summary or full) also carries `merged` — the task's git-derived ship state, or `null` if
+ * not proven merged; see {@link getTaskMergedInfo}'s fail-safe contract. @decision 9983eed6
  */
 /**
  * The FILTER core shared by {@link listProjectTasks} and {@link countProjectTasks} — applies every
- * column/priority/id/title filter but no pagination, projection, or merged-state enrichment. Split out
- * (card 9798200c) so a counts-only read never pays for the per-task git-derived `merged` lookup just to
- * total up rows it's about to discard.
+ * column/priority/id/title filter but no pagination, projection, or merged-state enrichment.
+ * @decision 9798200c
  */
 function filterProjectTasks(
   db: Db, projectId: string,
@@ -1153,26 +1150,9 @@ export async function updateProjectTask(
       }
     }
   }
-  // repoKey guard (multi-repo epic 49136451, phases 1+2). Three checks, all whole-patch-reject (nothing
-  // written, not even other fields in the same patch — same convention as the held-clear guard below):
-  //  (a) AUTHORITY (code-review ruling): from phase 2 on, repoKey decides which repo a worktree is cut
-  //      from and which gateCommand runs — a DISPATCH decision, and dispatch is the manager's job
-  //      everywhere else in Loom (a worker can't spawn, merge, or redirect). Restrict the WRITE to a
-  //      manager/platform actor; `tasks_create`'s repoKey is deliberately NOT gated here — a worker filing
-  //      a follow-up card on the repo it's already working in is legitimate, this guard is update-only.
-  //  (b) the unknown-key check (shared validator, same as create).
-  //  (c) TASK-SCOPED RETARGET GUARD (phase 2, widened by Code Review Major 1): a worker's worktree is
-  //      physically cut from ONE repo, stamped onto its OWN session (Session.repoKey) at spawn time and
-  //      never re-derived from the task afterward (see that field's doc). Retargeting THIS task's repoKey
-  //      while a session still holds that worktree on disk (or an undeleted branch) would let a LATER
-  //      confirm on that session gate/merge/squash into the OLD repo while ship-state (`resolveMergedInfo`
-  //      above) scans the NEW one — the card would then read as never-merged, permanently, with no error
-  //      anywhere. `checkTaskRepoKeyRebind` checks this WIDER than mere `process_state='live'` (a rejected
-  //      merge or `worker_stop` RETAINS the worktree/branch by design — see its own doc for the reachable
-  //      sequence this closes) and is scoped to THIS task ONLY — unlike the project-wide `repos` registry
-  //      guard, an UNRELATED task's retained worktree must never block this one's retarget. Exempt a
-  //      genuine no-op (the resolved value already matches the task's current repoKey): it changes
-  //      nothing, so it can never cause the divergence this guard exists to prevent.
+  // repoKey guard: three checks, all whole-patch-reject (same convention as the held-clear guard below) —
+  // WRITE is manager/platform-only (a dispatch decision), the shared unknown-key validator, and a
+  // task-scoped retarget guard against a live worktree. @decision 49136451
   if (patch.repoKey !== undefined) {
     if (actor?.role !== "manager" && actor?.role !== "platform") {
       return { error: "repoKey is a dispatch decision — only a manager or the Platform Lead may set it, not a worker" };
@@ -1185,21 +1165,9 @@ export async function updateProjectTask(
     }
     patch = { ...patch, repoKey: check.value };
   }
-  // deferredUntilTaskId guard (card 793ac76d, extended by 022659ac for multiple blockers) — set-time
-  // validation, whole-patch-reject (same convention as the column/repoKey guards above): each non-null
-  // id must resolve to a REAL task on THIS board (full id or an unambiguous prefix —
-  // resolveProjectTaskId), and a self-reference is rejected (a card can't un-defer itself). Each is
-  // normalized to its FULL id before it's written: resolveDeferredEffective's read-time lookup does an
-  // exact-id db.getTask, so a stored prefix would silently fail to resolve later. `null` (explicit clear)
-  // or `undefined` (omit) need no validation — omit is byte-identical to today.
-  //
-  // Accepts either a bare id/prefix OR an array of them (022659ac) — a caller may pass one id the same
-  // way it always could, or several for a card genuinely blocked on more than one thing (the shape
-  // `4458dd9e` needed and didn't have). Resolved ids are de-duped (preserving first-seen order) and, when
-  // exactly one DISTINCT id survives — whether the caller passed a single string, a 1-element array, or
-  // an array of duplicates of the same id — collapsed back to a bare string. This is deliberate, not
-  // cosmetic: it's what keeps a single-blocker write's stored/returned shape byte-identical to every
-  // single-blocker deferral written before this card, regardless of which input shape a caller uses.
+  // deferredUntilTaskId guard — set-time validation, whole-patch-reject: each non-null id must resolve
+  // to a REAL task on THIS board, self-reference rejected, normalized to its FULL id (a stored prefix
+  // would fail read-time exact-id lookup). @decision 793ac76d / @decision 022659ac
   if (patch.deferredUntilTaskId !== undefined && patch.deferredUntilTaskId !== null) {
     const rawIds = Array.isArray(patch.deferredUntilTaskId) ? patch.deferredUntilTaskId : [patch.deferredUntilTaskId];
     if (rawIds.length === 0) {

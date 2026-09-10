@@ -19,3 +19,15 @@ Storage note (db.ts): a single id is still persisted as the bare TEXT value it a
 ## Source
 
 JSDoc comment in `packages/shared/src/types.ts` (`Task.deferredUntilTaskId`'s own doc, the "MULTIPLE blockers" paragraph). Extracted by card 555f817f (tranche 3 on `packages/shared/src/types.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+
+## `updateProjectTask`'s SET-time validation, and why the array shape exists
+
+Card 4458dd9e needed a card blocked on more than one thing and didn't have it — `022659ac` is the array widening that gave it one. At SET time (`updateProjectTask`), resolved ids are de-duped (preserving first-seen order) and, when exactly one DISTINCT id survives — whether the caller passed a single string, a 1-element array, or an array of duplicates of the same id — collapsed back to a bare string. This is deliberate, not cosmetic: it keeps a single-blocker write's stored/returned shape byte-identical to every single-blocker deferral written before this card, regardless of which input shape a caller uses.
+
+### Do not (2)
+
+- Do not skip de-duping before collapsing to a bare string — a caller passing duplicate ids of the same blocker must still collapse to the single-blocker shape.
+
+### Source (2)
+
+Inline comment in `packages/daemon/src/mcp/tasks.ts` (`updateProjectTask`'s `deferredUntilTaskId` guard), lines 1188-1202 as of this tranche's HEAD ("docs(tasks): extract decision prose from mcp/tasks.ts, tranche 2"). Relocated by this card; wrapped source lines joined into a flowing paragraph, `//` comment markers stripped, no wording changed.
