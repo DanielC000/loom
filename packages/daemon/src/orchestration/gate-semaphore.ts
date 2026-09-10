@@ -2,104 +2,39 @@
  * Daemon-global, in-memory concurrency limiter for HEAVY, daemon-EXECUTED gate runs — the
  * merge-confirm gate (`confirmWorkerMerge`), the scoped-deploy gate (`deployOwnProject`), and the worker
  * DoD self-check (`runWorkerGate` / the `run_gate` tool), all of which invoke `runGateSequential` with an
- * arbitrary human-set build/test command. Bounds how many can run AT ONCE across every project, so N
- * concurrent gate calls can't pile up heavy build/test processes and starve a live sibling service on a
- * self-hosting host (card 301d8c01) — today that's enforced only by manager discipline (sequencing merges
- * by hand), not code.
+ * arbitrary human-set build/test command. Bounds how many can run AT ONCE across every project.
+ * @decision 301d8c01 — today that's enforced only by manager discipline (sequencing merges by hand), not
+ *   code (docs/decisions/301d8c01-gate-semaphore-bounds-daemon-global-heavy-gate-concurrency.md)
  *
- * A caller that can't acquire a slot QUEUES (awaits) rather than being rejected — merge correctness is
- * unaffected, it just may wait behind another in-flight gate. This composes cleanly with the existing
- * client-timeout resilience (card fb8df559): `PendingOpRegistry.attach` already wraps the WHOLE
- * `confirmWorkerMerge`/`deploy`/`run_gate` call and degrades to a pending handle once it runs past its
- * sync-wait budget, so a gate that sits queued for a while is handled exactly like a gate that just runs
- * long — no separate handling needed here.
+ * @decision fb8df559 — a caller that can't acquire a slot QUEUES rather than being rejected, composing
+ *   with PendingOpRegistry's client-timeout resilience with no separate handling needed; daemon-local,
+ *   in-memory, no persistence to lose on restart (docs/decisions/fb8df559-worker-list-pendingmerge-is-additive-with-a-placeholder-spawn-row.md)
  *
- * Mirrors `CapQueueRegistry`'s simplicity: daemon-local, in-memory, no persistence. Resetting on a
- * daemon restart is fine — a queued waiter only ever exists inside a live, in-flight call; there is
- * nothing durable to lose.
+ * @decision 24642c3d — PRIORITY QUEUE: `highWaiters` (merge/deploy) drain fully before `lowWaiters` (a
+ *   worker's own `run_gate` self-check), FIFO within each tier; reorders the QUEUE only, no preemption of
+ *   an already-RUNNING gate (docs/decisions/24642c3d-gate-priority-queue-two-tiers-no-preemption.md)
  *
- * PRIORITY QUEUE (card 24642c3d): queued callers wait on TWO tiers — `highWaiters` (merge/deploy) drain
- * fully before `lowWaiters` (a worker's own `run_gate` self-check), FIFO within each tier. This stops a
- * low-priority worker's timing-out `run_gate` retries from head-of-line-blocking a higher-priority merge
- * that arrives later. It reorders the QUEUE only — there is no preemption of an already-RUNNING gate.
+ * @decision a1c86452 — LIVE REGISTRY (the Gates page): every in-flight run also records a small metadata
+ *   `RegistryEntry` so the daemon can enumerate what is currently RUNNING and QUEUED
+ *   (docs/decisions/a1c86452-gate-history-page-enrichment-is-one-join-not-an-n-plus-1.md)
  *
- * LIVE REGISTRY (card a1c86452, the Gates page): alongside the counting/blocking machinery, every
- * in-flight run also records a small metadata `RegistryEntry` so the daemon can enumerate what is
- * currently RUNNING and QUEUED (the Gates page's active lane-hero reads this via
- * `SessionService.snapshotGates`). Each `runExclusive` REQUIRES a {@link GateDescriptor} (a required
- * param, so the compiler forces every call site to supply one — no silent gaps), and the registry entry
- * is added before acquisition and removed in a `finally` that fires on EVERY exit path
- * (admission-then-settle, a `fn` that throws, a `fn` that times out), so a leaked "phantom active gate"
- * can never accumulate.
+ * ⚠️ THE REGISTRY IS NOT PURE METADATA (card 8d585277) — `descriptor.worktreePath` (when set) also
+ * gates ADMISSION via `activeWorktrees` (`acquire`/`admit`/`release`/`grantNext` below), so two runs bound
+ * to the SAME worktree can never both be RUNNING at once. Do not assume it is side-effect-free.
  *
- * ⚠️ AS OF CARD 8d585277 THE REGISTRY IS NO LONGER PURE METADATA — it is also where per-worktree
- * exclusivity is decided: `descriptor.worktreePath` (when set) gates admission via `activeWorktrees`
- * (`acquire`/`admit`/`release`/`grantNext` below), so two runs bound to the SAME worktree can never both
- * be RUNNING at once, regardless of `cap`/tier. This is a deliberate, load-bearing exception to the
- * historical "additive only" framing above — do not assume the registry is side-effect-free just because
- * this comment once said so elsewhere in this file.
+ * @decision 8d585277 — CANCELLATION: a QUEUED entry withdraws with ZERO process risk (`fn` never
+ *   invoked); an ALREADY-RUNNING entry can only be ASKED to stop (`cancelRunning`) — see
+ *   `SessionService.cancelGateOp`/`runWorkerGate` for the actual kill + verified-death tagging
+ *   (docs/decisions/8d585277-gate-cancel-queued-zero-risk-running-worker-only.md)
  *
- * CANCELLATION (card 8d585277): a QUEUED entry can be withdrawn (`cancelQueued`/`cancelQueuedForSession`)
- * with ZERO process risk — `fn` was never invoked, so there is nothing to kill. An ALREADY-RUNNING entry
- * can only be ASKED to stop (`cancelRunning`, aborting its `controller`) — whether it actually does, and
- * how verifiably, is entirely up to what `fn` does with the signal it's handed; this class has no
- * process-level knowledge at all. See `SessionService.cancelGateOp`/`runWorkerGate` for where the actual
- * kill + verified-death tagging happens.
+ * @decision 92e960d1 — PER-REPO MERGE ADMISSION: a second, narrower exclusivity guard on
+ *   `descriptor.repoPath` (`merge`-kind only) via `activeMergeRepos`, composing with the worktree guard
+ *   and priority queue the same way (docs/decisions/92e960d1-per-repo-merge-admission-guard.md)
  *
- * PER-REPO MERGE ADMISSION (card 92e960d1): a SECOND, narrower exclusivity guard alongside the
- * per-worktree one above — `descriptor.repoPath` (set ONLY on a `merge`-kind descriptor, by
- * `confirmWorkerMerge`) gates admission via `activeMergeRepos`, so two `merge`-kind gates targeting the
- * SAME canonical repo can never both be RUNNING at once, regardless of `cap`/tier — closing the class
- * where two same-repo merges race concurrently, one guaranteed to burn a full gate run before aborting at
- * squash (canonical main is a single shared resource; see `mergeBranchLocked`'s `requireCanonicalHead`
- * re-check in git/worktrees.ts). Composes with the worktree guard and the priority queue exactly the same
- * way that guard already does (`mergeRepoFree`, alongside `worktreeFree`, in `acquire`/`grantNext`) — a
- * `worker`/`deploy` gate is structurally unaffected (see `mergeRepoFree`'s own doc), and two merges on
- * DIFFERENT repos are never cross-serialized.
- *
- * ⚠️ SCOPE, MADE EXPLICIT (card 0196ba78 — this is an ADMISSION-time mechanism, not a
- * merge-OPERATION-wide one): the "can never both be RUNNING" claim above binds ONLY to ops that actually
- * reach `acquire`/`admit` via `runExclusive` — anything that never calls `runExclusive` is structurally
- * invisible to `activeMergeRepos` and gets NO protection from this guard. Two real paths reach a squash
- * without ever calling `runExclusive`: a merge-gate REUSE (card e50600d2 — `gateResult = reuseResult ??
- * await this.gateSemaphore.runExclusive(...)`, short-circuited by `??` when a redundant re-gate is
- * skipped) and a GATELESS project/repo (no `gateCommand` configured, so the whole `if (gate)` block in
- * `confirmWorkerMerge` never runs). THIS IS DELIBERATE, not an oversight the way the unqualified claim
- * above initially reads:
- *   - THE JUSTIFYING CLAUSE ABOVE IS LANE LANGUAGE: this guard's own originating commit (`848f55fb`,
- *     2026-08-04) titled the problem "wasting a lane unrelated work could have used." A reuse-path merge
- *     NEVER TAKES A LANE AT ALL — it skips `runExclusive` entirely — so the harm this guard exists to
- *     prevent is one reuse is structurally incapable of causing. That's a category fact, not a scoping
- *     judgement call.
- *   - THE DATING CONFIRMS IT: `e50600d2` (commit `1a779c8f`, 2026-07-29) predates `92e960d1`
- *     (`848f55fb`, 2026-08-04) by six days — this guard was written into a codebase that ALREADY carried
- *     a documented, standing reuse-skip exemption from `runExclusive` (see the reuse producer's own doc
- *     at its `confirmWorkerMerge` call site in service.ts). The boundary drawn here is the mechanism's
- *     natural edge, not a gap that was missed.
- *   - `c24dd48a` (2026-08-05) independently RE-DERIVED the same boundary under review pressure: an
- *     earlier draft of that card called `beginSquash`/`endSquash` unconditionally, review caught that
- *     this let a reuse/gateless op silently delete a DIFFERENT, genuinely-admitted op's still-active hold
- *     (`activeMergeRepos` has no per-op identity), and the shipped fix confines both calls to `gateRan`
- *     — i.e. keeps reuse/gateless permanently outside this mechanism (see that call site's own doc in
- *     service.ts). Two independent derivations of the same boundary is strong evidence it's correct.
- *
- * WHAT ACTUALLY PROTECTS THE EXCLUDED PATHS: not this guard — `requireCanonicalHead`, re-checked INSIDE
- * `mergeBranchLocked`'s own lock (git/worktrees.ts) at squash time, fail-closed. A racing reuse/gateless
- * squash against a genuinely-admitted sibling self-aborts with `gateBaseInvalidated` rather than landing
- * unverified content — this is a throughput/wasted-gate-run gap, NOT a data-loss one.
- *
- * RESIDUAL EXPOSURE, PRECISELY SCOPED — do not round either of these up or down:
- *   - GATELESS: on a project where every binding of a given `repoPath` sets a `gateCommand` (the ordinary
- *     case, and this project's actual configuration), a gateless race can't occur — there's no
- *     gate-running sibling on that repo for a gateless op to race. That is NOT a general guarantee:
- *     `gateCommand` is per-PROJECT, `repoPath` is per-REPO, and nothing prevents two DIFFERENT projects on
- *     the same daemon from binding the SAME repo path with differing gate configuration — in that
- *     arrangement a gateless merge from one project genuinely can race a gate-running merge from the
- *     other. Unreachable on any configuration where every project binding this repo sets a gateCommand;
- *     the residual requires two projects sharing one `repoPath` with differing gate configuration.
- *   - REUSE: has no such conditional escape — it's a live gap under every configuration — but is observed
- *     at n=0 in weeks (card 0196ba78): low OBSERVED frequency on an instrument that can't distinguish
- *     "rare" from "never fires," not asserted-low severity.
+ * @decision 0196ba78 — SCOPE, MADE EXPLICIT: this is an ADMISSION-time mechanism, not a
+ *   merge-OPERATION-wide one — a reuse-path or gateless merge never reaches `runExclusive` and is
+ *   structurally invisible to it, deliberately, not an oversight
+ *   (docs/decisions/0196ba78-per-repo-merge-guard-is-admission-time-not-operation-wide.md)
  */
 
 import type { GateType } from "@loom/shared";
@@ -528,27 +463,14 @@ export class GateSemaphore {
     this.grantNext();
   }
 
-  /** Card b9e07a4a: waiters parked in {@link acquireRepoGuardOnly}, keyed by `repoPath` — entirely
-   *  separate from {@link highWaiters}/{@link lowWaiters}: those two tiers exist to queue for a CAP slot
-   *  (`admit()` always increments `active`), and a repo-guard-only waiter must NEVER consume one — the
-   *  whole point of this primitive is a caller (the `db9b0130` inert-diff skip) that has no gate to run
-   *  and therefore nothing that needs a cap slot at all, only exclusivity against a same-repo sibling
-   *  merge. Reusing the cap-based tiers here would silently re-admit this class of caller through
-   *  `grantNext()`'s `admit()` call and start consuming cap headroom it was never supposed to need.
-   *
-   *  ⚠️ PRIORITY INVERSION, DOCUMENTED (Code Review, card b9e07a4a): {@link freeRepoPath} checks THIS map
-   *  before ever considering `highWaiters` — a repo-guard-only waiter for `repoPath` ALWAYS wins the next
-   *  hand-off over a same-repo `highWaiters` entry, REGARDLESS of arrival order, even one that has been
-   *  queued far longer. This is a deliberate, accepted cost — a repo-guard-only wait is bounded by, at
-   *  worst, another op's own squash, never a full gate run — not a redesign of the existing FIFO/priority
-   *  tiering; `highWaiters`/`lowWaiters`' OWN relative ordering (card 24642c3d) is completely unaffected —
-   *  this inversion exists ONLY between this map and those two tiers, for the SAME contested `repoPath`.
-   *  ⚠️ NO LONGER "near-instant" (Code Review correction, card ac7aad04): that squash used to be a bare
-   *  `mergeBranch` call. Since card ac7aad04's post-guard reclassification, a HOLDER can also perform a
-   *  reap + a real `git merge` + a `git diff` (`isInertMergeDiff`) while holding this same guard, before
-   *  it ever reaches squash — measured ~1.5s typical, bounded worst-case by the caller's `gitOpMs` (15s
-   *  default, `GIT_OP_TIMEOUT_MS` in `git/worktrees.ts`) per git call. Still bounded and safe, just no
-   *  longer sub-second. */
+  /** Waiters parked in {@link acquireRepoGuardOnly}, keyed by `repoPath` — entirely separate from
+   *  {@link highWaiters}/{@link lowWaiters} (card b9e07a4a): those two tiers queue for a CAP slot, and a
+   *  repo-guard-only waiter must NEVER consume one — it has no gate to run at all.
+   *  ⚠️ PRIORITY INVERSION, DELIBERATE (card b9e07a4a): {@link freeRepoPath} checks THIS map before
+   *  `highWaiters` — a repo-guard-only waiter for `repoPath` ALWAYS wins the next hand-off, regardless of
+   *  arrival order; `highWaiters`/`lowWaiters`' own ordering is otherwise unaffected.
+   *  @decision ac7aad04 — this wait is NO LONGER near-instant; a holder can run a real reap + merge + diff
+   *  while holding it (docs/decisions/ac7aad04-repo-guard-only-hold-no-longer-near-instant.md) */
   private readonly repoGuardOnlyWaiters = new Map<string, Array<{ id: string; descriptor: RepoGuardOnlyDescriptor; enqueuedAt: number; resolve: () => void; reject: (err: Error) => void }>>();
 
   /** Card b9e07a4a Code Review: metadata for a repoPath CURRENTLY held via {@link acquireRepoGuardOnly}
@@ -567,29 +489,16 @@ export class GateSemaphore {
    *  admission authority; this exists purely so {@link squashOnlySnapshot} can report it. */
   private readonly squashHolders = new Map<string, SquashHolderEntry>();
 
-  /** Card b9e07a4a: the ONE place `activeMergeRepos` ever actually vacates a `repoPath` — shared by
-   *  {@link release} (a `runExclusive`-admitted merge's own repo hold) and {@link releaseMergeRepoGuard}/
-   *  {@link endSquash} (the same op's LATER, deferred release via `holdRepoGuardOnExit`), and
-   *  {@link acquireRepoGuardOnly}'s own returned release closure.
-   *
-   *  IDENTITY-CHECKED FIRST (Code Review, card b9e07a4a, CRITICAL): `holderId` MUST equal what's currently
-   *  stored for `repoPath` — see {@link activeMergeRepos}'s own doc for the exact cascade an unconfined
-   *  free/hand-off used to allow (a failed-gate or cancelled-while-queued op deleting a live sibling's
-   *  hold). A mismatch is a SAFE NO-OP (logged distinctly as `refused-not-owner`, never a throw — the
-   *  calling `finally` blocks this guards must never fail) — this op does not own whatever is there right
-   *  now, so it must not touch it.
-   *
-   *  Only once identity is confirmed does this check for a queued {@link acquireRepoGuardOnly} waiter for
-   *  this SAME `repoPath`: if one exists, hands the hold DIRECTLY to it — `activeMergeRepos` never
-   *  actually loses the key, it stays continuously present, just re-attributed (to the waiter's OWN
-   *  internally-minted id — see `acquireRepoGuardOnly`'s own doc) in the SAME synchronous turn as the old
-   *  holder's release. This atomicity is load-bearing: it is what makes a race with `acquire()`'s own
-   *  synchronous fast-path check (`this.active < cap && this.worktreeFree(entry) &&
-   *  this.mergeRepoFree(entry)`, called from a DIFFERENT `runExclusive` caller) impossible — that check
-   *  can only ever observe `repoPath` as either "held by the old op" or "held by the new one", never a
-   *  genuinely-free instant a third caller could slip into. Only once no repo-guard-only waiter is queued
-   *  does this actually delete the key, leaving `repoPath` genuinely free for `grantNext()`'s own
-   *  cap-based scan (called by every caller of this method, same as before this existed) to pick up. */
+  /** @decision b9e07a4a — the ONE place `activeMergeRepos` ever actually vacates a `repoPath`, shared by
+   *  {@link release}/{@link releaseMergeRepoGuard}/{@link endSquash}/{@link acquireRepoGuardOnly}'s own
+   *  release closure. IDENTITY-CHECKED FIRST (CRITICAL): `holderId` MUST equal what's currently stored, or
+   *  it's a SAFE NO-OP, logged `refused-not-owner`, never a throw
+   *  (docs/decisions/b9e07a4a-repoguardonlyqueueentry-exists-and-hides-repopath.md).
+   *  ⚠️ Once identity is confirmed, a queued {@link acquireRepoGuardOnly} waiter for the SAME `repoPath`
+   *  is handed the hold DIRECTLY, in the SAME synchronous turn — `activeMergeRepos` never actually loses
+   *  the key. This atomicity is load-bearing: it is what makes a race with `acquire()`'s own synchronous
+   *  fast-path check impossible. Only once no repo-guard-only waiter is queued is the key actually deleted,
+   *  leaving `repoPath` free for `grantNext()`'s own cap-based scan to pick up. */
   private freeRepoPath(repoPath: string, holderId: string, releasingOpId: string | undefined, releasingSite: string): void {
     const current = this.activeMergeRepos.get(repoPath);
     if (current !== holderId) {
@@ -764,33 +673,10 @@ export class GateSemaphore {
     return false;
   }
 
-  /** Card c24dd48a: mark `repoPath` as squash-in-flight for merge-admission purposes — the counterpart to
-   *  {@link endSquash}/{@link releaseMergeRepoGuard}, extending a `runExclusive`-admitted merge's own hold
-   *  (already taken at admission via `admit`, kept alive past the gate's own settle by `holdRepoGuardOnExit`
-   *  — see `runExclusive`'s own doc) across `confirmWorkerMerge`'s subsequent `mergeBranch` call.
-   *
-   *  CALLER CONTRACT, NOT MERELY "SAFE TO CALL": `confirmWorkerMerge` calls this ONLY when `gateRan` is
-   *  true — i.e. ONLY for an op that actually went through `this.gateSemaphore.runExclusive(...)` this
-   *  invocation (`gateRan = !reuseResult`, a provable proxy — see that call site's own doc). The REUSE path
-   *  (card e50600d2, `reuseResult` set — its `??` short-circuits `runExclusive` entirely) and a GATELESS
-   *  project/repo (`gate` falsy — never reaches a `runExclusive` call at all) DELIBERATELY NEVER call this;
-   *  those two paths get NO admission-level protection from this mechanism, unchanged from before this
-   *  card — `requireCanonicalHead` (inside `mergeBranch`'s own lock) is what protects them, exactly as it
-   *  always has — see the standing TOCTOU note on `confirmWorkerMerge`'s reuse producer.
-   *
-   *  Card b9e07a4a Code Review: NO LONGER MUTATES {@link activeMergeRepos} AT ALL — an earlier version
-   *  `.add()`-ed unconditionally, which under the (then-unidentified) IDENTITY gap could silently
-   *  overwrite a correctly-stored `entry.id` fallback identity with this call's own `opId`, corrupting the
-   *  ACTUAL holder's stored identity for a caller that never supplied a matching `opId` at admission. The
-   *  hold's continuity is ALREADY fully guaranteed by `admit()` + `holdRepoGuardOnExit`'s release-skip
-   *  (see `runExclusive`'s own doc) — there is nothing left for this call to acquire. It is now a
-   *  VALIDATED marker only: logs the expected reaffirmation on a match, and a distinct
-   *  `beginSquash-identity-mismatch` line (never a throw — this guards a `finally`-adjacent call site) on
-   *  a mismatch, which should never happen in correct usage and is worth surfacing if it ever does.
-   *
-   *  `opId` is now REQUIRED (Code Review, card b9e07a4a) — it is the identity this call validates against,
-   *  not merely forensics; every real call site already supplies the SAME `opId` used on the originating
-   *  `GateDescriptor` (see that field's own doc). */
+  /** @decision c24dd48a — mark `repoPath` as squash-in-flight, extending a `runExclusive`-admitted
+   *  merge's own hold across `confirmWorkerMerge`'s subsequent `mergeBranch` call. Called ONLY when
+   *  `gateRan` is true — a reuse or gateless merge NEVER calls this (see 0196ba78); VALIDATED marker only,
+   *  does not mutate {@link activeMergeRepos} (docs/decisions/c24dd48a-holdrepoguardonexit-extends-a-merges-repo-hold-across-its-own-squash.md) */
   beginSquash(repoPath: string, opId: string): void {
     const current = this.activeMergeRepos.get(repoPath);
     if (current !== opId) {
@@ -800,75 +686,28 @@ export class GateSemaphore {
     this.logRepoGuardMutation("add", repoPath, opId, "beginSquash");
   }
 
-  /** Card c24dd48a: end a `beginSquash` hold (the squash has settled — landed or failed, doesn't matter
-   *  which) and grant the freed repo to the next eligible queued waiter, if any. Same effect as
-   *  {@link releaseMergeRepoGuard} — kept as a distinctly-named pair with {@link beginSquash} purely for
-   *  readability at the call site (begin/end bracketing one squash call), not a different mechanism. Same
-   *  caller contract as {@link beginSquash} — `confirmWorkerMerge` calls this ONLY when `gateRan` is true.
-   *  IDENTITY-CHECKED (card b9e07a4a Code Review) via {@link releaseMergeRepoGuard}'s own `opId` match —
-   *  see {@link activeMergeRepos}'s own doc for the exact cascade this closes: a `gateRan:true` op whose
-   *  gate FAILED (never held anything past its own `release()`) or was cancelled while queued (never held
-   *  anything at all) can now call this unconditionally and safely — it simply won't match whatever (if
-   *  anything) is currently stored, and is refused as a no-op rather than deleting a sibling's live hold.
-   *  `opId` is now REQUIRED — see {@link beginSquash}'s own doc for why. */
+  /** @decision c24dd48a — end a `beginSquash` hold; same effect as {@link releaseMergeRepoGuard}, kept
+   *  as a distinctly-named pair purely for begin/end readability at the call site, not a different
+   *  mechanism (docs/decisions/c24dd48a-holdrepoguardonexit-extends-a-merges-repo-hold-across-its-own-squash.md) */
   endSquash(repoPath: string, opId: string): void {
     this.releaseMergeRepoGuard(repoPath, opId);
   }
 
-  /** Card c24dd48a: explicitly free a per-repo merge-admission guard — see {@link endSquash}'s doc (its
-   *  synonym) for when/why to call this.
-   *
-   *  Card b9e07a4a Code Review (CRITICAL): routed through {@link freeRepoPath} (same as {@link release}),
-   *  IDENTITY-CHECKED against `opId` — an absent key OR a key held by a DIFFERENT identity is a safe
-   *  no-op (never a throw), which is what closes the reviewer's reproduced cascade (see
-   *  {@link activeMergeRepos}'s own doc): a `gateRan:true` op whose gate FAILED, or was cancelled while
-   *  still queued, never actually holds `repoPath` under ITS OWN `opId` — this call correctly refuses to
-   *  touch whatever a DIFFERENT, genuinely-admitted op (or a handed-off repo-guard-only waiter) currently
-   *  holds there instead. On a genuine match: a queued {@link acquireRepoGuardOnly} waiter for this SAME
-   *  repoPath is handed the guard directly instead of ever observing it as free — this is the path a REAL
-   *  merge gate's deferred `holdRepoGuardOnExit` release actually takes (`endSquash`, called well after
-   *  this op's own `release()`), and without this an inert-diff-skip waiter queued behind a real gate's
-   *  squash phase would never be woken.
-   *
-   *  `opId` is now REQUIRED (Code Review, card b9e07a4a) — it is the identity this call validates against,
-   *  not merely forensics (card 96d5f76b) — see {@link beginSquash}'s own doc for the full reasoning. */
+  /** @decision c24dd48a — explicitly free a per-repo merge-admission guard (see {@link endSquash}'s doc,
+   *  its synonym). Routed through {@link freeRepoPath}, IDENTITY-CHECKED against `opId`: an absent key or
+   *  one held by a different identity is a safe no-op, never a throw
+   *  (docs/decisions/c24dd48a-holdrepoguardonexit-extends-a-merges-repo-hold-across-its-own-squash.md) */
   releaseMergeRepoGuard(repoPath: string, opId: string): void {
     this.freeRepoPath(repoPath, opId, opId, "releaseMergeRepoGuard");
     this.grantNext();
   }
 
-  /** Grant exactly ONE freed slot to the next eligible waiter — drains `highWaiters` before touching
-   *  `lowWaiters`, same as before card 8d585277, but WITHIN a tier this no longer blindly `.shift()`s the
-   *  head: it scans for the first waiter whose worktree (if any) isn't STILL held by some other running
-   *  entry AND whose repo (if any, card 92e960d1 — a `merge` gate only) isn't STILL held by some other
-   *  running merge, skipping past a blocked head-of-line waiter to admit a later, eligible one instead —
-   *  the mechanism that makes the per-worktree AND per-repo guards compose with the existing priority
-   *  queue rather than deadlocking behind it. A worktree-less/repo-less waiter is never skipped by either
-   *  check (see `worktreeFree`/`mergeRepoFree`). Grants at most one waiter per call, matching `release()`'s
-   *  own one-slot-freed contract — unchanged from before this card.
-   *
-   *  CAP CHECK (card d9d5057f): gated on `this.lastKnownCap` before scanning any tier — chosen over
-   *  threading a fresh `cap` through every call site because `releaseMergeRepoGuard`/`endSquash` (the
-   *  OTHER caller, invoked standalone from `confirmWorkerMerge`, outside `runExclusive` entirely) has no
-   *  `cap` in scope at all and is a PUBLIC method other code already calls by this exact signature; adding
-   *  a `cap` param there would be a breaking API change for a value this class already tracks. Both
-   *  callers were previously assumed "release-shaped" (called only when a slot had JUST freed, so
-   *  `active` was already `< cap` by construction) — true for `release()` (its own `this.active--` runs
-   *  immediately before this call, in the same synchronous turn) but NOT for `releaseMergeRepoGuard()`:
-   *  it frees a REPO guard, not a cap slot — the cap slot for that same op was already freed earlier, at
-   *  its own `release()` call, and an unrelated op can have consumed that freed slot in the gap between
-   *  the two. A cap-blind grant here would then over-admit past `cap`. `lastKnownCap` is the same
-   *  RESOLVE-LIVE value `runExclusive` already refreshes on every call (see its own doc + the
-   *  `[gate] maxConcurrentGates …` transition log) — reading it here extends that existing liveness
-   *  instead of freezing a cap captured at construction time. `undefined` (no `runExclusive` call has
-   *  ever happened yet) never blocks — unreachable in practice, since `grantNext()` is only ever reached
-   *  from `release()`/`releaseMergeRepoGuard()`, both of which presuppose at least one prior admission
-   *  that already set this.
-   *
-   *  ⚠️ Fixing this gap INVALIDATES a premise card `96d5f76b`'s investigation relied on: reasoning about
-   *  whether a decline at `release()`/`endSquash()` was cap-caused or repo-caused held ONLY because
-   *  `grantNext()` had no cap check. Any conclusion from that investigation resting on that premise needs
-   *  re-deriving now, not assumed to still hold. */
+  /** Grant exactly ONE freed slot to the next eligible waiter — drains `highWaiters` before `lowWaiters`
+   *  (card 8d585277), but WITHIN a tier scans for the first waiter whose worktree/repo (card 92e960d1)
+   *  isn't STILL held elsewhere, skipping a blocked head-of-line waiter rather than deadlocking behind it.
+   *  @decision d9d5057f — gated on `this.lastKnownCap` before scanning: `releaseMergeRepoGuard`/`endSquash`
+   *  is NOT release-shaped like `release()` is, so a cap-blind grant here could over-admit past `cap`
+   *  (docs/decisions/d9d5057f-grantnext-cap-check-releasemergerepoguard-is-not-release-shaped.md) */
   private grantNext(): void {
     if (this.lastKnownCap !== undefined && this.active >= this.lastKnownCap) return;
     for (const tier of [this.highWaiters, this.lowWaiters]) {
@@ -884,62 +723,30 @@ export class GateSemaphore {
 
   /**
    * Run `fn` holding one of `cap` concurrent slots — awaits a slot first (queueing past `cap`, ordered
-   * by `priority`, and past a per-worktree conflict regardless of `cap` — card 8d585277), then releases
-   * it once `fn` settles, whether it resolves or rejects. `cap` is read fresh on every call (mirrors the
-   * "RESOLVE-LIVE" config reads at each call site), so a human PATCH to `orchestration.maxConcurrentGates`
-   * takes effect on the very next gate run with no daemon restart. `priority` defaults to `"high"` so an
-   * untouched/future call site behaves exactly as before card 24642c3d (every caller was implicitly
-   * equal-priority FIFO).
+   * by `priority` (card 24642c3d), and past a per-worktree conflict regardless of `cap` — card 8d585277),
+   * then releases it once `fn` settles. `cap` is read fresh on every call, so a human PATCH to
+   * `orchestration.maxConcurrentGates` takes effect on the very next gate run with no daemon restart.
+   * `priority` defaults to `"high"` (byte-identical to every pre-24642c3d call site).
    *
-   * `fn` receives the entry's admission timestamp (`startedAt`) AND a `cancelSignal` (card 8d585277) —
-   * aborted by {@link cancelRunning} to ask an ALREADY-ADMITTED `fn` to stop; a caller whose `fn` never
-   * reads this second parameter (every pre-8d585277 call site — TS permits a callback to ignore trailing
-   * params) is simply never interruptible this way, byte-identical to before this existed.
+   * `fn` receives: the entry's admission timestamp (`startedAt`); a `cancelSignal` (card 8d585277,
+   * aborted by {@link cancelRunning} to ask an ALREADY-ADMITTED `fn` to stop — an `fn` that ignores it is
+   * simply never interruptible this way); a {@link GateLivenessHooks} (a caller that forwards it into its
+   * own `runGateSequential`/`runGateStep` call lets this entry's `lastOutputAt`/`extended` mirror that
+   * run's real liveness, never a second clock computed here).
    *
    * A QUEUED caller can be cancelled before ever being admitted (see {@link cancelQueued}/
    * {@link cancelQueuedForSession}) — `fn` is NEVER invoked in that case; this method translates that into
-   * a thrown {@link GateCancelledError} instead, so a caller's own try/catch decides how to represent "no
-   * verdict" rather than this class doing it for them.
+   * a thrown {@link GateCancelledError} instead. The registry entry is added up front and deleted in
+   * `finally` (admission-then-settle, a throwing `fn`, and a timing-out `fn` alike), so no in-flight
+   * metadata ever leaks; `release()` is gated on `acquired` so a slot is only released if one was taken.
    *
-   * The registry entry is added up front and deleted in `finally` — which runs on admission-then-settle,
-   * a throwing `fn`, and a timing-out `fn` alike — so no in-flight metadata ever leaks. `release()` is
-   * gated on `acquired` so a slot is only ever released if one was actually taken.
+   * @decision c6750500 — `fn` ALSO receives `getMaxConcurrentGates`, closing over `entry` directly (not a
+   *   registry lookup) so it stays correct after this entry is deleted from {@link registry}
+   *   (docs/decisions/c6750500-getmaxconcurrentgates-closes-over-entry-not-a-registry-lookup.md)
    *
-   * `fn` ALSO receives a third param, {@link GateLivenessHooks} — a caller whose `fn` forwards it into its
-   * own `runGateSequential`/`runGateStep` call lets THIS entry's `lastOutputAt`/`extended` mirror that
-   * run's real liveness (see {@link GateSnapshotEntry.lastOutputAt}'s doc for why this must be a mirror of
-   * the runner's own clock, never a second one computed here). A caller whose `fn` ignores it (ever pre-
-   * existing call site — TS permits a callback to omit trailing params) simply leaves `lastOutputAt` null
-   * and `extended` false forever, byte-identical to before this parameter existed.
-   *
-   * `fn` ALSO receives a fourth param (card c6750500), `getMaxConcurrentGates`: a live getter reading THIS
-   * entry's {@link RegistryEntry.maxConcurrent} directly off the closed-over `entry` object — NOT a
-   * registry lookup by id, which is deliberate: it stays correct even called AFTER this entry has already
-   * been deleted from {@link registry} in the `finally` below (the value is frozen at that point anyway,
-   * since no further admission can touch a deleted entry). A caller can therefore capture the getter
-   * reference inside `fn` and call it any time after — even outside `fn`, once `runExclusive` itself has
-   * resolved — and always read the true final max-over-run. A caller whose `fn` ignores it (every call
-   * site that predates this param) is byte-identical to before it existed.
-   *
-   * `fn` ALSO receives a fifth param (card c24dd48a), `holdRepoGuardOnExit`: a callback `fn` can call —
-   * synchronously, any time before it returns — to declare that this run's per-repo merge-admission guard
-   * (a `merge`-kind descriptor's `repoPath` in {@link activeMergeRepos}) should survive PAST this call's
-   * own settle instead of releasing automatically in the `finally` below. This exists for EXACTLY ONE
-   * caller shape: `confirmWorkerMerge`'s gate callback, which calls it iff the gate it just ran PASSED —
-   * a passing gate is about to hand off to that caller's own squash phase (`mergeBranch`, called outside
-   * this method entirely), and the whole point is to close the gap where a queued same-repo sibling could
-   * otherwise be admitted the INSTANT this gate settles but strictly BEFORE the squash actually lands (see
-   * `GateDescriptor.repoPath`'s own doc for the incident this closes). Calling it is what makes that
-   * transition ATOMIC: the flag is read by THIS SAME `finally` block, in the SAME synchronous turn `fn`
-   * set it in, so there is no `await`-shaped window between "gate settled" and "guard still held" for a
-   * queued waiter's own `grantNext` to slip through. The caller is then on the hook to release the guard
-   * explicitly, later, once its own squash phase has itself settled — via `endSquash`/
-   * `releaseMergeRepoGuard(repoPath)` — a hold with no matching release is a PERMANENT block on that repo,
-   * so every call site that ever invokes this must have a `finally` that unconditionally reaches the
-   * release, no matter which of throw/cancel/timeout/pass/fail the squash itself hits. A caller whose `fn`
-   * never calls this (every pre-c24dd48a call site, and any FAILING merge gate) is byte-identical to
-   * before this parameter existed — `holdRepoGuard` defaults to `false` and `release()` frees the guard
-   * exactly as it always has.
+   * @decision c24dd48a — `fn` ALSO receives `holdRepoGuardOnExit`, a callback that keeps this run's
+   *   per-repo merge guard held PAST settle, atomically, until the caller's own squash lands
+   *   (docs/decisions/c24dd48a-holdrepoguardonexit-extends-a-merges-repo-hold-across-its-own-squash.md)
    */
   async runExclusive<T>(
     cap: number, descriptor: GateDescriptor,
@@ -987,27 +794,13 @@ export class GateSemaphore {
     }
   }
 
-  /** Cancel a QUEUED (never-admitted) entry by its registry `id` — removes its waiter from whichever tier
-   *  holds it and resolves it as cancelled instead of granted. Zero process risk BY CONSTRUCTION: a queued
-   *  entry has never had `fn` invoked, so there is no child process this could ever need to kill. Returns
-   *  `false` (no-op) if `id` isn't currently queued — already admitted, already settled, or never existed
-   *  — the caller's own `runExclusive` throw/return path is what actually produces the visible outcome.
-   *
-   *  ⚠️ THE REAL INVARIANT (Code Review re-review of 8d585277, card 8f58c354; RE-STATED, card 361520a0
-   *  Half Two CR follow-up): a `gateType` is cancellable HERE only once its `runExclusive` caller has a
-   *  `GateCancelledError` catch to turn a withdrawn admission into a clean settle instead of a crash-shaped
-   *  throw (see `SessionService.cancelGateOp`'s own doc for the exact failure this prevents) — `worker`
-   *  (`runWorkerGate`) and, since card 361520a0, `merge` (`confirmWorkerMerge`) both have one; `deploy`
-   *  (`deployOwnProject`) does NOT yet. THIS IS DELIBERATELY AN ALLOWLIST, NOT A DENYLIST — a card 361520a0
-   *  CR finding caught an earlier draft written as `gateType === "deploy"`, which flips fail-closed into
-   *  fail-open: a FOURTH `GateType` added later would be silently CANCELLABLE by default (allowed by a
-   *  denylist that never named it) instead of refused until its own caller is proven to have the catch. The
-   *  `switch` below is exhaustive over {@link GateType} — TypeScript raises a COMPILE ERROR at the `never`
-   *  assignment in `default` the moment a new member is added to that union, forcing an explicit decision
-   *  here rather than a silent permission grant. Enforced HERE, at the primitive, so a future third caller
-   *  of this method inherits the SAME fail-closed default automatically instead of having to remember to
-   *  re-derive it — the existing caller-side guards (`cancelGateOp`, `cancelQueuedForSession`'s own
-   *  `gateType` match) stay in place; this is defence-in-depth, not a replacement for them. */
+  /** Cancel a QUEUED (never-admitted) entry by its registry `id`. Zero process risk BY CONSTRUCTION: a
+   *  queued entry has never had `fn` invoked, so there is no child process this could ever need to kill.
+   *  Returns `false` (no-op) if `id` isn't currently queued — the caller's own `runExclusive` throw/return
+   *  path is what actually produces the visible outcome.
+   *  @decision 8f58c354 — a `gateType` is cancellable HERE only once its `runExclusive` caller has a
+   *  `GateCancelledError` catch; the `switch` below is a compile-enforced ALLOWLIST, never a denylist
+   *  (docs/decisions/8f58c354-cancelqueued-is-an-allowlist-enforced-by-an-exhaustive-switch.md) */
   cancelQueued(id: string, kind: GateCancelKind, detail: string): boolean {
     for (const tier of [this.highWaiters, this.lowWaiters]) {
       const idx = tier.findIndex((w) => w.id === id);
@@ -1115,43 +908,17 @@ export class GateSemaphore {
     return { active: this.active, queued: this.highWaiters.length + this.lowWaiters.length, entries };
   }
 
-  /** Look up ONE live (running or queued) gate run by its {@link GateDescriptor.opId} — the LIVE-registry
-   *  half of `gate_status(opId)` (card edc1ec12; prefix support added by card 225bc7bd). Accepts EITHER a
-   *  full opId OR an unambiguous id-PREFIX (the 8-char short id Loom displays everywhere else — the same
-   *  `resolveIdPrefix` resolution `agent_get`/`worker_spawn` already use), so a caller pasting the short id
-   *  it was shown gets a real answer instead of a spurious miss. `kind:"found"` on a unique match;
-   *  `kind:"ambiguous"` (with the matching opIds) when the prefix matches more than one LIVE entry —
-   *  callers must surface this distinctly, never fold it into "not found"; `kind:"none"` when nothing
-   *  matches at all — either the op already settled, it never existed, or it hasn't registered with this
-   *  semaphore yet; this lookup, being LIVE-ONLY, genuinely cannot tell those apart on its own, but BOTH
-   *  are a real "no live run", unlike the ambiguous case. Card e3e40167: `SessionService.gateStatus`, the
-   *  caller of this method, now resolves that ambiguity itself — a `kind:"none"` here falls through to a
-   *  SECOND, identically-scoped lookup against the durable `pending_gate_ops` tombstone table
-   *  (`Db.findPendingGateOpByOpId`), which DOES distinguish settled/evicted/orphaned/never-minted. This
-   *  method's own contract is unchanged by that — it still only ever answers about the LIVE registry.
-   *  Entries with no `opId` (a run whose descriptor never carried a correlating one) are excluded from the
-   *  candidate set entirely, so they can never spuriously satisfy a prefix match. O(n) over the live
-   *  registry, which is bounded by `maxConcurrentGates` + queue depth — never large enough to matter.
-   *
-   *  `scopeSessionId` (card fc243a43 — the worker-facing `gate_status`) restricts the CANDIDATE SET itself
-   *  to entries whose `descriptor.sessionId` matches, BEFORE prefix resolution runs — not just a post-hoc
-   *  filter on the result. A scoped caller's `ambiguous`/`none` outcomes are therefore computed only over
-   *  ITS OWN live ops: it can never learn that a same-prefix op exists under another session (no count, no
-   *  ids leak). Omitted (every pre-existing manager call site), this is byte-identical to before the param
-   *  existed.
-   *
-   *  `scopeProjectId` (Code Review finding B2-3, card 8d585277's `gate_cancel`) is the SAME kind of
-   *  candidate-set restriction, keyed by project instead of session: when set, an id whose only matches
-   *  (exact OR prefix) belong to a DIFFERENT project is filtered out before prefix resolution runs, so an
-   *  `ambiguous` result can only ever name opIds within the caller's OWN project. `cancelGateOp` uses this
-   *  on a SECOND, re-scoped call specifically to avoid the leak an UNSCOPED ambiguous resolution would
-   *  otherwise expose (prefix-probing could otherwise enumerate other projects' live opIds via the
-   *  `ambiguous` error's `ids` list) — see its own doc for why the first (unscoped) call is still made too,
-   *  to preserve the informative `refused` outcome for a clean EXACT/unambiguous cross-project match.
-   *  Independent of `scopeSessionId` (both apply as separate, AND-combined filters) — since card e3e40167,
-   *  the worker-facing `gate_status` call site DOES pass both together (session AND its own project), so
-   *  this is no longer merely a theoretical combination. Omitted, this is byte-identical to before the
-   *  param existed. */
+  /** @decision edc1ec12 — look up ONE live (running or queued) gate run by its {@link
+   *  GateDescriptor.opId}, the LIVE-registry half of `gate_status(opId)`. Accepts a full opId or an
+   *  unambiguous id-PREFIX (card 225bc7bd); `kind:"ambiguous"` must never fold into "not found"
+   *  (docs/decisions/edc1ec12-gate-status-is-read-only-with-no-passfail-outcome.md).
+   *  @decision e3e40167 — `kind:"none"` here is LIVE-ONLY and genuinely can't distinguish settled from
+   *  never-existed; `SessionService.gateStatus` falls through to the durable tombstone table for that
+   *  (docs/decisions/e3e40167-tombstone-fallback-supersedes-not-found.md).
+   *  `scopeSessionId` (card fc243a43) and `scopeProjectId` (card 8d585277's `gate_cancel`, B2-3) both
+   *  restrict the CANDIDATE SET itself before prefix resolution runs, never a post-hoc filter — see
+   *  `cancelGateOp`'s own doc for why an unscoped call is still made first too. Omitted, either is
+   *  byte-identical to before the param existed. */
   findByOpId(opId: string, scopeSessionId?: string, scopeProjectId?: string): IdPrefixResult<GateSnapshotEntry> {
     const candidates = this.snapshot().entries
       .filter((e): e is GateSnapshotEntry & { opId: string } => e.opId != null)
