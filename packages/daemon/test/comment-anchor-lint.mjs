@@ -47,6 +47,12 @@
 //      id-space requires the `sha:` sigil, card 969b0e1c) — is flagged, in both the CLI scan and the live
 //      per-file hook; the SAME id in correctly-sigil'd `sha:` form, and a bare id that is NOT a real
 //      commit, are both confirmed NOT flagged.
+//  13. pointerAnchors (card a862e8f0): an anchor whose own ≤3-line text window contains a pointer phrase
+//      ("see docs/", "docs/adr/", "docs/decisions/", "docs/investigations/", "see the linked record", "see
+//      the record") instead of stating the prohibition/consequence itself — is flagged, once per SITE, in
+//      both the CLI scan and the live per-file hook; a prohibition-only anchor with none of those phrases,
+//      and the SAME phrases appearing in ordinary prose nowhere near an anchor, are both confirmed NOT
+//      flagged. REPORT-ONLY (never fails `guards`) — see the card for the measured corpus count.
 // Run: `node test/comment-anchor-lint.mjs` from packages/daemon (no build, no LOOM_HOME needed).
 import fs from "node:fs";
 import os from "node:os";
@@ -59,6 +65,7 @@ import {
   findBrokenAnchors,
   findOverlongAnchorIds,
   findSigilSpaceAnchors,
+  findPointerAnchors,
   findOversizedRecords,
   findCollidingRecords,
   listRecordIds,
@@ -462,6 +469,153 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
     "lines.push(`  - ${file}:${line} — @decision ${id}`); // a message string, not an anchor",
   ];
   check("mid-line mentions of the token are never flagged as a sigil-space anchor", findSigilSpaceAnchors(lines).length === 0);
+}
+
+// --- findPointerAnchors (card a862e8f0 — flag an anchor that POINTS AT its record instead of STATING ------
+// the prohibition/consequence inline)
+
+{
+  // Positive control, one per pointer phrase the card names — each on its own isolated 1-line anchor block
+  // (so the anchor's own window is exactly that one line), each must be flagged, exactly once.
+  const cases = [
+    ["see docs/", "// @decision aaaaaaaa — see docs/decisions/aaaaaaaa-example.md for the rest"],
+    ["docs/decisions/", "// @decision bbbbbbbb — the reasoning lives at docs/decisions/bbbbbbbb-x.md"],
+    ["docs/adr/", "// @decision cccccccc — recorded in docs/adr/cccccccc-x.md"],
+    ["docs/investigations/", "// @decision dddddddd — findings at docs/investigations/dddddddd-x/findings.md"],
+    ["see the linked record", "// @decision eeeeeeee — see the linked record for the full rationale"],
+    ["see the record", "// @decision ffffffff — see the record for why this is deliberate"],
+  ];
+  for (const [label, line] of cases) {
+    const lines = [line];
+    const blocks = extractCommentBlocks(lines);
+    const anchors = findFileAnchors(lines);
+    const pointer = findPointerAnchors(lines, blocks, anchors);
+    check(`pointer phrase "${label}": findPointerAnchors flags it, exactly once`, pointer.length === 1 && pointer[0].line === 1);
+  }
+}
+
+{
+  // Case-insensitivity: the same phrase, capitalized differently, must still match (POINTER_PHRASE_RE
+  // carries the `i` flag) — mirrors the real corpus specimen (packages/daemon/src/codescape/supervisor.ts)
+  // where "See the record" and "See docs/" appear capitalized at a sentence start.
+  const lines = ["// @decision 11111111 — See the Record for the full rationale, capitalized"];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  check("pointer phrase case-insensitivity: a capitalized phrase is still flagged",
+    findPointerAnchors(lines, blocks, anchors).length === 1);
+}
+
+{
+  // Negative control (DoD-1): a prohibition-only anchor — states the rule inline, no pointer phrase at
+  // all — must never be flagged. This is the convention's TARGET STATE.
+  const lines = ["// @decision 22222222 — never retry a HUNG removal; it leaks libuv threadpool threads"];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  check("prohibition-only anchor (target state): findPointerAnchors reports nothing",
+    findPointerAnchors(lines, blocks, anchors).length === 0);
+  check("prohibition-only anchor: findFileAnchors still finds it (sanity)", anchors.length === 1);
+}
+
+{
+  // Negative control (DoD-1): the SAME pointer phrases, in ordinary prose nowhere near an anchor site —
+  // must never be flagged. Proves the check is scoped to an anchor's own window, not a whole-file/whole-
+  // block scan (a pointer phrase in this file's own doc comments describing the convention must never
+  // trip it either — see this exact shape at the top of comment-anchor-lint.mjs's own header).
+  const lines = [
+    "// This module's design is recorded at docs/decisions/12345678-some-other-topic.md, unrelated to any anchor here.",
+    "// see docs/adr/ for the general convention this file follows.",
+    "// see the record of how this class evolved, in the git log.",
+    "",
+    "// @decision 33333333 — a real anchor, far below, stating its own rule with no pointer phrase",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  check("pointer phrases in ordinary prose, far from any anchor site: findPointerAnchors reports nothing",
+    findPointerAnchors(lines, blocks, anchors).length === 0);
+}
+
+{
+  // Window boundary: the pointer phrase sits OUTSIDE the anchor's own <=3-line window (a 4th continuation
+  // line, still inside the SAME comment block) — must NOT be flagged, since the convention's own window is
+  // capped at GUARD_MAX_LINES (3). Proves the window is bounded, not "the rest of the block".
+  const lines = [
+    "// @decision 44444444 — line 1 of the anchor, states nothing yet",
+    "// line 2, still no pointer phrase on this line",
+    "// line 3, still clean — this is the LAST line inside the anchor's own 3-line window",
+    "// line 4 (outside the window): see docs/decisions/44444444-x.md — must not count",
+  ];
+  check("window boundary sanity: GUARD_MAX_LINES is 3 (this test assumes that)", GUARD_MAX_LINES === 3);
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  check("pointer phrase beyond the anchor's own 3-line window: findPointerAnchors does NOT flag it",
+    findPointerAnchors(lines, blocks, anchors).length === 0);
+}
+
+{
+  // Window boundary, the positive mirror: the SAME pointer phrase on line 3 (still inside the window) DOES
+  // flag — proves the boundary is exercised on both sides, not just "some cutoff exists somewhere".
+  const lines = [
+    "// @decision 55555555 — line 1, states nothing yet",
+    "// line 2, still clean",
+    "// line 3, inside the window: see docs/decisions/55555555-x.md",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  const pointer = findPointerAnchors(lines, blocks, anchors);
+  check("pointer phrase on the LAST in-window line (line 3): findPointerAnchors DOES flag it",
+    pointer.length === 1 && pointer[0].line === 1);
+}
+
+{
+  // Multiple sites sharing the SAME id — not deduped (mirrors bareCommitAnchors' own convention: every
+  // site needs its own fix, independent of how many other sites share the id).
+  const lines = [
+    "// @decision 66666666 — see docs/decisions/66666666-x.md, site one",
+    "",
+    "// @decision 66666666 — see docs/decisions/66666666-x.md, site two",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  const pointer = findPointerAnchors(lines, blocks, anchors);
+  check("pointerAnchors: two sites sharing the same id are BOTH flagged (not deduped by id)",
+    pointer.length === 2 && pointer[0].line === 1 && pointer[2 - 1].line === 3);
+}
+
+{
+  // computeReport (CLI scan): end-to-end through the real walk, not just the pure function.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-pointer-anchor-"));
+  try {
+    fs.mkdirSync(path.join(dir, "packages", "daemon", "src"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "docs", "decisions"), { recursive: true });
+    const srcPath = path.join(dir, "packages", "daemon", "src", "fixture.ts");
+    fs.writeFileSync(srcPath, "// @decision aaaaaaaa — see docs/decisions/aaaaaaaa-x.md for the rest\n");
+    fs.writeFileSync(path.join(dir, "docs", "decisions", "aaaaaaaa-x.md"), "# aaaaaaaa\n\nA record.\n");
+    const report = computeReport(dir, { minLines: 15 });
+    check("computeReport: pointerAnchors is a top-level field, count 1",
+      report.pointerAnchors?.count === 1 && report.pointerAnchors.items[0]?.id === "aaaaaaaa"
+      && report.pointerAnchors.items[0]?.file === "packages/daemon/src/fixture.ts");
+
+    // computeFileReport (the live PostToolUse hook path) must ALSO catch it, at authoring time — same
+    // ground as bareCommitAnchors/overlongAnchorIds/sigilSpaceAnchors above (this is a per-file check, not
+    // a whole-corpus one, so the hook can see it without a repo walk).
+    const fileReport = computeFileReport(dir, srcPath, fs.readFileSync(srcPath, "utf8"));
+    // NOTE: the fixture line contains BOTH "see docs/" and "docs/decisions/" — POINTER_PHRASE_RE matches
+    // the EARLIEST position in the string, so "see docs/" (which starts first) wins over "docs/decisions/"
+    // (which starts later, even though it's also present); either is a correct match for this check's
+    // purpose (both indicate a pointer phrase), so assert membership, not one specific alternative.
+    check("computeFileReport (the live PostToolUse hook path): the pointer anchor is flagged too",
+      fileReport?.pointerAnchors?.length === 1 && fileReport.pointerAnchors[0]?.id === "aaaaaaaa"
+      && ["see docs/", "docs/decisions/"].includes(fileReport.pointerAnchors[0]?.phrase.toLowerCase()));
+
+    // Negative control: a prohibition-only anchor (no pointer phrase) must not be flagged, end to end.
+    fs.writeFileSync(srcPath, "// @decision aaaaaaaa — never retry a HUNG removal; it leaks threadpool threads\n");
+    const cleanReport = computeReport(dir, { minLines: 15 });
+    check("computeReport: a prohibition-only anchor is not flagged, count 0", cleanReport.pointerAnchors?.count === 0);
+    const cleanFileReport = computeFileReport(dir, srcPath, fs.readFileSync(srcPath, "utf8"));
+    check("computeFileReport: a prohibition-only anchor is not flagged (hook path)", cleanFileReport?.pointerAnchors?.length === 0);
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
 }
 
 // --- bucketDistribution -----------------------------------------------------------------------------
@@ -877,6 +1031,11 @@ try {
     // source file can never tell you whether ANOTHER record file under docs/ now shares its anchor's id.
     check("computeFileReport: collidingRecords is not a key on the hook-shaped report (CLI-scan only, by design)",
       !("collidingRecords" in fileReport));
+    // Card a862e8f0: pointerAnchors is the OPPOSITE case — it's a per-file/per-site check (no whole-corpus
+    // dependency), so unlike oversizedRecords/collidingRecords above it IS present on the hook-shaped
+    // report, as a real (possibly-empty) array, not merely "not undefined".
+    check("computeFileReport: pointerAnchors IS a key on the hook-shaped report (per-file, unlike oversizedRecords/collidingRecords)",
+      Array.isArray(fileReport?.pointerAnchors));
   }
 
   // Card e708670b DoD-3: does the LIVE per-file hook also surface a sigil-space anchor (either side of the

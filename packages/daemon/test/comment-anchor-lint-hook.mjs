@@ -1,9 +1,17 @@
 // comment-anchor-lint.mjs PER-FILE hook test (card 67621894 — wires the whole-repo report tool from card
-// 5329a9af as a live PostToolUse hook, scoped to just the file a Write/Edit just touched). Two halves:
+// 5329a9af as a live PostToolUse hook, scoped to just the file a Write/Edit just touched). Three halves:
 //   1. The pure per-file functions (`isInScope`/`computeFileReport`/`formatHookMessage`) against a fixture
 //      repo, plus a real subprocess spawn of the script's own `--hook` mode (no build needed for either —
 //      same "assets are plain ESM" posture as test/comment-anchor-lint.mjs).
-//   2. writeSessionSettings' wiring: card d92ec82b reworked this gate — the hook now wires on the EXPLICIT
+//   2. `extractWrittenText`/`scopeHookPointerAnchors` (card a862e8f0 lead review, round 2): the hook's
+//      `pointerAnchors` advisory used to dump EVERY pre-existing pointer anchor in the edited file on
+//      every single edit (measured up to 197 sites in one real file) — these two functions scope that
+//      down to the site(s) the triggering Edit/Write/MultiEdit actually just wrote, with a hard cap
+//      (`HOOK_POINTER_ANCHOR_CAP`) as a belt-and-suspenders bound. Tested both as pure functions and via
+//      a real subprocess spawn against a fixture file carrying many pre-existing pointer anchors, proving
+//      the hook's OUTPUT stays bounded and a newly-written pointer anchor is still caught while untouched
+//      pre-existing ones are not.
+//   3. writeSessionSettings' wiring: card d92ec82b reworked this gate — the hook now wires on the EXPLICIT
 //      `docLint` param AND requires `repoPath`, independently of `vaultPath` (vault-lint's own, separate
 //      gate) — so a project with docLint on but no Obsidian vault still gets it. Imported from
 //      `../dist/pty/claude-settings.js`, so THIS half needs a build first (`pnpm --filter @loom/daemon
@@ -15,7 +23,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { isInScope, computeFileReport, formatHookMessage } from "../assets/comment-anchor-lint.mjs";
+import {
+  isInScope,
+  computeFileReport,
+  formatHookMessage,
+  extractWrittenText,
+  scopeHookPointerAnchors,
+  HOOK_POINTER_ANCHOR_CAP,
+} from "../assets/comment-anchor-lint.mjs";
 
 if (!process.env.LOOM_HOME) { console.error("LOOM_HOME must be set."); process.exit(2); }
 
@@ -126,6 +141,137 @@ try {
   {
     const r = spawnSync(process.execPath, [COMMENT_ANCHOR_LINT_SCRIPT, "--hook"], { input: "{}", encoding: "utf8" });
     check("runHook (negative control): missing repoRoot arg exits 0 and stays silent", r.status === 0 && !(r.stdout || "").trim());
+  }
+
+  // --- extractWrittenText (card a862e8f0 round 2): pure-function coverage of the Write/Edit/MultiEdit -----
+  // tool_input shapes this hook's own harness (Claude Code) actually invokes these tools with.
+  {
+    check("extractWrittenText: Write carries tool_input.content",
+      extractWrittenText("Write", { file_path: "/x", content: "the whole file" }) === "the whole file");
+    check("extractWrittenText: Edit carries tool_input.new_string",
+      extractWrittenText("Edit", { file_path: "/x", old_string: "a", new_string: "the replacement" }) === "the replacement");
+    check("extractWrittenText: MultiEdit joins every edit's new_string",
+      extractWrittenText("MultiEdit", { file_path: "/x", edits: [{ new_string: "first" }, { new_string: "second" }] }) === "first\nsecond");
+    check("extractWrittenText: MultiEdit with an empty edits array returns null (nothing to join)",
+      extractWrittenText("MultiEdit", { file_path: "/x", edits: [] }) === null);
+    check("extractWrittenText: an unrecognized tool name returns null",
+      extractWrittenText("Read", { file_path: "/x" }) === null);
+    check("extractWrittenText: Edit missing new_string entirely returns null (never guesses)",
+      extractWrittenText("Edit", { file_path: "/x", old_string: "a" }) === null);
+    check("extractWrittenText: a non-object tool_input returns null rather than throwing",
+      extractWrittenText("Edit", null) === null && extractWrittenText("Edit", undefined) === null);
+  }
+
+  // --- scopeHookPointerAnchors (card a862e8f0 round 2): pure-function coverage -----------------------------
+  {
+    const pointerAnchors = [
+      { line: 1, id: "aaaaaaaa", ns: "card", phrase: "see docs/" },
+      { line: 3, id: "bbbbbbbb", ns: "card", phrase: "docs/decisions/" },
+      { line: 5, id: "cccccccc", ns: "card", phrase: "see the record" },
+    ];
+    const lines = [
+      "// @decision aaaaaaaa — see docs/decisions/aaaaaaaa-x.md, pre-existing site one",
+      "",
+      "// @decision bbbbbbbb — the reasoning is at docs/decisions/bbbbbbbb-x.md, pre-existing site two",
+      "",
+      "// @decision cccccccc — see the record for the full story, pre-existing site three",
+    ];
+
+    // Positive control (DoD): only the site whose OWN anchor line is a substring of `writtenText` is kept.
+    const writtenOne = "some unrelated diff context\n// @decision bbbbbbbb — the reasoning is at docs/decisions/bbbbbbbb-x.md, pre-existing site two\nmore context";
+    const scopedOne = scopeHookPointerAnchors(pointerAnchors, lines, writtenOne);
+    check("scopeHookPointerAnchors: only the site whose anchor line appears in writtenText is kept",
+      scopedOne.items.length === 1 && scopedOne.items[0].id === "bbbbbbbb" && scopedOne.omitted === 0);
+
+    // Negative control: writtenText containing NONE of the anchor lines keeps nothing.
+    const scopedNone = scopeHookPointerAnchors(pointerAnchors, lines, "completely unrelated text, no anchor here at all");
+    check("scopeHookPointerAnchors: writtenText matching no anchor line keeps nothing",
+      scopedNone.items.length === 0 && scopedNone.omitted === 0);
+
+    // writtenText === null (payload shape unrecognized): falls back to a CAPPED, unscoped slice — never
+    // flood, never silently drop everything either.
+    const manyAnchors = Array.from({ length: HOOK_POINTER_ANCHOR_CAP + 3 }, (_, i) => ({ line: i + 1, id: `id${i}`.padEnd(8, "0"), ns: "card", phrase: "see docs/" }));
+    const scopedNull = scopeHookPointerAnchors(manyAnchors, [], null);
+    check("scopeHookPointerAnchors: writtenText===null falls back to a CAPPED slice of the full list",
+      scopedNull.items.length === HOOK_POINTER_ANCHOR_CAP && scopedNull.omitted === 3);
+
+    // The cap applies even to genuinely-scoped (all just-written) candidates — the belt-and-suspenders
+    // bound documented on HOOK_POINTER_ANCHOR_CAP, not just the null-fallback path. Build a writtenText
+    // that contains every one of manyAnchors' own anchor LINE text (re-derive the same lines array
+    // `scopeHookPointerAnchors` will read against, so the containment test is self-consistent).
+    const manyLines = manyAnchors.map((a) => `// @decision ${a.id} — see docs/decisions/${a.id}-x.md`);
+    const manyAnchorsRealigned = manyAnchors.map((a, i) => ({ ...a, line: i + 1 }));
+    const writtenAll = manyLines.join("\n");
+    const scopedCapped = scopeHookPointerAnchors(manyAnchorsRealigned, manyLines, writtenAll);
+    check("scopeHookPointerAnchors: the cap trims even fully-scoped (all just-written) candidates",
+      scopedCapped.items.length === HOOK_POINTER_ANCHOR_CAP && scopedCapped.omitted === 3);
+  }
+
+  // --- end-to-end: a real subprocess spawn against a fixture file carrying MANY pre-existing pointer -------
+  // anchors, proving the hook's actual advisory text stays bounded (card a862e8f0 round 2, the exact
+  // complaint: "sessions/service.ts 197, pty/host.ts 71, ... ~200 lines of PRE-EXISTING findings per edit").
+  {
+    const manyDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-pointer-scope-hook-"));
+    try {
+      fs.mkdirSync(path.join(manyDir, "packages", "daemon", "src"), { recursive: true });
+      const N = 8; // well above HOOK_POINTER_ANCHOR_CAP (5), so the pre-existing set alone would overflow it
+      const preExisting = Array.from({ length: N }, (_, i) => `// @decision aaaaaaa${i} — see docs/decisions/aaaaaaa${i}-x.md, pre-existing site ${i}`);
+      // NOTE: the id must be REAL 8-hex ([0-9a-f]) — ANCHOR_RE requires it, so a non-hex id like
+      // "newnew01" is silently NOT an anchor at all (this bit the first draft of this test: the "newly
+      // written" site never appeared anywhere in the report because it was never recognized as an anchor).
+      const newlyWrittenLine = "// @decision deadc0de — see docs/decisions/deadc0de-x.md, the site this edit just added";
+      const manyPath = path.join(manyDir, "packages", "daemon", "src", "many.ts");
+      fs.writeFileSync(manyPath, [...preExisting, "", newlyWrittenLine, ""].join("\n"));
+
+      const runHookProcInput = (filePath, tool, toolInput) => {
+        const payload = { hook_event_name: "PostToolUse", tool_name: tool, tool_input: { file_path: filePath, ...toolInput }, cwd: manyDir };
+        const r = spawnSync(process.execPath, [COMMENT_ANCHOR_LINT_SCRIPT, "--hook", manyDir], { input: JSON.stringify(payload), encoding: "utf8" });
+        check(`runHook(${tool} ${path.basename(filePath)}, scoped): exits 0`, r.status === 0);
+        const out = (r.stdout || "").trim();
+        return out ? JSON.parse(out) : null;
+      };
+
+      // The Edit's own new_string is EXACTLY the newly-written line — this is what a real Edit call
+      // carries (the replacement text), so this is the realistic shape, not a synthetic shortcut.
+      const scopedHit = runHookProcInput(manyPath, "Edit", { old_string: "placeholder", new_string: newlyWrittenLine });
+      const scopedMsg = scopedHit?.hookSpecificOutput?.additionalContext ?? "";
+      check("hook (scoped Edit): fires (the newly-written pointer anchor IS flagged)", scopedHit !== null);
+      check("hook (scoped Edit): names the newly-written anchor's id", /deadc0de/.test(scopedMsg));
+      // NOTE: orphanAnchors is a SEPARATE, unscoped check (this fixup only scopes pointerAnchors — see
+      // the card) — it legitimately still lists all 9 ids (none have a matching record file), so testing
+      // "not anywhere in scopedMsg" would wrongly fail on that unrelated section. Pointer-anchor entries
+      // are the only ones rendered with a "(matched ...)" suffix — scope the assertion to those.
+      check("hook (scoped Edit): does NOT name any of the 8 pre-existing anchor ids as a pointer-anchor finding",
+        !/aaaaaaa[0-7] \(matched/.test(scopedMsg));
+      check("hook (scoped Edit): the pointer-anchor count in the message is exactly 1, not 9",
+        /^1 @decision anchor\(s\)/m.test(scopedMsg));
+
+      // Unknown/unrecognized tool_input shape (no new_string, no content, no edits) — falls back to the
+      // CAPPED, unscoped slice rather than either flooding (all 9) or going silent (0).
+      const fallbackHit = runHookProcInput(manyPath, "Edit", { unexpected_field: true });
+      const fallbackMsg = fallbackHit?.hookSpecificOutput?.additionalContext ?? "";
+      check("hook (unrecognized tool_input shape): still fires (never silently drops a real finding)", fallbackHit !== null);
+      check(`hook (unrecognized tool_input shape): pointer-anchor count is capped at ${HOOK_POINTER_ANCHOR_CAP}, not 9`,
+        new RegExp(`^${HOOK_POINTER_ANCHOR_CAP} @decision anchor\\(s\\)`, "m").test(fallbackMsg));
+      check("hook (unrecognized tool_input shape): the omitted-count note names how many more exist",
+        /\(4 more pointer-anchor site\(s\)/.test(fallbackMsg));
+
+      // A Write of a BRAND-NEW file where content IS the entire file (every anchor genuinely "just
+      // written") — scoping correctly keeps ALL of them (still capped, since the cap is unconditional),
+      // unlike a full-rewrite-of-an-existing-file case this program's own convention discourages.
+      // The hook ALWAYS re-reads the file from disk (never trusts tool_input.content as the file's
+      // actual state) — so the fixture must genuinely be written to disk first, exactly like a real
+      // Write tool call would leave it, or runHook's `fs.readFileSync` silently no-ops (file not found).
+      const freshPath = path.join(manyDir, "packages", "daemon", "src", "fresh.ts");
+      const freshContent = preExisting.join("\n") + "\n";
+      fs.writeFileSync(freshPath, freshContent);
+      const freshHit = runHookProcInput(freshPath, "Write", { content: freshContent });
+      const freshMsg = freshHit?.hookSpecificOutput?.additionalContext ?? "";
+      check("hook (Write, brand-new file, all genuinely new): still capped at HOOK_POINTER_ANCHOR_CAP, not flooded to 8",
+        freshHit !== null && new RegExp(`^${HOOK_POINTER_ANCHOR_CAP} @decision anchor\\(s\\)`, "m").test(freshMsg));
+    } finally {
+      try { fs.rmSync(manyDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
   }
 
   // --- writeSessionSettings wiring: gated on the explicit `docLint` param (card d92ec82b), independently

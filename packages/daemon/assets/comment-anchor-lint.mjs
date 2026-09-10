@@ -24,7 +24,7 @@
 // `posttooluse-hook-honors-additionalcontext-not-systemmessage` and decision-records.mjs's own header for
 // the full method.
 //
-// Nine checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
+// Ten checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
 //   1. unanchoredLongBlocks — a contiguous comment block >= `minLines` (default DEFAULT_MIN_LINES) with
 //      no `@decision <id>` anywhere in it. The "narrative is regrowing in source" signal.
 //   2. orphanAnchors — an `@decision <id>` whose id resolves to no record in ANY of the three stores this
@@ -101,6 +101,27 @@
 //      whole sweep rather than one `execFileSync` per id — this repo's own measured population is in the
 //      hundreds. Runs in BOTH the CLI scan and the per-file hook, same ground as orphanAnchors — it needs
 //      only the file's own anchors plus one repo-scoped git call.
+//  10. pointerAnchors (card a862e8f0) — an `@decision <id>` (or `sha:<id>`) SITE whose own text window (the
+//      anchor's line plus up to GUARD_MAX_LINES-1 continuation lines, bounded by the enclosing comment
+//      block's own end) contains a phrase that POINTS AT the out-of-band record instead of STATING the
+//      prohibition/consequence inline — "see docs/", "docs/adr/", "docs/decisions/", "docs/investigations/",
+//      "see the linked record", or "see the record". The convention (CLAUDE.md comment taxonomy,
+//      docs/extraction-program.md) requires the anchor TEXT itself to carry the rule; the record is reached
+//      by resolving the id, never by a "see docs/…" tail typed into the comment. Sent back by lead review 7
+//      times across two seats before this check existed (card a862e8f0) — see project memory
+//      `shipping-a-detector-is-not-someone-reading-it`. REPORT-ONLY (does not fail `guards` — see the card
+//      for why the existing corpus wasn't clean enough to gate on). One entry per SITE, not deduped by id
+//      (same convention as `bareCommitAnchors` above — every site needs its own fix). Runs in BOTH the CLI
+//      scan (`computeReport`/`computeFileReport` — the FULL, unscoped list, always) and the per-file hook,
+//      same ground as `bareCommitAnchors`/`overlongAnchorIds` — it needs only the one file's own
+//      blocks/anchors already computed for those checks, no repo-wide corpus. ⚠️ The HOOK's own advisory
+//      (`runHook`, not `computeFileReport`) additionally SCOPES this one field — and only this one — down
+//      to the site(s) the triggering edit actually just wrote (`extractWrittenText`/
+//      `scopeHookPointerAnchors`, both below), plus a hard cap (`HOOK_POINTER_ANCHOR_CAP`): a file already
+//      carrying hundreds of pre-existing pointer anchors (measured: up to 197 in one file) would otherwise
+//      inject the WHOLE list on every single edit to that file, regardless of relevance (card a862e8f0
+//      lead review, round 2). `computeFileReport` itself is unaffected — it still always returns the
+//      file's complete `pointerAnchors`; only what `runHook` chooses to SURFACE is narrowed.
 //
 // A <= GUARD_MAX_LINES-line block that DOES carry an anchor is the convention's TARGET STATE (Class A: a
 // short guard/prohibition, permanently inline) and is counted separately as `guardClassBlocks` — it is
@@ -260,6 +281,16 @@ const OVERLONG_ANCHOR_ID_RE = /@decision\s+(sha:)?([0-9a-f]{9,})\b/gi;
 // different, rarer shape — mirrors every other too-short carve-out in this file, and mirrors
 // `overlongAnchorIds`'s own `{8,}` cutoff for the identical reason).
 const SIGIL_SPACE_RE = /@decision\s+sha(?:\s+:\s*|:\s+)([0-9a-f]{8,})\b/gi;
+
+// Card a862e8f0 — a phrase that POINTS AT the out-of-band record instead of STATING the
+// prohibition/consequence in the anchor's own text (CLAUDE.md comment taxonomy: "≤3 lines, no
+// 'See docs/…' pointer"). Deliberately a small, literal phrase set — mirrors BROKEN_ANCHOR_RE/
+// OVERLONG_ANCHOR_ID_RE's own rejection of a broad heuristic (card ad3a9a85: a broad "not followed by
+// a valid id anywhere on the line" pattern produced 26 false positives on this repo's own prose
+// describing the convention). Case-insensitive; no `g` flag needed since every caller tests one
+// pre-assembled window string and only needs the first match. See `findPointerAnchors` below for how
+// the window itself is bounded (the anchor's own site, never a whole-file scan).
+const POINTER_PHRASE_RE = /(see\s+docs\/|docs\/adr\/|docs\/decisions\/|docs\/investigations\/|see\s+the\s+linked\s+record|see\s+the\s+record\b)/i;
 const FLAT_STORES = ["adr", "decisions"];
 
 // Default N (DoD-3): justified against THIS repo's OWN measured block-length distribution (OBSERVED —
@@ -437,6 +468,35 @@ export function findSigilSpaceAnchors(lines) {
   return found;
 }
 
+/** Every anchor SITE in `anchors` (as returned by `findFileAnchors`) whose own TEXT WINDOW contains a
+ * pointer phrase (card a862e8f0) — "see docs/", "docs/adr/", "docs/decisions/", "docs/investigations/",
+ * "see the linked record", or "see the record" — instead of stating the prohibition/consequence itself,
+ * per the convention (CLAUDE.md comment taxonomy, docs/extraction-program.md: "≤3 lines, no 'See docs/…'
+ * pointer"). The window is the anchor's OWN line plus up to `GUARD_MAX_LINES - 1` continuation lines,
+ * bounded by the enclosing comment BLOCK's own end (`blocks`, as returned by `extractCommentBlocks`) —
+ * never crossing past the block into unrelated code/prose, and never further than the anchor's own
+ * ≤3-line target length. Deliberately scoped to this small per-site window, not a whole-block or
+ * whole-file scan: a pointer phrase sitting elsewhere in ordinary, non-anchor prose (e.g. this file's own
+ * doc comments describing the convention, which legitimately say "docs/decisions/") must never be
+ * flagged — only text actually inside an anchor's own window counts. A site whose line falls outside
+ * every block (should not happen for a real anchor — `ANCHOR_RE` only ever matches inside a comment)
+ * degrades to a one-line window rather than throwing. One entry per SITE, not deduped by id (same
+ * convention as `findBareCommitAnchors` — every site needs its own fix, independent of how many other
+ * sites share the id). `phrase` carries the matched text (trimmed), so a report can show exactly what
+ * triggered it, not just a line number. */
+export function findPointerAnchors(lines, blocks, anchors) {
+  const found = [];
+  for (const a of anchors) {
+    const block = blocks.find((b) => a.line >= b.startLine && a.line <= b.endLine);
+    const windowEnd = block ? Math.min(a.line + GUARD_MAX_LINES - 1, block.endLine) : a.line;
+    const windowLines = [];
+    for (let ln = a.line; ln <= windowEnd; ln++) windowLines.push(lines[ln - 1] ?? "");
+    const m = POINTER_PHRASE_RE.exec(windowLines.join(" "));
+    if (m) found.push({ ...a, phrase: m[0].trim() });
+  }
+  return found;
+}
+
 /** True iff `nameLower` is `id` followed by a real boundary — mirrors decision-records.mjs's own
  * `idBoundaryMatch` (same rationale: never let id `deadbeef` bare-prefix-match `deadbeefcafe-other.md`). */
 function idBoundaryMatch(nameLower, id) {
@@ -604,7 +664,7 @@ export function bucketDistribution(blocks) {
 }
 
 /**
- * Scan `repoRoot` and compute all nine checks plus the calibration distribution. Never throws on a
+ * Scan `repoRoot` and compute all ten checks plus the calibration distribution. Never throws on a
  * violation being found — violations are just data in the returned report (DoD-1/2: warn-only, with the
  * count reported). `opts.minLines` overrides `DEFAULT_MIN_LINES` (DoD-3: N is configurable).
  */
@@ -616,16 +676,20 @@ export function computeReport(repoRoot, opts = {}) {
   const allBroken = [];
   const allOverlong = [];
   const allSigilSpace = [];
+  const allPointer = [];
 
   for (const file of files) {
     let raw;
     try { raw = fs.readFileSync(file, "utf8"); } catch { continue; }
     const lines = raw.split(/\r?\n/);
-    for (const b of extractCommentBlocks(lines)) allBlocks.push({ file, ...b });
-    for (const a of findFileAnchors(lines)) allAnchors.push({ ...a, file });
+    const blocks = extractCommentBlocks(lines);
+    const anchors = findFileAnchors(lines);
+    for (const b of blocks) allBlocks.push({ file, ...b });
+    for (const a of anchors) allAnchors.push({ ...a, file });
     for (const b of findBrokenAnchors(lines)) allBroken.push({ ...b, file });
     for (const o of findOverlongAnchorIds(lines)) allOverlong.push({ ...o, file });
     for (const s of findSigilSpaceAnchors(lines)) allSigilSpace.push({ ...s, file });
+    for (const p of findPointerAnchors(lines, blocks, anchors)) allPointer.push({ ...p, file });
   }
 
   const records = listRecordIds(repoRoot);
@@ -702,6 +766,12 @@ export function computeReport(repoRoot, opts = {}) {
       count: bareCommitAnchors.length,
       items: bareCommitAnchors.map((a) => ({ file: relPath(repoRoot, a.file), line: a.line, id: a.id })),
     },
+    pointerAnchors: {
+      count: allPointer.length,
+      // REPORT-ONLY (card a862e8f0 — see this file's header, check 10): never fails `guards`, unlike a
+      // future guard would; a worker reads this field directly per docs/extraction-program.md.
+      items: allPointer.map((p) => ({ file: relPath(repoRoot, p.file), line: p.line, id: p.id, ns: p.ns, phrase: p.phrase })),
+    },
     distribution: bucketDistribution(allBlocks),
   };
 }
@@ -727,14 +797,16 @@ export function isInScope(repoRoot, filePath) {
 
 /**
  * The hook's actual per-file check: checks (1) unanchoredLongBlocks, (2) orphanAnchors, (4) brokenAnchors,
- * (7) overlongAnchorIds, (8) sigilSpaceAnchors, and (9) bareCommitAnchors — see this file's header for why
- * (3) orphanRecords, (5) oversizedRecords, and (6) collidingRecords are deliberately excluded (all three
- * need the whole repo's record/anchor corpus, not just this one file) — scoped to ONE file's already-read
- * `content`, never a repo walk. `listRecordIds` is the only filesystem cost beyond the one file read: a
- * `readdirSync` of up to three small `docs/<kind>` directories (a handful of entries each in this repo
- * today), not a source-tree scan — see this function's own doc in `computeReport` above for why it's cheap.
- * `bareCommitAnchors` adds one `git cat-file --batch-check` call scoped to this file's own (usually tiny)
- * set of bare-anchor ids — the same cost model `orphanAnchors`' sha-verification already pays per file.
+ * (7) overlongAnchorIds, (8) sigilSpaceAnchors, (9) bareCommitAnchors, and (10) pointerAnchors — see this
+ * file's header for why (3) orphanRecords, (5) oversizedRecords, and (6) collidingRecords are deliberately
+ * excluded (all three need the whole repo's record/anchor corpus, not just this one file) — scoped to ONE
+ * file's already-read `content`, never a repo walk. `listRecordIds` is the only filesystem cost beyond the
+ * one file read: a `readdirSync` of up to three small `docs/<kind>` directories (a handful of entries each
+ * in this repo today), not a source-tree scan — see this function's own doc in `computeReport` above for
+ * why it's cheap. `bareCommitAnchors` adds one `git cat-file --batch-check` call scoped to this file's own
+ * (usually tiny) set of bare-anchor ids — the same cost model `orphanAnchors`' sha-verification already
+ * pays per file. `pointerAnchors` is free beyond that — it reuses `blocks`/`anchors` already computed here
+ * for the other per-file checks, no extra filesystem or git cost.
  * Returns `null` for a file outside `isInScope`'s scope; otherwise a report shaped for `formatHookMessage`
  * below (empty arrays when the file is in scope but has nothing to flag — a real, distinguishable "clean"
  * result, not the same `null` as "not even scanned").
@@ -750,6 +822,7 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
   const broken = findBrokenAnchors(lines);
   const overlong = findOverlongAnchorIds(lines);
   const sigilSpace = findSigilSpaceAnchors(lines);
+  const pointer = findPointerAnchors(lines, blocks, anchors);
   const unanchoredLong = blocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
 
   const recordIdSet = new Set(listRecordIds(repoRoot).map((r) => r.id));
@@ -773,11 +846,16 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
     overlongAnchorIds: overlong.map((o) => ({ line: o.line, ns: o.ns, match: o.match })),
     sigilSpaceAnchors: sigilSpace.map((s) => ({ line: s.line, match: s.match })),
     bareCommitAnchors: bareCommitAnchors.map((a) => ({ line: a.line, id: a.id })),
+    pointerAnchors: pointer.map((p) => ({ line: p.line, id: p.id, ns: p.ns, phrase: p.phrase })),
   };
 }
 
-/** Render a non-empty `computeFileReport` result as the advisory text handed back to the agent. */
-export function formatHookMessage(report) {
+/** Render a non-empty `computeFileReport` result as the advisory text handed back to the agent.
+ * `pointerAnchorsOmitted` (default 0, card a862e8f0) is the count `scopeHookPointerAnchors` trimmed off
+ * `report.pointerAnchors` before this call — when >0, an extra line says so, rather than the agent seeing
+ * a shorter list with no explanation for why. Optional and additive: every existing call site (including
+ * every prior test) that omits it keeps rendering byte-identical output. */
+export function formatHookMessage(report, pointerAnchorsOmitted = 0) {
   const lines = [];
   if (report.unanchoredLongBlocks.length) {
     lines.push(`${report.unanchoredLongBlocks.length} unanchored long comment block(s) in ${report.file} (>= ${report.minLines} lines, no @decision anchor):`);
@@ -803,6 +881,13 @@ export function formatHookMessage(report) {
     lines.push(`${report.bareCommitAnchors.length} bare @decision anchor(s) in ${report.file} whose id resolves as a REAL GIT COMMIT in this repo (CLAUDE.md: a bare id always means a board card; the commit id-space requires the "sha:" sigil — card 969b0e1c):`);
     for (const a of report.bareCommitAnchors) lines.push(`  - ${report.file}:${a.line} — @decision ${a.id} (resolves as a commit — did you mean "sha:${a.id}"?)`);
   }
+  if (report.pointerAnchors.length) {
+    lines.push(`${report.pointerAnchors.length} @decision anchor(s) in ${report.file} whose text POINTS AT the out-of-band record instead of STATING the prohibition/consequence inline (CLAUDE.md comment taxonomy: the anchor's own text carries the rule; the record is reached by resolving the id, not by a "see docs/…" tail — card a862e8f0):`);
+    for (const p of report.pointerAnchors) lines.push(`  - ${report.file}:${p.line} — @decision ${renderAnchorId(p)} (matched "${p.phrase}")`);
+  }
+  if (pointerAnchorsOmitted > 0) {
+    lines.push(`(${pointerAnchorsOmitted} more pointer-anchor site(s) in ${report.file} not shown here — run the CLI scan, \`node comment-anchor-lint.mjs .\`, for the full \`pointerAnchors\` list.)`);
+  }
   return `comment-anchor-lint (CLAUDE.md comment taxonomy, card 90b19799) flagged ${report.file}:\n${lines.join("\n")}\n`
     + `Advisory only: a long unanchored block may want "// @decision <id> — <the prohibition/consequence>" `
     + `(<=3 lines) plus an out-of-band record in docs/adr or docs/decisions; an orphan anchor needs a matching `
@@ -810,7 +895,9 @@ export function formatHookMessage(report) {
     + `over-long anchor id needs trimming to the 8-hex prefix (\`git rev-parse --short=8\`, or manually take `
     + `the first 8 chars of the full sha); a sigil-space anchor needs the whitespace after "sha:" removed so `
     + `it directly precedes the hex id; a bare-commit anchor needs the "sha:" sigil added if a commit was `
-    + `genuinely intended, or a real board card id if one was.`;
+    + `genuinely intended, or a real board card id if one was; a pointer anchor needs its "see docs/…" tail `
+    + `rewritten to state the actual prohibition/consequence — the record itself is reached by the id, not `
+    + `by a pointer phrase in the comment.`;
 }
 
 /**
@@ -829,6 +916,78 @@ function emitHook(obj) {
 }
 
 /**
+ * Best-effort extraction of the TEXT the triggering tool call itself just wrote, from the PostToolUse
+ * payload's `tool_input` (card a862e8f0 lead review: `pointerAnchors` was flooding the hook's advisory
+ * with EVERY pre-existing pointer anchor in the edited file — measured up to 197 sites in one file on
+ * a single Edit — instead of only the site(s) the agent actually just authored). Mirrors the SAME
+ * Edit/Write/MultiEdit tool schemas this hook's own harness (Claude Code) invokes these tools with —
+ * not a guess: `Write`'s `tool_input.content` is the file's ENTIRE new content (for a brand-new file
+ * that genuinely IS "everything just written"; for a full rewrite of an existing file it over-includes
+ * pre-existing content too — an accepted, narrow trade, since `Write` on an EXISTING file is rare here
+ * by convention, see `CLAUDE.md`: "Prefer editing existing files... prefer the Edit tool"); `Edit`'s
+ * `tool_input.new_string` is the one replacement snippet; `MultiEdit`'s `tool_input.edits` is an array
+ * of `{new_string, ...}` entries, joined. Returns `null` (never `""`) when the shape doesn't match any
+ * of these known tools/fields — a caller MUST treat `null` as "cannot determine what was written", never
+ * as "nothing was written" (those are different: the former means fall back to a bounded cap, the latter
+ * would wrongly suppress every real finding). No test in this repo currently observes MultiEdit's real
+ * payload shape (only Edit/Write appear in captured fixtures) — this function's `edits` branch is
+ * therefore UNVERIFIED against a real MultiEdit payload; it degrades safely to the `null`/cap path if the
+ * shape ever differs from this file's own belief about it.
+ */
+export function extractWrittenText(toolName, toolInput) {
+  if (!toolInput || typeof toolInput !== "object") return null;
+  if (toolName === "Write" && typeof toolInput.content === "string") return toolInput.content;
+  if (toolName === "Edit" && typeof toolInput.new_string === "string") return toolInput.new_string;
+  if (toolName === "MultiEdit" && Array.isArray(toolInput.edits)) {
+    const parts = toolInput.edits
+      .filter((e) => e && typeof e.new_string === "string")
+      .map((e) => e.new_string);
+    return parts.length ? parts.join("\n") : null;
+  }
+  return null;
+}
+
+// Hard cap on how many pointerAnchors sites the HOOK ever surfaces in one advisory, independent of the
+// scoping below — a belt-and-suspenders bound, not the primary mechanism (card a862e8f0). Covers the one
+// case scoping-by-written-text can still over-include: a `Write` of a genuinely large brand-new file
+// carrying many real, freshly-authored pointer anchors all at once (every one of them legitimately
+// "just written", so scoping alone wouldn't trim them) — and the fallback path below, when the payload
+// shape can't be read at all. The CLI scan (`pointerAnchors` on `computeReport`) always has the complete,
+// uncapped list; this cap only bounds what gets INJECTED into the agent's context per edit.
+export const HOOK_POINTER_ANCHOR_CAP = 5;
+
+/**
+ * Scope `pointerAnchors` (as returned on a `computeFileReport` result) down to the sites the triggering
+ * edit actually just wrote, for the HOOK's advisory only (card a862e8f0) — never changes what
+ * `computeFileReport`/`computeReport` themselves report; this function is applied by `runHook`, after
+ * computing the full report, purely to decide what to SURFACE. `lines` is the edited file's OWN lines
+ * (post-edit, same split the report was computed against) — used to read each anchor SITE's own raw line
+ * text (line `p.line`, 1-indexed) for the containment test. `writtenText`, from `extractWrittenText`
+ * above: `null` means the payload shape couldn't be read (falls back to a capped, unscoped slice of the
+ * full list rather than either flooding or going silent — an unrecognized payload must never suppress a
+ * real finding, but must also never dump everything); any string means "test each site's own anchor line
+ * for containment in this text" — a site is kept IFF its own (trimmed) anchor line text is a substring of
+ * `writtenText`. This is a SUBSTRING test, not a diff: it can theoretically false-keep a pre-existing site
+ * whose anchor line happens to be reproduced verbatim inside an unrelated large `new_string`/`content` —
+ * accepted, since a false keep only ever costs a little extra advisory text, never a missed real one (the
+ * failure mode this fix exists to prevent is the OPPOSITE: silently dropping a site the agent DID just
+ * write). Always applies `HOOK_POINTER_ANCHOR_CAP` on top, regardless of scoping outcome, as the
+ * belt-and-suspenders bound documented on that constant. Returns `{items, omitted}` — `omitted` is the
+ * count trimmed by the cap (0 when nothing was trimmed), used by `formatHookMessage` to say so rather than
+ * silently truncating.
+ */
+export function scopeHookPointerAnchors(pointerAnchors, lines, writtenText) {
+  const candidates = writtenText === null
+    ? pointerAnchors
+    : pointerAnchors.filter((p) => {
+        const anchorLineText = (lines[p.line - 1] ?? "").trim();
+        return anchorLineText.length > 0 && writtenText.includes(anchorLineText);
+      });
+  if (candidates.length <= HOOK_POINTER_ANCHOR_CAP) return { items: candidates, omitted: 0 };
+  return { items: candidates.slice(0, HOOK_POINTER_ANCHOR_CAP), omitted: candidates.length - HOOK_POINTER_ANCHOR_CAP };
+}
+
+/**
  * `node comment-anchor-lint.mjs --hook <repoRoot>` — the PostToolUse hook entry point (matcher Write|Edit;
  * see `writeSessionSettings` in claude-settings.ts for the wiring + its docLint gate). Reads the hook
  * payload on stdin: `{tool_name, tool_input:{file_path}, cwd}`. `repoRoot` is handed in as an argv (the
@@ -839,6 +998,14 @@ function emitHook(obj) {
  * file outside it can never do. A non-Write/Edit/MultiEdit tool, a missing/unreadable file, or a file
  * `isInScope` rejects are all fast, silent no-ops — byte-identical to a session with no hook wired at all.
  * Always exits 0 (see the dispatcher at the bottom of this file): a bug here must never block a real Write.
+ * `pointerAnchors` gets ONE extra step here (card a862e8f0 lead review) that no other check in this file
+ * needs: `computeFileReport` still returns the file's FULL, unscoped `pointerAnchors` list (every check
+ * it computes always describes the whole file — that contract doesn't change), but `runHook` narrows what
+ * it actually SURFACES to `scopeHookPointerAnchors`'s output before calling `formatHookMessage` — every
+ * other field is passed through untouched. See `extractWrittenText`/`scopeHookPointerAnchors`'s own docs
+ * above for why: without this, a single Edit to a file already carrying hundreds of pre-existing pointer
+ * anchors (measured: up to 197 in one file) would inject the ENTIRE list into the agent's context on
+ * EVERY edit, not just the site(s) it actually just wrote.
  */
 async function runHook(repoRootArg) {
   if (!repoRootArg) return;
@@ -863,11 +1030,18 @@ async function runHook(repoRootArg) {
   try { content = fs.readFileSync(filePath, "utf8"); } catch { return; } // tool already ran → file is on disk
 
   const report = computeFileReport(repoRoot, filePath, content);
-  if (!report || (report.unanchoredLongBlocks.length === 0 && report.orphanAnchors.length === 0
-    && report.brokenAnchors.length === 0 && report.overlongAnchorIds.length === 0
-    && report.sigilSpaceAnchors.length === 0 && report.bareCommitAnchors.length === 0)) return;
+  if (!report) return;
 
-  const msg = formatHookMessage(report);
+  const writtenText = extractWrittenText(tool, payload.tool_input);
+  const pointerScope = scopeHookPointerAnchors(report.pointerAnchors, content.split(/\r?\n/), writtenText);
+  const scopedReport = { ...report, pointerAnchors: pointerScope.items };
+
+  if (scopedReport.unanchoredLongBlocks.length === 0 && scopedReport.orphanAnchors.length === 0
+    && scopedReport.brokenAnchors.length === 0 && scopedReport.overlongAnchorIds.length === 0
+    && scopedReport.sigilSpaceAnchors.length === 0 && scopedReport.bareCommitAnchors.length === 0
+    && scopedReport.pointerAnchors.length === 0) return;
+
+  const msg = formatHookMessage(scopedReport, pointerScope.omitted);
   await emitHook({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: msg } });
 }
 

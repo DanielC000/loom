@@ -288,6 +288,19 @@ thing it exists to do.
    resolves" while the other file sharing that id goes permanently dark, and `orphanAnchors` stays
    at 0 throughout. Also check `bareCommitAnchors` stays at 0 — a bare `@decision <id>` you sourced
    off `git blame`/`git log` needs the `sha:` sigil (card `a2fc4031`).
+   **Also check `pointerAnchors` (card `a862e8f0`) for the anchor(s) you personally write or edit
+   this tranche.** This field flags an anchor whose own text POINTS AT its record ("see docs/…",
+   "docs/adr/", "docs/decisions/", "docs/investigations/", "see the linked record", "see the
+   record") instead of STATING the prohibition/consequence — the anchor grammar above requires the
+   text itself to carry the rule; the record is reached by resolving the id, never by a pointer
+   phrase typed into the comment. REPORT-ONLY, not a `guards` failure: the corpus already carries
+   several hundred pre-existing pointer-tailed anchors (measured on this program's own history, well
+   before this check existed), so the field is not a zero-tolerance gate on the whole repo — you are
+   not responsible for the pre-existing count. You ARE responsible for your OWN tranche's anchors:
+   run `node packages/daemon/assets/comment-anchor-lint.mjs .`, filter `pointerAnchors.items` to your
+   touched file(s), and rewrite any hit among the anchors you wrote or edited this tranche before
+   reporting done — lead review has sent this exact shape back 7 times across two seats without a
+   mechanical check; don't add an 8th.
 6. **Commit your changes first, then run `pnpm --filter @loom/daemon guards`.** `guards` is not
    `run_gate`. A `git add` short of a commit does not put your work through the diff-scoped core
    scan the merge gate itself re-runs — the guard list lives in `STATIC_GUARD_REPO_PATHS` in
