@@ -9711,25 +9711,9 @@ export class SessionService {
    * to its manager. No-op for a non-strand (already reported/merged, rate-limited, queued report, or
    * legitimately parked awaiting an ack).
    *
-   * TASKLESS (CR-flagged asymmetry on card 2514e6e1's taskless worker_spawn, widened by card df48366b): a
-   * taskless worker (an ad-hoc spike, or a read-only Code Reviewer with no vehicle card) has no board card
-   * for classifyIdleWorker's column-based reconciliation (parked-ack/queued-report need a task's lane) —
-   * that classifier stays entry-gated on taskId and out of scope here (see its own comment). But two
-   * things need no board state at all and are exactly as safety-critical for a taskless worker as a tasked
-   * one: (1) "did the engine ever start a turn at all" (broken-spawn) and (2) "did it finish a turn and go
-   * idle without EVER calling worker_report" (silent-finish) — a taskless worker that engaged, ran, and
-   * went idle used to get NEITHER signal (this branch returned unconditionally once past the broken-spawn
-   * check), leaving it just as silently stranded as the role-less case below. Handled directly here,
-   * BEFORE delegating to classifyIdleWorker, with the SAME pending-direction race guard that classifier
-   * applies (card 6101d7f7) and the busy-worker-watcher.ts `w.taskId ? ... : ""` taskId-optional message
-   * shape. Reconciliation beyond "ever reported at all" (parked-ack wording, re-ack tracking) is
-   * intentionally NOT extended to taskless — the manager that spawned it is expected to actively await +
-   * worker_stop it directly once nudged.
-   *
-   * ROLE-LESS CHILDREN (card df48366b): a session with `role: null` parented to a manager (e.g. a
-   * role-less consultation worker) is exactly as much this manager's responsibility as a role='worker'
-   * child — the entry gate below used to hard-require `role === "worker"`, so a role-less child got NO
-   * nudge whatsoever, tasked or not (the ONLY signal that could ever reach its manager on a silent finish).
+   * @decision df48366b — a taskless worker still needs broken-spawn + silent-finish coverage with no
+   *  board state, and a role-less child (role:null) gets the SAME nudge path as role='worker' — neither
+   *  may silently fall through with zero signal to its manager.
    */
   notifyManagerOfIdleWorker(workerSessionId: string): void {
     const w = this.db.getSession(workerSessionId);
@@ -9753,18 +9737,8 @@ export class SessionService {
       // most-decisive-first, mirrors classifyIdleWorker's own ordering at ~9301-9311) — a worker that has
       // already reported at least once needs no further classification here regardless of turn state.
       const everReported = this.db.listEventsForWorker(workerSessionId).some((e) => e.kind === "worker_report");
-      // DISCRIMINATOR A (card 6651bf24, mirrors classifyIdleWorker's card-2281009d discriminator exactly
-      // — see that classifier's own comment at ~9285-9316): `engineSessionId` being SET only proves the
-      // SessionStart hook fired, NOT that a turn ever ran (card f91c8634's parked-Enter signature can
-      // leave a kickoff sitting unsent in the composer forever) — without this check that state used to
-      // fall straight through into "it DID start a turn" and assert a completion that never happened.
-      // `hasFirstTurnStarted` is seeded `false` for EVERY real Claude live entry `spawn()` creates — fresh,
-      // resume, AND fork alike (host.ts:4072, unconditional, inside the one `spawn()` chokepoint every one
-      // of those paths shares — verified NOT the `firstTurnStarted:true` seeds at host.ts:4250/4331, which
-      // belong to `spawnShell`/`seedCanned`, an unrelated non-Claude `kind:"shell"|"canned"` code path
-      // reachable only from the human-only `POST /api/terminals` REST route and a WS-replay test fixture,
-      // never a real worker's resume/fork) — so a worker that crash-resumed with a genuinely never-started
-      // kickoff still reads `hasFirstTurnStarted:false` here, never a stale `true`.
+      // @decision 6651bf24 — engineSessionId SET is not proof a turn ran; check hasFirstTurnStarted too,
+      //  seeded false for every real Claude spawn() (fresh/resume/fork), never a stale true.
       if (
         !this.pty.hasFirstTurnStarted(workerSessionId) &&
         !everReported &&
@@ -9776,11 +9750,8 @@ export class SessionService {
         return;
       }
       if (everReported) return; // already reported at least once — nothing to nudge about
-      // DISCRIMINATOR B (card 6651bf24 SPECIMEN 2): discriminator A is false, so a turn genuinely STARTED
-      // — but `turnSeq` (the ONLY thing `onTurnCompleted` increments, at claude's genuine Stop-hook
-      // chokepoint or, since card 361a5520, codex's own analogous `armCodexBusyStaleTimer` CASE-2
-      // chokepoint) is still 0, i.e. `neverCompletedTurn`. See buildNeverCompletedTurnMsg's own doc for why
-      // this is reworded rather than folded into the plain "finished a turn" wording below.
+      // @decision 6651bf24 — a started-but-turnSeq-0 taskless worker (neverCompletedTurn) is reworded,
+      //  never asserted as a completion — see buildNeverCompletedTurnMsg's own doc for why.
       if ((w.turnSeq ?? 0) === 0) {
         try { this.pty.enqueueStdin(w.parentSessionId, buildNeverCompletedTurnMsg(w)); } catch { /* manager not live */ }
         return;
@@ -9803,21 +9774,10 @@ export class SessionService {
       return;
     }
 
-    // Card 8f36be30: the fallthrough `stranded` branch (below) is the ONLY one of these that both (a)
-    // recommends `worker_merge` unconditionally and (b) asserts "finished a turn" with no observable field
-    // the reader can check it against — the other kinds already carry their own discriminating detail
-    // (minutesSinceStart, wakeAt, status, minutesSinceReport). `w.turnSeq`/`w.lastActivity` are the same
-    // point-in-time-read fields `buildBrokenSpawnMsg` (above) already reports for the sibling broken-spawn
-    // notice — reused here rather than inventing a second idiom. Report OBSERVED fields only; do not assert
-    // a cause from them (the reader decides whether the elapsed time is routine for this worker or not).
-    // ELAPSED-FIGURE RECONCILIATION (card 422d3003 DoD-3, origin finding: the nudge said "~21 min" while
-    // gate_queue read 24.8 min seconds later): NOT two different clocks — `minutesSinceStart`/`idleMs` here
-    // are computed from the SAME GateSemaphore fields `gate_status`/`gate_queue` read live (`since`/
-    // `lastOutputAt`). The gap is DELIVERY LAG: this message is enqueued via `pty.enqueueStdin`, which
-    // (per its own doc) waits for the target's turn to end if the manager is mid-turn when the watchdog
-    // fires — so the embedded numbers are a snapshot from CLASSIFICATION time, not from whenever the
-    // manager actually reads them, and can be visibly stale by then. The message says so explicitly and
-    // points at a live re-check rather than asking the reader to trust the embedded figures as current.
+    // @decision 8f36be30 — the stranded fallthrough reports OBSERVED turnSeq/lastActivity only, never
+    //  an asserted cause; reuses buildBrokenSpawnMsg's own idiom rather than inventing a second one.
+    // @decision 422d3003 — parked-gate-stale's embedded minutesSinceStart/idleMs are a classification-
+    //  time snapshot (delivery can lag via pty.enqueueStdin), not a live read — say so, don't assert current.
     const msg = cls.kind === "parked-gate-stale"
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) has a run_gate op that's been running ~${cls.minutesSinceStart} min (past this project's plausible gate runtime) AND idle ~${Math.round(cls.idleMs / 1000)}s with no output — past GATE_EXTEND_IDLE_MS, the same point the gate's OWN auto-extend machinery would also stop rescuing it — so this may be a genuine wedge, not just a slow-but-healthy run. Both figures are a snapshot from when this nudge was generated and can already be stale by the time you read it (delivery lags behind classification if you were mid-turn) — re-check LIVE first: gate_status/gate_queue for this op's CURRENT idleMs, the number that actually matters (a large elapsedMs alone is routine, not a wedge signal). Only if idleMs is still high there, escalate: worker_transcript ${workerSessionId} to check what actually happened, then worker_message it, or worker_stop/worker_recycle it only once the gate is confirmed stuck.`
       : cls.kind === "parked-wake"

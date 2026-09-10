@@ -14,3 +14,21 @@ Reworded, not silenced (card 6651bf24 DoD-4: "fix the claim it makes", not "sile
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts` (`buildNeverCompletedTurnMsg`'s top-of-function doc): lines 1255-1276, as of this tranche's HEAD. Relocated by card 5dcc1e98 (tranche 6); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+
+## DISCRIMINATOR A — `hasFirstTurnStarted`, not `engineSessionId` presence, at the taskless path
+
+`notifyManagerOfIdleWorker`'s taskless branch runs its OWN discriminator, mirroring `classifyIdleWorker`'s card-`2281009d` discriminator exactly (see `docs/decisions/2281009d-broken-spawn-needs-two-proofs-a-turn-actually-started.md`): `engineSessionId` being SET only proves the SessionStart hook fired, NOT that a turn ever ran (card `f91c8634`'s parked-Enter signature can leave a kickoff sitting unsent in the composer forever) — without this check that state used to fall straight through into "it DID start a turn" and assert a completion that never happened.
+
+`hasFirstTurnStarted` is seeded `false` for EVERY real Claude live entry `spawn()` creates — fresh, resume, AND fork alike (`host.ts:4072`, unconditional, inside the one `spawn()` chokepoint every one of those paths shares) — verified NOT the `firstTurnStarted:true` seeds at `host.ts:4250`/`4331`, which belong to `spawnShell`/`seedCanned`, an unrelated non-Claude `kind:"shell"|"canned"` code path reachable only from the human-only `POST /api/terminals` REST route and a WS-replay test fixture, never a real worker's resume/fork — so a worker that crash-resumed with a genuinely never-started kickoff still reads `hasFirstTurnStarted:false` here, never a stale `true`.
+
+### Do not (2)
+
+- Do not trust `hasFirstTurnStarted:true` as proof a turn started without checking whether the session could be a `spawnShell`/`seedCanned` (`kind:"shell"|"canned"`) seed — those alone seed it `true` unconditionally; every real Claude `spawn()` path seeds it `false`.
+
+## Source (2)
+
+Inline comment in `packages/daemon/src/sessions/service.ts` (`notifyManagerOfIdleWorker`'s taskless branch, "DISCRIMINATOR A"): lines 9756-9767, as of main `c51b7bc2` (introducing commit `0e97a2fdb054c6c953db865b790a25898a3ce877`, `fix(sessions): gate the taskless idle nudge on whether a turn finished`). Extraction tranche 35.
+
+## Source (3)
+
+A second citation site of this record's main SPECIMEN-2 narrative above ("DISCRIMINATOR B (card 6651bf24 SPECIMEN 2)"), same `notifyManagerOfIdleWorker` taskless branch: lines 9779-9783, same commit family (`0e97a2fdb054c6c953db865b790a25898a3ce877`). No new content — the Narrative section above already covers this site in full. Extraction tranche 35.

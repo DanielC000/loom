@@ -12,3 +12,16 @@
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts` (`classifyIdleWorker`): lines 12814-12837 (through "guaranteed already non-null."), as of commit `a07c5092c871d47f25aeb2ec160958306294a043`. Relocated by card `3f40210c`; no wording changed, wrapped source lines joined into a flowing paragraph, the leading list-bullet marker and `*` comment markers stripped. The remainder of this same source line (the `minutesSinceStart`-measured-from-admission correction) is a distinct card and its own record: see `docs/decisions/865c528e-minutessincestart-measured-from-admission-not-registry-startedat.md`. Card `166ba5d9` is referenced here as related context rather than covered by this record — out of this record's scope.
+
+## DoD-3 — the stale-gate notice's embedded figures are a classification-time snapshot, not two disagreeing clocks
+
+Card 422d3003 DoD-3, origin finding: a `[loom:worker-idle]` `parked-gate-stale` notice said "~21 min" while `gate_queue`, read moments later, showed 24.8 min — NOT evidence of two different clocks. `minutesSinceStart`/`idleMs` in that notice are computed from the SAME GateSemaphore fields `gate_status`/`gate_queue` read live (`since`/`lastOutputAt`). The gap is DELIVERY LAG: `notifyManagerOfIdleWorker`'s message is enqueued via `pty.enqueueStdin`, which (per its own doc) waits for the target's turn to end if the manager is mid-turn when the watchdog fires — so the embedded numbers are a snapshot from CLASSIFICATION time, not from whenever the manager actually reads them, and can already be visibly stale by then. The message now says so explicitly and points the reader at a live re-check (`gate_status`/`gate_queue`) rather than asking them to trust the embedded figures as current.
+
+### Do not (2)
+
+- Do not read a discrepancy between a notice's embedded elapsed figure and a live `gate_status`/`gate_queue` read as evidence of two disagreeing clocks — both are read from the same GateSemaphore fields; the gap is delivery lag in `pty.enqueueStdin`, not a computation bug.
+- Do not word a stale-gate notice's embedded numbers as current — state them as a classification-time snapshot and point the reader at a live re-check first.
+
+## Source (2)
+
+Inline comment in `packages/daemon/src/sessions/service.ts` (`notifyManagerOfIdleWorker`'s `parked-gate-stale` message-building block, the "ELAPSED-FIGURE RECONCILIATION" comment): lines 9813-9820, as of main `c51b7bc2` (introducing commit `1773239838345bbd1f2ad7ff48661f48717ae70e`, `fix(daemon): the run_gate idle-watchdog calls a gate "may be wedged" from elapsedMs alone and recommends worker_stop — idleMs was 1.3s, the gate was producing output`). Extraction tranche 35.
