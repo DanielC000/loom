@@ -72,3 +72,16 @@ lines 5166-5171, as of commit `94d7f15344bffb12a8ae413d8345da2ff62b6071` (`fix(p
 give-up terminal branch discards permanently (budget 1) and invisibly...`). Relocated by card `61632c05`
 (tranche 15); no wording changed, wrapped source lines joined into a flowing paragraph and the `//`
 comment markers stripped.
+
+## Two more fixes bundled at this same site (card ccb407eb)
+
+The re-mint also fixes: `enqueueDurableMessage`'s `if (!r.delivered)` append never ran for an
+immediate re-mint (no `session_message_queued` row, not crash-durable) — the `giveUpHeldUntil` HELD
+branch fixes this too. `sender` is `"system"` for every settle-nudge site (no real session); safe —
+`ctx.sender` only feeds `managerSessionId` attribution and the sender-surface step, a no-op for
+`db.getSession("system")` (same shape `recoverUndeliveredMessagesOnBoot` documents).
+
+## Source (4)
+
+`sessions/service.ts` (`handleGiveUpExhausted` doc), lines 7131-7176, main `fb53a9f6`. Relocated by
+card `0d854939` (tranche 19); remainder duplicates the sections above.

@@ -7129,97 +7129,15 @@ export class SessionService {
   }
 
   /**
-   * Card ccb407eb: the terminal-branch policy for a durable message whose in-session `GIVE_UP_REQUEUE_LIMIT`
-   * (pty/host.ts) is exhausted — wired as EVERY `enqueueDurableMessage` dispatch's `onGiveUpExhausted` hook,
-   * so both original populations that used to hit this branch (a worker_message/redirect/recycle-carry
-   * "agent" message, AND — since this card — a settle-nudge "warning"/"agent" one-shot terminal push) are
-   * covered by the SAME policy instead of two independently-maintained ones.
-   *
-   * NEVER discards (this project's "fail toward a duplicate, never a loss" principle, 88f11385): below
-   * `GIVE_UP_REMINT_LIMIT`, RE-MINT — a fresh `enqueueDurableMessage` dispatch to the same recipient, new
-   * msgId, budget reset, `chainDepth + 1`. This is deliberately NOT the same thing the ⛔ "don't raise
-   * `GIVE_UP_REQUEUE_LIMIT`" constraint forbids: that budget guards the IMMEDIATE in-turn retry loop against
-   * a session already shown wedged in THIS turn; a re-mint is a genuinely independent dispatch. At/above the
-   * limit, PARK: stop dispatching entirely (no further `enqueueStdin` call for this message — the loop this
-   * bound exists to prevent), and surface it to a live sender.
-   *
-   * CR follow-up (card ccb407eb, BLOCKING finding [1]): the re-mint MUST pass `giveUpHeldUntil` (below) —
-   * WITHOUT it, this is NOT a turn-boundary dispatch at all. `fireEnterAndVerify` calls `setBusy(false)`
-   * BEFORE `requeueGiveUpOrigin` (host.ts) — the caller of THIS hook — so `live.busy` is already `false` the
-   * instant this method runs. A re-mint with no `giveUpHeldUntil` would pass `enqueueStdin`'s
-   * IMMEDIATE-SUBMIT gate and re-hammer the just-wedged session SYNCHRONOUSLY, in the very chain that just
-   * detected the wedge — exactly the immediate re-hammer the ⛔ constraint above forbids, just relocated one
-   * layer up. Passing `giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS` (the SAME constant `requeueGiveUpOrigin`
-   * uses for its own kept-requeue — "matching the requeue path's own discipline") forces `enqueueStdin`'s
-   * held branch instead: the re-mint sits ineligible for drain until a real turn boundary (Stop hook, the
-   * reconcile tick) or the hold expires — never an instant second attempt. It ALSO fixes a second bug the
-   * immediate path had: `enqueueDurableMessage`'s `if (!r.delivered)` durable-record append never ran for an
-   * immediately-"delivered" re-mint, so the re-mint carried NO `session_message_queued` row — not
-   * crash-durable. Held, it gets one, like every other durable dispatch.
-   *
-   * AUDITABLE: every re-mint (and the terminal park) appends a `session_message_gave_up` event carrying
-   * `rootMsgId` — the FIRST msgId in this logical message's chain — so "did my message ever land?" is
-   * answerable by querying that one id instead of chasing an unlabeled sequence of unrelated ids. This is
-   * INDEPENDENT of `session_message_delivered`: that marker is stamped the instant a HELD message is HANDED
-   * to the recipient (drainPending, well before give-up detection resolves — see `resolveQueuedMessage`'s
-   * doc), so the OLD msgId here has usually ALREADY been marked "delivered" (optimistically, pre-existing
-   * behavior this card does not change) by the time exhaustion fires. Calling `resolveQueuedMessage` again
-   * for it would be an idempotent no-op, not a resolution — so this method deliberately does NOT touch that
-   * marker; `session_message_gave_up` is the correction a reader must consult ALONGSIDE it, not instead.
-   *
-   * `sender` is the sentinel string `"system"` for every settle-nudge call site (merge-done, gate-done,
-   * cap-queue-autofire-failed, …) — there is no real originating session for a daemon-generated completion
-   * signal. That's safe: `ctx.sender` only ever feeds (a) this event's `managerSessionId` attribution
-   * (a plain TEXT column, no FK) and (b) the "surface to the sender" step below, where `db.getSession
-   * ("system")` simply returns undefined and the surface step is skipped — the SAME shape
-   * `recoverUndeliveredMessagesOnBoot` already documents for a sentinel sender with nobody to nudge.
+   * @decision ccb407eb — handleGiveUpExhausted's give-up terminal-branch policy: never-discard,
+   * re-mint-then-park (giveUpHeldUntil forces the HELD branch, also fixing a durable-record gap),
+   * AUDITABLE rootMsgId chain, and "system"-sender safety — fully recorded, docs/decisions/ccb407eb-*.md
    */
   /**
-   * Card 085d9422 — a MOOT `[loom:redelivery-parked]` notice costs far more than its own ~1.1KB: the
-   * owner measured FOUR duplicate/moot notices in one 40-minute window, each forcing a full manager
-   * verification turn (worker_status + worker_transcript + reasoning, ~2-5K tokens) to learn what THIS
-   * check can rule out for free — suppressing one is worth roughly 10x shortening it. Called at the PARK
-   * site, BEFORE the notice is built, so a suppressed case costs nothing beyond this query.
-   *
-   * THREE checks, each a real way this exact notice goes stale before it's even sent — NOT the notice's
-   * OWN re-mint recursion, which this card's own investigation found is already safe (see
-   * give-up-exhausted-durable.mjs scenario (7): the sentinel `"system"` sender never resolves to a live
-   * session, so a notice that itself gives up terminates with zero follow-on dispatch, proven both ways).
-   * That was this card's OWN leading hypothesis for the duplication and it does NOT hold — measured here
-   * instead:
-   *  (1) DUPLICATE PARK FOR THE SAME ROOT — established by this card's own reproduction (see the card body
-   *      for the exact repro): `enqueueDurableMessage`'s auto-join (`hasAmbiguousMatch`, card 4a0af485)
-   *      lets a SECOND, independent dispatch of matching content join an existing chain's `rootMsgId` —
-   *      but the join only shares the LABEL; each dispatch still runs its OWN independent chainDepth
-   *      counter and can reach PARK entirely on its own. Two independently-parking chains sharing one
-   *      rootMsgId produce two BYTE-IDENTICAL notices (neither carrying a possible-duplicate tag, since
-   *      each is a fresh, self-rooted send to the sender, not a re-mint of the other) — exactly the "two
-   *      byte-identical pairs" this card's measured evidence describes. Once any chain has already parked
-   *      this root, a second parking of the SAME root tells the sender nothing new.
-   *  (2) SUPERSEDED BY A NEWER DIRECTIVE — mirrors `staleDirectiveProjection`'s own "latest wins" rule
-   *      (mcp/orchestration.ts): if `sender` has since dispatched ANOTHER `message_worker`/`redirect_worker`
-   *      to this SAME `recipientId` after the one that produced this `rootMsgId`, that newer directive is
-   *      now the one worker_list/worker_status tracks — `parkedDirective` for the OLD root is no longer
-   *      reachable from there either, so a notice about it describes a directive the sender has already
-   *      moved past.
-   *  (3) ALREADY CONFIRMED-AFTER-PARK — a late confirming hook (`handleGiveUpConfirmed`) can resolve this
-   *      exact rootMsgId to `confirmed-after-park` in a narrow race before this PARK branch's own notice
-   *      goes out; that path already sends its own `[loom:redelivery-confirmed]` retraction, so a
-   *      `[loom:redelivery-parked]` notice for a chain already known to have landed would just contradict
-   *      it moments later.
-   *
-   * Deliberately does NOT check "does the recipient's transcript already contain the message" (the
-   * card's third candidate): no cross-session transcript-CONTENT read exists at this layer for the
-   * general sender (see `canCheckRecipient`'s own honesty split in the caller, just below), and (3) above
-   * already covers "already landed" via the durable confirmed-after-park signal for the one case that's
-   * checkable without one. Also deliberately does NOT add a settle-delay before evaluating these checks
-   * (the card floated one, since a late-arriving confirmation can beat a notice sent immediately) — that
-   * would delay reporting a message that is GENUINELY lost, which the card's own DoD calls the
-   * load-bearing half; the (3) check plus `handleGiveUpConfirmed`'s existing retraction already cover the
-   * "landed a little late" case without adding latency to the "actually lost" case.
-   *
-   * Never suppresses a genuinely first, unresolved, un-superseded park — a message that is actually lost
-   * still gets reported, at the same latency as before this card.
+   * @decision 085d9422 — three staleness checks (duplicate-park-for-same-root, superseded-by-newer-
+   * directive, already-confirmed-after-park) suppress a MOOT `[loom:redelivery-parked]` notice before it's
+   * built; never suppresses a genuinely first, unresolved park. Fully recorded, see
+   * docs/decisions/085d9422-suppressmootparknotice-three-staleness-checks.md
    */
   private suppressMootParkNotice(recipientId: string, sender: string, rootMsgId: string): string | null {
     const events = this.db.listEventsForWorker(recipientId);
