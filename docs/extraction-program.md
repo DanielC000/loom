@@ -90,6 +90,9 @@ it here as current.)
 ⇒ **Before writing any record:** `find docs/adr docs/decisions docs/investigations -iname
 "<id>*"`. If the id already has a file, your decision is a **new section in that file**, never a
 second file. Never overwrite what's already there — another lane's landed work may be in it.
+**Run this `find`, for every id, every time — including an id you personally minted a record for
+earlier in this same session.** A block that re-cites an id you anchored twenty minutes ago is
+exactly where a second record file gets created by accident; recency doesn't exempt it.
 
 **A `find` hit is not enough — read the returned path before concluding it's unrelated.** A
 worker misread its own `find` output once, and that misreading is precisely how a duplicate
@@ -100,10 +103,11 @@ section rather than create a second file: the heading names it *"(unrelated deci
 id, `<file>`)"* and carries its own `Source (this section only)` line stating it is **not** the
 same decision as the section above it. Prefer appending *before* a trailing `## Source`.
 
-**Worked precedent, copy the shape:** one tranche found a target id already held an unrelated
-decision, and restructured that file into `## Decision A` / `## Decision B`, with a header line
-naming the `resolveRecord()` shadowing mechanism as the reason two decisions share one id. At
-review, the restructure's only deletions were heading-level demotions — zero prose was lost.
+**Worked precedent, copy the shape:** one tranche found card id `a0d912f5` already held an
+unrelated decision, and restructured that file into `## Decision A` / `## Decision B`, with a
+header line naming the `resolveRecord()` shadowing mechanism as the reason two decisions share
+one id. At review, the restructure's only deletions were heading-level demotions — zero prose
+was lost.
 
 ## The byte-cap ladder
 
@@ -187,15 +191,27 @@ thing it exists to do.
    `packages/daemon/src/git/worktrees.ts`; read it there, it changes over time.
 7. **EOL, for any new file you create:** `git check-attr text eol -- <path>` first, then compare
    CR vs LF byte counts against *that* pin. `docs/**` is `text=auto` ⇒ pass is `CR == LF`, not
-   `CR == 0`. The `Write` tool lands bare LF and will fail this — repair via commit →
-   `git rm --cached <path>` → `git checkout HEAD -- <path>`. Use `Edit` for follow-up changes to
-   the same file, never `sed -i` (it rewrites the whole file and flips every ending despite its
-   name).
+   `CR == 0`. The `Write` tool lands bare LF and will fail this — one tranche hit exactly this on
+   all 5 new files it created in one sitting — repair via commit → `git rm --cached <path>` →
+   `git checkout HEAD -- <path>`. Use `Edit` for follow-up changes to the same file, never
+   `sed -i` (it rewrites the whole file and flips every ending despite its name).
 8. **State your own evidence tier on every claim you report: measured vs inferred vs
    estimated-from-sample.**
 9. **Report the id-less residue explicitly:** how many blocks you left inline purely for lack of
    any id, how many you resolved with a `sha:` key, and for any block you still couldn't key, why
    `git blame` didn't produce a usable commit for it.
+
+## Sizing a tranche
+
+**Cost scales with distinct ids per block, not with line count.** A single long block can cite
+several distinct ids at once (a re-citation of an id you anchored earlier in this same tranche,
+plus several ids never seen before). Each distinct id needs its own read to decide whether it is
+a genuinely separate decision, a second site on an id you already anchored this tranche, or a
+second site on an id that belongs to a future tranche. One such block, on a real tranche,
+contained roughly a dozen distinct ids and was correctly budgeted as an entire tranche's worth of
+work on its own — don't measure your progress in lines when a block looks like this; measure it
+in ids still to resolve. Stopping short of the nominal ~350-500 line target because you hit a
+block like this is a success, not a shortfall — report it as such.
 
 Re-measure your file's remaining unanchored-block count yourself before you start, rather than
 trusting a figure quoted at you — main moves under every tranche, and the lint itself has changed
