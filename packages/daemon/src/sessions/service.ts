@@ -6952,14 +6952,18 @@ export class SessionService {
   }
 
   /**
-   * Durable down/cross-tree message send (card 2ca18433). Wraps pty.enqueueStdin: if the recipient is
-   * idle the message goes out as a turn now (delivered:true, nothing persisted — it's already live); if
-   * it's BUSY the message is HELD in the recipient's in-memory FIFO (delivered:false) AND persisted as a
-   * `session_message_queued` event, so a sender death (API 529) or a daemon restart before the
-   * recipient's next turn boundary can no longer SILENTLY DROP it (it lost a P1 dispatch twice). The
-   * onDeliver callback resolves the durable event the instant the held message is finally handed to the
-   * recipient — drained at its next Stop or pulled via inbox_pull. The boot scan
-   * (recoverUndeliveredMessagesOnBoot) re-drives any that a process death interrupted before delivery.
+   * @decision 2ca18433 — a durable down/cross-tree message send: an idle recipient gets it as a turn
+   *  now, a busy one holds + persists it so a sender death or daemon restart can no longer silently
+   *  drop it (docs/decisions/2ca18433-restart-pending-snapshot-excludes-durable-messages.md)
+   * @decision 61a012ce — ctx.route must be threaded through, or a restart-triggered redrive of a
+   *  companion-routed dispatch silently downgrades to a plain nudge
+   *  (docs/decisions/61a012ce-redrive-persists-route-as-a-fifth-legacy-defaulted-field.md)
+   * @decision 21a281b6 — ctx.mintedAtWallClock is rendered at drain time only, never baked into the
+   *  compared/stored framedText (breaks hasAmbiguousMatch's content-match resend auto-join otherwise)
+   *  (docs/decisions/21a281b6-annotate-mint-stamp-gates-are-load-bearing.md)
+   * @decision 6439c51f — the "system" sentinel to null coalescing-identity map now lives inside
+   *  enqueueStdin itself; every caller here passes ctx.sender RAW
+   *  (docs/decisions/6439c51f-system-sentinel-coalescing-map-moved-into-enqueuestdin.md)
    *
    * Callers fall into two shapes:
    *  - The original ones (messageWorker, redirectWorker, messageSessionAsPlatform, the recycle carry-
@@ -7002,11 +7006,8 @@ export class SessionService {
    * `annotatePasteRecoveryAge` already established for the same reason. Every other caller (omitting it)
    * is byte-identical to before this field existed.
    */
-  // Card 6439c51f: the `"system"` sentinel → `null` coalescing-identity map that used to live HERE
-  // (`coalesceSenderId`, card e01687ea) is now applied INSIDE `enqueueStdin` itself
-  // (`coalesceSenderIdentity`, pty/host.ts, beside `routeKeyOf`) — the unit that actually consumes
-  // `senderId` as a coalescing/reorder identity, so no caller (this one included) can forget to apply it.
-  // Both call sites below now pass the RAW `sender`/`ctx.sender` straight through; `enqueueStdin` maps it.
+  // @decision 6439c51f — see above; both call sites below pass the RAW `sender`/`ctx.sender` straight
+  //  through, `enqueueStdin` maps it (docs/decisions/6439c51f-system-sentinel-coalescing-map-moved-into-enqueuestdin.md)
 
   private enqueueDurableMessage(
     recipientId: string, framedText: string,
@@ -7093,19 +7094,14 @@ export class SessionService {
       // Held (busy / not-ready) — persist the durable inbox record. delivered:false with no position also
       // means "recipient not live": we still record it, so the boot scan re-drives it once the recipient
       // is resumed (never silently lost), and surfaces it to the sender if it stays stuck.
-      // Card 129efe74: also persist `kind`/`rootMsgId`/`chainDepth`/`giveUpHeldUntil` — this record is the
-      // ONLY thing a redrive (across a restart) has to reconstruct dispatch semantics from. Before this fix
-      // NONE of the four were persisted, so redriveQueuedMessage had to hardcode a classification, drop any
-      // in-flight give-up hold, and reset the chain — see that method's own doc for the legacy-row defaults
-      // this now enables (a record from before this fix still redrives exactly as it always did). Card
-      // 61a012ce: `route` joins that list as a fifth field, same reasoning — a legacy record (or any caller
-      // that omits it) has no `route` key once JSON-serialized (undefined values are dropped), so it
-      // redrives as a plain nudge exactly as it always has.
-      // Card d09d58e7: `reportEventId` joins the same list — before this fix it was IN-MEMORY-ONLY (never
-      // persisted here), so any reconstruction of this record (a give-up re-mint, a recycle carry, a boot/
-      // resume redrive) silently produced an UNTAGGED entry `purgeQueuedByReportEventIds` can never match,
-      // leaving a read report's queued nudge undead. `undefined` (every non-workerReport caller) is dropped
-      // by JSON serialization exactly like `route`, so this is additive-only.
+      // @decision 129efe74 — a redrive reads back kind/rootMsgId/chainDepth/giveUpHeldUntil from this
+      //  persisted record; a legacy (pre-card) row falls back to the old hardcoded behavior
+      //  (docs/decisions/129efe74-redrive-reads-back-persisted-kind-hold-chain-legacy-defaults.md)
+      // @decision 61a012ce — route joins that persisted list as a fifth field, same reasoning
+      //  (docs/decisions/61a012ce-redrive-persists-route-as-a-fifth-legacy-defaulted-field.md)
+      // @decision d09d58e7 — reportEventId joins the same list, or a reconstructed record can never be
+      //  purge-matched by purgeQueuedByReportEventIds once its report has already been read
+      //  (docs/decisions/d09d58e7-reporteventid-joins-the-persisted-redrive-field-list.md)
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId: ctx.sender, workerSessionId: recipientId, taskId: ctx.taskId ?? null,
