@@ -3076,11 +3076,19 @@ export class OrchestrationMcpRouter {
           "`staleReport` (worker_list/worker_status) — prefer it over `worker_transcript(lastN:2)`, which " +
           "additionally depends on the worker's CURRENT engine transcript file still holding the turn " +
           "(broken across an engine session id rotation, card 8a5bd0d0) and on transcript rendering never " +
-          "having dropped anything. Returns the MOST RECENT worker_report event for `workerSessionId` by " +
-          "default — {eventId, ts, taskId, status, summary, prUrl, needs, noChanges, awaiting, warning, " +
+          "having dropped anything. ALSO reaches a report your worker FILED but that Loom's own pending-" +
+          "direction guard then REFUSED (card 36e43a98) — that refusal still records the report's full " +
+          "`summary`/`status`/`prUrl`/`needs`/`noChanges`/`awaiting` on its own `worker_report_rejected` " +
+          "event, so it is recoverable here exactly like an accepted one; such a result carries `rejected: " +
+          "true` plus `reason`/`queued`/`msgIds`/`repeat` (the refusal's own detail) so you can tell it apart " +
+          "from a genuine accepted report — a refused report was NEVER acted on by the worker, so treat its " +
+          "content as what the worker WOULD have reported, not as work already landed. Returns the MOST " +
+          "RECENT worker_report OR worker_report_rejected event for `workerSessionId` by default — " +
+          "{eventId, ts, taskId, status, summary, prUrl, needs, noChanges, awaiting, warning, " +
           "managerTurnSeqAtReport} (any field the report didn't set is simply absent, never null/empty) — " +
           "or pass `eventId` (the full id, or an unambiguous 8-char id-prefix) to read a SPECIFIC earlier " +
-          "report instead of the latest one. `error` (a string) means nothing to read — 'not your worker' " +
+          "report (accepted or refused) instead of the latest one. `error` (a string) means nothing to " +
+          "read — 'not your worker' " +
           "(scoped the same way every other per-worker tool is — your own lineage only), 'no worker_report " +
           "recorded for this worker', an ambiguous-prefix message naming the matching ids, or 'no " +
           "worker_report event matching id …' — never a partial/best-effort result. Also carries " +
@@ -3098,8 +3106,13 @@ export class OrchestrationMcpRouter {
       async ({ workerSessionId, eventId }) => {
         const w = selfHealWorkerLink(workerSessionId, "worker_report_get");
         if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
-        const reports = db.listEventsForWorker(workerSessionId).filter((e) => e.kind === "worker_report");
-        if (reports.length === 0) return ok({ error: "no worker_report recorded for this worker" });
+        // Card 36e43a98: also match `worker_report_rejected` — the pending-direction guard's refusal
+        // persists the worker's report content on that event (not a `worker_report` one, since the guard
+        // returns BEFORE the genuine-report append below ever runs), so without this a refused report was
+        // permanently unreachable here even though its content was durably recorded. Kept in the SAME
+        // chronological list (not a separate lookup) so "most recent" still means most recent overall.
+        const reports = db.listEventsForWorker(workerSessionId).filter((e) => e.kind === "worker_report" || e.kind === "worker_report_rejected");
+        if (reports.length === 0) return ok({ error: "no worker_report (or worker_report_rejected) recorded for this worker" });
         let target: OrchestrationEvent;
         if (eventId) {
           const r = resolveIdPrefix(reports, eventId);
@@ -3125,6 +3138,10 @@ export class OrchestrationMcpRouter {
           eventId: target.id,
           ts: target.ts,
           taskId: target.taskId ?? null,
+          // Explicit, not left for the caller to infer from the presence of `reason`/`queued`/`msgIds`:
+          // a refused report was NEVER acted on (the task never moved, no merge happened) — content-wise
+          // it's what the worker WOULD have reported, distinct from a genuine landed `worker_report`.
+          ...(target.kind === "worker_report_rejected" ? { rejected: true } : {}),
           ...restDetail,
           ...(spill.inline
             ? { summary }

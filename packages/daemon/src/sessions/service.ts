@@ -9987,10 +9987,23 @@ export class SessionService {
             : `worker_report(done) REFUSED — you have ${pending.length} UNRESOLVED instruction(s) queued from your manager that you have NOT consumed yet:\n${pendingList}\n` +
               `These may SUPERSEDE the work you're about to report (the incident this guards: a worker committed a superseded design before reading the manager's redirect). ` +
               `End this turn so the queued manager direction drains into your next turn, act on it, THEN re-report done. Your task stays in_progress.`;
+          // Card 36e43a98: persist the REFUSED report's own content on this same event, not just the
+          // refusal metadata — pre-fix, a `done` refused here vanished entirely (never recorded as a
+          // `worker_report` event, since that append happens later, past this early return), so a worker
+          // that assumed "refused ⇒ unseen, I'll just reference it next time" was pointing at nothing. This
+          // mirrors the genuine `worker_report` event's own conditional-field shape (noChanges/awaiting
+          // included only when non-default) so a rejected event's detail is shaped consistently with an
+          // accepted one — see `worker_report_get` (mcp/orchestration.ts), widened by this same card to
+          // read `worker_report_rejected` events too, which is what makes this recoverable.
           this.db.appendEvent({
             id: randomUUID(), ts: new Date().toISOString(),
             managerSessionId, workerSessionId, taskId, kind: "worker_report_rejected",
-            detail: { reason: "pending-direction", queued: pending.length, msgIds: currentMsgIds, repeat: isRepeat },
+            detail: {
+              reason: "pending-direction", queued: pending.length, msgIds: currentMsgIds, repeat: isRepeat,
+              status: report.status, summary: report.summary, prUrl: report.prUrl, needs: report.needs,
+              ...(report.noChanges ? { noChanges: true } : {}),
+              ...(report.awaiting === "background" ? { awaiting: "background" } : {}),
+            },
           });
           // `dropped`: nothing routed, the task was NOT moved (stays in_progress to drain + re-report).
           return { reported: false, refused: true, error, deliveryStatus: "dropped" };
