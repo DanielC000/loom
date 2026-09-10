@@ -31,21 +31,19 @@ const MAX_TEXT_BYTES = 4000;
 const MAX_TITLE_CHARS = 200;
 
 /**
- * Card 046c721e, off the `5469ec08` investigation — the FLOOR TIER (pinned && `never-drop`, see
- * `isNeverDrop`/`computeFloorTierStatus` in project-memory-recall.ts) is not "one more note among many":
- * every such note rides on EVERY future kickoff, unconditionally, so its byte cost is fixed overhead paid
- * by every session on the project, not just a cost to the note's own author. The investigation measured
- * the floor consuming ~91% of an 8000-tok digest budget with all 7 floor notes sized right up against
- * MAX_TEXT_BYTES — this dedicated, LOWER cap for that tier (≈500 est-tok vs the general ≈1000) roughly
- * halves that cost, enforced as a REJECTING write-time precondition, never an advisory: the pre-existing
- * `neverDropStatus` signal below (computeNeverDropStatus) is computed strictly AFTER the write already
- * succeeded, so it could inform but never prevent this exact problem — and the project's own
- * `shipping-a-detector-is-not-someone-reading-it` memory note found blocking preconditions 2-for-2 acted
- * on against advisories 0-for-many. The cap applies only when the note's EFFECTIVE post-write state is
- * genuinely `pinned && never-drop` (see the `isFloorTierNote` computation below) — a `never-drop` tag on
- * an unpinned note is INERT in the packer, confirmed by reading project-memory-recall.ts directly rather
- * than trusting the tool description, so this cap must stay silent for that case or it would fire on a
- * note the packer never actually puts in the floor tier.
+ * A LOWER byte cap than {@link MAX_TEXT_BYTES} for a note that is (effectively, post-write) `pinned &&
+ * never-drop` (see the `isFloorTierNote` computation below, and `isNeverDrop`/`computeFloorTierStatus`
+ * in project-memory-recall.ts) — such a note rides EVERY future kickoff unconditionally, so its byte
+ * cost is fixed overhead every session pays, not just a cost to the note's own author.
+ *
+ * @decision 046c721e — see
+ * docs/decisions/046c721e-never-drop-floor-tier-gets-a-lower-blocking-byte-cap.md for the `5469ec08`
+ * investigation this implements and why the cap REJECTS at write time instead of just advising.
+ *
+ * Applies only when the post-write state is genuinely `pinned && never-drop` — a `never-drop` tag on an
+ * unpinned note is INERT in the packer (confirmed by reading project-memory-recall.ts directly, not the
+ * tool description), so this cap must stay silent for that case or it would fire on a note the packer
+ * never actually puts in the floor tier.
  */
 const MAX_NEVER_DROP_TEXT_BYTES = 2000;
 
@@ -422,13 +420,12 @@ export function forgetProjectMemory(db: Db, projectId: string, key: string): { o
  *  never on an explicit `memory_read`/`memory_list`) so an author can see at a glance that their note has
  *  never once reached a reader — no judgement about the note's quality, just the fact.
  *
- *  `backlinks` (card e4e180ad) — every OTHER note in this project whose text `[[wikilink]]`s to THIS
- *  note's key, resolved fresh at read time exactly like `requestAnnotations` (see
- *  sessions/project-memory-backlinks.ts): the fix for the one-way-link gap where a capped canonical note
- *  has no room to add the forward link its own overflow companion already carries back to it. Kept as
- *  its OWN field, deliberately never merged into `requestAnnotations` — the two are unrelated kinds of
- *  link. ALWAYS an array (never omitted), so an empty `backlinks: []` is a MEASURED zero — "this note has
- *  no inbound links" — structurally distinguishable from the field being absent altogether. */
+ *  `backlinks` — every OTHER note in this project whose text `[[wikilink]]`s to THIS note's key, resolved
+ *  fresh at read time exactly like `requestAnnotations` (see sessions/project-memory-backlinks.ts).
+ *  @decision e4e180ad — see docs/decisions/e4e180ad-project-memory-backlinks-one-way-link-gap.md for the
+ *  one-way-link gap this closes. Kept as its OWN field, deliberately never merged into `requestAnnotations`
+ *  — the two are unrelated kinds of link. ALWAYS an array (never omitted), so an empty `backlinks: []` is
+ *  a MEASURED zero — "this note has no inbound links" — structurally distinguishable from absent. */
 export type ProjectMemoryEntryWithLinks = ProjectMemoryEntry & { requestAnnotations: string[]; everDelivered: boolean; backlinks: string[] };
 
 /** `backlinks` is a REQUIRED, already-resolved value — never an optional override with a per-note
@@ -450,21 +447,18 @@ function withLinks(db: Db, projectId: string, entry: ProjectMemoryEntry, backlin
 
 /**
  * Full listing — pinned first, then most-recently-updated. Use `memory_forget`/re-`memory_write` to
- * curate. **The "dozens to low-hundreds of short notes" corpus-size premise this doc comment used to
- * cite is stale** (card 41c3f546 — this project's own store already measured at 487 notes, 2026-09-03);
- * see project-memory-backlinks.ts's `findInboundBacklinks` doc comment for the live reconciliation.
- * This function stays safe at that scale ONLY because it resolves `backlinks` via the bulk path
- * ({@link annotateBacklinksBulk}), not per row — see its own doc comment below.
+ * curate. @decision 41c3f546 — see docs/decisions/41c3f546-project-memory-route-bulk-backlinks.md: the
+ * "dozens to low-hundreds of short notes" corpus-size premise is stale, and this function stays safe at
+ * that scale ONLY because it resolves `backlinks` via the bulk path ({@link annotateBacklinksBulk}), not
+ * per row — see its own doc comment below.
  * Each row is annotated with its linked Requests' LIVE state (card e6d270b3): `memory_list` returns full
  * note BODIES (unlike a metadata-only listing), so the same stale-decided-voice text this card exists to
  * fix would otherwise stand unchallenged here too — annotating only kickoff-injection + `memory_read`
  * would leave this access path telling a different story.
  *
- * `backlinks` (card 41c3f546) are resolved via {@link annotateBacklinksBulk} over the SAME fetched
- * corpus — not per row via {@link annotateBacklinks} — because per-row resolution used to mean N+1
- * `db.listProjectMemory` fetches and N full-corpus regex scans for a listing of N notes: measured at
- * ~4.2s wall-clock (synchronous, on the daemon's single event loop) against this project's own 487-note
- * corpus, versus ~15ms for the bulk path over the identical corpus and cap.
+ * `backlinks` are resolved via {@link annotateBacklinksBulk} over the SAME fetched corpus — not per row
+ * via {@link annotateBacklinks} — for the same N+1-fetch/N-full-corpus-scan cost @decision 41c3f546
+ * measured and rejected; see the record above for the numbers.
  */
 export function listProjectMemoryEntries(db: Db, projectId: string): ProjectMemoryEntryWithLinks[] {
   const corpus = db.listProjectMemory(projectId);
