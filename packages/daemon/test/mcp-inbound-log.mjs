@@ -12,10 +12,10 @@
 // — the other two (/mcp-platform, /mcp-setup) share the exact same one-line call in the exact same file,
 // wired identically (see gateway/server.ts), so are not independently re-exercised here; that equivalence
 // is what the shared-chokepoint choice buys. Also asserts the line's SHAPE never carries tool arguments —
-// only length + a non-reversible hash — per card 16c93a50's still-open (unanswered) content-in-durable-
-// logs policy: this instrument stays on the identity/shape side of that line regardless of what 16c93a50
-// eventually decides. Hermetic like gateway-hardening.mjs: buildServer() + a real ephemeral TCP port, no
-// external daemon, temp LOOM_HOME.
+// only length + a non-reversible hash — per card 16c93a50's decided ruling (`LOOM_LOG_MESSAGE_CONTENT`,
+// default OFF): this line lands in the rotated daemon log, so it must stay on the identity/shape side of
+// that ruling regardless of the flag's state. Hermetic like gateway-hardening.mjs: buildServer() + a real
+// ephemeral TCP port, no external daemon, temp LOOM_HOME.
 import fs from "node:fs";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
