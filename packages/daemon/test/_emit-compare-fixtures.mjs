@@ -34,6 +34,10 @@ export const FULL_GATE = "pnpm build && pnpm --filter @loom/daemon test:daemon";
 const { STATIC_GUARD_REPO_PATHS, ASSET_READING_TEST_REPO_PATHS, DIST_TEXT_SCANNER_REPO_PATHS } = await import(
   pathToFileURL(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "git", "worktrees.js")).href
 );
+// Card fab07aba Code Review (member-existence check): re-exported here, alongside the basenames below,
+// so a consumer (emit-compare-gate.mjs's own member-existence scenario) can existsSync() each REAL
+// repo-relative path without a second, independently-drifting `await import(dist/git/worktrees.js)`.
+export { STATIC_GUARD_REPO_PATHS, ASSET_READING_TEST_REPO_PATHS, DIST_TEXT_SCANNER_REPO_PATHS };
 export const GUARD_BASENAMES = STATIC_GUARD_REPO_PATHS.map((p) => path.posix.basename(p));
 // Card 3fbd95e0: DERIVED from the real ASSET_READING_TEST_REPO_PATHS (git/worktrees.ts), same reuse
 // discipline as GUARD_BASENAMES immediately above — never hand-copied, so an addition/removal there needs

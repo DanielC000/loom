@@ -2799,55 +2799,77 @@ export const ASSET_READING_TEST_REPO_PATHS = [
   "packages/daemon/test/vault-lint.mjs",
 ];
 
-/** The test files that read compiled `dist/**` TEXT (not merely import it as a module) and pattern-match
- *  that content — run by {@link buildReducedGateCommand} whenever the diff contains a changed compiled
- *  `.ts` file (card `abaaf16e`). Modelled on {@link ASSET_READING_TEST_REPO_PATHS} immediately above: same
- *  conditional-inclusion shape (unlike {@link STATIC_GUARD_REPO_PATHS}, which always runs regardless of
- *  diff shape), a SEPARATE list rather than folded into either sibling because it answers a DIFFERENT
- *  question — not "does this diff touch `packages/daemon/assets/**`" but "does this diff touch a compiled
- *  `.ts` file at all", the one case {@link computeEmitCompareGate}'s own transpile-comparison reduces the
- *  gate on. Run via bare `node <path>` (the {@link STATIC_GUARD_REPO_PATHS} shape), never through the
- *  `test:daemon --only=` harness (the {@link ASSET_READING_TEST_REPO_PATHS} shape) — every member below is
- *  independently verified to set up its OWN hermetic `LOOM_HOME`/temp-dir env (see each file's own header),
- *  so none of them needs the harness wrapper's fresh env the way an arbitrary changed test file might
- *  (@decision dd4349ff).
+/** The test files that raw-scan real, uncompiled `packages/daemon/src/**` TEXT and/or compiled `dist/**`
+ *  TEXT (not merely import either as a module) and pattern-match that content — run by
+ *  {@link buildReducedGateCommand} whenever the diff contains a changed compiled `.ts` file (card
+ *  `abaaf16e`; widened to cover `src/**` readers, not just `dist/**` ones, by card `fab07aba` — see
+ *  docs/decisions/fab07aba-src-text-scanners-share-the-dist-text-scanners-trigger.md for why this is ONE
+ *  widened list rather than a third one: both populations are unrun-but-reachable on the IDENTICAL trigger
+ *  `computeEmitCompareGate` already computes — `changedTsPaths.length > 0` — so a separate list would
+ *  duplicate that condition for no benefit). Modelled on {@link ASSET_READING_TEST_REPO_PATHS} immediately
+ *  above: same conditional-inclusion shape (unlike {@link STATIC_GUARD_REPO_PATHS}, which always runs
+ *  regardless of diff shape), a SEPARATE list rather than folded into either sibling because it answers a
+ *  DIFFERENT question — not "does this diff touch `packages/daemon/assets/**`" but "does this diff touch a
+ *  compiled `.ts` file at all", the one case {@link computeEmitCompareGate}'s own transpile-comparison
+ *  reduces the gate on. Run via bare `node <path>` (the {@link STATIC_GUARD_REPO_PATHS} shape), never
+ *  through the `test:daemon --only=` harness (the {@link ASSET_READING_TEST_REPO_PATHS} shape) — every
+ *  member below is independently verified to set up its OWN hermetic `LOOM_HOME`/temp-dir env (or needs
+ *  none — several members are pure fs/regex, no daemon/DB at all) (see each file's own header), so none of
+ *  them needs the harness wrapper's fresh env the way an arbitrary changed test file might (@decision dd4349ff).
  *
  *  WHY THIS LIST EXISTS: `computeEmitCompareGate` proves a changed `.ts` file's COMPILED BEHAVIOR unchanged
  *  by transpiling with `removeComments:true` forced (@decision 2154b6ad) and, when identical, skips the
  *  ~668-test runtime suite. That proof is sound for ordinary runtime behavior — but a HANDFUL of runtime
- *  tests don't exercise compiled behavior at all; they `fs.readFileSync` real `dist/**` output and
- *  pattern-match its TEXT, and tsc keeps comments in the emit (no `removeComments` anywhere in this repo's
- *  own tsconfig chain — only the isolated proof-comparison above forces it). For a member of THIS list, a
- *  comment-only diff that happens to introduce (or remove) matching text can flip the test's own verdict
- *  even though the reduced-gate's transpile-comparison correctly proved the diff behaviorally inert —
- *  exactly the gap that let one such test (`agent-runs-keys.mjs`'s "G3") sail through a reduced gate on a
- *  comment-only diff and only fail a later, UNRELATED full gate, misattributed to whoever merged then.
+ *  tests don't exercise compiled behavior at all; they `fs.readFileSync` real `dist/**` output OR the
+ *  real, pre-compile `src/**` `.ts` source it was compiled FROM, and pattern-match that TEXT. Neither tsc's
+ *  real `dist/**` emit nor the `src/**` file on disk ever has comments stripped (no `removeComments`
+ *  anywhere in this repo's own tsconfig chain — only the isolated proof-comparison above forces it). For a
+ *  member of THIS list, a comment-only diff that happens to introduce (or remove) matching text can flip
+ *  the test's own verdict even though the reduced-gate's transpile-comparison correctly proved the diff
+ *  behaviorally inert — exactly the gap that let one such test (`agent-runs-keys.mjs`'s "G3") sail through
+ *  a reduced gate on a comment-only diff and only fail a later, UNRELATED full gate, misattributed to
+ *  whoever merged then. A `src/**` reader has the identical failure shape as a `dist/**` reader — it reads
+ *  a `.ts` FILE the diff can touch directly, one step further upstream of the same comment-preserving
+ *  compile than a `dist/**` reader is.
  *
  *  MEMBERSHIP CRITERION — a test belongs here only if it does a RAW, UNSTRIPPED whole-file (or
- *  large-region) text scan of real, compiled `dist/**` output, where a comment anywhere in the scanned
- *  region can change what the scan matches. THIS IS A JUDGEMENT CALL, not a grep-derivable property — no
- *  single literal search finds every member (or excludes every non-member): the card `abaaf16e` sweep that
- *  built this list found `agent-runs-keys.mjs`'s G3 check missing from the naive `grep -l
- *  "readFileSync(.*dist" packages/daemon/test/*.mjs` (the read's `dist` path segment is built on an EARLIER
- *  line than the `readFileSync(` call, so the two never share a line), while a broader `readFileSync|
- *  readdirSync` + `dist` sweep over-shot into ~180 files dominated by ordinary `await
- *  import("../dist/...")` module loading (irrelevant: importing EXECUTES code, so comments never reach the
- *  parser either way, unlike a text scan). See docs/decisions/abaaf16e-dist-text-scanner-list-derived-by-hand-not-by-grep.md
- *  for the full sweep methodology and the shapes deliberately excluded below (that list is a judgment call,
- *  not exhaustive — see its own closing note).
+ *  large-region) text scan of real `packages/daemon/src/**` `.ts` source and/or compiled `dist/**` output,
+ *  where a comment anywhere in the scanned region can change what the scan matches. THIS IS A JUDGEMENT
+ *  CALL, not a grep-derivable property — no single literal search finds every member (or excludes every
+ *  non-member): the card `abaaf16e` sweep that built the original `dist/**` half of this list found
+ *  `agent-runs-keys.mjs`'s G3 check missing from the naive `grep -l "readFileSync(.*dist"
+ *  packages/daemon/test/*.mjs` (the read's `dist` path segment is built on an EARLIER line than the
+ *  `readFileSync(` call, so the two never share a line), while a broader `readFileSync|readdirSync` + `dist`
+ *  sweep over-shot into ~180 files dominated by ordinary `await import("../dist/...")` module loading
+ *  (irrelevant: importing EXECUTES code, so comments never reach the parser either way, unlike a text
+ *  scan). Card `fab07aba`'s own sweep for the `src/**` half found the identical pattern one level up: a
+ *  `"..", "src"`/`../src/` grep both missed real readers built through an intermediate path variable and
+ *  wrongly flagged files that merely construct a SYNTHETIC fixture directory happening to be named `src`
+ *  (the same "synthetic fixture ≠ real content" trap {@link ASSET_READING_TEST_REPO_PATHS}'s own doc
+ *  already names for `assets/**`) — see docs/decisions/abaaf16e-dist-text-scanner-list-derived-by-hand-not-by-grep.md
+ *  and docs/decisions/fab07aba-src-text-scanners-share-the-dist-text-scanners-trigger.md for the full sweep
+ *  methodology and the shapes deliberately excluded below (that list is a judgment call, not exhaustive —
+ *  see its own closing note).
  *
- *  ⛔ NOT a test whose dist-text read is one of the shapes below — each is comment-immune by construction,
- *  so a comment-only diff cannot flip it:
+ *  ⛔ NOT a test whose src/dist-text read is one of the shapes below — each is comment-immune by
+ *  construction, so a comment-only diff cannot flip it:
  *    (1) a BOUNDED, NAMED-DECLARATION extraction whose captured content is DATA, never comment syntax —
  *        e.g. `task-deferred-items-migration.mjs`/`task-deferred-until-event-migration.mjs`/
  *        `task-manual-deferral-migration.mjs`, which each extract only the `` const SCHEMA = `...`; ``
  *        template-literal BODY via a bounded regex. A template literal's string content is never comment
  *        syntax, so tsc's `removeComments` cannot touch it regardless of what any comment elsewhere in the
- *        file says.
+ *        file says. Same immunity, different shape — `anchor-re-parity.mjs` (real `src/**` reader; card
+ *        `fab07aba` Code Review) matches `/^const ANCHOR_RE = (.+);\s*$/m`: `^`/`m`-ANCHORED to a line
+ *        starting with the bare keyword `const`, which no comment in this codebase's `//`/`/** ` convention
+ *        ever does — so a comment can neither introduce a false match nor reposition which line the real
+ *        one resolves to. NOT added to this list for exactly that reason.
  *    (2) a TS-COMPILER AST-NARROWED function/method-body extraction, where the anchor is a real DECLARED
  *        NAME (found via the TypeScript compiler's own parser, not a text search) and the text check runs
  *        only against that one extracted region — e.g. `codescape-spawn-repopath-guard.mjs`,
- *        `loopback-write-guard.mjs` (§G), `task-version-guard.mjs` (§5), `project-memory-version-guard.mjs`.
+ *        `loopback-write-guard.mjs` (§G), `task-version-guard.mjs` (§5), `project-memory-version-guard.mjs`,
+ *        and — reading real `src/**` this time, not `dist/**` — `boot-listen-not-blocked.mjs` and
+ *        `gate-verdict-field-classification-exhaustive.mjs`, both of which call `ts.createSourceFile` and
+ *        walk the real parsed AST rather than matching raw text (card `fab07aba`).
  *        `loopback-write-guard.mjs`'s own inline comment documents it was BURNED by comment-anchoring once
  *        (a heading comment relocated by an unrelated extraction pass silently zeroed its anchor) and was
  *        deliberately re-anchored on a real code token to fix it — precedent that this shape is the
@@ -2866,8 +2888,27 @@ export const ASSET_READING_TEST_REPO_PATHS = [
  *        means), so a genuine call already present in code stays present regardless of any comment; a
  *        comment could only ever ADD a spurious match, which for a PRESENCE check can't flip pass→fail —
  *        the direction this list cares about. Immune by POLARITY, not by where it looks (contrast (1)-(3)).
+ *        `test-daemon-codex-real-spawn-preset.mjs`'s own `scripts/test-daemon.mjs` presence check is the
+ *        same shape one level up (a real `packages/daemon/scripts/**` reader, not `dist/**`; noted by card
+ *        `fab07aba` — not added to this list, since its correct trigger would be `changedScriptFiles`, the
+ *        SAME deferred gap this file's closing paragraph below documents).
+ *    (5) a BYTE-LEVEL / non-textual property — `no-nul-in-tracked-ts.mjs` scans every tracked `.ts` file for
+ *        embedded NUL bytes. An ordinary comment edit (added, moved, or deleted prose) can never introduce
+ *        or remove a NUL byte, so this is immune by the KIND of property it checks, not by where it looks
+ *        or how it's bounded — orthogonal to (1)-(4). Added by card `fab07aba`.
+ *    (6) a precondition ALREADY RE-VERIFIED LIVE by `computeEmitCompareGate` itself on every reduced-path
+ *        call — `emit-compare-soundness-guard.mjs` (A) walks `packages/daemon/src/**` `.ts` files for a
+ *        `const enum` declaration, but `emitCompareSoundnessOk` (this same file, called fail-closed inside
+ *        `computeEmitCompareGate` whenever `changedTsFiles.length > 0`) runs the IDENTICAL walk+regex
+ *        against the worktree's OWN current tree before ever returning `eligible:true`. A comment-only diff
+ *        that introduced `const-enum`-shaped text anywhere under `src/**` would already flip THAT live
+ *        check to `notReducible`, forcing the full gate — so this test's own correctness can only be broken
+ *        by editing `worktrees.ts` itself, which is already excluded on the SAME "that's a behavioural `.ts`
+ *        edit" ground {@link STATIC_GUARD_REPO_PATHS}'s own doc gives for this exact file, one list over.
+ *        Its (B) positive-control section is separately immune under shape (4) (a presence-only check on a
+ *        real declaration name). Added by card `fab07aba`.
  *  This is a judgment call, not a closed taxonomy — see the record's own closing note before assuming a
- *  new candidate's absence from these four proves it belongs on THIS list instead.
+ *  new candidate's absence from these six proves it belongs on THIS list instead.
  *  card `abaaf16e`'s own report names option (b) — teaching the raw scanners below to strip comments the
  *  same way (3) already does — as legitimate COMPLEMENTARY hardening (card `36afbbdd`), NOT a substitute
  *  for this list: {@link buildReducedGateCommand} folding this list in is what makes a comment-only diff
@@ -2875,6 +2916,20 @@ export const ASSET_READING_TEST_REPO_PATHS = [
  *  — the blame-routing defect this card closes. Comment-stripping would remove the false-positive risk
  *  these scanners carry (a real, separate improvement worth doing), but wouldn't by itself fix WHERE a
  *  real hit gets reported, so it doesn't replace this list.
+ *
+ *  ⚠️ KNOWN, DELIBERATELY DEFERRED GAP — `packages/daemon/scripts/**` readers (card `fab07aba` DoD-1's
+ *  other half): `gate-runner-harness-marker-coupling.mjs` raw-scans real `scripts/test-daemon.mjs` text via
+ *  a needle-based line locator (not AST, not stripped) and is genuinely flip-able the same way every member
+ *  below is — but its correct trigger is `changedScriptFiles.length > 0` (card `82662e98`'s population),
+ *  which `EmitCompareGateResult` does not currently expose as its own field and `buildReducedGateCommand`
+ *  does not currently read — only `changedTsPaths` reaches this list's fold-in condition below. Folding
+ *  this specific test into the EXISTING `changedTsPaths` trigger would be WRONG (it would run on any `.ts`
+ *  change that never touched `scripts/test-daemon.mjs`, and still miss the actual case — a `scripts/**`-only
+ *  diff — this test needs it for). NOT fixed by this card: exposing `changedScriptFiles` as a new
+ *  `EmitCompareGateResult` field and threading it into `buildReducedGateCommand`'s two non-batch call sites
+ *  needs an edit to `sessions/service.ts`, which was a live fleet lane owned by a different card at the time
+ *  `fab07aba` shipped — see docs/decisions/fab07aba-src-text-scanners-share-the-dist-text-scanners-trigger.md
+ *  for the full reasoning and the follow-up this left behind.
  *
  *  `packages/daemon/test/_emit-compare-fixtures.mjs`'s `DIST_SCANNER_BASENAMES` is DERIVED from this
  *  list at test-load time, not hand-copied — same reuse discipline `GUARD_BASENAMES`/`ASSET_TEST_BASENAMES`
@@ -2891,6 +2946,23 @@ export const DIST_TEXT_SCANNER_REPO_PATHS = [
   "packages/daemon/test/graceful-shutdown-epipe-resilience.mjs",
   "packages/daemon/test/project-memory.mjs",
   "packages/daemon/test/session-archive.mjs",
+  // card fab07aba — real packages/daemon/src/**/*.ts readers, same trigger as the dist/** readers above.
+  "packages/daemon/test/companion-lead-mode.mjs",
+  "packages/daemon/test/decisions-for-tool.mjs",
+  "packages/daemon/test/emit-compare-branch-capture-order-guard.mjs",
+  "packages/daemon/test/gate-intent-no-firing-coupling.mjs",
+  "packages/daemon/test/give-up-exhausted-durable.mjs",
+  "packages/daemon/test/inert-skip-branch-capture-order-guard.mjs",
+  "packages/daemon/test/log-message-content-gate.mjs",
+  "packages/daemon/test/operator-surface.mjs",
+  "packages/daemon/test/orchestration-mcp-role-guard.mjs",
+  "packages/daemon/test/pty-codex-agnostic-methods.mjs",
+  "packages/daemon/test/redelivery-parked-notice-suppression.mjs",
+  "packages/daemon/test/redirect-discoverability.mjs",
+  "packages/daemon/test/setup-project-init-rest.mjs",
+  "packages/daemon/test/setup-templates-rest.mjs",
+  "packages/daemon/test/shell-terminal.mjs",
+  "packages/daemon/test/skill-edit.mjs",
 ];
 
 /** @decision fd0d34da — a coarse, PATH-FREE classification of WHY `notApplicable:true`, safe to leave

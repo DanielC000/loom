@@ -1317,7 +1317,7 @@ export function formatReducedGateWarning(
   // themselves — mirrors assetReadingTestCount's own reasoning (this function stays redaction-agnostic; the
   // caller decides what's safe to surface, this file just formats a number).
   const distScannerClause = result.changedTsPaths.length
-    ? `; a compiled .ts changed — also ran the ${distScannerTestCount} dist-text-scanner test(s) (card abaaf16e)`
+    ? `; a compiled .ts changed — also ran the ${distScannerTestCount} compiled-source/dist text-scanner test(s) (cards abaaf16e, fab07aba)`
     : "";
   const subject = batchLandedCount !== undefined ? `batch merge gate reduced across ${batchLandedCount} landed branch(es)` : "merge gate reduced";
   return `${subject}: ${compiledClause} — ran build + static guards only${result.changedTestFiles.length ? ` + ${result.changedTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite${result.notHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${result.notHermeticExcluded.join(", ")}` : ""}${result.inertPathsSkipped.length ? `; also skipped as proven inert (docs/, card db9b0130): ${result.inertPathsSkipped.join(", ")}` : ""}${assetClause}${distScannerClause}${isolationCaveat}`;

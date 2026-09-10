@@ -302,7 +302,7 @@ try {
 
     if (value) {
       check("(TS) both branches landed via the batch, none fell back", value.ok === true && value.landed.length === 2 && value.fallback.length === 0);
-      check("(TS) reducedGateWarning names the dist-text-scanner count", typeof value.reducedGateWarning === "string" && value.reducedGateWarning.includes(`also ran the ${DIST_SCANNER_BASENAMES.length} dist-text-scanner test`));
+      check("(TS) reducedGateWarning names the compiled-source/dist text-scanner count", typeof value.reducedGateWarning === "string" && value.reducedGateWarning.includes(`also ran the ${DIST_SCANNER_BASENAMES.length} compiled-source/dist text-scanner test`));
     } else {
       console.log("(TS) NOTE: settled via the async degrade path — skipping the sync-return assertions. The DB/command checks above are unconditional and still ran.");
     }

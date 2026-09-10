@@ -572,7 +572,7 @@ try {
     check("(N) ⭐ card abaaf16e: the RECLASSIFIED command folds in every dist-text scanner — proves reclassified.changedTsPaths is read and used, not just the pre-wait emitCompareTsPaths",
       typeof capturedGate2 === "string" && DIST_SCANNER_BASENAMES.every((s) => capturedGate2.includes(`node packages/daemon/test/${s}`)));
     check("(N) N2's warning also names the reclassified dist-text-scanner count",
-      typeof confirm2.warning === "string" && new RegExp(`also ran the ${DIST_SCANNER_BASENAMES.length} dist-text-scanner test\\(s\\)`).test(confirm2.warning));
+      typeof confirm2.warning === "string" && new RegExp(`also ran the ${DIST_SCANNER_BASENAMES.length} compiled-source/dist text-scanner test\\(s\\)`).test(confirm2.warning));
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }

@@ -81,7 +81,13 @@ import os from "node:os";
 import { commitAll } from "./_git-commit.mjs";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
+
+// Card fab07aba Code Review (member-existence check, scenario (U) below): this file's own location,
+// three levels up (test -> daemon -> packages -> repo root), to resolve each reduced-gate list's
+// REPO-RELATIVE paths (e.g. "packages/daemon/test/agent-runs-keys.mjs") against a real filesystem path.
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ecg-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -94,7 +100,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 // set, keeps this file's own env setup ahead of anything that reads it.
 const {
   GIT_ID, FULL_GATE, GUARD_BASENAMES, DIST_SCANNER_BASENAMES, seed, mkdirp, mk, BASE_SRC, makeRepoWithBaseSrcFile,
-  writeRealTestDaemonScript,
+  writeRealTestDaemonScript, STATIC_GUARD_REPO_PATHS, ASSET_READING_TEST_REPO_PATHS, DIST_TEXT_SCANNER_REPO_PATHS,
 } = await import("./_emit-compare-fixtures.mjs");
 
 // Card 82662e98 — (P)/(Q)/(R)'s own small synthetic `.mjs` fixture, same shape/spirit as BASE_SRC above
@@ -161,7 +167,7 @@ try {
     // reduced gate that folded them into the actual command but left the warning saying "static guards
     // only" is the exact false-claim defect record d422e279 exists to prevent.
     check("(A) card abaaf16e: the warning names the dist-text scanners actually ran",
-      typeof confirm.warning === "string" && new RegExp(`also ran the ${DIST_SCANNER_BASENAMES.length} dist-text-scanner test\\(s\\)`).test(confirm.warning));
+      typeof confirm.warning === "string" && new RegExp(`also ran the ${DIST_SCANNER_BASENAMES.length} compiled-source/dist text-scanner test\\(s\\)`).test(confirm.warning));
   }
 
   // ── (B) ONE-TOKEN BEHAVIORAL .ts edit -> FULL gate ──────────────────────────────────────────────────
@@ -643,6 +649,28 @@ try {
     check("(S) direct call: reason is NOT the empty-diff reason the pre-fix repoPath/\"HEAD\" bug would have produced", !/empty diff/.test(direct.reason ?? ""));
     check("(S) direct call: notApplicable:false — a real, decided verdict about the worktree's own content, never a git-mechanism failure", direct.notApplicable === false);
   }
+
+  // ════════ (U) card fab07aba Code Review — MEMBER-EXISTENCE CHECK for all three reduced-gate lists ════════
+  // Nothing previously asserted these files actually EXIST. A later rename/delete of any member passes its
+  // OWN full gate (the full suite never runs any of these three lists as a group — STATIC_GUARD_REPO_PATHS
+  // members run individually as part of the corpus-wide guard sweep, but nothing runs `node <path>` against
+  // every list member the way `buildReducedGateCommand` does), then every LATER reduced merge gate
+  // fleet-wide fails on `node <missing-path>` — misattributed to whoever's branch happened to trigger the
+  // reduced path next, not to the rename/delete that actually broke it.
+  {
+    const allListedPaths = [...STATIC_GUARD_REPO_PATHS, ...ASSET_READING_TEST_REPO_PATHS, ...DIST_TEXT_SCANNER_REPO_PATHS];
+    check("(U) sanity: the three lists together name a non-trivial number of files (control isn't vacuous over an empty union)", allListedPaths.length > 30);
+    const missingReal = allListedPaths.filter((p) => !fs.existsSync(path.join(REPO_ROOT, p)));
+    check(`(U) every STATIC_GUARD_REPO_PATHS/ASSET_READING_TEST_REPO_PATHS/DIST_TEXT_SCANNER_REPO_PATHS member exists on disk (missing: ${JSON.stringify(missingReal)})`, missingReal.length === 0);
+
+    // NEGATIVE CONTROL: prove this check can actually FAIL — a synthetic path that does NOT exist must be
+    // reported missing. Without this, "missingReal.length === 0" above is indistinguishable from a broken/
+    // vacuous check that always reports zero missing regardless of what's on disk.
+    const fakeMissing = "packages/daemon/test/__fab07aba-does-not-exist__.mjs";
+    check("(U) sanity: the negative-control path genuinely does not exist (control isn't vacuous)", !fs.existsSync(path.join(REPO_ROOT, fakeMissing)));
+    const withFakeMissing = [...allListedPaths, fakeMissing].filter((p) => !fs.existsSync(path.join(REPO_ROOT, p)));
+    check("(U) NEGATIVE CONTROL: a synthetic missing path IS correctly flagged (exactly one, and it's the synthetic one)", withFakeMissing.length === 1 && withFakeMissing[0] === fakeMissing);
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) cleanupPathSync(wt);
@@ -653,5 +681,6 @@ console.log(failures === 0
   ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed; a provably-inert docs/** path no longer defeats the reduction when riding alongside a comment-only .ts edit, while still failing closed alongside a real behavioral edit (card b97f643d); the literal motivating case (card 5149c036) — a repo-root CLAUDE.md change alongside an otherwise comment-only .ts edit — also still fails closed to the full gate (O); and card 82662e98 — a comment-only packages/daemon/scripts/**/*.mjs edit now reduces too (P), while an added script file (Q) and a real one-token behavioral script edit (R) both still fail closed. See emit-compare-gate-scope.mjs for the shell-metacharacter, fixtures-scope, and cap-queue-admission cases."
   + " Card 2db8a3dd: (B)'s emitCompareReduced:false (proven-not-reducible) and (F)'s emitCompareReduced:undefined + direct notApplicable:true (repo-layout limit) are the two required polarities."
   + " Card fe848bfc (S): a per-worktree ref (\"HEAD\") resolved from a worktree whose HEAD genuinely diverges from canonical's sees the real worktree-only commit, never the empty diff the pre-fix repoPath/\"HEAD\" shape would have silently produced."
+  + " Card fab07aba (U): every STATIC_GUARD_REPO_PATHS/ASSET_READING_TEST_REPO_PATHS/DIST_TEXT_SCANNER_REPO_PATHS member exists on disk, proven against a negative control that a synthetic missing path is correctly flagged."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
