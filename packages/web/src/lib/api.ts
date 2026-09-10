@@ -115,26 +115,9 @@ export interface SetupTemplate {
 // target project (the authoritative counts the Done screen shows). Mirrors applyWorkflowTemplate's return.
 export interface TemplateApplyResult { agents: Agent[]; tasks: Task[]; }
 
-// Card 9ccedbee — the loopback human-only-write guard secret. The daemon now requires it (as
-// `Authorization: Bearer <token>`) on every non-GET /api/* write this client issues, AND on the
-// /ws/term upgrade (view + stdin) — see gateway/loopback-secret.ts + the guard hook in gateway/
-// server.ts. Post-review (v2), the guard covers EVERY write, not just a config subset — GETs stay
-// unaffected server-side, so they carry no header here either. Delivery: `loom open`/`loom start`
-// (bin/loom.mjs) and the daemon's own boot-log banner both embed it as `?token=` in the URL the browser
-// is opened with — captured ONCE below, persisted to localStorage, then stripped from the CURRENT
-// history entry (`history.replaceState` only replaces the entry it's called on — it does NOT purge the
-// token from the browser's separate global history/autocomplete log, which already recorded the full
-// URL the instant navigation happened; don't overstate what this achieves). A page that never carried
-// the param (a reload, a second tab) just reuses whatever localStorage already has; a page opened before
-// this feature existed reuses nothing and every write 401s until the user revisits a tokenized URL once.
-//
-// KNOWN GAP (dev workflow, Major 2 in Code Review): this module runs on whatever origin serves it. In
-// single-process/packaged mode that's the daemon's own origin (127.0.0.1:PORT) — token capture and the
-// write it authorizes are same-origin, no issue. Under `pnpm web`'s dev proxy the SPA is served from a
-// DIFFERENT origin (127.0.0.1:5317) with its OWN localStorage — a token captured while visiting the
-// daemon's own origin directly is invisible here. The daemon's boot banner prints a 5317 hint too (dev
-// builds only) for exactly this reason; there is no code-level fix on THIS side beyond visiting the
-// right URL once.
+// @decision 9ccedbee — every non-GET /api/* write (+ /ws/term) needs this token as
+// `Authorization: Bearer <token>`, delivered once via `?token=` in the URL and captured below into
+// localStorage. Dev-proxy origin split is a known, not-fixable-here gap — see the record.
 const LOOPBACK_TOKEN_STORAGE_KEY = "loom.loopbackToken";
 
 (function captureLoopbackToken() {
@@ -1173,24 +1156,9 @@ export const workerDiffQuery = (sessionId: string) => ({
   staleTime: WORKER_DIFF_STALE_MS,
 });
 
-// How long a fetched orchestration status counts as FRESH client-side. While the /ws/fleet socket is up
-// this cache is kept live by C5's `status` change-feed, so a mount-time refetch is pure duplication; while
-// the socket is down FleetSocketProvider's fallback poll already refreshes it on the same 10s cadence.
-//
-// ⚠️ THIS VALUE IS LOAD-BEARING, not just a nicety — it is what makes the cold load cost ONE request
-// rather than two. FleetSocketProvider's connect-time seed and the consumers' own mount fetch observe this
-// same entry, and they collapse by one of TWO mechanisms depending on which happens first:
-//   (a) seed while the mount fetch is still IN FLIGHT — react-query returns the in-flight promise, and
-//       this window is irrelevant;
-//   (b) seed AFTER the mount fetch resolved — the collapse then depends ENTIRELY on the cached entry
-//       still being fresh, i.e. on this window.
-// Measured in-page on one clock (n=5, local e2e fixture): (a) wins every time, but only by 0.9-9.6ms. That
-// is a race, not a guarantee — a loaded CI runner can invert it. A forced-inversion control confirmed the
-// (b) path is real and that this window is what covers it: with the seed deliberately delayed past the
-// mount fetch, 10s here => 1 request, 0 here => 2. So the margin is ~1000x the observed spread, and the
-// failure it protects against is bounded anyway (a socket opening >10s after the seed fetch would break
-// the feed's own liveness assertions long before this window lapsed). ⛔ Don't raise it to buy more
-// margin, and don't drop it to 0 assuming ordering carries the drop — it does not.
+// @decision sha:a1a89b72 — LOAD-BEARING: keeps a cold orchestration-status load at ONE request
+// instead of two (seed-vs-mount-fetch race; ~1000x measured margin). Don't raise for more margin;
+// don't drop to 0 assuming ordering alone covers it — see the record.
 export const ORCH_STATUS_STALE_MS = 10_000;
 
 // The single source of the orchestration-status query: its cache key, its fetcher, and its freshness
