@@ -192,19 +192,9 @@ export function redactedExcerpt(excerpt: string): string {
  */
 const COMPOSER_ACCUM_WINDOW = 8;
 
-/**
- * Card 00b5066e — the bound on the OMISSION direction of the offset-aware reconciliation check
- * (`intended.startsWith(reported)`, i.e. `reported` is a literal, contiguous PREFIX of `intended` missing
- * only its own trailing tail). Kept small and DELIBERATE: unbounded, a short `reported` could coincidentally
- * appear as a leading-prefix match of a large `intended` purely by chance, softening the wording for what is
- * actually a genuine large-tail truncation — the card's own explicit hard bound ("a large missing tail is a
- * genuine truncation and must keep crying loud", citing the `-41638` gen=4 specimen: `divergesAtChar=7`, a
- * 42,075-char missing tail). The card's own live specimen this bound is sized from had a tail of exactly 1
- * char (a trailing newline, almost certainly not echoed back) — 2 leaves a little headroom without coming
- * anywhere near a size where coincidence becomes plausible. The INSERTION direction
- * (`reported.includes(intended)`, `reported` fully CONTAINS `intended`) carries no equivalent risk and is
- * deliberately left unbounded — see that check's own comment below for why.
- */
+/** @decision 00b5066e — OMISSION bound kept small & deliberate: unbounded, a short `reported` could
+ *  coincidentally prefix-match a large `intended`, softening what's actually a genuine large-tail
+ *  truncation. INSERTION direction carries no such risk — left unbounded (see below). */
 const OFFSET_OMISSION_MAX_TAIL_CHARS = 2;
 
 /** @decision c2c750a9 — two-stage sum-then-hash accumulation detector (a sum alone can't pin ordering);
@@ -6130,59 +6120,14 @@ export class PtyHost {
               const isBenignWhitespaceRerender = normalizeForMismatchNotice(reported) === normalizeForMismatchNotice(intended);
               const stalePlaceholderPrefixMatch = /^(?:\[Pasted text #\d+(?: \+\d+ lines)?\])+/.exec(reported);
               const isStalePlaceholderPrefix = stalePlaceholderPrefixMatch !== null && reported.slice(stalePlaceholderPrefixMatch[0].length) === intended;
-              // Card 2b57b5a9 (n=13, 10 distinct positions, zero exceptions): a stray U+000C (form
-              // feed) lands in the engine-reported echo at an EXACT MULTIPLE of PTY_WRITE_CHUNK_UNITS,
-              // mid-token. Root cause (DoD-4): `repaint()` writes a raw Ctrl-L directly to the pty,
-              // unsynchronized with `writeChunked` — when a viewer's repaint (Terminal.tsx's post-
-              // attach "geometry" handler) lands in `writeChunked`'s inter-chunk pacing gap while a
-              // bracketed-paste run is still open, the engine treats the stray byte as literal pasted
-              // content instead of a repaint trigger, landing exactly at the chunk seam. RECONCILIATION,
-              // not signature, is the suppression bar (binding per this card, from a dissolved
-              // counter-specimen `f1a8dce1`): stripping the ONE form feed at that exact seam must make
-              // the remainder byte-IDENTICAL to `intended` — a genuinely lost/truncated payload cannot
-              // satisfy that, so this can never mask a real loss. Mirrors `isStalePlaceholderPrefix`'s
-              // own exact-strip-and-compare discipline; only the position (a seam, not a fixed prefix)
-              // differs. `i > 0` excludes a divergence AT the very start (before any chunk was ever
-              // written) — not a chunk seam.
+              // @decision 2b57b5a9 — root cause: repaint()'s raw Ctrl-L unsynchronized with writeChunked
+              // lands a stray form feed at the chunk seam; suppress only by RECONCILIATION (strip-and-
+              // compare), never by signature alone. `i > 0` excludes divergence at the very start.
               const isChunkSeamFormFeed = i > 0 && i % PTY_WRITE_CHUNK_UNITS === 0 && reported[i] === "\u000c" &&
                 reported.slice(0, i) + reported.slice(i + 1) === intended;
-              // Card 00b5066e — THE OFFSET-AWARE RECONCILIATION CHECK. Two live specimens (one Platform Lead
-              // session, 100 minutes apart) both fell through every check above to the generic "possible
-              // LOSS" fallback below, with byte-identical wording despite being structurally opposite: a
-              // STRICT PREFIX missing one trailing char (`divergesAtChar` == `reportedLen`, `tailReportedLen`
-              // == 0 — almost certainly an unechoed trailing newline) and a PREFIX INSERTION where every byte
-              // of `intended` is present, just offset by a prepended run (`divergesAtChar` == 0, both tails
-              // read FULL — the exact never-re-syncs shape `cf2fef73` already documented for a mid-string
-              // benign re-render, relocated to char 0). An exact byte-wise scan (`i` above) cannot re-sync
-              // after content is inserted or removed at an offset, so BOTH specimens read as alarming as a
-              // genuine substitution to a bare divergence-point/tail-size read — that IS the bug this
-              // discriminator exists to fix. Check whether one string is a PREFIX/SUFFIX-offset copy of the
-              // other — NOT the same question `isBenignWhitespaceRerender`/`isStalePlaceholderPrefix`/
-              // `isChunkSeamFormFeed` above ask (those are PROVEN, specific mechanisms and SUPPRESS the notice
-              // entirely); this is a WEAKER, general structural fact ("nothing here shows a byte of `intended`
-              // is genuinely missing/replaced") that only changes the notice's WORDING below — the notice
-              // still fires, since the offset's own origin is not established.
-              //   - INSERTION (`reported.endsWith(intended)`, `reported` longer): `reported` is some PREFIX
-              //     run followed by `intended` unchanged in full — every byte of `intended` is provably
-              //     present, in order, at the very end. Deliberately `endsWith`, NOT the broader `includes`:
-              //     an earlier cut of this check used `includes` and false-matched card 68459420's own
-              //     UNCHARACTERIZED "reported longer, unmatched" population (test scenario 13's own shape,
-              //     `reported = intended + <unexplained SUFFIX>` — `intended` is a PREFIX of `reported`, the
-              //     mirror-image shape, not a prefix insertion) — that population is explicitly required to
-              //     keep its "possible LOSS" wording verbatim (card 68459420 DoD-3, re-affirmed by this
-              //     card's own DoD-3: "the LOSS wording is NOT weakened for any other population"). `endsWith`
-              //     matches ONLY the card's own specimen shape (extra content PREPENDED, `intended` recovered
-              //     whole at the tail) and correctly excludes the appended-suffix shape. An exact match over
-              //     the entire (typically hundreds of chars) `intended` string cannot happen by coincidence,
-              //     so this direction is left UNBOUNDED.
-              //   - OMISSION (`intended.startsWith(reported)`, `reported` a literal prefix, `reported`
-              //     shorter): BOUNDED to `OFFSET_OMISSION_MAX_TAIL_CHARS` (see that constant's own doc) — a
-              //     large omitted tail is a genuine truncation and must keep crying loud unchanged; this
-              //     direction only ever fires for the card's own tiny-trailing-artifact shape.
-              // MEASURED to answer NO for the real gen=4 loss specimen this card's own hard bound cites
-              // (`reportedLen=444` vs `intendedLen=42,082`, unrelated content, `divergesAtChar=7`): neither
-              // direction matches — `reported` does not end with the whole of `intended` (insertion), and the
-              // omission bound alone already excludes a 42,075-char missing tail regardless of content.
+              // @decision 00b5066e — offset-aware reconciliation: INSERTION uses `endsWith` (not `includes`,
+              // which false-matched card 68459420's unrelated population), left unbounded; OMISSION is
+              // bounded to OFFSET_OMISSION_MAX_TAIL_CHARS. Neither suppresses the notice, only its wording.
               const isOffsetInsertion = reported.length > intended.length && reported.endsWith(intended);
               const isOffsetOmission = !isOffsetInsertion && reported.length < intended.length &&
                 (intended.length - reported.length) <= OFFSET_OMISSION_MAX_TAIL_CHARS && intended.startsWith(reported);
