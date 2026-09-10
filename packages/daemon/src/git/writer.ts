@@ -72,24 +72,10 @@ const NONINTERACTIVE_ENV: Record<string, string> = {
  * it, and (2) would any op in this file (log/branches/show/checkout/commit/push — all captured stdio,
  * never a real TTY) ever legitimately need it.
  *
- * **STRIPPED — delegated to `git/bounded.ts`'s {@link scrubGitEnv} (card f7a80d76; both tests above say
- * yes, so removing them is pure upside)**: GIT_EDITOR/GIT_SEQUENCE_EDITOR (no op here opens an editor;
- * commit uses `-m`), EDITOR (the bare, non-`GIT_`-prefixed form — its own category, a very common ambient
- * shell export missed by the original two-key strip), GIT_PAGER/PAGER (card 42544916: proved every git
- * read/write 500s once either is set — this repo's OWN worker/session spawn recipe sets both, see root
- * CLAUDE.md — none of these ops ever page, piped stdio not a TTY), GIT_EXTERNAL_DIFF (`show()`'s diff
- * output must stay git's own parseable format, not an arbitrary external tool's). See
- * {@link GIT_ENV_STRIP_KEYS}'s own doc for the exact list and why each entry is there — this file no
- * longer maintains its own copy.
- *
- * **PASSED THROUGH, EXPLICITLY ALLOWED — `boundedSimpleGit`'s `unsafe.allowUnsafeConfigPaths` (card
- * f7a80d76 DoD-2, fixing M2: this used to leave these unhandled, which meant an ambient one made every
- * git write throw)**: GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM / GIT_CONFIG / GIT_EXEC_PATH / PREFIX — one
- * simple-git category (`allowUnsafeConfigPaths`), applied at `boundedSimpleGit`'s construction chokepoint
- * rather than here, so this file cannot drift from `runs/snapshot.ts`'s copy of the same decision again.
- * NOT stripped: `vault/versioner.ts`'s own doc (card 54b839c5) shows blind-stripping this family silently
- * redirects identity resolution to the host's real `~/.gitconfig` instead of failing loud — the same risk
- * applies here, so pass-through + explicit allowance is the correct fix, not removal.
+ * @decision f7a80d76 — STRIPPED (delegated to {@link scrubGitEnv} — see its own doc for the exact list;
+ * includes GIT_PAGER/PAGER, which proved a real 500, card 42544916) vs PASSED-THROUGH-EXPLICITLY-ALLOWED
+ * (the config-path family, via `boundedSimpleGit`'s `unsafe.allowUnsafeConfigPaths`) categorization +
+ * rationale. See docs/decisions/f7a80d76-git-write-child-env-categorization.md.
  *
  * DELIBERATELY LEFT BLOCKED (simple-git's guard staying active is the intended behavior, not a gap):
  *  - GIT_ASKPASS / SSH_ASKPASS — pre-existing decision (see {@link NONINTERACTIVE_ENV}'s comment):
@@ -266,22 +252,10 @@ export class GitWriter {
   }
 
   /**
-   * Hold the vault auto-committer's advisory pause lease (card 614dfbef) for the duration of one
-   * git-surgery op on `this.repoPath`, so a checkout/commit/push issued through THIS writer can never
-   * race a `VaultVersioner` background auto-commit mid-sequence — the exact race the origin finding
-   * (4ae8a3c9) hit by hand. Harmless when `repoPath` isn't a watched vault root: the lease is just an
-   * unused file under its own `.git/` that nothing reads. Always resumes in `finally`, so a lease is
-   * never left held past this call even if `fn` throws (its own timeout ceiling is a self-healing
-   * backstop regardless).
-   *
-   * **Per-op token (card 237d1899):** the lease is a single shared file, not ref-counted, and every
-   * surface that writes (REST, Platform, companion git-push) constructs its own `new GitWriter(repoPath)`
-   * with no cross-surface mutex — so two ops on the same repo CAN overlap. Without a token, op A's
-   * `finally` would unconditionally `rm` the lease file, un-protecting op B mid-flight even though B is
-   * still running. Threading THIS call's own token through to `resumeVaultAutoCommit` makes the resume
-   * "mine-only": if B re-paused (writing a new token) before A's `finally` runs, A's resume no-ops and
-   * B's lease survives until B resumes it (or the TTL expires). Low-severity even before this fix — see
-   * the card body — but now closed rather than merely self-healing.
+   * Hold the vault auto-commit pause lease for the duration of one git-surgery op on `this.repoPath`.
+   * @decision 614dfbef — see docs/decisions/614dfbef-advisory-vault-auto-commit-pause-lease.md.
+   * @decision 237d1899 — the per-op token that makes a resume "mine-only" under overlap; see
+   * docs/decisions/237d1899-per-op-token-for-the-vault-pause-lease.md.
    */
   private async withVaultPauseLease<T>(fn: () => Promise<T>): Promise<T> {
     const pauseToken = pauseVaultAutoCommit(this.repoPath);
@@ -353,28 +327,17 @@ export class GitWriter {
    * A clean tree is an EXPECTED no-op failure ("nothing to commit") — surfaced, not thrown. Identity is
    * the repo's configured user (no overrides, no trailer).
    *
-   * **Oversized-staged-file WARNING, not a refusal (card 237d1899, decision on finding 2 of 614dfbef's
-   * CR):** `vault/versioner.ts`'s `commitVault` silently unstages a staged file above
-   * {@link DEFAULT_MAX_VAULT_FILE_BYTES} (~95MB) before committing — correct THERE because that path is
-   * fully automatic/unattended (no human in the loop, so overriding silently is the safe default). This
-   * method is instead a DELIBERATE act by a human or agent on the project's code repo — silently
-   * unstaging (or refusing outright) would override an intent that may be entirely legitimate (a large
-   * asset the repo genuinely wants tracked). So this path commits the file as asked, but surfaces a
-   * non-blocking `warning` on the result when a staged file exceeds the SAME shared threshold — enough
-   * signal that a human/agent isn't blindsided by a push later wedging on a remote's object-size limit
-   * (e.g. GitHub's 100MB hard cap), without taking the choice out of their hands. Detection is
-   * best-effort (a stat failure just skips that file) and never blocks the commit itself.
+   * @decision 237d1899 — oversized-staged-file handling: WARN, never refuse/unstage (unlike
+   * `commitVault`'s automatic path) — this call is a deliberate human/agent act. See
+   * docs/decisions/237d1899-per-op-token-for-the-vault-pause-lease.md.
    *
    * `opts.maxFileBytes` overrides the shared default — a TEST seam only (mirrors `commitVault`'s own
    * `opts.maxFileBytes`: writing a real ~95MB fixture per test run would be slow and wasteful). Every
    * real caller omits it and gets {@link DEFAULT_MAX_VAULT_FILE_BYTES}.
    *
-   * **Admitted through {@link withCanonicalIndexLock} (card e41dbb58):** `git add -A` + `git commit`
-   * stage and commit whatever is CURRENTLY in the canonical repo's shared index/working tree — the SAME
-   * resource `mergeBranchLocked` (git/worktrees.ts) squash-merges against. Before this, a commit()
-   * interleaved with an in-progress merge could land the merge's own staged squash under THIS message
-   * with no `Loom-Worker-Branch` trailer (see `test/merge-writer-index-lock.mjs` for the reproduction).
-   * The lock makes this call queue behind an in-flight merge (or vice versa) instead of racing it.
+   * @decision e41dbb58 — admitted through {@link withCanonicalIndexLock}, so this races neither an
+   * in-progress squash-merge nor createBranch/checkout. See
+   * docs/decisions/e41dbb58-gitwriter-write-ops-admitted-through-the-canonical-index-lock.md.
    */
   async commit(
     message: string,
@@ -445,12 +408,8 @@ export class GitWriter {
    * mismatch) so the human who just published sees if their email is wrong for this remote. It never
    * blocks the push and a detection failure is silently swallowed — see {@link identityWarning}.
    *
-   * **Durably records the outcome** (card 614dfbef, origin finding 4ae8a3c9) via
-   * `vault/versioner.ts`'s `recordGitPushOutcome` — the ONE chokepoint every real pusher (this class,
-   * reached from the REST git-write surface, the Platform MCP, and the companion `git-push` capability)
-   * routes through, so a rejecting remote (e.g. GitHub's >100MB blob hard-limit) is durably known instead
-   * of only discoverable by an agent doing forensics after the fact. A vault's periodic push-status log
-   * (`logVaultPushStatus`/`VaultPushStatusWatcher`) surfaces a recorded failure the next time it ticks.
+   * @decision 614dfbef — durably records the outcome via `recordGitPushOutcome`; see
+   * docs/decisions/614dfbef-advisory-vault-auto-commit-pause-lease.md.
    */
   async push(): Promise<GitWriteResult<{ branch: string; warning?: string }>> {
     return this.withVaultPauseLease(async () => {
