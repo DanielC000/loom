@@ -55,3 +55,19 @@ Inline comment in `packages/daemon/src/pty/host.ts` (`QueuedMessageKind`'s own t
 `8078a08ed95998599554d6ed4f2c10826c48f158`. The 2026-07-03 classification itself introduced by commit
 `ab65c2ac3529ceeaf5f19f906517a408200eeab6`; the same-sender coalescing amendment by commit
 `8d4f9a086c1200205bb1f96f168e8bfe07798392`. Relocated by card `3f45b7d8` (tranche 6 on `pty/host.ts`).
+
+## `enqueueStdin`'s reorder-on-enqueue draws from these same bounds
+
+Card eac3464d: a same-sender agent-kind arrival reorders on enqueue to land after that sender's
+own last eligible entry (never the FIFO tail), giving `drainPending`'s coalescing an adjacent entry
+even when another sender interleaved. Never past a give-up-held/`giveUpGen`-tagged entry. Reuses
+`AGENT_COALESCE_MAX_COUNT` as its own lookback bound. The real fairness cap on the delay this
+imposes on a quiet different-sender entry is `leapfrogCount` (card `e01687ea`), not this window.
+
+## Do not (3)
+
+- Do not reorder past a give-up-held or `giveUpGen`-tagged entry.
+
+## Source (3)
+
+`pty/host.ts` (reorder scan), commit `8d4f9a08`. Card `9145a86f` (tranche 26).

@@ -6943,21 +6943,19 @@ export class PtyHost {
     // `queued: false` makes the negative explicit: nothing is recorded, nothing will ever deliver this —
     // unlike the `held` path below, where `queued: true` is exactly as durable/successful as it sounds.
     if (!live?.alive) return { delivered: false, reason: "session-dead", queued: false, deliveryState: "dropped" };
-    // Card 21a281b6 (merge-gate fix — see EnqueueStdinTail.captureMintGen's own doc): an EXPLICIT opt-in,
-    // never a `mintedAtWallClock`-presence fallback. A caller that opts in AND supplies no `mintedAtGen` of
-    // its own (sessions/service.ts's four fresh-mint call sites have no access to `live.submitGeneration`,
-    // which lives only here) gets one captured NOW, mirroring the paste-recovery mint site's own
-    // `const mintedAtGen = live.submitGeneration;` (below, in `enqueueStdin`'s own caller at the
-    // paste-tripwire give-up site). This is NOT cosmetic: `annotateMintStamp`'s (joinSubmittedText) own
-    // "nothing to disclose on the first write" gate depends on `mintedAtGen` being set so THIS write's own
-    // `currentGen` (read moments later, still unchanged) equals it — keeping a message's FIRST write
-    // byte-identical to its pristine text. Without this, `Live.ambiguousDispatches`'s resend-auto-join
-    // signature (`hasAmbiguousMatch`, card 4a0af485) would be seeded from an ANNOTATED write carrying a
-    // wall-clock value no fresh resend's freshly-framed (pristine) text could ever equal — silently
-    // disabling that join for every message this card touches. `captureMintGen` being a strict opt-in (not
-    // a `mintedAtWallClock`-presence fallback) is what keeps every CROSS-BOUNDARY carry site (recycle,
-    // resume, restart replay) untouched — none of them ever pass it, so `mintedAtGen` stays exactly as they
-    // already leave it: deliberately absent.
+    // @decision 21a281b6 — captureMintGen must stay a strict, EXPLICIT opt-in, never a
+    // `mintedAtWallClock`-presence fallback: skipping it seeds `Live.ambiguousDispatches`'s
+    // `hasAmbiguousMatch` (card 4a0af485) resend-auto-join signature from an ANNOTATED write,
+    // silently disabling that join. This is NOT cosmetic — see `annotateMintStamp` (called via
+    // `joinSubmittedText`)'s own GATE 1 for the byte-identical-first-write / `currentGen`
+    // mechanics this depends on (nothing to disclose on the first write). A caller that opts in
+    // and supplies no `mintedAtGen` of its own (sessions/service.ts's four fresh-mint call sites
+    // have no access to `live.submitGeneration`, which lives only here) gets one captured NOW,
+    // mirroring the paste-recovery mint site's own `const mintedAtGen = live.submitGeneration;`
+    // (below, in `enqueueStdin`'s own caller at the paste-tripwire give-up site). `captureMintGen`
+    // being a strict opt-in is also what keeps every CROSS-BOUNDARY carry site (recycle, resume,
+    // restart replay) untouched — none of them ever pass it, so `mintedAtGen` stays deliberately
+    // absent there.
     if (captureMintGen && mintedAtGen === undefined) mintedAtGen = live.submitGeneration;
     // Shape guard (card 78a16dc5) — see the doc comments on both checks for why NEITHER tier drops: a
     // dropped "warning"-kind entry is a real stall hazard (the async run_gate failure nudge can legitimately
@@ -7044,31 +7042,20 @@ export class PtyHost {
       // `mintedAtGen` rides along PRISTINE (card 4af5aefa) — annotated fresh at actual drain time
       // (`joinSubmittedText`, called from `drainPending`), never baked in here.
       const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(resolveTailAtDelivery ? { resolveTailAtDelivery } : {}) };
-      // Card eac3464d DoD-2 (owner ask 2, 2026-08-28): a SAME-SENDER agent-kind message jumps ahead of
-      // any OTHER senders' messages queued after its own sender's last (eligible) entry, landing right
-      // after it instead of at the FIFO tail — so drainPending's same-sender coalescing (above) actually
-      // has something adjacent to coalesce with even when another sender's message interleaved the
-      // arrivals. Never reorders past a give-up-held entry or a giveUpGen-tagged (possible-duplicate)
-      // entry — those keep their FIFO/front position untouched, exactly like the coalescing exclusion.
+      // @decision eac3464d — a SAME-SENDER agent-kind arrival reorders to land right after that
+      // sender's own last (eligible) queued entry, never the FIFO tail, so same-sender coalescing has
+      // something adjacent to work with; NEVER past a give-up-held or giveUpGen-tagged entry.
       //
-      // FAIRNESS BOUND — card e01687ea CORRECTION: the wording that used to live here claimed the
-      // AGENT_COALESCE_MAX_COUNT-position lookback window itself capped the delay a quiet entry could
-      // accumulate ("once an entry has that many OTHER arrivals queued behind it, it has aged out ... and
-      // can never again be leapfrogged"). MEASURED FALSE: this reorder always inserts at `matchIndex + 1`
-      // — immediately in front of whatever is already queued after the sender's own last entry — so a
-      // quiet entry sitting right there is found and leapfrogged again on EVERY subsequent same-sender
-      // arrival; its absolute index grows in lockstep with the window's own start, so it NEVER ages out
-      // (reproduced in pty-agent-sender-coalesce.mjs scenario (I)). The lookback window below still bounds
-      // how far back the SCAN walks (a cheap perf bound on a long queue) — it is NOT what caps the delay.
-      // The real cap is `leapfrogCount` (QueuedMessage's own field — see its doc): every entry this splice
-      // actually displaces has its count bumped below, and once an entry's count reaches
-      // AGENT_COALESCE_MAX_COUNT the scan treats FURTHER displacement of it as a boundary — refusing to
-      // walk PAST it in search of an earlier match — which is what genuinely caps the worst-case extra
-      // delay any one entry can accumulate from this reordering at AGENT_COALESCE_MAX_COUNT same-kind
-      // arrivals, not the window by itself.
+      // @decision e01687ea — the delay this reorder can impose on a quiet different-sender entry is
+      // capped by the per-entry `leapfrogCount` field (below), NOT by this lookback window — the
+      // window alone never ages a quiet entry out of eligibility.
+      // The reorder always inserts at `matchIndex + 1`, right in front of whatever is already queued
+      // after the sender's own last entry, so a quiet entry sitting there is leapfrogged again on
+      // EVERY subsequent same-sender arrival; its absolute index grows in lockstep with the window's
+      // own start (reproduced in pty-agent-sender-coalesce.mjs scenario (I)).
       // A NULL/undefined `senderId` never matches another null-sender entry (same reasoning as
-      // drainPending's own senderKey !== null guard — see that comment): identity can't be established
-      // from an absent id, so this whole reorder is skipped for a message with no genuine sender.
+      // drainPending's own senderKey !== null guard) — identity can't be established from an absent
+      // id, so this whole reorder is skipped for a message with no genuine sender.
       const senderKey = senderId ?? null;
       if (kind === "agent" && senderKey !== null) {
         const lookbackStart = Math.max(0, live.pending.length - AGENT_COALESCE_MAX_COUNT);
@@ -7082,21 +7069,14 @@ export class PtyHost {
           // is EVER inserted before it — its position is genuinely never touched, not merely "not
           // matched against". Regression-covered: pty-agent-sender-coalesce.mjs scenario (G).
           if (this.isGiveUpHeld(candidate) || candidate.giveUpGen !== undefined) break;
-          // Code Review follow-up (card e01687ea): MATCH is checked BEFORE the leapfrogCount freeze below
-          // — a match places the new entry at `i + 1`, strictly AFTER `candidate`'s own index, so taking a
-          // match here never displaces `candidate` itself, regardless of how many times it's already been
-          // leapfrogged. An over-cap entry is still a perfectly legitimate coalescing target; the cap only
-          // has to stop it being pushed back FURTHER by matches found beyond it. (Reachable in production:
-          // an entry can accumulate leapfrogCount from OTHER senders'/routes' insertions scanning past it
-          // without matching, then later be the correct match for its own sender+route once that sender
-          // sends again — checking the freeze first would wrongly deny that safe, non-displacing match.)
-          // Card a9e4240f: third copy of the same-sender equality set (route/senderId/proactive) — without
-          // `proactive` here, this scan could place a new entry adjacent to a `candidate` whose `proactive`
-          // differs, manufacturing an adjacency `drainPending`'s own equalized run condition (above) then
-          // correctly refuses to coalesce. HARMLESS today (same unreachability as the drainPending sites —
-          // every real proactive producer omits `senderId`, so `senderKey` is null and this whole scan is
-          // skipped by the outer `senderKey !== null` gate), but left uncorrected it's a third site that
-          // would need re-deriving the same fix if that unreachability is ever lifted.
+          // @decision e01687ea — MATCH is checked BEFORE the leapfrogCount freeze so an over-cap
+          // entry stays a legitimate coalescing target: a match places the new entry at `i + 1`,
+          // strictly AFTER `candidate`'s own index, so a match here never displaces `candidate`
+          // itself. (Reachable: it can accrue leapfrogCount from OTHER senders'/routes' scans,
+          // then later be the correct match for its own sender+route once that sender sends again.)
+          // @decision a9e4240f — a third copy of the same-sender equality set (route/senderId/
+          // proactive) — HARMLESS today only because every real proactive producer omits senderId;
+          // left uncorrected, restoring reachability would need re-deriving the same fix a third time.
           if (candidate.kind === "agent" && (candidate.senderId ?? null) === senderKey && routeKeyOf(candidate.route) === routeKeyOf(route) && (candidate.proactive ?? false) === proactive) {
             insertAt = i + 1;
             break;
