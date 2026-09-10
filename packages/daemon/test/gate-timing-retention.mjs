@@ -15,8 +15,10 @@ const scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), "loom-gate-timing-rete
 
 /** Builds one run's worth of synthetic rows: a run-start, N file rows, and (unless `crashed`) a
  *  run-summary row — matching the real schema's field names closely enough for this module's own
- *  run-key/kind logic (it never reads any field this fixture omits). */
-function makeRun(runUid, fileCount, { crashed = false } = {}) {
+ *  run-key/kind logic (it never reads any field this fixture omits). `hostLoadAggregates` (card
+ *  ec2d154b), when given, is stamped onto the run-summary row verbatim — this module treats it as
+ *  opaque, so any plain object exercises the same survive-or-drop path a real one would. */
+function makeRun(runUid, fileCount, { crashed = false, hostLoadAggregates } = {}) {
   const lines = [];
   lines.push(JSON.stringify({ kind: "run-start", runUid, runIndex: Number(runUid.split("-")[0]), poolSize: 2, testCount: fileCount, selected: [] }));
   for (let i = 0; i < fileCount; i++) {
@@ -24,7 +26,9 @@ function makeRun(runUid, fileCount, { crashed = false } = {}) {
   }
   lines.push(JSON.stringify({ kind: "host-sample", runUid, sampleIndex: 0, cpuBusyPct: 10 }));
   if (!crashed) {
-    lines.push(JSON.stringify({ kind: "run-summary", runUid, poolSize: 2, testCount: fileCount, executedCount: fileCount, failedCount: 0, durationMs: 1000 + fileCount }));
+    const summary = { kind: "run-summary", runUid, poolSize: 2, testCount: fileCount, executedCount: fileCount, failedCount: 0, durationMs: 1000 + fileCount };
+    if (hostLoadAggregates !== undefined) summary.hostLoadAggregates = hostLoadAggregates;
+    lines.push(JSON.stringify(summary));
   }
   return lines;
 }
@@ -84,6 +88,47 @@ function readRows(target) {
   const afterBytes = fs.statSync(target).size;
   const beforeBytes = result.beforeBytes;
   check("the file actually shrank on disk", afterBytes < beforeBytes);
+}
+
+// ── host-load aggregates (Card ec2d154b) survive compaction while the per-tick rows they were derived ─────
+// from are dropped — the whole point of putting them on the run-summary row instead of leaving them
+// recoverable only from the "host-sample" rows this module already strips for every non-recent run.
+{
+  const target = path.join(scratchRoot, "host-load-aggregates.ndjson");
+  const oldAgg = { sampleCount: 42, cpuBusyPctMean: 55.5, cpuBusyPctP95: 88, cpuBusyPctMax: 97, diskProbeMsP95: 6.2, diskProbeMsMax: 9.1, freeMemMBMin: 512 };
+  // A SECOND old run with every field null (a run too short for a single tick) — proving the survivor
+  // check below isn't vacuously true for one lucky shape.
+  const oldAggAllNull = { sampleCount: 0, cpuBusyPctMean: null, cpuBusyPctP95: null, cpuBusyPctMax: null, diskProbeMsP95: null, diskProbeMsMax: null, freeMemMBMin: null };
+  const recentAgg = { sampleCount: 7, cpuBusyPctMean: 12.3, cpuBusyPctP95: 20, cpuBusyPctMax: 25, diskProbeMsP95: 2.1, diskProbeMsMax: 3.0, freeMemMBMin: 900 };
+
+  const oldRun = makeRun("1-old", 5, { hostLoadAggregates: oldAgg });
+  const oldRunAllNull = makeRun("2-old", 5, { hostLoadAggregates: oldAggAllNull });
+  const recentRun = makeRun("3-recent", 5, { hostLoadAggregates: recentAgg });
+  writeNdjson(target, [...oldRun, ...oldRunAllNull, ...recentRun]);
+
+  // [negative control] RED before this test would even mean anything: prove the fixture's "host-sample"
+  // row is actually present pre-compaction, so "it's gone after" below is a real removal, not an artifact
+  // of it never having existed.
+  const before = readRows(target);
+  check("[negative control] the old run's host-sample row is present BEFORE compaction", before.some((r) => r.kind === "host-sample" && r.runUid === "1-old"));
+
+  const result = compactGateTimingLogIfNeeded(target, { triggerBytes: 1, keepFullRuns: 1, maxCompactedSummaries: 1000 });
+  check("[positive control] compaction fires", result.compacted === true);
+
+  const after = readRows(target);
+  check("the OLD run's host-sample row is GONE after compaction (the detail this card's aggregates replace)", !after.some((r) => r.kind === "host-sample" && r.runUid === "1-old"));
+  check("the OLD run's file rows are GONE after compaction", !after.some((r) => r.kind === "file" && r.runUid === "1-old"));
+
+  const survivor = after.find((r) => r.runUid === "1-old" && r.kind === "run-summary");
+  check("the OLD run's run-summary row survives compaction at all", survivor !== undefined);
+  check("its hostLoadAggregates object survives BYTE-FOR-BYTE (every field, real values)", survivor && JSON.stringify(survivor.hostLoadAggregates) === JSON.stringify(oldAgg));
+
+  const survivorAllNull = after.find((r) => r.runUid === "2-old" && r.kind === "run-summary");
+  check("an all-null hostLoadAggregates survives just as faithfully (not dropped as if it were absent)", survivorAllNull && JSON.stringify(survivorAllNull.hostLoadAggregates) === JSON.stringify(oldAggAllNull));
+
+  const recentSurvivor = after.find((r) => r.runUid === "3-recent" && r.kind === "run-summary");
+  check("the RECENT run's hostLoadAggregates survives too, as part of its full untouched detail", recentSurvivor && JSON.stringify(recentSurvivor.hostLoadAggregates) === JSON.stringify(recentAgg));
+  check("the RECENT run's own host-sample row ALSO survives (full detail, unlike the old runs above)", after.some((r) => r.kind === "host-sample" && r.runUid === "3-recent"));
 }
 
 // ── hard ceiling: oldest compacted run-summary rows are dropped once maxCompactedSummaries is exceeded ────

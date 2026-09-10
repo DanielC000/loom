@@ -121,6 +121,18 @@ const TEST_DIR = path.join(__dirname, "..", "test");
 // an `undefined`-valued property entirely, so a passing row has NO `failureDetail` key at all, never a
 // present-but-empty one; presence of the key IS the failure signal, unambiguous under a key-shape census
 // (the peer's own volunteered gap — see this card's design-input log).
+//
+// Card ec2d154b: the "run-summary" row now also carries `hostLoadAggregates` — a per-run SUMMARY of the
+// same `cpuBusyPct`/`diskProbeMs`/`freeMemMB` values the periodic "host-sample" rows above already carry.
+// Why: `gate-timing-retention.mjs` compacts every run older than its most recent `keepFullRuns` down to
+// its "run-summary" row alone, dropping the "host-sample" rows entirely (see that module's own doc) — so
+// before this card, host-load detail was UNRECOVERABLE for all but the most recent runs. Computed by
+// `computeHostLoadAggregates` (below) from the SAME in-memory sample arrays `onHostSample` already
+// accumulates for the human-readable summary lines — no new sampling, no new subprocess, just a second
+// consumer of data already being collected. `null` per field when there were no samples for it (a run too
+// short for a single tick, or every disk probe on this run failed), never a fabricated 0 — same convention
+// `cpuBusyPctDelta`/`diskProbeWriteMs` already use. ADDITIVE ONLY, same posture as `failureDetail` above:
+// a reader written before this card simply lacks the key.
 const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
 const GATE_TIMING_NDJSON = path.join(LOOM_HOME, "gate-timing", "daemon-per-file-timing.ndjson");
 // Card afd51f5d: a FIXED, dedicated probe file — separate from GATE_TIMING_NDJSON, overwritten in place
@@ -341,6 +353,51 @@ export function formatDiskProbeSummaryLine(probeMsSamples, intervalMs) {
   const max = Math.max(...probeMsSamples);
   const mean = probeMsSamples.reduce((sum, v) => sum + v, 0) / probeMsSamples.length;
   return `# disk probe write latency — AWAIT-TIME PROXY (not a true OS queue-depth counter), ${probeMsSamples.length} sample(s) @ ${intervalMs}ms: min ${min.toFixed(2)}ms / mean ${mean.toFixed(2)}ms / max ${max.toFixed(2)}ms`;
+}
+
+/** Nearest-rank p95 (never interpolated) over `samples`: sorts ascending and takes the value at
+ *  `ceil(0.95 * n) - 1`, clamped into range. Returns `null` for an empty input rather than a fabricated
+ *  number — same convention every other stat in this module already uses. Pure (no host reads), so a test
+ *  can drive it with a fixed array instead of real, non-deterministic samples. */
+function p95(samples) {
+  if (samples.length === 0) return null;
+  const sorted = [...samples].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(0.95 * sorted.length) - 1));
+  return sorted[idx];
+}
+
+/** Card ec2d154b: per-run host-load AGGREGATES for the `run-summary` NDJSON row — see this file's own
+ *  header comment (search `hostLoadAggregates`) for why this exists (the compactor drops the per-tick
+ *  "host-sample" rows for every run older than `keepFullRuns`, so without this the CPU/disk distribution
+ *  is unrecoverable for the bulk of run history). Pure and injectable: takes the SAME in-memory sample
+ *  arrays `onHostSample` (isMain, below) already accumulates for the human-readable summary lines, so a
+ *  test can drive it with synthetic arrays instead of a real gate run.
+ *
+ *  `cpuBusyPctSamples`/`diskProbeMsSamples` should already exclude null (no-prior-reading / failed-probe)
+ *  entries, matching `formatHostLoadSummaryLine`/`formatDiskProbeSummaryLine`'s own convention.
+ *  `freeMemMBSamples` is never null-filtered (every tick records a real reading — see `onHostSample`), so
+ *  its own length is used as `sampleCount`: the count of host-sample TICKS this run actually took, which
+ *  can exceed the CPU/disk sample counts (the sampler's first tick has no prior reading to delta against;
+ *  an occasional disk probe can fail) without ever being smaller than either.
+ *
+ *  Every field is `null` when its own source array is empty — a run too short for a single tick, or (for
+ *  disk) one where every probe on this run failed — never a fabricated 0, same posture as
+ *  `cpuBusyPctDelta`/`diskProbeWriteMs` themselves. `p95` is nearest-rank (see that helper's own doc), not
+ *  interpolated — deliberately simple over a small, host-generated sample count where sub-percentile
+ *  precision isn't meaningful. */
+export function computeHostLoadAggregates(cpuBusyPctSamples, diskProbeMsSamples, freeMemMBSamples) {
+  const mean = (arr) => (arr.length ? arr.reduce((sum, v) => sum + v, 0) / arr.length : null);
+  const max = (arr) => (arr.length ? Math.max(...arr) : null);
+  const min = (arr) => (arr.length ? Math.min(...arr) : null);
+  return {
+    sampleCount: freeMemMBSamples.length,
+    cpuBusyPctMean: mean(cpuBusyPctSamples),
+    cpuBusyPctP95: p95(cpuBusyPctSamples),
+    cpuBusyPctMax: max(cpuBusyPctSamples),
+    diskProbeMsP95: p95(diskProbeMsSamples),
+    diskProbeMsMax: max(diskProbeMsSamples),
+    freeMemMBMin: min(freeMemMBSamples),
+  };
 }
 
 /** Card 90678ee9 DoD-5: the one population field this NDJSON was missing. `testCount` only says HOW MANY
@@ -1923,6 +1980,11 @@ if (isMain) {
   // Card afd51f5d: parallel array to gateTimingHostBusySamples, same null-exclusion convention — see
   // diskProbeWriteMs's own doc for what this measures and why.
   const gateTimingDiskProbeSamples = [];
+  // Card ec2d154b: parallel array to the two above, but NEVER null-filtered — every tick records a real
+  // freeMemMB reading (unlike cpuBusyPct's first-tick null or an occasional failed disk probe), so this
+  // array's own length is what computeHostLoadAggregates uses as sampleCount. Feeds ONLY that aggregate;
+  // the per-tick "host-sample" row already carries its own freeMemMB field independently, unchanged.
+  const gateTimingFreeMemMBSamples = [];
   let gateTimingHostSampleIndex = 0;
   const onHostSample = () => {
     try {
@@ -1930,6 +1992,8 @@ if (isMain) {
       if (busyPct !== null) gateTimingHostBusySamples.push(busyPct);
       const diskProbeMs = diskProbeWriteMs(DISK_PROBE_FILE, DISK_PROBE_BUF);
       if (diskProbeMs !== null) gateTimingDiskProbeSamples.push(diskProbeMs);
+      const freeMemMB = Math.round(os.freemem() / 1e6);
+      gateTimingFreeMemMBSamples.push(freeMemMB);
       appendGateTimingRow(GATE_TIMING_NDJSON, {
         kind: "host-sample",
         runIndex: gateTimingRunIndex,
@@ -1944,7 +2008,7 @@ if (isMain) {
         // SAMPLED DELTA, never cumulative — see cpuBusyPctDelta's own doc for why that distinction is
         // load-bearing here. null on the sampler's first tick (no prior reading to delta against yet).
         cpuBusyPct: busyPct,
-        freeMemMB: Math.round(os.freemem() / 1e6),
+        freeMemMB,
         totalMemMB: Math.round(os.totalmem() / 1e6),
         // Card afd51f5d DoD-1/2/3: disk-I/O signal, additive on this existing row kind — an OLDER row (or
         // any reader that predates this field) simply lacks the key; every reader here already destructures
@@ -2064,6 +2128,18 @@ if (isMain) {
     // normally" signal a reader keys on. Every per-file "file" row was already flushed incrementally in
     // runLane as each file completed, so there is no longer a post-run loop over `results` here — the
     // original defect this card fixes was exactly that loop never running when the process was SIGKILLed.
+    //
+    // Card ec2d154b (CR follow-up): computeHostLoadAggregates is called in its OWN try/catch, separate from
+    // the row it feeds — a throw here must cost only the aggregate, never the whole run-summary row (the
+    // "the run terminated normally" signal gate-timing-band.ts and the deferred-trigger nudge composition
+    // both key on). Falls back to `null`, same "absent detail, not a fabricated value" posture the function
+    // itself already uses for an empty sample array.
+    let gateTimingHostLoadAggregates = null;
+    try {
+      gateTimingHostLoadAggregates = computeHostLoadAggregates(gateTimingHostBusySamples, gateTimingDiskProbeSamples, gateTimingFreeMemMBSamples);
+    } catch (err) {
+      console.warn(`⚠ gate-timing: hostLoadAggregates computation failed (non-fatal, row still written): ${err.message}`);
+    }
     appendGateTimingRow(GATE_TIMING_NDJSON, {
       kind: "run-summary",
       runIndex: gateTimingRunIndex,
@@ -2090,6 +2166,13 @@ if (isMain) {
       failedNames: failed.map((f) => f.name),
       hostBefore: gateTimingHostBefore,
       hostAfter: gateTimingHostAfter,
+      // Card ec2d154b: per-run CPU/disk/mem aggregates over this run's OWN "host-sample" ticks — see this
+      // file's header comment (search `hostLoadAggregates`) and computeHostLoadAggregates's own doc. These
+      // survive gate-timing-retention.mjs's compaction (which drops the per-tick "host-sample" rows for
+      // every run older than keepFullRuns) because they live on THIS row, not on the rows being dropped.
+      // Computed above in its own try/catch — `null` here means the computation itself threw, not "no
+      // samples" (which the function reports as a real object with null fields, not a null object).
+      hostLoadAggregates: gateTimingHostLoadAggregates,
     });
     for (const line of formatGateTimingSummaryLines(results, gateTimingWallClockMs)) console.log(line);
     // Card 17069e7e (CR follow-up): ONE summary line for every write failure this run, never one per row —

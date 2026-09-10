@@ -11,7 +11,7 @@ import path from "node:path";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const { cpuBusyPctDelta, createHostLoadSampler, formatHostLoadSummaryLine, runInstrumentedSuite, diskProbeWriteMs, formatDiskProbeSummaryLine } = await import(
+const { cpuBusyPctDelta, createHostLoadSampler, formatHostLoadSummaryLine, runInstrumentedSuite, diskProbeWriteMs, formatDiskProbeSummaryLine, computeHostLoadAggregates } = await import(
   pathToFileURL(path.join(import.meta.dirname, "..", "scripts", "test-daemon.mjs")).href
 );
 
@@ -170,6 +170,48 @@ function cpu(user, idle) {
   // fabricate a min/mean/max from nothing.
   const emptyLine = formatDiskProbeSummaryLine([], 5000);
   check("[negative control] zero samples reports 0 sample(s), no fabricated min/mean/max", emptyLine.includes("0 sample(s)") && !emptyLine.includes("min "));
+}
+
+// ── computeHostLoadAggregates (Card ec2d154b) ───────────────────────────────────────────────────────────
+// The per-run summary that survives gate-timing-retention.mjs's compaction (which drops the per-tick
+// "host-sample" rows this data comes from) — see that field's own doc in test-daemon.mjs.
+{
+  // [positive control] real samples across all three inputs produce real, non-null aggregates.
+  const cpu = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+  const disk = [1, 2, 3, 4, 5];
+  const mem = [500, 480, 460, 440, 420];
+  const agg = computeHostLoadAggregates(cpu, disk, mem);
+  check("[positive control] sampleCount is freeMemMBSamples.length (the tick count), not the cpu/disk sample counts", agg.sampleCount === mem.length);
+  check("cpuBusyPctMean is the arithmetic mean", Math.abs(agg.cpuBusyPctMean - 55) < 0.001);
+  check("cpuBusyPctMax is the max, not the last sample", agg.cpuBusyPctMax === 100);
+  check("diskProbeMsMax is the max", agg.diskProbeMsMax === 5);
+  check("freeMemMBMin is the min, not the first or last sample", agg.freeMemMBMin === 420);
+
+  // p95 is NEAREST-RANK (never interpolated) — verified against a population where the answer is
+  // unambiguous: 1..20, ceil(0.95*20)-1 = 18 (0-based) -> the 19th-smallest value.
+  const twenty = Array.from({ length: 20 }, (_, i) => i + 1);
+  const aggP95 = computeHostLoadAggregates(twenty, twenty, [1]);
+  check("cpuBusyPctP95 uses nearest-rank, not linear interpolation", aggP95.cpuBusyPctP95 === 19);
+  check("diskProbeMsP95 uses the SAME nearest-rank method", aggP95.diskProbeMsP95 === 19);
+
+  // [negative control] sampleCount tracks freeMemMBSamples even when it's the SMALLEST of the three arrays
+  // (the sampler's first tick has no cpu delta yet; a disk probe can fail) — never silently widened to
+  // whichever input happens to be largest.
+  const mismatched = computeHostLoadAggregates([1, 2, 3, 4, 5], [1, 2, 3], [9]);
+  check("[negative control] sampleCount is freeMemMBSamples.length even when it's smaller than the other two arrays", mismatched.sampleCount === 1);
+
+  // [negative control] every field is null (never a fabricated 0) when its own source array is empty — a
+  // run too short for a single tick, or (disk only) a run where every probe failed.
+  const emptyAgg = computeHostLoadAggregates([], [], []);
+  check("[negative control] sampleCount is 0 for zero ticks", emptyAgg.sampleCount === 0);
+  check("[negative control] cpuBusyPctMean/P95/Max are null (not 0 or NaN) with no cpu samples", emptyAgg.cpuBusyPctMean === null && emptyAgg.cpuBusyPctP95 === null && emptyAgg.cpuBusyPctMax === null);
+  check("[negative control] diskProbeMsP95/Max are null with no disk samples", emptyAgg.diskProbeMsP95 === null && emptyAgg.diskProbeMsMax === null);
+  check("[negative control] freeMemMBMin is null with no mem samples", emptyAgg.freeMemMBMin === null);
+
+  // A run that took real ticks (freeMemMB present) but had zero valid cpu deltas / disk probes must report
+  // ONLY those two fields as null — proving nullness is per-field, not all-or-nothing.
+  const partial = computeHostLoadAggregates([], [], [500, 480]);
+  check("cpu/disk fields are independently null even when freeMemMB has real samples (not all-or-nothing)", partial.sampleCount === 2 && partial.cpuBusyPctMean === null && partial.diskProbeMsMax === null && partial.freeMemMBMin === 480);
 }
 
 console.log(`\n${failures === 0 ? "✅" : "❌"} test-daemon-host-load-sampling: ${failures} check(s) failed.`);

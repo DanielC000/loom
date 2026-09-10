@@ -214,5 +214,19 @@ check(
   neverCompletedFiles(cleanRunStart[0]?.selected ?? [], cleanFileRows.map((r) => r.name)).length === 0,
 );
 
+// Card ec2d154b (CR follow-up): against a REAL clean run's WRITER-PRODUCED row, not a hand-built fixture —
+// the retention test's own fixture supplies this key itself, and the pure-function test never touches a
+// row the writer actually emitted, so neither would catch the writer line that stamps it ever being
+// deleted. This is that missing check.
+const cleanAgg = cleanRunSummary[0]?.hostLoadAggregates;
+check("the clean run's WRITER-PRODUCED run-summary row carries a real hostLoadAggregates object", typeof cleanAgg === "object" && cleanAgg !== null);
+check("hostLoadAggregates.sampleCount is a real number (this run took at least one host-sample tick)", typeof cleanAgg?.sampleCount === "number" && !Number.isNaN(cleanAgg.sampleCount));
+check(
+  "every other hostLoadAggregates field is a number or null, never undefined/a string/NaN",
+  ["cpuBusyPctMean", "cpuBusyPctP95", "cpuBusyPctMax", "diskProbeMsP95", "diskProbeMsMax", "freeMemMBMin"].every(
+    (key) => cleanAgg?.[key] === null || (typeof cleanAgg?.[key] === "number" && !Number.isNaN(cleanAgg[key])),
+  ),
+);
+
 console.log(`\n${failures === 0 ? "✅" : "❌"} test-daemon-gate-timing-sigkill: ${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);
