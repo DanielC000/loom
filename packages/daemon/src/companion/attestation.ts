@@ -5,10 +5,9 @@
  * consumer, using all three primitives — later levers (session-steer, board-write, …) reuse the SAME
  * `OwnerConfirmStore`, namespacing their own proposals by their own capability slug (see `proposalKey`).
  *
- * WHY: the Companion forms turns from inbound chat — it is Loom's most prompt-injection-exposed agent. An
- * ACT lever may NEVER let the Companion ORIGINATE a privileged action — only RELAY the owner's literal
- * input, structurally enforced, not by prompt discipline. These three primitives make "literal owner
- * input only" a structural property instead of a hope:
+ * WHY: the Companion forms turns from inbound chat — Loom's most prompt-injection-exposed agent — so an
+ * ACT lever may NEVER let it ORIGINATE a privileged action, only RELAY the owner's literal input,
+ * structurally enforced (not by prompt discipline). These three primitives make that structural:
  *   A — server-attested owner text (`getActiveTurnOwnerText`/`getRecentOwnerTurns`, pty/host.ts): the
  *       LITERAL authenticated owner inbound bytes forming the CURRENT turn (or null), plus a BOUNDED,
  *       recent-turns window of the same (card 2b26035c — see `isVerbatimOwnerSubstring`'s doc).
@@ -18,15 +17,9 @@
  *   C — owner-confirm round-trip (`OwnerConfirmStore`): the highest-risk levers don't commit on the tool
  *       call; they propose, and only the owner's own NEXT authenticated turn can commit it.
  *
- * Card 2b26035c ("board_create verbatim-quote guard forces owner repetition") adds two owner-suggested
- * relaxations on top of these, without loosening what "owner-attested" MEANS:
- *   (b) Primitive A/B widen from "the current turn only" to "any of the last N authenticated owner
- *       turns" — still the owner's OWN server-attested words, just a wider TURN SCOPE. See
- *       `Live.recentOwnerTurns`/`getRecentOwnerTurns` (pty/host.ts) and `isVerbatimOwnerText` below.
- *   (a) `AuthoredContentGrantStore` — an EXPLICIT, Primitive-C-gated owner act that lets a lever author
- *       card content for one project instead of quoting the owner verbatim, granted inline from chat
- *       (not just the pre-existing per-project settings toggle). It reuses Primitive C's propose/confirm
- *       round-trip verbatim (see its doc below) — the Companion can never grant this to itself.
+ * @decision 2b26035c — the (a)/(b) owner-suggested relaxations below widen HOW a verbatim quote can be
+ * sourced, never loosen what "owner-attested" means. (b) is Primitive A/B's recent-turns widening
+ * (`isVerbatimOwnerSubstringRecent` below); (a) is `AuthoredContentGrantStore` below.
  * `createOwnerAttestation` wires all of this into the ONE `OwnerAttestation` object threaded through
  * `GrantContext.attest` (capabilities.ts) — the shape a lever's `register()` closes over.
  */
