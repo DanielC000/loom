@@ -7947,11 +7947,9 @@ export class SessionService {
    * Returns a `deliveryStatus` (delivered-live | queued | boarded) so the caller gets an HONEST outcome:
    *  - LIVE target → the durable stdin-enqueue channel (submitted as a turn if idle = delivered-live;
    *    held FIFO if busy = queued).
-   *  - NOT-LIVE target whose recycle lineage has a LIVE successor (card 5519559c) → route to the successor
-   *    via the SAME durable channel instead of boarding: the target id was superseded, not gone, so the
-   *    message reaches whoever is actually doing the work now. `routedTo` names the successor so the
-   *    caller can see the redirect. This is DISTINCT from card 2ca18433 (a still-live recipient that
-   *    recycles AFTER a message is already queued) — here the target is already dead at send time.
+   * @decision 5519559c — a NOT-LIVE target with a live recycle successor routes there via the same
+   *  durable channel instead of boarding — the id was superseded, not gone; distinct from card
+   *  2ca18433 (a still-live recipient that recycles after the message is already queued).
    *  - NOT-LIVE target with NO live successor anywhere in its lineage → it has no PTY to take a turn, so
    *    instead of THROWING (which silently drops the message), we BOARD a durable note onto the target's
    *    OWN project board — the same durable-board fallback platformEscalate uses for an offline Lead —
@@ -8036,18 +8034,9 @@ export class SessionService {
    * `[loom:from-platform]` so the receiver knows the source is the platform operator, not its own
    * manager. See {@link deliverSessionMessage} for the shared delivery/routing/boarding mechanics.
    *
-   * DELIVER-ONCE (card c17291c3): two distinct manifestations of the same root gap — no delivered-once
-   * guard on this route — showed up in the wild: (a) a retried/duplicated call for the SAME directive
-   * landing as two full duplicate turns, and (b) the directive text itself already carrying a
-   * `[loom:from-platform]` line (e.g. copied from a prior framed message) so this method's own wrap
-   * doubled it. Both are closed here, BEFORE the shared `deliverSessionMessage` ever sees the text:
-   *  1. `stripLeadingPlatformTag` normalizes away any leading `[loom:from-platform]` line(s) already in
-   *     `text`, so the frame this method applies is always the ONLY one, however the caller wrote it.
-   *  2. The normalized (recipient, text) pair is hashed into a short-TTL dedupe key
-   *     ({@link platformMessageDedupe}); a resend of the SAME directive within the window returns the
-   *     ORIGINAL delivery result (marked `duplicate:true`) with NO new enqueue — deliver-once. A
-   *     genuinely different directive (different text, or a different recipient) always gets a fresh key
-   *     and delivers normally.
+   * @decision c17291c3 — normalize away any leading `[loom:from-platform]` tag before re-framing, and
+   *  dedupe a resend of the SAME (recipient, text) within a short TTL to the ORIGINAL delivery result
+   *  (`duplicate:true`, no new enqueue) — closes both a retried-call double-turn and a doubled frame tag.
    */
   messageSessionAsPlatform(
     sessionId: string, text: string, senderSessionId?: string,
