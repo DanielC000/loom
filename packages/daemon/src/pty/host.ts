@@ -7818,39 +7818,23 @@ export class PtyHost {
     const head = live.pending[startIdx]!;
     let drained: QueuedMessage[];
     if (!this.coalesceAgentMessages && head.kind === "agent") {
-      // SAME-SENDER coalescing (card eac3464d DoD-1/DoD-2/DoD-3, owner-authorized 2026-08-28). This
-      // DELIBERATELY TRADES the WITHIN-sender one-per-turn guarantee the 2026-07-03 classification
-      // established, in favor of the owner's 2026-08-28 ask 3 ("concatenated and sent together as one
-      // prompt ... so it's clear to the user what is happening"). The CROSS-sender guarantee that
-      // 2026-07-03 rule actually exists to protect — two DIFFERENT senders' directives never mashed
-      // together — is UNCHANGED below: the run breaks on any route, sender, or kind mismatch exactly
-      // like the warning-kind branch, and DRAIN_SEPARATOR (via joinSubmittedText) keeps same-sender
-      // items legible as distinct entries within the one turn.
+      // @decision eac3464d — same-sender coalescing deliberately drops the WITHIN-sender one-per-turn
+      // guarantee for a same-sender run; the CROSS-sender guarantee it protects stays intact below.
       //
-      // EXCLUDED from this run (both as an extension candidate, via the loop guard, and as a head that
-      // can extend at all, via the `head.giveUpGen === undefined` gate below): any entry carrying
-      // `giveUpGen` — a give-up/re-mint redelivery (framed `[loom:possible-duplicate root:...]`). Card
-      // eac3464d's own DoD-0 measured these arriving 10-40s AFTER the original attempt already drained
-      // or parked — nothing is ever actually adjacent to coalesce them with — while stacking a bigger
-      // write onto exactly the unconfirmed-write path that produced them would only raise exposure on
-      // that separate, already-carded defect (card 8af2b9bd). A giveUpGen-tagged head therefore drains
-      // alone, byte-identical to pre-eac3464d behavior.
+      // @decision 8af2b9bd — a giveUpGen-tagged entry never joins this run as head or extension; it
+      // always drains alone rather than stacking a bigger write onto an already-unconfirmed path.
       //
-      // BOUNDED by count AND bytes (DoD-4's "LIVE RISK" — coalescing makes writes bigger on a path with
-      // a live, unresolved confirmation-loss defect): see AGENT_COALESCE_MAX_COUNT/_MAX_BYTES's own doc.
-      // Per-msgId accounting is unaffected — `submit()`'s `origin` array and `requeueGiveUpOrigin` already
-      // iterate a multi-member `drained` array member-by-member (this mechanism was already exercised by
-      // the warning-kind route-keyed branch below; agent-kind now reuses it, not a new one), and every
-      // drained entry's own `onDeliver` still fires independently after submit (see the loop after this
-      // if/else) — a partial confirmation failure re-queues and re-tags EACH constituent message on its
-      // own `giveUpRequeues`/`giveUpGen`, never collapsing N outcomes into one.
-      // A NULL/undefined `senderId` (a real, pre-existing shape: e.g. the restart-replay seam and the
-      // kickoff give-up remint both enqueue agent-kind text with senderId deliberately omitted) never
-      // matches ANOTHER null-sender entry here — identity can't be established from an absent id, so
+      // Card eac3464d: bounded by count AND bytes (see AGENT_COALESCE_MAX_COUNT/_MAX_BYTES's own doc).
+      // Per-msgId accounting is unaffected — `origin`/`requeueGiveUpOrigin` iterate the drained array
+      // member-by-member (the SAME mechanism the route-keyed branch below already exercises, not a new
+      // one), and each drained entry's own `onDeliver` fires independently — a partial confirmation
+      // failure re-queues/re-tags each message on its own, never collapsing N outcomes into one.
+      //
+      // A NULL/undefined `senderId` (restart-replay, kickoff give-up remint — a real, pre-existing shape)
+      // never matches ANOTHER null-sender entry — identity can't be established from an absent id, so
       // "both omitted a sender" must NOT be read as "same sender". Without this, two UNRELATED messages
-      // that merely both happen to skip senderId (e.g. two different original senders' entries replayed
-      // through the restart seam, which drops the original senderId) could wrongly coalesce/reorder
-      // together. Only a message with a GENUINE (non-null) senderId ever participates in this branch.
+      // from different original senders, replayed through the restart seam (which drops the original
+      // senderId), could wrongly coalesce/reorder together.
       const key = routeKeyOf(head.route);
       const senderKey = head.senderId ?? null;
       // Card 66b78175: `submit()` below reads `drained[0]!.proactive` HEAD-ONLY (like route/senderId,
