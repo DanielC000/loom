@@ -44,13 +44,32 @@
 // 16MB / ~200KB-per-run ≈ 80 runs total (mixed kinds) before falling out of the read window — of which
 // exactly 1 row per run is ever a `run-summary` row, so at most ~80 `run-summary` rows were ever visible to
 // that reader, split across however many distinct `poolSize` values existed. Under this module's policy, a
-// STEADY-STATE file compacts to roughly `keepFullRuns` full-detail runs (~keepFullRuns * 200KB) PLUS up to
-// `maxCompactedSummaries` old `run-summary`-only rows (~500 bytes each) — with the defaults below that's
-// ~4MB of full detail plus up to ~10MB of compacted history, comfortably inside the SAME 16MB tail window,
-// meaning up to ~20,000 `run-summary` rows (not ~80) become visible to `computeGateTimingBand` once the file
-// has accumulated that much history — several orders of magnitude past `MIN_BAND_N=8` for any `poolSize`
-// stratum that has run even a handful of times, closing the exact sample-starvation (`nExact:3`) the card's
-// kickoff measured.
+// STEADY-STATE file compacts to roughly `keepFullRuns` full-detail runs PLUS up to `maxCompactedSummaries`
+// old `run-summary`-only rows — and BOTH populations sit in the SAME file, in append (write) order, so the
+// most-recent `keepFullRuns` runs' full detail lands at the very TAIL of the file: `readTailRunSummaryRows`
+// in `gate-timing-band.ts` reads the literal last `capBytes` bytes (`start = size - capBytes`, reading from
+// that offset to EOF), i.e. the newest-written bytes. That means the full-detail rows are NOT "on top of"
+// the 16MB window — they eat directly INTO it, leaving only (16MB − full-detail bytes) of that same window
+// for the compacted `run-summary`-only rows that precede them in the file.
+//
+// MEASURED on the live `~/.loom` corpus, 2026-09-10 (n=1509 run-summary rows total): the 1501 rows written
+// before card ec2d154b's `hostLoadAggregates` field average ~675 B/row; the 8 rows that now carry it —
+// small sample, but the figure that governs going forward since every new row carries the field — average
+// ~1002 B/row. The `~200KB/run` full-detail estimate (`DEFAULT_KEEP_FULL_RUNS`'s own doc, below) is an
+// UNMEASURED blended average over a strongly bimodal population — MEASURED (same corpus, same date):
+// full-suite runs are ~459-473KB each (mean ~467KB, n=5 of the last 20 runs), `--only=`-targeted runs are
+// ~1-20KB each (n=15 of that same window) — so the real full-detail share for `keepFullRuns=20` kept runs
+// depends on the live run mix, not a fixed number:
+//   - worst case (all 20 kept runs are full-suite): ~20 * 467KB ≈ 9.3MB full-detail share, leaving
+//     (16MB − 9.3MB) / ~1002 B/row ≈ ~7,400 compacted `run-summary` rows visible in the tail window.
+//   - best case (all 20 kept runs are targeted): full-detail share stays well under 1MB, leaving
+//     ~16,350 compacted rows visible — close to the unadjusted 16MB / ~1002 B figure.
+// So "up to ~20,000" `run-summary` rows visible is not achievable even in the best case at today's
+// `hostLoadAggregates` row size — the true figure is somewhere in the ~7,400-16,350 range depending on the
+// run mix, always well past `MIN_BAND_N=8` for any `poolSize` stratum that has run even a handful of times
+// (closing the exact sample-starvation `nExact:3` the card's kickoff measured), but never the full ceiling.
+// Whether to lower `maxCompactedSummaries` to restore closer-to-full-ceiling coverage is a retention-policy
+// call for a separate card, not this one.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -63,17 +82,20 @@ import path from "node:path";
 export const DEFAULT_COMPACT_TRIGGER_BYTES = 8 * 1024 * 1024;
 
 /** How many of the most-recent runs (by write order) keep their full `file`/`host-sample`/`run-start`
- *  detail, untouched. At ~200KB/run (current measured rate — see this file's header comment) this is
- *  ~4MB of full detail, leaving the rest of the 16MB reader window for compacted history. */
+ *  detail, untouched. `~200KB/run` is an UNMEASURED blended average, not a real rate — see the header
+ *  comment above for the MEASURED bimodal split (full-suite ~467KB vs targeted ~1-20KB) and why the
+ *  actual full-detail share left for compacted history in the 16MB reader window depends on the live
+ *  run mix, not a fixed ~4MB. */
 export const DEFAULT_KEEP_FULL_RUNS = 20;
 
 /** Hard ceiling on how many OLD (already-compacted, `run-summary`-only) rows survive — the oldest are
  *  dropped first once this is exceeded. This is what makes growth genuinely BOUNDED (DoD-1), not merely
  *  slow: without it, `run-summary` rows alone would still accumulate forever, just ~650x slower than the
- *  pre-compaction rate. At ~500 bytes/row and even 10 gate runs/day (this project's CLAUDE.md notes ~10/day
- *  as the estimate the original card scaled its own numbers from), 20,000 rows is >5 years of history
- *  before this ceiling ever drops anything — generous enough to never realistically bind, but a real,
- *  provable bound either way. */
+ *  pre-compaction rate. At ~1002 bytes/row (measured going-forward rate — see the header comment above)
+ *  and even 10 gate runs/day (this project's CLAUDE.md notes ~10/day as the estimate the original card
+ *  scaled its own numbers from), 20,000 rows is still >5 years of history before this ceiling ever drops
+ *  anything (the row-count math is independent of per-row byte size) — generous enough to never
+ *  realistically bind, but a real, provable bound either way. */
 export const DEFAULT_MAX_COMPACTED_SUMMARIES = 20000;
 
 /** Resolves the run-grouping key for a row: `runUid` when present (every row since card 05056168), else a
