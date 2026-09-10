@@ -51,7 +51,8 @@ const OUTPUT_TAIL_BYTES = 4096;
  *  returns the highest-priority tier with any match. Retry eligibility is DELIBERATELY DECOUPLED from this
  *  priority: it reads {@link createFailingTestTracker.failTierResult}/`.failTierMatchCount` instead, never
  *  `result()`'s tier.
- *  @decision 0e5b2045 — see docs/decisions/0e5b2045-uncaught-tier-ranks-above-fail-not-ok-and-retry-is-decoupled.md */
+ *  @decision 0e5b2045 — retry eligibility must read failTierResult()/failTierMatchCount(), never result();
+ *  diagnostic tier priority (UNCAUGHT first) must never drive it. */
 /** The `FAIL`/`not ok` tier of {@link FAILING_TEST_PATTERNS}, named separately so `scanLine` (below) can
  *  identify a match against THIS specific tier by reference (`===`), independent of its array position. */
 const FAIL_NOT_OK_TIER_RE = /^\s*(FAIL|✗|✖|not ok)\b.*/i;
@@ -65,7 +66,8 @@ const FAILING_TEST_PATTERNS: RegExp[] = [
 /** Discards a bare `FAIL <token>` line (nothing else on it) whose token isn't a real file under
  *  `packages/daemon/test/` — catches a mocked gate verdict's `outputTail` leaking into the real stream via
  *  `test-daemon.mjs`'s own `FAILURES:` epilogue re-echo. A genuine per-file marker never has this bare shape.
- *  @decision 11737292 — see docs/decisions/11737292-unverifiable-bare-fail-token-guards-a-mocked-verdict-leak.md */
+ *  @decision 11737292 — discard a bare `FAIL <token>` line (nothing else on it) whose token isn't a real file
+ *  under packages/daemon/test/; never extend this beyond that exact bare-token shape. */
 function isUnverifiableBareFailToken(line: string, cwd: string): boolean {
   const m = /^\s*(?:FAIL|✗|✖|not ok)\s+(\S+)\s*$/i.exec(line);
   if (!m) return false; // has prose/extra content beyond one token — not this shape, don't second-guess it
@@ -85,7 +87,9 @@ function isUnverifiableBareFailToken(line: string, cwd: string): boolean {
  * per-assertion `FAIL` line (indented when re-echoed by the `FAILURES:` epilogue, or printed bare by a
  * reduced-path static guard) satisfies at most one, never both, so it can never be mistaken for a real
  * per-file wrapper line.
- * @decision 6c84b87b — see docs/decisions/6c84b87b-harness-fail-wrapper-anchors-on-no-indent-and-exit-suffix.md
+ * @decision 6c84b87b — never drop either anchor condition (no leading whitespace, trailing `(exit ` suffix);
+ * either alone lets a FAILURES: epilogue echo or a bare guard's own check() failure masquerade as a real
+ * per-file wrapper line.
  */
 export const HARNESS_FAIL_WRAPPER_RE = /^FAIL\s+\S+\s+\(exit /;
 
@@ -94,7 +98,8 @@ export const HARNESS_FAIL_WRAPPER_RE = /^FAIL\s+\S+\s+\(exit /;
  * test file(s) never actually executed) — a signal {@link identifyRetriableTestFiles} refuses the retry
  * on outright, regardless of `failTierMatchCount`, because a co-occurring genuine failure's own wrapper
  * line survives this early exit untouched and would otherwise mask it.
- * @decision 2a79a74c — see docs/decisions/2a79a74c-notexecuted-refuses-the-single-file-retry-outright.md
+ * @decision 2a79a74c — a match here is a hard refusal for the retry, regardless of failTierMatchCount; a clean
+ * count says nothing about files that never ran at all.
  */
 export const HARNESS_NOT_EXECUTED_RE = /^❌ test-daemon\.mjs: \d+ discovered hermetic test file\(s\) were NOT actually executed/;
 
@@ -102,7 +107,8 @@ export const HARNESS_NOT_EXECUTED_RE = /^❌ test-daemon\.mjs: \d+ discovered he
  *  optionally indented — must never be mistaken for a failure, whatever words its own LABEL contains.
  *  Checked BEFORE any `FAILING_TEST_PATTERNS` tier (all unanchored, so a passing label's prose can
  *  otherwise match one) and before {@link HARNESS_FAIL_WRAPPER_RE}.
- *  @decision 2f0b2e57 — see docs/decisions/2f0b2e57-a-recorded-pass-line-is-never-a-failure.md */
+ *  @decision 2f0b2e57 — check this before any FAILING_TEST_PATTERNS tier, unconditionally; a passing
+ *  assertion's own LABEL can contain a failure keyword and must still lose to PASS. */
 const PASS_LINE_RE = /^\s*PASS\b/i;
 
 /** Cap (bytes/UTF-16 code units) on `createFailingTestTracker`'s `carry` — the not-yet-newline-terminated
@@ -120,8 +126,10 @@ const FAILING_TEST_CARRY_CAP_BYTES = 8192;
  * {@link FAILING_TEST_CARRY_CAP_BYTES} regardless — see the decision record for why both are load-bearing.
  * `cwd` is optional and purely a cross-check for {@link isUnverifiableBareFailToken}; omitting it is a
  * no-op, not a behavior change.
- * @decision 55cba5c5 — see docs/decisions/55cba5c5-failing-test-tracker-scans-the-full-stream-carry-is-bounded.md
- * @decision 2f0b2e57 — see docs/decisions/2f0b2e57-a-recorded-pass-line-is-never-a-failure.md (known limitation, specimen 2)
+ * @decision 55cba5c5 — never revert the line-split regex to /\r?\n/ (misses bare-\r progress-bar output, reopens
+ * unbounded carry growth); never remove the FAILING_TEST_CARRY_CAP_BYTES hard cap.
+ * @decision 2f0b2e57 — result()/failingTest names a matching LINE only, never an attributed FAILING FILE under
+ * multi-lane concurrency; it can belong to the wrong lane (known limitation, specimen 2).
  */
 export function createFailingTestTracker(cwd?: string): {
   feed(chunk: Buffer): void;
@@ -399,7 +407,8 @@ export interface GateStepResult {
    *  guess — see {@link extractFailingTest}'s own doc). STRUCTURALLY ONE LINE (or `undefined` entirely for
    *  an unmatched multi-line shape) — `outputTail`'s front-anchored `FAILURES:`-block capture is the
    *  recovery path, not this field, and it has two known gaps — see the decision record.
-   *  @decision 87cdb15f — see docs/decisions/87cdb15f-failingtest-is-one-line-outputtail-is-the-recovery-with-two-gaps.md */
+   *  @decision 87cdb15f — `failingTest === undefined` is not "no diagnostic" — read `outputTail` first; its
+   *  FAILURES: recovery can still starve under a shared budget or have no fallback on a step timeout. */
   failingTest?: string;
   /** How many lines matched the SAME tier `failingTest` was drawn from (see
    *  {@link createFailingTestTracker.matchCount}) — `undefined` iff `failingTest` is `undefined` (nothing
@@ -548,7 +557,9 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
    *  decision record for the regression this guards against. Priority once it applies: (1) the
    *  front-anchored FAILURES: block; (2) the single best failing-test line; (3) an explicit honest-miss
    *  string — never a silent positional chunk. PASSING path is untouched (`tail()`).
-   *  @decision 6ffee3e2 — see docs/decisions/6ffee3e2-failure-tail-is-content-selected-not-positional.md (Decision B) */
+   *  @decision 6ffee3e2 — content-selection only fires when totalBytesSeen > OUTPUT_TAIL_BYTES (tail() is
+   *  genuinely lossy); unconditional selection loses a short command's ANSI-wrapped FAIL line to a
+   *  lower-priority tier. */
   const resolveOutputTail = (): string =>
     totalBytesSeen <= OUTPUT_TAIL_BYTES
       ? tail()
@@ -703,7 +714,9 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
  * posix: spawned `detached:true` above so `child.pid` is the process GROUP id — `process.kill(-pid,
  * "SIGKILL")` signals the whole group; a plain `process.kill(pid, ...)` would leak on posix too.
  * Resolves once the kill has been ISSUED; best-effort — an already-exited pid is a silent no-op.
- * @decision 3564fd1e — see docs/decisions/3564fd1e-kill-gate-process-tree-not-just-the-shell.md
+ * @decision 3564fd1e — never kill only the shell (descendants survive and accumulate, eventually saturating the
+ * host); on posix this must be `process.kill(-pid, "SIGKILL")` against the process GROUP id, never a plain pid
+ * signal.
  */
 function killGateProcessTree(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => {
@@ -821,7 +834,9 @@ export function formatGateStepsDiagnostic(steps: GateStepDuration[]): string | u
  * attempt-with-extension allowance; a `fraction` over `1.0` means a retry of this step would have no
  * reprieve even though this run passed. Never compare these numbers against each other or an "expected"
  * range for any other purpose — see {@link formatGateStepsDiagnostic}'s own doc.
- * @decision 3407caad — see docs/decisions/3407caad-gate-proximity-threshold-anchored-on-looms-own-worst-step-reading.md
+ * @decision 3407caad — fraction is durationMs/gateCommandTimeoutMs (the smaller hard retry ceiling, never the
+ * ~2x first-attempt-with-extension allowance); never anchor 0.85 on a peer project's own reading or unify it
+ * with Gates.tsx's LONG_RUN_WARN_FRACTION.
  */
 export const GATE_PROXIMITY_THRESHOLD = 0.85;
 
@@ -941,7 +956,8 @@ export async function runGateSequential(
  * not yet run, in order. Pure step-string arithmetic — never inspects *why* a step failed or whether a
  * retry is eligible; a caller calls this only after {@link classifyGateFailure}/
  * {@link identifyRetriableTestFiles} have already said "yes, proceed."
- * @decision 7ad12202 — see docs/decisions/7ad12202-dispatch-on-gate-verdict-not-retrypassed.md (Decision B)
+ * @decision 7ad12202 — never report a gate passed:true after a rescued single-file retry without first checking
+ * this — steps after the original failure may never have run at all.
  */
 export function remainingGateSteps(effectiveGate: string, stepsAlreadyRun: number): string[] {
   return splitGateSteps(effectiveGate).slice(stepsAlreadyRun);
@@ -957,7 +973,8 @@ export function remainingGateSteps(effectiveGate: string, stepsAlreadyRun: numbe
  * tail); on `resumed.passed === false` (or cancelled), `resumed`'s own fields win outright. Never invents
  * a verdict, and must never be looped — a caller resumes once. See the decision record for the full
  * two-branch reasoning and the Code Review finding that motivated it.
- * @decision 7ad12202 — see docs/decisions/7ad12202-dispatch-on-gate-verdict-not-retrypassed.md (Decision B)
+ * @decision 7ad12202 — on resumed.passed===true keep original's diagnostic fields (or isTimeoutKillEntry stops
+ * matching attempt 1's tail); never loop this — a caller resumes once.
  */
 export function mergeResumedGateResult(original: GateSequentialResult, resumed: GateSequentialResult): GateSequentialResult {
   const steps = [...original.steps, ...resumed.steps];
@@ -1004,7 +1021,8 @@ export type GateFailureClass = "genuine" | "kill" | "timeout";
  *    retry call site's guardrail). Retry-eligible, but deliberately so.
  *  - **"genuine"** — a clean non-zero exit (or a spawn error) with no signal and no timeout: a real
  *    test/build failure. NEVER retried — retrying would waste cycles and could mask a flaky-passing test.
- * @decision bcba83a1 — see docs/decisions/bcba83a1-classify-gate-failure-so-managers-stop-routing-around-the-gate.md
+ * @decision bcba83a1 — never fold "kill"/"timeout" back into a flat failure (that taught managers to bypass the
+ * gate with --no-verify); never retry a "genuine" classification.
  */
 export function classifyGateFailure(
   result: Pick<GateSequentialResult, "failedSignal" | "failedTimedOut">,
@@ -1098,9 +1116,12 @@ export type RetryIdentification =
  * of the whole suite before declaring a rejection. `failTierTestCount` stays REQUIRED (not optional) for
  * the fail-closed reason detailed in the decision record. Refuses outright, regardless of count, whenever
  * `harnessNotExecutedDetected` is true.
- * @decision 67030bb9 — see docs/decisions/67030bb9-retrywarning-three-cases-corrected-present-on-fail-too.md (Decision B)
- * @decision 0e5b2045 — see docs/decisions/0e5b2045-uncaught-tier-ranks-above-fail-not-ok-and-retry-is-decoupled.md (failTierAll divergence)
- * @decision 2a79a74c — see docs/decisions/2a79a74c-notexecuted-refuses-the-single-file-retry-outright.md
+ * @decision 67030bb9 — one name failing the filesystem check declines the WHOLE set, never a partial candidate;
+ * never widen past the bare `FAIL <name>` convention or add a second parser.
+ * @decision 0e5b2045 — must read failTierAll/failTierTestCount here, never failingTest/failingTestCount — a
+ * higher-priority diagnostic tier (e.g. UNCAUGHT) would otherwise silently suppress a real retry.
+ * @decision 2a79a74c — never skip the harnessNotExecutedDetected check because the fail-tier count looks clean;
+ * refuse the retry outright when it's true, regardless of count.
  */
 export function identifyRetriableTestFiles(
   failTierAll: string[] | undefined,
@@ -1168,7 +1189,9 @@ function isTimeoutKillEntry(retriedFile: string, outputTail: string | undefined)
  * `batchBranchCount` are both OPTIONAL/additive; see {@link formatRetryAlsoFailedWarning} for the sibling
  * FAILED-retry case — this signature is deliberately NOT a `passed` boolean on that function instead (a
  * defaultable/forgettable boolean previously produced a false claim with no compiler catch).
- * @decision 6dcb9cd3 — see docs/decisions/6dcb9cd3-format-weaker-pass-warning-is-the-one-authored-place.md
+ * @decision 6dcb9cd3 — never inline a second copy of this wording elsewhere (both the nudge and gate_status
+ * must call this one formatter); never add a `passed` boolean here — use the sibling
+ * formatRetryAlsoFailedWarning instead.
  */
 export function formatWeakerPassWarning(retriedFile: string, outputTail?: string, batchBranchCount?: number): string {
   const names = retriedFile.split(",");
@@ -1193,7 +1216,9 @@ export function formatWeakerPassWarning(retriedFile: string, outputTail?: string
  * failure only rules out pollution from the REST of the suite, never pollution AMONG the retried files
  * themselves (they run concurrently by default). The `allTimeoutKills`/{@link isTimeoutKillEntry} caveat
  * applies here exactly as on the pass side.
- * @decision 9bdc8ea5 — see docs/decisions/9bdc8ea5-format-retry-also-failed-warning-is-a-separate-function.md
+ * @decision 9bdc8ea5 — never fold this into formatWeakerPassWarning via a `passed` boolean; for N>1 never claim
+ * "not an order-dependent bug" unqualified — it only rules out pollution from the rest of the suite, not among
+ * the retried files themselves.
  */
 export function formatRetryAlsoFailedWarning(retriedFile: string, outputTail?: string, batchBranchCount?: number): string {
   const names = retriedFile.split(",");
@@ -1219,7 +1244,8 @@ export function formatRetryAlsoFailedWarning(retriedFile: string, outputTail?: s
  * because {@link mergeResumedGateResult}'s own resume then failed for real. A caller must dispatch on the
  * GATE's real outcome first, THEN on `retryPassed` only to pick between the sibling formatter and this
  * one. Deliberately takes NO `outputTail` — see the decision record for why.
- * @decision 7ad12202 — see docs/decisions/7ad12202-dispatch-on-gate-verdict-not-retrypassed.md (Decision B)
+ * @decision 7ad12202 — deliberately takes no outputTail: isTimeoutKillEntry classifies retriedFile's OWN
+ * failure, not the actionable question once a later step is what actually rejected the gate.
  */
 export function formatRetryRescuedButGateRejectedWarning(retriedFile: string, batchBranchCount?: number): string {
   const names = retriedFile.split(",");
@@ -1262,7 +1288,9 @@ export interface ReducedGateWarningInput {
  * file must be NAMED in `notHermeticExcluded`, not just counted (card 17cd1f30); a skipped-as-inert path
  * must be NAMED in `inertPathsSkipped` too (card 8ee4f11e) — a bare count of either leaves a reader unable
  * to tell WHICH file went unaccounted for.
- * @decision d422e279 — see docs/decisions/d422e279-format-reduced-gate-warning-is-the-shared-builder.md
+ * @decision d422e279 — never hand-author a second copy of this text at either call site; never report
+ * notHermeticExcluded/inertPathsSkipped as a bare count — name every excluded/skipped file, or a reader can't
+ * tell which went unrun.
  */
 export function formatReducedGateWarning(
   result: ReducedGateWarningInput, assetReadingTestCount: number, batchLandedCount?: number,
