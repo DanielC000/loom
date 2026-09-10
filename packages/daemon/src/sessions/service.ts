@@ -8578,38 +8578,9 @@ export class SessionService {
   }
 
   /**
-   * Subordinate→lead relay (orchestration `notify_lead`, board card 2db23c4d) — an owner-facing NON-manager
-   * session (role "assistant": the Companion, or any ideation/thought-partner rig sharing that same role)
-   * relaying a message to ITS OWN project's live manager. The Companion's own `session_message`
-   * (companion/capabilities.ts SESSION_STEER) already solved the "owner asks its Companion to control/
-   * message some session" case (an owner-granted act-mode scope + Primitive-A turn-attestation, because
-   * that lever ACTS on the owner's behalf with real authority over another session) — and `messagePeerManager`
-   * above solved the manager↔manager peer case. This is the missing, narrower subordinate→lead lever: an
-   * assistant-role session with NO grant and NO target choice, reaching ONLY its own project's live manager.
-   * Mirrors `messagePeerManager`'s mechanics, same-project instead of cross-project:
-   *   - ASSISTANT-ONLY caller (`requireAssistant`) — defense in depth on top of this being registered ONLY
-   *     on the `role==="assistant"` MCP branch (mcp/orchestration.ts).
-   *   - ALWAYS the caller's own project, server-derived from its session id — there is no target param at
-   *     all (narrower than `peer_message`, which at least validates an owner-declared link before naming a
-   *     cross-project target).
-   *   - Target manager resolved FRESH on every call (`role==="manager" && processState==="live"` within the
-   *     caller's own project) — survives a manager recycle for free: recycle retires the predecessor's row
-   *     and inserts the successor as the project's new live row (see recycleAsManager's re-parent comments),
-   *     so this query always finds whoever is live now, with no lineage-chain walk needed.
-   *   - RATE-LIMITED per calling assistant session (`checkNotifyLeadRateLimit`, its OWN dedicated bucket in
-   *     peer-message-guard.ts — never shared with peer_message's bucket): role "assistant" is the most
-   *     injection-exposed surface in Loom (chat-facing), so a compromised/confused session can't turn this
-   *     into a spam vector against its own manager.
-   *   - FRAMED as a subordinate CLAIM, never as attested owner/human words (owner ruling, card 2db23c4d):
-   *     `[loom:from-assistant · <name> · sessionId:...]`. Even when the assistant is relaying something the
-   *     owner told it, the manager receives it as "the assistant relayed: X", to weigh/verify — never as an
-   *     owner-authored turn. This is WHY no Primitive-A gate is needed here: unlike the Companion's
-   *     operator-mode session_message/session_steer (which ACT with real authority over another session,
-   *     so they require verified owner text), this lever only ever produces a non-authoritative relay the
-   *     recipient manager must independently judge — mirrors `workerReport`, which has no such gate either.
-   * When the caller's own project has NO live manager, mirrors `messagePeerManager`'s own-board fallback:
-   * boards a durable card on the SAME project's board (never silently dropped or errored for a legitimately
-   * offline/recycling manager). Audited via a single `assistant_relay_message` event.
+   * @decision 2db23c4d — assistant-only relay to the caller's OWN live manager: no target param,
+   * framed as an unattested subordinate claim (never owner-authored), rate-limited per assistant
+   * session, and boards a durable card when no manager is live.
    */
   notifyLead(
     assistantSessionId: string,
@@ -8625,14 +8596,12 @@ export class SessionService {
 
     const agent = caller.agentId ? this.db.getAgent(caller.agentId) : undefined;
     const senderName = agent?.name ?? "assistant";
-    // Framed as a subordinate CLAIM (owner ruling, card 2db23c4d) — never as attested owner/human words,
-    // even when the assistant is relaying something the owner told it. The recipient manager must weigh/
-    // verify this like a worker_report, not act on it as an owner-authored instruction.
+    // @decision 2db23c4d — keep this framing prefix: without it a compromised/injected assistant
+    // session could hand the manager fabricated text as if it were owner-authored.
     const framed = `[loom:from-assistant · ${senderName} · sessionId:${assistantSessionId}]\n${text}`;
 
-    // ASSISTANT-role's own project's live manager ONLY — a live worker/other role there is never matched
-    // (mirrors messagePeerManager's manager-only match), resolved fresh so a recycled predecessor is never
-    // stale-targeted.
+    // @decision 2db23c4d — resolve the target manager FRESH on every call; caching it would target a
+    // recycled predecessor instead of the project's current live manager.
     const targetManager = this.db.listAllSessions().find(
       (s) => s.projectId === projectId && s.role === "manager" && s.processState === "live",
     );
@@ -8643,9 +8612,8 @@ export class SessionService {
       const r = this.enqueueDurableMessage(targetManager.id, framed, { sender: assistantSessionId, taskId: targetManager.taskId ?? null });
       result = { deliveryStatus: this.deliveryStatusFor(r), position: r.position, targetSessionId: targetManager.id };
     } else {
-      // No live manager in the caller's own project: board a durable card on that SAME project's board
-      // (mirrors messagePeerManager's "no live target" fallback) — the message survives until a manager
-      // next attaches, instead of being silently dropped or erroring for a legitimately offline/recycling one.
+      // @decision 2db23c4d — board a durable card here rather than drop/error: a legitimately
+      // offline/recycling manager must still receive the message.
       const body = [
         "**Message relayed from this project's assistant session** (boarded because no manager session was live).",
         "",
@@ -8682,28 +8650,14 @@ export class SessionService {
   }
 
   /**
-   * Manager→Platform escalation READ (orchestration `escalation_status`) — closes the gap where a manager
-   * has no way to tell whether a `platform_escalate` it filed was ever picked up, so it re-escalates work
-   * the Lead already claimed. READ-ONLY, origin-project-scoped: the candidate set is derived SERVER-SIDE
-   * from `platform_escalate` events whose `detail.originProjectId` equals the CALLER'S OWN project (never
-   * a client-supplied projectId) — scoped by origin project, not by managerSessionId, so a recycled
-   * successor manager in the same project still sees escalations its predecessor filed. A `taskId` outside
-   * that set — whether it belongs to another project's escalation or is simply unknown — returns
-   * `{ found: false }` uniformly; it never confirms or denies that a given Platform task exists, so a
-   * manager can't use this to probe another project's escalations.
-   *
-   * `taskId` accepts EITHER a full id or an unambiguous id-PREFIX (reuses the shared `resolveIdPrefix`
-   * helper, card e63874e9) — the SAME paste-able 8-char short id every other `*_get`-shaped read already
-   * accepts. Resolution is scoped STRICTLY to `events` (already origin-project-scoped above) — never
-   * `db.listTasks()`/`getTask`, which would leak whether an out-of-scope id exists. An ambiguous prefix
-   * names the candidate ids (still project-scoped); a true miss — unknown OR simply out-of-scope — still
-   * returns `{ found: false }` uniformly, unchanged.
-   *
-   * LIST MODE (no `taskId`) is bounded to OPEN escalations by default — `pending`/`in_progress` only —
-   * so a manager checking in isn't handed every escalation ever filed, most of it days-stale `resolved`/
-   * `closed` history it didn't ask for (card 107b595b: a manager paid ~44KB of stale history twice when
-   * it only needed the open ones). Pass `includeResolved:true` to opt back into the full unfiltered
-   * history. The single-`taskId` lookup above is unaffected either way — it's already cheap.
+   * Manager→Platform escalation READ (orchestration `escalation_status`), origin-project-scoped
+   * server-side (never a client-supplied projectId); an out-of-scope or unknown taskId returns
+   * `{found:false}` uniformly, so this can never confirm or deny another project's escalations.
+   * `taskId` accepts a full id or an unambiguous prefix (shared `resolveIdPrefix` convention, card
+   * e63874e9), resolved strictly against this project's own escalation events.
+   * @decision 107b595b — list mode (no `taskId`) defaults to OPEN escalations only; pass
+   * `includeResolved:true` for full history. A manager once paid ~44KB of stale resolved/closed
+   * history twice when it only needed the open ones.
    */
   async escalationStatus(
     managerSessionId: string,
@@ -8719,11 +8673,9 @@ export class SessionService {
       // shared OrchestrationEvent type — filter defensively so resolveIdPrefix's candidates are always
       // real strings rather than coercing a null/undefined into a matchable "" prefix.
       const withId = events.filter((e): e is typeof e & { taskId: string } => typeof e.taskId === "string");
-      // card 9eaae37b: dedupe to ONE candidate per DISTINCT taskId before resolving — a re-escalated
-      // card contributes one `platform_escalate` event per escalation, so `withId` can hold several
-      // entries sharing the same taskId. resolveIdPrefix's contract is one candidate per entity; feeding
-      // it the raw event list made an UNAMBIGUOUS prefix "ambiguous" against its own repeated id. Keep
-      // the LATEST event per taskId (highest `ts`) — the freshest filed title/state for that card.
+      // @decision 9eaae37b — dedupe to ONE candidate per DISTINCT taskId before resolving, keeping
+      // the LATEST event per taskId; a re-escalated card's repeated taskId otherwise makes an
+      // unambiguous prefix resolve as "ambiguous".
       const latestByTaskId = new Map<string, (typeof withId)[number]>();
       for (const e of withId) {
         const existing = latestByTaskId.get(e.taskId);
@@ -8737,10 +8689,8 @@ export class SessionService {
       return { found: true, escalation: await this.describeEscalation(r.record.event) };
     }
     const all = await Promise.all(events.map((e) => this.describeEscalation(e)));
-    // "Open" = not yet CONFIRMED fixed and not gone — pending/in_progress/triaged all still warrant a
-    // manager's attention (card ba04d607: `triaged` is deliberately NOT lumped in with `resolved` here,
-    // since it makes no stronger claim than "the Lead acted" — a manager checking in on an open escalation
-    // still wants to see it by default).
+    // @decision ba04d607 — keep `triaged` out of "resolved" here: it only means the Lead acted, and a
+    // manager checking in on open work still wants to see it by default.
     const scoped = input.includeResolved ? all : all.filter((it) => it.status !== "resolved" && it.status !== "closed");
     return { found: true, escalations: scoped };
   }
@@ -8758,25 +8708,9 @@ export class SessionService {
   }
 
   /**
-   * Column → escalation status, role-resolved against the Platform project's OWN column roles (never a
-   * hardcoded "inbox"/"backlog"/"done" key) — mirrors the landing-lane fallback `platformEscalate` files
-   * new escalations into, so a task still sitting in that exact lane reads back as "pending". Terminal
-   * column reads back "resolved" here — this is the CHEAP, column-only classification `platformEscalate`'s
-   * own internal "is there a still-open escalation under this title" dedupe/reuse gate uses (unchanged
-   * behavior from before card ba04d607).
-   *
-   * ⚠️ DELIBERATE DIVERGENCE FROM {@link deriveEscalationStatus} — read before "fixing" either one.
-   * `deriveEscalationStatus` is the manager-facing `escalation_status` read: it does NOT trust the column
-   * alone for "resolved" (that was the defect ba04d607 fixes), so a LINKED-but-not-yet-merged terminal
-   * escalation reads `triaged` there while THIS function still returns `resolved` for the exact same
-   * column state. That is BY DESIGN, not a bug in either one: this function is an internal reuse
-   * heuristic never reported to a manager, so it doesn't carry the same asserted-vs-derived trust problem
-   * `escalation_status`'s reported `status` does, and column-only is the correct, cheap answer for "should
-   * I reuse this still-open card" here. Keeping this sync + narrow also means the write path
-   * (platformEscalate, and its ~30 synchronous test call sites) never has to go async just to file an
-   * escalation. If you're tempted to make the two agree, don't — see EscalationStatusItem's doc for why
-   * the read path must never assert `resolved` from the column, and this doc for why the write path is
-   * fine doing exactly that.
+   * @decision ba04d607 — DELIBERATE DIVERGENCE from {@link deriveEscalationStatus}: stays column-only
+   * (cheap, sync, keeps `platformEscalate`'s ~30 write-path call sites from going async) even where
+   * that read no longer trusts the column alone for "resolved". Don't make the two agree.
    */
   private columnEscalationStatus(platformProjectId: string, columnKey: string): "resolved" | "pending" | "in_progress" {
     const terminalKey = this.columnKeyForProjectRole(platformProjectId, "terminal");
@@ -8787,14 +8721,9 @@ export class SessionService {
   }
 
   /**
-   * The manager-facing `escalation_status` read's FULL classification (card ba04d607) — below the terminal
-   * column, identical to {@link columnEscalationStatus} (pending/in_progress). ONCE in the terminal column,
-   * `resolved` is no longer asserted from the column alone — it's DERIVED from the linked destination
-   * task's own git-verified merged state (`db.findEscalationTriage` + `getTaskMergedInfo`, the SAME check
-   * `project_task_get`/`tasks_get` expose as `merged`). No link, or a link whose destination isn't proven
-   * merged, reads `triaged`: the Lead finished its OWN triage on the Platform board, nothing more is
-   * claimed — see EscalationStatusItem's doc for why a `triaged` reading must never be misread as
-   * "confirmed still broken".
+   * @decision ba04d607 — once in the terminal column, `resolved` is DERIVED from the destination
+   * task's git-verified merged state, never asserted from the column alone; no link, or an unmerged
+   * link, reads `triaged` — never read as "confirmed still broken".
    */
   private async deriveEscalationStatus(
     platformProjectId: string, columnKey: string, taskId: string,
