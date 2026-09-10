@@ -1,34 +1,14 @@
 /**
  * Loom Companion — the ZERO-REPLY detector (card 48e8d289, split from `dbba993f`'s DoD-4).
  *
- * CAUSE-AGNOSTIC detectability half of the incident that motivated it: a companion session emitted 113
- * turns and called `chat_reply` ZERO times, and the first sign anything was wrong was the owner typing
- * "Hello?" — nothing in the system noticed. Whatever CAUSES a companion to go silent (an MCP tool-list
- * caching gap, a prompt bug, a genuinely-thinking-not-replying stretch that never resolves), this module
- * makes the silence itself VISIBLE instead of relying on a human eventually noticing.
+ * @decision 48e8d289 — cause-agnostic: detects a companion whose turns stop producing `chat_reply` (the
+ * incident: 113 silent turns before the owner noticed by typing "Hello?") without diagnosing WHY.
  *
- * The hook is `pty/host.ts`'s existing `onTurnCompleted` (card 343441bd's completed-turn counter),
- * SCOPED to companion sessions — `checkCompanionReplyHealth` is a no-op for any session with no
- * `companion_config` row, so wiring it unconditionally into `onTurnCompleted` (index.ts) is fully
- * additive: every non-companion session's path stays byte-identical. This deliberately reuses the
- * existing per-tick-watcher FAMILY's conventions (idle-watcher.ts, busy-worker-watcher.ts,
- * companion/heartbeat.ts) — a durable once-per-streak event, dedup state that survives a restart — but is
- * itself a stateless function called from a turn-completion hook, not a `setInterval` watcher: there is
- * no natural "tick" for "did this session's turns stop replying", only "a turn just completed".
+ * @decision 343441bd — consumes `pty/host.ts`'s `onTurnCompleted` (the completed-turn counter);
+ * `checkCompanionReplyHealth` no-ops with no `companion_config` row, so wiring it in is fully additive.
  *
- * DEFAULT-need-not-be-armed: this runs for every companion session with NO configuration (no cadence to
- * set, unlike the heartbeat) — `enabled` on the companion_config row is the only gate, matching "per
- * ENABLED companion session" in the card's DoD.
- *
- * SURFACING (settled by card 8bda9fc6): this module still deliberately PUSHES nothing to the owner (no
- * chat_reply, no attention-push, no notification) — a silent companion structurally cannot report its own
- * silence, so the companion is exactly the wrong channel. It writes (1) a durable
- * `companion_zero_reply_detected` orchestration event and (2) a `console.warn`, both internal/operational.
- * The OWNER-visible half is a PULL: `buildCompanionReplyStatus` below feeds the dedicated runtime read
- * `GET /api/companion/status[/:sessionId]`, which the web cockpit's companion CHAT panel renders as an
- * alert banner — the surface the owner is already looking at while waiting for the reply that never came.
- * It is deliberately NOT folded into `maskCompanionConfig` (the config-masking edge a human edits and PUTs
- * back): config and runtime telemetry have different lifetimes and must not share a shape.
+ * @decision 8bda9fc6 — surfaces via a PULL read (`GET /api/companion/status`) only, never pushed to the
+ * companion itself, which cannot report its own silence.
  */
 import { randomUUID } from "node:crypto";
 import type { CompanionReplyStatus, OrchestrationEvent } from "@loom/shared";
@@ -58,18 +38,11 @@ export interface ReplyWatchDb {
 
 /**
  * One check pass, called once per completed turn for `sessionId` (from `onTurnCompleted`, AFTER
- * `incrementTurnSeq` has already bumped `session.turnSeq` for the just-completed turn). No-op for any
- * session with no companion_config row, or a disabled one — the ONLY gate, matching "per ENABLED
- * companion session".
+ * `incrementTurnSeq` has already bumped `session.turnSeq`). No-op for any session with no
+ * `companion_config` row, or a disabled one — the ONLY gate, matching "per ENABLED companion session".
  *
- * Lazy baseline: a row whose `lastChatReplyTurnSeq` is NULL (a brand-new companion's first-ever
- * completed turn, or a pre-migration legacy row that backfilled to NULL) is treated as "first
- * observation" — seeded to the session's CURRENT turn_seq and returned early, WITHOUT alerting. This is
- * what keeps an upgraded long-lived companion from instantly tripping the detector on its very first
- * post-migration turn (it would otherwise see turnSeq - NULL as a huge, spurious streak).
- *
- * `console.warn` fires alongside the durable event on every genuine (non-deduped) trip — an operational
- * log line, mirroring the daemon's other swallowed-fault console warnings (e.g. alert-webhook.ts).
+ * @decision 48e8d289 — a NULL `lastChatReplyTurnSeq` is a lazy baseline (first observation: seed and
+ * return, no alert) — never read as a huge spurious streak against NULL.
  */
 export function checkCompanionReplyHealth(
   db: ReplyWatchDb,
