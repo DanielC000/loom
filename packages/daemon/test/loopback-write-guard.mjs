@@ -339,7 +339,16 @@ try {
   {
     const serverPath = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..", "dist", "gateway", "server.js");
     const src = fs.readFileSync(serverPath, "utf8");
-    const guardIdx = src.indexOf("Loopback human-only-write guard");
+    // Anchored on CODE, not the block's leading comment: `1235e6b2` (the gateway/server.ts decision-
+    // comment extraction, tranche 3) deleted the literal phrase "Loopback human-only-write guard" this
+    // used to anchor on, silently zeroing guardIdx (-1) and turning every check below into a false green
+    // (`src.slice(-1, ...)` — a 1-char garbage slice — happens to still satisfy a `!/…/.test()` negated
+    // regex check, which is why 2 of 9 stayed green while the other 7 went red). `deps.loopbackSecret !==
+    // undefined` is the `if` guard that gates the WHOLE hook (server.ts, just above `app.addHook`) — real
+    // code the extraction program has no license to touch (it only relocates comments), verified unique
+    // in this file (both source and compiled output) and two lines above `app.addHook`, so the codeSlice
+    // logic below (which searches for `app.addHook` FROM this index onward) still finds it.
+    const guardIdx = src.indexOf("deps.loopbackSecret !== undefined");
     check("(G) the guard block exists in compiled output", guardIdx !== -1);
     // 18000 (was 13000, was 10000, was 7000): wide enough to comfortably reach past the WHOLE hook — doc
     // comment AND code, measured end-to-end at ~14346 chars as of this card's fix — with real headroom,
