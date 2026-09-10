@@ -1,0 +1,18 @@
+# f797affb — `unresolvedCascade` flags a parked directive co-occurring with a mismatch, without guessing which reading is true
+
+## Narrative
+
+Card f797affb — the EXPOSURE half of `5c3db367`'s forensic close: that card spent a two-file, cross-referenced log read (daemon-output.log's give-up trace + the per-session console mirror's actual transcript) to establish that a give-up/re-mint cascade ending PARKED, with a `[prompt-mismatch]` logged alongside, was in that specimen benign — delivered and fully acted on, just never individually CONFIRMED by Loom's own bookkeeping. NOTHING in worker_list/worker_status could have told anyone that without the archaeology. DoD-1's own finding: all three facts it asked to enumerate were ALREADY tracked and ALREADY surfaced, just never combined — (a) "the cascade happened" + (b) "no individual CONFIRMED was ever recorded" is exactly `parkedDirective`/`directive.state === "parked"` (a PARK is reached only once the give-up/re-mint chain exhausts its budget at every level with no confirming hook ever arriving — see `resolveDirectiveOutcome`'s own doc); (c) "a `[prompt-mismatch]` was logged" is exactly `lastMismatch` (every mismatch class it covers is logged under a `[prompt-mismatch*]` tag in pty/host.ts). This field is pure WIRING: it combines two ALREADY-COMPUTED signals, stores nothing new, detects nothing new.
+
+⛔ DoD-2's own constraint: this must read as "COULD NOT BE DETERMINED", never as a guessed verdict — `5c3db367` proved BOTH readings ("silently lost" and "succeeded anyway") are live possibilities for the identical observable signature, and a surface that picks one is strictly worse than one that admits it doesn't know. Hence no "likely lost"/"likely fine" field here, only the flagged co-occurrence plus the pointer that actually settles it (DoD-3).
+
+CORRELATION WINDOW: `parkedDirective` is STICKY (never cleared until a newer directive supersedes it) and `lastMismatch` is also STICKY (overwritten, not cleared) — so without SOME temporal bound, a long-lived worker's ancient, unrelated parked directive would pair with an entirely unrelated later mismatch and vice versa, flagging a co-occurrence that never actually occurred together. The `5c3db367` specimen's own trace shows the mismatch detected in the SAME logged instant as the terminal give-up that produced the park (both lines under the same `1785625284835`ms write) — real cascades resolve in seconds, not minutes, once the terminal give-up fires. `UNRESOLVED_CASCADE_WINDOW_MS` (10 minutes) is deliberately generous well beyond that measured specimen (engine confirmation can lag whole minutes under load with no known ceiling — see memory `engine-confirmation-can-lag-minutes-timeouts-assume-seconds` — and `[prompt-mismatch]` fires on the NEXT submission after a give-up, not synchronously with it) without being unbounded: a judgment call, not a measured constant.
+
+## Do not
+
+- Do not add a "likely lost"/"likely fine" verdict field for this co-occurrence — `5c3db367` proved both readings are live possibilities for the identical observable signature; a surface that guesses is strictly worse than one that admits it doesn't know.
+- Do not shrink or remove the temporal correlation window on the assumption a cascade resolves instantly — the measured specimen shows same-instant resolution, but engine confirmation can lag whole minutes under load with no known ceiling.
+
+## Source
+
+Inline comment in `packages/daemon/src/mcp/orchestration.ts` (the fleet-view builder, `deriveUnresolvedCascade`/`UNRESOLVED_CASCADE_WINDOW_MS`): lines 2705-2736 (pre-tranche-2 numbering), as of commit `f81f9c1108773e559efe78b7166cbf78b6201480`. Relocated by card `a2278b09` (tranche 2).

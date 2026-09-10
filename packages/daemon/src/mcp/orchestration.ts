@@ -2590,25 +2590,9 @@ export class OrchestrationMcpRouter {
     // The fleet view — the manager's direct children as a compact list. Shared by worker_list and the
     // no-arg worker_status call (a manager's reflexive `worker_status({})` aliases to this rather than
     // throwing a schema-validation error).
+    // @decision fb8df559 — see docs/decisions/fb8df559-worker-list-pendingmerge-is-additive-with-a-placeholder-spawn-row.md
     //
-    // CLIENT-TIMEOUT RESILIENCE (card fb8df559 Part 1): each real worker row gains a `pendingMerge`
-    // field (non-null while a worker_merge_confirm for it is still IN FLIGHT — NOT necessarily "running
-    // its gate": `state:"running"` flips the instant the op is minted, which can be well before the gate
-    // is even submitted for admission, see `withGatePhase`/card 008f33f1 just above — and briefly after it
-    // settles, see PendingOpRegistry's "RETAINED TERMINAL VIEW" doc, card d1aee5f1 follow-up) — read-only,
-    // never consumed by this view. worker_list's TOP-LEVEL shape stays a BARE ARRAY (no breaking change): a
-    // pending worker_spawn has no worker row yet (inserted only once createWorktree resolves), so it's
-    // appended as an ADDITIVE PLACEHOLDER row instead — `workerSessionId:null`, `pendingSpawn` set,
-    // `processState:"starting"`, `reportedState:null`, `awaitingReview:false`, so an existing "count live
-    // workers" / "find one awaiting review" consumer skips it rather than miscounting a phantom worker.
-    //
-    // `rateLimitedUntil`/`rateLimitDeadline` (card b16320bc): additive — a non-limited worker's row is
-    // otherwise unchanged, both fields simply read null. Without this, a worker parked on a usage cap
-    // (§19c — detectUsageLimit's StopFailure signal, or the weekly/account TEXT-sentinel fallback in
-    // pty/host.ts) showed as plain `busy:false` here, indistinguishable from a healthy idle worker; a
-    // manager had to worker_status(id) — or read the transcript — to discover the park. worker_status(id)
-    // already surfaced both fields (it returns the full session record), so this closes the SAME gap for
-    // the fleet view without adding a new field/scanner.
+    // @decision b16320bc — see docs/decisions/b16320bc-ratelimiteduntil-ratelimitdeadline-close-the-looks-idle-blind-spot.md
     //
     // `lastEngineOutputAt`: an INTRA-TURN liveness signal, additive alongside the DB-persisted
     // `lastActivity` (which only moves at turn boundaries — hook events). Reads pty/host.ts's in-memory
@@ -2617,16 +2601,9 @@ export class OrchestrationMcpRouter {
     // engine truly stops producing. Lets a manager tell "busy and emitting" (recent) from "silent, possibly
     // wedged" (stale) at a glance, without spending a worker_transcript pull.
     //
-    // Card a1916267: `pty.getLastOutputAt` reads CLAUDE ONLY (`this.live`, never `findAnyLive`) — a
-    // non-claude (e.g. codex) worker row therefore always projects `lastEngineOutputAt: null`, the SAME
-    // codex-null convention `composerDirtyLen` below already has. This was NOT always true: it used to read
-    // every harness's live state, and on codex that meant the field kept advancing on pure TUI repaint with
-    // no turn running — a signal that read as "busy and emitting" on a session that would never act again,
-    // which is worse than an absent signal (a manager trusting it as liveness had nothing to warn it
-    // otherwise). See `PtyHost.getLastOutputAt`'s own doc (pty/host.ts) for the harness-level reasoning.
+    // @decision a1916267 — see docs/decisions/a1916267-lastengineoutputat-reads-claude-only-a-codex-worker-always-projects-null.md
     //
-    // WHAT IT DOES NOT PROVE (card docs(orchestration): lastEngineOutputAt's description over-claims
-    // progress): liveness is a property of the PROCESS, not the WORK — a retry loop, or a worker
+    // WHAT IT DOES NOT PROVE: liveness is a property of the PROCESS, not the WORK — a retry loop, or a worker
     // re-reading the same file, moves this field identically to real progress. `lastActivity` advancing
     // (a turn boundary was crossed) is the strongest signal ON THIS ROW that an intra-turn wedge is ruled
     // out — a stuck turn cannot end — though a loop spanning several turns still crosses boundaries
@@ -2643,35 +2620,17 @@ export class OrchestrationMcpRouter {
     // `undefined` (session not live in this process, e.g. exited/never spawned here) reads as `null`, same
     // as every other optional field on this row.
     //
-    // `composerDirtyLen` (card dcd8659c): a PULL read of `Live.composerDirtyLen` (pty/host.ts, card
-    // 3ce3fa39) — a count of characters possibly still sitting UNSUBMITTED in this worker's composer from
-    // an earlier delivery whose confirmation never arrived. Same getter shape as `lastEngineOutputAt`
-    // above (`pty?.getComposerDirtyLen(id) ?? null`) — read-only, never touches submit()/enqueueStdin/
-    // drainPending/the pty. SET synchronously the moment a give-up/heal-if-stuck fires (no dependency on
-    // any later write), so it stays non-zero and readable indefinitely when nothing further ever arrives —
-    // exactly the stuck case this exists to catch, not just the case where a later write happens to
-    // surface it. `0` means the composer is genuinely clean; `null` means this session isn't live in this
-    // process — never conflate the two (an absent signal read as a measured zero is the bug this card
-    // closes). ⚠️ Card c148f118: this is the CONSERVATIVE reading only — it never assumes a defensive
-    // clear-prefix actually landed, so ALONE it cannot tell "a clear was attempted and failed" from "a
-    // clear worked but the write after it just hasn't confirmed yet" — those read as the SAME number.
-    // `composerDirtyLenBelieved` (same row, below) is the OPTIMISTIC counterpart — read the two TOGETHER:
-    // equal means nothing to doubt, `composerDirtyLenBelieved` lower than this means a clear is unresolved
-    // and the gap is exactly how many characters are in doubt. See getComposerDirtyLen/
-    // getComposerDirtyLenBelieved's own docs in pty/host.ts for the full mechanics.
+    // `composerDirtyLen`: a PULL read of possibly-unsubmitted composer text, set synchronously at
+    // give-up/heal-if-stuck.
+    // @decision dcd8659c — see docs/decisions/dcd8659c-composerdirtylen-is-a-pull-read-set-synchronously-at-give-up-heal-if-stuck.md
+    // ⚠️ CONSERVATIVE reading only — cannot tell "a clear was attempted and failed" from "a clear worked
+    // but hasn't confirmed yet"; read together with `composerDirtyLenBelieved`.
+    // @decision c148f118 — see docs/decisions/c148f118-composerdirtylen-is-the-conservative-reading-pair-with-composerdirtylenbelieved.md
     // WHAT THIS DOES NOT COVER: a MANAGER's own composer going dirty mid-session (no third-party
     // read surface reaches a manager the way this reaches its workers — see `my_context`, which folds in
     // the same getter for self-checking), and a human glancing at the web UI (no REST/web surface exists
     // yet — unscoped, deliberately left as a follow-up card rather than bundled here).
-    // WAITING-vs-EXECUTING disambiguation (card 008f33f1): `pendingMerge.state:"running"` is
-    // PendingOpRegistry's own coarse in-flight bit, set the instant the merge op is minted — well before
-    // it's ever submitted to GateSemaphore for admission. It does NOT mean the gate is actually executing,
-    // and a manager who reads it that way can watch a merge sit QUEUED behind a same-repo sibling for
-    // minutes and reasonably conclude it's wedged. `gatePhase` closes that WITHOUT a second call: it folds
-    // in the SAME live GateSemaphore.findByOpId lookup gate_status(opId)/gate_queue already read, so it
-    // can never disagree with either. Only ever attached while state is "running" (a settled row's outcome
-    // already answers the question unambiguously — see sessions.gatePhaseForOpId's own doc for the full
-    // reading guide, including why `null` here is a normal, non-alarming reading, not an error state.
+    // @decision 008f33f1 — see docs/decisions/008f33f1-gatephase-disambiguates-minted-from-executing.md
     const withGatePhase = (
       pm: (PendingOpView & { predecessorSessionId?: string }) | null,
     ): (PendingOpView & { predecessorSessionId?: string; gatePhase?: "queued" | "running" | null }) | null =>
@@ -2702,38 +2661,7 @@ export class OrchestrationMcpRouter {
       return candidates.reduce((latest, c) => (c.at > latest.at ? c : latest));
     };
 
-    // Card f797affb — the EXPOSURE half of `5c3db367`'s forensic close: that card spent a two-file,
-    // cross-referenced log read (daemon-output.log's give-up trace + the per-session console mirror's
-    // actual transcript) to establish that a give-up/re-mint cascade ending PARKED, with a
-    // `[prompt-mismatch]` logged alongside, was in that specimen benign — delivered and fully acted on,
-    // just never individually CONFIRMED by Loom's own bookkeeping. NOTHING in worker_list/worker_status
-    // could have told anyone that without the archaeology. DoD-1's own finding: all three facts it asked
-    // to enumerate were ALREADY tracked and ALREADY surfaced, just never combined — (a) "the cascade
-    // happened" + (b) "no individual CONFIRMED was ever recorded" is exactly `parkedDirective`/
-    // `directive.state === "parked"` (a PARK is reached only once the give-up/re-mint chain exhausts its
-    // budget at every level with no confirming hook ever arriving — see `resolveDirectiveOutcome`'s own
-    // doc); (c) "a `[prompt-mismatch]` was logged" is exactly `lastMismatch` (deriveLastMismatch above —
-    // every mismatch class it covers is logged under a `[prompt-mismatch*]` tag in pty/host.ts). This
-    // field is pure WIRING: it combines two ALREADY-COMPUTED signals, stores nothing new, detects nothing
-    // new.
-    //
-    // ⛔ DoD-2's own constraint: this must read as "COULD NOT BE DETERMINED", never as a guessed verdict
-    // — `5c3db367` proved BOTH readings ("silently lost" and "succeeded anyway") are live possibilities
-    // for the identical observable signature, and a surface that picks one is strictly worse than one
-    // that admits it doesn't know. Hence no "likely lost"/"likely fine" field here, only the flagged
-    // co-occurrence plus the pointer that actually settles it (DoD-3).
-    //
-    // CORRELATION WINDOW: `parkedDirective` is STICKY (never cleared until a newer directive supersedes
-    // it) and `lastMismatch` is also STICKY (overwritten, not cleared) — so without SOME temporal bound, a
-    // long-lived worker's ancient, unrelated parked directive would pair with an entirely unrelated later
-    // mismatch and vice versa, flagging a co-occurrence that never actually occurred together. The
-    // `5c3db367` specimen's own trace shows the mismatch detected in the SAME logged instant as the
-    // terminal give-up that produced the park (both lines under the same `1785625284835`ms write) — real
-    // cascades resolve in seconds, not minutes, once the terminal give-up fires. `UNRESOLVED_CASCADE_WINDOW_MS`
-    // is deliberately generous well beyond that measured specimen (engine confirmation can lag whole
-    // minutes under load with no known ceiling — see memory `engine-confirmation-can-lag-minutes-timeouts-
-    // assume-seconds` — and `[prompt-mismatch]` fires on the NEXT submission after a give-up, not
-    // synchronously with it) without being unbounded: a judgment call, not a measured constant.
+    // @decision f797affb — see docs/decisions/f797affb-unresolved-cascade-flags-a-parked-directive-cooccurring-with-a-mismatch.md
     const UNRESOLVED_CASCADE_WINDOW_MS = 10 * 60 * 1000;
     const deriveUnresolvedCascade = (
       parkedDirective: { msgId: string; parkedAt: string } | null,
@@ -2775,30 +2703,9 @@ export class OrchestrationMcpRouter {
     const lastFlushAttribution = (workerId: string): { gen: number; attributable: boolean; reason: string; resolvedAt: number } | null =>
       typeof pty?.getLastFlushAttribution === "function" ? (pty.getLastFlushAttribution(workerId) ?? null) : null;
 
-    // Card f8d53712: `worker_status`'s single-worker body used to spread `...w` — the RAW session row
-    // straight from `db.getSession()` — into its tool response. That's an OPT-OUT projection: any column
-    // added to the `sessions` table in future reaches the calling agent automatically, with no code
-    // change and no review step (contrast `fleetView` just below, which already names every field it
-    // returns explicitly and never spreads a raw row — this closes the one place that didn't). `pendingMerge`
-    // is deliberately omitted: `toSession` never sets it (it's projected in from the in-memory
-    // PendingOpRegistry elsewhere), and the `worker_status` handler always overrides it with the
-    // live-computed value regardless of what `...w` would have carried.
+    // @decision f8d53712 — see docs/decisions/f8d53712-worker-status-stopped-spreading-the-raw-session-row.md
     //
-    // Card 2961dd3b: the field-by-field object literal this helper used to return was BEHAVIOUR-PRESERVING
-    // against today's row shape, but its claimed compile-time guarantee — "the next addition to `Session`
-    // is a deliberate one-line choice here, not an automatic one" — held only for `Session`'s REQUIRED
-    // fields. TypeScript does not force an object literal to name an OPTIONAL property, and `Session` has
-    // TWENTY-EIGHT of them (role?, parentSessionId?, taskId?, …), so a new `newThing?: X` on `Session`
-    // would have compiled fine here while silently dropping from every consumer (`worker_status`,
-    // `worker_list`, …) with no build error and no test failure. `SESSION_ROW_FIELDS` below closes that
-    // gap the same way entityRowFields.ts's `PROJECT_FIELDS`/`AGENT_FIELDS`/`PROFILE_FIELDS` do:
-    // `Record<keyof T, 1>` forces EVERY key, required and optional alike, so a field added to `Session` in
-    // `@loom/shared` now breaks the build at this sentinel until it's a deliberate, reviewed addition.
-    // ⚠️ THE SENTINEL VALUE IS THE NUMBER `1`, NOT THE BOOLEAN LITERAL — this file compiles into
-    // `dist/mcp/*.js`, the same directory `test/agent-runs-keys.mjs` (G3) textually scans for a literal
-    // `endpoint:\s*true` (see entityRowFields.ts's own doc comment for the full mechanism). `Session`
-    // carries no `endpoint` field today, but the numeric marker costs nothing and keeps this file immune
-    // to the same class of collision regardless.
+    // @decision 2961dd3b — see docs/decisions/2961dd3b-session-row-fields-sentinel-forces-every-key-required-and-optional.md
     const SESSION_ROW_FIELDS: Record<Exclude<keyof Session, "pendingMerge">, 1> = {
       id: 1, projectId: 1, agentId: 1, engineSessionId: 1, title: 1, cwd: 1, processState: 1,
       resumability: 1, busy: 1, createdAt: 1, lastActivity: 1, lastError: 1, role: 1,
@@ -2821,37 +2728,7 @@ export class OrchestrationMcpRouter {
     // ONE list, not two: the sentinel's own keys ARE the field list this projects, so there is nothing to
     // keep in sync by hand. Behaviour-preserving against the prior object literal (same 39 keys) except
     // for card 41f35bfe's `harness` resolution below.
-    //
-    // Card 41f35bfe (the symmetric Session half of 3edf6ef7's `profileFields`/`ProfileWireView` — see
-    // that function's own doc comment for the full reasoning): an unset `harness` (a NULL column becomes
-    // `undefined` per db.ts's `toSession`) and a field this projection simply doesn't carry were
-    // INDISTINGUISHABLE once this router's `ok()` envelope's `JSON.stringify` drops the undefined-valued
-    // key — `worker_status` could not answer "has this worker's harness been set" (observed directly:
-    // a real worker_status call on a live claude worker returned every sibling field and no `harness`
-    // key at all). `null` = unset, `"claude"`/`"codex"` = explicitly set — mirroring what the DB column
-    // itself already means (db.ts's insertSession comment: "NULL = 'claude' (absent ⇒ today's only
-    // harness)").
-    //
-    // Deliberately NOT fixed by changing db.ts's `toSession()` to stop returning `undefined` for an
-    // unset harness — but NOT for the reason a first read of the Profile-side precedent above might
-    // suggest by analogy. `Session.harness` is typed `?: "claude" | "codex"` with NO `null` member, so
-    // `toSession()` returning an explicit `null` would not even COMPILE without widening that shared
-    // type, which is out of scope here. This differs from the Profile side: `Profile.harness` has the
-    // identical type shape, but `updateProfile`'s column binding (db.ts:4806, `patch.harness === undefined
-    // ? undefined : patch.harness ?? null`) genuinely DOES read an unresolved `undefined` as "leave the
-    // column as-is" on a real partial-PATCH path (`profile_update`/`PUT /api/profiles/:id`) — that hazard
-    // is real for Profiles. It does NOT transfer to Sessions: no `UPDATE sessions SET` statement in db.ts
-    // touches the `harness` column at all, and the fork/recycle "carry the pinned vendor CLI forward"
-    // call sites (sessions/service.ts) each build a brand-new `Session` literal via `old.harness ??
-    // undefined`, which `insertSession`'s own binding (`s.harness ?? null`) then collapses to the same
-    // NULL value whether the source was `undefined` or an explicit `null` — so there is no "leave-as-is"
-    // semantic on the Session side to disturb. Widening a LOCAL, wire-only return type (`SessionWireView`,
-    // above) — never `Session` itself — is still the right call regardless, on its own independent merit:
-    // `worker_status` is this field's only exposed reader (`fleetView`'s own curated `worker_list` row
-    // never names `harness` at all — a separate, pre-existing curation choice, not this bug) and it
-    // spreads this function's result straight into `ok({...})` alongside other computed fields, never
-    // treating it as a real `Session` — so this widening has zero blast radius outside this one
-    // function's return value.
+    // @decision 41f35bfe — see docs/decisions/41f35bfe-sessionwireview-widens-harness-to-null-for-worker-status-only.md
     const projectSessionRowFields = (w: Session): SessionWireView => {
       const picked = pickKeys(w, SESSION_ROW_KEYS);
       return { ...picked, harness: picked.harness ?? null };
@@ -2983,21 +2860,7 @@ export class OrchestrationMcpRouter {
         unresolvedCascade: null,
         archivedWithoutReport: false,
       }));
-      // Archived-without-report workers (card ae0b7891): the archived counterpart to the three
-      // categories above — a worker that genuinely vanished (exited without ever calling worker_report)
-      // instead of silently disappearing from the fleet view once archiveOnExit stamps archivedAt.
-      // listWorkerSessionIdsWithEventKind is the existing "which sessions ever had event kind X" lookup
-      // (built for the crash-recovery watcher, already indexed) — reused here rather than adding a new
-      // SQL join. Bounded/self-clearing: isArchivedWithoutReport re-checks live, so this only ever holds
-      // workers still worth the manager's attention (see its own doc for why).
-      //
-      // LINEAGE, not exact parent match (card 93609ef3's own reasoning applies verbatim here): an
-      // archived-without-report worker is by definition exited and was never re-parented by
-      // reparentLiveWorkers (which only moves LIVE workers on recycle), so after a manager recycle it
-      // keeps parentSessionId pointing at the now-retired predecessor. An exact match would silently
-      // hide it from the successor manager — exactly the finding this category exists to surface. Unlike
-      // the real `workers` list above (deliberately exact-match, per workerReadableByManager's own doc),
-      // this NEW category has no such precedent to preserve, so it uses the lineage-tolerant read guard.
+      // @decision ae0b7891 — see docs/decisions/ae0b7891-archived-without-report-workers-surface-a-vanished-worker-by-lineage.md
       const archivedUnreported = db.listWorkerSessionIdsWithEventKind(["worker_exited_without_report"])
         .map((id) => db.getSession(id))
         .filter((w): w is Session => !!w && workerReadableByManager(w) && sessions.isArchivedWithoutReport(w.id))
@@ -3825,24 +3688,9 @@ export class OrchestrationMcpRouter {
       async ({ questionId, reason }) => ok(cancelQuestionForAgent(db, managerSessionId, questionId, reason)),
     );
 
-    // question_resolve (card feat(mcp): let an owner chat reply resolve a pending Request as answered,
-    // origin finding 308259e5) — closes the file-then-cancel gap: when the owner answers a pending
-    // question_ask CONVERSATIONALLY in this manager's own chat instead of the web Requests UI, this lets
-    // the manager mark it 'answered' with the owner's own words captured as the note, rather than filing
-    // a durable question_ask and tearing it down one turn later with question_cancel (which lands it
-    // 'cancelled'/moot — losing the owner's reasoning to chat scrollback). Shares resolveQuestionForAgent
-    // (mcp/questionTool.ts) verbatim with the Lead surface (mcp/platform.ts) — see its doc for the
-    // anti-fabrication invariant (the note is ALWAYS server-captured owner text, never agent-authored)
-    // and why this skips the Companion's propose/confirm friction ladder.
+    // @decision 308259e5 — see docs/decisions/308259e5-question-resolve-lets-a-conversational-owner-reply-answer-a-pending-request.md
     //
-    // ownerText source (card fix(mcp): let question_resolve accept mid-turn-tool composer answers,
-    // origin finding ca341979): falls back from the CURRENT turn to the single most-recent owner-authored
-    // turn (PtyHost.getRecentOwnerTurns[0]) when the current turn isn't owner-formed — e.g. the manager
-    // spawned workers, ended its own turn, and only gets to question_resolve on a LATER turn triggered by
-    // something else (a worker report drain, an idle nudge). Same bounded, never-cleared-at-Stop ring
-    // companion/attestation.ts's isVerbatimOwnerText already widens onto (card 2b26035c) — [0] only (not a
-    // scan of the whole window), so the note always attests the owner's LATEST word, never an older one
-    // stitched in to make a match.
+    // @decision ca341979 — see docs/decisions/ca341979-question-resolve-falls-back-to-the-most-recent-owner-authored-turn.md
     server.registerTool(
       "question_resolve",
       {
@@ -4127,57 +3975,14 @@ export class OrchestrationMcpRouter {
         }
       },
     );
-    // Card a16c580b, widened by card 5ef78900 (round 2, code review): this call site is UNSCOPED
-    // (`scopeSessionId`/`getScopeProjectId` both omitted) — a manager can resolve ANY project's settled op
-    // by opId (see `gate_status`'s own header doc). `getRedactCrossProjectCallerProjectId` redacts every
-    // field `GATE_VERDICT_FIELD_CLASSIFICATION` (sessions/service.ts) classifies `"sensitive"` — see that
-    // Record's own doc for the mechanism (an exhaustive, compiler-enforced classification, not a deny-list)
-    // — for a foreign project's row — widened from `outputFile` alone (card a16c580b) to also cover
-    // `outputTail`/`steps`/`gateDetail` (round 1 of this card) and then `reason`/`commitSubject`/
-    // `retriedFile`/`retryWarning`/`emitCompareTestFiles`/`emitCompareNotHermeticExcluded`/
-    // `validatedHead`/`headWarning` (round 2, after a code-review probe executed a real cross-project read
-    // and found those six still leaking) — see `SessionService.gateStatus`'s own `redactCrossProject` doc
-    // for the full reasoning, including the wrapper-object mechanism that fails safe if
-    // `db.getSession(managerSessionId)` itself ever comes back undefined. Every structural field
-    // (`passed`/`outcome`/`gateType`/timing/concurrency) stays visible — this is a targeted redaction of
-    // captured-output/diagnostic fields, not a refusal.
-    // DELIBERATE (owner-reviewed) scope decision, not an oversight: this SAME call site also serves
-    // `deploy`-kind opIds (a manager on another project polling a `deploy` op it was handed) — the
-    // redaction applies uniformly there too, since `SessionService.gateStatus`'s comparison is keyed on
-    // `t.record.projectId`, not `t.record.kind`. A `deploy` is daemon-global in EFFECT, but that only
-    // entitles another tenant to know it ran and whether it failed (`passed`/`outcome`/`gateType`/timing
-    // all still visible) — never to the deploying tenant's own build output or host paths.
+    // @decision a16c580b — see docs/decisions/a16c580b-cross-project-gate-redaction-uses-a-wrapper-object.md (§2)
     registerGateStatus(server, sessions, db, undefined, undefined, () => db.getSession(managerSessionId)?.projectId);
     registerGateQueue(server, sessions, db, managerSessionId);
     registerGateIntent(server, sessions, managerSessionId);
 
-    // gate_history (card 753d9911): `listGateEvents` (db.ts) already reads the complete, paginated,
-    // JOIN-enriched settled-gate-run series — INCLUDING rejected runs, whose `durationMs`/`gateCap`/
-    // `concurrentGates` are stamped unconditionally, before any pass/fail branching — but until now it was
-    // wired to exactly one consumer, the human-only web Gates page (`gateway/server.ts` `/api/gates/
-    // history`). A manager had no read path to it at all and, on card `99fb882e`, spent weeks treating a
-    // fully-recorded series as unrecoverable. This is that read path: a THIN wrapper, no new query — same
-    // `db.listGateEvents` the web endpoint calls, reused verbatim.
-    // CROSS-PROJECT SCOPING (the load-bearing risk this card called out): unlike the web endpoint, which
-    // takes an optional `projectId` and defaults to the WHOLE PLATFORM, this tool takes NO projectId
-    // argument at all — the project is resolved SERVER-SIDE from the caller's OWN session
-    // (`db.getSession(managerSessionId)?.projectId`), the same pattern `registerGateQueue` above uses, so
-    // there is no argument shape through which a caller could ask for a different project's rows. This is
-    // STRICTER than `gate_queue`'s own redaction (which still returns a foreign project's row with
-    // taskId/branch/workerLabel omitted): `gate_history` never returns a foreign-project row at all, so it
-    // cannot widen anything `gate_queue` already exposes.
+    // @decision 753d9911 — see docs/decisions/753d9911-gate-history-gives-a-manager-a-read-path-to-the-already-recorded-gate-series.md
     //
-    // MANAGER-ONLY IS DELIBERATE, NOT INCIDENTAL (card bb134d3e) — decided twice. `1baac6da` introduced
-    // this tool scoped to managers by name (subject line: "expose gate history to managers"). Later,
-    // `b0c7fd19` widened the WORKER surface for gate visibility and chose a self-scoped `gate_status`
-    // (resolve an opId the caller already holds) rather than this project-wide, enumerable history —
-    // someone stood at this exact fork a second time and took the other branch on purpose. Discriminator:
-    // a worker RESOLVES an opId it already holds (`run_gate` returns it) via `gate_status`; ENUMERATING
-    // settled ops across sessions is a manager concern under depth-1, which is exactly what this tool is.
-    //
-    // Both times this boundary has bitten in practice (cards `be260976`, `19456eb6`), the proximate cause
-    // was a manager writing a worker DoD around a tool the worker doesn't have — check the worker's
-    // pinned tested surface (`orchestration.ts:2346`) before drafting a DoD step that needs `gate_history`.
+    // @decision bb134d3e — see docs/decisions/bb134d3e-gate-history-manager-only-was-decided-twice.md
     server.registerTool(
       "gate_history",
       {
@@ -4420,24 +4225,9 @@ export class OrchestrationMcpRouter {
       },
     );
 
-    // events_search (card 60c1fff8): the general, kind-unrestricted sibling of `gate_history` just above —
-    // that tool only ever surfaces settled GATE runs; a manager investigating a fleet-down incident may
-    // need kill_switch/recycle_begin/merge_rejected/platform_escalate/etc, none of which `gate_history`
-    // can return no matter how it's queried. The real registration already existed on the `LOOM_DEV`-gated
-    // Platform surface (`mcp/platform.ts`) — this is the SAME query path (`eventsSearchQuery`, shared via
-    // `./eventsSearch.js`), including the SAME card-39f79291 unknown-`kind` rejection, never a hand-copied
-    // predicate that could drift from it.
-    // PROJECT-SCOPED SERVER-SIDE, NOT BY ARGUMENT — identical posture to `gate_history` above: there is no
-    // `projectId` parameter, the project is always the CALLER's own, resolved from this session. A manager
-    // cannot request another project's rows through any input this tool accepts, and a foreign-project row
-    // is never returned at all (not merely redacted).
-    // Card ab1d1129: the KNOWN GAP once recorded here — `listOrchestrationEventsBounded`'s scoping join
-    // missing a row entirely because an emitter stamped "" (never NULL — manager_session_id is NOT NULL)
-    // instead of a real session id — is fixed at the join (db.ts): NULLIF normalizes "" to NULL before
-    // COALESCE picks between worker/manager, and a SECOND fallback covers the fully-actorless emit sites
-    // (no resolvable session at all) via the already-joined task's own project. `session_message_delivered`
-    // (no taskId in its shape) is the one named site this does NOT recover — see db.ts's own comment. The
-    // SEPARATE, still-live quirk this does NOT touch — COALESCE prefers the worker/target session for
+    // @decision 60c1fff8 — see docs/decisions/60c1fff8-events-search-is-the-kind-unrestricted-sibling-of-gate-history.md
+    // @decision ab1d1129 — see docs/decisions/ab1d1129-empty-session-sentinel-must-be-normalized-before-coalesce.md
+    // ⚠️ A SEPARATE, still-live quirk this does NOT touch — COALESCE prefers the worker/target session for
     // attribution even when it resolves, so a `cross_project_message` sender can't see its own outbound
     // sends here — is documented on the tool description below (this comment is why, not what).
     server.registerTool(
@@ -5378,28 +5168,8 @@ export class OrchestrationMcpRouter {
       },
     );
 
-    // --- Manager↔manager cross-project channel (board card 2349d90c) --------------------------------
-    // The manager's OTHER structured cross-project write, alongside platform_escalate above. Unlike that
-    // hardcoded-target escalation, `targetProjectId` here is caller-chosen but gated server-side on
-    // `project_links` — an owner-declared, HUMAN-only table with NO MCP path (an agent can never create a
-    // link itself, only use one the owner already made). Delivers ONLY to the target project's LIVE
-    // manager session (never a worker/platform/auditor); when none is live, the message is durably boarded
-    // on the target project's own board instead of dropped. Reuses the same framed, kind:"agent",
-    // one-per-turn delivery channel as worker_message/session_message — a data message only, no privilege
-    // travels with it. Rate-limited per calling manager session.
-    //
-    // Both peer_message and peer_list are registered ONLY when this project has ≥1 project_links row
-    // (hasPeerLinks above, `db.listProjectLinks()` read directly — a deliberate SUPERSET of what
-    // sessions.listPeerProjects/peer_list actually returns, which ALSO drops an archived/missing peer via
-    // `.filter(p => !p.archivedAt)`). Safe either way: hasPeerLinks:false means NO link touches this
-    // project at all, so peer_list is guaranteed empty and peer_message would always reject "not linked" —
-    // a working peer tool is never hidden. It's only slightly over-inclusive when this project's SOLE link
-    // points to an archived/missing peer: both tools stay registered but peer_list still reports zero
-    // peers and peer_message still rejects "not linked" — the exact pre-trim always-registered behavior,
-    // just no longer the common case. So most projects (linking is an owner-only, opt-in action) never
-    // need either tool in their floor. A link added later appears on the manager's very next tool call
-    // (buildServer is
-    // rebuilt fresh per request — see handle() below).
+    // --- Manager↔manager cross-project channel ------------------------------------------------------
+    // @decision 2349d90c — see docs/decisions/2349d90c-peer-message-is-the-owner-gated-manager-to-manager-cross-project-channel.md
     if (hasPeerLinks) {
       server.registerTool(
         "peer_message",
