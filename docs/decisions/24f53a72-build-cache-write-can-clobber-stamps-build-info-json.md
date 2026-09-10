@@ -10,6 +10,10 @@ Root cause: `--force` on turbo's `"build"` task bypasses READING the cache for t
 
 The fix is in `turbo.json`: `"build"`'s `outputs` now explicitly exclude `"!dist/build-info.json"`, so a `"build"` cache hit/restore can never touch that file from ANY invocation, forced or not, `"stamp"`-included or not — `"stamp"` (`cache: false`) is the sole writer.
 
+## The rejected fear this fix disproves
+
+`3d7dccb9`'s own original design had already considered excluding `build-info.json` from `"build"`'s cached `outputs` — and rejected it, on the theory that doing so (rather than just adding the separate `"stamp"` task) would "leave a stale or absent stamp behind on the common cache-hit path." That reasoning was WRONG: this card's fix is exactly that exclusion, and the feared "stale or absent stamp" never materializes, because every real invocation site in this repo (`pnpm build` at the root, the deploy build, `daemon-supervisor.mjs`'s boot build) already requests `"stamp"` alongside `"build"`, so `"stamp"` still runs unconditionally on every one of them. The only case actually affected is an ad-hoc `turbo build` that omits `"stamp"` entirely — there the file is now simply left UNTOUCHED (the last real stamp survives) rather than overwritten with a foreign or frozen one, strictly safer than before, not worse.
+
 ## Why it matters — the cry-wolf direction
 
 `3d7dccb9` had already named the risk: "a check that false-alarms gets discounted, and then the one time it is RIGHT nobody believes it." This card is that prediction playing out a second time — the lead nearly recorded a genuinely-clean deploy as failed, and only a content-based check (grepping the running `dist/` for a token from a merged commit, with a positive control — never the sha pair alone) caught that the deploy itself was fine even while the stamp was wrong. `deploySignatureMismatch`/`builtContentMatchesHead` were RIGHT about their input; the fix was to stop feeding them a frozen stamp, not to weaken them.
@@ -22,3 +26,5 @@ The fix is in `turbo.json`: `"build"`'s `outputs` now explicitly exclude `"!dist
 ## Source
 
 Inline comment in `packages/daemon/src/orchestration/restart.ts` (`deployBuildSteps`, STEP 2), as of commit `779f3ce7`. Relocated by card `0a525ae1` ("restart.ts, tranche 1"); no wording changed, `//`-prefixed lines joined into a flowing paragraph. See also card `3d7dccb9` (this defect's first sighting) and its own record, `docs/decisions/3d7dccb9-stamp-rides-the-deploy-builds-own-turbo-invocation.md`.
+
+"The rejected fear this fix disproves" section sourced from a second site's inline comment in `packages/daemon/src/deploy-staleness.ts`'s module doc, as of commit `8c64cf77`. Relocated by card `f63b17e5` ("deploy-staleness.ts, tranche 1"); no wording changed, `*`-prefixed lines joined into a flowing paragraph.

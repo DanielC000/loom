@@ -10,48 +10,27 @@ import { DEPLOY_PACKAGES } from "./deploy-packages.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
- * Card 5e30c4bd — "merged" and "running" silently diverged for ~1h50m (a daemon-`src` commit sat on
- * mainline, unrestarted, invisible to every surface). This derives a STALENESS signal by comparing the
- * RUNNING daemon's own build artifact against mainline HEAD — never `version`/`webBundle`, which the
- * incident's own after-action measurement proved BOTH stay byte-identical across a source-only deploy
- * (see served_status's doc comment) — so either would report a false CLEAN for exactly this case.
+ * @decision 5e30c4bd — derives a staleness signal by comparing the RUNNING daemon's own build artifact
+ * against mainline HEAD, never `version`/`webBundle` (both stay byte-identical across a source-only
+ * deploy) (docs/decisions/5e30c4bd-compare-running-build-artifact-not-version-or-webbundle.md).
  *
- * DoD #2 (`637558ca` cry-wolf precedent): `stale`/`commitsBehind` are scoped to ONLY the paths whose
- * changes actually require a rebuild+RESTART of THIS PROCESS to take effect — `packages/daemon/src` and
- * `packages/shared/src` (see `DEPLOY_PACKAGES`, `./deploy-packages.js`). `assets/hook-relay.mjs` and
- * `assets/vault-lint/**` are read live per-use straight from the package dir with NO restart needed, and a
- * vault/docs-only merge needs no restart either — a signal that cries stale on those gets ignored within a
- * day, which is worse than no signal. ⚠️ Card e8697dd3: `assets/skills/**` is DIFFERENT and deliberately
- * excluded from THAT reasoning — a bundled skill is delivered to sessions from a separate STORE
- * (`<LOOM_HOME>/skills/<name>/SKILL.md`, see `skills/inject.ts`), and the store only re-syncs from
- * `assets/skills/**` on daemon boot/restart (`seedGlobalSkills()`). This module's own `stale`/
- * `commitsBehind` correctly never counts an assets-only merge either way (it answers "does the daemon
- * PROCESS need a restart", not "does anything need a restart") — but do not generalize its silence on
- * `assets/skills/**` into "that subtree needs no restart too". See `skills/store.ts`'s
- * `skillStoreStaleness()` for that separate signal, surfaced on `served_status` as its own field.
+ * @decision 637558ca — `stale`/`commitsBehind` are scoped to ONLY `packages/daemon/src`/
+ * `packages/shared/src` (see `DEPLOY_PACKAGES`) — a signal that cries stale on a docs/assets-only merge
+ * gets ignored within a day, which is worse than no signal
+ * (docs/decisions/637558ca-stale-scoped-to-restart-relevant-paths-cry-wolf.md).
+ * @decision e8697dd3 — `assets/skills/**` is excluded from that reasoning, not covered by it; do not read
+ * this module's silence on it as "no restart needed" — see `skills/store.ts`'s `skillStoreStaleness()`
+ * (docs/decisions/e8697dd3-bundled-skills-excluded-from-restart-relevant-scoping.md).
  *
- * Card c3ce92ea — `packages/web` is DELIBERATELY excluded from `stale`/`commitsBehind` (a web-only merge
- * must never advise a `daemon_restart`, which drops every live session across ALL projects), but it is NOT
- * ignored: the daemon serves `packages/web/dist` LIVE FROM DISK on every request (`@fastify/static`'s
- * `root`, `gateway/server.ts`) — confirmed by reading that registration, not assumed — so a web-only change
- * needs only a REBUILD, never a restart. That gets its OWN independent signal, `webStale`/
- * `webCommitsBehind`, comparing `packages/web/src` commits against `packages/web/dist`'s own build clock.
- * A prior version of this module's doc claimed `served_status`'s `webBundle` hash check already covered
- * this — it does not: `webBundle` only proves a *hash changed after a rebuild*, it has no notion of
- * "commits landed since the last rebuild" and cannot answer "is a rebuild needed right now", which is what
- * `webStale` answers instead.
+ * @decision c3ce92ea — `packages/web` is excluded from `stale`/`commitsBehind` (a web-only merge must
+ * never advise a `daemon_restart`) but gets its OWN `webStale`/`webCommitsBehind` signal instead, since the
+ * daemon serves `packages/web/dist` live from disk and only needs a rebuild, never a restart
+ * (docs/decisions/c3ce92ea-web-gets-its-own-independent-webstale-signal.md).
  *
- * Card c1072385 — `tsc` builds are INCREMENTAL: only files whose input changed get rewritten, so
- * `dist/index.js`'s own mtime means "when `index.ts` last changed" (rare), NOT "when this daemon was
- * last built" (frequent — a build that touches only e.g. `deploy-staleness.ts` leaves `index.js`
- * untouched). Measured live: `dist/` mtimes spanned a THREE-HOUR range for one deploy, and comparing
- * against `index.js` alone reported a FALSE `stale:true` for a daemon that had the latest commit
- * compiled in the whole time. The build clock is now the NEWEST mtime across every file recursively
- * under BOTH `packages/daemon/dist` and `packages/shared/dist` (the shared package is in the same
- * restart-relevant pathspec below, so a shared-only rebuild must not read clean off a stale daemon dist
- * either) — see `newestMtimeMs`. Measured cost on this checkout: 664 daemon-dist files + 24 shared-dist
- * files, ~18ms wall time for both recursive scans combined — negligible next to the 2×`GIT_TIMEOUT_MS`
- * git budget below, so no narrower subset was needed.
+ * @decision c1072385 — the build clock is the NEWEST mtime across every file recursively under BOTH
+ * `packages/daemon/dist` and `packages/shared/dist` (see `newestMtimeMs`), never a single file's mtime
+ * (`tsc`'s incremental builds can leave e.g. `dist/index.js` untouched for hours after a real rebuild)
+ * (docs/decisions/c1072385-build-clock-is-newest-mtime-not-one-file.md).
  *
  * DoD #4: every clock is DERIVED at call time, NEVER persisted — the dist scans and `git log` calls all
  * run fresh on every call. No caching, no stored "deploy is current" flag (that would recreate the exact
@@ -65,164 +44,60 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * lives in, not an additional unconditional cost) — worst case 6×`GIT_TIMEOUT_MS` of the event loop fully
  * blocked (this is a synchronous `execFileSync`, unlike the async claude-version cache — see the call-site
  * doc at `manager-prompt.ts` for why that's an acceptable tradeoff here) PLUS the (cheap, synchronous `fs`)
- * dist scans. Manager spawns can BURST (boot-reconcile resumes every manager across every project at
- * once), so keep the git timeout constant small. Card c6e7ebe7 measured the THREE-call baseline directly
- * on Windows: 147–275ms at IDLE, 220–465ms at 3× CPU oversubscription — NOT the "tens of ms" this comment
- * used to claim (a real 15–27% of the 1s budget consumed at idle alone). Still a comfortable margin even
- * with the fourth call added (a single-object lookup, cheap relative to the two full-history `git log`
- * walks already in the baseline) — the fifth/sixth calls are UNMEASURED directly, but are the same shape
- * (a single-object ancestry check + one bounded `git diff --name-only` against three pathspecs, not a
- * full-history walk) and share the SAME rare gate as the fourth, so they are not expected to change that
- * margin materially — and no observed in-flight call — idle or oversubscribed — has ever come close to the
- * timeout (see that card for the full data); a *different* tail shows up only in the outer node process's
- * own scheduling latency under heavy oversubscription, which is not a git-call tail and must not be
- * conflated with one.
+ * dist scans.
+ * @decision c6e7ebe7 — measured the THREE-call baseline directly on Windows: 147–275ms at IDLE, 220–465ms
+ * at 3× CPU oversubscription, a comfortable margin even with the fourth/fifth/sixth calls added; two
+ * further hardening changes (singling out a timeout, widening the timeout itself) were investigated and
+ * REJECTED for lack of evidence (docs/decisions/c6e7ebe7-git-timeout-margin-measured-two-changes-rejected.md).
  * NEVER throws — any failure (not a git checkout, e.g. a packaged `loomctl` install; git unavailable; dist
  * not built; a timeout) degrades to `{available:false, reason}`, never a false stale/clean verdict — and
  * this applies uniformly to BOTH the restart signal and the web signal: a failure computing either degrades
  * the WHOLE result, so `webStale` never reports a false clean/stale independent of `stale`'s own guarantee.
  *
- * Card f26339d7 — every signal above is DERIVED (clocks + a live git read), so a single fault class (a
- * turbo cache-replay that advances dist's mtime without rebuilding from current source — the `aad5fff3`
- * footgun documented in this repo's CLAUDE.md) can make every one of them agree, and all be wrong at once.
- * `distBuiltSha`/`processBuiltSha` are the missing POSITIVE signal: the actual `git rev-parse HEAD` an
- * artifact was compiled from, baked into `dist/build-info.json` at BUILD time by
- * `scripts/write-build-info.mjs` (never at runtime).
- * ⭐ THE MECHANISM, AS OF CARD 3d7dccb9 (this changed — read this before trusting an older description
- * elsewhere): `build-info.json` is written by `scripts/write-build-info.mjs` as its OWN, SEPARATE,
- * UNCACHED turbo task (`stamp`, `cache:false`, `dependsOn:["build"]` — see turbo.json), never as a step
- * INSIDE the cached `build` task's own script. It ALWAYS re-executes, cache hit or miss, stamping the
- * CURRENT checkout's real `git rev-parse HEAD` on every single build invocation.
- * ⚠️ WHY IT USED TO BE THE OPPOSITE, AND WHY THAT WAS WRONG: the original design ran this step LAST inside
- * the cached `build` script, on the theory that a turbo cache-HIT replay restoring the file's ORIGINAL
- * baked sha (while every mtime-derived clock reads fresh) would make a cache-replay DETECTABLE, not
- * silently invisible. That reasoning missed a load-bearing fact about turbo itself: turbo 2.x's local
- * cache is SHARED ACROSS EVERY GIT WORKTREE OF THE SAME REPO by default (confirmed live via
- * `TURBO_LOG=debug turbo build`: "Using shared worktree cache at: <main checkout>/.turbo/cache",
- * `is_shared_worktree=true` — NOT scoped to `node_modules`, which Loom otherwise deliberately never shares
- * across worktrees). A worker's OWN `pnpm build` (e.g. during its merge-gate self-check, run inside its
- * own isolated worktree) can populate a cache entry whose CONTENT matches a later build on a completely
- * different checkout — turbo correctly serves that cache hit (the content really is equivalent), but the
- * OLD design then replayed that worker worktree's own baked `build-info.json` along with it: content-right,
- * IDENTITY-wrong, and that identity could name a commit (e.g. an ephemeral union-forward merge commit
- * created only inside that worker's worktree) not even reachable from mainline HEAD. Card 3d7dccb9 caught
- * this live: a genuinely-current daemon read `processBuiltShaMatchesHead:false` / `deploySignatureMismatch:
- * true` — the CRY-WOLF direction, a false "not deployed" for code that was actually current — because the
- * running daemon's own boot build (daemon-supervisor.mjs, a non-`--force` turbo build) had cache-hit-served
- * a worker worktree's stamp. The uncached `stamp` task closes this: since a cache hit already proves
- * content-equivalence to compiling THIS checkout right now, re-stamping THIS checkout's own HEAD on every
- * invocation is always correct.
- * 🔴 CARD 24f53a72 — 3d7dccb9's fix was INCOMPLETE, and the sentence this replaces was the reason why: it
- * argued that excluding `build-info.json` from `build`'s own cached `outputs` (rather than just adding the
- * separate `stamp` task) would "leave a stale or absent stamp behind on the common cache-hit path." That
- * reasoning was WRONG, and 3d7dccb9's SAME frozen sha reproduced live, unchanged, across multiple rebuilds
- * of a genuinely-current checkout. The actual mechanism: `build`'s own `outputs: ["dist/**"]` glob doesn't
- * know `build-info.json` is written by `stamp`, not by `build` — so `build`'s own cache WRITE (which turbo
- * performs after every successful run, `--force` or not) snapshots WHATEVER value happened to be sitting in
- * `dist/` at that moment, i.e. `stamp`'s PREVIOUS output, since `stamp` (dependsOn: `build`) hasn't run yet
- * when `build` finishes and gets cached. Reproduced live: a `--force`'d `build`+`stamp` run correctly
- * stamped real HEAD, then a LATER, unrelated, non-forced `turbo build` (no `stamp` in its task list, no
- * source change) cache-HIT that poisoned `build` snapshot and silently reverted `build-info.json` to the
- * OLDER value `build` had captured — with `stamp` never in the picture at all for that second invocation.
- * Fix: `turbo.json`'s `build` outputs now carry `"!dist/build-info.json"`, so `build`'s cache can never
- * read OR write that file — `stamp` (cache:false) is the file's sole writer, full stop. The feared "stale
- * or absent stamp" never materializes: every real invocation site in this repo (`pnpm build` at the root,
- * this module's own deploy build, `daemon-supervisor.mjs`'s boot build) already requests `stamp` alongside
- * `build`, so `stamp` still runs unconditionally on every one of them; the only case actually affected is an
- * ad-hoc `turbo build` that omits `stamp` entirely, and there the file is now simply left UNTOUCHED (the
- * last real stamp survives) rather than overwritten with a foreign or frozen one — strictly safer than
- * before, not worse. See `builtContentMatchesHead`'s own doc below for the belt-and-suspenders CONTENT-based
- * check this incident also motivated, for the residual case a sha comparison alone can never resolve on its
- * own: two different, non-ancestor commits with byte-identical shipped trees (exactly what a squash merge
- * vs. its own unsquashed worktree form produces).
- * ⚠️ TWO FIELDS, ONE PER QUESTION — AMENDMENT 1, the correction that produced this shape: an earlier draft
- * of this card had ONE cached `builtSha` field, read once per dist dir and frozen. That is WRONG for a
- * subtle reason worth stating precisely: a per-process/per-distDir cache is "read once at FIRST USE", not
- * "read once at PROCESS START" — if the first call into this module happens to land AFTER a rebuild landed
- * on disk (a real, if narrow, window), the cache poisons itself with the NEW sha even though the process
- * has been running the OLD code the whole time, permanently. A value that can be wrong depending on WHEN
- * it happens to be first read is not a baked signal, it is a race. The fix: split "what's on disk" from
- * "what this process is running" into two fields with two different lifetimes:
- *   - `distBuiltSha` — a FRESH read on every call, like every other field in this module (DoD #4). Answers
- *     "what's on disk right now". Computed HERE, from `distDir`, unconditionally.
- *   - `processBuiltSha` — captured EXACTLY ONCE, at PROCESS START (module load time, not first use),
- *     by the CALLER (`served-status.ts`'s own top-level capture) and threaded in via the
- *     `processBuiltSha` option. This function does NOT read it, cache it, or know how it was captured —
- *     it stays PURE, so the existing `distDir` test seam keeps testing it trivially, with no module-level
- *     state of its own to reset between test sections. See `ComputeDeployStalenessOptions`'s own doc.
- * They are DELIBERATELY allowed to diverge — `distBuiltShaDiffersFromProcess` (distinct from
- * `distAheadOfProcess`, which infers the same fact from clocks and can be fooled by a mtime-bumping
- * cache-replay) is the CONTENT-BASED, direct answer to "has a rebuild landed that this process hasn't
- * picked up yet". `deploySignatureMismatch` is fed from `processBuiltSha` specifically (not
- * `distBuiltSha`) — the question it answers is "what is THIS PROCESS running", and in the cache-replay
- * case (no restart since the replay landed) the two values already agree anyway, so feeding either would
- * give the same answer there; they diverge only in the ALSO-real "process is currently running old code,
- * on-disk already has the fix" case, where `processBuiltSha` is the honest one to ask.
+ * @decision f26339d7 — `distBuiltSha`/`processBuiltSha` are the missing POSITIVE signal (the actual
+ * `git rev-parse HEAD` an artifact was compiled from, baked into `dist/build-info.json` at BUILD time),
+ * closing the gap where a single fault class (a turbo cache-replay advancing mtime with no rebuild — the
+ * `aad5fff3` footgun) can make every DERIVED clock above agree, and all be wrong at once; split into two
+ * fields with two different lifetimes so a per-process cache of the sha can't itself become a race
+ * (docs/decisions/f26339d7-baked-build-sha-is-the-positive-signal.md).
+ * @decision 3d7dccb9 — `build-info.json` is written by an uncached, same-invocation `stamp` turbo task so
+ * its identity can never be a stale/foreign sha replayed off turbo's cache (shared across every git
+ * worktree of this repo)
+ * (docs/decisions/3d7dccb9-stamp-rides-the-deploy-builds-own-turbo-invocation.md).
+ * @decision 24f53a72 — a forced `"build"` still WRITES a cache entry that can clobber `stamp`'s own output;
+ * `turbo.json`'s `build` outputs exclude `"!dist/build-info.json"` so only `stamp` can ever touch that file
+ * (docs/decisions/24f53a72-build-cache-write-can-clobber-stamps-build-info-json.md). See
+ * `builtContentMatchesHead`'s own field doc below for the CONTENT-based fallback this incident also
+ * motivated, for the residual case a sha comparison alone can never resolve: two different, non-ancestor
+ * commits with byte-identical shipped trees (a squash merge vs. its own unsquashed worktree form).
  *
- * Card 8ff7ccde — `distBuiltAt` (above) is an ON-DISK ARTIFACT clock: the newest mtime under the dist
- * directories, RIGHT NOW, at call time. It is NOT "when this running process was built" — a rebuild that
- * lands without a restart advances `distBuiltAt` while the process keeps executing whatever it loaded at
- * its OWN start (Node reads a module's file once, at import time, and never re-reads it off disk again).
- * Measured live: a process that started at `04:14:01Z` was still reporting `distBuiltAt` of `10:05:14Z` —
- * a build that landed nearly six hours AFTER the process began, that the process could not possibly be
- * executing — and every gate-kind DB row this process wrote in between (1880 of them) was missing a field
- * a merge at `07:30:24Z` unconditionally adds, proving the process really was still running pre-merge code
- * the whole time. `processStartedAt` fixes this: it is the moment this process's OWN currently-loaded code
- * was read from disk. Card 9aa4e2c9 — unlike every other clock in this module, it is read ONCE from
- * `performance.timeOrigin` (a value the runtime fixes at process start and never changes), NOT recomputed
- * per call under the DoD #4 "never cache" discipline — that discipline is right for a clock that genuinely
- * changes between calls (a dist mtime, mainline HEAD); a process's own start time does not, and the earlier
- * approach (`Date.now() - process.uptime() * 1000`, subtracting a wall clock from a monotonic one) drifted
- * by a few ms between calls in the SAME boot, which broke the property callers actually rely on: that two
- * reads of the same boot agree. `runningCodeBuiltAt` is `min(distBuiltAt, processStartedAt)` —
- * the EARLIER of the two is always a safe upper bound on what the process could actually be executing: if
- * the dist is newer than the process, the process cannot have loaded that newer code no matter what its
- * mtime says, so the process's own start time is the honest clock; if the process is newer than the dist
- * (the normal case — no rebuild has happened since it started), the dist clock is already correct on its
- * own. `stale`/`commitsBehind` are computed against THIS clock, not the raw dist clock, so staleness can no
- * longer be UNDERSTATED by a rebuild that outpaced a restart. `distAheadOfProcess` (`distBuiltAt` after
- * `processStartedAt`) makes that exact divergence VISIBLE as its own field, rather than folding it silently
- * into a corrected number — a manager reading it can tell "this daemon needs a restart to catch up to its
- * own dist" even in the (rare) case `commitsBehind` itself happens to read 0.
+ * @decision 8ff7ccde — `distBuiltAt` is an ON-DISK ARTIFACT clock, NOT "what this process is running" (a
+ * rebuild without a restart can advance it while the process keeps executing older code); `stale`/
+ * `commitsBehind` are computed against `runningCodeBuiltAt` (`min(distBuiltAt, processStartedAt)`)
+ * instead, so staleness can no longer be understated by a rebuild that outpaced a restart. Does NOT apply
+ * to the web signal — the daemon serves `packages/web/dist` live from disk, so there is no "loaded at
+ * process start" gap for web assets to fall into
+ * (docs/decisions/8ff7ccde-processstartedat-a-rebuild-can-outpace-the-running-process.md).
+ * @decision 9aa4e2c9 — `processStartedAt` is read ONCE from `performance.timeOrigin`, NOT recomputed per
+ * call like every other clock here and NOT derived as `Date.now() - process.uptime() * 1000` (that formula
+ * drifts by a few ms between calls in the same boot)
+ * (docs/decisions/9aa4e2c9-processstartedat-reads-performance-timeorigin-once.md).
  *
- * This does NOT apply to the web signal (`webStale`/`webCommitsBehind`/`webDistBuiltAt`) — the daemon
- * serves `packages/web/dist` live from disk on every request (see the module doc above), so there is no
- * "loaded at process start" gap for web assets to fall into; `webBuildMaxMs` alone stays correct.
- *
- * Card c6e7ebe7 — investigated the `GIT_TIMEOUT_MS` margin above and considered, then REJECTED, two
- * further changes. (b) Distinguishing a TIMEOUT specifically from every other `unavailable()` cause (no
- * `.git`, no HEAD commit, git not installed) was considered because a timed-out call degrades to the same
- * `{available:false, reason}` shape as any other unreadable-repo case. At the time, the one consumer that
- * treats `available:false` as silent — `composeManagerStartupPrompt` in `manager-prompt.ts` — did so
- * DELIBERATELY and UNIFORMLY for every `available:false` reason, not just a timeout, so singling out
- * timeouts there would have been inconsistent with that policy, not a fix to it. ⚠️ CARD d3d4d432 REPLACED
- * that uniform policy with a two-class split (`reasonKind: "not-applicable" | "could-not-measure"`,
- * classified at each `unavailable()` call site below) — but a TIMEOUT is still not singled out beyond that:
- * it classifies as `"could-not-measure"`, the same as every other reachable-but-failed cause, exactly as
- * this rejection intended. Anyone who wants the raw, uncollapsed reason can already read it —
- * `served_status` returns `available`/`reason`/`reasonKind` uncollapsed.
- * (c) Raising or retrying the timeout was rejected for lack of evidence: no observed git call, idle or at
- * up to 9× CPU oversubscription, has ever approached this budget (see the card for the full measurement).
- * Widening a timeout with no observed stall to justify it is exactly the kind of change this project has
- * a standing rule against.
- *
- * ⚠️ KNOWN LIMITATION — this is a DATE comparison, not an ANCESTRY computation, for BOTH signals.
- * `commitsBehind`/`webCommitsBehind` count commits whose COMMITTER DATE is later than the relevant dist's
- * mtime — the only signal available from an mtime (there is no built-from-sha stamped anywhere to diff
- * against). This can be wrong in both directions: a commit landing with a non-monotonic committer date
- * (rebase, cherry-pick, clock skew) can be MISSED ⇒ false CLEAN; a build that runs BEFORE a commit is made
- * (build locally, then commit) counts that commit ⇒ false STALE. In practice this holds: Loom lands every
- * card via a squash merge, which stamps a FRESH committer date at merge time, so mainline dates are
- * effectively monotonic — the failure modes above need an unusual git operation directly on mainline to
- * trigger. This is a pre-existing, deliberately accepted tradeoff (card c1072385) — not something this
- * card changes.
+ * ⚠️ KNOWN LIMITATION (card c1072385 — see its own record above) — this is a DATE comparison, not an
+ * ANCESTRY computation, for BOTH signals: `commitsBehind`/`webCommitsBehind` count commits whose COMMITTER
+ * DATE is later than the relevant dist's mtime, which can be wrong in both directions on an unusual git
+ * operation directly on mainline (rebase, cherry-pick, clock skew; building before committing) — accepted
+ * because Loom lands every card via a squash merge, which stamps a fresh, effectively-monotonic committer
+ * date at merge time.
  */
-/** Card d3d4d432 — discriminates WHY `available` is false, classified at THE SOURCE (each `unavailable()`
- * call site below), never by string-matching the human-readable `reason` prose downstream (that would be
- * the same defect class this card exists to fix). `"not-applicable"` means the signal is NEVER meaningful
- * here (today: no `.git` — a packaged install) and staying silent is correct forever. `"could-not-measure"`
- * means the instrument was reachable in principle but a step failed (a race, a git error, a timeout) — this
- * is NOT the same as "verified current", and a consumer that collapses the two produces a false all-clear. */
+/** @decision d3d4d432 — discriminates WHY `available` is false, classified at THE SOURCE (each
+ * `unavailable()` call site below), never by string-matching the `reason` prose downstream — that would be
+ * the same defect class this card exists to fix
+ * (docs/decisions/d3d4d432-reasonkind-splits-not-applicable-from-could-not-measure.md). `"not-applicable"`
+ * means the signal is NEVER meaningful here (today: no `.git` — a packaged install) and staying silent is
+ * correct forever. `"could-not-measure"` means the instrument was reachable in principle but a step failed
+ * (a race, a git error, a timeout) — this is NOT the same as "verified current", and a consumer that
+ * collapses the two produces a false all-clear. */
 export type DeployUnavailableReasonKind = "not-applicable" | "could-not-measure";
 
 export interface DeployStalenessResult {
