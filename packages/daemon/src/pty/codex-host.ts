@@ -6,7 +6,8 @@ import { TRUST_DIALOG_MARKER, TRUST_DIALOG_ANSWER, BUSY_STATUS_MARKER, BUSY_TITL
  * MCP-url→codex-argv translation.
  *
  * @decision 353f6dc4 — this file holds NO state and is never a session's Live/CodexLive entry point; the
- * real, wired runtime lives in pty/host.ts. See docs/decisions/353f6dc4-*.md before adding state here.
+ * real, wired runtime lives in pty/host.ts. Do not add state here or make this file the thing a session's
+ * Live/CodexLive entry points at — that split is what keeps this out of the ~8,000-line host file.
  */
 
 /** True iff `screen` (a raw pty-output frame, or any accumulated buffer of one) contains the literal,
@@ -40,7 +41,8 @@ export function isCodexBusy(screen: string): boolean {
  * true/false state and must never be asked this way, see that function's own doc).
  *
  * @decision 448f1b4a — NEVER treat this alone as readiness; combine with isCodexModelLoaded and
- * !live.trustDialogPending. See docs/decisions/448f1b4a-*.md for the merge-gate incident that proved why.
+ * !live.trustDialogPending — a real merge gate once landed a submit while this alone read true and
+ * codex was still genuinely loading.
  */
 export function isCodexReadyMarkerPresent(screen: string): boolean {
   return screen.includes(CODEX_READY_PLACEHOLDER);
@@ -50,8 +52,9 @@ export function isCodexReadyMarkerPresent(screen: string): boolean {
  * Card 448f1b4a fix: has codex's header finished resolving its model — i.e. is it NOT still showing the
  * transient "model: loading" boot-skeleton text (probe findings.md State 1 vs State 3).
  *
- * @decision 448f1b4a — screen MUST be stripAnsiCsi'd before testing, never raw; and the regex must stay a
- * POSITIVE "model: <resolved>" match, never negated. See docs/decisions/448f1b4a-*.md for why both matter.
+ * @decision 448f1b4a — screen MUST be stripAnsiCsi'd before testing, never raw — codex's own CSI styling
+ * around the model value can make an unstripped match return true while still loading. The regex must
+ * also stay a POSITIVE "model: <resolved>" match, never negated.
  */
 export function isCodexModelLoaded(screen: string): boolean {
   return CODEX_MODEL_LOADED_RE.test(stripAnsiCsi(screen));
@@ -62,8 +65,9 @@ export function isCodexModelLoaded(screen: string): boolean {
  * claude's `--mcp-config`) into codex's per-invocation `-c mcp_servers.<id>.url=<url>` argv pairs. Only
  * `{type:"http", url}` entries are translated (codex has no stdio-server concept here).
  *
- * @decision 7fa73e2c — an unsupported entry must be REPORTED, never silently skipped (a silent skip is
- * indistinguishable from a working mount). See docs/decisions/7fa73e2c-*.md and {@link unsupportedCodexMcpServers}.
+ * @decision 7fa73e2c — an unsupported entry must be REPORTED, never silently skipped: a silent skip here
+ * is indistinguishable from a working mount (e.g. browserTesting silently spawning with no Playwright
+ * MCP). Report via the companion {@link unsupportedCodexMcpServers}.
  */
 export function mcpServersToCodexArgs(mcpServers: Record<string, unknown>): string[] {
   const args: string[] = [];
@@ -126,9 +130,9 @@ export function unsupportedCodexMcpServers(mcpServers: Record<string, unknown>):
  * fresh-vs-resume-vs-fork decision can be asserted directly (codex-resume-argv.mjs) with no real spawn
  * required, mirroring why `mcpServersToCodexArgs` above lives here rather than inline in `createCodexPty`.
  *
- * @decision c6ce2804 — `resume` MUST lead argv (a clap subcommand, not a flag), and fork ALWAYS forces a
- * fresh spawn even if resumeId is set (reusing resume<uuid> for a fork risks two ptys racing one rollout
- * file). See docs/investigations/c6ce2804-codex-resume-rollout-timing/findings.md.
+ * @decision c6ce2804 — `resume` MUST lead argv (a clap subcommand, not a flag, so it cannot appear after
+ * -a/-s/--no-alt-screen), and fork ALWAYS forces a fresh spawn even if resumeId is set — reusing
+ * resume<uuid> for a fork risks two ptys racing writes into one rollout file.
  */
 export function buildCodexResumeArgs(opts: { resumeId?: string; fork?: boolean }): string[] {
   return opts.resumeId && !opts.fork ? ["resume", opts.resumeId] : [];
@@ -166,8 +170,8 @@ export const codexTrustDialogLock = new CodexTrustDialogLock();
  * codepoints on direct paste; root cause is Windows conpty's closed-source key-event translation).
  *
  * @decision 0e83c855 — this predicate is exactly as wide as the MEASURED drop class (`\p{L}` and astral
- * pass through) — never widen to a blanket non-ASCII gate. See docs/decisions/0e83c855-*.md for the full
- * measured boundary, the two falsified hypotheses, and the disclosed abugida limit.
+ * pass through) — never widen to a blanket non-ASCII gate; that would corrupt Cyrillic/Greek/CJK/emoji
+ * text codex already handles correctly.
  */
 const CODEX_LETTER_RE = /\p{L}/u;
 export function codexCharNeedsAsciiFold(codepoint: number): boolean {
@@ -180,8 +184,8 @@ export function codexCharNeedsAsciiFold(codepoint: number): boolean {
  * Code Review Major [2]: codepoints with NO independent meaning of their own (a variation selector, ZWJ,
  * ZWSP, a soft hyphen, a BOM, a directional mark) — Unicode's `Default_Ignorable_Code_Point` property.
  *
- * @decision 0e83c855 — these elide to NOTHING, never a `?` placeholder (a `?` would double up next to an
- * adjacent fold, e.g. `[!]?` instead of `[!]`). See docs/decisions/0e83c855-*.md.
+ * @decision 0e83c855 — these elide to NOTHING, never a `?` placeholder: a placeholder would double up
+ * next to an adjacent fold (e.g. `[!]?` instead of `[!]`) or split a ZWJ emoji sequence apart.
  */
 const CODEX_DEFAULT_IGNORABLE_RE = /\p{Default_Ignorable_Code_Point}/u;
 function codexIsDefaultIgnorable(ch: string): boolean {
@@ -240,9 +244,9 @@ const CODEX_ASCII_FOLD_MAP: ReadonlyMap<number, string> = new Map([
  * Unicode NFKC compatibility normalization recovers a real subset of the drop class for free (fullwidth
  * digits/letters, superscript/subscript digits, the "№" numero sign, ...) without hand-curating each one.
  *
- * @decision 7cbb3298 — the "pure ASCII" guard regex MUST use `+` not `*` (a `*` would let a hypothetical
- * empty-string NFKC result slip past the call site's `??` and vanish with no trace). See
- * docs/decisions/7cbb3298-*.md for the 14,358-codepoint sweep proving this is currently unreachable.
+ * @decision 7cbb3298 — the "pure ASCII" guard regex MUST use `+` not `*`: a `*` would let a hypothetical
+ * empty-string NFKC result slip past the call site's `??` and vanish with no trace — unreachable in a
+ * 14,358-codepoint sweep today, but `+` makes that irrelevant even if a future Unicode version changes it.
  */
 export function codexNfkcFold(ch: string): string | null {
   const normalized = ch.normalize("NFKC");
@@ -255,11 +259,11 @@ export function codexNfkcFold(ch: string): string | null {
  * generic `?`) — NEVER silently dropped. Every other codepoint passes through untouched.
  *
  * @decision 0e83c855 — applied ONLY on submitCodex's write (the path Loom authors text on for codex),
- * never on the claude path or anything read back from codex. See docs/decisions/0e83c855-*.md.
+ * never on the claude path or anything read back from codex (already holds whatever codex produced).
  *
  * @decision fd799f0f — deliberately NOT applied to writeStdinCodex (a live human's own keystrokes) even
- * though it shares the identical drop-exposed write path — a human sees and can retype a corrupted paste;
- * an unattended agent turn cannot. See docs/decisions/fd799f0f-*.md.
+ * though it shares the identical drop-exposed write path: a human watching their own keystrokes can see
+ * and retype a corrupted paste within seconds; an unattended agent turn cannot.
  */
 export function codexAsciiFold(text: string): string {
   if (!/[^\x00-\x7f]/.test(text)) return text; // pure ASCII — byte-identical, no allocation
