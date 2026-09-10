@@ -486,76 +486,24 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     });
   }
 
-  // --- Loopback human-only-write guard (card 9ccedbee — SECURITY. v2 after Code Review: v1 gated
-  // routeTier===0 only, which left every TIER-1 route open — and Tier 1 is exactly where the human's
-  // AUTHORITY lives, not just configuration: POST /api/sessions/:id/input tags text `source:"human"` and
-  // feeds it to `ownerText` (mcp/questionTool.ts's "ANTI-FABRICATION INVARIANT", whose entire basis is
-  // "ownerText comes from the SAME loopback-only, human-authenticated REST composer" — a premise v1 left
-  // false), POST /api/questions/:id/answer is a direct human decision, and /ws/term's `{type:"stdin"}}`
-  // writes raw bytes into ANY session's pty, including an elevated one. Tier 1 means "safe to expose to
-  // an authenticated REMOTE human" — a materially different predicate from "safe from an unauthenticated
-  // co-resident agent", and v1 conflated them. v2 does NOT inherit trust-tier.ts's classification at all:
-  // it asks its own question — "does an agent legitimately need this from a shell?" — and the answer is
-  // no for every non-GET `/api/*` route and for `/ws/term`'s stdin capability, so it gates ALL of them,
-  // uniformly, with no per-route allowlist to drift.
-  //
-  // The trust-tier wall directly above is deliberately INERT unless a non-loopback bind is configured
-  // (isTrustTierHookActive) — on the DEFAULT loopback-only daemon it never even registers, so every
-  // writer in this file reaches its handler with ZERO check beyond the CSRF/Host hook at the top of this
-  // function — which a same-host `curl` trivially satisfies (Host defaults to loopback; an absent Origin
-  // is the fail-safe ALLOW path). Any co-resident process that can open a TCP connection to this port —
-  // including an agent session's own Bash tool — is therefore exactly as privileged as the human at the
-  // browser. This is NOT hypothetical: a Loom agent did it (see the card). This hook closes that gap,
-  // UNCONDITIONALLY (registered regardless of isTrustTierHookActive — it must hold on the default
-  // daemon, which is precisely the case the wall above ships inert for):
-  //   - Scope: every non-GET/HEAD `/api/*` route (no Tier distinction — see above), PLUS the `/ws/term`
-  //     upgrade AND the `/ws/companion` upgrade (both viewing AND the write capability — gating the whole
-  //     socket is simpler than per-message auth and reuses the SAME subprotocol/query-token extraction the
-  //     remote tier already established, and it is the stronger posture: an agent shouldn't be able to
-  //     snoop another session's terminal/chat output any more than write to it). `/ws/companion` was
-  //     originally a SEPARATE known gap this card deliberately left open (v1/v2's own notes said so) —
-  //     closed by card 351e89af, which reuses this exact hook + mechanism rather than inventing a second
-  //     scheme; see that route's own doc comment below for the predicate this closes. PLUS (card 93249b52)
-  //     `POST /internal/shutdown` and `POST /internal/update` — the loomctl lifecycle writers, gated for
-  //     the same reason and by the same predicate (see that card's own comment at the
-  //     `isGuardedInternalWrite` check below). `/mcp/:sessionId` (every agent's real, legitimate tool
-  //     surface), `POST /internal/hook` (a DELIBERATE exception — see the same comment below for why),
-  //     `/hooks/*` (Tier-2 signature-gated webhook ingress), `/oauth/callback`, and the one remaining WS
-  //     route (`/ws/fleet` — read-only event bookkeeping) are untouched — an agent's MCP tool calls are
-  //     byte-identical before/after. A GET read is a materially different risk from a WRITE; closing
-  //     GET-level disclosure is a separate concern this hook does not attempt.
-  //     SETTLED POLICY (card 214caa53, GAP 2 — won't-do, reasoning recorded here rather than left open):
-  //     surveyed every `/api/*` GET route's handler. The routes that hold genuine plaintext secrets
-  //     (project API keys, gateway remote-access tokens, OAuth2/connection credentials) already mask them
-  //     at the GET layer regardless of this hook — see each store's own "PUBLIC metadata only (no
-  //     secret/hash)" / "tokens are NEVER returned by any REST read" comments (api-keys, gateway-tokens,
-  //     connections). Everything else a GET route can return is backed by the same shared SQLite DB and
-  //     vault files a co-resident agent's Bash tool can already read directly off disk under `LOOM_HOME`
-  //     — including other projects' boards/vaults/config, since none of this hook's routes are scoped to
-  //     the caller's own project the way `/mcp/:sessionId` is server-side. So blanket-gating GET adds no
-  //     material barrier beyond what filesystem access already grants, at real cost (breaking the web
-  //     UI's own read path, `loom status`, and health probes). Not gated.
-  //   - Credential: `Authorization: Bearer <deps.loopbackSecret>` for `/api/*` and `/internal/shutdown` /
-  //     `/internal/update` (constant-time compared); for `/ws/term`'s and `/ws/companion`'s upgrades, the
-  //     SAME secret via the remote tier's own established mechanism — `Sec-WebSocket-Protocol: loom.v1,
-  //     loom.bearer.<secret>` (preferred) or a `?token=` query-param fallback (resolveWsSubprotocolToken,
-  //     trust-tier.ts) — reused verbatim rather than reinvented.
-  //     Optional dep (see GatewayDeps' own doc) — ABSENT ⇒ this hook is a no-op, so partial-stub tests
-  //     that don't wire it stay byte-identical; index.ts (the only real boot path) always supplies it, so
-  //     production is fail-closed by construction.
+  // @decision 9ccedbee — the loopback human-only-write guard (SECURITY) asks its OWN question ("does an
+  // agent legitimately need this from a shell?"), not trust-tier.ts's "is this safe for a remote human?"
+  // — v1 gated by routeTier and left every Tier-1 route open; a real Loom agent exploited exactly that
+  // gap. See docs/decisions/9ccedbee-loopback-write-guard-v1-to-v2.md for the v1→v2 history and incident.
+  //   - Scope: every non-GET/HEAD `/api/*` route, PLUS the `/ws/term` and `/ws/companion` upgrades (both
+  //     viewing AND writing — card 351e89af), PLUS `POST /internal/shutdown`/`/internal/update` (card
+  //     93249b52). Untouched: `/mcp/:sessionId`, `POST /internal/hook` (deliberate — see the comment at
+  //     `isGuardedInternalWrite` below), `/hooks/*`, `/oauth/callback`, `/ws/fleet`. GET reads are
+  //     deliberately NOT gated — settled policy, card 214caa53 GAP 2 (see
+  //     docs/decisions/214caa53-loopback-guard-gap-hardening.md for the survey and its stated ceiling).
+  //   - Credential: `Authorization: Bearer <deps.loopbackSecret>` for `/api/*` and the two `/internal/*`
+  //     routes (constant-time compared); for the WS upgrades, the same secret via the remote tier's own
+  //     `Sec-WebSocket-Protocol: loom.v1, loom.bearer.<secret>` mechanism (or a `?token=` fallback) —
+  //     reused verbatim, not reinvented. Optional dep — ABSENT ⇒ no-op (partial-stub tests stay
+  //     byte-identical); `index.ts` (the only real boot path) always supplies it.
   //   - TEST NOTE: `req.socket.remoteAddress` is what this hook (and the trust-tier wall above) key
-  //     loopback-vs-remote off — a real TCP connection always populates it, but Fastify's `injectWS` test
-  //     helper does NOT default it the way plain `.inject()` does (light-my-request quirk, confirmed via
-  //     debug instrumentation while building this: a bare `injectWS(url, {headers})` call yields an EMPTY
-  //     `remoteAddress`). Since card 214caa53's GAP 1 fix, an empty `remoteAddress` on a guarded route is
-  //     REJECTED (401) rather than silently no-op'd — so a bare `injectWS` call now proves the fail-closed
-  //     path (see test/loopback-write-guard.mjs's (P) checks), and any test that wants to exercise the
-  //     ACCEPT path for `/ws/term` or `/ws/companion` MUST pass an explicit
-  //     `socket: { remoteAddress: "127.0.0.1" }` — mirroring exactly how trust-tier.mjs's own WS tests
-  //     already pass `socket: remoteSocket` for the remote-peer case. `.inject()`'s own `remoteAddress`
-  //     option cannot simulate an empty address for a plain `/api/*` write (light-my-request falls back
-  //     to `'127.0.0.1'` via `options.remoteAddress || '127.0.0.1'` — an empty string is falsy) — the
-  //     `ip === ""` check is exercised via the WS routes instead, which share this exact same code path.
+  //     loopback-vs-remote off — Fastify's `injectWS` helper does NOT default it the way `.inject()`
+  //     does; card 214caa53 GAP 1 (same record above) covers the mechanics this forces on tests.
   if (deps.loopbackSecret !== undefined) {
     const loopbackSecret = deps.loopbackSecret;
     app.addHook("onRequest", async (req, reply) => {
@@ -567,50 +515,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // inbound chat socket — gating the whole upgrade (not per-message) so reaching the handler at all
       // already proves the loopback secret, exactly like /ws/term.
       const isCompanionSocket = routePattern === "/ws/companion/:sessionId";
-      // Card 93249b52 (SECURITY follow-up on 9ccedbee, surfaced by that card's own Code Review): the two
-      // `/internal/*` lifecycle writers with real capability — POST /internal/shutdown (stops the daemon)
-      // and POST /internal/update (fetches + INSTALLS code on a packaged install, a strictly LARGER blast
-      // radius than any /api/* write this guard already covers) — were left on the old loopback-only
-      // posture this guard exists to replace. THE PREDICATE, stated explicitly per that card's own
-      // instruction: this asks "does an agent legitimately need this from a shell?", NOT trust-tier.ts's
-      // "is this safe for an authenticated REMOTE human?" (a materially different question — routeTier
-      // classifies BOTH of these Tier 0 today, i.e. "not yet decided to expose remotely", which says
-      // nothing about the co-resident-agent predicate this hook enforces). The answer for both is no, so
-      // both are gated identically to every other loopback write here.
-      // DELIBERATELY EXCLUDED: POST /internal/hook (the SessionStart hook relay, assets/hook-relay.mjs) —
-      // it is called by a child of the vendor CLI on EVERY session start, is high-frequency and NOT
-      // human-driven, and has no credential to present; gating it wrong breaks every spawn on the daemon.
-      // This exclusion is a scope decision, NOT a "this is already safe" claim — see the route's own
-      // comment at its registration below for the honest accounting of what it does and doesn't defend
-      // against (an earlier draft of this comment claimed it can't target an arbitrary session; that was
-      // FALSE — deliverHook's target sessionId is caller-supplied, not connection-derived — caught in
-      // review before merge; corrected there, not restated here).
+      // @decision 93249b52 — POST /internal/shutdown and /internal/update are gated identically to every
+      // other loopback write here; POST /internal/hook is DELIBERATELY EXCLUDED (high-frequency,
+      // non-human vendor-CLI caller, no credential to present) — a scope decision, not a "this is already
+      // safe" claim. See docs/decisions/93249b52-internal-lifecycle-writers-bearer-guarded.md.
       const isGuardedInternalWrite = req.method === "POST" &&
         (routePattern === "/internal/shutdown" || routePattern === "/internal/update");
       if (!isGuardedApiWrite && !isTermSocket && !isCompanionSocket && !isGuardedInternalWrite) return;
-      // A non-loopback caller reaching here either already passed the trust-tier wall above (a valid
-      // remote gateway token on a Tier-1 route — unaffected by this hook, which only ever ACTS on
-      // loopback callers) or already failed it (Tier 0 ⇒ 403 before this hook ever runs) or there is no
-      // non-loopback bind open at all (the OS refuses the connection) — so this check is what actually
-      // scopes the hook to loopback, not a defensive no-op.
-      //
-      // GAP 1 hardening (card 214caa53, follow-up to this card): an EMPTY/undeterminable
-      // `remoteAddress` must NOT be treated as "confirmed non-loopback, not our concern" — that used to
-      // fall through `!LOOPBACK.has("")` (true) straight to `return`, silently PERMITTING the request
-      // with no credential check at all. Node clears `socket.remoteAddress` once the underlying handle is
-      // destroyed, so the card raised (as an untested hypothesis) a client that completes its request and
-      // then immediately RSTs the connection racing this read to empty. TESTED (a throwaway raw-socket
-      // probe, not part of this test corpus — flush a full HTTP request to the OS, then `resetAndDestroy`
-      // immediately after): did NOT reproduce in 500 trials on Windows/Node 22/loopback — an immediate
-      // RST tore the connection down so completely that the request was never even parsed (0/500 reached
-      // any handler at all, despite 500/500 TCP connections accepted and writes flushed), so the specific
-      // "processed with an empty address" shape this hook would need to worry about never occurred. The
-      // fix stands anyway, on defense-in-depth grounds per the card. Fail CLOSED: an undeterminable
-      // address is REJECTED outright on a guarded route, unconditionally — a valid bearer credential does
-      // not rescue it, since the whole point is we cannot confirm this is the loopback caller the
-      // credential is scoped to trust. A genuinely non-loopback address (a real remote IP, not empty)
-      // is UNCHANGED — that case still falls through to the trust-tier wall's own decision, already made
-      // above.
+      // This check is what scopes the hook to loopback, not a defensive no-op: a non-loopback caller
+      // reaching here either already passed/failed the trust-tier wall above, or has no non-loopback bind
+      // to reach at all.
+      // @decision 214caa53 — an empty/undeterminable `remoteAddress` on a guarded route is REJECTED
+      // (401), never treated as "confirmed non-loopback" — fail CLOSED, and no bearer credential rescues
+      // it. See docs/decisions/214caa53-loopback-guard-gap-hardening.md (GAP 1) for the RST-race
+      // hypothesis this hardens against and the test methodology behind "the fix stands anyway."
       const ip = req.socket?.remoteAddress ?? "";
       if (ip === "") {
         // Distinct body from the credential-rejection cases below (Code Review nitpick, card 214caa53):
@@ -1890,38 +1808,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
 
   // --- Companion CAPABILITY GRANTS (Companion Capability & Permission-Lever Framework §1/§2): the ONE
   // data model every opt-in Companion lever (session-status, decisions-relay, …) is gated on. HUMAN-ONLY
-  // loopback REST — there is INTENTIONALLY NO MCP path (of ANY router: orchestration/platform/setup/audit),
-  // same trust posture as the bindings/allowlist/config writers above: an injection-exposed companion agent
-  // must never widen its own capability.
-  //
-  // ADD/upgrade (a brand-new tool, or read→act) needs a respawn to take effect — NOT because the SERVER is
-  // stale (`OrchestrationMcpRouter.buildServer` is stateless per MCP request — see its own `handle()` doc —
-  // so `resolveCompanionGrant` re-reads this table fresh on EVERY tool call), but because the running
-  // companion PROCESS only ever fetches `tools/list` once, at MCP registration/startup: it has no way to
-  // discover a tool it never asked for. See `POST /api/companion/:sessionId/upgrade` below (Framework §6's
-  // conversation-preserving respawn) for the on-demand live-apply path; this route alone does not trigger one.
-  // (Card dbba993f: the CORE chat_reply gate itself — companionSessionIds, arming a companion at all, not a
-  // per-capability grant — hit the identical gap and now DOES auto-trigger that same respawn from
-  // `CompanionController.startOne`, since a companion that can never discover chat_reply can never reply at
-  // all. This per-capability-grant path is unaffected and stays a deliberate human/REST-only opt-in.)
-  //
-  // REVOKE/downgrade (this CR fix), by contrast, is ALREADY live with NO respawn needed: the companion may
-  // still believe a revoked tool exists (its own stale `tools/list` belief), but the very next attempt to
-  // CALL it hits the freshly-rebuilt server, which either doesn't register the tool at all anymore or — for
-  // an act-mode lever that stays registered because another granted project is still act-mode — rejects it
-  // at the per-project `ctx.scope.mayAct` belt-and-suspenders re-check (also freshly resolved). What a
-  // revoke/downgrade does NOT do on its own is close the Companion Trust Window (Framework Card 0): a
-  // Tier-A lever's WARM low-friction window is keyed on (session, route, sender), not per-capability, so it
-  // can outlive a grant change entirely — `deps.orchMcp.closeCompanionTrustWindow?.(sessionId)` below closes
-  // it on every write (defense-in-depth: harmless on a grant that stays unchanged, and load-bearing against
-  // a stale-armed window surviving a downgrade-then-re-upgrade of the SAME capability).
-  //
-  // `attention-push` is the ONE lever with its own daemon-owned WATCHER, not an MCP tool at all
-  // (companion/attention-push.ts) — `deps.companion?.reconcile(sessionId)` below arms/disarms it LIVE, same
-  // as every other lever's revoke/downgrade path, just through its own mechanism (CompanionController.
-  // rearmAttentionPushFor) instead of the MCP tool surface. Grants are keyed on the natural key (sessionId,
-  // capability, projectId) — POST/PUT both upsert; POST additionally 201s a fresh grant while PUT 404s when
-  // there's nothing existing to update (so a client can tell "created" from "must exist").
+  // loopback REST — INTENTIONALLY NO MCP path (of ANY router) — an injection-exposed companion agent must
+  // never widen its own capability.
+  // @decision sha:e6042f2f — ADD/upgrade needs a respawn to take effect (the companion PROCESS only ever
+  // fetches `tools/list` once); REVOKE/downgrade is already live with none needed, but still closes the
+  // Companion Trust Window on every write. See
+  // docs/decisions/e6042f2f-companion-capability-grant-respawn-asymmetry.md for the full asymmetry, the
+  // `attention-push` special case, and how this relates to sibling card dbba993f.
+  // Grants are keyed on the natural key (sessionId, capability, projectId) — POST/PUT both upsert; POST
+  // additionally 201s a fresh grant while PUT 404s when there's nothing existing to update (so a client
+  // can tell "created" from "must exist").
   const GRANT_CONFIG_MAX_BYTES = 4096;
   const isValidGrantMode = (v: unknown): v is "read" | "act" => v === "read" || v === "act";
   // Buffer.byteLength (UTF-8 bytes), NOT .length (UTF-16 code units) — a multibyte config (e.g. non-ASCII

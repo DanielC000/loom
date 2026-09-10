@@ -20,12 +20,17 @@ The browser is the only real-world caller (`packages/web/src/lib/api.ts`'s `trig
 
 PACKAGED-ONLY (load-bearing): the npm reinstall is valid only for an npm-global `loomctl` install — npm-installing over a checkout would be wrong — so a from-source daemon REFUSES with 409 and a clear message (and its banner never shows anyway: `GET /api/update-status` reports `packaged:false`). On a packaged install we ack 202 and defer the spawn one tick so the response flushes first; the detached `loom update` (E2c-1) then runs stop→install→start. A packaged end-user daemon runs NO supervisor, so the exit-75 restart sentinel never applies here — the stop→install→start cycle is the restart path.
 
+### The `/internal/hook` exclusion (in the `onRequest` guard hook)
+
+`isGuardedInternalWrite` gates `/internal/shutdown`/`/internal/update` under the same co-resident-agent predicate as card `9ccedbee` — not `trust-tier.ts`'s "safe for a remote human?" (`routeTier` classifies both as Tier 0 today, i.e. "not yet decided to expose remotely" — irrelevant here). `POST /internal/hook` (`assets/hook-relay.mjs`) is DELIBERATELY EXCLUDED from it: a vendor-CLI child calls it every session start, high-frequency/non-human, no credential — gating it wrong breaks every spawn. Scope decision, not "already safe" (card `a2407ed4`: full accounting). An earlier draft claimed the exclusion means it "can't target an arbitrary session" — FALSE (`deliverHook`'s target `sessionId` is caller-supplied) — corrected before merge.
+
 ## Do not
 
 - Do not leave `/internal/shutdown` or `/internal/update` gated by loopback-IP alone — both must also pass the shared loopback-secret bearer guard (`isGuardedInternalWrite`); either route's real capability (stop the daemon / install+restart code) is too large a blast radius for co-resident-agent reach.
 - Do not let `/internal/update` run the npm reinstall against a from-source (non-packaged) daemon — refuse with 409; only a packaged `loomctl` install may reinstall.
 - Do not respond to either route before deferring the actual shutdown/update by a tick — the ack must flush before the process dies or the spawn begins.
+- Do not gate `POST /internal/hook` (no credential, every session start — breaks every spawn), and do not claim its exclusion means it "can't target an arbitrary session" — `deliverHook`'s `sessionId` is caller-supplied; that was false, corrected before merge.
 
 ## Source
 
-Inline comments in `packages/daemon/src/gateway/server.ts` (`POST /internal/shutdown`, lines 2786-2808; `POST /internal/update`, lines 2815-2831, as of commit `a9b55042`). Relocated by card `2bf0b41d`; wording condensed, no substantive detail dropped.
+Inline comments in `packages/daemon/src/gateway/server.ts` (`POST /internal/shutdown`, lines 2786-2808; `POST /internal/update`, lines 2815-2831, as of commit `a9b55042`). Relocated by card `2bf0b41d`; wording condensed, no detail dropped. `/internal/hook` exclusion section sourced from the `onRequest` guard hook, lines 570-587, commit `1d2e8e78`; extracted by card `33347ca0` (tranche 3).

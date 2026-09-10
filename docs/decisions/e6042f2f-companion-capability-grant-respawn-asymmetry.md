@@ -1,0 +1,21 @@
+# e6042f2f — capability-grant ADD needs a respawn; REVOKE does not
+
+## Narrative
+
+`POST/PUT /api/companion/config/:sessionId/grants` (Companion Capability & Permission-Lever Framework §1/§2) writes the ONE data model every opt-in Companion lever (session-status, decisions-relay, ...) is gated on.
+
+ADD/upgrade (a brand-new tool, or read->act) needs a respawn to take effect — NOT because the server is stale (`OrchestrationMcpRouter.buildServer` is stateless per MCP request and re-reads the grant table fresh on every call, so a revoke/downgrade is already live with no respawn), but because the running companion PROCESS only ever fetches `tools/list` once, at MCP registration/startup: it has no way to discover a tool it never asked for. `POST /api/companion/:sessionId/upgrade` (Framework §6's conversation-preserving respawn) is the on-demand live-apply path; this grants route alone does not trigger one. Card `dbba993f` hit the identical gap for a DIFFERENT lever — the CORE `chat_reply` gate itself (`companionSessionIds`, arming a companion at all, not a per-capability grant) — and that lever now DOES auto-trigger the same respawn from `CompanionController.startOne`, since a companion that can never discover `chat_reply` can never reply at all. This per-capability-grant path is unaffected by that fix and stays a deliberate human/REST-only opt-in — the two levers made different calls because a companion that literally cannot reply is a materially worse failure mode than one that is merely missing an optional capability.
+
+REVOKE/downgrade, by contrast, is already live with NO respawn needed: the companion may still believe a revoked tool exists (its own stale `tools/list` belief), but the very next attempt to CALL it hits the freshly-rebuilt server, which either doesn't register the tool at all anymore or — for an act-mode lever that stays registered because another granted project is still act-mode — rejects it at the per-project `ctx.scope.mayAct` belt-and-suspenders re-check (also freshly resolved). What a revoke/downgrade does NOT do on its own is close the Companion Trust Window (Framework Card 0): a Tier-A lever's WARM low-friction window is keyed on (session, route, sender), not per-capability, so it can outlive a grant change entirely — `deps.orchMcp.closeCompanionTrustWindow?.(sessionId)` closes it on every write (defense-in-depth: harmless on a grant that stays unchanged, and load-bearing against a stale-armed window surviving a downgrade-then-re-upgrade of the SAME capability).
+
+`attention-push` is the ONE lever with its own daemon-owned WATCHER, not an MCP tool at all (`companion/attention-push.ts`) — `deps.companion?.reconcile(sessionId)` arms/disarms it LIVE, same as every other lever's revoke/downgrade path, just through its own mechanism (`CompanionController.rearmAttentionPushFor`) instead of the MCP tool surface.
+
+## Do not
+
+- Do not assume a capability grant needs a respawn to take effect on the SERVER side — the grant table is re-read fresh on every MCP call; the respawn need is purely about the companion PROCESS's one-time `tools/list` fetch.
+- Do not auto-trigger a respawn from this grants route the way `CompanionController.startOne` does for the core `chat_reply` gate (card `dbba993f`) — that lever's auto-respawn is deliberately scoped to "companion can't reply at all," a materially worse failure than a missing optional capability; per-capability-grant ADD stays a human-driven, on-demand opt-in via the separate `/upgrade` route.
+- Do not skip `closeCompanionTrustWindow` on a grant write — a Tier-A lever's warm window is keyed on (session, route, sender), not per-capability, and can otherwise outlive the grant change that should have invalidated it.
+
+## Source
+
+Inline comment in `packages/daemon/src/gateway/server.ts` (Companion capability grants route registration, lines 1891-1924 as of commit `1d2e8e78`; introduced across commits `e6042f2fd6`, `2be309db23`, `20260a7459`). Extracted by card `33347ca0` (tranche 3) via the `sha:` grammar — no board card id anywhere in the block or its introducing commits for this specific narrative (only a cross-reference to sibling card `dbba993f`, which covers a different decision).

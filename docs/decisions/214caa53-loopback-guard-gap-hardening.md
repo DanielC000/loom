@@ -1,0 +1,26 @@
+# 214caa53 — two follow-up gaps on the loopback human-only-write guard (card 9ccedbee)
+
+## GAP 1 — an undeterminable `remoteAddress` must fail CLOSED, not fall through
+
+Before this fix, `!LOOPBACK.has("")` evaluated true for an empty/undeterminable `req.socket.remoteAddress`, so the check fell straight through to `return` — silently PERMITTING the request with no credential check at all. Node clears `socket.remoteAddress` once the underlying handle is destroyed, so the card raised (as an untested hypothesis) a client that completes its request and then immediately RSTs the connection, racing this read to empty.
+
+TESTED: a throwaway raw-socket probe (not part of this repo's test corpus) — flush a full HTTP request to the OS, then `resetAndDestroy` immediately after. Did NOT reproduce in 500 trials on Windows/Node 22/loopback: an immediate RST tore the connection down so completely that the request was never even parsed (0/500 reached any handler at all, despite 500/500 TCP connections accepted and writes flushed), so the specific "processed with an empty address" shape this hook would need to worry about never occurred in this measurement.
+
+The fix stands anyway, on defense-in-depth grounds: an undeterminable address is now REJECTED outright on a guarded route, unconditionally — a valid bearer credential does not rescue it, since the whole point is we cannot confirm this is the loopback caller the credential is scoped to trust. A genuinely non-loopback address (a real remote IP, not empty) is unchanged — that case still falls through to the trust-tier wall's own decision. The 401 body for this case is deliberately distinct from the credential-rejection cases (Code Review nitpick): this reject is unconditional on the address — no credential can rescue it — so telling the caller to go fetch one via `loom open` would point at the one thing that will NOT help here.
+
+TEST NOTE: `req.socket.remoteAddress` is what this hook (and the trust-tier wall above it) key loopback-vs-remote off — a real TCP connection always populates it, but Fastify's `injectWS` test helper does NOT default it the way plain `.inject()` does (light-my-request quirk, confirmed via debug instrumentation while building this fix: a bare `injectWS(url, {headers})` call yields an EMPTY `remoteAddress`). Since this GAP 1 fix, an empty `remoteAddress` on a guarded route is REJECTED (401) rather than silently no-op'd — so a bare `injectWS` call now proves the fail-closed path (see `test/loopback-write-guard.mjs`'s (P) checks), and any test that wants to exercise the ACCEPT path for `/ws/term` or `/ws/companion` MUST pass an explicit `socket: { remoteAddress: "127.0.0.1" }` — mirroring exactly how `trust-tier.mjs`'s own WS tests already pass `socket: remoteSocket` for the remote-peer case. `.inject()`'s own `remoteAddress` option cannot simulate an empty address for a plain `/api/*` write (light-my-request falls back to `'127.0.0.1'` via `options.remoteAddress || '127.0.0.1'` — an empty string is falsy) — the `ip === ""` check is exercised via the WS routes instead, which share this exact same code path.
+
+## GAP 2 — GET routes are deliberately NOT gated (won't-do, reasoning recorded rather than left open)
+
+SETTLED POLICY: surveyed every `/api/*` GET route's handler. The routes that hold genuine plaintext secrets (project API keys, gateway remote-access tokens, OAuth2/connection credentials) already mask them at the GET layer regardless of this hook — see each store's own "PUBLIC metadata only (no secret/hash)" / "tokens are NEVER returned by any REST read" comments (api-keys, gateway-tokens, connections). Everything else a GET route can return is backed by the same shared SQLite DB and vault files a co-resident agent's Bash tool can already read directly off disk under `LOOM_HOME` — including other projects' boards/vaults/config, since none of this hook's routes are scoped to the caller's own project the way `/mcp/:sessionId` is server-side. So blanket-gating GET adds no material barrier beyond what filesystem access already grants, at real cost (breaking the web UI's own read path, `loom status`, and health probes). Not gated.
+
+## Do not
+
+- Do not treat an empty/undeterminable `remoteAddress` as "confirmed non-loopback, not our concern" — fail CLOSED, unconditionally; no credential rescues it.
+- Do not use `loom open`/credential-fetch wording in the empty-address 401 body — a credential cannot fix an undeterminable address, so that wording is actively misleading there.
+- Do not gate GET routes under this hook to "finish the job" without re-litigating this survey — the settled reasoning is that it adds no material barrier over existing filesystem access, at real cost to the web UI/CLI/health probes.
+- Do not assume `.inject()`'s `remoteAddress` option can simulate the empty-address case for a plain `/api/*` write — it falls back to `'127.0.0.1'`; use the WS routes (`injectWS`) to exercise `ip === ""`.
+
+## Source
+
+Inline comments in `packages/daemon/src/gateway/server.ts` (GAP 2 policy at the loopback human-only-write guard registration, lines 527-537; GAP 1 hardening + TEST NOTE at the `onRequest` hook body, lines 546-558 and 591-613, all as of commit `1d2e8e78`). Extracted by card `33347ca0` (tranche 3); wording condensed, no substantive detail dropped.
