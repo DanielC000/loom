@@ -266,16 +266,11 @@ Your audit + suggestion tools and the "Review my workspace" trigger are live —
 
 /**
  * B4 backfill — seed the bundled Workspace Auditor agent into the SAME reserved "Platform" setup home as
- * the operator (one home, two agents), SEED-IF-ABSENT BY AGENT-NAME. Run at boot AFTER seedSetupHome, and
- * mirroring seedSetupAgentRename's containment: scoped to the reserved home (resolved by NAME — gotcha #1),
- * never a name-agnostic reserved lookup.
+ * the operator (one home, two agents), SEED-IF-ABSENT BY AGENT-NAME. Run at boot AFTER seedSetupHome.
  *
- * Why a separate boot-time seeder and not an extension of seedSetupHome (gotcha #2): seedSetupHome no-ops
- * the WHOLE seed once the home exists, so an EXISTING install (seeded before B4) would never get the auditor
- * if it were added there. Seeding the auditor by its own name-presence check instead backfills existing
- * installs on upgrade AND covers fresh installs (where seedSetupHome creates only the operator, then this
- * adds the auditor on the same boot) — without any structural change to seedSetupHome that could risk the
- * operator seed or its name-scoped idempotency.
+ * @decision sha:aecc6551 — scoped to the reserved home by NAME, never a name-agnostic reserved lookup
+ * (gotcha #1); seeded by its own separate boot-time name-presence check, never folded into seedSetupHome
+ * (gotcha #2) — see the record for why both matter.
  *
  * Idempotent + non-clobbering: if an agent named SETUP_AUDITOR_AGENT_NAME already lives in the home this
  * no-ops (returns null), so reboots never duplicate it and a user's edits to that agent (prompt, profile)
@@ -381,13 +376,11 @@ Your replies may be read aloud as a voice message, so write in short, natural sp
 /**
  * Seed the bundled Companion agent into the SAME reserved "Platform" setup home as the operator + auditor
  * (one home, three standing agents), SEED-IF-ABSENT BY AGENT-NAME — the EXACT mirror of seedSetupAuditorAgent
- * (B4). Run at boot AFTER seedSetupHome, scoped to the reserved home (resolved by NAME — gotcha #1), never a
- * name-agnostic reserved lookup.
+ * (B4). Run at boot AFTER seedSetupHome.
  *
- * Why a separate boot-time seeder and not an extension of seedSetupHome (gotcha #2): seedSetupHome no-ops the
- * WHOLE seed once the home exists, so an EXISTING install would never get the Companion rig if it were added
- * there. Seeding the agent by its own name-presence check instead backfills existing installs on upgrade AND
- * covers fresh installs (operator + auditor + companion on one boot).
+ * @decision sha:aecc6551 — scoped to the reserved home by NAME, never a name-agnostic reserved lookup
+ * (gotcha #1); seeded by its own separate boot-time name-presence check, never folded into seedSetupHome
+ * (gotcha #2) — see the record for why both matter.
  *
  * TEMPLATE ONLY — this seeds the rig (the assistant-role Companion profile + a Companion agent bound to it)
  * so a "New companion" provision has an author-free default spawn target. It creates NO session and writes
