@@ -8,10 +8,15 @@ Card 0e5b2045: the `UNCAUGHT` tier sits FIRST (highest priority), ABOVE `FAIL`/`
 
 DECOUPLED FROM RETRY ON PURPOSE (manager review, card 0e5b2045): `identifyRetriableTestFile` (the function's older, single-file-only predecessor) only recognizes a string shaped like `FAIL <name>` (its own bare-identifier regex) to drive the single-file merge retry — and `kickoff-real-spawn` (one of the `UNCAUGHT`-idiom files above) is this daemon's OWN measured source of both weaker-passes ever recorded, at roughly a 1-in-11 rate. Letting `result()`'s new UNCAUGHT-wins priority also decide retry eligibility would have turned every one of those self-healing retries into a hard merge rejection (~15 extra minutes each) as a SIDE EFFECT of a diagnostics fix — a real, recurring cost, and a policy change to fleet-wide merge-gate retry behavior that deserves its own deliberate decision, not an accidental one. So retry reads a SEPARATE accessor — `createFailingTestTracker.failTierResult`/`.failTierMatchCount` — independent of whichever tier `result()` picked for display. `result()`'s diagnostic value and the retry target can now differ on the SAME run (by design) without either one losing information the other already had. Card 6c84b87b: these two accessors do NOT read this file's `FAILING_TEST_PATTERNS` tiers at all — see `HARNESS_FAIL_WRAPPER_RE`'s own doc for why the retry needs a narrower, differently-anchored match than the diagnostic tiers do.
 
+## Same divergence, at the multi-file retry call site (`identifyRetriableTestFiles`)
+
+`identifyRetriableTestFiles` TAKES `failTierAll`/`failTierTestCount`, NOT `failingTest`/`failingTestCount`, for the identical reason: `failingTest` is whichever tier's line is most diagnostically useful (an `UNCAUGHT`-idiom line outranks a bare `FAIL <name>` summary), but this function can only ever parse the FAIL/not-ok tier's own bare-identifier shape — so it reads the tier-isolated `failTierAll`/`failTierTestCount` accessors instead, independent of whichever tier won `result()` for display. Passing `failingTest`/`failingTestCount` here would be silently wrong on any run where a higher-priority diagnostic tier also matched: the retry would appear to "stop firing" for reasons unrelated to whether a retriable FAIL line actually exists.
+
 ## Do not
 
 - Do not let the diagnostic tier priority (`UNCAUGHT` first) drive retry eligibility — retry must read `failTierResult()`/`failTierMatchCount()`, never `result()`.
 - Do not trust a hardcoded count of files using the `UNCAUGHT` idiom in this doc or any comment — re-derive it live via `grep -rl UNCAUGHT packages/daemon/test/*.mjs`, since it drifts silently as files are added/removed.
+- Do not pass `failingTest`/`failingTestCount` to `identifyRetriableTestFiles` — it must read `failTierAll`/`failTierTestCount`, or a higher-priority diagnostic tier can silently suppress a real retry.
 
 ## Source
 

@@ -90,22 +90,11 @@ function isUnverifiableBareFailToken(line: string, cwd: string): boolean {
 export const HARNESS_FAIL_WRAPPER_RE = /^FAIL\s+\S+\s+\(exit /;
 
 /**
- * Card 2a79a74c finding #5: matches `test-daemon.mjs`'s own structural `notExecuted` invariant failure —
- * `console.error(\`❌ test-daemon.mjs: ${notExecuted.length} discovered hermetic test file(s) were NOT
- * actually executed — naming them: ...\`)` followed by `process.exit(1)`, fired BEFORE the `FAILURES:`
- * epilogue ever runs (see that call site's own comment in `scripts/test-daemon.mjs`).
- *
- * ⚠️ THE RISK THIS EXISTS TO CLOSE: that early exit does NOT suppress `runLane`'s own per-file wrapper
- * line ({@link HARNESS_FAIL_WRAPPER_RE}) for whichever file(s) genuinely failed an assertion in the SAME
- * run — `runLane` prints its `FAIL  <name>  (exit N)` line THE MOMENT that file's own child process
- * settles, well before the later, separate `notExecuted` bookkeeping check even runs. So a run that BOTH
- * genuinely fails exactly one test AND, via an unrelated structural bug, silently never executes some
- * OTHER discovered file(s) still yields `failTierMatchCount() === 1` for the one genuine failure alone —
- * {@link identifyRetriableTestFile} would otherwise happily identify and retry that ONE file, and a pass
- * on the isolated `--only=<name>` retry would let the merge proceed while the structural "some selected
- * files never ran at all" defect is never re-observed (a single-file retry has no way to re-check it).
- * This regex is the caller's own signal to refuse that retry outright regardless of `failTierMatchCount`
- * — see {@link identifyRetriableTestFile}'s `harnessNotExecutedDetected` parameter.
+ * Matches `test-daemon.mjs`'s own structural `notExecuted` invariant failure (some discovered hermetic
+ * test file(s) never actually executed) — a signal {@link identifyRetriableTestFiles} refuses the retry
+ * on outright, regardless of `failTierMatchCount`, because a co-occurring genuine failure's own wrapper
+ * line survives this early exit untouched and would otherwise mask it.
+ * @decision 2a79a74c — see docs/decisions/2a79a74c-notexecuted-refuses-the-single-file-retry-outright.md
  */
 export const HARNESS_NOT_EXECUTED_RE = /^❌ test-daemon\.mjs: \d+ discovered hermetic test file\(s\) were NOT actually executed/;
 
@@ -121,65 +110,18 @@ const PASS_LINE_RE = /^\s*PASS\b/i;
 const FAILING_TEST_CARRY_CAP_BYTES = 8192;
 
 /**
- * Card 55cba5c5: scans a step's stdout+stderr AS IT STREAMS for the LAST failing-test/assertion marker
- * line, independent of the bounded {@link OUTPUT_TAIL_BYTES} ring `runGateStep`'s `tail()` keeps for
- * display. A tail dominated by trailing warnings or a pnpm epilogue — the COMMON failure mode, not an edge
- * case — can truncate the actual failing-test line right out of the last N bytes of combined output;
- * scanning the FULL stream as it arrives means the failing test's identity survives that truncation.
- *
- * PRIORITY PRESERVED, PER TIER: tracks the LAST line matching EACH {@link FAILING_TEST_PATTERNS} entry
- * independently (one slot per pattern), then `result()` returns the highest-priority tier (lowest index)
- * that has ANY match — mirroring {@link extractFailingTest}'s own "first pattern with a hit wins" ordering
- * (a `FAIL`/`not ok` marker always wins over a bare `AssertionError` line, matching a runner's own PASS/
- * FAIL-by-name summary over an incidental thrown-error line) — while still preferring the LAST occurrence
- * *within* that winning tier, which is what actually survives truncation (a summary line near the end of
- * a long run, not necessarily the first thing printed).
- *
- * Deliberately keeps only one line per pattern (a handful of bytes total), never the whole output, so this
- * adds no meaningful memory over the existing ring. Uses a streaming `TextDecoder` (not a per-chunk
- * `Buffer#toString`) so a multi-byte UTF-8 character split across two chunks decodes correctly instead of
- * producing a mangled replacement character right at the boundary.
- *
- * CARRY IS BOUNDED, TWO LAYERS (Code Review, card 55cba5c5):
- *  1. **A bare `\r` is a line boundary too** — `split(/\r\n|\r|\n/)`, not the original `/\r?\n/`. A
- *     progress-bar/download-meter renderer (pnpm/npm/turbo all use one) rewrites its line in place via a
- *     bare `\r` with NO following `\n`; the original regex never splits on that, so a step dominated by
- *     that kind of output would never pop anything off `carry` — it would grow to hold the step's ENTIRE
- *     combined output in daemon memory, exactly the unbounded thing {@link OUTPUT_TAIL_BYTES}'s own ring
- *     exists to avoid. Treating `\r` as a real boundary flushes each progress frame through `scanLine`
- *     the moment it arrives (matching or not — most don't), so `carry` naturally stays small for this
- *     realistic case AND a marker written with a bare `\r` (not just `\n`) is still found immediately,
- *     regardless of how much unrelated progress-bar text follows it in the SAME feed() call — `lastByPattern`
- *     only ever holds one short line per tier, not the stream itself.
- *  2. **A hard cap on `carry` as the backstop** for the residual pathological case this splitting can't
- *     help — a single write with NO `\r` and NO `\n` anywhere (an arbitrarily long unbroken string). That
- *     can't be flushed early no matter how the splitting is done, so `carry` is capped to the last
- *     {@link FAILING_TEST_CARRY_CAP_BYTES} after every `feed()` regardless. A real failing-test marker
- *     line is never anywhere close to that size, so this never interferes with the marker this tracker
- *     exists to find in the realistic case — it only discards old content that was never going to match.
- *
- * Exported (unlike the rest of this module's internals) so a hermetic test can drive it directly with
- * synthetic bare-`\r`/no-delimiter chunks, mirroring how `runGateStep`/`splitGateSteps` are already
- * exported for the same reason.
- *
- * ⚠️ KNOWN LIMITATION, LEFT UNFIXED HERE (card 2f0b2e57, specimen 2 — a WEAKER hypothesis than the
- * PASS-line bug specimen 1 fixed above; not reconstructed from a raw stream, only observed as plausible):
- * this daemon's own `test-daemon.mjs` runs failing files through a concurrent multi-lane pool, and every
- * lane's output lands in the SAME combined stream this tracker scans. "The LAST line matching the winning
- * tier" therefore means "whichever lane's matching line was written last to the shared stream", not "the
- * line belonging to whichever file the run ultimately blames". When more than one file's own FAIL-tier
- * line is genuinely present, `failTierMatchCount() !== 1` already refuses the single-file MERGE RETRY on
- * that ambiguity ({@link identifyRetriableTestFile} below) — but `result()`/`failingTest` (the DIAGNOSTIC
- * field surfaced in `gateDetail`) carries no equivalent gate: it always returns *a* real matching line,
- * with no guarantee it's the one test-daemon.mjs's own end-of-run `FAILURES:` echo ultimately blames.
- * Fixing this for real needs test-daemon.mjs to tag each lane's own lines with an attributable marker (a
- * lane or file id) before they ever reach this scanner — a change to the test HARNESS, not this tracker,
- * and out of scope for this card.
- *
- * Card 11737292: `cwd` is OPTIONAL and purely a cross-check — see {@link isUnverifiableBareFailToken}'s own
- * doc for exactly what it guards against and why omitting it (every existing caller that doesn't have a
- * `cwd` handy, e.g. a hermetic test driving this scanner directly on synthetic input) is unaffected: the
- * check simply never runs, identical to today's behavior.
+ * Scans a step's stdout+stderr AS IT STREAMS for the LAST failing-test/assertion marker line, independent
+ * of the bounded {@link OUTPUT_TAIL_BYTES} ring `runGateStep`'s `tail()` keeps for display — a tail
+ * dominated by trailing warnings/a pnpm epilogue can truncate the actual failing-test line out of it.
+ * Tracks the LAST line matching EACH {@link FAILING_TEST_PATTERNS} tier independently; `result()` returns
+ * the highest-priority tier with any match (never the whole output — a handful of bytes total). `carry`
+ * (the not-yet-terminated remainder between `feed()` calls) is BOUNDED two ways — do not regress either:
+ * a bare `\r` counts as a line boundary (not just `\n`), and `carry` is hard-capped at
+ * {@link FAILING_TEST_CARRY_CAP_BYTES} regardless — see the decision record for why both are load-bearing.
+ * `cwd` is optional and purely a cross-check for {@link isUnverifiableBareFailToken}; omitting it is a
+ * no-op, not a behavior change.
+ * @decision 55cba5c5 — see docs/decisions/55cba5c5-failing-test-tracker-scans-the-full-stream-carry-is-bounded.md
+ * @decision 2f0b2e57 — see docs/decisions/2f0b2e57-a-recorded-pass-line-is-never-a-failure.md (known limitation, specimen 2)
  */
 export function createFailingTestTracker(cwd?: string): {
   feed(chunk: Buffer): void;
@@ -454,32 +396,10 @@ export interface GateStepResult {
   /** Best-effort failing-test/assertion line, scanned LIVE across the full stream (see
    *  {@link createFailingTestTracker}) — unlike `outputTail`, never truncated to the last
    *  {@link OUTPUT_TAIL_BYTES}. `undefined` when nothing recognizable was found (an honest miss, never a
-   *  guess — see {@link extractFailingTest}'s own doc).
-   *
-   *  ⚠️ **STRUCTURALLY ONE LINE — this is a constraint on every test's failure OUTPUT, not just on this
-   *  field.** `createFailingTestTracker` deliberately keeps only the single winning line per tier (its own
-   *  doc: "never the whole output"), so a test whose decisive diagnostic genuinely spans multiple lines (a
-   *  timeline, a stack, a stdout/stderr dump) has that content EITHER cut down to its first matching line,
-   *  OR — for a failure shape that matches none of {@link FAILING_TEST_PATTERNS} at all (e.g. a plain
-   *  `throw new Error(multiLineMessage)` with no `AssertionError`/`UNCAUGHT`/`FAIL`/`error TS` marker
-   *  text) — this field is `undefined` ENTIRELY, not a truncated fragment. Card 63664129 confirmed both
-   *  shapes exist in this suite today: the `commitAll` test helper (`test/_git-commit.mjs`) throws a
-   *  3-line message on failure that matches no tier here (`failingTest` is always `undefined` for it), and
-   *  the `console.error(`... UNCAUGHT — ${err.stack}`)` idiom used by several test files has a multi-line
-   *  `.stack` of which only line 1 is ever kept.
-   *
-   *  ➡️ **The recovery path for either shape is `outputTail`, NOT this field** — specifically its
-   *  front-anchored `FAILURES:`-block capture (see {@link createFailureBlockTracker}), which echoes a
-   *  failing `test:daemon` file's FULL captured stdout/stderr (test-daemon.mjs's own epilogue never
-   *  truncates per file) up to a 16KB budget. A test author whose assertion failure isn't legible from
-   *  `failingTest` alone should read `outputTail` before assuming the diagnostic was lost — it usually
-   *  wasn't. Two known, unproven-either-way gaps in that recovery path, tracked as card `87cdb15f` (gap 1
-   *  = its DoD-1, gap 2 = its DoD-2 — don't re-derive by hand): (1) several failing files in the SAME
-   *  run share that one 16KB budget, so an earlier file's echo can starve a later file's own diagnostic;
-   *  (2) if the run never reaches its own `FAILURES:` epilogue at all (e.g. the step times out first —
-   *  card `9966c52d` records exactly this shape for `kickoff-real-spawn`), there is no fallback recovery
-   *  for a multi-line diagnostic — only whatever single line (or nothing, for the `commitAll` shape)
-   *  `failingTest` itself already holds. */
+   *  guess — see {@link extractFailingTest}'s own doc). STRUCTURALLY ONE LINE (or `undefined` entirely for
+   *  an unmatched multi-line shape) — `outputTail`'s front-anchored `FAILURES:`-block capture is the
+   *  recovery path, not this field, and it has two known gaps — see the decision record.
+   *  @decision 87cdb15f — see docs/decisions/87cdb15f-failingtest-is-one-line-outputtail-is-the-recovery-with-two-gaps.md */
   failingTest?: string;
   /** How many lines matched the SAME tier `failingTest` was drawn from (see
    *  {@link createFailingTestTracker.matchCount}) — `undefined` iff `failingTest` is `undefined` (nothing
@@ -622,34 +542,13 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
     if (atBoundary >= 0xdc00 && atBoundary <= 0xdfff) start += 1;
     return s.slice(start);
   };
-  /** Card 6ffee3e2 DoD 1/3: the RETAINED+REPORTED bytes for a FAILING step, selected by CONTENT rather
-   *  than position — never a change to pass/fail determination (that's decided entirely by `result.status`/
-   *  `error`/`timedOut` upstream of this call, untouched here).
-   *
-   *  ⚠️ CORRECTED (Code Review, merge-gate-retry.mjs case (E) — a real regression a first version of this
-   *  fix shipped): content-selection is a REPLACEMENT for `tail()`, so it only fires when `tail()` is
-   *  actually LOSSY — i.e. `totalBytesSeen` exceeds {@link OUTPUT_TAIL_BYTES}, meaning the ring genuinely
-   *  evicted something. When the WHOLE step's output fits inside the cap, `tail()` IS the complete output
-   *  (nothing was ever truncated) — falling back to it loses nothing and invents nothing, which is exactly
-   *  what DoD-3 asks for ("never an arbitrary TRUNCATED chunk"), not "never the raw tail, period". The
-   *  first version always preferred content-selection on any failure, which broke a real, common case: a
-   *  short gate command (not `test-daemon.mjs`) whose failure line survives ANSI color codes wrapped around
-   *  it (`\x1b[31mFAIL widget.spec.js\x1b[0m`) — {@link createFailingTestTracker}'s FAIL-tier pattern
-   *  requires the line to START with `FAIL` (after optional whitespace), so the leading escape sequence
-   *  defeats that match and the tracker falls through to a LOWER-priority tier (e.g. a same-run
-   *  `AssertionError` line) that doesn't name the test — content-selection silently produced WORSE output
-   *  than the untruncated raw tail it replaced. Bounding this to the genuinely-lossy case removes that
-   *  regression without reopening the original bug: a verbose ~700-file suite still exceeds the cap by a
-   *  wide margin, so it always takes the content-selected branch below, unchanged from before this fix.
-   *
-   *  Priority once content-selection DOES apply: (1) the front-anchored FAILURES: block, when
-   *  `test-daemon.mjs`'s own marker was seen — the richest available diagnostic, a real per-file assertion
-   *  body, not just a name; (2) the single best failing-test/assertion LINE `createFailingTestTracker`
-   *  already scans for (content-selected, just not a whole block) — the fallback for a gate command that
-   *  isn't `test-daemon.mjs`, or a genuine failure whose runner never reaches its own end-of-suite echo
-   *  (e.g. a build/lint step); (3) an EXPLICIT honest-miss string, never a silent fall-through to a
-   *  positional chunk that's already known to be missing content (DoD-3). The PASSING path is untouched —
-   *  see card 4c5bf820's own doc on `tail()`'s continued green-path use above. */
+  /** The RETAINED+REPORTED bytes for a FAILING step, selected by CONTENT rather than position — never a
+   *  change to pass/fail determination (decided entirely upstream by `result.status`/`error`/`timedOut`).
+   *  Fires ONLY when `tail()` is actually lossy (`totalBytesSeen > `{@link OUTPUT_TAIL_BYTES}`) — see the
+   *  decision record for the regression this guards against. Priority once it applies: (1) the
+   *  front-anchored FAILURES: block; (2) the single best failing-test line; (3) an explicit honest-miss
+   *  string — never a silent positional chunk. PASSING path is untouched (`tail()`).
+   *  @decision 6ffee3e2 — see docs/decisions/6ffee3e2-failure-tail-is-content-selected-not-positional.md (Decision B) */
   const resolveOutputTail = (): string =>
     totalBytesSeen <= OUTPUT_TAIL_BYTES
       ? tail()
@@ -1037,67 +936,28 @@ export async function runGateSequential(
 }
 
 /**
- * Card 7ad12202: a `&&`-chained `gateCommand` whose NON-FINAL step fails short-circuits {@link
- * runGateSequential} — steps AFTER the failing one never run, and `result.steps` only ever contains the
- * steps actually attempted (see that function's own doc). If a caller then narrows the failure to a
- * single re-runnable test file (via {@link identifyRetriableTestFiles}) and re-runs ONLY that file in
- * isolation, a pass there says nothing about whether the steps that were never reached would ALSO have
- * passed — reporting the whole gate `passed:true` at that point is the exact defect this card fixes.
- *
- * This is the discriminator: given the FULL command actually executed (`effectiveGate` — the reduced
- * command when one applies, never the raw configured `gateCommand`, since a reduced run has its own,
- * usually shorter, step count — see {@link runGateSequential}'s own "effectiveGate" callers) and how many
- * steps a result already accounts for (`result.steps.length`), returns every step from `effectiveGate`
- * that has not yet run, in order. Empty (`[]`, never `undefined`) when nothing is left — the common case,
- * a failure on the LAST configured step — so a caller can gate on `.length > 0` alone with no separate
- * "was there anything to resume" check.
- *
- * Pure step-string arithmetic only: this never inspects *why* a step failed (that's {@link
- * classifyGateFailure}) or whether a retry is even eligible (that's {@link identifyRetriableTestFiles}) —
- * a caller calls this only after both of those have already said "yes, proceed."
+ * The discriminator for a resumed gate: given the FULL command actually executed (`effectiveGate`, never
+ * the raw configured `gateCommand`) and how many steps a result already accounts for, returns every step
+ * not yet run, in order. Pure step-string arithmetic — never inspects *why* a step failed or whether a
+ * retry is eligible; a caller calls this only after {@link classifyGateFailure}/
+ * {@link identifyRetriableTestFiles} have already said "yes, proceed."
+ * @decision 7ad12202 — see docs/decisions/7ad12202-dispatch-on-gate-verdict-not-retrypassed.md (Decision B)
  */
 export function remainingGateSteps(effectiveGate: string, stepsAlreadyRun: number): string[] {
   return splitGateSteps(effectiveGate).slice(stepsAlreadyRun);
 }
 
 /**
- * Card 7ad12202: folds a RESUMED run's result (produced by re-invoking {@link runGateSequential}/
- * `runGateStep` against just the {@link remainingGateSteps} suffix, as its own separately-admitted gate
- * call — mirroring the existing single-file isolated-retry's own admission pattern, never a re-entry into
- * this file's own step-runner loop) back into the ORIGINAL result the caller already holds, so a caller
- * never has to hand-splice the two `steps[]` arrays itself.
- *
- * `steps` is NEVER taken from either side alone, in EITHER branch below: `original.steps` covers
- * everything up to and including the step that first failed; `resumed.steps` covers only the suffix
- * {@link remainingGateSteps} named. Concatenating them (in that order) is what makes the merged result's
- * `steps[]` finally equal to EVERY step `effectiveGate` names — the exact visibility gate_status/
- * gate_history was missing when this bug shipped silently (card 7ad12202's own DoD-3).
- *
- * ⚠️ CODE REVIEW FINDING [4], card 7ad12202: every OTHER field is NOT simply "whichever side is newest" —
- * which side wins depends on whether the resume itself passed, and conflating the two broke the retry-
- * warning path this same card was fixing. Two branches:
- *
- *  - **`resumed.passed === true`** (the rescue is complete — attempt 1's failure was genuinely rescued,
- *    and everything after it also ran clean): keeps `original`'s own `outputTail`/`outputFile`/
- *    `failingTest`/`failTierTest`/etc. — mirrors EXACTLY what the plain, no-resume single-file retry has
- *    always done on a pass (`sessions/service.ts`'s `gateResult = { ...gateResult, passed: true }` keeps
- *    attempt 1's own diagnostic fields, never the retry step's). This is load-bearing, not cosmetic:
- *    `formatWeakerPassWarning`'s own `isTimeoutKillEntry(retriedFile, outputTail)` check looks for
- *    `retriedFile`'s OWN `(exit timeout` line — a line that can only ever appear in ATTEMPT 1's captured
- *    tail (the resumed step is a different step entirely, and its tail never mentions `retriedFile` at
- *    all). Taking `resumed`'s tail here would make that check silently always miss, mislabeling a genuine
- *    timeout kill as an order-dependent/cross-test-pollution bug on every resumed pass.
- *  - **`resumed.passed === false`** (or cancelled) — a DIFFERENT, later step genuinely broke, one attempt
- *    1 never even reached: `resumed`'s own `failedStep`/`outputTail`/etc. win outright here, exactly like
- *    the TRANSIENT-KILL AUTO-RETRY's own full-gate re-run already treats ITS new result as authoritative.
- *    This is what a manager actually needs to fix the real, new problem — attempt 1's already-rescued
- *    failure is no longer the useful diagnostic once something else has broken.
- *
- * Never invents a verdict: `resumed.passed`/`cancelled` themselves are never overridden — a caller must
- * treat a `passed:false` merged result exactly like any other {@link GateSequentialResult} rejection/
- * cancellation, including running it through {@link classifyGateFailure} again if it wants to. This
- * function makes NO retry-eligibility decision of its own and must never be looped — a caller resumes
- * once, exactly like the single-file retry it follows.
+ * Folds a RESUMED run's result (re-invoking {@link runGateSequential}/`runGateStep` against just the
+ * {@link remainingGateSteps} suffix, as its own separately-admitted gate call) back into the ORIGINAL
+ * result. `steps` is NEVER taken from either side alone — `original.steps` concatenated with
+ * `resumed.steps` is what makes the merged `steps[]` equal EVERY step `effectiveGate` names. Every OTHER
+ * field is NOT simply "whichever side is newest": on `resumed.passed === true` keeps `original`'s own
+ * diagnostic fields (load-bearing for {@link isTimeoutKillEntry}, which can only ever match ATTEMPT 1's
+ * tail); on `resumed.passed === false` (or cancelled), `resumed`'s own fields win outright. Never invents
+ * a verdict, and must never be looped — a caller resumes once. See the decision record for the full
+ * two-branch reasoning and the Code Review finding that motivated it.
+ * @decision 7ad12202 — see docs/decisions/7ad12202-dispatch-on-gate-verdict-not-retrypassed.md (Decision B)
  */
 export function mergeResumedGateResult(original: GateSequentialResult, resumed: GateSequentialResult): GateSequentialResult {
   const steps = [...original.steps, ...resumed.steps];
@@ -1133,10 +993,8 @@ export const GATE_TIMEOUT_BREAKER_THRESHOLD = Number(process.env.LOOM_GATE_TIMEO
 export type GateFailureClass = "genuine" | "kill" | "timeout";
 
 /**
- * Classify a failed gate step so the merge gate can tell a transient external kill (an OOM-killer/
- * resource-limit SIGKILL under memory pressure) from a genuine test/build failure (card bcba83a1) — the
- * merge gate used to surface BOTH as the same flat "build gate failed", so managers learned the gate
- * "lies" under load and hand-rolled an unsafe `--no-verify` squash to route around it.
+ * Classify a failed gate step so the merge gate can tell a transient external kill from a genuine
+ * test/build failure — see the decision record for why this exists.
  *  - **"kill"** — an external signal terminated the step and OUR OWN {@link runGateStep} timeout bound
  *    was NOT the cause (`failedTimedOut` false, `failedSignal` set) — the shape of an OOM-killer/cgroup/
  *    resource-limit kill. Retry-eligible.
@@ -1146,6 +1004,7 @@ export type GateFailureClass = "genuine" | "kill" | "timeout";
  *    retry call site's guardrail). Retry-eligible, but deliberately so.
  *  - **"genuine"** — a clean non-zero exit (or a spawn error) with no signal and no timeout: a real
  *    test/build failure. NEVER retried — retrying would waste cycles and could mask a flaky-passing test.
+ * @decision bcba83a1 — see docs/decisions/bcba83a1-classify-gate-failure-so-managers-stop-routing-around-the-gate.md
  */
 export function classifyGateFailure(
   result: Pick<GateSequentialResult, "failedSignal" | "failedTimedOut">,
@@ -1232,52 +1091,16 @@ export type RetryIdentification =
   | { eligible: false; declineReason: RetryDeclineReason };
 
 /**
- * Card 344ce950 (single-file) / 67030bb9 (bounded multi-file, manager-approved design — REPLACES the old
- * exactly-one-file `identifyRetriableTestFile`; see git history for that function's own fuller reasoning,
- * which this one inherits in full and does not repeat here): given a gate run's own {@link
- * GateStepResult.failTierAll}/{@link GateSequentialResult.failTierAll} — every {@link
- * HARNESS_FAIL_WRAPPER_RE} line the live scan saw, in order — and the gate's `cwd`, identify UP TO
- * `maxFiles` distinct test files this daemon's own hermetic suite (`packages/daemon/scripts/
- * test-daemon.mjs`) can re-run TOGETHER in isolation via its existing `--only=<name>[,<name>...]`
- * selection flag (card 6185fbfc — the same flag `test-daemon-cli-args.mjs`/
- * `test-daemon-gate-timing-sigkill.mjs` already drive directly), so a merge gate can retry a small failing
- * SET instead of the whole ~650-file suite before declaring a rejection.
- *
- * ⚠️ Card 0e5b2045 — TAKES `failTierAll`/`failTierTestCount`, NOT `failingTest`/`failingTestCount`. The
- * two diverge on purpose: `failingTest` is whichever tier's line is most diagnostically useful (as of card
- * 0e5b2045, an `UNCAUGHT`-idiom line outranks a bare `FAIL <name>` summary there), but THIS function can
- * only ever parse the FAIL/not-ok tier's own bare-identifier shape — so it reads the tier-isolated
- * `failTierAll`/`failTierTestCount` accessors ({@link createFailingTestTracker.failTierAllResults}/
- * `.failTierMatchCount`) instead, independent of whichever tier won `result()` for display. Passing
- * `failingTest`/`failingTestCount` here would be silently wrong on any run where a higher-priority
- * diagnostic tier also matched: the retry would appear to "stop firing" for reasons unrelated to whether a
- * retriable FAIL line actually exists.
- *
- * DELIBERATELY NARROW AND FAIL-CLOSED, PER NAME: this recognizes ONLY this daemon's own `FAIL  <name>`
- * convention (a bare identifier — letters/digits/hyphen/underscore, no path, no extension — see
- * test-daemon.mjs's own `runLane`: `console.log(\`${result.ok ? "PASS" : "FAIL"}  ${result.name}...\`)`),
- * never the sibling Jest/AVA/tap/`AssertionError`/`error TSxxxx`/`UNCAUGHT` shapes {@link
- * FAILING_TEST_PATTERNS} also recognizes, and NEVER via a second parser beyond this one bare-name regex —
- * the caller must pass the SAME `failTierAll` the live {@link createFailingTestTracker} scan already
- * extracted, not re-derive it. EVERY name is confirmed against the REAL filesystem (`fs.existsSync`)
- * before ever being reported identifiable — never a regex-only guess — so a single name in the set that
- * merely LOOKS like one of ours but doesn't correspond to a real file declines the WHOLE set (never a
- * partial candidate), same fail-closed posture the old single-file function always had, just applied to
- * every member instead of the one.
- *
- * ⚠️ THE COUNT CHECK THIS REPLACES (manager review, card 344ce950, inherited unchanged in spirit): this
- * daemon's own test runner has NO fail-fast (`test-daemon.mjs`'s `Promise.all` over lanes; `failed` is an
- * ARRAY) — a single run can genuinely fail on any number of files. The old function required EXACTLY `1`;
- * this one requires the count to be within `[1, maxFiles]` — everything ABOVE the cap still refuses
- * exactly as `!== 1` used to for anything above 1, the identical "ambiguity ⇒ not identifiable" posture,
- * just with a wider still-identifiable band below it. `failTierTestCount` stays REQUIRED (not optional)
- * for the identical fail-closed reason it always was.
- *
- * 🎯 CARD 2a79a74c FINDING #5 — DECISION, unchanged: this retry REFUSES outright whenever
- * `harnessNotExecutedDetected` is true, REGARDLESS of the count — see `HARNESS_NOT_EXECUTED_RE`'s own doc
- * for the exact masking mechanism this closes (a co-occurring genuine failure's own wrapper line survives
- * test-daemon.mjs's early `notExecuted` exit untouched, so the count alone cannot see that OTHER
- * discovered files were structurally never run at all).
+ * Given a gate run's own {@link GateStepResult.failTierAll}/{@link GateSequentialResult.failTierAll} —
+ * every {@link HARNESS_FAIL_WRAPPER_RE} line the live scan saw, in order — and the gate's `cwd`, identify
+ * UP TO `maxFiles` distinct test files this daemon's own hermetic suite can re-run TOGETHER in isolation
+ * via its existing `--only=<name>[,<name>...]` flag, so a merge gate can retry a small failing SET instead
+ * of the whole suite before declaring a rejection. `failTierTestCount` stays REQUIRED (not optional) for
+ * the fail-closed reason detailed in the decision record. Refuses outright, regardless of count, whenever
+ * `harnessNotExecutedDetected` is true.
+ * @decision 67030bb9 — see docs/decisions/67030bb9-retrywarning-three-cases-corrected-present-on-fail-too.md (Decision B)
+ * @decision 0e5b2045 — see docs/decisions/0e5b2045-uncaught-tier-ranks-above-fail-not-ok-and-retry-is-decoupled.md (failTierAll divergence)
+ * @decision 2a79a74c — see docs/decisions/2a79a74c-notexecuted-refuses-the-single-file-retry-outright.md
  */
 export function identifyRetriableTestFiles(
   failTierAll: string[] | undefined,
@@ -1391,24 +1214,12 @@ export function formatRetryAlsoFailedWarning(retriedFile: string, outputTail?: s
 }
 
 /**
- * Card 7ad12202, Code Review BLOCKING [1]: the THIRD case neither {@link formatWeakerPassWarning} nor
- * {@link formatRetryAlsoFailedWarning} can honestly render — the isolated single-file retry genuinely
- * PASSED (`retryPassed:true`), but the gate is still REJECTED overall, because {@link
- * mergeResumedGateResult}'s own resume (a step the original `&&` chain never reached before the rescue)
- * then failed for real. Before this card, a caller dispatching purely on `retryPassed` (never checking the
- * gate's own actual verdict) rendered `formatWeakerPassWarning`'s "⚠ WEAKER PASS" wording on a `passed:
- * false` record — prose asserting a pass that did not happen, the exact defect class card `9bdc8ea5`
- * exists to remove. A caller must dispatch on the GATE's real outcome first (e.g. `t.record.verdict ===
- * "pass"` / `result.gatePassed`), THEN on `retryPassed` only to pick between {@link
- * formatRetryAlsoFailedWarning} (retry itself failed) and THIS function (retry passed, something else
- * broke afterward) — see this card's own two fixed dispatch sites in `sessions/service.ts` for the
- * pattern.
- *
- * Deliberately takes NO `outputTail` — {@link isTimeoutKillEntry}'s classification is about whether
- * `retriedFile`'s OWN failure was a timeout kill, which is no longer the actionable question once a
- * DIFFERENT, later step is what actually rejected the gate; a caller holding the resumed step's own
- * `outputTail` should surface THAT through the ordinary rejection/`gateDetail` fields, not through this
- * warning's text.
+ * The THIRD case neither {@link formatWeakerPassWarning} nor {@link formatRetryAlsoFailedWarning} can
+ * honestly render — the isolated single-file retry genuinely PASSED, but the gate is still REJECTED
+ * because {@link mergeResumedGateResult}'s own resume then failed for real. A caller must dispatch on the
+ * GATE's real outcome first, THEN on `retryPassed` only to pick between the sibling formatter and this
+ * one. Deliberately takes NO `outputTail` — see the decision record for why.
+ * @decision 7ad12202 — see docs/decisions/7ad12202-dispatch-on-gate-verdict-not-retrypassed.md (Decision B)
  */
 export function formatRetryRescuedButGateRejectedWarning(retriedFile: string, batchBranchCount?: number): string {
   const names = retriedFile.split(",");

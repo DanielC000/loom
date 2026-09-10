@@ -7,6 +7,21 @@ Card 67030bb9 (CORRECTED, card 4ad6ccfd — the previous version of this doc, "p
 - `ok:false` with `retryPassed:true` (the retry itself passed, but a fast-forward/HEAD-read failure AFTER the gate — `batch-merge.ts`'s `:806`/`:813` returns — means nothing actually landed): still the "⚠ WEAKER PASS" wording (the retry fact is real and worth surfacing), but with NO batch clause — the caller passes `batchBranchCount:undefined` here specifically so this never asserts a landing that didn't happen (the "ALL N land on the strength of this ONE retry" clause would be false on this return, whose own `landed: []` says as much).
 - `ok:false` with `retryPassed:false` (a genuine gate rejection, `batch-merge.ts`'s `:797` return, the ONLY reachable case here): the "⚠ RETRY ALSO FAILED" wording, with a batch clause carrying the count of branches ASSEMBLED into the batch worktree and gated (never "landed" — nothing lands on a rejection; this is the same "assembled", not "landed" wording `BatchGateResult.retriedFile`'s own doc (git/batch-merge.ts) already gets right).
 
+## Decision B: `identifyRetriableTestFiles` (gate-runner.ts) — the bounded multi-file design, fail-closed per name
+
+### Narrative
+
+`identifyRetriableTestFiles` (card 344ce950 single-file / 67030bb9 bounded multi-file, manager-approved — REPLACES the old exactly-one-file `identifyRetriableTestFile`) identifies UP TO `maxFiles` distinct test files this daemon's own hermetic suite can re-run TOGETHER in isolation via its `--only=<name>[,<name>...]` flag (card 6185fbfc), so a merge gate can retry a small failing SET instead of the whole ~650-file suite before declaring a rejection.
+
+DELIBERATELY NARROW AND FAIL-CLOSED, PER NAME: recognizes ONLY this daemon's own `FAIL  <name>` convention (a bare identifier — letters/digits/hyphen/underscore, no path/extension), never the sibling Jest/AVA/tap/`AssertionError`/`error TSxxxx`/`UNCAUGHT` shapes, and NEVER via a second parser. EVERY name is confirmed against the REAL filesystem before being reported identifiable — a single name that merely LOOKS like one of ours but doesn't correspond to a real file declines the WHOLE set (never a partial candidate).
+
+THE COUNT CHECK THIS REPLACES (manager review, card 344ce950, inherited unchanged in spirit): this daemon's test runner has NO fail-fast (`Promise.all` over lanes; `failed` is an ARRAY) — a single run can genuinely fail on any number of files. The old function required EXACTLY `1`; this one requires `[1, maxFiles]` — everything ABOVE the cap still refuses exactly as `!== 1` used to, the identical "ambiguity ⇒ not identifiable" posture, just with a wider band below it.
+
+### Do not
+
+- Do not report a partial candidate set when one name fails the filesystem check — the WHOLE set declines.
+- Do not widen the recognized shape beyond the bare `FAIL  <name>` convention, or add a second parser — a caller must pass the SAME `failTierAll` the live scan already extracted.
+
 ## Do not
 
 - Do not gate `retryWarning`'s presence on `ok:true` alone — card 4ad6ccfd corrected an earlier version of this doc that claimed exactly that; it is also present on `ok:false`.
