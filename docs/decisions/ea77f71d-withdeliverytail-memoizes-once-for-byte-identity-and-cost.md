@@ -9,11 +9,22 @@ Card ea77f71d (Code Reviewer Major ②, follow-up on card 8e0d09e8): `m.resolveT
 
 KNOWN CAVEAT (accepted, not closed by this fix): memoization happens on the FIRST touch, which is not always the real delivery write — a coalescing-budget probe that ends up REJECTING this candidate (it stays in `live.pending` for a later drain) still counts as a touch. Today's one production resolver (`SessionService.platformEscalate`) can never hit this, because it always enqueues with no `senderId`, which keeps it out of the same-sender coalescing-candidate scan entirely (see that scan's own `senderKey !== null` guard) — so it is always resolved exactly at its own head-of-batch, i.e. genuinely at drain time. A FUTURE resolver-bearing caller that DOES supply a `senderId` and gets rejected as a coalescing candidate would see its tail frozen at that earlier, rejected probe rather than at its actual later delivery — this is named explicitly here so a future caller (via `resolveTailAtDelivery`'s own doc) can judge whether that's acceptable for what it reads.
 
+## Item 7 (Code Reviewer Minor) — a deleted task returns a visible marker, not `undefined`
+
+`platformEscalate`'s `resolveTailAtDelivery` closure, when the escalated task has since been deleted,
+returns a VISIBLE `" · column: unknown"` marker instead of `undefined` — so "the resolver ran and found
+nothing" is no longer silently indistinguishable from "the resolver never ran at all" (the carry-boundary
+loss `8e0d09e8`'s own record names). A throw from the underlying `getTask` call is NOT caught inside the
+closure itself — `withDeliveryTail`'s own catch (`pty/host.ts`) handles that, degrading to the filing
+stamp alone exactly as before; this marker only covers the "ran, found nothing" case.
+
 ## Do not
 
 - Do not remove the memoization (`m.resolvedTailReady`/`m.resolvedTail`) — a resolver that reads live external state could then return a different value between `drainPending`'s real write and `requeueGiveUpOrigin`'s later reconstruction, silently breaking the late-confirmation content-match/purge mechanism.
 - Do not assume today's known caveat (first-touch may be a rejected coalescing probe, not the real delivery write) is closed — it's accepted as harmless only because the one production resolver never hits it; a future `senderId`-supplying resolver caller must judge this explicitly.
+- Do not let a deleted-task lookup return `undefined`/silence from `resolveTailAtDelivery` — return a
+  visible marker, or a genuine "ran and found nothing" becomes indistinguishable from "never ran."
 
 ## Source
 
-Inline comment in `packages/daemon/src/pty/host.ts` (`withDeliveryTail`'s function doc), as of commit `1974444dc94618d380f474192e22edff20215ec5`. Relocated by card `de94a415` (tranche 2 on `pty/host.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+Inline comment in `packages/daemon/src/pty/host.ts` (`withDeliveryTail`'s function doc), as of commit `1974444dc94618d380f474192e22edff20215ec5`. Relocated by card `de94a415` (tranche 2 on `pty/host.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped. The Item 7 section is from `packages/daemon/src/sessions/service.ts` (`platformEscalate`'s `resolveTailAtDelivery` closure), commit `8f08264959e3cda423b7a0c9c2df69acdc775b74`, as of this tranche's HEAD (tranche 30 on `sessions/service.ts`).

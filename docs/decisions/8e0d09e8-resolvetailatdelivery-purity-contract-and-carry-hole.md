@@ -37,6 +37,21 @@ time-sensitive) MUST embed its OWN read-time stamp in the string it returns — 
 frame's own vintage marker (if it has one) to cover the tail too; the two can legitimately diverge once a
 rate-limit replay is in play.
 
+## `platformEscalate`'s OWN DoD-1 (filing stamp) / DoD-5 (live column read)
+
+**DoD-1:** `platformEscalate`'s notice bakes the FILING instant (`now`, captured once at the top of the
+call) directly into the frozen frame text, alongside the frozen title — so a recipient reading the notice
+long after it was queued (a frame can sit in `live.pending` for minutes, see `enqueueStdin`'s held path)
+can tell it's reading a snapshot rather than a live event. `input.title` itself is never re-minted here or
+anywhere in this frame — it stays exactly as filed (the dedupe signature).
+
+**DoD-5:** the escalated task's CURRENT COLUMN is different — unlike the filing stamp, it's LIVE data and
+must be read at actual DELIVERY time, not baked in at filing. Observed case that motivated this: the Lead
+closed the underlying board card roughly 4 minutes before this exact notice finally drained from the
+queue — a column baked in at filing would have shown the wrong (stale, pre-close) state for those 4
+minutes. `resolveTailAtDelivery` is what makes the live read possible (see `ea77f71d` for exactly when it
+fires relative to drain).
+
 ## Do not
 
 - Do not give `resolveTailAtDelivery` any side effect — it must stay pure; a mutation, counter bump, or log
@@ -46,6 +61,9 @@ rate-limit replay is in play.
   resolver that ran and returned nothing).
 - Do not write a freshness-conveying resolver without embedding its own read-time stamp in the returned
   string — a rate-limit replay can deliver the frozen text hours after it was assembled.
+- Do not bake the escalated task's current column into the frame at filing time — read it via
+  `resolveTailAtDelivery` at actual delivery, or a Lead who closes the card between filing and delivery
+  sees stale column state.
 
 ## Source
 
@@ -54,4 +72,6 @@ Inline comment in `packages/daemon/src/pty/host.ts` (the `resolveTailAtDelivery`
 `8df12ef535e124c47abb9cd454031b601217b6ec` (`feat(sessions): stamp escalation notices with filing and
 column-read times`) and commit `8f08264959e3cda423b7a0c9c2df69acdc775b74` (`refactor(pty): memoize the
 delivery tail at drain so annotatedMessageText is pure again`). Relocated by card `3f45b7d8` (tranche 6 on
-`pty/host.ts`).
+`pty/host.ts`). The DoD-1/DoD-5 section is from the same two commits' comments in
+`packages/daemon/src/sessions/service.ts` (`platformEscalate`'s notice-building code), as of this
+tranche's HEAD (tranche 30 on `sessions/service.ts`).

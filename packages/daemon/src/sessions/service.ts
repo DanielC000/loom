@@ -1968,13 +1968,8 @@ export class SessionService {
    */
   private readonly runTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /**
-   * Completion-escalation de-dup window (card 5907b71e part 2): sessionId → the deploy SHAs a
-   * `[loom:daemon-restarted]` wake already delivered to that session (in the restart `reason`), with the
-   * delivery time. A later "X COMPLETE + DEPLOYED" `platform_escalate` that names the SAME SHA is then a
-   * duplicate of a turn the session already saw — its LIVE nudge is suppressed (the durable board task is
-   * still filed). In-memory by design: the deliver (resume on boot) and the read (escalation) both happen
-   * in the SAME post-restart daemon process, and a missed dedup is harmless (one extra turn). Pruned by
-   * {@link SHA_DEDUP_TTL_MS} so a stale SHA can't suppress a genuinely new, unrelated escalation later.
+   * @decision 5907b71e — sessionId → deploy SHAs a daemon-restart wake already delivered (part 2's dedup
+   * window). In-memory/process-local by design; pruned by {@link SHA_DEDUP_TTL_MS}.
    */
   private readonly deployShaWindow = new Map<string, { shas: Set<string>; atMs: number }>();
   private static readonly SHA_DEDUP_TTL_MS = 30 * 60_000;
@@ -4507,10 +4502,8 @@ export class SessionService {
       const s = this.db.getSession(id);
       return !!s?.rateLimitedUntil && new Date(s.rateLimitedUntil).getTime() > now.getTime();
     };
-    // card 5907b71e part 1 (wake cause/impact classification, superseding the older #7 + 90058589
-    // "converged" gate): a manager/platform wake is classified by what THIS restart actually touched —
-    // workers resumed, queued I/O replayed, the board — not by a (stale) idle-policy. An unaffected
-    // bystander no-ops cheaply (isNoOpManagerWake) instead of burning a full re-check turn.
+    // @decision 5907b71e — wake impact classified by what THIS restart actually touched (workers
+    // resumed, I/O replayed, board), not by a stale idle-policy; a genuine bystander no-ops cheaply.
     const liveWorkerCount = (managerId: string): number =>
       entries.filter((e) => e.role === "worker" && e.parentSessionId === managerId).length;
     // @decision 6d6b1b7b — the worktree-at-risk pre-pass runs once, eagerly, over the flat per-entry resume loop's own order-independent population; see docs/decisions/6d6b1b7b-worktree-risk-prepass-is-eager-and-flat.md.
@@ -4556,11 +4549,8 @@ export class SessionService {
       queuedIoReplayed: (intent.pending?.[id] ?? []).length,
     });
 
-    // Deploy SHAs named in the restart reason — a manager typically stamps the deployed SHA into it. Only
-    // a wake whose ENQUEUED text actually names the reason records these against its session (see the
-    // per-branch calls below), so a later "X COMPLETE + DEPLOYED" escalation for the same SHA can be
-    // de-duped (card 5907b71e part 2) — WITHOUT recording it for a session that was never actually told
-    // (card 066d317c).
+    // @decision 5907b71e — deploy SHAs named in a restart reason feed the completion-escalation dedup.
+    // @decision 066d317c — recorded only for a session whose enqueued text actually named the reason.
     const reasonShas = extractCommitShas(intent.reason);
 
     // Card 11b847e1: `intent.reason` is FREE TEXT a manager types when calling `daemon_restart` — unlike
@@ -4764,8 +4754,7 @@ export class SessionService {
         skippedParked.push(reqId);
       } else {
         replayPending(reqId);
-        // The requester's "code is live" nudge names the deployed SHA (in the reason) — record it so its
-        // own "X COMPLETE + DEPLOYED" completion escalation for that SHA is de-duped (card 5907b71e part 2).
+        // @decision 5907b71e — the requester's nudge always names the reason, so record its SHA too.
         this.recordDeployShasDelivered(reqId, reasonShas);
         const reqWorkersResumed = reqWorkers.filter((id) => resumed.includes(id)).length;
         const reqDraftNote = entries.find((e) => e.sessionId === reqId)?.hadUnsentDraft ? DRAFT_LOSS_NOTE : "";
@@ -8276,39 +8265,23 @@ export class SessionService {
     let suppressedShas: string[] | undefined;
     const liveLead = this.db.listAllSessions().find((s) => s.role === "platform" && s.processState === "live");
     if (liveLead) {
-      // Completion-escalation de-dup (card 5907b71e part 2, corrected by 066d317c): a "X COMPLETE +
-      // DEPLOYED" escalation naming a SHA the Lead already saw via a recent `[loom:daemon-restarted]`
-      // deploy wake is a duplicate turn — suppress the LIVE nudge (one completion = one turn). The durable
-      // board task above is ALWAYS filed either way, so nothing is ever LOST. But this IS a live Lead
-      // being deliberately skipped, not a genuinely offline one — `deliveryStatus` must say so distinctly
-      // (`suppressed-duplicate`, never `boarded`): a sender reading `boarded` here can't tell "nobody is
-      // watching" from "someone IS watching, we just chose not to interrupt them" (card 066d317c — this
-      // conflation, combined with the record-unconditionally bug in resumeFleetOnBoot, let a sender stand
-      // down believing a report was merely durably filed when a live Lead had in fact been skipped). A SHA
-      // the Lead has NOT seen is a legitimate, un-suppressed escalation (no regression).
+      // @decision 5907b71e — a completion escalation naming a SHA the Lead already saw via a recent
+      // daemon-restart wake is a duplicate turn; suppress only the LIVE nudge (board task still files).
+      // @decision 066d317c — deliveryStatus must say "suppressed-duplicate", never "boarded": a sender
+      // reading "boarded" can't tell "nobody is watching" from "someone is, we chose not to interrupt".
       const escShas = extractCommitShas(`${input.title} ${input.detail}`);
       const matchedShas = this.deployShasAlreadyDelivered(liveLead.id, escShas);
       if (matchedShas.length > 0) {
         deliveryStatus = "suppressed-duplicate";
         suppressedShas = matchedShas;
-        // Card 066d317c DoD-3: log the MATCHED TOKEN(S), not just that a suppression happened — both the
-        // dedup window and `extractCommitShas` free-match 7-40 hex chars, so a genuine commit SHA can
-        // collide with an unrelated hex-looking token (e.g. a Loom card id) named in either the deploy
-        // reason or this escalation's own title/detail. Without the token logged, a wrongly-suppressed
-        // escalation is unrecoverable after the fact — there'd be no way to tell which token collided.
+        // @decision 066d317c — log the matched SHA token(s), not just that suppression happened: a
+        // wrongly-suppressed escalation is unrecoverable after the fact without knowing which token collided.
         // eslint-disable-next-line no-console
         console.log(`[escalation] suppressed live completion nudge to Lead ${liveLead.id} — token(s) already delivered by a deploy restart: ${matchedShas.join(", ")} (task ${taskId} still filed)`);
       } else {
-        // Card 170daebd: a notice's title is frozen at filing and can only ever describe ITSELF (see
-        // `escalationSignature`'s own doc on why re-minting the title would destroy the dedupe signal) —
-        // so a recipient reading one notice in isolation has no way to tell "just this one" from
-        // "several outstanding, and this is only one of them". The observed failure mode: a LATE,
-        // already-resolved-by-the-time-it-arrives notice reads as a pure replay while a DIFFERENT,
-        // genuinely still-open escalation sits unmentioned. We can't rewrite an earlier notice's already-
-        // queued text, but we CAN give every notice an honest count, AS OF ITS OWN FILING, of how many
-        // OTHER escalations against this same Platform home are still open — so whichever one is filed
-        // later (while an earlier one is still outstanding) surfaces that count. This is a count, never a
-        // suppression: the replay/late-arrival itself is legitimate and still lands unchanged.
+        // @decision 170daebd — a notice's title is frozen at filing and can't disclose other open
+        // escalations; give every notice an honest "+N other escalations open" count AS OF ITS OWN
+        // FILING instead — a count, never a suppression (the late/replay arrival still lands unchanged).
         const otherOpenTaskIds = new Set<string>();
         for (const e of this.db.listEscalationsForPlatform(home.id)) {
           if (!e.taskId || e.taskId === taskId) continue;
@@ -8319,40 +8292,17 @@ export class SessionService {
         const otherSuffix = otherOpenCount > 0
           ? ` (+${otherOpenCount} other escalation${otherOpenCount === 1 ? "" : "s"} currently open)`
           : "";
-        // Card 8e0d09e8 DoD-1: stamp the FILING instant (`now`, captured once at the top of this call —
-        // frozen, safe to bake into the frame right here) alongside the frozen title, so a recipient who
-        // reads this notice long after it was queued (this whole frame can sit in `live.pending` for
-        // minutes — see `enqueueStdin`'s held path) can tell it's reading a snapshot rather than a live
-        // event. ⛔ Do NOT re-mint `input.title` itself here or anywhere below — it's the dedupe signature
-        // (`escalationSignature`, companion/attention-push.ts) and must stay exactly as filed.
+        // @decision 8e0d09e8 — stamp the FILING instant (`now`) into the frame, never re-mint `input.title`
+        // (the dedupe signature) — a recipient reading this long after queuing can tell snapshot from live.
         const note = `[loom:escalation] ${originName} manager escalated a Loom issue → Platform board task ${taskId} (filed ${now}): ${input.title} (severity: ${severity})${otherSuffix}`;
-        // DoD-5: the card's CURRENT COLUMN — unlike the filing stamp, this is LIVE data and must be read at
-        // actual DELIVERY time, not here (this whole branch can run seconds after filing while the Lead is
-        // idle, or the note can sit queued for minutes while the Lead is busy — see the second field
-        // instance on card 8e0d09e8, where the Lead closed the card ~4 minutes before this exact notice
-        // finally drained). `resolveTailAtDelivery` is invoked by PtyHost the first time it TOUCHES this
-        // entry (see `withDeliveryTail`'s own doc, card ea77f71d — genuinely at drain time for this
-        // resolver specifically, since it never sets `senderId` and so never becomes a coalescing-budget
-        // probe candidate), so this closure's `getTask` read happens then, not now.
-        // Card ea77f71d (Code Reviewer Minor, item 7): a deleted task now returns a VISIBLE
-        // ` · column: unknown` marker instead of `undefined` — so "the resolver ran but found nothing" is
-        // no longer silently indistinguishable from "the resolver never ran at all" (a carry-boundary loss,
-        // see `QueuedMessage.resolveTailAtDelivery`'s own doc for that remaining, still-silent hole). A
-        // throw from `getTask` itself is NOT caught here — PtyHost's own `withDeliveryTail` catch handles
-        // that (degrades to the filing stamp alone, exactly as before) — never dropped or delayed by this.
-        //
-        // Code Reviewer Major ① (2026-09-02): `annotatedMessageText`'s resolved text is what `submit()`
-        // stores verbatim into `live.lastPrompt` — and `resumeAfterRateLimit` replays THAT STRING, tail
-        // already baked in, unchanged, however much later a usage-cap park happens to clear (hours,
-        // potentially). Without its own vintage marker the tail would then read as CURRENT when it can be
-        // badly stale — worse than DoD-1's gap, since a reader who trusts the frame's `(filed …)` bound
-        // has no reason to suspect the TAIL carries a different, older vintage than the frame around it.
-        // So the tail stamps ITSELF, read at the same moment as the column (never re-derived from `now`
-        // above — that's the FILING instant, not this closure's own read time) — a replayed tail then
-        // still discloses precisely when the column value it's showing was actually read, honest under a
-        // rate-limit replay exactly the same way it's honest under an ordinary queued-then-drained delivery.
-        // Matches the filing stamp's own full-ISO format (not the card's illustrative "12:08Z" shorthand)
-        // — one timestamp format in this frame, not two.
+        // @decision 8e0d09e8 — the CURRENT COLUMN is LIVE data; read it via resolveTailAtDelivery at actual
+        // DELIVERY time (see @decision ea77f71d for exactly when that fires), never baked in here at filing.
+        // @decision ea77f71d — a deleted task returns a VISIBLE " · column: unknown" marker, not
+        // `undefined`, so "ran and found nothing" isn't silently indistinguishable from "never ran".
+        // A throw from getTask is NOT caught here — PtyHost's withDeliveryTail catch handles that.
+        // @decision 8e0d09e8 — the resolver's tail stamps ITS OWN read-time (never `now`, the filing
+        // instant) in the SAME full-ISO format as the filing stamp — one timestamp format in this frame —
+        // so a `resumeAfterRateLimit` replay hours later still discloses when the column was read.
         const resolveTailAtDelivery = () => {
           const t = this.db.getTask(taskId);
           if (!t) return " · column: unknown"; // card ea77f71d item 7: a VISIBLE marker, not a silent no-tail
