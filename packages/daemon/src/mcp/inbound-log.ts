@@ -1,24 +1,17 @@
 import { createHash } from "node:crypto";
 
 /**
- * Card 98c4a651: MCP tool calls were the only inbound path with NO log trace at all — pty writes get
- * `[pty-write]` (byte-level), hooks get `[hook]`/`[submit]` (event-level), MCP got nothing. That silence
- * is what made a "was that `worker_report` delivered twice, or called twice?" question undecidable even
- * in principle. This is the fix: one `[mcp]` line per inbound MCP HTTP request, identity-only, matching
- * the existing `[hook]`/`[pty-write]` `tag sessionId key=value…` shape so the same log-census greps keep
- * working (`Grep '\[mcp\]' packages/daemon/src` / the daemon log).
+ * @decision 98c4a651 — one `[mcp]` line per inbound MCP request, identity-only, matching the existing
+ * `[hook]`/`[pty-write]` log shape (`Grep '\[mcp\]' packages/daemon/src` / the daemon log). Don't remove
+ * as "redundant" — MCP calls were previously undecidable ("delivered twice" vs "called twice").
  *
- * ⚠️ Card 16c93a50 (content-in-durable-logs policy) is still OPEN/unanswered as of this card — so this
- * logs identity and SHAPE only (tool name, args length, `shortHash` — a truncated SHA-1 COMMITMENT over
- * the args), never the tool arguments or message text themselves. If 16c93a50 settles a different policy
- * later, conform this to it.
+ * Card 16c93a50 (content-in-durable-logs policy) is OPEN/unanswered — this logs identity/SHAPE only
+ * (tool name, args length, `shortHash`), never the tool arguments or message text. Conform this to
+ * 16c93a50 if/when it settles a different policy.
  *
- * ⛔ `shortHash` is a commitment, NOT a secrecy mechanism — it is one-way, but brute-forceable by
- * enumeration over a low-entropy input (a small enum, a boolean, `{}`), especially combined with the
- * `tool=` name on the same line (e.g. `tool=idle_report` narrows the guesses to a handful of known
- * states). It is sufficient for its actual job — telling identical args from different args when
- * correlating a suspected duplicate call — but it does NOT make logging the arguments themselves safe,
- * and it is not a substitute for 16c93a50 settling.
+ * ⛔ `shortHash` is a commitment, NOT a secrecy mechanism — one-way but brute-forceable over low-entropy
+ * args (a small enum, a boolean, `{}`), esp. combined with the `tool=` name on the same line. It tells
+ * identical args from different args; it does not make logging the args themselves safe.
  *
  * Called from gateway/server.ts, once per `/mcp*` route, BEFORE the request is handed to that router's
  * own `handle()` — mirrors the existing `deps.pty.markMcpSeen(sessionId)` call on `/mcp-orch`, which
@@ -30,28 +23,12 @@ import { createHash } from "node:crypto";
  * Cheap by construction: no I/O beyond the one `console.log`, and the JSON.stringify of `arguments` (for
  * the length/hash) is bounded by whatever the MCP transport already parsed into memory for this request.
  *
- * ⭐ WHO READS THIS, AND WHEN (per project memory `shipping-a-detector-is-not-someone-reading-it`): the
- * Loom lead reads `[mcp]` lines in the daemon log WHEN ALREADY DIAGNOSING a suspected duplicate delivery
- * (e.g. a `worker_report` or `[loom:prompt-mismatch]` that appears to have arrived twice) — NOT on a
- * periodic check nobody will actually run. That diagnosis is exactly what this instrument exists to make
- * decidable: cross-reference the `[mcp]` census against the suspect event to tell "delivered twice" from
- * "called twice."
+ * `attribute` (@decision cd0c7fee) piggybacks sub-agent correlation (`attribution=confirmed-subagent`
+ * etc.) onto this SAME line/reader — observation only; nothing enforces a sub-agent's call yet.
  *
- * Card cd0c7fee's `attribute` param piggybacks the sub-agent-call correlation state onto this SAME line
- * and SAME reader — no new surface, because there wasn't a reader for a new one. ⚠️ THIS IS STILL ONLY AN
- * OBSERVATION, not enforcement: nothing refuses a sub-agent's call yet. The honest state today is "the
- * Loom lead can see `attribution=confirmed-subagent` on this line if and when they go looking for a
- * specific incident" — there is no periodic reader and no alert. Per
- * `shipping-a-detector-is-not-someone-reading-it`: a card whose last step is an observation isn't closed
- * by merging this — the follow-up enforcement card is what turns this from visible-but-inert into acted-on.
- *
- * Card 2d8d2e42's `onRepeatedCall` param piggybacks a SECOND signal onto this SAME per-entry loop, for the
- * SAME reason `attribute` does: it needs the identical `argsHash` already computed here for the `[mcp]`
- * line, and adding a second, independent hash computation elsewhere would risk the two silently drifting.
- * Unlike `attribute` (which is scoped to `WATCHED_TOOL_NAMES`), this fires for EVERY tool call that carries
- * an `argsHash` — see `pty/repeated-call-tracker.ts`'s own doc for why the wider scope is deliberate and
- * costs nothing in false positives. This does NOT gate or refuse the call; it is advisory, same posture as
- * `attribute`.
+ * `onRepeatedCall` (@decision 2d8d2e42) reuses this loop's already-computed `argsHash` rather than
+ * recomputing it, and fires for EVERY tool call (wider than `attribute`'s `WATCHED_TOOL_NAMES` scope) —
+ * advisory only, never gates the call.
  */
 
 let mcpLogSeq = 0;
