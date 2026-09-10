@@ -7787,37 +7787,16 @@ export class SessionService {
    * (immediate delivery) simply records a harmless marker with no queued counterpart — but onDeliver is
    * only ever attached to a HELD entry, so that can't occur.
    *
-   * Card 9da2a435 (the caveat `messageWorker`'s own comment points back here for): despite the event kind
-   * name, this is a HAND-OFF stamp, not an engine-confirmed delivery — it fires the moment `drainPending`/
-   * `consumePending` splices the entry and calls `submit()`, exactly like the immediate-delivery path's own
-   * `turnSeqAtDelivery` stamp (`messageWorker`, above). `submit()`'s Enter write is confirmed — or GIVES UP
-   * — asynchronously, well after this method already ran. A submit that gives up re-mints or terminally
-   * PARKS (`handleGiveUpExhausted`) and appends a `session_message_gave_up` event carrying the SAME msgId
-   * this method just stamped "delivered" for; `staleDirectiveProjection`'s chain walk (mcp/orchestration.ts)
-   * is what actually resolves whether this stamp held up, not this method's name.
-   *
-   * `opts.sender` (card 0f693dea CR follow-up) — this event used to hard-code `managerSessionId:""`
-   * regardless of who originated the message, unlike its own paired `session_message_queued` event (which
-   * has ALWAYS carried the real `ctx.sender`, see `enqueueDurableMessage` above). That asymmetry is what
-   * made a HELD `peer_message` send resolve to "delivered" only via a RECIPIENT-scoped read
-   * (`db.listEventsForWorker`) and never a SENDER-scoped one (`db.listEvents(callerSessionId)`) — the exact
-   * gap `peer_message_status` (mcp/orchestration.ts) hit: reading only its own sender-scoped stream, a
-   * genuinely-delivered held send read "pending" forever, because the ONE event that would have flipped it
-   * was filed under nobody's session. Stamping the real sender here — every caller now threads it through —
-   * closes that WITHOUT widening `peer_message_status`'s own read into any other session's stream; the
-   * fix is at the SOURCE of the mis-attribution, not a workaround around it. Every caller that omits it
-   * (there are none left in this codebase, but a future one could) falls back to `""`, byte-identical to
-   * this method's behavior before this card.
+   * @decision 9da2a435 — despite the event kind name, this is a HAND-OFF stamp, not an engine-confirmed
+   * delivery; resolve via `staleDirective`/`parkedDirective`'s give-up chain walk, never this stamp alone.
+   * @decision 0f693dea — `opts.sender` must carry the real originating sender (never the old hardcoded
+   * `""`), or a HELD send resolves "delivered" only via a RECIPIENT-scoped read, never a SENDER-scoped one.
    */
   private resolveQueuedMessage(msgId: string, opts: { recipientId?: string; reason?: string; sender?: string } = {}): void {
     try {
       if (this.db.isQueuedMessageDelivered(msgId)) return; // already resolved — idempotent no-op
-      // Card 343441bd: this fires the instant a HELD message is handed off to the recipient
-      // (drainPending/consumePending's onDeliver, or the boot re-drive) — the correct stamp point for
-      // `turnSeqAtDelivery` on the held path (mirrors messageWorker's immediate-path stamp; NEVER at
-      // enqueue) — see this method's own doc above for why "handed off" is not "engine-confirmed". Only
-      // stamped on a genuine hand-off (`!opts.reason`) — a "superseded"/"obsolete" resolution never
-      // actually delivered the text, so it has no real delivery turn to record.
+      // @decision 343441bd — `turnSeqAtDelivery` is stamped here at HAND-OFF only (never at enqueue), and
+      // only on a genuine hand-off (`!opts.reason`); a superseded/obsolete resolution stamps nothing.
       const detail: Record<string, unknown> = opts.reason ? { msgId, reason: opts.reason } : { msgId };
       if (!opts.reason && opts.recipientId) {
         const recipient = this.db.getSession(opts.recipientId);
@@ -7846,29 +7825,9 @@ export class SessionService {
    *    recovery scan RETIRES it as superseded (the predecessor hasSuccessor), so a bare carry that drops
    *    the durable channel loses the message if the daemon restarts before the successor drains it.
    *
-   * A FOURTH field, `giveUpHeldUntil` (card f25bf3bf, deciding what 9e27f4d2 deliberately left open for
-   * this path), is NOT in that list — and that omission is DELIBERATE, not an oversight to fix. A recycle
-   * spawns the successor FRESH, with NO `--resume` (see recycleWorker/recycleManager/recyclePlatformLead —
-   * "NOT --resume, which would carry the old context forward and defeat the recycle"), so the successor's
-   * conversation never saw whatever the predecessor's engine may have already done with a still-held
-   * entry's text — there is no shared transcript for a re-delivered duplicate to confuse, unlike the
-   * restart/companion-re-pin cases (9e27f4d2; see `upgradeCompanionCapabilities` below). And the hold's
-   * purge could never fire here regardless of whether we preserved it: the successor's own
-   * `giveUpConfirmQueue` starts empty, exactly like a post-restart session, so
-   * `purgeConfirmedGiveUpRequeue` would early-return on it forever. Preserving the hold would therefore
-   * only ever stall the successor's first real instruction for up to `GIVE_UP_HOLD_MS`, with zero chance
-   * of the entry ever being purged instead of delivered — a pure cost with no offsetting benefit. So this
-   * method DELIVERS a still-held entry immediately (below), never carrying `giveUpHeldUntil` onto the
-   * successor's `enqueueStdin` call. See `upgradeCompanionCapabilities` for the SAME decision landing the
-   * other way, and why.
-   *
-   * The carry below ALSO omits `proactive`/`senderId` (both companion-only QueuedMessage fields) — a
-   * DIFFERENT kind of "not in the list" than `giveUpHeldUntil` above. `giveUpHeldUntil` COULD be preserved
-   * here but would yield no benefit (the reasoning above). `proactive`/`senderId` CAN'T ever be non-default
-   * on this path at all: they're stamped only by companion-exclusive senders (the three proactive
-   * watchers; the companion inbound submit path), which only ever target an assistant-role session —
-   * never a worker/manager/platform-lead, the only roles a recycle successor can be. Different reasons,
-   * same "nothing to fix" conclusion (card f25bf3bf).
+   * @decision f25bf3bf — a still-held `giveUpHeldUntil` entry is DELIVERED here immediately, never carried
+   * forward — the OPPOSITE of the resume-path conclusion for the SAME card: a recycle successor is FRESH
+   * (no `--resume`), so there's no shared transcript to confuse and its `giveUpConfirmQueue` starts empty.
    *
    * So, exactly like `redirectWorker`: SUPERSEDE each carried durable record (fire its onDeliver with
    * "superseded" — resolves the old record so the boot scan + done-guard never re-drive it), then re-MINT
@@ -7877,29 +7836,12 @@ export class SessionService {
    * Non-durable entries (idle/resume nudges, raw human turns) carry across with their source AND their
    * warning/agent classification preserved.
    *
-   * Card f907c8c4 DoD-1: a re-minted record whose text is a {@link PEER_MESSAGE_FRAME_RE} peer_message
-   * frame gets an INHERITANCE label prepended before re-mint — the measured incident this card fixes: a
-   * cross-project peer_message queued for `oldId` (busy/not-ready) that only drains here, onto a fresh
-   * successor that never saw the thread (e.g. a farewell delivered to a manager with no context for it).
-   * Scoped to peer frames ONLY (never a worker/session/platform-directed carry) — additive-and-tolerant to
-   * the receiving project's manager, since the underlying `[loom:from-manager · …]` frame this card's own
-   * design constraint protects is left byte-identical; the label is a separate paragraph ahead of it.
-   *
-   * Card af995d1d: the durable-record re-mint loop below now appends a `session_message_gave_up`
-   * (`outcome:"reminted"`) event linking the OLD record's own msgId to the NEW one — the SAME vocabulary
-   * `handleGiveUpExhausted`'s in-session remint already writes, so `resolveDirectiveOutcome`'s chain walk
-   * (mcp/orchestration.ts, shared by `peer_message_status`/`directive_status`) can hop from a msgId a
-   * sender is still holding forward to whatever actually happens to the carried copy on the successor.
-   * BEFORE this fix, a re-mint here started a brand-new, DISCONNECTED msgId with no link back to the one
-   * the original caller (`messagePeerManager`/`messageWorker`) returned — so a sender polling the OLD
-   * msgId saw `state:"pending"` FOREVER, even once the successor genuinely delivered (and the recipient
-   * consumed) the carried copy: the measured incident (card af995d1d) was a peer letter the recipient
-   * confirmed arrived in full and acted on, whose sender-side `peer_message_status` read never converged
-   * past `pending` across two reads ~16 minutes apart. The `flushed` loop above ALSO resolves the old
-   * in-memory entry as `"superseded"` (no `turnSeqAtDelivery`) for the boot-scan/done-guard's sake — that
-   * resolution is harmless to this fix: `resolveDirectiveOutcome`'s walk checks `session_message_gave_up`
-   * BEFORE it ever falls through to a `session_message_delivered` check, so the new "reminted" link is
-   * always found first and the chain hops onward instead of dead-ending on the superseded stamp.
+   * @decision f907c8c4 — a re-minted record whose text is a peer_message frame (`PEER_MESSAGE_FRAME_RE`)
+   * gets an inheritance label prepended before re-mint, scoped to peer frames only; the underlying frame
+   * text stays byte-identical — the label is a separate paragraph ahead of it, never a rewrite of it.
+   * @decision af995d1d — the re-mint LINKS the old msgId to the new one via a `session_message_gave_up`
+   * (`outcome:"reminted"`) event; without it a sender polling the OLD msgId reads "pending" forever even
+   * after the successor genuinely delivers the carried copy.
    */
   private carryPendingToSuccessor(
     oldId: string, successorId: string, flushed: QueuedMessage[], durableRecords: OrchestrationEvent[],

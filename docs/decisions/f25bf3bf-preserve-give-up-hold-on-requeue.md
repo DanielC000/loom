@@ -18,3 +18,18 @@ PRESERVE the hold (card f25bf3bf, deciding what 9e27f4d2 left open for this path
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts` (`upgradeCompanionCapabilities`): lines 4129-4135 (abort path) and 4157-4172 (post-resume path), as of commit `7a20d971f1c5d3d098b36030b5cc5feebd8be930`. Relocated by card `6065685c`; no wording changed, wrapped source lines joined into a flowing paragraph and the `//` comment markers stripped. See also `docs/decisions/9e27f4d2-giveupheldsuntil-rides-restart-intents-holds-map.md` (the restart-path reasoning this decision extends to the companion-upgrade resume path).
+
+## The recycle path (`carryPendingToSuccessor`) reaches the OPPOSITE conclusion, same card
+
+Card f25bf3bf also governs `carryPendingToSuccessor` (`sessions/service.ts`) — the recycle path's redrive of a predecessor's held queue onto its successor — and there it lands on the OPPOSITE side of the same question: DELIVER a still-held `giveUpHeldUntil` entry immediately, never carry it forward. The axis is the same one this record turns on (does the successor's transcript already reflect what the predecessor's engine did?), just resolved the other way: a recycle spawns the successor FRESH, with NO `--resume` (deliberately, so the recycle isn't defeated by carrying old context forward) — so the successor's conversation never saw whatever the predecessor's engine may have already done with the held entry's text, unlike the `resume()`d companion-upgrade case above where there IS a shared transcript to confuse. The hold's purge could also never fire here regardless: the successor's own `giveUpConfirmQueue` starts empty (same as a post-restart session), so `purgeConfirmedGiveUpRequeue` would early-return on it forever — preserving the hold would only ever stall the successor's first real instruction for up to `GIVE_UP_HOLD_MS`, a pure cost with no offsetting benefit.
+
+The SAME carry loop also omits two companion-only `QueuedMessage` fields, `proactive`/`senderId`, for a DIFFERENT reason than the hold: they CAN'T ever be non-default on this path at all. Both are stamped only by companion-exclusive senders (the three proactive watchers; the companion inbound submit path), which only ever target an assistant-role session — never a worker/manager/platform-lead, the only roles a recycle successor can be. Different reasons, same "nothing to fix" conclusion.
+
+## Do not (2)
+
+- Do not carry `giveUpHeldUntil` forward on the recycle path (`carryPendingToSuccessor`) — the successor is a fresh, non-resumed session, so the confusing-duplicate risk the hold exists to delay doesn't apply, and its purge can never fire there either.
+- Do not add `proactive`/`senderId` handling to this carry loop as a "missing field" fix — they are structurally unreachable on a recycle-eligible role (worker/manager/platform-lead), not an oversight.
+
+## Source (2)
+
+Inline comment in `packages/daemon/src/sessions/service.ts` (`carryPendingToSuccessor`'s method doc), as of main `753e55a754afc0638516f9079ee6c24219d80db8`. Extracted by card `fa831c1c` (tranche 25).
