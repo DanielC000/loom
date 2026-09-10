@@ -70,22 +70,10 @@ const CODEX_ENGINE_ID_RETRY_MS = Number(process.env.LOOM_CODEX_ENGINE_ID_RETRY_M
  */
 const CODEX_ENGINE_ID_MAX_ATTEMPTS = Number(process.env.LOOM_CODEX_ENGINE_ID_MAX_ATTEMPTS) || 40;
 /**
- * Code Review C2/M3 fix: how long codex's busy STATUS-LINE marker (`isCodexBusy`, refreshed roughly once
- * per second while genuinely busy — its own text carries a live seconds counter) may go UNSEEN before a
- * session is declared idle. The prior design recomputed busy from EVERY output chunk (either the latest
- * chunk alone, or the accumulated `screenScan`) and treated the marker's mere ABSENCE from that one
- * snapshot as "done" — which is unsound in BOTH directions: a stale accumulated match can linger for a
- * long time past real completion (M3), while a single ordinary mid-turn chunk that simply doesn't happen
- * to carry the marker (streamed tool output between status refreshes, or the marker split across a chunk
- * boundary) would wrongly read as an immediate falling edge (C2 — a real submitCodex race: a chunk landing
- * in the ~300ms text->\r gap, before codex has rendered the marker for THIS turn at all, would flip busy
- * back to false and let a second message land in a composer still holding the first). Instead, busy is
- * FRESHNESS-based: seeing the marker (re)arms a bounded per-session timer (`armCodexBusyStaleTimer`); only
- * once this many ms pass with NO fresh sighting is the session declared genuinely idle. Comfortably larger
- * than the ~1s observed refresh cadence (so an ordinary gap between refreshes, or one fragmented/missed
- * chunk, is never mistaken for completion) while still bounded (so a real completion is detected promptly,
- * not left latched forever). Env-overridable so a hermetic test can shrink it instead of sleeping for
- * multiple real seconds (mirrors `GRACEFUL_STOP_KILL_MS`'s own `LOOM_GRACEFUL_KILL_MS` convention).
+ * @decision sha:ab549920 — busy is FRESHNESS-based (a bounded per-session stale timer, rearmed by each
+ * sighting of codex's busy marker), never recomputed from a single output chunk/snapshot — see
+ * docs/decisions/ab549920-codex-busy-is-freshness-based-not-per-chunk-snapshot.md for the C2/M3 race
+ * this replaces.
  */
 const CODEX_BUSY_STALE_MS = Number(process.env.LOOM_CODEX_BUSY_STALE_MS) || 3_000;
 /**
@@ -873,24 +861,16 @@ export function isResumeSummaryGate(flatCollapsed: string): boolean {
 }
 
 /**
- * Which option the resume-summary gate's ❯ cursor currently sits on — "1" (still the default, "Resume
- * from summary"), "2" (the target, "Resume full session as-is"), "3" ("Don't ask me again"), or `null`
- * if unreadable (the frame hasn't painted the cursor yet, or the gate isn't on screen). PURE + exported
- * for the hermetic test. `collapseBoot` strips ANSI but does NOT insert separators between lines (it
- * collapses whitespace to nothing), so a rendered "❯ 2. Resume full session as-is" flattens to
- * "❯2.Resumefullsessionas-is" — the cursor glyph sits immediately against the option's leading digit.
- *
- * This is what lets `resolveResumeGate` CONFIRM a Down press actually landed before risking Enter,
- * closing the 2026-07-10 incident: the old handler wrote a blind, unverified Down+Enter pair, and under
- * restart load the Down was delayed/reordered past the Enter — which then confirmed the still-default
- * option 1, silently compacting the manager's full context (3-for-3 simultaneously, a systematic race,
- * not a random dropped keystroke).
- *
- * Takes the LAST `❯N.` match, not the first: `resumeGateScan` is a CUMULATIVE rolling buffer (each
- * re-render is appended, not substituted — the TUI repaints via cursor-repositioning escapes that
- * `collapseBoot` strips, leaving every prior frame's text still concatenated in front of the current
- * one), so only the most recent occurrence reflects the gate's current state. Same "last occurrence
- * wins" reasoning as `detectPermissionMode`'s footer-mode `lastIndexOf` scan above.
+ * Which option the resume-summary gate's ❯ cursor currently sits on — "1"/"2"/"3", or `null` if
+ * unreadable (the frame hasn't painted the cursor yet, or the gate isn't on screen). PURE + exported
+ * for the hermetic test. `collapseBoot` strips ANSI but does NOT insert separators between lines, so a
+ * rendered "❯ 2. Resume full session as-is" flattens to "❯2.Resumefullsessionas-is". Takes the LAST
+ * `❯N.` match (`resumeGateScan` is a CUMULATIVE rolling buffer — old frames stay concatenated in front
+ * of the current one), same "last occurrence wins" reasoning as `detectPermissionMode`'s footer-mode
+ * `lastIndexOf` scan above.
+ * @decision sha:29b22e7e — lets `resolveResumeGate` CONFIRM a Down press landed before risking Enter;
+ * see docs/decisions/29b22e7e-resume-gate-confirms-down-before-risking-enter.md for the 2026-07-10 race
+ * this closes.
  */
 export function resumeGateCursorOption(flatCollapsed: string): "1" | "2" | "3" | null {
   const matches = [...flatCollapsed.matchAll(/❯(\d)\./g)];
@@ -1367,18 +1347,13 @@ let markitdownProvisioner: MarkitdownProvisioner = ensurePythonPackageAsync;
 
 /**
  * Kick BACKGROUND provisioning of the shared venv's markitdown (async `child_process.spawn` under the hood
- * — NEVER `spawnSync`), so the heavy venv-create + pip install runs OFF the event loop.
- *
- * RETRYABLE, not a permanent one-shot: the dedupe guard is ONLY a genuinely IN-FLIGHT install
- * (`markitdownProvisionInFlight`), so concurrent documentConversion spawns never launch parallel pip installs —
- * but after a TERMINAL outcome (ready/failed) the in-flight clears and a fresh kick is allowed. So a
- * profile-save pre-warm, a later spawn, or an explicit `POST /api/python/provisioning/retry` all actually
- * retry (the old PERMANENT `markitdownProvisionTried` flag dead-ended every retry until a daemon restart — the
- * defect this fixes).
- *
- * On success it lands the resolved binary into the `markitdownBin` memo (subsequent spawns inject it) and the
- * status → `ready`; on failure it warn-logs the SPECIFIC classified reason + captured tail and the status →
- * `failed` (documentConversion sessions keep spawning WITHOUT the MCP, best-effort), retryable as above.
+ * — NEVER `spawnSync`), so the heavy venv-create + pip install runs OFF the event loop. On success it lands
+ * the resolved binary into the `markitdownBin` memo (subsequent spawns inject it) and the status → `ready`;
+ * on failure it warn-logs the SPECIFIC classified reason + captured tail and the status → `failed`
+ * (documentConversion sessions keep spawning WITHOUT the MCP, best-effort).
+ * @decision sha:918bd712 — RETRYABLE, not a permanent one-shot: the dedupe guard is only a genuinely
+ * in-flight install; see docs/decisions/918bd712-markitdown-provision-kick-is-retryable-not-permanent.md
+ * for the prior permanent-flag defect this replaces.
  */
 let markitdownProvisionInFlight: Promise<void> | null = null;
 let markitdownProvisionKicks = 0; // test observability (see __markitdownProvisionKicks)
@@ -2254,26 +2229,12 @@ interface Live {
   // to have actually landed — see submit()'s own doc for why the clear is deliberately DEFERRED to the next
   // submit() rather than attempted at give-up time. ADDITIVE, never overwritten by a give-up: a second
   // unresolved give-up on top of an already-dirty composer must not lose track of the first.
-  // ⚠️ Card d4b3fa6c — NOT AUTHORITATIVE ALONE, DOCUMENTED LIMITATION (deliberately not "fixed" — see below):
-  // a GIVE-UP SUPPRESSED mark (`fireEnterAndVerify`'s "engine produced output after the final Enter write"
-  // branch) never calls `requeueGiveUpOrigin`, so it seeds neither `ambiguousDispatches`/`giveUpConfirmQueue`
-  // nor `composerDirtyLenClearedByGen` — meaning BOTH of this field's clear paths (`clearComposerDirtyOnConfirm`
-  // via `purgeConfirmedGiveUpRequeue`, and the `composerDirtyLenClearedByGen === submitGeneration` gate below)
-  // are structurally UNREACHABLE for a SUPPRESSED-only mark on its OWN generation. The field then reads
-  // stale-nonzero against a GENUINELY EMPTY composer — confirmed twice in production, in two different
-  // lifecycle states (idle post-turn; busy mid-first-turn, turnSeq still 0) — and clears ONLY once some
-  // wholly UNRELATED, LATER submit() (a fresh message) issues its own defensive clear-prefix and that gets
-  // confirmed. See `pty-giveup-suppressed-composerdirty-sticky.mjs` for the reproduction: the staleness
-  // survives BOTH the same generation's own UserPromptSubmit confirm AND its later Stop. A CANDIDATE FIX
-  // (enrolling the SUPPRESSED mark into `ambiguousDispatches`/`giveUpConfirmQueue` the same way, minus the
-  // `live.pending` requeue) was evaluated and REJECTED: `healIfStuck`'s own backstop unconditionally calls
-  // `requeueGiveUpOrigin` for a still-unconfirmed generation regardless of whether it was already marked
-  // dirty (only the dirty-MARK is gated on `composerDirtyMarkedGens`, not the requeue call) — so an
-  // already-enrolled SUPPRESSED generation would get double-enrolled into `giveUpConfirmQueue`, corrupting
-  // its FIFO-position correlation and risking a LATER, unrelated confirming hook being misattributed to an
-  // already-resolved generation. The safe direction here is fail-toward-DIRTY: consumers must treat a
-  // non-zero read as a SUSPICION, not proof, and call `worker_flush`'s submit-only, write-nothing recheck
-  // BEFORE trusting it or reaching for a destructive remedy (worker_recycle/worker_stop) — see
+  // @decision d4b3fa6c — NOT AUTHORITATIVE ALONE, a documented limitation (deliberately not "fixed"): a
+  // GIVE-UP SUPPRESSED mark can leave this reading stale-nonzero against a genuinely empty composer; see
+  // docs/decisions/d4b3fa6c-composerdirtylen-suppressed-gap-is-a-documented-limitation.md for why the
+  // obvious fix was evaluated and rejected. The safe direction is fail-toward-DIRTY: consumers must treat
+  // a non-zero read as a SUSPICION, not proof, and call `worker_flush`'s submit-only, write-nothing
+  // recheck BEFORE trusting it or reaching for a destructive remedy (worker_recycle/worker_stop) — see
   // worker_list/worker_status/my_context's own tool descriptions and the `/orchestrate` doctrine.
   composerDirtyLen: number;
   // Card c148f118: the OPTIMISTIC counterpart to `composerDirtyLen` above — same additive write-side
@@ -2406,14 +2367,10 @@ interface Live {
   // structured submit starting means any earlier raw baseline is now stale/superseded, and (b) after the
   // Stop/StopFailure chokepoint consumes it, so a leftover value never gets attributed to a LATER turn.
   // Best-effort by design, same spirit as composerLen/nextComposerLen — see nextRawDraftState.
-  // ⭐ RETENTION VERDICT (card 183de1a4, investigated so a future reader doesn't have to re-derive it): this
-  // IS the full content of a human raw-terminal paste, not merely a length — but retention is a SINGLE
-  // ephemeral slot with a ONE-TURN lifetime (overwritten/cleared per the two triggers above), never
-  // persisted to the DB, and reset to null on every spawn/resume/fork — it does NOT survive a daemon
-  // restart. That one-turn window is sufficient for the bare-placeholder tripwire + its one-shot recovery
-  // above (they consume it within the SAME turn it's set), but nothing downstream can recover an OLDER
-  // turn's raw paste once this slot has moved on — see detectPastePlaceholderLengthLoss's own doc for the
-  // resulting residual (a stale re-render several turns later, PASTE_LOSS_EXPLAIN_WINDOW-bounded).
+  // @decision 183de1a4 — retention is a SINGLE ephemeral slot with a ONE-TURN lifetime, never persisted,
+  // reset to null on every spawn/resume/fork; see
+  // docs/decisions/183de1a4-lastrawsubmit-retention-is-one-turn-only-never-persisted.md for the
+  // investigated verdict and the resulting residual this bounds.
   lastRawSubmit: string | null;
   // Card b4b9b707: mirrors lastRawSubmit's capture (same writeStdin call site, same nextRawDraftState
   // reconstruction) but is a SEPARATE field with its OWN lifecycle, dedicated to owner-text attribution —
