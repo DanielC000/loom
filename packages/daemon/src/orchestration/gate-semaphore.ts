@@ -910,7 +910,8 @@ export class GateSemaphore {
 
   /** @decision edc1ec12 — look up ONE live (running or queued) gate run by its {@link
    *  GateDescriptor.opId}, the LIVE-registry half of `gate_status(opId)`. Accepts a full opId or an
-   *  unambiguous id-PREFIX (card 225bc7bd); `kind:"ambiguous"` must never fold into "not found"
+   *  unambiguous id-PREFIX (card 225bc7bd) — the same `resolveIdPrefix` resolution `agent_get`/
+   *  `worker_spawn` already use; `kind:"ambiguous"` must never fold into "not found"
    *  (docs/decisions/edc1ec12-gate-status-is-read-only-with-no-passfail-outcome.md).
    *  @decision e3e40167 — `kind:"none"` here is LIVE-ONLY and genuinely can't distinguish settled from
    *  never-existed; `SessionService.gateStatus` falls through to the durable tombstone table for that
