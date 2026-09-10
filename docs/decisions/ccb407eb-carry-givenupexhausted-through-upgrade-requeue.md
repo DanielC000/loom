@@ -47,3 +47,28 @@ as of commit `94d7f15344bffb12a8ae413d8345da2ff62b6071` (`fix(pty): queued-messa
 discards permanently (budget 1) and invisibly...`). Relocated by card `3f45b7d8` (tranche 6 on
 `pty/host.ts`); distinct from this file's original `finding [6]` narrative (a different site in
 `sessions/service.ts`).
+
+## BLOCKING finding [2]: a redrive that then gives up must not silently drop, either
+
+CR follow-up (card ccb407eb, BLOCKING finding [2] — a third, distinct site under this card, unrelated to
+findings [6] and the pty/host.ts field doc above): before this fix, `redriveQueuedMessage`'s re-enqueue
+branch had NO `onGiveUpExhausted` at all. A redriven message — the exact path a crashed/wedged session
+actually takes — that then gave up hit the pre-card bare-drop branch: no re-mint, no park, no event, no
+sender surface, AND its `onDeliver` had already fired (see `resolveQueuedMessage`'s own doc) so it would
+never be redriven again either. Specimen Z's exact failure, intact, on this one path. Fixed by wiring the
+SAME `handleGiveUpExhausted` policy every other durable dispatch already uses — no separate policy for a
+redriven message.
+
+## Do not (3)
+
+- Do not let a redrive's re-enqueue branch omit `onGiveUpExhausted` — a redriven message that then gives
+  up is the exact path a crashed/wedged session takes, and dropping it there silently loses the message a
+  second time (its `onDeliver` already fired, so nothing else will ever redrive it again).
+
+## Source (3)
+
+Inline comment in `packages/daemon/src/sessions/service.ts` (`redriveQueuedMessage`'s re-enqueue branch):
+lines 5166-5171, as of commit `94d7f15344bffb12a8ae413d8345da2ff62b6071` (`fix(pty): queued-message
+give-up terminal branch discards permanently (budget 1) and invisibly...`). Relocated by card `61632c05`
+(tranche 15); no wording changed, wrapped source lines joined into a flowing paragraph and the `//`
+comment markers stripped.

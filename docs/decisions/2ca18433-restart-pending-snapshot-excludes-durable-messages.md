@@ -22,6 +22,31 @@ It takes an OPTIONAL `reason`: the drain/pull paths call it with NO arg (a plain
 - Do not invoke `onDeliver` from the immediate idle-submit path — that path already returns `delivered:true` synchronously; firing it there would double-count delivery and risk the load-bearing M1/M2 busy-gate ordering.
 - Do not let a human-facing delete/edit/reorder mutator touch a `source: 'system'` entry — that boundary stops an agent's queued report from being rewritten out from under it.
 
+## `recoverUndeliveredMessagesOnBoot` is the single re-enqueue owner
+
+The OTHER half of the dedup above: `recoverUndeliveredMessagesOnBoot` (`sessions/service.ts`) is the one
+place a still-undelivered durable `session_message_queued` record gets acted on after a restart, boot,
+or crash — since the intent snapshot never carries one, this scan is the ONLY redrive path. Runs ONCE at
+boot (`index.ts`, after the fleet resumes), covering every case the intent snapshot misses (crash,
+OS-service restart, non-live recipient at restart time), not just a plain `daemon_restart`.
+
+Per still-undelivered message (after the `mintedBefore` skip — see `docs/decisions/06ebbb78-…md`):
+LIVE recipient → re-enqueue with the SAME `msgId`, delivery proven at the next turn boundary, never
+assumed at dispatch; GONE/superseded/archived → RETIRE (`reason:"recipient-gone-or-superseded"`), so the
+undelivered set can't grow unbounded; EXISTS but not live → left for a later boot. Every still-stuck
+message is then surfaced to its live sender to re-send — best-effort, never throws.
+
+## Do not (2)
+
+- Do not add a second re-enqueue path for a pre-boot message — this scan is the sole owner.
+- Do not silently drop a stuck message — surface it to the live sender instead.
+
+## Source (3)
+
+JSDoc above `recoverUndeliveredMessagesOnBoot`, `service.ts` lines 5059-5108, as of main `1cbc0d74`.
+Relocated by card `61632c05` (tranche 15). The `mintedBefore` mechanism this JSDoc also described is out
+of scope here — see `docs/decisions/06ebbb78-resumefleetonboot-routes-through-enqueuedurablenudge.md`.
+
 ## Source
 
 - `packages/daemon/src/sessions/service.ts` (`requestDaemonRestart`): lines 4295-4304, as of commit `6faf27824c7f550d57bfdeb9e4724c7070b82315`. Relocated by card `5b8d2b0c`. See also `docs/decisions/9e27f4d2-giveupheldsuntil-rides-restart-intents-holds-map.md` and `docs/decisions/a1b79655-restart-intent-snapshots-cap-queued-worker-spawn-intents.md`.
