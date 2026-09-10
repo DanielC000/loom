@@ -4308,117 +4308,65 @@ export class SessionService {
   }
 
   /**
-   * Boot-time fleet resume (the resume half of P1 17df54c5) — re-spawn the WHOLE captured fleet after a
-   * `daemon_restart`, injecting NOTHING into the resume itself (the resume-injects-nothing invariant;
+   * Boot-time fleet resume (the resume half of P1 17df54c5 — re-spawn the WHOLE captured fleet after a
+   * `daemon_restart`; see docs/decisions/17df54c5-restart-resume-widened-to-whole-fleet.md). Injects
+   * NOTHING into the resume itself (the resume-injects-nothing invariant;
    * `resume()` passes no startupPrompt and honors the resume hardening — readiness wait, summary-gate
    * dismiss, mode convergence).
    *
-   * **One of the THREE resume-and-nudge paths card 9f7c59f1 CONVERGED (read this before changing any one
-   * of the three in isolation) — NOT a claim these are the only sessionService/watcher sites that resume a
-   * not-live session and then enqueue.** `orchestration/wake.ts`, `orchestration/poll.ts`, and
-   * `orchestration/event-triggers.ts` each do the same shape too, independently — card 90b9e904 converged
-   * their durability + MCP-seen gate onto this SAME `enqueueDurableNudge` too (each via its own optional
-   * injected dep, byte-identical raw fallback for a test double that doesn't wire it) — but they are NOT a
-   * fourth/fifth/sixth instance of THIS function's per-facet ruling below: their nudge is a specific
-   * external signal (a wake note / poll item / matched event), not this function's generic "continue your
-   * task" continuation nudge, so report-state handling, worker nudge text, and ordering (below) do not
-   * apply to them at all — only durability + the gate are the shared facet. report-resolution.ts's own
-   * header doc already tells this exact "three read as exhaustive and wasn't" story once (card cfffeda6);
-   * don't repeat it by reading "three" here as a completeness claim. Of the three THIS doc block is about:
-   * this is the DELIBERATE-RESTART path
-   * (`daemon_restart`), STRICTLY mutually exclusive per boot with
-   * {@link SessionService.recoverCrashOrphanedWorkers} (the crash / OS-restart / clean-stop path —
-   * `index.ts`'s boot branch runs exactly one of the two); the third, `CrashRecoveryWatcher.tick`
-   * (`orchestration/crash-recovery-watcher.ts`), is a continuous RUNTIME per-session auto-resume that runs
-   * on every boot regardless of which of these two fired, recovering an isolated session that died while
-   * the daemon stayed healthy. All three answer genuinely different questions, so they are NOT expected to
-   * converge on everything — differences are ruled per-facet below, not assumed to be bugs:
-   *   - **report-state handling (`blocked`/`done`):** CONVERGED — all three call the same
-   *     {@link deriveAwaitingReview} (report-resolution.ts) and give a `blocked` worker its own
-   *     re-state-your-blocker nudge, and a `done` worker SILENCE (nothing left for it to continue; see the
-   *     worker branch below). `merge_rejected` never resolves a report, for all three, by the same shared
-   *     predicate.
-   *   - **worker nudge text (`blocked` case):** CONVERGED — all three build from the shared
-   *     `buildBlockedResumeNudgeBody` (orchestration/resume-nudge.ts).
-   *   - **durability of the enqueue itself:** CONVERGED (card 06ebbb78) — this function's continuation
-   *     nudges now route through `enqueueDurableNudge`, the SAME MCP-seen-gated + durable helper
-   *     `recoverCrashOrphanedWorkers` already used, instead of the plain `enqueueNudge`. Card 06ebbb78
-   *     RULED this split accidental, not a considered asymmetry: card 597903fc's own stated rationale for
-   *     adding durability to the crash path ("a boot-time notice ... must not vanish ... exactly the
-   *     contended moment [give-up exhaustion] is most likely") applies at least as strongly here — a
-   *     whole-fleet `daemon_restart` is at least as contended as a crash-orphaned recovery, and it is the
-   *     MORE common path (it runs after every deliberate `daemon_restart`, i.e. every self-hosting deploy),
-   *     yet card 9f7c59f1 (which converged the other two paths) left this one on the old, non-durable
-   *     dispatch — no comment anywhere ever claimed that split was deliberate. Worker nudges pass the
-   *     worker's own `taskId` (mirroring `recoverCrashOrphanedWorkers`'s worker-branch calls); every other
-   *     role omits it (defaults to `null`), also mirroring that function's manager-notice call. A held
-   *     nudge now persists a `session_message_queued` record and, on give-up exhaustion, re-mints (or
-   *     durably PARKS) instead of vanishing with nothing but a console line — see `enqueueDurableNudge`'s
-   *     own doc for the mechanism. **CORRECTED (was wrong in the first draft of this card): a freshly-
-   *     resumed session's pty is NEVER `ready` this early** (`pty/host.ts`'s `live.ready` gate — SessionStart
-   *     hasn't fired yet), so EVERY continuation nudge dispatched here is ALWAYS held and therefore ALWAYS
-   *     persists a fresh `session_message_queued` record — this is the COMMON case, not the rare one. That
-   *     in turn means `recoverUndeliveredMessagesOnBoot` (index.ts, run right after this function in the
-   *     SAME boot with no `await` between them) would otherwise find that just-minted record and redrive
-   *     it AGAIN — a real, reproduced duplicate delivery (see that method's own doc, card 06ebbb78 CR
-   *     follow-up). `recoverUndeliveredMessagesOnBoot`'s `mintedBefore` cutoff (index.ts passes its own
-   *     `bootStartedAt`) is what actually guarantees single delivery: it skips any undelivered record
-   *     minted during THIS boot's own resume pass, since such a record already has a live in-memory FIFO
-   *     entry from its own dispatch and needs no help. A record genuinely predating this boot (a real
-   *     crash/sender-death leftover) is unaffected and still redrives normally.
-   *   - **ordering:** INTENTIONAL, for a documented reason — this function resumes everyone EXCEPT the
-   *     requesting manager first, then the requester LAST (its own summary nudge needs the rest of the
-   *     fleet's resume outcome, e.g. `failed.length`, already computed). `recoverCrashOrphanedWorkers`
-   *     resumes each candidate's MANAGER before its own workers (a worker's manager must be live before the
-   *     worker un-archives into a parent that can see it) — see that function's own doc. `CrashRecoveryWatcher`
-   *     has no cross-session ordering at all: it recovers one isolated dead session per candidate, with no
-   *     "fleet" or "manager-then-workers" concept to order.
+   * @decision 9f7c59f1 — one of THREE resume-and-nudge paths this card converged onto
+   * `enqueueDurableNudge` (see docs/decisions/9f7c59f1-enqueuedurablenudge-not-private-third-resume-path.md
+   * for which path this is, and which facets the three do/don't share — NOT a claim these are the only
+   * sessionService/watcher sites that resume a not-live session and enqueue: `orchestration/wake.ts`,
+   * `orchestration/poll.ts`, and `orchestration/event-triggers.ts` do the same shape too, converged by
+   * card 90b9e904, but their nudge is a specific external signal, not this function's generic
+   * continuation nudge, so this function's per-facet ruling does not apply to them). See cfffeda6
+   * (report-resolution.ts) for why "three" is not itself a completeness claim.
+   * Report-state handling, worker nudge text, and ordering are ruled per-facet against the other two
+   * paths in 9f7c59f1's own record — see there before changing any one in isolation.
+   * @decision 06ebbb78 — every continuation nudge here routes through the durable `enqueueDurableNudge`
+   * (see docs/decisions/06ebbb78-resumefleetonboot-routes-through-enqueuedurablenudge.md for the
+   * pty-never-ready-this-early correction and its interaction with `recoverUndeliveredMessagesOnBoot`'s
+   * `mintedBefore` cutoff, which is what actually prevents a duplicate delivery).
    * Continuation NUDGES are post-resume enqueues (a resumed session gets no
    * startup prompt, so without a nudge a worker/manager would sit idle — the stranded-worker hook can't
    * catch a resume's direct setBusy(false)):
    *   - the REQUESTING manager gets its "merged code is now live — continue/verify" re-prompt;
    *   - an AFFECTED manager/platform (workers resumed alongside it, queued I/O replayed to it, an unconsumed
-   *     answered question, or STRANDED board work — see strandedBoardWork) gets the full "re-check your
-   *     workers" re-orient, prefixed with a one-line classification of WHAT this restart touched;
-   *   - an UNAFFECTED bystander manager/platform (card 5907b71e part 1 — isNoOpManagerWake: non-causal,
-   *     0 live workers in the resume set, no queued I/O replayed, no unconsumed answer, AND no stranded
-   *     board work) resumes SILENTLY — NO enqueue at all (card b5664b5b Problems A + C1). The old
-   *     "lightweight FYI" was still an enqueueStdin, and an enqueue to an idle session submits as a full
-   *     TURN, so the FYI burned the very turn it claimed to save (the Lead, which flows through this same
-   *     branch, took ~10 such wakes in one session). 61cc91c6 further narrowed "pending board work": raw
-   *     backlog no longer forces the full nudge by itself — a 'watching' or 'snoozed' manager's ordinary
-   *     backlog is ALREADY independently covered by the idle-watcher's own cadence regardless of this
-   *     restart, so re-forcing it here was pure duplication (this was the dominant source of the reported
-   *     waste — see strandedBoardWork's doc for the full per-role/per-policy breakdown; a platform/Lead
-   *     session now gets the SAME IdleWatcher coverage a manager does — card 98b3725c — so it's classified
-   *     identically, no more unconditional carve-out). Only board work NOTHING ELSE will ever re-surface (a
-   *     'suppressed'-via-escalation manager OR platform/Lead) still forces the full nudge — a no-op there
-   *     would strand the queue. The deploy
+   *     answered question, or STRANDED board work) gets the full "re-check your workers" re-orient,
+   *     prefixed with a one-line classification of WHAT this restart touched; an UNAFFECTED bystander
+   *     resumes SILENTLY, no enqueue at all — @decision b5664b5b (Problems A + C1), see
+   *     docs/decisions/b5664b5b-bystander-and-idle-reviewer-resume-nudges-silenced.md;
+   *   - @decision 61cc91c6 narrows what "stranded board work" means for the AFFECTED branch above (only
+   *     work NOTHING ELSE will ever re-surface still forces the full nudge) — see
+   *     docs/decisions/61cc91c6-stranded-board-work-narrowed-to-unresurfaceable.md; a platform/Lead is
+   *     classified identically, not carved out — @decision 98b3725c, see
+   *     docs/decisions/98b3725c-platform-lead-gets-manager-idle-watchdog-coverage.md. The deploy
    *     REQUESTER is NEVER short-circuited — it always gets the full "code is live — continue/verify" nudge;
-   *   - every worker gets the "re-check your worktree's state, continue your task" nudge (card 547fcaaa —
-   *     no longer asserts unconditional worktree integrity, which nothing here ever checked);
+   *   - every worker gets the "re-check your worktree's state, continue your task" nudge —
+   *     @decision 547fcaaa, see docs/decisions/547fcaaa-worker-resume-nudge-drops-worktree-integrity-claim.md;
    *   - a standing reviewer (auditor/workspace-auditor/setup) gets a "you were resumed — continue your work"
-   *     nudge ONLY if it was BUSY (mid-run) at capture (card b5664b5b Problem B); an already-IDLE reviewer
+   *     nudge ONLY if it was BUSY (mid-run) at capture (b5664b5b Problem B); an already-IDLE reviewer
    *     between scheduled runs resumes SILENTLY (its next due wake/schedule re-engages it via the durable
-   *     WakeService/Scheduler tickers, so a nudge to it only burned a wasted turn);
+   *     WakeService/Scheduler tickers);
    *   - a plain (role-null) or "run" session is resumed but not nudged (no orchestration loop to re-engage);
    *   - a PARKED (rate-limited) session is resumed live so the rate-limit watcher can recover it, but
    *     its nudge + pending replay are WITHHELD — we never push a held turn back into the cap (honors
    *     the park; a staggered resume via the watcher at reset). Its DB park state is left intact.
-   * Every wake whose ENQUEUED text actually names the reason (the requester's nudge always does; a
-   * manager/platform's does ONLY in the affected/full-re-orient branch, never the silent or minimal
-   * no-op branch — card 066d317c — AND, within that branch, a MANAGER recipient only when it is in the
-   * SAME project as the requester — card 11b847e1, `reasonClauseFor` — while a PLATFORM (Lead) recipient
-   * always gets it there, since the Lead is not a party to the project-isolation boundary that scoping
-   * protects) also records the deploy SHA(s) named in the reason against its session
-   * (recordDeployShasDelivered), so a later "X COMPLETE + DEPLOYED" completion escalation for the same SHA
-   * is recognized as a duplicate turn and its live nudge suppressed (part 2). Recording it for a session
-   * that never actually saw the reason text would let that suppression fire against a session that, in
-   * truth, was never told — this is exactly the bug card 066d317c fixed.
-   * EVERY continuation nudge carries the shared {@link RESUME_NUDGE_TAIL} (PL Auditor #11): it NOTEs the
-   * engine's file-read tracking was reset by the restart (not preservable from the daemon — re-Read before
-   * Edit). It is the daemon's ONE coherent resume turn per session (card 5d8dea5f removed the old bare-
-   * "Continue" disclaimer; the daemon never enqueues a standalone bare-continue).
+   * @decision 066d317c — a wake's ENQUEUED text names the restart reason only in the affected/full
+   * re-orient branch, never the silent/minimal one, and @decision 11b847e1 further scopes a MANAGER
+   * recipient to the SAME project as the requester (a PLATFORM/Lead recipient is exempt) — see
+   * docs/decisions/066d317c-record-delivered-sha-only-when-reason-shown.md and
+   * docs/decisions/11b847e1-restart-reason-text-scoped-to-same-project-recipient.md. The deploy SHA(s)
+   * named are recorded against the session (recordDeployShasDelivered) under the SAME condition, so a
+   * later "X COMPLETE + DEPLOYED" completion escalation naming that SHA is recognized as a duplicate and
+   * suppressed — @decision 5907b71e, see
+   * docs/decisions/5907b71e-restart-wake-impact-classification-and-sha-dedup.md for the wake-impact
+   * classification (part 1) and the SHA-dedup window this recording feeds (part 2).
+   * EVERY continuation nudge carries the shared {@link RESUME_NUDGE_TAIL} (PL Auditor #11): it notes the
+   * engine's file-read tracking was reset by the restart (re-Read before Edit) — @decision 5d8dea5f
+   * removed the old bare-"Continue" disclaimer from that tail; the daemon never enqueues a standalone
+   * bare-continue turn (see docs/decisions/5d8dea5f-resume-nudge-tail-drops-bare-continue-disclaimer.md).
    * Best-effort per session: an unresumable one (dead transcript / gone worktree) is skipped + counted.
    * `resumeOne` is injectable for hermetic tests (default drives this.resume); `now` likewise for tests.
    */
