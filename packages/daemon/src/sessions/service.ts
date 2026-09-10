@@ -7857,24 +7857,15 @@ export class SessionService {
         // set: see this method's own doc above for why a fresh, non-resumed successor gets none of the
         // benefit a hold would provide on a restarted/resumed SAME conversation, only the needless delay.
         //
-        // Card 1c47454b: carry `m.mintedAtWallClock` (a still-pending paste-recovery notice's absolute
-        // mint time) but deliberately NEVER `m.mintedAtGen` — the successor is a FRESH `Live`, whose
-        // `submitGeneration` restarts at 0, so a predecessor's generation count carried verbatim would be
-        // compared against an unrelated counter (a unit error, not evidence) and `annotatePasteRecoveryAge`
-        // would silently disclose nothing, exactly the defect this card exists to close. See
-        // `QueuedMessage.mintedAtGen`/`mintedAtWallClock`'s own docs (pty/host.ts) for the full reasoning.
-        // Card e01687ea code-review follow-up: also carry `m.senderId` — this comment already says "so an
-        // agent message stays classified exactly as it was", but before this fix `senderId` (the SAME
-        // coalescing/reorder identity DoD-1 threads everywhere else) was silently dropped, so a
+        // @decision 1c47454b — carry `m.mintedAtWallClock`, never `m.mintedAtGen`: a recycle successor's
+        // `submitGeneration` restarts at 0, so a carried predecessor generation count would compare against
+        // an unrelated counter and silently disclose nothing to `annotatePasteRecoveryAge`.
+        // @decision e01687ea — code-review follow-up: also carry `m.senderId`, previously dropped here so a
         // recycle-carried directive could never coalesce with a fresh same-sender arrival on the successor.
-        // No re-mapping needed here: by the time a message sits in `live.pending`, `enqueueStdin` has
-        // already null-mapped its `senderId` at ORIGINAL enqueue time (card 6439c51f, `coalesceSenderIdentity`,
-        // pty/host.ts) — every entry in `live.pending` carries either a genuine id or `null`, never the raw
-        // `"system"` sentinel, so carrying `m.senderId` verbatim here is always already-normalized.
-        // Card 4d9f7471: also carry `m.questionId` — this loop is the ONLY carry site that omitted it (the
-        // companion-upgrade re-pin/resume carries at 3864/3902 already thread `msg.questionId` through). A
-        // still-queued answered-question nudge that survives to a recycle used to lose its tag here, so
-        // `purgeAnsweredQuestionNudges`/`purgeQueuedByQuestionIds` could never match it on the successor.
+        // No re-mapping needed — `enqueueStdin` already null-maps it at original enqueue time.
+        // @decision 4d9f7471 — also carry `m.questionId`: the only carry site that omitted it, leaving a
+        // still-queued answered-question nudge unmatched by `purgeAnsweredQuestionNudges`/
+        // `purgeQueuedByQuestionIds` on the successor after a recycle.
         this.pty.enqueueStdin(successorId, m.text, m.source, undefined, undefined, m.kind, m.questionId, undefined, undefined, m.senderId, { mintedAtWallClock: m.mintedAtWallClock });
       }
     }
@@ -7895,13 +7886,9 @@ export class SessionService {
       // successor, so `purgeQueuedByReportEventIds` can never later drop it once `worker_report_get` reads
       // the report it announces. `undefined` for every non-report record, byte-identical to before.
       const reportEventId = typeof rec.detail?.reportEventId === "string" ? rec.detail.reportEventId : undefined;
-      // Card 4d9f7471: also carry `kind`/`rootMsgId`/`chainDepth` back out of `rec.detail` — the SAME fields
-      // the `session_message_gave_up` link event a few lines below already reads off this exact `rec.detail`
-      // for its own audit trail (proof this is an oversight, not a design choice: the read-back expressions
-      // already existed two lines away and simply weren't reused here). Without this, `enqueueDurableMessage`
-      // defaults every re-mint to `kind:"agent"`/self-rooted/depth-0 (service.ts's own defaults), so a still-
-      // unresolved `kind:"warning"` record (settle/watchdog/give-up nudges — plenty live at any time) silently
-      // flips to one-per-turn "agent" delivery on the successor, and the give-up chain's lineage is severed.
+      // @decision 4d9f7471 — also carry `kind`/`rootMsgId`/`chainDepth` out of `rec.detail`: omitting them
+      // defaulted every re-mint to `kind:"agent"`/self-rooted/depth-0, flipping a still-unresolved
+      // `"warning"` record to one-per-turn delivery and severing the give-up chain's lineage on the successor.
       const kind: QueuedMessageKind | undefined = rec.detail?.kind === "warning" ? "warning" : rec.detail?.kind === "agent" ? "agent" : undefined;
       const rootMsgId = typeof rec.detail?.rootMsgId === "string" ? rec.detail.rootMsgId : undefined;
       // chainDepth is carried VERBATIM, deliberately NOT `+1` like handleGiveUpExhausted's own give-up re-mint

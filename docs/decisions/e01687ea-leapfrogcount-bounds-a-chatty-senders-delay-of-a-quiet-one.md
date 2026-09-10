@@ -55,3 +55,22 @@ Lifecycle mirrors `activeTurnOwnerText` exactly: set alongside it in `submit()`,
 Inline comment in `packages/daemon/src/pty/host.ts` (the `Live.activeTurnSenderId` field doc), as of `main`
 `d8b3076b`. Extracted by card `b19e70d3` (tranche 10 on `pty/host.ts`); wording unchanged beyond joining
 wrapped lines and stripping `//` markers.
+
+## Decision C — `carryPendingToSuccessor` also carries `m.senderId` (unrelated decision, same card id, `sessions/service.ts`)
+
+**Source (this section only):** code-review follow-up to `carryPendingToSuccessor`'s recycle-carry
+loop — distinct from the sections above.
+
+### Narrative
+
+The loop carried `m.text`/`m.source`/`m.kind` but dropped `m.senderId` — the same identity Decision A
+threads everywhere else — so a recycle-carried directive could never coalesce with a fresh same-sender
+arrival on the successor. No re-mapping needed: `enqueueStdin` already null-maps `senderId` at enqueue
+time (card `6439c51f`, `coalesceSenderIdentity`, `pty/host.ts`).
+
+### Do not (this section)
+
+- Do not re-map `m.senderId` on a recycle carry — `enqueueStdin` already normalized it at enqueue time
+  (card `6439c51f`).
+
+Source: `sessions/service.ts` (`carryPendingToSuccessor`), main `b89cafa4`.
