@@ -486,11 +486,9 @@ export const RETIRED_BUNDLED_SKILL_NAMES: readonly string[] = [
 ];
 
 /**
- * Boot-only auto-retire of orphaned store dirs left behind by a bundled-skill rename or unbundle (cards
- * 5ddc2289, 187873f9). seedGlobalSkills() is seed-IF-ABSENT — it adds a new/renamed name but never
- * removes an old store dir once its skill stops being bundled, so it lingers forever: injectSkills
- * mirrors the whole store, so every session keeps getting it injected, spending
- * skillListingBudgetFraction on a name nothing references anymore.
+ * @decision 5ddc2289 — boot-only auto-retire of orphaned store dirs left behind by a bundled-skill
+ * rename or unbundle (see also card 187873f9): seed-if-absent never removes the OLD dir once a skill
+ * stops being bundled, so it lingers forever, still getting injected into every session.
  *
  * A store dir `name` is retired ONLY when ALL hold:
  *  (a) `name` is in the hardcoded RETIRED_BUNDLED_SKILL_NAMES allowlist above.
@@ -724,10 +722,9 @@ export type SkillFileResolveOutcome =
   | { ok: false; code: "invalid" | "not-found" | "not-diverged" | "stale-shipped"; message: string; shippedHash?: string };
 
 /**
- * Resolve ONE diverged reference/script file, per the user's explicit choice. This is the escape hatch
- * for the state that had none: a file that is BOTH customized AND has a shipped update is skipped by
- * advancePristineExtraFiles (correctly — it protects the edit), so its badge could never clear and the
- * only remedy was Reset, a whole-directory discard.
+ * Resolve ONE diverged reference/script file, per the user's explicit choice — the non-destructive
+ * escape hatch for a file that is BOTH customized AND has a shipped update (see @decision sha:54ce583a
+ * for the gap this closes: previously the only remedy was Reset, a whole-directory discard).
  *
  *  take:"mine"    — leave `mine` BYTE-IDENTICAL; advance base := shipped ONLY. "I've seen the shipped
  *                   update and I'm keeping my version." updateAvailable clears; customized stays true,
@@ -741,13 +738,10 @@ export type SkillFileResolveOutcome =
  *                   under `.pre-ff-backups` first. Destructive to THIS ONE FILE, never the directory,
  *                   and the REST layer only ever reaches it from a row already showing this file's diff.
  *
- * `expectedShippedHash` is a REQUIRED TOCTOU guard, not an optimization. `assets/**` is read LIVE from
- * the package dir (see CLAUDE.md), so an asset merge takes effect with no daemon restart — `shipped`
- * can change between the user reading the diff and clicking a button. Without this, take:"shipped"
- * would overwrite `mine` with content the displayed diff never showed: a discard behind a diff that no
- * longer shows what is being discarded, which is precisely the defect this card exists to close,
- * reappearing as a race. It guards take:"mine" too — that writes base := shipped, so it can otherwise
- * silently record a base the user never saw. Same class, lower stakes, one guard covers both.
+ * @decision sha:54ce583a — `expectedShippedHash` is a REQUIRED TOCTOU guard, not an optimization:
+ * `assets/**` is read LIVE with no restart needed, so `shipped` can change between the user reading
+ * the diff and clicking a button; guards both take:"mine" (a base recorded for content the user never
+ * saw) and take:"shipped" (a discard behind a diff that's gone stale).
  *
  * SKILL.md is REJECTED here: it has a real edit surface and its own 3-way merge/adopt/reset flow, and
  * routing it through a two-button per-file resolve would be a second, subtly-different notion of
@@ -834,14 +828,12 @@ export function deleteSkill(name: string): boolean {
  * skill don't reach an existing store on reboot — this is the explicit, per-skill opt-in refresh.
  * Returns false if the skill has no bundled asset (a user-created skill can't be "reset").
  *
- * mine = base = shipped for the WHOLE directory, not just SKILL.md (board card 75a0755d, CR M1): the
- * cpSync below already rewrites every reference doc / helper script file to shipped, but a reset that only
- * re-synced SKILL.md's base would leave every OTHER file's base stuck at its pre-reset value — reading
- * customized:true AND updateAvailable:true forever after, since mine (now shipped) would permanently
- * disagree with a base that reset never touched. That's this card's own bug, reintroduced through the
- * one action whose entire job is "discard and re-sync". Binary files are skipped (see isBinaryFile) —
- * cpSync already copied their real bytes correctly; there is simply no safe base to RECORD for them
- * without a utf8-mangling read, so (consistent with the rest of this module) they stay untracked.
+ * @decision 75a0755d — mine = base = shipped for the WHOLE directory, not just SKILL.md: a reset that
+ * only re-synced SKILL.md's base left every other tracked file's base stuck pre-reset, reading
+ * customized+updateAvailable forever after (see the record for the reintroduction story). Binary files
+ * are skipped (see isBinaryFile) — cpSync already copied their real bytes correctly; there is simply no
+ * safe base to RECORD for them without a utf8-mangling read, so (consistent with the rest of this
+ * module) they stay untracked.
  *
  * `.pre-ff-backups` entries for this skill are deliberately left in place, NOT cleared: they exist to
  * hedge against a rare pre-fix hand-edit being misread as `base` on first sight, and that hedge is about
