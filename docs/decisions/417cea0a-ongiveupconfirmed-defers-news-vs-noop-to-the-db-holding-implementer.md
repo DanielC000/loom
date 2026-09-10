@@ -10,6 +10,8 @@ NEVER fired from the `batchIds.size > 1` branch (see card `bc0774c4`'s own recor
 
 OPTIONAL, same rationale as `onTurnCompleted` (card `343441bd`, Decision B) — every existing `PtyHostEvents` test double is unaffected until it opts in.
 
+Site 2 (`sessions/service.ts`'s `handleGiveUpConfirmed`, the DB-holding implementer this record already defers to): walks the recipient's own event history for a `session_message_gave_up` row rooted at `logicalId` with `outcome:"parked"` — none found is a silent no-op (an ordinary mid-chain confirmation is not every CONFIRMED signal being news); found means append a NEW row of the SAME kind with `outcome:"confirmed-after-park"` (extends the outcome vocabulary rather than minting a new event kind), then best-effort-notify the ORIGINAL sender (`gaveUp.managerSessionId`, the same session `handleGiveUpExhausted` recorded at park time). The single-batch-only scope above is stated in the PARKED notice's own wording too — hedged as "MAY follow up", never "will" — so a colliding-signature message's silence is never misread as proof of non-delivery.
+
 ## Do not
 
 - Do not fire `onGiveUpConfirmed` from the `batchIds.size > 1` branch — a colliding-signature match is deliberately left unresolved; there is no single batch to attribute the confirmation to.

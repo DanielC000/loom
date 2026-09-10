@@ -7667,8 +7667,9 @@ export class SessionService {
    * content ruling; do not assume the latter's scope extends to a durable `orchestration_events` row.
    * @decision a419a7e6 — `messageExcerpt` is a bounded HEAD slice of the original intended text, gated
    * behind `isLogMessageContentEnabled()`; durability is reserved for this established-loss shape only.
-   * @decision f9b1ea00 — (card 280309d9's correction) this row's own `ts` is the GIVE-UP instant, not the
-   * write instant — see the record's own two-independent-parties correction and `writtenAt`'s own role.
+   * @decision f9b1ea00 — this row's own `ts` is the GIVE-UP instant, not the write instant (stamped
+   * `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` after write) — use `writtenAt` for true write time; never
+   * re-derive it via a manual hash-keyed join against `[prompt-echo]`.
    */
   handlePromptMismatchUnresolved(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number; messageExcerpt: string; writtenAt: string | null }): void {
     const s = this.db.getSession(sessionId);
@@ -7701,9 +7702,9 @@ export class SessionService {
   }
 
   /**
-   * @decision 38d68b8d — consumes `PtyHostEvents.onPromptMismatchUnmatched`; ONLY recipient is the
-   * SENDER/PARENT (`parentSessionId`) — never `info.gen`'s own `senderId`. Fires UNCONDITIONALLY; only
-   * the content clause is gated. Adds no separate durable audit event (see the record for why).
+   * @decision 38d68b8d — ONLY recipient is the SENDER/PARENT (`parentSessionId`), never `info.gen`'s
+   * own `senderId`. Fires UNCONDITIONALLY (only the content clause is gated); adds no separate durable
+   * audit event — the in-memory capture + pull surface deliberately never creates a durable row.
    * @decision 0eb43216 — the content-in-durable-records ruling this method implements: opt-in verbosity,
    * content only under `LOOM_LOG_MESSAGE_CONTENT`, default OFF.
    * @decision 25f31381 — re-examined whether the existing pull surface (`getLastMismatchUnmatched`) made
@@ -7741,80 +7742,15 @@ export class SessionService {
   }
 
   /**
-   * Card 417cea0a — the post-hoc retraction half of the give-up notice: `purgeConfirmedGiveUpRequeue`
-   * (pty/host.ts) already learns, by content match, that a given-up message's turn actually ran — this
-   * consumes that signal (wired via `PtyHostEvents.onGiveUpConfirmed`). `sessionId` is the RECIPIENT whose
-   * confirming hook fired; `logicalId` is the chain's `rootMsgId` (stable across every re-mint — see
-   * `QueuedMessage.logicalId`'s own doc).
-   *
-   * PtyHost is deliberately DB-agnostic (see `onGiveUpConfirmed`'s own doc), so THIS is where "was this
-   * actually parked, or just a normal mid-chain confirmation?" gets answered: walk `sessionId`'s own event
-   * history for a `session_message_gave_up` event rooted at `logicalId` with `outcome: "parked"`. None
-   * found ⇒ this confirmation resolved an ordinary still-in-budget requeue/re-mint, not a terminal park —
-   * nothing to retract, no notice (a silent, correct no-op; NOT every CONFIRMED log line is news). Found ⇒
-   * the sender was told this message was gone-until-proven-otherwise; tell them it landed. Records a
-   * durable `session_message_gave_up` event (SAME kind, NEW `outcome: "confirmed-after-park"` — extends
-   * the existing outcome vocabulary rather than minting a new event kind) so the audit trail carries the
-   * correction alongside the original park, then best-effort notifies the ORIGINAL sender
-   * (`gaveUp.managerSessionId` — the same session `handleGiveUpExhausted` looked up as `sender` when this
-   * chain parked).
-   *
-   * ⛔ SCOPE (Correction 1, card 417cea0a): only ever called from `purgeConfirmedGiveUpRequeue`'s
-   * single-`batchId` branch (see `onGiveUpConfirmed`'s call site in pty/host.ts) — a parked message whose
-   * signature collides with another live give-up batch never reaches this method, so it will NOT produce a
-   * `[loom:redelivery-confirmed]` notice. That gap is stated in the parked notice itself (hedged as "MAY
-   * follow up", never "will") precisely so its absence is never misread as proof of non-delivery.
-   *
-   * ⚠️ CARD 7f47991e — THE SIGNAL BEHIND THIS NOTICE ATTESTS AN OUTCOME, NOT A CAUSE. `latencyMs` (and the
-   * "CONFIRMED" it reflects) comes ENTIRELY from `purgeConfirmedGiveUpRequeue`'s content-hash match against
-   * `hook.prompt` — the text Claude Code's own `UserPromptSubmit` hook reports it received (see that
-   * method's doc, and the hook's own handling in `pty/host.ts`'s `deliverHook`). That hook fires identically
-   * for EVERY turn regardless of what pressed Enter — a Loom-issued `submit()`, the engine resubmitting a
-   * still-composed write on its own, OR a human manually pressing Enter on a stuck composer. **It proves
-   * WHAT text reached the engine and WHEN, never WHO or WHAT triggered the keystroke that submitted it.**
-   * The ONE mechanism in this file that DOES attribute a turn to a human (`Live.pendingRawOwnerSubmit`,
-   * populated only by `writeStdin`'s raw-terminal relay) is NOT wired to this signal, and would not help
-   * even if it were: it only captures text the human typed THROUGH that raw channel and accumulated in
-   * `Live.rawDraftText`. A parked message's text was written by Loom's own `ptyWrite`, not through
-   * `writeStdin`, so `rawDraftText` stays empty; a human who presses a bare Enter on that already-composed
-   * text produces `nextRawDraftState`'s `submitted:null` (its `text.length > 0` guard fails), so
-   * `pendingRawOwnerSubmit` never even fires for exactly this scenario. There is therefore no code path,
-   * wired or unwired, that lets this notice tell a genuine engine self-heal apart from a human keystroke —
-   * the notice below must say so, not imply "Loom's retry landed."
-   *
-   * ⚠️ A THIRD CANDIDATE, surfaced by a manager's in-vivo report during this card's own implementation
-   * (worker `c500e7e3`'s stuck-then-recovered turn): the RECIPIENT of this notice is the very sender who
-   * may, in the meantime, have ALSO sent a fresh `worker_message`/`worker_redirect` to the same session —
-   * itself a Loom-driven `submit()`, indistinguishable from an automatic give-up retry by this same
-   * content-match signal. That manager could only rule its own action out because `worker_message`
-   * happened to return `delivered:false, reason:"held"` with a `busyForMs` that proved the turn had
-   * already started before the message was even sent — a trace that will NOT exist in general. So this
-   * notice's "cause unknown" must include the sender's own later action, not only "Loom automatically" vs.
-   * "a human" — a sender who just re-drove the session is the one reader most tempted to credit their own
-   * intervention for a turn their intervention may not have caused.
-   *
-   * ⚠️ CARD c2f8695a — A FOURTH CANDIDATE, and the one this notice's original candidate list omitted
-   * entirely: `worker_flush` (`PtyHost.flushComposer`, wired via `flushWorkerComposer` above). It is a
-   * MANAGER MCP TOOL CALL, not a human at a terminal — `flushComposer`'s doc frames it as "the daemon-driven
-   * analogue of what a human does at the raw terminal," which is exactly why a manager who just called it
-   * doesn't recognise its own action in a clause worded for a human pressing Enter, and gets steered toward
-   * filing an `f91c8634` specimen against its own correct remedy. It reuses the SAME `fireEnterAndVerify`
-   * verify-and-retry ladder `submit()`'s own give-up redelivery uses (see `flushComposer`'s doc), so its
-   * Enter press produces the identical content-match signal this notice is built on — structurally
-   * indistinguishable from Loom's own automatic retry by that signal alone, same as the third candidate above.
-   *
-   * DoD-2 (does the daemon correlate rather than list?): NO, and not for lack of trying — checked whether
-   * `flushWorkerComposer`'s own durable `flush_worker_composer` event (sessions/service.ts, above) could be
-   * looked up here and used to NAME the cause instead of listing it. It cannot, structurally: that event is
-   * appended only AFTER `pty.flushComposer`'s promise resolves, which itself waits on `awaitFlushConfirmSettle`
-   * polling `live.enterConfirmed` — and `live.enterConfirmed` is set true, and `purgeConfirmedGiveUpRequeue`
-   * (which fires `onGiveUpConfirmed` → this method, synchronously, in the SAME hook-handling call) runs,
-   * BEFORE that poll ever observes the flip (see `deliverHook`'s `UserPromptSubmit` case, pty/host.ts: `live.
-   * enterConfirmed = true` precedes the `purgeConfirmedGiveUpRequeue` call by several lines in the same
-   * function). So by the time THIS method runs and sends the notice, a causally-responsible flush's own audit
-   * event does not exist in the DB yet — there is nothing to query. An accurate menu beats a confident wrong
-   * attribution (this card's own bound); do not add a lookup here that would always return empty and read as
-   * "checked, ruled out" when it never actually ran early enough to see the event that would prove it.
+   * @decision 417cea0a — `handleGiveUpConfirmed` walks event history for `session_message_gave_up`
+   * outcome:"parked" rooted at `logicalId`; none found is a silent no-op, found appends a NEW row
+   * (outcome:"confirmed-after-park") and notifies `gaveUp.managerSessionId`, never a fresh lookup.
+   * @decision 7f47991e — the notice's signal attests WHAT text landed and WHEN, never WHO/WHAT
+   * triggered it — never word it as "Loom's retry landed"; a sender's own later worker_message/
+   * worker_redirect produces the identical signal and is the least-suspected cause of the four.
+   * @decision c2f8695a — `worker_flush` is a fourth candidate (same verify-and-retry ladder as
+   * `submit()`'s redelivery); never add a `flush_worker_composer`-event lookup to name the cause —
+   * that event is appended after this notice already fires, so the lookup would always read empty.
    */
   handleGiveUpConfirmed(sessionId: string, logicalId: string, latencyMs: number): void {
     const events = this.db.listEventsForWorker(sessionId);
