@@ -27,23 +27,13 @@ export interface RunSnapshotGitDeps {
 /**
  * Agent Runs R2 — the disposable, read-only cwd for an ephemeral `run` session.
  *
- * ╔═ WHY A SNAPSHOT (the run-cwd isolation decision, owner-approved 2026-06-05) ════════════════════════╗
- * ║ A run must read the project's code but produce NO commit and NEVER dirty the LIVE checkout — yet it ║
- * ║ boots with the SAME gate-free posture as every other session (CLAUDE.md's spawn-mode table), so     ║
- * ║ Write/Edit are auto-approved. cwd=the real repoPath would let a run silently write into the live    ║
- * ║ working tree. So each run gets its OWN throwaway copy of the project's COMMITTED HEAD, extracted     ║
- * ║ with no `.git` — hence NO branch and NO git-worktree admin record (sidesteps the worktree-GC bug    ║
- * ║ class entirely; there is nothing for `git worktree prune` to chase). Any writes the run makes land   ║
- * ║ in this disposable copy and are discarded on teardown. Committed-HEAD (not the working tree) is the ║
- * ║ deliberate, deterministic input semantics: an endpoint agent's answer must be reproducible, not     ║
- * ║ dependent on whatever happens to be dirty in the live tree at call time.                            ║
- * ╚═════════════════════════════════════════════════════════════════════════════════════════════════════╝
+ * @decision sha:8d49d2dd — never set a run's cwd to the live repoPath; it would let the run silently
+ * write into the live working tree instead of a disposable copy. See
+ * docs/decisions/8d49d2dd-run-snapshot-cwd-isolation.md for the full owner-approved rationale.
  *
- * Extraction is pure git plumbing (no `tar` dependency, cross-platform): populate a THROWAWAY index from
- * HEAD (`read-tree`, via a per-run GIT_INDEX_FILE so the live repo's index/working tree are untouched),
- * then `checkout-index -a` with an absolute `--prefix` into the snapshot dir. Tracked files only ⇒ no
- * `.git`. future: a run that needs untracked/gitignored DATA files would be a separate "run data mount"
- * extension — out of scope for R2.
+ * Extraction is pure git plumbing (read-tree + checkout-index into a throwaway index, no `tar` dep,
+ * tracked files only ⇒ no `.git`; untracked/gitignored DATA files would need a separate "run data
+ * mount" extension, out of scope for R2).
  */
 
 /** Absolute path to a run session's disposable snapshot cwd (`runs/<sessionId>/`). */
@@ -111,17 +101,9 @@ export interface RunSnapshotRemoveDeps {
  * leave the run non-terminal — the run row is already marked terminal before this runs; a lingering dir
  * is swept on the next boot.
  *
- * card 26c661cd (bd9fc808-shaped fix): the prior implementation retried a hung `fs.promises.rm` up to 40×
- * — a genuinely WEDGED directory handle never lets that promise settle at all, so the retries never even
- * start; the call just occupies a libuv threadpool slot (default pool size 4) FOREVER, invisibly, since
- * this is fire-and-forget (`void removeRunSnapshot(...)` at sessions/service.ts) and the `catch` below was
- * therefore unreachable in exactly the case that mattered. This now adopts `removeWorktree`'s proven,
- * already-tested shape (git/worktrees.ts:1281): {@link killableRemoveDir} runs the removal in a SEPARATE OS
- * process (a wedged handle blocks only that child, never a daemon thread) and force-kills it on timeout;
- * the outer {@link withTimeout} additionally fails SAFE to `killed:true` if the (real or injected) `removeDir`
- * seam itself never settles, so a hang is NEVER retried in a loop here — a genuinely wedged dir is simply
- * left on disk for the next boot sweep, and (since killableRemoveDir always resolves) the warning below is
- * now reachable even in the wedged case, closing the "unreportable by construction" gap.
+ * @decision 26c661cd — never retry a hung `fs.promises.rm` in-process; a wedged handle leaks a libuv
+ * threadpool slot forever. Removal runs in a separate, force-killable OS process instead. See
+ * docs/decisions/26c661cd-run-snapshot-removal-killable-child-process.md
  */
 export async function removeRunSnapshot(sessionId: string, deps: RunSnapshotRemoveDeps = {}): Promise<void> {
   const dir = runSnapshotDir(sessionId);
@@ -141,16 +123,10 @@ export async function removeRunSnapshot(sessionId: string, deps: RunSnapshotRemo
  * under RUNS_DIR at boot is orphaned by a crash/restart that interrupted a run (those runs are marked
  * failed alongside this). Best-effort + never throws — a stuck handle leaves a dir for the next sweep.
  *
- * card 26c661cd: the prior implementation was `fs.rmSync(..., { maxRetries: 10, retryDelay: 100 })` —
- * SYNCHRONOUS on the main thread, so a single wedged dir at boot blocked the ENTIRE daemon (every request,
- * every session) for up to its full retry budget before anything could be served. This is now async and
- * uses the same {@link killableRemoveDir}-backed bound as {@link removeRunSnapshot} (a separate OS process
- * per removal, force-killed on timeout), and — deliberately — the caller (`reconcileRunsOnBoot`) fires this
- * WITHOUT awaiting it: boot must never block on a stubborn dir, so a wedge here is simply skipped-and-
- * deferred to the next boot sweep rather than serialized in front of `app.listen()`. The failure this buys:
- * a run snapshot dir can still be mid-removal in the background for up to `timeoutMs` after boot reports
- * ready; this is safe because `runSnapshotDir` is keyed by session id, which is never reused, so a fresh
- * run can never collide with an orphaned dir still being cleaned up.
+ * @decision 26c661cd — runs async, never a synchronous retry loop; a synchronous `fs.rmSync` retry here
+ * once blocked the WHOLE daemon at boot on a single wedged dir. The caller fires this WITHOUT awaiting
+ * it, deliberately, so boot never blocks on it. See
+ * docs/decisions/26c661cd-run-snapshot-removal-killable-child-process.md
  */
 export async function sweepAllRunSnapshots(deps: RunSnapshotRemoveDeps = {}): Promise<void> {
   let entries: string[];
