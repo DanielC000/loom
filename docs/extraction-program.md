@@ -24,6 +24,14 @@ from git, never from a number quoted at you:
 git log main --oneline --grep="<your file>, tranche"
 ```
 
+**This is blind to a zero-yield tranche** — a tranche that correctly reports
+`noChanges:true` (nothing to extract) makes no commit, so there's nothing here for it to find.
+Also check the board (`tasks_list` with `titleContains: "<your file>, tranche"`,
+`excludeDone: false` — a `done` card with `merged: null` is a zero-yield tranche) and project
+memory for the file name. If a prior tranche was zero-yield and the file is unchanged since
+(`git log --oneline --since="<that card's updatedAt>" main -- <file>` is empty), **STOP AND
+REPORT** rather than re-classifying it.
+
 **A card id and a short commit sha are the same shape — 8 lowercase hex — and nothing in the
 string says which.** Writing one where the other belongs makes a reference silently dead-end (a
 board card id is never a valid git object; a commit sha is never a board card). Before citing
