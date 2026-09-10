@@ -55,9 +55,9 @@ function codexSessionsRoot(): string {
  * Tolerates mtime/wall-clock skew when matching a just-written codex rollout file's `mtimeMs` against
  * `sinceMs` in {@link findConversationIdForSpawn}'s freshness filter.
  *
- * @decision 49d43ef9 — keep this SMALL: it bounds (does not close) the sequential recycle-race window;
- * `excludeSessionIds` (card cbae4520) closes that shape by construction instead. See
- * docs/decisions/49d43ef9-mtime-skew-tolerance-measured-and-bounded-not-closed.md.
+ * @decision 49d43ef9 — keep this SMALL: measured skew is sub-2ms, so a wide "safe-feeling" tolerance
+ * (e.g. a round 2000ms) would widen the same window that lets the recycle race through. Bounds, does
+ * not close, the race — `excludeSessionIds` (card cbae4520) closes that shape by construction instead.
  *
  * Env-overridable so a hermetic test can exercise the boundary without waiting on real skew (mirrors this
  * project's `LOOM_CODEX_*_MS` convention in `pty/host.ts`).
@@ -142,9 +142,9 @@ export function transcriptExists(cwd: string, conversationId: string): boolean {
  * read it can be trusted indefinitely; the `mtimeMs`+`size` stamp is a defensive staleness check only (it
  * should never actually fire for a real rollout file — nothing this project does ever rewrites one).
  *
- * @decision cbae4520 — without this cache, the corpus-wide spawn-hot-path scan re-reads every candidate
- * rollout file's content on every fresh codex spawn (measured 74.2ms vs ~5.7ms cached, 242-file corpus).
- * See docs/decisions/cbae4520-sessionmetacache-avoids-reading-every-rollout-file-per-spawn.md.
+ * @decision cbae4520 — do not remove or unbound this cache: without it, the corpus-wide spawn-hot-path
+ * scan re-reads every candidate rollout file's content on every fresh codex spawn (measured 74.2ms vs
+ * ~5.7ms cached, 242-file corpus) — synchronous, on the spawn hot path.
  */
 const SESSION_META_CACHE_MAX = 500;
 const sessionMetaCache = new Map<string, { mtimeMs: number; size: number; sessionId: string; cwd: string }>();
@@ -322,9 +322,9 @@ export function findConversationIdForSpawn(cwd: string, sinceMs: number, exclude
  * deliberately point back here rather than repeating this, so it can't drift out of sync. Do not read this
  * function's own certainty about the sequential case as covering the concurrent one too.
  *
- * @decision 184fd82e — do not adopt a per-cwd spawn lock off the ~120s retry-ladder ceiling alone;
- * `captureCodexEngineSessionId` (`pty/host.ts`) now logs the real exposure instead. See
- * `docs/adr/184fd82e-defer-serializing-fresh-codex-spawns-per-cwd.md`.
+ * @decision 184fd82e — do not adopt a per-cwd spawn lock off the ~120s retry-ladder ceiling alone —
+ * that ceiling is a configured worst case, not a measured collision cost. `captureCodexEngineSessionId`
+ * (host.ts) instead logs the real exposure; the race is NOT fixed, only its visibility changed.
  *
  * Reads every matching file's `session_meta` (not just `stat`s it, unlike the freshness scan above) since
  * cwd is only knowable from content — cached and read incrementally, never the whole file (see

@@ -7,7 +7,7 @@
  *
  * @decision cd0c7fee — the PreToolUse-before-MCP ordering guarantee is PER-INVOCATION ONLY: it says
  * nothing about relative arrival order between two invocations of the same tool on the same session.
- * Never trust FIFO across invocations for the "ambiguous" state — see the record for why.
+ * Never trust FIFO across invocations — that's exactly what produces the "ambiguous" state.
  *
  * @decision cd0c7fee — fail-open by design: "unknown"/"ambiguous" are honest, never folded into
  * "confirmed-main". Not persisted across a restart — a lost entry can only under-attribute, never

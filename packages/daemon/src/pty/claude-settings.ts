@@ -8,10 +8,10 @@ import { SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, DECISION_RECORDS_SCRIPT,
  *  `test/tool-attribution.mjs` asserts they stay in sync, run it after editing either side. */
 export const PRE_TOOL_USE_ATTRIBUTION_MATCHER = "mcp__loom-orchestration__worker_report|mcp__loom-tasks__memory_write";
 
-/** @decision sha:29b22e7e — both resume-gate env thresholds are overridden so Claude Code's "resume
- *  from summary" gate (whose DEFAULT option force-compacted three managers at once, 2026-07-10) never
- *  renders; keep the pty-side `resolveResumeGate` verify-retry (host.ts) as a fallback, don't rely on
- *  this alone — see docs/decisions/29b22e7e-resume-gate-confirms-down-before-risking-enter.md */
+/** @decision sha:29b22e7e — overrides both resume-gate env thresholds so the CLI's "resume from
+ *  summary" gate never renders (default choice force-compacted 3 managers at once, 2026-07-10). Two
+ *  independent layers — never rely on this override alone; keep host.ts's verify-retry as fallback.
+ *  Do not lower either threshold back toward a value a real session could reach, either. */
 const RESUME_GATE_ENV_OVERRIDE: Record<string, string> = {
   // ~100 years — no real session is ever that old; suppresses the gate via the age check alone.
   CLAUDE_CODE_RESUME_THRESHOLD_MINUTES: String(60 * 24 * 365 * 100),
@@ -19,20 +19,14 @@ const RESUME_GATE_ENV_OVERRIDE: Record<string, string> = {
   CLAUDE_CODE_RESUME_TOKEN_THRESHOLD: "999999999",
 };
 
-/** @decision 9c03f5a6 — BEST-EFFORT, reverse-engineered suppression of Claude Code's auto-mode
- *  first-run entry-warning dialog (`skipAutoPermissionPrompt`); the settings-scope mapping was never
- *  confirmed against a real CLI. Purely additive — a wrong guess is a no-op, never a regression. Treat
- *  as a belt on the proven gate-free boot recipe, not a replacement for it — see
- *  docs/decisions/9c03f5a6-auto-mode-entry-warning-suppressed-via-reverse-engineered-flag.md */
+/** @decision 9c03f5a6 — BEST-EFFORT reverse-engineered suppression of Claude Code's auto-mode
+ *  entry-warning dialog; the settings-scope mapping was never confirmed against a real CLI. Purely
+ *  additive (a wrong guess no-ops). Do not treat as a replacement for the gate-free boot recipe. */
 const AUTO_MODE_ENTRY_WARNING_OVERRIDE = { skipAutoPermissionPrompt: true } as const;
 
-/** @decision ea2fbcca — validates settings.hooks OBJECT SHAPE in-process rather than shelling out to
- *  `claude doctor` (measured to REPORT an invalid file and still EXIT 0, 3 CLI versions × 2 arms,
- *  2026-08-25). Models only the ONE nesting-depth invariant the 2026-08-25 double-wrap incident
- *  violated — a known, accepted gap against the CLI's undocumented, auto-updating full schema, not an
- *  oversight. Returns a list of violations (empty ⇒ valid); ONE definition shared with
- *  `test/settings-hooks-shape.mjs`. See
- *  docs/decisions/ea2fbcca-settings-hooks-shape-validated-fail-closed.md */
+/** @decision ea2fbcca — validates settings.hooks shape in-process; do not shell out to `claude doctor`
+ *  instead (measured to exit 0 on an invalid file, 3 CLI versions × 2 arms). Models only the ONE
+ *  nesting-depth invariant the 2026-08-25 incident violated — do not widen to chase the CLI's full schema. */
 export function hooksShapeViolations(hooksObj: unknown): string[] {
   const errors: string[] = [];
   if (typeof hooksObj !== "object" || hooksObj === null) return ["settings.hooks is not an object"];
@@ -64,12 +58,9 @@ export function hooksShapeViolations(hooksObj: unknown): string[] {
   return errors;
 }
 
-/** @decision ea2fbcca — REFUSE (throw), never write/hand back a bad settings file: the only other
- *  detector is the CLI's own BLOCKING dialog inside an unattended session, indistinguishable from a
- *  hung PTY/spawn fault until a human happens to attach. `SessionsService.spawnWorker`'s existing
- *  try/catch around `createPty` already reconciles this throw the same way an OS-level spawn failure
- *  is reconciled. Called TWICE: pre-write on the in-memory object, and on a read-back of what actually
- *  landed on disk. See docs/decisions/ea2fbcca-settings-hooks-shape-validated-fail-closed.md */
+/** @decision ea2fbcca — REFUSE (throw), never write/hand back a bad settings file: the CLI's own
+ *  detector is a BLOCKING dialog in an unattended session, indistinguishable from a hung spawn until a
+ *  human attaches. Called TWICE — pre-write on the in-memory object, and on a read-back of disk. */
 export function assertValidHooksShape(hooksObj: unknown, context: string): void {
   const violations = hooksShapeViolations(hooksObj);
   if (violations.length) {
@@ -105,10 +96,9 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  * `--hook` mode (never a repo-wide scan — see that script's own doc for the whole-repo cost this
  * deliberately avoids), scoped to just the ONE file a Write/Edit just touched — gated on the explicit
  * `docLint` param (see {@link SpawnOpts.docLint} in host.ts) AND `repoPath` (a caller that omits
- * `repoPath` entirely never gets this hook wired). @decision d92ec82b — do not re-couple this gate to
- * `vaultPath` truthiness, a proxy that silently skipped a docLint-on/no-vault project even though this
- * hook targets source, not vault content — see
- * docs/decisions/d92ec82b-comment-anchor-lint-gated-on-explicit-doclint.md. Advisory only — never blocks.
+ * `repoPath` entirely never gets this hook wired). @decision d92ec82b — do not re-couple this gate
+ * to `vaultPath` truthiness: that reintroduces a docLint-on/no-vault project silently losing this
+ * source-file lint, even though the hook never touches vault content. Advisory only — never blocks.
  *
  * A PostToolUse hook (matcher Read) runs `decision-records.mjs`, which appends any complete,
  * out-of-band decision record anchored in the range a `Read` call actually returned, so a range that
@@ -120,9 +110,8 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  * stores (see `anyDecisionRecordStoreExists` below, which mirrors `decision-records.mjs`'s own runtime
  * `anyStoreExists` bail — keep both in sync). `repoPath` OMITTED falls back to the pre-5244adc2 behavior
  * of always wiring the hook, so every existing caller stays byte-identical. @decision 5244adc2 — a
- * session already LIVE when the first store appears will NOT get this hook wired until its own next
- * resume; this is an accepted, documented gap, not a bug — see
- * docs/decisions/5244adc2-decision-records-hook-gated-on-store-existence.md
+ * session already LIVE when the first store appears is NOT rewired until its own next resume — an
+ * accepted, documented gap, not a bug.
  *
  * `hookToken` (card a2407ed4) rides as a 4th argv on the relay command, alongside the sessionId/port
  * already there — `hook-relay.mjs` forwards it in the POST body, and `/internal/hook` requires it to
@@ -131,11 +120,9 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  * `PtyHost.verifyHookToken`'s doc for exactly what this does and does not close. Placed BEFORE the
  * optional `vaultPath`/`repoPath` — TypeScript disallows a required param after an optional one.
  */
-/** @decision 016ee373 — the CLI's ACTUALLY-accepted `--permission-mode` values, probe-verified against
- *  the installed CLI (2.1.246); VERSION-PINNED, re-verify against `claude --help` on a newer CLI. Do
- *  NOT hand-copy this list anywhere else — `writeSessionSettings` below and host.ts's
- *  `DIRECT_BOOT_MODES`/`computeBootMode` both import this type. See
- *  docs/decisions/016ee373-direct-boot-modes-typed-as-compile-time-guard.md */
+/** @decision 016ee373 — the CLI's ACTUALLY-accepted `--permission-mode` values, probe-verified
+ *  against 2.1.246; VERSION-PINNED, re-verify via `claude --help` on a newer CLI. Do NOT hand-copy
+ *  this list elsewhere — `writeSessionSettings` and host.ts's DIRECT_BOOT_MODES both import this type. */
 export type CliPermissionMode = "acceptEdits" | "auto" | "bypassPermissions" | "manual" | "dontAsk" | "plan";
 
 /**

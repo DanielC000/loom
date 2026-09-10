@@ -60,8 +60,8 @@ export function otherProjectTranscriptDenyRules(otherProjectId: string, otherPro
  * null if not found.
  *
  * @decision f432cbb8 — MUST stay synchronous (the hottest caller runs inside the M2 busy-gate drain
- * window's "no `await`" invariant); resolvedPathCache below is the load-bearing cost bound instead —
- * see the record for the measured cost and why the readdir scan itself is deliberately NOT cached.
+ * window's "no `await`" invariant); resolvedPathCache below bounds the cost instead. Do not cache the
+ * readdir scan itself — a TTL'd listing misses a file rotation writes into an already-scanned dir.
  */
 const RESOLVED_PATH_CACHE_MAX = 500; // mirrors walkState's MAX_TRACKED_WALKS bound in sessions/transcript.ts — never grows unbounded
 const resolvedPathCache = new Map<string, string>(); // engineSessionId -> last-resolved fallback-scan hit
@@ -143,8 +143,8 @@ export const TOOL_RESULT_BODY_CAP = 2048;
 
 /**
  * @decision sha:5cb98ca4 — repairs a CONFIRMED engine-side JSONL comment-marker corruption at READ
- * time (can't be fixed at the source); the `\ `/`\*` leading-position check can't false-positive on
- * real content — see the record before changing this regex.
+ * time (can't fix at the source). Do not weaken the leading `\ `/`\*` position check — it's what
+ * keeps the repair from false-positiving on real content, e.g. a mid-line backslash in a Windows path.
  */
 const LINE_DECORATION_RE = /^[ \t]*(?:\d+[:\t-])?[ \t]*/;
 function repairMangledCommentMarkers(text: string): string {
