@@ -65,9 +65,9 @@ const TIER_A_ACT_SLUGS: readonly string[] = ["decisions-relay", "board-reach", "
 
 /** Compute the grant-time co-grant advisories for a companion session's WHOLE resolved grant set (pass
  *  every row from `listCompanionCapabilityGrantsForSession`). Pure + side-effect-free; returns `[]` for a
- *  benign grant set. @decision 4c33a1bc — the two advisories (transcript-read+session-steer laundering,
- *  multi-Tier-A shared-window ceiling) and why; see
- *  docs/decisions/4c33a1bc-companion-co-grant-risk-advisories.md. */
+ *  benign grant set. @decision 4c33a1bc — never derive these advisories from per-act FrictionTier logic
+ *  (decided per-call; this is about which levers were CO-GRANTED, a static grant-set fact); never turn
+ *  them into blocks — the owner chose warn-only, Option B. */
 export function computeCoGrantWarnings(grants: Pick<CompanionCapabilityGrant, "capability" | "mode">[]): CompanionCoGrantWarning[] {
   const warnings: CompanionCoGrantWarning[] = [];
 
@@ -161,8 +161,9 @@ export interface ResolvedGrantScope {
  *
  * Companion "lead mode" is checked FIRST, ahead of any grant-row read: when set on this session, this
  * SHORT-CIRCUITS to {@link synthesizeLeadModeScope}'s synthesized full-scope answer — SUPERSEDING the
- * rows, never deleting/mutating them. @decision b5c606aa — Option B, no guardrails; see
- * docs/decisions/b5c606aa-companion-lead-mode-option-b-no-guardrails.md.
+ * rows, never deleting/mutating them. @decision b5c606aa — Option B, no guardrails: lead mode is a pure
+ * runtime supersede, never a mutation of the grant rows — toggling it off must instantly revert to
+ * whatever was actually granted.
  */
 export function resolveCompanionGrant(db: Db, sessionId: string, capability: string): ResolvedGrantScope | null {
   if (isCompanionLeadModeEnabled(db, sessionId)) {
@@ -213,9 +214,9 @@ export function isCompanionLeadModeEnabled(db: Db, sessionId: string): boolean {
  *  "lead mode". Iterates `db.listAllProjects()` LIVE on every call (never cached) — the INCLUSIVE list, so
  *  a project created after lead mode was enabled is included on the very next read. Returns `null` (never
  *  an empty-but-truthy scope) when there are zero live projects or `db` doesn't implement
- *  `listAllProjects`. @decision b5c606aa — Option B, no guardrails, and the per-capability config
- *  synthesized for decisions-relay/attention-push/media-out; see
- *  docs/decisions/b5c606aa-companion-lead-mode-option-b-no-guardrails.md. */
+ *  `listAllProjects`. @decision b5c606aa — Option B, no guardrails: every project resolves act-mode with
+ *  no role exclusion; but never relax `session-steer`'s `roleFilter` or `board-reach`'s `authoredContent`
+ *  defaults here — Option B covers decision/alert visibility only, never verbatim-relay. */
 function synthesizeLeadModeScope(db: Db, capability: string): ResolvedGrantScope | null {
   if (typeof db.listAllProjects !== "function") return null;
   const projects = db.listAllProjects();
@@ -248,8 +249,9 @@ function synthesizeLeadModeScope(db: Db, capability: string): ResolvedGrantScope
  * Names WHICH capability is missing (vs. a collapsed "not in your granted scope" that reads the same for
  * a fully-ungranted project as for one just missing this one lever). `label` names the project reference
  * in the message (defaults to `project "<id>"`).
- * @decision sha:f4d04609 — why, and the fallback behavior; see
- * docs/decisions/f4d04609-scope-denial-names-missing-capability.md.
+ * @decision sha:f4d04609 — every per-project scope denial must route through this so the error names the
+ * missing capability, not a collapsed message; this helper is purely descriptive — it must never widen
+ * or itself decide scope.
  */
 function scopeDenialMessage(
   db: Db,
@@ -592,14 +594,14 @@ function pendingResolveKey(sessionId: string, route: CompanionRoute | null): str
  * would always fail; the validated note is instead carried in the pending-proposal payload and used
  * verbatim on commit.
  *
- * @decision a8ddd6d2 — the confirm prompt goes DIRECTLY to the owner via `ctx.outbound.deliverToOwner`;
- * the tool NEVER returns the confirm token to the companion (a bare `{status:'proposed'}`) — see
- * docs/decisions/a8ddd6d2-decision-resolve-token-withholding.md for the hijacked-companion relay attack this closes.
+ * @decision a8ddd6d2 — never return `promptText`/the confirm token to the companion from this propose
+ * call, in any form — that reopens the hijacked-companion relay attack this hardening closed. Never rely
+ * on Primitive B (a verbatim substring check) alone — it doesn't distinguish "approve" from "NOT approve".
  */
 /**
  * @decision 0c1365d0 — this dedup signature folds in ONLY the answer tuple (state/chosenOption/answeredAt/
- * consumedAt); title/body/options/recommendation are immutable post-creation, see
- * docs/decisions/0c1365d0-decisions-relay-dedup-signature.md.
+ * consumedAt); never add title/body/options/recommendation without first re-verifying against `db.ts`'s
+ * `UPDATE questions` statements that they're still immutable post-creation.
  */
 function decisionSurfaceSignature(q: Pick<Question, "state" | "chosenOption" | "answeredAt" | "consumedAt">): string {
   return `${q.state}|${q.chosenOption ?? ""}|${q.answeredAt ?? ""}|${q.consumedAt ?? ""}`;
@@ -883,9 +885,9 @@ function pendingBoardKey(sessionId: string, route: CompanionRoute | null): strin
 
 /** Formats `updateProjectTask`'s additive `pendingRequestWarning` into one optional `pendingRequestNote`
  *  string, spread into the `board_update` ack only when non-empty — never a raw `{id,title}[]` dump, so
- *  it renders consistently in companion chat. @decision cc910aec — surfaces a warning that previously
- *  never reached the companion ack surface at all; see
- *  docs/decisions/cc910aec-board-update-ack-pending-request-note.md. */
+ *  it renders consistently in companion chat. @decision cc910aec — this note can only ever ADD a field to
+ *  an already-successful ack; it must never turn a success into an error (inherits card `c4355598`'s
+ *  constraint that this warning can never block the write it decorates). */
 function pendingRequestWarningNote(warnings: PendingRequestWarning[] | undefined): { pendingRequestNote?: string } {
   if (!warnings || warnings.length === 0) return {};
   const items = warnings.map((w) => `"${w.title}" (request ${w.id})`).join("; ");
@@ -918,9 +920,9 @@ function pendingAuthoredGrantKey(sessionId: string, route: CompanionRoute | null
  *  module-scoped pending-payload maps. A caller must ALSO call `OwnerConfirmStore.clearSession`
  *  (attestation.ts) for the SAME sessionId — this only clears the levers' own remembered payloads, never
  *  the confirm tokens themselves. Prefix-matches on `${sessionId}::`, mirroring every pending*Key helper's
- *  own key shape. @decision 327bcaaa — why this exists (orphaned pending-proposal memory on session
- *  close) and the CR follow-up that caught a missed lever; see
- *  docs/decisions/327bcaaa-clear-pending-proposals-on-session-close.md. */
+ *  own key shape. @decision 327bcaaa — never add a new ACT lever's pending-payload map without also
+ *  adding it here (the `pendingSpawns` omission is the incident this guards against); never trust a test
+ *  that only exercises the confirm-token path — assert on `pendingProposalCountForSession` directly. */
 export function clearPendingProposalsForSession(sessionId: string): void {
   const prefix = `${sessionId}::`;
   for (const k of pendingDecisionResolves.keys()) if (k.startsWith(prefix)) pendingDecisionResolves.delete(k);
@@ -951,9 +953,9 @@ export function pendingProposalCountForSession(sessionId: string): number {
  * SKIPPED for title/body there, and only there (never a collapsed/scope-wide read — always read via
  * `ctx.scope.configFor(projectId)` for the SPECIFIC project being written).
  *
- * @decision ccdb1e0c — an owner-accepted Tier-A residual risk, fail-closed default OFF, human-REST-only —
- * see docs/decisions/ccdb1e0c-authored-content-tier-a-residual.md. `authoredContent` never widens scope,
- * bypasses Primitive A, or waives the reply-to-route requirement — it ONLY conditions Primitive B.
+ * @decision ccdb1e0c — an owner-accepted Tier-A residual risk; never make this settable via any agent-
+ * facing MCP tool (human-REST-only, matching the rest of the grant boundary) and never treat it as
+ * "fixed" — `authoredContent` never widens scope, bypasses Primitive A, or waives reply-to-route.
  */
 function authoredContentAllowed(cfg: { authoredContent?: unknown }): boolean {
   return cfg.authoredContent === true;
@@ -977,8 +979,9 @@ function authoredContentAllowed(cfg: { authoredContent?: unknown }): boolean {
  * read-only grant's tool surface stays byte-identical. Both relay into the EXISTING loom-tasks write
  * path (`createProjectTask`/`updateProjectTask`, mcp/tasks.ts) rather than reimplementing board
  * mutation — same posture as `decision_resolve` reusing `db.answerQuestion`.
- * @decision 1039e892 — NO delete tool at all, and Primitive C is MANDATORY (not optional) for every
- * board write — see docs/decisions/1039e892-companion-board-write-sign-off.md.
+ * @decision 1039e892 — never add a delete tool here without a fresh owner sign-off (the no-delete posture
+ * was deliberate); never make Primitive C optional/skippable for these two tools — it was explicitly
+ * upgraded from recommended to mandatory.
  *
  * Both tools copy `decision_resolve`'s exact proven shape (its CR-hardened Primitive-C round-trip in
  * particular — see that lever's doc for the full rationale): every call (propose OR confirm) re-runs
@@ -1497,10 +1500,9 @@ const BOARD_REACH: CompanionCapability = {
     );
 
     /**
-     * @decision 2b26035c — Direction (a), "inline authored-content grant" — see
-     * docs/decisions/2b26035c-inline-authored-content-grant.md. This tool ITSELF NEVER authors or commits
-     * any card content — it only ever flips the grant used by board_create/board_update's own
-     * `contentIsVerbatim` check above.
+     * @decision 2b26035c — Direction (a), inline authored-content grant: this tool ITSELF NEVER authors or
+     * commits card content — it only ever flips the grant board_create/board_update's own
+     * `contentIsVerbatim` check reads above.
      *
      * ALWAYS Tier-X-shaped: unlike board_create/board_update's Tier A, there is NO low-friction direct-
      * commit path here at all, even inside an otherwise-warm trust window — granting authored-content
@@ -1768,8 +1770,9 @@ function isDeniedVaultPath(relPath: string): boolean {
  * Per-note opt-out: `companion-read: false` (or `no`/`off`) in a leading frontmatter block excludes that
  * note from `vault_lookup`. Strips a leading BOM before matching (not at the shared `readVaultFile`
  * reader, which has other callers) since an un-stripped BOM would silently defeat the `^---` anchor.
- * @decision sha:319ae2cc — the opt-out convention + why BOM-strip lives here; see
- * docs/decisions/319ae2cc-vault-read-bom-strip-placement.md.
+ * @decision sha:319ae2cc — strip the BOM only here, not in `readVaultFile` (its other callers' content
+ * must not be silently mutated on this file's account); a future vault-sensitivity feature should reuse
+ * this `companion-read` marker, never add a second, competing one.
  */
 function hasCompanionReadOptOut(content: string): boolean {
   const unbommed = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
@@ -1888,13 +1891,13 @@ const VAULT_READ: CompanionCapability = {
  * attention-push's `alertClasses` union — see its `resolveConfig`) — an absent/empty roots list on EVERY
  * granted project admits NOTHING (conservative default, matching decisions-relay's own absent-allowlist
  * posture): the owner must explicitly configure at least one root before anything is deliverable.
- * @decision 1039e892 — recommended default roots (vault `Assets/`, session scratch dir) are a
- * recommendation only; an empty configured allowlist still delivers nothing — see
- * docs/decisions/1039e892-companion-board-write-sign-off.md.
+ * @decision 1039e892 — never give `roots` an implicit non-empty fallback: the recommended defaults (vault
+ * `Assets/`, session scratch dir) are a recommendation only, and an empty configured allowlist must
+ * continue to deliver nothing.
  *
- * @decision 9ec79b52 — delivery was Telegram-only in v1; in-app delivery + the graceful
- * "unsupported-channel" degrade for a future channel were a later fast-follow — see
- * docs/decisions/9ec79b52-media-out-in-app-delivery-fast-follow.md.
+ * @decision 9ec79b52 — never assume `sendMedia` support is universal across channel adapters (the
+ * "unsupported-channel" degrade exists because it once was not); never record an in-app delivery to chat
+ * history or add store-and-forward for it — it's a pure, best-effort live push by design.
  */
 const MEDIA_OUT: CompanionCapability = {
   slug: "media-out",
@@ -1974,12 +1977,11 @@ const MEDIA_OUT: CompanionCapability = {
  * `session-steer` (Framework §4, card 305a54fb) — the session-control ACT lever: on the owner's intent,
  * the companion messages/steers/stops/resumes sessions in granted scope, composed from owner intent, NOT
  * a verbatim quote (Primitive B does NOT apply here, unlike `board_create`'s title/body).
- * @decision 47532bd0 — reframed from a verbatim-relay "steer" into this full operator surface — see
- * docs/decisions/47532bd0-session-steer-reframed-as-operator.md.
- * @decision 71509fd5 — FULLY FRICTION-FREE (no Primitive C round-trip) and a PERMISSIVE roleFilter
- * default, both deliberate accepted residual risk — see
- * docs/decisions/71509fd5-session-steer-friction-free.md. The safety model is NOT structural prevention
- * of a bad action, it's:
+ * @decision 47532bd0 — never require Primitive B (a verbatim owner quote) on this lever's composed text —
+ * that would revert the deliberate reframe from verbatim-relay into a full operator surface.
+ * @decision 71509fd5 — never add a Primitive C confirm round-trip here without a fresh owner decision
+ * (friction-free was deliberate, accepted residual risk); never flip `roleFilter` to admit-nothing —
+ * permissive is deliberate, opposite the rest of the catalog. Safety instead rests on:
  *
  *   - **Primitive A, MANDATORY, on every call**: `ctx.attest.getActiveTurnOwnerText` must be non-null —
  *     a proactive/heartbeat/reminder-originated turn can never reach `sessions`. This is the ONE
@@ -2510,10 +2512,9 @@ function truncateSubject(s: string): string {
  * path). `message` defaults to requiring Primitive B (a verbatim owner quote) UNLESS this project's grant
  * config sets `authoredContent:true` (the SAME reused key/semantics as `board-reach`'s own Tier-A residual
  * opt-in).
- * @decision a3c3ade8 — this authoredContent gate is deliberate hardening BEYOND the card's own spec,
- * closing a zero-owner-disclosure injection risk — see
- * docs/decisions/a3c3ade8-git-push-authoredcontent-hardening.md. Only ever touches the target
- * `resolveGitPushTarget` resolves — never an agent-supplied path.
+ * @decision a3c3ade8 — never remove this authoredContent gate from git_commit on the grounds the original
+ * card didn't require it — it closes a zero-owner-disclosure injection risk on the warm Tier-A path. Only
+ * ever touches the target `resolveGitPushTarget` resolves — never an agent-supplied path.
  *
  * `git_push` is Tier **X** — ALWAYS steps up, even inside an otherwise-warm window (mirrors
  * `board_relocate`/`session_spawn`'s dead-branch-guarded Tier-X shape verbatim: `mayProceedWithoutConfirm`
