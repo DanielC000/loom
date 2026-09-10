@@ -6,21 +6,14 @@ import { resolveResumeDocPath } from "../sessions/resume-doc-notes.js";
 import { isResumeDocFilename } from "../sessions/platform-lead-prompt.js";
 
 /**
- * Card 14f14d92 — the orchestrator resume doc is load-bearing (injected into every manager spawn,
- * protected by `rotation-check.ts`'s marker/floor checks) but until this card NOTHING ever backed it
- * up. `rotation-check.ts` only VERIFIES an archive a caller claims to have written (`fs.statSync` on a
- * caller-supplied path) — it never writes one itself. The Platform Lead truncated its own resume doc to
- * 0 bytes on 2026-09-05 and survived only because the text was still in context; a recycled/restarted
- * seat would have lost it outright.
- *
- * This module takes a BEST-EFFORT, NON-BLOCKING snapshot of every project's resolved resume doc at daemon
- * boot — before any agent can spawn/resume and touch it — into a sibling `<name>.archive/auto-<ISO>.md`,
- * bounded to the N most recent auto-snapshots. It never overwrites/prunes a real rotation archive (only
- * `auto-`-prefixed files it wrote itself), and it never writes an empty snapshot over a good one — the
- * exact failure mode this card exists to prevent. It also covers the Platform Lead's own resume doc(s)
+ * Best-effort, non-blocking snapshot of every project's resolved resume doc at daemon boot — before any
+ * agent can spawn/resume and touch it — into a sibling `<name>.archive/auto-<ISO>.md`, bounded to the N
+ * most recent auto-snapshots. Also covers the Platform Lead's own resume doc(s)
  * (`PLATFORM-LEAD-RESUME.md` / `PLATFORM-LEAD-RESUME-<lineageId>.md`) living in the reserved "Loom
- * Platform" project's vault dir — the exact file the 2026-09-05 incident was about — since a plain
- * `resolveResumeDocPath` lookup alone would never match that filename scheme.
+ * Platform" project's vault dir, via its own lookup (`findPlatformLeadResumeDocs` below).
+ *
+ * @decision 14f14d92 — never overwrite/prune a real rotation archive (only its own `auto-`-prefixed
+ * files), and never write an empty snapshot over a good one.
  */
 
 /** How many most-recent `auto-` snapshots to retain per resume doc, pruning older ones.
@@ -137,19 +130,18 @@ function findPlatformLeadResumeDocs(homePath: string): string[] {
 }
 
 /**
- * Boot-time entry point (card 14f14d92 DoD-1/2/3): snapshot every project's resolved resume doc. Resolves
- * each project's PRIMARY doc via the SAME `resolveResumeDocPath` that `composeManagerStartupPrompt`/
- * `ResumeDocWatcher` use (honoring a project's own `orchestration.resumeDocFilename` override), so this
- * can never snapshot a different file than the one a manager is actually told about — PLUS any Platform
- * Lead resume doc(s) living in that same project's vault dir (see `findPlatformLeadResumeDocs` above),
- * so the one project this pattern actually matches (the reserved "Loom Platform" home) gets its real
- * resume doc(s) covered too, not just a miss against the default filename.
+ * Boot-time entry point: snapshot every project's resolved resume doc. Resolves each project's PRIMARY
+ * doc via the SAME `resolveResumeDocPath` that `composeManagerStartupPrompt`/`ResumeDocWatcher` use, so
+ * this can never snapshot a different file than the one a manager is actually told about — plus any
+ * Platform Lead resume doc(s) in that project's vault dir (`findPlatformLeadResumeDocs` above).
  *
- * BEST-EFFORT + NON-BLOCKING at every layer: one project's failure (a bad config, an unreadable vault
- * dir) can never abort the sweep, and this function itself never throws — callers still wrap it (see
- * index.ts) as defense-in-depth, but every failure mode already degrades to a reported outcome here.
- * Boot correctness outranks this feature absolutely; it does no more than a handful of small, synchronous
- * fs calls on tiny markdown files, so it adds no meaningful boot latency.
+ * Best-effort + non-blocking at every layer: one project's failure (a bad config, an unreadable vault
+ * dir) degrades to a reported outcome here rather than aborting the sweep; callers still wrap it (see
+ * index.ts) as defense-in-depth. It does no more than a handful of small, synchronous fs calls on tiny
+ * markdown files, so it adds no meaningful boot latency.
+ *
+ * @decision 14f14d92 — this function itself never throws; boot correctness outranks this feature
+ * absolutely.
  */
 export function snapshotAllResumeDocsAtBoot(db: Db, now: Date = new Date()): ResumeDocBootSnapshotSummary {
   const outcomes: ResumeDocSnapshotOutcome[] = [];
