@@ -19,13 +19,9 @@
  * which the bindings-authoritative gateway routes back to the SAME session. The in-app binding is therefore
  * { sessionId:S, channel:"in-app", chatId:S, scope:"dm" } (minted by the provision endpoint, not here).
  *
- * The hub (InAppChannel) is STABLE across gateway rebuilds — a Telegram token change (which rebuilds the
- * gateway) must not drop live chat clients: it owns the connected-client registry and IS the outbound sink.
- * Its `.adapter` is registered on every ChatGateway the factory builds; outbound chat_reply → deliverReply →
- * adapter.send → the hub pushes a framed message to every web client attached to that chat id. INBOUND does
- * NOT flow through an adapter-constructor handler (there is no long-poll): it enters via the controller's
- * stable `handleInAppInbound` indirection (symmetric with deliverReply) so it always targets the CURRENT
- * gateway and never a torn-down one — see controller.ts.
+ * The hub (InAppChannel) is STABLE across gateway rebuilds — it must never drop live chat clients, and
+ * inbound must never bind to a captured gateway reference (controller.ts's `handleInAppInbound` indirection).
+ * @decision sha:1fab1dcb — the hub survives a Telegram-token-triggered gateway rebuild.
  *
  * VOICE (Companion Voice epic, VOICE-P4): the web mic's inbound audio and Kokoro's synthesized outbound
  * replies both ride THIS SAME channel — inbound as a server-generated temp file resolved via
@@ -83,21 +79,14 @@ export interface InAppServerAudio {
  * cleared the durable history, so this is PURELY the live push — an open panel empties immediately instead
  * of waiting for its next reload/history-fetch.
  *
- * `type:"cross-channel"` (live-push card, closing a gap in the unified cross-channel chat, card 7d63e200) —
- * a turn that happened on a NON-in-app channel (e.g. Telegram), pushed live to an attached web client the
- * moment chat-gateway.ts's generic recorder path persists it, so an already-OPEN CompanionChat panel sees it
- * appear without a reload. `id` is the SAME id the row was persisted under (companion_messages.id) — the
- * stable identity a client dedups on against the same row's later history-reload.
+ * `type:"cross-channel"` — pushes an ALREADY-persisted non-in-app turn live to attached web clients (`id` is
+ * the persisted row id, the client's dedup key); never writes to the db itself.
+ * @decision 7d63e200 — the live-push half of the unified cross-channel chat feature.
  *
- * `type:"media"` (the `media-out` lever's in-app delivery, card 9ec79b52 — fast-follow to the Telegram-first
- * v1) — a local file delivered via `send_media`, pushed to every attached web client as an inline base64
- * payload (mirrors `sendVoice`'s own base64-audio transport; the in-app channel has no separate file-serving
- * route, so the bytes ride the same WS the chat frames use). `mimeType` is resolved by extension
- * (`vaultFileContentType`, vault/browser.ts) so the panel can decide image-inline vs. attachment-card
- * rendering. NEVER recorded to chat history (mirrors `ChatGateway.deliverMedia`'s own doc: media isn't part
- * of the `companion_messages.text` conversation log) — purely a live push, dropped silently if nobody is
- * attached right now (exactly like a text reply's live push with zero clients, except there is no
- * store-and-forward fallback for media).
+ * `type:"media"` — a `send_media`-delivered local file, pushed as an inline base64 payload (no separate
+ * file-serving route; `mimeType` resolved by extension via `vaultFileContentType` so the panel can decide
+ * image-inline vs. attachment-card rendering).
+ * @decision 9ec79b52 — Telegram-first v1's fast-follow; never recorded to chat history, no store-and-forward.
  */
 export type InAppServerFrame =
   | {
