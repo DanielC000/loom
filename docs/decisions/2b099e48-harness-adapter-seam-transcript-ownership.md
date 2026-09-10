@@ -13,6 +13,19 @@ Card `2b099e48`, Phase 0 of the multi-harness epic `df1f94b0`: `pty/claude-trans
 - Do not construct a `~/.claude/projects/...` literal path, or encode an assumption about the Claude Code JSONL wire shape, anywhere outside this file.
 - Do not move `TranscriptTurn`'s definition back into this file — it is a harness-agnostic contract type that belongs in `pty/adapter.ts`, not inside one adapter's own implementation.
 
+## Decision B (unrelated decision, same card id, `pty/host.ts`)
+
+Card `2b099e48`, Phase 0 of the multi-harness epic: `HarnessAdapter`'s `doctrineInjection` field (`adapter.ts`) declares exactly two shapes for how project doctrine reaches a CLI — `"directory"` (claude's `.claude/skills` convention, delivered by `injectSkills`) and `"file"` (codex's `AGENTS.md` convention). `claudeAdapter` declares `"directory"`; `codexAdapter` declares `"file"` (`codex-adapter.ts:32`). This is a load-bearing architectural choice baked into the Phase-0 seam interface itself, not an incidental omission at any one call site — `createCodexPty`/`spawnCodexProcess` (`pty/host.ts`) never calling `injectSkills` is a consequence of this seam decision, not a separate gap (see card `7fbd1ba5`'s own record for the fuller consequence).
+
+### Do not (Decision B)
+
+- Do not add a third `doctrineInjection` shape without updating both `claudeAdapter` and `codexAdapter`'s own declarations — the seam is exactly two shapes by design.
+- Do not treat a harness's `injectSkills`-less codex path as a bug — it follows directly from `codexAdapter` declaring `"file"`, not `"directory"`.
+
+### Source (this section only)
+
+Inline comment in `packages/daemon/src/pty/host.ts` (the JSDoc above `createCodexPty`), as of this tranche's HEAD. Relocated by card `8dcf8521` (tranche 15 on `pty/host.ts`); wording unchanged beyond joining wrapped source lines into flowing paragraphs and stripping `*` comment markers. Not the same decision as the section above it — see `resolveRecord()`'s own shadowing-by-id mechanism (`docs/extraction-program.md`) for why this shares the file.
+
 ## Source
 
 Header doc comment in `packages/daemon/src/pty/claude-transcript.ts` (lines 6-23 pre-extraction), introduced by commit `f6e652be` (`refactor(pty): extract a HarnessAdapter seam from the claude driver`).

@@ -4427,65 +4427,22 @@ export class PtyHost {
    *    findings.md` point 5) — see field-consumers.ts's `model` entry for why it stays a declared, tracked
    *    gap.
    *
-   * Card `0770d916`: `opts.browserTesting`/`opts.documentConversion`/`opts.capabilities` ARE threaded into
-   * the SAME `buildMcpServers()` call the claude path already passes them to — that function already
-   * accepts all three generically, this call site was just the one omitting them, so resolving them here
-   * can never drift from claude's own capability-resolution logic. ⚠️ But threading the ARGUMENT is not the
-   * same as the capability actually MOUNTING for codex: `browserTesting`/`documentConversion` both resolve
-   * to a `{type:"stdio",...}` MCP entry (Playwright/markitdown), and `mcpServersToCodexArgs` (codex-host.ts)
-   * can only translate `{type:"http"}` — a stdio entry is now REPORTED (a loud `console.warn`, card
-   * `7fa73e2c`) and skipped, never silently dropped. `profiles/validate.ts` rejects a NEW
-   * `harness:"codex"`+`browserTesting`/`documentConversion:true` profile at save time for exactly this
-   * reason (`codexStdioCapabilityUnsupportedError`) — the threading here is defense-in-depth for a profile
-   * that predates that guard, not the primary enforcement point.
+   * @decision 0770d916 — opts.browserTesting/documentConversion/capabilities ARE threaded into codex's
+   * buildMcpServers call; threading the argument is NOT the same as the capability mounting for codex,
+   * since none of the three can ever resolve to a mountable {type:"http"} MCP entry.
    *
-   * Card `c6ce2804` (DoD-1): `opts.resumeId` now distinguishes fresh vs resume, mirroring `createPty`'s own
-   * `--resume` branch — `codex resume <uuid>` is a genuine top-level subcommand (probe findings.md State 6
-   * / point 2: codex itself prints this exact command, unprompted, on the clean exit of a session with
-   * in-flight state), so a resume spawn leads the argv with `["resume", opts.resumeId]` before the
-   * unattended-boot flags below (a clap subcommand token, not a flag — it cannot appear after `-a`/`-s`).
-   * ⚠️ **Deliberately NOT wired for `opts.fork`**, unlike the claude path: claude's fork has a real engine
-   * primitive (`--fork-session` + a pre-assigned `--session-id`) that diverges a NEW conversation from the
-   * source without touching the source's own transcript; the probe never found a codex equivalent (no
-   * `--fork-session`/`--session-id`-shaped flag surfaced in any fetched doc or `--help` output). Reusing
-   * `resume <uuid>` for a fork would attach a SECOND live pty to the SAME engine-session id the source may
-   * still be running under — a real correctness risk (two processes racing writes into one rollout file),
-   * not a cosmetic parity gap. So `opts.fork` for codex still falls through to a fresh spawn (unchanged
-   * pre-existing behavior, same as before this card), with a loud disclosed warning below rather than a
-   * silently-wrong resume attempt.
+   * @decision c6ce2804 — resume leads argv as a subcommand ahead of the boot flags; never reuse `resume
+   * <uuid>` for a fork, even with a resumeId also present — it would race a second pty against the
+   * source's own rollout file. Fork always falls through to a fresh spawn instead.
    *
-   * **This method (and `spawnCodexProcess` below) never calls `injectSkills` — card `7fbd1ba5`'s ruling:
-   * DELIBERATE, not a gap.** `HarnessAdapter`'s `doctrineInjection` field (`adapter.ts`) declares exactly
-   * two shapes for how doctrine reaches a CLI: `"directory"` (claude's `.claude/skills` convention,
-   * delivered by `injectSkills`, `skills/inject.ts`) and `"file"` (codex's `AGENTS.md` convention).
-   * `claudeAdapter` declares `"directory"`; `codexAdapter` declares `"file"` (`codex-adapter.ts:32`) —
-   * this is a load-bearing architectural choice baked into the Phase-0 seam interface itself (card
-   * `2b099e48`), not an incidental omission in this call site. Codex is NOT skills-blind — it ships its
-   * own first-party skills tree (`~/.codex/skills/.system/`, including a `skill-installer`; see
-   * `docs/investigations/049e4a7b-codex-cli-capability-probe/findings.md:16`) — but mirroring `.claude/
-   * skills` into a codex worktree would deliver a claude-specific path/layout codex has no reason to read;
-   * a codex-side skills equivalent, if ever built, belongs on codex's OWN skills convention, not this one.
-   * `injectCodexDoctrine` (`codex-doctrine.ts`) is the "file" counterpart — called from
-   * `spawnCodexProcess` below, mirroring `injectSkills`'s call site in `createPty` — and its own doc
-   * comment says exactly this.
+   * @decision 7fbd1ba5 — this method (and `spawnCodexProcess` below) never calls `injectSkills` for codex —
+   * DELIBERATE, not a gap. A codex worker gets only a hand-condensed doctrine file, never a skill directory.
    *
-   * What a codex WORKER therefore does NOT get, relative to a claude worker (`injectSkills` enumerated,
-   * card `7fbd1ba5`'s DoD-2 — none of these are wired to any codex-side equivalent today):
-   *  - The project's whole skill set (every store skill, or the profile-pinned subset) — `AGENTS.md`
-   *    carries no directory-of-skills equivalent by design.
-   *  - The role's full operating-doctrine skill (`ROLE_DOCTRINE_SKILL`, `skills/inject.ts`) — codex gets
-   *    only a hand-condensed worker doctrine (`codexWorkerDoctrineBody`, `codex-doctrine.ts`: three
-   *    load-bearing rules named by card `887e10b8`), and ONLY for `role === "worker"`; every other role
-   *    (manager/platform/auditor/workspace-auditor/setup) gets NO doctrine injection at all on codex
-   *    today — a named Phase-1 scope limit (`injectCodexDoctrine`'s own doc), not an oversight, but worth
-   *    knowing before any non-worker codex role is ever dispatched.
-   *  - The conditional Obsidian-preflight skill FRAGMENT (`OBSIDIAN_FRAGMENT_SKILLS`, `skills/inject.ts`)
-   *    — codex has no skill file to append it to. Card `9346ed5b` already threads the underlying
-   *    `LOOM_OBSIDIAN_PREFLIGHT` env var into a codex spawn's env (see the comment above), so an
-   *    `obsidian.autoStart` codex worker ends up with the script path SET but no instruction telling it
-   *    to run it — a known, disclosed asymmetry, not new.
-   * Whether any of these gaps needs a codex-side equivalent is a separate, undecided question this
-   * comment does not settle — see card `7fbd1ba5` for the full ruling and evidence trail.
+   * @decision 2b099e48 — `HarnessAdapter`'s `doctrineInjection` field is a two-shape architectural seam
+   * ("directory" for claude, "file" for codex) — a codex-side skills directory is not a gap to close here.
+   *
+   * @decision 9346ed5b — `LOOM_OBSIDIAN_PREFLIGHT` reaches a codex spawn's env, but codex has no skill file
+   * to append the run-instruction fragment to — a known, disclosed asymmetry (path set, no instruction).
    */
   protected createCodexPty(opts: SpawnOpts): IPty {
     const bin = resolveExecutable(process.env.LOOM_CODEX_BIN || CODEX_BINARY_NAME);
@@ -4518,26 +4475,9 @@ export class PtyHost {
     // (see createPty's own extraAllow/disallowedTools wiring below). createCodexPty has NO analogous
     // per-tool lever at all (verified: opts.permission/disallowedTools never appear anywhere in this
     // method or spawnCodexProcess).
-    // 🔴 CARD d7657543 CORRECTION: this comment used to assert "codex's whole permission model is the two
-    // blanket `-a never -s workspace-write` flags, which approve every tool call, write tools included." —
-    // FALSE, and the opposite of the real risk. VERIFIED (codex-cli 0.153.4, `codex --help`): `-a never`
-    // is documented as "Never ask for user approval. Execution failures are immediately returned to the
-    // model" — i.e. `-a never` never ESCALATES to a human, but anything that would have needed approval is
-    // DENIED outright and reported back to the model as a failure, not silently auto-approved. Corroborated
-    // by a real pilot worker: its own `worker_report` call was REJECTED ("requires approval and approval
-    // policy is never" — `worker_report_get` → none recorded, `worker_list` → `reportedState: null`). The
-    // SAME deny-not-approve shape holds for `-s workspace-write`'s filesystem sandbox: it is a real,
-    // enforced allow/deny boundary (an OS-level Windows restricted-token sandbox — ALLOW ACEs on the
-    // workdir + any `--add-dir` roots), not a blanket grant — directly proven by card d7657543's own
-    // real-spawn finding that `.git` writes are DENIED even from INSIDE a granted writable root (see
-    // `createCodexPty`'s argv-construction comment below for that finding in full). So "approves everything"
-    // is backwards on both axes this comment conflated: MCP-tool approval and filesystem writability are
-    // each closer to deny-by-default outside an explicit grant, evaluated with no human ever asked.
-    // ⚠️ EVIDENCE TIER: ESTABLISHED — `-a never`'s own documented semantics, and the pilot's corroborated
-    // `worker_report` denial. NOT ESTABLISHED — an exhaustive enumeration of exactly which MCP tools codex
-    // classifies as approval-requiring (all non-read-only tools? something narrower?); this comment fixes
-    // the FALSE premise but does not close that broader audit — card d7657543's own report names it as
-    // still open.
+    // @decision d7657543 — codex's `-a never -s workspace-write` is deny-by-default, NOT "approves
+    // everything" — denied actions fail back to the model, never silently auto-approved. A codex worker
+    // on Windows also can never `git commit` in its own worktree — `.git` carries a sandbox DENY ACE.
     // Mounting "codescape" here unconditionally would hand a codex session full, unrestricted read+write
     // access to the code graph — a strictly WORSE posture than claude's carefully gated mount, not mere
     // parity. This is the "real design question" the card asked for, answered: don't mount it until codex
@@ -4546,9 +4486,9 @@ export class PtyHost {
     // ✅ This security conclusion (decline to mount codescape) is UNCHANGED by the correction above — a
     // "denies unless explicitly granted" model is at least as strict as "approves everything" would have
     // been, so the decision to withhold codescape from codex errs the same safe direction either way.
-    // Card `b987f086`: collect every capability this spawn cannot mount for codex — combined below into
-    // ONE `onCodexUnsupportedCapability` report so a manager sees the full picture in one nudge rather than
-    // learning about a codescape gap and a dropped-MCP-server gap as two unrelated events.
+    // @decision b987f086 — every capability this spawn cannot mount for codex is collected into ONE
+    // `onCodexUnsupportedCapability` report, never split across separate signals for a manager to piece
+    // together.
     const unsupportedItems: { id: string; reason: string }[] = [];
     if (opts.codescapeEnabled) {
       // eslint-disable-next-line no-console
@@ -4589,44 +4529,9 @@ export class PtyHost {
     // (findings.md, "Point 4"): unattended approval + edit-capable sandbox + preserved scrollback (the
     // codex-native analogue of claude's `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1` env-var workaround).
     //
-    // 🔴 CARD d7657543 FINDING — a codex worker on Windows can NEVER `git commit` in its own worktree, and
-    // NO writable-roots lever fixes it. `git add`/`git commit` fail with "Unable to create '<gitdir>/
-    // index.lock': Permission denied" because a worktree's real gitdir (`<repo>/.git/worktrees/<name>`, and
-    // the shared `<repo>/.git` objects/refs it points at) sits outside every writable sandbox root this
-    // spawn grants (the worktree itself, `:slash_tmp`, `:tmpdir`).
-    // The card's own kickoff hypothesized a per-spawn writable-roots lever might exist and cure this — it
-    // does (documented, top-level `--add-dir <DIR>`: "Additional directories that should be writable
-    // alongside the primary workspace"; superseding the kickoff's own INFERRED `-c
-    // sandbox_workspace_write.writable_roots=…` guess, which was never confirmed and is now moot). ⛔ IT
-    // DOES NOT WORK FOR THIS CASE. REAL-SPAWN VERIFIED (codex-cli 0.153.4, this host, 2026-09-08): passing
-    // `--add-dir` for the worktree's gitdir — tried three ways, each on a FRESH never-before-sandboxed
-    // worktree to rule out ACL residue from an earlier probe: (1) `--add-dir <repo>/.git`, (2) `--add-dir
-    // <repo>/.git/worktrees/<name>` (the leaf itself), and (3) no add-dir at all in a PLAIN, non-worktree
-    // repo where `.git` sits directly INSIDE the already-writable workdir root, needing no add-dir — ALL
-    // THREE still fail with the identical "index.lock: Permission denied". `--add-dir` demonstrably DOES
-    // grant write elsewhere (verified working on an ordinary non-`.git` directory, existing or fresh) — the
-    // failure is specific to `.git`. `icacls` on the denied `.git` directory shows why: codex's Windows
-    // sandbox applies an explicit, non-inherited DENY ACE for Write/Delete directly on `.git` (both a direct
-    // DENY and an inherit-only DENY for its future children), which NTFS evaluates BEFORE the inherited
-    // ALLOW `--add-dir` produces — the deny always wins, regardless of what's on the writable-roots list. A
-    // strings scan of the bundled `codex-windows-sandbox-setup.exe` confirms this is deliberate, not a bug:
-    // its sandbox payload carries a dedicated `deny_write_paths` field (distinct from `write_roots`) and logs
-    // `"applied deny ACE to protect "` for entries in it. A `codex_git_commit` feature flag exists
-    // (`codex features list` → `stage: removed`) — plausibly the vestige of a rolled-back attempt to allow
-    // exactly this — but force-enabling it (`codex features enable codex_git_commit`) and re-testing on
-    // another fresh worktree changed nothing; still denied. (Config-cleanup discipline: every scratch
-    // `~/.codex/config.toml` trust block and the feature-flag toggle this investigation added were removed
-    // again before this commit — see the sibling real-spawn test files' own md5-diff-disclose convention.)
-    // ⚠️ EVIDENCE TIER: ESTABLISHED, all of the above, on THIS host/version (codex-cli 0.153.4, Windows).
-    // NOT ESTABLISHED: whether the same hardcoded `.git` protection exists on codex's macOS (Seatbelt) or
-    // Linux (landlock/bwrap) sandboxes — this investigation only had a Windows host to test against, and the
-    // protected-path mechanism is plausibly platform-specific (this exact binary is `codex-windows-sandbox-
-    // setup.exe`).
-    // ⛔ PER THE CARD'S OWN SECURITY LINE: no fix was attempted here. The narrowest legitimate lever
-    // (`--add-dir`) is proven insufficient, and reaching for `-s danger-full-access` or
-    // `--dangerously-bypass-approvals-and-sandbox` to route around a DELIBERATE upstream protection is
-    // explicitly out of a worker's authority to decide — reported up instead, per the card's own
-    // instruction to stop rather than escalate the grant.
+    // @decision d7657543 — no writable-roots lever (`--add-dir`) fixes a codex worktree's `git commit`
+    // denial on Windows — the sandbox's DENY ACE on `.git` wins over any inherited ALLOW. Do not reach for
+    // `-s danger-full-access`/`--dangerously-bypass-approvals-and-sandbox` to route around it; report up.
     const args = [...resumeArgs, "-a", "never", "-s", "workspace-write", "--no-alt-screen", ...CODEX_UPDATE_CHECK_OVERRIDE_ARGS, ...mcpArgs];
     // eslint-disable-next-line no-console
     console.log(`[pty] spawnCodex ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${isCodexResume ? opts.resumeId : "none"} mcpServers=${Object.keys(mcpServers).join(",")}`);
@@ -4641,12 +4546,9 @@ export class PtyHost {
   }
 
   /**
-   * Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4 — LEAD RULING #4/#5: the codex counterpart of
-   * `spawn()`, dispatched from it (never called directly by an external caller — mirrors `spawnShell`'s
-   * own "sibling to spawn(), not itself a SpawnOpts consumer external callers reach" shape, except here
-   * the caller-facing contract IS the same SpawnOpts, just routed here first). Builds a real node-pty
-   * process via `createCodexPty` and registers a CodexLive entry in the SEPARATE `liveCodex` map — never
-   * `this.live` (see CodexLive's own doc for why the two-registry split exists at all).
+   * @decision 353f6dc4 — multi-harness epic (df1f94b0) Phase 1, LEAD RULING #4/#5: the codex counterpart
+   * of `spawn()`, dispatched from it, builds a real node-pty process and registers a CodexLive entry in
+   * the SEPARATE `liveCodex` map — never `this.live`.
    *
    * TRUST DIALOG (card's landmine #1): every fresh worktree hits the undocumented first-use-per-directory
    * "Do you trust the contents of this directory?" dialog before any real prompt can land. Detected by
@@ -4671,24 +4573,9 @@ export class PtyHost {
    * in a composer still holding the first (C2). `events.onBusy` (mirrors claude's `setBusy`) still fires
    * only on a genuine rising/falling EDGE, so this stays idempotent under repeated chunks.
    *
-   * BOOT READINESS / KICKOFF (Code Review C1 fix, extended by card 448f1b4a into a structural gate): the
-   * one-time `opts.startupPrompt` is delivered, and `live.bootReady` latches, once ALL THREE hold: codex
-   * has rendered its main TUI at least once (`isCodexReadyMarkerPresent`, safe one-time use of the SAME
-   * placeholder text landmine #2 bans for ongoing idle detection — see that function's own doc), the
-   * header's model has actually finished resolving (`isCodexModelLoaded` — NOT implied by the placeholder
-   * alone; a real merge gate captured the placeholder rendering while the header still read `model:
-   * loading`, see that function's own doc for the full specimen), and the trust dialog, if any, is no
-   * longer mid-answer (`!live.trustDialogPending`). Card 448f1b4a: `live.bootReady` is no longer read only
-   * here — `enqueueStdinCodex`/`drainCodexPending` both structurally refuse to submit anything until it
-   * latches, closing the prior gap where safety was a CALLER CONVENTION (only this one call site checked
-   * readiness; any of this codebase's ~56 other real `enqueueStdin` callers could submit into an unready
-   * codex TUI with zero awareness). The kickoff itself still goes through the PUBLIC, busy-aware
-   * `enqueueStdin` entry point (never a direct write), so it queues cleanly behind whatever the MCP-startup
-   * episode is still doing rather than racing it. A bounded fail-loud timer (`CodexLive.bootReadyTimer`,
-   * `CODEX_BOOT_READY_TIMEOUT_MS`) reports — never silently hangs — if `bootReady` never latches at all;
-   * see that field's own doc and `onCodexBootStuck`'s own doc for why this is required rather than
-   * optional (a session that never boots would otherwise queue every caller's message forever with no
-   * signal, generalizing what used to be a single silently-undelivered kickoff into every caller).
+   * @decision 448f1b4a — `live.bootReady` gates the one-time kickoff AND every submit: TUI rendered,
+   * model resolved, trust dialog not pending — checked structurally by `enqueueStdinCodex`/
+   * `drainCodexPending`, never a caller convention any `enqueueStdin` site could bypass.
    */
   private spawnCodexProcess(opts: SpawnOpts): void {
     // Card 887e10b8 Item 1: deliver the condensed worker doctrine into <cwd>/AGENTS.md BEFORE the real
