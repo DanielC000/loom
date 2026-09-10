@@ -13,4 +13,4 @@ All three of the new sites dispatch `kind:"agent"` (a wake note / poll item / ma
 
 ## Source
 
-JSDoc comment in `packages/daemon/src/sessions/service.ts`, above `enqueueDurableNudge`: lines 4380-4394, as of this tranche's HEAD (tranche 10). Second citing site (no new content): JSDoc comment above `recoverCrashOrphanedWorkers`, line 4820, as of this tranche's HEAD (tranche 14).
+JSDoc comment in `packages/daemon/src/sessions/service.ts`, above `enqueueDurableNudge`: lines 4380-4394, as of this tranche's HEAD (tranche 10). Second citing site (no new content): JSDoc comment above `recoverCrashOrphanedWorkers`, line 4820, as of this tranche's HEAD (tranche 14). Third citing site (no new content): the `CrashRecoveryWatcher` class doc in `packages/daemon/src/orchestration/crash-recovery-watcher.ts`, lines 237-239, as of that file's own tranche 1 HEAD.

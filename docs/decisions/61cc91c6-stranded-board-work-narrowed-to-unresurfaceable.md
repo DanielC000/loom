@@ -40,4 +40,7 @@ JSDoc comment in `packages/daemon/src/sessions/service.ts`, above `resumeFleetOn
 as of this tranche's HEAD (tranche 11). Cross-referenced (read-only) against `orchestration/restart.ts`
 (lines 257-274) and `orchestration/wake-impact.ts` (lines 7, 120-121), which implement/document the same
 narrowing. Also anchored at a second, restating site inside the same function's `isNoOpManagerWake`
-branch: lines 4672-4680, as of this tranche's HEAD (tranche 12).
+branch: lines 4672-4680, as of this tranche's HEAD (tranche 12). Extended (Path C, a DIFFERENT card
+sharing this narrowing's underlying logic) by `c9e51581`, `crash-recovery-watcher.ts`'s own
+manager/platform stake-aware silencing — see `docs/decisions/c9e51581-manager-platform-no-stake-resumes-silently.md`
+for that extension's own narrative; not restated here.

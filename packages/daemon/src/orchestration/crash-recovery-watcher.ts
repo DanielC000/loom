@@ -18,12 +18,11 @@ import { computeWakeImpact } from "./wake-impact.js";
  * (role null), ephemeral `run` (never resume — a restart fails it clean), `auditor` (a fire-once
  * read-and-file session), `setup`, and `workspace-auditor`.
  *
- * STRUCTURAL GUARD (card a933613e): expressed as a `Record<SessionRole, boolean>`, not a bare array, so a
- * FUTURE `SessionRole` addition to `SESSION_ROLES` (shared/src/types.ts) fails to COMPILE here until this
- * map picks a disposition for it — the array below is DERIVED from the map, never hand-edited. This is
- * exactly what `operator` needed and didn't have: it was added to `SESSION_ROLES` a month after this list
- * was authored, the array type (`SessionRole[]`) permitted the now-stale subset with zero diagnostics, and
- * the comment read as exhaustive without being re-verified.
+ * STRUCTURAL GUARD: expressed as a `Record<SessionRole, boolean>`, not a bare array, so a FUTURE
+ * `SessionRole` addition to `SESSION_ROLES` (shared/src/types.ts) fails to COMPILE here until this map
+ * picks a disposition for it — the array below is DERIVED from the map, never hand-edited.
+ * @decision a933613e — see docs/decisions/a933613e-recoverable-role-map-is-a-record-not-an-array.md for
+ * why (the `operator` role slipped through unrecovered for a month under the old array shape).
  * DISCRIMINATOR for reusing this shape elsewhere: apply it to an EXHAUSTIVE-DISPOSITION list — one whose
  * own comment already claims to account for every role, the way this one always has — where a silent
  * omission is a bug. Do NOT apply it to a narrow CAPABILITY allowlist (e.g. "only these roles may request
@@ -77,17 +76,18 @@ export interface CrashRecoveryDeps {
   /**
    * OPTIONAL: dispatch a post-resume continuation nudge through `SessionService.enqueueDurableNudge`
    * (index.ts passes an arrow wrapper, `(id, role, text, taskId) => sessions.enqueueDurableNudge(id, role,
-   * text, taskId)`) instead of the bare `pty.enqueueStdin`
-   * this tick used to call directly for its worker/assistant/operator and manager/platform continuation
-   * nudges (card 9f7c59f1) — see this file's own class doc for why that raw call was a real, narrower
-   * instance of the exact gap `enqueueDurableNudge` exists to close: no `PtyHost.waitForMcpSeen` gate (a
-   * fresh MCP-client handshake can lose the race to an immediate `enqueueStdin`, same role-gated defer
-   * `enqueueDurableNudge` itself applies via `usesOrchestrationMcp`) and no durable give-up-exhaustion
-   * record. ABSENT (e.g. every existing hermetic test
-   * double that doesn't pass it) falls back to the pre-9f7c59f1 raw `pty.enqueueStdin` dispatch, byte-
-   * identical — additive, never a hard dependency a test double must opt into. The one-shot crash-loop
-   * heads-up below (`session_recovery_abandoned`) is DELIBERATELY NOT routed through this — see its own
-   * comment for why that one stays best-effort on purpose.
+   * text, taskId)`) instead of the bare `pty.enqueueStdin` this tick used to call directly for its
+   * worker/assistant/operator and manager/platform continuation nudges.
+   * @decision 9f7c59f1 — that raw call was a real, narrower instance of the exact gap
+   * `enqueueDurableNudge` exists to close: no `PtyHost.waitForMcpSeen` gate (a fresh MCP-client handshake
+   * can lose the race to an immediate `enqueueStdin`, same role-gated defer `enqueueDurableNudge` itself
+   * applies via `usesOrchestrationMcp`) and no durable give-up-exhaustion record. See
+   * docs/decisions/9f7c59f1-enqueuedurablenudge-not-private-third-resume-path.md for the full three-paths
+   * comparison. ABSENT (e.g. every existing hermetic test double that doesn't pass it) falls back to the
+   * pre-9f7c59f1 raw `pty.enqueueStdin` dispatch, byte-identical — additive, never a hard dependency a
+   * test double must opt into. The one-shot crash-loop heads-up below (`session_recovery_abandoned`) is
+   * DELIBERATELY NOT routed through this — see its own comment for why that one stays best-effort on
+   * purpose.
    */
   enqueueDurableNudge?: (sessionId: string, role: SessionRole, text: string, taskId: string | null) => void;
   /** Tick cadence; defaults to 60s. Injectable so a test drives tick() directly. */
@@ -129,14 +129,15 @@ const lastTriggerOf = (
 };
 
 /**
- * Strand backstop (incident 22a44352; gate broadened by card fc9a27d5): record the DURABLE
- * `worker_report_undelivered` wake trigger when a worker's report reached NO live FIFO. Called from
- * SessionService.workerReport after the framed notify came back `boarded` — `delivered:false` with NO
- * queue position, i.e. the manager's pty isn't alive (it idle-reaped after dispatching its last worker, or
- * its pty is otherwise gone while the row still lags `live`). A live-but-busy/parked manager (`queued`,
- * delivered:false WITH a position) is NOT a strand — its FIFO drains on its next turn — so that case never
- * records a trigger. The watchdog then bounded-auto-resumes the manager (once its row is exited) via the
- * SAME machinery as a `session_died`.
+ * Strand backstop: record the DURABLE `worker_report_undelivered` wake trigger when a worker's report
+ * reached NO live FIFO. Called from SessionService.workerReport after the framed notify came back
+ * `boarded` — `delivered:false` with NO queue position, i.e. the manager's pty isn't alive (it idle-reaped
+ * after dispatching its last worker, or its pty is otherwise gone while the row still lags `live`). A
+ * live-but-busy/parked manager (`queued`, delivered:false WITH a position) is NOT a strand — its FIFO
+ * drains on its next turn — so that case never records a trigger. The watchdog then bounded-auto-resumes
+ * the manager (once its row is exited) via the SAME machinery as a `session_died`.
+ * @decision 22a44352 — see docs/decisions/22a44352-strand-backstop-worker-report-undelivered.md for the
+ * incident and why the gate was later broadened by card fc9a27d5.
  *
  * Guards (mirroring recordUnexpectedExit) so we never record a useless trigger: the manager must be a
  * recoverable, resumable role with a captured engine id, not superseded by a recycle successor, and NOT
@@ -229,45 +230,31 @@ export function isCrashRecoveryEligible(
 }
 
 /**
- * Crash-recovery watchdog. **The THIRD of the three resume-and-nudge paths card 9f7c59f1 CONVERGED — NOT
- * a claim these are the only such sites in the codebase.** `orchestration/wake.ts`, `orchestration/poll.ts`,
- * and `orchestration/event-triggers.ts` each resume a not-live session and then enqueue too, independently
- * — card 90b9e904 converged their durability + MCP-seen gate onto the SAME `SessionService.
- * enqueueDurableNudge` this watcher uses (each via its own optional injected dep, byte-identical raw
- * fallback for a test double that doesn't wire it), but NOT their report-state handling / nudge text /
- * ordering: those three facets don't apply to them at all (their nudge is a specific external signal — a
- * wake note / poll item / matched event — not this watcher's generic continuation nudge). See
- * `SessionService.resumeFleetOnBoot`'s own doc for the full caveat and why "three" isn't a completeness
- * claim.
+ * Crash-recovery watchdog — the THIRD of three independent resume-and-nudge paths.
+ * @decision 9f7c59f1 — see docs/decisions/9f7c59f1-enqueuedurablenudge-not-private-third-resume-path.md
+ * for the full three-paths comparison (report-state handling / durability / ordering, what converged and
+ * what didn't, and why "three" isn't a completeness claim over the whole codebase).
+ * @decision 90b9e904 — `orchestration/wake.ts`, `poll.ts`, and `event-triggers.ts` independently resume +
+ * enqueue too and converged onto the SAME durable dispatch this watcher uses; see
+ * docs/decisions/90b9e904-enqueuedurablenudge-opts-param-generalizes-three-sites.md.
+ * @decision 06ebbb78 — `resumeFleetOnBoot` also routes through this same dispatch; see
+ * docs/decisions/06ebbb78-resumefleetonboot-routes-through-enqueuedurablenudge.md. ONE deliberate
+ * exception: the crash-loop escalation heads-up below (`session_recovery_abandoned`) stays on raw
+ * `pty.enqueueStdin` on purpose, best-effort — see that call site's own comment.
+ *
  * Where {@link SessionService.resumeFleetOnBoot} auto-resumes the whole fleet on a deliberate
  * `daemon_restart`, and {@link SessionService.recoverCrashOrphanedWorkers} does the same for a crash / OS-
  * restart / clean stop — the two are STRICTLY mutually exclusive per boot — THIS runs on EVERY boot
  * regardless of which of those two fired, auto-recovering an ISOLATED session whose pty died UNEXPECTEDLY
- * while the daemon stayed HEALTHY — the gap that left a manager dead ~2.5h until a human noticed. Per-facet
- * ruling against its two siblings:
- *   - **report-state handling:** CONVERGED for the worker case — the worker branch below calls the SAME
- *     {@link deriveAwaitingReview} the other two paths call, and gives a `blocked`/`done` worker the same
- *     treatment (re-state-your-blocker nudge / silence, respectively — see the worker branch's own comment).
- *   - **durability of the enqueue:** WAS a real, undeclared gap, CONVERGED by card 9f7c59f1 — this tick used
- *     to call `pty.enqueueStdin` directly for its continuation nudges, with NEITHER the MCP-seen gate NOR
- *     the durable give-up-exhaustion record its sibling `recoverCrashOrphanedWorkers` applied (via
- *     `enqueueDurableNudge`). Now routed through the SAME `SessionService.enqueueDurableNudge`
- *     `recoverCrashOrphanedWorkers` uses (and, since card 06ebbb78, `resumeFleetOnBoot` too — all THREE
- *     resume-and-nudge paths now share this one durable dispatch), via the optional
- *     `CrashRecoveryDeps.enqueueDurableNudge` — see that field's own doc. The ONE
- *     deliberate exception is the crash-loop escalation heads-up below (`session_recovery_abandoned`),
- *     which stays on raw `pty.enqueueStdin` ON PURPOSE — see its own comment.
- *   - **ordering:** N/A — this watcher has no cross-session ordering concept at all (it recovers one
- *     isolated dead session per candidate; neither sibling's "resume the manager/requester first-or-last"
- *     question applies to a single session with no fleet to sequence against).
+ * while the daemon stayed HEALTHY — the gap that left a manager dead ~2.5h until a human noticed.
+ *
  * It acts on EITHER of two durable triggers (see RECOVERY_TRIGGER_KINDS), sharing one bound:
  *   • `session_died`              — an unexpected pty death (recordUnexpectedExit; intended stops + whole-
  *      daemon restarts are excluded — see there).
- *   • `worker_report_undelivered` — STRAND BACKSTOP (incident 22a44352): a worker reported `done` to a
- *      since-EXITED parent manager so the report reached nobody (`delivered:false`) and its branch sat
- *      unmerged. recordUndeliveredReport files it; the watchdog resumes the manager so it merges the work.
- *      This is the "keyed on delivered:false rather than process-death" recovery: a CLEANLY idle-exited
- *      manager has no `session_died`, so only this trigger can re-wake it.
+ *   • `worker_report_undelivered` — the strand backstop; see recordUndeliveredReport's own doc
+ *      (@decision 22a44352) for the incident. This is the "keyed on delivered:false rather than
+ *      process-death" recovery: a CLEANLY idle-exited manager has no `session_died`, so only this trigger
+ *      can re-wake it.
  *
  * BOUNDED + CRASH-LOOP SAFE (the load-bearing property). Auto-resume is capped at `crashRecoveryMaxAttempts`
  * (per project; 0 = off) via a PERSISTED counter — the count of `session_resume_attempt` events since the
@@ -475,19 +462,14 @@ export class CrashRecoveryWatcher {
             dispatchNudge(s.id, s.role, note + RESUME_NUDGE_TAIL, s.taskId ?? null);
           }
         } else {
-          // manager or platform — card c9e51581 (Path C extension of 61cc91c6): a manager/platform with NO
-          // stake in this isolated crash resumes SILENTLY instead of the unconditional re-orient nudge below.
+          // manager or platform. @decision c9e51581 — a manager/platform with NO stake in this isolated
+          // crash resumes SILENTLY instead of the unconditional re-orient nudge below; see
+          // docs/decisions/c9e51581-manager-platform-no-stake-resumes-silently.md (Path C extension of
+          // 61cc91c6) for the KNOWN, ACCEPTED same-tick ordering gap.
           // causal:false (an isolated pty death isn't self-requested, unlike a daemon_restart requester).
           // liveWorkersResumed = the manager's CURRENT live worker count — this path has no "resume set"
           // list like Path A/B (it resumes ONE dead session per candidate), so "workers resumed alongside
           // it" doesn't exist; the natural analog is "does it have live workers to re-check right now".
-          // KNOWN, ACCEPTED gap: if this manager AND one of its workers crash-die in the SAME tick, this
-          // tick's candidate iteration order isn't guaranteed, so this query can undercount if the manager
-          // is processed before its worker's own resume (later in this same tick) lands — the
-          // manager would then resume silently for this ONE tick. Not a correctness bug: the worker still
-          // recovers independently via its own `session_died` trigger, and the manager learns about it
-          // shortly after via worker_list / the worker's own report — accepted rather than adding
-          // cross-candidate batching for a rare simultaneous-crash case.
           // queuedIoReplayed: a `worker_report_undelivered` trigger IS a specific queued/undelivered worker
           // report waiting on this manager — real work waiting, so it maps onto queuedIoReplayed and forces
           // the full nudge through the standard field rather than a bolt-on special case.
