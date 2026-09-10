@@ -5582,6 +5582,11 @@ export class SessionService {
       });
     } catch (e) {
       this.reconcileFailedSpawn(session.id, e);
+      // Card 8b194419: without this, the run row stayed 'starting' (holding a per-key concurrency slot,
+      // answering an idempotency replay with the dead run) and its snapshot dir stayed un-GC'd until the
+      // next boot's reconcileRunsOnBoot/sweepAllRunSnapshots — fail + GC it HERE instead, immediately.
+      this.db.failRun(runId, `run spawn failed before it could start: ${e instanceof Error ? e.message : String(e)}`);
+      void removeRunSnapshot(session.id);
       throw e;
     }
     this.db.setRunStatus(runId, "running"); // the startup-prompt turn is in flight
@@ -6289,8 +6294,12 @@ export class SessionService {
         // Reconciling to 'exited' HERE — the one place that knows the spawn never produced an
         // engine — releases the mutex immediately and lets a re-spawn (or worker_recycle, which
         // reuses this same worktree/branch and never checks processState) proceed normally.
-        this.db.setProcessState(worker.id, "exited");
-        this.db.setLastError(worker.id, `worker spawn failed before it could start: ${e instanceof Error ? e.message : String(e)}`);
+        // Card 8b194419 (Code Review follow-up on 6ca4155f, item 3): folded onto the shared
+        // reconcileFailedSpawn helper every other live-flip site already uses — the two differed only in
+        // the lastError message's prefix ("worker spawn failed…" vs "session spawn failed…"), and a
+        // repo-wide grep found zero consumers of either exact prefix (nothing outside this file's own
+        // source matches either string).
+        this.reconcileFailedSpawn(worker.id, e);
         throw e;
       }
       // Move the task into the `active` lane (role-resolved off the manager-project config, not the
@@ -6355,8 +6364,9 @@ export class SessionService {
   }
 
   // Card 6ca4155f: a synchronous throw between a row's live-flip and a successful pty.spawn must never
-  // leave it phantom-live — nothing else reconciles it. spawnWorker keeps its own catch (card fa1b77c1)
-  // deliberately, rather than being retrofitted onto this helper.
+  // leave it phantom-live — nothing else reconciles it. Card 8b194419 folded spawnWorker's own catch
+  // (fa1b77c1) onto this helper too — all 14 live-flip spawn sites in this file now call this uniformly;
+  // see live-flip-reconcile-guard.mjs, which structurally checks that invariant holds.
   //
   // @decision 4be56c33 — never unlink `recycled_from` here: resume() passes an EXISTING, often
   // gen>=1, row, and nulling it severs a live lineage.
