@@ -41,6 +41,14 @@ Same asymmetry as the sibling regardless of key choice: a match at the CURRENT g
 that function IS the current-gen detector and must not defer to itself. Only a token seen at a generation
 STRICTLY OLDER than `currentGen` counts as "already observed."
 
+`Live.recentPlaceholderTokens` is populated UNCONDITIONALLY, regardless of whether
+`detectBarePastePlaceholderTripwire` itself fired for this turn — even a token this same check already
+ruled benign (its own guard (1)/(3), the submitted-text/embedded-match conditions) is still direct evidence
+the literal placeholder string existed in the transcript at this `gen`, which is exactly the fact a LATER
+turn's own stale CLI-side re-render needs explained. Recording only on a positive detection would leave
+every benign occurrence unrecorded, reopening the same false-positive gap for the very re-render this
+history exists to catch.
+
 ## Do not
 
 - Do not reuse the sibling `abeac33a` discriminator's magnitude-only (`+M lines`) match here — two

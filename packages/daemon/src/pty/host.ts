@@ -6644,12 +6644,9 @@ export class PtyHost {
           const rawSubmittedText = live.lastRawSubmit ?? live.lastPrompt;
           const submittedText = rawSubmittedText !== null ? stripPossibleDuplicateFrame(rawSubmittedText) : null;
           live.lastRawSubmit = null;
-          // A future recurrence of a submitted paste silently collapsing to a bare placeholder is now
-          // LOGGED instead of silent — over EITHER delivery channel. Card 2c58bdd3: pass the CURRENT gen +
-          // `live.recentPlaceholderTokens` so the tripwire can tell a genuine fresh collapse of THIS turn
-          // apart from a stale CLI-side re-render of an OLDER, already-delivered turn's own placeholder
-          // token — see that function's own doc for the false-positive shape this closes (investigation
-          // `773b3914`) and for why this history is keyed on the exact token, not `live.recentWrittenLineCounts`.
+          // @decision 2c58bdd3 — pass the CURRENT gen + `live.recentPlaceholderTokens` (investigation
+          // `773b3914`) so a stale re-render of an OLDER gen's own placeholder can't misfire; keyed on the
+          // exact token, not `live.recentWrittenLineCounts`.
           if (detectBarePastePlaceholderTripwire(submittedText, stats?.lastUserText, live.submitGeneration, live.recentPlaceholderTokens)) {
             // Card 0f9268cc: one-shot auto-RECOVERY on top of detection. `submittedText` is provably
             // non-null here (detectBarePastePlaceholderTripwire's own first guard requires it truthy).
@@ -6680,9 +6677,9 @@ export class PtyHost {
               // additive: the warn above is untouched, this just gives the give-up a real, queryable
               // channel on top of it.
               const giveUpToken = matchEmbeddedPlaceholderToken(stats?.lastUserText);
-              // Card 72cab648: ALSO set the pull-surface (see `Live.lastPasteTripwireGiveUp`'s own doc) —
-              // purely additive alongside the event above; the event feeds the attention-path nudge/db
-              // record (47c11741), this feeds worker_list/worker_status for a watching manager.
+              // @decision 72cab648 — ALSO set the pull-surface, purely additive alongside the event above:
+              // the event feeds the attention-path nudge/db record (47c11741), this feeds worker_list/
+              // worker_status for a watching manager.
               live.lastPasteTripwireGiveUp = { gen: live.submitGeneration, token: giveUpToken, engineSessionId: live.engineSessionId ?? null, detectedAt: Date.now() };
               this.events.onPasteTripwireGiveUp?.(sessionId, { token: giveUpToken, engineSessionId: live.engineSessionId ?? null });
             }
@@ -6699,9 +6696,9 @@ export class PtyHost {
               // before that closure ever runs; capturing there would silently record the WRONG (already-
               // advanced) baseline instead of "how many turns have run since detection."
               const mintedAtGen = live.submitGeneration;
-              // Card 1c47454b: stamped alongside `mintedAtGen`, same reasoning (capture NOW, not inside the
-              // setTimeout(0) closure) — an absolute wall-clock time that survives a session boundary
-              // `mintedAtGen` cannot (see QueuedMessage.mintedAtWallClock's own doc).
+              // @decision 1c47454b — stamped alongside `mintedAtGen` (capture NOW, not inside the
+              // setTimeout(0) closure) since this is an absolute wall-clock time that survives a session
+              // boundary `mintedAtGen` cannot.
               const mintedAtWallClock = Date.now();
               // Card 4a0af485 (adopting the shared primitive for 38c687bb, the paste-recovery site named
               // there as "carries no id in EITHER space" — that card's own recipient-side consumption
@@ -6711,29 +6708,18 @@ export class PtyHost {
               setTimeout(() => { this.enqueueStdin(sessionId, recoveryText, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, { logicalId: randomUUID(), mintedAtGen, mintedAtWallClock }); }, 0);
             }
           }
-          // Card 2c58bdd3: record whatever placeholder token THIS turn's recorded text carried — win or
-          // lose above — into `live.recentPlaceholderTokens`, so a LATER turn's stale re-render of this
-          // SAME exact token can be recognized (the `gen` discriminator on the check above). Deliberately
-          // unconditional on whether the tripwire fired: even a token that guard (1)/(3) already ruled
-          // benign this turn is still evidence the literal string existed in the transcript at this gen,
-          // which is exactly what a future re-render would repeat.
+          // @decision 2c58bdd3 — record whatever placeholder token THIS turn carried into
+          // `live.recentPlaceholderTokens` UNCONDITIONALLY, win or lose above — it is evidence the token
+          // existed in the transcript at this gen, exactly what a future stale re-render would repeat.
           const observedToken = matchEmbeddedPlaceholderToken(stats?.lastUserText);
           if (observedToken) {
             live.recentPlaceholderTokens.push({ gen: live.submitGeneration, token: observedToken });
             if (live.recentPlaceholderTokens.length > PASTE_TRIPWIRE_TOKEN_WINDOW) live.recentPlaceholderTokens.shift();
           }
-          // Card b68d1f5b DoD-1 — the gen-aware, calibrated length check: catches an UNEXPLAINED
-          // `[Pasted text #N +M lines]` placeholder even when `detectBarePastePlaceholderTripwire` above
-          // stayed silent (no `submittedText` to compare, or `submittedText` too short/single-line to
-          // gate on) — the human/raw-terminal-paste class this card exists for. Deliberately a SEPARATE
-          // check from the one above, not a replacement: `live.recentWrittenLineCounts` (its OWN dedicated,
-          // longer-horizon, integer-only history — see that field's doc for why this is NOT
-          // `live.recentWrittenTurns`, card c2c750a9's ring) is what lets it stay silent on a placeholder
-          // that's actually EXPLAINED — either the current gen's own fresh collapse (already owned +
-          // recovered by the block above) or a stale CLI-side re-render of an older, already-delivered gen
-          // still inside the window (card abeac33a's finding) — see detectPastePlaceholderLengthLoss's own
-          // doc for the full discriminator AND its stated bound. Runs on `stats?.lastUserText` regardless
-          // of whether the block above fired, since it can find something that one structurally cannot.
+          // @decision b68d1f5b — a SEPARATE check from the tripwire above, not a replacement: catches an
+          // UNEXPLAINED placeholder that check structurally can't (no/too-short `submittedText`), and stays
+          // silent when EXPLAINED (current-gen collapse already owned above, or a stale older-gen re-render
+          // per `abeac33a`) via its own dedicated ring, not `c2c750a9`'s.
           for (const candidate of detectPastePlaceholderLengthLoss(stats?.lastUserText, submittedText, live.recentWrittenLineCounts)) {
             // eslint-disable-next-line no-console
             console.error(`[paste-length-loss] ${sessionId} UNEXPLAINED ${candidate.token} (engineSessionId=${live.engineSessionId ?? "?"}, gen=${live.submitGeneration}) — no known Loom write accounts for these lines; estimated ~${candidate.estimatedBytesLost} bytes (${candidate.statedLines} lines @ ~${PASTE_LOSS_CALIBRATED_BYTES_PER_LINE} B/line, card abeac33a calibration) never reached the engine and Loom holds no copy to auto-recover (see card b68d1f5b). Failing loud to recipient + sender.`);
@@ -6747,39 +6733,28 @@ export class PtyHost {
             const det = detectUsageLimit(hook);
             if (det.limited) {
               const until = rateLimitedUntil(det.resetsAtSeconds);
-              // PARK: suppress drain/submit until resume. Skipping the synchronous drain below is not enough —
-              // the ~10s reconcile timer (and any incoming enqueueStdin) would otherwise drain pending into the
-              // capped account and submit() would CLOBBER lastPrompt, losing the killed turn we must replay.
+              // @decision sha:c6338ae1 — suppress drain/submit until resume; skipping only the synchronous
+              // drain here is not enough since the ~10s reconcile timer would otherwise drain pending into
+              // the capped account and CLOBBER lastPrompt, losing the killed turn we must replay.
               live.rateLimited = true;
               this.events.onRateLimited(sessionId, until, { resetsAtSeconds: det.resetsAtSeconds, message: `usage limit — resumes ${until}`, detector: "stop_failure" });
               break;
             }
           }
-          // Weekly/account usage-cap TEXT sentinel fallback (card b16320bc): the interactive CLI answers
-          // THAT cap with an ordinary assistant message + a CLEAN Stop, not a StopFailure — so the
-          // structured check above never fires and the worker would otherwise stall, replying bare "No
-          // response requested" to every later nudge with no visible park. Test the LAST assistant turn's
-          // text-only reply (tool_use/tool_result excluded — see ContextStats.lastAssistantText) from the
-          // SAME `stats` read above for the sentinel; on a match, park through the EXACT SAME path as the
-          // structured detector above (no resetsAtSeconds — plain text carries no machine-readable reset —
-          // so rateLimitedUntil falls back to the default backoff / the already-polled usage-window reset,
-          // same as a reset-less StopFailure).
+          // @decision b16320bc — weekly/account cap answers as an ordinary assistant message + a CLEAN
+          // Stop (not StopFailure), so test the LAST assistant text-only reply from the SAME `stats` read
+          // above and park through the identical structured-detector path on a match.
           if (stats?.lastAssistantText && isWeeklyUsageLimitSentinel(stats.lastAssistantText)) {
             const until = rateLimitedUntil(undefined);
             live.rateLimited = true;
             this.events.onRateLimited(sessionId, until, { message: `usage limit — resumes ${until}`, detector: "weekly_text_sentinel" });
             break;
           }
-          // Card 343441bd: bump the completed-turn counter HERE, immediately before drain — NOT up at the
-          // setBusy(false) falling edge above. Both usage-cap PARKS (§19c rate-limit StopFailure, the
-          // weekly-cap text sentinel) `break` OUT of this try block before reaching this point: a capped/
-          // parked turn is a NON-opportunity for the worker to act (same reason give-up-recovery's
-          // setBusy(false) sites are excluded — see onTurnCompleted's own doc), so counting it would
-          // inflate turnsSinceDelivery for an opportunity that never happened and could FALSE-FIRE the
-          // no-false-alarm-critical staleDirective signal. Every OTHER path between the falling edge and
-          // here (a failed/successful context-stats read, the paste-placeholder tripwire detect/recover)
-          // falls through to this exact line — so this is still the one chokepoint every GENUINE turn
-          // completion passes through exactly once; only the two park breaks are excluded, on purpose.
+          // @decision 343441bd — bump HERE, immediately before drain, never at the setBusy(false) falling
+          // edge above: both usage-cap park breaks are non-opportunities that must stay excluded, or
+          // `staleDirective` would false-fire on a turn that never ran. Every other path between the
+          // falling edge and here (a failed/successful context-stats read, the paste-placeholder tripwire
+          // detect/recover) falls through to this exact line — not just the two excluded park breaks.
           this.events.onTurnCompleted?.(sessionId);
           // The turn ended → safe to write. Drain ONE queued message (FIFO), re-arming busy so the
           // next Stop releases the next: strict per-session serialization. Writing only at the turn
