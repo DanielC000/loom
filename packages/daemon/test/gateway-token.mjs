@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import ts from "typescript";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
+import { stripComments } from "./_strip-comments.mjs";
 
 // Find a class method's REAL body text by its actual syntax-tree extent (card fdf93d3a's pattern) —
 // never a fixed character window, which is sensitive to unrelated text growth (e.g. an added comment)
@@ -151,10 +152,24 @@ try {
   const gwMethods = ["createGatewayToken", "rotateGatewayToken", "updateGatewayToken", "deleteGatewayToken", "authenticateGatewayToken", "listGatewayTokens"];
   let mcpClean = true; const offenders = [];
   for (const f of mcpFiles) {
-    const src = fs.readFileSync(path.join(mcpDir, f), "utf8");
+    // Card 36afbbdd: comment-stripped BEFORE matching — an absence check, so a comment merely mentioning
+    // one of these method names (e.g. explaining why a router does NOT call createGatewayToken) would
+    // otherwise flip it on a comment-only diff. See (F-control) below for the proof.
+    const src = stripComments(fs.readFileSync(path.join(mcpDir, f), "utf8"));
     if (gwMethods.some((m) => src.includes(m))) { mcpClean = false; offenders.push(`${f}: gateway-token method`); }
   }
   check(`(F) no compiled MCP server references the gateway-token store${offenders.length ? " — " + offenders.join("; ") : ""}`, mcpClean);
+
+  // (F-control, card 36afbbdd) NEGATIVE: a comment-only mention no longer flips it. POSITIVE: the same
+  // text as REAL code still does.
+  {
+    const commentOnly = "// this router intentionally does not call createGatewayToken()\n";
+    check("(F-control) NEGATIVE: comment-only mention is gone after stripping",
+      !gwMethods.some((m) => stripComments(commentOnly).includes(m)));
+    const realViolation = "export function bad() { return createGatewayToken({}); }\n";
+    check("(F-control) POSITIVE: the same text as REAL code still trips the check after stripping",
+      gwMethods.some((m) => stripComments(realViolation).includes(m)));
+  }
 
   await app.close();
   db.close();

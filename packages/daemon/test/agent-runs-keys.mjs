@@ -22,6 +22,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { cleanupPathSync } from "./_tmp-fixture.mjs";
+import { stripComments } from "./_strip-comments.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -211,12 +212,28 @@ try {
   const keyMethods = ["createApiKey", "rotateApiKey", "updateApiKey", "deleteApiKey", "authenticateApiKey", "validateEndpointAllowlist", "listApiKeys"];
   let mcpClean = true; const offenders = [];
   for (const f of mcpFiles) {
-    const src = fs.readFileSync(path.join(mcpDir, f), "utf8");
+    // Card 36afbbdd: comment-stripped BEFORE matching — this is an ABSENCE check (mcpClean stays true only
+    // if none of these patterns appear ANYWHERE in the file), so a comment merely mentioning one of these
+    // method names or literals (e.g. explaining why a router does NOT call createApiKey) would otherwise
+    // flip a comment-only diff to a false failure. See (G3-control) below for the proof.
+    const src = stripComments(fs.readFileSync(path.join(mcpDir, f), "utf8"));
     if (keyMethods.some((m) => src.includes(m))) { mcpClean = false; offenders.push(`${f}: key method`); }
     if (/endpoint:\s*true/.test(src)) { mcpClean = false; offenders.push(`${f}: sets endpoint:true`); }
     if (/endpoint:\s*z\./.test(src)) { mcpClean = false; offenders.push(`${f}: endpoint zod input`); }
   }
   check(`(G3) no compiled MCP server carries a key tool or an endpoint flip${offenders.length ? " — " + offenders.join("; ") : ""}`, mcpClean);
+
+  // (G3-control, card 36afbbdd) NEGATIVE: a comment-only mention of a key method no longer flips the
+  // check. POSITIVE: the identical text as REAL code still does — proves stripping doesn't blind the scan.
+  {
+    const commentOnly = "// this router intentionally does not call createApiKey() or set endpoint: true\n";
+    const strippedCommentOnly = stripComments(commentOnly);
+    check("(G3-control) NEGATIVE: comment-only mention of a key method is gone after stripping",
+      !keyMethods.some((m) => strippedCommentOnly.includes(m)) && !/endpoint:\s*true/.test(strippedCommentOnly));
+    const realViolation = "export function bad() { return createApiKey({}); }\n";
+    check("(G3-control) POSITIVE: the same text as REAL code still trips the check after stripping",
+      keyMethods.some((m) => stripComments(realViolation).includes(m)));
+  }
 
   await app.close();
   db.close();

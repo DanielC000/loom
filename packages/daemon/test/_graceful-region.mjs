@@ -10,12 +10,22 @@
 //
 // The returned region INCLUDES the `process.exit(0)` call so callers can still assert ordering via
 // `region.indexOf("process.exit(0)")`.
+//
+// Card 36afbbdd: comments are stripped from `indexJs` BEFORE either anchor search — unstripped, a comment
+// mentioning the literal text "process.exit" anywhere between the two real anchors would truncate the
+// region early (indexOf finds the comment's occurrence first), silently excluding the real teardown
+// calls this region exists to bound; a comment mentioning "gracefulShutdown = (" could equally mislocate
+// `start`. Every caller's own `region.indexOf(...)` ordering/count assertions inherit this same immunity
+// for free, without each caller needing its own strip.
+import { stripComments } from "./_strip-comments.mjs";
+
 export function gracefulShutdownRegion(indexJs) {
-  const start = indexJs.indexOf("gracefulShutdown = (");
+  const codeOnly = stripComments(indexJs);
+  const start = codeOnly.indexOf("gracefulShutdown = (");
   if (start < 0) return ""; // anchor gone — assertions on "" fail loudly, which is the point
-  const exitIdx = indexJs.indexOf("process.exit", start);
-  if (exitIdx < 0) return indexJs.slice(start); // no exit in the body — let the assertions fail loudly
-  const closeParen = indexJs.indexOf(")", exitIdx); // extend past `process.exit(0)` so it's inside the slice
-  const end = closeParen >= 0 ? closeParen + 1 : indexJs.length;
-  return indexJs.slice(start, end);
+  const exitIdx = codeOnly.indexOf("process.exit", start);
+  if (exitIdx < 0) return codeOnly.slice(start); // no exit in the body — let the assertions fail loudly
+  const closeParen = codeOnly.indexOf(")", exitIdx); // extend past `process.exit(0)` so it's inside the slice
+  const end = closeParen >= 0 ? closeParen + 1 : codeOnly.length;
+  return codeOnly.slice(start, end);
 }

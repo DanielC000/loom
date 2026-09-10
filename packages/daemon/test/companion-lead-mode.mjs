@@ -37,6 +37,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { mkdtempManaged } from "./_tmp-fixture.mjs";
+import { stripComments } from "./_strip-comments.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -271,7 +272,10 @@ try {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) { walk(full); continue; }
         if (!entry.name.endsWith(".ts")) continue;
-        const text = fs.readFileSync(full, "utf8");
+        // Card 36afbbdd: comment-stripped before matching — an absence check (any non-exempt file matching
+        // is an offender), so a comment merely mentioning setCompanionLeadMode( (e.g. explaining why a
+        // router does NOT call it) would otherwise flip a comment-only diff into a false offender.
+        const text = stripComments(fs.readFileSync(full, "utf8"));
         if (!text.includes("setCompanionLeadMode(")) continue;
         const rel = path.relative(srcDir, full).replace(/\\/g, "/");
         if (rel === "db.ts" || rel === "gateway/server.ts") continue; // the two expected sites
@@ -281,6 +285,17 @@ try {
     walk(srcDir);
     check("(e) grep: setCompanionLeadMode is called ONLY from db.ts's own definition + gateway/server.ts's REST handler",
       offenders.length === 0);
+
+    // (e-control, card 36afbbdd) NEGATIVE: a comment-only mention in a non-exempt file no longer flips it.
+    // POSITIVE: the identical text as REAL code still does.
+    {
+      const commentOnly = "// this router intentionally does not call setCompanionLeadMode(\n";
+      check("(e-control) NEGATIVE: comment-only mention is gone after stripping",
+        !stripComments(commentOnly).includes("setCompanionLeadMode("));
+      const realViolation = "export function bad() { setCompanionLeadMode(true); }\n";
+      check("(e-control) POSITIVE: the same text as REAL code still trips the check after stripping",
+        stripComments(realViolation).includes("setCompanionLeadMode("));
+    }
 
     // Belt-and-suspenders: no tool name on the full lead-mode MCP surface (any router) resembles a
     // lead-mode write — the agent-facing surface is read/act-scoped, never self-elevating.

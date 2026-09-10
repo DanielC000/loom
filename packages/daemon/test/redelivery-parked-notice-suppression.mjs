@@ -215,6 +215,11 @@ try {
     // true), so `recipientCheckClause` legitimately naming worker_list here is correct, not a regression.
     console.log(`\n--- (4) new notice length: ${note?.length} chars ---\n${note}\n`);
 
+    // Card 36afbbdd: NOT comment-stripped, deliberately. The first three checks are PRESENCE checks on
+    // documentation prose that is itself the relocation destination (a real tool `description:` string) —
+    // a comment-only diff can only ADD a spurious match, never remove the real one, so it can't flip
+    // pass→fail. The fourth is a LOWER-BOUND count (`>= 2`, not `=== 2`) — a comment-only diff can only
+    // raise the count, never drop it below 2, so it's immune for the same reason.
     const orchSrc = fs.readFileSync(path.join(fileURLToPath(new URL("../src/mcp/orchestration.ts", import.meta.url))), "utf8");
     check("(4) RELOCATED: worker_message's description now carries resend-join caveat (a)", orchSrc.includes("embeds YOUR OWN session id"));
     check("(4) RELOCATED: worker_message's description now carries resend-join caveat (b)", orchSrc.includes("join window closes the instant Loom itself confirms"));

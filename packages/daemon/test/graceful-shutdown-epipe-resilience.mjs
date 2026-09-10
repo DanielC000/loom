@@ -145,6 +145,11 @@ if (scenario) {
   }
 
   // ════════ wiring: the REAL built gracefulShutdown delegates to runGracefulTeardown ════════
+  // Card 36afbbdd: no direct edit needed here — `region` (the order-sensitive check below) comes from
+  // the SHARED `gracefulShutdownRegion` (_graceful-region.mjs), which now strips comments internally
+  // before bounding the region, so this file's own ordering check inherits that immunity for free. The
+  // bare `indexJs` presence checks (import/call) were already immune (comment-only diffs can only add a
+  // spurious match, never remove the real one).
   {
     const indexJs = fs.readFileSync(new URL("../dist/index.js", import.meta.url), "utf8");
     const region = gracefulShutdownRegion(indexJs);

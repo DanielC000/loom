@@ -262,6 +262,12 @@ try {
       !!parkedNote && !/framed text.*session id.*recycled/is.test(parkedNote));
     check("(085d9422) the notice body no longer inlines the confirmed-after-park hedge prose (relocated, not deleted — see below)",
       !!parkedNote && !/MAY follow up/.test(parkedNote));
+    // Card 36afbbdd: NOT comment-stripped, deliberately — every check below is a PRESENCE check on
+    // documentation prose that is itself the relocation DESTINATION (a real MCP tool `description:`
+    // string, not a comment), so a comment-only diff can only ever ADD a spurious match, never remove a
+    // real one — it cannot flip pass→fail (same reasoning CLAUDE.md's shape-(4) presence-only exemption
+    // gives). Stripping here would add risk (a naive line-based stripper could mis-strip a multi-line
+    // description string literal that happens to contain "//") for zero benefit.
     const orchSrcPath = new URL("../src/mcp/orchestration.ts", import.meta.url);
     const orchSrc = fs.readFileSync(orchSrcPath, "utf8");
     check("(417cea0a #5a) resend caveat (a) RELOCATED to worker_message's own tool description: framed text embeds the sender's OWN session id, so a recycle breaks the auto-join",

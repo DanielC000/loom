@@ -22,6 +22,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { stripComments } from "./_strip-comments.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -81,8 +82,12 @@ try {
   // ===== (4) COVERAGE CENSUS: every call site this card's own enumeration found actually routes through ===
   // ===== redactedExcerpt — a regression guard against a future content-bearing log line skipping the gate =
   {
-    const hostSrc = fs.readFileSync(new URL("../src/pty/host.ts", import.meta.url), "utf8");
-    const serviceSrc = fs.readFileSync(new URL("../src/sessions/service.ts", import.meta.url), "utf8");
+    // Card 36afbbdd: comment-stripped before matching — these are EXACT-count censuses (=== 7, === 1), so
+    // even ONE stray comment mention of "redactedExcerpt(" (highly plausible near any of the 7 real call
+    // sites this test's own comment below enumerates) would break the equality and flip a comment-only
+    // diff to a false failure. See (4-control) below for the proof.
+    const hostSrc = stripComments(fs.readFileSync(new URL("../src/pty/host.ts", import.meta.url), "utf8"));
+    const serviceSrc = stripComments(fs.readFileSync(new URL("../src/sessions/service.ts", import.meta.url), "utf8"));
     const hostCalls = (hostSrc.match(/redactedExcerpt\(/g) ?? []).length - 1; // -1 for the function's own declaration line
     const serviceCalls = (serviceSrc.match(/redactedExcerpt\(/g) ?? []).length;
     // 7 call sites: the shared `around` helper (feeds BOTH reportedAround= and intendedAround=), the shared
@@ -96,6 +101,20 @@ try {
     // this isn't a pattern that matches everything.
     const bogusCalls = (hostSrc.match(/thisFunctionDoesNotExist\(/g) ?? []).length;
     check("(4) NEGATIVE CONTROL: a bogus function name finds 0 call sites in the same file (the census pattern discriminates)", bogusCalls === 0);
+
+    // (4-control, card 36afbbdd) NEGATIVE: a comment-only mention no longer inflates the exact count.
+    // POSITIVE: the identical text as a REAL extra call site still does.
+    {
+      const base = "function redactedExcerpt() {}\nredactedExcerpt();\n";
+      const withComment = base + "// see also redactedExcerpt(...) at the submit-write head= site\n";
+      const strippedCount = (stripComments(withComment).match(/redactedExcerpt\(/g) ?? []).length;
+      check("(4-control) NEGATIVE: a comment-only mention no longer inflates the count",
+        strippedCount === (base.match(/redactedExcerpt\(/g) ?? []).length);
+      const withRealCall = base + "redactedExcerpt();\n";
+      const strippedRealCount = (stripComments(withRealCall).match(/redactedExcerpt\(/g) ?? []).length;
+      check("(4-control) POSITIVE: a REAL extra call site still counts after stripping",
+        strippedRealCount === (base.match(/redactedExcerpt\(/g) ?? []).length + 1);
+    }
   }
 
   // ===== (5) END-TO-END, real site: the [prompt-mismatch] reportedAround/intendedAround excerpt, exercised =====

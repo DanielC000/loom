@@ -123,6 +123,36 @@ try {
   const sigIdx = indexJs.indexOf('"SIGINT"');
   const sigRegion = sigIdx >= 0 ? indexJs.slice(sigIdx, sigIdx + 400) : "";
   check("(5) the SIGINT/SIGTERM handler delegates to gracefulShutdown", /gracefulShutdown\s*\(/.test(sigRegion));
+
+  // (5-control, card 36afbbdd) gracefulShutdownRegion() (_graceful-region.mjs, shared with
+  // periodic-snapshot.mjs and graceful-shutdown-epipe-resilience.mjs) now strips comments internally.
+  // NEGATIVE: a comment mentioning "process.exit" BEFORE the real snapshotAllLive() call used to truncate
+  // the region right there (indexOf finds the comment's occurrence first), excluding the real call and
+  // flipping the ordering check to fail — proves that no longer happens. POSITIVE: the identical shape as
+  // REAL code (snapshotAllLive AFTER process.exit(0), i.e. genuinely mis-ordered) is still caught.
+  {
+    // The exact predicate check (5) above uses, reused here so the control proves the SAME property.
+    const orderingHolds = (r) => /snapshotAllLive\s*\(/.test(r) && r.indexOf("snapshotAllLive") < r.indexOf("process.exit(0)");
+
+    const syntheticGood = [
+      "  const gracefulShutdown = (",
+      "    // we call process.exit(0) below once teardown finishes",
+      "    snapshotAllLive();",
+      "    process.exit(0);",
+      "  );",
+    ].join("\n");
+    check("(5-control) NEGATIVE: a comment mentioning 'process.exit' no longer truncates the region early",
+      orderingHolds(gracefulShutdownRegion(syntheticGood)));
+
+    const syntheticBad = [
+      "  const gracefulShutdown = (",
+      "    process.exit(0);",
+      "    snapshotAllLive();",
+      "  );",
+    ].join("\n");
+    check("(5-control) POSITIVE: a REAL mis-ordering (snapshotAllLive after process.exit(0)) is still caught",
+      !orderingHolds(gracefulShutdownRegion(syntheticBad)));
+  }
 } finally {
   try { fs.rmSync(path.join(claudeDir, `${engineA}.jsonl`), { force: true }); } catch { /* ignore */ }
   try { fs.rmSync(path.join(claudeDir, `${engineB}.jsonl`), { force: true }); } catch { /* ignore */ }

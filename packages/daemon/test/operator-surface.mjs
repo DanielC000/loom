@@ -56,6 +56,7 @@ process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 import { requireHermeticEnv } from "./_guard.mjs";
 import { hermeticPort } from "./_hermetic-port.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { stripComments } from "./_strip-comments.mjs";
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
@@ -322,11 +323,24 @@ try {
   await client.close();
 
   // ============ F. SUBSET / NO-NEW-WRITER (source-level) ============
-  const operatorSrc = fs.readFileSync(path.join(__dirname, "..", "src", "mcp", "operator.ts"), "utf8");
+  // Card 36afbbdd: comment-stripped before matching — the last two checks below are ABSENCE checks, so a
+  // comment explaining "we don't call simpleGit()/fs.writeFileSync() directly here, we reuse GitWriter/
+  // writeVaultFile instead" would otherwise flip them on a comment-only diff. See (F-control) below.
+  const operatorSrc = stripComments(fs.readFileSync(path.join(__dirname, "..", "src", "mcp", "operator.ts"), "utf8"));
   check("(F) mcp/operator.ts imports GitWriter from git/writer.js", /import\s*\{\s*GitWriter\s*\}\s*from\s*"\.\.\/git\/writer\.js"/.test(operatorSrc));
   check("(F) mcp/operator.ts imports writeVaultFile from vault/writer.js", /import\s*\{\s*writeVaultFile\s*\}\s*from\s*"\.\.\/vault\/writer\.js"/.test(operatorSrc));
   check("(F) mcp/operator.ts defines NO simpleGit( of its own", !/simpleGit\(/.test(operatorSrc));
   check("(F) mcp/operator.ts defines NO fs.writeFileSync( of its own", !/fs\.writeFileSync\(/.test(operatorSrc));
+
+  // (F-control, card 36afbbdd) NEGATIVE: a comment-only mention no longer flips it. POSITIVE: the same
+  // text as REAL code still does.
+  {
+    const commentOnly = "// we don't call simpleGit() or fs.writeFileSync() directly here\n";
+    const s = stripComments(commentOnly);
+    check("(F-control) NEGATIVE: comment-only mention is gone after stripping", !/simpleGit\(/.test(s) && !/fs\.writeFileSync\(/.test(s));
+    const realViolation = "const git = simpleGit();\n";
+    check("(F-control) POSITIVE: the same text as REAL code still trips the check after stripping", /simpleGit\(/.test(stripComments(realViolation)));
+  }
 
   // ============ G. CONFIG PLUMBING ============
   check("(G) resolveConfig(undefined,{operatorEnabled:true}).platform.operatorEnabled === true",

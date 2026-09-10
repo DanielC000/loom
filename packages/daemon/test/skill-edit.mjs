@@ -52,6 +52,7 @@ fs.writeFileSync(path.join(assetSkillsDir, "core-doctrine", "SKILL.md"), BUNDLED
 process.env.LOOM_ASSET_SKILLS = assetSkillsDir; // BEFORE importing dist — store.ts computes ASSET_SKILLS at load
 
 import { requireHermeticEnv } from "./_guard.mjs";
+import { stripComments } from "./_strip-comments.mjs";
 requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
 
 const { Db } = await import("../dist/db.js");
@@ -161,12 +162,28 @@ try {
   await client.close();
 
   // ============ (f2) SOURCE-LEVEL — skill_edit has NO independent write path ============
-  const skillToolsSrc = fs.readFileSync(path.join(__dirname, "..", "src", "mcp", "skillTools.ts"), "utf8");
+  // Card 36afbbdd: comment-stripped before extraction/matching — the last check is an ABSENCE check on
+  // the extracted function body, so a comment inside skillEditData() explaining "no independent
+  // writeSkill()/publishSkillToBundled() call — delegates to skillWriteData()" would otherwise flip it on
+  // a comment-only diff. See (f2-control) below.
+  const skillToolsSrc = stripComments(fs.readFileSync(path.join(__dirname, "..", "src", "mcp", "skillTools.ts"), "utf8"));
   const editFnMatch = skillToolsSrc.match(/export function skillEditData\([\s\S]*?\n\}/);
   check("(f2) skillEditData() is defined in mcp/skillTools.ts", !!editFnMatch);
   const editFnBody = editFnMatch ? editFnMatch[0] : "";
   check("(f2) skillEditData() delegates its actual write to skillWriteData(...)", /skillWriteData\(/.test(editFnBody));
   check("(f2) skillEditData() calls NO independent persistence primitive (writeSkill/publishSkillToBundled)", !/\bwriteSkill\(/.test(editFnBody) && !/publishSkillToBundled\(/.test(editFnBody));
+
+  // (f2-control, card 36afbbdd) NEGATIVE: a comment-only mention inside the function body no longer flips
+  // it. POSITIVE: the same text as REAL code still does.
+  {
+    const commentOnly = "export function skillEditData() {\n  // no independent writeSkill() or publishSkillToBundled() call here\n  return skillWriteData();\n}\n";
+    const m = stripComments(commentOnly).match(/export function skillEditData\([\s\S]*?\n\}/);
+    const body = m ? m[0] : "";
+    check("(f2-control) NEGATIVE: comment-only mention is gone after stripping", !/\bwriteSkill\(/.test(body) && !/publishSkillToBundled\(/.test(body));
+    const realViolation = "export function skillEditData() {\n  writeSkill();\n  return skillWriteData();\n}\n";
+    const mBad = stripComments(realViolation).match(/export function skillEditData\([\s\S]*?\n\}/);
+    check("(f2-control) POSITIVE: the same text as REAL code still trips the check after stripping", /\bwriteSkill\(/.test(mBad ? mBad[0] : ""));
+  }
 } finally {
   db.close();
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }

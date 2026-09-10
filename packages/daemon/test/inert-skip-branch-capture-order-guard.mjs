@@ -30,6 +30,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripComments } from "./_strip-comments.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..", "..", "..");
@@ -74,10 +75,14 @@ function checkOrdering(text) {
 }
 
 // ── (A) REAL REPO — the ordering must hold TODAY, or the fix this guards has regressed ─────────────────
+// Card 36afbbdd: comment-stripped before checkOrdering — PRE_WAIT_RE/INERT_CALL_RE are per-line,
+// unanchored substring tests, so a comment mentioning either target line verbatim (this file's own header
+// above does exactly that, in prose) would count as a SECOND match and trip the "expected exactly 1"
+// fail-closed leg on a comment-only diff, even though the real ordering never changed.
 {
   let text = null;
   try {
-    text = fs.readFileSync(SERVICE_TS, "utf8");
+    text = stripComments(fs.readFileSync(SERVICE_TS, "utf8"));
   } catch (err) {
     check(`(A) sessions/service.ts is readable at ${SERVICE_TS} (fail-closed: an unreadable target is a FAIL, not a skip) — ${err.message}`, false);
   }
@@ -88,6 +93,27 @@ function checkOrdering(text) {
       result.ok,
     );
   }
+}
+
+// (A-control, card 36afbbdd) NEGATIVE: a comment mentioning BOTH target lines (a duplicate-match
+// fail-closed trip) no longer flips the check once stripped. POSITIVE: the identical text as REAL
+// duplicated code still trips it.
+{
+  const commentDuplicate = [
+    "// e.g. const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "// then: inertSkip = await isInertMergeDiff(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
+    "const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "inertSkip = await isInertMergeDiff(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
+  ].join("\n");
+  check("(A-control) NEGATIVE: comment-only duplicate mentions no longer trip the ambiguous-match fail-closed leg",
+    checkOrdering(stripComments(commentDuplicate)).ok);
+  const realDuplicate = [
+    "const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "const preWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "inertSkip = await isInertMergeDiff(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
+  ].join("\n");
+  check("(A-control) POSITIVE: a REAL duplicate capture line still trips the check after stripping",
+    !checkOrdering(stripComments(realDuplicate)).ok);
 }
 
 // ── (B) POSITIVE CONTROL — fa04f92c's real pre-fix arrangement, reconstructed by hand from

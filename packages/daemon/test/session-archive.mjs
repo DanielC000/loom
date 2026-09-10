@@ -29,6 +29,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { stripComments } from "./_strip-comments.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-archive-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -313,11 +314,25 @@ try {
 
   // ════════ F. manual archive surface removed ════════
   check("F: service.archiveSession() is gone (no manual archive / cascade)", typeof sessions.archiveSession === "undefined");
-  const gatewaySrc = fs.readFileSync(new URL("../dist/gateway/server.js", import.meta.url), "utf8");
+  // Card 36afbbdd: comment-stripped before matching — the first check below is an ABSENCE check, so a
+  // comment explaining that the manual archive route was REMOVED (using its own exact literal text, which
+  // this very test's header already does in prose) would otherwise flip it on a comment-only diff.
+  const gatewaySrc = stripComments(fs.readFileSync(new URL("../dist/gateway/server.js", import.meta.url), "utf8"));
   check("F: POST /api/sessions/:id/archive route removed from the compiled gateway",
     !gatewaySrc.includes('app.post("/api/sessions/:id/archive"') && !gatewaySrc.includes("sessions.archiveSession("));
   check("F: restore route kept", gatewaySrc.includes('app.post("/api/sessions/:id/restore"'));
   check("F: delete-archived route kept", gatewaySrc.includes('app.delete("/api/sessions/:id/archive"'));
+
+  // (F-control, card 36afbbdd) NEGATIVE: a comment-only mention of the removed route no longer flips it.
+  // POSITIVE: the identical text as REAL code still does.
+  {
+    const commentOnly = '// removed: app.post("/api/sessions/:id/archive" ...) — no manual archive anymore\n';
+    check("(F-control) NEGATIVE: comment-only mention of the removed route is gone after stripping",
+      !stripComments(commentOnly).includes('app.post("/api/sessions/:id/archive"'));
+    const realViolation = 'app.post("/api/sessions/:id/archive", handler);\n';
+    check("(F-control) POSITIVE: the same text as REAL code still trips the check after stripping",
+      stripComments(realViolation).includes('app.post("/api/sessions/:id/archive"'));
+  }
 
   // ════════ G. ONE-TIME archived_at BACKFILL (db.backfillArchivedAtOnce) ════════
   // Sessions that EXITED before auto-archive-on-exit shipped never got archived_at stamped → invisible in

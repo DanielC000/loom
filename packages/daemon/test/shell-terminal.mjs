@@ -15,6 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import url from "node:url";
+import { stripComments } from "./_strip-comments.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -97,7 +98,10 @@ try {
 // ===================== SECURITY: human-only, never an MCP tool =====================
 const here = path.dirname(url.fileURLToPath(import.meta.url));
 const srcDir = path.join(here, "..", "src");
-const read = (rel) => fs.readFileSync(path.join(srcDir, rel), "utf-8");
+// Card 36afbbdd: comment-stripped before matching — the loop below runs both absence checks (SHELL_SURFACE
+// needles, the registerTool/terminal|shell regex) and a presence check (the gateway route); stripping is
+// applied uniformly since it can only help the absence checks and never hurts the presence one.
+const read = (rel) => stripComments(fs.readFileSync(path.join(srcDir, rel), "utf-8"));
 const mcpFiles = ["mcp/server.ts", "mcp/orchestration.ts", "mcp/platform.ts"];
 
 // No MCP server may reference the shell-spawn surface at all (no registerTool, no call into it).
@@ -117,6 +121,18 @@ check("no MCP server (tasks/orchestration/platform) exposes a shell-spawn tool",
 const gw = read("gateway/server.ts");
 check("the human-only REST endpoint POST /api/terminals exists in the gateway",
   gw.includes('"/api/terminals"') && gw.includes("spawnShell"));
+
+// (control, card 36afbbdd) NEGATIVE: a comment-only mention of the shell surface no longer flips the
+// absence checks. POSITIVE: the same text as REAL code still does.
+{
+  const commentOnly = '// intentionally no spawnShell()/listShells()/"/api/terminals"/createShellPty() here — human-only\n';
+  const s = stripComments(commentOnly);
+  check("(control) NEGATIVE: comment-only mention is gone after stripping",
+    !SHELL_SURFACE.some((n) => s.includes(n)) && !/registerTool\(\s*["'][^"']*(terminal|shell)/i.test(s));
+  const realViolation = 'server.registerTool("spawn_shell_terminal", {});\n';
+  check("(control) POSITIVE: the same text as REAL code still trips the check after stripping",
+    /registerTool\(\s*["'][^"']*(terminal|shell)/i.test(stripComments(realViolation)));
+}
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — shell terminals register/list/resize/skip-Claude-logic/clean-exit, and shell spawn is human-only (no MCP tool)."

@@ -63,6 +63,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripComments } from "./_strip-comments.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..", "..", "..");
@@ -110,10 +111,14 @@ function checkOrdering(text) {
 }
 
 // ── (A) REAL REPO — the ordering must hold TODAY, or the fix this guards against has regressed ─────────
+// Card 36afbbdd: comment-stripped before checkOrdering — CAPTURE_RE/CLASSIFY_RE are per-line, unanchored
+// substring tests, so a comment mentioning either target line verbatim (this file's own header above does
+// exactly that, in prose) would count as a SECOND match and trip the "expected exactly 1" fail-closed leg
+// on a comment-only diff, even though the real ordering never changed. See (A-control) below for the proof.
 {
   let text = null;
   try {
-    text = fs.readFileSync(SERVICE_TS, "utf8");
+    text = stripComments(fs.readFileSync(SERVICE_TS, "utf8"));
   } catch (err) {
     check(`(A) sessions/service.ts is readable at ${SERVICE_TS} (fail-closed: an unreadable target is a FAIL, not a skip) — ${err.message}`, false);
   }
@@ -124,6 +129,27 @@ function checkOrdering(text) {
       result.ok,
     );
   }
+}
+
+// (A-control, card 36afbbdd) NEGATIVE: a comment mentioning BOTH target lines (a duplicate-match
+// fail-closed trip) no longer flips the check once stripped. POSITIVE: the identical text as REAL
+// duplicated code still trips it.
+{
+  const commentDuplicate = [
+    "// e.g. emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "// then: const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
+    "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
+  ].join("\n");
+  check("(A-control) NEGATIVE: comment-only duplicate mentions no longer trip the ambiguous-match fail-closed leg",
+    checkOrdering(stripComments(commentDuplicate)).ok);
+  const realDuplicate = [
+    "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;",
+    "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });",
+  ].join("\n");
+  check("(A-control) POSITIVE: a REAL duplicate capture line still trips the check after stripping",
+    !checkOrdering(stripComments(realDuplicate)).ok);
 }
 
 // ── (B) POSITIVE CONTROL — a SYNTHETIC inversion of the real pair: `computeEmitCompareGate` runs FIRST,
@@ -210,10 +236,14 @@ function firstArgsOf(text) {
   return args;
 }
 
+// Card 36afbbdd: comment-stripped before firstArgsOf — FIRST_ARG_RE is a global regex over the WHOLE text
+// (not per-line), so a comment anywhere mentioning e.g. "computeEmitCompareGate(repoPath, ..." (the exact
+// near-miss shape this section's own header spells out in prose) would mint a spurious `repoPath` arg and
+// trip the "every call passes worktreePath" check to fail on a comment-only diff. See (E-control) below.
 {
   let text = null;
   try {
-    text = fs.readFileSync(SERVICE_TS, "utf8");
+    text = stripComments(fs.readFileSync(SERVICE_TS, "utf8"));
   } catch (err) {
     check(`(E) sessions/service.ts is readable at ${SERVICE_TS} (fail-closed: an unreadable target is a FAIL, not a skip) — ${err.message}`, false);
   }
@@ -227,6 +257,16 @@ function firstArgsOf(text) {
       args.length > 0 && args.every((a) => a === "worktreePath"),
     );
   }
+}
+
+// (E-control, card 36afbbdd) NEGATIVE: a comment-only mention of the wrong-arg shape no longer flips it.
+// POSITIVE: the identical text as REAL code still does.
+{
+  const commentOnly = "// e.g. computeEmitCompareGate(repoPath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs })\n" +
+    "const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });\n";
+  const strippedArgs = firstArgsOf(stripComments(commentOnly));
+  check("(E-control) NEGATIVE: comment-only mention of repoPath-as-first-arg is gone after stripping",
+    strippedArgs.length === 1 && strippedArgs[0] === "worktreePath");
 }
 
 // RED PROOF: the exact near-miss named above — a synthetic call passing `repoPath` (in scope, same type,

@@ -23,6 +23,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripComments } from "./_strip-comments.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -81,7 +82,10 @@ function makeCodexLive() {
 // test actually read, not a full mirror).
 {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const HOST_TS = fs.readFileSync(path.join(__dirname, "..", "src", "pty", "host.ts"), "utf8");
+  // Card 36afbbdd: comment-stripped before the anchor search — indexOf is a plain substring search (not
+  // ^/m-anchored), so a comment quoting either anchor verbatim (e.g. a JSDoc example) BEFORE the real
+  // declaration could mislocate the region boundary and starve the field-count/known-field checks below.
+  const HOST_TS = stripComments(fs.readFileSync(path.join(__dirname, "..", "src", "pty", "host.ts"), "utf8"));
   const ifaceStart = HOST_TS.indexOf("export interface CodexLive {");
   const ifaceEnd = HOST_TS.indexOf("export interface SpawnOpts {", ifaceStart);
   check("(shape) CodexLive interface anchors found in host.ts", ifaceStart !== -1 && ifaceEnd !== -1 && ifaceEnd > ifaceStart);
@@ -100,6 +104,28 @@ function makeCodexLive() {
     `(shape) every field this hand-written fixture sets still exists on the REAL CodexLive interface (stale: ${staleFixtureKeys.join(", ") || "none"})`,
     staleFixtureKeys.length === 0,
   );
+
+  // (shape-control, card 36afbbdd) NEGATIVE: a comment quoting the anchor BEFORE the real interface no
+  // longer mislocates the region. POSITIVE: the identical anchor text as REAL code is still found.
+  {
+    const decoyThenReal = [
+      "// e.g. export interface CodexLive { kind: \"codex\"; }",
+      "export interface CodexLive {",
+      "  kind: string;",
+      "  pid: number;",
+      "}",
+      "export interface SpawnOpts {",
+      "  cwd: string;",
+      "}",
+    ].join("\n");
+    const stripped = stripComments(decoyThenReal);
+    const s = stripped.indexOf("export interface CodexLive {");
+    const e = stripped.indexOf("export interface SpawnOpts {", s);
+    const region = stripped.slice(s, e);
+    check("(shape-control) NEGATIVE: a decoy comment before the real interface no longer mislocates the region",
+      s !== -1 && e !== -1 && e > s && /^ {2}pid:/m.test(region));
+    check("(shape-control) POSITIVE: the real anchor text is still found after stripping", s !== -1);
+  }
 }
 
 // --- Negative control FIRST: before any codex entry is registered, every accessor reads as genuinely

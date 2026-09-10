@@ -14,6 +14,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { usesOrchestrationMcp, SESSION_ROLES } from "@loom/shared";
+import { stripComments } from "./_strip-comments.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -26,9 +27,13 @@ for (const role of SESSION_ROLES) {
 check("usesOrchestrationMcp(null) === false", usesOrchestrationMcp(null) === false);
 
 // --- 2. Source-level: both call sites route through the shared predicate, not a local copy ---------
+// Card 36afbbdd: comment-stripped before matching — the two "no longer hand-defines/derives" checks
+// below are ABSENCE checks on the exact OLD literal shape, and this file's own header (and a real
+// refactor-history comment in either .ts file) plausibly quotes that exact old shape verbatim as
+// explanation, which would otherwise flip a comment-only diff to a false failure.
 const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..");
-const serviceSrc = fs.readFileSync(path.join(repoRoot, "packages", "daemon", "src", "sessions", "service.ts"), "utf8");
-const hostSrc = fs.readFileSync(path.join(repoRoot, "packages", "daemon", "src", "pty", "host.ts"), "utf8");
+const serviceSrc = stripComments(fs.readFileSync(path.join(repoRoot, "packages", "daemon", "src", "sessions", "service.ts"), "utf8"));
+const hostSrc = stripComments(fs.readFileSync(path.join(repoRoot, "packages", "daemon", "src", "pty", "host.ts"), "utf8"));
 
 check("sessions/service.ts imports usesOrchestrationMcp from @loom/shared", /\busesOrchestrationMcp\b[\s\S]{0,400}\} from "@loom\/shared";/.test(serviceSrc));
 check("sessions/service.ts's dispatch gate calls the shared predicate", /if \(usesOrchestrationMcp\(role\)\)/.test(serviceSrc));
@@ -40,6 +45,25 @@ check(
   "pty/host.ts's kickoff gate no longer hand-derives the role list inline",
   !/const gateOnMcp = l0\?\.role === "manager" \|\| l0\?\.role === "worker" \|\| l0\?\.role === "assistant";/.test(hostSrc),
 );
+
+// (control, card 36afbbdd) NEGATIVE: a comment-only mention of the old hand-rolled shapes no longer flips
+// either check. POSITIVE: the identical text as REAL code still does.
+{
+  const commentOnly =
+    "// service.ts used to hand-define: usesOrchestrationMcp(role: SessionRole | null): boolean {\n" +
+    '// host.ts used to hand-derive: const gateOnMcp = l0?.role === "manager" || l0?.role === "worker" || l0?.role === "assistant";\n';
+  const s = stripComments(commentOnly);
+  check("(control) NEGATIVE: comment-only mentions of the old shapes are gone after stripping",
+    !/\busesOrchestrationMcp\(role: SessionRole \| null\): boolean \{/.test(s)
+    && !/const gateOnMcp = l0\?\.role === "manager" \|\| l0\?\.role === "worker" \|\| l0\?\.role === "assistant";/.test(s));
+  const realViolation =
+    'function usesOrchestrationMcp(role: SessionRole | null): boolean { return role === "manager"; }\n' +
+    'const gateOnMcp = l0?.role === "manager" || l0?.role === "worker" || l0?.role === "assistant";\n';
+  const r = stripComments(realViolation);
+  check("(control) POSITIVE: the same text as REAL code still trips both checks after stripping",
+    /\busesOrchestrationMcp\(role: SessionRole \| null\): boolean \{/.test(r)
+    && /const gateOnMcp = l0\?\.role === "manager" \|\| l0\?\.role === "worker" \|\| l0\?\.role === "assistant";/.test(r));
+}
 
 if (failures > 0) {
   console.error(`\n${failures} check(s) FAILED`);

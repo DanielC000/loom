@@ -116,6 +116,12 @@ try {
   // and assert it clears TWO intervals.
   // Structural window: gracefulShutdown anchor → its first process.exit (inclusive). No byte budget, so
   // future teardown lines/comments before the exit can't push the clearInterval calls out of the region.
+  // Card 36afbbdd: no direct edit needed here — `gracefulShutdownRegion` (_graceful-region.mjs, shared
+  // with shutdown-snapshot.mjs and graceful-shutdown-epipe-resilience.mjs) now strips comments internally
+  // before bounding the region, so this count check inherits that immunity for free (a comment mentioning
+  // "process.exit" could otherwise have truncated the region early, dropping real clearInterval calls
+  // below the count and flipping a comment-only diff to a false failure). See shutdown-snapshot.mjs's
+  // (5-control) for the negative/positive proof against the shared helper directly.
   const region = gracefulShutdownRegion(indexJs);
   check("(3) shutdown clears the periodic snapshot timer (≥2 clearInterval calls)",
     (region.match(/clearInterval\(/g) || []).length >= 2);

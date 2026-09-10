@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { hermeticPort } from "./_hermetic-port.mjs";
+import { stripComments } from "./_strip-comments.mjs";
 
 const TMP = mkdtempManaged("loom-setup-project-init-rest-");
 process.env.LOOM_HOME = TMP;
@@ -164,10 +165,24 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
   check("(7) at least one MCP router file found to scan", mcpFiles.length > 0);
   let leaked = false;
   for (const f of mcpFiles) {
-    const content = fs.readFileSync(path.join(mcpDir, f), "utf8");
+    // Card 36afbbdd: comment-stripped before matching — an absence check, so a comment merely mentioning
+    // this REST path (e.g. explaining "not /api/setup/project-init — that's REST-only") would otherwise
+    // flip it on a comment-only diff. See (7-control) below.
+    const content = stripComments(fs.readFileSync(path.join(mcpDir, f), "utf8"));
     if (content.includes("/api/setup/project-init")) leaked = true;
   }
   check("(7) no MCP router file references the /api/setup/project-init REST path", !leaked);
+
+  // (7-control, card 36afbbdd) NEGATIVE: a comment-only mention no longer flips it. POSITIVE: the same
+  // text as REAL code still does.
+  {
+    const commentOnly = "// not reachable via MCP — see /api/setup/project-init (REST-only)\n";
+    check("(7-control) NEGATIVE: comment-only mention is gone after stripping",
+      !stripComments(commentOnly).includes("/api/setup/project-init"));
+    const realViolation = 'fetch("/api/setup/project-init");\n';
+    check("(7-control) POSITIVE: the same text as REAL code still trips the check after stripping",
+      stripComments(realViolation).includes("/api/setup/project-init"));
+  }
 }
 
 console.log(failures === 0

@@ -27,6 +27,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
+import { stripComments } from "./_strip-comments.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -114,12 +115,30 @@ write(
 // to a byte threshold instead of a line number. ---
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const decisionsSrcPath = path.join(__dirname, "..", "src", "mcp", "decisions.ts");
-const decisionsSrc = fs.readFileSync(decisionsSrcPath, "utf8");
+// Card 36afbbdd: comment-stripped before matching — the regex below is UNANCHORED (no `^`/`m`), so a
+// comment mentioning a HISTORICAL value (e.g. "this used to be const MAX_FILE_BYTES = 100_000; before the
+// cap was raised") would otherwise be matched first if it precedes the real declaration, silently sizing
+// every fixture in this file against the WRONG cap — a comment-only diff that never fails loudly (the
+// sanity check at (0) only asserts "a positive number", which a stale historical value still is).
+const decisionsSrc = stripComments(fs.readFileSync(decisionsSrcPath, "utf8"));
 const capMatch = /const MAX_FILE_BYTES = ([^;]+);/.exec(decisionsSrc);
 if (!capMatch) throw new Error("could not find `const MAX_FILE_BYTES = ...;` in decisions.ts — fixture sizing depends on it");
 // eslint-disable-next-line no-new-func -- trusted own-source literal, not external input
 const MAX_FILE_BYTES = new Function(`"use strict"; return (${capMatch[1]});`)();
 check("(0) sanity: MAX_FILE_BYTES parsed from source is a sane positive number", Number.isFinite(MAX_FILE_BYTES) && MAX_FILE_BYTES > 0);
+
+// (0-control, card 36afbbdd) NEGATIVE: a comment mentioning a stale historical cap value no longer wins
+// the match. POSITIVE: the identical text as a REAL declaration still parses correctly.
+{
+  const decoyThenReal = "// this used to be const MAX_FILE_BYTES = 100_000; before the cap was raised\nconst MAX_FILE_BYTES = 512 * 1024;\n";
+  const strippedMatch = /const MAX_FILE_BYTES = ([^;]+);/.exec(stripComments(decoyThenReal));
+  check("(0-control) NEGATIVE: the decoy comment's stale value is gone — the REAL declaration is matched",
+    !!strippedMatch && strippedMatch[1].trim() === "512 * 1024");
+  const realOnly = "const MAX_FILE_BYTES = 512 * 1024;\n";
+  const realMatch = /const MAX_FILE_BYTES = ([^;]+);/.exec(stripComments(realOnly));
+  check("(0-control) POSITIVE: the same text as REAL code still matches after stripping",
+    !!realMatch && realMatch[1].trim() === "512 * 1024");
+}
 
 const OLD_CAP_BYTES = 512 * 1024; // the pre-card-2b2d9a47 cap this bug shipped with — a historical fact, not a moving target
 const OVER_OLD_CAP_UNDER_CURRENT_CAP = OLD_CAP_BYTES + 64 * 1024; // ~576KB: over the OLD cap, comfortably under the current one

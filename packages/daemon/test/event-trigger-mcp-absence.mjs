@@ -22,6 +22,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
+import { stripComments } from "./_strip-comments.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -33,10 +34,23 @@ const mcpFiles = fs.readdirSync(mcpDistDir).filter((f) => f.endsWith(".js"));
 check("static: found MCP router dist files to scan", mcpFiles.length > 0);
 const offenders = [];
 for (const f of mcpFiles) {
-  const src = fs.readFileSync(path.join(mcpDistDir, f), "utf8");
+  // Card 36afbbdd: comment-stripped BEFORE matching — an absence check, so a comment merely explaining
+  // that a router does NOT register an event_trigger tool would otherwise flip it on a comment-only diff.
+  const src = stripComments(fs.readFileSync(path.join(mcpDistDir, f), "utf8"));
   if (/event_trigger|eventTrigger/i.test(src)) offenders.push(f);
 }
 check(`static: NO compiled MCP router (${mcpFiles.join(", ")}) references event-trigger machinery (offenders: ${offenders.join(", ") || "none"})`, offenders.length === 0);
+
+// (static-control, card 36afbbdd) NEGATIVE: a comment-only mention no longer flips it. POSITIVE: the
+// same text as REAL code still does.
+{
+  const commentOnly = "// intentionally no event_trigger tool is registered here\n";
+  check("(static-control) NEGATIVE: comment-only mention is gone after stripping",
+    !/event_trigger|eventTrigger/i.test(stripComments(commentOnly)));
+  const realViolation = 'server.registerTool("event_trigger_fire", {});\n';
+  check("(static-control) POSITIVE: the same text as REAL code still trips the check after stripping",
+    /event_trigger|eventTrigger/i.test(stripComments(realViolation)));
+}
 
 // ============ (2) DYNAMIC — the OrchestrationMcpRouter's full tool surface has nothing trigger-related ============
 const tmpHome = path.join(os.tmpdir(), `loom-evtrig-mcpabs-${Date.now()}-${process.pid}`);

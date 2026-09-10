@@ -16,6 +16,7 @@ import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { hermeticPort } from "./_hermetic-port.mjs";
 import { waitUntil as sharedWaitUntil } from "./_wait.mjs";
+import { stripComments } from "./_strip-comments.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MCP_DIST_DIR = path.join(__dirname, "..", "dist", "mcp");
@@ -92,7 +93,10 @@ try {
   ]);
   const names = [];
   for (const f of fs.readdirSync(MCP_DIST_DIR).filter((n) => n.endsWith(".js"))) {
-    const src = fs.readFileSync(path.join(MCP_DIST_DIR, f), "utf8");
+    // Card 36afbbdd: comment-stripped BEFORE matching — the regex extracts a tool name from ANY line that
+    // looks like a registerTool(...) call, including one sitting inside a comment (e.g. explaining why a
+    // name like "loom_update" was deliberately NOT chosen), which would otherwise mint a spurious offender.
+    const src = stripComments(fs.readFileSync(path.join(MCP_DIST_DIR, f), "utf8"));
     const re = /registerTool\(\s*["'`]([^"'`]+)["'`]/g;
     let m;
     while ((m = re.exec(src)) !== null) names.push(m[1]);
@@ -102,6 +106,24 @@ try {
   check(`(d) NO MCP tool can trigger a Loom self-update (offenders: ${offenders.join(", ") || "none"})`, offenders.length === 0);
   // sanity: the unrelated data-editing update tools DO exist (proves the scan reads names correctly)
   check("(d) scan sees the benign data tools (e.g. tasks_update)", names.includes("tasks_update"));
+
+  // (d-control, card 36afbbdd) NEGATIVE: a comment-only mention of a forbidden name no longer flips it.
+  // POSITIVE: the identical text as a REAL registerTool(...) call still does.
+  {
+    const extractNames = (text) => {
+      const found = [];
+      const re = /registerTool\(\s*["'`]([^"'`]+)["'`]/g;
+      let mm;
+      while ((mm = re.exec(text)) !== null) found.push(mm[1]);
+      return found;
+    };
+    const commentOnly = '// we deliberately did not call registerTool("loom_update", ...) here\n';
+    check("(d-control) NEGATIVE: comment-only mention is gone after stripping",
+      extractNames(stripComments(commentOnly)).length === 0);
+    const realViolation = 'server.registerTool("loom_update", {});\n';
+    check("(d-control) POSITIVE: the same text as a REAL call still trips the check after stripping",
+      extractNames(stripComments(realViolation)).includes("loom_update"));
+  }
 }
 
 console.log(failures === 0

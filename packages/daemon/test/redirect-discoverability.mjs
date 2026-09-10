@@ -23,6 +23,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { stripComments } from "./_strip-comments.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DAEMON_ROOT = path.join(__dirname, "..");
@@ -34,7 +35,13 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // (A) + (B) — the tool descriptions, straight from the MCP registration source (what the model reads
 // at call time — not a paraphrase in some other doc that could drift from it).
 // -----------------------------------------------------------------------------------------------------
-const orchSrc = fs.readFileSync(path.join(DAEMON_ROOT, "src", "mcp", "orchestration.ts"), "utf8");
+// Card 36afbbdd: comment-stripped before extraction/matching — extractToolDescription's own anchor search
+// is a plain substring indexOf (not AST-narrowed), and the "forcefully redirect"/wantedIntents ordering
+// check below operates on whatever text falls between "description" and "inputSchema", which could
+// include an inline comment (e.g. quoting the deprecated "forcefully redirect" framing as history) that
+// would otherwise shift the reported ordering. This file's own §C (SKILL.md) is deliberately NOT stripped
+// here — it's prose documentation, not TypeScript, so JS comment-stripping doesn't apply to it.
+const orchSrc = stripComments(fs.readFileSync(path.join(DAEMON_ROOT, "src", "mcp", "orchestration.ts"), "utf8"));
 
 /** Extract the `description:` string literal/concatenation for a `server.registerTool("<name>", { ... })` block. */
 function extractToolDescription(src, toolName) {
@@ -81,6 +88,45 @@ if (redirectDesc) {
 if (stopDesc) {
   check("(B) worker_stop description states plainly that it ENDS the session (terminal, not a pause)", /ENDS[^.]*session/.test(stopDesc));
   check("(B) worker_stop description points a manager wanting a HOLD/pause at worker_redirect instead", /worker_redirect/.test(stopDesc));
+}
+
+// (A/B-control, card 36afbbdd) NEGATIVE: a comment-only occurrence of the deprecated "forcefully redirect"
+// framing inside the description span no longer shifts the ordering check. POSITIVE: the identical text
+// as REAL description prose still shifts it (proves stripping doesn't blind the ordering check either).
+{
+  const syntheticGood = [
+    'server.registerTool(',
+    '  "worker_redirect",',
+    '  {',
+    '    description: "hold, pause, wait for me, don\'t do X, or abandon the current task",',
+    '    // NOTE: this used to say "forcefully redirect" the worker — no longer true',
+    '    inputSchema: {},',
+    '  },',
+    ');',
+  ].join("\n");
+  const s = stripComments(syntheticGood);
+  const desc = extractToolDescription(s, "worker_redirect");
+  check("(A/B-control) NEGATIVE: a comment-only 'forcefully redirect' mention no longer appears in the description span",
+    !!desc && !/forcefully redirect/i.test(desc) && /hold/i.test(desc));
+
+  const syntheticBad = [
+    'server.registerTool(',
+    '  "worker_redirect",',
+    '  {',
+    '    description: "forcefully redirect the worker to a new task, or hold/pause/wait for me",',
+    '    inputSchema: {},',
+    '  },',
+    ');',
+  ].join("\n");
+  const sBad = stripComments(syntheticBad);
+  const descBad = extractToolDescription(sBad, "worker_redirect");
+  const firstIntentIdxBad = Math.min(...["hold", "pause", "wait for me", "don't do", "abandon"].map((w) => {
+    const i = descBad.toLowerCase().indexOf(w);
+    return i === -1 ? Infinity : i;
+  }));
+  const forcefullyIdxBad = descBad.toLowerCase().indexOf("forcefully redirect");
+  check("(A/B-control) POSITIVE: REAL prose where 'forcefully redirect' genuinely leads is still caught as leading",
+    !(firstIntentIdxBad < 200 && (forcefullyIdxBad === -1 || firstIntentIdxBad < forcefullyIdxBad)));
 }
 
 // -----------------------------------------------------------------------------------------------------

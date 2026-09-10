@@ -12,6 +12,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { stripComments } from "./_strip-comments.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -992,9 +993,24 @@ try {
   }
 
   // ===================== zero metered tokens (structural check) =====================
-  const recallSrc = fs.readFileSync(new URL("../dist/sessions/project-memory-recall.js", import.meta.url), "utf8");
+  // Card 36afbbdd: comment-stripped before matching — an absence check (fetch/node:http/node-fetch must
+  // appear NOWHERE), so a comment explaining "pure local FTS5, no fetch()/node:http/node-fetch" (exactly
+  // the prose this check's own label uses) would otherwise flip it on a comment-only diff.
+  const recallSrc = stripComments(fs.readFileSync(new URL("../dist/sessions/project-memory-recall.js", import.meta.url), "utf8"));
   check("(tokens) project-memory-recall.js contains no network call (fetch/http request) — pure local FTS5",
     !/\bfetch\s*\(/.test(recallSrc) && !recallSrc.includes("node:http") && !recallSrc.includes("node-fetch"));
+
+  // (tokens-control, card 36afbbdd) NEGATIVE: a comment-only mention no longer flips it. POSITIVE: the
+  // same text as REAL code still does.
+  {
+    const commentOnly = "// pure local FTS5, no fetch()/node:http/node-fetch here\n";
+    const s = stripComments(commentOnly);
+    check("(tokens-control) NEGATIVE: comment-only mention is gone after stripping",
+      !/\bfetch\s*\(/.test(s) && !s.includes("node:http") && !s.includes("node-fetch"));
+    const realViolation = 'import http from "node:http";\n';
+    check("(tokens-control) POSITIVE: the same text as REAL code still trips the check after stripping",
+      stripComments(realViolation).includes("node:http"));
+  }
 } finally {
   db.close();
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }

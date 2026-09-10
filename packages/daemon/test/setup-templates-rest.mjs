@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { hermeticPort } from "./_hermetic-port.mjs";
+import { stripComments } from "./_strip-comments.mjs";
 
 const TMP = mkdtempManaged("loom-setup-templates-rest-");
 process.env.LOOM_HOME = TMP;
@@ -157,10 +158,23 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
   check("(5) at least one MCP router file found to scan", mcpFiles.length > 0);
   let leaked = false;
   for (const f of mcpFiles) {
-    const content = fs.readFileSync(path.join(mcpDir, f), "utf8");
+    // Card 36afbbdd: comment-stripped before matching — an absence check, so a comment merely mentioning
+    // this REST path would otherwise flip it on a comment-only diff. See (5-control) below.
+    const content = stripComments(fs.readFileSync(path.join(mcpDir, f), "utf8"));
     if (content.includes("/api/setup/templates")) leaked = true;
   }
   check("(5) no MCP router file references the /api/setup/templates REST path", !leaked);
+
+  // (5-control, card 36afbbdd) NEGATIVE: a comment-only mention no longer flips it. POSITIVE: the same
+  // text as REAL code still does.
+  {
+    const commentOnly = "// not reachable via MCP — see /api/setup/templates (REST-only)\n";
+    check("(5-control) NEGATIVE: comment-only mention is gone after stripping",
+      !stripComments(commentOnly).includes("/api/setup/templates"));
+    const realViolation = 'fetch("/api/setup/templates");\n';
+    check("(5-control) POSITIVE: the same text as REAL code still trips the check after stripping",
+      stripComments(realViolation).includes("/api/setup/templates"));
+  }
 }
 
 console.log(failures === 0

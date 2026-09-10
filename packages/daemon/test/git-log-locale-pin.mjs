@@ -35,6 +35,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { stripComments } from "./_strip-comments.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -72,12 +73,27 @@ try {
 }
 
 // --- (2) WIRING guard — GitReader's compiled output actually applies the pin, not just defines it. ---
-const readerSrc = fs.readFileSync(new URL("../dist/git/reader.js", import.meta.url), "utf8");
+// Card 36afbbdd: comment-stripped before matching. The second check has a NEGATIVE half — asserting the
+// OLD post-construction `.env(nonInteractiveEnv())` chain is ABSENT — which a comment explaining that
+// exact history (this file's own header above does, in prose) could trip if the same phrasing ever landed
+// in reader.ts's own doc comment.
+const readerSrc = stripComments(fs.readFileSync(new URL("../dist/git/reader.js", import.meta.url), "utf8"));
 check("(2) GitReader imports nonInteractiveEnv from writer.js", /nonInteractiveEnv/.test(readerSrc));
 check(
   "(2) GitReader applies it via boundedSimpleGit(..., nonInteractiveEnv()) AT CONSTRUCTION (not a later .env() chain)",
   /boundedSimpleGit\([^;]*nonInteractiveEnv\(\)\s*\)/.test(readerSrc) && !/\.env\(\s*nonInteractiveEnv\(\)\s*\)/.test(readerSrc),
 );
+
+// (2-control, card 36afbbdd) NEGATIVE: a comment-only mention of the old `.env(nonInteractiveEnv())` chain
+// no longer flips the check. POSITIVE: the identical text as REAL code still does.
+{
+  const commentOnly = "// this used to be a chained .env(nonInteractiveEnv()) call after construction\n";
+  check("(2-control) NEGATIVE: comment-only mention of the old chain is gone after stripping",
+    !/\.env\(\s*nonInteractiveEnv\(\)\s*\)/.test(stripComments(commentOnly)));
+  const realViolation = "reader.env(nonInteractiveEnv());\n";
+  check("(2-control) POSITIVE: the same text as REAL code still trips the check after stripping",
+    /\.env\(\s*nonInteractiveEnv\(\)\s*\)/.test(stripComments(realViolation)));
+}
 
 // --- (3) End-to-end sanity: commitless-repo routes still return a clean empty log with a FOREIGN host
 // locale set on the test process for the duration of the request. ---
