@@ -32,7 +32,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (N) card abaaf16e — RECLASSIFICATION PATH FOR DIST-TEXT SCANNERS: same cap-queue-admission shape as
 //       (L), but the further commit landing on the branch while queued is ALSO comment-only, so the
 //       admission-time re-derivation reclassifies to eligible:true again (not a fallback to FULL) — and
-//       the resulting command must still fold in every DIST_TEXT_SCANNER_REPO_PATHS member, proving the
+//       the resulting command must still fold in every CHANGED_TS_TEXT_SCANNER_REPO_PATHS member, proving the
 //       reclassification branch (not just the pre-wait one) reads `changedTsPaths`.
 // Run: 1) build daemon (pnpm build), 2) node test/emit-compare-gate-scope.mjs
 import fs from "node:fs";
@@ -54,7 +54,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 // set, keeps this file's own env setup ahead of anything that reads it.
 const {
   sleep, GIT_ID, FULL_GATE, seed, mkdirp, mk, BASE_SRC, makeRepoWithBaseSrcFile, REAL_TEST_DAEMON_SCRIPT,
-  DIST_SCANNER_BASENAMES,
+  CHANGED_TS_SCANNER_BASENAMES,
 } = await import("./_emit-compare-fixtures.mjs");
 
 const { Db } = await import("../dist/db.js");
@@ -467,7 +467,7 @@ try {
   }
 
   // ── (N) card abaaf16e — Code Review MINOR: THE RECLASSIFICATION PATH itself must fold
-  //        DIST_TEXT_SCANNER_REPO_PATHS in, not just the pre-wait classification (L)/(M) above already
+  //        CHANGED_TS_TEXT_SCANNER_REPO_PATHS in, not just the pre-wait classification (L)/(M) above already
   //        cover. Same cap-queue-admission shape as (L): N2's pre-wait classification is a comment-only
   //        .ts edit (eligible, reduced); while genuinely queued behind N1's held-open cap slot, a FURTHER
   //        commit lands on N2's own branch — but unlike (L), this second edit is ALSO comment-only (still
@@ -570,9 +570,9 @@ try {
     check("(N) N2's captured command is the REDUCED gate — the re-derivation found the recombined diff STILL transpile-identical, not a stale carry-over of the pre-wait verdict",
       typeof capturedGate2 === "string" && capturedGate2 !== FULL_GATE);
     check("(N) ⭐ card abaaf16e: the RECLASSIFIED command folds in every dist-text scanner — proves reclassified.changedTsPaths is read and used, not just the pre-wait emitCompareTsPaths",
-      typeof capturedGate2 === "string" && DIST_SCANNER_BASENAMES.every((s) => capturedGate2.includes(`node packages/daemon/test/${s}`)));
+      typeof capturedGate2 === "string" && CHANGED_TS_SCANNER_BASENAMES.every((s) => capturedGate2.includes(`node packages/daemon/test/${s}`)));
     check("(N) N2's warning also names the reclassified dist-text-scanner count",
-      typeof confirm2.warning === "string" && new RegExp(`also ran the ${DIST_SCANNER_BASENAMES.length} compiled-source/dist text-scanner test\\(s\\)`).test(confirm2.warning));
+      typeof confirm2.warning === "string" && new RegExp(`also ran the ${CHANGED_TS_SCANNER_BASENAMES.length} compiled-source/dist text-scanner test\\(s\\)`).test(confirm2.warning));
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
@@ -581,6 +581,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a shell-metacharacter test file path fails closed before ever reaching buildReducedGateCommand's shell string; a diff touching ONLY a test/fixtures/*.mjs file fails closed to the full gate (card 815b4b30); and — card 44968963 — a diff touching a real test file plus its backing fixtures/ file no longer reduces at all, and neither does one touching a fixture plus only ONE of its several real consumers, since an untouched sibling consumer of that same fixture can't be proven unaffected; and — card 7183540f — a branch that gains a further BEHAVIORAL commit while genuinely queued on the semaphore's CAP (not a per-repo guard) is caught at admission too, never riding through on a stale pre-wait REDUCED verdict; and — card 66b3112a — a PRELANDED branch whose main gains a genuinely behavioral edit during that same cap-queue wait, with the branch itself staying byte-stable, is ALSO caught by the main leg's own admission-time HEAD read, never riding through on a stale pre-wait REDUCED verdict either (a detection fix, not a merge-safety one — the squash there is a provable no-op regardless); and — card abaaf16e — a branch that gains a FURTHER comment-only commit while queued reclassifies to eligible:true again through the SAME admission-time re-derivation, and that reclassified command folds in every DIST_TEXT_SCANNER_REPO_PATHS member too, proving the reclassification branch reads changedTsPaths, not just the pre-wait classification. See emit-compare-gate.mjs for the base classification, scope-boundary, and soundness cases."
+  ? "\n✅ ALL PASS — a shell-metacharacter test file path fails closed before ever reaching buildReducedGateCommand's shell string; a diff touching ONLY a test/fixtures/*.mjs file fails closed to the full gate (card 815b4b30); and — card 44968963 — a diff touching a real test file plus its backing fixtures/ file no longer reduces at all, and neither does one touching a fixture plus only ONE of its several real consumers, since an untouched sibling consumer of that same fixture can't be proven unaffected; and — card 7183540f — a branch that gains a further BEHAVIORAL commit while genuinely queued on the semaphore's CAP (not a per-repo guard) is caught at admission too, never riding through on a stale pre-wait REDUCED verdict; and — card 66b3112a — a PRELANDED branch whose main gains a genuinely behavioral edit during that same cap-queue wait, with the branch itself staying byte-stable, is ALSO caught by the main leg's own admission-time HEAD read, never riding through on a stale pre-wait REDUCED verdict either (a detection fix, not a merge-safety one — the squash there is a provable no-op regardless); and — card abaaf16e — a branch that gains a FURTHER comment-only commit while queued reclassifies to eligible:true again through the SAME admission-time re-derivation, and that reclassified command folds in every CHANGED_TS_TEXT_SCANNER_REPO_PATHS member too, proving the reclassification branch reads changedTsPaths, not just the pre-wait classification. See emit-compare-gate.mjs for the base classification, scope-boundary, and soundness cases."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

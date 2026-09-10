@@ -2910,11 +2910,11 @@ export const ASSET_READING_TEST_REPO_PATHS = [
  *  `fab07aba` shipped — see docs/decisions/fab07aba-src-text-scanners-share-the-dist-text-scanners-trigger.md
  *  for the full reasoning and the follow-up this left behind.
  *
- *  `packages/daemon/test/_emit-compare-fixtures.mjs`'s `DIST_SCANNER_BASENAMES` is DERIVED from this
+ *  `packages/daemon/test/_emit-compare-fixtures.mjs`'s `CHANGED_TS_SCANNER_BASENAMES` is DERIVED from this
  *  list at test-load time, not hand-copied — same reuse discipline `GUARD_BASENAMES`/`ASSET_TEST_BASENAMES`
  *  already establish, so an addition or removal here needs no matching edit there.
  */
-export const DIST_TEXT_SCANNER_REPO_PATHS = [
+export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   "packages/daemon/test/agent-runs-keys.mjs",
   "packages/daemon/test/event-trigger-mcp-absence.mjs",
   "packages/daemon/test/gateway-token.mjs",
@@ -3011,7 +3011,7 @@ export interface EmitCompareGateResult {
   changedAssetPaths: string[];
   /** Card `abaaf16e`: repo-relative paths of changed compiled `.ts` files (the SAME population classified
    *  into `changedTsFiles` internally, just surfaced) — populated only when `eligible`. Drives
-   *  {@link buildReducedGateCommand}'s conditional fold-in of {@link DIST_TEXT_SCANNER_REPO_PATHS}: a
+   *  {@link buildReducedGateCommand}'s conditional fold-in of {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS}: a
    *  test/docs-only diff (this empty) can never change compiled `dist/**` text, so those tests would only
    *  ever prove what they already proved on a prior run — folding them in unconditionally, the
    *  {@link ASSET_READING_TEST_REPO_PATHS} shape, would be correct but wasteful for the common case where
@@ -3019,7 +3019,7 @@ export interface EmitCompareGateResult {
    *  `packages/daemon/scripts/**\/*.mjs` files) — a script is never compiled by this repo's tsconfig chain
    *  into `dist/**` the way a `.ts` file is (see `EMIT_COMPARE_SCRIPTS_PREFIX`'s own doc), so a
    *  scripts-only diff cannot possibly change what a dist-text scanner reads and must NOT trigger this
-   *  list. See {@link DIST_TEXT_SCANNER_REPO_PATHS}'s own doc for the full membership reasoning. */
+   *  list. See {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS}'s own doc for the full membership reasoning. */
   changedTsPaths: string[];
   /** Count of changed compiled `.ts` files PLUS changed `packages/daemon/scripts/**\/*.mjs` files (card
    *  82662e98) proven transpile/parse-identical — diagnostic only, surfaced by the caller so a skip is
@@ -3348,7 +3348,7 @@ export async function computeEmitCompareGate(
     eligible: true, changedTestFiles, notHermeticExcluded, inertPathsSkipped, changedAssetPaths,
     // Card abaaf16e: the SAME population classified into changedTsFiles above, just surfaced — see
     // EmitCompareGateResult.changedTsPaths's own doc for why this drives buildReducedGateCommand's
-    // DIST_TEXT_SCANNER_REPO_PATHS fold-in and why it's deliberately NOT the combined identicalFileCount.
+    // CHANGED_TS_TEXT_SCANNER_REPO_PATHS fold-in and why it's deliberately NOT the combined identicalFileCount.
     changedTsPaths: changedTsFiles,
     // Card 82662e98: both populations are "proven inert via parse/transpile comparison" — folded into ONE
     // diagnostic count rather than a second field threaded through every persisted consumer of this one
@@ -3474,7 +3474,7 @@ function walkTsFiles(dir: string, out: string[] = []): string[] {
 /** @decision dd4349ff — a changed test file runs THROUGH THE HARNESS (`test:daemon --only=`), never as
  *  bare `node <path>` — a bare invocation left a hermetic-env-needing file unable to even start (exit 99,
  *  0s, no assertion run). `changedTestFiles` must already exclude `NOT_HERMETIC` names; never re-filter here.
- *  @decision abaaf16e — `changedTsPaths` folds {@link DIST_TEXT_SCANNER_REPO_PATHS} into `steps` instead
+ *  @decision abaaf16e — `changedTsPaths` folds {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} into `steps` instead
  *  (bare `node <path>`, the {@link STATIC_GUARD_REPO_PATHS} shape), never into `testPaths`/`--only=` — every
  *  member is independently verified to set up its own hermetic env, so it needs none of what the harness
  *  wrapper exists to provide. See that list's own doc for the full membership + trigger reasoning.
@@ -3490,7 +3490,7 @@ export function buildReducedGateCommand(
 ): string {
   const { changedTestFiles, changedAssetPaths, changedTsPaths } = input;
   const steps = ["pnpm build", ...STATIC_GUARD_REPO_PATHS.map((p) => `node ${p}`)];
-  if (changedTsPaths.length > 0) steps.push(...DIST_TEXT_SCANNER_REPO_PATHS.map((p) => `node ${p}`));
+  if (changedTsPaths.length > 0) steps.push(...CHANGED_TS_TEXT_SCANNER_REPO_PATHS.map((p) => `node ${p}`));
   const testPaths = changedAssetPaths.length > 0
     ? [...new Set([...changedTestFiles, ...ASSET_READING_TEST_REPO_PATHS])]
     : changedTestFiles;

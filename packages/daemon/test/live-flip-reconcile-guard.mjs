@@ -45,7 +45,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 //
 // WHAT THIS IS: a static AST scan (via the `typescript` compiler API — same dependency, same walk+check
 // shape as onexit-discard-guard.mjs) over ONE real source file's TS syntax tree — not compiled output (no
-// build needed first; contrast the emit-compare DIST_TEXT_SCANNER_REPO_PATHS class, which this is not).
+// build needed first; contrast the emit-compare CHANGED_TS_TEXT_SCANNER_REPO_PATHS class, which this is not).
 //
 // THE INVARIANT CHECKED, PRECISELY: for every call `<expr>.setProcessState(<id>, "live")` —
 //   1. find the nearest enclosing BLOCK the call's own statement is a direct member of;

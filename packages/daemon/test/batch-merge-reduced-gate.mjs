@@ -34,7 +34,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //         Review blocker [2]'s own positive control — the pre-blocker-[2] hand-rolled batch copy dropped
 //         this exact statement, silently under-reporting what ran).
 //   (TS) card abaaf16e — a batch of one branch with a COMMENT-ONLY compiled `.ts` edit PLUS one test-only
-//         branch -> REDUCES, and the captured command folds in every `DIST_TEXT_SCANNER_REPO_PATHS`
+//         branch -> REDUCES, and the captured command folds in every `CHANGED_TS_TEXT_SCANNER_REPO_PATHS`
 //         member too, plus `reducedGateWarning` names the count — the batch path's own version of the
 //         Code Review MAJOR fixed on the solo path (a reduced gate that ran these scanners but left the
 //         warning silent about it).
@@ -48,7 +48,7 @@ process.env.LOOM_HOME = path.join(process.env.TEMP ?? process.env.TMPDIR ?? "/tm
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const {
-  GIT_ID, FULL_GATE, ASSET_TEST_BASENAMES, DIST_SCANNER_BASENAMES, mk, mkdirp, makeRepoWithBaseSrcFile, writeRealTestDaemonScript, BASE_SRC, now,
+  GIT_ID, FULL_GATE, ASSET_TEST_BASENAMES, CHANGED_TS_SCANNER_BASENAMES, mk, mkdirp, makeRepoWithBaseSrcFile, writeRealTestDaemonScript, BASE_SRC, now,
 } = await import("./_emit-compare-fixtures.mjs");
 
 const { Db } = await import("../dist/db.js");
@@ -264,7 +264,7 @@ try {
 
   // ── (TS) card abaaf16e — a batch of one branch with a COMMENT-ONLY compiled .ts edit PLUS one test-only
   //        branch -> the batch's ONE gate run REDUCES, and the captured command folds in every
-  //        DIST_TEXT_SCANNER_REPO_PATHS member too (mirrors the (ASSET) scenario's own shape, for the
+  //        CHANGED_TS_TEXT_SCANNER_REPO_PATHS member too (mirrors the (ASSET) scenario's own shape, for the
   //        NEW compiled-.ts-in-the-union trigger instead of the assets one) ───────────────────────────
   {
     const T = mk("bmrg-ts");
@@ -298,11 +298,11 @@ try {
     check("(TS) the gate command was called exactly once for the whole batch", calls === 1);
     check("(TS) captured command is NOT the full gate — a comment-only .ts edit never blocks eligibility", capturedGate !== FULL_GATE);
     check("(TS) captured command's --only= names the added test file", capturedGate.includes("bmrg-ts-added"));
-    for (const s of DIST_SCANNER_BASENAMES) check(`(TS) captured command runs dist-text scanner ${s} bare (a compiled .ts file changed in the union)`, capturedGate.includes(`node packages/daemon/test/${s}`));
+    for (const s of CHANGED_TS_SCANNER_BASENAMES) check(`(TS) captured command runs dist-text scanner ${s} bare (a compiled .ts file changed in the union)`, capturedGate.includes(`node packages/daemon/test/${s}`));
 
     if (value) {
       check("(TS) both branches landed via the batch, none fell back", value.ok === true && value.landed.length === 2 && value.fallback.length === 0);
-      check("(TS) reducedGateWarning names the compiled-source/dist text-scanner count", typeof value.reducedGateWarning === "string" && value.reducedGateWarning.includes(`also ran the ${DIST_SCANNER_BASENAMES.length} compiled-source/dist text-scanner test`));
+      check("(TS) reducedGateWarning names the compiled-source/dist text-scanner count", typeof value.reducedGateWarning === "string" && value.reducedGateWarning.includes(`also ran the ${CHANGED_TS_SCANNER_BASENAMES.length} compiled-source/dist text-scanner test`));
     } else {
       console.log("(TS) NOTE: settled via the async degrade path — skipping the sync-return assertions. The DB/command checks above are unconditional and still ran.");
     }

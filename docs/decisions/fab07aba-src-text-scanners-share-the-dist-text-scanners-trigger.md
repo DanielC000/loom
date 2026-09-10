@@ -127,16 +127,22 @@ comment, keeping its exported name unchanged, means:
   `emit-compare-gate-scope.mjs`, `batch-merge-reduced-gate.mjs`) already assert against the array's ACTUAL
   membership, not a hardcoded count — so widening the array needed no test edits to stay green.
 
-**A rename was considered and rejected.** `DIST_TEXT_SCANNER_REPO_PATHS` no longer describes only `dist/**`
-readers, which is a real, if minor, accuracy cost this decision accepts deliberately. A rename would require
-editing every direct reference to the exported name — including its import and two `.length` usages inside
-`sessions/service.ts` (`ASSET_READING_TEST_REPO_PATHS.length, DIST_TEXT_SCANNER_REPO_PATHS.length` in both
-`formatReducedGateWarning` call sites). At the time this card shipped, `sessions/service.ts` was a live
-fleet lane owned by a different, concurrently-dispatched card (`8b194419`) and explicitly off-limits to this
-one. Widening the array's CONTENT and its doc comment's WORDING — without touching its exported identifier —
-achieves the same functional fix with zero blast radius into that file. If `sessions/service.ts` is ever
-free to edit alongside a future pass over this list, revisit the rename; until then, the array's own doc
-comment is the accurate description, not its name.
+**A rename was considered and rejected — at the time.** `DIST_TEXT_SCANNER_REPO_PATHS` no longer described
+only `dist/**` readers, which was a real, if minor, accuracy cost this decision accepted deliberately. A
+rename would have required editing every direct reference to the exported name — including its import and
+two `.length` usages inside `sessions/service.ts` (`ASSET_READING_TEST_REPO_PATHS.length,
+DIST_TEXT_SCANNER_REPO_PATHS.length` in both `formatReducedGateWarning` call sites). At the time this card
+shipped, `sessions/service.ts` was a live fleet lane owned by a different, concurrently-dispatched card
+(`8b194419`) and explicitly off-limits to this one. Widening the array's CONTENT and its doc comment's
+WORDING — without touching its exported identifier — achieved the same functional fix with zero blast
+radius into that file at the time.
+
+**Superseded by card `7b0cf49b` (2026-09-11):** once `sessions/service.ts` was free to touch again, the
+deferred rename was done — the array is now `CHANGED_TS_TEXT_SCANNER_REPO_PATHS` (named after its TRIGGER,
+not its content), and every derived name (`DIST_SCANNER_BASENAMES` → `CHANGED_TS_SCANNER_BASENAMES`,
+`distScannerTestCount`/`distScannerClause` → `changedTsScannerTestCount`/`changedTsScannerClause`) moved
+with it. The narrative above (why the rename was deferred, not whether it was ever coming) stands as
+history; do not read it as still-current guidance about the exported name.
 
 ## RED → GREEN proof
 
@@ -212,15 +218,16 @@ incorrect behavior.
 - Do not add `boot-listen-not-blocked.mjs`, `gate-verdict-field-classification-exhaustive.mjs`,
   `no-nul-in-tracked-ts.mjs`, `emit-compare-soundness-guard.mjs`, or `loopback-write-guard.mjs` to this list
   "to be thorough" — each is immune by construction for the specific, documented reason in
-  `DIST_TEXT_SCANNER_REPO_PATHS`'s own doc comment (shapes 2, 5, 6, and the pre-existing shape-2 citation
+  `CHANGED_TS_TEXT_SCANNER_REPO_PATHS`'s own doc comment (shapes 2, 5, 6, and the pre-existing shape-2 citation
   respectively; `loopback-write-guard.mjs` reads `dist/**`, not `src/**`, and was already re-anchored on a
   real code token after a real incident).
 - Do not fold `gate-runner-harness-marker-coupling.mjs` into this list under the `changedTsPaths` trigger —
   its correct trigger is `changedScriptFiles`, a different, currently-unexposed population. See the deferred
   section above before "fixing" this by attaching it to the wrong condition.
-- Do not treat this list's exported name (`DIST_TEXT_SCANNER_REPO_PATHS`) as still meaning "`dist/**`
-  only" — read its own doc comment, not its name, for current scope. A rename was deliberately deferred; see
-  the DoD-2 section above for why.
+- This list's exported name is now `CHANGED_TS_TEXT_SCANNER_REPO_PATHS` (card `7b0cf49b` — see the
+  "Superseded" note in the DoD-2 section above). Do not cite `DIST_TEXT_SCANNER_REPO_PATHS` as the current
+  name outside a historical quote of what this decision was named at the time; read the array's own doc
+  comment, not either name, for current scope.
 - Do not re-add `anchor-re-parity.mjs` to this list "to be thorough" — its `ANCHOR_RE_DECL_RE` is
   `^`/`m`-line-anchored to the bare keyword `const`, which no comment in this codebase's convention can ever
   start a line with. Immune for the same reason shape (1) is, via a different mechanism (a line anchor, not

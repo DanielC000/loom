@@ -63,7 +63,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       still force the FULL gate — same shape as (F), pinned explicitly for the real specimen this card
 //       investigated. See merge-gate-inert-diff.mjs scenario (M) for the CLAUDE.md-ONLY companion.
 //   (T) card abaaf16e — RED-PROOF, direct unit-level: buildReducedGateCommand folds
-//       DIST_TEXT_SCANNER_REPO_PATHS in (bare `node`) iff a changed compiled .ts path is passed — a changed
+//       CHANGED_TS_TEXT_SCANNER_REPO_PATHS in (bare `node`) iff a changed compiled .ts path is passed — a changed
 //       test/*.mjs file alone does not trigger it. (A)/(D) above carry the same two legs through a REAL
 //       end-to-end diff instead of a direct call.
 //   (S) card fe848bfc — THE DISCRIMINATING CASE for dropping computeEmitCompareGate's repoPath arg: `ref`
@@ -99,8 +99,8 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 // prod-DB guard then correctly refuses `new Db()` below). Importing it dynamically, after LOOM_HOME is
 // set, keeps this file's own env setup ahead of anything that reads it.
 const {
-  GIT_ID, FULL_GATE, GUARD_BASENAMES, DIST_SCANNER_BASENAMES, seed, mkdirp, mk, BASE_SRC, makeRepoWithBaseSrcFile,
-  writeRealTestDaemonScript, STATIC_GUARD_REPO_PATHS, ASSET_READING_TEST_REPO_PATHS, DIST_TEXT_SCANNER_REPO_PATHS,
+  GIT_ID, FULL_GATE, GUARD_BASENAMES, CHANGED_TS_SCANNER_BASENAMES, seed, mkdirp, mk, BASE_SRC, makeRepoWithBaseSrcFile,
+  writeRealTestDaemonScript, STATIC_GUARD_REPO_PATHS, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS,
 } = await import("./_emit-compare-fixtures.mjs");
 
 // Card 82662e98 — (P)/(Q)/(R)'s own small synthetic `.mjs` fixture, same shape/spirit as BASE_SRC above
@@ -148,10 +148,10 @@ try {
     check("(A) captured command DOES still run pnpm build", capturedGate.includes("pnpm build"));
     for (const g of GUARD_BASENAMES) check(`(A) captured command runs guard ${g}`, capturedGate.includes(g));
     // Card abaaf16e — RED-PROOF (real integration leg): a REAL changed compiled .ts file (proven
-    // transpile-identical, exactly this scenario's own shape) must fold every DIST_TEXT_SCANNER_REPO_PATHS
+    // transpile-identical, exactly this scenario's own shape) must fold every CHANGED_TS_TEXT_SCANNER_REPO_PATHS
     // member into the reduced command — this is the positive leg of the fix; see scenario (D) below for
     // the negative leg (no changed .ts file -> none of these run).
-    for (const s of DIST_SCANNER_BASENAMES) check(`(A) card abaaf16e: captured command runs dist-text scanner ${s} (a compiled .ts file changed)`, capturedGate.includes(`node packages/daemon/test/${s}`));
+    for (const s of CHANGED_TS_SCANNER_BASENAMES) check(`(A) card abaaf16e: captured command runs dist-text scanner ${s} (a compiled .ts file changed)`, capturedGate.includes(`node packages/daemon/test/${s}`));
     check("(A) a distinguishing warning is present", typeof confirm.warning === "string" && /reduced/.test(confirm.warning));
     // Card cf4aa7d1 DoD-3 (positive control, compiled-file arm): the check DID run here (a real compiled
     // .ts file changed and was proven transpile-identical) — the count must stay fully informative, never
@@ -167,7 +167,7 @@ try {
     // reduced gate that folded them into the actual command but left the warning saying "static guards
     // only" is the exact false-claim defect record d422e279 exists to prevent.
     check("(A) card abaaf16e: the warning names the dist-text scanners actually ran",
-      typeof confirm.warning === "string" && new RegExp(`also ran the ${DIST_SCANNER_BASENAMES.length} compiled-source/dist text-scanner test\\(s\\)`).test(confirm.warning));
+      typeof confirm.warning === "string" && new RegExp(`also ran the ${CHANGED_TS_SCANNER_BASENAMES.length} compiled-source/dist text-scanner test\\(s\\)`).test(confirm.warning));
   }
 
   // ── (B) ONE-TOKEN BEHAVIORAL .ts edit -> FULL gate ──────────────────────────────────────────────────
@@ -274,7 +274,7 @@ try {
     // Card abaaf16e — negative leg (real integration): no compiled .ts file changed here (only
     // test/placeholder.mjs did), so none of the dist-text scanners can possibly observe anything different
     // — none should run. Mirrors (A)'s positive leg above.
-    for (const s of DIST_SCANNER_BASENAMES) check(`(D) card abaaf16e: no changed .ts file -> dist-text scanner ${s} does NOT run`, !capturedGate.includes(`node packages/daemon/test/${s}`));
+    for (const s of CHANGED_TS_SCANNER_BASENAMES) check(`(D) card abaaf16e: no changed .ts file -> dist-text scanner ${s} does NOT run`, !capturedGate.includes(`node packages/daemon/test/${s}`));
     check("(D) card abaaf16e: the warning does NOT claim any dist-text scanner ran (none did)",
       typeof confirm.warning === "string" && !/dist-text-scanner/.test(confirm.warning));
   }
@@ -300,7 +300,7 @@ try {
     check("(M) zero changed test files -> no test:daemon step at all", !noTestFilesCmd.includes("test:daemon"));
   }
 
-  // ── (T) card abaaf16e — RED-PROOF: buildReducedGateCommand must fold DIST_TEXT_SCANNER_REPO_PATHS in
+  // ── (T) card abaaf16e — RED-PROOF: buildReducedGateCommand must fold CHANGED_TS_TEXT_SCANNER_REPO_PATHS in
   //        (bare `node <path>`, the STATIC_GUARD_REPO_PATHS shape — every member sets up its own hermetic
   //        env, so none needs the harness wrapper) whenever a changed compiled .ts file is passed, and must
   //        NOT fold it in otherwise. Direct unit-level call (no git/daemon plumbing) — pre-fix,
@@ -314,16 +314,16 @@ try {
     const withTs = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: ["packages/daemon/src/example.ts"] });
     check("(T) still runs pnpm build", withTs.includes("pnpm build"));
     for (const g of GUARD_BASENAMES) check(`(T) still runs static guard ${g}`, withTs.includes(`node packages/daemon/test/${g}`));
-    for (const s of DIST_SCANNER_BASENAMES) check(`(T) a changed .ts file folds in dist-text scanner ${s}, bare (not through --only=)`, withTs.includes(`node packages/daemon/test/${s}`));
+    for (const s of CHANGED_TS_SCANNER_BASENAMES) check(`(T) a changed .ts file folds in dist-text scanner ${s}, bare (not through --only=)`, withTs.includes(`node packages/daemon/test/${s}`));
     check("(T) no test:daemon step (no changed test/*.mjs or assets path passed)", !withTs.includes("test:daemon"));
 
     const withoutTs = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: [] });
-    for (const s of DIST_SCANNER_BASENAMES) check(`(T) NO changed .ts file -> dist-text scanner ${s} does NOT run (the pre-fix shape — must stay RED before this card, GREEN after)`, !withoutTs.includes(`node packages/daemon/test/${s}`));
+    for (const s of CHANGED_TS_SCANNER_BASENAMES) check(`(T) NO changed .ts file -> dist-text scanner ${s} does NOT run (the pre-fix shape — must stay RED before this card, GREEN after)`, !withoutTs.includes(`node packages/daemon/test/${s}`));
 
     // A changed test/*.mjs file alone (no .ts) must not fold the dist-text scanners in either — mirrors
     // scenario (D)'s real-integration negative leg at the unit level.
     const withTestFileOnly = buildReducedGateCommand({ changedTestFiles: ["packages/daemon/test/dev-server.mjs"], changedAssetPaths: [], changedTsPaths: [] });
-    for (const s of DIST_SCANNER_BASENAMES) check(`(T) a changed TEST file (not .ts) -> dist-text scanner ${s} still does NOT run`, !withTestFileOnly.includes(`node packages/daemon/test/${s}`));
+    for (const s of CHANGED_TS_SCANNER_BASENAMES) check(`(T) a changed TEST file (not .ts) -> dist-text scanner ${s} still does NOT run`, !withTestFileOnly.includes(`node packages/daemon/test/${s}`));
   }
 
   // ── (E) SCOPE BOUNDARY — an ADDED .ts file (status A) -> FULL gate ─────────────────────────────────
@@ -658,10 +658,10 @@ try {
   // fleet-wide fails on `node <missing-path>` — misattributed to whoever's branch happened to trigger the
   // reduced path next, not to the rename/delete that actually broke it.
   {
-    const allListedPaths = [...STATIC_GUARD_REPO_PATHS, ...ASSET_READING_TEST_REPO_PATHS, ...DIST_TEXT_SCANNER_REPO_PATHS];
+    const allListedPaths = [...STATIC_GUARD_REPO_PATHS, ...ASSET_READING_TEST_REPO_PATHS, ...CHANGED_TS_TEXT_SCANNER_REPO_PATHS];
     check("(U) sanity: the three lists together name a non-trivial number of files (control isn't vacuous over an empty union)", allListedPaths.length > 30);
     const missingReal = allListedPaths.filter((p) => !fs.existsSync(path.join(REPO_ROOT, p)));
-    check(`(U) every STATIC_GUARD_REPO_PATHS/ASSET_READING_TEST_REPO_PATHS/DIST_TEXT_SCANNER_REPO_PATHS member exists on disk (missing: ${JSON.stringify(missingReal)})`, missingReal.length === 0);
+    check(`(U) every STATIC_GUARD_REPO_PATHS/ASSET_READING_TEST_REPO_PATHS/CHANGED_TS_TEXT_SCANNER_REPO_PATHS member exists on disk (missing: ${JSON.stringify(missingReal)})`, missingReal.length === 0);
 
     // NEGATIVE CONTROL: prove this check can actually FAIL — a synthetic path that does NOT exist must be
     // reported missing. Without this, "missingReal.length === 0" above is indistinguishable from a broken/
@@ -681,6 +681,6 @@ console.log(failures === 0
   ? "\n✅ ALL PASS — comment-only and whitespace-only .ts edits reduce the gate (build + guards, no full test:daemon suite); a one-token behavioral edit, an added .ts file, and an out-of-scope path all still force the full gate; a comment-only test/*.mjs edit introducing Date.now() still runs every static guard plus the changed test file itself; emitDecoratorMetadata in EITHER tsconfig (base or the daemon package's own) fails closed; a provably-inert docs/** path no longer defeats the reduction when riding alongside a comment-only .ts edit, while still failing closed alongside a real behavioral edit (card b97f643d); the literal motivating case (card 5149c036) — a repo-root CLAUDE.md change alongside an otherwise comment-only .ts edit — also still fails closed to the full gate (O); and card 82662e98 — a comment-only packages/daemon/scripts/**/*.mjs edit now reduces too (P), while an added script file (Q) and a real one-token behavioral script edit (R) both still fail closed. See emit-compare-gate-scope.mjs for the shell-metacharacter, fixtures-scope, and cap-queue-admission cases."
   + " Card 2db8a3dd: (B)'s emitCompareReduced:false (proven-not-reducible) and (F)'s emitCompareReduced:undefined + direct notApplicable:true (repo-layout limit) are the two required polarities."
   + " Card fe848bfc (S): a per-worktree ref (\"HEAD\") resolved from a worktree whose HEAD genuinely diverges from canonical's sees the real worktree-only commit, never the empty diff the pre-fix repoPath/\"HEAD\" shape would have silently produced."
-  + " Card fab07aba (U): every STATIC_GUARD_REPO_PATHS/ASSET_READING_TEST_REPO_PATHS/DIST_TEXT_SCANNER_REPO_PATHS member exists on disk, proven against a negative control that a synthetic missing path is correctly flagged."
+  + " Card fab07aba (U): every STATIC_GUARD_REPO_PATHS/ASSET_READING_TEST_REPO_PATHS/CHANGED_TS_TEXT_SCANNER_REPO_PATHS member exists on disk, proven against a negative control that a synthetic missing path is correctly flagged."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

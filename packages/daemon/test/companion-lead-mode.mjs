@@ -44,7 +44,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 // --- Hermetic LOOM_HOME + sandboxed HOME. Set BEFORE importing dist (paths.ts reads LOOM_HOME at import).
 // UNCONDITIONAL (card fab07aba Code Review, reviewer 96bb7127): this file is now a
-// DIST_TEXT_SCANNER_REPO_PATHS member, run bare via `node <path>` on a reduced merge gate — which
+// CHANGED_TS_TEXT_SCANNER_REPO_PATHS member, run bare via `node <path>` on a reduced merge gate — which
 // inherits the daemon's own ambient env with no scrub (gate-runner.ts spreads process.env). The prior
 // `useOwnLoomHome()` only mints a temp dir when LOOM_HOME is UNSET — correct for every OTHER consumer of
 // that helper, which all run THROUGH the test:daemon harness (a fresh LOOM_HOME already set per file
@@ -53,7 +53,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // files behind (requireHermeticEnv only rejects the REAL default ~/.loom, not "inherited-vs-self-minted"
 // — see that function's own doc). mkdtempManaged() (unlike the conditional helper) always creates a
 // fresh, atomic, kernel-unique dir and registers it for guaranteed cleanup — matching the unconditional
-// pattern every OTHER DIST_TEXT_SCANNER_REPO_PATHS sibling already uses (decisions-for-tool.mjs,
+// pattern every OTHER CHANGED_TS_TEXT_SCANNER_REPO_PATHS sibling already uses (decisions-for-tool.mjs,
 // operator-surface.mjs, skill-edit.mjs), just via the shared managed-tempdir primitive instead of each
 // hand-rolling its own path. ---
 const tmpHome = mkdtempManaged("loom-companion-lead-mode-");
