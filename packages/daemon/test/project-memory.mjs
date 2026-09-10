@@ -298,6 +298,80 @@ try {
       db.listProjectMemory(cliffProj).filter((r) => seedKeys.includes(r.key)).length === cap - 1);
   }
 
+  // ===================== card cf8d773f: memory_write's evictionStatus warning =====================
+  // A brand-new never-retrieved note, written into a project already sitting AT its unpinned cap, is by
+  // construction the sole eviction candidate once every other unpinned row has been retrieved (same
+  // precondition as the "cliff" test above). This proves the WRITER gets a signal about it at write time —
+  // and that the signal's own prediction actually comes true on the very next write.
+  {
+    const evStatusProj = "proj-eviction-status";
+    const cap = 4;
+    db.insertProject({ id: evStatusProj, name: "Eviction Status Project", repoPath: tmpHome, vaultPath: tmpHome, config: { memory: { maxNotes: cap } }, createdAt: now, archivedAt: null });
+    const evSeedKeys = Array.from({ length: cap }, (_, i) => `ev-seed-${i}`);
+    for (const k of evSeedKeys) writeProjectMemory(db, evStatusProj, { key: k, text: `seed note ${k}` });
+    db.touchProjectMemoryRetrieved(db.listProjectMemory(evStatusProj).map((r) => r.id));
+    check("(eviction-status) setup: store sits exactly at cap, every existing unpinned note already retrieved",
+      db.listProjectMemory(evStatusProj).filter((r) => !r.pinned).length === cap &&
+      db.listProjectMemory(evStatusProj).every((r) => r.lastRetrievedAt !== null));
+
+    const first = writeProjectMemory(db, evStatusProj, { key: "ev-first", text: "the note that must warn" });
+    check("(eviction-status) write succeeds", !("error" in first) && !("conflict" in first));
+    // THE WARNING HALF (fails on pre-change code — there was no `evictionStatus` field at all):
+    check("(eviction-status) the response carries an evictionStatus key at all", "evictionStatus" in first);
+    check("(eviction-status) nextEvictionCandidate is true — store is at cap and this is the sole never-retrieved row",
+      first.evictionStatus?.nextEvictionCandidate === true);
+    check("(eviction-status) unpinnedCount reflects the store sitting exactly at cap", first.evictionStatus?.unpinnedCount === cap);
+    check("(eviction-status) maxNotes echoes this project's resolved cap", first.evictionStatus?.maxNotes === cap);
+    check("(eviction-status) writesUntilEviction is 1 (the VERY next write)", first.evictionStatus?.writesUntilEviction === 1);
+    check("(eviction-status) message names the cap and warns about the very next write",
+      /VERY NEXT write/i.test(first.evictionStatus?.message ?? "") && first.evictionStatus?.message?.includes(String(cap)));
+    // Manager review (post-f2281544): the message must NOT steer an agent toward `pinned:true` as a
+    // survival tactic — pinning is exempt from maxNotes but spends the separately-budgeted pinned tier
+    // and gives up this note's FTS recall path (a swap, not a free win). It must instead name a durable
+    // location OUTSIDE project memory, and must be explicit that a mere READ never saves the note.
+    check("(eviction-status) message does NOT suggest pinning as a survival tactic",
+      !/pin it/i.test(first.evictionStatus?.message ?? ""));
+    check("(eviction-status) message tells the caller to put survival-critical content OUTSIDE project memory",
+      /outside project memory/i.test(first.evictionStatus?.message ?? ""));
+    check("(eviction-status) message is explicit that memory_read/memory_list does NOT reset the rank",
+      /memory_read/i.test(first.evictionStatus?.message ?? "") && /does not count/i.test(first.evictionStatus?.message ?? ""));
+
+    // THE READ-DOES-NOT-SAVE-IT PROOF (manager review point 2 — this is the exact trap that fooled three
+    // sessions: a clean write followed by a clean read-back, then silent deletion). An explicit
+    // memory_read on ev-first must NOT touch last_retrieved_at at all — touchProjectMemoryRetrieved's
+    // only production call site is retrieveProjectMemoryForKickoff's `if (framed)` branch (actual
+    // rendered kickoff-digest inclusion), never memory_read/memory_list.
+    const readBackBeforeEvict = readProjectMemory(db, evStatusProj, "ev-first");
+    check("(eviction-status) an explicit memory_read on ev-first succeeds", !("error" in readBackBeforeEvict));
+    check("(eviction-status) the explicit read did NOT bump lastRetrievedAt (still null — not a retrieval)",
+      db.getProjectMemoryByKey(evStatusProj, "ev-first")?.lastRetrievedAt === null);
+
+    // THE EVICTION HALF (pins EXISTING/unchanged behaviour — this must pass on both pre- and post-change
+    // code: it is evictProjectMemoryOverCap's pre-existing sweep, untouched by this card's ⛔ fence against
+    // changing eviction policy). Card 2bc735d3 excludes THIS write's own key from ITS sweep, so it evicts
+    // some OTHER unpinned row — and since ev-first is the sole never-retrieved (rank-0) row besides this
+    // write's own key, ev-first is exactly the row the sweep deletes — DESPITE the explicit read-back
+    // immediately above, which is exactly the point: a read never saves it.
+    const second = writeProjectMemory(db, evStatusProj, { key: "ev-second", text: "the write that evicts the first" });
+    check("(eviction-status) second write succeeds", !("error" in second) && !("conflict" in second));
+    check("(eviction-status) the FIRST note is now gone — the warning's own prediction came true",
+      db.getProjectMemoryByKey(evStatusProj, "ev-first") === undefined);
+    check("(eviction-status) the store still honors the cap after the second write",
+      db.listProjectMemory(evStatusProj).filter((r) => !r.pinned).length <= cap);
+
+    // NEGATIVE CONTROL 1: a project nowhere near its cap never carries evictionStatus at all.
+    const underCapProj = "proj-eviction-status-under-cap";
+    db.insertProject({ id: underCapProj, name: "Under Cap Project", repoPath: tmpHome, vaultPath: tmpHome, config: { memory: { maxNotes: 500 } }, createdAt: now, archivedAt: null });
+    const underCap = writeProjectMemory(db, underCapProj, { key: "roomy", text: "plenty of headroom" });
+    check("(eviction-status) NEGATIVE CONTROL: a store nowhere near cap carries NO evictionStatus key at all",
+      !("evictionStatus" in underCap));
+
+    // NEGATIVE CONTROL 2: a PINNED note at cap never carries evictionStatus — pinned rows are never evicted.
+    const pinnedAtCap = writeProjectMemory(db, evStatusProj, { key: "ev-pinned", text: "pinned, never evictable", pinned: true });
+    check("(eviction-status) NEGATIVE CONTROL: a pinned note carries NO evictionStatus even when the project is at cap",
+      !("evictionStatus" in pinnedAtCap));
+  }
+
   // ===================== FTS5 search =====================
   {
     const ftsProj = "proj-fts";

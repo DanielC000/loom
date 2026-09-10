@@ -165,6 +165,81 @@ export interface TriggerGateSignal {
   inert?: true;
 }
 
+/**
+ * Card cf8d773f — an informational signal returned alongside a successful write for an UNPINNED note once
+ * this project's memory store is at (or over) its `memory.maxNotes` cap, mirroring {@link NeverDropSignal}/
+ * {@link RestTierSignal}/{@link TriggerGateSignal}'s "compute the consequence at the ONE moment the author
+ * can act on it, never block the write" posture. `undefined` when the note is pinned (pinned rows are
+ * never evicted), the cap is disabled (`maxNotes <= 0`), or the store isn't yet at cap (no eviction risk to
+ * report) — same "absent when inapplicable" convention as the sibling signals. Computed via
+ * {@link Db.projectMemoryEvictionRank}, which shares its candidate ORDER BY with the real sweep
+ * ({@link Db.evictProjectMemoryOverCap}) through one constant, so this can never silently diverge from what
+ * the sweep actually deletes.
+ *
+ * Root cause this closes (see the card): a brand-new never-retrieved note, at a project already sitting at
+ * `maxNotes`, is by construction in the most-evictable class — the eviction sweep that runs after EVERY
+ * subsequent write in the project (by anyone) deletes it the moment it becomes the sweep's top candidate,
+ * often within minutes, with no prior signal to the writer that it happened.
+ *
+ * MEASURED (manager review of the first cut, 2026-09-10): `last_retrieved_at` — the column this whole
+ * signal's rank is computed against — is written by exactly ONE production-reachable call site,
+ * `db.touchProjectMemoryRetrieved`, called from `sessions/project-memory-recall.ts`'s
+ * `retrieveProjectMemoryForKickoff` (`if (framed) db.touchProjectMemoryRetrieved(includedIds)`) — i.e. only
+ * a note ACTUALLY RENDERED into an injected kickoff digest resets its rank. `gateway/server.ts`'s
+ * `/internal/test/seed` route also calls it, but that route is gated `if (inTestMode())` — structurally
+ * absent from a real daemon's route table, not a second production retrieval path. An explicit
+ * `memory_read`/`memory_list` call does NOT touch this column at all (mirrors `everDelivered`'s own doc
+ * comment on {@link ProjectMemoryEntryWithLinks}) — a clean read-back is NOT a reprieve; the message below
+ * says so explicitly, because this exact confusion (a clean write + clean read-back, then silent deletion)
+ * is the card's own root incident.
+ */
+export interface EvictionCandidateSignal {
+  message: string;
+  /** True iff the VERY NEXT write to this project (by anyone, any key) will evict this exact note. */
+  nextEvictionCandidate: boolean;
+  /** This project's current unpinned note count (post-write, post this write's own eviction sweep). */
+  unpinnedCount: number;
+  /** `memory.maxNotes` — the resolved cap `unpinnedCount` is measured against. */
+  maxNotes: number;
+  /** How many more new-key writes to this project (at this note's CURRENT eviction rank) would evict it —
+   *  an estimate: it assumes no intervening RETRIEVAL — this note actually landing in a rendered kickoff
+   *  digest, the only thing that resets its rank; an explicit `memory_read`/`memory_list` never does — and
+   *  that intervening writes create/evict a row rather than only updating an existing key. */
+  writesUntilEviction: number;
+}
+
+/** Card cf8d773f DoD-1 — see {@link EvictionCandidateSignal}. */
+function computeEvictionCandidateStatus(
+  db: Db,
+  projectId: string,
+  entry: ProjectMemoryEntry,
+  maxNotes: number,
+): EvictionCandidateSignal | undefined {
+  if (entry.pinned || maxNotes <= 0) return undefined;
+  const rankInfo = db.projectMemoryEvictionRank(projectId, entry.key);
+  if (!rankInfo || rankInfo.unpinnedCount < maxNotes) return undefined;
+  const { rank, unpinnedCount } = rankInfo;
+  const writesUntilEviction = unpinnedCount - maxNotes + rank + 1;
+  const nextEvictionCandidate = writesUntilEviction === 1;
+  return {
+    nextEvictionCandidate,
+    unpinnedCount,
+    maxNotes,
+    writesUntilEviction,
+    message: nextEvictionCandidate
+      ? `this project's memory store is at its ${maxNotes}-note cap (memory.maxNotes) and this note is the ` +
+        "most-evictable unpinned row (never retrieved, or the oldest such) — the VERY NEXT write to this " +
+        "project by anyone will delete it. Only this note actually landing in a RENDERED kickoff digest " +
+        "resets that (a memory_read/memory_list call does NOT count and will NOT save it). If this note " +
+        "needs to survive, put its content somewhere durable outside project memory (e.g. the task card " +
+        "or your report)."
+      : `this project's memory store is at its ${maxNotes}-note cap (memory.maxNotes); at its current ` +
+        `eviction rank (${rank + 1} of ${unpinnedCount} unpinned notes, least-recently-retrieved first) ` +
+        `this note is ${writesUntilEviction} write(s) away from eviction. Only this note actually landing ` +
+        "in a RENDERED kickoff digest resets that (a memory_read/memory_list call does NOT count).",
+  };
+}
+
 function computeTriggerGateStatus(entry: ProjectMemoryEntry): TriggerGateSignal | undefined {
   if (!entry.triggerGlob) return undefined;
   if (!entry.pinned) {
@@ -222,7 +297,7 @@ export function writeProjectMemory(
   projectId: string,
   input: MemoryWriteInput,
 ):
-  | (ProjectMemoryEntry & { neverDropStatus?: NeverDropSignal; restTierStatus?: RestTierSignal; triggerGateStatus?: TriggerGateSignal })
+  | (ProjectMemoryEntry & { neverDropStatus?: NeverDropSignal; restTierStatus?: RestTierSignal; triggerGateStatus?: TriggerGateSignal; evictionStatus?: EvictionCandidateSignal })
   | { error: string }
   | MemoryWriteConflict
   | MemoryWriteTooLong {
@@ -320,11 +395,13 @@ export function writeProjectMemory(
   const neverDropStatus = computeNeverDropStatus(db, projectId, result.entry, memoryConfig.budgetTokens);
   const restTierStatus = computeRestTierSignal(db, projectId, result.entry, memoryConfig.budgetTokens);
   const triggerGateStatus = computeTriggerGateStatus(result.entry);
+  const evictionStatus = computeEvictionCandidateStatus(db, projectId, result.entry, memoryConfig.maxNotes);
   return {
     ...result.entry,
     ...(neverDropStatus ? { neverDropStatus } : {}),
     ...(restTierStatus ? { restTierStatus } : {}),
     ...(triggerGateStatus ? { triggerGateStatus } : {}),
+    ...(evictionStatus ? { evictionStatus } : {}),
   };
 }
 

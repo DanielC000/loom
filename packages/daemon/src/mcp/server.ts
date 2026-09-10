@@ -426,7 +426,25 @@ export class TaskMcpRouter {
           "on a pinned note returns a `neverDropStatus` on this response reporting that whole floor tier's " +
           "current size against the project's read-side digest budget (`memory.budgetTokens`) — purely " +
           "informational, it never blocks this write; use it to judge whether the tier is getting too big " +
-          "to keep guaranteeing delivery. Optional `title` " +
+          "to keep guaranteeing delivery. " +
+          "UNPINNED notes are bounded too (`memory.maxNotes`, a per-project cap on unpinned rows — pinned " +
+          "notes are exempt): once the project is AT that cap, every write anywhere in it evicts the single " +
+          "most-evictable unpinned row (least-recently retrieved, i.e. never-retrieved-yet notes die first, " +
+          "oldest such first) — a brand-new note you just wrote can BE that row and vanish within minutes of " +
+          "a sibling write, with a clean write + clean read-back and no prior signal that it happened. When " +
+          "the project is at/over that cap and this note is unpinned, the response carries an `evictionStatus` " +
+          "({nextEvictionCandidate, unpinnedCount, maxNotes, writesUntilEviction, message}): " +
+          "`nextEvictionCandidate:true` means the VERY NEXT write to this project by ANYONE will delete this " +
+          "note; `writesUntilEviction` estimates how many more such writes at its current rank before that " +
+          "happens. The ONLY thing that resets a note's rank is it actually landing in a RENDERED kickoff " +
+          "digest — an explicit `memory_read`/`memory_list` call does NOT count and will NOT save it (this " +
+          "is the exact trap that caused the incident this signal exists to prevent: a clean write, a clean " +
+          "read-back, then silent deletion by someone else's next write). Purely informational — it never " +
+          "blocks this write, exactly like `neverDropStatus`. If this note needs to survive, put its content " +
+          "somewhere durable outside project memory (e.g. the task card or your report) — do NOT reach for " +
+          "`pinned:true` just to dodge this cap: pinning is exempt from `maxNotes`, but it spends the " +
+          "separately-budgeted pinned tier (`memory.budgetTokens`) and trades away this note's FTS-relevance " +
+          "recall path (a pinned note only rides in full or not at all, never matched by search). Optional `title` " +
           "(short label, max 200 chars) and `tags` (string[]). `title` (or, if omitted, `key`) is rendered " +
           "into every delivered note's digest header as `### {title} ({key})` — both `title` and `key` are " +
           "on-budget, consuming `memory.budgetTokens` on every kickoff exactly like `text` does, so a long " +

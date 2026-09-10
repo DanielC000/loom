@@ -1474,6 +1474,17 @@ export interface WedgedWorktreeEntry {
 const MERGE_RECONCILE_WEDGED_KEY = "merge_reconcile_wedged";
 
 /**
+ * Project-memory eviction candidate order (card cf8d773f) — shared VERBATIM between
+ * {@link Db.evictProjectMemoryOverCap} (which deletes from the front of this order) and
+ * {@link Db.projectMemoryEvictionRank} (which reports a note's position in it) via this one constant, so
+ * the write-time "how close to eviction" signal can never silently diverge from what the sweep actually
+ * deletes. A never-retrieved row (`last_retrieved_at IS NULL`) sorts first (most evictable), tie-broken by
+ * `created_at ASC` (oldest-first within that tier) — see `evictProjectMemoryOverCap`'s own doc comment
+ * (card ec0be17e) for why this exact ordering was chosen and reviewed.
+ */
+const PROJECT_MEMORY_EVICTION_ORDER = "last_retrieved_at IS NOT NULL, last_retrieved_at ASC, created_at ASC";
+
+/**
  * One boot-reconcile Pass-A session whose repoKey can never resolve (card c33f94b2: three such records
  * retried at every boot for 26+ days with a bare "3 failed (retry next boot)" line, naming neither which
  * merges nor whose). Keyed on `sessionId` (stable across boots) rather than a worktree/branch path — a
@@ -6243,10 +6254,25 @@ export class Db {
     this.db.prepare(
       `DELETE FROM project_memory WHERE id IN (
          SELECT id FROM project_memory WHERE project_id = @projectId AND pinned = 0 AND key != @excludeKey
-         ORDER BY last_retrieved_at IS NOT NULL, last_retrieved_at ASC, created_at ASC
+         ORDER BY ${PROJECT_MEMORY_EVICTION_ORDER}
          LIMIT @over
        )`,
     ).run({ projectId, excludeKey: excludeKey ?? "", over });
+  }
+  /** Card cf8d773f — a note's position in the SAME candidate order {@link evictProjectMemoryOverCap}
+   *  deletes from (via the shared {@link PROJECT_MEMORY_EVICTION_ORDER} constant, never a re-derived
+   *  copy): `rank` 0 is "evicted first". Returns `null` for a pinned or nonexistent key — pinned rows are
+   *  never eviction candidates. `unpinnedCount` is the project's current total unpinned row count, so a
+   *  caller can tell whether the store is actually at/over `maxNotes` without a second query. Small,
+   *  bounded scan (at most `maxNotes`, capped at 1000 — see `memory.maxNotes` in config.ts), so a full
+   *  in-JS `findIndex` over the ordered id list is cheap and needs no separate COUNT/rank SQL. */
+  projectMemoryEvictionRank(projectId: string, key: string): { rank: number; unpinnedCount: number } | null {
+    const rows = this.db.prepare(
+      `SELECT key FROM project_memory WHERE project_id = ? AND pinned = 0 ORDER BY ${PROJECT_MEMORY_EVICTION_ORDER}`,
+    ).all(projectId) as { key: string }[];
+    const rank = rows.findIndex((r) => r.key === key);
+    if (rank === -1) return null;
+    return { rank, unpinnedCount: rows.length };
   }
 
   // --- schedules (phase-2 Pillar B) ---
