@@ -4,22 +4,9 @@ import path from "node:path";
 import type { TranscriptTurn } from "./adapter.js";
 
 /**
- * HarnessAdapter seam (card 2b099e48, Phase 0 of the multi-harness epic df1f94b0): this file is the
- * claude adapter's OWNERSHIP of the engine transcript's on-disk location + JSONL wire format. Every
- * literal `~/.claude/projects/...` path construction and every assumption about the shape of a Claude
- * Code transcript line (`type: "user"|"assistant"`, `message.content` blocks, `tool_use`/`tool_result`)
- * lives HERE and nowhere else — moved out of `sessions/transcript.ts` (formerly the sole owner) so that
- * file can hold only the harness-AGNOSTIC half (pagination, spill, Loom's own archive store), which
- * operates on the generic {@link TranscriptTurn} shape regardless of which harness produced it.
- * `sessions/transcript.ts` re-exports every name below UNCHANGED for its 13 existing consumers — see its
- * own header comment — so this move is a pure relocation with zero call-site churn and zero behavior
- * change (verified: see the pty test suite, in particular `transcript-encode.mjs` and
- * `real-homedir-transcript-leak-isolation.mjs`).
- *
- * `TranscriptTurn` itself is DEFINED in `pty/adapter.ts` (Code Review MAJOR-2, card 2b099e48) — it is the
- * harness-AGNOSTIC contract type every future adapter's `readTranscript` returns, so it belongs with the
- * interface, not inside adapter #1's own implementation. Re-exported here so nothing downstream needs to
- * change its import path.
+ * @decision 2b099e48 — this file OWNS every `~/.claude/projects/...` literal path and Claude Code
+ * transcript wire-format assumption; never duplicate them in `sessions/transcript.ts` or elsewhere.
+ * `TranscriptTurn` itself lives in `pty/adapter.ts` (the harness-agnostic contract), re-exported here.
  */
 export type { TranscriptTurn };
 
@@ -55,28 +42,9 @@ export function engineTranscriptPath(cwd: string, engineSessionId: string): stri
 export const TRANSCRIPT_ROOT_READ_DENY_RULE = "Read(~/.claude/projects/**)";
 
 /**
- * Card d78f8217 (implementing 31613c1e's approved option (d)): a per-OTHER-project transcript-root deny
- * for the `worker` role's PROJECT-SCOPED deny — as opposed to the BLANKET {@link TRANSCRIPT_ROOT_READ_DENY_RULE}
- * applied to `assistant`/`auditor`/`workspace-auditor`/`manager`/`platform`/`setup` (host.ts's
- * `TRANSCRIPT_ROOT_DENY_ROLES`). A worker legitimately reads its OWN project's transcripts (six in-tree
- * investigations depend on it — see card 31613c1e's own doc), so it can't take the blanket rule; but its
- * native reach otherwise spans every OTHER project's transcripts too, which this closes.
- *
- * TWO rules per other project, both MEASURED against the real `claude` binary (see host.ts's
- * `withTranscriptRootDenyForSpawn` doc for the measurement):
- *  - a MID-SEGMENT wildcard on the other project's id: a worktree cwd is
- *    `WORKTREES_DIR/<projectId>/[repoKey/]<taskKey>`, and {@link encodeProjectDir} flattens every path
- *    separator to '-', so `<projectId>` (a UUID — alphanumeric+dashes, i.e. glob-safe) sits as a
- *    `-`-delimited token inside the encoded dir name regardless of repoKey/taskKey — `*-<id>-*` matches
- *    it selectively without needing to know the exact repoKey/taskKey.
- *  - the other project's own encoded repoPath: a NON-worker session for that OTHER project (its manager,
- *    for instance) spawns with cwd = repoPath directly — no worktree, no projectId token at all (see
- *    sessions/service.ts's `cwd: project.repoPath` spawns) — so the id-token rule alone would miss it.
- *
- * This is a DENY-LIST over a DB-derived set and so FAILS OPEN on anything not enumerated here — most
- * notably a non-Loom `claude` session's transcripts elsewhere on the host. Best-effort narrowing, NEVER a
- * structural guarantee — see card 31613c1e's LEAD RULING ("CARRY ITS LIMIT VERBATIM OR THIS BECOMES THE
- * NEXT OVERCLAIMED CONTAINMENT DOC").
+ * @decision d78f8217 — worker-role per-other-project transcript deny (31613c1e's approved option (d)):
+ * a DENY-LIST over a DB-derived set, so it FAILS OPEN on anything unenumerated — best-effort, NEVER a
+ * structural guarantee. Carry that limit verbatim wherever cited (31613c1e's LEAD RULING).
  */
 export function otherProjectTranscriptDenyRules(otherProjectId: string, otherProjectRepoPath: string): string[] {
   return [
@@ -88,66 +56,12 @@ export function otherProjectTranscriptDenyRules(otherProjectId: string, otherPro
 /**
  * Locate a session's transcript file robustly: the computed path first (fast, correct for the
  * common case), else scan `~/.claude/projects/*` for `<engineSessionId>.jsonl` — the id is a
- * globally-unique UUID, so a match is unambiguous regardless of how Claude encoded the dir. This
- * makes transcript reads resilient to any future dir-encoding drift. Returns null if not found.
+ * globally-unique UUID, so a match is unambiguous regardless of how Claude encoded the dir. Returns
+ * null if not found.
  *
- * DoD-3 determination (card 7d70b27b, the second reader to ask this) — TWO SEPARATE QUESTIONS, only one
- * of them settled by "engine ids are UUIDs":
- *
- * CORRECTNESS — can this scan resolve to the WRONG file? The global fallback scan below is
- * CORRECT-BY-DESIGN for production and is NOT being changed here. Every real engine session id is a
- * Claude-CLI-minted UUID, so an accidental collision between two DIFFERENT sessions is implausible — the
- * scan's whole reason to exist (dir-encoding drift resilience, see encodeProjectDir's own doc comment)
- * depends on exactly that global-uniqueness property. The production defect this card actually fixes
- * lives entirely on the TEST side: `test/engine-session-rotation.mjs` used to write FIXED literal ids
- * ("engine-session-alpha/beta/gamma/delta") instead of real UUIDs, so a leftover from one run could
- * collide with a later run's lookup for the exact same literal name — a hazard this function's own
- * contract doesn't create and can't detect. Any HERMETIC test that exercises this scan must mint
- * globally-unique-shaped ids (e.g. suffixed with `${Date.now()}-${process.pid}`) for the same reason
- * real engine ids already are unique — not because this function should scope its search.
- *
- * COST — what does this scan PAY, regardless of correctness? This is NOT settled by the UUID argument,
- * and is a real, currently-unbounded, currently-growing production cost: measured against this repo's
- * OWN dev box, `~/.claude/projects/` held 5772 directories, ~69% of them test-run leakage (a handful of
- * `test/*.mjs` files write real-homedir fixtures — via {@link engineTranscriptPath} above — under a
- * unique-but-never-cleaned-up directory per run; see project memory
- * `real-homedir-transcript-leak-sibling-audit` for the accounting). `fs.readdirSync(root)` here walks
- * EVERY one of those entries on every fallback hit, so the scan's wall-clock cost scales with however
- * much test garbage has accumulated on the host, not with anything about the session being looked up.
- * That's a distinct problem from this card's scope (fixing it means bounding or cleaning the leak
- * sources, not changing this function) but it's a real, measured cost this determination should not be
- * read as dismissing.
- *
- * BOUNDING THE COST (card f432cbb8, the third reader to ask this) — this does NOT change the fallback's
- * existence or its correctness reasoning above; it bounds what the fallback PAYS, same as the manager's
- * own framing. Measured (project memory `resolve-transcript-file-fallback-scan-cost-measured`): the
- * worst case (direct miss, target genuinely not found) was ~169–239ms SYNCHRONOUS wall-clock against this
- * repo's own `~/.claude/projects` (5778 dirs) — and it's synchronous because it HAS to be: the hottest
- * caller, {@link readContextStats} (sessions/context.ts) via `pty/host.ts`'s `deliverHook` Stop-hook
- * handler, runs inside the M2 busy-gate drain window, which is a documented "DO NOT INTRODUCE AN `await`
- * IN THIS BRANCH" invariant — an async signature here is not available as an option for that call site.
- *
- * `resolvedPathCache` (engine session id -> resolved file path) closes the case that actually dominates
- * in practice: a REPEAT lookup for an id this function has already found via the fallback scan skips the
- * scan entirely — a live session's context-stats read re-resolves the SAME id on every Stop. A hit is
- * revalidated with a single `existsSync` before being trusted (the file could have been removed since
- * caching); a stale hit is dropped and falls through to a real scan, never returned as-is. This has no
- * coherence hole: a cache MISS here always falls through to the full scan below, unchanged.
- *
- * ⚠️ WHY THERE IS NO CACHE ON THE `readdir` ITSELF (an earlier draft of this fix had one — deliberately
- * removed, not merely never added): measured separately, `readdirSync` alone costs ~8ms at 5778 entries;
- * the `existsSync`-per-candidate loop alone costs ~249ms. The `readdir` was measured NOT to be the
- * bottleneck, so caching it saves ~3% of the worst case at best — and a TTL-cached listing has a
- * coherence hole a fresh `readdir` cannot: engine session ROTATION (see above) writes a NEW file into an
- * ALREADY-EXISTING project dir, so any "only re-check dirs new since the cached listing" optimization
- * silently EXCLUDES the one dir that actually changed, producing a false not-found for a transcript that
- * genuinely exists (self-healing once the cache would have expired, but still a real regression against
- * a plain fresh scan). Not a hypothetical: `readContextStats` calls this on every Stop hook specifically
- * because rotation is the documented reason the fallback exists at all (see `45274e34` above), so the
- * excluded case is the fallback's OWN primary use case. A bad trade at any TTL — deleted rather than
- * patched. See `test/transcript-fallback-cache-coherence.mjs` for the regression guard covering
- * `resolvedPathCache`'s own two failure shapes (a deleted cached file must rescan; a NEW file written
- * into an already-resolved-once dir must still resolve on the next distinct lookup).
+ * @decision f432cbb8 — MUST stay synchronous (the hottest caller runs inside the M2 busy-gate drain
+ * window's "no `await`" invariant); resolvedPathCache below is the load-bearing cost bound instead —
+ * see the record for the measured cost and why the readdir scan itself is deliberately NOT cached.
  */
 const RESOLVED_PATH_CACHE_MAX = 500; // mirrors walkState's MAX_TRACKED_WALKS bound in sessions/transcript.ts — never grows unbounded
 const resolvedPathCache = new Map<string, string>(); // engineSessionId -> last-resolved fallback-scan hit
@@ -177,6 +91,8 @@ export function resolveTranscriptFile(cwd: string, engineSessionId: string): str
 
   let found: string | null = null;
   try {
+    // @decision 7d70b27b — correct-by-design: real engine session ids are Claude-CLI-minted UUIDs, so
+    // cross-session collision here is implausible; a hermetic test must mint UUID-shaped ids too.
     for (const dir of fs.readdirSync(CLAUDE_PROJECTS_ROOT)) {
       const f = path.join(CLAUDE_PROJECTS_ROOT, dir, `${engineSessionId}.jsonl`);
       if (fs.existsSync(f)) { found = f; break; }
@@ -226,21 +142,9 @@ export function engineTranscriptExists(cwd: string, engineSessionId: string): bo
 export const TOOL_RESULT_BODY_CAP = 2048;
 
 /**
- * Repair a CONFIRMED engine-side transcript-capture quirk (Claude Code CLI on Windows, v2.1.202): the
- * last line of a Grep/Read `-C` context hunk occasionally has its leading comment token collapsed to a
- * bare backslash where the ENGINE WRITES ITS OWN on-disk JSONL — `// Guard the X` -> `\ Guard the X`,
- * `/** Every Y` -> `\** Every Y` (verified against a real transcript; the source file itself is
- * untouched — `git show`/`Read` on the same line reads back clean `//`/`/**`). Loom's daemon never
- * touches this text before this point (it's a straight `fs.readFileSync` + `JSON.parse` of the engine's
- * file), so this can't be fixed at the source — but the loom-audit surface must still hand an auditor
- * VERBATIM code, so repair the known corruption here at read time instead of passing it through.
- *
- * Per LINE (Grep/Read output is always line-oriented — `NNNN-`/`NNNN:`/`NNNN\t` decoration then the
- * source indentation): strip that leading decoration, and if what remains starts with a bare `\`
- * followed by a space or `*`, restore the dropped slash(es). A source/comment line never legitimately
- * starts (after its own indentation) with `\ ` or `\*` — that exact pair only arises from this engine
- * collapse — so the repair can't false-positive on real content; a mid-line backslash (e.g. a quoted
- * Windows path) is untouched since it never sits at this leading position.
+ * @decision sha:5cb98ca4 — repairs a CONFIRMED engine-side JSONL comment-marker corruption at READ
+ * time (can't be fixed at the source); the `\ `/`\*` leading-position check can't false-positive on
+ * real content — see the record before changing this regex.
  */
 const LINE_DECORATION_RE = /^[ \t]*(?:\d+[:\t-])?[ \t]*/;
 function repairMangledCommentMarkers(text: string): string {

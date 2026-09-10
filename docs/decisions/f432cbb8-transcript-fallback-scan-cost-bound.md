@@ -1,0 +1,20 @@
+# f432cbb8 — transcript fallback scan: bounding the cost, sync requirement, caching
+
+## Narrative
+
+Card `f432cbb8` (the third reader to ask this) does NOT change the fallback scan's existence or its correctness reasoning (see `7d70b27b-transcript-fallback-scan-correctness.md`) — it bounds what the fallback PAYS, same as that determination's own framing.
+
+Measured (project memory `resolve-transcript-file-fallback-scan-cost-measured`): the worst case (direct miss, target genuinely not found) was ~169-239ms SYNCHRONOUS wall-clock against this repo's own `~/.claude/projects` (5778 dirs at measurement time).
+
+This is a real, currently-unbounded, currently-growing production cost independent of correctness: measured against this repo's own dev box, `~/.claude/projects/` held 5772 directories, ~69% of them test-run leakage (a handful of `test/*.mjs` files write real-homedir fixtures — via `engineTranscriptPath` — under a unique-but-never-cleaned-up directory per run; see project memory `real-homedir-transcript-leak-sibling-audit` for the accounting). `fs.readdirSync(root)` walks EVERY one of those entries on every fallback hit, so the scan's wall-clock cost scales with however much test garbage has accumulated on the host, not with anything about the session being looked up. Fixing that leak (bounding or cleaning the sources) is out of this function's scope — but being out of this function's scope is not a reason to read this cost as dismissed: it is real and it is measured.
+
+`resolvedPathCache` (engine session id -> resolved file path) closes the case that actually dominates in practice: a REPEAT lookup for an id this function has already found via the fallback scan skips the scan entirely — a live session's context-stats read re-resolves the SAME id on every Stop. A hit is revalidated with a single `existsSync` before being trusted (the file could have been removed since caching); a stale hit is dropped and falls through to a real scan, never returned as-is. A cache MISS here always falls through to the full scan, unchanged — no coherence hole.
+
+## Do not
+
+- Do not make `resolveTranscriptFile` async. The hottest caller, `readContextStats` (`sessions/context.ts`) via `pty/host.ts`'s `deliverHook` Stop-hook handler, runs inside the M2 busy-gate drain window, which is a documented "DO NOT INTRODUCE AN `await` IN THIS BRANCH" invariant — an async signature is not available as an option for that call site.
+- Do not add a cache on the `readdir` scan itself — an earlier draft of this fix had one, deliberately removed, not merely never added. Measured separately: `readdirSync` alone costs ~8ms at 5778 entries; the `existsSync`-per-candidate loop alone costs ~249ms. The `readdir` was measured NOT to be the bottleneck, so caching it saves ~3% of the worst case at best — and a TTL-cached listing has a coherence hole a fresh `readdir` cannot: engine session ROTATION (source: commit `45274e34`, `fix(daemon): isolate engine-session-rotation's real-homedir artifacts per run`) writes a NEW file into an ALREADY-EXISTING project dir, so any "only re-check dirs new since the cached listing" optimization silently EXCLUDES the one dir that actually changed, producing a false not-found for a transcript that genuinely exists (self-healing once the cache would have expired, but still a real regression against a plain fresh scan). Not a hypothetical: `readContextStats` calls this function on every Stop hook specifically because rotation is the documented reason the fallback exists at all, so the excluded case is the fallback's OWN primary use case. A bad trade at any TTL.
+
+## Source
+
+`resolveTranscriptFile`'s doc comment in `packages/daemon/src/pty/claude-transcript.ts`, "COST" / "BOUNDING THE COST" / cache sections (part of the combined lines 88-151 block pre-extraction). `resolvedPathCache`'s own two failure shapes (a deleted cached file must rescan; a NEW file written into an already-resolved-once dir must still resolve on the next distinct lookup) are covered by `test/transcript-fallback-cache-coherence.mjs`. Commit `45274e34` verified: `git cat-file -t 45274e34` -> commit.
