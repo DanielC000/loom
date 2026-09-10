@@ -24,9 +24,37 @@ NOT stripped: card 54b839c5 (`vault/versioner.ts`) shows blind-stripping this fa
 identity resolution to the host's real `~/.gitconfig` instead of failing loud — the same risk applies
 here, so pass-through + explicit allowance is the correct fix, not removal.
 
+## `bounded.ts`: the verified full strip list + the structural scrub chokepoint
+
+`GIT_ENV_STRIP_KEYS` (`git/bounded.ts` — the actual STRIP half `GitWriter`'s own env delegates to, per
+the STRIPPED categorization above) was verified by EXECUTING `@simple-git/argv-parser@1.1.1`'s real
+`parseEnv` against the installed simple-git, one key at a time — not read from docs. This is the FULL
+set: a prior audit's copy of "eight keys" undercounted the real refusal list by ten (matching the M1/M2
+findings above, which measured two independent per-file copies covering only 2-of-18 and 6-of-18 of it).
+
+`boundedSimpleGit` (the construction chokepoint) applies both this scrub AND the config-path pass-through
+allowance (`unsafe.allowUnsafeConfigPaths`) unconditionally to whatever raw env a caller supplies — a
+caller now passes a raw env (e.g. a `process.env` spread) and gets the same safety a caller that
+pre-scrubbed would have. This is what makes "the caller must remember to scrub first" (the exact failure
+mode behind the M1/M2 gap above) structurally impossible going forward: `git/writer.ts` and
+`runs/snapshot.ts` (which needs `GIT_INDEX_FILE`) can no longer drift from the decision independently.
+`vault/versioner.ts`'s `commitVault` is the one caller that opts OUT of this scrub entirely, by design, by
+never passing an `env` argument at all — see the `54b839c5` record.
+
+The `allowUnsafeConfigPaths` allowance is a no-op (simple-git's vulnerability check never runs) for the
+many callers in this codebase that never pass `env` at all — it only takes effect for a caller that
+explicitly hands simple-git an env, which is exactly the population that can carry the ambient
+config-path var in the first place. It does NOT widen anything else: the category covers only
+config-PATH redirection, never the arbitrary-command-exec categories (editor/pager/diff/askpass/ssh/
+proxy) that `GIT_ENV_STRIP_KEYS` strips or that stay deliberately blocked (see that constant's own doc
+for the full breakdown).
+
 ## Do not
 
 - Do not blanket-strip GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM/GIT_CONFIG/GIT_EXEC_PATH/PREFIX — that
   silently redirects identity resolution to the host's real `~/.gitconfig` (card 54b839c5's finding),
   not a safe default.
 - Do not re-add GIT_PAGER/PAGER to the child env — proved (card 42544916) to 500 every git read/write.
+- Do not require a caller to scrub its own env or pass `allowUnsafeConfigPaths` itself — `boundedSimpleGit`
+  applies both unconditionally at its one construction chokepoint; a per-caller copy is exactly how the
+  M1/M2 gap (2-of-18 and 6-of-18 coverage) happened.

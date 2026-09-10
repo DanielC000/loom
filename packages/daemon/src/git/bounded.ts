@@ -15,18 +15,16 @@ import { simpleGit, type SimpleGit, type SimpleGitOptions } from "simple-git";
 
 /**
  * Reject `p` after `ms` if it hasn't settled, so a git step is bounded even if the underlying promise
- * NEVER settles. In production the simpleGit `block` timeout (set on the instance) ALSO bounds the child,
- * but — see the WARNING below — `block` is an IDLE timeout, not a total-elapsed one, so it is not a
- * reliable backstop for a slow-but-talking child; this race is what actually guarantees the FUNCTION
- * returns within the window regardless. The timer is cleared on the winning path; if it fires first the
- * timer is already done, so nothing lingers on the event loop.
+ * NEVER settles. `boundedSimpleGit`'s own `block` timeout also bounds the child in production, but is an
+ * IDLE timer, not total-elapsed (see that function's own doc) — this race is the actual backstop
+ * regardless. The timer is cleared on the winning path; if it fires first the timer is already done, so
+ * nothing lingers on the event loop.
  *
- * ⚠️ **This settles independent of the underlying git child** — on expiry it rejects and walks away; the
- * child (if still running) is left alone, still mutating whatever it was mutating. That is FINE for a
- * read-mostly or fire-and-forget call, but NOT safe for a call made while holding a lock that guards
- * shared on-disk state (e.g. `git/repo-lock.ts`'s `withCanonicalIndexLock`) — releasing such a lock here
- * lets the next holder start while this call's child is still alive and still writing. Use {@link
- * withTimeoutKillingChild} there instead (card 8e75ee20).
+ * @decision 8e75ee20 — this settles INDEPENDENT of the underlying git child: on expiry it rejects and
+ * walks away, leaving the child (if still running) alone, still mutating whatever it was mutating. Fine
+ * for a read-mostly/fire-and-forget call; NOT safe for a call made while holding a lock over shared
+ * on-disk state (e.g. `git/repo-lock.ts`'s `withCanonicalIndexLock`) — use {@link withTimeoutKillingChild}
+ * there instead. See docs/decisions/8e75ee20-confirmed-dead-kill-required-inside-a-lock.md.
  */
 export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -40,53 +38,24 @@ export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promis
 
 /**
  * Like {@link withTimeout}, but for a caller that CANNOT tolerate the underlying child outliving the
- * wrapper's settlement — concretely, a call made inside a lock that guards shared on-disk state (card
- * 8e75ee20: `createWorktree`'s `withCanonicalIndexLock` block). `withTimeout` alone is not sufficient
- * there: it rejects on a bare, independent timer and abandons `p`, so the lock releases while the git
- * child p is backed by may still be running and still mutating that shared state — exactly the race the
- * lock exists to close.
+ * wrapper's settlement — concretely, a call made inside a lock that guards shared on-disk state. Unlike
+ * {@link withTimeout}, this does not settle independently on expiry: it calls `controller.abort()` (`p`'s
+ * git instance must be constructed with that same `signal` via {@link boundedSimpleGit}'s `abortSignal`)
+ * and then waits for `p` itself to settle.
  *
- * ⭐ THE LOAD-BEARING PROPERTY, stated precisely because it's easy to "simplify" away: killing the child
- * on expiry is NOT BY ITSELF enough to make releasing the lock safe — a kill signal doesn't guarantee the
- * child is dead the instant it's sent, only that it will die soon. What actually makes this safe to await
- * from inside a lock is that this function does NOT settle independently once it has issued the kill; it
- * keeps awaiting `p` itself, and `p` only settles once the child is CONFIRMED dead (see below). A version
- * of this function that killed the child and then resolved/rejected on its own timer — the same shape as
- * {@link withTimeout} — would reintroduce the exact race this exists to close, just with a much smaller
- * window. Do not "simplify" this into a bare kill-then-settle race.
+ * @decision 8e75ee20 — the load-bearing property: `p` only settles once the child is CONFIRMED dead, so a
+ * caller awaiting this from inside a lock is safe to release it on return. Do NOT "simplify" this into a
+ * bare kill-then-settle race — that reintroduces the exact lock race this exists to close. `killGraceMs`
+ * is the bounded fallback for a child that doesn't die on signal. See
+ * docs/decisions/8e75ee20-confirmed-dead-kill-required-inside-a-lock.md.
  *
- * On expiry this calls `controller.abort()` — REQUIRES `p`'s git instance to have been constructed with
- * that same controller's `signal` passed to {@link boundedSimpleGit}'s `abortSignal` param, so the abort
- * reaches simple-git's `abortPlugin` and issues a REAL kill (`spawned.kill("SIGINT")` — forceful/
- * TerminateProcess-equivalent on Windows, since Windows has no real signals) — then, rather than settling
- * independently, WAITS FOR `p` ITSELF to settle: `p` (a `git.raw()` call) only resolves/rejects once
- * simple-git's completion-detection plugin observes the child's REAL `close`/`exit` event (verified at
- * source, `completion-detection.plugin.ts` — this runs unconditionally, kill or no kill), so a caller
- * that awaits this function's result really is only released once the child is confirmed dead, not
- * merely signaled. See [[simple-git-block-timeout-is-idle-not-elapsed]] for why the instance's own
- * `block` idle-timeout does not already guarantee this for a child that keeps producing output.
+ * @decision 1a858805 — a successful kill only guarantees the child is dead, never that its on-disk writes
+ * are undone; `createWorktree`'s own `worktree add` call site owns recovering any residue, not here. See
+ * docs/decisions/1a858805-recover-a-locked-worktree-admin-record-after-a-failed-add.md.
  *
- * `killGraceMs` (default: `ms`, i.e. a doubled worst-case ceiling) is the explicit, bounded fallback for
- * the residual case where even the kill fails to make `p` settle — a test double that ignores `abort`
- * (this file's own callers keep using bare {@link withTimeout} against those, since there's no real child
- * to kill or wait for), or, in production, a pathological child that doesn't die on signal. Past that
- * grace window this gives up and rejects anyway, accepting the same abandon-the-child risk `withTimeout`
- * always has — bounding the CONSEQUENCE of a kill that doesn't work, not pretending it can't happen.
- *
- * ⚠️ A SUCCESSFUL kill still leaves whatever the child had already written to disk — killing the process
- * stops it from doing MORE, it does not undo what it already did. Card 1a858805: `git worktree add`
- * writes `.git/worktrees/<name>/locked` (content `initializing`) at the START of the add and removes it
- * on success; a kill mid-checkout leaves that marker behind, and `git worktree prune` SKIPS locked
- * records by design, so it never self-heals. `createWorktree`'s own `worktree add` call site (git/
- * worktrees.ts) is the one caller of this function that also owns recovering that residue — see the
- * catch around its `boundedLockedRaw(["worktree", "add", ...])` call for the recovery, not here; this
- * function only guarantees the CHILD is dead (on its path-1 settlement — see below), never that its
- * on-disk side effects are undone.
- *
- * A kill's "confirmed dead" guarantee (the load-bearing property documented above) holds only for this
- * function's PATH-1 settlement (the `p.then(...)` "(git child killed)" rejection) — the `giveUpTimer`
- * fallback (PATH 2, "...giving up (hung git child?)") rejects on a bare timer with NO such confirmation.
- * A caller that needs to tell the two apart has card 963f69ab's discriminator.
+ * @decision 963f69ab — the "confirmed dead" guarantee holds only for this function's PATH-1 settlement,
+ * not its `giveUpTimer` PATH-2 fallback; a caller that needs to tell them apart needs that discriminator.
+ * See docs/decisions/963f69ab-path-1-vs-path-2-kill-settlement-discriminator.md.
  */
 export function withTimeoutKillingChild<T>(
   p: Promise<T>,
@@ -120,14 +89,16 @@ export function withTimeoutKillingChild<T>(
 
 /**
  * Env keys simple-git's `blockUnsafeOperationsPlugin` refuses when present in an explicitly-supplied
- * `.env()` object (verified by EXECUTING `@simple-git/argv-parser@1.1.1`'s real `parseEnv` against the
- * installed simple-git, one key at a time, card f7a80d76 — this is the FULL set; a prior audit's copy of
- * "eight keys" undercounted it by ten) that (1) a real host/session can plausibly carry ambiently AND
- * (2) no non-interactive git op in this codebase (piped stdio, never a real TTY — no op here ever opens
- * an editor/pager/diff tool) legitimately needs. Unconditionally safe to strip: a leftover value here
- * could only cause an unwanted throw, never a needed effect. This is the STRIP half of the design call in
- * card f7a80d76's DoD-2 — see {@link boundedSimpleGit}'s doc for the sibling PASS-THROUGH half (the
- * `GIT_CONFIG_*` / config-path family), which is deliberately NOT in this list.
+ * `.env()` object, that (1) a real host/session can plausibly carry ambiently AND (2) no non-interactive
+ * git op in this codebase (piped stdio, never a real TTY — no op here ever opens an editor/pager/diff
+ * tool) legitimately needs. Unconditionally safe to strip: a leftover value here could only cause an
+ * unwanted throw, never a needed effect. This is the STRIP half of the design call — see
+ * {@link boundedSimpleGit}'s doc for the sibling PASS-THROUGH half (the `GIT_CONFIG_*` / config-path
+ * family), which is deliberately NOT in this list.
+ *
+ * @decision f7a80d76 — this is the FULL set, verified by EXECUTING `@simple-git/argv-parser@1.1.1`'s real
+ * `parseEnv` against the installed simple-git, one key at a time — a prior audit's copy of "eight keys"
+ * undercounted it by ten. See docs/decisions/f7a80d76-git-write-child-env-categorization.md.
  *
  * Left OUT of this list, deliberately, matching `git/writer.ts`'s original `nonInteractiveEnv()` reasoning
  * (card 42544916) extended to the now-verified full set:
@@ -169,52 +140,22 @@ export function scrubGitEnv(env: Record<string, string | undefined>): Record<str
  * resets on every `data` event from the child's stdout/stderr (verified at source,
  * `node_modules/.pnpm/simple-git@3.36.0/.../timeoutPlugin`) — it is NOT a total-elapsed ceiling.** A
  * child that emits output at least once per `blockTimeoutMs` is never killed by this, however long it
- * runs in total; see [[simple-git-block-timeout-is-idle-not-elapsed]]. It still kills a genuinely HUNG
- * (no-output) child, which is the case most callers actually care about; a caller that also needs a
- * total-elapsed kill (not just idle) passes `abortSignal` (below) and bounds elapsed time itself via
- * {@link withTimeoutKillingChild}.
+ * runs in total. It still kills a genuinely HUNG (no-output) child, which is the case most callers
+ * actually care about; a caller that also needs a total-elapsed kill (not just idle) passes `abortSignal`
+ * (below) and bounds elapsed time itself via {@link withTimeoutKillingChild}.
  *
- * **`env`, when supplied, is run through {@link scrubGitEnv} HERE, unconditionally, before being applied
- * (card f7a80d76 review round 2 — this used to be the caller's job, and "the caller must remember to
- * scrub first" is EXACTLY the failure mode that produced the card's M1/M2 findings in the first place: two
- * independent copies covering only 2-of-18 and 6-of-18 of simple-git's real refusal list, because
- * remembering was load-bearing).** A caller now passes a RAW env (e.g. a `process.env` spread) and gets
- * the same safety a caller that pre-scrubbed would have; {@link scrubGitEnv} stays exported for a caller
- * that wants the scrubbed value for its own separate purpose, not because it is still required here. If
- * the result is empty (rare — a caller would have to pass ONLY {@link GIT_ENV_STRIP_KEYS} and nothing
- * else) this falls back to a plain instance with NO `.env()` call at all, exactly as `env:undefined`/`{}`
- * already did — that is a deliberate default, not an oversight, since `.env()` REPLACES the whole child
- * env (not a merge) and calling it with an empty object is never useful. This is exactly why
- * `vault/versioner.ts`'s own bounded-git site calls this with NO `env` argument at all instead of routing
- * through this scrub (see its own doc, card 54b839c5): `commitVault` needs to PRESERVE whatever the
- * caller's real ambient `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` resolves to (including a test's
- * deliberately-broken path, to exercise its own identity-fallback) — stripping those keys there silently
- * redirects identity resolution to this HOST's real `~/.gitconfig` instead, a worse failure than a loud
- * throw. That is a narrower, caller-specific need this function does not try to solve generically;
- * `versioner.ts` stays on its own no-`.env()` path (card f7a80d76 leaves it untouched) — it is the one
- * legitimate way to opt OUT of this scrub, by not passing an env at all.
+ * @decision f7a80d76 — `env`, when supplied, is scrubbed via {@link scrubGitEnv} and the config-path
+ * family (`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/`GIT_CONFIG`/`GIT_EXEC_PATH`/`PREFIX`) is explicitly
+ * allowed (`unsafe.allowUnsafeConfigPaths`), BOTH unconditionally, HERE, at the one construction
+ * chokepoint — so no caller (`git/writer.ts`, `runs/snapshot.ts`) can produce a partial copy of the
+ * decision or forget to scrub first. `vault/versioner.ts`'s `commitVault` is the one caller that opts OUT,
+ * by design, by not passing an `env` at all — see the `54b839c5` record for why. See
+ * docs/decisions/f7a80d76-git-write-child-env-categorization.md.
  *
- * **The config-path family is PASSED THROUGH, not stripped, and explicitly ALLOWED (card f7a80d76 DoD-2):**
- * whenever the scrubbed `env` is non-empty, this constructs the instance with
- * `unsafe: { allowUnsafeConfigPaths: true }` — the simple-git category covering
- * `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/`GIT_CONFIG`/`GIT_EXEC_PATH`/`PREFIX` (verified via
- * `@simple-git/argv-parser`'s own category map). The two honest options were (a) omit `.env()` entirely —
- * unavailable to a caller that genuinely needs an explicit env (both `runs/snapshot.ts` and
- * `git/writer.ts`'s `nonInteractiveEnv()` do, for `GIT_INDEX_FILE` / `GIT_TERMINAL_PROMPT` respectively) —
- * or (b) opt into `allowUnsafeConfigPaths`. (b) is chosen and applied HERE, at the one construction
- * chokepoint, exactly like the scrub above, so no caller can produce a partial copy of the decision. It is
- * a no-op (the vulnerability check never runs) for the many callers in this codebase that never pass `env`
- * at all — this only takes effect for a caller that explicitly hands simple-git an env, which is exactly
- * the population that can carry the ambient var in the first place. This does NOT widen anything else:
- * `allowUnsafeConfigPaths` covers only config-PATH redirection, not the arbitrary-command-exec categories
- * (editor/pager/diff/askpass/ssh/proxy) that {@link GIT_ENV_STRIP_KEYS} strips or that stay deliberately
- * blocked (see that constant's own doc for the full breakdown) — this function DOES widen a caller's env
- * on its behalf (the strip + the allowance), by design, precisely so a caller cannot fail to.
- *
- * `abortSignal`, when supplied, is passed through as simple-git's own `abort` option — wiring up its
- * `abortPlugin` so a later `controller.abort()` (the controller this signal came from) issues a real kill
- * of the spawned child. OMIT it (the default) for a plain instance with no abort wiring, matching every
- * existing caller byte-for-byte. See {@link withTimeoutKillingChild}'s doc for the one caller that needs it.
+ * `abortSignal`, when supplied, is passed through as simple-git's own `abort` option, wiring up its
+ * `abortPlugin` so a later `controller.abort()` issues a real kill of the spawned child — see the
+ * `8e75ee20` record for the one caller that needs it. OMIT it (the default) for a plain instance with no
+ * abort wiring, matching every existing caller byte-for-byte.
  */
 export function boundedSimpleGit(
   repoPath: string,
