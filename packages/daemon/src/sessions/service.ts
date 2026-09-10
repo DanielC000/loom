@@ -6338,87 +6338,20 @@ export class SessionService {
   }
 
   /**
-   * Predecessor-attribution suffix for a settle nudge whose `target` (the output of
-   * {@link resolveSettleNudgeTarget}) differs from `originSessionId` (the id the op was actually keyed/
-   * captured under) — i.e. a recycle routed this nudge to a successor. Code Review finding (card 05c36bf4):
-   * the "gate" kind is keyed `gate:${workerSessionId}`, per-ORIGINATING-session, not per-lineage — so a
-   * recycled worker's fresh successor can have its OWN `run_gate` in flight under its OWN key AND, on the
-   * same turn, receive a predecessor's `[loom:gate-done] op X` for a DIFFERENT op it never itself started.
-   * `pending_op_status`-style lookups on the successor's own key can't help it tell the two apart (a miss
-   * there ambiguously means "already settled" or "never existed"). Without attribution, a successor could
-   * misread the predecessor's result as its own gate passing and report done against pre-handoff code. Also
-   * disambiguates the merge side for a manager juggling several concurrent merges across a recycle. Returns
-   * `""` (nothing to attribute) when `target === originSessionId`.
-   *
-   * WHY "gate" STAYS PER-ORIGINATING-SESSION WHILE "merge" DIVERGED (card `3a2dac9c`): `peekPendingMerge`/
-   * `confirmWorkerMergeTracked` now also walk `recycledFrom` BACKWARD to find a predecessor's `merge:`
-   * entry (see `lineageResolvedPendingOp`) — a structurally identical per-session key to `gate:` above,
-   * deliberately given DIFFERENT treatment. This is not an inconsistency to "fix" by symmetry: a merge op
-   * has a MANAGER as its caller/beneficiary, so a recycled WORKER's successor has no key of its own to
-   * collide with a predecessor's — lineage-resolving the read (and, for the write, only when the
-   * predecessor's op is still RUNNING) purely ADDS visibility/dedupe with no new ambiguity. A gate op's
-   * caller and beneficiary are the SAME worker session (this method's own doc, elsewhere), so a recycled
-   * worker's fresh successor legitimately owns its OWN, DISTINCT `run_gate` self-check under its OWN key —
-   * lineage-resolving `gate:` reads would make a live, unrelated self-check indistinguishable from a
-   * predecessor's leftover one. This attribution suffix is the gate kind's OWN, already-sufficient
-   * mitigation for that ambiguity — do not "fix" this asymmetry by lineage-walking `gate:` too.
+   * @decision 05c36bf4 — predecessor-attribution suffix for a settle nudge whose target was
+   *  lineage-resolved to a recycled successor; also the gate kind's own sufficient mitigation for why
+   *  it stays per-originating-session rather than lineage-walked like merge (card 3a2dac9c)
+   *  (docs/decisions/05c36bf4-settle-nudge-target-resolved-at-settle-time-not-attach-time.md)
    */
   private settleNudgeAttribution(target: string, originSessionId: string): string {
     return target === originSessionId ? "" : ` (started by your predecessor session ${originSessionId.slice(0, 8)} before you were recycled)`;
   }
 
   /**
-   * AUTO-CANCEL-ON-NUDGE (card 9d521792, finding 23d8864a): when one of the 5 settle-nudge push sites
-   * (runWorkerGate's onSettledAfterPending, confirmWorkerMergeTracked's generic echo, rejectNotify's
-   * `[loom:merge-rejected]`, finishAlreadyMerged's `[loom:already-merged]`, and the boot-time
-   * `reconcileOrphanedGateOps` sweep) delivers its TERMINAL `[loom:gate-*]`/`[loom:merge-*]` nudge, a
-   * fallback `wake_me` a parked session scheduled to cover this exact op is now pointless — left alone
-   * it fires anyway (sometimes after the session already reported done), burning a turn re-discovering
-   * "already handled". Scoped by TIME, not by touching every pending wake: only `target`'s wakes with
-   * `createdAt >= opStartedAt` are reaped — a wake created BEFORE this op started provably predates it
-   * and is left untouched no matter how many wakes are pending. `target` is always the LINEAGE-RESOLVED
-   * recipient ({@link resolveSettleNudgeTarget}) — recycleWorker/recycleManager/recyclePlatformLead
-   * already reparent a predecessor's pending wakes onto the live successor (`db.reparentWakes`) at
-   * recycle time, so a fallback wake scheduled before a mid-op recycle already lives under `target`'s
-   * own session id, with its ORIGINAL `createdAt` preserved, by the time this runs.
-   *
-   * ACCEPTED RESIDUAL RISK (documented in `/worker` doctrine too, not just here): a session that
-   * schedules a SECOND, unrelated `wake_me` strictly after this op started but before it settles is
-   * swept too — timestamps alone can't tell "fallback for this op" apart from "unrelated wake scheduled
-   * while parked". This matches the card's own DoD wording ("any wake scheduled while that op was
-   * pending"); the doctrine's cancel-your-own-wake-on-nudge instruction is the primary defense, this is
-   * the backstop for the common single-fallback-wake case the originating evidence actually showed.
-   *
-   * `opStartedAt` IS A CAPTURED VALUE, NEVER A SETTLE-TIME LOOKUP: every call site either closes over a
-   * local captured synchronously BEFORE `attach()` ever ran (runWorkerGate, confirmWorkerMergeTracked —
-   * mirroring `attach()`'s own internal stamp: an already-running entry for `key` keeps ITS start
-   * instant, no running entry means this call is about to mint a fresh one at the same synchronous
-   * instant), threads that SAME captured value down through `confirmWorkerMerge`'s `opStartedAt` param
-   * to `rejectNotify`/`finishAlreadyMerged`, or (`reconcileOrphanedGateOps`) reads `started_at` straight
-   * off the durable row. An EARLIER version of this helper instead re-derived `opStartedAt` via
-   * `pendingOps.peek(key)` AT SETTLE TIME — plausible-looking (the retained view IS written moments
-   * earlier, in the same synchronous settle callback), but it raced the registry's retain-then-notify
-   * ordering under CPU-contended concurrent test load (merge-gate op 473b8596: this test's own
-   * "fallback wake reaped" assertions failed under `LOOM_GATE_TEST_CONCURRENCY=2` while passing standalone)
-   * — closure capture removes that race entirely instead of chasing a more reliable read.
-   *
-   * FAIL-SAFE ON UNKNOWN START TIME (kept even though closure capture makes it unreachable on every
-   * current caller — see the class doc's fail-safe reasoning below): `opStartedAt` would be undefined for
-   * a caller of `confirmWorkerMerge` OUTSIDE `PendingOpRegistry` (no start instant to capture in the first
-   * place) — the human REST merge route used to be exactly that caller, until card 361520a0's Half One
-   * routed it through `confirmWorkerMergeUntilSettled`/`confirmWorkerMergeTracked` too. NO current caller
-   * takes this branch; kept purely as a defensive guard against `confirmWorkerMerge` being invoked
-   * directly (bypassing the registry) again in the future, never a live path today. The two
-   * failure directions are NOT symmetric: cancelling nothing just leaves a stale wake to fire once more
-   * (today's bug, unchanged); cancelling broadly — or from epoch — could destroy a wake the session is
-   * genuinely relying on. So an unknown start time cancels NOTHING here — logged, never silent.
-   *
-   * VISIBILITY: every reaped row is logged INDIVIDUALLY (never just a count) — this feature destroys
-   * state a session deliberately created, and its one known imperfection is over-cancellation; if it
-   * ever reaps something it shouldn't, a per-row log line is the only way anyone can diagnose "a session
-   * mysteriously never woke up" after the fact. Deletes via the SAME `db.deleteWake` the `wake_cancel`
-   * MCP tool itself uses (WakeService.cancel) — no separate cancellation event or counter exists for a
-   * wake row, so this produces the identical observable end state as an explicit agent cancel.
+   * @decision 9d521792 — auto-cancels a parked session's fallback `wake_me` the instant its settle
+   *  nudge lands (time-scoped by `createdAt >= opStartedAt`, never a settle-time re-derive — that raced
+   *  under concurrent load); unknown start time cancels nothing, logged, never silent
+   *  (docs/decisions/9d521792-auto-cancel-fallback-wakes-on-settle-nudge.md)
    */
   private autoCancelSettleWakes(target: string, opStartedAt: string | undefined, opId: string): void {
     if (!opStartedAt) {
@@ -6434,21 +6367,10 @@ export class SessionService {
   }
 
   /**
-   * Boot-time (and generally callable) dead-owner sweep for orphaned MERGE ops (card 27ea069e — a daemon
-   * restart mid-merge used to leave `worker_merge_confirm` dedup-attaching to a zombie op forever, keyed
-   * `merge:${workerSessionId}`, because nothing ever reconciled/expired an entry whose owning manager
-   * session was gone). Evicts any RUNNING merge op whose `managerSessionId` is {@link isManagerLineageDead}
-   * — never a live/still-resuming owner's op, so the healthy case (a manager legitimately mid-merge, or
-   * one still being resumed at boot) is completely untouched. CORRECTED (card 257d534d): this used to key
-   * on the ORIGINATING session alone (`isManagerSessionDead`, no lineage walk) — see
-   * {@link isManagerLineageDead}'s own doc for the incident that fixed. A manager that RECYCLED mid-op is
-   * never touched here as long as its lineage has a live end; only a lineage with NO live session anywhere
-   * — the genuinely ownerless case this sweep exists for — is evicted. This registry is in-memory (reset
-   * on an actual process restart), so in production this sweep is usually a no-op the moment it runs — its
-   * real value is BELT-AND-SUSPENDERS for any orphaned-owner shape the per-call defensive check in
-   * {@link confirmWorkerMergeTracked} doesn't itself observe (e.g. nobody re-calls `worker_merge_confirm`
-   * for that worker before some other reconcile pass wants to know). Returns the number evicted, for a
-   * boot-log line; never throws.
+   * @decision 27ea069e — boot-time (and generally callable) dead-owner sweep for orphaned MERGE ops;
+   *  lineage-corrected (card 257d534d, see isManagerLineageDead's own doc), belt-and-suspenders since
+   *  the in-memory registry it reads resets on an actual process restart
+   *  (docs/decisions/27ea069e-dead-owner-recovery-the-one-eviction-exception.md)
    */
   reconcileDeadOwnerMergeOps(): number {
     let cleared = 0;
@@ -6469,65 +6391,21 @@ export class SessionService {
   }
 
   /**
-   * Boot-time sweep for RESTART-ORPHANED gate/merge ops (card edc1ec12, Platform-Audit finding 7afa6ea9) —
-   * the durable complement to {@link reconcileDeadOwnerMergeOps} above. That sweep reconciles the
-   * IN-MEMORY PendingOpRegistry against a dead manager while the daemon PROCESS itself stays up; it is a
-   * no-op the instant an actual process restart/crash happens, because that wipes the registry entirely
-   * with NOTHING left to reconcile. This sweep instead reads the DURABLE `pending_gate_ops` table (see its
-   * schema doc in db.ts).
-   *
-   * SELECTS ONLY `surfaced_pending=1 AND state='pending'` rows (card e3e40167 — NOT every surviving row,
-   * the way the original edc1ec12 shape did): since `pending_gate_ops` became a permanent tombstone that
-   * mints a row for EVERY op at creation (fast or slow, never just the surfaced-pending ones), "every
-   * surviving row" would now also include every FAST op that settled cleanly seconds before the crash —
-   * pushing a FALSE `[loom:gate-failed]`/`[loom:merge-failed]` for a run that actually passed. Only a row
-   * that was BOTH told "pending" to some caller AND never reached a real settle (still `state:'pending'`)
-   * is a CANDIDATE restart orphan.
-   *
-   * DURABLE-HISTORY RECOVERY FIRST (card 7d492f8b — a settled op that SETTLED before a crash is reported
-   * afterwards as orphaned, discarding its real verdict): a candidate row's `state` staying `'pending'`
-   * does NOT by itself mean the underlying run never finished — `PendingOpRegistry.attach()`'s settle
-   * callback (the thing that flips this row to `state:'settled'`) fires strictly AFTER the op's own
-   * `evt()` audit write, and a crash can land in that gap (confirmWorkerMerge still `await`s
-   * `rejectNotify` between its `build_gate` write and its `merge_rejected` write, for instance). So
-   * BEFORE assuming a candidate is a genuine orphan, this looks up its own durable audit trail
-   * ({@link Db.findGateOpEventsByOpId}) and tries to recover a real verdict from it ({@link
-   * recoverGateOpVerdict} — see its own doc for exactly what is and isn't safely recoverable: a definitive
-   * fail/cancel is always recovered; a definitive pass is recovered for "gate" only, never fabricated for
-   * "merge" since a passing gate is not proof the unlogged squash-merge step that follows it succeeded).
-   * A recovered row is durably marked `state:'settled'` with that REAL verdict (never `'orphaned-by-restart'`)
-   * and pushed the SAME `[loom:gate-done]`/`[loom:gate-failed]`/`[loom:gate-cancelled]`/`[loom:merge-failed]`/
-   * `[loom:merge-cancelled]` vocabulary a live settle would have used, prefixed with an honest "recovered
-   * after a restart" note rather than asserting a cause the daemon never verified.
-   *
-   * Only a row with NO recoverable audit trail at all falls through to the ORIGINAL behavior: push a
-   * synthetic terminal nudge to its owning session (the worker for "gate", the manager for "merge") and
-   * mark the row `orphaned-by-restart` (never deleted — this table is a permanent tombstone, see the
-   * schema doc) — the nudge text no longer asserts "daemon restart killed this run" (an unverified
-   * mechanism this daemon never actually confirmed): it states plainly that the outcome could not be
-   * recovered, and invites a re-run.
-   *
-   * Card c838aeac: this genuinely-unrecoverable branch is tagged `[loom:gate-orphaned]`/
-   * `[loom:merge-orphaned]` — a DISTINCT signal from `[loom:gate-failed]`/`[loom:merge-failed]` — because
-   * NO verdict was ever reached here; a row that reaches this branch never ran to completion in any
-   * observable way (see {@link recoverGateOpVerdict}'s doc for exactly what "no recoverable audit trail"
-   * means). The old behavior reused the FAILED tag for this branch, which reads to a worker/manager as "your
-   * gate/merge ran and failed" when the true state is "no gate/merge verdict exists at all, re-fire it" —
-   * the exact "no verdict" vs "a verdict I didn't like" confusion this fix exists to close (see
-   * `db.ts`'s `pending_gate_ops` schema comment, which already names `orphaned-by-restart` as a non-verdict
-   * STATE; this closes the gap between that state and the NOTICE TEXT describing it). The recovered-verdict
-   * branch above is UNCHANGED by this — it still emits the real `[loom:gate-done]`/`[loom:gate-failed]`/
-   * `[loom:gate-cancelled]`/`[loom:merge-failed]`/`[loom:merge-cancelled]` vocabulary whenever a genuine
-   * verdict WAS recovered, so a real failure still reads as a real failure. Best-effort per row (one push
-   * failure must never block the rest) + never throws; returns the count reconciled for a boot-log line
-   * (recovered + genuinely-orphaned rows both count). Runs AFTER the fleet-resume passes (mirrors
-   * reconcileDeadOwnerMergeOps's own placement) so a resumed owning session is live to receive the push
-   * rather than queuing into a session that isn't there yet.
-   *
-   * `beforeInstant` (ISO string, card d7f3416b): the caller's captured boot instant, threaded straight into
-   * {@link Db.listSurfacedPendingGateOps} — bounds the sweep to rows minted strictly before THIS process
-   * started, so an op minted during this very boot (still genuinely running) can never be mistaken for a
-   * restart orphan just because it happens to still be `state:'pending'` when this sweep runs.
+   * @decision edc1ec12 — boot-time sweep for RESTART-ORPHANED gate/merge ops, reading the durable
+   *  pending_gate_ops table since reconcileDeadOwnerMergeOps's in-memory registry is wiped by a restart
+   *  (docs/decisions/edc1ec12-gate-status-is-read-only-with-no-passfail-outcome.md)
+   * @decision e3e40167 — selects only surfaced_pending=1 AND state='pending' rows, never every
+   *  surviving row — the tombstone now mints one for every op regardless of speed
+   *  (docs/decisions/e3e40167-tombstone-fallback-supersedes-not-found.md)
+   * @decision 7d492f8b — recovers a real verdict from durable audit history before assuming orphan; a
+   *  settled-before-crash op must not be reported as orphaned, discarding its real outcome
+   *  (docs/decisions/7d492f8b-find-gate-op-events-is-an-unindexed-boot-only-scan.md)
+   * @decision c838aeac — a genuinely-unrecoverable row is tagged gate/merge-orphaned, never FAILED —
+   *  no verdict was ever reached, distinct from a verdict that failed
+   *  (docs/decisions/c838aeac-orphaned-tag-is-distinct-from-failed-no-verdict-reached.md)
+   * @decision d7f3416b — beforeInstant bounds the sweep to rows minted strictly before this boot, so a
+   *  genuinely-running fresh op is never mistaken for a restart orphan
+   *  (docs/decisions/d7f3416b-beforeinstant-bounds-boot-sweeps-to-pre-boot-rows.md)
    */
   reconcileOrphanedGateOps(beforeInstant: string): number {
     let cleared = 0;
@@ -6596,66 +6474,15 @@ export class SessionService {
   }
 
   /**
-   * Card 7239c712 — the STATE-ONLY complement to {@link reconcileOrphanedGateOps} above, closing a gap that
-   * card left deliberately out of scope: `reconcileOrphanedGateOps` reads {@link Db.listSurfacedPendingGateOps},
-   * whose WHERE clause requires `surfaced_pending = 1` — so it can NEVER see a row minted by a
-   * single-synchronous-span call site that never flips that flag at all. Two such sites exist today:
-   * `mergeBatch`'s own `insertPendingGateOp` call (kind:"merge", key `merge-batch:<managerSessionId>`) and
-   * `deployOwnProject`'s (kind:"deploy") — both mint immediately before their one `runExclusive` call (see
-   * each one's own insertPendingGateOp comment for why `surfacedPending:false` there is deliberate, not an
-   * oversight). `deployOwnProject` still settles back-to-back right after `runExclusive` resolves, by
-   * design. `mergeBatch` no longer does (card 81d795de): its settle is now deferred to `onSettle`, firing
-   * only once the WHOLE batch — fast-forward and per-branch finalize included, not just the gate run — has
-   * settled, so the exposure window this method exists to close is WIDER for a batch than for a deploy, not
-   * narrower; the mechanism below is unaffected either way; it reconciles ANY row still `pending` at boot,
-   * regardless of how wide that row's own mint-to-settle span is. If the daemon dies anywhere in that span,
-   * the row is stranded `state:'pending'` forever: `gate_status(opId)`
-   * reports `pending` with no verdict, indistinguishable from "still running" when nothing is, and no
-   * existing sweep ever reconciles it.
-   *
-   * DELIBERATELY PUSHES NO NUDGE, unlike `reconcileOrphanedGateOps` — this is the load-bearing difference,
-   * not an oversight. Every row this method touches has `surfaced_pending = 0`, meaning NO caller was ever
-   * actually told "pending" for it (a caller only learns that via `onSurfacedPending`, which these mint
-   * sites never invoke — see `Db.listUnsurfacedPendingGateOps`'s own doc). Surfacing one now would
-   * fabricate a notification for a state nobody ever observed in the first place, and — since a
-   * `mergeBatch` row is `kind:"merge"` — would route through `reconcileOrphanedGateOps`'s own `isMerge`
-   * branch, whose "re-run `worker_merge_confirm`" advice is wrong for a batch (no single worker/branch to
-   * re-confirm; see that method's own doc). The only goal here is that `gate_status` stops claiming
-   * `pending` forever for a row nothing will ever settle — nobody needs to be told that happened.
-   *
-   * NO DURABLE-HISTORY RECOVERY ATTEMPT (unlike `reconcileOrphanedGateOps`'s own recovery branch): that
-   * recovery exists to make a PUSHED NUDGE tell the truth (a real verdict instead of a false "orphaned").
-   * Since this method never pushes a nudge at all, recovering the real verdict here would only change what
-   * a LATER `gate_status(opId)` read reports — a real improvement, but not needed to close the gap this
-   * method exists for, and `recoverGateOpVerdict` doesn't accept `kind:"deploy"` today besides. Left as a
-   * documented, deliberate simplification rather than a half-built recovery path.
-   *
-   * SCOPE (card 7239c712 DoD-3): covers ALL THREE kinds, including "deploy" — deliberately WIDER than
-   * `reconcileOrphanedGateOps`'s own `if (row.kind === "deploy") continue`. That exclusion exists there only
-   * because a "deploy" row can never be `surfaced_pending=1` in the first place (so it's a defensive no-op,
-   * not a real filter) — it says nothing about whether deploy's OWN unsurfaced-tombstone exposure should be
-   * swept. `deployOwnProject` mints AND settles back-to-back in one synchronous span, by design (see its own
-   * insertPendingGateOp comment) — a daemon death anywhere inside that span strands its tombstone `pending`
-   * forever with nothing to reconcile it. Code Review, card 81d795de: `mergeBatch` no longer shares this
-   * exact shape (its own settle is deferred — see this file's own `batchGateVerdict` doc), but it is exposed
-   * to the IDENTICAL failure mode for the SAME underlying reason — `surfaced_pending` is never flipped for
-   * either mint site — and this method's own `Db.listUnsurfacedPendingGateOps` scan (`surfaced_pending = 0`)
-   * covers both regardless of how wide either one's own mint-to-settle span is. Since this method
-   * pushes no nudge regardless of kind, none of `reconcileOrphanedGateOps`'s "wrong re-run advice" reasoning
-   * for excluding deploy applies here — there is no advice being given at all. Chosen deliberately, not by
-   * omission: narrowing this to "gate"/"merge" only would leave deploy's identical exposure unclosed for no
-   * reason tied to this method's own design.
-   *
-   * Best-effort per row (one write failure must never abort the rest) + never throws, mirroring
-   * `reconcileOrphanedGateOps`. Returns the count reconciled for the same boot-log line. Runs alongside that
-   * method at boot (see index.ts) — order between the two does not matter, since they operate on disjoint
-   * row sets (`surfaced_pending=1` vs `=0`).
-   *
-   * `beforeInstant` (ISO string, card d7f3416b): the caller's captured boot instant, threaded straight into
-   * {@link Db.listUnsurfacedPendingGateOps} — bounds the sweep to rows minted strictly before THIS process
-   * started. Without this, `surfaced_pending=0 AND state='pending'` is the state EVERY op is minted in (the
-   * flag only flips ~12s after mint, if ever), so an ordinary op minted moments after boot would be swept
-   * (and marked `orphaned-by-restart`) while it is still genuinely running.
+   * @decision 7239c712 — the STATE-ONLY complement to reconcileOrphanedGateOps, covering rows minted by
+   *  a single-synchronous-span site (mergeBatch, deployOwnProject) that never flips surfaced_pending;
+   *  deliberately pushes no nudge, attempts no durable-history recovery, and covers all three op kinds
+   *  (docs/decisions/7239c712-tombstone-pending-covers-the-pre-registration-and-boot-reconcile-window.md)
+   * @decision 81d795de — mergeBatch's settle is deferred to whole-batch completion, so its
+   *  pending-exposure window is WIDER than deployOwnProject's back-to-back settle, not narrower
+   *  (docs/decisions/81d795de-mergebatch-settle-deferred-to-whole-batch-completion.md)
+   * @decision d7f3416b — beforeInstant bounds this sweep to rows minted strictly before this boot too
+   *  (docs/decisions/d7f3416b-beforeinstant-bounds-boot-sweeps-to-pre-boot-rows.md)
    */
   reconcileUnsurfacedPendingGateOps(beforeInstant: string): number {
     let cleared = 0;
@@ -6692,25 +6519,10 @@ export class SessionService {
   }
 
   /**
-   * Drain this manager's cap-queue: while a concurrency slot is free and an entry is queued, pop the
-   * OLDEST one (FIFO) and replay it through the SAME {@link spawnWorker} a manual worker_spawn call uses —
-   * so the atomic per-taskId claim and the atomic cap-admit (both proven race-free there) apply to an
-   * auto-fired spawn exactly as they do to a manual one; nothing here re-implements either guarantee, and
-   * a drain can never race a concurrent fresh worker_spawn past the cap because they share that one
-   * admission chokepoint. Called from every point a worker's slot actually frees: the pty `onExit` hook
-   * (index.ts — the default path: manual worker_stop, confirmWorkerMerge's own hard-stop of the merged
-   * worker, a crash), the no-commit auto-retire block, {@link retireSiblingSessionsForTask}, and the end of
-   * `finalizeMerge`. Fire-and-forget by every caller (never awaited) — a real spawn (worktree + pty) is as
-   * slow as a manual one, and none of those retirement paths should block on it. Never throws.
-   *
-   * SUPPRESSED while {@link recycleDrainSuppressed} holds this manager (see its own doc): recycleWorker is
-   * the one retirement path that re-claims its own just-freed slot directly, bypassing spawnWorker's
-   * cap-admit — an auto-drain racing into that window could push the manager over cap.
-   *
-   * Bounded by construction: each loop iteration either returns (queue empty, cap genuinely full again, or
-   * the manager is paused) or permanently disposes of exactly one popped entry (a successful spawn, a
-   * transient-condition requeue-and-stop, or a dropped+notified failure) — so it can't wedge or loop
-   * forever on a broken entry, and a repeatedly-failing entry costs at most one attempt per drain call.
+   * @decision sha:ea61b16c — drains this manager's cap-queue by replaying each popped entry through the
+   *  same spawnWorker a manual worker_spawn uses (never re-implementing its atomic guarantees),
+   *  fire-and-forget, suppressed during recycleWorker's own slot-reclaim, bounded by construction
+   *  (docs/decisions/ea61b16c-cap-queue-drain-reuses-spawnworker-fire-and-forget.md)
    */
   async maybeDrainCapQueue(managerSessionId: string): Promise<void> {
     if ((this.recycleDrainSuppressed.get(managerSessionId) ?? 0) > 0) return;
@@ -6893,34 +6705,10 @@ export class SessionService {
   }
 
   /**
-   * REDIRECT one of a manager's workers (parent-scoped) — the "land it NOW" steer, strictly more forceful
-   * than messageWorker (additive, non-interrupting): END the worker's CURRENT turn and REPLACE its pending
-   * direction with this single authoritative instruction, delivered as the next turn. NO new trust surface —
-   * steering your own worker is strictly LESS than the stopWorker process-kill the manager already holds.
-   *
-   * ORDER IS LOAD-BEARING (so the redirect deterministically lands as the next turn):
-   *   (a) FLUSH the worker's pending FIFO and SUPERSEDE each flushed durable record (fire its onDeliver with
-   *       reason "superseded" → a session_message_delivered marker), so the worker_report done-guard and the
-   *       boot-recovery scan never later re-drive the direction we're replacing. Plain (non-durable) held
-   *       nudges carry no callback and are simply dropped — the redirect supersedes them too.
-   *   (b) ENQUEUE the authoritative redirect (framed `[loom:from-manager:redirect]`) via the SAME durable
-   *       channel as messageWorker: a busy worker HOLDS it (delivered:false, persisted) — it is now the only
-   *       entry in the freshly-flushed queue; an idle worker submits it immediately (delivered:true).
-   *   (c) ONLY IF it was HELD (delivered:false ⇒ the worker was busy) do we interrupt: pty.interruptForRedirect
-   *       writes a single Esc to cancel the in-flight turn, then after a bounded settle clears the (stale) busy
-   *       and drains — delivering the redirect we enqueued in (b). The enqueue is SYNCHRONOUS and precedes the
-   *       interrupt's settle timer, so the message is always in the queue before the settle-drain fires (if it
-   *       were idle there's no turn to cancel, so we skip the Esc and the redirect already went out as a turn).
-   *
-   * Returns the enqueue status ({delivered, position?, ...}) — see {@link deliverRedirect} for why a HELD
-   * redirect's additive fields read differently from messageWorker's. Throws "not your worker" for a
-   * non-child (mirrors messageWorker/stopWorker's parent gate).
-   *
-   * `advisory` (card aa4e24ff, defect 2's remedy half — no detection question here, it just counts the
-   * queue `deliverRedirect` already flushed): set whenever this redirect discarded ≥1 queued message,
-   * naming the exact count and reminding the manager to re-send them — the same caveat
-   * `messageWorker`'s own advisory (§TRIGGER DECISION) carries, so a manager who hits either one never
-   * has to go discover the other half of the trade on its own.
+   * @decision aa4e24ff — worker_redirect's enqueue-then-interrupt ordering is load-bearing (flush +
+   *  supersede, THEN enqueue, THEN interrupt only if held) so it deterministically lands as the next
+   *  turn; its own discard-count advisory is defect 2's remedy half of this same card
+   *  (docs/decisions/aa4e24ff-redirect-advisory-triggers-on-observable-hold-time-not-message-text.md)
    */
   redirectWorker(
     managerSessionId: string, workerSessionId: string, text: string,
@@ -6964,43 +6752,10 @@ export class SessionService {
   }
 
   /**
-   * ContextWatcher's daemon-internal emergency-recycle interrupt (card 9f279c7b, Trigger A — see that
-   * file's class doc for the full two-trigger design). Routed through the SAME {@link deliverRedirect}
-   * core `redirectWorker`/`redirectSessionAsCompanion` use (durable enqueue, Esc-interrupt ONLY when
-   * held) — deliberately NOT a second interrupt implementation; see `deliverRedirect`'s own doc for why
-   * two that could disagree is exactly the failure card `f05e5a06` is about. Three things this wrapper
-   * does differently from its two siblings:
-   *
-   *  - `supersedeQueue: false` — the ONE caller of `deliverRedirect` that skips step (a)'s flush. Its two
-   *    siblings' targets are a WORKER or a companion-scoped session whose queue holds the CALLER's own
-   *    prior direction — content this fresh redirect legitimately replaces. A MANAGER's queue instead
-   *    holds INBOUND content from OTHER parties (a worker's `worker_report`, a `peer_message`, a platform
-   *    `session_message`) that an unrelated emergency-recycle interrupt has no business discarding —
-   *    DoD-4's "purging the queue wholesale would silently drop work the successor genuinely needs"
-   *    concern applies just as much at THIS fire step as it does at recycle time (caught by this card's
-   *    own DoD-4 negative-proof test reusing this exact method — see
-   *    `recycle-purges-stale-context-nudge.mjs`). The redirect still lands (appended, not prepended) and
-   *    the Esc-interrupt still fires via the SAME `pty.interruptForRedirect` primitive on the held path —
-   *    it just never touches whatever else was already queued.
-   *  - MERGE-DANGER GUARD: refuses (`fired:false, reason:"merge-danger-window"`) while the target's OWN
-   *    project repo sits inside an active merge-danger window — the SAME `listActiveMergeDangerWindows`
-   *    instrument `daemon_restart`'s own shutdown wait already reads (see its call above), filtered to
-   *    just this ONE repo rather than daemon-wide (an unrelated project's in-flight squash has nothing to
-   *    do with this manager, so it must not hold this interrupt hostage). An Esc mid-squash can leave a
-   *    canonical repo with staged, uncommitted residue that the NEXT merge refuses on until a human
-   *    resolves it by hand (card `f05e5a06`) — never worth risking for a nudge. Deliberately does NOT
-   *    wait/poll here (unlike `waitForMergeDangerWindowsToClear`'s bounded wait for a full daemon
-   *    shutdown): `ContextWatcher.tick()` re-runs every `contextWatchMs` regardless, and a real window is
-   *    typically ~1.5s of local git calls (see merge-danger-window.ts's own sizing doc) — a refusal here
-   *    just means "the very next tick tries again", which the caller logs plainly each time so a window
-   *    that somehow never clears stays visible in the daemon log instead of being silently retried forever.
-   *  - BESPOKE TAG: frames the message under {@link CONTEXT_EMERGENCY_REDIRECT_TAG}, not
-   *    `frameFromManager`'s `[loom:from-manager]` shape — the target here IS the manager, there is no
-   *    "from-manager" sender to name. `carryPendingToSuccessor`'s DoD-4 purge (below) matches on this
-   *    exact tag (and the ordinary nudge's `CONTEXT_RECYCLE_NUDGE_PREFIX`) to drop a still-queued copy at
-   *    recycle time, narrowly — never a wholesale queue wipe.
-   *
-   * Throws ONLY if the target session is unknown (mirrors redirectSessionAsCompanion).
+   * @decision 9f279c7b — ContextWatcher's emergency-recycle interrupt (Trigger A) reuses
+   *  deliverRedirect but skips the queue flush (a manager's queue holds OTHER parties' inbound
+   *  content), refuses inside an active merge-danger window, and frames under its own bespoke tag
+   *  (docs/decisions/9f279c7b-contextwatcher-emergency-recycle-interrupt-trigger-a.md)
    */
   redirectManagerForEmergencyRecycle(sessionId: string, text: string): EmergencyRedirectOutcome {
     const target = this.db.getSession(sessionId);

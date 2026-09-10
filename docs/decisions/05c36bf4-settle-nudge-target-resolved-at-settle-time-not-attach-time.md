@@ -39,3 +39,33 @@ and by `tasks_get`'s git-derived `merged` field either way.
 Inline comment in `packages/daemon/src/sessions/service.ts`, above `resolveSettleNudgeTarget`: lines
 6333-6356, as of main `1cbc0d74`. Relocated by card `61632c05` (tranche 15); no wording changed, wrapped
 source lines joined into a flowing paragraph and the `*` comment markers stripped.
+
+## `settleNudgeAttribution`: the gate nudge's own mitigation for staying per-session, not lineage-walked
+
+Code Review finding (card `05c36bf4`): the "gate" kind is keyed `gate:${workerSessionId}`,
+per-ORIGINATING-session — structurally identical to `merge:${workerSessionId}`
+(`docs/decisions/3a2dac9c-recycle-never-aliases-key-walk-the-ancestor-chain.md`) yet deliberately NEVER
+lineage-walked (card `3a2dac9c`): a merge op has a MANAGER as its caller/beneficiary, so lineage-resolving
+purely adds visibility with no new ambiguity, but a gate op's caller and beneficiary are the SAME worker
+session — its recycled successor legitimately owns its OWN, DISTINCT `run_gate` self-check under its OWN
+key, and lineage-walking `gate:` reads would make that indistinguishable from a predecessor's leftover op.
+
+The residual ambiguity this leaves: a recycled worker's successor can have its OWN `run_gate` in flight
+under its OWN key AND, on the same turn, receive a predecessor's `[loom:gate-done] op X` for a DIFFERENT
+op it never started — a plain lookup on the successor's own key can't disambiguate ("already settled" vs
+"never existed"). `settleNudgeAttribution` builds a suffix naming the predecessor whenever
+`resolveSettleNudgeTarget`'s resolved `target` differs from `originSessionId` — the ONE mitigation this
+asymmetry needs, so gate's key never has to become lineage-aware. Returns `""` when unchanged.
+
+### Do not (2)
+
+- Do not "fix" the gate/merge asymmetry by lineage-walking `gate:` too — a successor legitimately owns
+  its own distinct self-check under its own key; the attribution suffix is the correct, sufficient fix.
+- Do not assume a `[loom:gate-done]` nudge always describes the recipient's OWN currently-running
+  `run_gate` — check the attribution suffix; it may name a predecessor's differently-keyed result.
+
+### Source (2)
+
+Inline comment in `packages/daemon/src/sessions/service.ts`, above `settleNudgeAttribution`: lines
+6340-6364, as of main `055e96ce`. Relocated by card `c7ca6c08` (tranche 16); no wording changed,
+wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
