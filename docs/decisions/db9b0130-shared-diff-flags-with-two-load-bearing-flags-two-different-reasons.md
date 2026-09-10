@@ -1,6 +1,10 @@
 # db9b0130 — `changedPathsBetween`'s shared diff flags, and why `--no-renames` is load-bearing twice over
 
-## Narrative
+Card id `db9b0130` resolves to one file (`resolveRecord()`); it is cited by two UNRELATED decisions, held here as Decision A / Decision B rather than losing one to a shadowed second file.
+
+## Decision A — `changedPathsBetween` / `INERT_MERGE_PATH_PREFIXES` (`git/worktrees.ts`)
+
+### Narrative
 
 `changedPathsBetween` is the raw changed-path list between `base` and `ref` — the single git-diff invocation `changedPathSetDigest` and `isInertMergeDiff` BOTH build on (extracted after the two calls drifted into byte-identical copies of the same `git diff` args — two copies of a load-bearing flag is precisely the mechanism that makes losing one dangerous).
 
@@ -12,7 +16,7 @@ Each raw line has only its trailing `\r` stripped (never a generic `.trim()`, wh
 
 A THIRD caller depends on the same two flags without being built on this shared helper: `computeEmitCompareGate`'s own `git diff --name-status` invocation (needs per-path STATUS) sets both identically, inline-only — not duplicated here as a third copy of the flag list; see that call site's own comment for why it couldn't reuse this function directly.
 
-## `INERT_MERGE_PATH_PREFIXES` — the measured-absence allowlist, and why it stays narrow
+### `INERT_MERGE_PATH_PREFIXES` — the measured-absence allowlist, and why it stays narrow
 
 `INERT_MERGE_PATH_PREFIXES` is the list of path prefixes PROVEN to hold nothing compiled, tested, or read at runtime by the Loom daemon test suite SPECIFICALLY. Verified 2026-08-05: `grep -rnE "(readFileSync|existsSync|readdirSync|createReadStream)\([^)]*docs" packages/daemon/test/*.mjs` ⇒ zero hits (the identical pattern against `assets` ⇒ non-zero, so the zero is a real absence, not a broken pattern), and the one `docs/` path a test file's own comment cites (`test-daemon-gate-timing.mjs`) is a provenance citation, never a real read. Deliberately narrow and NOT extension-based: `assets/**` is markdown too, and IS heavily tested (10 test files reference it) — an extension check would wrongly classify a `SKILL.md` change as inert. Do not widen this list without re-running that same grep first.
 
@@ -20,7 +24,7 @@ WHY `assets/skills/**` IS DELIBERATELY EXCLUDED (card `9fcc29bb`): markdown unde
 
 THIS MEASUREMENT IS LOOM-ONLY, BUT `isInertMergeDiff` RUNS FOR EVERY PROJECT THIS DAEMON SERVES — so it does not trust this list alone for another project: it re-verifies PER-REPO, at gate time, via `repoTreeReferencesInertPrefix` (this list stays a cheap first-pass allowlist). See [[1c0d4aa4-per-repo-inert-prefix-rescan-is-fail-closed-on-exit-code-not-pattern]] for that re-verification's own fail-closed contract and pattern-coverage gaps, and [[0910531e-js-ts-applicability-gate-and-git-grep-exit-code-mechanics]] for why the scan itself is gated on the repo being JS/TS first (a "no match" is otherwise a tautology, not evidence, for a non-JS/TS project).
 
-## Do not
+### Do not
 
 - Do not drop `--no-renames` — proven on git 2.47.0 that it makes `isInertMergeDiff` misclassify a renamed source file relocated into an allowlisted prefix as inert, un-gating real source changes; `merge-gate-inert-diff.mjs` scenario (F) pins this.
 - Do not drop `-c core.quotePath=false` — a non-ASCII path would be emitted octal-escaped, silently missing the `startsWith` allowlist check.
@@ -30,10 +34,22 @@ THIS MEASUREMENT IS LOOM-ONLY, BUT `isInertMergeDiff` RUNS FOR EVERY PROJECT THI
 - Do not add `assets/skills/**` to `INERT_MERGE_PATH_PREFIXES` — real tests read it as a comparison oracle; `merge-gate-inert-diff.mjs` scenario (B) enforces the exclusion.
 - Do not trust `isInertMergeDiff`'s allowlist-only result for a non-Loom project without the per-repo re-check (see the two linked records above).
 
-## Consequences
+### Consequences
 
 Two (now three, counting the `--name-status` caller) diff invocations that must agree on flags now share one array (or are explicitly documented as a deliberate exception), closing the exact "two copies drift out of parity" mechanism that made losing a load-bearing flag possible in the first place. `INERT_MERGE_PATH_PREFIXES` stays a narrow, measured allowlist re-verified per-repo at gate time, rather than a trusted-everywhere shortcut.
 
-## Source
+### Source
 
 Inline comments in `packages/daemon/src/git/worktrees.ts`: `changedPathsBetween`'s own doc comment and `INERT_MERGE_PATH_PREFIXES`'s own doc comment, as of this worktree's HEAD before this extraction. Wrapped source lines joined into a flowing paragraph, `*` comment markers stripped, no wording changed.
+
+## Decision B — `gateOutcomeFromDetail` skip-before-pass ordering (`db.ts`)
+
+`gateOutcomeFromDetail` checks `skipped` BEFORE `passed`: an inert-diff skip stamps `passed:true` too (so `gateResult.passed` still drives the merge proceeding), but must never be reported as a `"pass"` outcome (see [[3a6f04cc-gateoutcome-cancelled-and-skipped-are-not-verdicts]]) — checking `skipped` first means that stamp can never shadow this one.
+
+### Do not
+
+- Do not reorder `gateOutcomeFromDetail` to check `passed` before `skipped` — a skip's `passed:true` stamp would then silently shadow the `"skipped"` outcome.
+
+### Source
+
+Inline comment in `packages/daemon/src/db.ts` (`gateOutcomeFromDetail`'s doc comment), as of this tranche's HEAD (card `d2c20218`, tranche 3 on `db.ts`) — a card id shared by coincidence with Decision A, not the same decision.

@@ -3139,18 +3139,10 @@ export class Db {
   }
   /**
    * Delete a binding by session id, or (when `channel` is given) only that session's binding on that ONE
-   * channel — the other channels' bindings are untouched. Idempotent either way (a missing id/channel
-   * matches nothing, a safe no-op). CASCADE-clears that scope's allowlisted senders AND unconsumed pairing
-   * codes in the SAME transaction (PL + Lead ruling: least-privilege on an auth boundary — a re-bind of
-   * the same (session, channel) must start with an EMPTY allowlist, never inherit a prior grant, and a
-   * still-outstanding pairing code from before the unbind must not be able to re-populate it). Mirrors the
-   * full-teardown `deleteCompanionConfig`'s cascade shape. companion_pairing_attempts is deliberately LEFT
-   * (see deleteCompanionConfig — a lockout must survive unbind/re-bind churn). The delete-ALL (channel
-   * omitted) branch is a FULL unbind — it ALSO cascade-clears companion_capability_grants (Companion
-   * Capability & Permission-Lever Framework §1): a session with no bindings left on any channel can no
-   * longer be reached, so its levers go with it, and a recycled session id never inherits a stale grant.
-   * The PER-CHANNEL branch does NOT touch grants — grants are session-scoped, not channel-scoped, and the
-   * companion is still reachable (and still holds its levers) on its other channel(s).
+   * channel — the other channels' bindings are untouched. Idempotent either way. CASCADE-clears that
+   * scope's allowlisted senders AND unconsumed pairing codes in the SAME transaction: a re-bind of the
+   * same (session, channel) must start with an EMPTY allowlist, never inherit a prior grant. See
+   * (@decision sha:e6042f2f) for the full-vs-per-channel grant-cascade distinction.
    */
   deleteCompanionBinding(sessionId: string, channel?: string): void {
     if (channel !== undefined) {
@@ -5475,21 +5467,10 @@ export class Db {
       .get() as { c: number }).c;
   }
   /**
-   * A BOUNDED, newest-first page of schedule-fire history (kinds `schedule_fired` /
-   * `schedule_fire_deferred` / `schedule_fire_failed`) plus the TOTAL count for the current filter —
-   * backing the Schedules page's lazy run-history section (`GET /api/schedules/history`). God-eye across
-   * ALL schedules (matching the god-eye schedules table); an optional `scheduleId` scopes it to one.
-   *
-   * Enrichment (schedule name + the target agent's "Project / Agent" label + the spawned session id) is a
-   * SINGLE query with LEFT JOINs (events → schedules → agents → projects) — NOT a per-row lookup: this DB
-   * is synchronous (better-sqlite3), so a 100-row page resolved with one query-per-row would be 100
-   * blocking round-trips that stall every other concurrent handler (the N+1 trap). The JOINs are LEFT so a
-   * fire whose schedule was later deleted still returns (its enrichment columns come back NULL — the
-   * durable event outlives the schedule row). `cron` falls back to the value carried in the event `detail`
-   * when the schedule row is gone. `limit` is clamped into [1, MAX_SCHEDULE_HISTORY_PAGE] and the EFFECTIVE
-   * value is returned (same "read it back so Load-more can't dead-end at the clamp" contract as the
-   * archived-sessions pages). Ordered by `ts DESC, seq DESC` — `seq` is the never-reused monotonic tiebreak
-   * for same-timestamp fires.
+   * A BOUNDED, newest-first page of schedule-fire history plus the TOTAL count for the current filter —
+   * backing the Schedules page's lazy run-history section. Enrichment is a SINGLE query with LEFT JOINs,
+   * never a per-row lookup — this DB is synchronous, so a 100-row page resolved one-query-per-row would be
+   * 100 blocking round-trips stalling every other concurrent handler (the N+1 trap). (@decision sha:51970e9a)
    */
   listScheduleHistory(opts: { scheduleId?: string; kind?: ScheduleHistoryEntry["kind"]; limit: number; offset?: number }): ScheduleHistoryPage {
     const lim = Math.max(1, Math.min(opts.limit, MAX_SCHEDULE_HISTORY_PAGE));
@@ -6452,21 +6433,12 @@ export class Db {
   listSurfacedPendingGateOps(beforeInstant: string): PendingGateOp[] {
     return (this.db.prepare("SELECT * FROM pending_gate_ops WHERE surfaced_pending = 1 AND state = 'pending' AND started_at < ?").all(beforeInstant) as PendingGateOpRow[]).map(toPendingGateOp);
   }
-  /** Boot-time read of the COMPLEMENT set (card 7239c712): rows still `state:'pending'` at boot that were
-   *  NEVER told "pending" to any caller (`surfaced_pending = 0`) — either a "merge"/"deploy" op minted by a
-   *  single-synchronous-span call site that never flips `surfaced_pending` at all (mergeBatch's own
-   *  `insertPendingGateOp` call, and `deployOwnProject`'s — see their own comments for why that's deliberate
-   *  in the no-crash case), or the much narrower window of a "gate"/"merge" op that crashed between its own
-   *  mint and either its `onSurfacedPending` flip or its `onSettle` callback. `SessionService.
-   *  reconcileUnsurfacedPendingGateOps` is this table's sole reader — see its own doc for why these rows get
-   *  no synthetic nudge (nobody was ever told "pending" in the first place). Excludes legacy pre-e3e40167
-   *  rows by construction: `migratePendingGateOps` backfills those to `surfaced_pending = 1` specifically so
-   *  they are NOT mistaken for this "never surfaced" set (see the schema doc).
-   *  `beforeInstant` (ISO string, card d7f3416b): bounds the sweep to rows minted strictly before it, for the
-   *  same reason as {@link listSurfacedPendingGateOps} above — `surfaced_pending=0 AND state='pending'` is
-   *  the state EVERY op is minted in, so without this bound the sweep would also catch an op minted moments
-   *  after boot, during its own first ~12s (or its whole life, for a mergeBatch/deploy row) before this
-   *  process ever got a chance to run it. */
+  /** Boot-time read of the COMPLEMENT set: rows never told "pending" (a single-synchronous-span mint that
+   *  never flips `surfaced_pending`, or a crash between mint and flip) — no synthetic nudge is owed for
+   *  these. (@decision 7239c712) `beforeInstant` (ISO string, card d7f3416b): bounds the sweep to rows
+   *  minted strictly before it, for the same reason as {@link listSurfacedPendingGateOps} above — without
+   *  this bound the sweep would also catch an op minted moments after boot, before this process ever got a
+   *  chance to run it. */
   listUnsurfacedPendingGateOps(beforeInstant: string): PendingGateOp[] {
     return (this.db.prepare("SELECT * FROM pending_gate_ops WHERE surfaced_pending = 0 AND state = 'pending' AND started_at < ?").all(beforeInstant) as PendingGateOpRow[]).map(toPendingGateOp);
   }
@@ -6804,23 +6776,12 @@ export class Db {
   }
   /**
    * Cancel a still-'pending' request — the terminal, retained-in-history counterpart to answerQuestion/
-   * answerCredentialQuestion, reached by TWO entry points that both funnel through this ONE write (never a
-   * forked state model): the human-only REST dismiss route (POST /api/questions/:id/dismiss) and the
-   * agent-lineage-scoped `question_cancel` MCP tool (both surfaces — see mcp/questionTool.ts's
-   * cancelQuestionForAgent, which layers the ownership check in front of this). Mirrors
-   * dismissPresetPromptSuggestion's shape exactly: returns undefined when no question has this id (caller
-   * 404s); THROWS when it isn't currently 'pending' (caller 409s) — the thrown message names the row's
-   * ACTUAL current state, so a race where the question was answered between the caller's read and this
-   * write surfaces as "question is already answered" rather than a generic rejection, telling the caller an
-   * answer is now available instead of silently discarding it. The UPDATE's own `AND state = 'pending'`
-   * guard is what actually protects the DATA (never relies solely on the pre-check above being
-   * uncontended) — and its outcome is OBSERVED, not assumed: `run()`'s `changes` is checked, so a 0-row
-   * UPDATE (the guard tripped) throws the SAME "already <state>" error the pre-check does, rather than
-   * silently returning the row in whatever state it now actually has. Both branches read as this method
-   * either cancels the row or throws — never a truthy return for a row that's secretly something else.
-   * Never hard-deletes: a cancelled row keeps every prior field and gains cancelled_reason/cancelled_by/
-   * cancelled_at, retained exactly like an answered/consumed row (see listOpenQuestions' includeConsumed
-   * branch, which folds 'cancelled' in alongside 'consumed').
+   * answerCredentialQuestion (@decision sha:becc7581). The UPDATE's own `AND state = 'pending'` guard is
+   * what actually protects the DATA (never relies solely on the pre-check above being uncontended) — and
+   * its outcome is OBSERVED, not assumed: `run()`'s `changes` is checked, so a 0-row UPDATE (the guard
+   * tripped) throws the SAME "already <state>" error the pre-check does, rather than silently returning
+   * the row in whatever state it now actually has. Never hard-deletes: a cancelled row keeps every prior
+   * field and gains cancelled_reason/cancelled_by/cancelled_at.
    */
   cancelQuestion(id: string, patch: { reason: string | null; cancelledBy: "agent" | "human" }): Question | undefined {
     const existing = this.getQuestion(id);
@@ -7000,23 +6961,9 @@ export class Db {
   }
   /**
    * Every request (any state), newest-first — the backing read for the Platform Auditor's cross-project
-   * `requests_list` (card 59489267) AND the manager's own project-scoped `requests_list` (card 988bb585
-   * follow-up): the audit-scope sibling of `listQuestionsForTask` (one-task-scoped). Deliberately
-   * NON-CONSUMING (never touches `state`/`consumed_at`), same as `listQuestionsForTask`. Filters are
+   * `requests_list` AND the manager's own project-scoped `requests_list` (@decision 59489267). Filters are
    * optional/AND'd; omit all (no `projectId`) for the whole platform — the Auditor's use; the manager
    * surface always passes its own `projectId` so it can never read another project's requests.
-   * `excludeConsumed` (default off, so the Auditor's "no filters returns the whole platform" behavior is
-   * unchanged) drops `state:'consumed'` AND `state:'cancelled'` rows UNLESS `state` itself is explicitly
-   * set — an explicit `state:'consumed'`/`'cancelled'` always wins, mirroring `listOpenQuestions`'s
-   * `includeConsumed` toggle (which folds both terminal states in together too). `agentId` is
-   * NOT a column on `questions` itself (only the asking session carries it), so this LEFT JOINs `sessions`
-   * to surface it — a hard-deleted asking session reads `agentId: null` rather than dropping the row.
-   * `agentId` is ALSO an optional filter (task f724d65a), matched against that same joined
-   * `sessions.agent_id` — the identical AGENT-LINEAGE ownership definition `pullAnsweredQuestionsForAgent`
-   * uses (not one exact `session_id`), so `requests_list`'s `mine` scoping stays consistent with what
-   * `question_pull` will later find/consume for that same lineage.
-   * Returns every matching row unpaginated (mirrors list_sessions: the MCP layer applies the default cap /
-   * explicit limit+offset, not this read).
    */
   listQuestionsForAudit(filters: {
     projectId?: string; state?: QuestionState; type?: QuestionType; since?: string; excludeConsumed?: boolean; agentId?: string;
@@ -7712,37 +7659,13 @@ function gateTypeForKind(kind: string): GateType {
   return "merge"; // build_gate | build_gate_retry
 }
 
-/** Derive the settled outcome from a gate event's detail. Card 3a6f04cc: `detail.cancelled === true` is
- *  checked FIRST and returns the distinct `"cancelled"` outcome — a withdrawn run (`gate_cancel`, queued
- *  or running) reached no verdict at all and must never fall through to `"reject"`. A cancelled MERGE gate
- *  ALSO emits a separate `merge_cancelled` event kind that `GATE_HISTORY_KINDS` excludes entirely — that
- *  kind exists for OTHER consumers (companion attention-push, crash-orphaned-workers, EventTriggers; see
- *  its own emit sites) and never reaches this function. CORRECTED (card 318ac7b2 — an earlier version of
- *  this doc claimed a cancelled MERGE gate NEVER reaches this function with `cancelled:true`, i.e. that a
- *  cancelled WORKER self-check was the ONLY shape that could; that was true until this card): the single-
- *  file retry's own cancel-while-queued path (sessions/service.ts) now ADDITIONALLY emits a `build_gate`
- *  row stamped `cancelled:true` whenever that retry's admission is withdrawn AFTER attempt 1 already ran a
- *  real, genuinely-failed full suite — recording that real run instead of letting it vanish from
- *  `gate_history` with no row at all. So a `build_gate` row can now ALSO carry `cancelled:true`, read here
- *  identically to a cancelled `worker_gate` row. CORRECTED AGAIN (card 518e7ff6 — the sibling gap this
- *  paragraph used to describe as unfixed): `build_gate_retry` CAN now also carry `cancelled:true` — the
- *  transient-kill auto-retry's OWN cancel-while-queued catch (sessions/service.ts) emits its own
- *  `build_gate_retry` row stamped `cancelled:true`/`gateSpawned:false` alongside `merge_cancelled`,
- *  DIFFERENT SHAPE from the single-file-retry fix above: there, attempt 1's `build_gate` row didn't exist
- *  yet at cancel time (the fix fills a void); here, attempt 1's `build_gate` row was ALREADY written
- *  (unconditionally, before this retry ever starts) and stays a real `outcome:"reject"`, unmodified — the
- *  new `build_gate_retry` row is a SEPARATE, second row recording that the retry itself never reached a
- *  verdict. A caller computing a rejection rate must read the PAIRING (a `build_gate` "reject" immediately
- *  followed, same `opId`, by a `build_gate_retry` "cancelled") as one unresolved op, not a rejection — see
- *  `gate_history`'s own tool description (orchestration.ts) for the full consumer-facing contract.
- *  Otherwise, truthy `passed`
- *  (worker/build gates) or `ok` (deploy) is a pass; a timed-out run is `timeout`, a signal-killed run is
- *  `kill`, and anything else (a genuine non-zero exit / error) is `reject`. Merge (`build_gate`) detail
- *  otherwise only carries `passed`, so a failed merge gate reads as `reject` — its kill/timeout nuance
- *  lives on the sibling merge_rejected event, not surfaced here.
- *  Card db9b0130: `skipped` is checked BEFORE `passed` — an inert-diff skip stamps `passed:true` too (so
- *  `gateResult.passed` still drives the merge proceeding), but must never be reported as a `"pass"`
- *  outcome (see `GateOutcome`'s own doc) — checking it first means that stamp can never shadow this one. */
+/** Derive the settled outcome from a gate event's detail. `detail.cancelled === true` is checked FIRST
+ *  (@decision 3a6f04cc) — a withdrawn run reached no verdict at all and must never fall through to
+ *  `"reject"`. `skipped` is checked BEFORE `passed` (@decision db9b0130) — an inert-diff skip stamps
+ *  `passed:true` too (so `gateResult.passed` still drives the merge proceeding) but must never be
+ *  reported as a `"pass"` outcome; checking it first means that stamp can never shadow this one.
+ *  Otherwise truthy `passed`/`ok` is a pass; a timed-out run is `timeout`; a signal-killed run is `kill`;
+ *  anything else is `reject`. */
 function gateOutcomeFromDetail(detail: Record<string, unknown>): GateOutcome {
   if (detail.cancelled === true) return "cancelled";
   if (detail.skipped === true) return "skipped";
@@ -7752,22 +7675,11 @@ function gateOutcomeFromDetail(detail: Record<string, unknown>): GateOutcome {
   return "reject";
 }
 
-/** Card 3a6f04cc: derive {@link GateHistoryRow.gateRan}. Checked in order: an explicit `gateSpawned`
- *  stamp — as of the Code Review follow-up, BOTH worker-gate cancel producer sites stamp this explicitly
- *  (queued-before-admission AND cancelled-while-running — the latter via `gateResult.steps.length > 0`,
- *  since admission alone does NOT prove a process spawned: `runGateSequential` checks
- *  `cancelSignal.aborted` before its own first step too, so a cancel landing between admission and that
- *  check settles with `steps:[]` despite a real, non-zero `durationMs` — the case that motivated this
- *  correction), plus the pre-existing reused-merge-gate site — always wins when present; else
- *  `reused:true` (pre-existing on every reuse event, since the reuse feature's own introduction — a row
- *  from before that shipped could never BE a reuse, so reads `true` correctly by the absence of the
- *  feature, not the absence of the field); else, for a cancelled worker-gate row with no explicit stamp
- *  (a row written between this card's original fix and the Code Review correction above — a narrow
- *  window, NOT the general case going forward), whether `durationMs` is a number as a FALLBACK — this is
- *  the exact heuristic the correction proved insufficient (a cancel-before-first-step still stamps a real
- *  `durationMs`), so it is honest about what it answers ("was this admitted before it was cancelled",
- *  not "did a process spawn") and is named accordingly. Every other row (a real pass/fail/timeout/kill/
- *  error, or a deploy) has neither `reused` nor `cancelled` set, so falls through to `true`. */
+/** Derive {@link GateHistoryRow.gateRan} (@decision 3a6f04cc). Checked in order: explicit `gateSpawned`
+ *  wins when present; else `reused:true`; else, for a cancelled worker-gate row with no explicit stamp,
+ *  `durationMs` being a number as a FALLBACK (an honest "was this admitted before it was cancelled", not
+ *  "did a process spawn" — see the linked record for why that distinction is load-bearing). Every other
+ *  row falls through to `true`. */
 function gateRanFromDetail(detail: Record<string, unknown>): boolean {
   if (typeof detail.gateSpawned === "boolean") return detail.gateSpawned;
   if (detail.reused === true) return false;
@@ -7846,29 +7758,10 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   // .transientRetried's own doc for why this is a SEPARATE row rather than a fold-onto-attempt-1 field like
   // `retriedFile`/`retryPassed`). `false` for every other kind this function ever sees.
   const transientRetried = r.kind === "build_gate_retry";
-  // Card 6ca4b1a0: deliberately NOT read from `detail` above — the raw `build_gate` event only ever stamps
-  // `emitCompareReduced` when `true` (a conditional spread at the producer, see service.ts's `evt("build_gate",
-  // ...)` call site), never an explicit `false`, so `detail` alone can't tell "genuinely full run" from
-  // "reduction never computed". `pending_gate_ops.verdict_payload_json` (joined in as `verdictPayloadJson`,
-  // parsed above into `verdictPayload` — shared with `failingTest`'s own fallback) is the one place
-  // `deriveMergeGateVerdict` persists the real tri-state — see GateHistoryRow.emitCompareReduced's own doc
-  // (shared/types.ts) for the full discipline this projects.
-  // Card 3d2afb53: a BATCHED merge gate (`detail.batched === true`) is the one exception to the paragraph
-  // above — it never routes through confirmWorkerMergeTracked/PendingOpRegistry at all (see mergeBatch's
-  // own header doc, sessions/service.ts). CORRECTED (card be260976): `verdictPayload` is NO LONGER always
-  // empty for it — mergeBatch now mints+settles its own `pending_gate_ops` tombstone directly (closing a
-  // separate defect: `gate_status(opId)` used to return `"never_existed"` for a settled batch op), so a
-  // real `verdictPayload` exists here too. `deriveBatchGateVerdict` (service.ts) still deliberately OMITS
-  // `emitCompareReduced`/`emitCompareIdenticalCount`/`emitCompareTestFiles` from what it writes — a
-  // deliberate choice (see that function's own doc) to keep the SAME `detail.batched === true` fallback
-  // this whole block already uses for `emitCompareReduced` the single source of truth for all three batch
-  // fields, rather than risk two producers disagreeing. Its own `build_gate` event stamps a genuine
-  // DECIDABLE tri-state directly in `detail` instead (mirrors confirmWorkerMerge's own
-  // `emitCompareStructuredFields`, gated on `gateRan && !notApplicable` — never the true-only-else-absent
-  // shape the paragraph above warns about), so recovering it from `detail` is safe ONLY for this one kind:
-  // every non-batched row's own `detail.emitCompareReduced` stays legacy true-only (never an honest
-  // `false`), so falling back to it there would silently fabricate a tri-state the producer never
-  // actually computed.
+  // Deliberately NOT read from `detail` above — it can't tell "genuinely full run" from "reduction never
+  // computed" (@decision 6ca4b1a0). A BATCHED merge gate (`detail.batched === true`) is the one exception
+  // — its own `build_gate` event stamps a genuine DECIDABLE tri-state directly in `detail` instead, so
+  // recovering it from `detail` is safe ONLY for this one kind (@decision 3d2afb53).
   const emitCompareReduced = typeof verdictPayload.emitCompareReduced === "boolean"
     ? verdictPayload.emitCompareReduced
     : (detail.batched === true && typeof detail.emitCompareReduced === "boolean") ? detail.emitCompareReduced : null;

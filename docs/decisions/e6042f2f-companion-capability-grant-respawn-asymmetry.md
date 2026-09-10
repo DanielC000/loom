@@ -10,12 +10,20 @@ REVOKE/downgrade, by contrast, is already live with NO respawn needed: the compa
 
 `attention-push` is the ONE lever with its own daemon-owned WATCHER, not an MCP tool at all (`companion/attention-push.ts`) — `deps.companion?.reconcile(sessionId)` arms/disarms it LIVE, same as every other lever's revoke/downgrade path, just through its own mechanism (`CompanionController.rearmAttentionPushFor`) instead of the MCP tool surface.
 
+### Cascade-clear on unbind (`db.ts`, same introducing commit)
+
+`Db.deleteCompanionBinding` mirrors the full-teardown `deleteCompanionConfig`'s cascade shape: deleting a binding CASCADE-clears that scope's allowlisted senders and unconsumed pairing codes in the same transaction — PL + Lead ruling (least-privilege on an auth boundary): a re-bind must start with an EMPTY allowlist, never inherit a prior grant, and a still-outstanding pairing code must not re-populate it. `companion_pairing_attempts` is deliberately LEFT alone — a lockout must survive unbind/re-bind churn. The delete-ALL (`channel` omitted) branch is a FULL unbind — it ALSO cascade-clears `companion_capability_grants`: a session with no bindings left on any channel can no longer be reached, so its levers go with it, and a recycled session id never inherits a stale grant. The PER-CHANNEL branch does NOT touch grants — grants are session-scoped, not channel-scoped, and the companion is still reachable (and still holds its levers) on its other channel(s).
+
 ## Do not
 
 - Do not assume a capability grant needs a respawn to take effect on the SERVER side — the grant table is re-read fresh on every MCP call; the respawn need is purely about the companion PROCESS's one-time `tools/list` fetch.
 - Do not auto-trigger a respawn from this grants route the way `CompanionController.startOne` does for the core `chat_reply` gate (card `dbba993f`) — that lever's auto-respawn is deliberately scoped to "companion can't reply at all," a materially worse failure than a missing optional capability; per-capability-grant ADD stays a human-driven, on-demand opt-in via the separate `/upgrade` route.
 - Do not skip `closeCompanionTrustWindow` on a grant write — a Tier-A lever's warm window is keyed on (session, route, sender), not per-capability, and can otherwise outlive the grant change that should have invalidated it.
+- Do not cascade-clear `companion_capability_grants` on a PER-CHANNEL unbind — grants are session-scoped, and the session is still reachable on its remaining channel(s).
+- Do not skip the grant cascade on a FULL unbind (all channels) — a session with zero bindings must lose its levers, so a recycled session id never inherits a stale grant.
 
 ## Source
 
 Inline comment in `packages/daemon/src/gateway/server.ts` (Companion capability grants route registration, lines 1891-1924 as of commit `1d2e8e78`; introduced across commits `e6042f2fd6`, `2be309db23`, `20260a7459`). Extracted by card `33347ca0` (tranche 3) via the `sha:` grammar — no board card id anywhere in the block or its introducing commits for this specific narrative (only a cross-reference to sibling card `dbba993f`, which covers a different decision).
+
+"Cascade-clear on unbind" was appended by `db.ts` tranche 3 (card `d2c20218`), from `Db.deleteCompanionBinding`'s doc comment — same introducing commit, a second call site, folded in per the one-record-per-id rule.
