@@ -5949,12 +5949,9 @@ export class PtyHost {
         // hook.prompt vs live.lastPrompt, gated on submitWasOutstanding. 4 predictions pre-registered
         // 2026-07-29; OBSERVED 2026-08-04 (card 201d0d95) a whole-content REPLACEMENT by a prior generation.
         if (submitWasOutstanding) {
-          // Card 4a0af485 (DoD#4 — measure the engine-confirmation lag distribution): only when there was
-          // NO ambiguity at all before this hook fired (see `hadNoAmbiguityBeforeThisHook`'s own comment
-          // above) and the content-match purge above didn't ALREADY attribute this hook to some OTHER,
-          // older generation — otherwise this hook's `CONFIRMED` line would have already been logged there,
-          // against the generation it actually belongs to, and logging it again here against the CURRENT
-          // generation would double-count one real confirmation as two.
+          // @decision 4a0af485 — DoD#4: measure the engine-confirmation lag distribution by logging
+          // CONFIRMED here only when no ambiguity preceded this hook AND the content-match purge above
+          // didn't already attribute it elsewhere, else one real confirmation double-counts as two.
           if (hadNoAmbiguityBeforeThisHook && !resolvedByContentMatch) {
             const logicalId = live.giveUpOrigin?.[0]?.logicalId ?? null;
             const latencyMs = live.currentGenFirstWrittenAt !== null ? Date.now() - live.currentGenFirstWrittenAt : null;
@@ -5962,57 +5959,42 @@ export class PtyHost {
             console.log(`[submit] ${sessionId} CONFIRMED gen=${live.submitGeneration} logicalId=${logicalId ?? "unknown"} latencyMs=${latencyMs ?? "unknown"}`);
           }
           if (typeof hook.prompt !== "string") {
-            // SELF-DIAGNOSING (card 7114838d): whether UserPromptSubmit's hook payload actually carries the
-            // prompt text at all was, until now, an UNCONFIRMED premise — Loom had simply never looked. Say
-            // so explicitly, ONCE per session, instead of silently comparing `undefined` and never firing —
-            // a detector that goes quiet when its input is missing is indistinguishable from one that's
-            // working and finding nothing. If this line is never seen after deploy, that itself answers the
-            // question: the field isn't there, and this detector has nothing to compare.
+            // @decision 7114838d — SELF-DIAGNOSING: log once per session when UserPromptSubmit carries no
+            // usable `prompt` field, so a silently-never-firing detector reads distinctly from one that's
+            // working and finding nothing.
+            // If this line is never seen after deploy, that itself answers the question: the field isn't
+            // there, and this detector has nothing to compare.
             if (!live.promptFieldAbsentDiagnosedOnce) {
               live.promptFieldAbsentDiagnosedOnce = true;
               // eslint-disable-next-line no-console
               console.log(`[prompt-mismatch] ${sessionId} UserPromptSubmit carried no usable 'prompt' field (keys=${JSON.stringify(Object.keys(hook))}) — card 7114838d's premise is UNCONFIRMED for this session; the detector cannot compare and will stay silent`);
             }
           } else {
-            // Card 4a0af485 (manager directive #3): an ALWAYS-ON happy-path diagnostic — the mismatch-only
-            // block below can go quiet for two entirely different reasons ("always matching" vs "this
-            // branch is simply never reached"), and content-matching's own tests all pass regardless of
-            // which is true because they synthesize an echo that matches BY CONSTRUCTION. Every content
-            // match in this file (hasAmbiguousMatch, purgeConfirmedGiveUpRequeue) depends on ONE premise:
-            // does the engine echo `hook.prompt` byte-identically to what Loom wrote? This line measures
-            // that premise directly, on every confirmed turn, match or mismatch alike.
-            // PREDICTION, stated before real data exists (this file's own pre-registration convention, card
-            // 7114838d): if the engine echoes verbatim on a FAST/current-generation confirmation (this is
-            // exactly that case — `submitWasOutstanding` means THIS hook confirms the CURRENT generation),
-            // there is no known mechanism by which the SAME engine would echo differently for a SLOW/late
-            // confirmation of an older, ambiguous generation — but that inference is UNCONFIRMED until real
-            // pairs land. A systematic `byteIdentical=false` here would mean the content-match mechanism can
-            // never fire in production even though every hermetic test passes — the exact "green you cannot
-            // fail" the manager flagged.
+            // @decision 4a0af485 — manager directive #3: an ALWAYS-ON diagnostic (not mismatch-only) —
+            // content-matching's own tests synthesize a matching echo by construction, so this measures the
+            // real engine's byte-identical premise directly, on every confirmed turn, match or mismatch alike.
+            // The mismatch-only block below can go quiet for two different reasons ("always matching" vs
+            // "branch never reached") — this diagnostic distinguishes them.
+            // @decision 7114838d — PREDICTION pre-registered before real data: a fast/current-gen echo is
+            // verbatim, so no known mechanism differs for a slow/late one until real pairs land; a
+            // systematic mismatch here would mean content-matching passes hermetically but never fires live.
             const sigReported = textSignature(hook.prompt);
             const sigWritten = textSignature(live.lastPrompt ?? "");
-            // Code Review follow-up (card 4a0af485, Major 4): `byteIdentical`/the two signatures above
-            // compare against `live.lastPrompt` — the CURRENT generation's (possibly JOINED) text — which
-            // validates only HALF the premise the content-match mechanism depends on. This ALSO reports
-            // whether `hook.prompt`'s signature matches ANY entry still tracked in `Live.ambiguousDispatches`
-            // (a read-only check — resolving/purging a real match is `purgeConfirmedGiveUpRequeue`'s job,
-            // called separately from the same hook), so a reader can tell "the current generation's own echo
-            // is byte-identical" apart from "an OLDER, ambiguous generation's echo was ALSO recognized" —
-            // the second is the actual, specific premise DoD#2/#3's purge needs validated.
-            //
-            // Card dbc7ffea: ALSO sweep `retiredGiveUpSignatures` — otherwise this diagnostic can report
-            // `ambiguousMatch=false` on the SAME hook that `purgeConfirmedGiveUpRequeue` (called earlier, same
-            // handler) just resolved via a retired-cycle match, which would read as a contradiction to anyone
-            // correlating this line against the `CONFIRMED ... content-matched` line just above it in the log.
+            // @decision 4a0af485 — Major 4: `byteIdentical` above validates only the CURRENT generation's
+            // own echo; this ALSO reports (read-only) whether `hook.prompt`'s signature matches any entry
+            // still in `Live.ambiguousDispatches` — an older, ambiguous generation's echo, recognized too.
+            // Read-only: resolving/purging a real match is `purgeConfirmedGiveUpRequeue`'s job, called
+            // separately from the same hook.
+            // @decision dbc7ffea — also sweep `retiredGiveUpSignatures`, or this can report
+            // `ambiguousMatch=false` on the same hook a retired-cycle match already resolved, reading as a
+            // contradiction against the CONFIRMED line just above it in the log.
             const ambiguousMatch = [...live.ambiguousDispatches.values()].some((e) => e.len === sigReported.len && e.hash === sigReported.hash)
               || [...live.retiredGiveUpSignatures.values()].some((sigs) => sigs.some((e) => e.len === sigReported.len && e.hash === sigReported.hash));
             // eslint-disable-next-line no-console
             console.log(`[prompt-echo] ${sessionId} gen=${live.submitGeneration} byteIdentical=${hook.prompt === live.lastPrompt} reportedLen=${hook.prompt.length} writtenLen=${(live.lastPrompt ?? "").length} reportedHash=${sigReported.hash} writtenHash=${sigWritten.hash} ambiguousMatch=${ambiguousMatch}`);
-            // Card d005f55b DoD-2: snapshot the prior RECORDED reported entry BEFORE this generation's own
-            // push just below — so "prior" below never means the entry this same hook is about to add for
-            // itself. Pushed unconditionally (match or mismatch alike), mirroring `recentWrittenTurns`'
-            // own "once per relevant event, regardless of outcome" cadence — see `Live.recentReportedTurns`'
-            // own doc for why this needs to happen every time, not only on a mismatch.
+            // @decision d005f55b — DoD-2: snapshot the prior RECORDED reported entry before this
+            // generation's own push just below, so "prior" never means the entry this same hook is about
+            // to add for itself; pushed unconditionally (match or mismatch alike).
             const priorReportedEntry = live.recentReportedTurns.length > 0 ? live.recentReportedTurns[live.recentReportedTurns.length - 1] : undefined;
             live.recentReportedTurns.push({ gen: live.submitGeneration, len: sigReported.len, hash: sigReported.hash });
             if (live.recentReportedTurns.length > COMPOSER_ACCUM_WINDOW) live.recentReportedTurns.shift();
@@ -6022,62 +6004,27 @@ export class PtyHost {
               // happened for this in-flight turn — the `?? ""` below is defensive only, never expected to fire.
               const reported = hook.prompt;
               const intended = live.lastPrompt ?? "";
-              // Card 87d2dc95 DoD-1 — LOOP-BREAKER: is THIS generation's own intended text itself one of
-              // Loom's own prompt-mismatch-family notices — this file's own `[loom:prompt-mismatch]`
-              // notice, SessionService's `[loom:prompt-mismatch-unresolved]` one, OR (card 38d68b8d)
-              // SessionService's `[loom:prompt-mismatch-unmatched]` sender/parent push (see all three tag
-              // constants' own docs for why each is checked, not just the first — a manager review found
-              // the original single-tag check left the second family's own mismatch able to mint a fresh
-              // plain notice and re-arm a follow-up timer that could still fire another `-unresolved`
-              // notice later; the third family is the SAME class of gap for the same reason). If so, this
-              // generation must never be allowed to mint ANOTHER notice about its own mismatch, no matter
-              // what the engine reports back for it — see the guard this feeds, just before `mismatchText`
-              // is actually composed/delivered, for the termination argument it establishes.
+              // @decision 87d2dc95 — DoD-1 LOOP-BREAKER: if this generation's own intended text is itself
+              // one of Loom's own prompt-mismatch-family notices (three tag constants — see 38d68b8d for
+              // the third), it must never mint another notice about its own mismatch, whatever the engine reports.
+              // See the guard this feeds, just before `mismatchText` is composed/delivered, for the
+              // termination argument it establishes.
               const intendedIsOwnMismatchNotice = intended.startsWith(PROMPT_MISMATCH_NOTICE_TAG) || intended.startsWith(PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG) || intended.startsWith(PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG);
               let i = 0;
               const max = Math.min(reported.length, intended.length);
               while (i < max && reported[i] === intended[i]) i++;
               // Show WHERE the divergence starts, not just that one exists — the known specimens all splice
-              // mid-token, so a bare "mismatch: true" would satisfy the letter of this and be useless in practice.
-              // ALSO make the log SELF-CLASSIFYING (manager review, card 7114838d): `lenDelta` and the two tail
-              // lengths let a reader tell a real splice from a wholly-different string at a glance — a splice
-              // makes `reported` longer by roughly a whole stranded message with a LARGE tail on both sides at
-              // the divergence point; wholly different strings diverge at `divergesAtChar=0`.
-              // ⛔ CORRECTED (card cf2fef73, owner-reported false LOSS alarm): this comment used to also claim a
-              // trailing-whitespace/normalization artifact diverges near the very END with TINY tails on both
-              // sides. MEASURED FALSE for the actual benign case seen in production — an INTERIOR tab, echoed
-              // back space-expanded by the terminal, desyncs a byte-wise scan AT the tab and never re-syncs, so
-              // everything after it counts as mismatched: a tail as large as any real splice's. Over the
-              // retained corpus, 355/368 mismatches had "both tails large" by this shape — almost all of them
-              // this benign case, not real splices. TAIL SIZE CANNOT DISCRIMINATE a benign whitespace re-render
-              // from a real splice; the whitespace-normalized comparison below is the actual discriminator now
-              // used to decide whether the session-facing notice fires.
-              // ⛔ ALSO CORRECTED (manager review, card cf2fef73): "wholly different strings diverge at
-              // `divergesAtChar=0`" is also not reliable in practice — the single most common benign shape
-              // measured in the corpus (a stale collapsed paste-placeholder, `[Pasted text #N +M lines]`,
-              // PREPENDED onto an otherwise-correct submission — see the placeholder-prefix check below)
-              // diverges at `divergesAtChar=1`, not 0: both strings start with the same `[` byte before
-              // splitting. The single most common benign shape in the corpus therefore presents with the
-              // MOST ALARMING-LOOKING raw signature available — do not read `divergesAtChar` alone as a
-              // reliable "wholly unrelated content" signal either.
-              // ⭐ THE GENERAL SHAPE OF THIS BUG: the comparison above is exact, but the property it exists to
-              // detect ("was the intended content preserved") is not a byte-exact one — a benign rendering or
-              // framing transform changes the bytes without losing anything, and an exact byte-comparison has
-              // no way to tell that apart from a real loss. It reports every transformation as a corruption
-              // unless the transform is explicitly named and checked for, which is what the two suppression
-              // checks below do.
+              // mid-token, so a bare "mismatch: true" would satisfy the letter of this and be useless in
+              // practice. `lenDelta` and the two tail lengths (card 7114838d) let a reader tell a real
+              // splice from a wholly-different string at a glance.
+              // @decision cf2fef73 — neither tail size nor `divergesAtChar` reliably discriminates a benign
+              // re-render from a real splice; see that record for both measured corrections and why.
               const around = (s: string, at: number) => redactedExcerpt(s.slice(Math.max(0, at - 20), at + 40));
               // eslint-disable-next-line no-console
               console.log(`[prompt-mismatch] ${sessionId} engine-reported submitted prompt DIVERGES from what Loom intended to write — possible frame splice (diagnostic only, does not fix 3ce3fa39). reportedLen=${reported.length} intendedLen=${intended.length} lenDelta=${reported.length - intended.length} divergesAtChar=${i} tailReportedLen=${reported.length - i} tailIntendedLen=${intended.length - i} reportedAround=${around(reported, i)} intendedAround=${around(intended, i)}`);
-              // Card c2c750a9: the sum+hash composer-accumulation detector — CONSUMES the very fields
-              // [prompt-echo]/[prompt-mismatch] already log, on every mismatch, rather than adding a new
-              // signal. Two DISTINCT outcomes, logged under two DISTINCT tags on purpose (never conflate
-              // them — that is the whole point of keeping the two stages separate, see
-              // detectComposerAccumulation's own doc for the reorder counterexample this guards against):
-              // CONFIRMED (sum AND hash both match, in gen order) is a real accumulation; a sum-only match
-              // whose hash confirmation REFUSES is a coincidence (same total length, different content or
-              // order) that must never be reported as one, but is still worth a quiet trace of what the
-              // trigger stage alone would have flagged.
+              // @decision c2c750a9 — the sum+hash composer-accumulation detector: two DISTINCT tags never
+              // conflated — CONFIRMED (sum AND hash both match, in gen order) is a real accumulation; a
+              // sum-only match whose hash REFUSES is a coincidence, traced but never reported as confirmed.
               const accumulation = detectComposerAccumulation(reported.length, sigReported.hash, live.recentWrittenTurns);
               if (accumulation?.confirmed) {
                 // eslint-disable-next-line no-console
@@ -6086,14 +6033,12 @@ export class PtyHost {
                 // eslint-disable-next-line no-console
                 console.log(`[composer-accumulation-candidate] ${sessionId} sum-matched but hash confirmation REFUSED gen=${live.submitGeneration} spanGens=${JSON.stringify(accumulation.spanGens)} sumOfWrittenLens=${accumulation.sumOfWrittenLens} reportedLen=${reported.length} concatenatedHash=${accumulation.concatenatedHash} reportedHash=${sigReported.hash} — same total length as a candidate accumulation span, but the content/order doesn't match; NOT reported as [composer-accumulation].`);
               }
-              // Card d005f55b DoD-2 — its OWN verdict kind, never folded into [composer-accumulation] above
-              // (that tag's own CONFIRMED claim is specifically "Loom wrote each of these EXACTLY ONCE",
-              // which is false here by construction: the prior generation's own content reached the composer
-              // via ITS OWN already-diverged report, not via a Loom write). Only tried when the clean
-              // detector above did NOT already confirm — see detectComposerAccumulationOverDivergedPrior's
-              // own doc for why these two are mutually exclusive by construction (a clean confirmed span
-              // sums WRITTEN lengths; this candidate sums one REPORTED length, and both matching the same
-              // reportedLen at once is not excluded by the code but has no known specimen).
+              // @decision d005f55b — DoD-2: never folded into [composer-accumulation] above — that tag's
+              // CONFIRMED claim requires "Loom wrote each of these EXACTLY ONCE", false here by
+              // construction (the prior generation's own content reached via its own already-diverged report).
+              // Mutually exclusive by construction with the clean detector (that sums WRITTEN lengths, this
+              // sums one REPORTED length) — both matching the same reportedLen isn't excluded by the code
+              // but has no known specimen.
               const divergedPriorAccumulation = !accumulation?.confirmed
                 ? detectComposerAccumulationOverDivergedPrior(reported.length, sigReported.hash, intended, priorReportedEntry)
                 : null;
@@ -6101,120 +6046,56 @@ export class PtyHost {
                 // eslint-disable-next-line no-console
                 console.log(`[composer-accumulation-diverged-prior] ${sessionId} CONFIRMED gen=${live.submitGeneration} priorGen=${divergedPriorAccumulation.priorGen} sumOfLens=${divergedPriorAccumulation.sumOfLens} reportedLen=${reported.length} — the engine reported back generation ${divergedPriorAccumulation.priorGen}'s own REPORTED echo (NOT what Loom wrote for it — that generation's own report had already diverged) fused with THIS generation's own written text. Card d005f55b — a compounding accumulation over a previously-diverged generation, a DISTINCT verdict kind from a clean [composer-accumulation]; see that card's §THE COMPOUNDING MECHANISM.`);
               }
-              // Card d005f55b — manager-supplied LIVE evidence, 2026-08-06 (sessions 494db005/f6eeeb52):
-              // confirms Candidate #3 as a real, measured DEFICIT shape (reported shorter than intended by
-              // exactly the possible-duplicate tag's own 40-char length) — see
-              // detectPossibleDuplicateWrapperDeficit's own doc. Logged unconditionally here (independent
-              // signal), same posture as the two diagnostics just above; the SESSION-facing notice's own
-              // priority (below) still defers to a stronger exact match (replayedEntry/confirmedFusion/
-              // confirmedDivergedPrior) when one also applies.
+              // @decision d005f55b — Candidate #3, manager-supplied LIVE evidence: a DEFICIT shape
+              // (reported shorter than intended by exactly the possible-duplicate tag's own length),
+              // logged unconditionally; the SESSION notice's priority still defers to a stronger exact match.
               const wrapperDeficit = detectPossibleDuplicateWrapperDeficit(reported, intended);
               if (wrapperDeficit) {
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-wrapper-deficit] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} strippedTagLen=${wrapperDeficit.strippedTag.length} strippedTag=${JSON.stringify(wrapperDeficit.strippedTag)} — the engine's report matches EXACTLY this generation's own intended text with a possible-duplicate tag stripped (byte-for-byte). Card 854d1632 (measured, not a guess): best explained as a STALE, out-of-order confirmation of an EARLIER bare write, compared against an already-advanced (wrapped) generation — NOT corruption, NOT content loss.`);
               }
-              // Card a640c110 — sibling diagnostic to the wrapper-deficit one just above: see
-              // detectAnsiEscapeStripDeficit's own doc. Logged unconditionally here (independent signal),
-              // same posture as every other diagnostic in this block; the SESSION-facing notice's own
-              // priority (below) still defers to a stronger exact match when one also applies.
+              // @decision a640c110 — sibling diagnostic to `wrapperDeficit`: the engine's own echo strips
+              // ANSI/CSI styling — NOT corruption, NOT content loss. Logged unconditionally, independent
+              // of the other diagnostics.
               const ansiStripDeficit = detectAnsiEscapeStripDeficit(reported, intended);
               if (ansiStripDeficit) {
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-ansi-strip] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} strippedAnsiLen=${ansiStripDeficit.strippedAnsiLen} — the engine's report matches EXACTLY this generation's own intended text with all ANSI/CSI escape sequences stripped (byte-for-byte). Card a640c110 (measured, not a guess): the engine's own echo strips ANSI/CSI styling — NOT corruption, NOT content loss.`);
               }
-              // Card 41950a38 — see isEngineTaskNotificationReport's own doc. Logged unconditionally here,
-              // same posture as every other diagnostic in this block; does NOT suppress anything below —
-              // only the [loom:prompt-mismatch] notice's own `replayNote` wording (further down) reads it.
+              // @decision 41950a38 — does NOT suppress anything below; only the `[loom:prompt-mismatch]`
+              // notice's own `replayNote` wording (further down) reads it.
               const taskNotificationReport = isEngineTaskNotificationReport(reported);
               if (taskNotificationReport) {
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-task-notification] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} — the engine's reported submission is itself a CLI-generated <task-notification> block (Claude Code's own resume-time background-task-status notice), not content Loom wrote for this generation. Does NOT establish what happened to Loom's own intended write — see card 41950a38's own specimen, where it was queued by the engine and delivered on a later turn instead of being lost.`);
               }
-              // Card c23e2869 (d005f55b candidate #3, arithmetically confirmed on a real specimen:
-              // `9,709 + 1,640 = 11,349` and `1,680 − 40 = 1,640`, both exact — session daf64e68, gen=10):
-              // sibling diagnostic to `wrapperDeficit` just above, but for the FUSED shape that detector
-              // cannot confirm — `reported` equal to an EARLIER generation's own recorded WRITTEN text plus
-              // THIS generation's own intended text with a recognized redelivery wrapper stripped, in
-              // either order. See detectRecognizedFusionWithWrapperStrippedCurrent's own doc. Logged
-              // unconditionally here (independent signal), same posture as every other diagnostic in this
-              // block; the SESSION-facing notice's own priority (below) still defers to a stronger exact
-              // match when one also applies.
+              // @decision c23e2869 — the FUSED shape `wrapperDeficit` cannot confirm: `reported` equals an
+              // EARLIER generation's own recorded WRITTEN text plus THIS generation's intended text with a
+              // redelivery wrapper stripped, either order (arithmetically confirmed, session daf64e68 gen=10).
               const wrapperAwareFusion = detectRecognizedFusionWithWrapperStrippedCurrent(reported, intended, live.recentWrittenTurns.slice(0, -1));
               if (wrapperAwareFusion) {
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-wrapper-aware-fusion] ${sessionId} gen=${live.submitGeneration} recognizedGen=${wrapperAwareFusion.recognizedGen} matchedLen=${wrapperAwareFusion.matchedLen} reportedLen=${reported.length} leadingRemainderLen=${wrapperAwareFusion.leadingRemainderLen} trailingRemainderLen=${wrapperAwareFusion.trailingRemainderLen} — the engine's report is EXACTLY generation ${wrapperAwareFusion.recognizedGen}'s own recorded write plus THIS generation's own intended text with a possible-duplicate tag stripped, byte-for-byte (card c23e2869). NOT A LOSS — every byte of both generations' content did arrive.`);
               }
-              // Card 201d0d95 Q1: SURFACE the mismatch to the session itself — until now every branch above
-              // was LOG-ONLY (daemon-output.log), and the shipped doctrine (orchestrate/SKILL.md) only ever
-              // documented the byteIdentical=true happy path, so a manager had no way to learn a submission
-              // had been silently substituted, nor that whatever WAS submitted might be a re-delivery of an
-              // earlier message. Fires on every byteIdentical=false confirmation reaching this point — not
-              // only the exact-single-generation-replay shape that motivated it — since ANY mismatch here
-              // means a turn is about to run (or just ran) on content Loom did not intend for this
-              // generation. Report OBSERVED FIELDS ONLY (lengths/hashes/gens) — never assert a CLI-internal
-              // CAUSE, which lives outside this repo and is unverified (card 201d0d95 DoD-2's own stated
-              // limit). Name BOTH halves, since a notice naming only one leaves the other invisible: the
-              // intended text may not have reached the engine at all (a possible LOSS), and separately, the
-              // content that WAS submitted may itself be a duplicate re-delivery of an earlier generation (a
-              // possible DUPLICATE) — checked directly against `live.recentWrittenTurns` (the same ring
-              // `detectComposerAccumulation` already reads), a single-entry exact match rather than a
-              // concatenated-span match, so this can name the specific prior generation when one matches.
-              //
-              // Platform sweep, 2026-08-05, over RETAINED logs (a FLOOR, not an all-time rate): 3,816
-              // [prompt-echo] records, 288 mismatches (7.5%), 15 SUBSTITUTION-SIGNATURE occurrences across 14
-              // sessions (0.39% of submissions) — recurred within one session (gen 5 and gen 8), and CURRENT
-              // (a session live on this fleet the same day). In ALL 15, the replay was of the IMMEDIATELY
-              // PRECEDING RECORDED generation (N←N-1, never older) and reportedLen < writtenLen (the newer,
-              // larger payload is always what's lost). LIMITS on that count: only THIS card's own gen=7/8 pair
-              // was eyeballed on raw lines — the other 14 are matched by signature only, not individually
-              // inspected; the other 273 mismatches were NOT classified into this shape and must not be
-              // folded into it (plausibly the pre-registered benign/accumulation classes instead); a gen
-              // number can be absent from the echo record, so "N-1" means the previous *recorded* generation.
-              // This is a MEASURED REGULARITY, not a mechanism — the notice below states it as an observed
-              // pattern to help a reader find the right earlier message, never as a claimed CAUSE.
-              // findLast, not find: Loom's own `warning`-kind nudges are REPEATEDLY re-sent byte-identical
-              // text by construction (idle/context/busy-stuck watchdogs, boot continuation notes), so the
-              // SAME string legitimately appearing at more than one generation in this ring is an ordinary
-              // occurrence, not a contrived one. `find` would return the OLDEST match — if identical text was
-              // also written at an earlier, non-adjacent generation, that would mislabel a genuine N-1 replay
-              // as an "unusual shape", manufacturing apparent counter-evidence against the measured N<-N-1
-              // regularity this notice itself cites. `findLast` returns the MOST RECENT matching generation,
-              // which is the one an actual replay-of-the-immediately-preceding-submission would produce.
+              // @decision 201d0d95 — Q1: SURFACE the mismatch to the session (report OBSERVED FIELDS ONLY —
+              // never assert a CLI-internal cause) and use `findLast`, not `find`, when matching the replay
+              // ring; see that record for the measured platform-sweep numbers and why `findLast` is required.
               const replayedEntry = live.recentWrittenTurns.findLast((e) => e.text === reported);
               const priorEntry = live.recentWrittenTurns.length >= 2 ? live.recentWrittenTurns[live.recentWrittenTurns.length - 2] : undefined;
               const isImmediatePrior = replayedEntry !== undefined && priorEntry !== undefined && replayedEntry.gen === priorEntry.gen;
-              // Card 87d2dc95 DoD-2 — THE LAG-BY-ONE CHAIN: a plain single-entry replay (this generation's
-              // own `reported` equals EXACTLY an earlier generation's own recorded WRITE) is itself proof
-              // that `replayedEntry.gen`'s own content DID reach the engine — one generation late,
-              // attributed to THIS generation's turn instead of its own. `recognizedGen`/`matchedLen` (the
-              // fields this proof lives in) are already computed above (`replayedEntry.gen`/`.text.length`)
-              // — nothing new needs measuring, per the card's own DoD-2 note. Mark it resolved the INSTANT
-              // this generation's own detection recognizes it, rather than waiting on a stronger multi-entry
-              // fusion (`confirmedFusion`, below) that a lag chain structurally never produces — a lag chain
-              // replays exactly ONE prior entry per link, never a concatenation of several. A still-pending
-              // `checkPromptMismatchUnresolved` timer for `replayedEntry.gen` (armed when THAT generation's
-              // own turn was first detected — see `isRecognizedReplayAwaitingResolution`, below) checks
-              // `live.mismatchResolvedGens.has(gen)` and stays silent once this fires — closing the false
-              // "established loss" alarm the lag chain used to produce for every NON-TERMINAL link. Left
-              // unconditional on which branch below ultimately classifies THIS generation's own mismatch
-              // (`confirmedFusion`/`confirmedWrapperDeficit`/etc. all still run their own, separate
-              // resolution logic where they apply, and adding this membership ahead of them is harmless —
-              // `Set.add` is idempotent) — a bare `replayedEntry` match is sufficient proof on its own terms.
-              // A gen that NO later generation ever recognizes this way (a genuine terminal loss, DoD-3's
-              // own load-bearing polarity) never gets added here, so its own timer fires normally.
+              // @decision 87d2dc95 — DoD-2 LAG-BY-ONE CHAIN: a plain single-entry replay proves
+              // `replayedEntry.gen`'s content DID reach the engine, one gen late — mark it resolved now so a
+              // still-pending `checkPromptMismatchUnresolved` timer for that gen stays silent, not alarms falsely.
+              // Marked the instant this generation's own detection recognizes it — waiting on a stronger
+              // multi-entry fusion isn't needed, since a lag chain structurally replays exactly ONE prior
+              // entry per link. Left unconditional on which branch below ultimately classifies this mismatch
+              // (adding this membership ahead of them is harmless — `Set.add` is idempotent). A gen no later
+              // generation ever recognizes this way (a genuine terminal loss) never gets added here, so its
+              // own timer fires normally.
               if (replayedEntry !== undefined) live.mismatchResolvedGens.add(replayedEntry.gen);
-              // Card d005f55b DoD-3 (the card's own floor item): only reached once an exact replay AND
-              // both confirmed-accumulation shapes above have already refused — see
-              // findRecognizedSubstring's own doc for why this asserts no new confidence, only names what
-              // WAS recognized so the fallback wording below can say a REMAINDER is unaccounted-for instead
-              // of reading identically to a genuinely uncharacterized mismatch.
-              // Card d005f55b DoD-3: search PRIOR writes only (`slice(0, -1)` drops the current
-              // generation's own just-pushed entry, always the ring's last) — see findRecognizedSubstring's
-              // own doc for why including the current generation would trivially "recognize" the caller's
-              // own turn on nearly every unmatched-longer mismatch and never surface a genuinely prior one.
-              // Card c23e2869: also skip when `wrapperAwareFusion` (above) already FULLY explains `reported`
-              // — a stronger, CONFIRMED result than this fallback's own partial "remainder unaccounted for"
-              // framing would give the same specimen; avoids logging both for the same mismatch.
+              // @decision d005f55b — DoD-3: only reached once an exact replay AND both confirmed-
+              // accumulation shapes above have refused, searching PRIOR writes only; also skipped when
+              // `wrapperAwareFusion` already FULLY explains `reported` (card c23e2869), a stronger result.
               const unmatchedRecognized = (replayedEntry === undefined && !accumulation?.confirmed && !divergedPriorAccumulation && !wrapperAwareFusion)
                 ? findRecognizedSubstring(reported, live.recentWrittenTurns.slice(0, -1))
                 : null;
@@ -6223,64 +6104,30 @@ export class PtyHost {
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-unmatched-remainder] ${sessionId} gen=${live.submitGeneration} recognizedGen=${unmatchedRecognized.gen} matchedLen=${unmatchedRecognized.matchedLen} reportedLen=${reported.length} leadingRemainderLen=${unmatchedRecognized.leadingRemainder.length} trailingRemainderLen=${unmatchedRecognized.trailingRemainder.length} leadingRemainder=${excerpt(unmatchedRecognized.leadingRemainder)} trailingRemainder=${excerpt(unmatchedRecognized.trailingRemainder)} — card d005f55b DoD-3: otherwise-unmatched, but reported CONTAINS generation ${unmatchedRecognized.gen}'s own recorded write as a substring; the remainder(s) above are NOT accounted for. No mechanism or confirmation is claimed by this alone.`);
               }
+              // @decision 41950a38 — checked FIRST: a CLI-generated task-notification never byte-matches
+              // anything Loom itself wrote, so this only enriches the wording rather than suppressing the
+              // "possible LOSS" framing that follows.
               const replayNote = taskNotificationReport
-                // Card 41950a38 — checked FIRST: a CLI-generated task-notification never byte-matches
-                // anything Loom itself wrote, so this is mutually exclusive with every ring-based check
-                // below in practice: see isEngineTaskNotificationReport's own doc for why this only
-                // enriches the wording rather than suppressing the "possible LOSS" framing that follows.
                 ? "The engine's reported submission for this turn is Claude Code's OWN CLI-generated <task-notification> block (a background-task-status notice synthesized on resume), not content Loom wrote for this generation. This does not confirm the intended text was lost — it may simply have been queued behind this engine-generated notification and delivered as a later turn instead. Check this session's subsequent turns for whether the intended content arrived; Loom's own daemon cannot see the engine's internal turn ordering to confirm this directly."
                 : replayedEntry
                 ? isImmediatePrior
                   ? `The submitted content exactly matches what this session itself wrote for the IMMEDIATELY PRECEDING generation (gen=${replayedEntry.gen}) — the shape every measured occurrence of this class of mismatch has shown so far. If that generation's own turn already ran, this is likely a DUPLICATE re-delivery of it, not new content — check the message sent just before this one.`
                   : `The submitted content exactly matches what this session itself wrote for an EARLIER generation (gen=${replayedEntry.gen}, not the immediately preceding one) — if that generation's own turn already ran, this may be a DUPLICATE re-delivery of it, not new content. This is an unusual shape: every measured occurrence of this class of mismatch so far replayed only the immediately preceding generation.`
-                // Card d005f55b DoD-3: a WEAKER, additive recognition — not an exact replay/accumulation
-                // match, so this stays in the "possible LOSS" family below, but names what WAS recognized
-                // instead of reading as a plain "matched nothing" (see findRecognizedSubstring's own doc).
+                // @decision d005f55b — DoD-3: a WEAKER, additive recognition; names what WAS recognized
+                // instead of reading as a plain "matched nothing".
                 : unmatchedRecognized
                   ? `The submitted content could not be matched EXACTLY to any of this session's own recent writes, but it DOES contain generation ${unmatchedRecognized.gen}'s own recorded write as a substring (${unmatchedRecognized.matchedLen} of ${reported.length} total chars recognized) — ${unmatchedRecognized.leadingRemainder.length} char(s) before it and ${unmatchedRecognized.trailingRemainder.length} char(s) after it are NOT accounted for by anything Loom has a record of writing on this session. This is a partial recognition only, not a confirmed replay or accumulation — nothing here establishes what the unrecognized remainder is or where it came from.`
                 : priorEntry !== undefined
                   ? "The submitted content does not match any of this session's own recent writes that Loom still has a record of. Every measured occurrence of this class of mismatch so far replayed the IMMEDIATELY PRECEDING submission — check the message sent just before this one for what may have been duplicated, even though this specific case could not be matched directly."
-                  // Card f5f6515a (manager msg 71e5f76d): guards against the "check the message sent just
-                  // before this one" advice firing when NO prior submission structurally exists to check —
-                  // keyed on `priorEntry` (the actual ring content), not a literal `gen === 1`, so a resumed/
-                  // forked session presenting a thin `recentWrittenTurns` for reasons other than being on
-                  // its first generation is handled correctly too, not just a true first-ever submission.
+                  // @decision f5f6515a — guards the "check the message just before this one" advice from
+                  // firing with NO prior submission to check; keyed on `priorEntry` (the ring content),
+                  // not a literal `gen === 1`, so a resumed/forked session with a thin ring is handled too.
                   : "The submitted content does not match any of this session's own recent writes that Loom still has a record of. There is no earlier write recorded for this session in Loom's own tracking — this may genuinely be its first submission, or a resume/recycle boundary where that tracking restarted — so there is no 'message sent just before this one' to check.";
-              // Card cf2fef73 (owner-reported, false LOSS alarm on benign whitespace re-rendering): before
-              // treating this mismatch as notice-worthy to the SESSION, check whether `reported` and
-              // `intended` reconcile once whitespace is normalized — tabs and runs of spaces collapsed, line
-              // endings normalized. A terminal that echoes a submitted TAB back space-expanded produces
-              // byte-identical CONTENT, but the byte-wise scan above diverges AT the tab and never re-syncs
-              // (see the corrected comment above `divergesAtChar` for why tail size can't tell this apart
-              // from a real splice). FAIL CLOSED: normalization only ever SUPPRESSES the notice, never adds
-              // one — a mismatch that reconciles under normalization is benign and skipped below; one that
-              // does NOT reconcile keeps firing exactly as it does today, unconditionally, including the real
-              // substitution class (card 201d0d95) this notice exists to catch. The diagnostic
-              // `[prompt-mismatch]` / `[prompt-echo]` / `[composer-accumulation*]` logs above are UNCONDITIONAL
-              // on this check — only the session-facing alarm below is gated, so the raw corpus is preserved.
+              // @decision cf2fef73 — before treating this as notice-worthy, check whether `reported`/
+              // `intended` reconcile once whitespace is normalized, or `reported` is `intended` with a
+              // stale paste-placeholder run stripped from the front — either FAIL-CLOSED: suppresses only.
               const normalizeForMismatchNotice = (s: string) => s.replace(/\r\n/g, "\n").replace(/\t/g, " ").replace(/ +/g, " ");
               const isBenignWhitespaceRerender = normalizeForMismatchNotice(reported) === normalizeForMismatchNotice(intended);
-              // Card cf2fef73 (manager review, second population — MEASURED the largest single benign class
-              // in the corpus): a STALE PLACEHOLDER PREFIX. The engine echoes back OLDER, already-collapsed
-              // paste-placeholder frame(s) (Claude Code's own paste-collapse UI — a SEPARATE mechanism from
-              // detectPastePlaceholderLengthLoss/eef4883c/0f9268cc, which this card does not touch) PREPENDED
-              // onto what is otherwise the correctly-submitted `intended` text, unchanged. Content is fully
-              // present — `reported` is LARGER than `intended` by exactly the prefix's own length, the wrong
-              // direction for a loss. TWO PLACEHOLDER FORMS are measured in production: `[Pasted text #N +M
-              // lines]` (with a line count) and `[Pasted text #N]` (no line count) — and PLACEHOLDERS STACK:
-              // a real specimen carried THREE concatenated, MIXING both forms (`[Pasted text #11][Pasted
-              // text #12 +38 lines][Pasted text #13 +40 lines]`, delta=71=17+27+27 exactly). The strip is
-              // therefore GLOBAL — one-or-more repetitions of the token, matched as a single leading run —
-              // not a single-shot match: a single-shot strip would leave later placeholders in the
-              // remainder on a stacked run, so `remainder !== intended`, so the identity below would FAIL
-              // and the notice would FIRE on a provably benign case — fail-OPEN in exactly the dense-paste
-              // case where a false alarm costs the most (manager review, card cf2fef73). PRECISE,
-              // non-heuristic, fails closed by construction (no band/threshold/tail arithmetic) regardless
-              // of how many placeholders matched or which form(s): only suppress when `reported` is EXACTLY
-              // `<the whole leading placeholder run>` + `intended`, byte-for-byte after stripping it — a
-              // placeholder run that instead REPLACED real content (measured: both a `lenDelta=-579`
-              // specimen for form 1 and negative-delta specimens for form 2, `reported` SHORTER — a genuine
-              // loss) does not match this shape and keeps firing, unchanged.
               const stalePlaceholderPrefixMatch = /^(?:\[Pasted text #\d+(?: \+\d+ lines)?\])+/.exec(reported);
               const isStalePlaceholderPrefix = stalePlaceholderPrefixMatch !== null && reported.slice(stalePlaceholderPrefixMatch[0].length) === intended;
               // Card 2b57b5a9 (n=13, 10 distinct positions, zero exceptions): a stray U+000C (form
