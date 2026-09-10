@@ -158,6 +158,50 @@ still auto-injects on `Read`, but arrives **head+tail truncated**, with the midd
 explicitly accept, with a stated reason.** Never trade a truncation for a collision by minting a
 new id just to dodge the cap. Never delete content to get under the cap.
 
+**Rung 3 (explicit accept) is legal for exactly one of two cases — check which one you're in
+before you reach for it:**
+
+1. **The record was already over cap before your edit** (or a brand-new record can't fit even
+   reflowed/split). Accepting costs nothing that was previously delivered in full — a reader
+   already got a truncated view before your edit, and still gets one after it.
+2. **The record was at-or-under cap before your edit, and your edit is what pushes it over.**
+   Accepting here is not neutral: the truncation window is computed against the record's *new*,
+   larger size, so the elided middle can land squarely inside content that predates your change —
+   bytes that were delivered **in full on every injection** go dark because of an edit that had
+   nothing to do with them.
+
+**Rung 3 is closed to case 2.** The correct move there is the ladder's own first two rungs
+(reflow, or split under a different legal key) — and if neither fits, **leave your new content
+inline and say so in the report**, the same move an earlier tranche already made for this exact
+record (specimen below). Extending an existing record is not licence to accept an overage it
+didn't have before you touched it.
+
+**The one-line check, before you write:** *was the record ≤ `PER_RECORD_MAX_BYTES` on main before
+your edit? If yes, your edit must leave it ≤ the cap — reflow or split, not accept.*
+
+### Measured specimen (case 2), re-derived from `truncateRecord`
+
+One tranche extended a record from 5,704 → 7,857 bytes and accepted the overage, reasoning that a
+visible elision marker means nothing is lost. **Re-derived here directly from `truncateRecord` in
+`packages/daemon/assets/decision-records.mjs` (read there at extraction time — these offsets track
+its current logic and the current `PER_RECORD_MAX_BYTES`, not a restated constant):**
+
+- The marker `"\n\n… [elided — see full record] …\n\n"` is 34 characters, 3 of them (both `…` and
+  the one `—`) 3 bytes each in UTF-8, the rest 1 byte ⇒ `markerBytes = 31 + 3×3 = 40`.
+- `remaining = PER_RECORD_MAX_BYTES − markerBytes`; `headBudget = Math.ceil(remaining × 0.6)`;
+  `tailBudget = remaining − headBudget`; the tail starts at `bufLength − tailBudget`.
+- Run against a 7,857-byte buffer at the current `PER_RECORD_MAX_BYTES`, this keeps bytes
+  **0–3,576** (head) and **5,473–7,857** (tail) and elides **3,576–5,473** — **1,897 bytes.**
+
+The record was 5,704 bytes *before* this edit — under cap, so fully delivered on every prior
+injection — and the elided window (3,576–5,473) falls entirely inside that pre-edit extent. **The
+bytes that went dark are not the new content; they are content a reader received in full before
+this edit and stopped receiving after it**, regardless of an accept note claiming otherwise.
+
+⚠️ These exact offsets are tied to this record's exact size and the `PER_RECORD_MAX_BYTES` in
+effect when computed — re-run the arithmetic against your own record and the live constant; don't
+reuse these numbers for a different case.
+
 **Measure the cap on the working tree, after writing:** `wc -c < <path>`. Never
 `git show <ref>:<path> | wc -c` — CRLF-on-disk vs LF-in-object makes that read short by *exactly
 the file's line count*, and only ever in the "I'm fine" direction. This is measured, twice,
@@ -175,8 +219,10 @@ the file **on disk, after writing it.**
 **The program itself generates over-cap records over time**, independent of any single worker's
 mistake (measured, card `9856e639`): two existing records crossed the cap purely because separate,
 concurrent tranches each folded a little more content into an already-anchored record. If you
-extend an *existing* record rather than creating a new one, `wc -c` it after your edit and expect
-to need the ladder even if the record was comfortably under cap before your change.
+extend an *existing* record rather than creating a new one, `wc -c` it **before and after** your
+edit. If it was already over cap before you touched it, you're in case 1 above and the full ladder,
+accept rung included, is open. If it was at-or-under cap before your edit and your edit is what
+pushes it over, you're in **case 2** — reflow or split, never accept.
 
 ## A rewrite preserves the rule and drops the example — not hypothetical
 
