@@ -218,8 +218,8 @@ function credentialAck(q: Question): string {
  * `permissionExpiresAt` hint. Shared by `questionPullItem` and `questionAnswerByType` so the two read
  * surfaces can never drift. NULL-SAFE for a pre-card row (both `decided*` fields null): surfaces
  * `{scope:null, expiresAt:null, lapsed:false}`, never mistaken for an expired one.
- * @decision sha:df2f5e17 — why `lapsed` is advisory-display only, never enforced; see
- * docs/decisions/df2f5e17-permissiongrant-is-advisory-display-only-never-enforced.md.
+ * @decision sha:df2f5e17 — advisory-display only: Loom never itself enforces, revokes, or re-checks a
+ * live grant against `lapsed` — the manager holding the grant must read it and honor it.
  */
 function permissionGrant(q: Question): { scope: PermissionScope | null; expiresAt: string | null; lapsed: boolean } {
   return {
@@ -260,8 +260,9 @@ function isProfileValuePresent(v: unknown): boolean {
  *     is false. A MEASURED false, never conflated with "unknown".
  *   - "fulfilled" — the live value matches.
  *
- * @decision 3880f783 — "unwritable" does NOT cover every profile write path (a real, still-open gap); see
- * docs/decisions/3880f783-computefulfillment-unwritable-does-not-cover-every-profile-write-path.md.
+ * @decision 3880f783 — "unwritable" is not a full audit of every profile write path: `Db.insertProfile`/
+ * `updateProfile`'s manual per-column binding isn't covered — a field dropped there reads "not_yet_done"
+ * forever, indistinguishable from "just not done yet".
  */
 export function computeFulfillment(db: Db, q: Question): { state: "unknown" | "unwritable" | "not_yet_done" | "fulfilled"; detail: string | null } {
   if (q.type !== "permission" || !q.fulfillmentTarget) return { state: "unknown", detail: null };
@@ -314,9 +315,9 @@ export function questionPullItem(q: Question, db: Db): Record<string, unknown> {
  * share this ONE branching implementation instead of drifting apart. The permission branch also surfaces
  * `permissionGrant`'s structured `{scope, expiresAt, lapsed}` and `fulfillment` (card 3880f783) regardless
  * of `hasAnswer` — an authorization can be declared as a checkable target before it's even answered.
- * @decision sha:becc7581 — why a pending/cancelled row's answer fields read `null` rather than a misleading
- * false-ish derivation; see
- * docs/decisions/becc7581-cancelquestion-two-entry-points-one-write-throws-actual-state.md.
+ * @decision sha:becc7581 — do not derive a pending/cancelled row's answer fields as a false-ish value
+ * (`approved:false`, a fabricated credential ack) — surface `null`, so "never answered" is never misread
+ * as "denied" or an empty ack.
  */
 export function questionAnswerByType(q: Question, db: Db): Record<string, unknown> {
   const hasAnswer = q.state === "answered" || q.state === "consumed";
@@ -387,13 +388,14 @@ function provisioningAudit(q: Question): Record<string, unknown> {
  * `taskRequestGetItem` so the credential never-echo guarantee (never `secret_blob`, only `ack`) can never
  * drift between the two read surfaces. `sessionId` → `loomSessionId` (the asking session's own DAEMON id,
  * see `Session`'s session-id naming policy doc in `@loom/shared`).
- * @decision 7fcb586a — see docs/decisions/7fcb586a-session-id-naming-policy.md (addendum: the one other
- * consumer of the pre-rename field name was updated in lockstep with this rename).
+ * @decision 7fcb586a — never name a new/renamed output field carrying a Loom session id anything but
+ * `loomSessionId` (never a bare `sessionId`); `test/audit-requests-list.mjs`, the only other consumer of
+ * the pre-rename name, was updated in lockstep with this rename.
  *
  * `loomSessionId` here is the CURRENT routing target (`Question.sessionId`), NOT provenance — a reader
  * wanting the filer must use `filedBySessionId` instead.
- * @decision cb7d6998 — why, and what's unrecoverable on a pre-field row; see
- * docs/decisions/cb7d6998-loomsessionid-is-routing-not-provenance.md.
+ * @decision cb7d6998 — a `null` `filedBySessionId` on a pre-field row is genuinely unrecoverable, not
+ * merely unmigrated — do not assume it can be backfilled.
  */
 export function auditRequestItem(q: Question & { agentId: string | null }, db: Db): Record<string, unknown> {
   return {
@@ -414,9 +416,9 @@ export function auditRequestItem(q: Question & { agentId: string | null }, db: D
  * callers' ownership-check + error-shaping can never drift apart, mirroring how `buildQuestionAsk` is
  * shared for the ask side. Rejects a question asked by a DIFFERENT agent lineage, a genuinely unknown id,
  * and (via `Db.cancelQuestion`'s throw) one that already left 'pending'.
- * @decision sha:becc7581 — why the ownership check is agent-lineage-scoped (not the exact asking session id)
- * and why the "already answered" rejection names that state instead of a generic error; see
- * docs/decisions/becc7581-cancelquestion-two-entry-points-one-write-throws-actual-state.md.
+ * @decision sha:becc7581 — scope the ownership check to `sessions.agent_id`, never the exact asking
+ * session id, so a recycle successor can still cancel a predecessor's still-pending ask; and never throw
+ * a generic rejection on a race — name the row's actual current state (e.g. "already answered").
  */
 export function cancelQuestionForAgent(
   db: Db,
@@ -451,9 +453,9 @@ export function cancelQuestionForAgent(
  * its OWN still-pending Request answered from a live owner chat reply, instead of the file-then-cancel
  * workaround (the owner's reasoning otherwise only exists in chat scrollback, and the Requests history
  * shows "cancelled"/moot rather than "answered").
- * @decision 308259e5 — why this exists, and why it may skip the Companion's propose/confirm friction
- * ladder; see
- * docs/decisions/308259e5-question-resolve-lets-a-conversational-owner-reply-answer-a-pending-request.md.
+ * @decision 308259e5 — do not cancel-and-refile a conversationally-answered `question_ask` to mark it
+ * resolved — that loses the owner's actual reasoning to chat scrollback (it lands 'cancelled'/moot);
+ * use `question_resolve` instead to capture the owner's own words as the note.
  * Do NOT "harden" this into a second confirm round-trip to match that ladder — it defends against an
  * injection-exposed relay channel this loopback-only composer path was never exposed to.
  *
@@ -463,8 +465,9 @@ export function cancelQuestionForAgent(
  * owner-authored turn when the current turn isn't owner-formed; this is what lets an agent resolve its
  * OWN question's answer without reopening the self-answer hole the human-only
  * `POST /api/questions/:id/answer` route exists to close.
- * @decision ca341979 — the fallback mechanism, and why it is deliberately `[0]`-only; see
- * docs/decisions/ca341979-question-resolve-falls-back-to-the-most-recent-owner-authored-turn.md.
+ * @decision ca341979 — never scan the whole owner-turn window for a match; always take `[0]` (the single
+ * most-recent owner-authored turn), and never concatenate multiple turns into one string before matching
+ * — mirrors why `isVerbatimOwnerSubstringRecent` checks each turn independently.
  *
  * Rejects (mirroring `cancelQuestionForAgent`'s ownership scoping + the REST answer route's per-type
  * validation): an unknown session/question; a question asked by a DIFFERENT agent lineage; a
@@ -534,8 +537,9 @@ export function resolveQuestionForAgent(
 /**
  * `question_ask`'s optional `supersedes:<questionId>` handling — the asker names the exact prior ask
  * it's replacing, explicitly, at the moment it knows; never an auto-detected "obviously replaces" guess.
- * @decision sha:fe2c1c6b — why the auto-detected alternative was rejected; see
- * docs/decisions/fe2c1c6b-supersedes-param-rejects-the-auto-supersede-heuristic.md.
+ * @decision sha:fe2c1c6b — do not build an auto-detected "this ask obviously replaces that one"
+ * heuristic — it will eventually guess wrong and silently cancel a live owner ask; require an explicit
+ * `supersedes:<id>` instead.
  *
  * Reuses `cancelQuestionForAgent` VERBATIM — the identical agent-lineage ownership check, pending-only
  * constraint, and atomic answer-race refusal as the standalone `question_cancel` tool; this never forks a
