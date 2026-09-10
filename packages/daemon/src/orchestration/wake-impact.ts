@@ -3,8 +3,8 @@ import type { Db } from "../db.js";
 import type { RestartWakeImpact } from "./restart.js";
 
 /**
- * Shared manager/platform wake-impact classification (card c9e51581), extracted from
- * `SessionService.resumeFleetOnBoot`'s original inline closures (61cc91c6) so the SAME "does this
+ * Shared manager/platform wake-impact classification (@decision c9e51581), extracted from
+ * `SessionService.resumeFleetOnBoot`'s original inline closures (@decision 61cc91c6) so the SAME "does this
  * session actually have a stake in this wake" logic can be reused by every resume path that brings a
  * manager/platform back and would otherwise unconditionally burn a full re-orient turn on it:
  *   - Path A — `resumeFleetOnBoot` (a `daemon_restart` fleet resume, restart.ts's RestartIntent)
@@ -24,7 +24,7 @@ import type { RestartWakeImpact } from "./restart.js";
  * parked — is pending work a manager should drive; a held card is the owner's brake and `deferred` is
  * the manager's own sequencing marker, neither ever counts, in any column) AND is NOT in a column
  * flagged `excludeFromIdleWatchdog` (a genuine dead-end/parking lane, e.g. "Dropped" — discounted the
- * same way, without per-card `deferred:true` toil). A STUCK deferral (card 93669813 — `deferredStuck`,
+ * same way, without per-card `deferred:true` toil). A STUCK deferral (@decision 93669813 — `deferredStuck`,
  * see Task.deferredStuck's own doc) is the one exception: its blocker can no longer be shown to
  * resolve, so it counts as actionable again rather than staying discounted forever. Raw signal only —
  * see {@link strandedBoardWork} for whether it actually forces the restart nudge. Deliberately does NOT
