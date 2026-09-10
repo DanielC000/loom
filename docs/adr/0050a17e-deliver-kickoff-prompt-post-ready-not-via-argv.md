@@ -6,7 +6,8 @@ accepted
 
 ## Context
 
-The kickoff prompt used to ride positional argv behind a `--` end-of-options separator, for every role.
+The kickoff prompt used to ride positional argv behind a `--` end-of-options separator, for every role
+(H2's dash-prompt fix).
 Windows `CreateProcess` has a hard **32766-character** command-line ceiling
 (`WINDOWS_COMMAND_LINE_LIMIT`). A large agent brief + kickoff (project memory, real `CLAUDE.md`/skill
 excerpts) could blow through it and refuse the spawn outright before the daemon ever produced a process —
@@ -32,6 +33,18 @@ the same ring buffer / write to the same pty.
   `lastPrompt` after `drainPending` captures the drained message instead (card `25813ecc`).
 - Do not deliver the kickoff concurrently with `logLandedMode`'s footer-read/auto-heal settling — it can
   silently break plan-mode auto-heal (mode reads as `"unknown"`) or interleave pty writes.
+
+## Follow-on: `preflightWindowsCommandLine` dropped its per-part breakdown
+
+`preflightWindowsCommandLine` (`pty/host.ts`) used to accept a labeled per-part "which knob to shorten"
+breakdown of the command line's contributors (e.g. a worker's agent base brief vs its kickoffPrompt) for
+its refusal message. This decision removed it: the startup prompt no longer rides argv AT ALL
+(`buildSpawnArgs` never emits it), so a breakdown of ITS contributors would now describe text that isn't
+even part of the command line — actively misleading, not just stale. What CAN still contribute to `args`
+today — the settings path, the inline `--mcp-config` JSON, `--disallowedTools`, `-n <name>` — has no
+natural single "shorten this" knob the way the old prompt-only breakdown did, so the refusal message now
+just names the total length/limit/overage; there's no per-part split to reintroduce until a real incident
+shows which of those needs one.
 
 ## Consequences
 

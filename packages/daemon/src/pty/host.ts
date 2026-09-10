@@ -3233,21 +3233,9 @@ export function redactSecrets(text: string, secrets: string[]): string {
   return out;
 }
 
-/**
- * Assemble the `claude` argv (extracted so the ordering is unit-testable).
- *
- * Card 0050a17e: the startup/kickoff prompt does NOT ride argv at all, for ANY role — it USED TO be
- * positional, behind a `--` end-of-options separator (H2's dash-prompt fix), but that put its FULL
- * TEXT on the Windows `CreateProcess` command line, which has a hard 32766-character ceiling
- * (`WINDOWS_COMMAND_LINE_LIMIT`) — a large agent brief + kickoff (project memory, real CLAUDE.md/SKILL.md
- * excerpts) could blow through it and refuse the spawn outright (the diagnosed occurrence this card
- * fixes). `o.startupPrompt` is accepted here purely so callers don't need a separate code path, but it
- * is NEVER emitted into `args` — the caller (createPty/spawn) instead boots claude with no trailing
- * prompt (identical to how a resume/fork spawn already boots) and delivers the SAME text later via
- * `submit()` once the session reaches `ready` (see `scheduleKickoffGuarantee`). All real flags precede
- * the (now prompt-free) end of the argv; there is no `--` separator at all unless some other future
- * option needs one.
- */
+/** Assemble the `claude` argv (extracted so the ordering is unit-testable).
+ * @decision 0050a17e — the kickoff prompt is NEVER emitted into this argv, for any role; delivered
+ * post-ready via `submit()` instead. See docs/adr/0050a17e-deliver-kickoff-prompt-post-ready-not-via-argv.md. */
 export function buildSpawnArgs(o: {
   resumeId?: string;
   fork?: boolean;
@@ -3338,26 +3326,9 @@ export function buildSpawnArgs(o: {
  */
 export const WINDOWS_COMMAND_LINE_LIMIT = 32766;
 
-/**
- * A behaviourally-equivalent ADAPTATION of node-pty's own argv→command-line quoting (its
- * `windowsPtyAgent.ts` `argsToCommandLine`, MIT-licensed, itself documented as following the
- * `CommandLineToArgvW` MSDN convention) — **not a byte-for-byte port** (measured: 935 chars theirs vs
- * 831 ours, source-normalised, against node-pty@1.1.0 — card 9fea4196). It covers ONLY the array-args
- * path node-pty takes when `args` is an array, which is every call this daemon ever makes. node-pty's
- * `isCommandLine` branch — `args` passed as a raw STRING, handled as
- * `` argsToCommandLine(file, []) + " " + args `` with no per-character quoting/escaping at all — is
- * deliberately NOT implemented here; the runtime guard below turns that unimplemented case into a
- * loud, named error instead of silently mis-quoting it (a `readonly string[]` TYPE alone doesn't
- * protect this function: it's exported and reachable from compiled JS, where the type has already
- * erased). On the array-args path, this adaptation is verified byte-identical to node-pty's real
- * output over a branch-derived corpus (test/node-pty-quoting-parity.mjs, Windows-only) — a
- * hand-maintained copy, not an import, precisely so a future node-pty quoting change reds that TEST
- * instead of silently drifting or moving a build-time import (see the test's own header). Deliberately
- * NOT imported from the `node-pty` package in PRODUCTION: that function lives under its compiled
- * `lib/` path, not the package's public entrypoint, so importing it here would pin the real spawn path
- * to an unsupported internal surface a future node-pty bump could silently move or change. This is our
- * OWN copy, used purely to COMPUTE a length — it never spawns anything itself.
- */
+/** @decision 9fea4196 — hand-maintained ADAPTATION of node-pty's argv quoting (NOT a byte-for-byte port,
+ * NOT imported from node-pty's internal lib/ path); covers only the array-args path, verified against
+ * test/node-pty-quoting-parity.mjs. See docs/decisions/9fea4196-*.md. */
 export function windowsCommandLine(file: string, args: readonly string[]): string {
   // node-pty's isCommandLine branch (raw string args) is not implemented here — see this function's
   // own doc. A TS type is compile-time only; this function is reachable from compiled JS where the
@@ -3402,33 +3373,11 @@ export function windowsCommandLine(file: string, args: readonly string[]): strin
   return result;
 }
 
-/**
- * Card abcf0eba part (a): preflight the EXACT, post-escaping, platform-aware command-line length a
- * spawn is about to produce, and fail ACTIONABLY instead of letting a bare Windows `CreateProcess`
- * `error code: 206` reach the caller with no indication of what's oversized (see WINDOWS_COMMAND_LINE_LIMIT's
- * doc for how this constant was grounded — an exact, empirically-confirmed boundary, not a guess).
- *
- * Takes the REAL `bin`+`args` this spawn is about to hand `node-pty` (computed by the SAME
- * `buildSpawnArgs` call the real spawn uses) so there is no risk of the preflight and the actual spawn
- * ever disagreeing about what "the command line" is — one measurement, reused for both the check and
- * (if it passes) the real spawn.
- *
- * Windows-only: POSIX `execve`'s argv/environ ceiling (`ARG_MAX`) is measured differently (combined
- * argv+environ bytes) and is typically several MB — multiple orders of magnitude above the settings
- * path / MCP config / disallowed-tools list this daemon actually puts on argv — so this is deliberately
- * NOT enforced on POSIX; the caller gates this function on `process.platform === "win32"` (see
- * `createPty`).
- *
- * Card 0050a17e removed the per-part "which knob to shorten" breakdown this used to take (a labeled
- * split of the startup prompt's own contributors, e.g. a worker's agent base brief vs its
- * kickoffPrompt): the startup prompt no longer rides argv AT ALL (buildSpawnArgs never emits it — see
- * that function's own doc), so a breakdown of ITS contributors would now describe text that isn't even
- * part of `cmdLine` — actively misleading, not just stale. What CAN still contribute to `args` today —
- * the settings path, the inline `--mcp-config` JSON, `--disallowedTools`, `-n <name>` — has no natural
- * single "shorten this" knob the way the old prompt-only breakdown did, so the refusal message below
- * just names the total length/limit/overage; there's no per-part split to reintroduce until a real
- * incident shows which of those needs one.
- */
+/** @decision abcf0eba — preflight the EXACT command line (via the SAME buildSpawnArgs call the real
+ * spawn uses) and fail actionably before Windows CreateProcess's opaque error 206; Windows-only.
+ * @decision 0050a17e — the refusal message no longer breaks down "which knob to shorten" by startup-
+ * prompt contributor, since the prompt no longer rides argv at all. See docs/decisions/abcf0eba-*.md and
+ * docs/adr/0050a17e-*.md. */
 export function preflightWindowsCommandLine(
   bin: string,
   args: readonly string[],
@@ -3446,39 +3395,13 @@ export function preflightWindowsCommandLine(
   };
 }
 
-/**
- * Assemble the environment for a `claude` worker pty — extracted as a PURE, testable seam mirroring
- * buildMcpServers / buildSpawnArgs. Behavior-preserving for the INHERITED env: the CLAUDECODE/CLAUDE_CODE_*
- * scrub (those vars would make the nested `claude` believe it is running inside another claude) and the
- * sessionEnv merge are unchanged — PLUS three git-safety vars that close the "git wedges the UNATTENDED
- * worker pty" class:
- *   - GIT_PAGER=cat / PAGER=cat — git (and other pager-using tools) can never launch `less` and block
- *     forever on `q`. Without this a worker's post-commit `git diff`/`git log` could page and never
- *     return, freezing the turn at busy → a FALSE [loom:worker-stuck] trip + its worker_report queued
- *     undelivered (the bug this fixes).
- *   - GIT_TERMINAL_PROMPT=0 — git FAILS FAST on an auth/credential prompt instead of hanging on it
- *     (mirrors git/writer.ts; same unattended-wedge class as the pager).
- * The three are set BEFORE the sessionEnv merge, so a project that deliberately overrides any of them via
- * config.sessionEnv still wins (no capability regression). Every other byte of the env is identical to
- * before. Exported so the hermetic spawn-env test asserts the vars, the scrub, and the override.
- *
- * Also carries `LOOM_WORKTREE=spawnCwd` — a stable anchor an agent's OWN Bash calls can reference (e.g.
- * `cd "$LOOM_WORKTREE" && …`) to make a cwd-dependent command deterministic regardless of what an
- * earlier call's `cd` left behind. Loom cannot reset the Bash tool's cwd itself (that shell state is
- * internal to the upstream Claude Code CLI process, invisible past its pty), so this is the strongest
- * reachable mitigation: a known-good absolute anchor, not a reset. Uniform across every session kind —
- * for a worker `spawnCwd` is the worktree root; for a manager/companion/plain session it's just that
- * session's own cwd (repo/project root). Set before the sessionEnv merge, like the git-safety vars, so a
- * deliberate override still wins.
- *
- * Also carries `PYTHONIOENCODING=utf-8` + `PYTHONUTF8=1` (card 5d8888b6) — the standard, safe way to make
- * every child Python interpreter (e.g. one an agent invokes ad hoc, or the shared markitdown venv) decode/
- * encode as UTF-8 regardless of the host's locale, instead of Windows' default legacy code page (`cp1252`
- * and similar), which raises `UnicodeEncodeError` on ordinary Loom data (arrows, emoji, box-drawing —
- * verified first-hand on this project's own board JSON). This is a GLOBAL interpreter-behavior change for
- * every Python child this spawn's env reaches, not a narrow tweak — set before the sessionEnv merge, like
- * every other var here, so a project that needs a different Python encoding can still override it.
- */
+/** Assemble the environment for a `claude` worker pty — extracted as a PURE, testable seam mirroring
+ * buildMcpServers / buildSpawnArgs. All vars below are set BEFORE the sessionEnv merge, so a deliberate
+ * project override still wins.
+ * @decision sha:28985a08 — GIT_PAGER/PAGER/GIT_TERMINAL_PROMPT close the unattended pty pager/auth wedge.
+ * @decision sha:6e6399fa — LOOM_WORKTREE is a known-good cwd anchor, not a cwd reset.
+ * @decision 5d8888b6 — PYTHONIOENCODING/PYTHONUTF8 force UTF-8 for every child Python interpreter.
+ * See docs/decisions/28985a08-*.md, docs/decisions/6e6399fa-*.md, docs/decisions/5d8888b6-*.md. */
 export function buildSpawnEnv(
   processEnv: Record<string, string | undefined>,
   sessionEnv: Record<string, string>,
@@ -3535,36 +3458,11 @@ export function detectDefaultShell(): string {
   return process.env.SHELL || "/bin/bash";
 }
 
-/**
- * Best-effort reap of any descendant process a torn-down pty's root process leaves behind — the backstop
- * for a child that ESCAPES node-pty's own orphan-free containment (its conpty kill path walking
- * _getConsoleProcessList() on Windows — not a Job Object, node-pty@1.1.0 has none — / a process-group
- * kill on POSIX) by detaching into its own process group/session — e.g. a `pnpm dev` vite dev-server the
- * agent backgrounds via its own Bash tool while verifying UI work (Web-Designer/QA workers), which then
- * outlives the session and walks the port range (board card 621ef252 — six stale vite servers observed).
- *
- * Called from the pty's `onExit` — the ONE chokepoint every exit path shares (a graceful/hard stop, a
- * recycle's predecessor stop, or an unexpected crash) — so it's DURABLE: it runs even when the root
- * process died without going through PtyHost.stop() at all.
- *
- * By the time this runs the root process is ALREADY DEAD (onExit only fires after exit), which rules out
- * `taskkill /T` on Windows — verified empirically that it refuses to walk the descendant tree once the
- * given PID is no longer a running process (it just errors "process not found" and stops). What DOES
- * still work: a process's `ParentProcessId` is stamped at CREATION and stays queryable via WMI/CIM long
- * after the parent has exited (verified). So we enumerate the FULL process list ourselves — Windows via
- * `Get-CimInstance Win32_Process` (CIM, not the deprecated `wmic`), POSIX via `ps -eo pid,ppid` — walk the
- * descendant tree from `rootPid` in-process, and force-kill each survivor directly (each already confirmed
- * a live pid by appearing in the snapshot, so a plain `process.kill` suffices — no further tree tool needed).
- *
- * Fire-and-forget: spawns a helper process asynchronously and never throws or blocks the caller. A missing
- * OS tool, an empty process list, or a pid already gone is a silent no-op. Narrow accepted race: OS PID
- * reuse could in principle attribute an unrelated process's children to a long-dead `rootPid` — the same
- * class of risk already accepted elsewhere in Loom for pid-keyed process tracking. That SAME reuse race
- * can also fabricate a parent-map CYCLE (e.g. `A.ppid=B` and `B.ppid=A`) — impossible in a real process
- * tree but reachable via a reused pid — so the walk below tracks `seen` pids and never revisits one; without
- * it a cycle would spin the `while (stack.length)` loop forever and freeze the daemon's event loop (`sweep`
- * runs synchronously in-process on `cmd`'s `close` event, not in the spawned helper).
- */
+/** @decision 621ef252 — best-effort reap, at pty `onExit`, of any descendant process a torn-down root
+ * escapes node-pty's own containment into (e.g. a backgrounded `pnpm dev` vite server — six stale
+ * servers observed live). Enumerates the WHOLE process list (CIM/`ps -eo pid,ppid`) since taskkill /T
+ * cannot walk a tree whose root is already dead; tracks `seen` pids to survive a PID-reuse cycle.
+ * See docs/decisions/621ef252-*.md. */
 export function reapOrphanedDescendants(rootPid: number): void {
   const sweep = (out: string): void => {
     const byParent = new Map<number, number[]>();
@@ -3688,34 +3586,11 @@ async function enumerateProcessesPosix(_timeoutMs: number): Promise<WorktreeProc
  *  (exported) in sessions/service.ts to sanitize gate output before it's piped through `enqueueStdin`. */
 export const CONTROL_CHAR_RE = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}]`, "g");
 
-/**
- * Parse {@link enumerateProcessesWin32}'s raw PowerShell stdout (a `ConvertTo-Json -Compress` array) into
- * {@link WorktreeProcess} records. Pure + exported so a test can drive it directly with a crafted payload
- * instead of spawning a real `powershell.exe` — see `test/worktree-process-reap.mjs`'s deterministic
- * enumeration-failure regression guard.
- *
- * THROWS on a malformed payload (never silently drops to an empty array) — this is the other half of the
- * fix for a real P1: a live self-hosting daemon host had `[Console]::OutputEncoding` defaulting to a
- * single-byte, non-UTF8 codepage (IBM850/CP850 — confirmed via `[Console]::OutputEncoding` + `chcp`), so
- * any character in ANY live process's `CommandLine` that codepage's best-fit encoder couldn't cleanly
- * round-trip could corrupt the ALREADY-CORRECTLY-ESCAPED JSON `ConvertTo-Json` had produced — breaking
- * `JSON.parse` for the WHOLE array, not just the one affected process. {@link enumerateProcessesWin32} now
- * forces `[Console]::OutputEncoding` to UTF8 (verified live: the same query against 465 real processes on
- * that host threw a JSON parse error without it, and parsed cleanly with it) — but the NEXT surprise in
- * that payload must not go silent either, so this function throws with the JSON position + a short
- * excerpt around it, and the caller ({@link enumerateProcessesWin32}) turns that into a rejection instead
- * of a bare `[]`. That silent-collapse was itself the reason a total enumeration failure went undetected:
- * `reapProcessesRootedInWorktree` runs from SEVEN call sites in sessions/service.ts (the merge-confirm
- * pre-gate reap, post-merge `gcWorktreeDir`, worker-stop cleanup, boot/GC sweeps), all of which would
- * silently do nothing on this failure with no observable difference from "nothing needed killing".
- *
- * `ConvertTo-Json` can also leave a raw, UN-ESCAPED control character inside a `CommandLine` string
- * (observed live against real running processes on this host) — a JSON structural character is never
- * below 0x20, so blanking those out is always safe. A leading BOM is stripped defensively too: forcing
- * `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8` is documented as BOM-emitting for some .NET
- * writer shapes, though verified empirically NOT to appear for this exact assignment + query shape — a
- * BOM would otherwise break `JSON.parse` at character 0.
- */
+/** @decision sha:16b7c38c — THROWS on a malformed CIM payload (never silently drops to `[]`): a real P1
+ * had a non-UTF8 console codepage corrupt `ConvertTo-Json`'s own output, breaking JSON.parse for the
+ * WHOLE array; enumerateProcessesWin32 now forces UTF8, and any remaining surprise must still not go
+ * silent (7 call sites in sessions/service.ts would otherwise no-op indistinguishably from "nothing to
+ * kill"). Also strips control chars + a leading BOM. See docs/decisions/16b7c38c-*.md. */
 export function parseWin32CimStdout(raw: string): WorktreeProcess[] {
   const withoutBom = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
   const sanitized = withoutBom.replace(CONTROL_CHAR_RE, " ");
@@ -3743,24 +3618,11 @@ export function parseWin32CimStdout(raw: string): WorktreeProcess[] {
  *  the ~4KB output-tail discipline `codescape/supervisor.ts`'s `runBounded` already uses. */
 const STDERR_TAIL_BYTES = 4096;
 
-/**
- * Classify {@link enumerateProcessesWin32}'s outcome once the CIM query's `powershell.exe` has CLOSED
- * CLEANLY — i.e. neither the self-timeout nor a spawn error fired, both handled separately by the caller.
- * Pure + exported so a test can drive it directly with a crafted stdout/stderr pair instead of spawning a
- * real `powershell.exe` — mirrors {@link parseWin32CimStdout}'s own testability shape, and this is the
- * direct follow-up to the failure class that doc-comment explains: the residual gap was that a
- * `powershell.exe` closing FAST and CLEANLY with EMPTY stdout (an execution-policy refusal, a CIM/WMI
- * service problem, a host/profile issue — never surfaced because stderr used to be discarded) sailed
- * through `parseWin32CimStdout`'s `sanitized || "[]"` fallback and came back as a silent, valid-looking
- * `[]` — indistinguishable, at every one of `reapProcessesRootedInWorktree`'s seven call sites, from "no
- * matching process exists". `@(Get-CimInstance Win32_Process | …)` enumerates EVERY live process on the
- * host, and the querying `powershell.exe` is itself always in that result set — so empty stdout on a clean
- * close is ALWAYS anomalous, never a legitimate "nothing running" answer, which is what makes failing on
- * it safe rather than a guess. Treated as the `empty-output` failure kind, same severity as a parse error.
- * `stderrTail` — a bounded capture of the child's own stderr, previously discarded via `stdio: "ignore"` —
- * is folded into whichever failure fires, since a genuine PowerShell error message is exactly the
- * diagnostic this path used to throw away.
- */
+/** @decision sha:266afe3f — a `powershell.exe` closing CLEANLY with EMPTY CIM stdout is ALWAYS anomalous
+ * (the querying process is always in its own `Get-CimInstance` result set), never a legitimate "nothing
+ * running" answer — treated as the `empty-output` failure kind, same severity as a parse error; stderr
+ * (previously discarded) is captured and folded into whichever failure fires. See
+ * docs/decisions/266afe3f-*.md. */
 export function classifyWin32EnumerationClose(stdout: string, stderrTail: string): WorktreeProcess[] {
   const stderrSuffix = stderrTail ? ` — stderr: ${stderrTail}` : "";
   if (!stdout.replace(CONTROL_CHAR_RE, "").trim()) {
@@ -3775,29 +3637,10 @@ export function classifyWin32EnumerationClose(stdout: string, stderrTail: string
   }
 }
 
-/** Real win32 process enumerator: `Get-CimInstance Win32_Process` for every live process's ExecutablePath
- *  + CommandLine (win32 exposes no per-process cwd via CIM, so `cwd` is always null here — Path +
- *  CommandLine is what the live-evidence investigation found sufficient: the esbuild service's OWN
- *  executable runs FROM inside the worktree, and vite's global node.exe carries the worktree path in its
- *  CommandLine). `@(...)` forces array context so ConvertTo-Json returns a JSON ARRAY even for 0 or 1
- *  processes (bare `ConvertTo-Json` on a single object would otherwise emit a bare object, not `[obj]`).
- *  `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;` is prepended INSIDE the same `-Command`
- *  string — see {@link parseWin32CimStdout}'s doc for why: a non-UTF8 console codepage can corrupt the
- *  CIM query's own JSON output for reasons having nothing to do with the worktree being searched for.
- *
- *  SELF-BOUNDED: unlike the outer {@link withReapTimeout} race (which only stops the CALLER waiting, the
- *  same limitation `withTimeout` in git/worktrees.ts documents for its own callers), this function arms
- *  its OWN timer and force-kills the `powershell.exe` child it spawned if the query hasn't closed by
- *  `timeoutMs` — so a wedged/slow CIM query (WMI contention, a loaded host) can never leave an orphaned
- *  helper process behind, the same leak class this whole feature exists to prevent.
- *
- *  LOUD ON FAILURE: every failure path (spawn error, this self-timeout, empty stdout on a clean close, or
- *  a parse failure — see {@link classifyWin32EnumerationClose}) REJECTS with a classified, descriptive
- *  Error instead of silently resolving `[]` — {@link reapProcessesRootedInWorktree}'s catch logs it and
- *  reports `enumerationFailed: true`, so a total enumeration failure is never indistinguishable from "no
- *  matching process exists" again. stderr is CAPTURED (bounded to a ~4KB tail, not discarded via
- *  `stdio: "ignore"` like before) and folded into whichever classified error fires, so a genuine
- *  PowerShell error message is preserved as a diagnostic instead of thrown away. */
+/** @decision sha:459e9dab — queries ExecutablePath+CommandLine (never cwd, unavailable via win32 CIM);
+ * SELF-BOUNDED (arms its own timer + force-kills its `powershell.exe` child, unlike the outer caller
+ * race which only stops the CALLER waiting). UTF8-forced + loud-on-failure per `sha:16b7c38c` /
+ * `sha:266afe3f`. See docs/decisions/459e9dab-*.md. */
 function enumerateProcessesWin32(timeoutMs: number): Promise<WorktreeProcess[]> {
   return new Promise((resolve, reject) => {
     const cmd = spawnProcess("powershell.exe", [
