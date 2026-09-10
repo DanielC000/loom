@@ -128,15 +128,19 @@ try {
     check("(R) direct call: changedTestFiles is empty — no test/*.mjs path touched", direct.changedTestFiles.length === 0);
     check("(R) direct call: notApplicable:false — a real reducibility decision was made", direct.notApplicable === false);
 
-    const built = buildReducedGateCommand(direct.changedTestFiles, direct.changedAssetPaths);
+    const built = buildReducedGateCommand(direct);
     check("(R) buildReducedGateCommand(direct fields) runs pnpm build", built.includes("pnpm build"));
     for (const g of GUARD_BASENAMES) check(`(R) buildReducedGateCommand(direct fields) runs static guard ${g}`, built.includes(g));
     for (const name of ASSET_TEST_BASENAMES) check(`(R) buildReducedGateCommand(direct fields) --only= names ${name}`, built.includes(name));
     check("(R) buildReducedGateCommand(direct fields) does NOT run the full suite unfiltered", built.includes("--only="));
-    // Backward-compat: the same call with NO second argument (every pre-3fbd95e0 call site) stays byte
-    // identical — no assets names folded in when the caller never passes them.
-    const builtNoAssets = buildReducedGateCommand(direct.changedTestFiles);
-    check("(R) buildReducedGateCommand with no assets arg omits every certified asset-reading test", !ASSET_TEST_BASENAMES.some((n) => builtNoAssets.includes(n)));
+    // Card abaaf16e Code Review MINOR: buildReducedGateCommand's input is now a REQUIRED
+    // Pick<EmitCompareGateResult, …> object, not positional args with defaults — a caller can no longer
+    // silently omit a field the way the old defaulted 2nd/3rd positional argument could (Code Review's own
+    // probe: mutating a call site to drop an argument used to trip ZERO tests). This replaces the old
+    // "no second argument" backward-compat check, which is no longer expressible now that every field is
+    // required — same assertion (empty changedAssetPaths folds in nothing), spelled out explicitly instead.
+    const builtNoAssets = buildReducedGateCommand({ changedTestFiles: direct.changedTestFiles, changedAssetPaths: [], changedTsPaths: [] });
+    check("(R) buildReducedGateCommand with changedAssetPaths:[] omits every certified asset-reading test", !ASSET_TEST_BASENAMES.some((n) => builtNoAssets.includes(n)));
   }
 
   // ── (S) DELETED asset path, alone, still reduces — no per-file identity proof exists for an asset ──────
@@ -166,6 +170,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — an assets-only diff reduces to build + static guards + the certified ASSET_READING_TEST_REPO_PATHS set (never the full suite); the same assets change alongside an ADDED .ts file still fails closed to the full gate; computeEmitCompareGate's own changedAssetPaths field and buildReducedGateCommand's optional second argument are wired end to end and stay backward-compatible when omitted; and a DELETED-only asset path reduces exactly like an added/modified one, since no per-file identity proof exists for a non-compiled asset (card 3fbd95e0)."
+  ? "\n✅ ALL PASS — an assets-only diff reduces to build + static guards + the certified ASSET_READING_TEST_REPO_PATHS set (never the full suite); the same assets change alongside an ADDED .ts file still fails closed to the full gate; computeEmitCompareGate's own changedAssetPaths field and buildReducedGateCommand's required Pick<EmitCompareGateResult, …> input are wired end to end, and an empty changedAssetPaths folds in nothing (card abaaf16e: no longer an omittable optional argument); and a DELETED-only asset path reduces exactly like an added/modified one, since no per-file identity proof exists for a non-compiled asset (card 3fbd95e0)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

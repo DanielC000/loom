@@ -1272,13 +1272,20 @@ export function formatTransientRetryWarning(): string {
 
 /** The subset of `EmitCompareGateResult` (git/worktrees.ts) {@link formatReducedGateWarning} needs — named
  *  locally rather than importing that type, so this file (spawn/process-timing plumbing) doesn't pick up a
- *  dependency on the git layer for a five-field shape. */
+ *  dependency on the git layer for a six-field shape. */
 export interface ReducedGateWarningInput {
   identicalFileCount: number;
   changedTestFiles: string[];
   notHermeticExcluded: string[];
   inertPathsSkipped: string[];
   changedAssetPaths: string[];
+  /** Card abaaf16e: mirrors `changedAssetPaths` above — REQUIRED, not optional, on the same "a caller can't
+   *  silently drop it" reasoning Code Review gave for `buildReducedGateCommand`'s own 3rd param (see that
+   *  function's own doc). Drives the `distScannerClause` below: when non-empty, `buildReducedGateCommand`
+   *  folded `DIST_TEXT_SCANNER_REPO_PATHS` into the actual gate that ran, so the warning text MUST say so —
+   *  omitting it left the warning claiming "static guards only" on a run that also ran ten runtime tests
+   *  (record d422e279's exact defect class, caught by Code Review on card abaaf16e itself). */
+  changedTsPaths: string[];
 }
 
 /**
@@ -1293,7 +1300,7 @@ export interface ReducedGateWarningInput {
  * tell which went unrun.
  */
 export function formatReducedGateWarning(
-  result: ReducedGateWarningInput, assetReadingTestCount: number, batchLandedCount?: number,
+  result: ReducedGateWarningInput, assetReadingTestCount: number, distScannerTestCount: number, batchLandedCount?: number,
 ): string {
   const compiledClause = result.identicalFileCount > 0
     ? `${result.identicalFileCount} file(s) proven transpile/parse-identical (card 2154b6ad, 82662e98)`
@@ -1304,6 +1311,14 @@ export function formatReducedGateWarning(
   const assetClause = result.changedAssetPaths.length
     ? `; ${result.changedAssetPaths.length} asset path(s) changed under packages/daemon/assets/** (${result.changedAssetPaths.join(", ")}) — ran the ${assetReadingTestCount} certified asset-reading test(s) too (card 3fbd95e0)`
     : "";
+  // Card abaaf16e (Code Review MAJOR): a compiled .ts change in this diff means buildReducedGateCommand
+  // ALSO folded DIST_TEXT_SCANNER_REPO_PATHS into what actually ran — the "ran build + static guards only"
+  // clause below is false for this run unless this clause says so too. A COUNT, not the changed .ts paths
+  // themselves — mirrors assetReadingTestCount's own reasoning (this function stays redaction-agnostic; the
+  // caller decides what's safe to surface, this file just formats a number).
+  const distScannerClause = result.changedTsPaths.length
+    ? `; a compiled .ts changed — also ran the ${distScannerTestCount} dist-text-scanner test(s) (card abaaf16e)`
+    : "";
   const subject = batchLandedCount !== undefined ? `batch merge gate reduced across ${batchLandedCount} landed branch(es)` : "merge gate reduced";
-  return `${subject}: ${compiledClause} — ran build + static guards only${result.changedTestFiles.length ? ` + ${result.changedTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite${result.notHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${result.notHermeticExcluded.join(", ")}` : ""}${result.inertPathsSkipped.length ? `; also skipped as proven inert (docs/, card db9b0130): ${result.inertPathsSkipped.join(", ")}` : ""}${assetClause}${isolationCaveat}`;
+  return `${subject}: ${compiledClause} — ran build + static guards only${result.changedTestFiles.length ? ` + ${result.changedTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite${result.notHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${result.notHermeticExcluded.join(", ")}` : ""}${result.inertPathsSkipped.length ? `; also skipped as proven inert (docs/, card db9b0130): ${result.inertPathsSkipped.join(", ")}` : ""}${assetClause}${distScannerClause}${isolationCaveat}`;
 }

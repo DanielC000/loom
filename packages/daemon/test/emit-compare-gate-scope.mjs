@@ -29,6 +29,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       wait, with the branch itself staying completely stable, must still be caught by its OWN
 //       admission-time HEAD read and trigger a real reclassification — never silently keep running the
 //       stale pre-wait REDUCED verdict.
+//   (N) card abaaf16e — RECLASSIFICATION PATH FOR DIST-TEXT SCANNERS: same cap-queue-admission shape as
+//       (L), but the further commit landing on the branch while queued is ALSO comment-only, so the
+//       admission-time re-derivation reclassifies to eligible:true again (not a fallback to FULL) — and
+//       the resulting command must still fold in every DIST_TEXT_SCANNER_REPO_PATHS member, proving the
+//       reclassification branch (not just the pre-wait one) reads `changedTsPaths`.
 // Run: 1) build daemon (pnpm build), 2) node test/emit-compare-gate-scope.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -49,6 +54,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 // set, keeps this file's own env setup ahead of anything that reads it.
 const {
   sleep, GIT_ID, FULL_GATE, seed, mkdirp, mk, BASE_SRC, makeRepoWithBaseSrcFile, REAL_TEST_DAEMON_SCRIPT,
+  DIST_SCANNER_BASENAMES,
 } = await import("./_emit-compare-fixtures.mjs");
 
 const { Db } = await import("../dist/db.js");
@@ -459,6 +465,115 @@ try {
     check("(M) M2's merge still lands as a safe no-op — ALREADY_MERGED, not a real squash of unverified content",
       confirm2.merged === true && confirm2.emptyKind === "ALREADY_MERGED");
   }
+
+  // ── (N) card abaaf16e — Code Review MINOR: THE RECLASSIFICATION PATH itself must fold
+  //        DIST_TEXT_SCANNER_REPO_PATHS in, not just the pre-wait classification (L)/(M) above already
+  //        cover. Same cap-queue-admission shape as (L): N2's pre-wait classification is a comment-only
+  //        .ts edit (eligible, reduced); while genuinely queued behind N1's held-open cap slot, a FURTHER
+  //        commit lands on N2's own branch — but unlike (L), this second edit is ALSO comment-only (still
+  //        transpile-identical), so the admission-time re-derivation (`reunionAtAdmission`'s `if
+  //        (moved) {…}` branch in service.ts) reclassifies to eligible:true again, not a fallback to FULL.
+  //        Pre-fix (before card abaaf16e), `reclassified.changedTsPaths` didn't exist at all, so this
+  //        assertion is RED against that code (TypeError / undefined) and GREEN once the reclassification
+  //        branch actually reads it and re-builds the command with it. ─────────────────────────────────
+  {
+    const N1 = mk("n1"), N2 = mk("n2");
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+
+    fs.mkdirSync(N1.repo, { recursive: true });
+    registerForCleanup(N1.repo);
+    fs.writeFileSync(path.join(N1.repo, "README.md"), "# ecg\n");
+    execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg`, { cwd: N1.repo });
+    commitAll(N1.repo, "init", GIT_ID);
+
+    makeRepoWithBaseSrcFile(N2, BASE_SRC);
+
+    let gate1Calls = 0, gate2Calls = 0;
+    let capturedGate2;
+    let gate1AdmittedResolve;
+    const gate1Admitted = new Promise((res) => { gate1AdmittedResolve = res; });
+    let releaseGate1;
+    const fakeGate = async (gateCmd, cwd) => {
+      if (cwd === N1.worktreePath) {
+        gate1Calls++;
+        gate1AdmittedResolve();
+        await new Promise((res) => { releaseGate1 = res; });
+        return { passed: true };
+      }
+      gate2Calls++;
+      capturedGate2 = gateCmd;
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+
+    const wt1 = await createWorktree(N1.repo, N1.projId, N1.taskId);
+    N1.worktreePath = wt1.worktreePath; N1.branch = wt1.branch; worktrees.push(wt1.worktreePath);
+    mkdirp(path.join(N1.worktreePath, "packages", "other"));
+    fs.writeFileSync(path.join(N1.worktreePath, "packages", "other", "note.txt"), "unrelated\n");
+    commitAll(N1.worktreePath, "chore: unrelated cap-slot occupant", GIT_ID);
+    seed(db, N1);
+
+    const wt2 = await createWorktree(N2.repo, N2.projId, N2.taskId);
+    N2.worktreePath = wt2.worktreePath; N2.branch = wt2.branch; worktrees.push(wt2.worktreePath);
+    // Pre-wait: a COMMENT-ONLY edit — eligible for the reduced gate, classified BEFORE admission.
+    fs.writeFileSync(path.join(N2.worktreePath, "packages", "daemon", "src", "example.ts"),
+      BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed)"));
+    commitAll(N2.worktreePath, "docs: fix comment typo", GIT_ID);
+    seed(db, N2);
+
+    const p1 = sessions.confirmWorkerMerge(N1.mgrId, N1.workerId);
+    await gate1Admitted;
+    check("(N) N1 genuinely admitted and holds the cap's only slot", sessions.gateSemaphore.snapshot().active === 1);
+
+    let confirm2Settled = false;
+    const p2 = sessions.confirmWorkerMerge(N2.mgrId, N2.workerId).then((r) => { confirm2Settled = true; return r; });
+
+    const queued = await pollUntil(
+      () => sessions.gateSemaphore.snapshot().entries.some((e) => e.phase === "queued" && e.projectId === N2.projId),
+      { timeoutMs: 10000 },
+    );
+    check("(N) N2 genuinely reached the semaphore's CAP-queue wait before N1 released", queued);
+
+    // Same PROVEN-SAFE-BY-CONSTRUCTION reasoning as (L)/(M) above — see their own comments for the full
+    // injection evidence; identical mechanism, only the project/session ids differ.
+    const WINDOW_MS = 150;
+    const neverSettled = await assertNeverWithControl({
+      label: "(N) N2's confirm does NOT settle while N1's held-open gate still occupies the cap's only slot",
+      check: () => confirm2Settled,
+      windowMs: WINDOW_MS,
+      positiveControl: async () => {
+        let controlSettled = false;
+        const pControl = sleep(1).then(() => { controlSettled = true; });
+        const observed = await observeOnce({ check: () => controlSettled, windowMs: WINDOW_MS });
+        await pControl;
+        return observed;
+      },
+    });
+    check("(N) N2's confirm PROVABLY waited on the cap, not a fluke of scheduling", neverSettled);
+
+    // NOW, while N2 is genuinely queued behind the cap, a FURTHER commit lands on N2's OWN branch — but
+    // this one is ALSO comment-only (unlike (L)'s behavioral flip), so the recombined diff stays
+    // transpile-identical and the re-derivation should land on eligible:true again, through the SAME
+    // `if (moved) {...}` reclassification branch (L) exercises for the FULL-gate fallback case.
+    fs.writeFileSync(path.join(N2.worktreePath, "packages", "daemon", "src", "example.ts"),
+      BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed, take two)"));
+    commitAll(N2.worktreePath, "docs: tidy the comment further during the cap-queue wait", GIT_ID);
+
+    releaseGate1("go");
+    const confirm1 = await p1;
+    const confirm2 = await p2;
+
+    check("(N) N1 merged successfully, ran its own gate exactly once", confirm1.merged === true && gate1Calls === 1);
+    check("(N) N2 merged successfully", confirm2.merged === true);
+    check("(N) N2's gate command was called exactly once", gate2Calls === 1);
+    check("(N) N2's captured command is the REDUCED gate — the re-derivation found the recombined diff STILL transpile-identical, not a stale carry-over of the pre-wait verdict",
+      typeof capturedGate2 === "string" && capturedGate2 !== FULL_GATE);
+    check("(N) ⭐ card abaaf16e: the RECLASSIFIED command folds in every dist-text scanner — proves reclassified.changedTsPaths is read and used, not just the pre-wait emitCompareTsPaths",
+      typeof capturedGate2 === "string" && DIST_SCANNER_BASENAMES.every((s) => capturedGate2.includes(`node packages/daemon/test/${s}`)));
+    check("(N) N2's warning also names the reclassified dist-text-scanner count",
+      typeof confirm2.warning === "string" && new RegExp(`also ran the ${DIST_SCANNER_BASENAMES.length} dist-text-scanner test\\(s\\)`).test(confirm2.warning));
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) cleanupPathSync(wt);
@@ -466,6 +581,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a shell-metacharacter test file path fails closed before ever reaching buildReducedGateCommand's shell string; a diff touching ONLY a test/fixtures/*.mjs file fails closed to the full gate (card 815b4b30); and — card 44968963 — a diff touching a real test file plus its backing fixtures/ file no longer reduces at all, and neither does one touching a fixture plus only ONE of its several real consumers, since an untouched sibling consumer of that same fixture can't be proven unaffected; and — card 7183540f — a branch that gains a further BEHAVIORAL commit while genuinely queued on the semaphore's CAP (not a per-repo guard) is caught at admission too, never riding through on a stale pre-wait REDUCED verdict; and — card 66b3112a — a PRELANDED branch whose main gains a genuinely behavioral edit during that same cap-queue wait, with the branch itself staying byte-stable, is ALSO caught by the main leg's own admission-time HEAD read, never riding through on a stale pre-wait REDUCED verdict either (a detection fix, not a merge-safety one — the squash there is a provable no-op regardless). See emit-compare-gate.mjs for the base classification, scope-boundary, and soundness cases."
+  ? "\n✅ ALL PASS — a shell-metacharacter test file path fails closed before ever reaching buildReducedGateCommand's shell string; a diff touching ONLY a test/fixtures/*.mjs file fails closed to the full gate (card 815b4b30); and — card 44968963 — a diff touching a real test file plus its backing fixtures/ file no longer reduces at all, and neither does one touching a fixture plus only ONE of its several real consumers, since an untouched sibling consumer of that same fixture can't be proven unaffected; and — card 7183540f — a branch that gains a further BEHAVIORAL commit while genuinely queued on the semaphore's CAP (not a per-repo guard) is caught at admission too, never riding through on a stale pre-wait REDUCED verdict; and — card 66b3112a — a PRELANDED branch whose main gains a genuinely behavioral edit during that same cap-queue wait, with the branch itself staying byte-stable, is ALSO caught by the main leg's own admission-time HEAD read, never riding through on a stale pre-wait REDUCED verdict either (a detection fix, not a merge-safety one — the squash there is a provable no-op regardless); and — card abaaf16e — a branch that gains a FURTHER comment-only commit while queued reclassifies to eligible:true again through the SAME admission-time re-derivation, and that reclassified command folds in every DIST_TEXT_SCANNER_REPO_PATHS member too, proving the reclassification branch reads changedTsPaths, not just the pre-wait classification. See emit-compare-gate.mjs for the base classification, scope-boundary, and soundness cases."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

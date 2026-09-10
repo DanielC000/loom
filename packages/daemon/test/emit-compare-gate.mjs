@@ -62,6 +62,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (O) card 5149c036 — a repo-root `CLAUDE.md` change alongside an otherwise comment-only .ts edit must
 //       still force the FULL gate — same shape as (F), pinned explicitly for the real specimen this card
 //       investigated. See merge-gate-inert-diff.mjs scenario (M) for the CLAUDE.md-ONLY companion.
+//   (T) card abaaf16e — RED-PROOF, direct unit-level: buildReducedGateCommand folds
+//       DIST_TEXT_SCANNER_REPO_PATHS in (bare `node`) iff a changed compiled .ts path is passed — a changed
+//       test/*.mjs file alone does not trigger it. (A)/(D) above carry the same two legs through a REAL
+//       end-to-end diff instead of a direct call.
 //   (S) card fe848bfc — THE DISCRIMINATING CASE for dropping computeEmitCompareGate's repoPath arg: `ref`
 //       is `"HEAD"`, a PER-WORKTREE ref (unlike the branch NAME every other scenario above passes, which
 //       resolves identically from canonical or the worktree) — resolved against a worktree whose own HEAD
@@ -89,7 +93,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 // prod-DB guard then correctly refuses `new Db()` below). Importing it dynamically, after LOOM_HOME is
 // set, keeps this file's own env setup ahead of anything that reads it.
 const {
-  GIT_ID, FULL_GATE, GUARD_BASENAMES, seed, mkdirp, mk, BASE_SRC, makeRepoWithBaseSrcFile,
+  GIT_ID, FULL_GATE, GUARD_BASENAMES, DIST_SCANNER_BASENAMES, seed, mkdirp, mk, BASE_SRC, makeRepoWithBaseSrcFile,
   writeRealTestDaemonScript,
 } = await import("./_emit-compare-fixtures.mjs");
 
@@ -137,6 +141,11 @@ try {
     check("(A) captured command does NOT run the full test:daemon suite", !capturedGate.includes("test:daemon"));
     check("(A) captured command DOES still run pnpm build", capturedGate.includes("pnpm build"));
     for (const g of GUARD_BASENAMES) check(`(A) captured command runs guard ${g}`, capturedGate.includes(g));
+    // Card abaaf16e — RED-PROOF (real integration leg): a REAL changed compiled .ts file (proven
+    // transpile-identical, exactly this scenario's own shape) must fold every DIST_TEXT_SCANNER_REPO_PATHS
+    // member into the reduced command — this is the positive leg of the fix; see scenario (D) below for
+    // the negative leg (no changed .ts file -> none of these run).
+    for (const s of DIST_SCANNER_BASENAMES) check(`(A) card abaaf16e: captured command runs dist-text scanner ${s} (a compiled .ts file changed)`, capturedGate.includes(`node packages/daemon/test/${s}`));
     check("(A) a distinguishing warning is present", typeof confirm.warning === "string" && /reduced/.test(confirm.warning));
     // Card cf4aa7d1 DoD-3 (positive control, compiled-file arm): the check DID run here (a real compiled
     // .ts file changed and was proven transpile-identical) — the count must stay fully informative, never
@@ -148,6 +157,11 @@ try {
     // test file directly.
     check("(A) card cf4aa7d1: no isolation caveat — this reduction never ran a test file in isolation",
       typeof confirm.warning === "string" && !/ISOLATION/.test(confirm.warning));
+    // Card abaaf16e Code Review MAJOR: the warning TEXT must name that the dist-text scanners ran too — a
+    // reduced gate that folded them into the actual command but left the warning saying "static guards
+    // only" is the exact false-claim defect record d422e279 exists to prevent.
+    check("(A) card abaaf16e: the warning names the dist-text scanners actually ran",
+      typeof confirm.warning === "string" && new RegExp(`also ran the ${DIST_SCANNER_BASENAMES.length} dist-text-scanner test\\(s\\)`).test(confirm.warning));
   }
 
   // ── (B) ONE-TOKEN BEHAVIORAL .ts edit -> FULL gate ──────────────────────────────────────────────────
@@ -251,6 +265,12 @@ try {
     // scripts/test-daemon.mjs's own header + test/_guard.mjs's requireHermeticEnv).
     check("(D) reduced command runs the changed test file THROUGH THE HARNESS (--only=), never bare",
       capturedGate.includes("pnpm --filter @loom/daemon test:daemon --only=placeholder") && !capturedGate.includes("node packages/daemon/test/placeholder.mjs"));
+    // Card abaaf16e — negative leg (real integration): no compiled .ts file changed here (only
+    // test/placeholder.mjs did), so none of the dist-text scanners can possibly observe anything different
+    // — none should run. Mirrors (A)'s positive leg above.
+    for (const s of DIST_SCANNER_BASENAMES) check(`(D) card abaaf16e: no changed .ts file -> dist-text scanner ${s} does NOT run`, !capturedGate.includes(`node packages/daemon/test/${s}`));
+    check("(D) card abaaf16e: the warning does NOT claim any dist-text scanner ran (none did)",
+      typeof confirm.warning === "string" && !/dist-text-scanner/.test(confirm.warning));
   }
 
   // ── (M) card dd4349ff — RED-PROOF: buildReducedGateCommand must invoke a changed test file THROUGH THE
@@ -260,7 +280,7 @@ try {
   //        packages/daemon/test/<file>.mjs` for each changed file — that is what made
   //        test/dev-server.mjs refuse with exit 99 at 0s and block a real release merge. ─────────────────
   {
-    const cmd = buildReducedGateCommand(["packages/daemon/test/dev-server.mjs", "packages/daemon/test/other-thing.mjs"]);
+    const cmd = buildReducedGateCommand({ changedTestFiles: ["packages/daemon/test/dev-server.mjs", "packages/daemon/test/other-thing.mjs"], changedAssetPaths: [], changedTsPaths: [] });
     check("(M) still runs pnpm build", cmd.includes("pnpm build"));
     for (const g of GUARD_BASENAMES) check(`(M) still runs guard ${g} bare (card 49c50b80: safe under any LOOM_HOME via _guard.mjs's isTestCreatedHome, not because guards avoid touching it)`, cmd.includes(`node packages/daemon/test/${g}`));
     check("(M) routes BOTH changed files through test:daemon --only=, comma-joined",
@@ -270,8 +290,34 @@ try {
     check("(M) never runs the ~668-test suite UNFILTERED (any test:daemon step here always carries --only=)",
       !cmd.includes("test:daemon") || cmd.includes("--only="));
     // A diff with NO changed test files must still omit the test:daemon step entirely (build + guards only).
-    const noTestFilesCmd = buildReducedGateCommand([]);
+    const noTestFilesCmd = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: [] });
     check("(M) zero changed test files -> no test:daemon step at all", !noTestFilesCmd.includes("test:daemon"));
+  }
+
+  // ── (T) card abaaf16e — RED-PROOF: buildReducedGateCommand must fold DIST_TEXT_SCANNER_REPO_PATHS in
+  //        (bare `node <path>`, the STATIC_GUARD_REPO_PATHS shape — every member sets up its own hermetic
+  //        env, so none needs the harness wrapper) whenever a changed compiled .ts file is passed, and must
+  //        NOT fold it in otherwise. Direct unit-level call (no git/daemon plumbing) — pre-fix,
+  //        buildReducedGateCommand took only 2 params, so a 3rd argument was silently ignored and none of
+  //        these scanners ever ran on a reduced gate; a comment-only diff introducing matching text into a
+  //        scanned dist/mcp/*.js file (the shape agent-runs-keys.mjs's own G3 check guards) sailed through
+  //        undetected. Card abaaf16e Code Review MINOR: the input is now a REQUIRED object (never
+  //        positional args with defaults) precisely so a call site can't silently drop a field the way the
+  //        old 3rd positional argument could — every call below spells out all three fields explicitly. ──
+  {
+    const withTs = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: ["packages/daemon/src/example.ts"] });
+    check("(T) still runs pnpm build", withTs.includes("pnpm build"));
+    for (const g of GUARD_BASENAMES) check(`(T) still runs static guard ${g}`, withTs.includes(`node packages/daemon/test/${g}`));
+    for (const s of DIST_SCANNER_BASENAMES) check(`(T) a changed .ts file folds in dist-text scanner ${s}, bare (not through --only=)`, withTs.includes(`node packages/daemon/test/${s}`));
+    check("(T) no test:daemon step (no changed test/*.mjs or assets path passed)", !withTs.includes("test:daemon"));
+
+    const withoutTs = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: [] });
+    for (const s of DIST_SCANNER_BASENAMES) check(`(T) NO changed .ts file -> dist-text scanner ${s} does NOT run (the pre-fix shape — must stay RED before this card, GREEN after)`, !withoutTs.includes(`node packages/daemon/test/${s}`));
+
+    // A changed test/*.mjs file alone (no .ts) must not fold the dist-text scanners in either — mirrors
+    // scenario (D)'s real-integration negative leg at the unit level.
+    const withTestFileOnly = buildReducedGateCommand({ changedTestFiles: ["packages/daemon/test/dev-server.mjs"], changedAssetPaths: [], changedTsPaths: [] });
+    for (const s of DIST_SCANNER_BASENAMES) check(`(T) a changed TEST file (not .ts) -> dist-text scanner ${s} still does NOT run`, !withTestFileOnly.includes(`node packages/daemon/test/${s}`));
   }
 
   // ── (E) SCOPE BOUNDARY — an ADDED .ts file (status A) -> FULL gate ─────────────────────────────────

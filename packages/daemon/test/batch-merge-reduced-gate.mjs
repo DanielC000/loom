@@ -33,6 +33,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //         asset-widening behavior), and `reducedGateWarning` states the certified tests actually ran (Code
 //         Review blocker [2]'s own positive control — the pre-blocker-[2] hand-rolled batch copy dropped
 //         this exact statement, silently under-reporting what ran).
+//   (TS) card abaaf16e — a batch of one branch with a COMMENT-ONLY compiled `.ts` edit PLUS one test-only
+//         branch -> REDUCES, and the captured command folds in every `DIST_TEXT_SCANNER_REPO_PATHS`
+//         member too, plus `reducedGateWarning` names the count — the batch path's own version of the
+//         Code Review MAJOR fixed on the solo path (a reduced gate that ran these scanners but left the
+//         warning silent about it).
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/batch-merge-reduced-gate.mjs
 import fs from "node:fs";
 import path from "node:path";
@@ -43,7 +48,7 @@ process.env.LOOM_HOME = path.join(process.env.TEMP ?? process.env.TMPDIR ?? "/tm
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const {
-  GIT_ID, FULL_GATE, ASSET_TEST_BASENAMES, mk, mkdirp, makeRepoWithBaseSrcFile, writeRealTestDaemonScript, BASE_SRC, now,
+  GIT_ID, FULL_GATE, ASSET_TEST_BASENAMES, DIST_SCANNER_BASENAMES, mk, mkdirp, makeRepoWithBaseSrcFile, writeRealTestDaemonScript, BASE_SRC, now,
 } = await import("./_emit-compare-fixtures.mjs");
 
 const { Db } = await import("../dist/db.js");
@@ -140,7 +145,7 @@ try {
     // Self-consistent, not order-assumed: builds the EXPECTED reduced command from the SAME recorded file
     // list the event actually carries, rather than guessing git's own diff-entry order.
     check("(POS) captured command is BYTE-IDENTICAL to buildReducedGateCommand's output for the recorded file set",
-      Array.isArray(recordedTestFiles) && capturedGate === buildReducedGateCommand(recordedTestFiles, []));
+      Array.isArray(recordedTestFiles) && capturedGate === buildReducedGateCommand({ changedTestFiles: recordedTestFiles, changedAssetPaths: [], changedTsPaths: [] }));
 
     // Code Review fold-in [4] + blocker [1]'s own positive control: the PROJECTED gate_history row (what a
     // manager actually reads via `listGateEvents`/`toGateHistoryRow`), not the raw event above. RED against
@@ -254,6 +259,52 @@ try {
       check("(ASSET) reducedGateWarning states the certified asset-reading tests actually ran — dropped by the pre-blocker-[2] hand-rolled batch copy", value.reducedGateWarning.includes(`${ASSET_TEST_BASENAMES.length} certified asset-reading test`));
     } else {
       console.log("(ASSET) NOTE: settled via the async degrade path — skipping the sync-return assertions. The DB/command checks above are unconditional and still ran.");
+    }
+  }
+
+  // ── (TS) card abaaf16e — a batch of one branch with a COMMENT-ONLY compiled .ts edit PLUS one test-only
+  //        branch -> the batch's ONE gate run REDUCES, and the captured command folds in every
+  //        DIST_TEXT_SCANNER_REPO_PATHS member too (mirrors the (ASSET) scenario's own shape, for the
+  //        NEW compiled-.ts-in-the-union trigger instead of the assets one) ───────────────────────────
+  {
+    const T = mk("bmrg-ts");
+    makeRepoWithBaseSrcFile(T, BASE_SRC);
+    writeRealTestDaemonScript(T.repo);
+    commitAll(T.repo, "chore: add real test-daemon script", GIT_ID);
+
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0; let capturedGate;
+    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    seedBatchProject(db, T);
+
+    const wTs = await createWorktree(T.repo, T.projId, `${T.taskId}-ts`);
+    worktrees.push(wTs.worktreePath);
+    fs.writeFileSync(path.join(wTs.worktreePath, "packages", "daemon", "src", "example.ts"),
+      BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed)"));
+    commitAll(wTs.worktreePath, "docs: fix comment typo", GIT_ID);
+    const workerTs = { taskId: `${T.taskId}-ts`, workerId: `${T.workerId}-ts`, branch: wTs.branch, worktreePath: wTs.worktreePath, label: "comment-only-ts" };
+    seedWorker(db, T, workerTs);
+
+    const wTest = await createWorktree(T.repo, T.projId, `${T.taskId}-test`);
+    worktrees.push(wTest.worktreePath);
+    fs.writeFileSync(path.join(wTest.worktreePath, "packages", "daemon", "test", "bmrg-ts-added.mjs"), "console.log(\"PASS  bmrg-ts-added\");\nprocess.exit(0);\n");
+    commitAll(wTest.worktreePath, "test: add bmrg-ts-added", GIT_ID);
+    const workerTest = { taskId: `${T.taskId}-test`, workerId: `${T.workerId}-test`, branch: wTest.branch, worktreePath: wTest.worktreePath, label: "test-only" };
+    seedWorker(db, T, workerTest);
+
+    const { value } = await runBatch(sessions, db, T.projId, T.mgrId, [workerTs.workerId, workerTest.workerId]);
+    check("(TS) the gate command was called exactly once for the whole batch", calls === 1);
+    check("(TS) captured command is NOT the full gate — a comment-only .ts edit never blocks eligibility", capturedGate !== FULL_GATE);
+    check("(TS) captured command's --only= names the added test file", capturedGate.includes("bmrg-ts-added"));
+    for (const s of DIST_SCANNER_BASENAMES) check(`(TS) captured command runs dist-text scanner ${s} bare (a compiled .ts file changed in the union)`, capturedGate.includes(`node packages/daemon/test/${s}`));
+
+    if (value) {
+      check("(TS) both branches landed via the batch, none fell back", value.ok === true && value.landed.length === 2 && value.fallback.length === 0);
+      check("(TS) reducedGateWarning names the dist-text-scanner count", typeof value.reducedGateWarning === "string" && value.reducedGateWarning.includes(`also ran the ${DIST_SCANNER_BASENAMES.length} dist-text-scanner test`));
+    } else {
+      console.log("(TS) NOTE: settled via the async degrade path — skipping the sync-return assertions. The DB/command checks above are unconditional and still ran.");
     }
   }
 

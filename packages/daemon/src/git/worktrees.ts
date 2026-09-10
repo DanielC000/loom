@@ -2799,6 +2799,100 @@ export const ASSET_READING_TEST_REPO_PATHS = [
   "packages/daemon/test/vault-lint.mjs",
 ];
 
+/** The test files that read compiled `dist/**` TEXT (not merely import it as a module) and pattern-match
+ *  that content — run by {@link buildReducedGateCommand} whenever the diff contains a changed compiled
+ *  `.ts` file (card `abaaf16e`). Modelled on {@link ASSET_READING_TEST_REPO_PATHS} immediately above: same
+ *  conditional-inclusion shape (unlike {@link STATIC_GUARD_REPO_PATHS}, which always runs regardless of
+ *  diff shape), a SEPARATE list rather than folded into either sibling because it answers a DIFFERENT
+ *  question — not "does this diff touch `packages/daemon/assets/**`" but "does this diff touch a compiled
+ *  `.ts` file at all", the one case {@link computeEmitCompareGate}'s own transpile-comparison reduces the
+ *  gate on. Run via bare `node <path>` (the {@link STATIC_GUARD_REPO_PATHS} shape), never through the
+ *  `test:daemon --only=` harness (the {@link ASSET_READING_TEST_REPO_PATHS} shape) — every member below is
+ *  independently verified to set up its OWN hermetic `LOOM_HOME`/temp-dir env (see each file's own header),
+ *  so none of them needs the harness wrapper's fresh env the way an arbitrary changed test file might
+ *  (@decision dd4349ff).
+ *
+ *  WHY THIS LIST EXISTS: `computeEmitCompareGate` proves a changed `.ts` file's COMPILED BEHAVIOR unchanged
+ *  by transpiling with `removeComments:true` forced (@decision 2154b6ad) and, when identical, skips the
+ *  ~668-test runtime suite. That proof is sound for ordinary runtime behavior — but a HANDFUL of runtime
+ *  tests don't exercise compiled behavior at all; they `fs.readFileSync` real `dist/**` output and
+ *  pattern-match its TEXT, and tsc keeps comments in the emit (no `removeComments` anywhere in this repo's
+ *  own tsconfig chain — only the isolated proof-comparison above forces it). For a member of THIS list, a
+ *  comment-only diff that happens to introduce (or remove) matching text can flip the test's own verdict
+ *  even though the reduced-gate's transpile-comparison correctly proved the diff behaviorally inert —
+ *  exactly the gap that let one such test (`agent-runs-keys.mjs`'s "G3") sail through a reduced gate on a
+ *  comment-only diff and only fail a later, UNRELATED full gate, misattributed to whoever merged then.
+ *
+ *  MEMBERSHIP CRITERION — a test belongs here only if it does a RAW, UNSTRIPPED whole-file (or
+ *  large-region) text scan of real, compiled `dist/**` output, where a comment anywhere in the scanned
+ *  region can change what the scan matches. THIS IS A JUDGEMENT CALL, not a grep-derivable property — no
+ *  single literal search finds every member (or excludes every non-member): the card `abaaf16e` sweep that
+ *  built this list found `agent-runs-keys.mjs`'s G3 check missing from the naive `grep -l
+ *  "readFileSync(.*dist" packages/daemon/test/*.mjs` (the read's `dist` path segment is built on an EARLIER
+ *  line than the `readFileSync(` call, so the two never share a line), while a broader `readFileSync|
+ *  readdirSync` + `dist` sweep over-shot into ~180 files dominated by ordinary `await
+ *  import("../dist/...")` module loading (irrelevant: importing EXECUTES code, so comments never reach the
+ *  parser either way, unlike a text scan). See docs/decisions/abaaf16e-dist-text-scanner-list-derived-by-hand-not-by-grep.md
+ *  for the full sweep methodology and the shapes deliberately excluded below (that list is a judgment call,
+ *  not exhaustive — see its own closing note).
+ *
+ *  ⛔ NOT a test whose dist-text read is one of the shapes below — each is comment-immune by construction,
+ *  so a comment-only diff cannot flip it:
+ *    (1) a BOUNDED, NAMED-DECLARATION extraction whose captured content is DATA, never comment syntax —
+ *        e.g. `task-deferred-items-migration.mjs`/`task-deferred-until-event-migration.mjs`/
+ *        `task-manual-deferral-migration.mjs`, which each extract only the `` const SCHEMA = `...`; ``
+ *        template-literal BODY via a bounded regex. A template literal's string content is never comment
+ *        syntax, so tsc's `removeComments` cannot touch it regardless of what any comment elsewhere in the
+ *        file says.
+ *    (2) a TS-COMPILER AST-NARROWED function/method-body extraction, where the anchor is a real DECLARED
+ *        NAME (found via the TypeScript compiler's own parser, not a text search) and the text check runs
+ *        only against that one extracted region — e.g. `codescape-spawn-repopath-guard.mjs`,
+ *        `loopback-write-guard.mjs` (§G), `task-version-guard.mjs` (§5), `project-memory-version-guard.mjs`.
+ *        `loopback-write-guard.mjs`'s own inline comment documents it was BURNED by comment-anchoring once
+ *        (a heading comment relocated by an unrelated extraction pass silently zeroed its anchor) and was
+ *        deliberately re-anchored on a real code token to fix it — precedent that this shape is the
+ *        intentionally-hardened one. Residual risk is only an interior comment INSIDE that one extracted
+ *        function/method matching the check's own pattern — several orders narrower than a whole-file scan,
+ *        and out of scope for card `abaaf16e`.
+ *    (3) an EXPLICIT comment-stripped whole-file scan — `codescape-supervisor-shutdown-wiring.mjs` calls its
+ *        own local `stripComments()` (with its own sanity check that the stripper actually strips) before
+ *        every assertion, documented as sharing that per-line discipline with `exit-code-verdict-guard.mjs`/
+ *        `harness-adapter-claude-literal-guard.mjs` — both already unconditional members of
+ *        {@link STATIC_GUARD_REPO_PATHS} above. Already immune by construction; adding it here would be
+ *        redundant with running it on every reduced gate anyway.
+ *    (4) a PRESENCE-ONLY assertion of a real code token — `loopback-secret.mjs` (D) asserts
+ *        `/timingSafeEqual\(/.test(src)` against compiled `dist/gateway/loopback-secret.js`: a comment-only
+ *        diff leaves every real code token unchanged by construction (that's what "transpile-identical"
+ *        means), so a genuine call already present in code stays present regardless of any comment; a
+ *        comment could only ever ADD a spurious match, which for a PRESENCE check can't flip pass→fail —
+ *        the direction this list cares about. Immune by POLARITY, not by where it looks (contrast (1)-(3)).
+ *  This is a judgment call, not a closed taxonomy — see the record's own closing note before assuming a
+ *  new candidate's absence from these four proves it belongs on THIS list instead.
+ *  card `abaaf16e`'s own report names option (b) — teaching the raw scanners below to strip comments the
+ *  same way (3) already does — as legitimate COMPLEMENTARY hardening (card `36afbbdd`), NOT a substitute
+ *  for this list: {@link buildReducedGateCommand} folding this list in is what makes a comment-only diff
+ *  that introduces matching text get CAUGHT AT THE REDUCED GATE, correctly blaming the introducing commit
+ *  — the blame-routing defect this card closes. Comment-stripping would remove the false-positive risk
+ *  these scanners carry (a real, separate improvement worth doing), but wouldn't by itself fix WHERE a
+ *  real hit gets reported, so it doesn't replace this list.
+ *
+ *  `packages/daemon/test/_emit-compare-fixtures.mjs`'s `DIST_SCANNER_BASENAMES` is DERIVED from this
+ *  list at test-load time, not hand-copied — same reuse discipline `GUARD_BASENAMES`/`ASSET_TEST_BASENAMES`
+ *  already establish, so an addition or removal here needs no matching edit there.
+ */
+export const DIST_TEXT_SCANNER_REPO_PATHS = [
+  "packages/daemon/test/agent-runs-keys.mjs",
+  "packages/daemon/test/event-trigger-mcp-absence.mjs",
+  "packages/daemon/test/gateway-token.mjs",
+  "packages/daemon/test/update-endpoint.mjs",
+  "packages/daemon/test/shutdown-snapshot.mjs",
+  "packages/daemon/test/periodic-snapshot.mjs",
+  "packages/daemon/test/git-log-locale-pin.mjs",
+  "packages/daemon/test/graceful-shutdown-epipe-resilience.mjs",
+  "packages/daemon/test/project-memory.mjs",
+  "packages/daemon/test/session-archive.mjs",
+];
+
 /** @decision fd0d34da — a coarse, PATH-FREE classification of WHY `notApplicable:true`, safe to leave
  *  unredacted cross-project (unlike the `reason` string it sits beside, which can embed a path). Every
  *  value names a CATEGORY, never a path/filename/error string. See
@@ -2865,6 +2959,18 @@ export interface EmitCompareGateResult {
    *  {@link notHermeticExcluded}/{@link inertPathsSkipped} above already follow, so a reduced gate never
    *  silently drops accounting for why the certified asset-reading tests ran. */
   changedAssetPaths: string[];
+  /** Card `abaaf16e`: repo-relative paths of changed compiled `.ts` files (the SAME population classified
+   *  into `changedTsFiles` internally, just surfaced) — populated only when `eligible`. Drives
+   *  {@link buildReducedGateCommand}'s conditional fold-in of {@link DIST_TEXT_SCANNER_REPO_PATHS}: a
+   *  test/docs-only diff (this empty) can never change compiled `dist/**` text, so those tests would only
+   *  ever prove what they already proved on a prior run — folding them in unconditionally, the
+   *  {@link ASSET_READING_TEST_REPO_PATHS} shape, would be correct but wasteful for the common case where
+   *  no `.ts` file changed at all. Deliberately NOT reusing `identicalFileCount` (which also counts changed
+   *  `packages/daemon/scripts/**\/*.mjs` files) — a script is never compiled by this repo's tsconfig chain
+   *  into `dist/**` the way a `.ts` file is (see `EMIT_COMPARE_SCRIPTS_PREFIX`'s own doc), so a
+   *  scripts-only diff cannot possibly change what a dist-text scanner reads and must NOT trigger this
+   *  list. See {@link DIST_TEXT_SCANNER_REPO_PATHS}'s own doc for the full membership reasoning. */
+  changedTsPaths: string[];
   /** Count of changed compiled `.ts` files PLUS changed `packages/daemon/scripts/**\/*.mjs` files (card
    *  82662e98) proven transpile/parse-identical — diagnostic only, surfaced by the caller so a skip is
    *  never silent (card 2154b6ad DoD-5). Deliberately ONE combined count, not two: both populations are
@@ -2910,11 +3016,11 @@ export async function computeEmitCompareGate(
   // and an unparseable line, none of which are verdicts about reducibility). Two explicitly-named
   // constructors mean a call site can no longer express the wrong one BY OMISSION — every return below
   // picks one on purpose. See {@link EmitCompareGateResult.notApplicable}'s own doc.
-  const notReducible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], identicalFileCount: 0, reason, notApplicable: false });
+  const notReducible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], changedTsPaths: [], identicalFileCount: 0, reason, notApplicable: false });
   // Card fd0d34da: `kind` is now a required second argument (never a defaulted/optional param) — the same
   // "no call site can express the wrong thing by omission" discipline card 4def0708 already applied to the
   // `notReducible`/`notApplicableHere` split itself, one layer in.
-  const notApplicableHere = (reason: string, kind: EmitCompareNotApplicableKind): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], identicalFileCount: 0, reason, notApplicable: true, notApplicableKind: kind });
+  const notApplicableHere = (reason: string, kind: EmitCompareNotApplicableKind): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], changedTsPaths: [], identicalFileCount: 0, reason, notApplicable: true, notApplicableKind: kind });
   const { git, timeoutMs } = boundedGit(worktreePath, deps);
 
   let entries: string[];
@@ -3191,6 +3297,10 @@ export async function computeEmitCompareGate(
 
   return {
     eligible: true, changedTestFiles, notHermeticExcluded, inertPathsSkipped, changedAssetPaths,
+    // Card abaaf16e: the SAME population classified into changedTsFiles above, just surfaced — see
+    // EmitCompareGateResult.changedTsPaths's own doc for why this drives buildReducedGateCommand's
+    // DIST_TEXT_SCANNER_REPO_PATHS fold-in and why it's deliberately NOT the combined identicalFileCount.
+    changedTsPaths: changedTsFiles,
     // Card 82662e98: both populations are "proven inert via parse/transpile comparison" — folded into ONE
     // diagnostic count rather than a second field threaded through every persisted consumer of this one
     // (sessions/service.ts's emitCompareIdenticalCount is part of a reconciliation event payload, not just
@@ -3318,9 +3428,24 @@ function walkTsFiles(dir: string, out: string[] = []): string[] {
  *  0s, no assertion run, rejecting a merge for an invocation defect, not the code under test.
  *  `changedTestFiles` must already exclude `NOT_HERMETIC` names (trusts the caller, never re-filters);
  *  `changedAssetPaths` folds the certified asset-reading set into the SAME `--only=` list. See
- *  docs/decisions/dd4349ff-reduced-gate-runs-changed-tests-through-the-harness-not-bare-node.md. */
-export function buildReducedGateCommand(changedTestFiles: string[], changedAssetPaths: string[] = []): string {
+ *  docs/decisions/dd4349ff-reduced-gate-runs-changed-tests-through-the-harness-not-bare-node.md.
+ *  @decision abaaf16e — `changedTsPaths` folds {@link DIST_TEXT_SCANNER_REPO_PATHS} into `steps` instead
+ *  (bare `node <path>`, the {@link STATIC_GUARD_REPO_PATHS} shape), never into `testPaths`/`--only=` — every
+ *  member is independently verified to set up its own hermetic env, so it needs none of what the harness
+ *  wrapper exists to provide. See that list's own doc for the full membership + trigger reasoning.
+ *  Card abaaf16e (Code Review MINOR): the three fields are a REQUIRED single object, not positional
+ *  arguments with defaults — a default let a caller silently drop an argument (Code Review's own probe:
+ *  mutating the two admission-reclassification/batch call sites to omit the 3rd argument tripped ZERO
+ *  tests) and the SAME latent shape already existed on `changedAssetPaths` before this card, so both are
+ *  fixed together rather than fixing only the newly-added one. `Pick<EmitCompareGateResult, …>` (not a
+ *  hand-typed object shape) so the two can never drift out of sync — a field renamed on
+ *  `EmitCompareGateResult` fails this call SITE, not silently. */
+export function buildReducedGateCommand(
+  input: Pick<EmitCompareGateResult, "changedTestFiles" | "changedAssetPaths" | "changedTsPaths">,
+): string {
+  const { changedTestFiles, changedAssetPaths, changedTsPaths } = input;
   const steps = ["pnpm build", ...STATIC_GUARD_REPO_PATHS.map((p) => `node ${p}`)];
+  if (changedTsPaths.length > 0) steps.push(...DIST_TEXT_SCANNER_REPO_PATHS.map((p) => `node ${p}`));
   const testPaths = changedAssetPaths.length > 0
     ? [...new Set([...changedTestFiles, ...ASSET_READING_TEST_REPO_PATHS])]
     : changedTestFiles;
