@@ -213,19 +213,13 @@ function credentialAck(q: Question): string {
 }
 
 /**
- * Derive a permission answer's structured grant fields (fix(mcp): persist and surface permission
- * scope/expiry) — `{scope, expiresAt, lapsed}` — from the human's ANSWER-TIME `decidedScope`/
- * `decidedExpiresAt`, never the ask-time `permissionScopeHint`/`permissionExpiresAt` hint (a separate,
- * unenforced REQUEST the asking manager made — see both fields' own doc on `Question`). Shared by
- * `questionPullItem` and `questionAnswerByType` so the two read surfaces can never drift.
- *
- * NULL-SAFE for a row answered before this card shipped (both `decided*` fields null — they were never
- * captured at all): surfaces `{scope:null, expiresAt:null, lapsed:false}` — an absent grant record is
- * never mistaken for an expired one. `lapsed` is a READ-TIME-derived boolean ONLY (`decidedExpiresAt` is
- * set AND in the past) — a "once" or no-expiry grant (`decidedExpiresAt: null`) is `lapsed:false`, not a
- * null-comparison artifact. ADVISORY ONLY: this is a display signal — Loom never itself revokes, blocks,
- * or re-checks a live grant against it; the asking (or a recycled successor) manager must read `lapsed`
- * and honor it, same posture as `provisionTo`'s "stating intent only."
+ * Derive a permission answer's structured grant fields — `{scope, expiresAt, lapsed}` — from the
+ * human's ANSWER-TIME `decidedScope`/`decidedExpiresAt`, never the ask-time `permissionScopeHint`/
+ * `permissionExpiresAt` hint. Shared by `questionPullItem` and `questionAnswerByType` so the two read
+ * surfaces can never drift. NULL-SAFE for a pre-card row (both `decided*` fields null): surfaces
+ * `{scope:null, expiresAt:null, lapsed:false}`, never mistaken for an expired one.
+ * @decision sha:df2f5e17 — why `lapsed` is advisory-display only, never enforced; see
+ * docs/decisions/df2f5e17-permissiongrant-is-advisory-display-only-never-enforced.md.
  */
 function permissionGrant(q: Question): { scope: PermissionScope | null; expiresAt: string | null; lapsed: boolean } {
   return {
@@ -315,20 +309,14 @@ export function questionPullItem(q: Question, db: Db): Record<string, unknown> {
 /**
  * The per-type ANSWER shape shared by `taskRequestGetItem` and `auditRequestItem` (card 59489267) — same
  * branching/fields as `questionPullItem`, but safe to call on a row in ANY state (not just a freshly-
- * answered one `question_pull` just drained): a row that was never actually answered — still `pending`, OR
- * terminally `cancelled` (question_cancel/dismiss, card feat(orchestration): question_cancel + dismiss) —
- * has its answer fields all read `null` instead of a misleading false-ish derivation (e.g. an unanswered
- * permission would otherwise wrongly read `approved:false`, indistinguishable from "denied"; an unanswered
- * credential would otherwise call `credentialAck`, which assumes an answer boundary actually ran, and
- * fabricate a "provided and stored securely" ack for a secret that was never given). Same credential
- * never-echo guarantee as `questionPullItem` — see `credentialAck`. Exported so both non-consuming read
- * surfaces (task-scoped and cross-project audit) share this ONE branching implementation instead of
- * drifting apart. The permission branch also surfaces `permissionGrant`'s structured `{scope, expiresAt,
- * lapsed}` — null-safe on an unanswered/legacy row exactly like `permissionGrant` itself. A "permission"
- * entry ALSO surfaces `fulfillment` (card 3880f783) regardless of `hasAnswer` — an authorization can be
- * declared as a checkable target before it's even answered, but is only ever meaningfully "fulfilled" once
- * the human's write lands, so `computeFulfillment` is safe (and correct) to call unconditionally here: an
- * unanswered/denied permission's target simply reads "not_yet_done"/"unwritable" like any other.
+ * answered one `question_pull` just drained). Same credential never-echo guarantee as `questionPullItem` —
+ * see `credentialAck`. Exported so both non-consuming read surfaces (task-scoped and cross-project audit)
+ * share this ONE branching implementation instead of drifting apart. The permission branch also surfaces
+ * `permissionGrant`'s structured `{scope, expiresAt, lapsed}` and `fulfillment` (card 3880f783) regardless
+ * of `hasAnswer` — an authorization can be declared as a checkable target before it's even answered.
+ * @decision sha:becc7581 — why a pending/cancelled row's answer fields read `null` rather than a misleading
+ * false-ish derivation; see
+ * docs/decisions/becc7581-cancelquestion-two-entry-points-one-write-throws-actual-state.md.
  */
 export function questionAnswerByType(q: Question, db: Db): Record<string, unknown> {
   const hasAnswer = q.state === "answered" || q.state === "consumed";
@@ -424,17 +412,11 @@ export function auditRequestItem(q: Question & { agentId: string | null }, db: D
  * Agent-lineage-scoped cancel — the shared implementation behind BOTH `question_cancel` MCP tool
  * registrations (mcp/orchestration.ts's manager surface, mcp/platform.ts's Lead surface) so the two
  * callers' ownership-check + error-shaping can never drift apart, mirroring how `buildQuestionAsk` is
- * shared for the ask side. Scoped the SAME way `question_pull`/`requests_list({mine:true})` are — by
- * `sessions.agent_id`, not the exact asking session id — so a fresh (non-recycle) successor session on the
- * same agent lineage may still cancel a still-pending ask a predecessor session filed.
- *
- * Rejects: a question asked by a DIFFERENT agent lineage (an asker may only cancel its own asks — never
- * another agent's, mirroring the `mine` ownership boundary); a genuinely unknown id; and — the load-bearing
- * case — a question that has already LEFT the 'pending' state. `Db.cancelQuestion` throws when the row
- * isn't pending, naming its actual current state; this catches that and, specifically for "already
- * answered", returns a message that tells the caller an answer is now available (via question_pull) rather
- * than a generic rejection — so an agent racing a human's answer can never read a failed cancel as having
- * silently discarded that answer.
+ * shared for the ask side. Rejects a question asked by a DIFFERENT agent lineage, a genuinely unknown id,
+ * and (via `Db.cancelQuestion`'s throw) one that already left 'pending'.
+ * @decision sha:becc7581 — why the ownership check is agent-lineage-scoped (not the exact asking session id)
+ * and why the "already answered" rejection names that state instead of a generic error; see
+ * docs/decisions/becc7581-cancelquestion-two-entry-points-one-write-throws-actual-state.md.
  */
 export function cancelQuestionForAgent(
   db: Db,
@@ -464,39 +446,25 @@ export function cancelQuestionForAgent(
 }
 
 /**
- * `question_resolve` (card feat(mcp): let an owner chat reply resolve a pending Request as answered,
- * origin finding 308259e5) — the shared implementation behind BOTH manager (`mcp/orchestration.ts`) and
- * Lead (`mcp/platform.ts`) registrations, mirroring how `cancelQuestionForAgent` is shared. Lets an asker
- * mark its OWN still-pending Request answered from a live owner chat reply, instead of the file-then-
- * cancel workaround (the owner's reasoning otherwise only exists in chat scrollback, and the Requests
- * history shows "cancelled"/moot rather than "answered").
+ * `question_resolve` — the shared implementation behind BOTH manager (`mcp/orchestration.ts`) and Lead
+ * (`mcp/platform.ts`) registrations, mirroring how `cancelQuestionForAgent` is shared. Lets an asker mark
+ * its OWN still-pending Request answered from a live owner chat reply, instead of the file-then-cancel
+ * workaround (the owner's reasoning otherwise only exists in chat scrollback, and the Requests history
+ * shows "cancelled"/moot rather than "answered").
+ * @decision 308259e5 — why this exists, and why it may skip the Companion's propose/confirm friction
+ * ladder; see
+ * docs/decisions/308259e5-question-resolve-lets-a-conversational-owner-reply-answer-a-pending-request.md.
+ * Do NOT "harden" this into a second confirm round-trip to match that ladder — it defends against an
+ * injection-exposed relay channel this loopback-only composer path was never exposed to.
  *
- * **THE ANTI-FABRICATION INVARIANT (load-bearing — do not weaken):** `note` is ALWAYS `ownerText` —
- * the CALLER-SUPPLIED, server-captured-verbatim text of an owner-authored turn, never something the
- * agent writes or paraphrases. The caller (both `mcp/orchestration.ts` and `mcp/platform.ts`) resolves
- * this by falling back from `PtyHost.getActiveTurnOwnerText` (the session's CURRENT in-flight turn) to
- * `PtyHost.getRecentOwnerTurns(sid)[0]` (the single most-recent owner-authored turn, never cleared at
- * Stop — card fix(mcp): let question_resolve accept mid-turn-tool composer answers, origin finding
- * ca341979) when the current turn isn't owner-formed — e.g. the asker ended its own turn after other
- * work (spawning workers, checking status) and only gets to `question_resolve` on a LATER turn. Both
- * sources are populated only from an actual human composer submission (see `pty/host.ts`'s `submit()`);
- * this function itself doesn't care which of the two supplied it — either way `ownerText` is
- * server-captured, never agent-authored. This is what lets an agent resolve its OWN question's answer
- * without reopening the self-answer hole the human-only `POST /api/questions/:id/answer` route exists
- * to close — the daemon captured the words, not the agent. Deliberately [0]-only, not a scan of the
- * whole recent-turns window: the note always attests the owner's LATEST word, never an older one
- * stitched in to make a match (mirrors why `isVerbatimOwnerSubstringRecent`, companion/attestation.ts,
- * checks each recent turn independently rather than concatenating them).
- *
- * **Why this may skip the Companion's propose/confirm friction ladder (`decision_resolve`,
- * `companion/capabilities.ts`):** that ladder exists because the Companion relays an EXTERNAL,
- * injection-exposed chat channel — the text reaching it was never itself authenticated as the owner's
- * own bytes until Primitive A/B/C says so. A manager/Lead session's `ownerText` comes from the SAME
- * loopback-only, human-authenticated REST composer (`POST /api/sessions/:id/input`) that answers a
- * question directly — there is no relay hop and nothing to attest beyond "this turn (or a recent one)
- * was actually formed from that route", which `getActiveTurnOwnerText`/`getRecentOwnerTurns` already
- * guarantee. Do not "harden" this into a second confirm round-trip; that would just be the Companion's
- * cross-channel-injection defense applied to a channel that was never exposed to that risk.
+ * **THE ANTI-FABRICATION INVARIANT (load-bearing — do not weaken):** `note` is ALWAYS `ownerText` — the
+ * CALLER-SUPPLIED, server-captured-verbatim text of an owner-authored turn, never something the agent
+ * writes or paraphrases. Falls back from the session's CURRENT in-flight turn to its single most-recent
+ * owner-authored turn when the current turn isn't owner-formed; this is what lets an agent resolve its
+ * OWN question's answer without reopening the self-answer hole the human-only
+ * `POST /api/questions/:id/answer` route exists to close.
+ * @decision ca341979 — the fallback mechanism, and why it is deliberately `[0]`-only; see
+ * docs/decisions/ca341979-question-resolve-falls-back-to-the-most-recent-owner-authored-turn.md.
  *
  * Rejects (mirroring `cancelQuestionForAgent`'s ownership scoping + the REST answer route's per-type
  * validation): an unknown session/question; a question asked by a DIFFERENT agent lineage; a
