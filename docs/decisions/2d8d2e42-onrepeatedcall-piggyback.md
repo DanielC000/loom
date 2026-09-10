@@ -34,6 +34,14 @@ since it is a wholly separate session/turn from the one stuck looping.
 - Do not deliver this nudge as a mid-turn interrupt — that option was explicitly rejected; queue it for
   the next turn boundary instead.
 
+## Turn-boundary reset (`resetTurn`, `pty/host.ts`'s `Stop`/`StopFailure` case)
+
+`deliverHook`'s `Stop`/`StopFailure` case calls `this.repeatedCalls.resetTurn(sessionId)` as the FIRST
+statement in the case body — a repeated-identical-call streak must never span across a Stop boundary (a
+new turn starting fresh should not inherit a streak count from the turn that just ended). This is a
+synchronous `Map` operation, so it sits safely outside (and before) the M2 synchronous window later in the
+same case body, which guards only the `setBusy`→`drainPending` ordering, not this reset.
+
 ## Source
 
 Inline comment in `packages/daemon/src/mcp/inbound-log.ts` (lines 48-54 as of commit `7da34b90`).

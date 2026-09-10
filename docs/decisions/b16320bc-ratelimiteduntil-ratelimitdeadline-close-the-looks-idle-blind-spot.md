@@ -17,6 +17,15 @@ Deliberately biased toward precision over recall: both `WEEKLY_LIMIT_HIT_RE` (th
 - Do not treat a fleet-view row with `busy:false` and no rate-limit context as proof a worker is genuinely idle without checking `rateLimitedUntil`/`rateLimitDeadline` — a rate-limited park reads identically to healthy idle without them.
 - Do not loosen `WEEKLY_LIMIT_HIT_RE`/`WEEKLY_LIMIT_RESET_CLOCK_RE` to generic "weekly limit"/"resets" vocabulary — ordinary conversation about this very feature would false-positive and silently freeze a healthy session.
 
+## Review: one shared read serves both the context-stats refresh and the weekly-cap sentinel
+
+`pty/host.ts`'s `Stop`/`StopFailure` case used to read+parse the transcript TWICE at this chokepoint: once
+for the context-occupancy refresh, and again below for the weekly-cap text sentinel this card added. A
+later review folded the weekly-cap sentinel's read into the SAME single-pass scan the context-occupancy
+refresh already does — `stats.lastAssistantText` now comes from that one shared read — halving the
+constant cost of a potentially multi-MB JSONL parse on this M2-sensitive synchronous Stop-hook chokepoint,
+without changing the ORDER of the two checks.
+
 ## Source
 
 - Inline comment in `packages/daemon/src/mcp/orchestration.ts` (the fleet-view builder): lines 2605-2611, as of commit `f81f9c1108773e559efe78b7166cbf78b6201480`. Relocated by card `a2278b09` (tranche 2).

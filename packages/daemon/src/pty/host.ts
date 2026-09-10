@@ -6530,9 +6530,8 @@ export class PtyHost {
       }
       case "Stop":
       case "StopFailure": {
-        // Card 2d8d2e42: a turn just ended — a repeated-identical-call streak (recordToolCallArgsHash)
-        // must never span across a Stop boundary. Synchronous Map op, so this sits safely outside (and
-        // before) the M2 synchronous window below, which guards only the setBusy->drain ordering.
+        // @decision 2d8d2e42 — resetTurn is a synchronous Map op placed BEFORE the M2 window, so a
+        // repeated-identical-call streak never spans a Stop boundary.
         this.repeatedCalls.resetTurn(sessionId);
         // ┌─ M2 INVARIANT (busy-gate drain ordering) — DO NOT INTRODUCE AN `await` IN THIS BRANCH ─┐
         // │ From the setBusy(false) below to the drainPending below, execution MUST stay strictly  │
@@ -6544,9 +6543,9 @@ export class PtyHost {
         // │ turns into one session and breaking FIFO serialization. The `finalizingTurn` tripwire    │
         // │ below makes that regression LOUD: enqueueStdin asserts it is never seen true (see there).│
         // └────────────────────────────────────────────────────────────────────────────────────────┘
-        // A Stop/StopFailure can only fire for a turn that actually ran, so it is itself proof the
-        // outstanding submit()'s Enter registered — even on the rare path where UserPromptSubmit's own
-        // hook was lost. Neutralize any still-pending verify-retry BEFORE the M2 window below.
+        // @decision sha:c433346f — a Stop/StopFailure is itself proof the outstanding submit()'s Enter
+        // registered (even if UserPromptSubmit's own hook was lost); neutralize any pending verify-retry
+        // before the M2 window below.
         live.enterConfirmed = true;
         this.resolveFlushMarker(sessionId, live); // card ac7884e3 — see that method's own doc; synchronous, safe before the M2 window below
         // Card 2521bf51: same "Stop is itself proof" reasoning clears any bounded human-submit hold too
@@ -6565,12 +6564,17 @@ export class PtyHost {
         } else {
           live.humanSubmitHeldUntil = null;
         }
-        // Card 3ce3fa39: same GATED reset as UserPromptSubmit's — see composerDirtyLenClearedByGen's doc.
+        // @decision 3ce3fa39 — same GATED composerDirtyLen reset as UserPromptSubmit's: fires only when
+        // composerDirtyLenClearedByGen === live.submitGeneration (see a6c1d413 for why the whole map clears).
         if (live.composerDirtyLenClearedByGen === live.submitGeneration) {
           live.composerDirtyLen = 0;
-          live.composerDirtyLenBelieved = 0; // card c148f118: a decisive confirm collapses both readings to the same true zero
+          // @decision c148f118 — one of the three decisive-confirm sites: collapses composerDirtyLen and
+          // composerDirtyLenBelieved back to true zero together.
+          live.composerDirtyLenBelieved = 0;
           live.composerDirtyLenClearedByGen = null;
-          live.composerDirtyMarkedGens.clear(); // card a6c1d413 — see the UserPromptSubmit hook's identical reset for why the whole map, not just the scalars
+          // @decision a6c1d413 — same full-map clear as UserPromptSubmit's: clearing only the scalars here
+          // would strand an older generation's composerDirtyMarkedGens entry.
+          live.composerDirtyMarkedGens.clear();
         }
         this.purgeConfirmedGiveUpRequeue(sessionId, live, true); // card 441499ee/09e655d5 — see the method doc; before any early park-break below on purpose; Stop/StopFailure advances the queue past its front
         this.finalizingTurn = true;
@@ -6586,39 +6590,27 @@ export class PtyHost {
           // still carries it for a rate-limited replay.
           live.activeTurnSenderId = null;
           // Refresh context occupancy at the turn boundary — ONE single-pass WHOLE-FILE read + parse of the
-          // transcript (card b16320bc review: this used to be read TWICE — once here, once again below for
-          // the weekly-cap text sentinel — doubling synchronous parse work of a potentially multi-MB JSONL
-          // on this M2-sensitive Stop-hook chokepoint; `stats.lastAssistantText` now comes from this SAME
-          // read; that review halved the constant, not the order). ⚠️ NOT a tail-read — card 21a77e85: a
-          // bounded tail-scan isn't implementable here (readContextStats' own doc has the evidence: `turns`
-          // needs a whole-session total, and `lastUserTurnText` can sit arbitrarily far from EOF behind a
-          // long tool-only stretch). O(file size), ~44 ms measured at 8.4 MB on this host — real but ~2
-          // orders of magnitude below the ~40s give-up/park budget (see 21a77e85's §BOUND) — done for EVERY
-          // session (the host doesn't know role — a manager's own occupancy matters too, "who recycles the
-          // manager"). Keep it sync — see the M2 box above before making this (or anything here) async.
+          // transcript.
+          // @decision b16320bc — this used to be read TWICE (here, and again below for the weekly-cap text
+          // sentinel); `stats.lastAssistantText` now comes from this SAME read, halving the constant without
+          // changing the order.
+          // @decision 21a77e85 — NOT a tail-read: `turns` needs a whole-session total and `lastUserTurnText`
+          // can sit arbitrarily far from EOF behind a long tool-only stretch, so a bounded tail-scan isn't
+          // implementable here.
+          // Done for EVERY session (the host doesn't know role — a manager's own occupancy matters too, "who
+          // recycles the manager"). Keep it sync — see the M2 box above before making this (or anything
+          // here) async.
           const stats = live.engineSessionId ? readContextStats(live.cwd, live.engineSessionId) : null;
           if (stats) {
             this.events.onContextStats(sessionId, stats);
           } else if (live.engineSessionId) {
-            // FAIL-VISIBLE (card 7c1fc117): a Stop always follows a completed assistant turn, so a null
-            // read here is ALWAYS anomalous — never a normal "nothing to measure yet" case — and used to
-            // be swallowed with zero signal, permanently freezing the persisted context counter (the
-            // recycle-nudge watcher's only input) with no trace. Distinguish the two null causes so a
-            // future freeze is diagnosable at a glance instead of re-investigated from scratch: the
-            // transcript file itself is missing/unresolvable (cheap re-check via engineTranscriptExists,
-            // which shares readContextStats' own resolveTranscriptFile resolution) vs. the file exists but
-            // no assistant line in it carries a `usage` field.
+            // @decision 7c1fc117 — a Stop always follows a completed assistant turn, so a null context-stats
+            // read here is ALWAYS anomalous; distinguish "transcript missing" from "found but no usage line"
+            // so a future freeze is diagnosable at a glance instead of re-investigated from scratch.
             //
-            // Card dbc6bcac: `engineTranscriptExists`'s FALLBACK path (only reached once its own cheap
-            // direct existsSync check misses) is a synchronous O(projects) `readdirSync` of
-            // `~/.claude/projects` — fine as a one-off, but this branch is anomalous-path-only, so a
-            // persistently-broken session (transcript that never comes back) would otherwise re-pay that
-            // scan on EVERY subsequent Stop. Check the cheap direct path ourselves first — if it hits,
-            // there's nothing to throttle (this is the common, inexpensive "found-but-no-usage" case, and
-            // it also means a session already latched as missing has RECOVERED, so unlatch for a fresh
-            // diagnosis next time). Only when the direct check misses do we consult the latch: skip the
-            // expensive fallback scan (and the log) entirely once it's already confirmed this session's
-            // transcript is genuinely missing — a repeat scan would find the same nothing.
+            // @decision dbc6bcac — check the cheap direct existsSync path before the O(projects) readdirSync
+            // fallback, and latch a confirmed-missing transcript, so a persistently-broken session doesn't
+            // re-pay the expensive scan on every subsequent Stop.
             const directHit = fs.existsSync(engineTranscriptPath(live.cwd, live.engineSessionId));
             let reason: "found-but-no-usage-line" | "file-not-found" | null = null;
             if (directHit) {
