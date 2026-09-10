@@ -222,6 +222,49 @@ export function diffConfigAfterSpawn(before: string, expectedProjectPath: string
 }
 
 /**
+ * Card `baa3435a`: bounded poll interval/deadline for {@link pollConfigDiffAfterSpawn}, env-overridable
+ * (mirrors this module's/host.ts's sibling `LOOM_CODEX_*_MS` convention) so a hermetic test can shrink
+ * both. Real-spawn sightings (two, same signature) observed the OLD one-shot check — a fixed 1500ms wait
+ * after the trust-dialog answer, `pty/host.ts`'s own now-removed hardcoded wait — landing BEFORE codex
+ * had actually persisted `config.toml`, silently skipping the strip forever with no retry and no log.
+ * DEADLINE gives real margin above that observed late-persist point (the ~1.8s mark: 300ms submit-enter
+ * delay + the old 1500ms wait) without waiting so long the poll usually outlives codex's own graceful-
+ * stop sequence in the common case (`GRACEFUL_STOP_KILL_MS`, `pty/host.ts`, 6s default) — not a
+ * correctness requirement, since the poll runs on the daemon's own timers independent of the codex
+ * process's lifetime (a `pty.onExit` final attempt, `pty/host.ts`, covers a persist that lands even
+ * later than this deadline).
+ */
+export const CODEX_TRUST_DIFF_POLL_INTERVAL_MS = Number(process.env.LOOM_CODEX_TRUST_DIFF_POLL_INTERVAL_MS) || 250;
+export const CODEX_TRUST_DIFF_POLL_DEADLINE_MS = Number(process.env.LOOM_CODEX_TRUST_DIFF_POLL_DEADLINE_MS) || 5_000;
+
+/**
+ * Card `baa3435a`: bounded-poll replacement for a one-shot {@link diffConfigAfterSpawn} call taken after a
+ * fixed wait. Codex's trust-dialog answer causes it to persist `config.toml` to disk ASYNCHRONOUSLY, with
+ * no confirming hook to await — a single diff taken too early reads `changed:false` and, with no retry,
+ * misses the write forever (the confirmed defect this replaces). Re-diffs every `intervalMs` until EITHER
+ * `.changed` becomes true OR `deadlineMs` elapses since this call started, then returns the LAST diff
+ * result either way, so a caller can still branch on `.changed` at expiry (e.g. to log and skip the
+ * strip). Keeps SINGLE-STRIP semantics for the caller: it returns once, with one `removable` list, never
+ * calling {@link removeAddedTrustBlocks} itself — the caller strips exactly once off that one result, the
+ * same as the one-shot version did. Never throws (`diffConfigAfterSpawn` itself never throws).
+ */
+export async function pollConfigDiffAfterSpawn(
+  before: string,
+  expectedProjectPath: string,
+  opts?: { intervalMs?: number; deadlineMs?: number },
+): Promise<ConfigDiffResult> {
+  const intervalMs = opts?.intervalMs ?? CODEX_TRUST_DIFF_POLL_INTERVAL_MS;
+  const deadlineMs = opts?.deadlineMs ?? CODEX_TRUST_DIFF_POLL_DEADLINE_MS;
+  const start = Date.now();
+  let diff = diffConfigAfterSpawn(before, expectedProjectPath);
+  while (!diff.changed && Date.now() - start < deadlineMs) {
+    await new Promise<void>((r) => setTimeout(r, intervalMs));
+    diff = diffConfigAfterSpawn(before, expectedProjectPath);
+  }
+  return diff;
+}
+
+/**
  * Remove exactly the `[projects.'<expectedProjectPath>']` block(s) {@link diffConfigAfterSpawn} identified
  * as this spawn's own trust-dialog write — the probe's own manual remediation, automated. Never touches
  * anything else in the file. Best-effort (never throws); returns false if nothing was removed.

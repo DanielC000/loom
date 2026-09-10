@@ -25,7 +25,7 @@ import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, i
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
-import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
+import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
 import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS } from "./codex-host.js";
 import { findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } from "./codex-transcript.js";
 
@@ -4681,16 +4681,26 @@ export class PtyHost {
           await new Promise<void>((r) => setTimeout(r, CODEX_SUBMIT_ENTER_DELAY_MS));
           if (live.alive && !live.killed) pty.write("\r");
           live.trustDialogPending = false; // the answer is on the wire (or the session died/was killed under it) — safe for a kickoff to write now
-          // Give codex a moment to actually persist config.toml before diffing — the write above is
-          // fire-and-forget from this process's point of view; there is no confirming hook to await.
-          await new Promise<void>((r) => setTimeout(r, 1500));
-          const diff = diffConfigAfterSpawn(configHashBefore, opts.cwd);
+          // Card baa3435a: the write above is fire-and-forget from this process's point of view (codex
+          // persists config.toml ASYNCHRONOUSLY, no confirming hook to await), so a ONE-SHOT diff taken
+          // after a fixed wait can read `changed:false` forever on a late persist — two real-spawn
+          // sightings confirmed exactly this (the block silently left behind). Poll instead, bounded —
+          // see pollConfigDiffAfterSpawn's own doc for the deadline/interval rationale. Single-strip
+          // semantics preserved: this still calls removeAddedTrustBlocks at most once, off the one
+          // settled result.
+          const diff = await pollConfigDiffAfterSpawn(configHashBefore, opts.cwd);
           if (diff.changed) {
             if (diff.removable.length) removeAddedTrustBlocks(diff.removable);
             if (diff.residual.length) {
               // eslint-disable-next-line no-console
               console.warn(`[codex-trust] ${opts.sessionId} residual config.toml delta not auto-classified — disclosing verbatim: ${JSON.stringify(diff.residual)}`);
             }
+          } else {
+            // Card baa3435a DoD-3: attributable signal for a next sighting — the deadline expired with no
+            // observed config.toml change at all, so no strip was even attempted. A final best-effort
+            // attempt still runs at pty.onExit (below) in case the persist lands later than this deadline.
+            // eslint-disable-next-line no-console
+            console.warn(`[codex-trust] ${opts.sessionId} config.toml still unchanged after ${CODEX_TRUST_DIFF_POLL_DEADLINE_MS}ms of polling — trust-block strip skipped for now; a final attempt runs at exit`);
           }
         }).catch((err: unknown) => {
           // A failed write leaves trustDialogPending stuck true forever (permanently blocking kickoff) if
@@ -4804,6 +4814,41 @@ export class PtyHost {
 
     pty.onExit(({ exitCode, signal }) => {
       live.alive = false;
+      // Card baa3435a DoD-2: one last best-effort strip attempt, in case codex's config.toml persist
+      // landed AFTER the bounded poll above had already given up (or the poll simply hadn't reached a
+      // fresh check yet when this pty happened to exit — the poll's own promise chain keeps running
+      // independently of the pty's lifetime, so this is a genuine belt-and-suspenders catch, not the only
+      // chance). Run on EVERY exit, not just an intended stop: a crash leaves the trust block behind just
+      // as surely as a graceful stop does, and this session isn't coming back to retry later. Guarded on
+      // `trustDialogAnswered` — if the dialog never appeared, this spawn never touched config.toml, so
+      // there's nothing to diff. Re-diffs against the SAME `configHashBefore` this spawn captured before
+      // any write, so it's idempotent by construction: once the block is already stripped, the file's
+      // current bytes hash back to that same pre-spawn value and diffConfigAfterSpawn reports
+      // `changed:false` — this can run any number of times (including racing the poll's own in-flight
+      // final iteration) without ever double-stripping. Routed through the SAME `codexTrustDialogLock`
+      // every other config.toml read/write in this file uses — the real file is shared across every codex
+      // session on this host, so this must serialize against a DIFFERENT session's own trust-answer cycle
+      // too, not just this session's own (already-finished-or-not) one. Fire-and-forget (onExit itself
+      // isn't async); best-effort (never throws — matches every other cleanup step in this handler).
+      if (live.trustDialogAnswered) {
+        codexTrustDialogLock.withLock(async () => {
+          const finalDiff = diffConfigAfterSpawn(configHashBefore, opts.cwd);
+          if (finalDiff.changed) {
+            if (finalDiff.removable.length) {
+              removeAddedTrustBlocks(finalDiff.removable);
+              // eslint-disable-next-line no-console
+              console.warn(`[codex-trust] ${opts.sessionId} stripped a late-persisted trust block at exit (missed the earlier bounded poll's own deadline)`);
+            }
+            if (finalDiff.residual.length) {
+              // eslint-disable-next-line no-console
+              console.warn(`[codex-trust] ${opts.sessionId} residual config.toml delta (observed at exit) not auto-classified — disclosing verbatim: ${JSON.stringify(finalDiff.residual)}`);
+            }
+          }
+        }).catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.error(`[codex-trust] ${opts.sessionId} exit-time trust-block final check failed: ${(err as Error)?.message ?? String(err)}`);
+        });
+      }
       // @decision ece98bd8 — resolve ONLY the two pty-dead-only outcomes here (died-mid-capture /
       // capture-not-attempted); "exhausted" is already latched by captureCodexEngineSessionId itself.
       // Never overwrite an existing capture or an already-latched reason.
