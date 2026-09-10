@@ -2721,22 +2721,9 @@ export interface CodexLive {
    *  unbounded rescan — see `captureCodexEngineSessionId`'s own doc for the ONE bounded retry this still
    *  allows before giving up for good. */
   engineSessionIdCaptureAttempted: boolean;
-  /** Codex-only, card ece98bd8: WHY the engine-session-id capture chain ended WITHOUT ever finding an id
-   *  — `null` while capture is still pending, or once it succeeds (this is a FAILURE-diagnostic field
-   *  only; never populated on the ordinary success path). Latched exactly once, by whichever of the two
-   *  sites first determines the chain is over:
-   *   - `"exhausted"` — `captureCodexEngineSessionId`'s own last scheduled attempt ran, the pty was
-   *     still alive, and the rollout file still hadn't turned up after all `CODEX_ENGINE_ID_MAX_ATTEMPTS`
-   *     tries. Set THERE, immediately — the pty may keep running long afterward, so this can't wait for
-   *     `pty.onExit`.
-   *   - `"died-mid-capture"` — the pty exited after at least one attempt had already fired
-   *     (`engineSessionIdCaptureAttempted`) but before any attempt found an id or the ladder exhausted.
-   *   - `"capture-not-attempted"` — the pty exited before the ready marker ever rendered, so
-   *     `engineSessionIdCaptureAttempted` never latched and the retry chain never started at all.
-   *  The `died-mid-capture`/`capture-not-attempted` split is resolved at `pty.onExit` itself, not by
-   *  waiting for the in-flight `setTimeout` to fire again against a now-dead pty — that stale tick would
-   *  only learn, up to `CODEX_ENGINE_ID_RETRY_MS` later, exactly what `pty.onExit` already knows at the
-   *  instant of death. Read via `codexStopDiag` (`PtyHostEvents.onExit`) and the exit console line. */
+  /** @decision ece98bd8 — latches exactly once: "exhausted" set THERE (still-alive, retries spent), or
+   *  "died-mid-capture"/"capture-not-attempted" resolved at pty.onExit — onExit never overwrites either an
+   *  existing capture or an already-latched reason. Diagnostic-only; read via codexStopDiag + exit log. */
   engineSessionIdCaptureEndReason: "exhausted" | "died-mid-capture" | "capture-not-attempted" | null;
   /** Codex-only, card 448f1b4a: has this pty instance reached FULL boot readiness — the ready marker
    *  rendered, the header's model finished resolving (⛔ not just the placeholder text; see
@@ -4827,10 +4814,9 @@ export class PtyHost {
 
     pty.onExit(({ exitCode, signal }) => {
       live.alive = false;
-      // Card ece98bd8: resolve the two capture-end outcomes that can only be known once the pty is
-      // actually dead — "exhausted" (the genuinely surprising, still-alive case) is already latched by
-      // `captureCodexEngineSessionId` itself, above, so it's left untouched here. Never overwrites an
-      // already-successful capture (`live.engineSessionId` set) or an already-latched reason.
+      // @decision ece98bd8 — resolve ONLY the two pty-dead-only outcomes here (died-mid-capture /
+      // capture-not-attempted); "exhausted" is already latched by captureCodexEngineSessionId itself.
+      // Never overwrite an existing capture or an already-latched reason.
       if (!live.engineSessionId && !live.engineSessionIdCaptureEndReason) {
         live.engineSessionIdCaptureEndReason = live.engineSessionIdCaptureAttempted ? "died-mid-capture" : "capture-not-attempted";
       }
@@ -4875,11 +4861,9 @@ export class PtyHost {
    * boot). Best-effort throughout: never gates kickoff/busy-detection either way (both already latch/fire
    * off `screenScan` alone, independent of this), and stops retrying the instant the pty exits.
    *
-   * Card ece98bd8: a chain that ends WITHOUT an id used to be silent — indistinguishable from a pty death
-   * mid-window or a ready marker that never rendered at all. This function now records its own genuinely
-   * surprising failure mode (exhausting every attempt on a STILL-LIVE pty) the instant it happens, into
-   * `live.engineSessionIdCaptureEndReason` — see that field's own doc for the other two outcomes, which
-   * are resolved at `pty.onExit` instead (nothing left to check here once the pty is dead).
+   * @decision ece98bd8 — this scan's own surprising failure (exhausted, still alive) is latched HERE, the
+   * instant it's known; the other two capture-end outcomes are pty-dead-only, resolved at pty.onExit — an
+   * unresolved chain used to be silently indistinguishable from a pty death.
    */
   private captureCodexEngineSessionId(sessionId: string, live: CodexLive, cwd: string, attempt = 0): void {
     if (live.engineSessionId || !live.alive) return; // already captured, or the pty is already gone
@@ -4903,9 +4887,9 @@ export class PtyHost {
       setTimeout(() => this.captureCodexEngineSessionId(sessionId, live, cwd, attempt + 1), CODEX_ENGINE_ID_RETRY_MS);
       return;
     }
-    // Card ece98bd8 DoD-3: the last scheduled attempt just ran, the pty is still alive, and the rollout
-    // file was never found — record it NOW rather than deferring to `pty.onExit`, which may be a long
-    // time away (or never, for a session that keeps running after a failed capture).
+    // @decision ece98bd8 — record "exhausted" NOW (last attempt just ran, pty still alive) rather than
+    // deferring to pty.onExit, which may be a long time away — or never, for a session that keeps running
+    // after a failed capture.
     live.engineSessionIdCaptureEndReason = "exhausted";
     // eslint-disable-next-line no-console
     console.warn(`[codex-engine-id] ${sessionId} engine-session id never discovered after ${CODEX_ENGINE_ID_MAX_ATTEMPTS} attempts (~${CODEX_ENGINE_ID_MAX_ATTEMPTS * CODEX_ENGINE_ID_RETRY_MS}ms) — pty still alive; rollout file was never found for this spawn.`);
@@ -4966,16 +4950,9 @@ export class PtyHost {
    *   3. Genuinely stale, NO real marker since `enterWrittenAt` (the swallowed-keystroke case), retries
    *      remain (`submitConfirmAttempts < CODEX_SUBMIT_MAX_RETRIES`) → retry one bare Enter
    *      (`retryCodexEnter` — never re-types `text`) and re-arm from that write's own instant.
-   *   4. Genuinely stale, no confirmation, retries EXHAUSTED → FAIL LOUD (card 6bf0ee32 doctrine): log,
-   *      fire the best-effort `onCodexSubmitUnconfirmed` signal (see its own doc on `PtyHostEvents` — this
-   *      is what makes the failure MANAGER-visible, not just a daemon-log line), and STOP. `live.busy`
-   *      stays true and NOTHING re-arms the timer from inside this branch, so `drainCodexPending` can never
-   *      write a further message on top of this unconfirmed one (DoD-3) — case 2's own `!live.busy` guard,
-   *      and `reconcile()`'s own `!live.busy` gate, both structurally can't fire while this holds. This is
-   *      not a dead end, though: if codex was merely very slow (not genuinely lost) and a real marker
-   *      eventually DOES arrive, onData's own UNCONDITIONAL `armCodexBusyStaleTimer` call re-arms regardless
-   *      of this exhausted state — that re-arm's own eventual fire lands in case 2 and resolves normally.
-   *      Exhaustion pauses the ladder; it does not disable it.
+   *   4. @decision 6bf0ee32 — exhausted: fail loud + STOP, never silent-retry forever. Nothing re-arms here,
+   *      so the queue can't drain atop an unconfirmed turn — but a later real marker still re-arms via onData
+   *      and resolves normally in CASE 2. Exhaustion pauses the ladder; it never disables it.
    *
    * ⚠️ CONFIRMS A TURN RAN, NOT THAT YOUR TEXT ARRIVED INTACT. A real busy-marker sighting proves codex
    * started processing SOMETHING; it is not a byte-level echo check — codex exposes no such signal today,
@@ -5120,24 +5097,9 @@ export class PtyHost {
    * sent) still holds the ORIGINAL, unfolded text — only the bytes actually typed into codex's TUI are
    * folded, so nothing durable or manager-visible is ever silently rewritten.
    *
-   * Card 02e42746: `text` used to reach the pty via ONE `live.pty.write(...)` call — unlike the claude
-   * path (`writeChunked`, defined below), which exists because a single large `pty.write` is TRUNCATED by
-   * Windows ConPTY's input buffer. That truncation sits BELOW the harness: `createPty` (claude) and
-   * `createCodexPty` both spawn through the identical `node-pty` `IPty`, whose `.write()` is a bare
-   * `net.Socket.write` onto ConPTY's input pipe regardless of which process is on the other end (verified
-   * by reading node-pty@1.1.0's own `terminal.js`/`windowsTerminal.js` — `write()` -> `_write()` ->
-   * `this._agent.inSocket.write(data)`, with no per-harness branching anywhere in that path). So nothing
-   * about codex's own TUI shields it — the reviewer's asymmetry was real, not merely apparent, and this is
-   * a MEASURED conclusion about the write path's structure, not an inference from the claude-side comment
-   * alone (that comment is evidence the hazard exists at all; the shared node-pty code path is what
-   * establishes it also reaches codex). No independent codex-side truncation repro was attempted (per the
-   * card's own instruction not to manufacture one) and no numeric threshold is known for either harness —
-   * `writeChunkedCodex` below reuses the SAME `PTY_WRITE_CHUNK_UNITS`/`PTY_WRITE_CHUNK_DELAY_MS`/
-   * `surrogateSafeChunkEnd` machinery `writeChunked` already uses, rather than inventing a second, untested
-   * threshold. The delayed Enter write (and the staleness timer it arms) now starts counting from the
-   * LAST chunk landing, not from this call's own synchronous instant — preserving the "write, then wait
-   * `CODEX_SUBMIT_ENTER_DELAY_MS`, then Enter" shape the probe observed, just measured from the write's
-   * true completion rather than its start.
+   * @decision 02e42746 — codex's write path shares claude's un-truncation-guarded node-pty .write() (verified
+   * in node-pty's own source, no per-harness branching) — chunk it identically via writeChunkedCodex, reusing
+   * writeChunked's own constants rather than inventing an untested codex-specific threshold.
    */
   private submitCodex(sessionId: string, live: CodexLive, text: string): void {
     this.setCodexBusy(sessionId, live, true, "submit");
@@ -5148,14 +5110,9 @@ export class PtyHost {
     // false-positive: a marker sighting with NO submit ever having happened must never count as a
     // completed turn).
     live.submitOutstanding = true;
-    // Card 7c2a6dc0: capture the generation NOW, before the chunked write below. A `stopCodex`/
-    // `interruptForRedirectCodex` landing anywhere in the write-then-wait window — whether mid-chunk (card
-    // 02e42746 widened this window from "near-instant" to however long the chunked write takes) or in the
-    // post-write `CODEX_SUBMIT_ENTER_DELAY_MS` gap — has nothing else to `clearTimeout` for THIS turn:
-    // bumping `busyStaleGen` is the only signal either of them can leave, and comparing against it once the
-    // whole write has landed is what stops this closure writing a stray "\r" into a session that was
-    // deliberately stopped or redirected mid-submit (the card's own "arguably the worse half" finding, for
-    // the redirect case) — this holds regardless of how long the chunked write itself takes.
+    // @decision 7c2a6dc0 — capture busyStaleGen NOW, before the chunked write (card 02e42746 widened this
+    // window from near-instant to however long chunking takes): a stop/redirect anywhere in the write-then-
+    // wait window has only this bump to leave, stopping a stray "\r" into a stopped/redirected session.
     const gen = live.busyStaleGen;
     this.writeChunkedCodex(sessionId, live, codexAsciiFold(text), () => {
       setTimeout(() => {
@@ -5177,17 +5134,9 @@ export class PtyHost {
   }
 
   /**
-   * Codex's own chunked-write helper — card 02e42746, mirrors `writeChunked` (this file's own doc, at its
-   * definition below) against `CodexLive`'s fields instead of `Live`'s. No `ptyWrite` diagnostic wrapper
-   * here: that wrapper (and the `writeSeq`/log-record convention it feeds) is typed to `Live` only, so a
-   * bare per-chunk `.pty.write` is the whole of it — see `submitCodex`'s own doc for why the same
-   * truncation risk `writeChunked` guards against also reaches this path. Re-fetches the live entry from
-   * `liveCodex` on every step (not the closed-over `live` reference), for the same reason `writeChunked`
-   * does: a multi-chunk write can span many `setTimeout` ticks — wide enough for a resume/recycle to
-   * replace this session's `CodexLive` entry mid-write. Deliberately does NOT check `busyStaleGen` per
-   * chunk (a stop/redirect landing mid-write can still let a later chunk of already-superseded text reach
-   * the pty) — `writeChunked` accepts the identical risk for claude; this mirrors it rather than inventing
-   * a stronger guarantee only one harness would have.
+   * @decision 02e42746 — mirrors writeChunked() for CodexLive instead of Live: no ptyWrite wrapper (Live-only),
+   * re-fetches the live entry every step (a multi-chunk write can span a resume/recycle), and deliberately
+   * does not gen-guard mid-chunk — writeChunked accepts the identical stale-write risk for claude.
    */
   private writeChunkedCodex(sessionId: string, live: CodexLive, text: string, done?: () => void): void {
     if (!live.alive || live.killed) { done?.(); return; }
