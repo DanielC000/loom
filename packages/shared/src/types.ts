@@ -22,7 +22,7 @@ export type RunId = string;
  * declaration, HUMAN-only like the rest of this interface.
  *
  * @decision 22629cb2 — `noGateByDesign` composes with `Project.noGateByDesign` by OR, never by
- *  layering/inheritance — see docs/decisions/22629cb2-repo-registry-entry-nogatebydesign-composes-by-or.md
+ *  layering/inheritance; clearing one flag never re-enables a warning the other still suppresses.
  */
 export interface RepoRegistryEntry {
   key: string;
@@ -254,9 +254,9 @@ export interface Profile {
    * `vault_write` tool (loom-tasks MCP) to write (create/overwrite) a UTF-8 text note under ITS OWN
    * project's vault root. Default OFF (absent/false) and fully additive; write-only (no delete).
    *
-   * @decision be8be211 — HUMAN-only trust posture (same as `connections`/`capabilities`), confined via
-   *  `vault/writer.ts`'s path-traversal guard — see
-   *  docs/decisions/be8be211-profile-vaultwrite-capability-human-only-trust-posture.md
+   * @decision be8be211 — HUMAN-only, same trust posture as `connections`/`capabilities`; never settable
+   *  via any agent-facing profile-writing MCP tool (Setup Assistant/Platform Lead included).
+   *  Write-only by design — no delete path.
    */
   vaultWrite?: boolean;
   /**
@@ -489,9 +489,9 @@ export type SessionRole = (typeof SESSION_ROLES)[number];
  * surface, assistant/Companion gets only my_context + chat_reply). Shared here so `sessions/service.ts`
  * and `pty/host.ts` don't maintain independently-typed copies of the same three-role list.
  *
- * @decision 95f40ee0 — NOT the only copy of this role list; two hand-rolled copies remain in
- *  `pty/host.ts` by design and must be updated in lockstep — see
- *  docs/decisions/95f40ee0-usesorchestrationmcp-shared-predicate-drift-hazard.md
+ * @decision 95f40ee0 — NOT the only copy of this role list: `pty/host.ts` hand-rolls the same
+ *  three-role check in `buildMcpServers`'s and the spawn-arg allowlist's own `wantsOrch`. Adding a
+ *  role here alone leaves it waiting forever on an MCP handshake that never fires — update both.
  */
 export function usesOrchestrationMcp(role: SessionRole | null): boolean {
   return role === "manager" || role === "worker" || role === "assistant";
@@ -613,14 +613,14 @@ export interface PendingMerge {
   startedAt: string;
   /** Terminal classification, set only once the op has settled (undefined while `state === "running"`):
    *  "merged" (a successful squash-merge); "cancelled" — the confirm was withdrawn before it ever ran,
-   *  no verdict reached (@decision 361520a0, docs/decisions/361520a0-cancelled-is-no-verdict-never-a-rejection.md);
-   *  "rejected" (the gate/stranded-work/empty-stage check resolved `merged:false`, no exception — the
-   *  merge was refused); "unknown" — the confirm itself threw with no provable outcome
-   *  (@decision 479f449f, docs/decisions/479f449f-pendingmerge-outcome-unknown-is-never-failed.md);
-   *  "stale-base" — a benign rejection where canonical main advanced mid-gate, says nothing about the
-   *  branch itself (@decision 99a1cf6f, docs/decisions/99a1cf6f-gatebaseinvalidated-is-a-real-verdict-never-cache-it.md).
-   *  The Board's `mergeDisplay` renders "unknown"/"stale-base" without their own visual state — "unknown"
-   *  piggybacks on the sibling `state:"failed"` treatment, "stale-base" renders like "rejected". */
+   *  no verdict reached and never read as a rejection (@decision 361520a0); "rejected" (the
+   *  gate/stranded-work/empty-stage check resolved `merged:false`, no exception — the merge was
+   *  refused); "unknown" — the confirm itself threw with no provable outcome, never mapped to
+   *  "failed" (@decision 479f449f); "stale-base" — a benign rejection where canonical main advanced
+   *  mid-gate, says nothing about the branch, and must never be served from cache to a later plain
+   *  re-confirm (@decision 99a1cf6f). The Board's `mergeDisplay` renders "unknown"/"stale-base" without
+   *  their own visual state — "unknown" piggybacks on the sibling `state:"failed"` treatment,
+   *  "stale-base" renders like "rejected". */
   outcome?: "merged" | "cancelled" | "rejected" | "unknown" | "stale-base";
   /** Disambiguates `state:"running"` into WAITING vs EXECUTING (card 53ad9ed3, closing the divergence
    *  008f33f1 left deliberately open on this REST/WS path — worker_list/worker_status's MCP `pendingMerge`
@@ -650,8 +650,8 @@ export interface PendingMerge {
  * @decision 7fcb586a — SESSION-ID NAMING POLICY for every MCP surface returning a session id to an
  *  agent (a NEW/RENAMED output field is `loomSessionId`/`engineSessionId`, never a bare `sessionId`;
  *  role-prefixed names and primary keys are exempt; input params keep their names). Hosted here because
- *  it spans both packages. Known legacy exceptions listed in the record — see
- *  docs/adr/7fcb586a-session-id-naming-policy.md
+ *  it spans both packages. A handful of pre-existing fields are grandfathered (e.g. the test-pinned
+ *  `GateHistoryRow.sessionId`) — this rule governs NEW/RENAMED fields only, not every existing one.
  */
 export interface Session {
   /** The DAEMON's own (Loom-namespaced) session-row primary key — distinct from `engineSessionId` below
@@ -878,9 +878,9 @@ export interface Session {
  *                        the recipient already saw this same content. Board task still filed, but distinct
  *                        from `boarded` — see the decision record for why.
  *
- * @decision fc9a27d5 — replaces the old ambiguous boolean `delivered`; `suppressed-duplicate` stays
- *  distinct from `boarded` on purpose — see
- *  docs/decisions/fc9a27d5-deliverystatus-replaces-ambiguous-delivered-boolean.md
+ * @decision fc9a27d5 — replaces the old ambiguous boolean `delivered`; never collapse
+ *  `suppressed-duplicate` back into `boarded` — only `dropped` warrants alarm, the other four
+ *  values are all durably routed.
  */
 export type DeliveryStatus = "delivered-live" | "queued" | "boarded" | "dropped" | "suppressed-duplicate";
 
@@ -1122,8 +1122,9 @@ export type OrchestrationEventKind =
   // stamped optimistically before give-up detection resolves) — consult both, don't infer "never
   // dropped" from delivered alone. `detail` carries { msgId, rootMsgId, chainDepth,
   // outcome: "reminted" | "parked" | "confirmed-after-park", remintedAs? }.
-  // @decision ccb407eb — the three outcomes' semantics and the confirmed-after-park correction — see
-  //  docs/decisions/ccb407eb-session-message-gave-up-event-kind-and-confirmed-after-park.md
+  // @decision ccb407eb — never infer "never dropped" from `session_message_delivered` alone; consult
+  //  this event too. A re-mint resets budget/increments chainDepth, never re-runs the same loop. A
+  //  "parked" event with no later "confirmed-after-park" is NOT proof the message never landed.
   | "session_message_gave_up"
   // ── Companion proactive heartbeat (CompanionHeartbeatWatcher, card 9488951e) ───────────────────────
   // A daemon-driven proactive turn was injected into the long-lived companion session: the watcher's
@@ -1230,16 +1231,17 @@ export type OrchestrationEventKind =
   // `orchestration.staleRequestMinutes` — the request-AGE twin of `idle_escalated`/`context_escalated`,
   // keyed on `questions.created_at`. Filed under the ASKING SESSION; `detail` carries
   // { questionId, title, ageMinutes }. Emitted EXACTLY ONCE per request.
-  // @decision 99d41588 — fires independent of any session's idle/suppression state — see
-  //  docs/decisions/99d41588-request-escalated-fires-independent-of-idle-suppression.md
+  // @decision 99d41588 — fires independent of any session's idle/suppression state; a suppressed
+  //  manager can never get an `idle_escalated` for this, so this is the only alert path. No
+  //  "cleared" event exists — re-check `state = 'pending'` rather than wait for one.
   | "request_escalated"
   // Adds VISIBILITY ONLY at the idle watchdog's existing `nothingElseActionable` skip — no predicate,
   // nudge, or gating decision changes. Filed under the MANAGER/PLATFORM session; `detail` carries
   // { reason, totalNonTerminal, causeCounts: {...}, ownerBlocked, selfParked, classification,
   // questionIds, releasable: [{ questionId, taskIds }] }. Emitted once per quiet EPISODE.
-  // @decision 275ac184 — the causeCounts partition, classification derivation, and why releasable is
-  //  a separate computation from the ownerRequest label — see
-  //  docs/decisions/275ac184-board-quiet-cause-adds-visibility-only-no-behavior-change.md
+  // @decision 275ac184 — VISIBILITY ONLY at the existing skip, never a predicate/nudge/gating change.
+  //  Never infer `releasable` from the `ownerRequest` label — a labeled card can still be excluded
+  //  (e.g. also deferred), so "answering N Requests releases M cards" can honestly read M=0.
   | "board_quiet_cause"
   // A `held` card was CLEARED (card 9b0373c0, Platform-Audit bb23d15a) — the un-brake audit trail. Emitted
   // from the ONE agent-facing choke point (`updateProjectTask`, mcp/tasks.ts — shared by `tasks_update` AND
@@ -1379,8 +1381,9 @@ export type OrchestrationEventKind =
   // engine's own echo mismatched it). `detail` carries { gen, writtenHash, reportedHash, intendedLen,
   // recognizedGen, matchedLen, leadingRemainderLen, trailingRemainderLen, writtenAt }, plus an optional
   // `messageExcerpt` gated on LOOM_LOG_MESSAGE_CONTENT.
-  // @decision f9b1ea00 — field semantics and the `ts`-is-give-up-not-write correction (card 280309d9) —
-  //  see docs/decisions/f9b1ea00-orchestrationevent-prompt-mismatch-unresolved-ts-correction.md
+  // @decision f9b1ea00 — this row's `ts` IS THE GIVE-UP INSTANT, NOT the write instant (stamped
+  //  600s later); never read it as write time or re-derive write time via a hash-keyed join —
+  //  use `detail.writtenAt` instead, which recovers it by construction.
   | "prompt_mismatch_unresolved"
   // Card 2d8d2e42 — `PtyHostEvents.onRepeatedToolCall` fired: a session called the same MCP tool with
   // IDENTICAL arguments (same `argsHash` already logged on the `[mcp]` line) `count` consecutive times
@@ -1438,8 +1441,9 @@ export type OrchestrationEventKind =
   // batch's single gate never validated main's real current tree — abandoned, every candidate falls
   // back to its own individual gate. Filed under the confirming MANAGER; `detail` carries
   // { opId, repoPath, baseMainSha, currentMainSha, reason, branches: [{ workerSessionId, taskId, branch }] }.
-  // @decision dbc6f660 — the one failure mode batching makes strictly worse than a solo merge — see
-  //  docs/decisions/dbc6f660-batch-merge-forfeited-is-the-one-failure-mode-batching-worsens.md
+  // @decision dbc6f660 — never fold this into an ordinary merge_rejected/build_gate failure kind —
+  //  it's the ONE failure mode batching makes strictly worse (up to K branches' gates wasted, not
+  //  just 1). Never emit `currentMainSha` as null/"undefined" when absent — omit the key.
   | "batch_merge_forfeited"
   // Card 932f13d4: a genuine engine-session-id ROTATION — the Claude Code CLI fired a SECOND
   // `SessionStart` reporting a DIFFERENT `session_id` for the SAME live pty (no new Loom spawn/resume/
@@ -1460,8 +1464,9 @@ export type OrchestrationEventKind =
   // daemon's own `sessions/service.ts`. WHAT the block is and WHY it's gated stays documented
   // daemon-side only — this file ships in full to every end-user install. `detail` carries
   // { injected: boolean, reason: string | null, stamped: boolean | null }.
-  // @decision badba5a8 — three deliberately separate facts, never collapsed into one boolean — see
-  //  docs/decisions/badba5a8-codescape-injection-status-is-pure-and-unit-testable-without-the-real-asset.md (§2)
+  // @decision badba5a8 — never collapse `injected`/`reason`/`stamped` back into one boolean, and never
+  //  merge the "asset unreadable" and "asset read but empty" reasons — different operational faults.
+  //  Never log the block's own prose via this event — it exists so nobody ever has to.
   | "discovery_block_injection";
 
 /**
@@ -1614,9 +1619,9 @@ export interface GateRun {
    *  `branch`/`taskId` above are `null` BY DESIGN — never back-fill them. `false`/`null` on every
    *  ordinary solo gate. `branchCount` is the POST-ASSEMBLY landed count; ⛔ never read
    *  `batchBranches.length` as that count — it is the REQUESTED set, captured before assembly.
-   *  @decision 10fd660b — null-branch-by-design, the landed-vs-requested count trap, and why a
-   *   wholesale forfeit can't be expressed here — see
-   *   docs/decisions/10fd660b-gaterun-batched-shape-null-branch-by-design.md */
+   *  @decision 10fd660b — a wholesale forfeit can't be expressed on this ACTIVE-snapshot type; it's a
+   *   LATER fact (once the whole batch fast-forwards or falls back) — see `GateHistoryRow.batchForfeited`
+   *   once settled, not a gap here. */
   batched: boolean;
   branchCount: number | null;
   batchBranches: string[] | null;
@@ -1624,7 +1629,8 @@ export interface GateRun {
    *  per-project override is reflected. `null` means genuinely UNKNOWN — ⛔ not a measured zero, never
    *  substitute a default. ⚠️ This is the RAW configured value, not the ~2× effective ceiling a first
    *  attempt's auto-extend can reach — an elapsed clock CAN legitimately pass 100% on an extended run.
-   *  @decision fd9edb87 — see docs/decisions/fd9edb87-gaterun-gatetimeoutms-is-per-project-raw-not-effective.md */
+   *  @decision fd9edb87 — never use one page-level constant for every row's timeout cue; the bound
+   *   is per-project, and two rows in one snapshot can legitimately carry different values. */
   gateTimeoutMs: number | null;
   /** Echoed from the daemon's `GateDescriptor.fallbackOfBatchOpId` via `GateSnapshotEntry`: the `opId`
    *  of the `merge_batch` op whose automatic PER-BRANCH FALLBACK spawned this merge. `null` on every run
@@ -1632,7 +1638,8 @@ export interface GateRun {
    *  legitimately share the same value; that IS the grouping key.
    *  ⛔ DO NOT mirror the agent-facing `gate_queue`'s same-named field, which is own-project-scoped (card
    *  80d54122) — this is the HUMAN-only loopback `/api/gates/active`, deliberately unscoped.
-   *  @decision 4cacc6f9 — see docs/decisions/4cacc6f9-gates-active-payload-leaves-fallback-batch-opid-unredacted.md */
+   *  @decision 4cacc6f9 — withholding it here would disclose strictly less than the branch name already
+   *   emitted on the same row, while breaking cross-project batch attribution. */
   fallbackOfBatchOpId: string | null;
 }
 
@@ -1648,9 +1655,9 @@ export interface GatesActive {
 /** How a settled gate run ended, derived from its orchestration_event detail. `"cancelled"` and
  *  `"skipped"` are DISTINCT non-verdicts — never count either as a `"reject"`/`"pass"` when computing a
  *  rate from a series of {@link GateHistoryRow}s. `"skipped"` is always paired with `gateRan:false`.
- *  @decision 3a6f04cc — the cancelled/skipped non-verdict rule, plus two later corrections
- *   (single-file-retry and transient-kill-retry cancel-while-queued shapes) — see
- *   docs/decisions/3a6f04cc-gateoutcome-cancelled-and-skipped-are-not-verdicts.md */
+ *  @decision 3a6f04cc — a `"reject"` row immediately followed (same opId) by a cancelled
+ *   `build_gate_retry` row is one unresolved op, not a rejection (transient-kill-retry); a
+ *   single-file-retry's own `cancelled:true` never loses attempt 1's real failure (sibling row). */
 export type GateOutcome = "pass" | "reject" | "timeout" | "kill" | "cancelled" | "skipped";
 
 /** One settled gate run in the HISTORY table — reconstructed from a gate-related orchestration_event
@@ -1678,11 +1685,9 @@ export interface GateHistoryRow {
   durationMs: number | null;
   /** ISO timestamp the run settled. */
   endedAt: string;
-  /** @decision eb9348b0 — the raw-event split stays deliberate (`gate_history` is the settled-run INDEX,
-   *  never `merge_rejected`'s own detail store); a `gateType:"merge"` row now ALSO falls back to the
-   *  settled verdict payload for this field at zero extra JOIN/column cost — see
-   *  docs/decisions/eb9348b0-gate-history-failingtest-reads-the-settled-verdict-payload-as-fallback.md
-   *  for the measured recovery rate and the full list of remaining null cases.
+  /** @decision eb9348b0 — never assume this is always null for a merge row: `gateType:"merge"` now ALSO
+   *  falls back to the settled verdict payload at zero extra JOIN/column cost (recovers ~70% of recent
+   *  merge-rejection rows vs ~10% for older ones). Still null for the cases that payload doesn't cover.
    *  `opId` (below) is still the reachability key to `gate_status(opId)` for the FULL diagnostic
    *  (`phase`/`stderrTail`/`outputTail`/`exitCode`/`signal`/`timedOut`) whenever this field comes back
    *  null — it was never meant to replace that pivot, only to make the common case (an aggregate scan
@@ -1701,8 +1706,7 @@ export interface GateHistoryRow {
    *  pass/fail branching) — this field never being true for a rejection is the whole point.
    *  @decision 3a6f04cc — `passed:false` means something different on a `"cancelled"` row than on a
    *   `"reject"` row, and the SAME trap catches `"skipped"` too — a rejection-rate caller must filter on
-   *   `outcome`, never on `passed` alone. See
-   *   docs/decisions/3a6f04cc-gateoutcome-cancelled-and-skipped-are-not-verdicts.md */
+   *   `outcome`, never on `passed` alone. */
   passed: boolean;
   /** Whether a gate PROCESS actually spawned for this op — exists so a duration series can exclude
    *  non-runs (a reused/never-spawned row's `durationMs` reflects bookkeeping overhead, not real gate
@@ -1710,8 +1714,7 @@ export interface GateHistoryRow {
    *  @decision sha:cc086436 — DERIVED, not a raw stamp everywhere; exactness depends on which signal was
    *   available when the row was written (exact for `reused:true` and any explicitly-stamped row, a
    *   `durationMs`-presence heuristic otherwise, which can read `true` for a row where nothing actually
-   *   spawned). See
-   *   docs/decisions/cc086436-gateran-derived-not-raw-stamp-accuracy-depends-on-available-signal.md */
+   *   spawned). */
   gateRan: boolean;
   /** The resolved `maxConcurrentGates` cap in effect when this run was recorded, and how many gates were
    *  concurrently active at its admission — both read straight from the event's own `detail_json` (every
@@ -1768,35 +1771,25 @@ export interface GateHistoryRow {
    *  mechanism was never even invoked (the row's own gate failure wasn't the "genuine" shape that gate would
    *  ever be called for) OR this row predates this field — never conflate either with "eligible". */
   retryDeclineReason: string | null;
-  /** @decision a0d1165c — sibling of `retriedFile`/`retryPassed` above, the SAME durable exposure for the
-   *  OTHER retry that can produce a `passed:true` merge row, the TRANSIENT-KILL AUTO-RETRY (card
-   *  bcba83a1), mutually exclusive with `retriedFile` per attempt and DERIVED (not a raw stamp) from the
-   *  row's own event kind — see
-   *  docs/decisions/a0d1165c-transientretried-mutually-exclusive-with-retriedfile.md for the full
-   *  derivation and how this differs from `PendingGateOpVerdict.transientRetried`. */
+  /** @decision a0d1165c — sibling of `retriedFile`/`retryPassed`; DERIVED from the row's own event kind,
+   *  mutually exclusive with a non-null `retriedFile` on the same row, and never conflated with
+   *  `PendingGateOpVerdict`'s own same-named, differently-computed field. */
   transientRetried: boolean;
-  /** @decision 6ca4b1a0 — the RETROSPECTIVE, `gate_history`-native read of the SAME emit-compare-reduction
-   *  fact `gate_status(opId)` already exposes for a settled merge op; a true/false/null tri-state sourced
-   *  from `pending_gate_ops.verdict_payload_json`, NEVER the raw event detail (which cannot distinguish
-   *  "genuinely not reduced" from "reduction never computed"). See
-   *  docs/decisions/6ca4b1a0-gate-history-emit-compare-fields-come-from-pending-gate-ops-not-detail-json.md
-   *  for the full tri-state discipline and the measured 12.9× duration-gap evidence for why a caller
-   *  building a duration series must bucket on this field rather than pooling populations. */
+  /** @decision 6ca4b1a0 — NEVER read this off the raw `orchestration_events.detail_json` — join
+   *  `pending_gate_ops` by `opId` instead, the one place the true/false/null tri-state survives (raw
+   *  detail can't distinguish "genuinely not reduced" from "reduction never computed").
+   *  A caller building a duration series must bucket on this field: never pool a `true` row with a
+   *  `false`/`null` row (measured 12.9× duration gap), and never pool `null` with `false` either —
+   *  `null` means "not determinable", not "known full run". */
   emitCompareReduced: boolean | null;
-  /** @decision fd0d34da — the coarse, PATH-FREE reason `emitCompareReduced` above reads `null` because the
-   *  reduce-predicate said "not applicable" (present ONLY alongside that cause, never a genuine `false`);
-   *  typed loosely as `string` rather than importing the daemon-internal union (same posture as
-   *  `retryDeclineReason`'s own doc, above). See
-   *  docs/decisions/fd0d34da-notapplicablekind-is-a-cross-project-visible-category-not-a-path.md for every
-   *  value's meaning and why each is safe to leave unredacted cross-project. */
+  /** @decision fd0d34da — every value here must stay a CATEGORY — never a path, filename, or error
+   *  string — since this field is deliberately left unredacted cross-project unlike `reason`. Present
+   *  ONLY alongside `emitCompareReduced === null`, never alongside a genuine `false` (notReducible). */
   emitCompareNotApplicableKind: string | null;
-  /** @decision 6ca4b1a0 — present (non-null) ONLY alongside `emitCompareReduced: true`; VACUOUS ON ONE OF
-   *  TWO ARMS — never read alone, always alongside `emitCompareTestFiles` (below). See
-   *  docs/decisions/6ca4b1a0-gate-history-emit-compare-fields-come-from-pending-gate-ops-not-detail-json.md
-   *  for the two-arm discipline, and
-   *  docs/decisions/0984260f-emitcompareidenticalcount-two-arms-are-not-mutually-exclusive.md for the
-   *  MIXED-case correction — the two arms are NOT mutually exclusive, and a non-zero count alongside a
-   *  non-empty `emitCompareTestFiles` does not make the count vacuous. */
+  /** @decision 6ca4b1a0 — present (non-null) ONLY alongside `emitCompareReduced: true`; VACUOUS ON ONE
+   *  OF TWO ARMS — never read alone, always alongside `emitCompareTestFiles` (below). The two arms are
+   *  NOT mutually exclusive (card 0984260f) — a non-zero count alongside a non-empty
+   *  `emitCompareTestFiles` does not make the count vacuous. */
   emitCompareIdenticalCount: number | null;
   /** Card 6ca4b1a0 — the changed `test/*.mjs` file(s) this reduced run ran instead of the full suite.
    *  Present (as an array — possibly EMPTY on the emit-identity arm) whenever `emitCompareReduced: true`;
@@ -1922,8 +1915,9 @@ export type DeferredUntilEventKind = "gate-fail-naming" | "request-answered";
  * gate-outcome nudge can point a reader at it the moment that event fires (see `sessions/service.ts`'s
  * `[loom:merge-rejected]`/`[loom:gate-failed]` composition — the two sites named in the card's own
  * "binding" note).
- * @decision 74716cfb — DELIBERATELY never scanned from `deferredReason` prose (proven unsound on this
- * board's own data) — see docs/decisions/74716cfb-deferreduntilevent-never-scanned-from-prose.md
+ * @decision 74716cfb — never derive this (or anything like it) by scanning `deferredReason` prose for a
+ * matching name — a reason can name something it already ruled out, and a scanner cannot tell the
+ * difference (proven unsound on this board's own data).
  *
  * 🔴 NEVER AUTO-CLEARS — unlike {@link Task.deferredUntilTaskId}, this field only ANNOTATES which event
  * to watch for; it carries no release semantics of its own; `deferred`/`deferredReason` are completely
@@ -1975,8 +1969,9 @@ export interface Task {
    * independent of `held`/`deferred` themselves and independent of that Request's OWN `taskId` (a
    * project-wide owner "decision" Request is very often filed with `taskId:null`, or tied to a sibling/
    * epic card rather than this one — see `Question.taskId`'s own single-task limitation).
-   * @decision 0ad1ca68 — closes the gap where an answered/consumed Request stops showing up as a live
-   * pending question anywhere — see docs/decisions/0ad1ca68-heldrequestid-traces-a-hold-back-after-the-request-is-consumed.md
+   * @decision 0ad1ca68 — never rely on body prose alone to trace a held card back to its gating Request —
+   * the Request stops showing up as a live pending question the moment it's answered/consumed, exactly
+   * when a manager most needs to find it.
    *
    * Deliberately NOT auto-populated and NOT auto-cleared: nothing infers this from `question_ask`'s own
    * (single, optional) `taskId` — a manager/agent sets it explicitly via `tasks_update` when it recognizes
@@ -2000,45 +1995,39 @@ export interface Task {
   /**
    * @decision 793ac76d — an OPTIONAL companion to `deferred`: "deferred until THIS task merges," which
    * auto-clears `deferred` on the named task's observed `merged` state. `null`/absent (default) means no
-   * auto-clear at all — load-bearing for an owner-gated or external-upstream deferral. See
-   * docs/decisions/793ac76d-deferreduntiltaskid-auto-clears-deferred-on-observed-merge.md for the
-   * mechanism, validation, and dangling-reference handling.
-   * @decision 022659ac — widens to an array of blockers: `deferred` auto-clears only once ALL have merged
-   * (AND), while `deferredStuck` (below) is the OR across all of them. See
-   * docs/decisions/022659ac-deferreduntiltaskid-multiple-blockers-and-are-across-all.md for the storage
-   * format and why release/stuck use opposite quantifiers.
+   * auto-clear at all — load-bearing for an owner-gated or external-upstream deferral. A dangling
+   * blocker reference (the named task was deleted) degrades to "stays deferred", never throws.
+   * @decision 022659ac — widens to an array of blockers: `deferred` auto-clears only once ALL have
+   * merged (AND); `deferredStuck` (below) is the OR across all of them — ANY one dangling or
+   * closed-with-no-merge trips it, even while the others are still cleanly pending. A single resolved
+   * blocker always collapses back to a bare string, never a 1-element array.
    */
   deferredUntilTaskId?: string | string[] | null;
   /**
-   * @decision 93669813 — a DERIVED, persisted, self-healing signal that `deferred`'s own release
-   * condition can no longer be reached (dangling blocker, or a blocker closed with no merge). A
-   * DELIBERATE fail-toward-VISIBLE choice, not proof of unreachability — never auto-clears `deferred`
-   * itself. See docs/decisions/93669813-includemerged-false-stuck-is-unknown-not-false.md for the full
-   * semantics, the three causes of `merged === null`, and the multi-blocker OR behavior.
+   * @decision 93669813 — never read `true` as "proven unreachable": `merged === null` can also mean
+   * "shipped outside the scan window" or "a transient git read failure" — this is a DELIBERATE
+   * fail-toward-VISIBLE choice. Never auto-clears `deferred` itself — a 0-commit close is legitimate,
+   * and `deferred` stays keyed on `merged` exactly as it always was.
    */
   deferredStuck?: boolean;
   /**
-   * @decision c90e9525 — the MANUAL-deferral self-explaining pair with `deferredReason`: the instant a
-   * manual deferral most recently started. `null` means "unknown" (never recorded, or a legacy row), NOT
-   * "just now" — never backfilled. Untouched by a route-(a) deferral (`deferredUntilTaskId` set), which
-   * self-explains a different way. See
-   * docs/decisions/c90e9525-deferredat-deferredreason-manual-deferral-self-explaining-pair.md
+   * @decision c90e9525 — never bump this on an edit that only touches the reason text — it answers
+   * "since when has it actually been deferred", not "when was this last edited" (that's `updatedAt`).
+   * `null` means "unknown", NEVER backfilled to "just now" for a legacy row predating this column.
    */
   deferredAt?: string | null;
   /**
-   * @decision c90e9525 — the human-readable REASON for a MANUAL deferral, paired with `deferredAt`; a
-   * write that would leave the card manually deferred with no reason recorded is REJECTED. See
-   * docs/decisions/c90e9525-deferredat-deferredreason-manual-deferral-self-explaining-pair.md
+   * @decision c90e9525 — a write that would leave the card manually deferred (`deferred:true`, no
+   * `deferredUntilTaskId`) with no reason recorded is REJECTED — a date alone does not satisfy this
+   * field's purpose. Not required for a route-(a) deferral; that route self-explains differently.
    */
   deferredReason?: string | null;
   /**
-   * @decision 0d4bc3f0 — sub-items THIS card's own DoD deferred onto ANOTHER card, recorded structurally
-   * alongside — never instead of — a `Related:`/prose note in the body. This is the OUTBOUND view; the
-   * INBOUND view (what's been handed to THIS card) is `TaskWithRequests.incomingDeferredItems`, a
-   * different, derived read-time scan. Written ONLY via `tasks_defer_item`/`tasks_defer_item_ack`, never
-   * a raw `tasks_update` patch. See
-   * docs/decisions/0d4bc3f0-deferreditems-outbound-view-and-the-inline-vs-spill-byte-cost.md for the
-   * measured NDJSON spill-budget cost of the always-present `[]` default.
+   * @decision 0d4bc3f0 — written ONLY via `tasks_defer_item`/`tasks_defer_item_ack`, never a raw
+   * `tasks_update` patch. Never omit when empty to save bytes — the always-present `[]` is deliberate
+   * for consumer-shape uniformity (a measured, accepted NDJSON spill-budget cost). This is the OUTBOUND
+   * view; the INBOUND view is `TaskWithRequests.incomingDeferredItems`, a different, derived read-time
+   * scan — never assume a card must be told a donor's id in advance to detect a hand-off.
    */
   deferredItems?: DeferredItem[];
   /**
@@ -2062,12 +2051,10 @@ export interface Task {
    */
   repoKey?: string | null;
   /**
-   * @decision 1eebc46a — ship-state persisted at merge-confirm time: WHICH repo the branch's squash-merge
-   * commit actually landed on, so a multi-repo project's web board/drawer can answer "did this land, and
-   * where" from a plain column read instead of a per-poll git scan. A CACHE, not the ground truth — the
-   * MCP `tasks_get`/`tasks_list` `merged` field (`TaskWithMerged`) stays the live-verified answer agents
-   * rely on. See docs/decisions/1eebc46a-lazy-ship-state-backfill-on-task-get.md for the full field
-   * contract (`mergedSha`/`mergedRepoKey`/`mergedDate`) and the measured scan-cost this cache avoids.
+   * @decision 1eebc46a — a CACHE, never the ground truth: the MCP `tasks_get`/`tasks_list` `merged`
+   * field (`TaskWithMerged`) stays the live-verified answer agents rely on. Never treat these columns
+   * as authoritative for an agent-facing "is this merged" check — they exist purely so the web
+   * board/drawer avoid the per-poll git-scan cost (measured ~40s at ~1200 cards) this cache exists to skip.
    */
   mergedSha?: string | null;
   mergedRepoKey?: string | null;
@@ -2089,11 +2076,10 @@ export interface Task {
   createdAt: string;
   updatedAt: string;
   /**
-   * @decision d0978321 — optimistic-concurrency CAS token, mirroring {@link ProjectMemoryEntry.version}'s
-   * monotonic-INTEGER rationale but UNLIKE it in one load-bearing way: this advances ONLY when `title` or
-   * `body` actually changes, never on a field-only move (column/priority/held/deferred/etc). Do NOT read
-   * an unchanged `version` as "the card is unchanged" overall. See
-   * docs/decisions/d0978321-task-version-is-a-content-counter-not-a-row-counter.md
+   * @decision d0978321 — a CONTENT counter, not a row counter: advances ONLY when `title`/`body` actually
+   * change, never on a field-only move (column/priority/held/deferred/position/repoKey/etc). Never read
+   * an unchanged `version` across two reads as "the card is unchanged" — it only means title/body
+   * haven't changed; the card may have moved column, changed priority, or auto-cleared its deferral.
    */
   version: number;
 }
@@ -2154,9 +2140,7 @@ export interface ProjectMemoryEntry {
    * kickoffs whose text names a matching PATH glob, instead of pinning it globally. `null` (default)
    * behaves EXACTLY as `pinned` always has. Inert on an unpinned note, and always bypassed by
    * `"never-drop"` (that floor must never be silently weakened). Stays FTS-reachable even when its
-   * predicate doesn't fire, unlike an ordinary pinned note. See
-   * docs/decisions/aeec1880-triggerglob-gates-pinned-delivery-to-a-matching-kickoff-path.md for the two
-   * rejected alternatives (tool name, card label) and the full gating contract.
+   * predicate doesn't fire — must never become LESS reachable than an ordinary unpinned note.
    */
   triggerGlob: string | null;
 }
@@ -2771,9 +2755,9 @@ export interface PollJob {
  * (task mutations emit no events today) and companion-internal mechanics (heartbeat/reminder/alert-push
  * — those are the companion's own watchers' output, not general orchestration lifecycle).
  *
- * @decision e955b5d8 — `rate_limit_bailed` is included, its usage-limit siblings deliberately stay out;
- * don't add one back without a fresh case — see
- * docs/decisions/e955b5d8-event-trigger-kinds-rate-limit-bailed-included-siblings-not.md
+ * @decision e955b5d8 — `rate_limit_bailed` is included; `rate_limit_resumed`/`rate_limit_recovered`/
+ * `usage_latch_armed`/`usage_latch_cleared`/`worker_spawn_usage_blocked` are deliberately excluded as
+ * routine bookkeeping, not attention-worthy signals — don't add one back without a fresh case.
  */
 export const EVENT_TRIGGER_EVENT_KINDS = [
   "merge_rejected", "merge_request",
