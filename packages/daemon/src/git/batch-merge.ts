@@ -4,82 +4,22 @@ import { findLandedSquashCommit, changedPathSetDigest, type MergeEmptyKind } fro
 import { nonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
 
 /**
- * Card dbc6f660 — batch the merge gate: gate K ready branches ONCE, land each on main.
+ * Card dbc6f660 — batch the merge gate: gate K ready branches ONCE, land each on main. Canonical main is
+ * mutated exactly once, at the fast-forward. See
+ * docs/decisions/dbc6f660-batch-merge-forfeited-is-the-one-failure-mode-batching-worsens.md for the
+ * owner-specified design and the forfeit failure mode.
  *
- * OWNER-SPECIFIED DESIGN (see the task card + `.loom/research/batched-merge-gate-feasibility-2026-09-03.md`
- * for the full study): cut a dedicated batch worktree `B` from canonical main's current tip, land each
- * ready branch into `B` in turn, gate `B` ONCE, and on green fast-forward canonical main to `B`'s tip.
- * Canonical main is mutated exactly once, at that fast-forward.
+ * @decision 6801c0a1 — each candidate branch's own commits land INDIVIDUALLY (cherry-picked, one commit at
+ * a time, oldest first), never squashed into one commit per branch — this module deliberately does NOT
+ * reuse {@link mergeBranch}. See
+ * docs/decisions/6801c0a1-batch-landing-preserves-each-branchs-own-commits-not-a-squash.md for the
+ * original (wrong) shape and the trailer-placement rationale.
  *
- * 🔴 CARD 6801c0a1 CORRECTION — READ BEFORE TOUCHING THIS FILE: the ORIGINAL shape shipped here (`b577f43`)
- * squash-merged each candidate via {@link mergeBranch} (reused unchanged), landing ONE commit per branch —
- * byte-shape-identical to a solo `worker_merge_confirm`. That was the WRONG commit shape: the owner
- * explicitly asked (verbatim, twice, on card 6801c0a1) for a BATCHED landing to preserve each branch's own
- * commits INDIVIDUALLY on main, squashing away only the MERGE commits (there are none here to begin with —
- * this file never creates one). **Solo `worker_merge_confirm` is UNCHANGED and still squashes** — that
- * behavior is explicitly kept; only the BATCHED path (this file) changed.
- *
- * `assembleBatchBranches` now REBASES (cherry-picks) each candidate's own commit range
- * (`merge-base(batchTip, branch)..branch`) onto the batch tip, ONE COMMIT AT A TIME, in original order —
- * so a branch contributing 3 commits lands 3 commits on main, not 1. No merge commits are ever created
- * (cherry-pick never does). This module deliberately does NOT reuse {@link mergeBranch} (`git merge
- * --squash`) any more for this path — that primitive is fundamentally the wrong shape (it collapses N
- * commits to 1 by construction) and stays reserved for the solo path, untouched.
- *
- * TRAILER PLACEMENT (the card's "real open question"): once a branch contributes N commits instead of 1,
- * "which commit carries `Loom-Worker-Branch`" is no longer answered for free — `scanMergedCommitMap`
- * (`git/worktrees.ts`, off-limits to modify without escalating — see the card) maps branch -> ONE commit
- * via a single-match `git log --grep` scan. **Chosen: (a) the trailer lands on the branch's LAST (tip)
- * commit ONLY, written AFTER that commit is cherry-picked (a rebase rewrites SHAs, so the trailer can only
- * be attached to the commit's FINAL sha, not inherited from the original).** This preserves the existing
- * one-branch-one-trailer invariant `scanMergedCommitMap`/`findLandedSquashCommit` already depend on —
- * zero changes needed to either reader. The non-tip commits from a batched branch carry NO
- * `Loom-Worker-Branch` trailer at all (exactly like any of a repo's other ordinary, non-landing commits) —
- * this is intentional, not a gap: a single trailer per branch is exactly what every existing reader
- * expects, and a branch's ship-state has always been "found via ITS trailer commit", never "every commit
- * this branch happens to touch".
- *
- * ⭐ **`Loom-Worker-PathSet` + `Loom-Worker-Base` are now stamped on EVERY batched branch's tip, regardless
- * of commit count** (card d62dad73 phase 2 — SUBSUMES phase 1's single-commit-only special case, which
- * existed only as a stopgap and has been folded away; see git history for that narrower version if needed).
- * `Loom-Worker-Base: <batchHeadBefore>` records the batch tip as it stood immediately before this branch's
- * OWN cherry-picks began — a real, already-existing commit reachable from HEAD forever once the batch
- * fast-forwards canonical main (a fast-forward never rewrites history, so this ancestry relationship is
- * permanent). `Loom-Worker-PathSet` is the digest of `batchHeadBefore..landedSha` — the branch's ACTUAL
- * landed contribution (ALL of its commits, not just the last one). `verifyPersistedPathSet`
- * (`git/worktrees.ts`) prefers this trailer's base over its default `sha^` fallback, so a multi-commit
- * contribution — where `sha^` would only span the tip's own last commit, not the whole branch — verifies
- * correctly instead of lying. See {@link landBranchCommitsIndividually}'s own implementation: the tip
- * commit lands WITHOUT either trailer first (so its real sha exists), the digest is computed via {@link
- * changedPathSetDigest} against that real sha and `batchHeadBefore`, then BOTH trailers are added via
- * `git commit --amend` (which preserves the original author/date by default — verified empirically, not
- * assumed).
- *
- * 🔴 **WHY THE DIGEST IS COMPUTED FROM THE LANDED RANGE, NOT THE ORIGINAL BRANCH'S OWN DIFF** (card
- * d62dad73's flagged untested assumption — investigated, and the naive alternative it warned against is
- * REAL): a cherry-picked commit's touched-path-set CAN genuinely differ from the same commit's diff on its
- * original branch, with NO conflict at all — reproduced with a clean (`cherry-pick` exit 0, no merge
- * markers) rename on the receiving side: main renames a file the branch also edits ({@code git mv
- * shared.txt shared-renamed.txt}), then a cherry-pick of the branch's edit to `shared.txt` lands cleanly as
- * an edit to `shared-renamed.txt` (git's rename-following 3-way merge). The ORIGINAL branch's own
- * `mergeBase..branchTip` diff says `shared.txt`; the LANDED `batchHeadBefore..landedSha` diff says
- * `shared-renamed.txt` — genuinely different digests for the identical logical change, and this is NOT a
- * conflict the batch's own drop-wholesale policy would ever catch. Computing the trailer from the branch's
- * pre-landing diff (the shape {@link mergeBranchLocked}'s own solo-path stamp USED to use, before card
- * 756a2cd8 fixed it the same way) would make the trailer LIE the moment {@link verifyPersistedPathSet}
- * later recomputes it from the commit's REAL ancestry (either
- * `sha^..sha` or, here, `Loom-Worker-Base..sha` — both are the LANDED range) — a false verification failure
- * (fails closed, so safe, but defeats the point). **This is a semantics point worth restating plainly:
- * `Loom-Worker-PathSet` describes WHAT LANDED on main, NOT what the branch originally touched on its own
- * fork — under rename-following, those two can legitimately differ with no conflict involved. A future
- * reader who diffs a branch's own history against this trailer and finds a mismatch is looking at expected
- * behavior, not a bug to "fix".** The fix that makes this safe: stamp the digest computed from
- * `batchHeadBefore..landedSha` — the branch's ACTUAL landed contribution, using two real, already-existing
- * commits in the batch's own history — which is trivially and unconditionally IDENTICAL to what {@link
- * verifyPersistedPathSet} will recompute later, by construction, regardless of any rename/auto-merge on the
- * receiving side. See `test/batch-merge.mjs` case (7e) for this exact scenario, kept as a permanent
- * regression guard: the landed-range digest verifies GREEN there in precisely the case where a pre-landing
- * digest would have gone red.
+ * @decision d62dad73 — `Loom-Worker-Base`/`Loom-Worker-PathSet` are stamped on EVERY batched branch's tip,
+ * regardless of commit count. See
+ * docs/decisions/d62dad73-loom-worker-base-trailer-stamps-the-landed-base-not-the-fork-point.md for the
+ * rename-following bug this fixes and why the digest is computed from the LANDED range, never the
+ * branch's own pre-landing diff.
  *
  * ⚠️ A branch whose own commit range contains a MERGE commit (e.g. a stale-base auto-forward that unioned
  * main into the worker's worktree mid-work — `mergeMainIntoWorktree`) is DROPPED, not cherry-picked:
@@ -100,20 +40,10 @@ import { nonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
  *  - Canonical main is FORFEITED (refused, not partially advanced) if it moved between the batch being cut
  *    and the fast-forward — the batch's single gate never validated whatever main became in the meantime.
  *
- * 🔴 RESIDUAL GAP (card 8ea85329, DECIDED not fixed here): `mergeBranchLocked`'s HTML-entity backstop
- * (card f324e8fa, `git/worktrees.ts`) is the SOLO squash path's "last line of defence" against an
- * accidentally-escaped title becoming a permanent mainline commit subject — it is NOT that for this file.
- * `landBranchCommitsIndividually` below lands every candidate's own commit subjects VERBATIM (see
- * `finalMessage` — sourced from each commit's real `%B`, never re-derived or checked), with no equivalent
- * entity check anywhere in this landing path. A hard refusal here was considered and REJECTED: unlike a
- * card title (a manager retitles in seconds), a worker-authored commit message has no cheap fix once the
- * worker may already be retired and `git rebase -i` is unsupported in this repo — refusing mid-batch would
- * strand the branch with no cheap recovery, a materially worse trade than the one f324e8fa made. Instead,
- * `SessionService.reviewWorkerMerge` (`sessions/service.ts`) now surfaces a WARN-ONLY advisory from the
- * SAME `ownTipSubject`/`ownNonTipCommitSubjects` fields a manager already reviews before choosing solo vs.
- * batch — before batch time, while the worker is typically still alive to amend. That advisory is
- * non-blocking: a manager can still ignore it and batch anyway, so this file's own landing path remains,
- * by design, un-enforced for this class of defect. Do not read this file's silence on entities as coverage.
+ * @decision 8ea85329 — this module has no HTML-entity backstop on a batched commit subject (unlike the
+ * solo squash path's `mergeBranchLocked`). See
+ * docs/decisions/8ea85329-batched-landing-has-no-entity-backstop-warn-only-advisory-instead.md for why a
+ * hard refusal here was considered and rejected. Do not read this file's silence on entities as coverage.
  */
 
 const GIT_OP_TIMEOUT_MS = 15_000;
@@ -251,9 +181,9 @@ interface LandResult {
  * ADDITIONALLY gets `Loom-Worker-Branch: <branch>` appended, PLUS `Loom-Worker-Base`/`Loom-Worker-PathSet`
  * (card d62dad73 phase 2) via a follow-up `git commit --amend` once the tip's real sha exists — every
  * earlier commit from this branch lands with its (trailer-stripped) message and nothing else appended.
- * See the header doc's "WHY THE DIGEST IS COMPUTED FROM THE LANDED RANGE..." section for why the PathSet
- * base must be `batchHeadBefore` (this branch's own pre-cherry-pick batch tip), never the branch's own
- * pre-landing diff.
+ * See docs/decisions/d62dad73-loom-worker-base-trailer-stamps-the-landed-base-not-the-fork-point.md for
+ * why the PathSet base must be `batchHeadBefore` (this branch's own pre-cherry-pick batch tip), never the
+ * branch's own pre-landing diff.
  *
  * ALL-OR-NOTHING PER BRANCH: if ANY commit in the range fails to cherry-pick (a real conflict, or any
  * other failure), the cherry-pick is aborted and the batch worktree is HARD-RESET back to exactly where it
@@ -377,21 +307,10 @@ async function landBranchCommitsIndividually(
         ? { ok: false, conflict: true, reason: `${branch}: conflict cherry-picking ${sha.slice(0, 7)} onto the batch` }
         : { ok: false, reason: `${branch}: cherry-pick of ${sha.slice(0, 7)} failed: ${(e as Error).message}` };
     }
-    // Detect an ALREADY-PRESENT (redundant) commit's empty stage EXPLICITLY, before the manual commit
-    // below (card 2eb78eb2) — `cherry-pick --no-commit` never errors when its patch is already fully
-    // applied (see the FAIL-CLOSED comment further down); it just leaves the index unchanged. The
-    // `mergeBase === branchTip` check above only catches a WHOLE branch already landed — it says nothing
-    // about ONE redundant commit inside an otherwise-new multi-commit branch (e.g. two branches that
-    // cherry-picked the same fix independently). Left undetected here, the manual `git commit` a few
-    // lines down runs against a clean index and can itself fail on git's own "nothing to commit, working
-    // tree clean" — a REAL git failure, not a Loom bug — landing in this function's generic commit-failure
-    // branch below with an opaque "commit failed while landing commit <sha7>: …". The outcome (this branch
-    // still drops, same fallback as always) doesn't change; only the diagnosability does — a manager reading
-    // that opaque reason has no way to tell "redundant content" apart from an actual Loom defect. `git diff
-    // --cached --name-only` (not `--quiet`) is used deliberately: `--quiet` signals "nothing staged" via its
-    // EXIT CODE, which is indistinguishable at this call site from any other command failure once it reaches
-    // simple-git's `.raw()` rejection path; `--name-only` always exits 0 and reports emptiness through its
-    // OUTPUT instead, so detecting "nothing staged" here needs no exit-code guessing.
+    // @decision 2eb78eb2 — detect an ALREADY-PRESENT (redundant) commit's empty stage EXPLICITLY, before
+    // the manual commit below, so a redundant-content drop reads distinctly from an opaque git failure.
+    // Uses `git diff --cached --name-only` (not `--quiet`) — exit-code ambiguity at this call site. See
+    // docs/decisions/2eb78eb2-detect-empty-stage-explicitly-before-the-manual-commit.md.
     let stagedPaths: string;
     try {
       stagedPaths = await withTimeout(
@@ -584,16 +503,15 @@ async function sortCandidatesByEarliestAuthorDate(
  * {@link landBranchCommitsIndividually} for the per-branch mechanism (cherry-pick, not squash — card
  * 6801c0a1) and this file's own header doc for why.
  *
- * The landing ORDER itself is `candidates` sorted oldest-author-date-first (card 4763432b — see
- * {@link sortCandidatesByEarliestAuthorDate}) against the batch worktree's HEAD as it stood before this
- * function touched anything — landing order was previously whatever order the caller happened to pass
- * `candidates` in, which made main's own commit history read non-chronologically once author dates (rather
- * than the always-monotonic committer dates sequential cherry-picking produces) were inspected.
+ * @decision 4763432b — the landing ORDER is `candidates` sorted oldest-author-date-first (see
+ * {@link sortCandidatesByEarliestAuthorDate}), never caller-supplied order. See
+ * docs/decisions/4763432b-batch-landing-order-is-oldest-author-date-first.md for why.
  *
  * A candidate that won't land cleanly (a real conflict on any of its own commits against an earlier
  * candidate in this same batch, or any other cherry-pick/commit failure) is DROPPED — recorded with its
  * reason and the loop continues with the rest. This never throws and never aborts the batch: assembly
- * failure is a per-branch outcome, not a batch-wide one (owner directive — "drop, don't fail").
+ * failure is a per-branch outcome, not a batch-wide one (owner directive — "drop, don't fail", see this
+ * file's own header doc).
  */
 export async function assembleBatchBranches(
   batchWorktreePath: string, candidates: BatchCandidate[], deps: BatchGitDeps = {},
@@ -690,32 +608,10 @@ export async function fastForwardCanonicalMain(
  *  real integration wires `runGate` to whatever this daemon already uses for a real gate run. */
 export interface BatchGateResult {
   passed: boolean;
-  /** Card dbc6f660's "measured interaction" note, CORRECTED by card d422e279 (Code Review fold-in [7]):
-   *  the ORIGINAL claim here — "batching unions K branches' changed paths, so a batch is far less likely
-   *  to qualify for a reduced gate than a single un-batched merge" — cited no evidence beyond every
-   *  historical batched `gate_history` row reading `emitCompareReduced:null`. That artifact was ITSELF the
-   *  repoPath/HEAD bug card d422e279 fixed (`computeEmitCompareGate` structurally could never decide a
-   *  batch at all — see that fix's own doc, sessions/service.ts), not a real measurement of how often a
-   *  batch's union is genuinely reducible. Retracted as a measured claim; carry no expectation about
-   *  frequency either way until it is actually measured post-fix.
-   *
-   *  dbc6f660 itself only ever measured (and ruled out) reduction-aware batch SELECTION — excluding an
-   *  individually-reduced-eligible branch from a batch, which the Lead's own measurement found doesn't pay
-   *  at this K (a reduced branch riding an already-full batch costs nothing marginal). It never measured or
-   *  decided the DIFFERENT question this field answers: whether the ONE gate command a batch actually runs
-   *  should itself reduce when the ASSEMBLED tree's own union of changes proves eligible. `chosen` batch
-   *  MEMBERSHIP stays exactly as dumb as dbc6f660 decided — this field, and the substitution it reflects,
-   *  changes only what the resulting ONE gate run executes, never which branches are admitted to it.
-   *
-   *  RECORD-ONLY (Code Review fold-in [6]): `true` means the caller's `runGate` closure (sessions/
-   *  service.ts's `mergeBatchTracked`) ALREADY substituted `buildReducedGateCommand`'s smaller command,
-   *  reusing the SAME predicate (`computeEmitCompareGate`) the solo path already reuses — but that
-   *  substitution is decided from the closure's OWN local `batchEligible`/`batchReduced` variables BEFORE
-   *  this struct is ever returned, never by a caller reading this field back. As of this card, nothing
-   *  reads `BatchGateResult.emitCompareReduced` (the pre-existing deadness predates this card — `gate_history`
-   *  is populated independently, from the SAME local variables, via the batch's own `evtBatch("build_gate",
-   *  ...)` call). It exists purely as a diagnostic echo on the return value, mirroring the shape a caller of
-   *  this interface would reasonably expect to find the verdict on. */
+  /** @decision d422e279 — this field's earlier doc asserted a RETRACTED measured claim about how often a
+   *  batch's union is reducible, and the field itself is RECORD-ONLY (nothing reads it back —
+   *  `gate_history` is populated independently, from the same local variables the caller's `runGate`
+   *  closure already computes). See docs/decisions/d422e279-format-reduced-gate-warning-is-the-shared-builder.md. */
   emitCompareReduced?: boolean;
   /** Card d422e279: present ONLY when `emitCompareReduced` is `true` — the SAME surfacing obligation
    *  `EmitCompareGateResult`'s own doc (git/worktrees.ts) mandates for a solo reduced merge

@@ -8,6 +8,14 @@ Card dbc6f660: the batch-merge-gate FORFEIT case — canonical main advanced bet
 
 The per-branch identity list is what keeps "which branches did this one batch opId cover" recoverable (`LOOM_GATE_OP_ID` is a cross-project contract read by Codescape's gate child; batching re-means its per-run unit from "one branch" to "up to maxWorkers branches" without renaming/dropping it — see `gateOpIdEnvOverride`'s own doc in `sessions/service.ts`). This is the ONE failure mode batching makes strictly worse than today (1 branch's gate wasted → up to K), so it is instrumented distinctly from an ordinary `merge_rejected`/`build_gate` failure rather than folded into either.
 
+### The overall design
+
+Owner-specified design (see the task card + `.loom/research/batched-merge-gate-feasibility-2026-09-03.md`
+for the full study): cut a dedicated batch worktree `B` from canonical main's current tip, land each ready
+branch into `B` in turn (see card `6801c0a1` — individually, not squashed), gate `B` ONCE, and on green
+fast-forward canonical main to `B`'s tip. Canonical main is mutated exactly once, at that fast-forward —
+the forfeit case above is what protects that single mutation from landing on stale ground.
+
 ## Do not
 
 - Do not fold a batch forfeit into an ordinary `merge_rejected`/`build_gate` failure kind — it is instrumented distinctly because it is the one failure mode batching makes strictly worse than a solo merge (up to K branches' gates wasted, not just 1).

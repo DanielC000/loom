@@ -8,6 +8,35 @@ Card d422e279 (Code Review blocker [2]): `formatReducedGateWarning` is the SHARE
 
 `batchLandedCount` is OPTIONAL and additive, mirroring `formatWeakerPassWarning`'s own convention for the identical solo-vs-batch distinction: omitted (the solo path) renders "merge gate reduced: ..." byte-identical to the pre-extraction text; passed (the batch path) renders "batch merge gate reduced across N landed branch(es): ..." and scales the isolation caveat's own "this green is not evidence either way" to name every landed branch, not just one. The isolation caveat's own singular/plural ("this changed test file was" / "these N changed test files were") is driven ENTIRELY by `changedTestFiles.length` in both modes — never hardcoded to plural for a batch, which would misreport a batch whose union touched exactly one test file.
 
+### The retracted frequency claim, and why this field is currently record-only
+
+`BatchGateResult.emitCompareReduced` (`git/batch-merge.ts`) originally claimed, as measured fact, that
+"batching unions K branches' changed paths, so a batch is far less likely to qualify for a reduced gate
+than a single un-batched merge" — cited no evidence beyond every historical batched `gate_history` row
+reading `emitCompareReduced:null`. That artifact was itself the repoPath/HEAD bug this card fixed
+(`computeEmitCompareGate` structurally could never decide a batch at all), not a real measurement of how
+often a batch's union is genuinely reducible. RETRACTED as a measured claim; carry no expectation about
+frequency either way until it is actually measured post-fix.
+
+This card only ever measured (and ruled out) reduction-aware batch SELECTION — excluding an
+individually-reduced-eligible branch from a batch, which measurement found doesn't pay at this K (a
+reduced branch riding an already-full batch costs nothing marginal). It never measured or decided the
+different question `emitCompareReduced` answers: whether the ONE gate command a batch actually runs should
+itself reduce when the assembled tree's own union of changes proves eligible. Batch MEMBERSHIP stays
+exactly as dumb as this card decided — this field, and the substitution it reflects, changes only what the
+resulting ONE gate run executes, never which branches are admitted to it.
+
+`emitCompareReduced` is RECORD-ONLY on `BatchGateResult`: `true` means the caller's `runGate` closure
+(`mergeBatchTracked`, `sessions/service.ts`) already substituted `buildReducedGateCommand`'s smaller
+command, reusing the SAME predicate (`computeEmitCompareGate`) the solo path already reuses — never a
+second, batch-specific predicate — but that substitution is decided from the closure's own local
+`batchEligible`/`batchReduced`
+variables BEFORE this struct is ever returned, never by a caller reading this field back. Nothing reads
+`BatchGateResult.emitCompareReduced` — the deadness predates this card; `gate_history` is populated
+independently, from the same local variables, via the batch's own `evtBatch("build_gate", ...)` call. It
+exists purely as a diagnostic echo on the return value, mirroring the shape a caller of this interface
+would reasonably expect to find the verdict on.
+
 ## Do not
 
 - Do not write a second, hand-authored copy of this warning text at either call site — both the solo and batch paths must call this one builder, or their texts will diverge again exactly as they did before this card.

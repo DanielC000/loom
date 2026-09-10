@@ -16,6 +16,28 @@ Fixed by stamping from the LANDED range instead: the base is `sha^` — canonica
 
 `verifyPersistedPathSet` prefers this trailer's value when present and falls back to `sha^` when absent — backward compatible by construction: every pre-`756a2cd8` solo-squash and pre-phase-2 batched commit lacks this trailer and keeps the exact `sha^`-based behavior it always had.
 
+### Batch implementation sequencing, and the reproduction that proves it
+
+On a batched landing (`landBranchCommitsIndividually`, `git/batch-merge.ts`), the tip commit lands WITHOUT
+either trailer first (so its real sha exists), the digest is computed via `changedPathSetDigest` against
+that real sha and `batchHeadBefore`, then BOTH trailers are added via `git commit --amend` (which
+preserves the original author/date by default — verified empirically, not assumed).
+
+The rename-following divergence above was reproduced directly: a clean (`cherry-pick` exit 0, no merge
+markers) rename on the receiving side — main renames a file the branch also edits (`git mv shared.txt
+shared-renamed.txt`), then a cherry-pick of the branch's edit to `shared.txt` lands cleanly as an edit to
+`shared-renamed.txt` (git's rename-following 3-way merge). The original branch's own `mergeBase..branchTip`
+diff says `shared.txt`; the landed `batchHeadBefore..landedSha` diff says `shared-renamed.txt` — genuinely
+different digests for the identical logical change, with no conflict involved. `test/batch-merge.mjs` case
+(7e) keeps this exact scenario as a permanent regression guard: the landed-range digest verifies GREEN
+there, in precisely the case where a pre-landing digest would have gone red.
+
+This trailer describes WHAT LANDED, never what the branch originally touched — a future reader who diffs
+a branch's history against it and finds a mismatch is seeing expected rename-following behavior, not a
+bug. `batchHeadBefore` stays reachable from HEAD forever once the batch fast-forwards (a fast-forward
+never rewrites history). The rename-following case began as this card's own flagged, untested assumption,
+later confirmed real by direct investigation.
+
 ## Do not
 
 - Do not compute this digest against `merge-base(HEAD, branch)` — that's the branch's pre-landing fork point, which diverges from the landed base once main has advanced past it (the rename-following case), degrading a genuinely landed commit to unverified.
