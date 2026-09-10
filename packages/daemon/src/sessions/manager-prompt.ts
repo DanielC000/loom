@@ -4,37 +4,15 @@ import { resumeDocSizeWarning, resolveResumeDocPath } from "./resume-doc-notes.j
 import { computeDeployStaleness, type DeployStalenessResult } from "../deploy-staleness.js";
 
 /**
- * PL Auditor finding #8 — inject a small "Where things live" context block (the project's absolute
- * `repoPath` + `vaultPath`, PLUS the fully-resolved resume-doc path) into a MANAGER session's startup
- * prompt at spawn. A cold-boot orchestrator otherwise can't construct its resume-doc path (the daemon
- * knows the vault root, but never tells the agent) and Globs for it — a broad Glob from the user's home
- * hits the 20s ripgrep cap.
+ * Injects a "Where things live" context block (the project's absolute `repoPath` + `vaultPath`, plus the
+ * fully-resolved resume-doc path) into a MANAGER session's startup prompt at spawn, so a cold-boot
+ * orchestrator never has to Glob for its own resume doc. @decision sha:4dfda727
  *
  * The block is a PRE-block (context first, then the agent's own doctrine/kickoff) — mirrors how
  * `composeRunStartupPrompt` wraps a run's doctrine + input. PURE-ISH (one guarded `fs.statSync` on the
  * resolved resume-doc path — see below) + exported so the hermetic test can assert the composition.
  * MANAGERS ONLY (lowest blast radius): only `startManager` calls this, so every worker/run/plain/
  * platform/auditor spawn byte-stream is unchanged.
- *
- * The block emits the resume doc as a FULLY-RESOLVED absolute path, built SERVER-SIDE via
- * `resolveResumeDocPath` (`resume-doc-notes.ts`) from the resolved `vaultPath` PLUS the project's
- * `orchestration.resumeDocFilename` config (defaults to `"Orchestrator Log.md"` — Loom's own convention —
- * when unset, so every project that doesn't override it is byte-identical to before). `vaultPath` IS the
- * project's vault directory (e.g. `.../Obsidian Vault/Projects/Loom`) — NOT the vault root. The agent
- * Reads it verbatim with zero derivation, instead of reconstructing the path from memory and mis-spelling
- * the vault root OR assuming a filename that isn't this project's actual convention (card c1f2f095 — both
- * failure modes were observed: a hand-written prompt line AND the generic derivation formula drifted from
- * the real file when a project's resume doc used a non-default name).
- *
- * Card 809cc4b5 — a manager's resume doc grew past the harness Read cap and broke a successor's cold
- * Read. `resumeDocSizeWarning` (`resume-doc-notes.ts` — the SAME check the Platform Lead's resume doc
- * already had) is checked here too, and if the resolved doc is already oversized, its
- * `[loom:resume-doc-size]` note is prepended AHEAD of the pointer block — mirroring
- * `composePlatformLeadStartupPrompt`'s ordering, so a cold-booting successor sees "rotate this" before
- * it's told where to read it. This only covers the spawn/recycle moment; the mid-session case (a doc
- * that grows oversized while its manager stays live, never recycling) is covered separately by
- * `ResumeDocWatcher` (`orchestration/resume-doc-watcher.ts`), which resolves the SAME path via the SAME
- * `resolveResumeDocPath` — one source of truth for both call sites.
  */
 export function composeManagerStartupPrompt(
   startupPrompt: string | undefined,
@@ -71,7 +49,12 @@ export function composeManagerStartupPrompt(
   // confidently-wrong absolute path, worse than the relative value it "fixed". Surface the problem
   // instead: skip the vault-dir/resume-doc lines and flag it for a human re-bind.
   const vaultPathInvalid = hasVault && !path.isAbsolute(loc.vaultPath);
+  // @decision c1f2f095 — resolve via the ONE shared `resolveResumeDocPath`, never re-derive the path
+  // here (a hand-written prompt line and a second hardcoded formula have both drifted from the real
+  // file on disk before).
   const resumeDoc = hasVault && !vaultPathInvalid ? resolveResumeDocPath(loc.vaultPath, loc.resumeDocFilename) : "";
+  // @decision 809cc4b5 — check size at spawn too (not just mid-session via ResumeDocWatcher), so an
+  // already-oversized doc is flagged before a cold-booting successor's Read breaks on it.
   const sizeNote = resumeDoc ? resumeDocSizeWarning(resumeDoc) : "";
   const invalidNote = vaultPathInvalid
     ? `[loom:vault-path-invalid] This project's configured vault path (\`${loc.vaultPath}\`) is not an ` +
@@ -79,24 +62,13 @@ export function composeManagerStartupPrompt(
       `shown below. This needs a HUMAN to re-bind the project's vault path (project settings) to a real, ` +
       `absolute filesystem path; do not attempt to derive or guess the correct path yourself.`
     : "";
-  // Card 5e30c4bd: a daemon-`src`/`shared` commit can be MERGED on mainline for a long time before this
-  // daemon PROCESS is restarted to actually run it — and nothing surfaced that gap (the incident: ~1h50m,
-  // discovered only because a manager happened to call `served_status` by hand). DERIVED fresh on every
-  // manager spawn/resume/recycle (never cached/persisted — see computeDeployStaleness's own doc), scoped
-  // to ONLY daemon-src/shared commits so an assets/docs/vault-only merge (no restart needed) never cries
-  // wolf. `available:false` for a packaged loomctl install (`reasonKind: "not-applicable"`) emits nothing —
-  // byte-identical to before this card for every non-self-hosting deployment. Card d3d4d432: `available:false`
-  // because the check itself failed (`reasonKind: "could-not-measure"`) is NO LONGER silent — see the
-  // `deployStaleNote` derivation below for why collapsing the two was a false all-clear.
+  // @decision 5e30c4bd — derive fresh on every manager spawn/resume/recycle, scoped to ONLY
+  // daemon-src/shared commits, and run this SYNCHRONOUSLY (a bounded, rare git call, not the
+  // per-spawn hot path CLAUDE.md's event-loop discipline protects) — never cache/persist it.
   //
-  // SYNCHRONOUS by design, not an oversight: `computeDeployStaleness()` runs a bounded `execFileSync` git
-  // read directly on this call. That is NOT the `createPty`/`buildSpawnArgs` hot path CLAUDE.md's
-  // event-loop discipline protects (the incident that discipline exists for was an UNBOUNDED,
-  // minutes-long `spawnSync` — venv create + pip install — on a path EVERY session spawn hits). This
-  // function only runs for a MANAGER spawn/resume/recycle, a comparatively rare event, so a bounded git
-  // call (worst case 2×`GIT_TIMEOUT_MS` fully-blocked event loop, degrading gracefully on timeout — see
-  // that constant's own doc) was judged an acceptable, much simpler alternative to an async-cache-plus-
-  // prewarm layer (the `getCachedClaudeVersion` pattern) for this specific, infrequent call site.
+  // @decision d3d4d432 — `available:false` because the check itself failed is NOT silent like a
+  // packaged install's `"not-applicable"` — see `deployStaleNote` below for why collapsing the two
+  // was a false all-clear.
   const staleness = stalenessOverride ?? computeDeployStaleness();
   const shortSha = (sha: string) => sha.slice(0, 8);
   // Deliberately EMITS NOTHING when clean (or unavailable) — no "Deploy status: current" line. A quiet
@@ -156,21 +128,13 @@ export function composeManagerStartupPrompt(
       "or gate for a reference repo. If a task turns out to need changes IN a reference repo, that's " +
       "out of scope here; surface it instead of committing there."
     : "";
-  // Multi-repo epic 49136451, phase 3: the project's WRITABLE repo registry — the repos a manager may
-  // actually route cards at (distinct from the read-only reference repos above). Omitted entirely when the
-  // project registers none, so a single-repo project's prompt is byte-identical to before this existed.
+  // @decision 49136451 — the project's WRITABLE repo registry (distinct from the read-only reference
+  // repos above); omitted entirely when the project registers none, so a single-repo project's prompt
+  // stays byte-identical.
   //
-  // The two facts here are the ones that were previously discoverable nowhere: repoKey is the manager's
-  // OWN dispatch lever (a worker cannot set it), and a registered repo's missing gate does NOT inherit
-  // this project's gate command — it merges unverified, which is a thing to decide about before
-  // dispatching, not to discover at merge time.
-  // NOT filtered, deliberately — and this must stay symmetric with the worker's block
-  // (`worker-prompt.ts` › `WorkerRepoContext.registry`), which also consumes the registry as-is.
-  // `validateRepoRegistry` is the single gate on every write path and already rejects a blank, duplicate,
-  // reserved, or non-`[A-Za-z0-9._-]` key, so a defensive blank-key filter here would be dead code that
-  // implies the data is untrusted — which then invites the next reader to add the same filter in the two
-  // or three other places the registry is read. The reference-repos blocks above DO filter, and that
-  // asymmetry is intentional: `referenceRepos` is a bare `string[]`, this is a validated typed record.
+  // NOT filtered, deliberately: `validateRepoRegistry` is the single write-path gate already (unlike the
+  // reference-repos block above, a bare `string[]` it does filter) — must stay symmetric with
+  // `worker-prompt.ts`'s `WorkerRepoContext.registry`, which also consumes the registry as-is.
   const registry = loc.repos;
   const repoBlock = registry && registry.length > 0
     ? "\n\n**Registered repos (this project is multi-repo):**\n" +

@@ -43,3 +43,15 @@ phase 2 — thread per-task repo through worktree/gate/merge/ship-state`) and
 `a882e727c950a45be348e199d61a3e27e17b2d4a` (`fix(orchestration): fork review worktrees from the reviewed
 branch tip`). Relocated by card `61632c05` (tranche 15); no wording changed, wrapped source lines joined
 into a flowing paragraph and the `//` comment markers stripped.
+
+## `composeManagerStartupPrompt` prints the registry unfiltered — `repoKey` is the manager's own dispatch lever
+
+The registry block in `composeManagerStartupPrompt` (multi-repo epic `49136451` phase 3) surfaces two facts previously discoverable nowhere: `repoKey` is the manager's OWN dispatch lever (a worker cannot set or change its own card's repo), and a registered repo with no configured gate command does NOT inherit the project's gate — it merges unverified, which is a thing to decide about before dispatching a card there, not to discover at merge time. Omitted entirely when the project registers none, so a single-repo project's prompt stays byte-identical to before this existed.
+
+### Do not (3)
+
+- Do not filter this registry block — `validateRepoRegistry` is the single gate on every write path already and already rejects a blank, duplicate, reserved, or non-`[A-Za-z0-9._-]` key, so a defensive filter here would be dead code implying the data is untrusted, inviting the same filter into the two or three other places the registry is read. Must also stay symmetric with `worker-prompt.ts`'s `WorkerRepoContext.registry`, which consumes the registry as-is. (This is the opposite of the reference-repos block in the SAME file, which DOES filter — that asymmetry is intentional: `referenceRepos` is a bare `string[]`, this registry is a validated typed record.)
+
+### Source (3)
+
+Inline comment in `packages/daemon/src/sessions/manager-prompt.ts` (the `repoBlock` derivation), as of commit `0c32bca8991bf7f8ba387012f7a0ad0c673fda24`. Relocated by card `4c6a1edf` ("manager-prompt.ts, tranche 1"); no wording changed, `//`-prefixed lines joined into a flowing paragraph.
