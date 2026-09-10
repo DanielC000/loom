@@ -21,8 +21,9 @@ import { computeWakeImpact } from "./wake-impact.js";
  * STRUCTURAL GUARD: expressed as a `Record<SessionRole, boolean>`, not a bare array, so a FUTURE
  * `SessionRole` addition to `SESSION_ROLES` (shared/src/types.ts) fails to COMPILE here until this map
  * picks a disposition for it — the array below is DERIVED from the map, never hand-edited.
- * @decision a933613e — see docs/decisions/a933613e-recoverable-role-map-is-a-record-not-an-array.md for
- * why (the `operator` role slipped through unrecovered for a month under the old array shape).
+ * @decision a933613e — do not revert this to a bare `SessionRole[]` array (that let `operator` go
+ * unrecovered for a month with zero diagnostics) and never hand-edit RECOVERABLE_ROLES — it must stay
+ * DERIVED from this map, or the compile-time exhaustiveness check is defeated.
  * DISCRIMINATOR for reusing this shape elsewhere: apply it to an EXHAUSTIVE-DISPOSITION list — one whose
  * own comment already claims to account for every role, the way this one always has — where a silent
  * omission is a bug. Do NOT apply it to a narrow CAPABILITY allowlist (e.g. "only these roles may request
@@ -78,16 +79,15 @@ export interface CrashRecoveryDeps {
    * (index.ts passes an arrow wrapper, `(id, role, text, taskId) => sessions.enqueueDurableNudge(id, role,
    * text, taskId)`) instead of the bare `pty.enqueueStdin` this tick used to call directly for its
    * worker/assistant/operator and manager/platform continuation nudges.
-   * @decision 9f7c59f1 — that raw call was a real, narrower instance of the exact gap
-   * `enqueueDurableNudge` exists to close: no `PtyHost.waitForMcpSeen` gate (a fresh MCP-client handshake
-   * can lose the race to an immediate `enqueueStdin`, same role-gated defer `enqueueDurableNudge` itself
-   * applies via `usesOrchestrationMcp`) and no durable give-up-exhaustion record. See
-   * docs/decisions/9f7c59f1-enqueuedurablenudge-not-private-third-resume-path.md for the full three-paths
-   * comparison. ABSENT (e.g. every existing hermetic test double that doesn't pass it) falls back to the
-   * pre-9f7c59f1 raw `pty.enqueueStdin` dispatch, byte-identical — additive, never a hard dependency a
-   * test double must opt into. The one-shot crash-loop heads-up below (`session_recovery_abandoned`) is
-   * DELIBERATELY NOT routed through this — see its own comment for why that one stays best-effort on
-   * purpose.
+   * @decision 9f7c59f1 — do not mark `enqueueDurableNudge` `private`: reverting to a raw `pty.enqueueStdin`
+   * call here reopens the exact give-up-exhaustion silent-loss gap it exists to close.
+   * That raw call lacked `PtyHost.waitForMcpSeen` (a fresh MCP-client handshake can lose the race to an
+   * immediate `enqueueStdin`, same role-gated defer `enqueueDurableNudge` itself applies via
+   * `usesOrchestrationMcp`) and a durable give-up-exhaustion record. ABSENT (e.g. every existing hermetic
+   * test double that doesn't pass it) falls back to the pre-9f7c59f1 raw `pty.enqueueStdin` dispatch,
+   * byte-identical — additive, never a hard dependency a test double must opt into. The one-shot
+   * crash-loop heads-up below (`session_recovery_abandoned`) is DELIBERATELY NOT routed through this —
+   * see its own comment for why that one stays best-effort on purpose.
    */
   enqueueDurableNudge?: (sessionId: string, role: SessionRole, text: string, taskId: string | null) => void;
   /** Tick cadence; defaults to 60s. Injectable so a test drives tick() directly. */
@@ -136,8 +136,8 @@ const lastTriggerOf = (
  * live-but-busy/parked manager (`queued`, delivered:false WITH a position) is NOT a strand — its FIFO
  * drains on its next turn — so that case never records a trigger. The watchdog then bounded-auto-resumes
  * the manager (once its row is exited) via the SAME machinery as a `session_died`.
- * @decision 22a44352 — see docs/decisions/22a44352-strand-backstop-worker-report-undelivered.md for the
- * incident and why the gate was later broadened by card fc9a27d5.
+ * @decision 22a44352 — do not assume `session_died` alone covers a strand: a manager that exits CLEANLY
+ * needs this separate trigger (never fire it for a live-but-busy/parked manager, whose FIFO drains itself).
  *
  * Guards (mirroring recordUnexpectedExit) so we never record a useless trigger: the manager must be a
  * recoverable, resumable role with a captured engine id, not superseded by a recycle successor, and NOT
@@ -231,16 +231,16 @@ export function isCrashRecoveryEligible(
 
 /**
  * Crash-recovery watchdog — the THIRD of three independent resume-and-nudge paths.
- * @decision 9f7c59f1 — see docs/decisions/9f7c59f1-enqueuedurablenudge-not-private-third-resume-path.md
- * for the full three-paths comparison (report-state handling / durability / ordering, what converged and
- * what didn't, and why "three" isn't a completeness claim over the whole codebase).
+ * @decision 9f7c59f1 — do not assume these three resume-and-nudge paths converge on everything: only
+ * durability + the MCP-seen gate are shared (report-state handling and worker nudge text also converged,
+ * but ordering is DELIBERATELY not — each answers a genuinely different question).
  * @decision 90b9e904 — `orchestration/wake.ts`, `poll.ts`, and `event-triggers.ts` independently resume +
- * enqueue too and converged onto the SAME durable dispatch this watcher uses; see
- * docs/decisions/90b9e904-enqueuedurablenudge-opts-param-generalizes-three-sites.md.
- * @decision 06ebbb78 — `resumeFleetOnBoot` also routes through this same dispatch; see
- * docs/decisions/06ebbb78-resumefleetonboot-routes-through-enqueuedurablenudge.md. ONE deliberate
- * exception: the crash-loop escalation heads-up below (`session_recovery_abandoned`) stays on raw
- * `pty.enqueueStdin` on purpose, best-effort — see that call site's own comment.
+ * enqueue too and converged onto the SAME durable dispatch via `enqueueDurableNudge`'s optional `opts`
+ * param (never hardcode `kind:"warning"` there — these three need `kind:"agent"`, one with `route`).
+ * @decision 06ebbb78 — `resumeFleetOnBoot` also routes every continuation nudge through this same durable
+ * dispatch; never reintroduce `enqueueNudge`/`deferredNudge` (or any other non-durable path) there.
+ * ONE deliberate exception: the crash-loop escalation heads-up below (`session_recovery_abandoned`) stays
+ * on raw `pty.enqueueStdin` on purpose, best-effort — see that call site's own comment.
  *
  * Where {@link SessionService.resumeFleetOnBoot} auto-resumes the whole fleet on a deliberate
  * `daemon_restart`, and {@link SessionService.recoverCrashOrphanedWorkers} does the same for a crash / OS-
@@ -462,10 +462,9 @@ export class CrashRecoveryWatcher {
             dispatchNudge(s.id, s.role, note + RESUME_NUDGE_TAIL, s.taskId ?? null);
           }
         } else {
-          // manager or platform. @decision c9e51581 — a manager/platform with NO stake in this isolated
-          // crash resumes SILENTLY instead of the unconditional re-orient nudge below; see
-          // docs/decisions/c9e51581-manager-platform-no-stake-resumes-silently.md (Path C extension of
-          // 61cc91c6) for the KNOWN, ACCEPTED same-tick ordering gap.
+          // manager or platform. @decision c9e51581 — a manager/platform with no stake in this isolated
+          // crash resumes SILENTLY (Path C extension of card 61cc91c6); if a manager and its own worker
+          // crash in the SAME tick, that's a known, accepted one-tick undercount — not a bug to "fix".
           // causal:false (an isolated pty death isn't self-requested, unlike a daemon_restart requester).
           // liveWorkersResumed = the manager's CURRENT live worker count — this path has no "resume set"
           // list like Path A/B (it resumes ONE dead session per candidate), so "workers resumed alongside
