@@ -16,16 +16,20 @@ import type { PendingOpView } from "../orchestration/pending-ops.js";
  * `recycledFrom` being IMMUTABLE for a given row's lifetime once inserted — a session's `recycledFrom` is
  * set once at INSERT and never rewritten; all three recycle paths (`recycleWorker`/`recycleManager`/the
  * Platform Lead's own recycle) insert a brand-new successor ROW rather than mutating the predecessor's.
- * This is EMERGENT, not enforced by any DB trigger/constraint or by this module: it holds only because
- * the one column-setter that COULD write it (`Db.setOrchestration`) has zero production callers today
- * (test-only). If that ever changes — a real caller starts writing `recycledFrom` after insert — this
- * invariant ends silently, and a caller-supplied seed can then genuinely diverge from what a fresh
- * `db.getSession` would return; the "no `await` between the row read and the walk" argument each current
- * call site separately satisfies is NOT a substitute for this invariant (it only rules out inter-request
- * staleness for the four call shapes that hold today, not a same-request rewrite). The seed's
- * `recycledFrom?` being optional (rather than required) is not a corner case introduced here either —
- * `lineageRootId` has always accepted the same permissive shape, matching `Session.recycledFrom` itself
- * being optional on the type.
+ * This is EMERGENT, not enforced by any DB trigger/constraint or by this module.
+ *
+ * `Db.setOrchestration` now HAS exactly one production caller of `recycledFrom`: each of the three
+ * recycle paths' OWN pre-spawn-failure catch nulls its OWN just-inserted, never-went-live successor's
+ * `recycledFrom` — synchronously, in the SAME tick as the `insertSession` that set it (no `await`
+ * between), before that row is ever returned to a caller or read by anything outside the recycle method
+ * itself. This does NOT reopen the immutability gap above: no OTHER caller mutates `recycledFrom` after
+ * insert, and this one caller only ever mutates a row that (a) was inserted THIS SAME synchronous call,
+ * (b) never went live, and (c) is unlinked before any other code path (a lineage walk, `getSuccessor`, a
+ * caller-supplied seed) could ever have observed the old value.
+ *
+ * @decision 4be56c33 — a FUTURE `setOrchestration({recycledFrom})` caller outside that exact shape
+ * (mutating a live or already-observed row) reopens this invariant — re-examine every seed-accepting
+ * function below before adding one.
  */
 
 /**

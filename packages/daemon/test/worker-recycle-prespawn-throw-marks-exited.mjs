@@ -105,15 +105,22 @@ try {
   check("(setup precondition) the injected pre-spawn throw actually propagated out of recycleWorker",
     !!recycleError && String(recycleError.message).includes(INJECTED_MESSAGE));
 
-  // The fresh successor row exists (insertSession ran before the throw) — find it via getSuccessor
-  // rather than trusting a returned Session (recycleWorker rejected, so it never returned one).
-  const successor = db.getSuccessor(oldWorkerId);
+  // The fresh successor row exists (insertSession ran before the throw) — find it via listWorkers
+  // rather than trusting a returned Session (recycleWorker rejected, so it never returned one) or
+  // db.getSuccessor (card 4be56c33: reconcileFailedSpawn now NULLS the failed row's own recycled_from,
+  // so a post-failure getSuccessor(oldWorkerId) no longer finds it — that's the fix under test, not a
+  // regression; listWorkers is unaffected since it keys off parent_session_id, not recycled_from).
+  const successor = db.listWorkers("mgr1").find((w) => w.id !== oldWorkerId);
   check("(setup precondition) a fresh successor row was created for the old worker despite the throw", !!successor);
 
   check("successor row ends processState:'exited', NOT stranded 'live', after a pre-spawn throw",
     successor?.processState === "exited");
   check("successor row's lastError carries the injected throw's own message (the catch's second effect)",
     typeof successor?.lastError === "string" && successor.lastError.includes(INJECTED_MESSAGE));
+  check("successor row's own recycledFrom is NULLED by the catch (card 4be56c33's fix's third effect)",
+    successor?.recycledFrom === null);
+  check("the OLD worker is no longer hasSuccessor()-superseded once its failed successor is unlinked",
+    db.hasSuccessor(oldWorkerId) === false);
 
   // Mirror what a real onExit would have done to the OLD worker's row (recycleWorker only hard-stops the
   // pty; SeamHost's fake pty never fires a real onExit) — isolates this assertion to the successor's own

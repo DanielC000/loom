@@ -94,14 +94,22 @@ try {
   check("(setup precondition) throwOnNextSpawn was consumed (the throw fired exactly once, at the recycle's own spawn)",
     throwOnNextSpawn === false);
 
-  // The fresh successor row exists (insertSession ran before the throw, per the atomic-handoff ordering).
-  const successor = db.getSuccessor(pred.id);
+  // The fresh successor row exists (insertSession ran before the throw, per the atomic-handoff ordering)
+  // — find it via listSessions(agentId) rather than db.getSuccessor (card 4be56c33: reconcileFailedSpawn
+  // now NULLS the failed row's own recycled_from, so a post-failure getSuccessor(pred.id) no longer finds
+  // it — that's the fix under test, not a regression; listSessions is unaffected since it keys off
+  // agent_id, not recycled_from).
+  const successor = db.listSessions("agentLead").find((s) => s.id !== pred.id);
   check("(setup precondition) a fresh successor row was created for the predecessor despite the throw", !!successor);
 
   check("successor row ends processState:'exited', NOT stranded 'live', after the pre-spawn throw (reconcileFailedSpawn)",
     successor?.processState === "exited");
   check("successor row's lastError carries the injected throw's own message",
     typeof successor?.lastError === "string" && successor.lastError.includes(INJECTED_MESSAGE));
+  check("successor row's own recycledFrom is NULLED by the catch (card 4be56c33's fix's third effect)",
+    successor?.recycledFrom === null);
+  check("the OLD Lead is no longer hasSuccessor()-superseded once its failed successor is unlinked",
+    db.hasSuccessor(pred.id) === false);
 
   // THE DEFECT THIS TEST GUARDS: the old Lead's row was flipped 'exited' by the atomic handoff BEFORE
   // the throw — but its real pty was NEVER stopped (recyclePlatformLead only schedules that 3s-deferred

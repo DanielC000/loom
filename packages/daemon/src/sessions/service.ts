@@ -6357,6 +6357,9 @@ export class SessionService {
   // Card 6ca4155f: a synchronous throw between a row's live-flip and a successful pty.spawn must never
   // leave it phantom-live — nothing else reconciles it. spawnWorker keeps its own catch (card fa1b77c1)
   // deliberately, rather than being retrofitted onto this helper.
+  //
+  // @decision 4be56c33 — never unlink `recycled_from` here: resume() passes an EXISTING, often
+  // gen>=1, row, and nulling it severs a live lineage.
   private reconcileFailedSpawn(sessionId: string, e: unknown): void {
     this.db.setProcessState(sessionId, "exited");
     this.db.setLastError(sessionId, `session spawn failed before it could start: ${e instanceof Error ? e.message : String(e)}`);
@@ -10769,6 +10772,9 @@ export class SessionService {
         });
       } catch (e) {
         this.reconcileFailedSpawn(fresh.id, e);
+        // @decision 4be56c33 — unlink only here: `fresh` was inserted in this same synchronous
+        // call and never went live.
+        this.db.setOrchestration(fresh.id, { recycledFrom: null });
         throw e;
       }
       // Hand the carried queue + scheduled wakes to the successor: re-point the old worker's wakes (so a
@@ -10921,6 +10927,9 @@ export class SessionService {
       });
     } catch (e) {
       this.reconcileFailedSpawn(fresh.id, e);
+      // @decision 4be56c33 — unlink only here: `fresh` was inserted in this same synchronous
+      // call and never went live.
+      this.db.setOrchestration(fresh.id, { recycledFrom: null });
       throw e;
     }
 
@@ -11128,6 +11137,9 @@ export class SessionService {
       // than leaving BOTH rows 'exited' while the old process keeps running) so the fleet view matches
       // reality; card 6ca4155f.
       this.db.setProcessState(old.id, "live");
+      // @decision 4be56c33 — unlink only here: `fresh` was inserted in this same synchronous
+      // call and never went live.
+      this.db.setOrchestration(fresh.id, { recycledFrom: null });
       throw e;
     }
     // === END ATOMIC LINEAGE HANDOFF ===============================================================
