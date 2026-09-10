@@ -31,32 +31,11 @@ const DEFAULT_INGEST_TIMEOUT_MS = 120_000;
 /** Bound (ms) for the fast control-plane calls (register/drop/overlay). */
 const DEFAULT_REGISTER_TIMEOUT_MS = 10_000;
 /**
- * Bound (ms) for reingest-main. AS-OF 2026-08-04 against Codescape sha `439e65f`: endpoint blocking
- * time (client fetch issue -> response, covering `getWarmProject` + queue wait + `ingestRepo`) measured
- * BIMODAL — ~13-19s warm, ~24-29s cold (a cold reingest rebuilds the same ts-morph `Project` as
- * {@link DEFAULT_INGEST_TIMEOUT_MS}'s initial ingest) — which mode fires is not a property of the
- * request; it depends on what another tenant last touched. The prior "blocks ~9-11s" figure this bound
- * was derived from was never re-measured and was off by 2.5-3x.
- *
- * CORPUS: presumed the Loom repo (the project this reingest-main call re-indexes — see
- * `service.ts` `fireCodescapeReingest`), but the exact corpus sha/commit and a size proxy (file count or
- * similar) were NOT recorded alongside the timing figures above and could not be recovered after the
- * fact. Ingest time scales with corpus size, not just tool version, so these figures are NOT safely
- * comparable once this repo has grown materially past whatever size it was at measurement time — an
- * unpinned population, stated honestly, rather than silently omitted.
- *
- * Aligned to {@link DEFAULT_INGEST_TIMEOUT_MS} (120s) rather than re-deriving a tighter number: the call
- * ({@link CodescapeSupervisor.reingestMain}) is fire-and-forget from a caller that never awaits it (see
- * `service.ts` `fireCodescapeReingest`), and codescape's own route has no cancellation wiring — our abort
- * closes only OUR socket, their ingest runs to completion regardless. So a tight bound buys us nothing by
- * being tight: it only decides whether we're still listening when the (server-side unobserved either way)
- * answer arrives. Sizing around SURVIVAL of a single mode invites exactly this staleness; sizing around
- * OBSERVABILITY of the slower mode does not. The tail beyond the measured range is UNMEASURED on this
- * host — this is a floor on the sample maximum, not a proven ceiling.
- *
- * A liveness/progress-based bound (indifferent to which mode fires) would be the more principled SHAPE,
- * but codescape's reingest-main route reports no partial progress to key off, and building one is out of
- * this fix's scope (our client half only) — flagged as a follow-up, not attempted here.
+ * Bound (ms) for reingest-main. @decision sha:e8354b5e — measured BIMODAL (~13-19s warm, ~24-29s cold)
+ * against Codescape sha `439e65f`, overturning a stale "~9-11s" estimate off by 2.5-3x; aligned to
+ * {@link DEFAULT_INGEST_TIMEOUT_MS} rather than a tighter bound since `reingestMain` is fire-and-forget
+ * and codescape's route has no cancellation wiring. See
+ * docs/decisions/e8354b5e-reingest-main-timeout-bimodal-measurement.md
  */
 const DEFAULT_REINGEST_TIMEOUT_MS = 120_000;
 /**
@@ -1231,20 +1210,11 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * Start the periodic `GET /graph/health` liveness probe — idempotent (a re-entrant `start()` call is
-   * already blocked by the `this.child` guard at its own top, but this guard makes the intent explicit:
-   * never stack a second interval). Armed UNCONDITIONALLY whenever {@link start} spawns `serve` —
-   * including with ZERO codescape-enabled projects, since `spawnServe()` itself always runs regardless of
-   * `repoPaths.length` (see {@link start}'s own doc). This used to be gated on a `hasEnabledProjects` flag
-   * latched from `repoPaths.length` at boot, which meant a daemon that booted with no codescape-enabled
-   * projects never armed the probe AT ALL for that boot's entire lifetime — and since v1 has no runtime
-   * project registration (a project whose `codescape.enabled` flips on after boot still needs a daemon
-   * restart to ever be ingested — see the CWD CONTRACT doc above and the config-PATCH log line in
-   * `gateway/server.ts`), there was no in-process event that could ever re-arm it. The result: `serve` ran
-   * fully unwatched — exactly the wedge blind spot this probe exists to close. `probeHealth` itself gates
-   * on `alive`, so the timer is a harmless no-op tick whenever serve isn't currently believed up (never
-   * started, mid-restart-backoff, or given up for good) — THAT check, not a project count, is what keeps
-   * an idle timer cheap.
+   * Start the periodic `GET /graph/health` liveness probe — idempotent, and ARMED UNCONDITIONALLY
+   * whenever {@link start} spawns `serve`, including with ZERO codescape-enabled projects.
+   * @decision sha:e2d23231 — a prior project-count gate left a zero-project boot with this probe
+   * never armed at all for its entire lifetime. See
+   * docs/decisions/e2d23231-codescape-health-probe-arms-unconditionally.md
    */
   private startHealthMonitor(): void {
     if (this.healthProbeTimer) return;
@@ -1569,20 +1539,11 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * `POST /project` `{repoRoot, graphPath?}` — codescape's fleet-daemon P4 dynamic registration (commit
-   * `669548e`, confirmed merged/live). Registers `repoRoot` into codescape's LIVE registry with NO
-   * `serve` restart — idempotent (`mode:"already-registered"` for a repo already live, `"attached"` if a
-   * graph.json already existed on disk, `"ingested"` for a brand-new repo — run through codescape's OWN
-   * single-flight queue, so this can genuinely take as long as a real ingest). Defaults to
-   * `ingestTimeoutMs` (the long bound, appropriate for a standalone/on-demand call that may be doing a
-   * real first-time ingest); `timeoutMs` lets a caller override it — {@link registerProjectWithRetry}
-   * passes the SHORT `registerTimeoutMs` instead, since ITS retries exist to close a spawn-timing race,
-   * not to babysit a slow ingest (see that method's own doc for why the distinction matters). On success,
-   * caches the response's AUTHORITATIVE `id` (Codescape's own `slugify+sha256` result — NEVER
-   * reimplemented here) keyed by the resolved repoRoot, so {@link resolveProjectId} serves it without a
-   * manifest re-read. Never throws: a 400 (bad repoRoot)/409 (id conflict)/500 (ingest/persist
-   * failure)/network error/timeout all resolve `ok:false` with NOTHING cached — the caller falls back to
-   * the cold manifest-by-path resolver, exactly as it already does when this call is never made at all.
+   * `POST /project` `{repoRoot, graphPath?}` — codescape's fleet-daemon @decision 088afc94 (P4) dynamic
+   * registration (commit `669548e`, confirmed merged/live). Idempotent (already-registered/attached/
+   * ingested); defaults to the long `ingestTimeoutMs`, overridable via `timeoutMs`. Caches the
+   * AUTHORITATIVE `id` on success; never throws — a failure just leaves the caller on the cold manifest
+   * fallback. See docs/decisions/088afc94-codescape-http-mcp-clean-skip-and-stable-id-resolution.md
    */
   async registerProject(repoRoot: string, graphPath?: string, timeoutMs?: number): Promise<CodescapeRequestResult> {
     const res = await this.request("POST", "/project", graphPath ? { repoRoot, graphPath } : { repoRoot }, timeoutMs ?? this.ingestTimeoutMs);
@@ -1598,26 +1559,11 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * A few quick retries around {@link registerProject}, for the BOOT-TIME call in {@link start} only:
-   * `serve` was just spawned synchronously a moment earlier and its HTTP listener may not be up yet on
-   * the first attempt — a bare single try would spuriously fall back to the manifest on every single
-   * boot for no real reason.
-   *
-   * BOUNDED PER ATTEMPT AT `registerTimeoutMs` (the FAST 10s control-plane bound), DELIBERATELY NOT the
-   * full `ingestTimeoutMs` (120s) `registerProject`'s own default uses: the race this retry exists to
-   * close (a listener that isn't bound YET) fails via an immediate ECONNREFUSED, not a hang — so a short
-   * per-attempt bound is the correct fit, and using the long one would let a single HUNG (accepted-but-
-   * never-responds) attempt burn up to 2 minutes before even trying again, times up to 5 attempts —
-   * exactly the "retry over a hung operation" shape this project has a documented scar from (the
-   * worktree-GC threadpool leak, card bd9fc808). With this bound, 5 attempts worst-case total ~50s, not
-   * ~10 minutes. A repo whose subprocess `ingest()` step (in {@link start}, just above) silently failed
-   * and genuinely needs a slow first ingest via THIS call may still read as "failed" here within that
-   * ~50s window — it self-heals via the cold manifest fallback once codescape's own single-flight queue
-   * finishes the ingest server-side (this client giving up does not stop codescape's own in-progress
-   * work), or on the next boot's subprocess-ingest retry. Boot itself is NEVER blocked by any of this —
-   * {@link start} is always fire-and-forget from index.ts (`void ... .catch(...)`, called well AFTER the
-   * daemon's own HTTP listener is already up), so a fully-exhausted worst case here delays only this
-   * repo's id-cache warm-up, never the daemon's availability.
+   * A few quick retries around {@link registerProject}, for the BOOT-TIME call in {@link start} only —
+   * closes a listener-not-up-yet race. @decision 088afc94 (P4 follow-up) — bounded PER ATTEMPT at the
+   * FAST `registerTimeoutMs` (never the long `ingestTimeoutMs`), to avoid repeating the retry-over-a-
+   * hung-operation shape of card `bd9fc808`. Boot itself is never blocked by this. See
+   * docs/decisions/088afc94-codescape-http-mcp-clean-skip-and-stable-id-resolution.md
    */
   private async registerProjectWithRetry(repoRoot: string, attempts = 5, delayMs = 300): Promise<CodescapeRequestResult> {
     let last: CodescapeRequestResult = { ok: false, error: "registerProjectWithRetry: never attempted" };
