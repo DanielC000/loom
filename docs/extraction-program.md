@@ -269,15 +269,48 @@ thing it exists to do.
    `"structurally unable to fold"`, read `base=1 / branch=1 / record=1` and was correct as-is.
    Resolve any ambiguity by *line number*, never by count alone — `base=3 / branch=2 / record=1`
    is the correct shape when only one of three occurrences was inside the touched block. Any
-   shape you can't explain: read the diff and explain it; don't "fix" it to match a pattern.
-4. **Whole-branch loss check.** Take every distinctive token (`[a-z][a-z0-9_]{7,}`, plus 8-hex
-   ids, minus stopwords) from the base source's comments; subtract those still present in the
-   branch source; every remainder must appear in the branch's new/changed records. Anything in
-   neither is a candidate loss to read by hand. Positive-control it — confirm genuinely-removed
-   tokens *are* found in the records. Measured on two branches: 63 removed tokens ⇒ 2 candidates,
-   27 removed ⇒ 3 candidates — both sets resolved on inspection to legitimate rewording, not loss.
+   shape you can't explain: read the diff and explain it; don't "fix" it to match a pattern. This
+   same "by line number, not by count" rule is also the fix for item 4's false-negative mode below.
+4. **Whole-branch loss check.** Take every distinctive token (`[a-z][a-z0-9_]{7,}`, plus
+   `\b[0-9a-f]{8}\b` for 8-hex ids, minus stopwords) from the base source's comments; subtract
+   those still present in the branch source; every remainder must appear in the branch's
+   new/changed records. Anything in neither is a candidate loss to read by hand. Positive-control
+   it — confirm genuinely-removed tokens *are* found in the records. Measured on two branches: 63
+   removed tokens ⇒ 2 candidates, 27 removed ⇒ 3 candidates — both sets resolved on inspection to
+   legitimate rewording, not loss.
    Its own false-positive mode: an ordinary English word dropped in a rewrite — check whether the
    *constraint* survived under different words before calling it a loss.
+   **Its false-negative mode — the item-3 "resolve by line number, never by count alone" rule
+   applies here too, but nothing said so until this line.** A clause built entirely from short
+   and/or file-common words can vanish while every one of its tokens still reads as "present," and
+   the check reports clean. **Measured specimen (card `6377d105`, `shared/config.ts` tranche 1):**
+   a worker removed *"Standing human/Lead-spawned managers do NOT count against this cap and can
+   never block a cadence, however large the standing fleet grows — only OTHER scheduler-spawned
+   managers compete for this budget."* and it landed in no record. That tranche's own DoD-4 run
+   reported clean (16 removed tokens ⇒ 14 in records, 2 hand-resolved) and was right to, on its
+   own terms: every token in the lost clause was invisible for one of two independent reasons —
+   (a) below the `{7,}` floor (`cadence` · `however` · `compete` · `budget`, all 6–7 chars), (b)
+   common elsewhere in the same file (`cadence` alone recurs 24 other times in `config.ts`
+   [MEASURED, re-derived independently on current main: still exactly 24, though the file has
+   moved since]). The loss was found only by a phrase-level grep with controls, not the token
+   check: `"compete for this budget"` — main whole tree 1 hit, branch whole tree 0 hits;
+   `"however large the standing"` — branch 0 hits; positive control (`"dual-accept grace TTL"`, a
+   clause the same branch *did* preserve) — 3 hits; negative control — 0 hits.
+   ⛔ **Do not lower the `{7,}` floor "to fix this."** Flooding the remainder set with ordinary
+   English makes the check unusable — the floor is a deliberate trade, not a defect. The check is
+   still worth running; it catches real candidates (above). Its complement, for the class it
+   structurally cannot see: read the removed hunk and ask, per removed sentence, "which record now
+   carries this?" — never a token count alone. "The record already covers this decision" is not
+   the same claim as "the record covers every clause at this site" — this specimen is exactly that
+   gap: the record kept the *rule* (separate budgets) and dropped the *consequence* (a schedule
+   can never be starved).
+   **Two more measured specimens (merge review, 2026-09-11):** (1) a digit-led 8-hex id (e.g.
+   `4a0af485`) is invisible to `[a-z][a-z0-9_]{7,}` alone — the pattern above must include
+   `\b[0-9a-f]{8}\b` for exactly this reason. (2) card `10707693` (commit `51665407`) removed a
+   two-item list whose second item turned on `repaint` — 7 characters, below the floor — so that
+   item vanished from a clean run while the record correctly kept the first item and the rule
+   around it. Same complement: per removed sentence or per listed case, "which record carries
+   it?" — never a count.
    **Scope this check to the files you actually touched, never to all of `docs/`.** Widening the
    "records" set to the whole corpus was tried once and correctly rejected as vacuous — a large
    enough pre-existing corpus makes almost any token "present" somewhere, so the check would pass
