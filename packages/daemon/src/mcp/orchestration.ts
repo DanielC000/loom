@@ -2941,8 +2941,9 @@ export class OrchestrationMcpRouter {
         worktreePathAliases: worktreePathAliases(d.worktreePath, d.workerSessionId),
       }));
       // Card 548a0c7e: live worker-concurrency snapshot — `{cap, live, inFlight, free}`, the SAME shape a
-      // successful worker_spawn's own `capacity` field carries (see that tool's description). No
-      // `excludeOwnClaim` here — this is a plain read holding no claim of its own. worker_list is a
+      // successful worker_spawn's own `capacity` field carries (see that tool's description); a plain
+      // read holding no claim of its own — `getWorkerCapacity` no longer takes an exclusion argument at
+      // all (card 16637a9e), since a spawn now releases its own claim before ever reading this. worker_list is a
       // DELIBERATE bare array (see worker-list-pending-ops.mjs's own "no {workers,...} wrapper" pin), so
       // this rides along as an ADDITIVE field on every row instead of restructuring the response — the
       // same convention every other cross-cutting fleet fact here already uses (pendingMerge, etc.). Known

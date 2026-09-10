@@ -2023,8 +2023,10 @@ export class SessionService {
    * the cap-admission comparison MUST be scoped to the calling manager because `liveWorkers` (the other
    * half of that comparison) already is. Summing a daemon-global count against a per-manager count was
    * exactly the bug this card fixes — do NOT "simplify" this back into one shared structure; that
-   * reintroduces the scope mismatch. Incremented/decremented in lockstep with `inFlightSpawnTaskIds`'s own
-   * add/delete (same claimKey's spawn, same try/finally), so it can never drift out of sync with it.
+   * reintroduces the scope mismatch.
+   * @decision 16637a9e — released EARLY (right after the row goes live), no longer strictly in lockstep
+   * with `inFlightSpawnTaskIds`'s own finally-only release
+   * (docs/decisions/16637a9e-worker-spawn-cap-claim-released-on-live-not-finally.md)
    */
   private readonly inFlightSpawnCountByManager = new Map<string, number>();
   /**
@@ -6055,6 +6057,18 @@ export class SessionService {
     }
     this.inFlightSpawnTaskIds.add(claimKey);
     this.inFlightSpawnCountByManager.set(managerSessionId, (this.inFlightSpawnCountByManager.get(managerSessionId) ?? 0) + 1);
+    // @decision 16637a9e — idempotent so it's safe to call both right after the row goes live (the normal
+    // success path, closing the live+in-flight double-count window) and again from the outer `finally`
+    // (every failure-before-live path, unchanged) — see the field doc above for the full rationale
+    // (docs/decisions/16637a9e-worker-spawn-cap-claim-released-on-live-not-finally.md)
+    let capSlotClaimReleased = false;
+    const releaseCapSlotClaim = () => {
+      if (capSlotClaimReleased) return;
+      capSlotClaimReleased = true;
+      const remaining = (this.inFlightSpawnCountByManager.get(managerSessionId) ?? 0) - 1;
+      if (remaining > 0) this.inFlightSpawnCountByManager.set(managerSessionId, remaining);
+      else this.inFlightSpawnCountByManager.delete(managerSessionId);
+    };
     try {
       // @decision 503cd822 — a noCommit/read-only rig never runs a build GATE, but that no longer means
       // the monorepo BUILD phase is unconditionally skipped for it — see `runBuild` below
@@ -6120,6 +6134,11 @@ export class SessionService {
       this.db.insertSession(worker);
       // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
       this.db.setProcessState(worker.id, "live");
+      // @decision 16637a9e — release the cap-count claim HERE, synchronously, the instant the row is
+      // live — not in the outer `finally` below, which runs only after further awaits (the shipped-card
+      // advisory's own git read) that used to leave this spawn double-counted against a concurrent
+      // spawn's cap check (docs/decisions/16637a9e-worker-spawn-cap-claim-released-on-live-not-finally.md)
+      releaseCapSlotClaim();
       // Project memory (card 2fd9abf9, fresh-spawn half) appended LAST, searched against the manager's
       // own kickoff text (which typically carries the task description — the richest match source of any
       // spawn path); null (no notes) ⇒ byte-identical to today. Card ea648f89: stamp the dedup map so this
@@ -6236,19 +6255,20 @@ export class SessionService {
       const reviewOf = reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined;
       // Card 548a0c7e: live capacity on the SUCCESS response — this is the exact moment a manager
       // decides whether to dispatch again, and a boot-time snapshot (see composeManagerStartupPrompt's
-      // orchestration block) goes stale the instant a slot frees or fills. `excludeOwnClaim:true` because
-      // THIS call's own in-flight claim (added below the cap-admit check above) has already resolved into
-      // the live `worker` row `live` below counts — leaving it in `inFlight` too would double-count it.
-      const capacity = this.getWorkerCapacity(managerSessionId, true);
+      // orchestration block) goes stale the instant a slot frees or fills. NO `excludeOwnClaim` here
+      // (card 16637a9e) — THIS call's own in-flight claim was already released above, right when the row
+      // went live (`releaseCapSlotClaim`), so `rawInFlight` here can only ever belong to an UNRELATED,
+      // genuinely-still-in-flight sibling spawn; excluding "this call's own claim" would wrongly subtract
+      // 1 from that (docs/decisions/16637a9e-worker-spawn-cap-claim-released-on-live-not-finally.md)
+      const capacity = this.getWorkerCapacity(managerSessionId);
       return { ...worker, processState: "live", shippedMatch, reusedDirtyWorktree, discardedOnRecut, staleBase, reviewOf, capacity };
     } finally {
       // Release the per-taskId (or taskless per-call) claim. By here the row is either live (liveHolder now
       // rejects re-spawns for a real task) or the spawn threw before any persistent state — either way the
-      // next spawn must be free to proceed.
+      // next spawn must be free to proceed. `releaseCapSlotClaim()` is idempotent — a no-op here on the
+      // success path (already released above); the one real release on any failure-before-live path.
       this.inFlightSpawnTaskIds.delete(claimKey);
-      const remaining = (this.inFlightSpawnCountByManager.get(managerSessionId) ?? 0) - 1;
-      if (remaining > 0) this.inFlightSpawnCountByManager.set(managerSessionId, remaining);
-      else this.inFlightSpawnCountByManager.delete(managerSessionId);
+      releaseCapSlotClaim();
     }
   }
 
@@ -6258,22 +6278,21 @@ export class SessionService {
    * SAME value `spawnWorker`'s own cap-admit check above enforces, never a restated default. `live`
    * counts this manager's own currently-live worker rows (mirrors the cap-admit check's own
    * `liveWorkers`). `inFlight` counts spawn calls for this manager that have claimed a slot but not yet
-   * landed a live row (`inFlightSpawnCountByManager`) — pass `excludeOwnClaim:true` when the CALLER
-   * itself currently holds one of those claims (the spawn-success call site below: that claim has
-   * already resolved into the `live` row being counted here, so leaving it in `inFlight` too would
-   * double-count it); a bare read with no claim of its own (worker_list) omits it. `free` is
+   * landed a live row (`inFlightSpawnCountByManager`) — read bare, with no exclusion: `spawnWorker`'s own
+   * success call site (below) already released ITS OWN claim before calling this (card 16637a9e — see
+   * `releaseCapSlotClaim`), so whatever remains here can only belong to an unrelated, genuinely-still-
+   * in-flight sibling spawn, never to the caller's own now-resolved claim. `free` is
    * `max(0, cap - live - inFlight)` — how many MORE workers this manager can spawn right now. Returns
    * all-zero for a manager/project this daemon can no longer resolve (defensive; not expected in
    * practice — every caller already holds a live manager session).
    */
-  getWorkerCapacity(managerSessionId: string, excludeOwnClaim = false): WorkerCapacity {
+  getWorkerCapacity(managerSessionId: string): WorkerCapacity {
     const manager = this.db.getSession(managerSessionId);
     const project = manager ? this.db.getProject(manager.projectId) : undefined;
     if (!manager || !project) return { cap: 0, live: 0, inFlight: 0, free: 0 };
     const cap = resolveConfig(project.config).orchestration.maxConcurrentWorkers;
     const live = this.db.listWorkers(managerSessionId).filter((w) => w.processState === "live").length;
-    const rawInFlight = this.inFlightSpawnCountByManager.get(managerSessionId) ?? 0;
-    const inFlight = excludeOwnClaim ? Math.max(0, rawInFlight - 1) : rawInFlight;
+    const inFlight = this.inFlightSpawnCountByManager.get(managerSessionId) ?? 0;
     const free = Math.max(0, cap - live - inFlight);
     return { cap, live, inFlight, free };
   }
