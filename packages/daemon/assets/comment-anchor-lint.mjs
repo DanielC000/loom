@@ -101,13 +101,14 @@
 //      whole sweep rather than one `execFileSync` per id — this repo's own measured population is in the
 //      hundreds. Runs in BOTH the CLI scan and the per-file hook, same ground as orphanAnchors — it needs
 //      only the file's own anchors plus one repo-scoped git call.
-//  10. pointerAnchors (card a862e8f0) — an `@decision <id>` (or `sha:<id>`) SITE whose own text window (the
-//      anchor's line plus up to GUARD_MAX_LINES-1 continuation lines, bounded by the enclosing comment
-//      block's own end) contains a phrase that POINTS AT the out-of-band record instead of STATING the
-//      prohibition/consequence inline — "see docs/", "docs/adr/", "docs/decisions/", "docs/investigations/",
+//  10. pointerAnchors (card a862e8f0; window widened by card 347d37d2) — an `@decision <id>` (or
+//      `sha:<id>`) SITE whose own text window contains a phrase that POINTS AT the out-of-band record
+//      instead of STATING the prohibition/consequence inline — "see docs/", "docs/adr/", "docs/decisions/",
 //      "see the linked record", or "see the record". The convention (CLAUDE.md comment taxonomy,
 //      docs/extraction-program.md) requires the anchor TEXT itself to carry the rule; the record is reached
-//      by resolving the id, never by a "see docs/…" tail typed into the comment. Sent back by lead review 7
+//      by resolving the id, never by a "see docs/…" tail typed into the comment. The window is the anchor's
+//      own paragraph — see `findPointerAnchors`'s own doc below for exactly where it ends (card 347d37d2:
+//      a fixed 3-line cap missed a pointer tail on a real anchor's 4th+ line). Sent back by lead review 7
 //      times across two seats before this check existed (card a862e8f0) — see project memory
 //      `shipping-a-detector-is-not-someone-reading-it`. REPORT-ONLY (does not fail `guards` — see the card
 //      for why the existing corpus wasn't clean enough to gate on). One entry per SITE, not deduped by id
@@ -468,27 +469,70 @@ export function findSigilSpaceAnchors(lines) {
   return found;
 }
 
+/** Strip the common `//`, `/*`, `/**`, `*`, `*​/` comment-syntax markers off `line` and trim — a
+ * comment-agnostic "what text, if any, does this line actually carry" reduction shared by
+ * `isBlankCommentLine`/`startsNewDocTag` below. */
+function stripCommentMarkers(line) {
+  return line.trim().replace(/^\/\*\*?/, "").replace(/\*\/$/, "").replace(/^\*/, "").replace(/^\/\//, "").trim();
+}
+
+/** True iff `line` carries no text once comment markers are stripped — a "blank" JSDoc line (e.g. a bare
+ * " * " between two paragraphs) used by `findPointerAnchors` below to end an anchor's own paragraph
+ * without ending the whole enclosing comment BLOCK: `extractCommentBlocks` only breaks a block on a
+ * genuinely blank (or non-comment) SOURCE line, so a blank `*`-prefixed line inside a `/** ... *​/` run
+ * stays part of one contiguous block even though it is exactly the paragraph-break convention JSDoc
+ * authors use — this function is what lets `findPointerAnchors` see that break anyway. */
+function isBlankCommentLine(line) {
+  return stripCommentMarkers(line).length === 0;
+}
+
+/** True iff `line`'s own comment text STARTS a new JSDoc tag (`@param`, `@returns`, a follow-on
+ * `@decision`, ...) — used by `findPointerAnchors` below as a second paragraph-break signal alongside
+ * `isBlankCommentLine`. Deliberately tests the STRIPPED content's own leading character, never a bare
+ * `includes("@")` — an inline `{@link X}` reference nested mid-sentence (this file's own style
+ * throughout) must never end a run; only a tag that BEGINS the line's visible text does. */
+function startsNewDocTag(line) {
+  return /^@[A-Za-z]/.test(stripCommentMarkers(line));
+}
+
 /** Every anchor SITE in `anchors` (as returned by `findFileAnchors`) whose own TEXT WINDOW contains a
  * pointer phrase (card a862e8f0) — "see docs/", "docs/adr/", "docs/decisions/", "docs/investigations/",
  * "see the linked record", or "see the record" — instead of stating the prohibition/consequence itself,
  * per the convention (CLAUDE.md comment taxonomy, docs/extraction-program.md: "≤3 lines, no 'See docs/…'
- * pointer"). The window is the anchor's OWN line plus up to `GUARD_MAX_LINES - 1` continuation lines,
- * bounded by the enclosing comment BLOCK's own end (`blocks`, as returned by `extractCommentBlocks`) —
- * never crossing past the block into unrelated code/prose, and never further than the anchor's own
- * ≤3-line target length. Deliberately scoped to this small per-site window, not a whole-block or
- * whole-file scan: a pointer phrase sitting elsewhere in ordinary, non-anchor prose (e.g. this file's own
- * doc comments describing the convention, which legitimately say "docs/decisions/") must never be
- * flagged — only text actually inside an anchor's own window counts. A site whose line falls outside
- * every block (should not happen for a real anchor — `ANCHOR_RE` only ever matches inside a comment)
- * degrades to a one-line window rather than throwing. One entry per SITE, not deduped by id (same
- * convention as `findBareCommitAnchors` — every site needs its own fix, independent of how many other
- * sites share the id). `phrase` carries the matched text (trimmed), so a report can show exactly what
- * triggered it, not just a line number. */
+ * pointer").
+ *
+ * Card 347d37d2: the window used to be a FIXED `GUARD_MAX_LINES`-line cap (the anchor's line plus 2
+ * continuation lines) — too narrow. Real specimens in this repo's own source (anchors `545ef479`/
+ * `90550a97`) carry a genuine, single, uninterrupted paragraph whose "See docs/decisions/…" tail lands on
+ * the 4th or 5th line, past that cap — a false negative on exactly the
+ * shape this check exists to catch. The window is now the anchor's own CONTIGUOUS PARAGRAPH: starting at
+ * the anchor's own line, it extends through continuation lines until the FIRST of — (a) the enclosing
+ * comment BLOCK's own end (`blocks`, from `extractCommentBlocks`); (b) the next `@decision` SITE inside
+ * the same block (that site's own paragraph is not this anchor's text, however contiguous the block);
+ * (c) a blank JSDoc line (`isBlankCommentLine`) — the ordinary paragraph-break convention; or (d) a line
+ * starting a new JSDoc tag (`startsNewDocTag`, e.g. `@param`) — never the whole block indiscriminately,
+ * so a pointer phrase sitting in an UNRELATED later paragraph of the same block (separated from the
+ * anchor by one of these boundaries) is never miscounted as part of this anchor's own text. A site whose
+ * line falls outside every block (should not happen for a real anchor — `ANCHOR_RE` only ever matches
+ * inside a comment) degrades to a one-line window rather than throwing. One entry per SITE, not deduped
+ * by id (same convention as `findBareCommitAnchors` — every site needs its own fix, independent of how
+ * many other sites share the id). `phrase` carries the matched text (trimmed), so a report can show
+ * exactly what triggered it, not just a line number. */
 export function findPointerAnchors(lines, blocks, anchors) {
   const found = [];
   for (const a of anchors) {
     const block = blocks.find((b) => a.line >= b.startLine && a.line <= b.endLine);
-    const windowEnd = block ? Math.min(a.line + GUARD_MAX_LINES - 1, block.endLine) : a.line;
+    let windowEnd = block ? block.endLine : a.line;
+    if (block) {
+      for (const other of anchors) {
+        if (other === a || other.line <= a.line || other.line > block.endLine) continue;
+        if (other.line - 1 < windowEnd) windowEnd = other.line - 1;
+      }
+    }
+    for (let ln = a.line + 1; ln <= windowEnd; ln++) {
+      const line = lines[ln - 1] ?? "";
+      if (isBlankCommentLine(line) || startsNewDocTag(line)) { windowEnd = ln - 1; break; }
+    }
     const windowLines = [];
     for (let ln = a.line; ln <= windowEnd; ln++) windowLines.push(lines[ln - 1] ?? "");
     const m = POINTER_PHRASE_RE.exec(windowLines.join(" "));

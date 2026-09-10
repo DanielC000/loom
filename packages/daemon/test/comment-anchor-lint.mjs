@@ -47,12 +47,17 @@
 //      id-space requires the `sha:` sigil, card 969b0e1c) — is flagged, in both the CLI scan and the live
 //      per-file hook; the SAME id in correctly-sigil'd `sha:` form, and a bare id that is NOT a real
 //      commit, are both confirmed NOT flagged.
-//  13. pointerAnchors (card a862e8f0): an anchor whose own ≤3-line text window contains a pointer phrase
-//      ("see docs/", "docs/adr/", "docs/decisions/", "docs/investigations/", "see the linked record", "see
-//      the record") instead of stating the prohibition/consequence itself — is flagged, once per SITE, in
-//      both the CLI scan and the live per-file hook; a prohibition-only anchor with none of those phrases,
-//      and the SAME phrases appearing in ordinary prose nowhere near an anchor, are both confirmed NOT
-//      flagged. REPORT-ONLY (never fails `guards`) — see the card for the measured corpus count.
+//  13. pointerAnchors (card a862e8f0; window widened by card 347d37d2): an anchor whose own text window
+//      contains a pointer phrase ("see docs/", "docs/adr/", "docs/decisions/", "docs/investigations/", "see
+//      the linked record", "see the record") instead of stating the prohibition/consequence itself — is
+//      flagged, once per SITE, in both the CLI scan and the live per-file hook. The window is the anchor's
+//      own contiguous paragraph — NOT a fixed 3-line cap (that missed a pointer tail landing on a real
+//      anchor's 4th+ line) — bounded by whichever comes first: the enclosing block's end, the next
+//      `@decision` site in the same block, a blank JSDoc line, or a line starting a new doc tag (`@param`,
+//      ...). A prohibition-only anchor with none of those phrases, and the SAME phrases appearing in
+//      ordinary prose nowhere near an anchor OR in a later paragraph of the same block separated by one of
+//      those boundaries, are both confirmed NOT flagged. REPORT-ONLY (never fails `guards`) — see the card
+//      for the measured corpus count.
 // Run: `node test/comment-anchor-lint.mjs` from packages/daemon (no build, no LOOM_HOME needed).
 import fs from "node:fs";
 import os from "node:os";
@@ -535,19 +540,79 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 }
 
 {
-  // Window boundary: the pointer phrase sits OUTSIDE the anchor's own <=3-line window (a 4th continuation
-  // line, still inside the SAME comment block) — must NOT be flagged, since the convention's own window is
-  // capped at GUARD_MAX_LINES (3). Proves the window is bounded, not "the rest of the block".
+  // Card 347d37d2 — real-corpus regression: the pointer phrase sits on the anchor's 4th continuation line,
+  // one PAST the old fixed GUARD_MAX_LINES (3) cap, still inside the SAME uninterrupted paragraph (no blank
+  // line, no new tag, no other anchor in between). This is the exact shape of the two live specimens this
+  // card was filed over (packages/daemon/src/codescape/supervisor.ts, anchors 545ef479/90550a97: a
+  // "See docs/decisions/…" tail landing on the 4th-5th line of one continuous JSDoc paragraph) — the old
+  // fixed-window scan missed it (RED); the whole-paragraph scan must flag it (GREEN).
   const lines = [
     "// @decision 44444444 — line 1 of the anchor, states nothing yet",
     "// line 2, still no pointer phrase on this line",
-    "// line 3, still clean — this is the LAST line inside the anchor's own 3-line window",
-    "// line 4 (outside the window): see docs/decisions/44444444-x.md — must not count",
+    "// line 3, still clean — past the OLD 3-line cap already",
+    "// line 4: see docs/decisions/44444444-x.md — one continuous paragraph, must be flagged",
   ];
   check("window boundary sanity: GUARD_MAX_LINES is 3 (this test assumes that)", GUARD_MAX_LINES === 3);
   const blocks = extractCommentBlocks(lines);
   const anchors = findFileAnchors(lines);
-  check("pointer phrase beyond the anchor's own 3-line window: findPointerAnchors does NOT flag it",
+  const pointer = findPointerAnchors(lines, blocks, anchors);
+  check("pointer phrase on the 4th line of an uninterrupted paragraph (past the old 3-line cap): findPointerAnchors DOES flag it",
+    pointer.length === 1 && pointer[0].line === 1);
+}
+
+{
+  // Negative control (false-positive direction): a blank JSDoc line (" * " with no text once markers are
+  // stripped) ends the anchor's own paragraph — a pointer phrase in an UNRELATED later paragraph of the
+  // SAME comment block must never be attributed to the anchor above it, even though nothing here breaks
+  // `extractCommentBlocks`'s own block grouping (a blank `*`-line does not split the block, only a truly
+  // blank/non-comment SOURCE line does).
+  const lines = [
+    "/**",
+    " * @decision 77777777 — states its own rule inline, completely, right here.",
+    " *",
+    " * Unrelated further discussion in the SAME doc comment, mentioning docs/decisions/ for something",
+    " * else entirely — not part of the decision above.",
+    " */",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  check("blank-line negative control: the block is still ONE contiguous block (sanity)", blocks.length === 1 && blocks[0].length === 6);
+  const anchors = findFileAnchors(lines);
+  check("blank JSDoc line ends the anchor's paragraph: findPointerAnchors does NOT flag the later paragraph",
+    findPointerAnchors(lines, blocks, anchors).length === 0);
+}
+
+{
+  // Negative control (false-positive direction): a NEW `@decision` site ends the PREVIOUS anchor's window —
+  // anchor A's run must never swallow anchor B's own "see docs/…" tail just because both live in one
+  // contiguous block with no blank line between them (mirrors the real corpus shape at
+  // packages/daemon/src/codescape/supervisor.ts:1347-1359, where three anchors share one JSDoc block).
+  const lines = [
+    "/**",
+    " * @decision 88888888 — states its own rule inline, no pointer phrase on this anchor's own text",
+    " * @decision 99999999 — a DIFFERENT decision, whose own tail points at docs/decisions/99999999-x.md",
+    " */",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  const pointer = findPointerAnchors(lines, blocks, anchors);
+  check("next-anchor boundary: only the SECOND anchor (whose own text has the pointer) is flagged",
+    pointer.length === 1 && pointer[0].id === "99999999" && pointer[0].line === 3);
+}
+
+{
+  // Negative control (false-positive direction): a new JSDoc tag (`@param`) ends the anchor's own
+  // paragraph, same as a blank line — a pointer phrase inside the tag's own text (a separate concern) must
+  // never be attributed to the preceding anchor.
+  const lines = [
+    "/**",
+    " * @decision 10101010 — states its own rule inline, across two lines of prose",
+    " * with no blank separator before the tag below.",
+    " * @param recordPath see docs/decisions/ for the convention this parameter follows",
+    " */",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  check("doc-tag boundary: a following @param line ends the anchor's run, not flagged",
     findPointerAnchors(lines, blocks, anchors).length === 0);
 }
 
