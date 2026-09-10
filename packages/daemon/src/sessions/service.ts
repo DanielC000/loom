@@ -2360,84 +2360,93 @@ export class SessionService {
     // M5: flip to live BEFORE wiring the pty, so onExit ('exited') from a fast-failing spawn always
     // wins — there is no post-spawn 'live' write left to clobber it back to live.
     this.db.setProcessState(session.id, "live");
-    // Companion memory RECALL (fresh half, companion/memory-recall.ts): an assistant session's OWN
-    // MEMORY.md store is keyed by ITS session id (companionMemoryDir), so it is normally empty on a truly
-    // fresh spawn — but this stays correct for any future path that seeds memory ahead of first spawn.
-    // Appended via assistant-prompt.ts so the compose logic lives in one place; null (no memories) ⇒
-    // startupPrompt returned byte-identical, so a fresh companion with empty memory is unchanged. Card
-    // ea648f89/0e08c0b7: stamp the durable digest so this companion's FIRST resume compares against what
-    // this fresh spawn just showed it, instead of treating "nothing stored" as license to redundantly
-    // re-inject (mirrors stampProjectMemoryDigest's fresh-spawn stamping below).
-    // PL Auditor finding #8, fresh-boot gap: a role-omitted "+New"/"Spawn from profile" call can still
-    // resolve role==="manager" (a profile confers it — see PROFILE_SPAWNABLE_ROLES), but this generic
-    // path used to skip composeManagerStartupPrompt entirely (only the EXPLICIT role:"manager" path,
-    // startManager, applied it) — so the default "Spawn from profile" button on a manager-profiled agent
-    // cold-booted with no "Where things live" block and Globbed its home dir for the resume doc. Mirror
-    // startManager/recycleManager here so every manager boot, explicit or profile-derived, gets the block.
-    const companionRecallFramed = role === "assistant"
-      ? buildFramedMemoryRecall(listCompanionMemories(session.id), (name) => readCompanionMemory(session.id, name))
-      : null;
-    if (role === "assistant") this.stampCompanionMemoryDigest(session.id, companionRecallFramed);
-    // Card badba5a8: computed ONCE (not re-derived) so both the composition below and the observability
-    // event after spawn read the SAME result — only relevant for the role==="manager" branch, which is
-    // the only one that ever appends the codescape block here.
-    const codescapeStatus = role === "manager" ? this.resolveCodescapeInjectionStatus(project) : null;
-    const finalStartupPrompt = role === "assistant"
-      ? appendMemoryRecallToStartupPrompt(startupPrompt!, companionRecallFramed)
-      : role === "manager"
-      ? appendMemoryRecallToStartupPrompt(
-          composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } }),
-          codescapeStatus!.text,
-        )
-      : startupPrompt;
-    // Poll-triggered spawn (P3): append the untrusted-framed kickoff AFTER the agent's own resolved
-    // prompt — reuses composeWorkerStartupPrompt's brief+"---"+dynamicPart shape verbatim (no new
-    // compose path). Omitted (every other caller) ⇒ finalStartupPrompt unchanged, byte-identical.
-    const composedStartupPrompt = opts.kickoffPrompt
-      ? composeWorkerStartupPrompt(finalStartupPrompt, opts.kickoffPrompt)
-      : finalStartupPrompt;
-    // Project memory (card 2fd9abf9, fresh-spawn half): pinned + FTS5-related notes, appended LAST (after
-    // any role/kickoff composition above) via the SAME generic append primitive the companion recall
-    // reuses. Search text is the kickoff prompt when present (a poll-triggered spawn), else the agent's
-    // own prompt — both empty ⇒ pinned-only. null (no project memory notes) ⇒ composedStartupPrompt is
-    // passed through UNCHANGED (incl. `undefined`, a plain agent with no prompt) — fully byte-identical.
-    const projectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, opts.kickoffPrompt ?? startupPrompt ?? "");
-    const withProjectMemory = projectMemoryFramed
-      ? appendMemoryRecallToStartupPrompt(composedStartupPrompt ?? "", projectMemoryFramed)
-      : composedStartupPrompt;
-    // Card ea648f89: stamp the dedup map so this session's FIRST resume compares against what this fresh
-    // spawn just showed it, instead of treating "no prior digest" as license to redundantly re-inject.
-    this.stampProjectMemoryDigest(session.id, projectMemoryFramed);
-    // Card f9b47cd1: a profile can confer role "worker" here too (PROFILE_SPAWNABLE_ROLES) — this path
-    // never runs in a worktree/has a task, so it names as a TASKLESS worker ("adhoc" segment); every
-    // other role (incl. undefined ⇒ "Plain/run") uses the fixed per-role tag.
-    const sessionName = role === "worker"
-      ? composeWorkerSessionName(project.name, agent.name, null, session.id)
-      : composeRoleSessionName(role, project.name);
-    this.pty.spawn({
-      sessionId: session.id,
-      cwd: session.cwd,
-      permission,
-      geometry: config.pty,
-      sessionEnv: config.sessionEnv,
-      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
-      codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
-      projectId: project.id,
-      repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
-      // no worktreeId: this path never runs in a worktree/has a task (see the "adhoc" comment just below) —
-      // it hits the bare /mcp/<codescapeId> project route, same as a manager.
-      startupPrompt: withProjectMemory,
-      role,
-      browserTesting,
-      documentConversion,
-      capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
-      restrictedTools,
-      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
-      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
-      sessionName, // card f9b47cd1: `-n <name>` resume-picker label (version-gated at createPty)
-      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
-    });
+    // Card 6ca4155f: everything below through pty.spawn is wrapped so a synchronous throw anywhere in
+    // this window (a pre-pty step, or createPty itself) reconciles the row to 'exited' instead of
+    // leaving it phantom-live — see reconcileFailedSpawn's own doc.
+    let codescapeStatus: CodescapeInjectionStatus | null;
+    try {
+      // Companion memory RECALL (fresh half, companion/memory-recall.ts): an assistant session's OWN
+      // MEMORY.md store is keyed by ITS session id (companionMemoryDir), so it is normally empty on a truly
+      // fresh spawn — but this stays correct for any future path that seeds memory ahead of first spawn.
+      // Appended via assistant-prompt.ts so the compose logic lives in one place; null (no memories) ⇒
+      // startupPrompt returned byte-identical, so a fresh companion with empty memory is unchanged. Card
+      // ea648f89/0e08c0b7: stamp the durable digest so this companion's FIRST resume compares against what
+      // this fresh spawn just showed it, instead of treating "nothing stored" as license to redundantly
+      // re-inject (mirrors stampProjectMemoryDigest's fresh-spawn stamping below).
+      // PL Auditor finding #8, fresh-boot gap: a role-omitted "+New"/"Spawn from profile" call can still
+      // resolve role==="manager" (a profile confers it — see PROFILE_SPAWNABLE_ROLES), but this generic
+      // path used to skip composeManagerStartupPrompt entirely (only the EXPLICIT role:"manager" path,
+      // startManager, applied it) — so the default "Spawn from profile" button on a manager-profiled agent
+      // cold-booted with no "Where things live" block and Globbed its home dir for the resume doc. Mirror
+      // startManager/recycleManager here so every manager boot, explicit or profile-derived, gets the block.
+      const companionRecallFramed = role === "assistant"
+        ? buildFramedMemoryRecall(listCompanionMemories(session.id), (name) => readCompanionMemory(session.id, name))
+        : null;
+      if (role === "assistant") this.stampCompanionMemoryDigest(session.id, companionRecallFramed);
+      // Card badba5a8: computed ONCE (not re-derived) so both the composition below and the observability
+      // event after spawn read the SAME result — only relevant for the role==="manager" branch, which is
+      // the only one that ever appends the codescape block here.
+      codescapeStatus = role === "manager" ? this.resolveCodescapeInjectionStatus(project) : null;
+      const finalStartupPrompt = role === "assistant"
+        ? appendMemoryRecallToStartupPrompt(startupPrompt!, companionRecallFramed)
+        : role === "manager"
+        ? appendMemoryRecallToStartupPrompt(
+            composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } }),
+            codescapeStatus!.text,
+          )
+        : startupPrompt;
+      // Poll-triggered spawn (P3): append the untrusted-framed kickoff AFTER the agent's own resolved
+      // prompt — reuses composeWorkerStartupPrompt's brief+"---"+dynamicPart shape verbatim (no new
+      // compose path). Omitted (every other caller) ⇒ finalStartupPrompt unchanged, byte-identical.
+      const composedStartupPrompt = opts.kickoffPrompt
+        ? composeWorkerStartupPrompt(finalStartupPrompt, opts.kickoffPrompt)
+        : finalStartupPrompt;
+      // Project memory (card 2fd9abf9, fresh-spawn half): pinned + FTS5-related notes, appended LAST (after
+      // any role/kickoff composition above) via the SAME generic append primitive the companion recall
+      // reuses. Search text is the kickoff prompt when present (a poll-triggered spawn), else the agent's
+      // own prompt — both empty ⇒ pinned-only. null (no project memory notes) ⇒ composedStartupPrompt is
+      // passed through UNCHANGED (incl. `undefined`, a plain agent with no prompt) — fully byte-identical.
+      const projectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, opts.kickoffPrompt ?? startupPrompt ?? "");
+      const withProjectMemory = projectMemoryFramed
+        ? appendMemoryRecallToStartupPrompt(composedStartupPrompt ?? "", projectMemoryFramed)
+        : composedStartupPrompt;
+      // Card ea648f89: stamp the dedup map so this session's FIRST resume compares against what this fresh
+      // spawn just showed it, instead of treating "no prior digest" as license to redundantly re-inject.
+      this.stampProjectMemoryDigest(session.id, projectMemoryFramed);
+      // Card f9b47cd1: a profile can confer role "worker" here too (PROFILE_SPAWNABLE_ROLES) — this path
+      // never runs in a worktree/has a task, so it names as a TASKLESS worker ("adhoc" segment); every
+      // other role (incl. undefined ⇒ "Plain/run") uses the fixed per-role tag.
+      const sessionName = role === "worker"
+        ? composeWorkerSessionName(project.name, agent.name, null, session.id)
+        : composeRoleSessionName(role, project.name);
+      this.pty.spawn({
+        sessionId: session.id,
+        cwd: session.cwd,
+        permission,
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
+        codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
+        projectId: project.id,
+        repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
+        // no worktreeId: this path never runs in a worktree/has a task (see the "adhoc" comment just below) —
+        // it hits the bare /mcp/<codescapeId> project route, same as a manager.
+        startupPrompt: withProjectMemory,
+        role,
+        browserTesting,
+        documentConversion,
+        capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
+        restrictedTools,
+        model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+        skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+        sessionName, // card f9b47cd1: `-n <name>` resume-picker label (version-gated at createPty)
+        harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
+      });
+    } catch (e) {
+      this.reconcileFailedSpawn(session.id, e);
+      throw e;
+    }
     // Card badba5a8: observability only — record whether the codescape block was injected. Only fires for
     // the role==="manager" branch (the only one that ever computes codescapeStatus above).
     if (codescapeStatus) {
@@ -2494,51 +2503,59 @@ export class SessionService {
     this.db.setProcessState(session.id, "live");
     // Card badba5a8: computed ONCE, before the spawn call, so both the composition inside it and the
     // observability event after it read the SAME result.
-    const codescapeStatus = this.resolveCodescapeInjectionStatus(project);
-    this.pty.spawn({
-      sessionId: session.id,
-      cwd: session.cwd,
-      permission,
-      geometry: config.pty,
-      sessionEnv: config.sessionEnv,
-      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
-      codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
-      projectId: project.id,
-      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — a manager runs in the main repo
-      // PL Auditor finding #8: MANAGERS ONLY get a "Where things live" pre-block (absolute repo+vault
-      // roots) so a cold-boot orchestrator reads its resume doc by absolute path instead of Globbing.
-      // vaultPath is passed here UNGATED by docLint — the orchestrator needs the location regardless of
-      // whether the vault-lint hook is on. Additive to the manager prompt only; every other spawn path
-      // is untouched (byte-identical).
-      // Project memory (card 2fd9abf9, fresh-spawn half) appended LAST, after the scheduled-prompt
-      // composition — search text is the schedule's own prompt when present, else the agent's own
-      // startup prompt (both empty ⇒ pinned-only). null (no notes) ⇒ the scheduled prompt is passed
-      // through UNCHANGED — byte-identical to today.
-      startupPrompt: ((): string | undefined => {
-        const scheduled = appendScheduledPrompt(
-          appendMemoryRecallToStartupPrompt(
-            composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } }),
-            codescapeStatus.text,
-          ),
-          prompt,
-        );
-        const projectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, prompt ?? startupPrompt ?? "");
-        // Card ea648f89: stamp the dedup map so this manager's FIRST resume compares against what this
-        // fresh spawn just showed it (see stampProjectMemoryDigest's own doc).
-        this.stampProjectMemoryDigest(session.id, projectMemoryFramed);
-        return projectMemoryFramed ? appendMemoryRecallToStartupPrompt(scheduled ?? "", projectMemoryFramed) : scheduled;
-      })(),
-      role,
-      browserTesting,
-      documentConversion,
-      capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
-      restrictedTools,
-      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
-      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
-      sessionName: composeRoleSessionName("manager", project.name), // card f9b47cd1: `loom-<project>-mgr`
-      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
-    });
+    // Card 6ca4155f: wrapped through pty.spawn so a synchronous throw in this window reconciles the row
+    // to 'exited' instead of leaving it phantom-live — see reconcileFailedSpawn's own doc.
+    let codescapeStatus: CodescapeInjectionStatus;
+    try {
+      codescapeStatus = this.resolveCodescapeInjectionStatus(project);
+      this.pty.spawn({
+        sessionId: session.id,
+        cwd: session.cwd,
+        permission,
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
+        codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
+        projectId: project.id,
+        repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — a manager runs in the main repo
+        // PL Auditor finding #8: MANAGERS ONLY get a "Where things live" pre-block (absolute repo+vault
+        // roots) so a cold-boot orchestrator reads its resume doc by absolute path instead of Globbing.
+        // vaultPath is passed here UNGATED by docLint — the orchestrator needs the location regardless of
+        // whether the vault-lint hook is on. Additive to the manager prompt only; every other spawn path
+        // is untouched (byte-identical).
+        // Project memory (card 2fd9abf9, fresh-spawn half) appended LAST, after the scheduled-prompt
+        // composition — search text is the schedule's own prompt when present, else the agent's own
+        // startup prompt (both empty ⇒ pinned-only). null (no notes) ⇒ the scheduled prompt is passed
+        // through UNCHANGED — byte-identical to today.
+        startupPrompt: ((): string | undefined => {
+          const scheduled = appendScheduledPrompt(
+            appendMemoryRecallToStartupPrompt(
+              composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs } }),
+              codescapeStatus.text,
+            ),
+            prompt,
+          );
+          const projectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, prompt ?? startupPrompt ?? "");
+          // Card ea648f89: stamp the dedup map so this manager's FIRST resume compares against what this
+          // fresh spawn just showed it (see stampProjectMemoryDigest's own doc).
+          this.stampProjectMemoryDigest(session.id, projectMemoryFramed);
+          return projectMemoryFramed ? appendMemoryRecallToStartupPrompt(scheduled ?? "", projectMemoryFramed) : scheduled;
+        })(),
+        role,
+        browserTesting,
+        documentConversion,
+        capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
+        restrictedTools,
+        model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+        skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+        sessionName: composeRoleSessionName("manager", project.name), // card f9b47cd1: `loom-<project>-mgr`
+        harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
+      });
+    } catch (e) {
+      this.reconcileFailedSpawn(session.id, e);
+      throw e;
+    }
     // Card badba5a8: observability only — record whether the codescape block was injected.
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
@@ -2595,30 +2612,37 @@ export class SessionService {
     // Card 2fed1663: a fresh Spawn always opens a NEW lineage (no recycledFrom yet) — its own id IS the
     // lineageId. Resolve the (base or per-lineage, seeded-if-absent) resume-doc path and inject it as a
     // "Where things live" pre-block, mirroring the manager's composeManagerStartupPrompt seam.
-    const leadResumeDocPath = resolvePlatformLeadResumeDocPath(this.db, project.vaultPath, session.id);
-    const resumeDocNotes = composeResumeDocOperationalNotes(project.vaultPath, leadResumeDocPath);
-    this.pty.spawn({
-      sessionId: session.id,
-      cwd: session.cwd,
-      permission,
-      geometry: config.pty,
-      sessionEnv: config.sessionEnv,
-      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
-      codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
-      projectId: project.id,
-      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — the Lead runs in the main repo
-      startupPrompt: composePlatformLeadStartupPrompt(startupPrompt, leadResumeDocPath, resumeDocNotes),
-      role,
-      browserTesting,
-      documentConversion,
-      capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
-      restrictedTools,
-      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
-      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
-      sessionName: PLATFORM_LEAD_SESSION_NAME, // card f9b47cd1: "loom-lead" — no project segment
-      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
-    });
+    // Card 6ca4155f: wrapped through pty.spawn so a synchronous throw in this window reconciles the row
+    // to 'exited' instead of leaving it phantom-live — see reconcileFailedSpawn's own doc.
+    try {
+      const leadResumeDocPath = resolvePlatformLeadResumeDocPath(this.db, project.vaultPath, session.id);
+      const resumeDocNotes = composeResumeDocOperationalNotes(project.vaultPath, leadResumeDocPath);
+      this.pty.spawn({
+        sessionId: session.id,
+        cwd: session.cwd,
+        permission,
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
+        codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
+        projectId: project.id,
+        repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — the Lead runs in the main repo
+        startupPrompt: composePlatformLeadStartupPrompt(startupPrompt, leadResumeDocPath, resumeDocNotes),
+        role,
+        browserTesting,
+        documentConversion,
+        capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
+        restrictedTools,
+        model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+        skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+        sessionName: PLATFORM_LEAD_SESSION_NAME, // card f9b47cd1: "loom-lead" — no project segment
+        harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
+      });
+    } catch (e) {
+      this.reconcileFailedSpawn(session.id, e);
+      throw e;
+    }
     return { ...session, processState: "live" };
   }
 
@@ -2675,27 +2699,34 @@ export class SessionService {
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
-    this.pty.spawn({
-      sessionId: session.id,
-      cwd: session.cwd,
-      permission,
-      geometry: config.pty,
-      sessionEnv: config.sessionEnv,
-      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
-      codescapeEnabled, projectId: project.id, // card C2: Codescape MCP wiring
-      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — an auditor runs in the main repo
-      startupPrompt: appendScheduledPrompt(startupPrompt, prompt),
-      role,
-      browserTesting,
-      documentConversion,
-      capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
-      restrictedTools,
-      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
-      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
-      sessionName: composeRoleSessionName("auditor", project.name), // card f9b47cd1: `loom-<project>-audit`
-      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
-    });
+    // Card 6ca4155f: wrapped so a synchronous throw in this window reconciles the row to 'exited'
+    // instead of leaving it phantom-live — see reconcileFailedSpawn's own doc.
+    try {
+      this.pty.spawn({
+        sessionId: session.id,
+        cwd: session.cwd,
+        permission,
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
+        codescapeEnabled, projectId: project.id, // card C2: Codescape MCP wiring
+        repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — an auditor runs in the main repo
+        startupPrompt: appendScheduledPrompt(startupPrompt, prompt),
+        role,
+        browserTesting,
+        documentConversion,
+        capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
+        restrictedTools,
+        model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+        skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+        sessionName: composeRoleSessionName("auditor", project.name), // card f9b47cd1: `loom-<project>-audit`
+        harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
+      });
+    } catch (e) {
+      this.reconcileFailedSpawn(session.id, e);
+      throw e;
+    }
     return { ...session, processState: "live" };
   }
 
@@ -2742,27 +2773,34 @@ export class SessionService {
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
-    this.pty.spawn({
-      sessionId: session.id,
-      cwd: session.cwd,
-      permission,
-      geometry: config.pty,
-      sessionEnv: config.sessionEnv,
-      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
-      codescapeEnabled, projectId: project.id, // card C2: Codescape MCP wiring
-      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — a workspace-auditor runs in the main repo
-      startupPrompt: appendScheduledPrompt(startupPrompt, prompt),
-      role,
-      browserTesting,
-      documentConversion,
-      capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
-      restrictedTools,
-      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
-      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
-      sessionName: composeRoleSessionName("workspace-auditor", project.name), // card f9b47cd1: `loom-<project>-wsaudit`
-      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
-    });
+    // Card 6ca4155f: wrapped so a synchronous throw in this window reconciles the row to 'exited'
+    // instead of leaving it phantom-live — see reconcileFailedSpawn's own doc.
+    try {
+      this.pty.spawn({
+        sessionId: session.id,
+        cwd: session.cwd,
+        permission,
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
+        codescapeEnabled, projectId: project.id, // card C2: Codescape MCP wiring
+        repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — a workspace-auditor runs in the main repo
+        startupPrompt: appendScheduledPrompt(startupPrompt, prompt),
+        role,
+        browserTesting,
+        documentConversion,
+        capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
+        restrictedTools,
+        model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+        skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+        sessionName: composeRoleSessionName("workspace-auditor", project.name), // card f9b47cd1: `loom-<project>-wsaudit`
+        harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
+      });
+    } catch (e) {
+      this.reconcileFailedSpawn(session.id, e);
+      throw e;
+    }
     return { ...session, processState: "live" };
   }
 
@@ -2814,27 +2852,34 @@ export class SessionService {
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
-    this.pty.spawn({
-      sessionId: session.id,
-      cwd: session.cwd,
-      permission,
-      geometry: config.pty,
-      sessionEnv: config.sessionEnv,
-      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
-      codescapeEnabled: resolveCodescapeConfig(project.config).enabled, projectId: project.id, // card C2
-      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — setup runs in the main repo
-      startupPrompt,
-      role,
-      browserTesting,
-      documentConversion,
-      capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
-      restrictedTools,
-      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
-      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
-      sessionName: composeRoleSessionName("setup", project.name), // card f9b47cd1: `loom-<project>-setup`
-      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
-    });
+    // Card 6ca4155f: wrapped so a synchronous throw in this window reconciles the row to 'exited'
+    // instead of leaving it phantom-live — see reconcileFailedSpawn's own doc.
+    try {
+      this.pty.spawn({
+        sessionId: session.id,
+        cwd: session.cwd,
+        permission,
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
+        codescapeEnabled: resolveCodescapeConfig(project.config).enabled, projectId: project.id, // card C2
+        repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — setup runs in the main repo
+        startupPrompt,
+        role,
+        browserTesting,
+        documentConversion,
+        capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
+        restrictedTools,
+        model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+        skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+        sessionName: composeRoleSessionName("setup", project.name), // card f9b47cd1: `loom-<project>-setup`
+        harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
+      });
+    } catch (e) {
+      this.reconcileFailedSpawn(session.id, e);
+      throw e;
+    }
     return { ...session, processState: "live" };
   }
 
@@ -2881,27 +2926,34 @@ export class SessionService {
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
     this.db.setProcessState(session.id, "live");
-    this.pty.spawn({
-      sessionId: session.id,
-      cwd: session.cwd,
-      permission,
-      geometry: config.pty,
-      sessionEnv: config.sessionEnv,
-      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
-      codescapeEnabled: resolveCodescapeConfig(project.config).enabled, projectId: project.id, // card C2
-      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — an operator runs in the main repo
-      startupPrompt,
-      role,
-      browserTesting,
-      documentConversion,
-      capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
-      restrictedTools,
-      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
-      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
-      sessionName: composeRoleSessionName("operator", project.name), // card f9b47cd1: `loom-<project>-operator`
-      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
-    });
+    // Card 6ca4155f: wrapped so a synchronous throw in this window reconciles the row to 'exited'
+    // instead of leaving it phantom-live — see reconcileFailedSpawn's own doc.
+    try {
+      this.pty.spawn({
+        sessionId: session.id,
+        cwd: session.cwd,
+        permission,
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
+        codescapeEnabled: resolveCodescapeConfig(project.config).enabled, projectId: project.id, // card C2
+        repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — an operator runs in the main repo
+        startupPrompt,
+        role,
+        browserTesting,
+        documentConversion,
+        capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
+        restrictedTools,
+        model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+        skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+        sessionName: composeRoleSessionName("operator", project.name), // card f9b47cd1: `loom-<project>-operator`
+        harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude")
+      });
+    } catch (e) {
+      this.reconcileFailedSpawn(session.id, e);
+      throw e;
+    }
     return { ...session, processState: "live" };
   }
 
@@ -2957,59 +3009,67 @@ export class SessionService {
 
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(session.id, "live");
-    // Auto-archive model (card b37750a4): resuming a stopped session CLEARS archived_at, returning it
-    // to the live rail (the inverse of auto-archive-on-exit). Cleared HERE, before pty.spawn — so a
-    // fast-failing spawn's onExit re-archives it (the M5 ordering above) rather than this clearing a
-    // dead session. restoreSession is the existing archived_at clear (it subsumes the old manual restore).
-    this.db.restoreSession(session.id);
-    // CR blocking fix (card 088afc94): codescape's worktree registry is IN-MEMORY, never persisted on
-    // their side (their own header: "Loom re-registers on its next hook fire") — so a resumed worker's
-    // /mcp/<codescapeId>/<worktreeId> route 404s honestly after any `codescape serve` restart or crash
-    // unless THIS resume re-fires the same registration hook spawnWorker fired at creation. Fire-and-forget
-    // + idempotent per codescape's own contract, so a redundant fire against a still-warm registry is free.
-    this.fireCodescapeRegisterWorktree(project.id, resolveCodescapeConfig(project.config).enabled, project.repoPath, codescapeWorktreeId(session.taskId), session.worktreePath ?? session.cwd, session.branch ?? "");
-    this.pty.spawn({
-      sessionId: session.id,
-      cwd: session.cwd, // SAME cwd — Claude keys sessions to the project dir
-      // @decision f05e4897 — do not give --resume a blind Shift-Tab count; pass resumeModeTarget so a
-      // resumed session converges to the same mode a fresh spawn of this config would reach (docs/decisions/f05e4897-converge-resume-mode-target-with-fresh-spawn.md)
-      permission: { ...resumePermission, startupModeCycles: 0 },
-      resumeModeTarget: modeAfterCyclesFromAcceptEdits(resumePermission.startupModeCycles ?? 0),
-      geometry: config.pty,
-      sessionEnv: config.sessionEnv,
-      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
-      codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
-      projectId: project.id,
-      repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
-      // Carry the SAME worktree scoping a fresh spawn of this session would get — a resumed worker keeps
-      // its /mcp/<codescapeId>/<worktreeId> route (session.taskId is whatever this row was ORIGINALLY
-      // spawned with; a non-worker role never has one, so this is naturally undefined for those).
-      worktreeId: codescapeWorktreeId(session.taskId),
-      resumeId: session.engineSessionId,
-      // Carry the role across resume so a manager/worker/platform session is re-spawned WITH its
-      // role-gated MCP surface (loom-orchestration / loom-platform) + allowlist. Without this a
-      // resumed manager loses worker_spawn/merge/etc. and a worker loses worker_report.
-      role: session.role ?? undefined,
-      // Carry the browser capability across resume too (pinned on the row at spawn): a resumed
-      // browser-worker must keep its per-session Playwright MCP, exactly as role is re-passed.
-      browserTesting: session.browserTesting ?? false,
-      // Carry the document-conversion capability across resume too (pinned on the row at spawn): a
-      // resumed document-worker must keep its per-session markitdown MCP, exactly as role is re-passed.
-      documentConversion: session.documentConversion ?? false,
-      // Carry the registry-capability grants across resume too (pinned on the row at spawn, agent-tooling
-      // P4): a resumed session mounts the SAME capability MCPs, exactly as browserTesting is re-passed.
-      capabilities: session.capabilities ?? [],
-      // Carry the restricted-tools flag across resume from the ROW (pinned at spawn): a resumed Companion
-      // must keep its dangerous-native-tool disallow, exactly as role/browserTesting are re-passed.
-      restrictedTools: session.restrictedTools ?? false,
-      // Carry the pinned skill subset across resume from the ROW (never re-resolve the profile) so the
-      // resumed session sees the SAME skills it spawned with. null ⇒ all (today's behavior). (Landmine 1.)
-      skills: session.skills ?? null,
-      // Multi-harness epic df1f94b0 P1: carry the pinned vendor CLI across resume from the ROW (never
-      // re-resolve the profile) — a resumed Codex worker must not silently respawn as claude.
-      harness: session.harness ?? undefined,
-    });
+    // Card 6ca4155f: wrapped through pty.spawn so a synchronous throw in this window (restoreSession or
+    // createPty itself) reconciles the row to 'exited' instead of leaving it phantom-live — see
+    // reconcileFailedSpawn's own doc.
+    try {
+      // Auto-archive model (card b37750a4): resuming a stopped session CLEARS archived_at, returning it
+      // to the live rail (the inverse of auto-archive-on-exit). Cleared HERE, before pty.spawn — so a
+      // fast-failing spawn's onExit re-archives it (the M5 ordering above) rather than this clearing a
+      // dead session. restoreSession is the existing archived_at clear (it subsumes the old manual restore).
+      this.db.restoreSession(session.id);
+      // CR blocking fix (card 088afc94): codescape's worktree registry is IN-MEMORY, never persisted on
+      // their side (their own header: "Loom re-registers on its next hook fire") — so a resumed worker's
+      // /mcp/<codescapeId>/<worktreeId> route 404s honestly after any `codescape serve` restart or crash
+      // unless THIS resume re-fires the same registration hook spawnWorker fired at creation. Fire-and-forget
+      // + idempotent per codescape's own contract, so a redundant fire against a still-warm registry is free.
+      this.fireCodescapeRegisterWorktree(project.id, resolveCodescapeConfig(project.config).enabled, project.repoPath, codescapeWorktreeId(session.taskId), session.worktreePath ?? session.cwd, session.branch ?? "");
+      this.pty.spawn({
+        sessionId: session.id,
+        cwd: session.cwd, // SAME cwd — Claude keys sessions to the project dir
+        // @decision f05e4897 — do not give --resume a blind Shift-Tab count; pass resumeModeTarget so a
+        // resumed session converges to the same mode a fresh spawn of this config would reach (docs/decisions/f05e4897-converge-resume-mode-target-with-fresh-spawn.md)
+        permission: { ...resumePermission, startupModeCycles: 0 },
+        resumeModeTarget: modeAfterCyclesFromAcceptEdits(resumePermission.startupModeCycles ?? 0),
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
+        codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
+        projectId: project.id,
+        repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
+        // Carry the SAME worktree scoping a fresh spawn of this session would get — a resumed worker keeps
+        // its /mcp/<codescapeId>/<worktreeId> route (session.taskId is whatever this row was ORIGINALLY
+        // spawned with; a non-worker role never has one, so this is naturally undefined for those).
+        worktreeId: codescapeWorktreeId(session.taskId),
+        resumeId: session.engineSessionId,
+        // Carry the role across resume so a manager/worker/platform session is re-spawned WITH its
+        // role-gated MCP surface (loom-orchestration / loom-platform) + allowlist. Without this a
+        // resumed manager loses worker_spawn/merge/etc. and a worker loses worker_report.
+        role: session.role ?? undefined,
+        // Carry the browser capability across resume too (pinned on the row at spawn): a resumed
+        // browser-worker must keep its per-session Playwright MCP, exactly as role is re-passed.
+        browserTesting: session.browserTesting ?? false,
+        // Carry the document-conversion capability across resume too (pinned on the row at spawn): a
+        // resumed document-worker must keep its per-session markitdown MCP, exactly as role is re-passed.
+        documentConversion: session.documentConversion ?? false,
+        // Carry the registry-capability grants across resume too (pinned on the row at spawn, agent-tooling
+        // P4): a resumed session mounts the SAME capability MCPs, exactly as browserTesting is re-passed.
+        capabilities: session.capabilities ?? [],
+        // Carry the restricted-tools flag across resume from the ROW (pinned at spawn): a resumed Companion
+        // must keep its dangerous-native-tool disallow, exactly as role/browserTesting are re-passed.
+        restrictedTools: session.restrictedTools ?? false,
+        // Carry the pinned skill subset across resume from the ROW (never re-resolve the profile) so the
+        // resumed session sees the SAME skills it spawned with. null ⇒ all (today's behavior). (Landmine 1.)
+        skills: session.skills ?? null,
+        // Multi-harness epic df1f94b0 P1: carry the pinned vendor CLI across resume from the ROW (never
+        // re-resolve the profile) — a resumed Codex worker must not silently respawn as claude.
+        harness: session.harness ?? undefined,
+      });
+    } catch (e) {
+      this.reconcileFailedSpawn(session.id, e);
+      throw e;
+    }
     // A freshly-resumed session has no turn in flight (resume injects no prompt) — clear any stale
     // busy=true carried in the DB across the restart. Without this the session shows/acts "busy"
     // forever, so enqueued worker reports queue instead of submitting and the idle guard can't fire.
@@ -5354,36 +5414,43 @@ export class SessionService {
       : config.permission;
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(session.id, "live");
-    // CR blocking fix (card 088afc94): a fork shares its SOURCE's cwd/worktree (see the repoKey comment
-    // above) and mounts that SAME worktree-scoped codescape route below — exactly as stale/lost across a
-    // serve restart as resume()'s registration would be. Fire-and-forget + idempotent; src.taskId (NOT
-    // this fork row's own, which never carries one) mirrors the worktreeId passed to pty.spawn just below.
-    this.fireCodescapeRegisterWorktree(project.id, resolveCodescapeConfig(project.config).enabled, project.repoPath, codescapeWorktreeId(src.taskId), src.cwd, src.branch ?? "");
-    this.pty.spawn({
-      sessionId: session.id,
-      cwd: session.cwd,
-      permission: forkPermission,
-      geometry: config.pty,
-      sessionEnv: config.sessionEnv,
-      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
-      codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
-      projectId: project.id,
-      repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
-      // src.taskId, NOT the fork row's own (deliberately uncarried, see the repoKey comment above) — a fork
-      // shares its SOURCE's cwd/worktree, so it must scope to that SAME worktree's codescape route too.
-      worktreeId: codescapeWorktreeId(src.taskId),
-      resumeId: src.engineSessionId, // resume the SOURCE conversation...
-      fork: true,                    // ...but fork it (--fork-session)...
-      forkSessionId: forkEngineId,   // ...into this pre-assigned id (--session-id).
-      role: src.role ?? undefined,
-      browserTesting: src.browserTesting ?? false,
-      documentConversion: src.documentConversion ?? false,
-      capabilities: src.capabilities ?? [], // carry the registry-capability grants onto the fork's pty (matches the fork row)
-      restrictedTools: src.restrictedTools ?? false, // carry the restricted-tools disallow onto the fork's pty (matches the fork row)
-      skills: src.skills ?? null, // carry the pinned subset onto the fork's pty (matches the fork row)
-      harness: src.harness ?? undefined, // carry the pinned vendor CLI onto the fork's pty (matches the fork row)
-    });
+    // Card 6ca4155f: wrapped through pty.spawn so a synchronous throw in this window reconciles the row
+    // to 'exited' instead of leaving it phantom-live — see reconcileFailedSpawn's own doc.
+    try {
+      // CR blocking fix (card 088afc94): a fork shares its SOURCE's cwd/worktree (see the repoKey comment
+      // above) and mounts that SAME worktree-scoped codescape route below — exactly as stale/lost across a
+      // serve restart as resume()'s registration would be. Fire-and-forget + idempotent; src.taskId (NOT
+      // this fork row's own, which never carries one) mirrors the worktreeId passed to pty.spawn just below.
+      this.fireCodescapeRegisterWorktree(project.id, resolveCodescapeConfig(project.config).enabled, project.repoPath, codescapeWorktreeId(src.taskId), src.cwd, src.branch ?? "");
+      this.pty.spawn({
+        sessionId: session.id,
+        cwd: session.cwd,
+        permission: forkPermission,
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
+        codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
+        projectId: project.id,
+        repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
+        // src.taskId, NOT the fork row's own (deliberately uncarried, see the repoKey comment above) — a fork
+        // shares its SOURCE's cwd/worktree, so it must scope to that SAME worktree's codescape route too.
+        worktreeId: codescapeWorktreeId(src.taskId),
+        resumeId: src.engineSessionId, // resume the SOURCE conversation...
+        fork: true,                    // ...but fork it (--fork-session)...
+        forkSessionId: forkEngineId,   // ...into this pre-assigned id (--session-id).
+        role: src.role ?? undefined,
+        browserTesting: src.browserTesting ?? false,
+        documentConversion: src.documentConversion ?? false,
+        capabilities: src.capabilities ?? [], // carry the registry-capability grants onto the fork's pty (matches the fork row)
+        restrictedTools: src.restrictedTools ?? false, // carry the restricted-tools disallow onto the fork's pty (matches the fork row)
+        skills: src.skills ?? null, // carry the pinned subset onto the fork's pty (matches the fork row)
+        harness: src.harness ?? undefined, // carry the pinned vendor CLI onto the fork's pty (matches the fork row)
+      });
+    } catch (e) {
+      this.reconcileFailedSpawn(session.id, e);
+      throw e;
+    }
     // Project memory (card 2fd9abf9, fork half): --fork-session carries the SOURCE transcript forward
     // with NO startup prompt of its own (mirrors resume()'s "resume injects nothing" invariant), so
     // without this a fork would never see project notes the way resume()'s own inject already does for
@@ -5490,25 +5557,33 @@ export class SessionService {
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(session.id, "live");
 
-    const startupPrompt = composeRunStartupPrompt(agent.startupPrompt, opts.input, schema);
-    this.pty.spawn({
-      sessionId: session.id,
-      cwd: snapshotDir,
-      permission: config.permission, // VERBATIM boot recipe (config.permission's own field values, unmodified — computeBootMode resolves the actual --permission-mode flag from these, same as any other role) — only prompt + MCP surface differ
-      geometry: config.pty,
-      sessionEnv: config.sessionEnv,
-      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
-      startupPrompt,
-      role: "run", // buildMcpServers mounts ONLY loom-run; createPty allowlists mcp__loom-run
-      browserTesting: false,
-      documentConversion: false,
-      capabilities: [],
-      restrictedTools: false,
-      model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
-      skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
-      sessionName: composeRoleSessionName("run", project.name), // card f9b47cd1: `loom-<project>-run`
-    });
+    // Card 6ca4155f: wrapped so a synchronous throw in this window (incl. composeRunStartupPrompt's own
+    // JSON.stringify/trim) reconciles the row to 'exited' instead of leaving it phantom-live — see
+    // reconcileFailedSpawn's own doc.
+    try {
+      const startupPrompt = composeRunStartupPrompt(agent.startupPrompt, opts.input, schema);
+      this.pty.spawn({
+        sessionId: session.id,
+        cwd: snapshotDir,
+        permission: config.permission, // VERBATIM boot recipe (config.permission's own field values, unmodified — computeBootMode resolves the actual --permission-mode flag from these, same as any other role) — only prompt + MCP surface differ
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
+        startupPrompt,
+        role: "run", // buildMcpServers mounts ONLY loom-run; createPty allowlists mcp__loom-run
+        browserTesting: false,
+        documentConversion: false,
+        capabilities: [],
+        restrictedTools: false,
+        model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
+        skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+        sessionName: composeRoleSessionName("run", project.name), // card f9b47cd1: `loom-<project>-run`
+      });
+    } catch (e) {
+      this.reconcileFailedSpawn(session.id, e);
+      throw e;
+    }
     this.db.setRunStatus(runId, "running"); // the startup-prompt turn is in flight
     // Arm the hard run-timeout (capstone BUG 2): if the agent finishes WITHOUT submit_result, nothing
     // else makes the run terminal — this backstop force-marks it `timed_out` + tears down. Cleared on any
@@ -6277,6 +6352,14 @@ export class SessionService {
       this.inFlightSpawnTaskIds.delete(claimKey);
       releaseCapSlotClaim();
     }
+  }
+
+  // Card 6ca4155f: a synchronous throw between a row's live-flip and a successful pty.spawn must never
+  // leave it phantom-live — nothing else reconciles it. spawnWorker keeps its own catch (card fa1b77c1)
+  // deliberately, rather than being retrofitted onto this helper.
+  private reconcileFailedSpawn(sessionId: string, e: unknown): void {
+    this.db.setProcessState(sessionId, "exited");
+    this.db.setLastError(sessionId, `session spawn failed before it could start: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   /**
@@ -10688,75 +10771,85 @@ export class SessionService {
         `Your predecessor's handoff:\n\n${handoffSummary}\n\nContinue from here.`;
       // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
       this.db.setProcessState(fresh.id, "live");
-      // Project memory (card 2fd9abf9): a recycle spawns FRESH (no --resume), so — unlike resume(), which
-      // injects for every role — a recycled worker would otherwise lose project notes its predecessor saw.
-      // Same one-liner as spawnWorker, searched against the predecessor's handoff (the richest match text
-      // available here); null (no notes) ⇒ byte-identical to today. Card ea648f89: stamp the dedup map so
-      // this recycled worker's FIRST resume compares against what this fresh spawn just showed it.
-      // Multi-repo epic 49136451, phase 3: resolve the OLD session's OWN stamped repoKey — NOT the task's
-      // current one. A recycle REUSES the existing worktree, which is physically rooted in whatever repo
-      // it was originally cut from, and a manager may have retargeted the card since; re-deriving here
-      // would tell the successor it is working in a repo its worktree does not live in. A stale key (the
-      // registry entry was removed while this worker was live) degrades to NO block rather than failing
-      // the recycle — this is prompt text, a read-shaped concern, and the worktree is still on disk.
-      let recycleRepoContext: WorkerRepoContext | undefined;
+      // Card 6ca4155f: everything below through pty.spawn is wrapped so a synchronous throw in this
+      // window reconciles the fresh successor row to 'exited' instead of leaving it phantom-live — see
+      // reconcileFailedSpawn's own doc. Nested INSIDE this method's own outer try/finally (unchanged
+      // above/below) so unsuppressCapQueueDrain + maybeDrainCapQueue still fire on the rethrow.
+      let codescapeStatus: CodescapeInjectionStatus;
       try {
-        recycleRepoContext = buildWorkerRepoContext(project, resolveRepoByKey(project, old.repoKey));
-      } catch (e) {
-        if (!(e instanceof UnknownRepoKeyError)) throw e;
-        console.warn(`[sessions] recycled worker ${old.id} has a stale repoKey (${e.repoKey}) not in project ${project.id}'s registry — omitting the repo block from its successor's prompt`);
-      }
-      const recycleProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, framed);
-      this.stampProjectMemoryDigest(fresh.id, recycleProjectMemoryFramed);
-      // CR blocking fix (card 088afc94): same reasoning as resume() — a recycle reuses the OLD worker's
-      // worktree, so its codescape registration is exactly as stale/lost across a serve restart as a plain
-      // resume's would be. Fire-and-forget + idempotent; see resume()'s identical call for the full doc.
-      this.fireCodescapeRegisterWorktree(project.id, resolveCodescapeConfig(project.config).enabled, project.repoPath, codescapeWorktreeId(taskId), worktreePath, branch ?? "");
-      // Card badba5a8: computed ONCE, before the spawn call, so both the composition inside it and the
-      // observability event alongside recycle_complete below read the SAME result. Card bed49000: gate
-      // on the SAME task (recycle keeps the same taskId/worktree) whose title the sessionName recompute
-      // below already re-reads — see isCodescapeExcludedTaskClass's doc for the boundary.
-      const codescapeStatus = this.resolveCodescapeInjectionStatus(project, taskId ? this.db.getTask(taskId)?.title ?? null : null);
-      this.pty.spawn({
-        sessionId: fresh.id,
-        cwd: worktreePath,
-        permission: workerSpawn?.permission ?? config.permission, // re-resolved layered allowlist (was bare config.permission)
-        geometry: config.pty,
-        sessionEnv: config.sessionEnv,
-        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-        docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
-        codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
-        projectId: project.id,
-        repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
-        worktreeId: codescapeWorktreeId(taskId), // SAME worktree as the predecessor — same codescape scope
-        // Lead with the worktree LOCATION block (same worktree — a recycled worker is equally at risk of
-        // leaking edits to the main checkout), then the worker's agent base brief, then the handoff
-        // (mirrors spawnWorker + the manager recycle warm-up). Empty brief ⇒ the block + handoff.
-        startupPrompt: appendMemoryRecallToStartupPrompt(
-          appendMemoryRecallToStartupPrompt(
-            composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath, project.referenceRepos, undefined, undefined, recycleRepoContext),
-            codescapeStatus.text,
+        // Project memory (card 2fd9abf9): a recycle spawns FRESH (no --resume), so — unlike resume(), which
+        // injects for every role — a recycled worker would otherwise lose project notes its predecessor saw.
+        // Same one-liner as spawnWorker, searched against the predecessor's handoff (the richest match text
+        // available here); null (no notes) ⇒ byte-identical to today. Card ea648f89: stamp the dedup map so
+        // this recycled worker's FIRST resume compares against what this fresh spawn just showed it.
+        // Multi-repo epic 49136451, phase 3: resolve the OLD session's OWN stamped repoKey — NOT the task's
+        // current one. A recycle REUSES the existing worktree, which is physically rooted in whatever repo
+        // it was originally cut from, and a manager may have retargeted the card since; re-deriving here
+        // would tell the successor it is working in a repo its worktree does not live in. A stale key (the
+        // registry entry was removed while this worker was live) degrades to NO block rather than failing
+        // the recycle — this is prompt text, a read-shaped concern, and the worktree is still on disk.
+        let recycleRepoContext: WorkerRepoContext | undefined;
+        try {
+          recycleRepoContext = buildWorkerRepoContext(project, resolveRepoByKey(project, old.repoKey));
+        } catch (e) {
+          if (!(e instanceof UnknownRepoKeyError)) throw e;
+          console.warn(`[sessions] recycled worker ${old.id} has a stale repoKey (${e.repoKey}) not in project ${project.id}'s registry — omitting the repo block from its successor's prompt`);
+        }
+        const recycleProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, framed);
+        this.stampProjectMemoryDigest(fresh.id, recycleProjectMemoryFramed);
+        // CR blocking fix (card 088afc94): same reasoning as resume() — a recycle reuses the OLD worker's
+        // worktree, so its codescape registration is exactly as stale/lost across a serve restart as a plain
+        // resume's would be. Fire-and-forget + idempotent; see resume()'s identical call for the full doc.
+        this.fireCodescapeRegisterWorktree(project.id, resolveCodescapeConfig(project.config).enabled, project.repoPath, codescapeWorktreeId(taskId), worktreePath, branch ?? "");
+        // Card badba5a8: computed ONCE, before the spawn call, so both the composition inside it and the
+        // observability event alongside recycle_complete below read the SAME result. Card bed49000: gate
+        // on the SAME task (recycle keeps the same taskId/worktree) whose title the sessionName recompute
+        // below already re-reads — see isCodescapeExcludedTaskClass's doc for the boundary.
+        codescapeStatus = this.resolveCodescapeInjectionStatus(project, taskId ? this.db.getTask(taskId)?.title ?? null : null);
+        this.pty.spawn({
+          sessionId: fresh.id,
+          cwd: worktreePath,
+          permission: workerSpawn?.permission ?? config.permission, // re-resolved layered allowlist (was bare config.permission)
+          geometry: config.pty,
+          sessionEnv: config.sessionEnv,
+          vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+          docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
+          codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
+          projectId: project.id,
+          repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
+          worktreeId: codescapeWorktreeId(taskId), // SAME worktree as the predecessor — same codescape scope
+          // Lead with the worktree LOCATION block (same worktree — a recycled worker is equally at risk of
+          // leaking edits to the main checkout), then the worker's agent base brief, then the handoff
+          // (mirrors spawnWorker + the manager recycle warm-up). Empty brief ⇒ the block + handoff.
+          startupPrompt: appendMemoryRecallToStartupPrompt(
+            appendMemoryRecallToStartupPrompt(
+              composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath, project.referenceRepos, undefined, undefined, recycleRepoContext),
+              codescapeStatus.text,
+            ),
+            recycleProjectMemoryFramed,
           ),
-          recycleProjectMemoryFramed,
-        ),
-        role: "worker",
-        browserTesting: old.browserTesting ?? false,
-        documentConversion: old.documentConversion ?? false,
-        capabilities: old.capabilities ?? [], // carry the registry-capability grants forward across recycle
-        restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
-        model: workerSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`); was dropped
-        skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
-        harness: old.harness ?? undefined, // carry the pinned vendor CLI forward across recycle (undefined ⇒ "claude")
-        // Card f9b47cd1: RECOMPUTED (not carried from `old`) from the CURRENT agent name + task title, so a
-        // recycled worker "keeps its name" for free as long as neither changed — the same agent/task pair
-        // always slugs identically. EXCLUDE both fresh.id (already inserted+live by this point — the row
-        // would otherwise "collide with itself", code review fix) and workerSessionId (the predecessor,
-        // which can still show `live` mid-teardown and must never count as its successor's collision).
-        sessionName: composeWorkerSessionName(
-          project.name, agent?.name ?? "worker", taskId ? this.db.getTask(taskId)?.title ?? null : null, fresh.id,
-          this.siblingWorkerSessionNames(managerSessionId, project.name, new Set([fresh.id, workerSessionId])),
-        ),
-      });
+          role: "worker",
+          browserTesting: old.browserTesting ?? false,
+          documentConversion: old.documentConversion ?? false,
+          capabilities: old.capabilities ?? [], // carry the registry-capability grants forward across recycle
+          restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
+          model: workerSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`); was dropped
+          skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
+          harness: old.harness ?? undefined, // carry the pinned vendor CLI forward across recycle (undefined ⇒ "claude")
+          // Card f9b47cd1: RECOMPUTED (not carried from `old`) from the CURRENT agent name + task title, so a
+          // recycled worker "keeps its name" for free as long as neither changed — the same agent/task pair
+          // always slugs identically. EXCLUDE both fresh.id (already inserted+live by this point — the row
+          // would otherwise "collide with itself", code review fix) and workerSessionId (the predecessor,
+          // which can still show `live` mid-teardown and must never count as its successor's collision).
+          sessionName: composeWorkerSessionName(
+            project.name, agent?.name ?? "worker", taskId ? this.db.getTask(taskId)?.title ?? null : null, fresh.id,
+            this.siblingWorkerSessionNames(managerSessionId, project.name, new Set([fresh.id, workerSessionId])),
+          ),
+        });
+      } catch (e) {
+        this.reconcileFailedSpawn(fresh.id, e);
+        throw e;
+      }
       // Hand the carried queue + scheduled wakes to the successor: re-point the old worker's wakes (so a
       // due wake can't resurrect the retired worker) and re-drive the held messages onto the fresh worker
       // (busy-gated; they drain on its first turn boundary, after its handoff turn).
@@ -10873,35 +10966,42 @@ export class SessionService {
     this.db.insertSession(fresh);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(fresh.id, "live");
-    // Project memory (card 2fd9abf9): a manager recycle spawns FRESH (no --resume), so — unlike resume(),
-    // which injects for every role — a recycled manager would otherwise lose project notes its
-    // predecessor saw. Same one-liner as recycleWorker/spawnWorker, searched against the predecessor's
-    // continuation handoff (the richest match text available here); null (no notes) ⇒ byte-identical to
-    // today. Stamp the dedup map (card ea648f89) so this recycled manager's FIRST resume compares against
-    // what this fresh spawn just showed it.
-    const recycleManagerProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, continuationPrompt);
-    this.stampProjectMemoryDigest(fresh.id, recycleManagerProjectMemoryFramed);
-    this.pty.spawn({
-      sessionId: fresh.id,
-      cwd: fresh.cwd,
-      permission: managerSpawn?.permission ?? config.permission, // re-resolved layered allowlist (was bare config.permission)
-      geometry: config.pty,
-      sessionEnv: config.sessionEnv,
-      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
-      codescapeEnabled: resolveCodescapeConfig(project.config).enabled, projectId: project.id, // card C2
-      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — a manager runs in the main repo
-      startupPrompt: appendMemoryRecallToStartupPrompt(startupPrompt, recycleManagerProjectMemoryFramed),
-      role: "manager", // successor keeps the orchestration surface
-      browserTesting: old.browserTesting ?? false,
-      documentConversion: old.documentConversion ?? false,
-      capabilities: old.capabilities ?? [], // carry the registry-capability grants forward across recycle
-      restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
-      model: managerSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`); was dropped
-      skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
-      harness: old.harness ?? undefined, // carry the pinned vendor CLI forward across recycle (undefined ⇒ "claude")
-      sessionName: composeRoleSessionName("manager", project.name), // card f9b47cd1: unchanged across recycle
-    });
+    // Card 6ca4155f: wrapped through pty.spawn so a synchronous throw in this window reconciles the row
+    // to 'exited' instead of leaving it phantom-live — see reconcileFailedSpawn's own doc.
+    try {
+      // Project memory (card 2fd9abf9): a manager recycle spawns FRESH (no --resume), so — unlike resume(),
+      // which injects for every role — a recycled manager would otherwise lose project notes its
+      // predecessor saw. Same one-liner as recycleWorker/spawnWorker, searched against the predecessor's
+      // continuation handoff (the richest match text available here); null (no notes) ⇒ byte-identical to
+      // today. Stamp the dedup map (card ea648f89) so this recycled manager's FIRST resume compares against
+      // what this fresh spawn just showed it.
+      const recycleManagerProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, continuationPrompt);
+      this.stampProjectMemoryDigest(fresh.id, recycleManagerProjectMemoryFramed);
+      this.pty.spawn({
+        sessionId: fresh.id,
+        cwd: fresh.cwd,
+        permission: managerSpawn?.permission ?? config.permission, // re-resolved layered allowlist (was bare config.permission)
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
+        codescapeEnabled: resolveCodescapeConfig(project.config).enabled, projectId: project.id, // card C2
+        repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — a manager runs in the main repo
+        startupPrompt: appendMemoryRecallToStartupPrompt(startupPrompt, recycleManagerProjectMemoryFramed),
+        role: "manager", // successor keeps the orchestration surface
+        browserTesting: old.browserTesting ?? false,
+        documentConversion: old.documentConversion ?? false,
+        capabilities: old.capabilities ?? [], // carry the registry-capability grants forward across recycle
+        restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
+        model: managerSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`); was dropped
+        skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
+        harness: old.harness ?? undefined, // carry the pinned vendor CLI forward across recycle (undefined ⇒ "claude")
+        sessionName: composeRoleSessionName("manager", project.name), // card f9b47cd1: unchanged across recycle
+      });
+    } catch (e) {
+      this.reconcileFailedSpawn(fresh.id, e);
+      throw e;
+    }
 
     // Re-parent live workers onto the successor BEFORE closing the old manager, so they're never
     // orphaned (worker_report routes by parent_session_id; the successor sees them via worker_list).
@@ -11075,27 +11175,40 @@ export class SessionService {
     this.db.insertSession(fresh);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(fresh.id, "live");
-    this.pty.spawn({
-      sessionId: fresh.id,
-      cwd: fresh.cwd,
-      permission: leadSpawn?.permission ?? config.permission, // re-resolved layered allowlist
-      geometry: config.pty,
-      sessionEnv: config.sessionEnv,
-      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
-      codescapeEnabled: resolveCodescapeConfig(project.config).enabled, projectId: project.id, // card C2
-      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — the Lead runs in the main repo
-      startupPrompt,
-      role: "platform", // successor keeps the platform surface
-      browserTesting: old.browserTesting ?? false,
-      documentConversion: old.documentConversion ?? false,
-      capabilities: old.capabilities ?? [], // carry the registry-capability grants forward across recycle
-      restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
-      model: leadSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`)
-      skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
-      harness: old.harness ?? undefined, // carry the pinned vendor CLI forward across recycle (undefined ⇒ "claude")
-      sessionName: PLATFORM_LEAD_SESSION_NAME, // card f9b47cd1: "loom-lead" — unchanged across recycle
-    });
+    // Card 6ca4155f: wrapped so a synchronous throw in this window reconciles the fresh row to 'exited'
+    // instead of leaving it phantom-live — see reconcileFailedSpawn's own doc. Fully synchronous (no
+    // await anywhere in this try), so it does not disturb the atomic handoff's own no-await guarantee.
+    try {
+      this.pty.spawn({
+        sessionId: fresh.id,
+        cwd: fresh.cwd,
+        permission: leadSpawn?.permission ?? config.permission, // re-resolved layered allowlist
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
+        codescapeEnabled: resolveCodescapeConfig(project.config).enabled, projectId: project.id, // card C2
+        repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — the Lead runs in the main repo
+        startupPrompt,
+        role: "platform", // successor keeps the platform surface
+        browserTesting: old.browserTesting ?? false,
+        documentConversion: old.documentConversion ?? false,
+        capabilities: old.capabilities ?? [], // carry the registry-capability grants forward across recycle
+        restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
+        model: leadSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`)
+        skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
+        harness: old.harness ?? undefined, // carry the pinned vendor CLI forward across recycle (undefined ⇒ "claude")
+        sessionName: PLATFORM_LEAD_SESSION_NAME, // card f9b47cd1: "loom-lead" — unchanged across recycle
+      });
+    } catch (e) {
+      this.reconcileFailedSpawn(fresh.id, e);
+      // The old Lead's pty is NOT stopped until the deferred setTimeout further below, which a throw
+      // here never reaches — its process is genuinely still alive. Restore its row to 'live' (rather
+      // than leaving BOTH rows 'exited' while the old process keeps running) so the fleet view matches
+      // reality; card 6ca4155f.
+      this.db.setProcessState(old.id, "live");
+      throw e;
+    }
     // === END ATOMIC LINEAGE HANDOFF ===============================================================
 
     // Carry the predecessor's scheduled wakes + in-flight inbound queue (durable cross-tree platform
