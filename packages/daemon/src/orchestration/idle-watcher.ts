@@ -13,18 +13,14 @@ export interface IdlePty {
    * Nudge text into the session's busy-gated queue (waits if the target is mid-turn). `source`/`route`/
    * `kind`/`questionId` mirror PtyHost.enqueueStdin's own optional tail — the answered-stuck watchdog
    * passes `kind:"agent"` so its re-nudge drains as a distinct one-per-turn message, not a coalesced
-   * warning, and `questionId` so a LATER `question_pull` can purge this exact nudge via the SAME
-   * `purgeQueuedByQuestionIds` path the answer-route push-nudge already uses (card bbc46336) — without
-   * this tag a watchdog nudge still sitting queued when the question is pulled survives the purge and
-   * drains later as a stale "pull it" message for an already-consumed question.
+   * warning, and `questionId` so a LATER `question_pull` can purge this exact nudge (@decision bbc46336)
+   * via the SAME path the answer-route push-nudge already uses.
    *
    * The real PtyHost.enqueueStdin returns a richer `EnqueueResult` (see pty/host.ts) with THREE possible
-   * outcomes, collapsed here to the two this watcher needs to distinguish (mirrors ContextPty — card
-   * f6d72db8): `delivered:true` (handed straight to submit() this turn) or `delivered:false, queued:true`
-   * (durably held, lands at the next turn boundary) both mean the nudge was ACCEPTED; `delivered:false`
-   * with `queued` falsy means it was NOT accepted at all (e.g. the target went not-live between our own
-   * `isAlive` check above and this call) — tick()/tickAnsweredStuckQuestions() below must not treat that
-   * as a sent nudge.
+   * outcomes, collapsed here to the two this watcher needs to distinguish: `delivered:true` or
+   * `delivered:false, queued:true` both mean the nudge was ACCEPTED; `delivered:false` with `queued`
+   * falsy means it was NOT accepted at all. @decision f6d72db8 — only an accepted result may be treated
+   * as a sent nudge; see docs/decisions/f6d72db8-only-an-accepted-enqueuestdin-result-stamps-a-nudge.md.
    */
   enqueueStdin(sessionId: string, text: string, source?: QueueSource, onDeliver?: () => void, route?: TurnRoute, kind?: QueuedMessageKind, questionId?: string): { delivered: boolean; position?: number; queued?: boolean };
 }
@@ -112,16 +108,18 @@ const IDLE_NUDGE_BOUNDED_HINT =
   "to confirm them; only fetch details if you're about to act on a specific card.";
 
 /**
- * Asleep-at-the-Wheel watcher (idle-manager watchdog) — also covers platform (Lead) sessions (card
- * 98b3725c). Structural twin of ContextWatcher: each tick, for every LIVE manager OR platform session
- * that is idle (`busy=false` + `lastActivity` older than the project's `idleNudgeMinutes`) with NO live
- * workers, it injects a ONE-TIME-per-episode busy-gated nudge asking it WHY it is idle and to
- * `idle_report` its state (then resume the loop). Agent-in-the-loop: Loom can't know why a manager/Lead
- * is idle, so it asks; it answers over MCP (`idle_report` — on the orchestration router for a manager,
- * the platform router for a Lead, both backed by the same `SessionService.recordIdleReport`). A Lead
- * never parents a worker (see `db.listLivePlatformSessions`'s doc), so the worker-shaped checks below
- * (`db.listWorkers`, `tickIdleWorkers`) simply see an empty set for it — the manager loop is reused
- * verbatim, not specialized.
+ * Asleep-at-the-Wheel watcher (idle-manager watchdog) — also covers platform (Lead) sessions.
+ * @decision 98b3725c — a Lead gets the SAME coverage a manager gets; the manager loop is reused
+ * verbatim below, never specialized, because a Lead never parents a worker so the worker-shaped checks
+ * (`db.listWorkers`, `tickIdleWorkers`) simply see an empty set for it. See
+ * docs/decisions/98b3725c-platform-lead-gets-manager-idle-watchdog-coverage.md.
+ *
+ * Structural twin of ContextWatcher: each tick, for every LIVE manager OR platform session that is idle
+ * (`busy=false` + `lastActivity` older than the project's `idleNudgeMinutes`) with NO live workers, it
+ * injects a ONE-TIME-per-episode busy-gated nudge asking it WHY it is idle and to `idle_report` its
+ * state (then resume the loop). Agent-in-the-loop: Loom can't know why a manager/Lead is idle, so it
+ * asks; it answers over MCP (`idle_report` — on the orchestration router for a manager, the platform
+ * router for a Lead, both backed by the same `SessionService.recordIdleReport`).
  *
  * Unlike ContextWatcher's in-memory `nudged` Set, the "once per episode" mark is PERSISTED
  * (`last_idle_nudge_at`): a re-nudge only fires after another full `idleNudgeMinutes` of continued
@@ -136,25 +134,16 @@ const IDLE_NUDGE_BOUNDED_HINT =
  * nudge is pending (recycle takes precedence); or the project disabled it (`idleNudgeMinutes === 0`).
  * Reset-on-activity re-arms a manager that returned to real work.
  *
- * IDLE-WORKER coverage (board card b9d479b0, `tickIdleWorkers` below): the manager loop above and
- * BusyWorkerWatcher (which only covers `busy=true` workers) left a two-path asymmetry — a live worker
- * that went idle (`busy=false`) WITHOUT calling worker_report was watched by NOBODY, and the manager
- * loop used to skip its own idle-manager nudge for ANY live worker (busy or idle), suppressing exactly
- * the nudge that would have caught it. Each tick, for every LIVE worker that's idle with its task still
- * unreported and stale beyond `idleWorkerMinutes`, we RE-fire the same reconciled worker→manager nudge
- * SessionService.notifyManagerOfIdleWorker already fires once on the busy→false edge (injected as
- * `notifyIdleWorker`, never re-implemented here) on the same persisted once-per-window cadence as the
- * manager loop (the session's own `idle_nudge_state` columns — workers never call idle_report, so only
- * `last_idle_nudge_at` paces them; policy/snooze stay at the 'watching' default).
+ * @decision b9d479b0 — IDLE-WORKER coverage (`tickIdleWorkers` below) fixes a two-path asymmetry between
+ * this loop and `BusyWorkerWatcher`; re-fires the same reconciled worker→manager nudge
+ * `SessionService.notifyManagerOfIdleWorker` already fires once on the busy→false edge (injected as
+ * `notifyIdleWorker`, never re-implemented here). See
+ * docs/decisions/b9d479b0-single-sourced-idle-worker-classification.md.
  *
- * STALE-REQUEST coverage (card 99d41588, `tickStaleRequests` below): a wholly SEPARATE clock from every
- * loop above — keyed on `questions.created_at` (a Request's own age), never a session's idle/suppression
- * state. Closes the residual gap the manager loop's own `hasOwnPendingRequest` discount deliberately
- * leaves open: a session correctly suppressed because it's blocked ONLY on its own pending owner Request
- * never gets idle-nudged, so its `unanswered` counter never increments and it can never reach
- * `maxUnansweredNudges`'s `idle_escalated` — meaning that Request could otherwise sit forever with no
- * path to alert a human. `tickStaleRequests` reaches it (and any other pending Request, regardless of the
- * asking session's activity) directly off the request row itself.
+ * @decision 99d41588 — STALE-REQUEST coverage (`tickStaleRequests` below) runs on a wholly separate
+ * clock, keyed on `questions.created_at` rather than any session's idle/suppression state — closes the
+ * gap where a session correctly own-Request-suppressed could otherwise never escalate. See
+ * docs/decisions/99d41588-request-escalated-fires-independent-of-idle-suppression.md.
  */
 export class IdleWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -336,29 +325,22 @@ export class IdleWatcher {
       // non-held/non-deferred lane (intake/defaultLanding/workReady/active/parked) is pending work a
       // manager should be driving. Counting only workReady mis-told an idle manager "0 todo" while actionable
       // cards sat in inbox/active. Mirrors resumeFleetOnBoot's "pending board work" definition
-      // (sessions/service.ts) so the two stay consistent. `held` (Board Hold Model redesign) is the SOLE owner
-      // brake now, checked in ANY column — a legit card titled with uppercase HOLD/CONFIRM is counted/nudges
-      // unless explicitly flagged held (card 788274a9 hardened the old OWNER_HELD_TITLE_RE false-positive
-      // away). `deferred` is the manager's OWN sequencing marker (orthogonal to `held`, never checked by
+      // (sessions/service.ts) so the two stay consistent.
+      // @decision 788274a9 — `held` is the SOLE owner brake, checked in ANY column, never inferred from a
+      // card's title text. See docs/decisions/788274a9-held-flag-replaces-owner-held-title-regex.md.
+      // `deferred` is the manager's OWN sequencing marker (orthogonal to `held`, never checked by
       // worker_spawn) — discounted from the count the same way, so a manager's deliberate defer never
-      // triggers a recurring idle nudge. The REVIEW lane is ALSO discounted (card follow-up): a card there
-      // is awaiting the manager's OWN merge review, not dispatchable work — role-resolved via
-      // columnKeyForRole (never a hardcoded "review" key) so a project with renamed/reordered columns still
-      // identifies it correctly. Likewise a card carrying a PENDING (unanswered) connected owner Request
-      // (db.listQuestionsForTask, the same taskId→questions linkage tasks_get's connected-requests summary
-      // and task_requests_list use) is blocked on the owner, not the manager — discounted the same way; a
-      // card whose request is already answered/consumed is NOT discounted (it's actionable again).
-      // Scan throttle (card a193398f): the board scan below is the expensive part of this predicate
-      // (a full db.listTasks(projectId) plus, historically, one listQuestionsForTask query PER non-terminal
-      // card). A "nothing actionable" outcome doesn't advance last_idle_nudge_at, so without this throttle
-      // it reran every 60s tick indefinitely. Skip re-scanning within the throttle window of the last scan
-      // for THIS manager — short enough that a due nudge is never meaningfully delayed. Only ever SKIPS a
-      // re-derivation; never affects whether a nudge fires once scanned.
-      //
-      // CR follow-up: idleMinutes is project/env-overridable with NO floor, so a project configuring it
-      // below IDLE_SCAN_THROTTLE_MINUTES would have its actionable re-nudge cadence silently stretched to
-      // the throttle window instead. Floor the EFFECTIVE throttle at this manager's own idleMinutes so it
-      // can never exceed that manager's configured nudge cadence, for any config.
+      // triggers a recurring idle nudge. The REVIEW lane is ALSO discounted: a card there is awaiting the
+      // manager's OWN merge review, not dispatchable work — role-resolved via columnKeyForRole (never a
+      // hardcoded "review" key) so a project with renamed/reordered columns still identifies it correctly.
+      // Likewise a card carrying a PENDING (unanswered) connected owner Request (db.listQuestionsForTask,
+      // the same taskId→questions linkage tasks_get's connected-requests summary and task_requests_list
+      // use) is blocked on the owner, not the manager — discounted the same way; a card whose request is
+      // already answered/consumed is NOT discounted (it's actionable again).
+      // @decision a193398f — the board scan below is throttled per-manager (never affects WHETHER a nudge
+      // fires, only how often it's re-derived) and the effective throttle is floored at this manager's own
+      // `idleMinutes` so a short-configured project's cadence is never silently stretched. See
+      // docs/decisions/a193398f-idle-nudge-board-scan-throttle.md.
       const effectiveScanThrottleMinutes = Math.min(IDLE_SCAN_THROTTLE_MINUTES, idleMinutes);
       const lastScanMs = this.lastIdleScanAt.get(m.id) ?? 0;
       if (nowMs - lastScanMs < effectiveScanThrottleMinutes * 60_000) { this.logSkipIfChanged(m.id, "scan-throttled"); continue; }
@@ -460,23 +442,16 @@ export class IdleWatcher {
       // genuinely-actionable) AND there's no review-lane card to merge AND no genuinely-stranded worker to
       // check on either AND no undocumented manual deferral to flag, the manager has nothing it can action
       // and no way to clear the gate → skip silently instead of deadlock-nudging. A truly empty board (no
-      // cards at all) still nudges — the manager should `idle_report 'done'`. But board card b9d479b0: a
-      // live STRANDED worker is independently actionable (check on it / worker_message it) even when every
-      // OTHER card is non-actionable — don't let this skip re-silence exactly the manager that should be
-      // checking on its stranded worker. The undocumented-deferral case is the SAME shape: it must not be
-      // swallowed by this skip either, or a board that's ENTIRELY undocumented-deferred cards would never
-      // once get flagged (card c90e9525's central defect, reproduced inside this very skip if left out).
+      // cards at all) still nudges — the manager should `idle_report 'done'`.
+      // @decision b9d479b0 — a live STRANDED worker must not be re-silenced by this skip even when every
+      // other card is non-actionable. @decision c90e9525 — neither may an undocumented manual deferral;
+      // see their own records (docs/decisions/b9d479b0-…, docs/decisions/c90e9525-…) for why.
       //
-      // Card 8e87f3b5: the session's OWN pending owner Request (hasOwnPendingRequest, computed above) folds
-      // in HERE rather than short-circuiting earlier — it only silences the nudge when there's genuinely
-      // nothing else actionable either (nothingElseActionable), so a session parked on its own Request WITH
-      // other actionable work in play still gets nudged for that work. It also OVERRIDES the "truly empty
-      // board still nudges" carve-out immediately above: a session correctly parked on its own Request with
-      // zero cards at all is exactly cb56cf80's original "blocked on the owner, stay quiet" case, not a
-      // dropped-the-loop case that should `idle_report 'done'`. NOTE: this skip is evaluated AFTER the
-      // ESCALATE-INSTEAD-OF-NUDGE block above, so a session that slept through its unanswered-nudge cap
-      // still escalates to the human even while its own-Request suppression would otherwise apply here —
-      // the escalation is a distinct human-facing signal, never itself gated by this predicate.
+      // @decision 8e87f3b5 — the session's OWN pending owner Request (hasOwnPendingRequest, computed
+      // above) folds in HERE rather than short-circuiting earlier, and overrides the "truly empty board
+      // still nudges" carve-out above; evaluated AFTER the escalate-instead-of-nudge block, which is never
+      // gated by this predicate. See
+      // docs/decisions/8e87f3b5-own-pending-request-folds-into-nothing-else-actionable.md.
       const nothingElseActionable =
         strandedWorkers.length === 0 && !hasReviewCards && openCards.length === 0 && undocumentedManualDeferrals.length === 0;
       if (nothingElseActionable && (nonTerminal.length > 0 || hasOwnPendingRequest)) {
@@ -582,25 +557,14 @@ export class IdleWatcher {
   }
 
   /**
-   * Card 275ac184's DOCUMENTED priority order for the cause PARTITION (causeCounts) below — recovered
-   * verbatim from the prior Code Reviewer's report (the lead's own correction after locating that session):
-   * first match wins, so a card matching more than one predicate is attributed to exactly ONE cause.
-   * `ownerRequest` (a pending owner Request) is checked FIRST — a card that is ALSO held/deferred/excluded/
-   * parked is still labeled `ownerRequest`, never its other condition. This partition answers "is an
-   * owner-facing block present on this card AT ALL", not "which block would you fix first" — that's why
-   * `ownerRequest` outranks everything else, the OPPOSITE of what you'd want for the RELEASE computation
-   * below (which needs the narrower "is this the ONLY block" question, computed separately by
-   * `isSoleBlockerPendingRequest`, never inferred from this label). `ownerHeld` (the owner's explicit
-   * brake) is next, then `managerReview` (structurally unreachable here — a review-lane card would have
-   * kept the `nothingElseActionable` skip from firing at all, since `hasReviewCards` guards it — kept in
-   * the chain only to document the FULL priority order this partition is defined over), then
-   * `managerDeferred` (the manager's own sequencing marker), then the two structural lanes
-   * (`deadEndLane` — an `excludeFromIdleWatchdog` column — and `leadOwnerFlow` — a platform Lead's own
-   * decision-gated "parked" lane).
-   * "unknown" is a defensive fallback that should be UNREACHABLE whenever this is called from the
-   * `nothingElseActionable` skip site (openCards.length===0 there already proves every non-terminal card
-   * matches at least one of the six predicates above) — a non-zero unknown count is a genuine bug signal,
-   * never a real "cause", and is reported as its own bucket rather than silently folded into another one.
+   * @decision 275ac184 — the DOCUMENTED priority order for the cause PARTITION (causeCounts) below
+   * (recovered verbatim from a prior Code Reviewer's report): first match wins —
+   * `ownerRequest → ownerHeld → managerReview → managerDeferred → deadEndLane → leadOwnerFlow`.
+   * `ownerRequest` outranks everything else because this partition answers "is an owner-facing block
+   * present AT ALL", not "which block would you fix first" (the OPPOSITE question `isSoleBlockerPendingRequest`
+   * below answers). `managerReview` is structurally unreachable here (`hasReviewCards` guards it) but kept
+   * to document the full chain. A non-zero `unknown` is a genuine bug signal, never a real cause. See
+   * docs/decisions/275ac184-board-quiet-cause-adds-visibility-only-no-behavior-change.md.
    */
   private causeForQuietTask(
     t: Task,
@@ -715,14 +679,9 @@ export class IdleWatcher {
   }
 
   /**
-   * Stale-owner-Request watchdog (card 99d41588). Independent of the manager idle-nudge loop above:
-   * keyed on `questions.created_at` (the Request's own clock), never any asking session's idle/
-   * suppression state — so it correctly reaches a Request whose asking session is currently busy/live
-   * doing unrelated work, AND a Request whose session is correctly own-Request-suppressed by
-   * cb56cf80/8e87f3b5 (that suppression's own `unanswered` idle-nudge counter never increments for a
-   * suppressed session, so it can never reach `maxUnansweredNudges` — this loop is the ONLY path such a
-   * Request ever gets a human-facing signal at all). Deliberately never reads or mutates
-   * `idle_nudge_state` — a different clock for a different subject, per the card's own DoD.
+   * @decision 99d41588 — stale-owner-Request watchdog, independent of the manager idle-nudge loop above:
+   * keyed on `questions.created_at`, deliberately never reading or mutating `idle_nudge_state`. See
+   * docs/decisions/99d41588-request-escalated-fires-independent-of-idle-suppression.md.
    *
    * `Db.listStalePendingQuestions` is called with `beforeIso=now` (trivially true of any still-pending
    * row) rather than a precomputed cutoff, because the actual age THRESHOLD is per-project
@@ -732,10 +691,7 @@ export class IdleWatcher {
    * age hasn't yet crossed that project's threshold.
    *
    * `Db.markQuestionEscalated`'s own guarded UPDATE (`state='pending' AND escalated_at IS NULL`) is what
-   * makes this fire EXACTLY ONCE per Request: a later tick never re-returns an already-stamped row from
-   * `listStalePendingQuestions`, and the guard refuses the stamp anyway if the row was answered/cancelled
-   * between the scan and this write — in which case NO event is appended, since an already-resolved
-   * Request needs no alert.
+   * makes this fire EXACTLY ONCE per Request — see the decision record for why no "cleared" event exists.
    */
   private tickStaleRequests(nowMs: number, nowIso: string): void {
     const { db } = this.deps;
@@ -757,20 +713,20 @@ export class IdleWatcher {
   }
 
   /**
-   * Answered-stuck-question watchdog (follow-up to card 8701bdbb): a `questions` row the human answered
+   * Answered-stuck-question watchdog: a `questions` row the human answered
    * (`POST /api/questions/:id/answer`) but the asking manager never `question_pull`ed, stuck past
    * ANSWERED_QUESTION_STUCK_MINUTES, re-nudges that MANAGER — never the human, who already answered and
-   * would only see noise. Routed by AGENT LINEAGE, not the exact asking session id (card f88e91f0):
-   * `db.getLiveSessionForAgent` resolves whoever is CURRENTLY live for the asker's agent — a recycle
-   * successor OR a fresh non-recycle respawn on the same agent — so this nudge reaches a live successor
-   * instead of nagging a session id whose pty is already gone. Skips silently when there's no live
-   * session for that agent, it isn't a manager, is human-paused, is rate-limited/parked (it'll
-   * auto-resume on its own), or has itself flagged non-'watching' via idle_report (waiting/done/
-   * escalated) — reusing the SAME idle-nudge-state policy the manager idle loop above reads, so a manager
-   * legitimately not watching its inbox right now isn't nagged twice. Nudged EXACTLY ONCE per
-   * answered→still-answered window via the in-memory `nudgedAnsweredQuestions` Set (no schema change):
-   * pruned the moment a question leaves 'answered' (pulled/consumed), so the Set stays bounded and a
-   * hypothetical future re-answer of the same id isn't silenced by a stale entry.
+   * would only see noise. @decision 8701bdbb / @decision f88e91f0 — routed by AGENT LINEAGE
+   * (`db.getLiveSessionForAgent`, resolving whoever is CURRENTLY live for the asker's agent) rather than
+   * the exact asking session id, so a recycle successor or a fresh non-recycle respawn is still reached.
+   * See docs/decisions/8701bdbb-reparent-decision-inbox-questions-to-recycle-successor.md and
+   * docs/decisions/f88e91f0-agent-lineage-question-pull-sees-a-predecessors-decisions.md.
+   * Skips silently when there's no live session for that agent, it isn't a manager, is human-paused, is
+   * rate-limited/parked (it'll auto-resume on its own), or has itself flagged non-'watching' via
+   * idle_report — reusing the SAME idle-nudge-state policy the manager idle loop above reads. Nudged
+   * EXACTLY ONCE per answered→still-answered window via the in-memory `nudgedAnsweredQuestions` Set (no
+   * schema change): pruned the moment a question leaves 'answered', so a future re-answer isn't silenced
+   * by a stale entry.
    */
   private tickAnsweredStuckQuestions(nowMs: number): void {
     const { db, pty, control } = this.deps;
