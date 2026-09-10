@@ -114,7 +114,7 @@ export interface RestartIntent {
    *
    * @decision 9e27f4d2 — do NOT widen `pending`'s element type to carry this; an older daemon reading a
    * widened entry would silently string-coerce it to `"[object Object]"`, losing the message with no
-   * throw and no log (docs/decisions/9e27f4d2-giveupheldsuntil-rides-restart-intents-holds-map.md).
+   * throw and no log.
    */
   pendingHolds?: Record<string, Record<number, number>>;
   /**
@@ -158,10 +158,9 @@ export interface RestartIntent {
    * `supervisorChanged` (at most one is ever true). resumeFleetOnBoot's requester nudge surfaces this as
    * SUPERVISOR_CHECK_FAILED_WARNING instead of the unconditional "now LIVE" claim.
    *
-   * @decision 2e84a250 — kept as a SEPARATE field rather than a `supervisorChanged: boolean | "unknown"`
-   * union, so an old on-disk intent (or any reader that only knows `supervisorChanged`) degrades exactly
-   * as before: absent/false, never a crash or a misread "unknown" (docs/decisions/2e84a250-supervisor-
-   * check-result-is-a-three-state-union.md).
+   * @decision 2e84a250 — kept as a SEPARATE field, not a `supervisorChanged: boolean | "unknown"` union,
+   * so an old on-disk intent (or a reader that only knows `supervisorChanged`) degrades exactly as
+   * before: absent/false, never a crash or a misread "unknown".
    */
   supervisorCheckFailed?: boolean;
   requestedAt: string;
@@ -363,14 +362,15 @@ export function deployBuildSteps(root: string): BuildStep[] {
     // silently diverge on which packages a deploy actually rebuilds. Covers @loom/daemon, @loom/shared, AND
     // @loom/web — the daemon serves packages/web/dist statically, so a deploy that only rebuilt the daemon
     // left the SERVED UI stale.
-    // @decision 51522f05 — the old `pnpm exec turbo …` shell form failed inside the daemon's spawned-
-    // process env with EMPTY captured output (docs/decisions/51522f05-absolute-turbo-invocation-no-shell.md).
-    // @decision 3d7dccb9 — "stamp" rides the SAME turbo invocation right after "build" so the deploy's own
-    // artifact identity can never be a stale/foreign sha replayed off turbo's cache, which is shared across
-    // every git worktree of this repo (docs/decisions/3d7dccb9-stamp-rides-the-deploy-builds-own-turbo-invocation.md).
+    // @decision 51522f05 — do NOT revert to a shell-invoked `pnpm exec turbo …` form: inside the daemon's
+    // own spawned-process env that produced EMPTY captured output, turning a real build failure into an
+    // undebuggable error.
+    // @decision 3d7dccb9 — do NOT remove/bypass "stamp" from this invocation or let it run cached: an
+    // uncached, same-invocation stamp is what guarantees the deploy's artifact identity reflects THIS
+    // checkout, not a replayed cache entry from a different git worktree (turbo's cache is shared across all).
     // @decision 24f53a72 — `--force` on "build" does NOT also protect "build"'s own CACHE WRITE: turbo.json
     // excludes "!dist/build-info.json" from "build"'s outputs so a cache hit/restore, forced or not, can
-    // never clobber what "stamp" (cache:false) most recently wrote (docs/decisions/24f53a72-build-cache-write-can-clobber-stamps-build-info-json.md).
+    // never clobber what "stamp" (cache:false) most recently wrote.
     { label: "build", command: process.execPath, args: [turboBin(), "build", "stamp", ...DEPLOY_PACKAGES.map((p) => `--filter=${p.name}`), "--force"], shell: false, timeoutMs: 0 },
   ];
 }
@@ -430,9 +430,8 @@ function webDistBackupDir(): string {
  * block the deploy itself, only leave that one deploy unprotected.
  *
  * @decision 0eb97fa1 — turbo's `clean` task wipes dist before EITHER a real build or a cache-hit
- * restore, so a failed deploy build can leave the daemon serving a broken/missing UI instead of the
- * last good bundle; this snapshot/restore pair is the fix (docs/decisions/0eb97fa1-snapshot-and-
- * restore-web-dist-around-a-deploy-build.md — also covers the interrupted-deploy self-healing case).
+ * restore, so a failed deploy can leave the daemon serving a broken/missing UI; do NOT "fix" this by
+ * removing/weakening `clean` — this snapshot/restore pair is the deliberate fix instead.
  */
 function snapshotWebDist(root: string): void {
   const backup = webDistBackupDir();
@@ -541,17 +540,17 @@ export interface SupervisorChangeDeps {
 }
 
 /**
- * @decision 54b839c5 — card 469b5e67: deliberately calls {@link boundedSimpleGit} with NO `env` argument;
- * do NOT reintroduce `{ ...process.env, GIT_TERMINAL_PROMPT: "0" }` (the shape this site used to have —
- * it threw `GitPluginError` (`allowUnsafeEditor`/`allowUnsafePager`) on an ambient `GIT_EDITOR`/
- * `GIT_PAGER`/`PAGER`/`EDITOR`/`GIT_SEQUENCE_EDITOR`/`GIT_EXTERNAL_DIFF` and was silently swallowed into
- * a permanently-false "unchanged" advisory). simple-git's unsafe-operations check inspects only what's
+ * Card 469b5e67: this site used to call {@link boundedSimpleGit} with `.env({ ...process.env,
+ * GIT_TERMINAL_PROMPT: "0" })`, which threw `GitPluginError` (`allowUnsafeEditor`/`allowUnsafePager`) on
+ * an ambient `GIT_EDITOR`/`GIT_PAGER`/`PAGER`/`EDITOR`/`GIT_SEQUENCE_EDITOR`/`GIT_EXTERNAL_DIFF` (this
+ * repo's own session spawn recipe sets `GIT_PAGER`/`PAGER`) and was silently swallowed into a
+ * permanently-false "unchanged" advisory. simple-git's unsafe-operations check inspects only what's
  * EXPLICITLY PASSED to `.env()`, not the process's own inherited env, so omitting `.env()` entirely
- * sidesteps it altogether — the smaller fix than stripping those six keys, since `git log` performs no
- * operation, so `GIT_TERMINAL_PROMPT` has no live effect here regardless — same reasoning
- * `vault/versioner.ts`'s `boundedVaultGit` documents for its own no-`.env()` call
- * (docs/decisions/54b839c5-bound-vault-git-plumbing-calls-and-unstageoversizedfiles-reset-semantics.md —
- * the full mechanism; this site carries no separate copy).
+ * sidesteps it altogether — the smaller fix than stripping those six keys.
+ *
+ * @decision 54b839c5 — do NOT reintroduce a `.env({ ...process.env, GIT_TERMINAL_PROMPT: "0" })` override
+ * here: `git log` performs no network operation, so `GIT_TERMINAL_PROMPT` has no live effect on it
+ * regardless — same reasoning `vault/versioner.ts`'s `boundedVaultGit` documents for its own no-`.env()` call.
  */
 async function defaultGitLogSince(root: string, sinceIso: string, file: string): Promise<string> {
   const git = boundedSimpleGit(root, SUPERVISOR_CHECK_TIMEOUT_MS);
@@ -564,8 +563,7 @@ async function defaultGitLogSince(root: string, sinceIso: string, file: string):
  * up-stack caller that wants to surface WHY doesn't need to re-derive it.
  *
  * @decision 2e84a250 — deliberately a discriminated union, NOT a second boolean: a caller that folds this
- * back into a bare true/false is a TYPE ERROR, not a silent possibility (docs/decisions/2e84a250-
- * supervisor-check-result-is-a-three-state-union.md).
+ * back into a bare true/false is a TYPE ERROR, not a silent possibility.
  */
 export type SupervisorCheckResult =
   | { status: "changed" }
@@ -588,9 +586,8 @@ export type SupervisorCheckResult =
  * keeps its own independently-findable trace.
  *
  * @decision 2e84a250 — "checked, unchanged" and "could not check" must not be indistinguishable to a
- * caller: the two used to fold into one silent `false` with no trace of which happened, which is exactly
- * the failure mode that made an env bug in {@link defaultGitLogSince} invisible for as long as it was
- * (docs/decisions/2e84a250-supervisor-check-result-is-a-three-state-union.md).
+ * caller: the two used to fold into one silent `false` with no trace of which happened — exactly the
+ * failure mode that made an env bug in {@link defaultGitLogSince} invisible for as long as it was.
  */
 export async function supervisorScriptChangedSince(bootTime: Date, deps: SupervisorChangeDeps = {}): Promise<SupervisorCheckResult> {
   try {
