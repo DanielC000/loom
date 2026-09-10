@@ -1005,33 +1005,32 @@ async function main(): Promise<void> {
   // Best-effort cleanup: it must NEVER gate startup, so any unexpected failure is warned and swallowed
   // (a deterministic throw here would otherwise crash-loop the boot, since merging self-restarts the
   // dev daemon — and that would also block usage-limit auto-resume).
-  // Kicked here, AFTER listen and NOT awaited (perf card 460d3178): the fs-heavy worktree removals
-  // (Pass A finalizeMerge->removeWorktree, Pass B removeWorktree) run in serial `await`ed loops, and each
-  // stuck Windows dir handle blocks the full GIT_OP_TIMEOUT_MS (15s) before its withTimeout swallows and
-  // moves on — N danglers serialize to N*15s. Awaiting this before listen left port PORT unbound for the
-  // whole span. Nothing between the old await site and listen reads its result, so backgrounding it is
-  // pure ordering — the reconcile logic (guards, serial removal, summary log) is unchanged; it just runs
-  // fire-and-forget instead of gating the port bind. A merge briefly showing un-finalized on the board
-  // for the run's duration is a self-healing cosmetic cost, not a correctness one.
-  // worktreesPruned counts only an ACTUAL removal (task 8e5a7a5e) — a boot pass whose only activity is
-  // retrying an already-wedged worktree (still held, not yet actually removed) would otherwise leave
-  // every one of these counters at 0 and silently skip this summary line, so worktreesStillWedged is
-  // included in the gate (it's reported separately below, not folded into the "pruned" wording, which
-  // means something narrower now: an ACTUAL removal, not merely a retried attempt).
+  // @decision 460d3178 — kicked AFTER listen, NOT awaited: awaiting this before listen previously left the
+  // port unbound for as long as reconcile's serial worktree removals took (each stuck Windows dir handle
+  // costs the full GIT_OP_TIMEOUT_MS). Backgrounding is pure ordering; the reconcile logic itself (guards,
+  // serial removal, summary log) is unchanged.
+  // See docs/decisions/460d3178-boot-orchestration-reconcile-kicked-after-listen-not-awaited.md.
+  //
+  // @decision 8e5a7a5e — worktreesPruned counts only an ACTUAL removal, never a retried-but-still-wedged
+  // attempt; worktreesStillWedged is included in this line's own gate condition separately so a
+  // retry-only boot pass still surfaces instead of silently skipping the line.
+  // See docs/decisions/8e5a7a5e-worktreespruned-counts-actual-removals-not-retries.md.
+  //
   // NOTE (multi-repo epic 49136451 phase 2): `worktreesStaleRepoKey` is DELIBERATELY left OUT of this
   // condensed summary line/gate — reconcileOrchestrationOnBoot already emits its OWN dedicated warn for
   // it, mirroring worktreesNeedsHuman/stillWedged (also not folded into this line's wording). Keep new
   // counters as SEPARATE surfaced signals rather than appending to this line — readability, not a test
-  // constraint: boot-listen-not-blocked.mjs (card fdf93d3a) now asserts this chain via the real AST
-  // (src/index.ts), so growing this line or adding comments near the call site below is safe.
+  // constraint (see the fdf93d3a anchor just below for why growing this line is safe either way).
   //
-  // Card c33f94b2: `mergesFailed` used to read as a bare "N failed (retry next boot)" for EVERY failure
-  // shape, including a repoKey that structurally can never resolve — "retry next boot" is false comfort
-  // for that class (three such records retried at every boot for 26+ days, never once clearing). Split
-  // the wording here the same way worktreesStillWedged/worktreesNeedsHuman already split out of
-  // worktreesPruned on this line: an honestly-retriable count, plus (only when non-zero) the permanently-
-  // wedged count with a pointer to reconcileOrchestrationOnBoot's own dedicated per-entry warn (which
-  // names each worker/branch/project/wedged-since/attempts — too much detail for this one condensed line).
+  // @decision fdf93d3a — boot-listen-not-blocked.mjs asserts this chain via real AST shape, not a fixed
+  // character-offset slice (an earlier slice-based version broke twice on unrelated nearby text growth) —
+  // so growing this line or adding comments near the call site below is safe.
+  // See docs/decisions/fdf93d3a-boot-listen-not-blocked-test-asserts-real-ast-shape.md.
+  //
+  // @decision c33f94b2 — mergesFailed splits an honestly-retriable count from a permanently-wedged one:
+  // "retry next boot" was false comfort for a repoKey that can never resolve (three records retried every
+  // boot for 26+ days, never clearing) — the wedged count points at the per-entry warn for detail.
+  // See docs/decisions/c33f94b2-mergesfailed-splits-retriable-from-permanently-wedged.md.
   void sessions.reconcileOrchestrationOnBoot(protectedSessionIds).then((reconciled) => {
     if (reconciled.mergesFinished || reconciled.mergesFailed || reconciled.staleMergesResolved || reconciled.worktreesPruned || reconciled.worktreesKept || reconciled.worktreesNeedsHuman || reconciled.worktreesStillWedged) {
       const retriableFailed = reconciled.mergesFailed - reconciled.mergeReconcileWedged;
@@ -1044,27 +1043,28 @@ async function main(): Promise<void> {
     console.warn(`[boot] orchestration reconcile failed (continuing boot): ${(err as Error).message}`);
   });
 
-  // Boot-time canonical-index residue scan (card 9e77050f, narrowed by card 06b5c47f): the merge-time
-  // refusal in mergeBranchLocked already makes the corruption this guards against impossible on its own
-  // (a staged-residue-bearing repo now fails its next merge closed instead of silently absorbing it) —
-  // this is purely an early-warning courtesy, shrinking "someone notices" from "next merge attempt" to
-  // "next boot". READ-ONLY, never resets anything (same ambiguity as the merge-time check: this can't
-  // tell a dead squash's leftover stage apart from a human's own WIP in that checkout), and best-effort
-  // like the reconcile kick above — never gates boot. Worded differently for staged vs. unstaged-only
-  // dirt (card 06b5c47f) since only staged content is a genuine residue suspicion / will block a merge —
-  // an earlier version of this message called BOTH "possible stale merge residue" and asserted the next
-  // merge would refuse, which was simply false for unstaged dirt (measured 4-for-4 false positives) and
-  // gave a user staring at a submodule gitlink (` M some/submodule` — a normal steady state for a repo
-  // with submodules, not residue) no way to guess what was being asked of them.
+  // Boot-time canonical-index residue scan: READ-ONLY early-warning courtesy (shrinks "someone notices"
+  // from "next merge attempt" to "next boot" for a corruption mergeBranchLocked's own entry check already
+  // makes impossible on its own); never resets anything; best-effort like the reconcile kick above — never
+  // gates boot.
   //
-  // Card b272d215: this list must name EVERY canonical repo a merge can land on, not just each project's
-  // PRIMARY `repoPath` — a multi-repo project's SECONDARY registry repos (`project.repos`, epic 49136451;
-  // `mergeBranchLocked` merges against them directly) are just as reachable by a real merge, and omitting
-  // them here isn't merely a gap: it makes `describeMergeDangerLatchAtBoot` below take its CLEAN branch for
-  // a secondary repo it never scanned, printing a false all-clear over a repo that actually holds a dead
-  // squash's stage. Mirrors the sibling enumeration at sessions/service.ts's branch-ref sweep
-  // (`[project.repoPath, ...project.repos.map((r) => r.path)]`) — two independent enumerations of "this
-  // project's canonical repos" must agree. De-duped (two projects can register the same path).
+  // @decision 2eddf573 — scoped to STAGED residue only, not staged+unstaged: an earlier broader check
+  // false-positived 4-for-4 on repos whose only dirt was unstaged (ordinary WIP, or a submodule gitlink
+  // ahead of its recorded pointer), which could have blocked a legitimately-configured repo's merges
+  // permanently.
+  // See docs/decisions/2eddf573-squash-merge-is-idempotent-and-refuses-on-ambiguous-dirty-state.md.
+  //
+  // (2eddf573's record is at its byte cap — can't extend, so the specific old wording stays here: the
+  // earlier broader version called this "possible stale merge residue" and asserted the next merge would
+  // refuse, false for unstaged dirt — a user staring at a submodule gitlink (` M some/submodule`, a
+  // normal steady state for a repo with submodules, not residue) had no way to guess what was being
+  // asked of them.)
+  //
+  // @decision b272d215 — this list must name EVERY canonical repo a merge can land on (primary repoPath
+  // AND multi-repo epic 49136451's secondary `project.repos`), or describeMergeDangerLatchAtBoot below can
+  // print a false all-clear for a repo it never scanned; mirrors sessions/service.ts's own branch-ref
+  // sweep — the two enumerations must agree. De-duped.
+  // See docs/decisions/b272d215-boot-scan-must-list-every-canonical-repo-not-just-primary.md.
   const canonicalRepoPaths = new Set<string>();
   for (const project of db.listProjects()) {
     for (const repoPath of [project.repoPath, ...project.repos.map((r) => r.path)]) {
@@ -1408,22 +1408,19 @@ async function main(): Promise<void> {
       for (const v of vaultVersioners) { if (v.flushSync()) flushed++; }
       if (flushed > 0) console.log(`[shutdown] flushed ${flushed} pending vault commit(s)`);
     } catch { /* never block the exit */ }
-    // codescapeSupervisor.stop() (card 8c13a023): on Windows a non-`detached` `codescape serve` child is
+    // @decision d671f1b8 — codescapeSupervisor.stop() on Windows: a non-detached `codescape serve` child is
     // implicitly job-object-bound and already dies with this process regardless of exit path (verified by
     // isolating the one variable that flips the outcome — see `spawnServe`'s own doc in codescape/
-    // supervisor.ts, next to the `spawn()` call this is actually about) — so calling stop() here is mostly
-    // making the cleanup OURS rather than relying on that undocumented platform default. On POSIX a
-    // non-detached child is reparented and would keep running (unverified/predicted, not measured here —
-    // Windows-only repro), which only matters for a POSIX host running `LOOM_DEV=1` self-hosted (this
-    // supervisor never starts for a regular loomctl end user).
-    // Guarded like the vault half above, ⛔ not incidentally: `stop()` itself cannot currently throw (its
-    // own body already wraps `this.child.kill()`), but a throw HERE would behave very differently across
-    // this function's two callers. On gracefulShutdown it would just cost a clean `exit(0)`. On
-    // daemon_restart's exit-flush timer (SessionService.requestDaemonRestart, sessions/service.ts) it
-    // would escape as an uncaughtException — routing through crashlog.ts's handler, which exits `1`
-    // instead of the restart sentinel `75`, so the supervisor would NOT relaunch and the daemon would stay
-    // down. Swallowing here makes "a future edit to stop() can't silently turn a restart into a
-    // non-relaunching crash" true by construction rather than true by accident.
+    // supervisor.ts); calling stop() here is mostly making the cleanup OURS rather than relying on that
+    // undocumented platform default (POSIX reparents instead — load-bearing there, harmless-but-redundant
+    // on Windows).
+    // See docs/decisions/d671f1b8-daemon-restart-runs-shared-vault-flush-cleanup-after-the-response-flush.md.
+    //
+    // Guarded like the vault half above, not incidentally: stop() itself cannot currently throw, but a
+    // throw HERE would differ across this function's two callers — gracefulShutdown just loses a clean
+    // exit(0), while daemon_restart's exit-flush timer would escape as an uncaughtException routed through
+    // crashlog.ts's handler (exits 1, not the restart sentinel 75), so the supervisor would NOT relaunch.
+    // Swallowing here makes that impossible by construction, not by accident.
     try { codescapeSupervisor.stop(); } catch { /* never block the exit */ }
   };
   // Card 7f9444f3 audit: this function's only two writes (the `console.log` above and the
