@@ -10406,30 +10406,13 @@ export class SessionService {
   }
 
   /**
-   * Recycle the PLATFORM LEAD near its context limit (the platform-surface `recycle_me` flow) — the
-   * platform analogue of recycleManager. The Lead has already run /loom-session-end and written
-   * `continuationPrompt`; Loom boots a FRESH successor Lead seeded with the agent warm-up + that
-   * continuation (NOT --resume — fresh context, intent carried), carries the predecessor's wakes +
-   * in-flight inbound queue onto it, then closes the predecessor (deferred, so this call's tool
-   * response flushes first). gen+1; recycledFrom = old. There is NO worker re-parenting: the Lead's
-   * spawned sessions are independent (not parented to it), unlike a manager's workers.
+   * @decision sha:b346f2c8 — recyclePlatformLead boots a FRESH successor (never `--resume`), carrying
+   *  the predecessor's wakes + queue; it is one of exactly two sanctioned paths that mint a platform
+   *  session — never widen this beyond the platform MCP router + the human-REST startPlatformLead path.
    *
-   * PER-LINEAGE REPLACEMENT (1 recycle → 1 successor, NOT a global singleton). Multiple live Leads may
-   * coexist (startPlatformLead is create-only); recycle replaces ONLY the calling Lead's lineage. The
-   * predecessor is ITSELF a LIVE platform session, so we retire it in the DB *BEFORE* the successor is
-   * marked live and run retire → insert → flip-live SYNCHRONOUSLY with NO await between. This keeps the
-   * transition atomic on Node's single-threaded loop — the predecessor and its successor are never both
-   * live at once (no double-counted lineage, no zombie) — even though OTHER unrelated Leads stay live
-   * throughout. The predecessor's pty is then hard-stopped on a 3s defer (response-flush); because the
-   * successor carries `recycledFrom = old.id`, `hasSuccessor(old.id)` is true, so the crash-recovery
-   * watchdog never resurrects the retired predecessor (recordUnexpectedExit + the tick both skip a
-   * superseded session) — no orphan, no zombie.
-   *
-   * This is one of two sanctioned paths that spawn a platform session (the other is the human-REST
-   * startPlatformLead): it is reachable ONLY by an existing platform Lead (the platform MCP router gates
-   * role === "platform", and this method re-asserts old.role === "platform"), and it mints exactly one
-   * successor of the same role. session_spawn still refuses role "platform" — no general agent-facing
-   * platform-spawn path is opened.
+   * @decision sha:1d974864 — the retire→insert→flip-live handoff here is PER-LINEAGE atomicity, NOT a
+   *  global singleton: multiple live Platform Leads may coexist post-1d974864; this synchronous,
+   *  no-`await` sequence only guarantees THIS predecessor/successor pair is never both live at once.
    */
   async recyclePlatformLead(oldLeadId: string, continuationPrompt: string): Promise<Session> {
     const old = this.db.getSession(oldLeadId);
