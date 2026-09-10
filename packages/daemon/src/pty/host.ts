@@ -26,7 +26,7 @@ import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
-import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, codexTrustDialogLock, codexAsciiFold } from "./codex-host.js";
+import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS } from "./codex-host.js";
 import { findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } from "./codex-transcript.js";
 
 const RING_CAP_BYTES = 256 * 1024;
@@ -5464,7 +5464,7 @@ export class PtyHost {
     // `--dangerously-bypass-approvals-and-sandbox` to route around a DELIBERATE upstream protection is
     // explicitly out of a worker's authority to decide — reported up instead, per the card's own
     // instruction to stop rather than escalate the grant.
-    const args = [...resumeArgs, "-a", "never", "-s", "workspace-write", "--no-alt-screen", ...mcpArgs];
+    const args = [...resumeArgs, "-a", "never", "-s", "workspace-write", "--no-alt-screen", ...CODEX_UPDATE_CHECK_OVERRIDE_ARGS, ...mcpArgs];
     // eslint-disable-next-line no-console
     console.log(`[pty] spawnCodex ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${isCodexResume ? opts.resumeId : "none"} mcpServers=${Object.keys(mcpServers).join(",")}`);
     return spawn(bin, args, {

@@ -18,6 +18,13 @@ if (!outputFile) {
 }
 
 fs.writeFileSync(outputFile, JSON.stringify(process.env));
+
+// Card 4084fadb: additive argv dump, gated on an opt-in env var so this stays byte-identical for every
+// existing consumer (pty-codex-spawn-env.mjs never sets it) — lets a sibling test pin the exact argv a
+// harness spawn passed this fixture, not just its env.
+const argvOutputFile = process.env.FIXTURE_ARGV_OUTPUT_FILE;
+if (argvOutputFile) fs.writeFileSync(argvOutputFile, JSON.stringify(process.argv.slice(2)));
+
 process.stdout.write("FIXTURE_ENV_DUMPED\n");
 
 setTimeout(() => process.exit(0), 5000);

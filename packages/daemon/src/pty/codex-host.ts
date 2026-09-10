@@ -81,6 +81,22 @@ export function mcpServersToCodexArgs(mcpServers: Record<string, unknown>): stri
 }
 
 /**
+ * Card `4084fadb` — per-invocation override suppressing codex's own startup "Update available!" dialog,
+ * which otherwise blocks unattended boot whenever a newer codex release has been published than what's
+ * installed (the dialog is a blocking TUI prompt with no auto-dismiss). MEASURED (this host, codex-cli
+ * 0.153.4, real update genuinely pending: 0.153.4 installed vs 0.154.0 published): `check_for_update_on_startup`
+ * is a real, recognized top-level boolean config field, not merely a substring found in the binary —
+ * `codex --strict-config -c check_for_update_on_startup=false` passes config validation and proceeds to
+ * the NEXT processing stage, while the identical invocation with a genuinely-unknown key is rejected at
+ * the config-load stage with "unknown configuration field ... in -c/--config override", and a non-boolean
+ * value for this SAME key is rejected with "invalid type: string ..., expected a boolean" — both confirm
+ * the key's existence and boolean type from the CLI's own validation, not from the card's original binary-
+ * strings hypothesis. Deliberately a per-invocation `-c` override, never written into the user's real
+ * `~/.codex/config.toml` — see `createCodexPty`'s own call site for why persistence is out of bounds here.
+ */
+export const CODEX_UPDATE_CHECK_OVERRIDE_ARGS: readonly string[] = ["-c", "check_for_update_on_startup=false"];
+
+/**
  * Card `b987f086`: companion to {@link mcpServersToCodexArgs} — WHICH entries of the SAME `mcpServers` map
  * that function silently (bar the `console.warn` above, into a shared multi-tenant log nobody polls —
  * project memory `shipping-a-detector-is-not-someone-reading-it` measures passive notice at 0-acted-on)

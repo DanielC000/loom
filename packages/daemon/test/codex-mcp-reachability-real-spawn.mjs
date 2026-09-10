@@ -97,9 +97,14 @@ const hashBefore = configBefore ? md5(configBefore) : "ENOENT";
 const releaseCodexLock = await acquireCodexRealSpawnLock();
 
 const scratchCwd = fs.mkdtempSync(path.join(os.tmpdir(), "loom-codex-mcp-reach-cwd-"));
+// Card 4084fadb: this file deliberately drives a REAL pty boot INDEPENDENTLY of PtyHost/createCodexPty
+// (see this file's own header) — so it does NOT inherit createCodexPty's update-check-suppression fix and
+// must carry the SAME override itself, or it wedges on codex's own "Update available!" dialog whenever a
+// newer release is genuinely published, exactly as it did pre-fix (see codex-host.ts's
+// CODEX_UPDATE_CHECK_OVERRIDE_ARGS for the measured evidence this key/value pair suppresses it).
 const p = pty.spawn(
   codexBin,
-  ["-a", "never", "-s", "workspace-write", "--no-alt-screen", "-c", `mcp_servers.loom_reach_probe.url="${url}"`],
+  ["-a", "never", "-s", "workspace-write", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", `mcp_servers.loom_reach_probe.url="${url}"`],
   { name: "xterm-256color", cols: 120, rows: 40, cwd: scratchCwd, env: process.env },
 );
 
