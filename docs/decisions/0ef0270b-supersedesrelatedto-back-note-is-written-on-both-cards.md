@@ -30,3 +30,17 @@ rather than silently losing the relation entirely, but it is not itself checked 
 
 Inline JSDoc in `packages/daemon/src/mcp/tasks.ts` (`createProjectTaskChecked`'s own doc, lines 934-946
 as of this tranche's HEAD).
+
+## Decision B (unrelated decision, same card id, `mcp/duplicateDetection.ts`) — HISTORICAL: coincidental code-landmark/convention false-positive class, CLOSED by card `b6eab182`
+
+### Narrative
+
+A second, distinct false-positive class in the cross-channel duplicate-card detector (card `5b221bf2`), measured against the real ~1687-card board: two cards about SUBSTANTIVELY UNRELATED work could share a code LANDMARK (a `file.ts:line` each cited for its own unrelated reason) or an established, codebase-wide CONVENTION name (a shared pattern/field name used correctly by two unrelated features) — neither card citing the other's id, a coincidental-landmark collision rather than a citation. Two real specimen pairs illustrated it: `166e3536` (a Platform Lead singleton bug) flagged against `f3917f96` (an unrelated graphify A/B spike) on a shared symbol + shared `service.ts:490`; `fae919b3` (a PresetForm `meta.inlineError` bug) flagged against `378d250b` (an unrelated companion-create-flow code review) on shared `inlineError`/`MutationCache` vocabulary.
+
+Two rounds of measurement (this card, `0ef0270b`: 8.5% raw-flag rate, 5×40-card draws, n=200 pooled; card `abdaecda`'s re-measure: 10.0%, same methodology) each found this class deliberately NOT tuned around — reported as an intended `allowDuplicate`/`relatedTo`-correctable edge case rather than narrowed, because a false negative was judged worse than a false positive at the time.
+
+Card `b6eab182` revisited that judgment call: those measurements were synthetic sampled draws (n=200, 2.5%–15% per-draw range); 5 REAL spurious create-blocks in live usage — this exact class, e.g. matching on a bare `workerlabel` field name + `sessions/service.ts:3341` — was a different order of evidence. Requiring a STRONG identifier for every match (see the `b6eab182` record) makes this whole class of match STRUCTURALLY IMPOSSIBLE now, not merely de-prioritized — there is no longer a "weak-only match" shape for a coincidental landmark/convention to produce.
+
+### Source (this section only)
+
+Inline JSDoc in `packages/daemon/src/mcp/duplicateDetection.ts` (`findSuspectedDuplicate`'s own doc, "SECOND DISCLOSED LIMITATION" section, lines 195-213 as of this tranche's HEAD, prior to compression).

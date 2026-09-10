@@ -60,3 +60,15 @@ as of this tranche's HEAD).
 Cross-project addendum: inline comment in `packages/daemon/src/mcp/platform.ts` (`project_task_create`'s
 preceding block, lines 2213-2230 as of this tranche's HEAD, prior to compression). Relocated by card
 `b721401b` (tranche 1 on `mcp/platform.ts`).
+
+## Decision B (unrelated decision, same card id, `mcp/duplicateDetection.ts`) — detector design, FP tuning, and a disclosed limitation
+
+MEASURED (1683-card board, Code Review round 2): the detector's first cut had a 47.5% FP rate (40-card sample), dropped to 22.5% via three fixes — (1) PascalCase regex letting ALL-CAPS words false-match, fixed via `[A-Z][a-z0-9]+`; (2) a single shared weak token (e.g. `tmpRoots`, `gateDetail`) required 2+ distinct weak categories — superseded by card `b6eab182` (own record); (3) `file:line`, once STRONG-tier, demoted to weak (two audit cards shared a dozen refs while being genuinely distinct findings) — with both founding pairs then ranking 1st.
+
+Disclosed, unfixed: a design doc quoting past incidents BY ID (e.g. this card, citing its own six specimens) can flag as their duplicate. Three fixes were tried and rejected: excluding cited-id tasks breaks `dde0ce24`/`47340c82` (retitled "DUPLICATE of dde0ce24"); a mutual-citation carve-out then breaks `bc91e86c`/`abcf0eba` (one-way citation); a 2+/3+ citation-count threshold still breaks `dde0ce24` (4 ordinary "Related:" citations).
+
+Do not fix the meta-document FP via a cited-id exclusion, mutual-citation carve-out, or citation-count threshold — each regresses a founding pair.
+
+### Source (this section only)
+
+Inline JSDoc in `mcp/duplicateDetection.ts`, top-of-file module doc + `findSuspectedDuplicate`'s "KNOWN, DISCLOSED LIMITATION" section, as of this tranche's HEAD prior to compression.

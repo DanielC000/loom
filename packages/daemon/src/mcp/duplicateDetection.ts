@@ -1,68 +1,17 @@
 import type { Task } from "@loom/shared";
 
 /**
- * Cross-channel duplicate-card detection (board card 5b221bf2). The founding case: two managers
- * independently file a card for the SAME incident, each in their own words, via two different
- * channels (an escalation-triage landing vs. a hand-filed `tasks_create`) — title/prose similarity
- * plausibly misses exactly this pair, since independent authorship diverges in wording. What
- * SURVIVES independent authorship is the identifiers both authors cite: a session id, a git
- * branch, an OS error constant, a `file:line`, a code symbol. This module extracts those
- * candidates and lets the caller (see {@link findSuspectedDuplicate}) match on their intersection,
- * rarity-weighted against the existing corpus — no prose/title similarity, no embeddings.
+ * Cross-channel duplicate-card detection (board card 5b221bf2): extracts rare identifiers (a
+ * session id, git branch, OS error constant, `file:line`, or code symbol) that survive independent
+ * authorship of the same incident, and lets the caller (see {@link findSuspectedDuplicate}) match on
+ * their intersection, rarity-weighted against the existing corpus — no prose/title similarity, no
+ * embeddings.
  *
- * MEASURED against the real 1683-card board (Code Review, round 2): the first cut of this module
- * had a 47.5% false-positive rate on a 40-card recency sample. Three independent mechanisms drove
- * it, each fixed below and re-measured:
- *   1. The PascalCase regex accepted a bare capital letter as a valid zero-lowercase segment, so an
- *      ALL-CAPS shouted word ("MEASURED", "HYPOTHESIS" — Loom cards use heavy caps emphasis) parsed
- *      as N single-letter "segments" and matched. Fixed by requiring `[A-Z][a-z0-9]+` (one-or-more
- *      lowercase tail), not `[A-Z][a-z0-9]*`, everywhere a segment is asserted.
- *   2. A single shared code-symbol-shaped token is too easily explained by "these two cards discuss
- *      the same subsystem" (two temp-dir cleanup cards both saying `tmpRoots`; two gate-diagnostic
- *      cards both saying `gateDetail`) rather than "these two cards are the same incident." Fixed (at
- *      the time) by requiring evidence to span at least 2 DISTINCT weak categories, not merely 2 raw
- *      tokens — the founding p2 pair cleared this via ONE SCREAMING_SNAKE_CASE constant + ONE
- *      PascalCase symbol (two categories), while "two camelCase symbols from one subsystem" no longer
- *      did (one category, however many tokens). ⛔ SUPERSEDED by card b6eab182 below — weak evidence,
- *      however many categories, is no longer sufficient on its own at all.
- *   3. `file:line` was in the single-hit-sufficient STRONG tier on the claim that it was "as rare as
- *      a UUID." Measured false: two audit/sweep cards that each cite a wholesale list of sites can
- *      share a dozen `file:line` refs while being genuinely distinct findings, and two unrelated
- *      fixes can coincidentally cite the exact same one. `file:line` is now its OWN weak category —
- *      it can corroborate other evidence but, like any single weak category, is never sufficient
- *      alone regardless of how many refs are shared (a category is present/absent, not counted).
- * These three bring the same 40-card sample to a 22.5% FP rate with BOTH founding pairs flagging at
- * rank 1 in BOTH directions and the negative control clear — see {@link findSuspectedDuplicate}'s doc
- * for the one remaining, DELIBERATELY UNFIXED false-positive class (a design/meta card quoting past
- * incidents as worked examples) and why three further attempts at fixing it were each rejected on
- * measurement rather than shipped.
+ * @decision 5b221bf2 — design rationale + the false-positive tuning history behind the STRONG/WEAK
+ *   tier split below (three measured fix mechanisms, 47.5% → 22.5% FP rate on a 40-card sample).
  *
- * ⭐⭐ CARD b6eab182 (2026-08-06) — WEAK evidence, of ANY category in ANY combination, no longer
- * qualifies a task as a suspected duplicate BY ITSELF. This supersedes the `MIN_WEAK_CATEGORIES`-based
- * weak-only matching described above and in {@link findSuspectedDuplicate}'s own doc. Reason: unlike the
- * synthetic sampled-draw measurements above (2.5%–15% per-draw, n=200 pooled), this is **5 REAL spurious
- * create-BLOCKS measured in live usage** — the 5th matched on nothing but a bare camelCase-shaped field
- * name (`workerlabel`) plus a `file:line` landmark (`sessions/service.ts:3341`), i.e. exactly the
- * MIN_WEAK_CATEGORIES=2 bar clearing on two bare code identifiers. Per the founding asymmetry (a spurious
- * dedup CONFLICT is loud and self-correcting — the caller sees it and re-files; a spurious create-BLOCK is
- * silent in the OTHER direction — the finding still exists, but the path of least resistance is to give up
- * filing it), the tuning now favors false NEGATIVES: a block requires at least one STRONG identifier (a
- * session id / task id — both are full UUIDs — or a Loom branch name) shared with an existing card. Weak
- * (code-symbol / file:line / naming-convention) evidence is retained ONLY as ranking/corroboration context
- * on top of a strong hit (folded into `sharedIdentifiers` for legibility) — it can no longer trigger a
- * block on its own, however many distinct categories it spans.
- * ⇒ This CLOSES the module's own SECOND disclosed false-positive class below (a weak-only coincidental
- * code-landmark/convention collision) outright — that class can no longer fire, because weak-only matches
- * no longer exist. The FIRST disclosed class (a meta/design document quoting another incident's identifiers
- * VERBATIM) is UNCHANGED by this — it's about STRONG evidence and stays open.
- * ⚠️ ACCEPTED COST, not an oversight: this module's own founding `abcf0eba`/`bc91e86c` positive-control pair
- * (the Windows-argv-limit duplicate) carries NO strong identifier at all — it was originally caught purely
- * via `ERROR_FILENAME_EXCED_RANGE` + `CreateProcess` + `startupPrompt` (three weak categories, zero strong).
- * Under this redesign it is **no longer auto-flagged** — a genuine duplicate whose only shared evidence is a
- * code symbol/error constant/file:line now has to be caught by a human/agent reading the board, or filed
- * with `supersedes`/`relatedTo` by hand. That is the accepted trade of the stated asymmetry, not a bug —
- * see the regression test in task-dedupe.mjs for the explicit, documented "this pair no longer matches"
- * assertion rather than a silently-dropped check.
+ * @decision b6eab182 — weak evidence, of ANY category in ANY combination, never qualifies a match on
+ *   its own; only a shared STRONG identifier does.
  */
 
 /** STRONG identifiers: near-impossible to share by coincidence or by discussing the same general
@@ -166,51 +115,11 @@ export interface DuplicateMatch {
  * fresh each call, not a hardcoded exclude list: a term common enough to appear in many cards (a
  * tool name, a field name) is filtered out by frequency alone, however identifier-shaped it looks.
  *
- * ⚠️ KNOWN, DISCLOSED LIMITATION (Code Review round 2) — deliberately NOT "fixed" here: a design/spec
- * document that discusses several past incidents BY ID as worked examples (e.g. this very card,
- * `5b221bf2`, quoting the identifiers of all six of its own founding specimens) can itself get flagged
- * as a duplicate of one of them, since it genuinely does share their rare identifiers verbatim. THREE
- * citation-based exclusions were tried and each rejected on measurement, not by inspection:
- *   - Exclude any existing task the candidate cites by id → fixes this case, but ALSO excludes
- *     `dde0ce24` from matching `47340c82` (retitled "DUPLICATE of dde0ce24" post-resolution, so its
- *     own text cites the very sibling it should match) — trades the meta-document FP for a founding
- *     positive-control FALSE NEGATIVE.
- *   - Same, but excused when the cited task cites the candidate BACK (a "mutual" carve-out) → fixes
- *     BOTH of the above, but then breaks `bc91e86c` → `abcf0eba`: that pair's citation is one-way
- *     (`bc91e86c` cites `abcf0eba`; `abcf0eba` never mentions `bc91e86c`), so "resolved pairs cite each
- *     other mutually" is not a reliable property of this board's history.
- *   - Only treat a candidate as a "meta document" once it cites 2+ (or 3+) distinct task ids → still
- *     breaks a founding direction: `dde0ce24` alone carries 4 "Related:" citations (an ordinary amount
- *     for a well-cross-referenced card here), so it trips the same threshold as the genuine 6-citation
- *     meta-document and loses its own match to `47340c82`.
- * Every variant traded this one narrow, self-referential false positive for a different regression on
- * a founding pair — this board's citation conventions (multi-item "Related:" footers on ordinary
- * cards, one-way "DUPLICATE of X" retitles) don't reliably distinguish "citing as a worked example"
- * from "citing your own confirmed duplicate." Per the review's own instruction, this is reported
- * rather than tuned around: a design/meta card that quotes another incident's identifiers as an
- * illustrative case study will occasionally self-refuse — loudly, naming the wrong-but-related
- * counterpart, and correctable in one call via `allowDuplicate`/`relatedTo`. That is the intended
- * escape hatch for exactly this shape of edge case, not a silent failure.
+ * @decision 5b221bf2 — a known, deliberately unfixed false-positive class: a design/meta document
+ *   quoting past incidents' identifiers as worked examples can flag as a duplicate of one of them.
  *
- * ⚠️ SECOND DISCLOSED LIMITATION (card 0ef0270b, measured against the real ~1687-card board) — HISTORICAL,
- * CLOSED by card b6eab182. The "meta-document citing another incident's OWN identifiers" class above was
- * NOT the whole set of residual false positives: a second, distinct class existed where two cards about
- * SUBSTANTIVELY UNRELATED work shared a code LANDMARK (a `file.ts:line` each cited for its own unrelated
- * reason) or an established, codebase-wide CONVENTION name (a shared pattern/field name used correctly by
- * two unrelated features) — neither card citing the other's id, a coincidental-landmark collision rather
- * than a citation. Two real specimen pairs illustrated it: `166e3536` (a Platform Lead singleton bug)
- * flagged against `f3917f96` (an unrelated graphify A/B spike) on a shared symbol + shared `service.ts:490`;
- * `fae919b3` (a PresetForm `meta.inlineError` bug) flagged against `378d250b` (an unrelated companion-
- * create-flow code review) on shared `inlineError`/`MutationCache` vocabulary. Two rounds of measurement
- * (0ef0270b: 8.5% raw-flag rate, 5×40-card draws, n=200 pooled; card abdaecda's re-measure: 10.0%, same
- * methodology) each found this deliberately NOT tuned around — reported as an intended `allowDuplicate`/
- * `relatedTo`-correctable edge case rather than narrowed, because a false negative was judged worse than a
- * false positive at the time. **Card b6eab182 revisited that judgment call**: those measurements were
- * synthetic sampled draws (n=200, 2.5%–15% per-draw range); 5 REAL spurious create-blocks in live usage —
- * this exact class, e.g. matching on a bare `workerlabel` field name + `sessions/service.ts:3341` — is a
- * different order of evidence. Requiring a STRONG identifier for every match (see above) makes this whole
- * class of match STRUCTURALLY IMPOSSIBLE now, not merely de-prioritized — there is no longer a "weak-only
- * match" shape for a coincidental landmark/convention to produce.
+ * @decision 0ef0270b — HISTORICAL, closed by `b6eab182`: a second false-positive class where two
+ *   unrelated cards shared a coincidental code landmark or naming convention.
  *
  * Returns the single BEST-qualifying match — ranked by strong-hit count first, then weak-category
  * count, then total weak token count as a final tie-break — or null if none clears the bar. Never
