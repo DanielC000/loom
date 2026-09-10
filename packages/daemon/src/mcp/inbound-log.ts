@@ -5,9 +5,9 @@ import { createHash } from "node:crypto";
  * `[hook]`/`[pty-write]` log shape (`Grep '\[mcp\]' packages/daemon/src` / the daemon log). Don't remove
  * as "redundant" — MCP calls were previously undecidable ("delivered twice" vs "called twice").
  *
- * Card 16c93a50 (content-in-durable-logs policy) is OPEN/unanswered — this logs identity/SHAPE only
- * (tool name, args length, `shortHash`), never the tool arguments or message text. Conform this to
- * 16c93a50 if/when it settles a different policy.
+ * @decision 16c93a50 — this line lands in the rotated daemon log, so it must stay on the identity/SHAPE
+ * side of that ruling regardless of `LOOM_LOG_MESSAGE_CONTENT`'s state: never the tool arguments or
+ * message text, only tool name, args length, and `shortHash`.
  *
  * ⛔ `shortHash` is a commitment, NOT a secrecy mechanism — one-way but brute-forceable over low-entropy
  * args (a small enum, a boolean, `{}`), esp. combined with the `tool=` name on the same line. It tells
