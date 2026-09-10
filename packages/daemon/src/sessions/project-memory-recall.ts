@@ -11,34 +11,16 @@ import { annotateNote } from "./project-memory-annotations.js";
  * title/text FTS5-MATCH the kickoff/task text — so a fleet-shared decision or gotcha survives across
  * sessions instead of living only in hand-curated docs.
  *
- * Zero metered tokens: retrieval is a local SQLite FTS5 query (db.ts › searchProjectMemory), never an
- * embedding endpoint or API call. `estimateTokens` is a cheap bytes/4 heuristic (no tokenizer) — good
- * enough to bound the digest deterministically without spending a real API call just to count tokens.
- *
  * Framed EXPLICITLY as DATA/CONTEXT, never instructions (mirrors companion/memory-recall.ts's posture,
  * extended from the ASSISTANT_BASE_BRIEF untrusted-input stance): a note is agent-authored, but an agent
  * whose write path was prompt-injected must never be able to re-inject standing instructions into every
  * future session on the project via a memory note. Recalled memory is read, never obeyed.
  *
- * Two delivery points, both role-agnostic (unlike the companion-only recall): a FRESH spawn appends the
- * framed digest to the composed startup prompt (`appendMemoryRecallToStartupPrompt`, reusing the SAME
- * generic append primitive assistant-prompt.ts already exports for the companion case); a RESUME has no
- * startup prompt at all (the "resume injects nothing" invariant), so it is queued via the ordinary
- * `enqueueStdin` turn-injection primitive instead — see sessions/service.ts call sites.
- *
- * Coverage (sessions/service.ts): startNew, startManager, spawnWorker, recycleWorker, recycleManager (all
- * fresh-spawn paths, appending to the composed startup prompt) + resume() and forkSession (both --resume/
- * --fork-session paths, which carry NO startup prompt of their own — injected via the ordinary
- * `enqueueStdin` turn-injection primitive instead, exactly like resume()'s own project-memory half).
- * Known remaining gap: the platform/auditor spawn paths do not inject project memory — they sit above/
- * outside the per-project board this feature is scoped to, so there's no natural project to retrieve
- * notes from; not pursued further here.
- *
- * Card e6d270b3: a note may link one or more Requests (`ProjectMemoryEntry.requestIds`, set via
- * `memory_write`). Those links are resolved to a live annotation line PER NOTE, PER READ, right here in
- * `composeProjectMemoryDigest`'s `annotate` callback (see project-memory-request-links.ts) — so a note
- * written in asking voice about a PENDING request self-corrects the moment the owner answers it, instead
- * of freezing that word forever across every future kickoff.
+ * @decision 2fd9abf9 — zero-metered-token retrieval, the two delivery points (fresh spawn vs. resume),
+ * call-site coverage, and the known platform/auditor gap:
+ * docs/decisions/2fd9abf9-project-memory-two-delivery-points-and-coverage.md
+ * @decision e6d270b3 — a note may link a Request, resolved to a live annotation per read:
+ * docs/decisions/e6d270b3-project-memory-note-links-a-request-live-annotation.md
  */
 
 export const PROJECT_MEMORY_TAG = "[loom:project-memory]";
@@ -213,55 +195,23 @@ export function computeFloorTierStatus(
 }
 
 /** Card 738568b6 — the MAXIMUM share of `budgetTokens` the RELATED tier can wall off from the pinned-REST
- *  sub-tier — a CEILING on the reservation, not an unconditional grant. Fixes a structural bug, not a
- *  tuning shortfall: PLATFORM_DEFAULTS' own `memory.budgetTokens` doc comment (shared/src/config.ts)
- *  states the 4000-token default is sized for "a handful of pinned notes plus a sizeable related-tier
- *  slice" — but before this fix, pinned-REST packed greedily against the FULL budget with no reservation,
- *  so any pinned set that alone exceeded budgetTokens (measured live on this project: ~20,300 tokens of
- *  pinned notes vs. a 4000 budget) left RELATED a guaranteed, permanent zero — the exact opposite of the
- *  documented intent.
- *  30%, derived from this project's own measured corpus (memory_list, 2026-08-05): unpinned note blocks
- *  (the RELATED tier's own population) average ~782 tokens / median ~831 tokens, so a 30% reserve (1200
- *  tokens at the 4000 default) reliably fits at least one typically-sized related note plus its section
- *  header, with room for a second smaller match — while still leaving 70% for pinned.
- *  ⚠️ CORRECTED (code review, same card): an EARLIER version of this fix reserved this fraction
- *  UNCONDITIONALLY, regardless of whether `related` had anything in it or needed the full reserve — an
- *  empty or small related tier then walled off space nothing occupied, dropping MORE pinned notes than
- *  before this card for ZERO benefit (a straight regression the original test suite couldn't see, since it
- *  only ever seeded related notes bigger than the reserve). {@link composeProjectMemoryDigest} now PROBES
- *  how much related would ACTUALLY consume (via {@link packRelatedPrefix}, capped at this fraction) and
- *  reserves only THAT — empty related ⇒ zero reserved ⇒ byte-identical to pre-this-card behavior.
- *  This DELIBERATELY drops MORE ordinary pinned notes than before under a tight budget WHEN related
- *  genuinely needs the room: a note the FTS matcher scored against THIS task's text is more likely to
- *  matter for THIS task than the Nth-most-recent general pinned note, so trading some of that margin to
- *  related is the intended outcome, not a regression — but ONLY when related actually uses it.
+ *  sub-tier — a CEILING on the reservation, PROBED via {@link packRelatedPrefix} rather than reserved
+ *  unconditionally, so an empty or small related tier never walls off space nothing occupies.
  *  NEVER_DROP_TAG notes are UNAFFECTED — the floor tier keeps packing against the FULL `budgetTokens`
- *  exactly as before; this reserve narrows only the ordinary pinned-REST sub-tier's own ceiling. */
+ *  exactly as before; this reserve narrows only the ordinary pinned-REST sub-tier's own ceiling.
+ *  @decision 738568b6 — the structural bug this fixed, the measured 30% derivation, and the code-review
+ *  correction from an unconditional to a probed reserve:
+ *  docs/decisions/738568b6-related-tier-reserve-probed-not-unconditional.md */
 const RELATED_RESERVE_FRACTION = 0.3;
 
 /** Card 6def8bf4 — the pinned tier's delivery-order signal: LEAST-RECENTLY-DELIVERED first
  *  (`lastRetrievedAt` ascending, `null` — never once delivered — sorting AHEAD of every real timestamp),
  *  `updatedAt` descending as a secondary tiebreak, `key` ascending as the final deterministic tiebreak.
- *  Replaces card 15503722's pure `updatedAt DESC` sort, which fixed the ORIGINAL key-alphabetical
- *  starvation but introduced a NEW one: a pinned note that is never edited after creation keeps the exact
- *  same `updatedAt`, so its sort position never changes between kickoffs — once the budget is tight, that
- *  note loses to the same higher-ranked notes on EVERY kickoff, forever (measured live on this project:
- *  4 pinned notes dark for 19 days). `retrievalCount` alone was rejected then for being self-reinforcing
- *  (a note the old bug already starved has `retrievalCount:0` and stays there); `lastRetrievedAt` doesn't
- *  have that problem — it's a TIMESTAMP a delivery updates (`db.touchProjectMemoryRetrieved`, called for
- *  every note `composeProjectMemoryDigest` actually includes), so ranking by it directly INVERTS
- *  starvation instead of entrenching it: a never-delivered note (`null`) gets top priority; the instant it
- *  IS delivered, its stamp becomes the newest in the corpus and it rotates to the back until every other
- *  note has had a turn. This converges to full coverage within a bounded number of kickoffs for any note
- *  that can individually fit the budget at all — a note that can't (a single oversized note exceeding
- *  `budgetTokens` on its own) is the pre-existing, separately-tracked size/budget case (see
- *  NEVER_DROP_TAG's own doc comment and card 0186576f), not something ordering can fix. `updatedAt` stays
- *  the secondary tiebreak deliberately: among notes tied on `lastRetrievedAt` (most commonly a bulk of
- *  never-delivered notes, all `null`), a freshly-edited note plausibly matters more RIGHT NOW than a
- *  stale one that's equally never-been-seen — preserving the useful half of card 15503722's original
- *  reasoning underneath the new fairness key. Backward-compatible with any all-null-`lastRetrievedAt`
- *  corpus (e.g. every existing test fixture, and any project's first-ever kickoff): every entry ties on
- *  the primary key, so the sort degrades EXACTLY to the pre-this-card `updatedAt DESC, key ASC` order. */
+ *  Backward-compatible with any all-null-`lastRetrievedAt` corpus (e.g. every existing test fixture, and
+ *  any project's first-ever kickoff): every entry ties on the primary key, so the sort degrades EXACTLY
+ *  to the pre-this-card `updatedAt DESC, key ASC` order.
+ *  @decision 6def8bf4 — the starvation bug this replaces, why `retrievalCount` alone was rejected, and
+ *  why `updatedAt` stays the secondary tiebreak: docs/decisions/6def8bf4-pinned-tier-lru-fairness-sort.md */
 function sortPinnedByRecency(entries: ProjectMemoryEntry[]): ProjectMemoryEntry[] {
   return [...entries].sort((a, b) => {
     if (a.lastRetrievedAt !== b.lastRetrievedAt) {
@@ -308,23 +258,15 @@ function packRelatedPrefix(
 /**
  * Card 3b2aa339 — the REST sub-tier's (ordinary pinned, non-`never-drop`) write-time capacity estimate:
  * the write-time-visible sibling of {@link computeFloorTierStatus} for the tier that actually starves
- * under a shared budget. Measured live on this project (30 rotation-aware rounds against the real corpus,
- * card 3b2aa339): the floor tier is fixed overhead (≈66% of an 8000-token budget before a single REST note
- * is considered) and REST rotates through the leftover at a mean ~1.6% per-note delivery rate, with most
- * REST notes never delivered across 30 kickoffs. "Pinned" was never the guarantee for this sub-tier the
- * way it is for `never-drop` — but that cost was invisible at the moment of the pin, which is the actual
- * defect this function targets (see writeProjectMemory's `restTierStatus`, mcp/memory.ts).
- *
- * Unlike the floor tier (an exact fits-or-doesn't-fit pack against the FULL budget), REST competes with
- * the RELATED tier's reserve (see {@link RELATED_RESERVE_FRACTION}) and only ever gets a rotating slot
- * under fair LRU packing ({@link sortPinnedByRecency}) — "will THIS note ever be delivered" isn't
- * answerable exactly without simulating real kickoffs (there is no `kickoffText` yet at write time, so
- * the actual per-round RELATED reserve consumption is unknowable here). This instead returns a CHEAP,
- * deterministic, write-time estimate: REST's capacity under the WORST-CASE nominal RELATED reserve (the
- * full {@link RELATED_RESERVE_FRACTION}, since a real kickoff could claim all of it), and the resulting
- * expected full-rotation cycle length in kickoffs, so an author sees roughly "1 in every N kickoffs" for
- * the REST tier as it stands the moment they're about to add to it. Advisory only — this never blocks a
- * write, mirroring {@link computeFloorTierStatus}'s own posture.
+ * under a shared budget. Unlike the floor tier (an exact fits-or-doesn't-fit pack against the FULL
+ * budget), REST competes with the RELATED tier's reserve (see {@link RELATED_RESERVE_FRACTION}) and only
+ * ever gets a rotating slot under fair LRU packing ({@link sortPinnedByRecency}) — this returns a CHEAP,
+ * deterministic, write-time estimate of REST's capacity and expected full-rotation cycle length, not a
+ * simulation of real kickoffs. Advisory only — this never blocks a write, mirroring
+ * {@link computeFloorTierStatus}'s own posture.
+ * @decision 3b2aa339 — the measured corpus (floor overhead, REST's per-note delivery rate) that motivated
+ * this estimate, and why it's a worst-case estimate rather than a kickoff simulation:
+ * docs/decisions/3b2aa339-rest-tier-capacity-estimate-measured-corpus.md
  */
 export function computeRestTierStatus(
   pinnedNotes: ProjectMemoryEntry[],
@@ -363,37 +305,26 @@ export function computeRestTierStatus(
  * "retrieved" into context), plus `droppedFloorKeys`/`droppedRestKeys`/`droppedRelatedKeys` for the
  * caller to log. `null` digest ⇒ nothing to inject (both tiers empty, or nothing fit at all).
  *
- * PINNED delivery order (card 15503722 — replaces the original key-alphabetical sort, which delivered
- * notes by spelling and size, not importance: `db.ts`'s `listPinnedProjectMemory` doc comment already
- * stated the intended order was "newest-updated first," but this function silently discarded that order
- * and re-sorted by key instead — a specimen of this project's own `a-comment-is-a-claim` rule: the DB
- * layer's comment asserted an order its own consumer threw away). Two sub-tiers, each internally ordered
- * by {@link sortPinnedByRecency}:
- *   1. FLOOR — any note tagged {@link NEVER_DROP_TAG}. Packed FIRST, so it can only fail to survive if it
- *      (or the sum of several floor notes) alone exceeds the WHOLE budget — reported as a distinct, louder
- *      ALARM (`droppedFloorKeys`), never folded into the routine overflow signal (an alarm that reads like
- *      routine overflow is an alarm nobody notices).
- *   2. REST — every other pinned note, recency-ordered, reported via the routine `droppedRestKeys` signal.
- *      Card 738568b6 — REST packs against a REDUCED cap (`budgetTokens` minus what RELATED actually needs,
- *      PROBED via {@link packRelatedPrefix} and capped at {@link RELATED_RESERVE_FRACTION} — NOT the raw
- *      nominal fraction itself; an empty or under-reserve related tier reduces this cap by zero or by less
- *      than the fraction), not the full `budgetTokens` FLOOR still uses: whatever IS reduced can only be
- *      eaten by FLOOR (which keeps absolute priority, unchanged), never by REST.
- * Both sub-tiers still pack MAXIMALLY within their own pass: an oversized note is SKIPPED (`continue`),
- * never `break` — "pinned ALWAYS injected" is the feature's headline promise, so one bloated note must
- * never suppress every other (possibly small, critical) note behind it in the SAME sub-tier.
+ * PINNED has two sub-tiers, each internally ordered by {@link sortPinnedByRecency}: FLOOR (any note
+ * tagged {@link NEVER_DROP_TAG}, packed first, so it can only fail to survive if it — or the sum of
+ * several floor notes — alone exceeds the WHOLE budget, reported as a distinct ALARM never folded into
+ * routine overflow) and REST (every other pinned note, packing against a REDUCED cap — see
+ * {@link RELATED_RESERVE_FRACTION} — that only ever narrows REST's ceiling, never FLOOR's). Both
+ * sub-tiers pack MAXIMALLY within their own pass: an oversized note is SKIPPED (`continue`), never
+ * `break` — "pinned ALWAYS injected" is the feature's headline promise, so one bloated note must never
+ * suppress every other (possibly small, critical) note behind it in the SAME sub-tier.
+ * @decision 15503722 — why FLOOR/REST replaced a plain key-alphabetical sort, and the
+ * `a-comment-is-a-claim` specimen it's an instance of:
+ * docs/decisions/15503722-pinned-tier-order-a-comment-is-a-claim-specimen.md
+ * @decision 738568b6 — the structural bug REST's reduced cap fixes, and the measured 30% derivation:
+ * docs/decisions/738568b6-related-tier-reserve-probed-not-unconditional.md
  *
- * RELATED tier still `break`s at the first overflow — a rank-ordered PREFIX is the correct truncation there
- * (the top-ranked matches are the ones worth keeping; skipping past a big one to pack a worse-ranked one
- * would invert the ranking). Card fddd58ef — unlike PINNED (which promises "injected IN FULL on EVERY
- * kickoff," so a drop breaks a stated guarantee), RELATED is relevance-matched and best-effort BY
- * CONSTRUCTION: nothing ever promised a given related note survives. That alone would argue for silence.
- * But MEASURED on this project's real corpus at its live `budgetTokens`, the drop rate was 100% (200/200
- * candidates across 25/25 real kickoffs) — not an occasional near-miss, a structurally dead tier with zero
- * way for a reader to discover it. That volume is what earns RELATED the same `droppedRelatedKeys` +
- * notice treatment as the pinned tiers (reusing {@link summarizeDroppedKeys} — one idiom, not a second
- * convention): the everything-past-the-break-point suffix of `related` (already rank-ordered, so no
- * per-note `continue`-and-collect is needed the way the pinned sub-tiers need it).
+ * RELATED tier still `break`s at the first overflow — a rank-ordered PREFIX is the correct truncation
+ * there (the top-ranked matches are the ones worth keeping; skipping past a big one to pack a
+ * worse-ranked one would invert the ranking).
+ * @decision fddd58ef — why a best-effort, no-promise tier still gets the same drop-notice treatment as
+ * pinned, and the measured 100% drop rate that motivated it:
+ * docs/decisions/fddd58ef-related-tier-drop-notice-same-treatment-as-pinned.md
  */
 export function composeProjectMemoryDigest(
   pinned: ProjectMemoryEntry[],
@@ -608,29 +539,9 @@ export function buildFramedProjectMemory(
  * whose text names a matching path, instead of pinning it globally, so its byte cost is paid only on
  * kickoffs where it's actually relevant and the freed budget goes to the RELATED tier the rest of the
  * time. See {@link ProjectMemoryEntry.triggerGlob}'s own doc comment for the field contract.
- *
- * MECHANISM CHOSEN: a touched-path GLOB, matched against path-like tokens found literally in the kickoff/
- * task text — the SAME text {@link retrieveProjectMemoryForKickoff} already threads through to the FTS
- * "related" query via its own `kickoffText` param — not the actual files a worker's branch ends up
- * touching (unknowable at kickoff time, before the worker has touched anything; the git-diff-based
- * deny-glob matcher in `git/worktrees.ts` operates on REAL touched files, but only exists post-hoc at
- * merge review, a different moment entirely). A Loom task card routinely names the files it concerns
- * literally in its own title/body (this project's own board cards do this constantly, including the card
- * that filed this feature) — a worker-spawn kickoffText is exactly `${task.title}\n${task.body}`
- * (sessions/service.ts) — so a glob predicate over that text needs ZERO new plumbing: the data it needs
- * already exists at the one place this note is composed, for every kickoff shape (fresh spawn, resume,
- * fork, recycle) {@link retrieveProjectMemoryForKickoff} already covers.
- *
- * REJECTED — tool name: no tool has been invoked yet at kickoff time (the session hasn't taken a turn),
- * so gating on "the next tool this session calls" isn't a kickoff-time predicate at all — it would need
- * the note re-evaluated and injected MID-session, on every tool call, which needs new runtime plumbing
- * inside every MCP router (a materially bigger surface than this card's scope, and would touch
- * `mcp/orchestration.ts` — a file this card's own kickoff flags as held by another live worker).
- *
- * REJECTED — card label: `Task` (shared/src/types.ts) has no modeled "label" concept at all — only
- * `title`/`body`/`columnKey`/`priority`/etc. (verified by reading the interface directly). This predicate
- * would first require adding an entirely new task field (schema + validation + UI) — a separate, larger
- * card of its own — where a touched-path glob needs none of that.
+ * @decision aeec1880 — why a touched-path glob over kickoff text was chosen, and why "tool name" and
+ * "card label" were rejected as the predicate instead:
+ * docs/decisions/aeec1880-triggerglob-gates-pinned-delivery-to-a-matching-kickoff-path.md
  */
 const PATH_TOKEN_RE = /[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+/g;
 
@@ -720,13 +631,10 @@ export function partitionPinnedForKickoff(
  * byte-identical to before this feature) when the project has zero memory notes — the additive guarantee.
  * `kickoffText` empty/whitespace ⇒ pinned-only (no FTS query is issued — `searchProjectMemory` would
  * reject an empty MATCH anyway; skipping it here avoids the round-trip).
- *
- * Card 15503722 — the SECOND overflow-visibility surface (the first is the in-digest line itself, seen by
- * the spawned agent): a daemon log line for a human/dev scanning logs. `console.error` for a
- * `NEVER_DROP_TAG` drop (a broken guarantee — an operational alarm), `console.warn` for a routine budget
- * drop — kept as two distinct calls so the alarm doesn't read as routine in the logs either. Card
- * fddd58ef adds a third `console.warn` for RELATED-tier drops, same routine severity as the pinned-rest
- * one (RELATED never promised full inclusion, so it's not a broken guarantee either).
+ * @decision 15503722 — the daemon-log severity split (console.error for a NEVER_DROP_TAG drop vs.
+ * console.warn for a routine one): docs/decisions/15503722-pinned-tier-order-a-comment-is-a-claim-specimen.md
+ * @decision fddd58ef — why the RELATED-tier console.warn shares routine severity, not alarm:
+ * docs/decisions/fddd58ef-related-tier-drop-notice-same-treatment-as-pinned.md
  */
 export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kickoffText: string): string | null {
   const project = db.getProject(projectId);
