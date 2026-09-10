@@ -7658,119 +7658,40 @@ export class SessionService {
   }
 
   /**
-   * Card f9b1ea00 DoD-2 — consumes `PtyHostEvents.onPromptMismatchUnresolved`: a "recognized replay"
-   * `[loom:prompt-mismatch]` detection (pty/host.ts's `UserPromptSubmit` mismatch detector, the
-   * `replayedEntry !== undefined` branch) never resolved within `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` — no
-   * later generation's own submission fused that gen's content back in whole. THE GAP THIS CLOSES: that
-   * original notice promised its reader a follow-up EITHER WAY ("wait one generation and re-check ... if
-   * that happens you will see a separate, later notice saying plainly that nothing was lost") — until this
-   * card, only the SUCCESS half of that promise had a mechanism behind it (the `confirmedFusion` branch,
-   * same file); the failure half emitted nothing at all, so "no second notice arrived" was structurally
-   * indistinguishable from "not yet, still waiting". Deliberately reuses `handlePasteLengthLoss`'s
-   * established shape (same two recipients, same durable `db.appendEvent` audit trail, just above) — this
-   * card's own board body records an independent worker, on a completely different specimen, converging on
-   * the SAME diagnosis: `paste_length_loss` persists an event AND fails loud to the sender;
-   * `prompt_mismatch` did neither, until now.
-   *   - RECIPIENT: `sessionId` itself — the session that experienced the mismatch and was told to wait.
-   *   - SENDER: for a worker, that's its manager (`parentSessionId`) — the one party who could actually
-   *     have sent (or relayed) the content and can resend it. A session with no `parentSessionId` (a
-   *     manager, a `run`/plain session, the platform lead) has no programmatic sender Loom can identify —
-   *     the durable event below still records the gap for a human auditing the log, but there is no live
-   *     party to nudge, the same structural limit `handlePasteLengthLoss`'s own doc names above.
-   *
-   * Card c23e2869 DoD-2 (non-content half only — see `PtyHostEvents.onPromptMismatchUnresolved`'s own
-   * doc): `recognizedGen`/`matchedLen`/`leadingRemainderLen`/`trailingRemainderLen` name WHICH earlier
-   * generation this mismatch replayed and how much of it matched — lengths and a generation number, never
-   * the matched/remainder TEXT itself, consistent with `intendedLen`/`writtenHash` already stored here.
-   *
-   * Card 16c93a50 left this durable row's own content question OPEN on purpose (see the paragraph this one
-   * replaces, preserved in that card's own history): request `0eb43216`'s ruling and card 16c93a50's DoD are
-   * both scoped in terms to "the rotated daemon log" (the console.* stream `daemon-output.log` tees), a
-   * bounded, 60MB-capped file — a durable `orchestration_events` row is a STRUCTURALLY DIFFERENT artifact
-   * (never rotates away, queryable indefinitely via `events_search` and friends), so extending that ruling
-   * to cover it here would have been INFERRING an owner decision nobody actually made.
-   *
-   * Card a419a7e6 DECIDED that open question, owning it explicitly rather than leaving it to rot as an
-   * orphaned doc comment (see that card's own "why this is a card and not a comment"): `detail.messageExcerpt`
-   * below is gated behind the SAME `isLogMessageContentEnabled()` flag as every other raw-text diagnostic in
-   * this file (see that function's own doc) — OMITTED from `detail` entirely when the flag is OFF (the
-   * shipped default), so an unopted-in host's durable row is BYTE-IDENTICAL to before this card, and no new
-   * decision was needed for that population. With the flag ON, the operator has already accepted raw message
-   * content in a host-wide, cross-tenant ROTATING log; a project-scoped durable row is a NARROWER surface
-   * than the one already permitted, not a wider one — see this card's own board body for the full reasoning.
-   * `info.messageExcerpt` (pty/host.ts) is always a bounded HEAD slice of the ORIGINAL `intended` text for
-   * the generation that never resolved — genuinely the best available evidence of what was lost, not a
-   * "remainder": the deferred item's own "bounded remainder excerpts" phrasing does not match what this
-   * branch can ever actually produce (`leadingRemainderLen`/`trailingRemainderLen` are always 0 here — see
-   * `PtyHostEvents.onPromptMismatchUnresolved`'s own doc — because the reachable branch is always a WHOLE-
-   * string replay match, never a partial one), so there is no remainder to excerpt, only the intended text
-   * itself.
-   *
-   * DoD-3's OWN ask ("decide the durability boundary deliberately … not a request to durably log all
-   * 685[+ console notices] — a request to say which shapes are worth surviving rotation, and why") IS
-   * answered here: only a mismatch that reaches THIS method — i.e. one that never resolved within
-   * `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` and is therefore treated as an established loss — earns a durable
-   * row. Every other classified shape logged in `pty/host.ts` (composer-accumulation, wrapper-deficit,
-   * ANSI-strip-deficit, wrapper-aware-fusion, and an unresolved-but-still-pending unmatched-remainder) is
-   * either confirmed benign or still within its resolve window, and stays console-only by design: those
-   * are debugging breadcrumbs for a human reading the live log, not accountability records for an outcome
-   * that already happened. Durability is reserved for the one shape that needs to survive log rotation —
-   * a loss nobody can any longer verify by re-reading the log — not for every classification this file
-   * makes along the way.
-   *
-   * 🔴 Card 280309d9 — THE ROW'S OWN `ts` BELOW IS THE GIVE-UP INSTANT, NOT THE WRITE INSTANT: this method
-   * runs `PROMPT_MISMATCH_RESOLVE_WINDOW_MS` (a hard 600s) AFTER the mismatch was actually detected/written,
-   * and `ts` is stamped at THAT (fire) time, not at the write. Two independent parties both read `ts` as the
-   * write time and got every time-correlation they built on it wrong by exactly ten minutes, in the same
-   * direction — the emitting site's own console.error names the mechanism verbatim ("no confirming later
-   * generation resolved this within 600000ms"), but nothing on the DURABLE row said so before this card.
-   * `detail.writtenAt` (below) carries the true write instant so a future reader never has to re-learn this
-   * the same way — see `PtyHostEvents.onPromptMismatchUnresolved`'s own doc for where it's captured.
-   * ⛔ The 600s window and the fire condition are UNCHANGED by this card (deliberately out of scope — see
-   * `f9b1ea00`'s own reasoning for firing only once a loss is ESTABLISHED); only the row's own MEANING is
-   * newly documented, and `writtenAt` is newly ADDED — the existing `ts` field is never re-meant.
+   * @decision f9b1ea00 — consumes `PtyHostEvents.onPromptMismatchUnresolved`; RECIPIENT is the session
+   * itself, SENDER is its manager (`parentSessionId`) — the only party that could resend the content. A
+   * session with no parent has no programmatic sender to nudge; the durable row still records the gap.
+   * @decision c23e2869 — `recognizedGen`/`matchedLen`/`leadingRemainderLen`/`trailingRemainderLen` name
+   * WHICH generation replayed and how much matched — lengths and a generation number only, never text.
+   * @decision 16c93a50 — the durable-row content question is deliberately separate from the rotated-log
+   * content ruling; do not assume the latter's scope extends to a durable `orchestration_events` row.
+   * @decision a419a7e6 — `messageExcerpt` is a bounded HEAD slice of the original intended text, gated
+   * behind `isLogMessageContentEnabled()`; durability is reserved for this established-loss shape only.
+   * @decision f9b1ea00 — (card 280309d9's correction) this row's own `ts` is the GIVE-UP instant, not the
+   * write instant — see the record's own two-independent-parties correction and `writtenAt`'s own role.
    */
   handlePromptMismatchUnresolved(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number; messageExcerpt: string; writtenAt: string | null }): void {
     const s = this.db.getSession(sessionId);
     this.db.appendEvent({
-      // Card 280309d9: this `ts` is the GIVE-UP instant (this method runs `PROMPT_MISMATCH_RESOLVE_
-      // WINDOW_MS` after the mismatch was actually detected/written) — NEVER the write time. `detail.
-      // writtenAt` below carries the true write instant; do not read this row's own `ts` as when the
-      // write happened.
+      // Card 280309d9 (see @decision f9b1ea00 above): this `ts` is the GIVE-UP instant (stamped after
+      // the resolve window elapses), NEVER the write time — `detail.writtenAt` below carries the true one.
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
       workerSessionId: sessionId, taskId: s?.taskId ?? null,
       kind: "prompt_mismatch_unresolved", detail: {
         gen: info.gen, writtenHash: info.writtenHash, reportedHash: info.reportedHash, intendedLen: info.intendedLen,
         recognizedGen: info.recognizedGen, matchedLen: info.matchedLen, leadingRemainderLen: info.leadingRemainderLen, trailingRemainderLen: info.trailingRemainderLen,
-        // Card 280309d9: the real Enter-write instant for `gen`, or `null` if never recorded — see
-        // PtyHostEvents.onPromptMismatchUnresolved's own doc for why this exists and why it is distinct
-        // from this row's own `ts` above. `?? null` (manager correction) normalizes at THIS boundary too,
-        // not only at PtyHost's own default: a hand-built `info` object (a hermetic test double, or any
-        // future direct caller) that omits the key would otherwise carry `undefined` here, a third state
-        // the declared `string | null` contract does not admit — never surfaced as an omitted `detail` key
-        // either, unlike `messageExcerpt` below, since that would be indistinguishable from "never
-        // recorded" without actually meaning it.
+        // Card 280309d9: the real Enter-write instant for `gen`, or `null` if never recorded (distinct
+        // from this row's own `ts` above). `?? null` normalizes at THIS boundary too — a hand-built
+        // `info` omitting the key would otherwise carry `undefined`, a third state the `string | null`
+        // contract doesn't admit.
         writtenAt: info.writtenAt ?? null,
-        // Card a419a7e6: OMITTED entirely (not an empty string) when the flag is off — see this method's
-        // own doc for why omission, not a redacted placeholder, is the byte-identical-to-before shape.
+        // @decision a419a7e6 — OMITTED entirely (not an empty string) when the content flag is off.
         ...(isLogMessageContentEnabled() ? { messageExcerpt: info.messageExcerpt } : {}),
       },
     });
-    // Card 87d2dc95 DoD-4: state what is KNOWN — no LATER generation's own confirmation was ever recognized
-    // as containing this content within the wait window — rather than a causal VERDICT ("most likely never
-    // reached it"). That phrasing overclaimed a mechanism Loom cannot see (the actual cause, if any, lives
-    // inside the engine, not here) and, combined with an unconditional "please resend it", actively
-    // instructed a reader toward the sibling duplicate-delivery defect this project spends real machinery
-    // suppressing (see this card's own board body). By the time this method runs, DoD-2's own fix (pty/
-    // host.ts, the lag-by-one chain resolution) has already retried every intermediate possibility — this
-    // fires only for a gen no later generation ever recognized, so it is a genuine, load-bearing alarm; the
-    // wording change here is about not overclaiming WHY, not about whether to alarm at all.
-    // Card 87d2dc95 (manager review): both messages are built FROM the shared tag constants (pty/host.ts),
-    // not a second hardcoded literal — pty/host.ts's own loop-breaker (`intendedIsOwnMismatchNotice`) must
-    // recognize a generation whose own intended text IS one of these two messages, and a literal duplicated
-    // here could silently drift from what that guard actually checks (exactly the gap a manager review
-    // caught: the guard originally checked only `PROMPT_MISMATCH_NOTICE_TAG`, missing this file's own tag
-    // entirely). One source of truth for both the mint site (here) and the recognition site (pty/host.ts).
+    // @decision 87d2dc95 — both messages below state what is KNOWN, never a causal verdict, and are built
+    // FROM the shared tag constants (pty/host.ts) so a new mint site can't silently drift from what
+    // `intendedIsOwnMismatchNotice` actually checks.
     const recipientMsg = `${PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG} an earlier ${PROMPT_MISMATCH_NOTICE_TAG} notice on this session (gen=${info.gen}, ${info.intendedLen} chars, writtenHash=${info.writtenHash} reportedHash=${info.reportedHash}) told you to wait one generation and re-check before treating it as a confirmed loss. No later generation's own confirmation was ever recognized as containing this content within the wait window — that is the best available evidence of a genuine loss, though Loom cannot independently confirm what actually happened to it beyond that. If you are a Loom-driven session, say so in your next report up.`;
     this.enqueueSystemNudge(sessionId, recipientMsg, { kind: "warning", taskId: s?.taskId ?? null });
     if (s?.parentSessionId) {
@@ -7780,41 +7701,13 @@ export class SessionService {
   }
 
   /**
-   * Card 38d68b8d — consumes `PtyHostEvents.onPromptMismatchUnmatched`: `59757189` DoD-1/3 shipped
-   * CAPTURE (`Live.lastMismatchUnmatched`) and a PULL surface (`getLastMismatchUnmatched`) for an
-   * UNMATCHABLE mismatch, but deliberately withheld the PUSH half pending the `0eb43216` content-in-
-   * durable-records ruling — `25f31381` re-examined whether the pull surface made the push unnecessary
-   * and ruled NO (a pull surface only ever helps someone who already suspects a mismatch and knows to
-   * call it; the push exists to tell a sender who does not know to ask — card `68459420`). `0eb43216` has
-   * since been answered ("opt-in verbosity, content only under an explicit env flag, default OFF"), which
-   * is exactly the shape this method implements.
-   *
-   * ONLY recipient this method has: the SENDER/PARENT (`s.parentSessionId`) — mirroring
-   * `handlePromptMismatchUnresolved`/`handlePasteTripwireGiveUp` above exactly (same "if a parent exists,
-   * push to it" shape; a session with no parent — e.g. a top-level manager/lead — has no sender to push
-   * to, so this is a silent no-op for it, same as those siblings). Deliberately does NOT also resolve
-   * `info.gen`'s own `QueuedMessage.senderId` as an alternate target: `parentSessionId` is the SAME
-   * established addressee this notification family already uses for every sibling shape, and inventing a
-   * second, untested resolution path here would diverge from that convention for no proven benefit.
-   *
-   * ⛔ NO separate durable audit event (unlike `handlePromptMismatchUnresolved`'s own `db.appendEvent`):
-   * `59757189`'s own reasoning for the unmatched population is that an in-memory capture + a pull surface
-   * "never creates durable content at rest" — a NEW durable row here would contradict that deliberate
-   * design choice for no requirement this card's own DoD states. `enqueueSystemNudge` below already
-   * durably queues the delivery itself (the existing message-delivery machinery), which is sufficient for
-   * the PUSH obligation this card actually asks for.
-   *
-   * ⭐ THE NOTIFICATION ITSELF FIRES UNCONDITIONALLY — only the CONTENT inside it is gated. Card `38d68b8d`'s
-   * own explicit design constraint: gating the whole notification behind the opt-in flag would silently
-   * re-create the exact defect this card exists to close (a sender who does not know to ask, and now also
-   * never told). Gated with `isLogMessageContentEnabled()` directly (paths.ts), the SAME flag every other
-   * content-bearing diagnostic in this file uses — mirroring `handlePromptMismatchUnresolved`'s own
-   * `messageExcerpt` gating just above (an inline `? :`, not `redactedExcerpt`/pty/host.ts's chokepoint:
-   * that helper's own job is producing a len+hash SUBSTITUTE string for an otherwise-unconditional call
-   * site; here the signature (`intendedLen`, `writtenHash`) is already stated plainly and unconditionally
-   * in the shared lead-in sentence below, so gating only needs to add-or-withhold the raw text itself, not
-   * synthesize a replacement for it). `intendedLen` is stated explicitly per this card's own DoD-1
-   * ("alongside `intendedLen`"), regardless of which branch the content clause takes.
+   * @decision 38d68b8d — consumes `PtyHostEvents.onPromptMismatchUnmatched`; ONLY recipient is the
+   * SENDER/PARENT (`parentSessionId`) — never `info.gen`'s own `senderId`. Fires UNCONDITIONALLY; only
+   * the content clause is gated. Adds no separate durable audit event (see the record for why).
+   * @decision 0eb43216 — the content-in-durable-records ruling this method implements: opt-in verbosity,
+   * content only under `LOOM_LOG_MESSAGE_CONTENT`, default OFF.
+   * @decision 25f31381 — re-examined whether the existing pull surface (`getLastMismatchUnmatched`) made
+   * this push notice redundant; ruled NO — a pull surface only reaches a party who already suspects loss.
    */
   handlePromptMismatchUnmatched(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; intendedText: string; detectedAt: number }): void {
     const s = this.db.getSession(sessionId);
@@ -7827,17 +7720,9 @@ export class SessionService {
   }
 
   /**
-   * Card 47c11741 — consumes `PtyHostEvents.onPasteTripwireGiveUp`: the bare-placeholder tripwire's own
-   * one-shot RECOVERY re-injection ALSO collapsed, and Loom will not retry a second time (one-shot by
-   * design — see the call site's own doc). Until this card, the give-up terminated in a bare
-   * `console.warn` and nothing else — no queryable record, no notice to anyone who could actually act.
-   * Deliberately reuses `handlePasteLengthLoss`'s established shape (same two recipients, same durable
-   * `db.appendEvent` audit trail) rather than inventing a second channel for what is, from the affected
-   * session's point of view, the same kind of gap: pasted content that never reached the engine. The one
-   * real difference from that sibling is WHO can act: there, Loom never wrote the lost text at all (a
-   * human/raw-terminal paste) so the notice can only ask "did you send something? — resend it." Here Loom
-   * DID write the text (twice, including the one-shot recovery itself) and DID detect both collapses, so
-   * the SENDER'S action is unambiguous — manually resend, because Loom's own automatic budget is spent.
+   * @decision 47c11741 — consumes `PtyHostEvents.onPasteTripwireGiveUp`; reuses `handlePasteLengthLoss`'s
+   * shape (same two recipients, same durable audit event). Unlike that sibling, Loom DID write the text
+   * (twice) and DID detect both collapses, so the sender's action is unambiguous: manually resend.
    */
   handlePasteTripwireGiveUp(sessionId: string, info: { token: string | null; engineSessionId: string | null }): void {
     const s = this.db.getSession(sessionId);
