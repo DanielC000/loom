@@ -176,22 +176,12 @@ export function seedSetupHome(db: Db): string[] {
 }
 
 /**
- * "Getting Started" → "Platform" home rename backfill — the GUARDED one-shot rename of the reserved SETUP
- * HOME ROW for existing installs (the project-level analog of seedSetupAgentRename). `seedSetupHome` is
- * seed-if-absent keyed on the NEW name, so an install seeded BEFORE this rename keeps its reserved home row
- * under the OLD `LEGACY_SETUP_PROJECT_NAME` literal while every resolver (getReservedProjectByName,
- * /api/setup/home, the workspace-audit suggest target) now looks it up by the new SETUP_PROJECT_NAME.
+ * "Getting Started" → "Platform" home rename backfill (the project-level analog of
+ * seedSetupAgentRename). MUST run at boot BEFORE seedSetupHome.
  *
- * MUST run at boot BEFORE seedSetupHome: seedSetupHome's absence-check keys on the NEW name, so if it ran
- * first on a pre-rename install it would see no "Platform" home and mint a SECOND, empty one beside the old
- * "Getting Started" row (the user's home + its boards orphaned). Renaming the existing row in place first
- * avoids that.
- *
- * Scoped tightly so it only ever touches that one home:
- *   - the RESERVED home named by the EXACT old literal (getReservedProjectByName / hasReservedProjectNamed
- *     are reserved=1 only) — a user's ORDINARY project named "Getting Started" is never touched;
- *   - refuses if a reserved home ALREADY holds the new name (collision / already-migrated guard) — it never
- *     creates a duplicate or clobbers a distinct reserved "Platform".
+ * @decision sha:db1e4bb8 — running this after seedSetupHome would let seedSetupHome mint a second,
+ * empty "Platform" home beside the orphaned legacy row; scoped to the reserved home under the exact
+ * legacy literal, refuses if "Platform" is already taken — see record for the full narrative.
  *
  * Idempotent by NAME-MATCH, no marker needed: after the rename the old literal is gone, so a re-run finds
  * nothing and no-ops (returns null). Also no-ops on a fresh install (seed already created "Platform"), on a
@@ -217,8 +207,8 @@ export function seedSetupProjectRename(db: Db): string | null {
  * fresh installs.
  *
  * Scoped tightly so it only ever touches that one agent:
- *   - the reserved "Platform" setup home ONLY (resolved by name, never a name-agnostic reserved lookup —
- *     gotcha #1) — a non-reserved-home agent is never touched;
+ *   - @decision sha:aecc6551 — the reserved "Platform" setup home ONLY (resolved by name, never a
+ *     name-agnostic reserved lookup — gotcha #1; first named at this exact site) — see record;
  *   - matched by the EXACT old literal — a user-renamed agent (any other name) is left alone;
  *   - AND it must run the setup-role profile (the operator's rig) — a stray same-named agent isn't renamed.
  *
@@ -316,18 +306,17 @@ Act only on the explicit task the human gives you this session. Confirm before a
 /**
  * Bucket 2b "Bounded Elevated Operator" — seed the bundled Elevated Operator agent into the SAME reserved
  * "Platform" setup home as the operator/auditor/companion agents, SEED-IF-ABSENT BY AGENT-NAME, mirroring
- * seedSetupAuditorAgent/seedCompanionAgent — EXCEPT this one is FLAG-GATED: it seeds ONLY while
- * platform.operatorEnabled is on (isOperatorEnabled, read LIVE — same helper the router/REST gate use), so
- * a fresh install with the flag off never grows the agent row at all. Once seeded it PERSISTS across a
- * later flag-off (the row itself is inert — the surface it drives 404s the moment the flag flips off; this
- * mirrors every other seed-if-absent agent, which is never retroactively deleted by a config change).
+ * seedSetupAuditorAgent/seedCompanionAgent, run at boot AFTER seedSetupHome.
  *
- * Run at boot AFTER seedSetupHome, scoped to the reserved home (resolved by NAME — gotcha #1 from the
- * sibling seeders), never a name-agnostic reserved lookup. Bound to the bundled "Elevated Operator" profile
- * (looked up by name; profileId null backstop if absent so the seed never throws). Deliberately NO
- * first-run auto-launch anywhere — an operator is opt-in + elevated and must NEVER auto-spawn; seeding the
- * AGENT is not spawning a SESSION (that stays human-REST-only via startOperator). Returns the seeded name,
- * or null when it no-ops (home missing, flag off, or already present).
+ * @decision sha:afd3bf5b — FLAG-GATED (seeds only while platform.operatorEnabled is on, read live)
+ * but PERSISTS across a later flag-off; deliberately NO first-run auto-launch — session creation
+ * stays human-REST-only via startOperator. See record for the full narrative.
+ *
+ * Scoped to the reserved home resolved by NAME (gotcha #1, see
+ * docs/decisions/aecc6551-reserved-home-agent-seeder-pattern.md), never a name-agnostic reserved lookup.
+ * Bound to the bundled "Elevated Operator" profile (looked up by name; profileId null backstop if absent
+ * so the seed never throws). Returns the seeded name, or null when it no-ops (home missing, flag off, or
+ * already present).
  */
 export function seedOperatorAgent(db: Db): string | null {
   if (!isOperatorEnabled(db)) return null; // flag off — never seed the agent row at all
