@@ -7515,22 +7515,9 @@ export class SessionService {
   }
 
   /**
-   * Card b68d1f5b DoD-1/DoD-2 — consumes `PtyHostEvents.onPasteLengthLoss`: an UNEXPLAINED
-   * `[Pasted text #N +M lines]` placeholder landed in `sessionId`'s recorded turn text with no known
-   * Loom write to account for it (see `detectPastePlaceholderLengthLoss`'s own doc for what "unexplained"
-   * means — the human/raw-terminal-paste class this card exists for). PtyHost cannot recover the content
-   * (it never had it) or identify a sender beyond the session itself (no DB) — this is where both halves
-   * of DoD-2 ("fail LOUD to the RECIPIENT and the SENDER") actually happen:
-   *   - RECIPIENT: `sessionId` itself — it experienced the gap but, per the card's own "worst case"
-   *     finding, may have no channel to ask anyone what it was owed. A durable nudge at least tells it
-   *     something is missing instead of silently completing on incomplete input.
-   *   - SENDER: for a worker, that's its manager (`parentSessionId`) — the one party who could actually
-   *     have sent (or relayed) the missing paste and can resend it. Mirrors `handleKickoffGiveUpExhausted`'s
-   *     established parent-notify pattern above. A session with no `parentSessionId` (a manager, a `run`/
-   *     plain session, the platform lead) has no programmatic sender Loom can identify — the durable event
-   *     below still records the gap for a human auditing the log, but there is no live party to nudge; this
-   *     is the SAME structural limit the card's own ledger caveat names (a human pasting outside Loom's own
-   *     write path leaves no daemon-side record of who sent it).
+   * @decision b68d1f5b — later handlers in this family reuse this two-recipient durable-event shape
+   * by name (`handleEngineSessionRotated` through `onPasteTripwireGiveUp`) — change it here and they
+   * silently diverge from what they each claim to be reusing.
    */
   handlePasteLengthLoss(sessionId: string, candidate: PasteLengthLossCandidate): void {
     const s = this.db.getSession(sessionId);
@@ -7548,24 +7535,9 @@ export class SessionService {
   }
 
   /**
-   * Card 932f13d4 — consumes `PtyHostEvents.onEngineSessionId`'s `previousEngineId` param: a genuine
-   * engine-session-id ROTATION (a second `SessionStart` reporting a different `session_id` for the SAME
-   * live pty — see `pty/host.ts`'s SessionStart handler doc / card 7c1fc117) just landed for `sessionId`.
-   * By the time this fires, `db.setEngineSessionId` has already overwritten the tracked id — this is the
-   * ONLY durable record of the OLD id (card 8a5bd0d0's own finding: nothing downstream can reconstruct
-   * it). Durable-only, deliberately NO live nudge (unlike `handlePasteLengthLoss` above): a single
-   * rotation is not a decision point for anyone in the moment — it's audit trail for the two triggers
-   * named on the card itself (a transcript read that comes back shorter than expected; a future revisit
-   * of cross-rotation stitching). `managerSessionId` falls back to the session's own id when it has no
-   * parent (a manager/plain/setup session rotating its own engine id) — same NOT-NULL-column convention
-   * `handlePasteLengthLoss` uses above.
-   *
-   * To read the accumulated rotation history: `db.appendEvent`'s rows are queryable via
-   * `SELECT id, ts, worker_session_id, detail_json FROM orchestration_events WHERE kind =
-   * 'engine_session_rotated' ORDER BY ts` — the row count is the lifetime rotation count SINCE this
-   * shipped (starts at ZERO on deploy, never back-filled — do not difference it against card 8a5bd0d0's
-   * pre-existing "4 in the retained log window" figure, a different, retention-bounded instrument) and
-   * `MIN(ts)` is the oldest observation, the figure that turns the count into a rate.
+   * @decision 932f13d4 — durable-only, deliberately NO live nudge: a single rotation is not a decision
+   * point for anyone in the moment. Do not diff its lifetime row count against card 8a5bd0d0's own
+   * "4 in the retained log window" figure — a different, retention-bounded instrument.
    */
   handleEngineSessionRotated(sessionId: string, previousEngineId: string, newEngineId: string): void {
     const s = this.db.getSession(sessionId);
@@ -7577,23 +7549,9 @@ export class SessionService {
   }
 
   /**
-   * Card 2d8d2e42 — consumes `PtyHostEvents.onRepeatedToolCall`: `sessionId` has called `info.tool` with
-   * IDENTICAL arguments `info.count` consecutive times within one turn (no Stop boundary between them) —
-   * fired at the Nth repeat and every subsequent multiple of N (see `RepeatedCallResult.firedAtThreshold`'s
-   * own doc, pty/repeated-call-tracker.ts). Defence in depth behind card `45390f74`'s cheap primary fix (an
-   * anti-poll `note` on `gate_status`'s live reply) — this fires regardless of whether that note was ever
-   * read, and regardless of which tool the streak is on (generalized past `gate_status` — see the tracker's
-   * own doc). Reuses `handlePasteLengthLoss`'s established two-recipient, durable-event shape:
-   *   - RECIPIENT: `sessionId` itself — queued for whenever this turn eventually ends (a live turn-
-   *     interrupt was explicitly REJECTED as this card's option (c) — see the card's own "option choice"),
-   *     so this can't break the loop mid-turn, but it does mean the NEXT turn starts already warned instead
-   *     of silently repeating the same mistake.
-   *   - SENDER (human-attention half of DoD-1): for a worker, that's its manager (`parentSessionId`) — the
-   *     one live party who CAN act on this while the loop is still running (e.g. `worker_recycle`), since
-   *     it is a wholly separate session/turn from the one stuck looping. A session with no `parentSessionId`
-   *     (a manager, a `run`/plain session, the platform lead) has no programmatic party to nudge — the
-   *     durable event below still records the loop for a human auditing the log, the same structural limit
-   *     `handlePasteLengthLoss`'s own doc names.
+   * @decision 2d8d2e42 — defense in depth behind card `45390f74`'s cheap primary fix; the RECIPIENT
+   * nudge is deliberately queued for the next turn boundary, NEVER a mid-turn interrupt (rejected
+   * option (c) — it could break the loop mid-turn).
    */
   handleRepeatedToolCall(sessionId: string, info: { tool: string; argsHash: string; count: number; threshold: number }): void {
     const s = this.db.getSession(sessionId);
@@ -7647,31 +7605,8 @@ export class SessionService {
   }
 
   /**
-   * Card 448f1b4a — consumes `PtyHostEvents.onCodexBootStuck`: a codex session's `live.bootReady` latch
-   * (ready marker + model-loaded + trust-dialog-resolved, ALL together — see `CodexLive.bootReady`'s own
-   * doc) never fired within its bounded ceiling (`info.timeoutMs`). Before this card, `enqueueStdinCodex`/
-   * `submitCodex` had no readiness awareness of their own, so a not-yet-ready codex TUI could silently
-   * receive a submit from any of this codebase's real `enqueueStdin` callers; the fix queues everything
-   * until `bootReady` latches — correct, but it turns "boot never completes" from a single silently-
-   * undelivered kickoff into every queued caller's message waiting forever with nothing to report it. This
-   * is that report. Reuses `handleCodexSubmitUnconfirmed`'s established two-recipient, durable-event shape
-   * immediately above rather than inventing a new one:
-   *   - RECIPIENT: `sessionId` itself — best-effort only (the session is, by definition, not yet able to
-   *     receive anything; this nudge simply queues behind whatever else is stuck, and is delivered if/when
-   *     the session naturally recovers).
-   *   - SENDER (the actionable half): for a worker, that's its manager (`parentSessionId`) — the one live
-   *     party who can actually intervene (inspect the session, `worker_stop`+respawn) while this session
-   *     sits frozen pre-boot. A session with no `parentSessionId` has no programmatic party to nudge — the
-   *     durable event below still records the gap for a human auditing the log.
-   *
-   * ⚠️ Deliberately ONE-SHOT (see `CodexLive.bootReadyTimer`'s own doc) — a LATE boot-readiness still
-   * resolves normally afterward; this only reports that the wait already exceeded `info.timeoutMs` once,
-   * it does not mean the session is permanently unrecoverable.
-   *
-   * Card 4babeb43: `info.readyMarker`/`info.modelLoaded`/`info.trustDialogResolved` name WHICH of
-   * the three composite conditions were true/false at fire time (see `PtyHostEvents.onCodexBootStuck`'s own
-   * doc) — surfaced in both recipient messages and persisted on the durable event's `detail`, rather than
-   * the prior undifferentiated "never all held together" wording.
+   * @decision 448f1b4a — deliberately ONE-SHOT: do not add a retry ladder here. A LATE boot-readiness
+   * still resolves normally via the onData handler's own composite check.
    */
   handleCodexBootStuck(sessionId: string, info: { timeoutMs: number; pendingCount: number; readyMarker: boolean; modelLoaded: boolean; trustDialogResolved: boolean }): void {
     const s = this.db.getSession(sessionId);
@@ -7700,22 +7635,8 @@ export class SessionService {
   }
 
   /**
-   * Card `b987f086` — consumes `PtyHostEvents.onCodexUnsupportedCapability`: this codex spawn declared one
-   * or more capabilities (a stdio MCP server codex cannot mount, or the project's `codescape.enabled`) that
-   * the harness structurally cannot honour. Before this card the ONLY signal was a `console.warn` into a
-   * shared multi-tenant log — project memory `shipping-a-detector-is-not-someone-reading-it` measures that
-   * exact shape (passive notice, nobody polling) at 0-acted-on on this project. Reuses `handleCodexBootStuck`'s
-   * established two-recipient, durable-event shape immediately above rather than inventing a new one:
-   *   - RECIPIENT: `sessionId` itself — so the session that lacks the capability knows NOT to rely on it
-   *     (the `/worker` doctrine's own self-verify-with-Playwright step is exactly the kind of instruction a
-   *     codex QA worker would otherwise follow into an improvised workaround with no tool to back it).
-   *   - SENDER (the actionable half): for a worker, that's its manager (`parentSessionId`) — the one live
-   *     party who can decide whether the missing capability actually matters for this task (re-profile to
-   *     harness "claude", or proceed knowing the gap). A session with no `parentSessionId` has no
-   *     programmatic party to nudge — the durable event below still records the gap for a human auditing
-   *     the log.
-   * Fired ONCE per spawn (fresh/resume/fork/recycle each re-evaluate and may fire again) — this is a
-   * spawn-time report, not a retry ladder like `onCodexSubmitUnconfirmed`'s.
+   * @decision b987f086 — fired ONCE per spawn (fresh/resume/fork/recycle each re-evaluate and may fire
+   * again); this is a spawn-time report, never a retry ladder like `onCodexSubmitUnconfirmed`'s.
    */
   handleCodexUnsupportedCapability(sessionId: string, info: { items: { id: string; reason: string }[] }): void {
     const s = this.db.getSession(sessionId);

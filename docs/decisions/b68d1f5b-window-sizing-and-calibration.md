@@ -46,6 +46,22 @@ ADDS rows via wrapping, so a row-count reading would undercount).
 - Do not calibrate the bytes-per-line estimate against wrapped terminal display rows — the fixed
   120-column pty only ever adds rows via wrapping, which would undercount.
 
+## Consumption establishes the two-recipient notification shape (`sessions/service.ts`)
+
+Card b68d1f5b DoD-2 ("fail LOUD to the RECIPIENT and the SENDER") is implemented by
+`handlePasteLengthLoss`, which consumes `PtyHostEvents.onPasteLengthLoss`. PtyHost cannot recover the
+lost content (never had it) or identify a sender beyond the session itself (no DB), so this method
+records a durable `paste_length_loss` event, then nudges the RECIPIENT (`sessionId` itself — it
+experienced the gap and may have no channel to ask who sent it, so the nudge at least tells it
+something is missing instead of it silently completing on incomplete input) and, if one exists, the
+SENDER (`parentSessionId` — the one party who could actually resend). A session with no
+`parentSessionId` has no programmatic sender Loom can identify — the durable event still records the
+gap for a human auditor, but there is no live party to nudge.
+
+This durable-event-plus-conditional-two-recipient shape, established here, is reused unmodified by
+every later handler in this family (`handleEngineSessionRotated` through `onPasteTripwireGiveUp`) —
+each cites this method by name as "the established shape" rather than re-deriving it.
+
 ## Source
 
 Inline comment in `packages/daemon/src/orchestration/paste-tripwire.ts`
@@ -53,3 +69,8 @@ Inline comment in `packages/daemon/src/orchestration/paste-tripwire.ts`
 `PASTE_LOSS_EXPLAIN_WINDOW`'s doc). Relocated by card 26afc9eb (tranche 1 on
 `orchestration/paste-tripwire.ts`); no wording changed beyond compressing wrapped source lines into flowing
 paragraphs and stripping `/** */`/`*` comment markers.
+
+The "Consumption" section above is from a second inline comment, `handlePasteLengthLoss`'s own JSDoc in
+`packages/daemon/src/sessions/service.ts`, as of `main` `b4721fd1`. Extracted by card `da28e0a5`
+(tranche 22 on `sessions/service.ts`); wording condensed from the source's fuller prose, no clause
+dropped.
