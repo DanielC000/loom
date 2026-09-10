@@ -10,6 +10,18 @@ The bug this replaces: an earlier design used a SINGLE scalar, `composerDirtyMar
 
 - Do not collapse this back to a single scalar tracking only the most recent contributor — a confirm of that one generation would again blindly zero the whole additive total, silently un-marking still-unconfirmed earlier contributions as clean.
 
+## Why the `UserPromptSubmit` hook clears the WHOLE map, not just the scalars
+
+A second site, in the `UserPromptSubmit` case of `deliverHook`, inside the same gated reset as `3ce3fa39`'s hook-side record: this hook belongs to the CURRENT (`submitGeneration`) generation — by construction the latest one there can ever be — so its own clear-prefix (the thing that originally set `composerDirtyLenClearedByGen`) targeted the FULL total accumulated from every still-unresolved OLDER generation. Clearing `composerDirtyMarkedGens` in full alongside the scalars is therefore safe at this call site specifically; leaving it un-cleared would strand an older generation's entry, unreachable by any future confirm.
+
+### Do not (2)
+
+- Do not clear only `composerDirtyLen`/`composerDirtyLenBelieved` at this hook without also clearing `composerDirtyMarkedGens` — an older generation's entry would linger orphaned.
+
 ## Source
 
 Inline comment in `packages/daemon/src/pty/host.ts` (the `composerDirtyMarkedGens` field doc, `Live` state), as of commit `779f3ce7eccfb6cb3880d285b2016bc0554cc82c`. Extracted by card `6ba35149` (tranche 7 on `pty/host.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `//` comment markers stripped. The field's own base mechanism doc (the `composerDirtyLenClearedByGen`-mirroring gate description, card `3ce3fa39`/`a6c1d413`) remains inline at the same location as a Class-A guard — this record captures only the replaced-design narrative.
+
+## Source (2)
+
+Inline comment in `packages/daemon/src/pty/host.ts` (the `UserPromptSubmit` case in `deliverHook`), as of `main` `0cac46b89a9d2ad236117c355fb93d43f4f0f03f` (this tranche's starting HEAD). Extracted by card `7f448888` (tranche 19 on `pty/host.ts`).

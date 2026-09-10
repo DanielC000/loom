@@ -5907,66 +5907,36 @@ export class PtyHost {
         // turn actually started, closing scheduleKickoffGuarantee's fallback window and healIfStuck's
         // short pre-first-turn stale window (see both). Idempotent after the first.
         live.firstTurnStarted = true;
-        // Card fca6af6d (REVERSE-order race, follow-up to b4b9b707): capture whether a submit() was
-        // OUTSTANDING for THIS hook BEFORE the line below flips enterConfirmed to true — this is the
-        // discriminator between the two cases a non-null pendingRawOwnerSubmit can mean below.
-        //   - outstanding-submit was false (no submit in flight) → this hook confirms a genuine
-        //     raw-terminal-originated turn (writeStdin's Enter IS what started it) → attribute.
-        //   - outstanding-submit was true (a submit()'s Enter is being confirmed) → ANY pendingRawOwnerSubmit
-        //     seen here can only have raced in during the async gap between that submit() clearing the
-        //     field and ITS OWN hook firing (submit() is the sole writer that clears it, and it clears it
-        //     before writing a byte — see the field's doc) — a raced-in HUMAN line, but not this turn's
-        //     own attestation. Attributing it here would credit the agent-originated submit's turn with
-        //     words the human typed for some other (possibly never-realized) turn. Discard, don't attribute.
+        // @decision fca6af6d — capture submitWasOutstanding BEFORE enterConfirmed flips true (REVERSE-order
+        // race fix, follow-up to b4b9b707): discriminates a genuine raw-terminal turn from a line that raced
+        // in during a submit()'s own outstanding-Enter window (discard, don't attribute — see b4b9b707).
         const submitWasOutstanding = !live.enterConfirmed;
         live.enterConfirmed = true; // proof the outstanding submit()'s Enter registered — cancels sendEnterAndVerify's retry loop (card 9549e322)
         this.resolveFlushMarker(sessionId, live); // card ac7884e3 — see that method's own doc
-        // Card 3ce3fa39: GATED reset — only when THIS hook fires while `submitGeneration` still equals the
-        // generation that actually issued the clear-prefix (see `composerDirtyLenClearedByGen`'s doc). An
-        // ungated reset here would be WRONG: a hook belonging to unrelated engine activity (no submit() of
-        // ours in flight) can still land and flip enterConfirmed true — first-hand confirmed in production —
-        // and must NOT be read as proof our clear-prefix (which may not even have been attempted yet) landed.
+        // @decision 3ce3fa39 — GATED reset: only when this hook's submitGeneration matches
+        // composerDirtyLenClearedByGen — an unrelated hook can flip enterConfirmed without
+        // proving THIS generation's clear-prefix landed (first-hand confirmed in production).
         if (live.composerDirtyLenClearedByGen === live.submitGeneration) {
           live.composerDirtyLen = 0;
           live.composerDirtyLenBelieved = 0; // card c148f118: a decisive confirm collapses both readings to the same true zero
           live.composerDirtyLenClearedByGen = null;
-          // Card a6c1d413: this hook belongs to the CURRENT (`submitGeneration`) generation — by
-          // construction the latest one there can ever be — so its own clear-prefix (the thing that set
-          // `composerDirtyLenClearedByGen` in the first place) targeted the FULL total accumulated from
-          // every still-unresolved older generation. Clear the whole per-generation map alongside the
-          // scalars above, or an older entry would linger orphaned, unreachable by any future confirm.
+          // @decision a6c1d413 — this hook is always the CURRENT generation, so its clear-prefix targeted
+          // the FULL accumulated total; clear composerDirtyMarkedGens whole, not just the scalars, or an
+          // older generation's entry lingers orphaned.
           live.composerDirtyMarkedGens.clear();
         }
-        // Card 4a0af485: captured BEFORE the purge call below, which can itself delete an entry — if there
-        // was NO ambiguity at all before this hook fired, this hook can only be about the CURRENT
-        // generation (nothing else it could possibly be confirming), which is what makes the CONFIRMED log
-        // below safe. (If ambiguity DID exist, whether this hook is about the current generation or an
-        // older ambiguous one is exactly the question the purge call resolves — see its own return value.)
-        // Card dbc7ffea — REVERTED (Code Review Major 3): an earlier draft widened this to also require
-        // `live.retiredGiveUpSignatures.size === 0`, reasoning the widening was "cosmetic" because
-        // `resolvedByContentMatch` below would catch the real case regardless. That reasoning was WRONG:
-        // the guard below is `hadNoAmbiguityBeforeThisHook && !resolvedByContentMatch` — an AND — so
-        // widening the first conjunct changes the outcome whenever the second is ALSO false, which is the
-        // ORDINARY case (a hook that content-matches nothing). A session that ever had so much as one
-        // give-up redrain keeps a retired entry around indefinitely (see Major 1's fix — an entry now
-        // retires once its chain is no longer in flight, but is not always immediately empty), which would
-        // suppress this line's own CONFIRMED-gen log for every ordinary, non-ambiguous confirmation in that
-        // session from then on. That log is a NAMED MEASUREMENT CORPUS (sessions/service.ts's give-up
-        // latency percentiles are framed against it) — silently biasing exactly the population being
-        // studied is a materially worse outcome than the cosmetic inaccuracy the widening was chasing.
-        // Reverted to reading `ambiguousDispatches` alone, unchanged from before this card.
+        // @decision 4a0af485 — captured BEFORE the purge call below (which can itself delete an entry): with
+        // no pre-existing ambiguity this hook can only be about the CURRENT generation, making the CONFIRMED
+        // log below safe; otherwise the purge call's return value settles which generation it belongs to.
+        // @decision dbc7ffea — REVERTED (Code Review Major 3): do NOT widen this to also require
+        // retiredGiveUpSignatures.size===0 — the AND with resolvedByContentMatch already covers it, and
+        // widening would suppress the CONFIRMED-gen log (a named measurement corpus) for ordinary confirms.
         const hadNoAmbiguityBeforeThisHook = live.ambiguousDispatches.size === 0;
         const reportedPromptForPurge = typeof hook.prompt === "string" ? hook.prompt : undefined;
         const resolvedByContentMatch = this.purgeConfirmedGiveUpRequeue(sessionId, live, false, reportedPromptForPurge); // card 441499ee/09e655d5/4a0af485 — see the method doc; UserPromptSubmit purges without advancing the queue
-        // Card b4b9b707: attribute a raw-terminal-typed line to THIS turn's ownerText. SECURITY INVARIANT
-        // (see Live.pendingRawOwnerSubmit's doc): submit() clears this field FIRST, before writing a byte,
-        // so a non-null value here can ONLY have originated from writeStdin — never from any Loom-issued
-        // submit() (kickoff/nudge/redirect/worker-report drain/rate-limit replay/companion/composer).
-        // TTL-bounded (RAW_OWNER_SUBMIT_TTL_MS): a raw Enter that lands on a non-composer TUI surface (a
-        // permission/resume-gate prompt) never itself starts a new turn, so nothing clears or overwrites
-        // the field afterward — if it sits unconsumed past the TTL, discard it rather than risk
-        // attributing stale human text to a later, unrelated prompt. Consumed (cleared) either way —
-        // attributed or discarded as stale, it must never survive this check to a later turn.
+        // @decision b4b9b707 — SECURITY INVARIANT: pendingRawOwnerSubmit can only originate from writeStdin
+        // (submit() clears it before writing); TTL-bounded (RAW_OWNER_SUBMIT_TTL_MS) and always consumed
+        // (cleared) whether attributed or discarded stale — never let it survive into a later turn.
         if (live.pendingRawOwnerSubmit !== null) {
           const fresh = live.pendingRawOwnerSubmitAt !== null && Date.now() - live.pendingRawOwnerSubmitAt <= RAW_OWNER_SUBMIT_TTL_MS;
           // Card fca6af6d: fresh alone is not enough — a raced-in raw line confirmed by a submit()'s OWN
@@ -5975,67 +5945,9 @@ export class PtyHost {
           live.pendingRawOwnerSubmit = null;
           live.pendingRawOwnerSubmitAt = null;
         }
-        // Card 7114838d: frame-splice detector — LOG-ONLY, fixes nothing (see 3ce3fa39, the card this
-        // unblocks). `daemon-output.log`'s `[pty-write]`/`[submit-write]` lines prove only that a write was
-        // CALLED, never that ConPTY actually APPLIED it — nothing at the write layer distinguishes "written
-        // and applied" from "written and dropped/spliced". This comparison can, because its two sides come
-        // from genuinely INDEPENDENT sources: the engine's own report of what it actually submitted
-        // (`hook.prompt`) vs. the daemon's own record of what it intended to write for this turn
-        // (`live.lastPrompt`) — not two views of the same mocked/written state.
-        // Deliberately `console.log` (stdout), same stream as `[pty-write]`/`[submit-write]`/`[stdin-write]`
-        // — this detector's whole point is correlating a splice against the write records around it, and
-        // `console.warn` (stderr) is a SEPARATELY buffered/timestamped stream, so line order between the two
-        // in the combined log file is not guaranteed. Regardless of stream, correlate by the log's EPOCH-MS
-        // TIMESTAMPS, never by line order — the corpus is mixed with other stderr output too.
-        // Gated on submitWasOutstanding (captured above, BEFORE this hook flipped enterConfirmed): per
-        // Live.lastPrompt's doc, that field is set ONLY by Loom-originated submit() calls, never by a raw
-        // human-typed turn — an ungated always-compare would misfire on EVERY raw-terminal turn, comparing
-        // it against a stale lastPrompt left over from an earlier, unrelated Loom-originated turn.
-        // CHECKED (manager review, card 7114838d) so this isn't a SYSTEMATIC benign mismatch on every turn:
-        // `live.lastPrompt` is set from the EXACT literal `text` argument submit() receives (host.ts's own
-        // `live.lastPrompt = text` in submit()), and callers build any `[loom:from-manager]\n…`-style frame
-        // BEFORE calling in (e.g. sessions/service.ts `messageWorker`'s `const framed = ...`) — so
-        // `lastPrompt` already holds the FULL POST-FRAMING text, same form as what's typed into the composer.
-        // `writeChunked` (submit()'s writer) writes that string byte-for-byte with no daemon-side
-        // normalization (no trim, no CRLF conversion, no appended newline — Enter is a SEPARATE write). What
-        // remains genuinely UNCONFIRMED — because it lives entirely on the engine/CLI side, outside this
-        // repo — is whether Claude Code's own hook reports that identical string back verbatim (e.g. any
-        // Ink-side trimming). The tests below synthesize hook.prompt and so cannot answer that; only the
-        // first real hook after deploy can. `lenDelta`/tail-length fields below exist so THAT observation is
-        // self-classifying the moment it lands, rather than needing a follow-up investigation.
-        //
-        // PRE-REGISTERED 2026-07-29, card 7114838d — the four bullets below were PREDICTIONS, made BEFORE
-        // any real observation existed. As of that writing, whether UserPromptSubmit's hook payload carries
-        // a `prompt` field at all was ITSELF unverified (that's the whole reason this detector exists — see
-        // the paragraph above). Predictions:
-        //   - SILENCE ⇒ Claude Code echoes the framed string back identically. Detector armed and working;
-        //     no splice observed yet. This is the expected steady state.
-        //   - `prompt-field-absent` (fires once) ⇒ the hook payload doesn't carry the prompt text at all.
-        //     This card's premise dies here, cleanly — 3ce3fa39 goes back to the accept-risk-vs-real-
-        //     terminal choice with nothing new to add.
-        //   - Mismatch with TINY tails (both `tailReportedLen`/`tailIntendedLen` small) and/or a small
-        //     `lenDelta`, divergence near the very END ⇒ benign normalization on Claude Code's own side
-        //     (e.g. trailing-whitespace trimming). NOT a splice — report it, don't suppress it; the
-        //     comparison would need relaxing/scoping, not this detector declared broken.
-        //   - Mismatch with LARGE tails on BOTH sides, divergence MID-STRING, `lenDelta` roughly the size of
-        //     a whole stranded message ⇒ the real thing: a live frame splice, captured with full context.
-        //   - ⭐ OBSERVED 2026-08-04 (card 201d0d95, session 363002b9 gen=8, real production traffic — not a
-        //     test): whole-content EXACT REPLACEMENT by an UNRELATED, OLDER, ALREADY-CONFIRMED prior
-        //     generation's own text — `reportedHash` matched a PRIOR generation's `writtenHash` byte-for-byte
-        //     (not this generation's own), `divergesAtChar` landed right after the shared literal prefix
-        //     (the message-type tag), and `reportedLen` did not correspond to any splice/concatenation of the
-        //     intended text — a clean duplicate of a fully separate past submission, confirmed independently
-        //     via the archived transcript (the duplicate turn was byte-identical to the original, ~168s
-        //     apart, both len=1864). This is NONE of the four predictions above: not silence, not
-        //     absent-field, not benign end-of-string normalization, and not a mid-string splice with an ADDED
-        //     tail — it is a REPLACEMENT, and its effect is to DOUBLE a real prior turn's delivery while
-        //     DROPPING the new one, not merely to lose it. See `[loom:prompt-mismatch]` below, added by that
-        //     same card, for how this class is now surfaced to the affected session.
-        // ⛔ OBLIGATION FULFILLED 2026-08-04 (card 201d0d95): the pre-registration above has now recorded its
-        // first real observation, per its own rule — the four ORIGINAL predictions stay (still the right
-        // shape to recognize a splice/normalization/absent-field), but they are no longer untested; one has
-        // fired. A FUTURE first-observation of any of the remaining three untested predictions should get the
-        // same treatment: append what was actually seen, cite the card, don't just believe the prediction.
+        // @decision 7114838d — frame-splice detector: LOG-ONLY (fixes nothing, unblocks 3ce3fa39), compares
+        // hook.prompt vs live.lastPrompt, gated on submitWasOutstanding. 4 predictions pre-registered
+        // 2026-07-29; OBSERVED 2026-08-04 (card 201d0d95) a whole-content REPLACEMENT by a prior generation.
         if (submitWasOutstanding) {
           // Card 4a0af485 (DoD#4 — measure the engine-confirmation lag distribution): only when there was
           // NO ambiguity at all before this hook fired (see `hadNoAmbiguityBeforeThisHook`'s own comment

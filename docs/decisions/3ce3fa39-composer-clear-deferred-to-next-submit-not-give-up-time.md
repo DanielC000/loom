@@ -13,6 +13,18 @@ When the deferred clear does fire (submit()'s `composerDirtyLen > 0 && composerL
 - Do not attempt the clear-prefix while `composerLen > 0` — that gate exists for the SAME reason every other clear in this file is (card e1829591): never risk erasing a real human draft on the raw terminal. If a human is mid-draft, the defensive clear is skipped and the (already-rare) historical stray-concatenation risk applies instead, unchanged.
 - Do not reset `composerDirtyLen` at give-up time, or on an unconfirmed deferred clear — resetting early would silently discard a still-genuinely-unresolved earlier contribution the next redelivery cycle needs to keep compounding on top of.
 
+## The `UserPromptSubmit` hook's GATED reset of `composerDirtyLen`
+
+A second site, in the `UserPromptSubmit` case of `deliverHook`: the reset (`composerDirtyLen = 0`, etc.) fires ONLY when this hook lands while `live.submitGeneration` still equals the generation that actually issued the clear-prefix (tracked via `composerDirtyLenClearedByGen`, see `a6c1d413`'s record for the per-generation map this gate feeds into). An ungated reset here would be WRONG: a hook belonging to unrelated engine activity (no `submit()` of ours in flight) can still land and flip `enterConfirmed` true — first-hand confirmed in production — and must NOT be read as proof our clear-prefix (which may not even have been attempted yet) landed.
+
+### Do not (2)
+
+- Do not reset `composerDirtyLen` at `UserPromptSubmit` without checking `composerDirtyLenClearedByGen === live.submitGeneration` first — an unrelated hook can fire and flip `enterConfirmed` without proving this generation's clear-prefix actually landed.
+
 ## Source
 
 Inline comment in `packages/daemon/src/pty/host.ts` (`submit()`, the composer clear-prefix / give-up-redelivery block), lines 9808-9825, as of commit `dc53c7111807e103baf99544d3890df80e9a1c92` (this tranche's starting HEAD). Extracted by card `dfde8c66` (tranche 9). This record covers only the deferred-clear-timing design at this specific call site — 3ce3fa39's own root-cause question (which of two candidate mechanisms makes a clear-prefix's success unverifiable) remains OPEN; see `docs/spikes/frame-splice-3ce3fa39-*.md` and `2960c3bf`'s record. 3ce3fa39 is cited at many other sites in this file (`git grep -n "3ce3fa39" -- packages/daemon/src/pty/host.ts`); this record does not attempt to cover all of them.
+
+## Source (2)
+
+Inline comment in `packages/daemon/src/pty/host.ts` (the `UserPromptSubmit` case in `deliverHook`), as of `main` `0cac46b89a9d2ad236117c355fb93d43f4f0f03f` (this tranche's starting HEAD). Extracted by card `7f448888` (tranche 19 on `pty/host.ts`).
