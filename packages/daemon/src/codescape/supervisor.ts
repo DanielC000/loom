@@ -31,11 +31,10 @@ const DEFAULT_INGEST_TIMEOUT_MS = 120_000;
 /** Bound (ms) for the fast control-plane calls (register/drop/overlay). */
 const DEFAULT_REGISTER_TIMEOUT_MS = 10_000;
 /**
- * Bound (ms) for reingest-main. @decision sha:e8354b5e — measured BIMODAL (~13-19s warm, ~24-29s cold)
- * against Codescape sha `439e65f`, overturning a stale "~9-11s" estimate off by 2.5-3x; aligned to
- * {@link DEFAULT_INGEST_TIMEOUT_MS} rather than a tighter bound since `reingestMain` is fire-and-forget
- * and codescape's route has no cancellation wiring. See
- * docs/decisions/e8354b5e-reingest-main-timeout-bimodal-measurement.md
+ * Bound (ms) for reingest-main.
+ * @decision sha:e8354b5e — measured BIMODAL (~13-19s warm, ~24-29s cold); never retune tighter than
+ * {@link DEFAULT_INGEST_TIMEOUT_MS} without re-measuring, and never trust these percentiles once this
+ * repo's corpus has grown materially past measurement time.
  */
 const DEFAULT_REINGEST_TIMEOUT_MS = 120_000;
 /**
@@ -67,10 +66,9 @@ const DEFAULT_PORT_REPORT_TIMEOUT_MS = 30_000;
  */
 const DEFAULT_RESTART_WINDOW_MS = 60 * 60_000;
 /**
- * @decision 4c7a337d — a SECOND, independent restart-rate ceiling (measured over a sliding
- * {@link DEFAULT_RESTART_WINDOW_MS}) that CANNOT be cleared by `ranHealthy`, unlike `restartAttempts`
- * above — without it, any crash loop recurring slower than `healthyRunMs` makes the give-up ceiling
- * structurally unreachable. See docs/decisions/4c7a337d-restart-rate-ceiling-independent-of-healthy-run-reset.md
+ * @decision 4c7a337d — a SECOND ceiling (over {@link DEFAULT_RESTART_WINDOW_MS}) that `ranHealthy`
+ * CANNOT clear — without it, a crash loop recurring slower than `healthyRunMs` makes backoff-exhaustion
+ * structurally unreachable, so never let `ranHealthy` clear this window-based count either.
  */
 const DEFAULT_MAX_RESTARTS_PER_WINDOW = 10;
 /**
@@ -597,9 +595,8 @@ export class CodescapeSupervisor {
   private lastMismatchRunningBuild: string | null = null;
   /**
    * @decision ebd755ab — latches the exhausted-restart diagnostic per distinct (installedBuild,
-   * runningBuild) pair, so a permanently-unresolved drift logs "still unresolved" ONCE, not every ~30s
-   * probe tick. Reset (and the reset announced as a recovery) once the running side catches up. See
-   * docs/decisions/ebd755ab-latch-exhausted-drift-diagnostic-per-distinct-pair.md
+   * runningBuild) pair; never let it fire on every probe tick, or an unresolvable drift becomes
+   * indistinguishable from a healthy steady state in the log.
    */
   private lastExhaustedDriftAnnounced: string | null = null;
   /**
@@ -839,10 +836,11 @@ export class CodescapeSupervisor {
    * Start supervision (no-op if disabled or already running/starting): ingests each of `repoPaths` in
    * order (v1 bootstrap — see the CWD CONTRACT), reserves a loopback port, then spawns + supervises
    * `serve`. Async, best-effort: an ingest failure is logged and does NOT abort the boot — serve still
-   * starts. @decision b8de5876 — `dbPath` is remembered on {@link codescapePath} for this instance's
-   * WHOLE lifetime (not just this call), so every later restart-on-death spawn and the boot log line all
-   * resolve the SAME candidate — a DB-only-configured host used to disagree with itself about enablement.
-   * See docs/decisions/b8de5876-codescape-start-remembers-dbpath-for-instance-lifetime.md
+   * starts.
+   *
+   * @decision b8de5876 — `dbPath` is remembered on {@link codescapePath} for this instance's WHOLE
+   * lifetime, not just this call; never re-derive the binary candidate from env/bare-PATH alone on a
+   * restart-on-death spawn, or a DB-only-configured host disagrees with itself about enablement.
    */
   async start(repoPaths: string[] = [], dbPath?: string): Promise<void> {
     if (this.starting || this.child) return;
@@ -1230,11 +1228,11 @@ export class CodescapeSupervisor {
 
   /**
    * One `/graph/health` check — closes the "alive but wedged" blind spot `child.on("exit")` alone can't
-   * see. @decision 545ef479 — an answered-but-not-ok response (e.g. a 5xx) is proof of life, NEVER wedge
-   * evidence; only a genuine no-answer counts, and only after {@link healthProbeFailureThreshold}
-   * CONSECUTIVE failures (a busy serve can miss one beat under load). A sustained wedge kills the child
-   * once and lets the existing exit → `scheduleRestart` path own the restart — never a second restart
-   * channel. See docs/decisions/545ef479-health-probe-wedge-vs-error-and-drift-state-latching.md
+   * see.
+   *
+   * @decision 545ef479 — an answered-but-not-ok response (e.g. a 5xx) is proof of life, NEVER wedge
+   * evidence; only a SUSTAINED run of genuine no-answer failures counts, and a sustained wedge kill must
+   * route through the existing exit → `scheduleRestart` path, never open a second restart channel.
    */
   private async probeHealth(): Promise<void> {
     if (this.stopped || !this.alive || this.probeInFlight) return;
@@ -1294,11 +1292,9 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * @decision 350bc307 — a real `tools/list` round-trip against the RUNNING mounted server (not just the
-   * in-memory partition), layered onto a successful health probe: async, bounded, best-effort, never
-   * blocks a spawn/boot/gate. Always persists on a successful round-trip (even an empty unclassified set)
-   * so `checkedAt` stays fresh; the in-memory latch only gates the CONSOLE line to once per transition.
-   * See docs/decisions/350bc307-tool-drift-probe-layered-on-health-tick.md
+   * @decision 350bc307 — a real `tools/list` round-trip against the RUNNING mounted server, layered onto
+   * a successful health probe: async, bounded, best-effort, never blocks a spawn/boot/gate. Always
+   * persists on a successful round-trip even when empty, and logs the finding line only on a transition.
    */
   private async checkToolDrift(): Promise<void> {
     const port = this.getPort();
@@ -1346,22 +1342,20 @@ export class CodescapeSupervisor {
 
   /**
    * @decision 545ef479 — every exit path (including the two silent no-ops: running build absent, honest
-   * installed `null`) latches a {@link DriftCheckState} via `announceDriftCheckState`, so "finding
-   * nothing" is never indistinguishable from "inert". See
-   * docs/decisions/545ef479-health-probe-wedge-vs-error-and-drift-state-latching.md
-   * @decision 90550a97 — compares `build` (a SHA), NEVER `healthJson.version` (a static semver); three
-   * distinguishable installed-side outcomes (real SHA / honest null / genuine read failure — only the
-   * last is loud); one restart per detected drift, delivered by killing the child once and letting the
-   * existing exit → `scheduleRestart` path own it. See
-   * docs/decisions/90550a97-build-id-drift-contract-and-restart-once-per-drift.md
+   * installed `null`) must latch a {@link DriftCheckState} via `announceDriftCheckState`, or "finding
+   * nothing" becomes indistinguishable from "inert".
+   *
+   * @decision 90550a97 — compares `build` (a SHA), NEVER `healthJson.version` (a static semver that never
+   * changes); a genuine mismatch kills the child once via the existing exit → `scheduleRestart` path, and
+   * `lastDriftRestartInstalledBuild` must gate a second restart for the same installed build.
+   *
    * @decision 9e6f984d — a genuine mismatch waits for the installed build to sit stable for
    * {@link driftStabilityMs} before restarting, so a burst of rebuilds collapses into one restart, not N.
    */
   /**
-   * @decision 23980bbf — latch-and-announce a {@link DriftCheckState} TRANSITION only (never every
-   * probe tick), folding the RESOLVED {@link healthProbeIntervalMs} into the line itself so the true poll
-   * cadence is derivable from the log alone. See
-   * docs/decisions/23980bbf-drift-check-state-log-folds-in-resolved-interval.md
+   * @decision 23980bbf — latch-and-announce a {@link DriftCheckState} TRANSITION only, never every probe
+   * tick, and always fold in the RESOLVED {@link healthProbeIntervalMs} (never the hardcoded default) so
+   * the true poll cadence is derivable from the log alone.
    */
   private announceDriftCheckState(state: DriftCheckState): void {
     if (state === this.driftCheckState) return;
@@ -1472,21 +1466,19 @@ export class CodescapeSupervisor {
 
   /**
    * Read the INSTALLED codescape binary's own build id — bounded + async via {@link runBoundedSplit}
-   * (stdout/stderr must stay separate here, unlike `ingest()`'s shared `runBounded`). @decision 90550a97
-   * — the AGREED CONTRACT with the Codescape manager: strict JSON parsing only (never lenient/substring),
-   * and NEVER read their internal `dist/buildInfo.generated.js` directly — an unversioned coupling that
-   * breaks silently the moment they reshape their build output. See
-   * docs/decisions/90550a97-build-id-drift-contract-and-restart-once-per-drift.md
+   * (stdout/stderr must stay separate here, unlike `ingest()`'s shared `runBounded`).
+   *
+   * @decision 90550a97 — AGREED CONTRACT with the Codescape manager: parse strictly (never lenient/
+   * substring), and never read their internal `dist/buildInfo.generated.js` directly — an unversioned
+   * coupling that breaks silently the moment they reshape their build output.
    */
   private async readInstalledBuild(): Promise<{ build: string | null; failed: boolean; reason?: string }> {
     const { command, args } = resolveCodescapeBin(this.codescapePath);
     let r: SplitRunResult = { ok: false, code: null, timedOut: false, stdout: "", stderr: "" };
     let attempt = 0;
-    // @decision f0718488 — retry ONLY a TIMED-OUT attempt (a non-zero exit or malformed stdout is a real
-    // binary failure, not host contention, and is never retried). Worst-case budget for this method alone:
-    // versionProbeMaxAttempts(3) * versionProbeTimeoutMs(5000) + 2 * versionProbeRetryDelayMs(250) =
-    // 15,500ms; do not retune these without redoing that arithmetic against healthProbeIntervalMs. See
-    // docs/decisions/f0718488-version-probe-retry-only-on-timeout-worst-case-budget.md
+    // @decision f0718488 — retry ONLY a TIMED-OUT attempt (a real binary failure is never retried); do
+    // not retune versionProbeMaxAttempts/versionProbeTimeoutMs/versionProbeRetryDelayMs without redoing
+    // the worst-case-budget arithmetic against healthProbeIntervalMs (only ~9.5s of margin today).
     while (true) {
       attempt++;
       this.versionProbeAttempts++;
@@ -1545,11 +1537,11 @@ export class CodescapeSupervisor {
   }
 
   /**
-   * `POST /project` `{repoRoot, graphPath?}` — codescape's fleet-daemon @decision 088afc94 (P4) dynamic
-   * registration (commit `669548e`, confirmed merged/live). Idempotent (already-registered/attached/
-   * ingested); defaults to the long `ingestTimeoutMs`, overridable via `timeoutMs`. Caches the
-   * AUTHORITATIVE `id` on success; never throws — a failure just leaves the caller on the cold manifest
-   * fallback. See docs/decisions/088afc94-codescape-http-mcp-clean-skip-and-stable-id-resolution.md
+   * `POST /project` `{repoRoot, graphPath?}` — codescape's fleet-daemon dynamic registration (commit
+   * `669548e`, confirmed merged/live), idempotent (already-registered/attached/ingested).
+   *
+   * @decision 088afc94 — never throws; a failure must leave the caller on the cold manifest fallback,
+   * never block boot. Caches the AUTHORITATIVE `id` on success so `resolveProjectId` skips a re-read.
    */
   async registerProject(repoRoot: string, graphPath?: string, timeoutMs?: number): Promise<CodescapeRequestResult> {
     const res = await this.request("POST", "/project", graphPath ? { repoRoot, graphPath } : { repoRoot }, timeoutMs ?? this.ingestTimeoutMs);
@@ -1566,10 +1558,11 @@ export class CodescapeSupervisor {
 
   /**
    * A few quick retries around {@link registerProject}, for the BOOT-TIME call in {@link start} only —
-   * closes a listener-not-up-yet race. @decision 088afc94 (P4 follow-up) — bounded PER ATTEMPT at the
-   * FAST `registerTimeoutMs` (never the long `ingestTimeoutMs`), to avoid repeating the retry-over-a-
-   * hung-operation shape of card `bd9fc808`. Boot itself is never blocked by this. See
-   * docs/decisions/088afc94-codescape-http-mcp-clean-skip-and-stable-id-resolution.md
+   * closes a listener-not-up-yet race.
+   *
+   * @decision 088afc94 — bound PER ATTEMPT at the FAST `registerTimeoutMs`, never the long
+   * `ingestTimeoutMs` — this race fails fast (ECONNREFUSED), so a long bound only risks repeating the
+   * retry-over-a-hung-operation shape of card `bd9fc808`. Boot itself is never blocked by this.
    */
   private async registerProjectWithRetry(repoRoot: string, attempts = 5, delayMs = 300): Promise<CodescapeRequestResult> {
     let last: CodescapeRequestResult = { ok: false, error: "registerProjectWithRetry: never attempted" };
@@ -1586,11 +1579,11 @@ export class CodescapeSupervisor {
   /**
    * Resolve codescape's project id for `repoRoot` — the ONE seam every caller should use. Checks this
    * instance's in-memory cache first, falling back to the COLD manifest-by-path read on a miss (kept
-   * deliberately, since `POST /project` can fail transiently while the manifest resolves any repo
-   * codescape has EVER ingested). @decision 088afc94 — a manifest HIT is cached forever (spawn hot path,
-   * no blocking work); a MISS is cached only for {@link PROJECT_ID_NEGATIVE_CACHE_TTL_MS}, since a repo
-   * enabled after boot must eventually be picked up without a restart. See
-   * docs/decisions/088afc94-codescape-http-mcp-clean-skip-and-stable-id-resolution.md
+   * deliberately, since `POST /project` can fail transiently while the manifest still resolves).
+   *
+   * @decision 088afc94 — a manifest HIT is cached forever (this is the spawn hot path — no blocking
+   * reads); a MISS must expire after {@link PROJECT_ID_NEGATIVE_CACHE_TTL_MS}, or a repo enabled after
+   * boot never gets picked up without a restart.
    */
   resolveProjectId(repoRoot: string): string | null {
     const key = repoKey(repoRoot);
