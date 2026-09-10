@@ -52,14 +52,15 @@ const okLines = (rows: unknown[]) => ({ content: [{ type: "text" as const, text:
  * nextOffset` fields when `page` is passed. `key` should be deterministic per (session, list) so
  * repeated pulls overwrite rather than accumulate scratch-dir garbage.
  *
- * `page` (card 84f6ac42) is the completeness signal: pass `{total, offset, nextOffset, explicit}` (total
- * = the TRUE matching-row count before this page's slice; nextOffset = offset+returned while more
- * remains, else null; explicit = true iff the caller passed offset/limit itself) to opt a caller into the
- * envelope. Mirrors `list_all_tasks`' own page envelope (card 57cb355d) field-for-field, and the SAME
- * "bare when it fits and wasn't explicitly paged, else envelope" contract `spillableTurnsResponse` (the
- * transcript-reading sibling) already uses — so a capped/partial read is NEVER indistinguishable from a
- * complete one. Omitting `page` (as `task_requests_list` still does below) preserves today's behavior
- * byte-for-byte — this is an ADDITIVE opt-in, not a behavior change for every caller of this helper.
+ * `page` is the completeness signal: pass `{total, offset, nextOffset, explicit}` (total = the TRUE
+ * matching-row count before this page's slice; nextOffset = offset+returned while more remains, else
+ * null; explicit = true iff the caller passed offset/limit itself) to opt a caller into the envelope.
+ * Omitting `page` (as `task_requests_list` still does below) preserves today's behavior byte-for-byte —
+ * an ADDITIVE opt-in, not a behavior change for every existing caller of this helper.
+ * @decision 84f6ac42 — total/nextOffset must come from a real count query, never `rows.length` (already
+ * post-slice, so it can never tell "exactly at the cap" apart from "more remains").
+ * @decision 57cb355d — mirrors `list_all_tasks`'s own page envelope field-for-field, and the same "bare
+ * when it fits and wasn't explicitly paged, else envelope" contract `spillableTurnsResponse` also uses.
  */
 const okLinesSpillable = (
   sessionId: string, subdir: string, key: string, rows: unknown[],
