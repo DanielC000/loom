@@ -701,7 +701,22 @@ try {
   check("(k) start with an ABSOLUTE <dir> succeeds regardless of the invoking process's own cwd", absStart.status === 0);
   const absStartMatch = /\(pid (\d+)\)/.exec(absStart.stdout || "");
   cwdBugAbsTrackedPid = absStartMatch ? Number(absStartMatch[1]) : null;
-  check("(k) tracked pid is alive", cwdBugAbsTrackedPid != null && isAlive(cwdBugAbsTrackedPid));
+  const cwdBugPidAlive = cwdBugAbsTrackedPid != null && isAlive(cwdBugAbsTrackedPid);
+  if (!cwdBugPidAlive) {
+    // Self-diagnosing failure (card 4946f01d): this check failed ONCE in a full merge gate and could not
+    // be reproduced in 3 isolated runs — no mechanism was established from that single sighting alone.
+    // Rather than guess at a fix from n=1, dump what a later sighting needs: the pid `start` printed, the
+    // tracking file's own recorded state (does it agree with what was printed?), and the supervisor's log
+    // file (which, since this same card also added a `child.on('error', ...)` handler to the supervisor,
+    // now records a spawn-failure reason there if that's what happened).
+    const diagLogFile = cwdBugTrackFile.replace(/\.json$/, ".log");
+    console.log(`  [diag] printed pid=${cwdBugAbsTrackedPid}`);
+    console.log(`  [diag] start stdout=${JSON.stringify(absStart.stdout)}`);
+    console.log(`  [diag] start stderr=${JSON.stringify(absStart.stderr)}`);
+    console.log(`  [diag] tracking file (${cwdBugTrackFile}) = ${fs.existsSync(cwdBugTrackFile) ? fs.readFileSync(cwdBugTrackFile, "utf8") : "<missing>"}`);
+    console.log(`  [diag] log file (${diagLogFile}) = ${JSON.stringify(fs.existsSync(diagLogFile) ? fs.readFileSync(diagLogFile, "utf8") : "<missing>")}`);
+  }
+  check("(k) tracked pid is alive", cwdBugPidAlive);
 
   const absStop = spawnSync(process.execPath, [HELPER, "stop", cwdBugWorktree], { encoding: "utf8", timeout: 10_000, cwd: os.tmpdir() }); // yet ANOTHER cwd
   check(
@@ -1112,6 +1127,52 @@ try {
   failures++;
 } finally {
   if (crashControlChild) { try { crashControlChild.kill("SIGKILL"); } catch { /* best effort */ } }
+}
+
+// (o) card 4946f01d — manager review of this same card's own `child.on("error", ...)` fix: the supervisor
+// must not lose its own spawn-error diagnostic to the async-write/exit race that fix exists to survive.
+// Runs the REAL, currently-committed SUPERVISOR_CODE in isolation — extracted from the real helper source
+// below, never a hand-copied duplicate, so this test can never silently drift from what actually ships —
+// against a payload whose `cmd` cannot spawn (`shell:false`, so it's Node's own `spawn()` that emits
+// 'error', not a shell reporting "command not found" as an ordinary nonzero exit). Asserts (a) the
+// supervisor exits without Node's own unhandled-'error'-event crash trace on stderr, and (b) its log file
+// actually contains the diagnostic line.
+const helperSrcForSupervisor = fs.readFileSync(HELPER, "utf8");
+// Non-greedy up to the literal `].join("\n");` closing the array — NOT up to the first bare `]`, which
+// would stop early at e.g. `process.argv[1]` inside one of the array's own string elements.
+const supervisorCodeMatch = /const SUPERVISOR_CODE = (\[[\s\S]*?\])\.join\("\\n"\);/.exec(helperSrcForSupervisor);
+check(
+  "(o) extracted SUPERVISOR_CODE from the real helper source (a failure here means this test has gone stale against the helper's own literal shape, not that the supervisor is broken)",
+  !!supervisorCodeMatch,
+);
+const SUPERVISOR_CODE_UNDER_TEST = supervisorCodeMatch ? new Function(`return ${supervisorCodeMatch[1]};`)().join("\n") : null;
+
+const unspawnableCmdDir = path.resolve(mkdtempManaged("loom-dev-server-supervisor-error-"));
+const unspawnableCmd = path.join(unspawnableCmdDir, `does-not-exist-${crypto.randomBytes(6).toString("hex")}`);
+const supervisorErrorLogPath = path.join(unspawnableCmdDir, "supervisor.log");
+const supervisorPayload = JSON.stringify({
+  logPath: supervisorErrorLogPath,
+  cmd: unspawnableCmd, // an absolute path that does not exist — spawn() itself must fail, not a shell
+  args: [],
+  cwd: unspawnableCmdDir,
+  shell: false, // no shell to swallow the failure as an ordinary shell-reported nonzero exit instead
+});
+
+if (SUPERVISOR_CODE_UNDER_TEST) {
+  const superResult = spawnSync(process.execPath, ["-e", SUPERVISOR_CODE_UNDER_TEST, supervisorPayload], { encoding: "utf8", timeout: 10_000 });
+  check("(o) supervisor exits nonzero on an unspawnable command", superResult.status !== 0);
+  // Node's own default handler for an EventEmitter's unhandled 'error' event prints this exact, distinctive
+  // pair of markers to stderr before terminating — the discriminator between "caught and exited cleanly"
+  // and "crashed via an uncaught exception" (the two are otherwise both just "nonzero exit", which alone
+  // can't tell them apart).
+  const crashed = /Unhandled 'error' event/.test(superResult.stderr || "") || /Emitted 'error' event/.test(superResult.stderr || "");
+  check("(o) supervisor does NOT crash via Node's own unhandled-'error'-event exception (it is caught and handled)", !crashed);
+  const supervisorLog = fs.existsSync(supervisorErrorLogPath) ? fs.readFileSync(supervisorErrorLogPath, "utf8") : "<missing>";
+  check("(o) supervisor's log file records the spawn-error diagnostic (survives the exit, not lost to the async-write/exit race)", /spawn error/.test(supervisorLog));
+} else {
+  check("(o) supervisor exits nonzero on an unspawnable command", false);
+  check("(o) supervisor does NOT crash via Node's own unhandled-'error'-event exception (it is caught and handled)", false);
+  check("(o) supervisor's log file records the spawn-error diagnostic (survives the exit, not lost to the async-write/exit race)", false);
 }
 
 console.log(failures === 0

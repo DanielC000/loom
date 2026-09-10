@@ -282,6 +282,18 @@ const SUPERVISOR_CODE = [
   // drop the other's later output.
   "child.stdout.pipe(out, { end: false });",
   "child.stderr.pipe(out, { end: false });",
+  // card 4946f01d: without this, a genuine spawn failure (the shell/target failing to launch — resource
+  // exhaustion under host contention is the realistic trigger, not a bad command, since `cmd`/`args` are
+  // already validated by the time this runs) emits an unhandled 'error' on `child`, which Node re-throws
+  // as an uncaught exception — killing THIS supervisor almost immediately after `start` already printed
+  // and tracked its pid, with no trace of why. Log the reason to the same file a caller already falls
+  // back to reading, then exit the same way the exit handler below would. MUST use `fs.appendFileSync`,
+  // not `out.write` — `out` is an `fs.createWriteStream`, whose writes are buffered and flushed to disk
+  // asynchronously; an immediately-following `process.exit()` can terminate the process before that flush
+  // ever happens, silently dropping the one line this handler exists to leave behind. Confirmed on this
+  // host: `out.write(...)` here lost the diagnostic 5/5 trials (test section (o)); `appendFileSync` is
+  // synchronous, so the write is durable before `process.exit` runs, no matter how `out` itself is doing.
+  "child.on('error', (err) => { try { fs.appendFileSync(payload.logPath, '[dev-server supervisor] spawn error: ' + (err && err.stack || err) + '\\n'); } catch {} try { out.end(); } catch {} process.exit(1); });",
   // Exit once the real command does, so a target that dies on its own (a bad command, a crash) doesn't
   // leave an orphaned supervisor sitting around forever.
   "child.on('exit', (code) => { out.end(); process.exit(code == null ? 1 : code); });",
