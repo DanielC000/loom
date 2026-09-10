@@ -93,42 +93,13 @@ export const CONTEXT_EMERGENCY_REDIRECT_TAG = "loom:context-emergency:redirect";
  * answered by RECYCLING — which makes the manager go not-live and its successor a FRESH row with default
  * 'watching' state, so the cycle re-arms naturally without a counter reset.
  *
- * BLIND-TURN advisory (card fdf1291f) — a SECOND, independent signal, checked every tick alongside the
- * ratio logic above: `ctxInputTokens`/`ctxUpdatedAt` refresh ONLY at the Stop hook (end of a LOGICAL
- * turn), so a manager that issues hundreds of tool round-trips inside ONE turn (never reaching Stop) is
- * invisible to the ratio check above for the ENTIRE duration — the worst case, since a long tool-looping
- * turn is both the fastest way to burn context and the thing that suppresses the only signal measuring
- * it (the incident this card investigates: ~65min blind, ending only because a human intervened). The fix
- * is NOT a numeric occupancy estimate composed from `session_usage_samples` — those columns are
- * per-interval BILLED-USAGE deltas, not context occupancy, and composing them into a % would need the
- * turn-to-turn prompt-cache hit rate (unknowable from that table alone — a broken cache prefix inflates
- * them by an unbounded factor; see `cacheHitRatio`'s doc) — shipping a wrong number here would be worse
- * than the blindness it replaces. Instead this reuses BusyWorkerWatcher's PROVEN signal (`busy` +
- * `lastActivity` staleness — `lastActivity` only moves at turn EDGES for a manager exactly as it does for
- * a worker), scoped to managers, gated by `managerBlindTurnMinutes`; `session_usage_samples` is consulted
- * ONLY as a best-effort diagnostic (confirms genuine token flow during the gap, reported alongside the
- * alert) via `getUsageActivitySince`, never as the trigger itself. On trip it appends ONE
- * `context_blind_turn` event (once per episode, mirroring `worker_stuck`'s de-dup) — a SOFT, human-facing
- * advisory only. It deliberately does NOT attempt a queued nudge: the busy-gated stdin queue is exactly
- * the mechanism that can't reach a manager stuck mid-turn (it lands, unread, at the next turn boundary —
- * the very event that isn't arriving).
+ * BLIND-TURN advisory (Trigger B, `checkBlindTurn` below) — a second, independent signal, checked every
+ * tick regardless of `ctxInputTokens`; advisory-only, never a queued nudge (can't reach a stuck manager).
+ * @decision fdf1291f — reuses BusyWorkerWatcher's busy+lastActivity signal, never a numeric occupancy estimate.
  *
- * EMERGENCY INTERRUPT (card 9f279c7b, Trigger A) — a THIRD signal, `checkEmergencyOccupancy` below,
- * checked whenever `ctxInputTokens` IS known (it needs a real reading; the null gap is Trigger B's job,
- * not this one's). Where the ratio logic above only ever QUEUES a nudge — busy-gated, landing at the
- * manager's next turn boundary, which never arrives for a manager stuck in one long turn — crossing the
- * SECOND, harder `emergencyRecycleAtContextRatio` floor (validated ≥ the ordinary ratio at resolve time,
- * config.ts) makes this watcher BYPASS the queue: `deps.emergencyInterrupt` wraps
- * `SessionService.redirectManagerForEmergencyRecycle`, which reuses `worker_redirect`'s existing
- * flush+supersede+Esc-interrupt primitive (`deliverRedirect` — no second interrupt mechanism; two that
- * could disagree is the exact failure `f05e5a06` is about) and refuses to fire while the target's own
- * project repo sits inside an active merge-danger window (never risk wedging a mid-squash repo for a
- * nudge — see that method's own doc for the retry-next-tick policy on refusal). ⛔ Trigger B (blind-turn,
- * above) deliberately does NOT escalate into this interrupt: it has no occupancy number to justify
- * cancelling a turn, and the gen-235 specimen this card's triage recorded (a manager blind for ~such a
- * window doing perfectly ordinary, safe orchestration) is exactly the case an unconditional interrupt on
- * blind-turn-alone would wrongly cancel. Trigger B stays the soft, human-facing advisory it already
- * shipped as.
+ * EMERGENCY INTERRUPT (Trigger A, `checkEmergencyOccupancy` below) — a third signal that BYPASSES the
+ * queue once a second, harder floor is crossed; Trigger B deliberately never escalates into it.
+ * @decision 9f279c7b — reuses `worker_redirect`'s deliverRedirect primitive; refuses during merge-danger.
  */
 export class ContextWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -235,27 +206,9 @@ export class ContextWatcher {
   }
 
   /**
-   * EMERGENCY INTERRUPT (card 9f279c7b, Trigger A) — see the class doc's own section for the full
-   * rationale on why this is a SECOND, harder floor above the ordinary ratio rather than just a lower
-   * cooldown on the same one. Needs a REAL `ctxInputTokens` reading (the caller already skips this when
-   * null — Trigger B/`checkBlindTurn` covers that gap, deliberately not this method).
-   *
-   * DE-DUP: fires AT MOST once per still-current reading. `ctxUpdatedAt` only advances at this manager's
-   * NEXT Stop (a genuinely fresh reading, possibly still over the floor — re-fires correctly) or when it
-   * finally recycles (a brand-new session id, so `getLatestEventForManagerByKind` finds nothing) — either
-   * way this re-arms naturally, exactly mirroring `checkBlindTurn`'s own "advances past the stamped event"
-   * episode boundary, one field over (`ctxUpdatedAt` here vs. `lastActivity` there).
-   *
-   * REFUSAL ACCOUNTING (DoD-5): a refusal (`fired:false` — no hook wired, session died between the
-   * `isAlive` check and the call, or the target project's repo is mid-squash) does NOT append the de-dup
-   * event and does NOT log a false success — it logs the refusal reason and lets the NEXT tick retry from
-   * scratch. This is the explicit, argued answer to "what happens when the interrupt can't fire right
-   * now": retry every tick (`intervalMs`, default 60s) rather than block this synchronous tick loop
-   * waiting, and rather than ever interrupting through an active merge-danger window regardless of age —
-   * see `SessionService.redirectManagerForEmergencyRecycle`'s own doc for why that check lives there, not
-   * here. A merge-danger window is typically ~1.5s of local git calls (see that module's own sizing doc),
-   * so in practice this almost never needs a second tick; if it ever did retry many times in a row, that
-   * repetition is itself visible in the daemon log as a real operational signal, not silently swallowed.
+   * EMERGENCY INTERRUPT (Trigger A) — needs a REAL `ctxInputTokens` reading; the null gap is
+   * `checkBlindTurn`'s (Trigger B's) job, deliberately not this method's.
+   * @decision 9f279c7b — de-dups per still-current reading; a refusal never advances that state.
    */
   private checkEmergencyOccupancy(db: Db, m: Session, cfg: OrchestrationConfig, r: number, window: number, nowIso: string): void {
     if (cfg.emergencyRecycleAtContextRatio <= 0) return; // disabled for this project

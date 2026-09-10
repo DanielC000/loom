@@ -45,9 +45,31 @@ Throws ONLY if the target session is unknown (mirrors `redirectSessionAsCompanio
   its own interval, so a refusal just means the next tick retries; a bounded wait belongs to the
   full-shutdown path, not this one.
 
+## ContextWatcher's own trigger conditions and de-dup (`checkEmergencyOccupancy`)
+
+The ordinary ratio logic only ever QUEUES a nudge (busy-gated, landing at the manager's next turn
+boundary) — which never arrives for a manager stuck in one long turn. The SECOND, harder
+`emergencyRecycleAtContextRatio` floor (validated ≥ the ordinary ratio at resolve time, `config.ts`)
+bypasses the queue entirely and fires this interrupt instead.
+
+Fires AT MOST once per still-current `ctxInputTokens` reading, re-arming at the manager's NEXT Stop (a
+genuinely fresh reading, possibly still over the floor — correctly re-fires) or on recycle (a brand-new
+session id) — mirrors `checkBlindTurn`'s own
+episode-boundary pattern, one field over (`ctxUpdatedAt` here vs. `lastActivity` there). A refusal (no
+hook wired, session died, or the merge-danger window above) does NOT advance this de-dup state — only
+a FIRED interrupt does — so the very next tick's retry (see the MERGE-DANGER GUARD bullet above) starts
+from the same untried state, never a false success.
+
+Trigger B (`checkBlindTurn`) deliberately does NOT escalate into this interrupt: it has no occupancy
+number to justify cancelling a turn, and a real gen-235 specimen (a manager blind for a long window
+doing perfectly ordinary, safe orchestration) is exactly the case an unconditional interrupt on
+blind-turn-alone would wrongly cancel.
+
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts`, above the ContextWatcher emergency-recycle
 interrupt method: lines 6754-6791, as of main `055e96ce`. Relocated by card `c7ca6c08` (tranche 16); no
 wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers
-stripped.
+stripped. Second site: JSDoc comments in `packages/daemon/src/orchestration/context-watcher.ts` (the
+class doc's EMERGENCY INTERRUPT section and `checkEmergencyOccupancy`'s own method doc): lines 116-131
+and 237-259, as of this tranche's HEAD (tranche 1 on `context-watcher.ts`).
