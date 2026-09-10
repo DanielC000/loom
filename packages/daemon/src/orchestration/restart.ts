@@ -106,27 +106,15 @@ export interface RestartIntent {
    */
   pending?: Record<string, string[]>;
   /**
-   * Card 9e27f4d2 — the give-up HOLD half of `pending`'s snapshot, kept in a wholly separate, ADDITIVE
-   * field rather than folding it into `pending`'s own element type. `pending[id][i]` still within its
-   * post-give-up hold window (host.ts's `isGiveUpHeld`/`GIVE_UP_HOLD_MS`) has its `giveUpHeldUntil`
-   * deadline recorded here as `pendingHolds[id][i]` — SAME session key, SAME index into that session's
-   * `pending` array — instead of on the entry itself.
+   * The give-up HOLD half of `pending`'s snapshot, kept in a wholly separate, ADDITIVE field rather than
+   * folding it into `pending`'s own element type. `pending[id][i]` still within its post-give-up hold
+   * window (host.ts's `isGiveUpHeld`/`GIVE_UP_HOLD_MS`) has its `giveUpHeldUntil` deadline recorded here
+   * as `pendingHolds[id][i]` — SAME session key, SAME index into that session's `pending` array — instead
+   * of on the entry itself. Absent when nothing captured was still held (the overwhelmingly common case).
    *
-   * WHY NOT JUST WIDEN `pending`'S ELEMENT TYPE (code review on this same card measured the alternative
-   * and rejected it): `RestartIntent` is un-versioned JSON on disk (`readRestartIntent` is a bare
-   * `JSON.parse(...) as RestartIntent`, no schema/version check) that an OLDER daemon binary can read —
-   * this project's own documented pattern of running a second stable daemon from a separate checkout
-   * sharing `~/.loom`, or a rollback landing in the gap between this daemon's exit-75 and the supervisor's
-   * relaunch. An older daemon's replay expects `pending[id][i]` to always be a plain string; handed an
-   * object instead, `enqueueStdin`'s `kind:"agent"` path short-circuits BOTH pre-fix shape guards
-   * (`sanitizeLoneSurrogates`/`isUntaggedSystemNudge`) before either inspects the value, and the eventual
-   * `.map(m=>m.text).join()` silently string-coerces it to `"[object Object]"` — the real message TEXT is
-   * gone, with no throw and no log. That is exactly the LOSS class this card's own constraint forbids
-   * ("fail toward a duplicate, never a loss"), reintroduced by the FIX meant to prevent a duplicate.
-   * Keeping `pending` a bare `string[]` and carrying the hold as this wholly separate, additive field
-   * means an older daemon reading a newer intent sees only strings it already knows how to handle — an
-   * unheld duplicate (the ALREADY-ACCEPTED pre-this-card behavior), never a garbled loss. Absent when
-   * nothing captured was still held (the overwhelmingly common case).
+   * @decision 9e27f4d2 — do NOT widen `pending`'s element type to carry this; an older daemon reading a
+   * widened entry would silently string-coerce it to `"[object Object]"`, losing the message with no
+   * throw and no log (docs/decisions/9e27f4d2-giveupheldsuntil-rides-restart-intents-holds-map.md).
    */
   pendingHolds?: Record<string, Record<number, number>>;
   /**
@@ -165,13 +153,15 @@ export interface RestartIntent {
    */
   supervisorChanged?: boolean;
   /**
-   * Card 2e84a250 — the sibling of {@link RestartIntent.supervisorChanged}: set when
-   * {@link supervisorScriptChangedSince} resolved `"could-not-check"` rather than a confirmed
-   * changed/unchanged. Mutually exclusive with `supervisorChanged` (both come from the SAME check, at
-   * most one is ever true) — kept as a separate field rather than a `supervisorChanged: boolean | "unknown"`
-   * union so an old on-disk intent (or any reader that only knows `supervisorChanged`) degrades exactly
-   * as before: absent/false, never a crash or a misread "unknown". resumeFleetOnBoot's requester nudge
-   * surfaces this as SUPERVISOR_CHECK_FAILED_WARNING instead of the unconditional "now LIVE" claim.
+   * The sibling of {@link RestartIntent.supervisorChanged}: set when {@link supervisorScriptChangedSince}
+   * resolved `"could-not-check"` rather than a confirmed changed/unchanged. Mutually exclusive with
+   * `supervisorChanged` (at most one is ever true). resumeFleetOnBoot's requester nudge surfaces this as
+   * SUPERVISOR_CHECK_FAILED_WARNING instead of the unconditional "now LIVE" claim.
+   *
+   * @decision 2e84a250 — kept as a SEPARATE field rather than a `supervisorChanged: boolean | "unknown"`
+   * union, so an old on-disk intent (or any reader that only knows `supervisorChanged`) degrades exactly
+   * as before: absent/false, never a crash or a misread "unknown" (docs/decisions/2e84a250-supervisor-
+   * check-result-is-a-three-state-union.md).
    */
   supervisorCheckFailed?: boolean;
   requestedAt: string;
@@ -363,8 +353,7 @@ export function deployBuildSteps(root: string): BuildStep[] {
     // sync, so a normal code-only deploy pays only a quick verify. CI=1 keeps pnpm non-interactive.
     { label: "install", command: "pnpm install --frozen-lockfile --prefer-offline", args: [], shell: true, timeoutMs: DEPLOY_INSTALL_TIMEOUT_MS },
     // STEP 2 — BUILD (closes face A: a stale FULL TURBO cache replaying a green build over broken/stale
-    // source). Invoke turbo via ABSOLUTE node + ABSOLUTE turbo JS, NO shell — the 51522f05 fix (the old
-    // `pnpm exec turbo …` form failed inside the daemon's spawned-process env with EMPTY captured output).
+    // source). Invoke turbo via ABSOLUTE node + ABSOLUTE turbo JS, NO shell — see @decision 51522f05 below.
     // `--force` is a DIRECT turbo argument here (`node <turbo> build … --force`), which is what actually
     // bypasses turbo's content-keyed cache so a deploy ALWAYS does a real compile. ⚠️ Do NOT "simplify"
     // this to `pnpm --filter @loom/web build --force`: there `--force` is forwarded to the package's build
@@ -374,24 +363,14 @@ export function deployBuildSteps(root: string): BuildStep[] {
     // silently diverge on which packages a deploy actually rebuilds. Covers @loom/daemon, @loom/shared, AND
     // @loom/web — the daemon serves packages/web/dist statically, so a deploy that only rebuilt the daemon
     // left the SERVED UI stale.
-    // "stamp" (card 3d7dccb9) runs in the SAME turbo invocation, right after "build" (turbo.json:
-    // dependsOn:["build"], cache:false) — it (re)writes dist/build-info.json fresh from THIS checkout's
-    // real HEAD, cache hit or miss, so the deploy build's own artifact identity can never be a stale/
-    // foreign sha replayed off turbo's cache (which — see deploy-staleness.ts's module doc — is SHARED
-    // across every git worktree of this repo).
-    // ⚠️ Card 24f53a72 — `--force` on "build" does NOT, by itself, also protect "build"'s own CACHE WRITE:
-    // even a forced "build" still WRITES a fresh cache entry after it finishes (turbo always caches a
-    // successful run unless told not to), and that entry's "dist/**" snapshot used to be taken BEFORE
-    // "stamp" (which dependsOn "build") ever touched build-info.json — so it silently baked in whatever
-    // build-info.json happened to be sitting in dist/ pre-stamp. A LATER, non-forced invocation elsewhere
-    // (daemon-supervisor.mjs's boot build, a plain `pnpm build`) that omitted "stamp" and cache-hit THIS
-    // entry would restore that frozen pre-stamp value, clobbering whatever the real "stamp" step most
-    // recently wrote — reproduced live: a correctly re-stamped real HEAD reverted to an unrelated sha via
-    // nothing more than a same-hash, no-source-change cache hit. `--force` here only bypasses reading
-    // turbo's cache for THIS invocation; it does nothing to stop THIS invocation's own "build" cache write
-    // from poisoning a later one. The actual fix is in turbo.json: "build"'s outputs now explicitly exclude
-    // "!dist/build-info.json", so a "build" cache hit/restore can never touch that file from ANY
-    // invocation, forced or not, "stamp"-included or not — "stamp" (cache:false) is the sole writer.
+    // @decision 51522f05 — the old `pnpm exec turbo …` shell form failed inside the daemon's spawned-
+    // process env with EMPTY captured output (docs/decisions/51522f05-absolute-turbo-invocation-no-shell.md).
+    // @decision 3d7dccb9 — "stamp" rides the SAME turbo invocation right after "build" so the deploy's own
+    // artifact identity can never be a stale/foreign sha replayed off turbo's cache, which is shared across
+    // every git worktree of this repo (docs/decisions/3d7dccb9-stamp-rides-the-deploy-builds-own-turbo-invocation.md).
+    // @decision 24f53a72 — `--force` on "build" does NOT also protect "build"'s own CACHE WRITE: turbo.json
+    // excludes "!dist/build-info.json" from "build"'s outputs so a cache hit/restore, forced or not, can
+    // never clobber what "stamp" (cache:false) most recently wrote (docs/decisions/24f53a72-build-cache-write-can-clobber-stamps-build-info-json.md).
     { label: "build", command: process.execPath, args: [turboBin(), "build", "stamp", ...DEPLOY_PACKAGES.map((p) => `--filter=${p.name}`), "--force"], shell: false, timeoutMs: 0 },
   ];
 }
@@ -444,24 +423,16 @@ function webDistBackupDir(): string {
 }
 
 /**
- * Snapshot packages/web/dist before the build step that can wipe it out from under a failure — card
- * 0eb97fa1: turbo.json's `clean` task runs unconditionally ahead of `@loom/web`'s `build` task, so a
- * deploy build that then fails (tests, typecheck, or vite itself) currently leaves the daemon serving a
- * broken/missing UI while reporting itself healthy (the old dist was already deleted; nothing rebuilt
- * it). Called only immediately before the "build" step — never before "install", which never touches
- * dist, so an install failure (the common lockfile-drift case) pays zero snapshot cost.
+ * Snapshot packages/web/dist before the build step that can wipe it out from under a failure. Called
+ * only immediately before the "build" step — never before "install", which never touches dist, so an
+ * install failure (the common lockfile-drift case) pays zero snapshot cost. Best-effort: never throws
+ * past its own call site (wrapped in try/catch by {@link buildDaemon}) — a snapshot failure must never
+ * block the deploy itself, only leave that one deploy unprotected.
  *
- * Best-effort: never throws past its own call site (wrapped in try/catch by {@link buildDaemon}) — a
- * snapshot failure must never block the deploy itself, only leave that one deploy unprotected.
- *
- * INTERRUPTED-DEPLOY CASE: if the daemon process dies mid-build (after this snapshot is taken but before
- * the matching restore/discard runs — see buildDaemon), the backup is simply left on disk. It is not a
- * growing leak: the FIRST line here unconditionally clears any existing backup before taking a new one,
- * so the very next deploy attempt that reaches the build step overwrites the orphan with a fresh
- * snapshot. Worst case is one extra dist-sized copy sitting under LOOM_HOME until then — never served,
- * never user-visible, never accumulating. A crash between the wipe and a restore does mean the UI stays
- * broken until that next deploy attempt (successful or not) resolves it; that gap needs a human to notice
- * the crash and re-run the supervisor regardless (see CLAUDE.md), so it isn't made worse by this design.
+ * @decision 0eb97fa1 — turbo's `clean` task wipes dist before EITHER a real build or a cache-hit
+ * restore, so a failed deploy build can leave the daemon serving a broken/missing UI instead of the
+ * last good bundle; this snapshot/restore pair is the fix (docs/decisions/0eb97fa1-snapshot-and-
+ * restore-web-dist-around-a-deploy-build.md — also covers the interrupted-deploy self-healing case).
  */
 function snapshotWebDist(root: string): void {
   const backup = webDistBackupDir();
@@ -570,18 +541,17 @@ export interface SupervisorChangeDeps {
 }
 
 /**
- * Card 469b5e67: deliberately calls {@link boundedSimpleGit} with NO `env` argument — do NOT reintroduce
- * `{ ...process.env, GIT_TERMINAL_PROMPT: "0" }` (the shape this site used to have). Measured against the
- * installed simple-git: passing an explicit `.env()` object containing an ambient `GIT_EDITOR`/
- * `GIT_PAGER`/`PAGER`/`EDITOR`/`GIT_SEQUENCE_EDITOR`/`GIT_EXTERNAL_DIFF` throws `GitPluginError`
- * (`allowUnsafeEditor`/`allowUnsafePager`) — simple-git's unsafe-operations check inspects only the
- * object explicitly passed to `.env()`, not the process's real inherited env, so OMITTING `.env()`
- * entirely (rather than stripping those six keys) sidesteps the check altogether. `git log` performs no
- * network operation, so `GIT_TERMINAL_PROMPT` (which only governs git's own HTTP(S) credential-prompt
- * behavior) has no live effect here regardless — the identical reasoning `vault/versioner.ts`'s
- * `boundedVaultGit` already documents for its own no-`.env()` call (card 54b839c5). See `git/bounded.ts`'s
- * own doc on {@link boundedSimpleGit} for the full account of why this previously threw and was silently
- * swallowed into a permanently-false "unchanged" advisory.
+ * @decision 54b839c5 — card 469b5e67: deliberately calls {@link boundedSimpleGit} with NO `env` argument;
+ * do NOT reintroduce `{ ...process.env, GIT_TERMINAL_PROMPT: "0" }` (the shape this site used to have —
+ * it threw `GitPluginError` (`allowUnsafeEditor`/`allowUnsafePager`) on an ambient `GIT_EDITOR`/
+ * `GIT_PAGER`/`PAGER`/`EDITOR`/`GIT_SEQUENCE_EDITOR`/`GIT_EXTERNAL_DIFF` and was silently swallowed into
+ * a permanently-false "unchanged" advisory). simple-git's unsafe-operations check inspects only what's
+ * EXPLICITLY PASSED to `.env()`, not the process's own inherited env, so omitting `.env()` entirely
+ * sidesteps it altogether — the smaller fix than stripping those six keys, since `git log` performs no
+ * operation, so `GIT_TERMINAL_PROMPT` has no live effect here regardless — same reasoning
+ * `vault/versioner.ts`'s `boundedVaultGit` documents for its own no-`.env()` call
+ * (docs/decisions/54b839c5-bound-vault-git-plumbing-calls-and-unstageoversizedfiles-reset-semantics.md —
+ * the full mechanism; this site carries no separate copy).
  */
 async function defaultGitLogSince(root: string, sinceIso: string, file: string): Promise<string> {
   const git = boundedSimpleGit(root, SUPERVISOR_CHECK_TIMEOUT_MS);
@@ -589,12 +559,13 @@ async function defaultGitLogSince(root: string, sinceIso: string, file: string):
 }
 
 /**
- * Card 2e84a250: the three states `supervisorScriptChangedSince` can resolve to. Deliberately a
- * discriminated union, NOT a second boolean — a second boolean just recreates the exact collapse this
- * card exists to kill one layer up, and a caller that tries to fold this back into a bare true/false is
- * a TYPE ERROR, not a silent possibility. `reason` on `"could-not-check"` carries the same message
- * already logged by {@link supervisorScriptChangedSince}'s own `console.warn`, so an up-stack caller
- * that wants to surface WHY doesn't need to re-derive it.
+ * The three states `supervisorScriptChangedSince` can resolve to. `reason` on `"could-not-check"` carries
+ * the same message already logged by {@link supervisorScriptChangedSince}'s own `console.warn`, so an
+ * up-stack caller that wants to surface WHY doesn't need to re-derive it.
+ *
+ * @decision 2e84a250 — deliberately a discriminated union, NOT a second boolean: a caller that folds this
+ * back into a bare true/false is a TYPE ERROR, not a silent possibility (docs/decisions/2e84a250-
+ * supervisor-check-result-is-a-three-state-union.md).
  */
 export type SupervisorCheckResult =
   | { status: "changed" }
@@ -612,14 +583,14 @@ export type SupervisorCheckResult =
  * last-deployed-SHA bookkeeping is needed. BEST-EFFORT + BOUNDED + NEVER throws: a git failure (no
  * repo, git unavailable, a genuinely HUNG child hitting {@link defaultGitLogSince}'s idle `block`
  * timeout — NOT a merely slow-but-producing one, see that function's own doc) resolves to
- * `{status:"could-not-check"}` — this is an ADVISORY
- * warning only, so an inability to check must never block the restart itself. But "checked, unchanged"
- * and "could not check" must not be indistinguishable to a caller: card 469b5e67 found the two folded
- * into one silent `false` with NO trace of which happened, which is exactly the failure mode that made
- * an env bug in {@link defaultGitLogSince} invisible for as long as it was. Card 2e84a250 carries that
- * distinction past this function's own return value (469b5e67 only got it into the daemon log) — see
- * `SupervisorCheckResult`. A check failure is still logged here too (never thrown), so the daemon log
+ * `{status:"could-not-check"}` — this is an ADVISORY warning only, so an inability to check must never
+ * block the restart itself. A check failure is still logged here too (never thrown), so the daemon log
  * keeps its own independently-findable trace.
+ *
+ * @decision 2e84a250 — "checked, unchanged" and "could not check" must not be indistinguishable to a
+ * caller: the two used to fold into one silent `false` with no trace of which happened, which is exactly
+ * the failure mode that made an env bug in {@link defaultGitLogSince} invisible for as long as it was
+ * (docs/decisions/2e84a250-supervisor-check-result-is-a-three-state-union.md).
  */
 export async function supervisorScriptChangedSince(bootTime: Date, deps: SupervisorChangeDeps = {}): Promise<SupervisorCheckResult> {
   try {
