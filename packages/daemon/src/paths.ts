@@ -87,20 +87,11 @@ export function sessionScratchDir(sessionId: string): string {
   return path.join(SCRATCH_ROOT_DIR, sessionId);
 }
 /**
- * Per-worker git worktrees live outside the PROJECT repo (share its object store; don't clutter it) —
- * AND outside LOOM_HOME itself. `LOOM_HOME` (`~/.loom`) is a plain state dir for most users, but in the
- * self-hosting setup it IS a git repo of its own (cross-agent state: skill sources, resume docs,
- * `restart-intent.json`, …). Nesting `worktrees/` inside it (the pre-2026-07-07 layout) meant a worker
- * whose Bash cwd sits under its worktree could `cd ..` up into that repo and a stray `git` command there
- * would mutate the daemon home's live working tree — this actually happened (a worker's `cd .. && git
- * stash` swept up another agent's uncommitted WIP). So the base is a SIBLING of LOOM_HOME —
- * `<LOOM_HOME>-worktrees` — derived from it (still isolated per-LOOM_HOME, so side-by-side daemons with
- * different LOOM_HOME stay isolated) but with no `.git` ancestor of its own between it and the
- * filesystem root (LOOM_HOME's parent — the user's home dir — is not a git repo). `path.dirname`/
- * `path.basename` (not string concatenation) so a trailing separator on LOOM_HOME can't produce a
- * malformed sibling path. Existing worktrees created under the OLD `LOOM_HOME/worktrees` layout keep
- * working (tracked by absolute path in the DB) until they're individually removed — going-forward
- * relocation only, no migration.
+ * Per-worker git worktrees live OUTSIDE LOOM_HOME, as a sibling dir — never nested inside it. LOOM_HOME
+ * can itself be a live git repo (the self-hosting setup), so nesting worktrees there let a worker's
+ * relative `cd ..` + git op mutate the daemon home's own working tree — this actually happened once.
+ * `path.dirname`/`path.basename` (not string concatenation) avoid a malformed path on a trailing separator.
+ * @decision sha:e1c6ef65 — do not nest worktrees back inside LOOM_HOME; see the record for the incident.
  */
 export const WORKTREES_DIR = path.join(path.dirname(LOOM_HOME), `${path.basename(LOOM_HOME)}-worktrees`);
 /**
@@ -249,21 +240,11 @@ export const SYNTHESIZE_SCRIPT = path.join(__dirname, "..", "assets", "python", 
 export const OBSIDIAN_PREFLIGHT_FRAGMENT = path.join(__dirname, "..", "assets", "skill-fragments", "obsidian-preflight.md");
 
 /**
- * Card 0e4a859a: the codescape discovery block's PROSE TEXT lives as a dev-only asset file — NOT a source
- * string literal — inside the `codescape` skill dir (`assets/skills/codescape/prompt-block.md`), never
- * under `skill-fragments/` above (which ships to every user). `codescape/` is one of `DEV_ONLY_SKILLS`
- * (`curate-release-skills.mjs`) and is entirely omitted from a published `loomctl` release, exactly like
- * that dir's own SKILL.md — the SAME privacy posture the codescape-privacy-guard test (card f3ce53f1)
- * already enforces for that dir. Read live from the package dir at manager/worker spawn time
- * (`sessions/service.ts`'s `resolveCodescapeBlockText`); a missing/unreadable file (every non-dev,
- * non-self-host build, where this dir was curated out) degrades to no block — never a fallback string
- * embedded in source, which would defeat the whole point of moving it here.
- *
  * ⛔ STANDING COMMITMENT ON THE ASSET TEXT: `prompt-block.md` (the file this constant points at) is a
  * cross-project measurement instrument — its TEXT must not change without recording a change boundary
- * and disclosing the change to the Codescape peer unasked. This constant/comment may still be edited
- * freely; only the asset file's own bytes are under the commitment. See project memory
- * `codescape-prompt-block-is-a-measurement-instrument`.
+ * and disclosing the change to the Codescape peer unasked (the constant/comment may still be edited
+ * freely). See project memory `codescape-prompt-block-is-a-measurement-instrument`.
+ * @decision 0e4a859a — why this lives in the dev-only `codescape/` skill dir, not `skill-fragments/`.
  */
 export const CODESCAPE_PROMPT_BLOCK_ASSET = path.join(__dirname, "..", "assets", "skills", "codescape", "prompt-block.md");
 
@@ -390,22 +371,10 @@ export function isLogMessageContentEnabled(): boolean {
 export const CODESCAPE_HOME_DIR = path.join(LOOM_HOME, "codescape");
 
 /**
- * Card 503a30a0: whether the Codescape fleet-daemon supervisor should start at boot. `isLoomDev()` is a
- * HARD prerequisite — Codescape supervision lives in the same LOOM_DEV-gated layer as the Platform Lead
- * builtins and NEVER runs for a regular `loomctl` user, flag or not. Within dev, the gate is now HOST-CLI
- * PRESENCE, not a hand-set env toggle: `hostToolBinExists(codescapeBinCandidate(dbPath))` — the SAME
- * DB-path → `LOOM_CODESCAPE_BIN` → bare-PATH-name precedence the spawn resolvers already use (see
- * `codescapeBinCandidate`/`resolveCodescapeBin` below). Codescape is a PRIVATE internal tool: a vanilla
- * end-user's host never has a `codescape` binary anywhere on PATH, so this resolves false for every
- * ordinary install with ZERO configuration and no discoverable toggle — it activates automatically, with
- * no hand-set env var, on the ONE class of host that actually has the CLI installed (the owner's own dev
- * machine). Retires the old `LOOM_CODESCAPE_ENABLED=1` hardcoded env-only gate entirely (the exact class
- * of knob the `f487df9d` sweep retired elsewhere) — there is no env-based "master switch" left to hand-set.
- * `dbPath` is the optional DB-persisted `integrations.codescape.path` override (card 8dc5ebb9), threaded
- * in by a caller that has one (e.g. `pty/host.ts`'s per-spawn `getIntegrationPaths` seam); omitted by a
- * caller with no DB context (paths.ts itself has none), which still resolves correctly via the
- * env/bare-PATH layers alone. Read at CALL time (like `isLoomDev`) so a single test process can exercise
- * both the CLI-present and CLI-absent state within one run.
+ * Whether the Codescape fleet-daemon supervisor should start at boot. `isLoomDev()` is a HARD
+ * prerequisite — Codescape supervision NEVER runs for a regular `loomctl` user, flag or not. Read at
+ * CALL time (like `isLoomDev`) so a single test process can exercise both states within one run.
+ * @decision 503a30a0 — gated on HOST-CLI PRESENCE, not a hand-set env toggle; see the record for why.
  */
 export function isCodescapeSupervisorEnabled(dbPath?: string): boolean {
   return isLoomDev() && hostToolBinExists(codescapeBinCandidate(dbPath));
