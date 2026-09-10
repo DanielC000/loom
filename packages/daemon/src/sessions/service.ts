@@ -3770,21 +3770,12 @@ export class SessionService {
           ...(payload?.outputFile !== undefined ? { outputFile: payload.outputFile } : {}),
           ...(payload?.gateDetail !== undefined ? { gateDetail: payload.gateDetail } : {}),
           ...(payload?.proximity !== undefined ? { proximity: payload.proximity } : {}),
-          // Card 6dcb9cd3: `!== undefined` (not truthy) — a `null` here IS the measured negative
-          // (`payload.retriedFile` is written unconditionally, as a real name or `null`, by
-          // deriveMergeGateVerdict) and must pass through, exactly like the `undefined`-means-"row predates
-          // this card" case must stay omitted rather than fabricated as `null`. `retryWarning` is the one
-          // exception to this whole block's "spread payload.X verbatim" shape — it's DERIVED (via one of
-          // TWO formatters the live nudge also renders from, card 9bdc8ea5 — see the dispatch just below),
-          // not stored, and gated on `retriedFile` non-null AND `retryPassed` a strict boolean (a
-          // `null`/`undefined` retriedFile has no warning to render; see the dispatch's own doc for why
-          // `retryPassed` must ALSO be checked, not `retriedFile` alone). Card 5ef78900 round 2: it's
-          // computed from the RAW `payload.retriedFile`/`payload.outputTail` regardless of redaction — this
-          // was the bypass (see `GATE_VERDICT_FIELD_CLASSIFICATION`'s doc) — but that's safe here precisely
-          // BECAUSE the post-hoc filter below keeps a key only when it's classified `"structural"`, so
-          // `retryWarning` (classified `"sensitive"`) is dropped on a cross-project read same as every
-          // other sensitive field in this object; nothing downstream needs the computation itself to be
-          // redaction-aware.
+          // @decision 6dcb9cd3 — retriedFile spread `!== undefined` (not truthy): a `null` here IS a
+          // positive measured negative and must pass through as-is, never fabricated or omitted
+          // (docs/decisions/6dcb9cd3-retriedfile-is-a-positive-measured-negative.md)
+          // @decision 5ef78900 — retryWarning is the one field here that's DERIVED, not spread verbatim;
+          // classified "sensitive" so it's still dropped by the post-hoc redaction filter below
+          // (docs/decisions/5ef78900-timingband-cross-project-numeric-disclosure-is-deliberate.md)
           ...(payload?.retriedFile !== undefined ? { retriedFile: payload.retriedFile } : {}),
           ...(payload?.retryPassed !== undefined ? { retryPassed: payload.retryPassed } : {}),
           // Card 9966c52d: `payload.outputTail` (attempt 1's own captured tail, spread a few lines above)
@@ -4117,83 +4108,21 @@ export class SessionService {
   private static readonly DEFAULT_GATE_CANCEL_VERIFY_MS = 5_000;
 
   /**
-   * `gate_cancel` (card 8d585277) — the manual cancel/supersede escalation for a case auto-supersede-on-
-   * merge does NOT cover: no merge decision exists yet (a known-failing base, a stale/UNVERIFIED self-
-   * check, a force-push, a worker recycled mid-run — see the card's own worked instances). Manager-facing,
-   * PROJECT-SCOPED (a caller can only ever cancel an op belonging to their OWN project — `outcome:
-   * "refused"` for anything else, checked BEFORE any mutation), by the same `opId` a `run_gate`/
+   * `gate_cancel` — the manual cancel/supersede escalation for a case auto-supersede-on-merge does NOT
+   * cover: no merge decision exists yet (a known-failing base, a stale/UNVERIFIED self-check, a force-push,
+   * a worker recycled mid-run). Manager-facing, PROJECT-SCOPED (`outcome:"refused"` for an op outside the
+   * caller's own project, checked BEFORE any mutation), by the same `opId` a `run_gate`/
    * `worker_merge_confirm` pending response or `gate_queue` entry already names (full id or an unambiguous
    * prefix, via the same `GateSemaphore.findByOpId` resolution `gate_status` uses).
-   *
-   * QUEUED → zero process risk (see `GateSemaphore.cancelQueued`'s own doc: `fn` was never invoked, there
-   * is nothing to kill) — cancels immediately. Supported for `gateType:"worker"` (a worker's own self-check)
-   * AND, since card 361520a0 (Half Two), `gateType:"merge"` — a queued merge gate is JUST as zero-risk as a
-   * queued self-check: nothing has been admitted, so nothing has touched the canonical repo or the worktree
-   * yet. `confirmWorkerMerge` now carries the same `GateCancelledError` catch `runWorkerGate` already had
-   * (see its own doc), which is what makes a withdrawn QUEUED merge settle as a clean `cancelled`
-   * `ConfirmMergeResult` instead of the crash-shaped `[loom:merge-failed] … errored: gate cancelled` a
-   * queued merge cancel used to produce before that catch existed. `gateType:"deploy"` stays refused in
-   * BOTH phases — `deployOwnProject` has NO such catch, so cancelling one would still surface as that same
-   * crash-shaped throw; nothing establishes it's safe to add one on this card, and the card never asked.
-   *
-   * ⚠️ RUNNING → scoped to `gateType:"worker"` ONLY, still — a QUEUED merge gate is safe to withdraw for the
-   * reason above, but an ALREADY-RUNNING one is NOT, and the two phases are deliberately NOT treated the
-   * same: interrupting a RUNNING merge risks leaving staged residue in the canonical checkout mid-squash,
-   * which fails closed and needs a HUMAN to clear it by hand before ANY further merge on that repo succeeds
-   * (memory `concurrent-squash-merges-lose-work`, trigger 2; `62fb673` refuses rather than absorbing it) —
-   * a risk that simply does not exist for a gate that was never admitted. `run_gate`'s self-check remains
-   * the only gateType whose `fn` actually reads/forwards `cancelSignal` into `runGateStep` (see
-   * `runWorkerGate`'s wiring), so a RUNNING merge or deploy gate is refused in EITHER case: refused honestly
-   * rather than silently issuing a cancel a caller might mistake for a supported one. A later reader must
-   * not "simplify" queued and running merge cancellation into one rule — they differ on purpose.
-   *
-   * RUNNING, once past that gate (worker self-checks only): asks it to stop (`cancelRunning`), then waits UP TO
-   * `GATE_CANCEL_VERIFY_MS` (the ADMISSION clock the underlying op's own settle races against — never a
-   * bare wall-clock guess) for the real settle to land. If it lands in time, the kill was VERIFIED (see
-   * `runGateStep`'s `cancelling` doc — a settle can only be tagged `cancelled` after a genuine close/error
-   * event, never merely because a kill was issued) and this reports `cancelled`. If it DOESN'T land in
-   * time, this reports NOT cancelled — the process tree's death is unverified, so the slot is treated as
-   * still legitimately held rather than freed on an assumption; the run continues under its own
-   * pre-existing `gateTimeoutMs` bound exactly as if no cancel had been attempted. A cancel that can't be
-   * verified is never worse than no cancel at all.
-   *
-   * RACE WITH NATURAL COMPLETION: `cancelRunning` itself no-ops (`false`) if the op already left "running"
-   * by the time this call reaches the semaphore — reported as `not_cancelled` with the real reason, never
-   * a fabricated cancelled/failed outcome over a result that already landed for real.
-   *
-   * AMBIGUITY IS PROJECT-SCOPED TOO (Code Review finding B2-3): the FIRST resolution below is intentionally
-   * UNSCOPED (mirrors the original design) so a clean, unambiguous EXACT global match belonging to another
-   * project still yields the informative `refused` outcome (the caller already typed/knows that one id —
-   * confirming it exists elsewhere and is not theirs is not a new disclosure). But if THAT resolution comes
-   * back `ambiguous`, its `ids` could include other projects' live opIds (a prefix that happens to match
-   * several projects' ops at once) — so on an ambiguous global hit, this RE-RESOLVES scoped to the caller's
-   * OWN project (`scopeProjectId`) before ever returning anything: a clean hit within their own project
-   * proceeds normally (the global ambiguity was irrelevant to them), a still-ambiguous result only ever
-   * names THEIR OWN project's ids, and no match within their own project reports `not_found` — never
-   * `ambiguous` — since none of the globally-ambiguous candidates were even a valid target for this caller.
-   */
-  /**
-   * `params.scope` (card a0d912f5, Code Review [4]): a REQUIRED discriminator — `{kind:"project"}` (the
-   * pre-existing MANAGER surface: project-scoped only, exactly as before this card) or `{kind:"own",
-   * sessionId}` (the WORKER-scoped surface added by this card: cancel only an op it OWNS — `gateType ===
-   * "worker"` AND `entry.sessionId === sessionId`). REQUIRED, not optional, on purpose: an earlier draft
-   * made this an optional `restrictToOwnerSessionId` field, which meant a future caller that simply forgot
-   * to pass it would silently inherit MANAGER-level (any op in the project) cancel power instead of
-   * failing to compile — Code Review caught this as a real capability-escalation-by-omission risk before
-   * it ever shipped. A "merge" gate's own descriptor happens to be stamped with the WORKER's sessionId too
-   * (it shares the same worktree key, `merge:${workerSessionId}` vs `gate:${workerSessionId}` — see
-   * `confirmWorkerMerge`'s own descriptor construction), so a bare sessionId match alone would let a
-   * worker cancel its OWN merge gate — a MANAGER's decision, never the worker's — as an accidental side
-   * effect of that coincidence; the explicit `gateType === "worker"` conjunct is what keeps `{kind:"own"}`
-   * scoped to a worker's own `run_gate` self-check and nothing else, in EITHER branch below (the ordinary
-   * registry entry and the repo-guard-only fallback, which is unconditionally merge-shaped — see its own
-   * doc).
-   * `params.intent`/`params.reason` (DoD-4): folded into the SAME `detail` string threaded into
-   * `cancelQueued`/`cancelRunning`/`cancelRepoGuardOnlyWait` below — already what a QUEUED cancel's
-   * `GateCancelledError.detail` (and, since this card, a RUNNING cancel's captured abort reason — see
-   * `runWorkerGate`'s `cancelSignalRef`) surfaces back out as the settled op's own `reason`, and from
-   * there into the `[loom:gate-cancelled]`/`[loom:merge-cancelled]` nudge text — so this is the ONE place
-   * that needs to compose it; nothing downstream needs its own intent/reason plumbing.
+   * @decision 8d585277 — QUEUED is zero-risk cancel-immediately for ANY gate type (worker or merge);
+   * RUNNING stays refused for merge/deploy (mid-squash residue needs a human to clear) and, for a worker
+   * self-check, is only reported `cancelled` once the kill is independently VERIFIED within
+   * `DEFAULT_GATE_CANCEL_VERIFY_MS` — an unverified kill leaves the slot held, not freed on assumption
+   * (docs/decisions/8d585277-gate-cancel-queued-zero-risk-running-worker-only.md)
+   * @decision a0d912f5 — `params.scope` is a REQUIRED discriminator (`{kind:"project"}` manager-wide vs
+   * `{kind:"own",sessionId}` a worker's own run_gate self-check only, gated on `gateType==="worker"` too) —
+   * making it optional risks a future caller silently inheriting manager-level cancel power
+   * (docs/decisions/a0d912f5-gate-admit-stamps-is-a-separate-later-checkpoint-than-start-stamps.md)
    */
   async cancelGateOp(
     callerSessionId: string, opId: string,
@@ -4350,47 +4279,17 @@ export class SessionService {
   }
 
   /**
-   * Card 597903fc: durable post-resume continuation-nudge dispatch — a boot-time notice that must not be
-   * silently dropped if its in-session give-up budget exhausts. Before this card, a boot-resume nudge (bare
-   * `pty.enqueueStdin`, no `onGiveUpExhausted`) drops a message with nothing surviving but a console line
-   * once its ONE give-up requeue is exhausted (host.ts's `submit()`: "non-durable entry, nothing further
-   * to preserve") — exactly the asymmetry a card audit found between `[loom:crash-recovered]` (was routed
-   * through a bare role-gated defer with no durability) and its sibling `[loom:merge-orphaned]` (already
-   * routed through `enqueueDurableMessage`, below). This closes that gap the same way: on give-up
-   * exhaustion, `enqueueDurableMessage`'s wired `onGiveUpExhausted` hook (`handleGiveUpExhausted`)
-   * re-mints the dispatch (self-healing under exactly the contention a whole-fleet boot resume creates)
-   * and, if truly exhausted past `GIVE_UP_REMINT_LIMIT`, appends a durable `session_message_gave_up`
-   * (outcome:"parked") audit event UNCONDITIONALLY — never a silent loss, matching the bar every other
-   * daemon-originated settle nudge already meets. Role-gated defer (`waitForMcpSeen` for a role that
-   * mounts loom-orchestration) so the resume race guard (see {@link usesOrchestrationMcp}) applies;
-   * dispatches immediately for every other role. `sender: "system"` (a daemon-generated notice, no
-   * originating session) — safe by the same reasoning `enqueueDurableMessage`'s own doc gives for every
-   * other sentinel-sender call site: `db.getSession("system")` returns undefined, so
-   * `handleGiveUpExhausted`'s sender-facing PARKED notice is skipped, never thrown.
-   *
-   * Card 9f7c59f1: NOT `private` — also wired into `CrashRecoveryDeps.enqueueDurableNudge` (index.ts, at
-   * `CrashRecoveryWatcher` construction, via an arrow wrapper) so the THIRD resume-and-nudge path reuses
-   * this same MCP-seen-gated + durable dispatch instead of the raw `pty.enqueueStdin` it used to call
-   * directly — see that class's own doc for why its old dispatch was a real, if narrower, instance of the
-   * exact gap this method was built to close. Card 06ebbb78: `resumeFleetOnBoot` (below) now routes ALL
-   * of its continuation nudges through this same method too — the plain, non-durable `enqueueNudge`/
-   * `deferredNudge` helpers this doc used to reference are gone; every boot-resume nudge in the codebase
-   * now shares this one durable dispatch.
-   *
-   * Card 90b9e904: the optional 5th param `opts` generalizes this for THREE MORE resume-and-nudge sites —
-   * `orchestration/wake.ts` (`WakeService.tick`), `orchestration/poll.ts` (`PollService.fire`), and
-   * `orchestration/event-triggers.ts` (`EventTriggerService.fire`, wake mode) — each independently resumes
-   * a not-live session and then enqueues, and (before this card) did so via a bare `pty.enqueueStdin`
-   * (event-triggers, which ALSO lacked durability) or the durable-but-ungated `enqueueSystemNudge` (wake/
-   * poll) — the exact gap card 9f7c59f1 closed here, just unconverged at three more call sites. All three
-   * dispatch `kind: "agent"` (a wake note / poll item / matched event is its own turn, never coalesced with
-   * anything else queued), and a companion-origin wake also carries a `route` — neither fits this method's
-   * original `kind: "warning"` default, hence `opts` rather than a hardcoded value. Every PRE-EXISTING
-   * caller above (all `kind: "warning"`, no route) is unaffected: `opts` defaults to `{}`, reproducing the
-   * old hardcoded behavior byte-for-byte. Each of the three new call sites wires this in via its OWN
-   * optional injected dep (mirroring `CrashRecoveryDeps.enqueueDurableNudge`'s shape) with a byte-identical
-   * raw fallback for every existing hermetic test double that doesn't inject it — see each site's own dep
-   * doc.
+   * Durable post-resume continuation-nudge dispatch, shared by every resume-and-nudge path in the daemon.
+   * @decision 597903fc — must not silently drop a boot-time notice if its in-session give-up budget
+   * exhausts; re-mints on give-up, then durably PARKS rather than vanishing with only a console line
+   * (docs/decisions/597903fc-durable-boot-resume-continuation-nudge.md)
+   * @decision 9f7c59f1 — NOT private: also called directly by `CrashRecoveryDeps.enqueueDurableNudge`,
+   * the third resume-and-nudge path (docs/decisions/9f7c59f1-enqueuedurablenudge-not-private-third-resume-path.md)
+   * @decision 06ebbb78 — `resumeFleetOnBoot` routes ALL its continuation nudges through this method too
+   * (docs/decisions/06ebbb78-resumefleetonboot-routes-through-enqueuedurablenudge.md)
+   * @decision 90b9e904 — optional 5th param `opts` (kind/route) generalizes this for 3 more call sites;
+   * defaults to `{}`, reproducing old `kind:"warning"` behavior byte-for-byte for every pre-existing caller
+   * (docs/decisions/90b9e904-enqueuedurablenudge-opts-param-generalizes-three-sites.md)
    */
   enqueueDurableNudge(
     id: string, role: SessionRole | null, text: string, taskId: string | null = null,
