@@ -6,8 +6,8 @@
  * (`ContextStats.lastUserText`).
  *
  * @decision 0f9268cc — detects (card eef4883c) then one-shot-recovers a transient upstream `claude` CLI
- *  paste-collapse race (investigated: card 8a39f544) — NOT a Loom write defect, no production write-fix —
- *  see docs/decisions/0f9268cc-paste-tripwire-detection-then-recovery.md
+ *  paste-collapse race (investigated: card 8a39f544) — NOT a Loom write defect, no production write-fix.
+ *  Do not treat a recurrence past v2.1.215 as the upstream fix regressing without re-checking claudeVersion.
  */
 
 /**
@@ -76,22 +76,17 @@ export const PASTE_TRIPWIRE_TOKEN_WINDOW = 16;
  * ABSENT from the submitted text, and (4) that EXACT placeholder token wasn't already observed, verbatim,
  * in an OLDER generation's own recorded turn.
  *
- * @decision 0f9268cc — (3) is a discriminating FIELD, not a suppressing filter: a placeholder token is
- *  CLI-GENERATED and can never appear in text Loom itself wrote, only in what the transcript records back.
- *  Validated against 18140 real transcript turns — the only 18 embedded-match hits were someone literally
- *  TYPING "[Pasted text #N...]" while discussing this bug, never a genuine collapse — see
- *  docs/decisions/0f9268cc-paste-tripwire-detection-then-recovery.md
+ * @decision 0f9268cc — (3) is a discriminating FIELD, not a filter: a placeholder token is CLI-GENERATED,
+ *  never present in text Loom itself wrote. Validated against 18140 transcript turns (18 embedded hits, all
+ *  typed discussion of this bug) — do not weaken/remove (3) without re-running that validation.
  *
  * ⚠️ KNOWN RESIDUAL, accepted: guard (3) can over-suppress if the CLI's assigned `#N` coincidentally
  *  matches an `#N` already quoted in the pasted content itself (e.g. a bug report about this bug) — rare
  *  enough to accept; not derivable from these two strings alone, so not a gap to rediscover.
  *
- * @decision 2c58bdd3 — (4) guards a stale-render-ghost: concurrent session traffic can leave an EARLIER,
- *  already-delivered generation's own placeholder token sitting in a LATER, unrelated turn's recorded
- *  text (found via investigation 773b3914, which traced 3 of 4 "ALSO collapsed" escalations, and
- *  structurally the 4th, to exactly this shape). Matches the WHOLE token (id+count), never magnitude
- *  alone, deliberately unlike the sibling `detectPastePlaceholderLengthLoss`'s own `gen` discriminator
- *  (card abeac33a) — see docs/decisions/2c58bdd3-gen-discriminator-matches-whole-token-not-magnitude.md
+ * @decision 2c58bdd3 — (4) guards a stale-render-ghost: an EARLIER generation's own placeholder token can
+ *  resurface in a LATER, unrelated turn's recorded text (investigation 773b3914). Matches the WHOLE token
+ *  (id+count), never magnitude alone — a magnitude-only match would let unrelated collapses collide.
  *
  * ⛔ Only a token at a generation STRICTLY OLDER than `currentGen` counts as "already observed" — this
  *  function IS the current-gen detector for its own case and must never defer to itself (the sibling
@@ -145,8 +140,8 @@ export function isPasteRecoveryAttempt(submittedText: string): boolean {
  * THIS text is recognized by `isPasteRecoveryAttempt` instead of triggering a third attempt.
  *
  * @decision 2d36337e — wording asks "does something you've done SINCE assume this content?", not "have
- *  you acted?" — catches a missed premise a later, already-acted-on message can mask. Builds on 4af5aefa's
- *  observed-not-claimed fix — see docs/decisions/2d36337e-recovery-wording-asks-since-not-already-acted.md
+ *  you acted?", since the latter alone lets a later message built on this one mask a missed premise. Do
+ *  not word it as a claim the content reached the recipient — the detector only observes the transcript.
  */
 export function buildPasteRecoveryText(originalText: string): string {
   return `${PASTE_RECOVERY_TAG} The transcript recorded a placeholder instead of your previous message's pasted content — it may not have reached you (a known upstream CLI paste-collapse race; see card eef4883c). Before dismissing this as already-handled: does anything you have done SINCE assume this content, not merely resemble something you recall seeing? A later message can be fully acted-on while still having depended on THIS one — check your own artifact (a reply you sent, a memory write, a turn count) for that, not just whether the topic feels familiar. Otherwise, here is the original content, resent:\n\n${originalText}`;
@@ -161,27 +156,21 @@ export function buildPasteRecoveryText(originalText: string): string {
  * placeholder wouldn't be there at all). That is what makes it work "regardless of who wrote the text"
  * (card's own framing).
  *
- * @decision 183de1a4 — the raw/human path usually DOES have a captured `submittedText`
- *  (`Live.lastRawSubmit`, one-turn ephemeral); the REAL, narrower gap this check exists to close is that
- *  the raw path never gets an entry in `Live.recentWrittenLineCounts` (pushed only by `submit()`), so a
- *  STALE/delayed re-render has nothing to explain it against — see
- *  docs/decisions/183de1a4-lastrawsubmit-retention-is-one-turn-only-never-persisted.md
+ * @decision 183de1a4 — the raw/human path usually DOES capture `submittedText` (`Live.lastRawSubmit`), but
+ *  that slot is one-turn ephemeral, not a durable store. The real gap: the raw path never gets an entry in
+ *  `Live.recentWrittenLineCounts` (pushed only by `submit()`), so a stale re-render has nothing to explain it.
  *
- * @decision abeac33a — HARD CONSTRAINT: a naive "placeholder present ⇒ loss" check FIRES ON A CORRECT
- *  SEND — a stale token can be a CLI-side re-render ghost from an EARLIER, already-delivered generation.
- *  `findExplainingWrittenGen` treats ANY matching entry (current or older gen) as explained; a raw
- *  `writeStdin` turn never pushes an entry, so only a STALE re-render of an older RAW turn is genuinely
- *  unexplained — see docs/decisions/abeac33a-gen-discriminator-explains-current-and-older-gen-matches.md
+ * @decision abeac33a — HARD CONSTRAINT: "placeholder present ⇒ loss" alone FIRES ON A CORRECT SEND — a
+ *  stale token can be an already-delivered older generation's CLI-side re-render ghost. Do not flag a
+ *  CURRENT-gen match here either — `detectBarePastePlaceholderTripwire` already owns that case.
  *
  * @decision b68d1f5b — silence is guaranteed only while the explaining write is inside
- *  `PASTE_LOSS_EXPLAIN_WINDOW`; beyond it this check WILL fire on a correct send. Deliberately a separate,
- *  integer-only ring from card c2c750a9's `Live.recentWrittenTurns` (sized for full-text concatenation, a
- *  different job) — see docs/decisions/b68d1f5b-window-sizing-and-calibration.md
+ *  `PASTE_LOSS_EXPLAIN_WINDOW`; beyond it this check WILL fire on a correct send. Do not reuse card
+ *  c2c750a9's `COMPOSER_ACCUM_WINDOW` ring here — it's sized for a different job (full-text concatenation).
  *
  * @decision b68d1f5b — `PASTE_LOSS_CALIBRATED_BYTES_PER_LINE` (five specimens, 128.4–132.3 B/line, all
- *  kickoffs delivered intact) is for the ALERT MESSAGE only, never the detection gate; calibrated against
- *  payload newlines, never wrapped terminal display rows — see
- *  docs/decisions/b68d1f5b-window-sizing-and-calibration.md
+ *  kickoffs delivered intact) is for the ALERT MESSAGE only, never the detection gate. Calibrated against
+ *  payload newlines, never wrapped terminal rows — a fixed 120-col pty only ever ADDS rows via wrapping.
  */
 export const PASTE_LOSS_CALIBRATED_BYTES_PER_LINE = 130;
 
@@ -264,10 +253,9 @@ export interface PasteLengthLossCandidate {
  * caller passed it didn't have one available at that moment); every other guard (the `gen` discriminator)
  * still applies in full.
  *
- * @decision 183de1a4 — null/undefined here does NOT mean "the human-paste case this detector exists for —
- *  Loom never captured what was typed"; the raw/human path usually DOES have a captured `submittedText`.
- *  See the retention-verdict doc for the real, narrower reason the human path still needs this detector —
- *  docs/decisions/183de1a4-lastrawsubmit-retention-is-one-turn-only-never-persisted.md
+ * @decision 183de1a4 — null/undefined here does NOT mean "no `submittedText` was ever captured" — the
+ *  raw/human path usually DOES capture it (`Live.lastRawSubmit`). Do not treat that slot as durable: it's
+ *  one-turn ephemeral, overwritten/cleared well before an older turn's content could be needed again.
  *
  * `recentWrittenLineCounts` is `Live.recentWrittenLineCounts` — the dedicated, integer-only history (see
  * `PASTE_LOSS_EXPLAIN_WINDOW`'s doc), NOT card c2c750a9's `Live.recentWrittenTurns`.
