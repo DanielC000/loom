@@ -25,3 +25,30 @@ FIXED (card `bc0774c4`): `purgeConfirmedGiveUpRequeue` no longer purges every si
 
 - `packages/daemon/src/pty/host.ts` (`textSignature`'s function doc). Relocated by card `a4818d7a` (tranche 1 on `pty/host.ts`).
 - `packages/daemon/src/pty/host.ts` (`AMBIGUOUS_DISPATCH_CAP`'s top-of-const doc), as of commit `1974444dc94618d380f474192e22edff20215ec5`. Relocated by card `de94a415` (tranche 2 on `pty/host.ts`). Folded into this pre-existing `4a0af485` record (rather than a second file) after tranche 2 created a same-id collision the injector's one-record-per-id resolution can't serve.
+
+## `logicalId` unifies two previously-separate id spaces so a late confirmation can find a duplicate across a remint
+
+Card 4a0af485 (follow-up): `logicalId` (QueuedMessage field) is the STABLE identity of the logical content
+an entry carries, unifying two id spaces that used to be separate — PtyHost's own per-enqueue `id`
+(regenerated on every enqueue, including a remint) and `sessions/service.ts`'s cross-remint `rootMsgId`
+(which already survives a remint, but PtyHost never saw it). `enqueueStdin` defaults `logicalId` to the
+entry's own freshly-minted `id` when a caller doesn't supply one, so every caller that never plumbs one
+still gets a valid, unique value — fully additive.
+
+`enqueueDurableMessage` supplies its OWN `rootMsgId` here instead, so a value surviving a re-mint OR an
+auto-joined manual resend (`hasAmbiguousMatch`) matches what PtyHost tracks in `Live.ambiguousDispatches`
+— letting a late confirmation purge a duplicate from a different dispatch (a remint or resend), not just
+a same-generation retry.
+
+## Do not (2)
+
+- Do not let `logicalId` drift from `sessions/service.ts`'s `rootMsgId` for a durable message — a mismatch
+  breaks the late-confirmation purge's ability to recognize a duplicate that arrived via a different
+  dispatch (a remint or a manual resend) rather than a same-generation retry.
+
+## Source (2)
+
+Inline comment in `packages/daemon/src/pty/host.ts` (the `logicalId` field doc on `QueuedMessage`), as of
+commit `44aca27866f2409cddec99b270e5dd27a139e61c` (`fix(pty): attribute a late engine confirmation by
+logical content id so a re-send cannot duplicate`). Relocated by card `3f45b7d8` (tranche 6 on
+`pty/host.ts`).

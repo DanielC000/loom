@@ -1824,187 +1824,128 @@ export type QueueSource = "human" | "system";
  */
 export type TurnRoute = CompanionRoute;
 /**
- * Coalescing classification (owner-directed, 2026-07-03; AMENDED 2026-08-28 by card eac3464d): `"warning"`
- * = a Loom operational nudge (idle/context/busy-stuck watchdogs, restart/boot continuation notes,
- * memory-recall injection — full producer enumeration at drainPending's warning-kind branch, card
- * 8f1d7912) — always safe to concatenate with its neighbors into one turn, from ANY sender. Rate-limit
- * replay is NOT a producer here: `resumeAfterRateLimit` replays `live.lastPrompt` via a direct
- * `this.submit()` call, deliberately bypassing `enqueueStdin`/`live.pending` (and this classification)
- * entirely. `"agent"` = a message AUTHORED by an agent or a human TO the recipient (a
- * Lead's `session_message`, a human composer turn, a worker→manager report, a manager→worker
- * direction/redirect, a companion inbound or proactive reminder/heartbeat) — drained ONE-PER-TURN
- * **ACROSS senders** (the 2026-07-03 guarantee this classification exists to protect: two DIFFERENT
- * senders' directives are never mashed together), but a run of CONSECUTIVE queued entries from the SAME
- * sender now coalesces into one turn (card eac3464d, owner-authorized 2026-08-28 ask 3 — "concatenated
- * and sent together as one prompt... so it's clear to the user what is happening" — with
- * `DRAIN_SEPARATOR` as the legibility mitigation), bounded by `AGENT_COALESCE_MAX_COUNT`/
- * `AGENT_COALESCE_MAX_BYTES` and excluding any give-up/re-mint (`giveUpGen`-tagged) entry (see
- * `drainPending`'s same-sender branch). This is a STATED trade: the WITHIN-sender one-per-turn guarantee
- * is deliberately given up; the CROSS-sender guarantee is not. Full legacy behavior (every kind, every
- * sender, the whole leading same-route run) is still available via `coalesceAgentMessages` (see
- * `drainPending`). Defaults to `"warning"` at the `enqueueStdin` call boundary so every pre-existing
- * caller that predates this classification (tests, and any call site this change didn't touch) keeps
- * the old full-coalesce behavior byte-identical; every real production call site is classified
- * explicitly (see host.ts's callers). Bias for anything genuinely ambiguous: `"agent"` — the harm this
- * classification exists to prevent is coalescing DIFFERENT senders' agent messages together, so a
- * warning wrongly delivered one-per-turn is merely a few extra benign turns.
+ * Coalescing classification of a queued message: `"warning"` (a Loom operational nudge — idle/context/
+ * busy-stuck watchdogs, restart/boot continuation, memory-recall injection; full enumeration at
+ * `drainPending`'s warning-kind branch, card 8f1d7912) always coalesces with its neighbors, from ANY
+ * sender. `"agent"` (a message authored by an agent or human TO the recipient) drains ONE-PER-TURN ACROSS
+ * senders, though a run of consecutive entries from the SAME sender now coalesces too, bounded. Rate-limit
+ * replay is NOT a producer here — `resumeAfterRateLimit` replays `live.lastPrompt` via a direct `submit()`
+ * call, bypassing `enqueueStdin`/`live.pending` (and this classification) entirely. Defaults to `"warning"`
+ * at the `enqueueStdin` call boundary so every pre-existing caller keeps the old full-coalesce behavior
+ * byte-identical. Bias for anything genuinely ambiguous toward `"agent"`. Full legacy behavior (every
+ * kind, every sender, the whole leading same-route run) is still available via `coalesceAgentMessages`
+ * (see `drainPending`).
+ * @decision eac3464d — the owner-directed 2026-07-03 classification + its 2026-08-28 same-sender-coalescing
+ * amendment, and the deliberate trade (within-sender guarantee given up, cross-sender kept); see
+ * docs/decisions/eac3464d-agent-coalesce-bounds-are-deliberate-against-a-live-confirmation-loss-risk.md.
  */
 export type QueuedMessageKind = "warning" | "agent";
 /**
- * `questionId` OPTIONALLY tags a queued entry as a decision-inbox answer-push-nudge (card bbc46336
- * follow-up) for the question it announces. Only the answer route sets it; every other caller leaves it
- * undefined. It exists solely so `purgeQueuedByQuestionIds` can find and drop a nudge that's gone stale —
- * `question_pull` consumes ALL of a session's answered questions atomically, so a batch of N answers
- * produces N queued nudges but only the FIRST pull is productive; the rest would otherwise drain as
- * separate turns and each find nothing left to pull.
+ * `questionId` optionally tags a queued entry as a decision-inbox answer-push-nudge for the question it
+ * announces (only the answer route sets it). Exists so `purgeQueuedByQuestionIds` can drop a nudge that's
+ * gone stale.
+ * @decision bbc46336 — `question_pull` consumes ALL of a session's answered questions atomically, so a
+ * batch of N answers produces N queued nudges but only the FIRST pull is productive; see
+ * docs/decisions/bbc46336-questionid-tags-a-stale-answer-nudge-for-batch-purge.md.
  */
 /**
- * `reportEventId` (card 60b26261) is the SAME shape of tag `questionId` is, one field down: it OPTIONALLY
- * tags a queued `[loom:worker-report] …` nudge with the `worker_report` orchestration event's own id —
- * the same id `worker_report_get` returns as `eventId`. Only `SessionService.workerReport`'s manager-bound
- * push sets it (stamped with the id it just gave `db.appendEvent` for that same report); every other
- * caller leaves it undefined. It exists solely so `purgeQueuedByReportEventIds` can find and drop a
- * still-queued copy of a report the manager already read straight from durable storage via
- * `worker_report_get` — WITHOUT keying on the worker id (a worker can file `progress` then `done`; purging
- * by worker id would silently drop an UNREAD earlier report). A worker id has no such ambiguity problem
- * for `purgeQueuedWorkerIdleNudges` (only ever one live idle-nudge per worker at a time), which is why that
- * helper keys on worker id and this one deliberately does not.
+ * `reportEventId` optionally tags a queued `[loom:worker-report] …` nudge with the `worker_report`
+ * orchestration event's own id (the same id `worker_report_get` returns as `eventId`) — set ONLY by
+ * `SessionService.workerReport`'s manager-bound push.
+ * @decision 60b26261 — lets `purgeQueuedByReportEventIds` drop a still-queued copy of a report the manager
+ * already read via `worker_report_get`, WITHOUT keying on worker id (ambiguous across a progress→done
+ * pair); see docs/decisions/60b26261-reporteventid-purges-a-report-the-manager-already-read.md.
  */
 /**
- * `giveUpRequeues` (card 441499ee) OPTIONALLY counts how many times THIS EXACT message has already been
- * put back on `live.pending` after a submit give-up (see `fireEnterAndVerify`'s GIVE-UP RECOVERY branch
- * and `GIVE_UP_REQUEUE_LIMIT`) — undefined/0 for every message that has never given up. Identity-scoped
- * to the message object itself (never inferred from matching text), so two legitimately identical
- * messages are counted independently and a message that keeps giving up can't requeue forever.
+ * `giveUpRequeues` optionally counts how many times THIS EXACT message has already been put back on
+ * `live.pending` after a submit give-up (see `fireEnterAndVerify`'s GIVE-UP RECOVERY branch and
+ * `GIVE_UP_REQUEUE_LIMIT`) — undefined/0 for a message that has never given up. Identity-scoped to the
+ * message object itself (never inferred from matching text), so two legitimately identical messages are
+ * counted independently and a message that keeps giving up can't requeue forever.
  *
- * `giveUpGen` (card 441499ee, hardening against a false-negative give-up) tags a requeued entry with the
- * `submitGeneration` its ORIGINAL (failed) submit ran under. The give-up discriminator can itself be
- * wrong — a confirming hook can arrive AFTER give-up already fired, proving the original turn actually
- * started (see `purgeConfirmedGiveUpRequeue`) — so this is the correlation a late confirmation uses to
- * find and purge the now-redundant requeued copy before it can ever drain and double-deliver the same
- * text. undefined for every entry that was never requeued.
- *
- * `giveUpHeldUntil` (card 73d5c34a) is the epoch-ms deadline before which this SAME requeued entry is
- * ineligible for `drainPending` — see `isGiveUpHeld`/`GIVE_UP_HOLD_MS`. Stamped alongside `giveUpGen` in
- * `requeueGiveUpOrigin`, never elsewhere; undefined for every entry that was never requeued (so a normal
- * message's drain eligibility is untouched — `isGiveUpHeld` is false whenever this is undefined).
- *
- * `onGiveUpExhausted` (card ccb407eb) is the SAME shape of hook `onDeliver` is — a caller-supplied closure
- * PtyHost invokes and otherwise knows nothing about — but fired on the OPPOSITE outcome: `requeueGiveUpOrigin`
- * calls it instead of silently discarding a message whose `giveUpRequeues` has exceeded
- * `GIVE_UP_REQUEUE_LIMIT`. Deliberately NOT reusing `onDeliver` for this: `onDeliver` fires (and, via
- * `enqueueDurableMessage`'s wiring, marks the durable record "delivered") the instant a held message is
- * HANDED to the recipient — see `resolveQueuedMessage`'s doc — which for a message that ends up giving up
- * has usually ALREADY fired by the time exhaustion is detected; a second call is just an idempotent no-op,
- * not a channel this branch can repurpose. `onGiveUpExhausted` is PtyHost's only hook for "this message's
- * final in-session attempt failed and its budget is spent" — everything upstream of that (re-mint a fresh
- * dispatch, or park it and tell the sender) is sessions/service.ts's `enqueueDurableMessage` /
- * `handleGiveUpExhausted`'s concern, not PtyHost's; PtyHost stays DB-agnostic exactly as it already is for
- * every other durability guarantee. undefined for every entry that never had one wired (every existing
- * caller, and any `enqueueStdin` caller that doesn't need durability) — a strict no-op, never invoked.
+ * `giveUpGen` tags a requeued entry with the `submitGeneration` its ORIGINAL (failed) submit ran under —
+ * the correlation a LATE confirming hook (arriving after give-up already fired, proving the original turn
+ * actually started) uses to find and purge the now-redundant requeued copy before it can drain and
+ * double-deliver the same text (see `purgeConfirmedGiveUpRequeue`). undefined for an entry never requeued.
+ * @decision 441499ee — the give-up discriminator's own measured false-negative rate is what makes this
+ * correlation load-bearing (a late confirmation is the COMMON case, not the exception); see
+ * docs/decisions/441499ee-give-up-confirm-settle-is-a-short-last-chance-check.md.
  */
 /**
- * `logicalId` (card 4a0af485) is the STABLE identity of the logical content this entry carries, unified
- * across two id spaces that used to be separate: PtyHost's own per-enqueue `id` (above — regenerated on
- * every enqueue, including a remint) and sessions/service.ts's cross-remint `rootMsgId` (which already
- * survives a remint, but PtyHost never saw it). `enqueueStdin` defaults `logicalId` to the entry's own
- * freshly-minted `id` when a caller doesn't supply one — every existing caller (that never plumbs a
- * logicalId) still gets a valid, unique-to-itself value, so this is fully additive. `enqueueDurableMessage`
- * (sessions/service.ts) is the one caller that supplies its OWN `rootMsgId` here instead, so a value that
- * survives across an automatic re-mint OR an auto-joined manual resend (see `hasAmbiguousMatch`) is the
- * SAME value PtyHost tracks in `Live.ambiguousDispatches` — this is what lets a late confirmation purge a
- * duplicate copy that arrived via a completely different dispatch (a remint, or a manager's own resend),
- * not just a same-generation retry.
+ * `giveUpHeldUntil` is the epoch-ms deadline before which this SAME requeued entry is ineligible for
+ * `drainPending` (see `isGiveUpHeld`). Stamped alongside `giveUpGen` in `requeueGiveUpOrigin`, never
+ * elsewhere; undefined for an entry never requeued.
+ * @decision 73d5c34a — see docs/decisions/73d5c34a-give-up-hold-window-outlasts-one-reconcile-tick.md for
+ * why the window is sized past one reconcile tick and deliberately un-coupled from it.
  */
 /**
- * `mintedAtGen` (card 4af5aefa) — the value of `Live.submitGeneration` at the moment THIS entry was
- * minted, set ONLY by the paste-recovery re-injection (`host.ts`'s Stop-hook tripwire call site). Never
- * used to suppress or reorder anything (that would recreate this card's own defect one level up —
- * acting on a proxy for engine visibility rather than what's actually observable). Its ONLY consumer is
- * `annotatePasteRecoveryAge`, which compares it against the generation count at ACTUAL WRITE time to
- * disclose a fact we genuinely know (how many turns ran since this was queued) — never touched by any
- * other caller, so every existing enqueue stays byte-identical.
- *
- * `submitGeneration` is a PER-SESSION counter that starts at 0 for every fresh `Live` (a `worker_recycle`
- * successor, or a session resumed after a `daemon_restart`) — so `mintedAtGen`, a value from a
- * DIFFERENT session's counter, is MEANINGLESS once that boundary is crossed: comparing a predecessor's
- * gen 47 against a successor's gen 0 doesn't mean "47 generations ago", it silently means nothing
- * (`annotatePasteRecoveryAge`'s own `currentGen <= mintedAtGen` guard reads that as "nothing to
- * disclose yet" and stays quiet — the exact silent-degrade card `1c47454b` names). Every caller that
- * carries a `QueuedMessage` across such a boundary (`SessionService.carryPendingToSuccessor`, the
- * `daemon_restart` replay in `resumeFleetOnBoot`) MUST NOT thread `mintedAtGen` through to the far side
- * — see `mintedAtWallClock` below for the field that actually survives a boundary honestly.
+ * `onGiveUpExhausted` is the SAME shape of hook `onDeliver` is — a caller-supplied closure PtyHost invokes
+ * and otherwise knows nothing about — but fired on the OPPOSITE outcome: `requeueGiveUpOrigin` calls it
+ * instead of silently discarding a message whose `giveUpRequeues` has exceeded `GIVE_UP_REQUEUE_LIMIT`.
+ * @decision ccb407eb — deliberately NOT `onDeliver` reused for this (already-fired by the time exhaustion
+ * is detected, for a message that gives up); PtyHost stays DB-agnostic — everything upstream of "this
+ * message's final attempt failed" is sessions/service.ts's concern; see
+ * docs/decisions/ccb407eb-carry-givenupexhausted-through-upgrade-requeue.md.
  */
 /**
- * `mintedAtWallClock` (card 1c47454b) — `Date.now()` at the SAME moment `mintedAtGen` is stamped (the
- * paste-recovery mint site only). Unlike `mintedAtGen`, an absolute wall-clock timestamp is NOT
- * session-relative, so it is the one piece of age evidence that survives a `worker_recycle` /
- * `daemon_restart` boundary honestly: `carryPendingToSuccessor` and the restart replay both thread THIS
- * field onto the far side (while deliberately leaving `mintedAtGen` behind — see its own doc). Its only
- * consumer is `annotatePasteRecoveryAge`. When `mintedAtGen` is absent (i.e. the entry just crossed a
- * boundary), this is the ONLY age evidence available, so it stands alone to disclose an absolute mint
- * time instead of a now-meaningless generation count. Card 2d36337e: when `mintedAtGen` IS present (a
- * genuinely in-session mint), this field is now ALSO read — appended alongside the generation-count
- * wording, since a relative count alone can't tell the recipient whether this predates a SPECIFIC later
- * message they've already read. Never touched by any other caller, so every existing enqueue stays
- * byte-identical.
+ * `logicalId` is the STABLE identity of the logical content this entry carries, unifying two id spaces
+ * that used to be separate: PtyHost's own per-enqueue `id` (regenerated on every enqueue, including a
+ * remint) and sessions/service.ts's cross-remint `rootMsgId`. `enqueueStdin` defaults it to the entry's
+ * own freshly-minted `id` when a caller doesn't supply one — fully additive.
+ * @decision 4a0af485 — `enqueueDurableMessage` supplies its OWN `rootMsgId` here so a value that survives a
+ * remint OR an auto-joined manual resend is the SAME value `Live.ambiguousDispatches` tracks, letting a
+ * late confirmation purge a duplicate from a different dispatch, not just a same-generation retry; see
+ * docs/decisions/4a0af485-ambiguousdispatches-signature-purge-scoped-to-one-batchid.md.
  */
 /**
- * `leapfrogCount` (card e01687ea) — how many times this entry has been pushed back (displaced from its
- * queue position) by the same-sender agent-kind reorder in `enqueueStdin`, below. That reorder inserts a
- * fresh same-sender arrival right after the sender's own last eligible entry, which shifts every OTHER
- * entry still queued behind that point one position further from the front — including a quiet entry
- * from a different sender that never itself matches. Incremented once per displacement; once it reaches
- * `AGENT_COALESCE_MAX_COUNT`, the reorder scan treats this entry as a boundary (like a give-up-held or
- * giveUpGen entry) and refuses to displace it again, so a chatty sender's burst caps the extra delay it
- * can impose on a quiet entry instead of accumulating it unboundedly. See the reorder scan's own
- * "FAIRNESS BOUND" comment for the mechanism this enforces.
+ * `mintedAtGen` — the value of `Live.submitGeneration` at the moment THIS entry was minted, set ONLY by
+ * the paste-recovery re-injection. Never used to suppress or reorder anything (that would recreate this
+ * card's own defect one level up — acting on a proxy for engine visibility rather than what's actually
+ * observable); its ONLY consumer is `annotatePasteRecoveryAge`.
+ *
+ * `submitGeneration` is a PER-SESSION counter starting at 0 for every fresh `Live` (a `worker_recycle`
+ * successor, or a session resumed after a `daemon_restart`) — so `mintedAtGen` is MEANINGLESS once that
+ * boundary is crossed. Every caller that carries a `QueuedMessage` across such a boundary
+ * (`carryPendingToSuccessor`, the `daemon_restart` replay) MUST NOT thread `mintedAtGen` through — see
+ * `mintedAtWallClock` below for the field that survives a boundary honestly.
+ * @decision 4af5aefa — see docs/decisions/4af5aefa-paste-recovery-age-annotates-never-suppresses.md.
  */
 /**
- * `resolveTailAtDelivery` (card 8e0d09e8) — an OPTIONAL caller-supplied closure. **PURITY CONTRACT: MUST
- * be pure / side-effect-free (a plain read, never a mutation, counter bump, or log write).** ⚠️ CORRECTED
- * (Code Reviewer Major ②, card ea77f71d): this is NOT invoked exactly once per delivery the way
- * `onDeliver` is — see `withDeliveryTail`'s own doc (above `annotatedMessageText`) for the real invocation
- * count and the memoization (`resolvedTailReady`/`resolvedTail`, below) that bounds it to AT MOST one real
- * call, ever, per entry — including, in the general case, for an entry that is later found never to have
- * been delivered at all (a coalescing-budget probe that gets rejected). Its return value (or
- * `""`/`undefined` for "nothing to add") is appended to `m.text` before any other annotation. Exists so a
- * message whose BODY must stay frozen at enqueue time (e.g. `platform_escalate`'s notice — the title is a
- * dedupe signature and must never be re-minted, see `SessionService.platformEscalate`'s own doc) can still
- * carry a small amount of LIVE state read as late as possible — the escalated card's current column, in
- * that caller's case — without mutating the frozen part. A throwing resolver is swallowed and contributes
- * nothing (the base text still delivers unchanged) — a live lookup failing must never drop or delay the
- * message it's attached to; that swallowed failure is ALSO memoized (never retried on a later touch of the
- * same entry).
+ * `mintedAtWallClock` — `Date.now()` at the SAME moment `mintedAtGen` is stamped. Unlike `mintedAtGen`, an
+ * absolute wall-clock timestamp is NOT session-relative, so it survives a `worker_recycle`/`daemon_restart`
+ * boundary honestly: both carry paths thread THIS field onto the far side while deliberately leaving
+ * `mintedAtGen` behind. Its only consumer is `annotatePasteRecoveryAge`.
+ * @decision 4af5aefa — when `mintedAtGen` is absent (a carried entry), this is the ONLY age evidence
+ * available; when present, it's now ALSO read alongside the generation count (card 2d36337e) since a
+ * relative count alone can't tell the recipient whether this predates a specific later message they've
+ * already read; see docs/decisions/4af5aefa-paste-recovery-age-annotates-never-suppresses.md.
+ */
+/**
+ * `leapfrogCount` — how many times this entry has been pushed back (displaced from its queue position) by
+ * the same-sender agent-kind reorder in `enqueueStdin`, below. Incremented once per displacement; once it
+ * reaches `AGENT_COALESCE_MAX_COUNT`, the reorder scan treats this entry as a boundary and refuses to
+ * displace it again.
+ * @decision e01687ea — the FAIRNESS BOUND this caps: a chatty sender's burst can only delay a quiet
+ * different-sender entry by a bounded amount, never unboundedly; see
+ * docs/decisions/e01687ea-leapfrogcount-bounds-a-chatty-senders-delay-of-a-quiet-one.md.
+ */
+/**
+ * `resolveTailAtDelivery` is an OPTIONAL caller-supplied closure. **PURITY CONTRACT: MUST be pure /
+ * side-effect-free** (a plain read, never a mutation, counter bump, or log write) — see `withDeliveryTail`
+ * for the real invocation count and memoization that bounds it to AT MOST one real call ever per entry.
+ * Its return value (or `""`/`undefined` for "nothing to add") is appended to `m.text` before any other
+ * annotation. A throwing resolver is swallowed and contributes nothing.
  *
- * ⚠️ THE CARRY HOLE (named, not just accepted as "safe degrade" — Code Reviewer Minor, card ea77f71d): NOT
- * threaded through `carryPendingToSuccessor` or `getPersistablePendingSnapshot` (a function cannot cross a
- * recycle/restart's serialization boundary) — an entry that crosses either boundary simply LOSES this
- * closure and delivers with its frozen text alone, silently and with no visible marker, exactly like a
- * resolver that returns `undefined`/throws. This is the SAME successor-Lead cold-boot persona card
- * 8e0d09e8 named as most at risk (a daemon restart or `worker_recycle` mid-flight), so the live-tail
- * feature is silently absent precisely where staleness matters most. `SessionService.platformEscalate`'s
- * own resolver (see its call site) now returns a visible ` · column: unknown` marker when its OWN lookup
- * finds the task gone — but that only disambiguates "the resolver RAN and found nothing" from silence. A
- * resolver that never ran at all (this carry hole) or that itself threw (see `withDeliveryTail`'s catch)
- * still produces the exact same silent no-tail output, indistinguishable from each other.
- *
- * ⚠️ CALLER RESPONSIBILITY (Code Reviewer Major ①, card 8e0d09e8): the text this resolver contributes is
- * NOT re-read on every future delivery of the same content — `submit()` stores the fully-assembled text
- * (tail already resolved) verbatim into `live.lastPrompt`, and `resumeAfterRateLimit` replays THAT STRING
- * unchanged, however much later a usage-cap park happens to clear (potentially hours). A resolver whose
- * return value conveys freshness (a live status, a count, anything time-sensitive) MUST embed its OWN
- * read-time stamp in the string it returns — never rely on the surrounding frame's own vintage marker (if
- * it has one) to cover the tail too; the two can legitimately diverge once a rate-limit replay is in play.
- *
- * `resolvedTailReady`/`resolvedTail` (card ea77f71d) — the memoization cache `withDeliveryTail` writes onto
- * this SAME entry the first time it's touched: `resolvedTailReady` is set `true` on that first touch
- * (success OR failure, so a throw is never retried), and `resolvedTail` holds the resolver's return value
- * (or stays `undefined` on failure/absence). Never set by any caller directly — `withDeliveryTail` is the
- * sole writer. This is what makes `requeueGiveUpOrigin`'s reconstruction byte-identical to the real write:
- * `origin`'s members are the SAME object references `drainPending` drained (see `submit`'s
- * `live.giveUpOrigin = origin`), so its later `annotatedMessageText` call reads the cache instead of
- * re-invoking a resolver that may have observed different external state by then.
+ * `resolvedTailReady`/`resolvedTail` are the memoization cache `withDeliveryTail` writes onto this SAME
+ * entry the first time it's touched — never set by any caller directly.
+ * @decision 8e0d09e8 — exists so a message whose BODY must stay frozen at enqueue time can still carry a
+ * small amount of LIVE state read as late as possible; names a real carry-boundary gap (not threaded
+ * through `carryPendingToSuccessor`/`getPersistablePendingSnapshot`) and a caller-responsibility rule
+ * (a resolver conveying freshness must embed its OWN read-time stamp, since `submit()` freezes the
+ * assembled text into `live.lastPrompt` and a rate-limit replay can replay it hours later unchanged); see
+ * docs/decisions/8e0d09e8-resolvetailatdelivery-purity-contract-and-carry-hole.md.
+ * @decision ea77f71d — the memoization's own byte-identity + cost rationale is recorded separately; see
+ * docs/decisions/ea77f71d-withdeliverytail-memoizes-once-for-byte-identity-and-cost.md.
  */
 export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; reportEventId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number; leapfrogCount?: number; resolveTailAtDelivery?: () => string | undefined; resolvedTailReady?: boolean; resolvedTail?: string };
 /**

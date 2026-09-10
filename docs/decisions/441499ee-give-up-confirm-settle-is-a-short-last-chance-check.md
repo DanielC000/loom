@@ -14,3 +14,28 @@ DELIBERATELY NOT sized to cover the full hook-confirmation latency distribution 
 ## Source
 
 Inline comment in `packages/daemon/src/pty/host.ts` (`GIVE_UP_CONFIRM_SETTLE_POLL_MS`/`GIVE_UP_CONFIRM_SETTLE_MAX_POLLS`'s top-of-const doc). Relocated by card a4818d7a (tranche 1 on `pty/host.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+
+## `giveUpRequeues`/`giveUpGen` are per-message identity-scoped counters guarding the same false-negative
+
+`giveUpRequeues` (QueuedMessage field) counts how many times THIS EXACT message object has already been
+put back on `live.pending` after a submit give-up — identity-scoped to the object itself, never inferred
+from matching text, so two legitimately identical messages are counted independently and a message that
+keeps giving up can't requeue forever (bounded by `GIVE_UP_REQUEUE_LIMIT`).
+
+`giveUpGen` tags a requeued entry with the `submitGeneration` its ORIGINAL (failed) submit ran under. The
+give-up discriminator that produces both fields can itself be wrong in the OTHER direction too — a
+confirming hook can arrive AFTER give-up already fired, proving the original turn actually started (this is
+exactly the measured ~86% case this record's Narrative describes) — so `giveUpGen` is the correlation a
+late confirmation uses (`purgeConfirmedGiveUpRequeue`) to find and purge the now-redundant requeued copy
+before it can ever drain and double-deliver the same text.
+
+## Do not (2)
+
+- Do not infer `giveUpRequeues` from matching message TEXT — scope it to the message object's own identity,
+  or two legitimately-identical messages get their retry budgets conflated.
+
+## Source (2)
+
+Inline comment in `packages/daemon/src/pty/host.ts` (the `giveUpRequeues`/`giveUpGen` field docs on
+`QueuedMessage`), as of commit `88f11385c2c863db682b8e0d37c9a5f0118b0d17` (`fix(pty): hold a give-up
+requeue and stop the purge misattributing it`). Relocated by card `3f45b7d8` (tranche 6 on `pty/host.ts`).
