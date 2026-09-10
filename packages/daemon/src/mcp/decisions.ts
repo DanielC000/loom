@@ -69,7 +69,17 @@ function verifyCommitSha(repoRoot: string, sha: string): boolean {
 const FLAT_STORES = ["adr", "decisions"] as const;
 
 // --- hard bounds (mirrors repo-read.ts's own posture: a huge/hostile repo can't wedge this call) ---
-const MAX_FILE_BYTES = 512 * 1024;
+// MAX_FILE_BYTES (card 2b2d9a47): was 512KB, which silently skipped this repo's own largest source files
+// (service.ts, pty/host.ts, db.ts — up to ~1.6MB) and then reported `orphan:true` for any id anchored only
+// inside one of them, an active false assertion rather than a disclosed gap. MEASURED before raising it:
+// reading + regex-scanning all three (3.1MB combined) takes ~38ms total; even this repo's single largest
+// walked file today (a 3.3MB investigation data blob) scans in ~14ms — negligible next to the full-repo
+// walk's own ~1.5s baseline for ~2,400 files. Raised to comfortably exceed the current largest anchor-
+// bearing file with real headroom, while still bounding a genuinely pathological one. `skippedFiles` below
+// (buildAnchorIndex/findAnchorsInFile) is the belt-and-suspenders half: a cap always leaves SOME size that
+// can be skipped, so any id/enumerate-all result now discloses which files (if any) it could not scan,
+// rather than asserting `orphan` from an incomplete scan with no way for a caller to tell.
+const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_WALK_FILES = 20_000;
 const MAX_SYMBOL_HITS = 20; // cap on how many files a bare symbol lookup can resolve to
 const SKIP_DIRS = new Set([
@@ -202,33 +212,45 @@ function* walkFiles(root: string): Generator<string> {
   }
 }
 
-/** Every `@decision <id>` (or `@decision sha:<id>`) site in one file, or `[]` on an unreadable/oversized/
- * binary file. */
-function findAnchorsInFile(absPath: string): Array<{ ns: AnchorNs; id: string; line: number }> {
+type AnchorScan = { anchors: Array<{ ns: AnchorNs; id: string; line: number }>; skippedForSize: boolean };
+
+/** Every `@decision <id>` (or `@decision sha:<id>`) site in one file. `skippedForSize:true` (card
+ * 2b2d9a47 DoD-1) marks a file that exceeded MAX_FILE_BYTES and was NOT scanned — kept distinct from an
+ * unreadable/binary file (`anchors:[]`, `skippedForSize:false`) so every caller can tell "genuinely no
+ * anchors here" from "did not look here at all" instead of collapsing both into an empty result. */
+function findAnchorsInFile(absPath: string): AnchorScan {
   let stat: fs.Stats;
-  try { stat = fs.statSync(absPath); } catch { return []; }
-  if (!stat.isFile() || stat.size > MAX_FILE_BYTES) return [];
+  try { stat = fs.statSync(absPath); } catch { return { anchors: [], skippedForSize: false }; }
+  if (!stat.isFile()) return { anchors: [], skippedForSize: false };
+  if (stat.size > MAX_FILE_BYTES) return { anchors: [], skippedForSize: true };
   let content: string;
-  try { content = fs.readFileSync(absPath, "utf8"); } catch { return []; }
-  if (containsNul(content)) return [];
+  try { content = fs.readFileSync(absPath, "utf8"); } catch { return { anchors: [], skippedForSize: false }; }
+  if (containsNul(content)) return { anchors: [], skippedForSize: false };
   const found: Array<{ ns: AnchorNs; id: string; line: number }> = [];
   content.split(/\r?\n/).forEach((line, i) => {
     for (const m of line.matchAll(ANCHOR_RE)) found.push({ ...parseAnchorMatch(m), line: i + 1 });
   });
-  return found;
+  return { anchors: found, skippedForSize: false };
 }
+
+type AnchorIndexResult = { index: Map<string, AnchorSite[]>; skippedFiles: string[] };
 
 /** Full-repo `"ns:id" -> anchor sites` index, built fresh every call (DoD-2 — never persisted). Card
  * 969b0e1c: keyed by the COMBINED `"ns:id"` string, never bare `id` — a sha-sigil'd anchor and a card
  * anchor sharing the same 8 hex characters (negligible odds, accepted by the deciding card) must never be
  * conflated into one entry, mirroring decision-records.mjs's own `main()` and comment-anchor-lint.mjs's
- * own `orphanAnchors` key scheme exactly. */
-function buildAnchorIndex(repoRoot: string): Map<string, AnchorSite[]> {
+ * own `orphanAnchors` key scheme exactly. Card 2b2d9a47: also returns `skippedFiles` — every file this
+ * walk could NOT scan (MAX_FILE_BYTES) — sorted for a deterministic result, since walkFiles' own DFS
+ * order isn't. Every caller of this index (id reverse-lookup, no-query enumerate-all) surfaces this list
+ * so an `orphan` verdict it computes is interpretable rather than a silent false assertion. */
+function buildAnchorIndex(repoRoot: string): AnchorIndexResult {
   const idx = new Map<string, AnchorSite[]>();
+  const skippedFiles: string[] = [];
   for (const full of walkFiles(repoRoot)) {
-    const anchors = findAnchorsInFile(full);
-    if (anchors.length === 0) continue;
+    const { anchors, skippedForSize } = findAnchorsInFile(full);
     const rel = relPosix(repoRoot, full);
+    if (skippedForSize) { skippedFiles.push(rel); continue; }
+    if (anchors.length === 0) continue;
     for (const a of anchors) {
       const key = `${a.ns}:${a.id}`;
       const list = idx.get(key) ?? [];
@@ -236,7 +258,8 @@ function buildAnchorIndex(repoRoot: string): Map<string, AnchorSite[]> {
       idx.set(key, list);
     }
   }
-  return idx;
+  skippedFiles.sort();
+  return { index: idx, skippedFiles };
 }
 
 /** Confine a caller-supplied relative path to `root` — refuses an absolute path, a `..` escape, or a
@@ -307,9 +330,12 @@ function findSymbolDefinitionFiles(repoRoot: string, symbol: string): string[] {
 
 type DecisionItem = { ns: AnchorNs; id: string; line: number; record: { path: string; title: string } | null; orphan: boolean };
 
-/** Core of the `path` mode — every anchor in ONE file, each resolved (or flagged orphan: DoD-4). */
-function decisionsForFile(repoRoot: string, abs: string): { path: string; anchorCount: number; orphanAnchorCount: number; decisions: DecisionItem[] } {
-  const anchors = findAnchorsInFile(abs);
+/** Core of the `path` mode — every anchor in ONE file, each resolved (or flagged orphan: DoD-4).
+ * `skippedForSize:true` (card 2b2d9a47) means this file exceeded MAX_FILE_BYTES and was NOT scanned —
+ * `anchorCount:0`/`decisions:[]` in that case means "did not look", not "genuinely has none", and this
+ * flag is what lets a caller tell the two apart instead of trusting a false-empty result. */
+function decisionsForFile(repoRoot: string, abs: string): { path: string; anchorCount: number; orphanAnchorCount: number; decisions: DecisionItem[]; skippedForSize: boolean } {
+  const { anchors, skippedForSize } = findAnchorsInFile(abs);
   const decisions: DecisionItem[] = anchors.map((a) => {
     const rec = resolveRecordMeta(repoRoot, a.ns, a.id);
     return { ns: a.ns, id: a.id, line: a.line, record: rec ? { path: rec.rel, title: rec.title } : null, orphan: !rec };
@@ -319,6 +345,7 @@ function decisionsForFile(repoRoot: string, abs: string): { path: string; anchor
     anchorCount: decisions.length,
     orphanAnchorCount: decisions.filter((d) => d.orphan).length,
     decisions,
+    skippedForSize,
   };
 }
 
@@ -338,10 +365,15 @@ function decisionsForPath(repoRoot: string, rel: string): { mode: "path"; error:
  * Card 969b0e1c: `query` is already namespace-parsed by `looksLikeId`/`parseIdQuery` — a bare hex query
  * means `ns:"card"` (the pre-existing meaning, unchanged); `sha:<hex>` means `ns:"sha"`, applying the SAME
  * verification gate as a source anchor would (a query for an unverifiable sha reports `record:null`, not
- * a stale/fake resolution — consistent with `resolveRecordMeta`'s own refuse-rather-than-fall-through). */
+ * a stale/fake resolution — consistent with `resolveRecordMeta`'s own refuse-rather-than-fall-through).
+ * Card 2b2d9a47: `skippedFiles` names every file this call's own index build could NOT scan
+ * (MAX_FILE_BYTES) — a non-empty list means `orphan:true` here is NOT a proven absence, only "not found in
+ * what was scanned"; a caller relying on `orphan` should treat it as unverified until it independently
+ * confirms (e.g. `git grep`) that none of `skippedFiles` cite this id. */
 function decisionsForId(repoRoot: string, ns: AnchorNs, id: string) {
   const record = resolveRecordMeta(repoRoot, ns, id);
-  const anchoredIn = buildAnchorIndex(repoRoot).get(`${ns}:${id}`) ?? [];
+  const { index, skippedFiles } = buildAnchorIndex(repoRoot);
+  const anchoredIn = index.get(`${ns}:${id}`) ?? [];
   return {
     mode: "record" as const,
     ns,
@@ -349,6 +381,7 @@ function decisionsForId(repoRoot: string, ns: AnchorNs, id: string) {
     record: record ? { path: record.rel, title: record.title } : null,
     anchoredIn,
     orphan: !record || anchoredIn.length === 0,
+    skippedFiles,
   };
 }
 
@@ -374,9 +407,13 @@ function decisionsForSymbol(repoRoot: string, symbol: string) {
  * and side-effect-free, before any `git` call — a pure optimization, the final boolean is the same either
  * order). A sha id that fails verification is reported as an orphan ANCHOR even when a same-named record
  * file exists (refuse-rather-than-fall-through), and — since it therefore never marks that record id as
- * "anchored" — the SAME record also correctly surfaces as an orphan RECORD if nothing else cites it. */
+ * "anchored" — the SAME record also correctly surfaces as an orphan RECORD if nothing else cites it.
+ * Card 2b2d9a47: `skippedFiles` names every file the underlying index build could NOT scan
+ * (MAX_FILE_BYTES) — any record whose ONLY anchor lives in one of these can be wrongly reported as an
+ * orphan RECORD here (the anchor was never indexed), so both `orphanAnchors`/`orphanRecords` are only as
+ * complete as `skippedFiles` is empty. */
 function decisionsForAll(repoRoot: string) {
-  const idx = buildAnchorIndex(repoRoot);
+  const { index: idx, skippedFiles } = buildAnchorIndex(repoRoot);
   const records = listAllRecords(repoRoot);
   const recordIds = new Set(records.map((r) => r.id));
   const shaVerifyCache = new Map<string, boolean>();
@@ -402,6 +439,7 @@ function decisionsForAll(repoRoot: string) {
     recordCount: records.length,
     orphanAnchors: { count: orphanAnchors.length, items: orphanAnchors },
     orphanRecords: { count: orphanRecords.length, advisory: true, items: orphanRecords },
+    skippedFiles,
   };
 }
 
@@ -440,18 +478,24 @@ export function registerDecisionTools(server: McpServer, resolveRepoRoot: () => 
         "(e.g. \"sha:c70a5e0e\") -> the SAME reverse lookup on a verified-commit anchor instead (an " +
         "unverifiable sha reports record:null, exactly like a bare id with no card record — it is never " +
         "silently treated as resolved) — either form returns {ns, id, record, anchoredIn: [{file,line}...], " +
-        "orphan} (orphan:true if nothing cites this id, OR if the id has no resolvable record but IS cited " +
-        "somewhere — check both `record` and `anchoredIn` to tell which); " +
+        "orphan, skippedFiles} (orphan:true if nothing cites this id, OR if the id has no resolvable record " +
+        "but IS cited somewhere — check both `record` and `anchoredIn` to tell which; skippedFiles names " +
+        "every file this call could NOT scan for size — card 2b2d9a47 — a non-empty list means `orphan` is " +
+        "NOT a proven absence, only \"not found in what was scanned\": double-check with `git grep` before " +
+        "trusting orphan:true when skippedFiles is non-empty); " +
         "a path-shaped string (contains \"/\" or \"\\\\\", or ends in a file extension) -> every anchor found " +
-        "in that ONE file, each item carrying {ns, id, line, record, orphan} (resolved, or flagged " +
-        "`orphan:true` when the anchored id has no record — for a sha anchor this includes an id whose " +
-        "commit no longer verifies, even if a same-named record file exists); " +
+        "in that ONE file, each item carrying {ns, id, line, record, orphan}, plus a file-level " +
+        "`skippedForSize` (true means the file exceeded the byte cap and was NOT scanned at all — " +
+        "anchorCount:0/decisions:[] in that case means \"did not look\", not \"has none\") — otherwise " +
+        "resolved, or flagged `orphan:true` when the anchored id has no record (for a sha anchor this " +
+        "includes an id whose commit no longer verifies, even if a same-named record file exists); " +
         "anything else -> a best-effort, language-agnostic SYMBOL lookup (a trivial declaration-name " +
         "match, not a real symbol table — resolves 0, 1, or several files, all reported) whose result(s) " +
         "each run through the path mode above; " +
-        "omitted/blank -> the FULL repo index, enumerating {orphanAnchors, orphanRecords} in BOTH " +
-        "directions (an anchored id with no record, and a record nothing anchors) so neither kind of gap " +
-        "is silently skipped — orphanAnchors items carry `ns` too. The index is rebuilt fresh on every " +
+        "omitted/blank -> the FULL repo index, enumerating {orphanAnchors, orphanRecords, skippedFiles} " +
+        "(an anchored id with no record, and a record nothing anchors) so neither kind of gap is silently " +
+        "skipped — orphanAnchors items carry `ns` too, and a non-empty skippedFiles means both orphan " +
+        "directions are only as complete as that list is empty. The index is rebuilt fresh on every " +
         "call by walking this project's own repo (`repoPath`) — never a persisted or cached snapshot, so " +
         "it can never go stale. Record bodies are NOT inlined here (only {path,title}) — Read the returned " +
         "record path directly for the full text; the on-Read hook is the place that delivers complete " +

@@ -24,6 +24,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 
@@ -106,6 +107,67 @@ write(
   "// @decision deadc0de — bare form is a CARD id, never SHA-verified\n" +
   "export const BARE_DEADC0DE_MARKER = 1;\n",
 );
+
+// --- Card 2b2d9a47: two big-file fixtures exercising the MAX_FILE_BYTES cap directly. Sized RELATIVE to
+// the REAL cap read out of the source (never a pinned literal) so this stays correct if the cap changes
+// again — mirrors the card's own "match on file+anchor text, not a pinned line number" instruction, applied
+// to a byte threshold instead of a line number. ---
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const decisionsSrcPath = path.join(__dirname, "..", "src", "mcp", "decisions.ts");
+const decisionsSrc = fs.readFileSync(decisionsSrcPath, "utf8");
+const capMatch = /const MAX_FILE_BYTES = ([^;]+);/.exec(decisionsSrc);
+if (!capMatch) throw new Error("could not find `const MAX_FILE_BYTES = ...;` in decisions.ts — fixture sizing depends on it");
+// eslint-disable-next-line no-new-func -- trusted own-source literal, not external input
+const MAX_FILE_BYTES = new Function(`"use strict"; return (${capMatch[1]});`)();
+check("(0) sanity: MAX_FILE_BYTES parsed from source is a sane positive number", Number.isFinite(MAX_FILE_BYTES) && MAX_FILE_BYTES > 0);
+
+const OLD_CAP_BYTES = 512 * 1024; // the pre-card-2b2d9a47 cap this bug shipped with — a historical fact, not a moving target
+const OVER_OLD_CAP_UNDER_CURRENT_CAP = OLD_CAP_BYTES + 64 * 1024; // ~576KB: over the OLD cap, comfortably under the current one
+// Deliberately a `check()`, not a throw: run this SAME file against pre-fix (reverted) decisions.ts — where
+// MAX_FILE_BYTES is still 512KB — and this sizing assumption itself goes red (576KB is no longer "under
+// the current cap"), which is itself part of the DoD-2 RED signal rather than a crash that would hide the
+// real per-assertion failures below (e.g. (8i)) that this fixture exists to drive.
+check("(0d) sanity: OVER_OLD_CAP_UNDER_CURRENT_CAP sits under the CURRENT cap (fails here on pre-fix code, by design)",
+  OVER_OLD_CAP_UNDER_CURRENT_CAP < MAX_FILE_BYTES);
+const OVER_CURRENT_CAP = MAX_FILE_BYTES + 1024 * 1024; // always skipped, whatever the current cap is
+
+/** Pad `header` with filler comment lines until it reaches `targetBytes` (never truncates below `header`).
+ * All-ASCII content only (header + filler), so `.length` IS the UTF-8 byte count — computed ONCE up front
+ * and tracked incrementally rather than re-measured via `Buffer.byteLength` on the whole (growing) string
+ * every iteration, which is accidentally-quadratic: a real first draft of this helper took 58s to pad a
+ * single 5MB fixture for exactly that reason. Built via array-push + one final `join`, never repeated `+=`
+ * on a single string, so V8 never has to re-flatten a growing rope on each append either. */
+function padTo(targetBytes, header) {
+  if (/[^\x00-\x7f]/.test(header)) throw new Error("padTo: header must be pure ASCII — byte-count math below assumes .length === UTF-8 byte length");
+  const filler = "// padding line to inflate this fixture past a byte-cap threshold for testing\n";
+  const parts = [header];
+  let len = header.length;
+  while (len < targetBytes) { parts.push(filler); len += filler.length; }
+  return parts.join("");
+}
+
+// eeeeeeee: anchored in a file BIGGER than the pre-fix 512KB cap, SMALLER than the current cap — the
+// RED/GREEN case (DoD-2): this must resolve (orphan:false) on FIXED code and FAIL (orphan:true) on the
+// pre-fix 512KB-cap code, proving the check can actually go red.
+write(
+  "src/big-under-current-cap.ts",
+  padTo(OVER_OLD_CAP_UNDER_CURRENT_CAP, "// @decision eeeeeeee - anchored in a file over the OLD cap, under the CURRENT one\nexport const BIG_MARKER = 1;\n"),
+);
+write("docs/decisions/eeeeeeee-big-file-decision.md", "# eeeeeeee — Big file decision title\n\nBody.\n");
+
+// ffffffff: anchored in a file BIGGER than the CURRENT cap too — proves the disclosure half (DoD-1):
+// when a file genuinely cannot be scanned, the tool must say so (skippedFiles) rather than silently
+// asserting orphan:true with no way for a caller to tell "not found" from "did not look".
+write(
+  "src/genuinely-over-current-cap.ts",
+  padTo(OVER_CURRENT_CAP, "// @decision ffffffff - anchored in a file over the CURRENT cap too\nexport const HUGE_MARKER = 1;\n"),
+);
+write("docs/decisions/ffffffff-huge-file-decision.md", "# ffffffff — Huge file decision title\n\nBody.\n");
+check("(0b) sanity: the big-under-cap fixture is actually over the OLD cap and under the CURRENT cap",
+  fs.statSync(path.join(repoRoot, "src/big-under-current-cap.ts")).size > OLD_CAP_BYTES
+  && fs.statSync(path.join(repoRoot, "src/big-under-current-cap.ts")).size < MAX_FILE_BYTES);
+check("(0c) sanity: the genuinely-over-cap fixture is actually over the CURRENT cap",
+  fs.statSync(path.join(repoRoot, "src/genuinely-over-current-cap.ts")).size > MAX_FILE_BYTES);
 
 const now = new Date().toISOString();
 const db = new Db();
@@ -204,11 +266,12 @@ try {
   const noSymbol = await call("decisions_for", { query: "ThisSymbolDoesNotExistAnywhere" });
   check("(7) an unresolvable symbol reports {mode:\"symbol\", error, resolvedFiles:[]}", noSymbol.mode === "symbol" && typeof noSymbol.error === "string" && noSymbol.resolvedFiles.length === 0);
 
-  // (8) NO query — full-repo enumeration reporting BOTH orphan directions at once (DoD-4). 6 unique
-  // "ns:id" anchor keys (card:aaaaaaaa, card:dddddddd, card:cccccccc, card:deadc0de, sha:REAL_SHA,
-  // sha:deadc0de), 5 records (aaaaaaaa/bbbbbbbb/cccccccc/REAL_SHA/deadc0de).
+  // (8) NO query — full-repo enumeration reporting BOTH orphan directions at once (DoD-4). 7 unique
+  // "ns:id" anchor keys (card:aaaaaaaa, card:dddddddd, card:cccccccc, card:deadc0de, card:eeeeeeee,
+  // sha:REAL_SHA, sha:deadc0de — card:ffffffff's OWN anchor lives in the genuinely-over-cap fixture and is
+  // never indexed, so it does NOT add an 8th key here), 7 records (the original 5 plus eeeeeeee/ffffffff).
   const all = await call("decisions_for", {});
-  check("(8a) enumerate-all reports mode:\"index\" with the right totals", all.mode === "index" && all.recordCount === 5 && all.uniqueAnchorIds === 6);
+  check("(8a) enumerate-all reports mode:\"index\" with the right totals", all.mode === "index" && all.recordCount === 7 && all.uniqueAnchorIds === 7);
   check("(8b) orphanAnchors names card:dddddddd (an anchored card id with no record)",
     all.orphanAnchors.items.some((o) => o.ns === "card" && o.id === "dddddddd"));
   check("(8c) orphanRecords names bbbbbbbb (a record with no inbound anchor in EITHER namespace), advisory:true",
@@ -233,6 +296,46 @@ try {
   check("(8h) the deadc0de record is NOT an orphan record — the BARE card:deadc0de anchor still anchors it",
     !all.orphanRecords.items.some((o) => o.id === "deadc0de"));
 
+  // (8i) card 2b2d9a47 DoD-2 RED/GREEN: eeeeeeee's anchor lives in a file over the PRE-FIX 512KB cap but
+  // under the CURRENT one — this must resolve (orphan:false) on fixed code, and this exact assertion is
+  // what the negative-control run (below, post-report) shows failing against pre-fix code.
+  const idBig = await call("decisions_for", { query: "eeeeeeee" });
+  check("(8i) eeeeeeee (anchored in a big-but-under-cap file) resolves, orphan:false",
+    idBig.mode === "record" && idBig.record?.title === "Big file decision title"
+    && idBig.anchoredIn.length === 1 && idBig.anchoredIn[0].file === "src/big-under-current-cap.ts" && idBig.orphan === false);
+
+  // (8j) card 2b2d9a47 DoD-1 disclosure: ffffffff's anchor lives in a file over the CURRENT cap too, so it
+  // genuinely cannot be found — orphan:true is unavoidable here, but the response must say WHY: a
+  // non-empty skippedFiles naming the file it could not scan, so orphan:true is interpretable rather than
+  // a silent false assertion.
+  const idHuge = await call("decisions_for", { query: "ffffffff" });
+  check("(8j) ffffffff (anchored ONLY in a genuinely over-cap file) reports orphan:true WITH skippedFiles naming that file",
+    idHuge.mode === "record" && idHuge.orphan === true
+    && Array.isArray(idHuge.skippedFiles) && idHuge.skippedFiles.includes("src/genuinely-over-current-cap.ts"));
+
+  // (8k) path mode on the genuinely-over-cap file itself: skippedForSize:true, anchorCount:0 — the file-
+  // level signal that "0 anchors" here means "did not look", not "has none" (mirrors the id-mode case).
+  const pathHuge = await call("decisions_for", { query: "src/genuinely-over-current-cap.ts" });
+  check("(8k) querying the genuinely-over-cap file by path reports skippedForSize:true, anchorCount:0",
+    pathHuge.mode === "path" && pathHuge.skippedForSize === true && pathHuge.anchorCount === 0 && pathHuge.decisions.length === 0);
+
+  // (8l) path mode on the big-but-under-cap file: skippedForSize:false, its one real anchor IS found.
+  const pathBig = await call("decisions_for", { query: "src/big-under-current-cap.ts" });
+  check("(8l) querying the big-but-under-cap file by path reports skippedForSize:false and finds its anchor",
+    pathBig.mode === "path" && pathBig.skippedForSize === false && pathBig.anchorCount === 1
+    && pathBig.decisions[0]?.id === "eeeeeeee" && pathBig.decisions[0]?.orphan === false);
+
+  // (8m) enumerate-all mode carries the same disclosure: skippedFiles names the genuinely-over-cap file,
+  // and — the accepted residual (DoD-1's own text: the cap always leaves SOME size that can be skipped) —
+  // ffffffff's record IS still (wrongly) reported as an orphan RECORD, because its only anchor lives in a
+  // file this scan could not read; that is exactly why skippedFiles must ride alongside orphanRecords.
+  check("(8m) enumerate-all's skippedFiles names the genuinely-over-cap file",
+    Array.isArray(all.skippedFiles) && all.skippedFiles.includes("src/genuinely-over-current-cap.ts"));
+  check("(8n) eeeeeeee is correctly NOT an orphan record (it resolves under the current cap)",
+    !all.orphanRecords.items.some((o) => o.id === "eeeeeeee"));
+  check("(8o) ffffffff IS (still) reported as an orphan record — the documented residual the skippedFiles disclosure exists to explain",
+    all.orphanRecords.items.some((o) => o.id === "ffffffff"));
+
   // (9) A project with no repoPath at all gets a clean {error}, never a throw.
   db.insertProject({ id: "pNoRepo", name: "No Repo", repoPath: "", vaultPath: "", config: {}, createdAt: now, archivedAt: null, reserved: false });
   const noRepoServer = new TaskMcpRouter(db, wakes).buildServer("pNoRepo", "S2");
@@ -251,6 +354,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — decisions_for resolves path/id/symbol/enumerate-all queries against a real fixture repo, across all three record stores, reporting BOTH orphan directions (DoD-4) instead of silently skipping either."
+  ? "\n✅ ALL PASS — decisions_for resolves path/id/symbol/enumerate-all queries against a real fixture repo, across all three record stores, reporting BOTH orphan directions (DoD-4) instead of silently skipping either, and (card 2b2d9a47) never asserting orphan:true from an unscanned over-cap file without disclosing skippedFiles."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
