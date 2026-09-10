@@ -10,27 +10,24 @@ import { DEPLOY_PACKAGES } from "./deploy-packages.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
- * @decision 5e30c4bd — derives a staleness signal by comparing the RUNNING daemon's own build artifact
- * against mainline HEAD, never `version`/`webBundle` (both stay byte-identical across a source-only
- * deploy) (docs/decisions/5e30c4bd-compare-running-build-artifact-not-version-or-webbundle.md).
+ * @decision 5e30c4bd — never use `version`/`webBundle` as a staleness proxy: both stay byte-identical
+ * across a source-only deploy — the exact incident (a daemon-src commit merged but unrestarted for
+ * ~1h50m, invisible to every surface) this module exists to catch.
  *
- * @decision 637558ca — `stale`/`commitsBehind` are scoped to ONLY `packages/daemon/src`/
- * `packages/shared/src` (see `DEPLOY_PACKAGES`) — a signal that cries stale on a docs/assets-only merge
- * gets ignored within a day, which is worse than no signal
- * (docs/decisions/637558ca-stale-scoped-to-restart-relevant-paths-cry-wolf.md).
- * @decision e8697dd3 — `assets/skills/**` is excluded from that reasoning, not covered by it; do not read
- * this module's silence on it as "no restart needed" — see `skills/store.ts`'s `skillStoreStaleness()`
- * (docs/decisions/e8697dd3-bundled-skills-excluded-from-restart-relevant-scoping.md).
+ * @decision 637558ca — never widen `stale`/`commitsBehind` past `packages/daemon/src`/
+ * `packages/shared/src` (`DEPLOY_PACKAGES`) to count docs/assets/scripts changes — a signal that cries
+ * stale on those gets ignored within a day, which is worse than no signal at all.
+ * @decision e8697dd3 — `assets/skills/**` is excluded from this reasoning, not covered by it: never read
+ * this module's silence on it as "no restart needed" — it needs one for a DIFFERENT reason (a separate
+ * store re-sync), tracked by `skills/store.ts`'s own `skillStoreStaleness()` signal.
  *
- * @decision c3ce92ea — `packages/web` is excluded from `stale`/`commitsBehind` (a web-only merge must
- * never advise a `daemon_restart`) but gets its OWN `webStale`/`webCommitsBehind` signal instead, since the
- * daemon serves `packages/web/dist` live from disk and only needs a rebuild, never a restart
- * (docs/decisions/c3ce92ea-web-gets-its-own-independent-webstale-signal.md).
+ * @decision c3ce92ea — never fold `packages/web` changes into `stale`/`commitsBehind`: a web-only merge
+ * must never advise a `daemon_restart`. It gets its own `webStale`/`webCommitsBehind` signal instead,
+ * since the daemon serves `packages/web/dist` live from disk and only needs a rebuild, never a restart.
  *
- * @decision c1072385 — the build clock is the NEWEST mtime across every file recursively under BOTH
- * `packages/daemon/dist` and `packages/shared/dist` (see `newestMtimeMs`), never a single file's mtime
- * (`tsc`'s incremental builds can leave e.g. `dist/index.js` untouched for hours after a real rebuild)
- * (docs/decisions/c1072385-build-clock-is-newest-mtime-not-one-file.md).
+ * @decision c1072385 — never read a single dist file's mtime (e.g. `dist/index.js`) as the build clock:
+ * an incremental `tsc` build can leave it untouched for hours after a real rebuild. Use the NEWEST mtime
+ * across every file recursively under BOTH `packages/daemon/dist` and `packages/shared/dist` instead.
  *
  * DoD #4: every clock is DERIVED at call time, NEVER persisted — the dist scans and `git log` calls all
  * run fresh on every call. No caching, no stored "deploy is current" flag (that would recreate the exact
@@ -45,43 +42,30 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * blocked (this is a synchronous `execFileSync`, unlike the async claude-version cache — see the call-site
  * doc at `manager-prompt.ts` for why that's an acceptable tradeoff here) PLUS the (cheap, synchronous `fs`)
  * dist scans.
- * @decision c6e7ebe7 — measured the THREE-call baseline directly on Windows: 147–275ms at IDLE, 220–465ms
- * at 3× CPU oversubscription, a comfortable margin even with the fourth/fifth/sixth calls added; two
- * further hardening changes (singling out a timeout, widening the timeout itself) were investigated and
- * REJECTED for lack of evidence (docs/decisions/c6e7ebe7-git-timeout-margin-measured-two-changes-rejected.md).
+ * @decision c6e7ebe7 — never raise `GIT_TIMEOUT_MS` without a measured stall (147–275ms IDLE / 220–465ms
+ * at 3× oversubscription measured, never approached up to 9×) and never single out a timeout from the
+ * `unavailable()` reason taxonomy on its own initiative — see `d3d4d432`'s record for the actual axis.
  * NEVER throws — any failure (not a git checkout, e.g. a packaged `loomctl` install; git unavailable; dist
  * not built; a timeout) degrades to `{available:false, reason}`, never a false stale/clean verdict — and
  * this applies uniformly to BOTH the restart signal and the web signal: a failure computing either degrades
  * the WHOLE result, so `webStale` never reports a false clean/stale independent of `stale`'s own guarantee.
  *
- * @decision f26339d7 — `distBuiltSha`/`processBuiltSha` are the missing POSITIVE signal (the actual
- * `git rev-parse HEAD` an artifact was compiled from, baked into `dist/build-info.json` at BUILD time),
- * closing the gap where a single fault class (a turbo cache-replay advancing mtime with no rebuild — the
- * `aad5fff3` footgun) can make every DERIVED clock above agree, and all be wrong at once; split into two
- * fields with two different lifetimes so a per-process cache of the sha can't itself become a race
- * (docs/decisions/f26339d7-baked-build-sha-is-the-positive-signal.md).
- * @decision 3d7dccb9 — `build-info.json` is written by an uncached, same-invocation `stamp` turbo task so
- * its identity can never be a stale/foreign sha replayed off turbo's cache (shared across every git
- * worktree of this repo)
- * (docs/decisions/3d7dccb9-stamp-rides-the-deploy-builds-own-turbo-invocation.md).
- * @decision 24f53a72 — a forced `"build"` still WRITES a cache entry that can clobber `stamp`'s own output;
- * `turbo.json`'s `build` outputs exclude `"!dist/build-info.json"` so only `stamp` can ever touch that file
- * (docs/decisions/24f53a72-build-cache-write-can-clobber-stamps-build-info-json.md). See
- * `builtContentMatchesHead`'s own field doc below for the CONTENT-based fallback this incident also
- * motivated, for the residual case a sha comparison alone can never resolve: two different, non-ancestor
- * commits with byte-identical shipped trees (a squash merge vs. its own unsquashed worktree form).
+ * @decision f26339d7 — `distBuiltSha`/`processBuiltSha` are the missing POSITIVE signal, closing the gap
+ * where a turbo cache-replay (the `aad5fff3` footgun) can make every DERIVED clock above agree and all be
+ * wrong at once. Never cache `processBuiltSha` here — capture it once at process START, in the caller.
+ * @decision 3d7dccb9 — never remove, bypass, or let run cached the `stamp` turbo task that (re)writes
+ * `build-info.json` on every build: turbo's local cache is SHARED across every git worktree of this
+ * repo, so only an uncached, same-invocation stamp keeps the baked sha off a replayed foreign worktree's.
+ * @decision 24f53a72 — never assume a forced `"build"` protects its own cache WRITE the way `--force`
+ * protects the READ: it still writes a cache entry that can clobber `stamp`'s own output. `turbo.json`'s
+ * `build` outputs exclude `"!dist/build-info.json"` so only `stamp` can ever touch that file.
  *
- * @decision 8ff7ccde — `distBuiltAt` is an ON-DISK ARTIFACT clock, NOT "what this process is running" (a
- * rebuild without a restart can advance it while the process keeps executing older code); `stale`/
- * `commitsBehind` are computed against `runningCodeBuiltAt` (`min(distBuiltAt, processStartedAt)`)
- * instead, so staleness can no longer be understated by a rebuild that outpaced a restart. Does NOT apply
- * to the web signal — the daemon serves `packages/web/dist` live from disk, so there is no "loaded at
- * process start" gap for web assets to fall into
- * (docs/decisions/8ff7ccde-processstartedat-a-rebuild-can-outpace-the-running-process.md).
- * @decision 9aa4e2c9 — `processStartedAt` is read ONCE from `performance.timeOrigin`, NOT recomputed per
- * call like every other clock here and NOT derived as `Date.now() - process.uptime() * 1000` (that formula
- * drifts by a few ms between calls in the same boot)
- * (docs/decisions/9aa4e2c9-processstartedat-reads-performance-timeorigin-once.md).
+ * @decision 8ff7ccde — never compute `stale`/`commitsBehind` against the raw `distBuiltAt` clock: a
+ * rebuild without a restart can advance it while the process still runs older code. Use
+ * `runningCodeBuiltAt` (`min(distBuiltAt, processStartedAt)`) instead, or staleness gets understated.
+ * @decision 9aa4e2c9 — never derive `processStartedAt` as `Date.now() - process.uptime() * 1000` (mixes
+ * a wall clock with a monotonic one and drifts between calls in the same boot); never recompute it per
+ * call like every other clock here — read it ONCE from `performance.timeOrigin` instead.
  *
  * ⚠️ KNOWN LIMITATION (card c1072385 — see its own record above) — this is a DATE comparison, not an
  * ANCESTRY computation, for BOTH signals: `commitsBehind`/`webCommitsBehind` count commits whose COMMITTER
@@ -90,14 +74,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * because Loom lands every card via a squash merge, which stamps a fresh, effectively-monotonic committer
  * date at merge time.
  */
-/** @decision d3d4d432 — discriminates WHY `available` is false, classified at THE SOURCE (each
- * `unavailable()` call site below), never by string-matching the `reason` prose downstream — that would be
- * the same defect class this card exists to fix
- * (docs/decisions/d3d4d432-reasonkind-splits-not-applicable-from-could-not-measure.md). `"not-applicable"`
- * means the signal is NEVER meaningful here (today: no `.git` — a packaged install) and staying silent is
- * correct forever. `"could-not-measure"` means the instrument was reachable in principle but a step failed
- * (a race, a git error, a timeout) — this is NOT the same as "verified current", and a consumer that
- * collapses the two produces a false all-clear. */
+/** @decision d3d4d432 — never classify `reasonKind` downstream by string-matching the `reason` prose;
+ * classify it at THE SOURCE (each `unavailable()` call site below), or the same defect this card fixed
+ * comes back.
+ *
+ * `"not-applicable"` means the signal is NEVER meaningful here (today: no `.git` — a packaged install)
+ * and staying silent is correct forever. `"could-not-measure"` means the instrument was reachable in
+ * principle but a step failed (a race, a git error, a timeout) — never collapse the two into one silent
+ * case, or a consumer produces a false all-clear for a signal that was merely unreachable. */
 export type DeployUnavailableReasonKind = "not-applicable" | "could-not-measure";
 
 export interface DeployStalenessResult {
@@ -205,11 +189,10 @@ export interface DeployStalenessResult {
    * whenever `stale` is already `true` (ordinary staleness isn't a "disagreement" — both signals already
    * agree something needs a rebuild). */
   deploySignatureMismatch: boolean;
-  /** @decision 3d7dccb9 — the CONTENT-based fallback `processBuiltShaMatchesHead` cannot give you: a sha
-   * comparison alone can never distinguish "different commit, identical shipped tree" from "genuinely
-   * stale" — and the former is exactly what a squash-merged card looks like from the vantage of its own
-   * unsquashed worktree form (see the module doc's mechanism section for the incident this answers)
-   * (docs/decisions/3d7dccb9-stamp-rides-the-deploy-builds-own-turbo-invocation.md).
+  /** @decision 3d7dccb9 — a sha comparison alone can never distinguish "different commit, identical
+   * shipped tree" from "genuinely stale" — the former is exactly what a squash-merged card looks like
+   * from the vantage of its own unsquashed worktree form; this field is the CONTENT-based fallback.
+   *
    * Computed ONLY when `processBuiltSha` is resolvable AND is NOT an ancestor of `mainlineHeadSha` (a
    * `git merge-base --is-ancestor` check) — the one case a plain sha/date comparison is structurally
    * unable to answer; when `processBuiltSha` IS an ancestor (the ordinary case — ordinary commit history,
@@ -327,10 +310,9 @@ export interface BuildInfo {
  * substitute (card f26339d7 DoD #1). Exported so `served-status.ts` can reuse this exact parsing for its
  * OWN "once at process start" capture (`processBuiltSha`/`processBuiltDirty`) — one parser, not two
  * hand-maintained copies.
- * @decision 119fd301 — the baked `build-info.json` this reads must exist ONLY inside a build OUTPUT dir,
- * never reachable from a from-source run's own `__dirname` — breaking that turns an honest "not built" gap
- * into a silently WRONG stale bake, present and well-formed
- * (docs/decisions/119fd301-readbuildinfo-must-read-only-from-a-build-output-dir.md). */
+ * @decision 119fd301 — never make this walk up looking for the file, write it outside a `dist/` build
+ * output dir, or default a `distDir` override to a resolved `dist` path regardless of runtime: any of the
+ * three turns an honest "not built" gap (a from-source `tsx watch` boot) into a silently WRONG stale bake. */
 export function readBuildInfo(distDir: string): BuildInfo {
   try {
     const raw = fs.readFileSync(path.join(distDir, "build-info.json"), "utf8");
@@ -383,9 +365,8 @@ function isAncestor(repoRoot: string, sha: string, of: string): boolean | null {
  * fatal — this best-effort scan only ever needs to find the max mtime, not certify every file.
  *
  * @decision c241d54b — a `null` return here is ambiguous (never-built vs. transiently unreadable); a
- * caller that already confirmed the dir's presence must treat it as "unreadable now", never coerce it to a
- * default "very old" value
- * (docs/decisions/c241d54b-null-mtime-is-unreadable-now-not-very-old.md).
+ * caller that already confirmed the dir's presence moments earlier must treat it as "unreadable now",
+ * never coerce it to a default "very old" value — that silently corrupts every downstream clock reader.
  */
 export function newestMtimeMs(dir: string): number | null {
   let max: number | null = null;
@@ -498,9 +479,9 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
   }
 
   const sharedDistDir = sharedDistOverride ?? path.join(repoRoot, "packages", "shared", "dist");
-  // @decision c241d54b — distDir is confirmed to exist above; a null here means "unreadable now" (a build
-  // racing this read), never "very old" — do not coerce to epoch
-  // (docs/decisions/c241d54b-null-mtime-is-unreadable-now-not-very-old.md).
+  // @decision c241d54b — distDir is confirmed to exist above, so never coerce a null here to epoch the
+  // way sharedDistDir's own null safely does below: unlike sharedDistDir, distDir is not legitimately
+  // absent at this point — a null means "unreadable now" (a build racing this read), never "very old".
   const distMaxMs = newestMtimeMs(distDir);
   if (distMaxMs === null) {
     return unavailable("this daemon's own dist directory became unreadable while deriving its build clock (a build likely raced this read) — cannot derive a build time", "could-not-measure", baked);
