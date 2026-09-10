@@ -15,10 +15,12 @@
  *
  * SECURITY (load-bearing): the plaintext bot token exists only transiently — encrypted at rest via the
  * envelope helper (AES-256-GCM, LOOM_HOME key file), decrypted here only to hand the live gateway a token
- * to call Telegram or to derive the masked last-4. It is NEVER logged and NEVER returned in clear. Home is
- * NOT stored in the config row — it stays in app_meta, PER SESSION (get/setCompanionHome(sessionId)) —
- * see resolveAllEnabledConfigs, which resolves each row's OWN home rather than one shared value (the
- * multi-companion cross-delivery fix, task e849a487).
+ * to call Telegram or to derive the masked last-4. It is NEVER logged and NEVER returned in clear.
+ *
+ * Home is NOT stored in the config row — it stays in app_meta, PER SESSION (get/setCompanionHome(sessionId)),
+ * with `resolveAllEnabledConfigs` resolving each row's OWN home.
+ * @decision e849a487 — why it must be per-session, never one shared value; see
+ * docs/decisions/e849a487-multi-companion-home-not-a-shared-value.md.
  */
 import { createHash } from "node:crypto";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
@@ -134,33 +136,26 @@ export function resolveAllEnabledConfigs(
 }
 
 /**
- * SAME-HOME COLLISION GUARD (f1d7a22b investigation — duplicate proactive messages): the per-row home
- * resolution above is correct (each config reads its OWN session's app_meta home) — the gap is that two
- * DIFFERENT enabled sessions can each resolve their home to the SAME route, and `CompanionHeartbeatWatcher`
- * is armed 1-per-session with no cross-session scoping (controller.ts), so both would fire independently
- * and the owner gets the SAME proactive message twice. Mirrors the token-fingerprint guard's shape (group
- * by a fingerprint, keep exactly one) — but narrower: only the HEARTBEAT is suppressed on the losing
- * session(s) (by zeroing `heartbeatIntervalMinutes`, the existing "no heartbeat" convention — see
- * `CompanionConfig.heartbeatIntervalMinutes`), never the whole config. Its gateway/reminders/chat stay
- * fully armed. Competition is restricted to LIVE, non-archived members (`isLiveSession`): a companion's
- * `companion_config` row survives its session's pty death (`enabled` stays untouched — see
- * controller.ts's `onSessionExit`), so a dead-but-still-enabled session would otherwise be able to WIN
- * the group — or win an unmeasured tie as the "older" row — and silence a live sibling's heartbeat, the
- * exact orphan-silence this guard exists to prevent. Among the live members, the one kept armed has the
- * most real activity/history — highest `ctxTurns`, ties broken by the OLDEST session (earliest
- * `createdAt`, i.e. the longest-running real thread). Mutates `heartbeatIntervalMinutes` of the losing
- * config(s) in place.
+ * SAME-HOME COLLISION GUARD: the per-row home resolution above is correct (each config reads its OWN
+ * session's app_meta home) — but two DIFFERENT enabled sessions can resolve their home to the SAME route,
+ * and `CompanionHeartbeatWatcher` is armed 1-per-session with no cross-session scoping (controller.ts), so
+ * both would otherwise fire and duplicate a proactive message.
+ * @decision f1d7a22b — the investigation; see
+ * docs/decisions/f1d7a22b-same-home-collision-guard-investigation.md.
  *
- * RESIDUAL LATENCY ON A WINNER'S EXIT — FIXED (card 134368ac): if the winning LIVE session later exits, a
- * bare pty exit alone does not re-run this guard — controller.ts's `onSessionExit` deliberately bypasses
- * `reconcile()` (the config row's `enabled` stays true across a pty death, so an unscoped reconcile would
- * try to re-START the now-dead session's gateway), and even a REST-scoped `reconcile(sessionId)` for an
- * unrelated write only diffs that ONE session (the `onlySessionId` cross-companion-rearm-all fix), never a
- * sibling. `onSessionExit` now closes this itself: `teardownOneAndRearmSameHomeSiblings` captures the
- * exited session's home before tearing it down, then re-resolves + reconciles (via `applyDesired`, scoped
- * per sibling — never through `reconcile()`, which would recurse into the same serialization chain this
- * runs inside of) every still-LIVE sibling sharing that home — so a suppressed survivor re-arms promptly on
- * the exit itself, never deferred to the next boot or an unrelated config write. See controller.ts.
+ * Mirrors the token-fingerprint guard's shape (group by a fingerprint, keep exactly one) — but narrower:
+ * only the HEARTBEAT is suppressed on the losing session(s) (by zeroing `heartbeatIntervalMinutes`, the
+ * existing "no heartbeat" convention — see `CompanionConfig.heartbeatIntervalMinutes`), never the whole
+ * config. Its gateway/reminders/chat stay fully armed. Competition is restricted to LIVE, non-archived
+ * members (`isLiveSession`): a companion's `companion_config` row survives its session's pty death
+ * (`enabled` stays untouched — see controller.ts's `onSessionExit`), so an unfiltered dead-but-still-
+ * enabled session could WIN the group and silence a live sibling's heartbeat — the exact orphan-silence
+ * this guard exists to prevent. Winner selection: see `mostActive` below. Mutates
+ * `heartbeatIntervalMinutes` of the losing config(s) in place.
+ *
+ * @decision 134368ac — re-arming a suppressed survivor when the WINNER itself later exits is handled in
+ * controller.ts's `onSessionExit`, not here; see
+ * docs/decisions/134368ac-same-home-heartbeat-rearm-on-exit.md.
  */
 function suppressDuplicateHomeHeartbeats(db: CompanionConfigStore, configs: CompanionConfig[]): void {
   const byHome = new Map<string, CompanionConfig[]>(); // "channel\0chatId" -> every armed config on it
@@ -180,7 +175,7 @@ function suppressDuplicateHomeHeartbeats(db: CompanionConfigStore, configs: Comp
   }
   for (const group of byHome.values()) {
     // Only LIVE, non-archived sessions may compete for — or be silenced by — this guard (see the
-    // RESIDUAL LATENCY note above for the reverse gap — a winner's exit — and how it's re-armed).
+    // @decision 134368ac note above for the reverse gap — a winner's exit — and how it's re-armed).
     const liveGroup = group.filter((cfg) => isLiveSession(db, cfg.sessionId));
     if (liveGroup.length < 2) continue;
     const winner = mostActive(db, liveGroup);
