@@ -10,9 +10,13 @@ Card 99a1cf6f: `GateDescriptor.attempt` is set ONLY when this admission cycle is
 
 CORRECTED by card 7ad12202: an earlier version of this doc claimed "no gate descriptor ever needs a higher number [than 2]" — false. When the single-file retry's own isolated run passes but the ORIGINAL `&&` chain short-circuited on a non-final step, `confirmWorkerMerge` resumes whatever step(s) never ran as a THIRD, separately-admitted `runExclusive` cycle — `attempt:3` on that descriptor. `3` is real but rare (only this specific failure shape reaches it). A related Code Review correction, fixed in the same pass: `batchLandedCount` was never a discriminator between a batch's own attempt-1/retry/resume admissions (identical on all three) — the batch path now ALSO stamps `attempt`/`priorAttemptMs` on its retry (`2`) and resume (`3`) admissions, alongside `batchLandedCount` (both present together, never either/or).
 
+## `PendingOpRegistry`'s own until-superseded cache (registry-side mechanism)
+
+`PendingOpRegistry`'s `NEVER_CACHED_OUTCOMES` Set names `"stale-base"` as the SECOND member of what used to be "the ONE hardcoded exception" (`"cancelled"`, card 171297dc) — an outcome that must never be served from the TTL'd `retained` cache, nor written into the never-expiring `untilSupersededVerdicts` map, when its correctness depends on state the cache's identity key does NOT capture. `"stale-base"` qualifies because `confirmWorkerMergeTracked` keys its until-superseded cache on `verdictIdentity` (the BRANCH's resolved HEAD sha) alone, but a stale-base rejection is a verdict about main, not the branch — and the branch is UNCHANGED by construction on a stale-base rejection, so no branch-keyed identity string can ever capture main having moved on.
+
 ## Do not
 
-- Do not serve a stale-base rejection back to a later plain re-confirm from cache — `PendingOpRegistry`'s `NEVER_CACHED_OUTCOMES` treats `"stale-base"` specially precisely because the rejection says nothing about the branch; the advertised remedy ("just re-run worker_merge_confirm") only works if the re-call genuinely re-gates.
+- Do not serve a stale-base rejection back to a later plain re-confirm from cache — `PendingOpRegistry`'s `NEVER_CACHED_OUTCOMES` treats `"stale-base"` specially precisely because the rejection says nothing about the branch, and its own advertised remedy ("just re-run worker_merge_confirm") only works if the re-call genuinely re-gates; a branch-keyed identity string can't capture that main has moved on.
 - Do not read `gateBaseInvalidated` as an ordinary rejection like a real test failure — it is a benign race where canonical main advanced during this merge's own gate/squash, not evidence against the branch.
 - Do not assume `attempt` is capped at 2 — a resumed non-final step after a passing single-file retry reaches `attempt:3` (card 7ad12202), on both the solo and batch paths.
 
@@ -20,4 +24,6 @@ CORRECTED by card 7ad12202: an earlier version of this doc claimed "no gate desc
 
 Inline comment in `packages/daemon/src/sessions/service.ts` (`ConfirmMergeResult.gateBaseInvalidated`): lines 559-574, as of commit `f9caa77e30d5c1a6dd994b6203261968c0dbf94f`. Relocated by card `8f4c8a8f`; no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
 
-Inline comment in `packages/daemon/src/orchestration/gate-semaphore.ts` (`GateDescriptor.attempt`/`priorAttemptMs`): lines 223-254, as of commit `5f6d9fd981336bfafd530fada633b229677aa081`. Relocated by card `9641742e`; no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+Inline comment in `packages/daemon/src/orchestration/gate-semaphore.ts` (`GateDescriptor.attempt`/`priorAttemptMs`): lines 223-254, as of commit `5f6d9fd981336bfafd530fada633b229677aa081`. Relocated by card `9641742e`; no wording changed, wrapped lines joined into a flowing paragraph and `*` markers stripped.
+
+Inline comments in `packages/daemon/src/orchestration/pending-ops.ts`: `NEVER_CACHED_OUTCOMES`'s own doc (lines 17-32) and the class doc's `"stale-base"` paragraph (lines 330-339), as of commit `507e966583ff18068f5e7e56942acfe67001ee94`. Relocated by card `a1491009` (tranche 1); no wording changed beyond joining wrapped lines and stripping `*` markers.
