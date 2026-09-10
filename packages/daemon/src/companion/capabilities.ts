@@ -245,19 +245,11 @@ function synthesizeLeadModeScope(db: Db, capability: string): ResolvedGrantScope
 }
 
 /**
- * Distinguishes a project that's TOTALLY ungranted from one that's granted for a DIFFERENT capability but
- * not `deniedCapability` — every belt-and-suspenders per-project scope denial below (Framework §2) routes
- * through this so it names WHICH capability is missing, instead of the old collapsed "not in your granted
- * scope" that reads identically whether the project has no access at all or just lacks THIS ONE lever
- * (Platform Auditor finding, session 5db71873: `sessions_status` on a project succeeded while `board_list`
- * on the SAME project returned the plain message, with nothing surfacing that the two are independently
- * scoped — a partial grant is easy to mistake for full access). `label` names the project reference in the
- * message (defaults to `project "<id>"`; a caller that resolved the project from a task/question/session
- * id instead of a bare `project` param passes its own label, e.g. "this task's project"). Reads the
- * session's WHOLE grant set (every capability, every project) — purely descriptive, never widens or itself
- * decides scope. Falls back to the plain message (byte-identical to before this fix) when the store can't
- * list grants, or when the project genuinely has no OTHER capability grant either — a fully-ungranted
- * project's error is unchanged.
+ * Names WHICH capability is missing (vs. a collapsed "not in your granted scope" that reads the same for
+ * a fully-ungranted project as for one just missing this one lever). `label` names the project reference
+ * in the message (defaults to `project "<id>"`).
+ * @decision sha:f4d04609 — why, and the fallback behavior; see
+ * docs/decisions/f4d04609-scope-denial-names-missing-capability.md.
  */
 function scopeDenialMessage(
   db: Db,
@@ -1794,19 +1786,11 @@ function isDeniedVaultPath(relPath: string): boolean {
 }
 
 /**
- * Per-note opt-out: a leading `---\n…\n---` frontmatter block setting `companion-read: false` (or
- * `no`/`off`, quoted or bare, case-insensitive) excludes that note from `vault_lookup` even though it
- * isn't otherwise secret-shaped. NOTE: no existing vault sensitivity/exclusion marker was found in
- * `vault-lint.mjs` or `vault/browser.ts` (checked before building this) — `companion-read: false` is the
- * convention THIS lever introduces; a future vault sensitivity feature should adopt/rename this rather
- * than add a second, competing marker. Deliberately narrow (a falsy-literal match, not a full YAML
- * parse) — this tool has no other use for frontmatter.
- *
- * CR fix: `readVaultFile` reads utf8 WITHOUT stripping a leading BOM (`﻿`), which is realistic on
- * this Windows-primary host (VSCode/PowerShell commonly write one) — an un-stripped BOM sits before the
- * `---` and silently defeats the `^---` anchor, so a BOM-prefixed opt-out note would get searched anyway.
- * Strip a single leading BOM before matching, here (the only place this content is inspected for
- * frontmatter) rather than at the shared `readVaultFile` reader, which has other callers.
+ * Per-note opt-out: `companion-read: false` (or `no`/`off`) in a leading frontmatter block excludes that
+ * note from `vault_lookup`. Strips a leading BOM before matching (not at the shared `readVaultFile`
+ * reader, which has other callers) since an un-stripped BOM would silently defeat the `^---` anchor.
+ * @decision sha:319ae2cc — the opt-out convention + why BOM-strip lives here; see
+ * docs/decisions/319ae2cc-vault-read-bom-strip-placement.md.
  */
 function hasCompanionReadOptOut(content: string): boolean {
   const unbommed = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
