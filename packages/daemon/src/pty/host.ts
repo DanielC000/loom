@@ -9805,140 +9805,36 @@ export class PtyHost {
         setTimeout(() => this.sendEnterAndVerify(sessionId, 1, gen), delay);
       });
     };
-    // Card 3ce3fa39 (the frame-splice bug): `composerDirtyLen` is a possibly-stranded amount an EARLIER
-    // submit's give-up/heal-if-stuck left unresolved — see the field's doc for why the clear is deferred
-    // here rather than attempted at give-up time. THIS is the moment to actually address it: unlike give-up
-    // time (whose whole trigger condition is "the engine wasn't reading"), a fresh submit is the one point
-    // where we get real corroboration for free — if THIS write's own Enter goes on to confirm, that proves
-    // the engine read the entire ordered byte stream, clear-prefix included, in order. Gated on
-    // `composerLen === 0` for the SAME reason every other clear in this file is (card e1829591 — never risk
-    // a real human draft); if a human is mid-draft, skip the defensive clear and fall back to the historical
-    // stray-concatenation risk in that one already-rare edge case, unchanged from before this card.
-    // Force-close first (a fresh zero-length START+END pair, the SAME bytes sendEnterAndVerify's own retry
-    // reassert uses — card 97558183: idle → true no-op, still-open → closes with only a small stray tail)
-    // so the backspace burst that follows can never be swallowed as literal paste content from an earlier
-    // write whose own closing END marker may have been the thing that dropped.
-    // Deliberately NOT reset to 0 here (only a genuine confirmation resets it — see the field's doc): if
-    // THIS write also gives up unconfirmed, the give-up branch must keep compounding on top of whatever was
-    // already unresolved, not overwrite it — that compounding is exactly what specimen A/C's doubled/singled
-    // residue measured.
+    // @decision 3ce3fa39 — the composer clear-prefix is DEFERRED to the next submit(), never attempted at
+    // give-up time itself (a fresh submit is the only point that gets real corroboration for free); gated
+    // on composerLen===0 so a live human draft is NEVER touched. Force-closes the paste bracket first so a
+    // later backspace burst can't be misread as literal paste content. See 3ce3fa39's record.
     //
-    // Card b9b8f8db (the composer-runaway fix): a REDELIVERY of an already-attempted message — `origin`
-    // contains a member whose own PRIOR physical write already failed to confirm (`giveUpGen !== undefined`,
-    // set only by `requeueGiveUpOrigin`'s `kept.push`) — must NOT repeat the backspace-then-repaste below.
-    // `composerDirtyLen` is never reset except by a genuine confirmation (see the doc above), so in a
-    // genuinely wedged session (confirmation never arrives) every redelivery cycle backspaced the FULL
-    // accumulated total and repasted the ~identical body again, compounding without bound (measured: a
-    // 45,934 B kickoff's own single-generation write grew to 184,967 B — 4× — across 4 cycles in ~2.5min).
-    // Since this exact message already put its own content in front of the engine once, ASSUME the composer
-    // still holds it (give or take the small possible-duplicate tag prefix `joinSubmittedText` adds at write
-    // time, which is never literally re-typed either way) and retry ONLY the Enter — do not touch the
-    // composer body at all.
-    // ASSUMPTION, STATED (not inherited silently): the composer genuinely still holds what was last written
-    // for this message — i.e. the earlier paste landed byte-for-byte and only the Enter/hook confirmation
-    // never registered. If that's wrong (a genuinely mangled/partial earlier paste), this Enter submits
-    // whatever content is ACTUALLY sitting there as a real turn, instead of self-correcting the way a full
-    // backspace+repaste would. That is a real tradeoff, taken deliberately: it applies ONLY to a message
-    // that has itself already been physically written once (never to a brand-new/different message, nor to
-    // a fresh re-mint's own FIRST attempt — see `handleKickoffGiveUpExhausted`'s re-mint, which mints a NEW
-    // QueuedMessage with no `giveUpGen` of its own yet, so it still takes the full clear+repaste below,
-    // unchanged), and it is bounded by the SAME `GIVE_UP_REQUEUE_LIMIT`/chainDepth cycle count as before —
-    // this does not remove the cap, it removes the wasted bytes inside each already-capped cycle.
+    // @decision b9b8f8db (the composer-runaway fix) — a REDELIVERY of an already-attempted message (every
+    // `origin` member already `giveUpGen`-tagged) retries ONLY the Enter, never repastes the body: without
+    // this, an unconfirmed wedged session compounds its own backspace+repaste every cycle without bound
+    // (measured: a 45,934 B kickoff grew to 184,967 B — 4× — across 4 cycles in ~2.5min). Assumes the
+    // composer still holds this message's own prior physical write — see b9b8f8db's record for the stated
+    // tradeoff, and 4796f999 below for the gap this assumption turned out to have.
     //
-    // Card c148f118 (closing the ambiguity ae354916's comment below records): the defensive clear-prefix
-    // below never decremented `composerDirtyLen`, and the additive give-up mark that can follow it fires
-    // UNCONDITIONALLY — so "the clear worked, then the repaste alone failed to confirm" and "the clear
-    // did nothing at all" landed on the EXACT SAME NUMBER, with no way to tell them apart. Fixed by
-    // giving `composerDirtyLen` a single, HONEST job (the CONSERVATIVE upper bound — assume no attempted
-    // clear, ever, has actually landed; unchanged below, byte-identical to before this card whenever no
-    // clear is ever attempted) and adding a second field, `composerDirtyLenBelieved` (see its own doc on
-    // the Live interface), for the OPTIMISTIC read (assume every attempted clear DID land). The two
-    // together bound the truth: equal ⇒ no unresolved clear is in play, nothing to doubt;
-    // `composerDirtyLenBelieved < composerDirtyLen` ⇒ a clear was attempted whose outcome is still
-    // unverified, and the gap between them is exactly how many characters are in doubt. Neither field
-    // alone could ever say that — two honest fields instead of one field doing two jobs, which is why it
-    // could do neither.
+    // @decision c148f118 — composerDirtyLen is the conservative reading; always pair it with
+    // composerDirtyLenBelieved (see that field's own doc / c148f118's record).
     //
-    // Card 2960c3bf (2026-08-05, worker `a9b67b0d`): a SECOND occurrence of exactly the residue
-    // 3ce3fa39's comment above predicted ("first-hand confirmed: two specimens' abandoned text
-    // survived a backspace-clear... only to resurface — once doubled") — this time via THIS deferred
-    // clear (the branch below), not the immediate one 3ce3fa39 moved away from. A re-minted give-up
-    // retry (44283 stranded + a fresh 44323-char repaste, the 40-char excess being the
-    // `[loom:possible-duplicate root:…]` tag `framePossibleDuplicate` adds) landed at
-    // `composerDirtyLen === 88606` (`= 44283 + 44323`, exact) after ITS OWN Enter also never
-    // confirmed. ⚠️ THAT NUMBER IS NOT COMPOSER EVIDENCE — `composerDirtyLen` is pure write-side
-    // bookkeeping (verified: every mutation site is either `+= lastPrompt.length`, the length of
-    // what LOOM wrote, at 5673/6315/6363, or a full reset to 0 gated on `composerDirtyLenClearedByGen`
-    // trusting a CONFIRMED hook — never a read-back of real terminal/composer content). `88606` is
-    // therefore what this accounting produces whenever a clear-then-repaste generation's OWN Enter
-    // also fails to confirm, REGARDLESS of whether the backspace burst actually cleared anything —
-    // it says nothing about what the engine's real composer held. Two open candidates, not
-    // established either way from static logs alone: (a) the un-bracketed `BACKSPACE.repeat(dirty)`
-    // burst below gets misinterpreted as literal paste content once/if the engine processes it; (b)
-    // the engine simply stopped consuming stdin after rendering the specimen's first large paste (its
-    // raw per-session output log recorded ~0 bytes of further output for the rest of that session's
-    // life — consistent with nothing sent afterward, backspaces included, ever being read at all).
-    // A live experiment is needed to discriminate (a)/(b) above; this comment records the evidence, not
-    // a fix for the STRAND — card 17c98df7's own repaint probe (merged a648239) since ran that
-    // experiment and did NOT reproduce the strand in 9 attempts (a small-n null, not a clearance — see
-    // that card). Card c148f118 fixed a DIFFERENT, narrower thing: `88606` above being unable to tell
-    // "the clear worked, the repaste alone didn't confirm" from "the clear did nothing" is now closed by
-    // `composerDirtyLenBelieved` (see its own doc) — for this exact specimen it would have read `44323`
-    // (just the repaste, assuming the clear landed) alongside `composerDirtyLen`'s unchanged `88606`
-    // (assuming it didn't) — an honest range instead of one number silently picking neither story. This
-    // does NOT resolve which of (a)/(b) actually happened; it only stops the number from claiming to.
+    // @decision 2960c3bf — composerDirtyLen is pure write-side accounting, never composer evidence, even
+    // at a number this large (a measured specimen read 88606 with the real composer content unknown either
+    // way). See 2960c3bf's record for the specimen and the two still-open candidate causes.
     //
-    // Card 4796f999: `b9b8f8db`'s ASSUMPTION above ("the composer still holds THIS message's own physical
-    // write") has no way to verify itself, and is invalidated the instant an INTERVENING generation's own
-    // clear-then-repaste (the `else if` branch below) fails to actually erase the terminal — CONFIRMED
-    // end-to-end from two real specimens (docs/investigations/f779b3da-giveup-redrain-race/findings.md):
-    // one a silent fusion of two messages' content, one a silently and permanently LOST message. Neither
-    // this branch's own code nor `3ce3fa39`'s ever checked the OTHER's precondition.
-    // THE FIX reuses `composerDirtyLenBelieved` (card c148f118, see its own doc above) — it already tracks
-    // exactly the signal needed and was simply never consulted here: `composerDirtyLenBelieved ===
-    // composerDirtyLen` means no OTHER generation's clear is currently unresolved, i.e. nothing has
-    // touched the composer since THIS message's own last write — Enter-only is genuinely safe. A gap
-    // between them means an intervening clear's outcome is unverified, and this redelivery must NOT trust
-    // whatever is actually sitting in the composer — fall through to the full clear+repaste branch below
-    // instead, which re-pastes THIS redelivery's own real body: `text` here is `joinSubmittedText(drained,
-    // …)` over the SAME `drained` array passed through as `origin`, so it always CONTAINS this redelivery's
-    // own body. (It is not necessarily EXCLUSIVELY this message's body — `drainPending`'s run-collection
-    // can splice several entries into one `drained`/`origin`: for a `"warning"`-kind head, with
-    // `coalesceAgentMessages` on, or — since card `eac3464d`'s same-sender coalescing — for the default
-    // `"agent"`-kind splice too, which can itself run up to `AGENT_COALESCE_MAX_COUNT` entries; no splice
-    // shape here is guaranteed single-entry any more. Still safe: the same-sender branch never extends a
-    // run onto a `giveUpGen`-tagged entry (see `drainPending`'s own comment), so a same-sender batch can
-    // never MIX an already-written member with a fresh one — the specific mixing `every` (vs. `some`)
-    // above guards against. Either way `text` still carries every member's real content, which is what the
-    // safety of this fallback actually rests on.) Per this card's own DoD: a correct fallback matters more
-    // than avoiding the re-paste — an unnecessary backspace+repaste is cheap; silently fusing or losing
-    // another message's content is not.
-    // ⚠️ Card a6c1d413 (fixed): this check used to be BOUNDED, not closed, by that card's own gap —
-    // `composerDirtyLenBelieved`/`composerDirtyLen` were reset TOGETHER by `composerDirtyMarkedForGen`'s
-    // single-scalar confirm gate, which could zero an EARLIER, still-genuinely-unresolved contribution
-    // when a LATER generation alone confirmed, making the gap this fix checks for read "nothing to doubt"
-    // when there still was some. `clearComposerDirtyOnConfirm` now tracks per-generation contributions
-    // (`composerDirtyMarkedGens`) and only ever resolves an EARLIER generation's mark when the confirming
-    // generation's own confirmation is DECISIVE (content-matched — see that method's own doc for why that
-    // specifically is transitive proof); a content-blind (FIFO-position) confirmation now resolves only
-    // its own generation's contribution, never an earlier one's. This check's `composerBelievedTrustworthy`
-    // read is therefore no longer exposed to that false-"nothing to doubt" reading.
-    // Card fa27d262 (Code Review finding on 4796f999's branch, TRACED then REPRODUCED — see
-    // pty-enter-only-drops-coalesced-neighbour.mjs): this used to be `origin?.some(...)` — ANY member of
-    // `origin` carrying `giveUpGen` was enough to trust the WHOLE joined `text` as "already physically
-    // written, retry the Enter only". But `drainPending`'s run-collection loop can coalesce a
-    // `giveUpGen`-tagged entry together with a FRESH neighbour that has never been attempted before (same
-    // route + kind, neither held) into ONE `drained`/`origin` array — that fresh neighbour's real body was
-    // never written anywhere. `some` let that mixed batch take Enter-only too: zero body bytes written for
-    // the ENTIRE joined text, fresh neighbour included, while `drainPending` still unconditionally fires
-    // `onDeliver()` for every drained entry afterward — a silent loss the system believes it delivered.
-    // `every` requires EVERY member of this batch to have already been physically written once before
-    // trusting the composer still holds all of it; a single fresh member routes the WHOLE batch to the
-    // full clear+repaste branch below instead, which re-pastes the complete joined text (every member's
-    // real body, fresh ones included) rather than trusting nothing was ever written. Safe for the
-    // single-message case `b9b8f8db` exists to fix: `origin` is never empty (every call site passes either
-    // `undefined` or a non-empty array — see submit()'s own call sites), so `every`/`some` agree whenever
-    // origin has exactly one element, which is the only shape that case ever produces.
+    // @decision 4796f999 — an Enter-only redelivery is safe ONLY when composerDirtyLenBelieved ===
+    // composerDirtyLen (no OTHER generation's clear is currently unresolved) — an intervening generation's
+    // own unverified clear can otherwise silently fuse or lose a message (two real specimens:
+    // docs/investigations/f779b3da-giveup-redrain-race/findings.md). A gap falls through to the full
+    // clear+repaste branch below, which re-pastes THIS redelivery's own real body (never a foreign one —
+    // see fa27d262 below for why that's still true when several entries coalesce into one batch). This
+    // check's own exposure to an a6c1d413-shaped stale gap is closed — see 4796f999's record.
+    //
+    // @decision fa27d262 — `every`, not `some`: ALL of `origin` must already be `giveUpGen`-tagged before
+    // trusting Enter-only, or a batch mixing a fresh, never-written neighbour silently loses that
+    // neighbour's body while onDeliver() still fires for it as delivered. See fa27d262's record.
     const isGiveUpRedelivery = origin?.every((m) => m.giveUpGen !== undefined) ?? false;
     const composerBelievedTrustworthy = live.composerDirtyLenBelieved === live.composerDirtyLen;
     if (live.composerDirtyLen > 0 && live.composerLen === 0 && isGiveUpRedelivery && composerBelievedTrustworthy) {

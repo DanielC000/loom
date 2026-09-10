@@ -1,0 +1,18 @@
+# 3ce3fa39 — the composer clear-prefix is DEFERRED to the next submit(), never attempted at give-up time
+
+## Narrative
+
+Card 3ce3fa39 (the frame-splice bug): `composerDirtyLen` tracks a possibly-stranded amount an earlier submit's give-up/heal-if-stuck left unresolved. The clear-prefix is deliberately deferred to the NEXT submit() rather than attempted at give-up time itself: give-up time's own trigger condition is "the engine wasn't reading," so nothing at that moment can corroborate whether a clear would actually land. A fresh submit is the one point that gets real corroboration for free — if that write's own Enter goes on to confirm, it proves the engine read the entire ordered byte stream, clear-prefix included, in order.
+
+When the deferred clear does fire (submit()'s `composerDirtyLen > 0 && composerLen === 0` branch), it force-closes the paste bracket first — a fresh zero-length START+END pair, the same bytes `sendEnterAndVerify`'s own retry-reassert uses (card 97558183: idle → true no-op, still-open → closes with only a small stray tail) — so the backspace burst that follows can never be swallowed as literal paste content from an earlier write whose own closing END marker may have been the thing that dropped.
+
+`composerDirtyLen` is deliberately NOT reset to 0 by this deferred clear (only a genuine confirmation resets it — see the field's own doc). If this write also gives up unconfirmed, the give-up branch must keep compounding on top of whatever was already unresolved, not overwrite it — that compounding is exactly what an earlier specimen's doubled/singled residue measured.
+
+## Do not
+
+- Do not attempt the clear-prefix while `composerLen > 0` — that gate exists for the SAME reason every other clear in this file is (card e1829591): never risk erasing a real human draft on the raw terminal. If a human is mid-draft, the defensive clear is skipped and the (already-rare) historical stray-concatenation risk applies instead, unchanged.
+- Do not reset `composerDirtyLen` at give-up time, or on an unconfirmed deferred clear — resetting early would silently discard a still-genuinely-unresolved earlier contribution the next redelivery cycle needs to keep compounding on top of.
+
+## Source
+
+Inline comment in `packages/daemon/src/pty/host.ts` (`submit()`, the composer clear-prefix / give-up-redelivery block), lines 9808-9825, as of commit `dc53c7111807e103baf99544d3890df80e9a1c92` (this tranche's starting HEAD). Extracted by card `dfde8c66` (tranche 9). This record covers only the deferred-clear-timing design at this specific call site — 3ce3fa39's own root-cause question (which of two candidate mechanisms makes a clear-prefix's success unverifiable) remains OPEN; see `docs/spikes/frame-splice-3ce3fa39-*.md` and `2960c3bf`'s record. 3ce3fa39 is cited at many other sites in this file (`git grep -n "3ce3fa39" -- packages/daemon/src/pty/host.ts`); this record does not attempt to cover all of them.
