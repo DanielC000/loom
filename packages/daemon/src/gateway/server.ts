@@ -298,7 +298,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // (the trust-tier hook below instead reads `req.socket.remoteAddress` directly, so it stays correct
   // regardless of this setting — see gateway/trust-tier.ts).
   // @decision 6bc02f50 — resolve `remoteAccess`/TLS HERE, before Fastify() construction (https is
-  // construction-time-only); ships inert by default. See docs/decisions/ for the httpsActive rationale.
+  // construction-time-only, so this can never move below it). File-read and TLS-parse failures are
+  // caught independently — either must degrade to plain HTTP with httpsActive:false, never throw.
   const remoteAccessConfig = resolveConfig(undefined, deps.db.getPlatformConfig()).remoteAccess;
   let httpsOptions: { cert: Buffer; key: Buffer } | undefined;
   if (isTrustTierHookActive(remoteAccessConfig) && remoteAccessConfig.tls) {
@@ -486,16 +487,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     });
   }
 
-  // @decision 9ccedbee — the loopback human-only-write guard (SECURITY) asks its OWN question ("does an
-  // agent legitimately need this from a shell?"), not trust-tier.ts's "is this safe for a remote human?"
-  // — v1 gated by routeTier and left every Tier-1 route open; a real Loom agent exploited exactly that
-  // gap. See docs/decisions/9ccedbee-loopback-write-guard-v1-to-v2.md for the v1→v2 history and incident.
+  // @decision 9ccedbee — never gate this hook by routeTier/Tier classification again: v1 did, left every
+  // Tier-1 route open, and a real Loom agent exploited exactly that gap. This hook asks its own question
+  // ("does an agent need this from a shell?"), not trust-tier.ts's "is this safe for a remote human?".
   //   - Scope: every non-GET/HEAD `/api/*` route, PLUS the `/ws/term` and `/ws/companion` upgrades (both
   //     viewing AND writing — card 351e89af), PLUS `POST /internal/shutdown`/`/internal/update` (card
   //     93249b52). Untouched: `/mcp/:sessionId`, `POST /internal/hook` (deliberate — see the comment at
   //     `isGuardedInternalWrite` below), `/hooks/*`, `/oauth/callback`, `/ws/fleet`. GET reads are
-  //     deliberately NOT gated — settled policy, card 214caa53 GAP 2 (see
-  //     docs/decisions/214caa53-loopback-guard-gap-hardening.md for the survey and its stated ceiling).
+  //     deliberately NOT gated (settled policy, card 214caa53 GAP 2) — filesystem access already grants
+  //     the same read surface, so gating adds no material barrier at real cost to the UI/CLI/health probes.
   //   - Credential: `Authorization: Bearer <deps.loopbackSecret>` for `/api/*` and the two `/internal/*`
   //     routes (constant-time compared); for the WS upgrades, the same secret via the remote tier's own
   //     `Sec-WebSocket-Protocol: loom.v1, loom.bearer.<secret>` mechanism (or a `?token=` fallback) —
@@ -515,10 +515,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // inbound chat socket — gating the whole upgrade (not per-message) so reaching the handler at all
       // already proves the loopback secret, exactly like /ws/term.
       const isCompanionSocket = routePattern === "/ws/companion/:sessionId";
-      // @decision 93249b52 — POST /internal/shutdown and /internal/update are gated identically to every
-      // other loopback write here; POST /internal/hook is DELIBERATELY EXCLUDED (high-frequency,
-      // non-human vendor-CLI caller, no credential to present) — a scope decision, not a "this is already
-      // safe" claim. See docs/decisions/93249b52-internal-lifecycle-writers-bearer-guarded.md.
+      // @decision 93249b52 — never leave /internal/shutdown or /internal/update gated by loopback-IP
+      // alone; both must also pass this bearer guard — stopping the daemon / installing+restarting code
+      // is too large a blast radius. POST /internal/hook stays EXCLUDED (no credential, every session start).
       const isGuardedInternalWrite = req.method === "POST" &&
         (routePattern === "/internal/shutdown" || routePattern === "/internal/update");
       if (!isGuardedApiWrite && !isTermSocket && !isCompanionSocket && !isGuardedInternalWrite) return;
@@ -526,9 +525,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // reaching here either already passed/failed the trust-tier wall above, or has no non-loopback bind
       // to reach at all.
       // @decision 214caa53 — an empty/undeterminable `remoteAddress` on a guarded route is REJECTED
-      // (401), never treated as "confirmed non-loopback" — fail CLOSED, and no bearer credential rescues
-      // it. See docs/decisions/214caa53-loopback-guard-gap-hardening.md (GAP 1) for the RST-race
-      // hypothesis this hardens against and the test methodology behind "the fix stands anyway."
+      // (401), never treated as "confirmed non-loopback" — fail CLOSED, unconditionally; no bearer
+      // credential rescues it, since we can't confirm this is the loopback caller it's scoped to trust.
       const ip = req.socket?.remoteAddress ?? "";
       if (ip === "") {
         // Distinct body from the credential-rejection cases below (Code Review nitpick, card 214caa53):
@@ -1810,11 +1808,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // data model every opt-in Companion lever (session-status, decisions-relay, …) is gated on. HUMAN-ONLY
   // loopback REST — INTENTIONALLY NO MCP path (of ANY router) — an injection-exposed companion agent must
   // never widen its own capability.
-  // @decision sha:e6042f2f — ADD/upgrade needs a respawn to take effect (the companion PROCESS only ever
-  // fetches `tools/list` once); REVOKE/downgrade is already live with none needed, but still closes the
-  // Companion Trust Window on every write. See
-  // docs/decisions/e6042f2f-companion-capability-grant-respawn-asymmetry.md for the full asymmetry, the
-  // `attention-push` special case, and how this relates to sibling card dbba993f.
+  // @decision sha:e6042f2f — ADD/upgrade needs a respawn (the companion PROCESS only fetches `tools/list`
+  // once); REVOKE/downgrade is already live server-side with none needed. Never skip
+  // `closeCompanionTrustWindow` on a grant write — a Tier-A warm window can otherwise outlive the change.
   // Grants are keyed on the natural key (sessionId, capability, projectId) — POST/PUT both upsert; POST
   // additionally 201s a fresh grant while PUT 404s when there's nothing existing to update (so a client
   // can tell "created" from "must exist").
@@ -2631,8 +2627,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // --- Hook relay target (loopback only). DELIBERATELY excluded from the loopback-secret bearer guard
   // above — this is the SessionStart hook relay (assets/hook-relay.mjs), invoked by a child of the vendor
   // CLI on EVERY session start/resume, with no straightforward way to hold/present that shared secret.
-  // @decision a2407ed4 — verifyHookToken (a per-session token, not the shared bearer secret) closes the
-  // forge-against-any-session gap this exclusion otherwise left open. See docs/decisions/ for the mechanism.
+  // @decision a2407ed4 — never extend the loopback-secret bearer guard to /internal/hook (high-frequency,
+  // not human-driven — gating it wrong breaks every spawn). verifyHookToken (a per-session token, not the
+  // shared secret) instead closes the forge-against-any-session gap this exclusion otherwise left open.
   // ⛔ THIS IS NOT "HOOKS ARE NOW AUTHENTICATED" and does NOT achieve isolation — a co-resident caller that
   // deliberately reads the TARGET session's own settings.json can still extract the token; that ceiling is
   // inherited from 93249b52, not closed by this fix.
@@ -2654,9 +2651,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // Windows detached processes have NO real SIGTERM, so the management CLI POSTs here instead; this
   // triggers the SAME path the SIGINT/SIGTERM handlers run. Exits 0 (clean stop), NOT 75 (the
   // supervisor's RESTART sentinel — a stop must never relaunch).
-  // @decision 93249b52 — loopback-IP alone is not enough; also covered by the loopback-secret bearer
-  // guard above (`isGuardedInternalWrite`) — stopping the daemon is too large a capability for a
-  // co-resident agent to reach unauthenticated. See docs/decisions/ for the full rationale.
+  // @decision 93249b52 — loopback-IP alone is not enough; this route is also covered by the loopback-
+  // secret bearer guard above (`isGuardedInternalWrite`) — stopping the daemon is too large a capability
+  // for a co-resident agent to reach unauthenticated.
   app.post("/internal/shutdown", async (req, reply) => {
     if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
     setTimeout(() => deps.requestShutdown(), 50);
@@ -2666,9 +2663,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // --- Self-update control hook (Epic 2c-2, UI half) — the "Update & restart" button's target.
   // @decision 93249b52 — loopback-gated AND covered by the loopback-secret bearer guard (same as
   // /internal/shutdown): this route FETCHES AND INSTALLS CODE on a packaged install, a strictly larger
-  // blast radius than any /api/* write. PACKAGED-ONLY: a from-source daemon REFUSES with 409 — the npm
-  // reinstall is valid only for an npm-global `loomctl` install. See docs/decisions/ for the full split
-  // vs. `loom update` (CLI, which never calls this route) and the ack/defer mechanics.
+  // blast radius than any /api/* write. PACKAGED-ONLY: a from-source daemon REFUSES with 409.
   app.post("/internal/update", async (req, reply) => {
     if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
     if (!isPackagedInstall()) {
@@ -2678,10 +2673,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return reply.code(202).send({ ok: true, updating: true });
   });
 
-  // @decision 32fd6f4c — /internal/test/seed: direct deps.db/file writes for e2e-only data a spec cannot
-  // otherwise reach (usage samples, runs, live-no-PTY sessions, companion state) — gated on BOTH
-  // inTestMode() AND loopback, structurally unreachable on a real daemon. See docs/decisions/ for the
-  // per-kind history and the full seedable-field list.
+  // @decision 32fd6f4c — /internal/test/seed: direct deps.db/file writes for e2e-only data (usage
+  // samples, runs, live-no-PTY sessions, companion state) — gated on BOTH inTestMode() AND loopback,
+  // structurally unreachable on a real daemon; never route a new kind through startRun/PTY or reconcile().
   if (inTestMode()) {
     app.post("/internal/test/seed", async (req, reply) => {
       if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
@@ -3595,8 +3589,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // MCP tool. HUMAN-only loopback read; READ-ONLY — no write/forget surface here.
   // @decision 41c3f546 — backlinks are resolved via findInboundBacklinksBulk over ONE fetched corpus,
   // never per-row (N+1 fetches + N full-corpus scans measured ~4.2s vs ~15ms bulk on this project's
-  // corpus). @decision d371a9bf — the `backlinks` field is the structured {keys,totalFound} shape, never
-  // the agent-facing prose lines. See docs/decisions/ for both.
+  // corpus). @decision d371a9bf — never repoint this route at mcp/memory.ts's listProjectMemoryEntries
+  // (drags in requestAnnotations/everDelivered, which would mislead a human reader) — backlinks stays
+  // the structured {keys,totalFound} shape here, never the agent-facing prose annotation lines.
   app.get("/api/projects/:id/memory", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
@@ -4996,9 +4991,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { text } = (req.body as { text?: string }) ?? {};
     if (typeof text !== "string" || !text.trim()) return reply.code(400).send({ error: "text required" });
     // @decision 018ce1db — a Companion (role:"assistant") session is REFUSED here, full stop — never even
-    // reaches enqueueStdin. Loopback trusts ANY co-resident process (incl. a manager's own Bash), so
-    // without this a manager could curl this route and author words that land as the Companion's own
-    // ownerText — a privilege-escalation path. See docs/decisions/ for the full rationale + sibling fix.
+    // reaches enqueueStdin: loopback trusts ANY co-resident process (incl. a manager's own Bash), so
+    // without this it could curl this route and author words landing as the Companion's own ownerText.
     if (deps.db.getSession(id)?.role === "assistant") {
       // Owner-facing wording (not internals-facing "assistant-role"/"generic composer route" jargon) —
       // sibling card 9ccedbee's client fix (api.ts's post/del/put parsing a REST {error} body via
@@ -5464,7 +5458,6 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // @decision 351e89af — gated by the SAME loopback human-only-write guard as /ws/term (not "loopback =
   // authenticated human" — that conflates two different predicates). CEILING: this closes the
   // casual/incidental bypass, NOT a co-resident agent that deliberately reads the loopback secret file.
-  // See docs/decisions/ for the full rationale.
   //
   // VOICE (Companion Voice epic, VOICE-P4 inbound): a { type:"audio", data, mimeType } frame carries a
   // web-mic recording as base64 — untrusted bytes, decoded here (decodeInAppAudioToTempFile) into a
