@@ -307,11 +307,11 @@ export function currentColumns(db: Db, projectId: string): KanbanColumn[] {
 /**
  * Apply a project config override that MAY change the board's column layout, SAFELY — the shared writer
  * behind the config-PATCH surfaces (the platform `project_configure` MCP tool + the REST
- * `PATCH /api/projects/:id/config`). The blind `db.setProjectConfig` is a two-path asymmetry hazard: it
- * writes the new columns with NO card re-key, so renaming/removing a column ORPHANS every card still on the
- * old key (Board.tsx filters strictly → the card vanishes, no migration), violating columns.ts's hard
- * invariant "no task references a non-existent column". The dedicated column editor (PUT /api/projects/:id/
- * columns → planColumnLayout) re-keys cards; these config-PATCH surfaces bypassed it.
+ * `PATCH /api/projects/:id/config`).
+ *
+ * @decision sha:e9256a4f — the blind `db.setProjectConfig` path is a two-path asymmetry hazard: it never
+ * re-keys cards, so renaming/removing a column via it ORPHANS every card left on the old key, violating
+ * columns.ts's hard invariant "no task references a non-existent column" (see record for the full history).
  *
  * When the override changes the column KEY SET (the only thing that can orphan a card), route the column
  * change through the existing transactional safe WRITER `db.applyBoardColumnLayout`: every card on a
@@ -328,12 +328,9 @@ export function currentColumns(db: Db, projectId: string): KanbanColumn[] {
  * this surface only guarantees no orphan. Returns {ok:false} on an unknown project or an empty board, with
  * the stored config left UNCHANGED.
  *
- * `actor` (card a0cafef2) identifies WHO is making this write — every one of the four config-PATCH surfaces
- * (the human REST PATCH, the Platform Lead's + Setup Assistant's project_configure/project_update, and the
- * manager's project_update) routes through this ONE chokepoint, so recording the change history HERE means
- * every writer gets truthful attribution for free instead of four separate call sites each having to
- * remember to record it. See `ProjectConfigHistoryEntry`'s doc for the actor-string convention — never
- * hardcode "human" (unlike platform_config's single human-only writer, three of these four are agents).
+ * @decision a0cafef2 — `actor` identifies WHO made this write; every config-PATCH surface routes through
+ * this ONE chokepoint for attribution instead of recording it separately at each call site (see record
+ * for the actor-string convention and why hardcoding "human" is wrong on 3 of the 4 surfaces).
  * The "after" value recorded is the project's ACTUAL persisted config post-write (re-read fresh, not
  * reconstructed from `next`), so it's correct on both the blind path and the re-key path (which persists
  * via two separate writes — the non-column keys, then applyBoardColumnLayout's own kanbanColumns write).
