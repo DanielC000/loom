@@ -14,11 +14,12 @@ export type PendingOpState = "running" | "done" | "failed";
  */
 export type PendingOpOutcome = string;
 
-/** @decision 171297dc — a CANCELLED settle is not a verdict (no gate ever ran) and must never be replayed
- *  from either cache. See docs/decisions/171297dc-cancelled-settle-is-not-a-verdict-never-cache-it.md
- *  @decision 99a1cf6f — a stale-base rejection IS a real verdict, but about canonical MAIN, not the
- *  branch — `verdictIdentity` only ever tracks the branch, so it can never capture main having moved on.
- *  See docs/decisions/99a1cf6f-gatebaseinvalidated-is-a-real-verdict-never-cache-it.md */
+/** @decision 171297dc — a CANCELLED settle is not a verdict (no gate ever ran): never cache it in either
+ *  cache or replay it — a manager's documented "just re-call" retry would be handed the same stale
+ *  cancellation forever.
+ *  @decision 99a1cf6f — a stale-base rejection is a real, resolved verdict about canonical MAIN, not the
+ *  branch: never serve it from either cache to a later re-confirm — a branch-keyed identity string can't
+ *  capture that main has moved on. */
 const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base"]);
 
 /**
@@ -171,10 +172,9 @@ interface RetainedView extends PendingOpView {
  *  file for the DB-persisted `pending_gate_ops` tombstone row). Deliberately NOT a `RetainedView`: it
  *  carries none of the display-facing fields (`peek()`/worker_list's `pendingMerge` stays on the existing
  *  TTL'd `retained` map), only what `attach()`'s dedupe check needs to hand back a cached answer.
- *  @decision 1555e361 — "until superseded" alone is not enough for merge: `identity` gates a cache hit on
- *  a re-call's freshly-resolved identity matching the one recorded at settle time, so a re-call after a
- *  genuine fix is never told the stale rejection for a commit that no longer exists. See
- *  docs/decisions/1555e361-merge-gate-recall-trap-until-superseded-verdict-cache.md */
+ *  @decision 1555e361 — "until superseded" alone is not enough for merge: never serve a cache hit whose
+ *  freshly-resolved identity mismatches the identity recorded at settle — that mismatch is a genuine miss
+ *  and must fall through to a fresh mint, not the stale rejection for a commit that no longer exists. */
 interface UntilSupersededVerdict {
   rawOutcome: { ok: true; value: unknown } | { ok: false; error: unknown };
   identity?: string;
@@ -184,17 +184,16 @@ interface UntilSupersededVerdict {
  * Daemon-global registry of long-running orchestration ops (worker_spawn / worker_merge_confirm) that
  * can be POLLED and RE-ATTACHED — generalizes the old bare `inFlightSpawnTaskIds` claim Set (a
  * throw-on-retry mutex) into a record whose outcome a client can come back for.
- * @decision b9515beb — a client-side MCP timeout on a minutes-long gate run used to leave the manager
- * unable to tell whether the op landed, with a retry bouncing off "already in flight" instead of finding
- * out. See docs/decisions/b9515beb-registry-origin-mcp-timeout-left-manager-blind.md
+ * @decision b9515beb — never reintroduce a bare claim-Set / throw-on-retry mutex here: a caller whose own
+ * client-side MCP timeout fires on a minutes-long gate run needs a way to ask "did it land?", not just an
+ * "already in flight" throw with no path to find out.
  * One op per `key` at a time (spawn: `spawn:${taskId}`; merge: `merge:${workerSessionId}`; gate:
  * `gate:${workerSessionId}` — card 7f96aa09, a worker's own daemon-mediated DoD self-check; merge-batch:
  * `merge-batch:${managerSessionId's LINEAGE ROOT}:${sorted, comma-joined LINEAGE ROOTS of the resolved
  * candidate set's workerSessionIds}` — card f944d4e4 minted this key from raw ids).
- * @decision 3a2dac9c — a `worker_recycle` mints a fresh session id but never aliases the old key onto it;
- * both the read side (`peekPendingMerge`) and the write side's key selection walk the worker's
- * `recycledFrom` chain and prefer a RUNNING ancestor's key (same fix applied to the merge-batch key,
- * rebuilt from `lineageRootId`). See docs/decisions/3a2dac9c-recycle-never-aliases-key-walk-the-ancestor-chain.md
+ * @decision 3a2dac9c — never key a pending merge/merge-batch op on a raw session id a `worker_recycle`
+ * could later replace: both the read side (`peekPendingMerge`) and the write side's key selection must
+ * walk the `recycledFrom` chain (or lineage root), or a recycle mid-flight forks the dedupe in two.
  * The "gate" kind has no separate owning manager: its `managerSessionId` field holds the CALLING WORKER's own
  * session id (the caller and the beneficiary of the completion nudge are the same session), so it needs
  * none of the dead-owner reconciliation the "merge" kind does — there is no cross-session ownership split
@@ -215,65 +214,37 @@ interface UntilSupersededVerdict {
  * on their OWN pre-existing idempotency: confirmWorkerMerge's ALREADY_MERGED re-derive-from-clean-index,
  * and spawnWorker's `liveSessionIdForTask` live-worker guard — neither of which this registry duplicates.
  *
- * @decision 27ea069e — DEAD-OWNER RECOVERY, the ONE exception to evict-on-settle-only: a `run()`
- * invocation can outlive its owning manager session with no live caller left to ever receive its outcome,
- * so `evictDeadOwner()` force-removes such an entry ahead of its own settlement, letting a fresh
- * `attach()` on the same `key` start a genuinely new invocation instead of dedup-attaching to (or
- * spin-polling) one that can never be delivered. See `SessionService.confirmWorkerMergeTracked` and
- * `reconcileDeadOwnerMergeOps`. Full tradeoff: docs/decisions/27ea069e-dead-owner-recovery-the-one-eviction-exception.md
+ * @decision 27ea069e — DEAD-OWNER RECOVERY, the ONE exception to evict-on-settle-only: when a `run()`
+ * invocation outlives its owning manager with no live caller left to receive its outcome, `evictDeadOwner()`
+ * force-removes the entry ahead of settlement so a fresh `attach()` can start a genuinely new invocation.
  *
- * @decision d1aee5f1 — RETAINED TERMINAL VIEW: evict-on-settle above means a settled op's terminal state
- * is otherwise never observable via `peek()` — for the Board that meant the merged/rejected/failed
- * hairline fill had at most one poll's worth of a chance to render. `opts.retainMs` opts a `key` into a
- * brief post-settle window (a SEPARATE `retained` map, written at the same identity-guarded delete as
- * `entries`) so `peek()` can fall back to it instead of reverting to nothing instantly. See
- * docs/decisions/d1aee5f1-retained-terminal-view-after-evict-on-settle.md
+ * @decision d1aee5f1 — RETAINED TERMINAL VIEW: never read a settled op's absence from `peek()` as "nothing
+ * ever ran" — evict-on-settle means a `key` with no `opts.retainMs` opt-in reverts to nothing shown the
+ * instant it settles, by design; `retainMs` opts a `key` into a brief post-settle window instead.
  *
- * @decision 33172f01 — `retained` is ALSO consulted BEFORE minting a fresh `entries` row: a `key` miss on
- * `entries` with a live, unexpired `retained` hit means a duplicate re-confirm landed just after the real
- * op settled, and must be served that cached RAW outcome rather than re-run for real against a
- * worktree/branch the first call already tore down. Bounded strictly by `retainMs` (a genuine retry after
- * the window still runs for real); `opts.bypassRetained` is the deliberate escalation opt-out (e.g.
- * `forceRemoveWorktree`) that skips this read but still WRITES the cache on its own settle. See
- * docs/decisions/33172f01-retained-view-dedupe-stops-duplicate-re-confirm.md
+ * @decision 33172f01 — never let a `key` miss on `entries` mean "nothing outstanding, safe to re-run for
+ * real": check the retained-view cache first, or an accidental duplicate re-confirm can re-run for real
+ * against a worktree/branch the first call already tore down. `opts.bypassRetained` is the escalation opt-out.
  *
- * @decision 79b0ee52 — the dedupe above hands back a live `retained` hit UNCONDITIONALLY BY DEFAULT
- * (right for merge — there's no such thing as a merge outcome "settled but already known unusable").
- * `opts.isRetainedResultUsable` is the per-value escape hatch for a kind whose settled outcome CAN
- * self-declare staleness (`run_gate`'s `headCurrent:false`), never applied to an `ok:false` hit. See
- * docs/decisions/79b0ee52-retained-result-usability-escape-hatch.md
+ * @decision 79b0ee52 — never gate an `ok:false` (thrown error) retained hit with `opts.isRetainedResultUsable`
+ * — an error carries no analogous staleness signal, and re-serving it is the SAFER choice (a throw can
+ * strike mid-mutation; re-running risks compounding unknown state). It applies only to `ok:true` hits.
  *
- * @decision 1555e361 — UNTIL-SUPERSEDED VERDICT CACHE: the TTL'd `retained` dedupe above is bounded (5s
- * for merge, `MERGE_OP_RETAIN_MS`), and a caller polling a multi-minute gate run will usually land its
- * re-call after that window closes — `opts.retainVerdictUntilSuperseded` opts a `key` into a SEPARATE,
- * never-expiring `untilSupersededVerdicts` map (gated by `NEVER_CACHED_OUTCOMES`, below) so a re-call is
- * safe no matter how long it waited. Superseded, not expired: cleared only by a genuinely fresh settle
- * under the same `key`, reachable only via `opts.bypassRetained`, never a clock. PROCESS-LOCAL, NOT
- * PERSISTED (a restart clears it — a re-call spanning one mints a genuinely fresh op, as before this
- * existed), and deliberately DECOUPLED from `retained`/`retainMs`: `peek()` (worker_list/Board display)
- * stays on the TTL'd map, so a settled merge can vanish from display after a few seconds while a re-call
- * minutes later still safely returns the cached verdict — the display window's cadence must never gate
- * the safety property. See docs/decisions/1555e361-merge-gate-recall-trap-until-superseded-verdict-cache.md
+ * @decision 1555e361 — UNTIL-SUPERSEDED VERDICT CACHE: never let a merge poll re-run the gate once the
+ * TTL'd `retained` window closes — `opts.retainVerdictUntilSuperseded` opts a `key` into a SEPARATE,
+ * never-expiring cache instead; an unrequested second run can launder a rejected branch into a merge.
  *
  * ⚠️ THE TWO HARDCODED EXCEPTIONS (`NEVER_CACHED_OUTCOMES`, see its own top-level doc): `attach()` checks
  * the classified outcome string directly, both at this write and at the TTL'd `retained` read a few lines
  * below, rather than adding a new per-call opt for either.
- * @decision 171297dc — `"cancelled"` is not a verdict (no gate ever ran) and must never be cached or
- * replayed. See docs/decisions/171297dc-cancelled-settle-is-not-a-verdict-never-cache-it.md
- * @decision 99a1cf6f — `"stale-base"` IS a real, resolved verdict, but about canonical MAIN, not the
- * branch — `verdictIdentity` only ever tracks the branch, so it must also never be replayed from either
- * cache. See docs/decisions/99a1cf6f-gatebaseinvalidated-is-a-real-verdict-never-cache-it.md
+ * @decision 171297dc — `"cancelled"` is not a verdict (no gate ever ran): never cache or replay it — a
+ * manager's documented "just re-call" retry would be handed the same stale cancellation forever.
+ * @decision 99a1cf6f — `"stale-base"` is a real, resolved verdict about canonical MAIN, not the branch:
+ * `verdictIdentity` only tracks the branch, so this must never be replayed from either cache either.
  *
- * @decision 1555e361 — IDENTITY-GATED SUPERSEDE: "until superseded" alone is not enough — a manager who
- * fixes a rejected branch and re-calls plainly must not be told the cached rejection for a commit that no
- * longer exists ("my fix didn't work"). `opts.verdictIdentity` requires a re-call's freshly-resolved
- * identity to match the one recorded at settle time; a MISMATCH is a genuine MISS that also skips the
- * TTL'd `retained` fallback (written at the same now-stale settle). And `opts.identityOptional`: a
- * SUCCESSFUL merge confirm deletes the branch as part of its own completion, so a later re-call can never
- * again resolve the same sha — the caller declares, per call, that identity cannot meaningfully differ
- * here (set only when context makes divergence structurally impossible, never merely because a git ref
- * failed to resolve, which is usually transient and must still fail closed). See
- * docs/decisions/1555e361-merge-gate-recall-trap-until-superseded-verdict-cache.md
+ * @decision 1555e361 — IDENTITY-GATED SUPERSEDE: never serve a cached verdict whose freshly-resolved
+ * identity mismatches the one recorded at settle — that's a genuine MISS, skipping the TTL'd fallback too.
+ * Never set `opts.identityOptional` merely because a git ref failed to resolve — only when divergence is impossible.
  */
 export class PendingOpRegistry {
   private readonly entries = new Map<string, Entry<unknown>>();
@@ -374,8 +345,7 @@ export class PendingOpRegistry {
    *
    *  @decision 27ea069e — ACCEPTED TRADEOFF: this can only remove the MAP ENTRY, never cancel the orphaned
    *  `run()` itself — the old op's real work keeps executing in the background, unreachable, until it
-   *  settles on its own, harmlessly (the identity-guarded delete can only clear its own, already-detached
-   *  entry). See docs/decisions/27ea069e-dead-owner-recovery-the-one-eviction-exception.md */
+   *  settles on its own, harmlessly (the identity-guarded delete can only clear its own, already-detached entry). */
   evictDeadOwner(key: string): boolean {
     const e = this.entries.get(key);
     if (!e || e.state !== "running") return false;
@@ -435,10 +405,9 @@ export class PendingOpRegistry {
    * to `"cancelled"` (predates this card, unchanged) and now maps a stale-base rejection to `"stale-base"`,
    * so this closes both traps with no OTHER caller-side change at all.
    *
-   * @decision 33172f01 — `opts.bypassRetained`: the retention-window dedupe below is arg-agnostic by
-   * design (`key` alone decides it), so a caller whose args carry a one-shot escalation (e.g.
-   * `forceRemoveWorktree`) needs this opt-out or the escalation is silently swallowed by an earlier call's
-   * cache hit. See docs/decisions/33172f01-retained-view-dedupe-stops-duplicate-re-confirm.md
+   * @decision 33172f01 — never widen the retention-window dedupe key to include `run`'s actual args (it's
+   * `key`-only by design, to keep the RUNNING-op dedupe from forking into concurrent real invocations) — a
+   * caller with a one-shot escalation (e.g. `forceRemoveWorktree`) needs `opts.bypassRetained` instead.
    *
    * `opts.retainVerdictUntilSuperseded` (card 1555e361 — see the class doc's "UNTIL-SUPERSEDED VERDICT
    * CACHE" section for the full incident/rationale, INCLUDING its process-local/not-persisted boundary):
