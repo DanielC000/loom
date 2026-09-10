@@ -28,6 +28,11 @@
 //      form still resolve as a board-card id, never SHA-verified; and a `sha:`-sigil'd anchor whose id is
 //      NOT a real commit in this repo is flagged as orphan even when a same-named record file exists
 //      (the refuse-rather-than-fall-through gate, mirroring decision-records.mjs's own `resolveRecord`).
+//  10. overlongAnchorIds (card afc56dcc): a same-line `@decision` (bare or `sha:`-sigil'd) followed by 9+
+//      hex chars — the shape a verbatim 40-hex `git blame`/`git log` paste produces — is flagged, in both
+//      the CLI scan and the live per-file hook; a well-formed 8-hex anchor (bare or sigil'd), a too-short
+//      same-line id, the EOL-wrap shape (a DIFFERENT defect — brokenAnchors' own concern), and mid-line
+//      mentions of the literal token are all confirmed NOT flagged.
 // Run: `node test/comment-anchor-lint.mjs` from packages/daemon (no build, no LOOM_HOME needed).
 import fs from "node:fs";
 import os from "node:os";
@@ -38,6 +43,7 @@ import {
   extractCommentBlocks,
   findFileAnchors,
   findBrokenAnchors,
+  findOverlongAnchorIds,
   findOversizedRecords,
   findCollidingRecords,
   listRecordIds,
@@ -196,6 +202,77 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   check("mid-line mentions of the token are never flagged as broken", findBrokenAnchors(lines).length === 0);
 }
 
+// --- findOverlongAnchorIds (card afc56dcc — the verbatim-40-hex-paste silent-failure defect) -----------
+
+{
+  // The exact real-world shape the card names: a verbatim 40-hex `git blame`/`git log` paste under the
+  // `sha:` sigil. RED/GREEN: findFileAnchors (the pre-existing check) finds NOTHING — this IS the defect
+  // card 969b0e1c's grammar made newly likely — and findOverlongAnchorIds flags it.
+  const lines = ["// @decision sha:1234567890abcdef1234567890abcdef12345678 — a pasted 40-hex sha"];
+  const anchors = findFileAnchors(lines);
+  const overlong = findOverlongAnchorIds(lines);
+  check("40-hex sha paste: findFileAnchors (the pre-existing check) finds NOTHING — this IS the defect",
+    anchors.length === 0);
+  check("40-hex sha paste: findOverlongAnchorIds flags it, exactly once, as ns=sha, with the full match text",
+    overlong.length === 1 && overlong[0].line === 1 && overlong[0].ns === "sha"
+    && overlong[0].match === "@decision sha:1234567890abcdef1234567890abcdef12345678");
+}
+
+{
+  // The bare (non-sigil'd) equivalent — an over-long hex run with no `sha:` prefix at all.
+  const lines = ["// @decision 1234567890 — a bare over-long hex run, no sigil"];
+  const overlong = findOverlongAnchorIds(lines);
+  check("bare over-long hex run: findOverlongAnchorIds flags it, as ns=card",
+    overlong.length === 1 && overlong[0].ns === "card" && overlong[0].match === "@decision 1234567890");
+}
+
+{
+  // Boundary: exactly 9 hex chars (the pattern's own lower bound) must flag; exactly 8 (a well-formed id)
+  // must not — proves the {9,} boundary is where the card's DoD-1 said it should be, not off by one.
+  check("boundary: 9 hex chars flags", findOverlongAnchorIds(["// @decision 123456789 — nine hex chars"]).length === 1);
+  check("boundary: 8 hex chars (well-formed) does not flag", findOverlongAnchorIds(["// @decision 12345678 — eight hex chars"]).length === 0);
+}
+
+{
+  // Positive control: well-formed anchors (bare AND sha:-sigil'd) must never be flagged as overlong.
+  const bareWellFormed = ["// @decision 725dc89a — the prohibition, all on one line"];
+  const sigilWellFormed = ["// @decision sha:725dc89a — the prohibition, all on one line"];
+  check("well-formed bare anchor: findOverlongAnchorIds reports nothing", findOverlongAnchorIds(bareWellFormed).length === 0);
+  check("well-formed sha:-sigil'd anchor: findOverlongAnchorIds reports nothing", findOverlongAnchorIds(sigilWellFormed).length === 0);
+  check("well-formed bare anchor: findFileAnchors still finds it (sanity)", findFileAnchors(bareWellFormed).length === 1);
+  check("well-formed sha:-sigil'd anchor: findFileAnchors still finds it (sanity)", findFileAnchors(sigilWellFormed).length === 1);
+}
+
+{
+  // Scope boundary: a same-line id that's merely too SHORT is a DIFFERENT, out-of-scope shape (mirrors the
+  // identical carve-out already tested for findBrokenAnchors above) — never flagged as overlong.
+  const lines = ["// @decision 12ab — too short to be a real id"];
+  check("malformed same-line id, too short (out of this check's scope): findOverlongAnchorIds does NOT flag it",
+    findOverlongAnchorIds(lines).length === 0);
+}
+
+{
+  // Scope boundary: the EOL-wrap shape is brokenAnchors' concern, not this check's — the keyword has
+  // nothing after it on its own line, so there's no hex run for this pattern to even see.
+  const lines = [" * @decision", " * 725dc89a — the prohibition"];
+  check("EOL-wrap shape (brokenAnchors' concern, a DIFFERENT defect): findOverlongAnchorIds does NOT flag it",
+    findOverlongAnchorIds(lines).length === 0);
+  check("EOL-wrap shape: findBrokenAnchors DOES flag it (sanity — confirms the two checks partition correctly)",
+    findBrokenAnchors(lines).length === 1);
+}
+
+{
+  // Measured false-positive guard, same shape as the existing brokenAnchors negative control above: mid-
+  // line mentions of the literal token "@decision" — prose, a regex-literal definition, a message string —
+  // must never be flagged, since none of them carry a REAL 9+-hex run immediately after real whitespace.
+  const lines = [
+    "/** `@decision <id>` — the convention's own canonical example syntax, written as prose. */",
+    "const ANCHOR_RE = /@decision\\s+([0-9a-f]{8})\\b/gi; // a regex LITERAL containing the bare token",
+    "lines.push(`  - ${file}:${line} — @decision ${id}`); // a message string, not an anchor",
+  ];
+  check("mid-line mentions of the token are never flagged as overlong", findOverlongAnchorIds(lines).length === 0);
+}
+
 // --- bucketDistribution -----------------------------------------------------------------------------
 
 {
@@ -274,7 +351,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   }
 }
 
-// --- computeReport: fixture repo, all six checks end to end ------------------------------------------
+// --- computeReport: fixture repo, all seven checks end to end ------------------------------------------
 
 const REPO = path.join(os.tmpdir(), `loom-comment-anchor-lint-${Date.now()}-${process.pid}`);
 try {
@@ -313,7 +390,11 @@ try {
     " * @decision",
     " * cccccccc — split across a line wrap, must be flagged as a broken anchor",
   ].join("\n");
-  const src = [
+  // Card afc56dcc DoD-4: built as a function of `includeOverlong` so a genuine BEFORE/AFTER comparison can
+  // run against otherwise-byte-identical fixture content — the only permitted difference between the two
+  // reports is `overlongAnchorIds` itself; every other field (orphanAnchors, brokenAnchors, collidingRecords,
+  // oversizedRecords, totalAnchorSites) must read IDENTICAL in both.
+  const buildSrc = (includeOverlong) => [
     "const before = 1;",
     "",
     "// @decision aaaaaaaa — resolved via docs/adr, never flagged as orphan",
@@ -334,9 +415,22 @@ try {
     "",
     splitAnchor,
     "",
+    // Card afc56dcc: a verbatim 40-hex sha paste — invisible to ANCHOR_RE (so it can never reach
+    // orphanAnchors or count toward totalAnchorSites), invisible to brokenAnchors (a DIFFERENT defect
+    // shape), and must be the ONLY thing that moves overlongAnchorIds off zero in this fixture. Placed
+    // LAST (after every other anchor/block) so its inclusion shifts no EARLIER line number — the
+    // before/after comparison below diffs `brokenAnchors`/`orphanAnchors` items (including their line
+    // numbers) and must see them byte-identical, not merely equal in count.
+    ...(includeOverlong ? [
+      "// @decision sha:1234567890abcdef1234567890abcdef12345678 — card afc56dcc: a pasted 40-hex sha",
+      "",
+    ] : []),
     "const after = 1;",
   ].join("\n");
-  fs.writeFileSync(path.join(REPO, "packages", "daemon", "src", "fixture.ts"), src);
+  const fixturePath = path.join(REPO, "packages", "daemon", "src", "fixture.ts");
+
+  // BEFORE: no malformed anchor in the fixture at all.
+  fs.writeFileSync(fixturePath, buildSrc(false));
 
   // A synthetic fixture anchor placed under test/ must NEVER pollute the measured corpus.
   fs.writeFileSync(path.join(REPO, "packages", "daemon", "test", "fixture-test.mjs"),
@@ -358,7 +452,32 @@ try {
   fs.writeFileSync(path.join(REPO, "docs", "decisions", "deadc0de-namespace-test.md"),
     "# deadc0de\n\nNamespace test record — the bare form resolves without verification; the sha: sigil is refused because deadc0de is not a real commit in this repo.\n");
 
+  const reportBefore = computeReport(REPO, { minLines: 15 });
+
+  // AFTER: the same fixture, PLUS the malformed 40-hex-sha-paste line (card afc56dcc DoD-1).
+  fs.writeFileSync(fixturePath, buildSrc(true));
   const report = computeReport(REPO, { minLines: 15 });
+
+  // --- DoD-4: before/after — orphanAnchors, brokenAnchors, collidingRecords, oversizedRecords, and
+  // totalAnchorSites must not move at all; overlongAnchorIds must move from 0 to exactly 1. ---
+  check("DoD-4 before/after: totalAnchorSites is UNCHANGED by adding the malformed anchor (it was never a real anchor site)",
+    report.totalAnchorSites === reportBefore.totalAnchorSites);
+  check("DoD-4 before/after: orphanAnchors is UNCHANGED (count and items, by value)",
+    report.orphanAnchors.count === reportBefore.orphanAnchors.count
+    && JSON.stringify(report.orphanAnchors.items) === JSON.stringify(reportBefore.orphanAnchors.items));
+  check("DoD-4 before/after: brokenAnchors is UNCHANGED (this is a DIFFERENT defect shape)",
+    report.brokenAnchors.count === reportBefore.brokenAnchors.count
+    && JSON.stringify(report.brokenAnchors.items) === JSON.stringify(reportBefore.brokenAnchors.items));
+  check("DoD-4 before/after: collidingRecords is UNCHANGED",
+    JSON.stringify(report.collidingRecords) === JSON.stringify(reportBefore.collidingRecords));
+  check("DoD-4 before/after: oversizedRecords is UNCHANGED",
+    JSON.stringify(report.oversizedRecords) === JSON.stringify(reportBefore.oversizedRecords));
+  check("DoD-4 before/after: overlongAnchorIds moves from 0 (BEFORE) to exactly 1 (AFTER) — the new signal, and ONLY it, moved",
+    reportBefore.overlongAnchorIds.count === 0 && report.overlongAnchorIds.count === 1);
+  check("computeReport: the overlong anchor is reported with the correct file, ns, and full matched text",
+    report.overlongAnchorIds.items[0]?.file === "packages/daemon/src/fixture.ts"
+    && report.overlongAnchorIds.items[0]?.ns === "sha"
+    && report.overlongAnchorIds.items[0]?.match === "@decision sha:1234567890abcdef1234567890abcdef12345678");
 
   check("computeReport: fixture-test.mjs under test/ is excluded from the sweep (filesScanned === 1)", report.filesScanned === 1);
   check("computeReport: the 20-line unanchored block is flagged", report.unanchoredLongBlocks.count === 1
@@ -429,6 +548,12 @@ try {
     const fileReport = computeFileReport(REPO, fixturePath, fs.readFileSync(fixturePath, "utf8"));
     check("computeFileReport (the live PostToolUse hook path): the split anchor is flagged too",
       fileReport?.brokenAnchors?.length === 1);
+    // Card afc56dcc: the overlong anchor id must ALSO surface via the live per-file hook, not just the
+    // CLI scan — this is the check that catches it AT AUTHORING TIME, before it's ever committed.
+    check("computeFileReport (the live PostToolUse hook path): the overlong anchor id is flagged too",
+      fileReport?.overlongAnchorIds?.length === 1
+      && fileReport.overlongAnchorIds[0]?.ns === "sha"
+      && fileReport.overlongAnchorIds[0]?.match === "@decision sha:1234567890abcdef1234567890abcdef12345678");
     // oversizedRecords is deliberately NOT part of computeFileReport (records live under docs/, outside
     // SOURCE_ROOTS — see this file's own header) — confirm the hook-shaped report has no such key at all,
     // rather than silently reporting zero and looking like it checked.
@@ -456,8 +581,10 @@ console.log(failures === 0
     + "treats orphan records as advisory-only, never flags the guard class (isolated or merged-adjacent), "
     + "excludes test/-fixture noise from the sweep, honors a configurable minLines, flags a split (line-"
     + "wrapped) anchor in both the CLI scan and the live per-file hook, flags a record over "
-    + "PER_RECORD_MAX_BYTES (read from decision-records.mjs, not a hand-copied number), and flags two "
+    + "PER_RECORD_MAX_BYTES (read from decision-records.mjs, not a hand-copied number), flags two "
     + "record files sharing an id, naming every candidate and which one resolveRecord() actually wins "
-    + "(store precedence, then alphabetically-first within that store)."
+    + "(store precedence, then alphabetically-first within that store), and flags a same-line over-long "
+    + "hex anchor id (a verbatim 40-hex sha paste) in both the CLI scan and the live per-file hook, with "
+    + "orphanAnchors/brokenAnchors/collidingRecords/oversizedRecords/totalAnchorSites unmoved by it."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

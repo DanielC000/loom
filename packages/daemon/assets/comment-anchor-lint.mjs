@@ -24,7 +24,7 @@
 // `posttooluse-hook-honors-additionalcontext-not-systemmessage` and decision-records.mjs's own header for
 // the full method.
 //
-// Six checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
+// Seven checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
 //   1. unanchoredLongBlocks — a contiguous comment block >= `minLines` (default DEFAULT_MIN_LINES) with
 //      no `@decision <id>` anywhere in it. The "narrative is regrowing in source" signal.
 //   2. orphanAnchors — an `@decision <id>` whose id resolves to no record in ANY of the three stores this
@@ -66,6 +66,15 @@
 //      count. CLI-scan mode only, same ground as oversizedRecords above: records live under `docs/`, outside
 //      SOURCE_ROOTS, so the per-file hook structurally never observes a second record file for an id that
 //      already has one.
+//   7. overlongAnchorIds (card afc56dcc) — a `@decision` (optionally `sha:`-sigil'd) followed by 9+ hex
+//      chars on the SAME line: the shape a verbatim 40-hex `git blame`/`git log` paste produces, once card
+//      969b0e1c told authors to source a `sha:` id that way. `ANCHOR_RE` requires EXACTLY 8 hex chars
+//      followed by a word boundary, so this shape never matches it at all — no anchor, no orphanAnchors
+//      entry, no brokenAnchors entry (that check is EOL-only, a DIFFERENT defect shape — see
+//      `BROKEN_ANCHOR_RE`'s own doc), no injection, no error: silent, total no-op. Runs in BOTH the CLI
+//      scan and the per-file hook, same ground as brokenAnchors — it needs only the one file already being
+//      scanned. ⛔ Does NOT catch a same-line id that's merely too SHORT (e.g. "@decision 12ab") — a
+//      different, rarer shape outside this card's DoD, the same carve-out `BROKEN_ANCHOR_RE` already states.
 //
 // A <= GUARD_MAX_LINES-line block that DOES carry an anchor is the convention's TARGET STATE (Class A: a
 // short guard/prohibition, permanently inline) and is counted separately as `guardClassBlocks` — it is
@@ -153,6 +162,31 @@ function renderAnchorId(a) { return a.ns === "sha" ? `sha:${a.id}` : a.id; }
 // ⛔ Narrower scope, stated plainly: this does NOT catch a same-line malformed id (e.g. `@decision 12ab`,
 // too short) — that's a different, rarer shape outside this card's DoD, which is specifically the wrap.
 const BROKEN_ANCHOR_RE = /@decision\b\s*$/i;
+
+// Card afc56dcc: a THIRD anchor-shape defect, distinct from BROKEN_ANCHOR_RE's EOL-wrap shape above — a
+// SAME-LINE hex run of 9+ characters after `@decision` (optionally `sha:`-sigil'd). `ANCHOR_RE` requires
+// EXACTLY 8 hex chars followed by a word boundary, so a 9+-hex run never matches it — no anchor, no
+// orphanAnchors entry, no brokenAnchors entry, no injection, no error: a silent, total no-op. This became
+// the NATURAL authoring mistake once card 969b0e1c told authors to source a `sha:` id off `git blame`/
+// `git log`, which hand back a full 40-hex sha, not the 8-hex prefix the grammar actually wants.
+// Repo-wide sweep (worker card afc56dcc DoD-1, base sha 41336cdb, 2026-09-10): this pattern returns ZERO
+// real hits against every one of this repo's 540 `@decision` occurrences across 36 files (git grep,
+// case-insensitive) — MEASURED, not inferred. Positive-controlled first (this exact pattern, run against
+// a synthetic fixture line) to prove it can fire: a synthetic `sha:`-sigil'd 40-hex line and a synthetic
+// bare 10-hex line both matched; a well-formed 8-hex anchor (both bare and `sha:`-sigil'd) did not. So the
+// zero is a real zero, not an artifact of a broken pattern — see card ad3a9a85's own warning that a clean
+// zero from an unproven pattern is exactly what this project keeps cataloguing.
+// ⭐ This is deliberately the NARROW shape, not the broader "@decision not followed by a valid id anywhere
+// on the line" form BROKEN_ANCHOR_RE's own doc already rejected (card ad3a9a85: that broader form produced
+// 26 real false positives — every mid-line mention of the literal token "@decision", e.g. this file's own
+// doc comments and the `ANCHOR_RE` literal definitions). This pattern instead requires an ACTUAL match of
+// 9+ hex characters immediately after the keyword (+ optional whitespace / `sha:` sigil) — the reviewer's
+// argument (card afc56dcc) is that shape has no legitimate population, and the sweep above tests that
+// argument rather than assuming it.
+// ⛔ Scope, stated plainly (mirrors BROKEN_ANCHOR_RE's own carve-out): does NOT catch the EOL-wrap shape
+// (that's BROKEN_ANCHOR_RE above) and does NOT catch a same-line id that's merely too SHORT (e.g.
+// "@decision 12ab") — a different, rarer shape outside this card's DoD.
+const OVERLONG_ANCHOR_ID_RE = /@decision\s+(sha:)?([0-9a-f]{9,})\b/gi;
 const FLAT_STORES = ["adr", "decisions"];
 
 // Default N (DoD-3): justified against THIS repo's OWN measured block-length distribution (OBSERVED —
@@ -267,6 +301,24 @@ export function findBrokenAnchors(lines) {
   const found = [];
   lines.forEach((line, i) => {
     if (BROKEN_ANCHOR_RE.test(line)) found.push({ line: i + 1 });
+  });
+  return found;
+}
+
+/** Every same-line over-long hex anchor id in `lines` (card afc56dcc) — an `@decision` (optionally
+ * `sha:`-sigil'd) immediately followed by 9+ hex chars, the shape a verbatim 40-hex `git blame`/`git log`
+ * paste produces. `ns` mirrors `parseAnchorMatch`'s own convention ("sha" when the `sha:` sigil matched,
+ * else "card") even though the id itself never resolves either way — it's still useful in a report to say
+ * which form the author was attempting. `match` carries the full matched text (verbatim) so a report can
+ * show exactly what was pasted, not just a line number. Independent of comment-block grouping, same as
+ * `findFileAnchors`/`findBrokenAnchors` above. See `OVERLONG_ANCHOR_ID_RE`'s own doc for the scope carve-out
+ * (does not catch the EOL-wrap shape or a too-short same-line id). */
+export function findOverlongAnchorIds(lines) {
+  const found = [];
+  lines.forEach((line, i) => {
+    for (const m of line.matchAll(OVERLONG_ANCHOR_ID_RE)) {
+      found.push({ line: i + 1, ns: m[1] ? "sha" : "card", match: m[0] });
+    }
   });
   return found;
 }
@@ -438,7 +490,7 @@ export function bucketDistribution(blocks) {
 }
 
 /**
- * Scan `repoRoot` and compute all six checks plus the calibration distribution. Never throws on a
+ * Scan `repoRoot` and compute all seven checks plus the calibration distribution. Never throws on a
  * violation being found — violations are just data in the returned report (DoD-1/2: warn-only, with the
  * count reported). `opts.minLines` overrides `DEFAULT_MIN_LINES` (DoD-3: N is configurable).
  */
@@ -448,6 +500,7 @@ export function computeReport(repoRoot, opts = {}) {
   const allBlocks = [];
   const allAnchors = [];
   const allBroken = [];
+  const allOverlong = [];
 
   for (const file of files) {
     let raw;
@@ -456,6 +509,7 @@ export function computeReport(repoRoot, opts = {}) {
     for (const b of extractCommentBlocks(lines)) allBlocks.push({ file, ...b });
     for (const a of findFileAnchors(lines)) allAnchors.push({ ...a, file });
     for (const b of findBrokenAnchors(lines)) allBroken.push({ ...b, file });
+    for (const o of findOverlongAnchorIds(lines)) allOverlong.push({ ...o, file });
   }
 
   const records = listRecordIds(repoRoot);
@@ -506,6 +560,10 @@ export function computeReport(repoRoot, opts = {}) {
     brokenAnchors: {
       count: allBroken.length,
       items: allBroken.map((b) => ({ file: relPath(repoRoot, b.file), line: b.line })),
+    },
+    overlongAnchorIds: {
+      count: allOverlong.length,
+      items: allOverlong.map((o) => ({ file: relPath(repoRoot, o.file), line: o.line, ns: o.ns, match: o.match })),
     },
     oversizedRecords: {
       count: oversizedRecords.length,
@@ -558,6 +616,7 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
   const blocks = extractCommentBlocks(lines);
   const anchors = findFileAnchors(lines);
   const broken = findBrokenAnchors(lines);
+  const overlong = findOverlongAnchorIds(lines);
   const unanchoredLong = blocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
 
   const recordIdSet = new Set(listRecordIds(repoRoot).map((r) => r.id));
@@ -574,6 +633,7 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
     unanchoredLongBlocks: unanchoredLong.map((b) => ({ startLine: b.startLine, endLine: b.endLine, length: b.length })),
     orphanAnchors: [...orphanAnchorsById.values()].map((a) => ({ id: a.id, ns: a.ns, line: a.line })),
     brokenAnchors: broken.map((b) => ({ line: b.line })),
+    overlongAnchorIds: overlong.map((o) => ({ line: o.line, ns: o.ns, match: o.match })),
   };
 }
 
@@ -592,10 +652,16 @@ export function formatHookMessage(report) {
     lines.push(`${report.brokenAnchors.length} broken @decision anchor(s) in ${report.file} (the keyword is not followed by a valid 8-hex id on the SAME line — likely a line wrap; the anchor is NOT detected and its record silently becomes an orphan):`);
     for (const b of report.brokenAnchors) lines.push(`  - ${report.file}:${b.line} — @decision with no valid id on this line`);
   }
+  if (report.overlongAnchorIds.length) {
+    lines.push(`${report.overlongAnchorIds.length} over-long @decision anchor id(s) in ${report.file} (9+ hex chars on the SAME line — likely a verbatim 40-hex git sha pasted where an 8-hex prefix belongs; the anchor is NOT detected and its record silently becomes an orphan):`);
+    for (const o of report.overlongAnchorIds) lines.push(`  - ${report.file}:${o.line} — ${o.match}`);
+  }
   return `comment-anchor-lint (CLAUDE.md comment taxonomy, card 90b19799) flagged ${report.file}:\n${lines.join("\n")}\n`
     + `Advisory only: a long unanchored block may want "// @decision <id> — <the prohibition/consequence>" `
     + `(<=3 lines) plus an out-of-band record in docs/adr or docs/decisions; an orphan anchor needs a matching `
-    + `record file; a broken anchor needs "@decision <id>" kept together on one line, never wrapped.`;
+    + `record file; a broken anchor needs "@decision <id>" kept together on one line, never wrapped; an `
+    + `over-long anchor id needs trimming to the 8-hex prefix (\`git rev-parse --short=8\`, or manually take `
+    + `the first 8 chars of the full sha).`;
 }
 
 /**
@@ -648,7 +714,8 @@ async function runHook(repoRootArg) {
   try { content = fs.readFileSync(filePath, "utf8"); } catch { return; } // tool already ran → file is on disk
 
   const report = computeFileReport(repoRoot, filePath, content);
-  if (!report || (report.unanchoredLongBlocks.length === 0 && report.orphanAnchors.length === 0 && report.brokenAnchors.length === 0)) return;
+  if (!report || (report.unanchoredLongBlocks.length === 0 && report.orphanAnchors.length === 0
+    && report.brokenAnchors.length === 0 && report.overlongAnchorIds.length === 0)) return;
 
   const msg = formatHookMessage(report);
   await emitHook({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: msg } });
