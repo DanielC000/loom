@@ -28,13 +28,20 @@
 // Plus card 5244adc2 (the remaining half of 661b7d46 DoD-2's "no overhead"): writeSessionSettings wires
 // the Read PostToolUse hook group ONLY when its `repoPath` arg resolves to a project carrying at least
 // one of the three record stores; `repoPath` omitted stays byte-identical to the old always-wired default.
+// Plus card 969b0e1c (2026-09-10) — the `@decision sha:<id>` namespace sigil: a `sha:`-sigil'd anchor
+// citing a REAL, verified commit (the fixture repo is a genuine `git init`'d repo with one seed commit,
+// not just a bare `.git` marker) resolves and its injected heading carries the sigil; the SAME 8 hex
+// characters under the ORIGINAL bare form still resolve as a card id, unverified (the backward-
+// compatibility control); and the sigil'd form REFUSES when the id does not verify as a real commit, even
+// when the identical record file exists (resolveRecord's refuse-rather-than-fall-through gate).
 //
 // RUN with an isolated LOOM_HOME (writeSessionSettings just needs the settings dir; no daemon needed):
 //   pnpm build (repo root) then `node test/decision-records.mjs` from packages/daemon.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 import { DECISION_RECORDS_SCRIPT, SETTINGS_DIR, ensureDirs } from "../dist/paths.js";
 import { writeSessionSettings, DECISION_RECORD_STORE_KINDS } from "../dist/pty/claude-settings.js";
 
@@ -48,7 +55,14 @@ const REPO = path.join(os.tmpdir(), `loom-decrec-repo-${Date.now()}-${process.pi
 const DEDUPE_DIR = path.join(os.tmpdir(), `loom-decrec-dedupe-${Date.now()}-${process.pid}`);
 const FOREIGN_REPO = path.join(os.tmpdir(), `loom-decrec-foreign-${Date.now()}-${process.pid}`); // S4: a DIFFERENT repo on the same host
 const NO_STORE_REPO = path.join(os.tmpdir(), `loom-decrec-nostore-${Date.now()}-${process.pid}`); // S1: a repo with no record store at all
-fs.mkdirSync(path.join(REPO, ".git"), { recursive: true });
+// Card 969b0e1c: a REAL git repo (not just a bare `.git` marker — every OTHER fixture here only needs
+// `.git` to exist for `findRepoRoot`) so `resolveRecord`'s SHA-verification branch has a genuine commit
+// to verify against. One seed commit is enough; nothing else in this fixture needs to be tracked.
+fs.mkdirSync(REPO, { recursive: true });
+execFileSync("git", ["init", "-q"], { cwd: REPO });
+fs.writeFileSync(path.join(REPO, "SEED.md"), "seed\n");
+commitAll(REPO, "seed", "-c user.email=decrec-fixture@loom -c user.name=decrec-fixture");
+const REAL_SHA = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO, encoding: "utf8" }).trim().slice(0, 8);
 fs.mkdirSync(path.join(REPO, "docs", "adr"), { recursive: true });
 fs.mkdirSync(path.join(REPO, "docs", "decisions"), { recursive: true });
 fs.mkdirSync(path.join(REPO, "docs", "investigations", "bbbbbbbb-a-real-investigation"), { recursive: true });
@@ -63,6 +77,11 @@ fs.writeFileSync(path.join(REPO, "docs", "decisions", "deadbeef-oversized.md"), 
 for (const id of ["e0000001", "e0000002", "e0000003", "e0000004"]) {
   fs.writeFileSync(path.join(REPO, "docs", "decisions", `${id}-budget.md`), `# ${id}\n\n` + "y".repeat(3480) + "\n");
 }
+// Card 969b0e1c: REAL_SHA's own record — resolves via the sha: sigil (a genuine, verified commit).
+fs.writeFileSync(path.join(REPO, "docs", "decisions", `${REAL_SHA}-sha-record.md`), `# ${REAL_SHA}\n\nGenuine commit-keyed record, resolved via the sha: sigil.\n`);
+// deadc0de's record backs BOTH the bare-form (resolves, never verified) and sigil'd (refused — not a
+// real commit in this repo, even though this very record file exists) cases from the SAME fixture id.
+fs.writeFileSync(path.join(REPO, "docs", "decisions", "deadc0de-namespace-test.md"), "# deadc0de\n\nNamespace test record.\n");
 
 // --- fixture source file: several blank-line-delimited blocks. Built with a line-tracking helper (never
 // hand-counted line numbers) so every anchor's real 1-indexed line is known exactly, however the blocks
@@ -101,6 +120,14 @@ blank();
 for (const id of ["e0000001", "e0000002", "e0000003", "e0000004"]) {
   lineOf[id] = push(`// @decision ${id} — budget-competing record`);
 }
+blank();
+
+// Block F: card 969b0e1c's sigil namespace — three isolated one-line blocks, each its own anchor.
+lineOf.shaReal = push(`// @decision sha:${REAL_SHA} — a genuine verified-commit record`);
+blank();
+lineOf.deadc0deBare = push("// @decision deadc0de — bare form is a CARD id, never SHA-verified");
+blank();
+lineOf.deadc0deSha = push("// @decision sha:deadc0de — sigil'd form IS SHA-verified; deadc0de is not a real commit here");
 blank();
 
 const SRC = path.join(REPO, "src.ts");
@@ -226,6 +253,42 @@ try {
     !!a6 && /# e0000001/.test(a6.hookSpecificOutput.additionalContext) && !a6.hookSpecificOutput.additionalContext.includes("[TRUNCATED"));
   check("DoD-4b: at least one record is explicitly named as omitted for shared budget, not silently dropped",
     !!a6 && /omitted for byte budget/.test(a6.hookSpecificOutput.additionalContext) && /e000000\d-budget\.md/.test(a6.hookSpecificOutput.additionalContext));
+
+  // --- sigil namespace (card 969b0e1c): a `sha:`-sigil'd anchor citing a REAL, verified commit resolves
+  // exactly like a card anchor, and the injected heading carries the sigil (never confusable with a card
+  // id — the "never confusable by a reader" property must survive into the injected text). ---
+  const shaHit = runHook("s-sha-real", lineOf.shaReal, 1);
+  check("sigil DoD-2/3: a sha:-sigil'd anchor citing a REAL, verified commit injects its record",
+    !!shaHit && shaHit.hookSpecificOutput.additionalContext.includes("Genuine commit-keyed record, resolved via the sha: sigil."));
+  check("sigil: the injected heading carries the sha: sigil (never bare, never confusable with a card id)",
+    !!shaHit && shaHit.hookSpecificOutput.additionalContext.includes(`### decision sha:${REAL_SHA} (`));
+
+  // --- sigil namespace, the SAME 8 hex characters (deadc0de), once bare and once sigil'd, backed by the
+  // SAME record file. The bare form resolves (never SHA-verified — proves a card-id anchor still resolves
+  // exactly as it did before this card, the fence's own requirement). ---
+  const deadc0deBareHit = runHook("s-deadc0de-bare", lineOf.deadc0deBare, 1);
+  check("sigil control (positive): the bare deadc0de anchor resolves as a CARD id, unverified",
+    !!deadc0deBareHit && deadc0deBareHit.hookSpecificOutput.additionalContext.includes("Namespace test record."));
+  check("sigil control (positive): its heading is the BARE id, no sigil (ns=card)",
+    !!deadc0deBareHit && deadc0deBareHit.hookSpecificOutput.additionalContext.includes("### decision deadc0de ("));
+  // ⚠️ METHOD-LIMITATION NOTE (honest, not swept under the RED/GREEN proof above): the sigil'd form
+  // (deadc0de is not a real commit) also injects nothing — but a null result here is NOT, by itself,
+  // evidence of "recognized then refused" rather than "never recognized as an anchor at all". Checked
+  // against the reverted pre-sigil source (git checkout HEAD -- decision-records.mjs, then re-run): this
+  // exact assertion PASSES on the OLD code too, for a DIFFERENT reason — the old ANCHOR_RE never matches
+  // "sha:deadc0de" as an anchor in the first place, so `foundAnchors` is simply empty for this line, same
+  // observable null as a genuine post-verification refusal. decision-records.mjs's own design makes every
+  // resolution failure uniformly silent (mirrors the pre-existing DoD-5 behavior for an id with no record
+  // anywhere) — there is no distinct signal in ITS output for "refused" vs "never an anchor". The
+  // discriminating RED/GREEN proof for the refusal mechanism itself lives in
+  // test/comment-anchor-lint.mjs's `computeReport (sigil)` checks instead: `orphanAnchors.items` there
+  // explicitly carries `ns: "sha"` for a recognized-but-unverifiable sha anchor, which DOES fail under the
+  // reverted source and pass under the fix (verified below) — that is the check that actually isolates
+  // resolveRecord's refuse-rather-than-fall-through gate from mere non-recognition.
+  const deadc0deShaHit = runHook("s-deadc0de-sha", lineOf.deadc0deSha, 1);
+  check("sigil: the sha:deadc0de anchor injects nothing (consistent with refusal — see the method-"
+    + "limitation note above for why this assertion alone can't isolate refusal from non-recognition)",
+    deadc0deShaHit === null);
 
   // --- B1 regression: block expansion is upward-only. A DENSE file (no blank lines anywhere) with an
   // anchor at line 30 — a read strictly BEFORE it must NOT reach it via downward expansion, and must NOT

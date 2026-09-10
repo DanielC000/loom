@@ -31,7 +31,10 @@
 //      convention actually uses at runtime (docs/adr, docs/decisions, docs/investigations/<id>-*/
 //      findings.md — the same three `decision-records.mjs` resolves against; the card's own text says
 //      "either register" naming only the first two, but mirroring the shipped resolver's full three-store
-//      set is what avoids flagging an anchor that legitimately resolves via investigations).
+//      set is what avoids flagging an anchor that legitimately resolves via investigations). Card
+//      969b0e1c: a `@decision sha:<id>` anchor is ALSO orphan if its sha no longer verifies as a real
+//      commit in this repo (`anchorResolves`/`verifyCommitSha` below), even when a same-named record file
+//      exists — mirroring `decision-records.mjs`'s own refuse-rather-than-fall-through resolver gate.
 //   3. orphanRecords — a record with no inbound anchor anywhere in the swept source. ADVISORY, never an
 //      error (see `advisory: true` on its report key) — a policy-level record can correctly have no single
 //      anchor site, and treating this as a hard violation trains people to ignore the whole lint.
@@ -70,6 +73,7 @@
 // and must never appear there; `packages/daemon/test/comment-anchor-lint.mjs` asserts this directly.
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { PER_RECORD_MAX_BYTES } from "./decision-records.mjs";
 
@@ -82,7 +86,58 @@ import { PER_RECORD_MAX_BYTES } from "./decision-records.mjs";
 // source of truth, not a hand-copied number, and that script's `main()` is import-safe (guarded — see its
 // own dispatch at the bottom of that file), so importing just the constant carries none of the "standalone
 // invocation" risk the regex/function duplication above exists to avoid.
-const ANCHOR_RE = /@decision\s+([0-9a-f]{8})\b/gi;
+//
+// Card 969b0e1c: a TWO-NAMESPACE union, mirroring decision-records.mjs's own ANCHOR_RE exactly (see that
+// file's doc for the full rationale) — `sha:([0-9a-f]{8})` (group 1) keys a verified commit; the bare
+// `([0-9a-f]{8})` (group 2) is the unchanged original form and keys a board card. `parseAnchorMatch` and
+// `verifyCommitSha` below are the SAME duplicated-not-imported shape as this regex.
+const ANCHOR_RE = /@decision\s+(?:sha:([0-9a-f]{8})|([0-9a-f]{8}))\b/gi;
+
+/** Normalize one `ANCHOR_RE` match into `{ns, id}` — mirrors decision-records.mjs's own `parseAnchorMatch`
+ * exactly (same doc there). */
+function parseAnchorMatch(m) {
+  return m[1] ? { ns: "sha", id: m[1].toLowerCase() } : { ns: "card", id: m[2].toLowerCase() };
+}
+
+/** True iff `sha` resolves to a real commit in `repoRoot`'s git history — mirrors decision-records.mjs's
+ * own `verifyCommitSha` exactly (same doc there, including why any failure — including the bounded
+ * `timeout` below firing, review S2 card 969b0e1c — reads as UNVERIFIED, never thrown). Used by this
+ * lint's `orphanAnchors` check so a `sha:`-sigil'd anchor whose commit no longer verifies is correctly
+ * reported as orphaned, not silently counted as resolved just because a same-named record file exists. */
+function verifyCommitSha(repoRoot, sha) {
+  try {
+    execFileSync("git", ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], {
+      cwd: repoRoot,
+      stdio: ["ignore", "ignore", "ignore"],
+      timeout: 5000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** True iff anchor `a` ({ns, id}) resolves against `recordIdSet` (the set of ids `listRecordIds` found a
+ * record for) — the `orphanAnchors` check's own resolvability predicate, deliberately mirroring (never
+ * importing) `decision-records.mjs`'s `resolveRecord` gate: a `ns === "sha"` anchor is orphan unless its id
+ * BOTH has a record file AND verifies as a real commit in `repoRoot`; a `ns === "card"` anchor is orphan
+ * iff it merely has no record (unchanged, no verification). The record-existence check runs FIRST here
+ * (unlike `resolveRecord`, which verifies first) — cheap and side-effect-free, so it's a pure optimization
+ * that avoids a `git` subprocess call for an anchor that's doomed to be orphan either way; the final
+ * boolean is identical regardless of order. `shaCache` (a Map) memoizes one `verifyCommitSha` call per
+ * distinct sha id across the whole sweep, since the SAME sha may be cited at multiple anchor sites. */
+function anchorResolves(repoRoot, a, recordIdSet, shaCache) {
+  if (!recordIdSet.has(a.id)) return false;
+  if (a.ns !== "sha") return true;
+  if (!shaCache.has(a.id)) shaCache.set(a.id, verifyCommitSha(repoRoot, a.id));
+  return shaCache.get(a.id);
+}
+
+/** Render one anchor's id for a human-facing report line — `sha:<id>` for a commit-namespaced anchor,
+ * bare `<id>` for a card one (card 969b0e1c: the sigil must survive into every report/message this lint
+ * produces, not just the source grammar, so a reader can never confuse the two id-spaces). */
+function renderAnchorId(a) { return a.ns === "sha" ? `sha:${a.id}` : a.id; }
+
 // Card ad3a9a85: a `@decision` keyword that is the LAST thing on its line (only trailing whitespace may
 // follow) — the exact shape a JSDoc continuation wrap leaves behind when it breaks the keyword from its
 // id onto the next line. Deliberately NARROWER than "not followed by a valid id anywhere on the line":
@@ -177,7 +232,11 @@ export function extractCommentBlocks(lines) {
 
     if (isComment) {
       if (start === null) start = lineNo;
-      for (const m of lines[i].matchAll(ANCHOR_RE)) anchors.add(m[1].toLowerCase());
+      // `anchorIds` stays a plain set of bare hex ids, namespace-blind — this block-level check only ever
+      // asks "does this block carry ANY anchor" (guardClassBlocks / unanchoredLongBlocks), which doesn't
+      // care which namespace resolved it; namespace only matters to `orphanAnchors`, which uses
+      // `findFileAnchors` below instead.
+      for (const m of lines[i].matchAll(ANCHOR_RE)) anchors.add(parseAnchorMatch(m).id);
     } else {
       flush(lineNo - 1);
     }
@@ -187,11 +246,13 @@ export function extractCommentBlocks(lines) {
 }
 
 /** Every `@decision <id>` site in `lines`, independent of comment-block grouping (an anchor is still an
- * anchor even on a line this file's own block heuristic fails to classify as a comment). */
+ * anchor even on a line this file's own block heuristic fails to classify as a comment). Each entry now
+ * also carries `ns` (`"card"` or `"sha"`, card 969b0e1c) alongside the unchanged `id`/`line` fields —
+ * purely additive, so existing callers that only read `.id`/`.line` are unaffected. */
 export function findFileAnchors(lines) {
   const found = [];
   lines.forEach((line, i) => {
-    for (const m of line.matchAll(ANCHOR_RE)) found.push({ id: m[1].toLowerCase(), line: i + 1 });
+    for (const m of line.matchAll(ANCHOR_RE)) found.push({ ...parseAnchorMatch(m), line: i + 1 });
   });
   return found;
 }
@@ -406,10 +467,14 @@ export function computeReport(repoRoot, opts = {}) {
   const unanchoredLong = allBlocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
   const guardClass = allBlocks.filter((b) => b.length <= GUARD_MAX_LINES && b.anchorIds.length > 0);
 
-  // One representative site per orphaned id (a repeated anchor id isn't a new violation each occurrence).
+  // One representative site per orphaned (ns, id) pair (a repeated anchor isn't a new violation each
+  // occurrence) — keyed by "ns:id" (card 969b0e1c) so a sha-sigil'd anchor and a card anchor sharing the
+  // same 8 hex characters are never conflated into one orphan entry.
+  const shaCache = new Map();
   const orphanAnchorsById = new Map();
   for (const a of allAnchors) {
-    if (!recordIdSet.has(a.id) && !orphanAnchorsById.has(a.id)) orphanAnchorsById.set(a.id, a);
+    const key = `${a.ns}:${a.id}`;
+    if (!anchorResolves(repoRoot, a, recordIdSet, shaCache) && !orphanAnchorsById.has(key)) orphanAnchorsById.set(key, a);
   }
   const orphanRecords = records.filter((r) => !anchorIdSet.has(r.id));
 
@@ -429,7 +494,9 @@ export function computeReport(repoRoot, opts = {}) {
     guardClassBlocks: { count: guardClass.length },
     orphanAnchors: {
       count: orphanAnchorsById.size,
-      items: [...orphanAnchorsById.values()].map((a) => ({ id: a.id, file: relPath(repoRoot, a.file), line: a.line })),
+      // `id` stays the bare hex (namespace-blind — unchanged shape, so an existing card-id comparison like
+      // `items[0].id === "dddddddd"` keeps working); `ns` is additive (card 969b0e1c).
+      items: [...orphanAnchorsById.values()].map((a) => ({ id: a.id, ns: a.ns, file: relPath(repoRoot, a.file), line: a.line })),
     },
     orphanRecords: {
       count: orphanRecords.length,
@@ -494,16 +561,18 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
   const unanchoredLong = blocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
 
   const recordIdSet = new Set(listRecordIds(repoRoot).map((r) => r.id));
+  const shaCache = new Map();
   const orphanAnchorsById = new Map();
   for (const a of anchors) {
-    if (!recordIdSet.has(a.id) && !orphanAnchorsById.has(a.id)) orphanAnchorsById.set(a.id, a);
+    const key = `${a.ns}:${a.id}`;
+    if (!anchorResolves(repoRoot, a, recordIdSet, shaCache) && !orphanAnchorsById.has(key)) orphanAnchorsById.set(key, a);
   }
 
   return {
     file: rel,
     minLines,
     unanchoredLongBlocks: unanchoredLong.map((b) => ({ startLine: b.startLine, endLine: b.endLine, length: b.length })),
-    orphanAnchors: [...orphanAnchorsById.values()].map((a) => ({ id: a.id, line: a.line })),
+    orphanAnchors: [...orphanAnchorsById.values()].map((a) => ({ id: a.id, ns: a.ns, line: a.line })),
     brokenAnchors: broken.map((b) => ({ line: b.line })),
   };
 }
@@ -517,7 +586,7 @@ export function formatHookMessage(report) {
   }
   if (report.orphanAnchors.length) {
     lines.push(`${report.orphanAnchors.length} orphan @decision anchor(s) in ${report.file} (no record in docs/adr, docs/decisions, or docs/investigations):`);
-    for (const a of report.orphanAnchors) lines.push(`  - ${report.file}:${a.line} — @decision ${a.id}`);
+    for (const a of report.orphanAnchors) lines.push(`  - ${report.file}:${a.line} — @decision ${renderAnchorId(a)}`);
   }
   if (report.brokenAnchors.length) {
     lines.push(`${report.brokenAnchors.length} broken @decision anchor(s) in ${report.file} (the keyword is not followed by a valid 8-hex id on the SAME line — likely a line wrap; the anchor is NOT detected and its record silently becomes an orphan):`);

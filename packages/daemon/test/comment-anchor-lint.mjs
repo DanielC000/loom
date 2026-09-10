@@ -23,10 +23,17 @@
 //      candidate AND which one currently wins — replicating decision-records.mjs's own `resolveRecord()`
 //      winner pick (store precedence, then alphabetically-first within the winning store), not just
 //      "same id, arbitrary member". CLI-scan only, same ground as oversizedRecords.
+//   9. sigil namespace (card 969b0e1c): a `@decision sha:<id>` anchor citing a REAL, verified git commit
+//      resolves like any other anchor; the SAME 8 hex characters under the ORIGINAL bare `@decision <id>`
+//      form still resolve as a board-card id, never SHA-verified; and a `sha:`-sigil'd anchor whose id is
+//      NOT a real commit in this repo is flagged as orphan even when a same-named record file exists
+//      (the refuse-rather-than-fall-through gate, mirroring decision-records.mjs's own `resolveRecord`).
 // Run: `node test/comment-anchor-lint.mjs` from packages/daemon (no build, no LOOM_HOME needed).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { commitAll } from "./_git-commit.mjs";
 import {
   extractCommentBlocks,
   findFileAnchors,
@@ -102,6 +109,38 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   const anchors = findFileAnchors(lines);
   check("findFileAnchors: a single line carrying two anchors yields both", anchors.length === 2
     && anchors.some((a) => a.id === "11111111") && anchors.some((a) => a.id === "22222222"));
+}
+
+// --- sigil namespace (card 969b0e1c): findFileAnchors distinguishes ns=card (bare) from ns=sha (sigil'd) ---
+
+{
+  const lines = ["// @decision 1974444d — bare form, unchanged from before this card"];
+  const anchors = findFileAnchors(lines);
+  check("sigil: a bare 8-hex anchor parses as ns=card", anchors.length === 1 && anchors[0].ns === "card" && anchors[0].id === "1974444d");
+}
+
+{
+  const lines = ["// @decision sha:1974444d — sigil'd form keys a commit, never a card"];
+  const anchors = findFileAnchors(lines);
+  check("sigil: a sha:-sigil'd anchor parses as ns=sha, with the sigil stripped from id",
+    anchors.length === 1 && anchors[0].ns === "sha" && anchors[0].id === "1974444d");
+}
+
+{
+  // The SAME 8 hex characters, once bare and once sigil'd, on the SAME line — must yield two DISTINCT
+  // anchors (different namespaces), never be deduped or conflated as "the same id twice".
+  const lines = ["// @decision 1974444d — bare  // @decision sha:1974444d — sigil'd"];
+  const anchors = findFileAnchors(lines);
+  check("sigil: bare and sigil'd forms of the SAME hex on one line yield TWO distinct anchors",
+    anchors.length === 2 && anchors.some((a) => a.ns === "card") && anchors.some((a) => a.ns === "sha"));
+}
+
+{
+  // Case-insensitivity of the sigil itself (the regex carries the `i` flag) — "SHA:" must match too.
+  const lines = ["// @decision SHA:deadbeef — uppercase sigil keyword"];
+  const anchors = findFileAnchors(lines);
+  check("sigil: the 'sha:' keyword is case-insensitive, matching the rest of ANCHOR_RE's own case handling",
+    anchors.length === 1 && anchors[0].ns === "sha" && anchors[0].id === "deadbeef");
 }
 
 // --- findBrokenAnchors (card ad3a9a85 — the split-anchor silent-failure defect) ----------------------
@@ -245,6 +284,15 @@ try {
   fs.mkdirSync(path.join(REPO, "docs", "decisions"), { recursive: true });
   fs.mkdirSync(path.join(REPO, "docs", "investigations", "bbbbbbbb-an-investigation"), { recursive: true });
 
+  // Card 969b0e1c: a REAL git repo (not just a bare `.git` marker — computeReport doesn't need one, but
+  // `verifyCommitSha` genuinely shells out to `git rev-parse`) so there's a real, verifiable commit sha to
+  // test the sigil's SHA-verification gate against. One seed commit is enough; nothing else in this
+  // fixture needs to be tracked.
+  execFileSync("git", ["init", "-q"], { cwd: REPO });
+  fs.writeFileSync(path.join(REPO, "SEED.md"), "seed\n");
+  commitAll(REPO, "seed", "-c user.email=lint-fixture@loom -c user.name=lint-fixture");
+  const REAL_SHA = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO, encoding: "utf8" }).trim().slice(0, 8);
+
   // aaaaaaaa: anchored AND recorded (docs/adr) → not orphan either direction.
   // bbbbbbbb: anchored, recorded via docs/investigations (third store) → not orphan.
   // dddddddd: anchor with NO matching record anywhere → orphan anchor.
@@ -274,6 +322,12 @@ try {
     "",
     "// @decision dddddddd — resolves to nothing, must be flagged as an orphan anchor",
     "",
+    `// @decision sha:${REAL_SHA} — card 969b0e1c: a genuine verified-commit record, must resolve`,
+    "",
+    "// @decision deadc0de — card 969b0e1c: bare form is a CARD id, never SHA-verified",
+    "",
+    "// @decision sha:deadc0de — card 969b0e1c: sigil'd form IS SHA-verified; deadc0de is not a real commit here",
+    "",
     longUnanchored,
     "",
     longAnchored,
@@ -297,6 +351,12 @@ try {
   // 99999999: two records sharing an id — must be flagged as colliding (card a4b83fb7).
   fs.writeFileSync(path.join(REPO, "docs", "decisions", "99999999-b-loses.md"), "# 99999999 (loses)\n");
   fs.writeFileSync(path.join(REPO, "docs", "decisions", "99999999-a-wins.md"), "# 99999999 (wins)\n");
+  // Card 969b0e1c: REAL_SHA's own record — resolves under the sha: sigil (verified commit).
+  fs.writeFileSync(path.join(REPO, "docs", "decisions", `${REAL_SHA}-sha-record.md`), `# ${REAL_SHA}\n\nGenuine commit-keyed record.\n`);
+  // deadc0de's record — shared by BOTH the bare (resolves, never verified) and sigil'd (refused, not a
+  // real commit) anchors above, so the SAME record file backs both the positive and negative case.
+  fs.writeFileSync(path.join(REPO, "docs", "decisions", "deadc0de-namespace-test.md"),
+    "# deadc0de\n\nNamespace test record — the bare form resolves without verification; the sha: sigil is refused because deadc0de is not a real commit in this repo.\n");
 
   const report = computeReport(REPO, { minLines: 15 });
 
@@ -308,16 +368,29 @@ try {
   check("computeReport: bbbbbbbb (investigations-resolved) is not an orphan anchor",
     !report.orphanAnchors.items.some((a) => a.id === "bbbbbbbb"));
   check("computeReport: dddddddd (unresolved) IS an orphan anchor, exactly once",
-    report.orphanAnchors.count === 1 && report.orphanAnchors.items[0]?.id === "dddddddd");
+    report.orphanAnchors.items.filter((a) => a.id === "dddddddd").length === 1);
   check("computeReport: the synthetic test/-fixture anchor ffffffff never reaches orphanAnchors",
     !report.orphanAnchors.items.some((a) => a.id === "ffffffff"));
+
+  // --- sigil namespace, card 969b0e1c ---
+  check("computeReport (sigil): a sha:-sigil'd anchor citing a REAL, verified commit is NOT an orphan",
+    !report.orphanAnchors.items.some((a) => a.ns === "sha" && a.id === REAL_SHA));
+  check("computeReport (sigil): the bare-form anchor sharing deadc0de's hex resolves as a CARD id "
+    + "(never SHA-verified — it has a matching record and that's the whole check for ns=card)",
+    !report.orphanAnchors.items.some((a) => a.ns === "card" && a.id === "deadc0de"));
+  check("computeReport (sigil): the SAME hex under the sha: sigil IS refused — deadc0de is not a real "
+    + "commit in this repo, even though a matching record file exists (refuse-rather-than-fall-through)",
+    report.orphanAnchors.items.some((a) => a.ns === "sha" && a.id === "deadc0de"));
+  check("computeReport (sigil): orphanAnchors.count is exactly 2 — dddddddd (pre-existing, unresolved) "
+    + "and sha:deadc0de (new refusal); sha:REAL_SHA and card:deadc0de both resolve and add nothing",
+    report.orphanAnchors.count === 2);
   check("computeReport: eeeeeeee (no inbound anchor) IS an orphan record, marked advisory",
     report.orphanRecords.items.some((r) => r.id === "eeeeeeee") && report.orphanRecords.advisory === true);
-  // 6 real records (aaaaaaaa via adr, bbbbbbbb via investigations, eeeeeeee + 12345678 + the two
-  // colliding 99999999 files via decisions) — template.md excluded despite living in docs/adr alongside
-  // a real record.
+  // 8 real records (aaaaaaaa via adr, bbbbbbbb via investigations, eeeeeeee + 12345678 + the two
+  // colliding 99999999 files + REAL_SHA + deadc0de via decisions) — template.md excluded despite living
+  // in docs/adr alongside a real record.
   check("computeReport: template.md is never treated as a record",
-    !report.orphanRecords.items.some((r) => r.path.endsWith("template.md")) && report.recordCount === 6);
+    !report.orphanRecords.items.some((r) => r.path.endsWith("template.md")) && report.recordCount === 8);
   // Card ad3a9a85: the split-anchor shape (keyword and id on different lines) is invisible to every other
   // check (no valid ANCHOR_RE match exists on either line) — brokenAnchors is the ONLY one that sees it.
   check("computeReport: the split anchor is flagged as a broken anchor, exactly once",
@@ -343,10 +416,11 @@ try {
   check("computeReport: a non-colliding record (e.g. 12345678) never appears in collidingRecords",
     !report.collidingRecords.items.some((c) => c.id === "12345678"));
   // Guard class is a SHAPE classification (length <= GUARD_MAX_LINES && has an anchor), independent of
-  // whether that anchor resolves — all three 1-line anchors (aaaaaaaa, bbbbbbbb, and the orphaned
-  // dddddddd) are guard-class-shaped even though dddddddd is separately flagged as an orphan anchor.
-  check("computeReport: all 3 one-line anchors are guard-class-shaped, and none is flagged as unanchored-long",
-    report.guardClassBlocks.count === 3 && report.unanchoredLongBlocks.items.every((b) => b.length >= 15));
+  // whether that anchor resolves — all six 1-line anchors (aaaaaaaa, bbbbbbbb, dddddddd, sha:REAL_SHA,
+  // deadc0de, sha:deadc0de) are guard-class-shaped even though dddddddd and sha:deadc0de are separately
+  // flagged as orphan anchors.
+  check("computeReport: all 6 one-line anchors are guard-class-shaped, and none is flagged as unanchored-long",
+    report.guardClassBlocks.count === 6 && report.unanchoredLongBlocks.items.every((b) => b.length >= 15));
 
   // Card ad3a9a85 DoD-3: does the LIVE per-file hook also surface a broken anchor, or only the CLI scan?
   // Answer: both — computeFileReport runs the same per-line findBrokenAnchors over the one file's content.

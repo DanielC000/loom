@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { strictShape } from "./arg-alias.js";
@@ -31,8 +32,40 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * scope-fence note) and importing it here would couple the two.
  */
 
-// Comment-syntax-agnostic — byte-identical intent to decision-records.mjs's own ANCHOR_RE.
-const ANCHOR_RE = /@decision\s+([0-9a-f]{8})\b/gi;
+// Comment-syntax-agnostic — semantically equal to decision-records.mjs's/comment-anchor-lint.mjs's own
+// ANCHOR_RE (card 969b0e1c: a THIRD, independently-typed copy — see those assets' own doc for why the
+// grammar is a two-group union, `sha:([0-9a-f]{8})` tried first for the commit-sha id-space, the bare
+// `([0-9a-f]{8})` unchanged and still keying a board card). `test/anchor-re-parity.mjs` pins this literal
+// text-equal to the two `.mjs` copies AND asserts its extraction pattern actually finds something first
+// (a positive control) — update all three together, never just this one.
+const ANCHOR_RE = /@decision\s+(?:sha:([0-9a-f]{8})|([0-9a-f]{8}))\b/gi;
+type AnchorNs = "card" | "sha";
+
+/** Normalize one `ANCHOR_RE` match into `{ns, id}` — mirrors decision-records.mjs's own `parseAnchorMatch`
+ * (same doc there): group 1 set ⇒ `ns:"sha"`; else group 2 (the bare form) ⇒ `ns:"card"`. */
+function parseAnchorMatch(m: RegExpMatchArray): { ns: AnchorNs; id: string } {
+  return m[1] ? { ns: "sha", id: m[1].toLowerCase() } : { ns: "card", id: (m[2] ?? "").toLowerCase() };
+}
+
+/** True iff `sha` resolves to a real, existing commit in `repoRoot`'s git history — mirrors
+ * decision-records.mjs's own `verifyCommitSha` (same doc/rationale there). Bounded by a short `timeout`
+ * (card 969b0e1c review S2 — this repo's standing posture is every git call is timeout-bounded; this one
+ * is a per-request MCP-tool subprocess, so a hang can't wedge the daemon, but there's no reason to leave
+ * it unbounded either) — a timeout throws, and this function's own `catch` already reads that as
+ * UNVERIFIED, the documented refuse-rather-than-fall-through behavior, not a special case to add. */
+function verifyCommitSha(repoRoot: string, sha: string): boolean {
+  try {
+    execFileSync("git", ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], {
+      cwd: repoRoot,
+      stdio: ["ignore", "ignore", "ignore"],
+      timeout: 5000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const FLAT_STORES = ["adr", "decisions"] as const;
 
 // --- hard bounds (mirrors repo-read.ts's own posture: a huge/hostile repo can't wedge this call) ---
@@ -72,8 +105,13 @@ function extractTitle(text: string, fallback: string): string {
   return m && m[1] ? m[1].trim() : fallback;
 }
 
-/** Resolve one anchored `id` to its record's {path, title}, across all three stores — null if none. */
-function resolveRecordMeta(repoRoot: string, id: string): RecordMeta | null {
+/** Resolve one anchored `{ns, id}` to its record's {path, title}, across all three stores — null if none.
+ * Card 969b0e1c: for `ns:"sha"`, `id` is FIRST verified against this repo's real git history
+ * (`verifyCommitSha`) — an unverifiable sha REFUSES outright, before ever attempting the file lookup
+ * below, mirroring decision-records.mjs's own `resolveRecord` gate exactly (same file lookup either way —
+ * only the admission gate differs). `ns:"card"` skips verification entirely, unchanged from before. */
+function resolveRecordMeta(repoRoot: string, ns: AnchorNs, id: string): RecordMeta | null {
+  if (ns === "sha" && !verifyCommitSha(repoRoot, id)) return null;
   for (const store of FLAT_STORES) {
     const dir = path.join(repoRoot, "docs", store);
     let entries: string[];
@@ -164,22 +202,27 @@ function* walkFiles(root: string): Generator<string> {
   }
 }
 
-/** Every `@decision <id>` site in one file, or `[]` on an unreadable/oversized/binary file. */
-function findAnchorsInFile(absPath: string): Array<{ id: string; line: number }> {
+/** Every `@decision <id>` (or `@decision sha:<id>`) site in one file, or `[]` on an unreadable/oversized/
+ * binary file. */
+function findAnchorsInFile(absPath: string): Array<{ ns: AnchorNs; id: string; line: number }> {
   let stat: fs.Stats;
   try { stat = fs.statSync(absPath); } catch { return []; }
   if (!stat.isFile() || stat.size > MAX_FILE_BYTES) return [];
   let content: string;
   try { content = fs.readFileSync(absPath, "utf8"); } catch { return []; }
   if (containsNul(content)) return [];
-  const found: Array<{ id: string; line: number }> = [];
+  const found: Array<{ ns: AnchorNs; id: string; line: number }> = [];
   content.split(/\r?\n/).forEach((line, i) => {
-    for (const m of line.matchAll(ANCHOR_RE)) found.push({ id: m[1]!.toLowerCase(), line: i + 1 });
+    for (const m of line.matchAll(ANCHOR_RE)) found.push({ ...parseAnchorMatch(m), line: i + 1 });
   });
   return found;
 }
 
-/** Full-repo `id -> anchor sites` index, built fresh every call (DoD-2 — never persisted). */
+/** Full-repo `"ns:id" -> anchor sites` index, built fresh every call (DoD-2 — never persisted). Card
+ * 969b0e1c: keyed by the COMBINED `"ns:id"` string, never bare `id` — a sha-sigil'd anchor and a card
+ * anchor sharing the same 8 hex characters (negligible odds, accepted by the deciding card) must never be
+ * conflated into one entry, mirroring decision-records.mjs's own `main()` and comment-anchor-lint.mjs's
+ * own `orphanAnchors` key scheme exactly. */
 function buildAnchorIndex(repoRoot: string): Map<string, AnchorSite[]> {
   const idx = new Map<string, AnchorSite[]>();
   for (const full of walkFiles(repoRoot)) {
@@ -187,9 +230,10 @@ function buildAnchorIndex(repoRoot: string): Map<string, AnchorSite[]> {
     if (anchors.length === 0) continue;
     const rel = relPosix(repoRoot, full);
     for (const a of anchors) {
-      const list = idx.get(a.id) ?? [];
+      const key = `${a.ns}:${a.id}`;
+      const list = idx.get(key) ?? [];
       list.push({ file: rel, line: a.line });
-      idx.set(a.id, list);
+      idx.set(key, list);
     }
   }
   return idx;
@@ -219,10 +263,19 @@ function looksLikePath(query: string): boolean {
   return query.includes("/") || query.includes("\\") || /\.[A-Za-z0-9]{1,10}$/.test(query);
 }
 
-/** True iff `query` is a bare 8-hex-char decision id (the reverse-lookup / "what does this record
- * govern" mode) — never a bare-prefix match against a longer hex-looking string. */
+/** True iff `query` is a bare 8-hex-char decision id, OR a `sha:<8hex>`-sigil'd commit id (card 969b0e1c
+ * — the SAME two-namespace grammar the source anchors themselves use), triggering the reverse-lookup /
+ * "what does this record govern" mode — never a bare-prefix match against a longer hex-looking string. */
 function looksLikeId(query: string): boolean {
-  return /^[0-9a-f]{8}$/i.test(query);
+  return /^(?:sha:)?[0-9a-f]{8}$/i.test(query);
+}
+
+/** Parse a query already confirmed by `looksLikeId` into `{ns, id}` — mirrors `parseAnchorMatch`'s
+ * namespace split, applied to a raw query string instead of an `ANCHOR_RE` match. A bare hex query means
+ * `ns:"card"` (the pre-969b0e1c meaning of a bare id query, unchanged); `sha:<hex>` means `ns:"sha"`. */
+function parseIdQuery(query: string): { ns: AnchorNs; id: string } {
+  const m = /^sha:([0-9a-f]{8})$/i.exec(query);
+  return m ? { ns: "sha", id: m[1]!.toLowerCase() } : { ns: "card", id: query.toLowerCase() };
 }
 
 /**
@@ -252,14 +305,14 @@ function findSymbolDefinitionFiles(repoRoot: string, symbol: string): string[] {
   return hits;
 }
 
-type DecisionItem = { id: string; line: number; record: { path: string; title: string } | null; orphan: boolean };
+type DecisionItem = { ns: AnchorNs; id: string; line: number; record: { path: string; title: string } | null; orphan: boolean };
 
 /** Core of the `path` mode — every anchor in ONE file, each resolved (or flagged orphan: DoD-4). */
 function decisionsForFile(repoRoot: string, abs: string): { path: string; anchorCount: number; orphanAnchorCount: number; decisions: DecisionItem[] } {
   const anchors = findAnchorsInFile(abs);
   const decisions: DecisionItem[] = anchors.map((a) => {
-    const rec = resolveRecordMeta(repoRoot, a.id);
-    return { id: a.id, line: a.line, record: rec ? { path: rec.rel, title: rec.title } : null, orphan: !rec };
+    const rec = resolveRecordMeta(repoRoot, a.ns, a.id);
+    return { ns: a.ns, id: a.id, line: a.line, record: rec ? { path: rec.rel, title: rec.title } : null, orphan: !rec };
   });
   return {
     path: relPosix(repoRoot, abs),
@@ -278,17 +331,21 @@ function decisionsForPath(repoRoot: string, rel: string): { mode: "path"; error:
   return { mode: "path", ...decisionsForFile(repoRoot, abs) };
 }
 
-/** Reverse lookup: "what does this record govern" — every anchor site citing `id`, plus the record
+/** Reverse lookup: "what does this record govern" — every anchor site citing `{ns, id}`, plus the record
  * itself if one resolves. `orphan:true` covers BOTH orphan-signal halves at the single-id granularity
  * (DoD-4): no inbound anchor (record exists, nothing cites it) OR no record (anchors cite an id that
- * resolves to nothing) both leave the OTHER side empty, so a caller checking `orphan` catches either. */
-function decisionsForId(repoRoot: string, id: string) {
-  const lower = id.toLowerCase();
-  const record = resolveRecordMeta(repoRoot, lower);
-  const anchoredIn = buildAnchorIndex(repoRoot).get(lower) ?? [];
+ * resolves to nothing) both leave the OTHER side empty, so a caller checking `orphan` catches either.
+ * Card 969b0e1c: `query` is already namespace-parsed by `looksLikeId`/`parseIdQuery` — a bare hex query
+ * means `ns:"card"` (the pre-existing meaning, unchanged); `sha:<hex>` means `ns:"sha"`, applying the SAME
+ * verification gate as a source anchor would (a query for an unverifiable sha reports `record:null`, not
+ * a stale/fake resolution — consistent with `resolveRecordMeta`'s own refuse-rather-than-fall-through). */
+function decisionsForId(repoRoot: string, ns: AnchorNs, id: string) {
+  const record = resolveRecordMeta(repoRoot, ns, id);
+  const anchoredIn = buildAnchorIndex(repoRoot).get(`${ns}:${id}`) ?? [];
   return {
     mode: "record" as const,
-    id: lower,
+    ns,
+    id,
     record: record ? { path: record.rel, title: record.title } : null,
     anchoredIn,
     orphan: !record || anchoredIn.length === 0,
@@ -311,15 +368,33 @@ function decisionsForSymbol(repoRoot: string, symbol: string) {
 }
 
 /** No-query mode: the full index, plus BOTH orphan directions (DoD-4) — "enumerating records before a
- * refactor". */
+ * refactor". Card 969b0e1c: `idx` is keyed by `"ns:id"`; an entry counts as anchored-and-resolved only
+ * when its record exists AND — for `ns:"sha"` — its id still verifies as a real commit (mirrors
+ * comment-anchor-lint.mjs's own `anchorResolves`: the record-existence check runs first here too, cheap
+ * and side-effect-free, before any `git` call — a pure optimization, the final boolean is the same either
+ * order). A sha id that fails verification is reported as an orphan ANCHOR even when a same-named record
+ * file exists (refuse-rather-than-fall-through), and — since it therefore never marks that record id as
+ * "anchored" — the SAME record also correctly surfaces as an orphan RECORD if nothing else cites it. */
 function decisionsForAll(repoRoot: string) {
   const idx = buildAnchorIndex(repoRoot);
   const records = listAllRecords(repoRoot);
   const recordIds = new Set(records.map((r) => r.id));
-  const orphanAnchors = [...idx.entries()]
-    .filter(([id]) => !recordIds.has(id))
-    .map(([id, sites]) => ({ id, sites }));
-  const orphanRecords = records.filter((r) => !idx.has(r.id)).map((r) => ({ id: r.id, path: r.rel, title: r.title }));
+  const shaVerifyCache = new Map<string, boolean>();
+  const anchoredRecordIds = new Set<string>();
+  const orphanAnchors: Array<{ ns: AnchorNs; id: string; sites: AnchorSite[] }> = [];
+  for (const [key, sites] of idx) {
+    const sep = key.indexOf(":");
+    const ns = key.slice(0, sep) as AnchorNs;
+    const id = key.slice(sep + 1);
+    let resolves = recordIds.has(id);
+    if (resolves && ns === "sha") {
+      if (!shaVerifyCache.has(id)) shaVerifyCache.set(id, verifyCommitSha(repoRoot, id));
+      resolves = shaVerifyCache.get(id)!;
+    }
+    if (resolves) anchoredRecordIds.add(id);
+    else orphanAnchors.push({ ns, id, sites });
+  }
+  const orphanRecords = records.filter((r) => !anchoredRecordIds.has(r.id)).map((r) => ({ id: r.id, path: r.rel, title: r.title }));
   return {
     mode: "index" as const,
     uniqueAnchorIds: idx.size,
@@ -330,12 +405,13 @@ function decisionsForAll(repoRoot: string) {
   };
 }
 
-/** Dispatch on the shape of `query`: an 8-hex id -> reverse lookup; a path-shaped string -> file lookup;
- * anything else -> best-effort symbol resolution; omitted/blank -> full-repo enumeration. */
+/** Dispatch on the shape of `query`: an 8-hex id (bare -> card, `sha:`-sigil'd -> commit, card 969b0e1c)
+ * -> reverse lookup; a path-shaped string -> file lookup; anything else -> best-effort symbol resolution;
+ * omitted/blank -> full-repo enumeration. */
 export function decisionsFor(repoRoot: string, query?: string) {
   const q = (query ?? "").trim();
   if (!q) return decisionsForAll(repoRoot);
-  if (looksLikeId(q)) return decisionsForId(repoRoot, q);
+  if (looksLikeId(q)) { const { ns, id } = parseIdQuery(q); return decisionsForId(repoRoot, ns, id); }
   if (looksLikePath(q)) return decisionsForPath(repoRoot, q);
   return decisionsForSymbol(repoRoot, q);
 }
@@ -355,26 +431,31 @@ export function registerDecisionTools(server: McpServer, resolveRepoRoot: () => 
     "decisions_for",
     {
       description:
-        "The index over this project's `@decision <id>` source anchors and their out-of-band decision " +
-        "records (docs/adr/, docs/decisions/, docs/investigations/<id>-*/findings.md) — an ESCAPE HATCH " +
-        "for questions the on-Read injection hook can't answer positionally, not the primary way to read a " +
-        "record (a plain Read of an anchored file already surfaces the full record inline). `query` is " +
-        "optional and its shape picks the mode: " +
-        "an 8-hex-char id (e.g. \"a32533a1\") -> REVERSE lookup, \"what does this record govern\" — " +
-        "returns {record, anchoredIn: [{file,line}...], orphan} (orphan:true if nothing cites this id, OR " +
-        "if the id has no resolvable record but IS cited somewhere — check both `record` and `anchoredIn` " +
-        "to tell which); " +
+        "The index over this project's `@decision <id>` (card) and `@decision sha:<id>` (verified commit, " +
+        "card 969b0e1c) source anchors and their out-of-band decision records (docs/adr/, docs/decisions/, " +
+        "docs/investigations/<id>-*/findings.md) — an ESCAPE HATCH for questions the on-Read injection hook " +
+        "can't answer positionally, not the primary way to read a record (a plain Read of an anchored file " +
+        "already surfaces the full record inline). `query` is optional and its shape picks the mode: " +
+        "an 8-hex-char id (e.g. \"a32533a1\") -> REVERSE lookup on a board-card anchor; \"sha:<8hex>\" " +
+        "(e.g. \"sha:c70a5e0e\") -> the SAME reverse lookup on a verified-commit anchor instead (an " +
+        "unverifiable sha reports record:null, exactly like a bare id with no card record — it is never " +
+        "silently treated as resolved) — either form returns {ns, id, record, anchoredIn: [{file,line}...], " +
+        "orphan} (orphan:true if nothing cites this id, OR if the id has no resolvable record but IS cited " +
+        "somewhere — check both `record` and `anchoredIn` to tell which); " +
         "a path-shaped string (contains \"/\" or \"\\\\\", or ends in a file extension) -> every anchor found " +
-        "in that ONE file, resolved (or flagged `orphan:true` when the anchored id has no record); " +
+        "in that ONE file, each item carrying {ns, id, line, record, orphan} (resolved, or flagged " +
+        "`orphan:true` when the anchored id has no record — for a sha anchor this includes an id whose " +
+        "commit no longer verifies, even if a same-named record file exists); " +
         "anything else -> a best-effort, language-agnostic SYMBOL lookup (a trivial declaration-name " +
         "match, not a real symbol table — resolves 0, 1, or several files, all reported) whose result(s) " +
         "each run through the path mode above; " +
         "omitted/blank -> the FULL repo index, enumerating {orphanAnchors, orphanRecords} in BOTH " +
         "directions (an anchored id with no record, and a record nothing anchors) so neither kind of gap " +
-        "is silently skipped. The index is rebuilt fresh on every call by walking this project's own " +
-        "repo (`repoPath`) — never a persisted or cached snapshot, so it can never go stale. Record " +
-        "bodies are NOT inlined here (only {path,title}) — Read the returned record path directly for " +
-        "the full text; the on-Read hook is the place that delivers complete record text automatically.",
+        "is silently skipped — orphanAnchors items carry `ns` too. The index is rebuilt fresh on every " +
+        "call by walking this project's own repo (`repoPath`) — never a persisted or cached snapshot, so " +
+        "it can never go stale. Record bodies are NOT inlined here (only {path,title}) — Read the returned " +
+        "record path directly for the full text; the on-Read hook is the place that delivers complete " +
+        "record text automatically.",
       inputSchema: strictShape({ query: z.string().optional() }),
     },
     async ({ query }) => {

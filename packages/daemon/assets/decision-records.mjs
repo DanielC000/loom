@@ -2,10 +2,14 @@
 // Loom decision-record injector — PostToolUse hook on `Read` (card 661b7d46).
 //
 // Loom's source anchors durable decision/rationale prose with a short marker:
-//   // @decision <8hex card id> — <the prohibition or consequence>   (<=3 lines, comment-syntax agnostic)
-// and stores the COMPLETE record out of band, keyed by that same id, in one of three stores (see
-// CLAUDE.md's decision-records convention, card 90b19799): `docs/adr/<id>*.md` (immutable),
-// `docs/decisions/<id>*.md` (mutable), or an existing `docs/investigations/<id>-*/findings.md`.
+//   // @decision <8hex card id> — <the prohibition or consequence>          (<=3 lines, comment-syntax agnostic)
+//   // @decision sha:<8hex commit sha> — <the prohibition or consequence>   (card 969b0e1c — a SECOND,
+//      explicitly sigil'd id-space for prose that cites no board card; see ANCHOR_RE's own doc below for
+//      why the sigil is required rather than folding a commit sha into the same bare grammar)
+// and stores the COMPLETE record out of band, keyed by that same 8-hex id (the file-store lookup is
+// namespace-agnostic — see `resolveRecord`'s own doc), in one of three stores (see CLAUDE.md's
+// decision-records convention, card 90b19799): `docs/adr/<id>*.md` (immutable), `docs/decisions/<id>*.md`
+// (mutable), or an existing `docs/investigations/<id>-*/findings.md`.
 //
 // ONE FILE PER ID, ALWAYS (card a4b83fb7) — `resolveRecord` below picks exactly one winner per id (store
 // precedence, then alphabetically-first within that store) and silently drops every other file sharing
@@ -46,12 +50,59 @@
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 // Deliberately comment-syntax-agnostic: matches the literal token regardless of what precedes it (`//`,
 // `#`, `--`, `/*`, ...), so the SAME anchor format works in .ts/.mjs/.py/.sql/.md source alike. Global
 // (`g`) so a line carrying more than one anchor yields every id, not just the first (card review N4).
-const ANCHOR_RE = /@decision\s+([0-9a-f]{8})\b/gi;
+//
+// Card 969b0e1c: a TWO-NAMESPACE union. `sha:([0-9a-f]{8})` (group 1) is tried FIRST — a `sha:`-sigil'd
+// id keys a VERIFIED GIT COMMIT (see `resolveRecord`'s SHA-verification branch below); the bare
+// `([0-9a-f]{8})` (group 2) is the ORIGINAL, unchanged form and keys a board CARD id, exactly as before
+// this card. Exactly one of the two groups is ever set per match — the alternation is mutually exclusive
+// by construction (a bare hex id can never itself start with the literal "sha:" prefix). Card 966238f1's
+// decision explicitly REJECTED folding a commit sha into the bare grammar (the old `ANCHOR_RE` matched an
+// 8-hex sha byte-for-byte, making it indistinguishable from a card id to a reader, to `tasks_get`, and to
+// this resolver) — the sigil is the fix, not a convenience.
+const ANCHOR_RE = /@decision\s+(?:sha:([0-9a-f]{8})|([0-9a-f]{8}))\b/gi;
+
+/** Normalize one `ANCHOR_RE` match into `{ns, id}`: `ns` is `"sha"` when the `sha:` sigil matched (group
+ * 1 set), else `"card"` (the original bare form, group 2 set) — exactly one group is ever set, so this
+ * never has to guess which. `id` is always lowercased. Shared by every anchor-scanning site in this file;
+ * `comment-anchor-lint.mjs` carries its OWN duplicate of this same shape (see that file's own doc for why
+ * it's duplicated rather than imported — the same "assets ship standalone" reasoning as `ANCHOR_RE` itself). */
+function parseAnchorMatch(m) {
+  return m[1] ? { ns: "sha", id: m[1].toLowerCase() } : { ns: "card", id: m[2].toLowerCase() };
+}
+
+/**
+ * True iff `sha` (an 8-hex-char prefix) resolves to a real, existing commit in `repoRoot`'s git history —
+ * `git rev-parse --verify --quiet <sha>^{commit}` (the `^{commit}` peel rejects a hex string that happens
+ * to resolve to some OTHER object kind, e.g. a tree/blob, not just "is this a known object id"). This is
+ * what makes a `sha:`-sigil'd anchor a GIT-ASSIGNED id (satisfying the standing "never write an id you
+ * weren't handed" rule — a worker reads this SHA off `git blame`, the same way a card id is handed by the
+ * board) rather than an arbitrary 8-hex guess wearing the sigil. Any failure — git missing, the SHA
+ * rebased away or never fetched (a shallow clone), a non-git `repoRoot`, or the bounded `timeout` below
+ * firing — is treated as UNVERIFIED, never thrown: this is a boolean admission gate for `resolveRecord`
+ * below, not a diagnostic surface. Bounded (review S2, card 969b0e1c): this repo's standing posture is
+ * every git call is timeout-bounded (CLAUDE.md; `git/writer.ts`, `vault/versioner.ts`) — this call is a
+ * per-`Read` hook subprocess, so a hang can't wedge the daemon, but there's no reason to leave it
+ * unbounded either; a timeout throws, which the `catch` below already reads as UNVERIFIED.
+ */
+function verifyCommitSha(repoRoot, sha) {
+  try {
+    execFileSync("git", ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], {
+      cwd: repoRoot,
+      stdio: ["ignore", "ignore", "ignore"],
+      timeout: 5000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Flat `<id>*.md` stores, checked in this order. `docs/investigations/` is handled separately below —
 // its existing convention nests each report under its own `<id>-<slug>/` directory (see any
 // docs/investigations/*/findings.md), not a flat file.
@@ -158,12 +209,22 @@ function idBoundaryMatch(nameLower, id) {
   return rest === "" || rest.startsWith("-") || rest.startsWith(".");
 }
 
-/** Resolve an anchored `id` to its full record text + source path, across the three stores. Null if none.
+/** Resolve an anchored `{ns, id}` to its full record text + source path, across the three stores. Null if
+ * none. Card 969b0e1c: for `ns === "sha"`, `id` is FIRST verified against this repo's real git history
+ * (`verifyCommitSha`) — an unverifiable SHA REFUSES outright (returns null immediately) WITHOUT ever
+ * attempting the file-store lookup below, so a stale/rebased/guessed sha can never silently fall through
+ * to matching a record file that merely happens to share its 8 hex characters. `ns === "card"` skips
+ * verification entirely, unchanged from before this card — the property that keeps every existing card-id
+ * anchor resolving exactly as it did. Once past that gate, BOTH namespaces resolve through the exact same
+ * store lookup below: a sha-keyed record lives in the same docs/adr|decisions|investigations stores as a
+ * card-keyed one, named by the same `<8hex>-slug.md` convention — only the anchor's own admission gate
+ * differs, never the file lookup.
  * Deterministic: candidates are sorted before picking the first (card-review N3 — `readdirSync` order is
  * not guaranteed). ⚠️ A second candidate for the SAME id is a BUG, not a valid state to design for — see
  * this file's own header (card a4b83fb7): it is silently, permanently unreachable, and this function has
  * no way to warn about it (that's `comment-anchor-lint.mjs`'s `collidingRecords` check, CLI-scan only). */
-function resolveRecord(repoRoot, id) {
+function resolveRecord(repoRoot, ns, id) {
+  if (ns === "sha" && !verifyCommitSha(repoRoot, id)) return null;
   for (const store of FLAT_STORES) {
     const dir = path.join(repoRoot, "docs", store);
     let entries;
@@ -302,21 +363,27 @@ async function main() {
 
   const blockStart = expandStartToBlock(lines, startIdx);
 
-  const foundIds = new Set();
+  // Card 969b0e1c: keyed by "ns:id" (never bare id) — a sha-sigil'd anchor and a card anchor that happen
+  // to share the same 8 hex characters (negligible odds, accepted by the decision) must never be treated
+  // as the same delivery/dedupe unit.
+  const foundAnchors = new Map();
   for (let i = blockStart; i <= endIdx; i++) {
-    for (const m of lines[i].matchAll(ANCHOR_RE)) foundIds.add(m[1].toLowerCase());
+    for (const m of lines[i].matchAll(ANCHOR_RE)) {
+      const a = parseAnchorMatch(m);
+      foundAnchors.set(`${a.ns}:${a.id}`, a);
+    }
   }
-  if (foundIds.size === 0) return; // no anchor in the actually-read range (or its block) → byte-identical to today (DoD-2)
+  if (foundAnchors.size === 0) return; // no anchor in the actually-read range (or its block) → byte-identical to today (DoD-2)
 
   const sessionId = typeof payload.session_id === "string" && payload.session_id ? payload.session_id : "unknown";
   const dedupeFile = path.join(dedupeDir, `${sessionId}.json`);
   const delivered = loadDelivered(dedupeFile);
 
   const candidates = [];
-  for (const id of foundIds) {
-    if (delivered.has(id)) continue; // per-session dedupe (DoD-3)
-    const record = resolveRecord(repoRoot, id);
-    if (record) candidates.push({ id, ...record });
+  for (const [key, { ns, id }] of foundAnchors) {
+    if (delivered.has(key)) continue; // per-session dedupe (DoD-3)
+    const record = resolveRecord(repoRoot, ns, id);
+    if (record) candidates.push({ key, ns, id, ...record });
   }
   if (candidates.length === 0) return; // every anchor already delivered this session, or its store entry is missing (DoD-5)
 
@@ -324,20 +391,24 @@ async function main() {
   const sections = [];
   const omitted = [];
   const newlyDelivered = [];
-  for (const { id, recordPath, text } of candidates) {
+  for (const { key, ns, id, recordPath, text } of candidates) {
     const { text: body, truncated } = truncateRecord(text, PER_RECORD_MAX_BYTES);
     const rel = relPath(repoRoot, recordPath);
-    const rendered = `### decision ${id} (${rel})\n\n${body}`
+    // The rendered heading carries the sigil for a sha-keyed record — the same "never confusable by a
+    // reader" property the anchor grammar itself enforces (card 969b0e1c) must survive into the injected
+    // text, not just the source comment.
+    const label = ns === "sha" ? `sha:${id}` : id;
+    const rendered = `### decision ${label} (${rel})\n\n${body}`
       + (truncated ? `\n\n[TRUNCATED at ${PER_RECORD_MAX_BYTES} bytes — head+tail kept, middle elided — full record: ${rel}]` : "");
     const renderedBytes = Buffer.byteLength(rendered, "utf8");
     // Past budget: drop the WHOLE record rather than truncate it further — a record already at its own
     // per-record cap is truncated-with-signal above; a record that merely lost the race for shared
     // budget is omitted whole, named explicitly, never half-included a second time. Deliberately NOT
     // marked delivered here — a later call with a different (smaller) candidate set may still have room.
-    if (renderedBytes > budget) { omitted.push({ id, recordPath }); continue; }
+    if (renderedBytes > budget) { omitted.push({ key, recordPath }); continue; }
     sections.push(rendered);
     budget -= renderedBytes;
-    newlyDelivered.push(id);
+    newlyDelivered.push(key);
   }
 
   if (sections.length === 0) {
@@ -349,13 +420,13 @@ async function main() {
     // this identical note on every future read of the same region, forever, in this session).
     const note = `${omitted.length} decision record(s) governing this range were too large to inject (byte budget ${TOTAL_MAX_BYTES}) — read directly: `
       + omitted.map((o) => relPath(repoRoot, o.recordPath)).join(", ");
-    for (const { id } of omitted) delivered.add(id);
+    for (const { key } of omitted) delivered.add(key);
     saveDelivered(dedupeFile, delivered);
     await emit({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: note } });
     return;
   }
 
-  for (const id of newlyDelivered) delivered.add(id);
+  for (const key of newlyDelivered) delivered.add(key);
   saveDelivered(dedupeFile, delivered);
 
   const omittedNote = omitted.length
