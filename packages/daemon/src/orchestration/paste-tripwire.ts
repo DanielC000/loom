@@ -1,21 +1,13 @@
 /**
- * Bare-pasted-text-placeholder tripwire (card eef4883c originally DETECTION ONLY; card 0f9268cc adds a
- * one-shot RECOVERY on top).
+ * Bare-pasted-text-placeholder tripwire. Pure module (no fs / no host state) so it unit-tests
+ * deterministically; host.ts calls it from the Stop/StopFailure hook chokepoint with the turn's submitted
+ * text — `live.lastRawSubmit ?? live.lastPrompt` (the raw-terminal channel's baseline when set, else the
+ * structured submit() channel's) — and the transcript's recorded turn text for that SAME turn
+ * (`ContextStats.lastUserText`).
  *
- * Background: 8a39f544 investigated owner pastes arriving over the Companion as a bare
- * `[Pasted text #N +M lines]` placeholder (silent content loss) and traced it to a transient UPSTREAM
- * `claude` CLI race pinned to v2.1.212 (fixed by 2.1.215) — NOT a Loom `submit()`/`writeChunked()` write
- * defect. No production write-fix was warranted. But the failure was SILENT — the owner lost paste
- * content with no signal — so this module gives a recurrence of the same class a detectable signal
- * instead of vanishing unnoticed. Card 0f9268cc confirmed a DIFFERENT recurrence (claudeVersion 2.1.217,
- * past the 2.1.215 "fix") and, having ruled out PREVENTION (see host.ts's Stop-hook call site for why),
- * added automatic one-shot RECOVERY: re-inject the lost content as a corrective turn.
- *
- * This module is pure (no fs / no host state) so it unit-tests deterministically; host.ts calls it from
- * the Stop/StopFailure hook chokepoint with the turn's submitted text — `live.lastRawSubmit ?? live.
- * lastPrompt` (card 0f9268cc: the raw-terminal channel's baseline when set, else the structured submit()
- * channel's — see `Live.lastRawSubmit`'s doc for why the raw channel needed its own tracking) — and the
- * transcript's recorded turn text for that SAME turn (`ContextStats.lastUserText`).
+ * @decision 0f9268cc — detects (card eef4883c) then one-shot-recovers a transient upstream `claude` CLI
+ *  paste-collapse race (investigated: card 8a39f544) — NOT a Loom write defect, no production write-fix —
+ *  see docs/decisions/0f9268cc-paste-tripwire-detection-then-recovery.md
  */
 
 /**
@@ -84,59 +76,26 @@ export const PASTE_TRIPWIRE_TOKEN_WINDOW = 16;
  * ABSENT from the submitted text, and (4) that EXACT placeholder token wasn't already observed, verbatim,
  * in an OLDER generation's own recorded turn.
  *
- * (3) is a false-positive guard, added after the embedded-match widening ((2), card 0f9268cc) was
- * validated against the real transcript corpus (18140 user turns) and found 18 embedded-match hits — ALL
- * of them someone (a worker report, a manager message, this very bug's own investigation) literally
- * TYPING the phrase "[Pasted text #N...]" while discussing this bug, not an actual CLI collapse. A
- * placeholder token is CLI-GENERATED: a genuine collapse artifact can, by construction, never appear in
- * the text Loom itself wrote to the pty — only in what the transcript records back. So if the SAME literal
- * substring is already present in `submittedText`, it was authored/typed, not collapsed, and must not
- * trip. This is a discriminating FIELD (checked from data already in hand), not a suppressing filter of
- * unknown correctness — see the project's own standing lesson on that distinction before touching this
- * again: over-suppressing (dropping ANY embedded match) would silently re-hide the very case (2) exists to
- * catch; this check only rules out the one shape that's structurally impossible to be a real collapse.
+ * @decision 0f9268cc — (3) is a discriminating FIELD, not a suppressing filter: a placeholder token is
+ *  CLI-GENERATED and can never appear in text Loom itself wrote, only in what the transcript records back.
+ *  Validated against 18140 real transcript turns — the only 18 embedded-match hits were someone literally
+ *  TYPING "[Pasted text #N...]" while discussing this bug, never a genuine collapse — see
+ *  docs/decisions/0f9268cc-paste-tripwire-detection-then-recovery.md
  *
- * KNOWN RESIDUAL (considered, accepted — not a gap to rediscover): guard (3) can over-suppress in one
- * narrow, coincidental case. If the submitted text happens to literally CONTAIN the exact token the CLI
- * then independently assigns on collapse (e.g. someone pastes a bug report about THIS bug, and the CLI's
- * own placeholder numbering — "#N" — happens to land on a value already quoted somewhere in that same
- * text), both submittedText and recordedText contain the identical substring for two UNRELATED reasons,
- * and the guard wrongly reads that as "authored, not collapsed" — a real loss goes unflagged. This needs
- * the collapsed-to N to coincide with an N already quoted in the content itself; rare enough to accept
- * rather than engineer around (any fix would need to distinguish WHY the substring is present, which
- * isn't derivable from these two strings alone).
+ * ⚠️ KNOWN RESIDUAL, accepted: guard (3) can over-suppress if the CLI's assigned `#N` coincidentally
+ *  matches an `#N` already quoted in the pasted content itself (e.g. a bug report about this bug) — rare
+ *  enough to accept; not derivable from these two strings alone, so not a gap to rediscover.
  *
- * (4) is card 2c58bdd3's `gen` discriminator, added after investigation `773b3914` traced 3 of 4
- * "RECOVERY re-injection ALSO collapsed" escalations (and, structurally, the 4th) to a specific false-
- * positive shape guard (3) cannot see: concurrent traffic on the session (a peer/manager message, or
- * Loom's own `[loom:prompt-mismatch]` diagnostic, landing near the same moment) leaves a placeholder-
- * shaped token — from an EARLIER, already-delivered generation's own collapse — sitting in the recorded
- * text of a LATER, unrelated, correctly-delivered turn. That token is CLI-side re-render noise, not a loss
- * of THIS turn's content; guard (3) alone can't tell it apart from a genuine fresh collapse because it only
- * compares against `submittedText` (this SAME turn's own write), never against what a PRIOR turn's own
- * recorded text already contained.
+ * @decision 2c58bdd3 — (4) guards a stale-render-ghost: concurrent session traffic can leave an EARLIER,
+ *  already-delivered generation's own placeholder token sitting in a LATER, unrelated turn's recorded
+ *  text (found via investigation 773b3914, which traced 3 of 4 "ALSO collapsed" escalations, and
+ *  structurally the 4th, to exactly this shape). Matches the WHOLE token (id+count), never magnitude
+ *  alone, deliberately unlike the sibling `detectPastePlaceholderLengthLoss`'s own `gen` discriminator
+ *  (card abeac33a) — see docs/decisions/2c58bdd3-gen-discriminator-matches-whole-token-not-magnitude.md
  *
- * This is the exact shape `detectPastePlaceholderLengthLoss` below was already hardened against via its own
- * `gen` discriminator (card `abeac33a`) — same STRUCTURE (a bounded, `gen`-ordered history a later turn's
- * placeholder can be "explained" against), but a DELIBERATELY DIFFERENT KEY. `abeac33a`'s sibling matches on
- * the placeholder's STATED LINE COUNT against Loom's own WRITE history — reasonable there, because it's
- * comparing a placeholder's claimed magnitude against what Loom is independently certain it wrote. Reusing
- * that same magnitude match here over-suppresses: two UNRELATED genuine collapses (or an unrelated full
- * resolve and a real collapse — see the regression this card's own test suite caught, PART 2 test (b)/(c),
- * both submitting `longPaste`) routinely share the same line count by pure coincidence, especially at the
- * SMALL end (`+3 lines` is common) — exactly the magnitude band `abeac33a` itself flagged as "where a real
- * defect would live." A magnitude collision would silently swallow a genuine, independent loss, which is the
- * narrowing-into-blindness DoD-3 forbids. The CLI's own placeholder id (`#N`) has no such collision risk: it
- * is assigned once per collapse event and never reused within a session (a real transcript specimen ran
- * `#1`...`#91` monotonically) — two DIFFERENT collapses can never share BOTH the same `#N` and `+M`, so an
- * EXACT token match can only mean "this literal artifact was already seen," never "two different losses
- * happened to be the same size." Matching on the whole token (id + count together) rather than the count
- * alone is what makes this guard collision-safe where the sibling's magnitude match is not.
- *
- * Same asymmetry as the sibling regardless of key choice: a match at the CURRENT gen must NOT suppress —
- * `detectPastePlaceholderLengthLoss` explicitly defers current-gen collapses to THIS function; this function
- * IS the current-gen detector and must not defer to itself. Only a token seen at a generation STRICTLY OLDER
- * than `currentGen` counts as "already observed."
+ * ⛔ Only a token at a generation STRICTLY OLDER than `currentGen` counts as "already observed" — this
+ *  function IS the current-gen detector for its own case and must never defer to itself (the sibling
+ *  detector above instead defers current-gen collapses TO this function).
  *
  * `currentGen`/`recentPlaceholderTokens` are OPTIONAL — omitted, this guard simply doesn't run, leaving
  * (1)-(3) as the whole check (the pre-2c58bdd3 shape, still exercised directly by callers that don't carry
@@ -185,20 +144,9 @@ export function isPasteRecoveryAttempt(submittedText: string): boolean {
  * resending it costs nothing new to reconstruct. Carries `PASTE_RECOVERY_TAG` so a second collapse on
  * THIS text is recognized by `isPasteRecoveryAttempt` instead of triggering a third attempt.
  *
- * Card 4af5aefa (two live false positives observed by peer managers): the wording used to
- * assert the content "was lost ... before you could see it" — a claim about ENGINE/RECIPIENT
- * VISIBILITY. `detectBarePastePlaceholderTripwire` has no access to that: it only OBSERVES that the
- * transcript recorded a placeholder in place of the submitted text. Evidence is a proxy for the claim,
- * not the claim itself, so the wording now states only what was observed, and hands the recipient the
- * cheap own-artifact check (a reply they sent, a memory write, a turn count) instead of asserting
- * something the notice cannot actually see.
- *
- * Card 2d36337e: the "did you already act on that message?" framing this introduced still had a
- * discriminating-question gap — a real near-miss showed a recipient can truthfully answer "yes, I acted"
- * about a LATER message that built on this one's content, while never having seen THIS message at all.
- * "Have I acted?" and "does something I've done SINCE assume this?" are different questions; only the
- * second one catches a missed premise instead of reading a recovered predecessor as a redundant repeat.
- * The wording now asks the second one.
+ * @decision 2d36337e — wording asks "does something you've done SINCE assume this content?", not "have
+ *  you acted?" — catches a missed premise a later, already-acted-on message can mask. Builds on 4af5aefa's
+ *  observed-not-claimed fix — see docs/decisions/2d36337e-recovery-wording-asks-since-not-already-acted.md
  */
 export function buildPasteRecoveryText(originalText: string): string {
   return `${PASTE_RECOVERY_TAG} The transcript recorded a placeholder instead of your previous message's pasted content — it may not have reached you (a known upstream CLI paste-collapse race; see card eef4883c). Before dismissing this as already-handled: does anything you have done SINCE assume this content, not merely resemble something you recall seeing? A later message can be fully acted-on while still having depended on THIS one — check your own artifact (a reply you sent, a memory write, a turn count) for that, not just whether the topic feels familiar. Otherwise, here is the original content, resent:\n\n${originalText}`;
@@ -213,72 +161,27 @@ export function buildPasteRecoveryText(originalText: string): string {
  * placeholder wouldn't be there at all). That is what makes it work "regardless of who wrote the text"
  * (card's own framing).
  *
- * ⚠️ CORRECTED (card 183de1a4, 2026-08-27): this doc used to claim the human/raw-terminal path has "no
- * `submittedText` Loom ever captured." FALSE, and already stale when written — `Live.lastRawSubmit`
- * (host.ts) has captured the raw channel's full composed TEXT (not just a length) since card `0f9268cc`
- * (2026-07-23, twelve days before this doc's own `b68d1f5b`), and `detectBarePastePlaceholderTripwire`
- * above already receives it via `live.lastRawSubmit ?? live.lastPrompt` at host.ts's Stop-hook call site —
- * so the human/raw path already has BOTH detection and the one-shot auto-recovery through that mechanism,
- * verified end-to-end (test (f), paste-placeholder-tripwire.mjs, drives `writeStdin` directly). Retention
- * shape (see `Live.lastRawSubmit`'s own doc): a SINGLE ephemeral slot — overwritten by the next raw
- * submit, cleared by any intervening `submit()`, unconditionally nulled right after the next Stop reads
- * it. One turn's lifetime, never persisted, does NOT survive a daemon restart.
+ * @decision 183de1a4 — the raw/human path usually DOES have a captured `submittedText`
+ *  (`Live.lastRawSubmit`, one-turn ephemeral); the REAL, narrower gap this check exists to close is that
+ *  the raw path never gets an entry in `Live.recentWrittenLineCounts` (pushed only by `submit()`), so a
+ *  STALE/delayed re-render has nothing to explain it against — see
+ *  docs/decisions/183de1a4-lastrawsubmit-retention-is-one-turn-only-never-persisted.md
  *
- * The REAL, narrower gap this check exists to close: the raw/human path never gets an entry in
- * `Live.recentWrittenLineCounts` — that history is pushed to ONLY by `submit()` (host.ts, alongside
- * `live.lastPrompt = text`), never by `writeStdin`. So a STALE/delayed placeholder re-render, surfacing
- * turns after the original raw paste (once its one-turn `lastRawSubmit` snapshot is long gone), has
- * nothing in the write-count history to explain it against — THAT is the case only this check can catch,
- * not "the human path has no captured text at all."
+ * @decision abeac33a — HARD CONSTRAINT: a naive "placeholder present ⇒ loss" check FIRES ON A CORRECT
+ *  SEND — a stale token can be a CLI-side re-render ghost from an EARLIER, already-delivered generation.
+ *  `findExplainingWrittenGen` treats ANY matching entry (current or older gen) as explained; a raw
+ *  `writeStdin` turn never pushes an entry, so only a STALE re-render of an older RAW turn is genuinely
+ *  unexplained — see docs/decisions/abeac33a-gen-discriminator-explains-current-and-older-gen-matches.md
  *
- * ⛔ HARD CONSTRAINT (card `abeac33a`, folded into `b68d1f5b` 2026-08-04): a naive version of this check
- * — "placeholder present ⇒ report a loss" — FIRES ON A CORRECT SEND. A stale placeholder TOKEN can be a
- * CLI-side rendering ghost: an EARLIER delivery's own placeholder (already fully delivered, at an OLDER
- * `gen`) re-rendering into a LATER, unrelated, correctly-delivered turn's recorded text. Nothing
- * daemon-side replayed it — the re-render is CLI-side — so by the time this check runs, the M lines it
- * names were never actually missing FROM THIS TURN; they were already accounted for, earlier.
+ * @decision b68d1f5b — silence is guaranteed only while the explaining write is inside
+ *  `PASTE_LOSS_EXPLAIN_WINDOW`; beyond it this check WILL fire on a correct send. Deliberately a separate,
+ *  integer-only ring from card c2c750a9's `Live.recentWrittenTurns` (sized for full-text concatenation, a
+ *  different job) — see docs/decisions/b68d1f5b-window-sizing-and-calibration.md
  *
- * ✅ THE `gen` DISCRIMINATOR: `findExplainingWrittenGen` searches a bounded, `gen`-ordered history of
- * Loom's OWN writes for ANY entry — current gen or an older one — whose own line count matches the
- * placeholder's stated M. A match means this occurrence is EXPLAINED, one of two ways, and either way
- * this check must stay silent:
- *   - Matches the CURRENT gen's own entry → this is a real, FRESH collapse of THIS turn's own submission
- *     — but `detectBarePastePlaceholderTripwire` above already owns that case (full-text comparison,
- *     already gen-safe by construction, already wired to one-shot recovery). Flagging it again here
- *     would be a duplicate alarm, not a new finding.
- *   - Matches an OLDER gen's entry → the `abeac33a` stale-token ghost. That gen's content is already
- *     known-delivered (Loom wrote it and, if it had actually collapsed back then, the tripwire above
- *     would have already caught and recovered THAT turn) — this later re-appearance is a harmless
- *     CLI-side artifact, not a new loss.
- * Only a placeholder matching NO entry in the history is genuinely UNEXPLAINED. A raw `writeStdin` turn
- * never pushes into this history — only `submit()` does — so a raw-terminal placeholder never has an
- * entry to match against here, REGARDLESS of whether Loom actually captured its content elsewhere (see
- * the correction above: it usually did, in `Live.lastRawSubmit`, and `detectBarePastePlaceholderTripwire`
- * already caught + recovered the CURRENT-gen case using it). What genuinely has no explanation left ANYWHERE
- * by the time it reaches here is a STALE re-render of an OLDER raw turn, whose one-turn `lastRawSubmit`
- * snapshot is long since overwritten — that's the case this check exists to surface.
- *
- * ⚠️ THE BOUND, STATED EXPLICITLY (Code Review, card b68d1f5b): silence above is guaranteed ONLY for a
- * placeholder whose explaining write is still inside `Live.recentWrittenLineCounts`'s
- * `PASTE_LOSS_EXPLAIN_WINDOW` — beyond it, an explained token reads as unexplained and this check WILL
- * fire on a correct send, exactly the failure mode the hard constraint above names. This is a genuinely
- * SEPARATE, dedicated history from card c2c750a9's `Live.recentWrittenTurns` (8 entries, sized for that
- * detector's own sum+hash CONCATENATION, which needs full TEXT) — reusing that ring's window would have
- * inherited a bound picked for a different job: `abeac33a`'s own worked stale-token specimen was a
- * FIFTEEN-MINUTE gap between the explaining write and its re-render, and whether 8 intervening
- * submissions fit that gap is a property of session traffic, not of this check's logic. Because this
- * history stores only a `gen` plus two small integers per entry (see `WrittenLineCountEntry`) rather than
- * full text, it costs far less per entry than card c2c750a9's ring, which is what justifies giving it a
- * MUCH longer horizon (`PASTE_LOSS_EXPLAIN_WINDOW`, its own doc) without growing `Live`'s footprint the
- * way widening `COMPOSER_ACCUM_WINDOW` itself would have (that ring is card c2c750a9's own field, sized
- * for its own purpose — not this check's to grow as a side effect).
- *
- * ✅ CALIBRATION (card `abeac33a`, five specimens, 128.4–132.3 B/line, all kickoffs delivered intact):
- * `PASTE_LOSS_CALIBRATED_BYTES_PER_LINE` estimates lost BYTES from the placeholder's stated line count
- * for the alert message only — it is NOT part of the detection gate (presence of an unexplained
- * placeholder is itself the whole signal; the byte estimate just makes the alert legible). Deliberately
- * calibrated against PAYLOAD NEWLINES, never wrapped terminal display rows (a fixed 120-column pty only
- * ever ADDS rows via wrapping, so a row-count reading would undercount).
+ * @decision b68d1f5b — `PASTE_LOSS_CALIBRATED_BYTES_PER_LINE` (five specimens, 128.4–132.3 B/line, all
+ *  kickoffs delivered intact) is for the ALERT MESSAGE only, never the detection gate; calibrated against
+ *  payload newlines, never wrapped terminal display rows — see
+ *  docs/decisions/b68d1f5b-window-sizing-and-calibration.md
  */
 export const PASTE_LOSS_CALIBRATED_BYTES_PER_LINE = 130;
 
@@ -355,16 +258,16 @@ export interface PasteLengthLossCandidate {
  * gap. Empty array ⇒ nothing to report (either no placeholder at all, or every one found is explained).
  *
  * `submittedText` is OPTIONAL and, when given, only feeds the SAME false-positive guard
- * `detectBarePastePlaceholderTripwire` already validated (card 0f9268cc, 18140 real transcript turns): a
- * placeholder-shaped substring the sender's own submitted text ALSO contains verbatim was typed/quoted,
- * not CLI-collapsed, and must not be reported as a loss. Passing `null`/`undefined` simply skips that
- * guard; every other guard (the `gen` discriminator) still applies in full. ⚠️ CORRECTED (card 183de1a4):
- * this used to frame null/undefined as "the human-paste case this detector exists for — Loom never
- * captured what was typed." That's not accurate as a generalization — the raw/human path usually DOES
- * have a captured `submittedText` (`live.lastRawSubmit ?? live.lastPrompt`, host.ts's Stop-hook call
- * site), same as any other caller; null/undefined here just means whichever caller passed it didn't have
- * one available at that moment. See the corrected doc on `detectPastePlaceholderLengthLoss` above for
- * the real reason the human path still needs this detector.
+ * `detectBarePastePlaceholderTripwire` already validated (card 0f9268cc, see above) — a placeholder-shaped
+ * substring the sender's own submitted text ALSO contains verbatim was typed/quoted, not CLI-collapsed.
+ * Passing `null`/`undefined` simply skips that guard (same as any other caller — it just means whichever
+ * caller passed it didn't have one available at that moment); every other guard (the `gen` discriminator)
+ * still applies in full.
+ *
+ * @decision 183de1a4 — null/undefined here does NOT mean "the human-paste case this detector exists for —
+ *  Loom never captured what was typed"; the raw/human path usually DOES have a captured `submittedText`.
+ *  See the retention-verdict doc for the real, narrower reason the human path still needs this detector —
+ *  docs/decisions/183de1a4-lastrawsubmit-retention-is-one-turn-only-never-persisted.md
  *
  * `recentWrittenLineCounts` is `Live.recentWrittenLineCounts` — the dedicated, integer-only history (see
  * `PASTE_LOSS_EXPLAIN_WINDOW`'s doc), NOT card c2c750a9's `Live.recentWrittenTurns`.
