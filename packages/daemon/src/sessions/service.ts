@@ -7339,110 +7339,36 @@ export class SessionService {
   }
 
   /**
-   * Card a8f8a8f2 — consumes `PtyHostEvents.onKickoffGiveUpExhausted`: `scheduleKickoffGuarantee`'s
-   * synthetic turn-1 origin (pty/host.ts) exhausted its ONE give-up requeue with no confirming hook ever
-   * arriving. PtyHost cannot decide anything DB-aware from there (same layering boundary as
-   * `onGiveUpConfirmed`), so this is where "who spawned this, and how do they recover" gets answered.
-   *
-   * Scoped exactly like `notifyManagerOfIdleWorker` (role worker/null + a real `parentSessionId`): a
-   * top-level session (a manager/platform-lead spawned with no parent) has no single natural recipient for
-   * this notice, so it's a no-op there — the generic idle-watchdog + the console.error below stay its only
-   * signals, unchanged by this card.
-   *
-   * Card 7772176d — THE FIX: the ORIGINAL a8f8a8f2 wiring went straight to park+notify on the very first
-   * exhaustion. Root-caused (card c8660ac7) as the actual defect behind `f91c8634`'s stuck-turn-1
-   * specimens: an ORDINARY durable message that exhausts `GIVE_UP_REQUEUE_LIMIT` gets a further,
-   * cross-turn-boundary RE-MINT from `handleGiveUpExhausted` (below `GIVE_UP_REMINT_LIMIT`) before it ever
-   * parks; the kickoff had no equivalent — it went straight from "one requeue" to "park, no further
-   * attempt, ever." This method now gives the kickoff the SAME re-mint step, via its own `chainDepth`
-   * (mirrors `handleGiveUpExhausted`'s own `chainDepth`/`GIVE_UP_REMINT_LIMIT` pattern exactly — not a
-   * parallel, differently-shaped mechanism): below the limit, re-mint via a fresh, held `enqueueStdin`
-   * call; at/above it, fall through to the park+notify path below, unchanged.
-   *
-   * ⚠️ HONEST SCOPE (do not oversell this): this raises the kickoff to PARITY with `handleGiveUpExhausted`'s
-   * own re-mint, which is itself NOT proven reliable — a live specimen (an ordinary, established-session
-   * `worker_message` on the very same re-mint mechanism) parked anyway. This fix converts the kickoff's
-   * terminal state from "zero further attempts once the shared budget is spent, whoever spent it" to "one
-   * bounded further attempt, then park" — the same structure every other durable message gets, not a
-   * guarantee. It does not close `f91c8634` (that card's other specimens — a live manager mid-session, no
-   * kickoff involved — are structurally outside `scheduleKickoffGuarantee` and unverified by this fix).
-   *
-   * DOUBLE-DELIVERY: the re-mint below is dispatched with `logicalId: rootMsgId` — the IDENTICAL key
-   * `requeueGiveUpOrigin` (pty/host.ts) already seeds into `Live.ambiguousDispatches` for the ORIGINAL
-   * kickoff write, UNCONDITIONALLY, even on the exhaustion branch (before the budget check). So if the
-   * original write is ever confirmed by a later hook, `purgeConfirmedGiveUpRequeue`'s existing content-match
-   * purge (card 4a0af485) finds and deletes this still-queued re-mint by that shared `logicalId` — the
-   * IDENTICAL protection every ordinary `handleGiveUpExhausted` re-mint already relies on, not a new or
-   * stronger guarantee invented here. `giveUpHeldUntil` also forces `enqueueStdin`'s HELD branch, so the
-   * re-mint can never immediately re-hammer a session just shown wedged (mirrors `handleGiveUpExhausted`'s
-   * own `giveUpHeldUntil` reasoning, card ccb407eb finding [1]). See `kickoff-giveup-remint-purge.mjs` for
-   * the actual race proven end-to-end against the real PtyHost purge, not just an SessionService-level stub.
-   *
-   * Routed, for the re-mint, through `this.pty.enqueueStdin` directly rather than `enqueueDurableMessage`:
-   * the kickoff's synthetic origin was never durable in the first place (no `session_message_queued` row —
-   * see `scheduleKickoffGuarantee`'s own doc), and `enqueueDurableMessage`'s `onGiveUpExhausted` is hardwired
-   * to the generic `handleGiveUpExhausted` (whose terminal park targets a generic `sender`, not this
-   * method's manager-notify shape) — reusing it here would either invent a fake "sender" for a kickoff
-   * (which has none) or silently drop the manager-visible notice on the re-mint's own eventual exhaustion.
-   * Recursing back into THIS method (with `chainDepth + 1`) keeps the manager-notify terminal behavior
-   * intact regardless of how many re-mints preceded it.
-   *
-   * The terminal (park+notify) branch is routed through `enqueueSystemNudge` (the SAME durable dispatch
-   * every settle-nudge — merge-done, gate-failed, etc. — already uses) rather than a bare `pty.enqueueStdin`:
-   * a fire-and-forget push is lost outright if the manager isn't live at this exact instant, and this is
-   * EXACTLY the "item lost" failure mode this card exists to close — a bare drop one layer up is not a fix.
-   * The durable path persists a `session_message_queued` row (redriven on the manager's next resume/boot)
-   * and gets its OWN `onGiveUpExhausted` wiring recursively (re-mint, then park to nobody — sender is the
-   * `"system"` sentinel) if IT also can't get through.
-   *
-   * Names the non-destructive verification step FIRST, then the ONE recovery known to work if that
-   * verification confirms nothing ever started (worker_stop + fresh worker_spawn), and explicitly rules
-   * out — until verified — the two actions that look plausible but are wrong before then: worker_message
-   * (returns a false `delivered:true` against a session running no turn) and worker_merge (would review an
-   * empty branch) — see this card's own DEFINITION OF DONE.
-   *
-   * Card 00bd3b4a — TWO fixes on top of the original a8f8a8f2 wiring, both from a first-hand incident where
-   * this notice fired against a healthy, 35-turn-deep worker (Loom's own give-up budget is calibrated in
-   * seconds; pinned memory `engine-confirmation-can-lag-minutes-timeouts-assume-seconds` records a
-   * measured 232s confirmation lag with no known ceiling — exhaustion proves only that LOOM's OWN
-   * confirmation is stale, never that the engine never received the write):
-   * (1) DISCRIMINATE before accusing. Card `f91c8634` already converged on, and card-documented, the
-   *     working discriminator for "did this session ever really start": `busy:false` + EMPTY transcript.
-   *     That card's own DoD item 3 asked for exactly this notice to be keyed on it — `a8f8a8f2` instead
-   *     keyed the trigger on give-up-budget exhaustion (a delivery-channel signal) without adopting the
-   *     specified discriminator, which is the root of this card's incident. Fixed here by reading the
-   *     `f91c8634`-shape check DIRECTLY: `readTranscript(w.cwd, w.engineSessionId)` non-empty is
-   *     proof-by-construction the kickoff was NOT dropped (the same ground-truth artifact
-   *     `worker_transcript` exposes, and the one that refuted this exact notice in production — session
-   *     405985b5 showed `totalTurns:35` there while this notice was still asserting "nothing began at
-   *     all"). `busy` is NOT re-checked here: at this exact call site it is ALREADY false by construction
-   *     (`fireEnterAndVerify`'s GIVE-UP RECOVERY branch always calls `setBusy(false, "give-up-recovery")`
-   *     before `onGiveUpExhausted` can fire), so it adds no discrimination at THIS seam — unlike the
-   *     generic idle watchdog `f91c8634` built the check for, which polls `busy` at an arbitrary moment.
-   *     Also deliberately ONE read, not `f91c8634`'s "≥2 reads": that guard exists for a periodic watchdog
-   *     that can race a transcript write within a cold start's first ~50s; this handler fires only AFTER
-   *     Loom's own give-up budget has fully exhausted (two submit-retry cycles plus a hold — see
-   *     `requeueGiveUpOrigin`'s own doc — genuinely multiple minutes), well past that race window. This
-   *     discriminator is checked on EVERY call regardless of `chainDepth` — a false-positive give-up must
-   *     get NO dispatch at all, re-mint included, not just no terminal notice.
-   *     `this.pty.hasFirstTurnStarted` is kept as an ADDITIONAL (OR'd), zero-I/O pre-check — cheap and
-   *     strictly safe to keep since it can only ever suppress MORE eagerly, never less — but it is
-   *     downstream of the SAME hook-relay confirmation channel already shown unreliable/delayed in this
-   *     incident, so it is not, by itself, the specified reference discriminator; the transcript read is.
-   * (2) CLOSE THE RETRACTION GAP for the genuine-exhaustion case: record the SAME durable
-   *     `session_message_gave_up` (outcome:"parked") event `handleGiveUpExhausted`'s own park branch
-   *     records, keyed to `msgId`/`rootMsgId` (the synthetic origin's own ids — see
-   *     `PtyHostEvents.onKickoffGiveUpExhausted`'s doc). `requeueGiveUpOrigin` (pty/host.ts) seeds
-   *     `Live.ambiguousDispatches` for this exact `rootMsgId` REGARDLESS of which give-up branch fired, so
-   *     a later content-matched confirming hook still fires `onGiveUpConfirmed` even after exhaustion —
-   *     but before this fix, `handleGiveUpConfirmed`'s lookup found no "parked" event to retract and
-   *     silently no-op'd, leaving this notice's claim permanently uncorrected even once the engine's late
-   *     confirmation proved it wrong. Recording the event here is what lets that ALREADY-CORRECT retraction
-   *     machinery (card 417cea0a) reach the kickoff path too. The re-mint branch records its OWN
-   *     `outcome:"reminted"` event (mirrors `handleGiveUpExhausted`'s identical vocabulary) — a chain that
-   *     never reaches park correctly leaves `handleGiveUpConfirmed` nothing to retract, same as an ordinary
-   *     reminted-then-confirmed chain (see that method's own negative control).
+   * @decision a8f8a8f2 — handleKickoffGiveUpExhausted: PtyHost decides nothing DB-aware on kickoff
+   * give-up-exhaustion; scoped to worker/null-role + real parentSessionId, notifies via the durable
+   * enqueueSystemNudge (not a bare push), verification-before-recovery wording. docs/decisions/a8f8a8f2-*.md
    */
+  /**
+   * @decision 7772176d — below GIVE_UP_REMINT_LIMIT, re-mints the kickoff (shared rootMsgId logicalId,
+   * giveUpHeldUntil-held) via raw pty.enqueueStdin (never enqueueDurableMessage — no durable origin, no
+   * generic sender); recurses on further exhaustion. docs/decisions/7772176d-*.md
+   */
+  /**
+   * @decision c8660ac7 — root cause of f91c8634's stuck-turn-1 specimens: the kickoff had NO re-mint
+   * parity with an ordinary durable message's give-up-exhaustion (straight to permanent park after one
+   * requeue). Fixed by 7772176d, above. docs/decisions/c8660ac7-*.md
+   */
+  /**
+   * @decision f91c8634 — reference discriminator for "did this session ever really start": busy:false +
+   * non-empty on-disk transcript, never give-up-budget exhaustion alone (root of the 00bd3b4a incident
+   * below). Re-mint parity does NOT close this card. docs/decisions/f91c8634-*.md
+   */
+  /**
+   * @decision 00bd3b4a — records the SAME durable session_message_gave_up(outcome:"parked") event on
+   * kickoff park as handleGiveUpExhausted's own park branch, so 417cea0a's late-confirmation retraction
+   * machinery can reach the kickoff path too. docs/decisions/00bd3b4a-*.md
+   */
+  // @decision 417cea0a — the kickoff park path above reuses this SAME already-correct late-confirmation
+  // retraction machinery rather than inventing a second one for the kickoff's synthetic origin.
+  // @decision 4a0af485 — the re-mint's shared rootMsgId logicalId is what lets this SAME content-match
+  // purge find and delete it if the original kickoff write is later confirmed by a late hook.
+  // @decision ccb407eb — giveUpHeldUntil forcing enqueueStdin's HELD branch on the re-mint mirrors
+  // handleGiveUpExhausted's own reasoning (finding [1]) for why an immediate re-hammer is blocked.
   handleKickoffGiveUpExhausted(sessionId: string, msgId: string, rootMsgId: string, kickoffText: string, chainDepth = 0): void {
     const w = this.db.getSession(sessionId);
     if (!w || (w.role !== "worker" && w.role !== null) || !w.parentSessionId) {
