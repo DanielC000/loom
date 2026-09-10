@@ -26,6 +26,7 @@ unqualified version of that second claim).
 ## Source
 
 JSDoc comment in `packages/daemon/src/sessions/service.ts`, above `resumeFleetOnBoot`: lines 4420-4421,
-as of this tranche's HEAD (tranche 11). Cross-referenced (read-only) against
-`orchestration/resume-nudge.ts` lines 25-44, which carries the fuller narrative for this same card at its
-original site.
+as of this tranche's HEAD (tranche 11). Also anchored (extraction tranche 1) at its original, fuller-
+narrative site: JSDoc comment above `RESUME_NUDGE_TAIL` in `packages/daemon/src/orchestration/
+resume-nudge.ts`, lines 34-40 as of that tranche's HEAD — the `service.ts` copy above is the shorter,
+secondary citation.

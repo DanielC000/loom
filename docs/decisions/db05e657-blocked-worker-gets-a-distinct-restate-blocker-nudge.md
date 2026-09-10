@@ -18,4 +18,4 @@ Both boot paths deliberately do NOT silence the `done`-awaiting-review case iden
 
 ## Source
 
-JSDoc comment in `packages/daemon/src/sessions/service.ts`, above `recoverCrashOrphanedWorkers`: lines 4838-4849 as of this tranche's HEAD (tranche 14). Introduced by commit `8bf8f8c2`; MAJOR 1/2 review fixes landed in commit `f5b0dc7c8`.
+JSDoc comment in `packages/daemon/src/sessions/service.ts`, above `recoverCrashOrphanedWorkers`: lines 4838-4849 as of this tranche's HEAD (tranche 14). Introduced by commit `8bf8f8c2`; MAJOR 1/2 review fixes landed in commit `f5b0dc7c8`. Also cited (extraction tranche 1, no new content — a passing "review follow-up to db05e657/24ed1edc" reference, not a second full narrative site) in the JSDoc above `buildBlockedResumeNudgeBody` in `packages/daemon/src/orchestration/resume-nudge.ts`, line 116.

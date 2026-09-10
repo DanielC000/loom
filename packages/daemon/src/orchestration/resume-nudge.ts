@@ -1,43 +1,18 @@
 /**
- * PL Auditor finding #11: the shared tail appended to EVERY auto-resume nudge — both the daemon-restart
- * fleet resume (`resumeFleetOnBoot` in sessions/service.ts) AND the crash-recovery watchdog's bounded
- * auto-resume (crash-recovery-watcher.ts). ONE source of the string (DRY): any `claude --resume` — whether
- * the whole fleet on a daemon restart or one stranded/dead session the watcher revives — hits the SAME
- * engine reality the engine does NOT preserve across the resume, so the resumed agent acts deliberately
- * instead of being surprised:
+ * The shared tail appended to EVERY auto-resume nudge — both the daemon-restart fleet resume
+ * (`resumeFleetOnBoot` in sessions/service.ts) AND the crash-recovery watchdog's bounded auto-resume
+ * (crash-recovery-watcher.ts). ONE source of the string (DRY): any `claude --resume` hits the SAME
+ * engine-state-reset facts, so the resumed agent acts deliberately instead of being surprised.
  *
- *   FILE-READ TRACKING RESET — the engine's per-session "you have Read this file" set is in-memory state
- *   that a `--resume` does NOT restore (confirmed first-hand: a post-resume Edit reports "File has not
- *   been read yet"). The daemon has NO API into that engine-internal state, so preserving it is infeasible;
- *   per the card's accepted fallback we NOTE the reset so the agent re-Reads intentionally before editing.
- *
- *   IN-FLIGHT BACKGROUND SHELLS KILLED (PL Auditor finding a305669e) — a `--resume` is a NEW engine process
- *   attached to a NEW pty; the OLD pty (and everything node-pty's orphan-free containment — its conpty kill
- *   path walking _getConsoleProcessList() on Windows, a process-group kill on POSIX; not a Job Object,
- *   node-pty@1.1.0 has none — was keeping alive under it — including any `run_in_background` Bash shells the
- *   agent had started) dies with it. This is OS-level process-tree teardown, not a Loom choice, and applies to EVERY
- *   live session torn down by the restart/crash — not just the one that caused it. There is no daemon API
- *   into the engine's background-task registry, so checkpointing/draining an arbitrary running shell across
- *   the gap is infeasible; per the same accepted-fallback shape as the file-read note, we NOTE the kill so
- *   the agent expects a bare `<status>killed</status>` on its next poll and re-launches what it still needs
- *   instead of spending a turn diagnosing it as a fresh failure.
- *
- *   CORRECTED (card 0edda303, 2026-08-24): the tail used to claim "any background shells" without
- *   qualification. That is FALSE for a DELIBERATELY DETACHED child (e.g. one started via the tracked
- *   dev-server helper, `.claude/skills/orchestrate/scripts/dev-server.mjs`) — its whole design is to
- *   outlive the launching pty, so it is NOT part of the process tree torn down above and can survive the
- *   restart. A worker that trusted the old unqualified claim proceeded as if no dev server were running and
- *   hit an `EPERM` reinstalling over files the still-live server held open. The tail now scopes the kill
- *   claim to shells tied to the old pty and tells the agent to check a detached process before relying on
- *   it being gone, instead of asserting a state the daemon never verified for that case.
- *
- * BARE-CONTINUE DISCLAIMER REMOVED (card 5d8dea5f): the tail used to ALSO carry a paragraph disclaiming the
- * engine's bare "Continue from where you left off." auto-submit (an empty artifact `claude --resume` emits
- * before this nudge for an interrupted transcript). That disclaimer is gone: the daemon contributes EXACTLY
- * ONE resume turn — the `[loom:daemon-restarted]` nudge — and that single turn IS the authoritative resume
- * context, so there is nothing for the agent to reconcile against and no need to spend a sentence on an
- * engine artifact. Removing it keeps the resume system-message to one coherent point (now two related
- * engine-state-reset facts: file-read tracking and in-flight background shells).
+ * @decision a305669e — a `--resume` tears down the OLD pty's whole process tree (in-flight background
+ *  shells + file-read tracking) with no daemon API to checkpoint/drain either
+ *  (docs/decisions/a305669e-resume-kills-in-flight-background-shells.md)
+ *  @decision 0edda303 — the background-shells-killed claim above excludes a DELIBERATELY DETACHED child
+ *  (e.g. the tracked dev-server helper) — it is not part of the torn-down process tree
+ *  (docs/decisions/0edda303-resume-nudge-kill-claim-excludes-detached-children.md)
+ *  @decision 5d8dea5f — no bare-"Continue" disclaimer here: the daemon sends exactly ONE resume turn, so
+ *  there is nothing for the agent to reconcile against
+ *  (docs/decisions/5d8dea5f-resume-nudge-tail-drops-bare-continue-disclaimer.md)
  */
 export const RESUME_NUDGE_TAIL =
   ' (Note: this restart reset your file-read tracking — Read a file again before you Edit it, or the edit ' +
@@ -46,30 +21,19 @@ export const RESUME_NUDGE_TAIL =
   'check before any install step.)';
 
 /**
- * Card 7d3899cb: the explicit, machine-checkable ORIGINATOR CLASS folded into every `[loom:daemon-restarted]`
- * notice, right after the tag — so a reading peer (most pointedly, another project's manager, who has no
- * other way to learn this) never has to infer WHO triggered the restart from prose alone, or guess whether
- * a missing announcement is a real breach of the cross-project announce-before-restart pact (that pact
- * binds only the agent case). Composed at exactly the two sites that ever emit this tag, and nowhere else:
+ * The explicit, machine-checkable ORIGINATOR CLASS folded into every `[loom:daemon-restarted]` notice,
+ * right after the tag. Composed at exactly the two sites that ever emit this tag, and nowhere else:
+ * `RESTART_ORIGIN_AGENT` — sessions/service.ts's `resumeFleetOnBoot` (fires iff a `daemon_restart` tool
+ * call captured a `RestartIntent` before exiting; `index.ts`'s boot branch is a strict, mutually
+ * exclusive if/else, and the supervisor's own exit-75 relaunch is not a third shape here since
+ * `RESTART_EXIT_CODE=75` is written only by `requestDaemonRestart`, which always writes the intent
+ * first). `RESTART_ORIGIN_UNKNOWN` — `recoverCrashOrphanedWorkers`'s `cleanStop` branch only; the
+ * SIBLING no-marker-at-all branch (`[loom:crash-recovered]`) deliberately carries no such clause, since
+ * it already states an unambiguous non-agent cause in its own prose.
  *
- *   RESTART_ORIGIN_AGENT — sessions/service.ts's `resumeFleetOnBoot`, which runs if-and-only-if a
- *   `daemon_restart` tool call captured a `RestartIntent` before exiting (index.ts: `restartIntent ?
- *   resumeFleetOnBoot(...) : recoverCrashOrphanedWorkers(...)`, mutually exclusive per boot). The
- *   supervisor's own exit-75 relaunch is not a third shape here: RESTART_EXIT_CODE=75 is written only by
- *   `requestDaemonRestart` (service.ts), which always calls `writeRestartIntent` first — so an exit-75
- *   relaunch reads back its own intent and is agent-initiated by construction.
- *
- *   RESTART_ORIGIN_UNKNOWN — `recoverCrashOrphanedWorkers`'s `cleanStop` (shutdown-marker-found) branch
- *   ONLY, i.e. the SAME `[loom:daemon-restarted]` tag reused for a no-intent boot that is provably not a
- *   crash. Real-world evidence (card 7d3899cb's own filing) showed a deliberate human Ctrl-C + relaunch can
- *   present at boot identically to a genuine crash — no restart-intent, no shutdown marker either — so
- *   `cleanStop` genuinely cannot separate "a human stopped it" from "an as-yet-unexplained non-crash"; it
- *   only rules out an agent (which always writes an intent) and rules out a JS-level crash (which never
- *   leaves a fresh marker). Do NOT invent a third `owner-initiated` label: it would be wrong on every
- *   genuine crash still routed to this branch by a stray/late marker, and an invented origin is worse than
- *   none because it would be believed. The SIBLING branch (no marker at all — `[loom:crash-recovered]`,
- *   "crashed" / "killed from outside") is deliberately left WITHOUT this clause: that tag already states an
- *   unambiguous, non-agent cause in its own prose and was never the source of the peer's confusion.
+ * @decision 7d3899cb — the notice states an ORIGINATOR CLASS (agent-initiated vs unknown), never a
+ *  project/session/agent identity — a bare no-intent boot must read as unknown, never as an invented
+ *  `owner-initiated` label (docs/decisions/7d3899cb-restart-notice-names-originator-class-not-identity.md)
  */
 export const RESTART_ORIGIN_AGENT = "(origin: agent-initiated — a daemon_restart tool call)";
 export const RESTART_ORIGIN_UNKNOWN =
@@ -82,27 +46,14 @@ export const RESTART_ORIGIN_UNKNOWN =
  * PtyHost.isComposerDirty in liveFleetResumeSet). Unlike RESUME_NUDGE_TAIL's two facts (always true of
  * every resume), this one is true only for THAT session, so it is NOT folded into the shared tail.
  *
- * Real-engine probes (card: pasted-text-attachment-survives-restart) confirmed a SUBMITTED turn's pasted
- * text is fully durable — the engine resolves it to full content before persisting, and `--resume`
- * reconstructs it correctly every time. That original probe (`test/_probe-paste-resume.mjs`) validated this
- * via a single raw `writeStdin` write mimicking a human raw-terminal paste — NOT the companion/system
- * delivery path (`enqueueStdin` → `submit()` → `writeChunked()`, isolated `pty.write` calls for the bracket
- * markers). Task 16c50cdd re-validated the claim against that REAL path (`test/_probe-paste-companion.mjs`,
- * incl. the queued-while-busy/`drainPending` timing companion messages actually use) and it still holds on
- * claude 2.1.215. A real production incident (3 pastes on session 5db71873, all pinned to claude 2.1.212,
- * with zero recurrence across 8 later versions of continued use on the SAME session) showed a submitted
- * companion paste CAN collapse to a bare placeholder with no recoverable text — traced to a transient
- * upstream CLI race around Stop-hook timing, not a Loom defect. CORRECTED (card 94721f95, 2026-08-04): the
- * "does not reproduce on current tooling" claim this comment used to make here is FALSE — card 94721f95
- * measured 53 paste-tripwire recurrences at claudeVersion=2.1.220 across the daemon's own rotated logs, so
- * the upstream race is recurring across engine versions, not a closed incident. If pastes-losing-content
- * resurfaces, suspect this same recurring CLI race, not a NEW Loom write-path regression. The ONE genuine gap
- * this note is actually about is a draft that was pasted/typed but never
- * submitted (Enter not yet pressed) at the moment of the restart: it lives only in the now-dead pty's (and
- * engine's) in-memory composer, commonly collapsed on-screen to a "[Pasted text #N]" placeholder, and is
- * not part of the transcript at all — so it is NOT replayed and NOT recoverable. Without this note that
- * loss is entirely silent (no dangling reference even appears); this makes it explicit instead of leaving
- * the resumed agent to either not notice or guess at content it never actually saw.
+ * @decision sha:79af3725 — a SUBMITTED paste is durable across `--resume`; only a never-submitted draft
+ *  is genuinely, silently lost (docs/decisions/79af3725-pasted-text-durability-vs-genuinely-lost-draft.md)
+ *  @decision 16c50cdd — that durability claim was re-validated against the REAL companion/system delivery
+ *  path (`enqueueStdin`→`submit()`→`writeChunked()`), not just a raw-terminal write
+ *  (docs/decisions/16c50cdd-paste-durability-revalidated-against-real-delivery-path.md)
+ *  @decision 94721f95 — RETRACTED: the paste-tripwire race is a RECURRING upstream CLI issue across
+ *  engine versions (measured: 53 recurrences at claude 2.1.220), not a closed 2.1.212 incident
+ *  (docs/decisions/94721f95-paste-tripwire-recurrence-not-a-closed-incident.md)
  */
 export const DRAFT_LOSS_NOTE =
   ' (Note: at the moment of this restart you had an UNSENT draft sitting in your raw-terminal input box — ' +
@@ -113,14 +64,13 @@ export const DRAFT_LOSS_NOTE =
   'restart and ask them to resend it.)';
 
 /**
- * The shared body of the "you reported blocked, don't resume as if nothing happened" nudge (card
- * cfffeda6, review follow-up to db05e657/24ed1edc). `deriveAwaitingReview` (report-resolution.ts)
- * unified WHETHER a worker resumes into this branch, but the resume TEXT itself stayed four independent
- * literal copies across three call sites — the daemon-restart boot path, the crash boot path's two
- * `cleanStop` variants, and the crash-recovery watchdog's isolated-resume path (each in `sessions/
- * service.ts` or `orchestration/crash-recovery-watcher.ts`) — so a re-wording on one path could silently
- * drift from the others with nothing to catch it. This function is now the ONE place that sentence is
- * written.
+ * The shared body of the "you reported blocked, don't resume as if nothing happened" nudge.
+ * `deriveAwaitingReview` (report-resolution.ts) unified WHETHER a worker resumes into this branch, but
+ * the resume TEXT itself used to stay independent literal copies across several call sites (the
+ * daemon-restart boot path, the crash boot path's two `cleanStop` variants, and the crash-recovery
+ * watchdog's isolated-resume path, each in `sessions/service.ts` or
+ * `orchestration/crash-recovery-watcher.ts`) — so a re-wording on one path could silently drift from the
+ * others with nothing to catch it. This function is now the ONE place that sentence is written.
  *
  * `prefix` carries everything that's genuinely specific to the call site — the `[loom:tag]` and the
  * lead-in sentence describing HOW the daemon/session came back (e.g. "The daemon was rebuilt + restarted
@@ -131,6 +81,16 @@ export const DRAFT_LOSS_NOTE =
  * Deliberately does NOT include {@link RESUME_NUDGE_TAIL} or `draftNote` — callers append those
  * themselves, since not every call site attaches them the same way (the watchdog path appends
  * RESUME_NUDGE_TAIL to the built note afterward rather than inline).
+ *
+ * @decision cfffeda6 — this function exists so the blocked-resume sentence is written in exactly ONE
+ *  place; a loose `/re-state your blocker/i` test cannot catch wording drift between call sites, only a
+ *  pin on this constant/function can (docs/decisions/cfffeda6-blocked-resume-nudge-text-unified-into-one-function.md)
+ *  @decision db05e657 — the underlying ruling this text implements: a recovered `blocked` worker gets
+ *  this distinct nudge, never the generic continue-nudge, and never silence
+ *  (docs/decisions/db05e657-blocked-worker-gets-a-distinct-restate-blocker-nudge.md)
+ *  @decision 24ed1edc — the SAME ruling reaches the crash-recovery watchdog's RUNTIME resume path too,
+ *  not just the two boot paths
+ *  (docs/decisions/24ed1edc-crash-watcher-runtime-resume-applies-blocked-worker-ruling-too.md)
  */
 export function buildBlockedResumeNudgeBody(prefix: string, extra = ""): string {
   return `${prefix} Your last report to your manager was worker_report(blocked) — you are still waiting ` +
