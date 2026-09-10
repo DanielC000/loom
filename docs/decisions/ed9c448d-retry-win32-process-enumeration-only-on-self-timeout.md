@@ -1,0 +1,19 @@
+# ed9c448d — retry win32 worktree-process enumeration only on a self-timeout, never a spawn/parse error
+
+## Narrative
+
+`enumerateWithRetry` (`pty/host.ts`) wraps `enumerateProcessesWin32`. ROOT CAUSE (established, not assumed): the observed failure (`test/merge-spawn-tracked.mjs`'s "(merge retain)" scenario, gate tail "CIM query produced no output within 10000ms", at `cap=2 concurrent=2` — genuine host contention) is NEITHER "10s is a permanently broken bound" NOR "the query is unconditionally too expensive to ever finish" — `reapProcessesRootedInWorktree`'s catch already treats a failed enumeration as fully non-fatal (fail-closed, logged, `enumerationFailed: true`, never thrown past that function at any of its seven call sites in `sessions/service.ts`, every one of which also wraps the call in its own best-effort try/catch), so "failure handled too harshly" is likewise ruled out; the failure was already SURVIVABLE, just not RECOVERABLE — the retry is what turns a tolerated failure into a successful attempt.
+
+What actually happens is the SAME shape card `f0718488` established for the codescape version probe (`readInstalledBuild`, this file's sibling in `codescape/supervisor.ts`): `Get-CimInstance Win32_Process` enumerates every live process, so under a loaded host (two concurrent merge gates competing for CPU/WMI) a single attempt can transiently miss its own timeout window even though the query would have completed given a little more patience or a slightly quieter moment — contention on this host is bursty, not constant, so a second attempt has a real chance of landing where the first one didn't. Widening the 10s bound would not fix a query that's still contended at 15s or 20s (and this project has a standing rule that widening a constant is not a structural fix — the `7b634e58` family); retrying the SAME bound on a fresh attempt does, for exactly the reason the codescape precedent already proved.
+
+Returns the successful attempt's process list plus the number of attempts actually made — read by `test/worktree-process-reap.mjs`'s enumeration-timeout-then-success case, and by a persistent-failure case that counts invocations of its own fake enumerator — so both are asserted on observed attempt counts / observable outcome, NEVER wall-clock (card `ca87fc6a` is the sibling this deliberately does not repeat: a wall-clock assertion flakes under exactly the contention this decision is about, while a real `REAP_ENUMERATE_RETRY_DELAY_MS` sleep still elapses between attempts). Rethrows the last error once attempts are exhausted, or immediately for a non-timeout error.
+
+## Do not
+
+- Do not retry a non-timeout enumeration failure (a genuine spawn error, empty output, or parse error) — that is a real defect of the installed tooling, not contention, and retrying it would just repeat a guaranteed failure at the cost of extra teardown latency.
+- Do not widen `timeoutMs` as a fix for observed contention — a query still contended at a wider bound just fails later; retry the SAME bound on a fresh attempt instead (see the `7b634e58` "widening a constant isn't a fix" family).
+- Do not assert this retry behavior on wall-clock timing — assert on the reported attempt count / observable outcome, the same lesson card `ca87fc6a`'s sibling exists to enforce.
+
+## Source
+
+Inline doc comment above `enumerateWithRetry` in `packages/daemon/src/pty/host.ts`, introduced by commit `b31db7a5f23a471808ef485f3d2c306c8983b742` ("fix(pty): the worktree-reap CIM enumeration times out at 10s under load, failing a merge that should have succeeded"), as of this tranche's HEAD (main `9421720c`). Precedent: card `f0718488` (`docs/decisions/f0718488-version-probe-retry-only-on-timeout-worst-case-budget.md`) established the same retry-only-on-timeout shape for the codescape version probe first.

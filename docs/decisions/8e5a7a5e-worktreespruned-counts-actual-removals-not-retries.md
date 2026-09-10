@@ -36,3 +36,48 @@ removal happened, not merely that removal was attempted.
 Inline comment in `packages/daemon/src/index.ts`, immediately after the boot-time orchestration-reconcile
 kick-off, as of this worktree's HEAD before this extraction. Wrapped source lines joined into a flowing
 paragraph, `//` comment markers stripped, no wording changed.
+
+## `reapProcessesRootedInWorktree` (pty/host.ts) — THE PREVENTION, SAFETY, SELF-EXCLUSION
+
+THE PREVENTION (live evidence 2026-07-03/04): before a worktree dir is removed, kill any OS process still
+ROOTED in it — by executable path, cwd, or command line — that `reapOrphanedDescendants`'s pty-tree walk
+MISSES because it detached/re-parented away from the pty's process tree entirely (an esbuild long-lived
+service process, a backgrounded vite dev-server, a lingering tsserver/watcher). Without this, such a
+survivor keeps a file handle open inside the worktree and the subsequent `removeWorktree` hits
+`ERROR_SHARING_VIOLATION` on Windows (the confirmed root cause of the owner's 8 wedged dead-leftover
+worktrees) — this closes the window BEFORE that removal is even attempted, rather than reacting to it.
+
+SAFETY (this is the one new code path this task's MANDATORY Code-Reviewer pass exists for): the match is
+scoped to EXACTLY the one `worktreePath` being torn down, at a path-segment boundary (no prefix-collision
+false-positive across sibling worktree dirs). It is the CALLER's responsibility to only ever invoke this
+with a worktree genuinely being removed (never live/protected) — every call site in `SessionService`
+(`gcWorktreeDir`, the single removal chokepoint shared by `finalizeMerge`, boot-reconcile Pass B, and the
+wedge-retry sweep) already upholds that invariant for `removeWorktree` itself, so wiring the reap in right
+before that same call inherits the same guarantee for free, without this function needing to know
+anything about session liveness itself.
+
+BOUNDED + BEST-EFFORT (original design; the P1 logging fix is `sha:16b7c38c`): time-boxed both by the
+outer `withReapTimeout` race AND, for the real win32 enumerator, by its OWN internal timer that
+force-kills its spawned helper — so a wedged query can never leak a helper process. Failures are
+swallowed (never throw/block teardown). Injectable via `deps` (enumerate/kill/timeoutMs) — a test can
+drive a fake process list, or a fake enumerator that REJECTS, instead of the real OS.
+
+SELF-EXCLUSION: the daemon's OWN pid (`process.pid`) is never a kill candidate, regardless of what
+`processRootedInWorktree` says — a defense-in-depth backstop against the (theoretical, cheap-to-rule-out)
+case where the daemon's own cwd/exePath/commandLine happens to satisfy the match (e.g. a misconfigured
+`LOOM_HOME` nested under the very worktree being torn down). The task's own DoD requires this can never
+happen; this makes it structurally impossible rather than merely unlikely.
+
+### Do not (this section)
+
+- Do not invoke `reapProcessesRootedInWorktree` with a worktree that isn't genuinely about to be removed —
+  the safety guarantee depends entirely on every call site upholding that invariant.
+- Do not drop the unconditional `process.pid` self-exclusion in favor of relying on `excludePids` alone
+  (see card `864e79fe`) — the daemon-pid check is a blanket backstop, `excludePids` is caller-supplied.
+
+### Source (this section)
+
+Inline doc comment above `reapProcessesRootedInWorktree` in `packages/daemon/src/pty/host.ts` (THE
+PREVENTION / SAFETY / SELF-EXCLUSION paragraphs), introduced by commit `459e9dab56` ("fix(pty): reap
+escaped build/dev-server processes rooted in a worktree BEFORE removal"), as of main `9421720c`. Extends
+this record per its own header note: task `8e5a7a5e` is the broader effort, this is the reap site it named.

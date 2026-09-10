@@ -3738,32 +3738,12 @@ export const REAP_ENUMERATE_MAX_ATTEMPTS = 2;
 export const REAP_ENUMERATE_RETRY_DELAY_MS = 500;
 
 /**
- * Card ed9c448d — ROOT CAUSE (established, not assumed): the observed failure (`test/merge-spawn-
- * tracked.mjs`'s "(merge retain)" scenario, gate tail "CIM query produced no output within 10000ms", at
- * `cap=2 concurrent=2` — genuine host contention) is NEITHER "10s is a permanently broken bound" NOR "the
- * query is unconditionally too expensive to ever finish" — {@link reapProcessesRootedInWorktree}'s catch
- * already treats a failed enumeration as fully non-fatal (fail-closed, logged, `enumerationFailed: true`,
- * never thrown past that function at any of its seven call sites in sessions/service.ts, every one of
- * which ALSO wraps the call in its own best-effort try/catch) — so "failure handled too harshly" is
- * likewise ruled out; the failure was already survivable, just not RECOVERABLE. What actually happens is
- * the SAME shape card f0718488 established for the codescape version probe (`readInstalledBuild`, this
- * file's sibling in `codescape/supervisor.ts`): `Get-CimInstance Win32_Process` enumerates EVERY live
- * process, so under a loaded host (two concurrent merge gates competing for CPU/WMI) a single attempt can
- * transiently miss its own timeout window even though the query would have completed given a little more
- * patience or a slightly quieter moment — contention on this host is bursty, not constant, so a SECOND
- * attempt has a real chance of landing where the first one didn't. Widening the 10s bound would not fix a
- * query that's still contended at 15s or 20s (and this project has a standing rule that widening a
- * constant is not a structural fix — the `7b634e58` family); retrying the SAME bound on a fresh attempt
- * does, for exactly the reason the codescape precedent already proved. Retried ONLY when the rejection is
- * flagged `timedOut: true` (see {@link enumerateProcessesWin32}'s `fail` helper) — a genuine spawn error,
- * empty-output, or parse-error is a real defect, not contention, and retrying one of those would just
- * repeat a guaranteed failure at the cost of extra teardown latency for nothing.
+ * @decision ed9c448d — retry ONLY a `timedOut: true` rejection (never widen the timeout instead — the
+ * `7b634e58` family); a spawn/parse/empty-output error is never retried. Assert on the attempt count,
+ * never wall-clock (sibling: card `ca87fc6a`).
  *
- * Returns the successful attempt's process list plus the number of attempts actually made — read by
- * `test/worktree-process-reap.mjs`'s enumeration-timeout-then-success case, and by a persistent-failure
- * case that counts invocations of its own fake enumerator — so both are asserted on observed attempt
- * counts / observable outcome, NEVER wall-clock (card ca87fc6a is the sibling this deliberately does not
- * repeat). Rethrows the LAST error once attempts are exhausted, or immediately for a non-timeout error.
+ * Returns the successful attempt's process list plus attempts made. Rethrows the last error once
+ * attempts are exhausted, or immediately for a non-timeout error.
  */
 async function enumerateWithRetry(enumerate: ProcessEnumerator, timeoutMs: number): Promise<{ procs: WorktreeProcess[]; attempts: number }> {
   let attempt = 0;
@@ -3786,63 +3766,15 @@ async function enumerateWithRetry(enumerate: ProcessEnumerator, timeoutMs: numbe
 }
 
 /**
- * THE PREVENTION for dangling worktrees (task 8e5a7a5e — live evidence 2026-07-03/04): before a worktree
- * dir is removed, kill any OS process still ROOTED in it — by executable path, cwd, or command line (see
- * {@link processRootedInWorktree}) — that {@link reapOrphanedDescendants}'s pty-tree walk MISSES because
- * it detached/re-parented away from the pty's process tree entirely (an esbuild long-lived service
- * process, a backgrounded vite dev-server, a lingering tsserver/watcher). Without this, such a survivor
- * keeps a file handle open inside the worktree and the subsequent `removeWorktree` hits
- * `ERROR_SHARING_VIOLATION` on Windows (the confirmed root cause of the owner's 8 wedged dead-leftover
- * worktrees) — this closes the window BEFORE that removal is even attempted, rather than reacting to it.
- *
- * SAFETY (this function is the one new code path this task's mandatory Code-Reviewer pass exists for): the
- * match is scoped to EXACTLY the one `worktreePath` the caller is about to tear down, at a path-segment
- * boundary ({@link processRootedInWorktree} — no prefix-collision false-positive across sibling worktree
- * dirs). It is the CALLER's responsibility to only ever invoke this with a worktree that is genuinely being
- * removed (never a live/protected one) — every call site in SessionService (gcWorktreeDir, the single
- * removal chokepoint shared by finalizeMerge, boot-reconcile Pass B, and the wedge-retry sweep) already
- * upholds that invariant for `removeWorktree` itself, so wiring this in right before that same call inherits
- * the same guarantee for free, without this function needing to know anything about sessions/liveness itself.
- *
- * BOUNDED + BEST-EFFORT: the enumerate step is time-boxed both by the outer {@link withReapTimeout} race
- * AND, for the real win32 enumerator, by its OWN internal timer that force-kills its spawned helper (see
- * {@link enumerateProcessesWin32}) — so a wedged query can never leak a helper process on top of failing
- * to find its target. ANY failure (a missing OS tool, an enumeration timeout, a malformed CIM payload, a
- * kill that errors) is still swallowed here — this must never throw or block teardown, mirroring every
- * other best-effort helper in the worktree-removal path — but a REAL P1 (a non-UTF8 PowerShell console
- * codepage on this project's own self-hosting host silently zeroed EVERY enumeration for as long as any
- * live process's CommandLine held a character that codepage couldn't cleanly round-trip, across all
- * SEVEN call sites of this function in sessions/service.ts) proved that "swallowed" must not also mean
- * "invisible": a failure here is now logged with a classified reason via `console.error` and reported
- * back as `enumerationFailed: true`, so it no longer looks identical to a clean `killedPids: []`. See
- * {@link parseWin32CimStdout}'s doc for the mechanism. Injectable via `deps` (enumerate/kill/timeoutMs) so
- * a test can drive it with a fake process list — or a fake enumerator that REJECTS — instead of the real
- * OS.
- *
- * ACCEPTED RISK (both fail-safe / under-kill, not over-kill — reviewed and deliberately kept): (1) the
- * command-line arm of {@link processRootedInWorktree} intentionally over-matches a process that merely
- * NAMES the doomed worktree path in its argv without being rooted there — this is load-bearing, not a
- * bug, because on win32 vite's global node.exe carries the worktree path ONLY in its CommandLine (CIM
- * exposes no per-process cwd), so narrowing the match would miss the exact survivor this function exists
- * to catch. (2) {@link killProcessById}'s win32 path (`taskkill /pid <pid> /T /F`) kills the matched pid's
- * whole subtree, which widens the blast radius past the one matched process — theoretically reaching an
- * ancestor-of-the-daemon if one were ever wrongly rooted in a worktree, though not realistic for a
- * checkout-launched daemon (the daemon's own pid is separately excluded below regardless).
- *
- * SELF-EXCLUSION: the daemon's OWN pid (`process.pid`) is never a kill candidate, regardless of what
- * `processRootedInWorktree` says — a defense-in-depth backstop against the (currently theoretical, but
- * cheap-to-rule-out) case where the daemon's own cwd/exePath/commandLine happens to satisfy the match
- * (e.g. a misconfigured LOOM_HOME nested under the very worktree being torn down). The task's own DoD
- * requires this can never happen; this makes it structurally impossible rather than merely unlikely.
- *
- * `deps.excludePids` (Code Review finding on card 864e79fe): additional pids a caller knows are
- * genuinely rooted in `worktreePath` but must survive anyway — specifically, a worker's OWN claude pty
- * when this is invoked BEFORE that worker has been stopped (confirmWorkerMerge's pre-gate sweep, run
- * while the confirming worker may still be live). Without this, the sweep would kill the worker's own
- * process on every gated confirm — on a subsequent gate FAILURE that would strand a worker meant to
- * survive for re-tasking. This is deliberately separate from the unconditional `process.pid`
- * self-exclusion above: that one is a blanket, always-on backstop for the daemon itself; this one is a
- * caller-supplied, call-site-specific allowance.
+ * @decision 8e5a7a5e — kill any process still rooted in a worktree BEFORE removal (closes the
+ * ERROR_SHARING_VIOLATION window rather than reacting to it); scoped to exactly that worktree, daemon's
+ * own pid never a kill candidate.
+ * @decision sha:16b7c38c — an enumeration failure is logged + reported `enumerationFailed: true`, never
+ * silently identical to "nothing to kill" (same P1 fix as `enumerateProcessesWin32`).
+ * @decision sha:d8395f4e — ACCEPTED RISK, reviewed and kept: the command-line match over-matches by
+ * design (win32 CIM exposes no per-process cwd); a win32 kill takes the matched pid's whole subtree.
+ * @decision 864e79fe — `deps.excludePids`: a caller-named survivor (e.g. a still-live worker's own pty
+ * during confirmWorkerMerge's pre-gate sweep) beyond the always-on daemon-pid self-exclusion above.
  */
 export async function reapProcessesRootedInWorktree(
   worktreePath: string,
