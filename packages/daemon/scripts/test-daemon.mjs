@@ -387,18 +387,10 @@ export const NOT_HERMETIC = new Set([
 // out-of-band suite-flake census harness (its own `lib.mjs`, phase*.mjs probes, `fixtures/`, `raw/` logs)
 // — a sibling investigation, not part of this gate.
 //
-// ⚠ Card fa52f555: hand-deriving the discovered test count from `git ls-tree`/`grep -c` (or any other
-// tracked-file count) is UNSUPPORTED and WILL drift from the real number. Two exclusion layers already
-// broke a hand-rolled count in production: (1) this very set — a naive count included every file under
-// `fixtures/`/`census/`, which the walk never even descends into (668 vs. the real 646 at the time); (2)
-// the underscore-prefix rule below (`isUnderscoreExcluded`) — a further ~18 files invisible to a count
-// that only knows about (1) (646 vs. ~628, and even that corrected number wasn't certifiable, since it
-// still didn't account for `looksLikeTest` violations). The ONLY authoritative number is `HERMETIC.length`
-// (computed below) — read it from a real run's own "N/M hermetic daemon test files passed" line, or run this
-// script with `--count` for the same number without running the suite.
-// Exported (card 815b4b30) so `git/worktrees.ts`'s emit-compare reduced-gate classifier can dynamically
-// import THIS exact Set — the diff's own worktree copy of this file — rather than hand-copying the two
-// names into a second, driftable list. See `loadExcludedTestDirNames` in worktrees.ts for the reuse.
+// @decision d67725c1 — hand-deriving this discovered-test count (`git ls-tree`/`grep -c`, or any
+// tracked-file count) is UNSUPPORTED and WILL drift; `HERMETIC.length` (or `--count`) is authoritative.
+// @decision 815b4b30 — Exported so worktrees.ts's emit-compare classifier imports this Set directly,
+// never a hand-copied second list.
 export const EXCLUDED_DIR_NAMES = new Set(["fixtures", "census"]);
 
 // A discovered file not underscore-prefixed must carry at least one of these to count as a real test.
@@ -483,23 +475,8 @@ export function discoverHermeticTests(testDir, notHermetic = NOT_HERMETIC) {
   return { hermetic, violations, notHermeticNames };
 }
 
-// Card fa52f555 Part 2: a test-shaped file placed inside an EXCLUDED_DIR_NAMES subtree is, BY
-// CONSTRUCTION, invisible to `walkMjsFiles`/`discoverHermeticTests`/the DISCOVERY_VIOLATIONS check above —
-// it runs NEVER and SILENTLY, and nothing tells its author so (false coverage, worse than a miscount: card
-// f106f28e is a real instance — test/census/lib-guards.test.mjs — that happens to be a legitimate,
-// deliberately-manual test; nothing previously distinguished it from an accident).
-//
-// A bare "this is deliberate" marker is an unchecked claim — the same shape as a comment asserting safety
-// with no argument attached. Every declaration must carry a non-empty REASON; a marker with an empty or
-// missing reason is treated as ABSENT (still a violation), never silently accepted.
-//
-// Two markers, never conflated, because they mean different things to a reader of the `declared` echo
-// (see the isMain block below):
-//   `loom:gate-exempt: <reason>`  — a REAL test, deliberately run manually / out of band.
-//   `loom:not-a-test: <reason>`   — NOT a test at all; it only trips the `looksLikeTest` heuristic (a
-//     shared lib that throws for input validation, a CLI stub, a child-process fixture that calls
-//     `process.exit(1)` to simulate an outcome). Folding this into `gate-exempt` would misrepresent it in
-//     the echoed count as a manual test that exists, when no such test exists at all.
+// @decision d67725c1 — a test-shaped file inside an EXCLUDED_DIR_NAMES subtree runs NEVER and
+// SILENTLY unless it declares `loom:gate-exempt:`/`loom:not-a-test:` with a non-empty reason.
 const EXCLUDED_DIR_MARKER_RE = /loom:(gate-exempt|not-a-test):[ \t]*(.*)/;
 
 function parseExcludedDirMarker(source) {
@@ -733,37 +710,10 @@ export function resolveSelectionForCliMode(hermetic, cliMode, codexRealSpawnBase
   return resolveSelection(hermetic, { only: cliMode.only, exclude: cliMode.exclude });
 }
 
-// Card e6e55f7a: a sibling harness (Codescape) prints a whole-run peak-RSS + max-inter-event-gap summary
-// on every gate run, pass or fail — a night was spent hand-reconstructing both numbers because this gate
-// didn't. Observation only (DoD-5: zero change to selection/ordering/concurrency/exit codes) — cheap
-// `process.memoryUsage`-class reads on a timer, no per-test synchronisation, no added subprocess (DoD-6).
-//
-// SCOPE: this tracks the RUNNER process only — this coordinating script, not its spawned test children —
-// and the printed line says so explicitly rather than claiming "process tree" for what is really one
-// process. That scope is now a CHECKED, EVIDENCED, PERMANENT decision (card f1043732), not the original
-// speculative "no cheap way" claim it replaces — read the full history before re-attempting this:
-//
-// A `--import`-injected preload + an 'ipc' stdio channel CAN reach a spawned test child's own
-// `process.memoryUsage().rss` without any `/proc` read or `tasklist`/`ps` shell-out (no added subprocess
-// — DoD-6 respected) — that part of the original speculative comment was WRONG, and it was implemented,
-// merge-gated locally, and re-verified against the real harness. It was then REVERTED after it was found
-// to reproduce a real, structurally daemon-fatal upstream bug: node-pty issue #952 (WindowsPtyAgent's
-// ConPTY `kill()` races an uncaught `_getConsoleProcessList().then(...)` against a synchronous
-// `_ptyNative.kill(...)`) — confirmed via a controlled A/B/C/D/E experiment that merely attaching an IPC
-// channel + sending ANY `process.send()` (even a single one, at load, with no periodic timer and no exit
-// handler) is sufficient to crash `test/kickoff-real-spawn.mjs` deterministically (5/5+ across bundled and
-// solo runs), while the SAME channel attached with zero sends stayed clean (0/9). Two other PTY-spawning
-// files (boot-mode-settings-argv-coupling, spawn-command-line-preflight) were NOT similarly sensitive once
-// a periodic timer was removed, ruling out "IPC channel presence alone" as the trigger for those two — but
-// not for kickoff-real-spawn, which is uniquely and reliably sensitive to this file's OWN PTY-teardown
-// timing (not explained by `createPty` call count — it calls fewer than either of the other two).
-//
-// The full reproduction recipe (exact crash signature, exact configs tried, exact counts) is preserved in
-// this project's shared memory as `nodepty-952-conpty-kill-race-reproducer` — read that before trying this
-// again, and before assuming any future node-pty upgrade has fixed the underlying race (it names the
-// minimal config to re-test against). Do NOT re-attempt this by excluding kickoff-real-spawn (or any other
-// PTY-spawning file) by name — a name-list would pass today and silently regress the instant a new
-// PTY-spawning test is added, with nothing left to catch it.
+// @decision e6e55f7a — this samples/prints whole-run peak-RSS + max inter-event gap (own process
+// tree, own labeled scope) so it's never hand-reconstructed again; observation-only, zero behavior change.
+// @decision f1043732 — RUNNER-ONLY RSS scope is permanent: whole-tree via IPC was implemented then
+// REVERTED (crashes via node-pty#952's ConPTY kill race) — do not re-attempt by excluding files by name.
 //
 // `readRssBytes` is injectable so a hermetic test can drive this with synthetic readings instead of
 // asserting real, non-deterministic process memory.
@@ -831,25 +781,13 @@ export function formatMaxGapLine(gapMs, { partial = false } = {}) {
     `so no threshold on this number can tell them apart; descriptive run-shape diagnostic only${partialNote}`;
 }
 
-// Card e6e55f7a (manager follow-up, not the card's literal DoD but its PURPOSE): the harness itself
-// dying mid-run — an uncaught exception, a hang killed externally, anything that aborts before the
-// normal summary prints — is the single most opaque rejection mode this instrument exists to illuminate.
-// A crash mid-run is exactly the case where the descriptive RSS-floor/max-gap numbers are most valuable
-// (see card b6ab2521 — the max-gap number is a descriptive diagnostic only, never a stall verdict or a
-// margin), and a DoD that covered every case except that one would be a technicality. So: wrap the actual
-// run body.
-// On success, resolve normally — the CALLER prints the two clean-path lines itself (unlabelled,
-// full-confidence), unchanged from before. On failure, print BOTH lines HERE — labelled `partial: true` —
-// then RETHROW THE SAME ERROR UNCHANGED. Never swallowed (this file IS the merge gate for every project on
-// this daemon; a swallowed exception here would silently green a dead harness) and never a different exit
-// code (the caller/Node's own default uncaught-exception handling is what decides that, exactly as it did
-// before this wrapper existed — this function only ever observes and rethrows, never catches-and-exits).
+// @decision e6e55f7a — a harness crash mid-run is the most opaque rejection mode this instrument
+// exists to illuminate; on failure this prints BOTH lines (labelled `partial: true`) then RETHROWS
+// THE SAME ERROR UNCHANGED — never swallowed, never a different exit code.
 // `runFn` does the actual test-running work; `log` is injectable so a hermetic test can capture output
-// instead of asserting against real console.log side effects. `onSample` (card a496166a DoD-0) is an
-// OPTIONAL, ADDITIVE hook fired on the SAME timer tick as the RSS sample — lets a caller ride this
-// existing periodic-sampling machinery for its own observability (e.g. host-load sampling) instead of
-// standing up a second interval. Defaults to a no-op, so every existing call site (and the RSS-gap test,
-// which doesn't pass it) is byte-identical in behavior to before this parameter existed.
+// instead of asserting against real console.log side effects.
+// @decision a496166a — `onSample` is an OPTIONAL, ADDITIVE hook on the SAME RSS-sample timer tick;
+// defaults to a no-op so every existing call site stays byte-identical.
 export async function runInstrumentedSuite(runFn, { sampleIntervalMs = 5000, log = console.log, onSample = () => {} } = {}) {
   const rssTracker = createRssTracker();
   const completionTimestamps = [performance.now()];
@@ -873,27 +811,12 @@ const { hermetic: HERMETIC, violations: DISCOVERY_VIOLATIONS, notHermeticNames: 
 
 // Ceiling — unchanged. `LOOM_GATE_TEST_CONCURRENCY` may still dial UP to this on a host known to take it.
 const MAX_CONCURRENCY = 8;
-// Safe DEFAULT when LOOM_GATE_TEST_CONCURRENCY is unset (card 301d8c01 — a bare `pnpm --filter @loom/daemon
-// test:daemon`, no env override, is exactly the command a worker or the daemon-run merge gate runs
-// unattended). Previously this fell back to `os.availableParallelism()`, which on a many-core
-// self-hosting box let this command spike to `MAX_CONCURRENCY` lanes of concurrent temp-SQLite/
-// in-process-daemon boots with nothing bounding it — that's what starved the live Codescape service.
-// Card ba3c9580: renamed from the generic `LOOM_TEST_CONCURRENCY`, which every project's gate child
-// received regardless of whether its own harness happened to read that same generic name.
-//
-// Card 2ff32b5c: raised 2 -> 3, a DIRECT OWNER DECISION given live in chat (superseding the adaptive
-// shape they'd chosen in Request 17b90717 the same day — the adaptive version, card a496166a, is
-// DEFERRED behind this one, not abandoned). The product math that bounds this number:
-//   worst-case concurrent test processes = orchestration.maxConcurrentGates (2) x this constant's lanes
-//   2 lanes -> 4 processes  (today, safe)
-//   3 lanes -> 6 processes  (this change — still below the documented failure level)
-//   4 lanes -> 8 processes  (DO NOT raise to 4 — this is EXACTLY the level that starved the live
-//                            self-hosting Codescape service on 2026-07-15: card 301d8c01's incident was
-//                            ONE unpinned gate spiking to MAX_CONCURRENCY=8 lanes with nothing bounding
-//                            it, not N gates at a smaller pool size — but 8 total concurrent processes is
-//                            8 total concurrent processes regardless of how they were assembled)
-// MAX_CONCURRENCY stays at 8 (the ceiling above is deliberately unchanged) and this constant stays a
-// fixed number, not adaptive to host load — both are explicitly out of scope for this change.
+// @decision 301d8c01 — never fall back to `os.availableParallelism()` on an unset env; that spiked
+// this to MAX_CONCURRENCY unbounded and starved the self-hosting Codescape service once already.
+// @decision ba3c9580 — reads `LOOM_GATE_TEST_CONCURRENCY`, a Loom-project-qualified name, never the
+// old generic `LOOM_TEST_CONCURRENCY` (injected into every project's gate child regardless of project).
+// @decision 2ff32b5c — DO NOT raise past 3 without re-deciding: 4 lanes puts the worst-case product
+// (maxConcurrentGates x lanes) at 8 processes, exactly the level that starved Codescape on 2026-07-15.
 const DEFAULT_CONCURRENCY = 3;
 const POOL_SIZE = Math.max(
   1,

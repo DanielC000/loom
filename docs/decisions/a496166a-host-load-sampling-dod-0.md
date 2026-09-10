@@ -14,6 +14,16 @@ Filed to build an adaptive gate-lane count that scales to observed host/fleet lo
 
 The periodic `kind:"host-sample"` row this card adds (5s cadence, same `runUid` join key as every other row) is emitted *throughout* the run, not just once before and once after like the existing `hostBefore`/`hostAfter` fields on the run-start/run-summary rows. That is the piece that lets a fast run and a slow run be compared **distribution-to-distribution** instead of by one point-in-time snapshot each — exactly the instrument §DoD-0b needed and didn't have (host load was recorded for only one of the two contrasted runs). An unknown row kind is silently ignored by any existing reader that filters by `kind`, so this is additive.
 
+## The `onSample` hook rides the existing RSS-sample timer, rather than a second interval
+
+`runInstrumentedSuite`'s `onSample` parameter (part of DoD-0's "the gate already emits per-file
+timing + a `cheapHostSnapshot()` before/after — extend that to a periodic sample rather than
+building a new harness") is an optional, additive hook fired on the *same* timer tick as the RSS
+sample. It lets a caller — e.g. this card's own periodic host-load sampling — ride the existing
+periodic-sampling machinery for its own observability instead of standing up a second interval.
+Defaults to a no-op, so every existing call site (and the RSS-gap test, which doesn't pass it) stays
+byte-identical in behavior to before this parameter existed.
+
 ## Deferred, not cancelled
 
 **Owner, live in chat, 2026-08-05:** *"yes you are right maybe we should hold off on the variable load dependent gate lanes and just raise the number of lanes for now."* This superseded an earlier inbox answer (Request `17b90717`, "build the adaptive version") — a later live instruction beats an earlier inbox answer. Card `2ff32b5c` (the simple 2→3 lane raise) is what the owner chose instead; this card resumes after it, and its 3-lane contrast pair (§DoD-0b above) is itself evidence for what the eventual adaptive function should target: continuous host-load sampling across a fast run AND a slow run, to turn "runs vary 26%" into an attributable cause, rather than another one-off point-in-time snapshot.
