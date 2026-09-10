@@ -22,6 +22,14 @@ Both writes happen inside the SAME function on each side (`enterMergeDangerWindo
 
 A signal or an owner-initiated stop landing mid-squash now waits a short, bounded grace for the merge to settle before exiting, instead of exiting unconditionally into the ~92s-margin near-miss window; a hard death still leaves an attributable record via the durable latch for the next boot to report.
 
+## Why the boot-time residue scan can't substitute for the latch, and why one file per repo
+
+`scanCanonicalReposForMergeResidue` (git/worktrees.ts) answers a STATE question at every boot — "is the canonical tree dirty right now" — unconditionally, regardless of how the prior process died. The latch answers a different, EVENT question the scan structurally cannot: "did THIS process die inside a merge squash." That distinction earns two things a bare dirty-tree scan can't give a boot-time report on its own: (1) it lets the report NAME the specific repo/branch/op instead of an unattributed dirty tree, indistinguishable from ordinary human WIP; and (2) it lets the report say something at all when the tree came back CLEAN — a mid-window death that happens to leave no residue is invisible to a state probe (`status === ""` ⇒ nothing to print) but is still exactly the event a human deserves to hear about ("we exited inside a merge window; tree looks clean").
+
+The latch itself is one JSON file per canonical repo path, keyed by a hash of `canonicalRepoLockKey`, under LOOM_HOME alongside the other daemon-stop classifiers (`last-shutdown.json`, `crash.log`, `restart-intent.json`) — one file per repo because a daemon can have several repos each independently mid-squash at once (the per-repo mutex only serializes within one repo).
+
 ## Source
 
 Inline comments in `packages/daemon/src/git/merge-danger-window.ts`: the module-level doc comment and `enterMergeDangerWindow`'s own doc comment, as of this worktree's HEAD before this extraction. Wrapped source lines joined into a flowing paragraph, `*` comment markers stripped, no wording changed.
+
+The "Why the boot-time residue scan can't substitute" section above is sourced from `packages/daemon/src/git/merge-danger-latch.ts`'s own module-level doc comment, as of this worktree's HEAD before this extraction (`git/merge-danger-latch.ts, tranche 1`) — same treatment: wrapped lines joined, `*` markers stripped, no wording changed.

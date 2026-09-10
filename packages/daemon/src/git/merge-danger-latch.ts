@@ -5,30 +5,14 @@ import { LOOM_HOME } from "../paths.js";
 import { canonicalRepoLockKey } from "./repo-lock.js";
 
 /**
- * DURABLE counterpart to the in-memory tracker in merge-danger-window.ts (board card 5a7692a4). The
- * in-memory tracker answers a LIVE-PROCESS question ("is a merge in my danger window right now") for
- * `gracefulShutdown`'s own bounded wait; it is wiped by a hard death (SIGKILL, power loss, a crash that
- * never reaches any handler) — exactly the case this module exists for.
+ * @decision 5a7692a4 — DURABLE counterpart to the in-memory tracker in merge-danger-window.ts, for a hard
+ * death that tracker doesn't survive; one hash-keyed file per canonical repo, since several can be
+ * independently mid-squash at once. See the record for why the boot-time residue scan can't substitute.
  *
- * `scanCanonicalReposForMergeResidue` (git/worktrees.ts) already answers a STATE question at every boot —
- * "is the canonical tree dirty right now" — unconditionally, regardless of how the prior process died. It
- * is NOT superseded by this module; this module answers a DIFFERENT, EVENT question it structurally
- * cannot: "did THIS process die inside a merge squash" — which is what lets a boot-time report (1) name
- * the specific repo/branch/op instead of an unattributed dirty tree, indistinguishable from ordinary human
- * WIP (see that scan's own doc: "can't tell a dead squash's leftover stage apart from a human's own WIP"),
- * and (2) say something at all when the tree came back CLEAN — a mid-window death that happened to leave
- * no residue is invisible to a state probe (`status === ""` ⇒ nothing reported) but is still exactly the
- * event a human deserves to hear about ("we exited inside a merge window; tree looks clean").
- *
- * One JSON file per canonical repo path (keyed by a hash of {@link canonicalRepoLockKey}, since a daemon
- * can have several repos each independently mid-squash at once — the per-repo mutex only serializes
- * within one repo), under LOOM_HOME alongside the other daemon-stop classifiers (`last-shutdown.json`,
- * `crash.log`, `restart-intent.json`). Written/removed SYNCHRONOUSLY and NEVER throws — same discipline as
- * shutdown-marker.ts's `writeShutdownMarker`, for the same reason: the write happens on the hot path right
- * before `git merge --squash` (NOT literally the attempt's first mutating git call — see
- * merge-danger-window.ts's own doc on `enterMergeDangerWindow` for why), inside the per-repo mutex, so it
- * must never itself become a reason a merge fails, and it must complete before a signal can kill the
- * process (a synchronous write, not queued behind the event loop, is what makes that true).
+ * Written/removed SYNCHRONOUSLY and NEVER throws (same discipline as shutdown-marker.ts's
+ * `writeShutdownMarker`) — the write lands on the hot path right before `git merge --squash` (NOT
+ * literally the attempt's first mutating git call — see merge-danger-window.ts's own doc), inside the
+ * per-repo mutex, and must complete before a signal can kill the process; it must never itself fail a merge.
  */
 export const MERGE_DANGER_LATCH_DIR = path.join(LOOM_HOME, "merge-danger-latches");
 
@@ -123,31 +107,15 @@ export function readAndClearMergeDangerLatches(): MergeDangerLatchRecord[] {
 }
 
 /**
- * PURE classification — a latch found at boot, cross-referenced against `scanCanonicalReposForMergeResidue`'s
- * own result (`dirty`, already resolved by the caller — see index.ts's boot sequence, which calls this
- * from inside that scan's own `.then()`), AND against the actual set of repo paths that scan was asked to
- * cover (`scannedRepoPaths`, card b272d215) — `dirty` alone can't distinguish "this repo was scanned and
- * came back clean" from "this repo was never in the scanned set at all" (a project's SECONDARY registry
- * repo omitted from the caller's input list, say), and those two cases must never share a message: the
- * first is a genuine all-clear, the second is a repo nobody actually checked. Extracted as its own function
- * (rather than inlined at the one call site) so it is independently testable without needing to drive the
- * whole daemon boot sequence — see test/merge-danger-latch.mjs. Never throws (pure string formatting over
- * already-validated inputs).
+ * @decision b272d215 — PURE classification of a latch found at boot against
+ * `scanCanonicalReposForMergeResidue`'s result (`dirty`) and the actual scanned set (`scannedRepoPaths`):
+ * `dirty` alone can't tell "scanned and clean" from "never scanned at all" — see the record for why those
+ * two must never share a message. Extracted as its own function so it is independently testable without
+ * driving the whole boot sequence — see test/merge-danger-latch.mjs. Never throws (pure string formatting).
  *
- * Both comparisons key through `canonicalRepoLockKey` rather than raw string equality (card b272d215 DoD-4)
- * — the latch and a `dirty`/`scannedRepoPaths` entry can each name the SAME physical directory with a
- * different case or separator spelling (notably on Windows), and a raw `===` would then silently take the
- * "not this repo" branch for what is actually the same repo.
- *
- * Three branches, matching DoD-2/DoD-3/DoD-2.5:
- *  - The scan found THIS repo STAGED-dirty ⇒ attribute it: this is very likely the dead squash the latch
- *    recorded, not unrelated human WIP — a distinction the scan alone cannot make.
- *  - The repo was never in the scanned set at all ⇒ say so explicitly, rather than falling through to the
- *    clean-tree wording below: "absent from input" and "absent because clean" must not collapse into one
- *    message — a human should still check this repo by hand.
- *  - The repo WAS scanned and came back clean (or unstaged-only) ⇒ DoD-2.5's required sentence: a
- *    mid-window death that happened to leave no residue is still worth reporting, and today (latch-free)
- *    that case is completely silent — `status === ""` from the scan gives it nothing to print.
+ * @decision b272d215 — both comparisons key through `canonicalRepoLockKey`, not raw string equality: the
+ * latch and a `dirty`/`scannedRepoPaths` entry can name the SAME directory with a different case or
+ * separator spelling (notably on Windows) — see the record for the three-way message split this feeds.
  */
 export function describeMergeDangerLatchAtBoot(
   latch: MergeDangerLatchRecord,
