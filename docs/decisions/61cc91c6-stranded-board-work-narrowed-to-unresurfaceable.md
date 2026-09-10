@@ -21,6 +21,11 @@ This also removed the old unconditional carve-out that treated a platform/Lead s
 always-stranded: since card 98b3725c gave a Lead the SAME idle-watchdog tick coverage a manager gets, a
 Lead's board backlog is now classified by this identical rule, not a special case.
 
+A neighboring, related gate uses the same "only force a turn for what's genuinely new" logic on a
+different signal: a merely PENDING (unanswered) owner question never forces the full re-orient nudge
+either — only an ANSWERED, not-yet-pulled one does (`hasUnconsumedAnswer`, part 1 of card `5907b71e`),
+since only the answered case is genuinely new information for this session.
+
 ## Do not
 
 - Do not force the full boot-resume re-orient nudge off raw board backlog alone — check the
@@ -34,4 +39,5 @@ Lead's board backlog is now classified by this identical rule, not a special cas
 JSDoc comment in `packages/daemon/src/sessions/service.ts`, above `resumeFleetOnBoot`: lines 4388-4396,
 as of this tranche's HEAD (tranche 11). Cross-referenced (read-only) against `orchestration/restart.ts`
 (lines 257-274) and `orchestration/wake-impact.ts` (lines 7, 120-121), which implement/document the same
-narrowing.
+narrowing. Also anchored at a second, restating site inside the same function's `isNoOpManagerWake`
+branch: lines 4672-4680, as of this tranche's HEAD (tranche 12).

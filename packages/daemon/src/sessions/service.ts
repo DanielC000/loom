@@ -4413,33 +4413,10 @@ export class SessionService {
       };
     };
 
-    // Replay a session's pre-restart pending inbound FIFO (snapshotted into the intent) onto the freshly
-    // resumed pty, IN ORDER and BEFORE its continuation nudge. These predate the restart, so FIFO order
-    // puts them ahead of the boot note. enqueueStdin is ready-gated (host.ts), so they queue until the
-    // resumed TUI boots, then drain cleanly.
-    //
-    // kind: "agent" — the snapshot (getPersistablePendingSnapshot) carries only TEXT, not each entry's original
-    // warning/agent classification (it predates that discriminator), and this replayed set can be a mix
-    // of worker reports / manager direction (agent) and idle/resume nudges (warning) that were pending at
-    // restart. Ambiguous ⇒ bias to "agent" per the classification's own rule — a warning wrongly replayed
-    // one-per-turn is a few extra benign turns, never a coalesced-away agent message.
-    //
-    // Card 9e27f4d2: `intent.pendingHolds[id]` carries, by INDEX into `intent.pending[id]`, the
-    // `giveUpHeldUntil` deadline of any entry that was still within its give-up hold window at capture
-    // time (a SEPARATE, additive field — see RestartIntent's doc for why `pending` itself stays a bare
-    // `string[]` rather than folding this in). Restoring it via enqueueStdin's `giveUpHeldUntil` param
-    // keeps `isGiveUpHeld` honoring the hold until it naturally expires post-boot, instead of the entry
-    // landing as an ordinary, unheld, immediately-drainable message. Logged distinguishably (the DoD's own
-    // "explicit, logged, justified choice" clause) — since no confirming hook can ever reach a dead
-    // process's generation, this entry's eventual delivery is a CERTAIN duplicate once the hold expires,
-    // not a maybe; the log is what makes that duplicate identifiable to an operator instead of mysterious.
-    //
-    // DEFENSIVE per-entry: `intent` is un-versioned on-disk JSON an older/future daemon binary could also
-    // write or partially write (see RestartIntent's doc) — a malformed entry (wrong type, a stray index in
-    // `pendingHolds` with no live counterpart) must never throw here. `resumeFleetOnBoot` has no per-call
-    // try/catch of its own and `clearRestartIntent()` has already run by the time this fires (index.ts), so
-    // an uncaught throw here would abort resuming every LATER session in the fleet with the intent file
-    // already gone — nothing left to retry from. Skip-and-log beats fail-fast for this one caller.
+    // @decision sha:974017b4 — replay a session's pre-restart pending FIFO in order, before its continuation nudge (enqueueStdin is ready-gated, so it queues until boot).
+    // @decision sha:ab65c2ac — the replayed snapshot carries no per-entry warning/agent kind; ambiguous defaults to "agent" (see docs/decisions/ab65c2ac-replayed-pending-entry-defaults-to-agent-kind.md).
+    // @decision 9e27f4d2 — replay side: restore giveUpHeldUntil via enqueueStdin so the hold survives resume; every restored hold is logged, since its eventual delivery is a certain duplicate.
+    // DEFENSIVE per-entry: intent is un-versioned on-disk JSON — a malformed entry must never throw here; skip-and-log beats fail-fast (resumeFleetOnBoot has no per-call try/catch, and the intent file is already gone by the time this runs).
     const replayPending = (id: string): void => {
       const holds = intent.pendingHolds?.[id] ?? {};
       // Card 1c47454b: `mintedAt[i]` is a still-pending paste-recovery notice's `mintedAtWallClock` —
@@ -4474,29 +4451,7 @@ export class SessionService {
     // bystander no-ops cheaply (isNoOpManagerWake) instead of burning a full re-check turn.
     const liveWorkerCount = (managerId: string): number =>
       entries.filter((e) => e.role === "worker" && e.parentSessionId === managerId).length;
-    // Card 6d6b1b7b: THE THING AT RISK, measured here too — the same trap ab8b2cc6 closed on the
-    // crash-recovery path (recoverCrashOrphanedWorkers), reopened one function over by the very fix that
-    // closed it there (a manager who learns from the crash-path notice that "the restart notice tells me
-    // about my worktrees" would otherwise carry that expectation to THIS path, where silence would read
-    // as "checked, nothing to report" when nothing was checked at all). classifyWorktreeIntegrity
-    // (worktree-vanished-watcher.ts) is the SAME fs-only detector reused (not rebuilt) — see its own doc.
-    // UNLIKE the sibling's already-manager-grouped loop, this function's main resume loop below is FLAT
-    // across every role (worker/manager/platform/auditor/setup/plain) for the whole captured fleet, in
-    // `entries`' own (unspecified) order — a manager can appear BEFORE its own worker entries in that
-    // order, so building this accumulator incrementally INSIDE the main loop (classify-as-you-go) would
-    // make a manager's notice text depend on iteration order: whether its worker had already been visited
-    // by the time the manager's own entry was reached. Built as its own eager pre-pass here instead, over
-    // the SAME `entries.filter((e) => e.role === "worker" && e.parentSessionId === managerId)` population
-    // `liveWorkerCount` above already reads — so "N of your live workers were resumed" and "of those, K
-    // ..." always describe the identical set, order-independent. (Deliberately NOT gated on the per-entry
-    // resumeOne() outcome computed later in the main loop below: `impact.liveWorkersResumed` itself is
-    // already a raw resume-set count, not filtered by actual resumeOne success either — see its own
-    // definition — so classifying every worker entry here, unconditionally, keeps the same population
-    // `liveWorkerCount` already promises, rather than introducing a second, narrower one that could
-    // undercount relative to the sentence it's supposed to qualify.) Scoped to `e.role === "worker"`
-    // entries only: only workers have worktrees to check, and this is the natural bound on the added
-    // sync-fs cost (the main loop below already calls resumeOne() — a pty spawn — per session, so 2-3
-    // stat-class calls per worker is marginal against work already in that loop).
+    // @decision 6d6b1b7b — the worktree-at-risk pre-pass runs once, eagerly, over the flat per-entry resume loop's own order-independent population; see docs/decisions/6d6b1b7b-worktree-risk-prepass-is-eager-and-flat.md.
     const worktreeCheckedByManager = new Map<string, number>();
     const worktreeAtRiskByManager = new Map<string, number>();
     for (const e of entries) {
@@ -4665,29 +4620,9 @@ export class SessionService {
         // by the no-op/idle branch below either.
         const capNote = capQueuedNote(e.sessionId);
         if (isNoOpManagerWake(impact)) {
-          // card b5664b5b (Problems A + C1), narrowed further by 61cc91c6: a non-causal bystander this
-          // restart did NOT touch (no workers resumed, no queued I/O, no unconsumed answer, no STRANDED
-          // board work) resumes SILENTLY — NO enqueue. The old "lightweight FYI" was still an enqueueStdin,
-          // and an enqueue to an idle session is submitted as a full TURN, so the FYI burned the very turn
-          // it claimed to save (the Lead took ~10 such wakes in one session). `!strandedBoardWork` no
-          // longer requires an EMPTY board — a 'watching'/'snoozed' manager's ordinary backlog is already
-          // covered by the idle-watcher's own cadence regardless of this restart, so forcing a turn for it
-          // here is pure duplication; only board work NOTHING ELSE will re-surface (a 'suppressed'-via-
-          // escalation manager, or any platform/Lead — see strandedBoardWork) still forces it. A merely
-          // PENDING (unanswered) owner question still never forces a turn either — only an ANSWERED,
-          // not-yet-pulled one does (hasUnconsumedAnswer), since that's genuinely new for this session.
-          // EXCEPT a lost draft or a dropped cap-queue entry: both are actionable regardless of impact, so
-          // either still gets a minimal turn.
-          //
-          // NOTE (card 066d317c): whatever gets enqueued in THIS branch (nothing, or the minimal
-          // draft/cap-note-only text) never names `intent.reason`, so this session never actually saw the
-          // SHA — recordDeployShasDelivered must NOT fire here. It used to fire unconditionally for every
-          // manager/platform wake regardless of branch (the comment here used to claim "an unaffected
-          // bystander still 'saw' it" — false: a silent bystander sees literally nothing, and even the
-          // draft/cap-note text carries no SHA). That let a later completion escalation for the same SHA
-          // suppress its live nudge to a Lead that never actually saw it — the sender read `boarded` and
-          // stood down believing the report was durably filed, with no way to tell that apart from a
-          // genuinely offline Lead. See the `else` branch below for the one place this record IS correct.
+          // @decision b5664b5b — a non-causal bystander (no workers/queued-I/O/unconsumed-answer/stranded board work) resumes SILENTLY; EXCEPT a lost draft or dropped cap-queue entry, both still forced.
+          // @decision 61cc91c6 — !strandedBoardWork no longer needs an empty board: watching/snoozed backlog is already covered by the idle-watcher; only suppressed-via-escalation backlog still forces the nudge.
+          // @decision 066d317c — this branch's enqueue never names intent.reason, so recordDeployShasDelivered must NOT fire here (the `else` branch below is the one place it IS correct).
           if (draftNote || capNote) this.enqueueDurableNudge(e.sessionId, e.role, `[loom:daemon-restarted] ${RESTART_ORIGIN_AGENT} You were resumed.${draftNote}${capNote}`);
         } else {
           // Affected (workers resumed, queued I/O replayed, an unconsumed answer, or stranded board work)

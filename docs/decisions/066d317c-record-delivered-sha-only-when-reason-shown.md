@@ -12,7 +12,9 @@ manager/platform branch — regardless of whether that session's own enqueued wa
 restart reason (and therefore the SHA). A silent bystander resume (see `b5664b5b`) enqueues literally
 nothing, and a minimal/no-op branch may enqueue a note with no SHA in it at all — yet the SHA was still
 recorded as "delivered" to that session. The result: a later, genuine completion escalation naming that
-same SHA was wrongly suppressed against a session that, in truth, was never told.
+same SHA was wrongly suppressed against a session that, in truth, was never told — the sender read
+`boarded` and stood down believing the report was durably filed, with no way to tell that apart from a
+genuinely offline Lead.
 
 Fix: only record the SHA(s) against a session when its actual enqueued text names the restart reason.
 The requester's own nudge always names it (full, unconditional). A manager/platform's nudge names it
@@ -35,3 +37,5 @@ as of this tranche's HEAD (tranche 11). Cross-referenced (read-only) against `se
 4744-4754, 9648-9663, 10575, and `docs/investigations/8126f1a0-weaker-pass-first-firing` (a separate
 investigation whose evidence data happens to cite this same card's fix, commit `bbe1970b`, as a
 specimen — that investigation is keyed on a DIFFERENT id, 8126f1a0, and is not a record for this one).
+Also anchored at a second, restating site inside the same function's `isNoOpManagerWake` branch: lines
+4682-4690, as of this tranche's HEAD (tranche 12).

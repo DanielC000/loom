@@ -38,4 +38,6 @@ what `resumeFleetOnBoot` reads to gate the Problem-B nudge.
 
 JSDoc comment in `packages/daemon/src/sessions/service.ts`, above `resumeFleetOnBoot`: lines 4383-4386
 and 4400-4403, as of this tranche's HEAD (tranche 11). Cross-referenced (read-only) against
-`orchestration/restart.ts` line 55, which documents the same `busy`-at-capture field for Problem B.
+`orchestration/restart.ts` line 55, which documents the same `busy`-at-capture field for Problem B. Also
+anchored at a second, restating site inside the same function's `isNoOpManagerWake` branch: lines
+4668-4680, as of this tranche's HEAD (tranche 12).
