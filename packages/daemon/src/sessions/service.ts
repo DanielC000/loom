@@ -8168,10 +8168,8 @@ export class SessionService {
         if (existingTask && this.columnEscalationStatus(home.id, existingTask.columnKey) !== "resolved") {
           const priorSeverity = (e.detail?.severity as string | undefined) ?? "unspecified";
           if (this.escalationSeverityRank(severity) <= this.escalationSeverityRank(priorSeverity)) {
-            // Mode A fix (card 9315ddf9): this used to return here with the new `detail` silently
-            // dropped — a reader watching the card saw only whatever was there before. Append it as an
-            // attributed, timestamped section so the evidence is never lost, without touching (let alone
-            // clobbering) a Lead's own triage note or any prior report already on the body.
+            // @decision 9315ddf9 — append the new evidence before returning; a still-open dedup match
+            // used to return here with `detail` silently dropped, leaving only what was on the card before.
             this.appendEscalationDetail(existingTask, managerSessionId, originName, severity, input.detail, now);
             return { taskId: existingTask.id, projectId: home.id, deliveryStatus: "boarded", outcome: "appended", deduped: true, appended: true };
           }
@@ -8190,47 +8188,22 @@ export class SessionService {
     let possiblyRelatedTaskIds: string[] | undefined;
     if (reuseTaskId) {
       taskId = reuseTaskId;
-      // Same Mode A gap as the dedup branch above: a severity bump used to reuse the task and file a
-      // fresh (higher-severity) event WITHOUT ever writing the new detail to the body — the Lead got a
-      // high-severity nudge with no payload behind it (the second half of card 9315ddf9). Append here too.
+      // @decision 9315ddf9 — append here too: a severity-bump reuse used to file a higher-severity event
+      // with no new detail ever written to the body, so the Lead got a nudge with no payload behind it.
       //
-      // Card 772d15bd DoD-3: this branch DELIBERATELY never moves `reusedTask` out of the terminal
-      // column, even when `targetWasTerminal` is true (an explicit followUpOn reopening a closed
-      // thread). Auto-reopening a card the Lead deliberately closed is its own surprising behaviour
-      // change — the Lead may have closed it because the underlying issue genuinely resolved, and a
-      // manager's follow-up evidence doesn't know that. Leaving the column alone and making the
-      // reopened-ness visible IN the card body (the distinct heading below) lets the Lead decide
-      // whether to move it, rather than Loom silently deciding for them.
+      // @decision 772d15bd — never auto-move a reopened terminal-column task out of that column; the Lead
+      // may have closed it because the issue genuinely resolved. Reopened-ness is surfaced in the body
+      // instead (the distinct heading below), letting the Lead decide whether to move it.
       const reusedTask = this.db.getTask(taskId);
-      // Code Review Minor B (dffd5534): `outcome` below is derived as `created ? "created" : "appended"`
-      // — unconditional on `created` alone — while `appended` only ever flips true in this branch. A task
-      // deleted between the resolution read above and this re-read would otherwise fall through to a
-      // false "appended" success: no body write, no `appended` flag, a taskId for a deleted card. Make
-      // that case an explicit error instead of a silent success. UNREACHABLE today — this function takes
-      // no `await`, so nothing can delete the task in between — but latent and cheap to close now rather
-      // than leaving two fields that can silently disagree.
+      // @decision sha:dffd5534 — error explicitly if the reused task vanished between resolution and
+      // this re-read, rather than fall through to a false "appended" success with no body write, no flag.
       if (!reusedTask) throw new Error(`escalation target task ${taskId} no longer exists (deleted concurrently)`);
       this.appendEscalationDetail(reusedTask, managerSessionId, originName, severity, input.detail, now, targetWasTerminal);
       appended = true;
     } else {
-      // Mode B fix (card 9315ddf9): no still-open escalation matches this title, so we're about to mint
-      // a brand-new card — the shape that silently forked a finding when a reporter reasonably retitled
-      // a follow-up to describe new evidence. Before minting, look for other still-open escalation(s)
-      // this SAME manager session has filed in this project under a DIFFERENT title — the natural
-      // signature of "same investigation, retitled follow-up." Auto-link ONLY when there is EXACTLY ONE
-      // candidate: two or more is genuinely ambiguous, and a wrong guess (silently relating two distinct
-      // findings) is the fragmentation bug running in reverse — worse than leaving it unlinked-but-
-      // reported. Mirrors the board's own project_task_create dupe guard (cards 0bd5aff5/e13c6087):
-      // never silently merge, never silently drop — surface it and let the reporter/Lead decide.
-      // ⚠️ DELIBERATELY session-scoped, not project-scoped — widening to "same origin project" would
-      // make nearly every open escalation a candidate, so `candidates.length > 1` would be the common
-      // case and this would auto-link almost nothing anyway, just noisily. The unstated cost of that
-      // choice: managers on this project recycle constantly, and a recycled successor gets a NEW
-      // managerSessionId — so a retitled follow-up filed by a SUCCESSOR manager (not the same session
-      // that filed the original) matches ZERO candidates here and mints an unlinked card, the exact
-      // fork this fix exists to prevent, just across a recycle boundary instead of within one session.
-      // That case is left to the reporter (or the Lead, via `escalation_status`) rather than covered
-      // automatically — a project-wide scan would be too broad to auto-link safely.
+      // @decision 9315ddf9 — before minting, auto-link to the ONE other still-open, differently-titled
+      // escalation this SAME manager session filed (a likely retitled follow-up); ≥2 candidates surface
+      // as `possiblyRelatedTaskIds` instead, and the scan is deliberately session- not project-scoped.
       const candidateTaskIds = new Set<string>();
       for (const e of this.db.listEscalationsForProject(caller.projectId)) {
         if (e.managerSessionId !== managerSessionId || !e.taskId) continue;
@@ -8286,12 +8259,8 @@ export class SessionService {
       managerSessionId, taskId, kind: "platform_escalate",
       detail: {
         originProjectId: caller.projectId, severity, platformProjectId: home.id, title: input.title,
-        // Card 772d15bd DoD-1: stamped even though the caller already gets these two fields back in the
-        // return value — that return dies at the calling manager the moment it doesn't act on it (the
-        // whole failure this card exists to close). Recording them HERE too means a forensic read of
-        // this task's escalation history (`listEscalationsForProject`/`listEscalationsForPlatform`) can
-        // always tell "was this event a reopen of a closed thread" without depending on anyone having
-        // paid attention when the call returned. Free to write; costs nothing to omit when false.
+        // @decision 772d15bd — stamp followedUp/targetWasTerminal on the event too, not just the return
+        // value, so a forensic read of escalation history never depends on the caller having acted on it.
         ...(followedUp ? { followedUp: true } : {}),
         ...(followedUp && targetWasTerminal ? { targetWasTerminal: true } : {}),
       },
@@ -8419,19 +8388,12 @@ export class SessionService {
   }
 
   /**
-   * Card 9315ddf9 — appends a timestamped, attributed detail section to an escalation task's body,
-   * NEVER replacing existing content. Used every time `platformEscalate` reuses a still-open task
-   * instead of filing a new one (same-title dedup, or a severity bump) — both paths used to come back
-   * as "success" while the new evidence silently vanished. An append-only section means a Lead's own
-   * triage note (which REPLACES the body when filed) and any prior report already there both survive.
-   *
-   * `terminalReopen` (card 772d15bd, DoD-2) — set ONLY when this append is an explicit `followUpOn`
-   * reopening a target that was sitting in the terminal (resolved) column. Without it, this section is
-   * byte-identical to an ordinary append onto a still-open card — so a human reading the card (or the
-   * Lead, on the no-live-Lead `deliveryStatus:"boarded"` path where nothing else ever tells them) has no
-   * way to tell "routine follow-up" from "someone reopened a thread I'd already closed" from the body
-   * alone. A distinct heading is the cheapest artifact that survives that path: it costs nothing extra
-   * to write and needs no live recipient to be seen.
+   * Appends a timestamped, attributed detail section to an escalation task's body, never replacing
+   * existing content.
+   * @decision 9315ddf9 — called on every path that reuses a still-open task instead of filing a new
+   * one; skipping this call is what used to silently drop the new evidence on a reused task.
+   * @decision 772d15bd — `terminalReopen` marks an explicit followUpOn reopening a terminal-column
+   * task, so it reads differently from a routine follow-up in the body alone.
    */
   private appendEscalationDetail(
     task: Task, managerSessionId: string, originName: string, severity: string, detail: string, now: string,
