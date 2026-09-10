@@ -57,78 +57,34 @@ import { reapStaleLoomTempDirs } from "./temp-reaper.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DIR = path.join(__dirname, "..", "test");
 
-// Card 17069e7e (DoD-2): per-file test durations, on the normal gate path, no flag required. Written
-// LOOM_HOME-relative — NOT into this worktree — because a worker's (or the merge gate's) worktree is
-// force-removed (`git worktree remove --force`, git/worktrees.ts `removeWorktree`) on the ORDINARY
-// successful-merge path (SessionService's `gcWorktreeDir`), so anything written inside it is destroyed the
-// moment the task merges. `process.env.LOOM_HOME || path.join(os.homedir(), ".loom")` duplicates
-// packages/daemon/src/paths.ts's own `LOOM_HOME` constant rather than importing it — this script is plain
-// JS, run standalone before any build, and importing the TS source (or a maybe-stale dist/) here would be
-// its own footgun. This resolves correctly for every zero-argv caller: run_gate/the merge gate (the gate
-// child inherits the daemon's full `process.env` unconditionally — see gate-runner.ts's `runGateStep`, so
-// the daemon's real LOOM_HOME is just there), a human's local `pnpm --filter @loom/daemon test:daemon` (their
-// own real ~/.loom — the same daemon they're running), and CI (ci.yml/release.yml — lands in the runner's
-// own ephemeral home; harmless, just not persisted, which is fine since CI isn't this artifact's consumer).
+// Gate-timing NDJSON schema history (row kinds: "file", "run-summary", "run-start", "host-sample").
+// LOOM_HOME-relative, never the worktree (force-removed on merge); same schema as the committed
+// investigation snapshot docs/investigations/6c1aadf7-daemon-suite-timing/data/per-file-timing.ndjson
+// so the two stay concatenable; every row carries `runUid` as its join key; an unknown row kind is
+// silently ignored by any reader that filters by `kind`, so each addition below is additive-only.
 //
-// Deliberately a DIFFERENT filename from the investigation's own committed snapshot
-// (docs/investigations/6c1aadf7-daemon-suite-timing/data/per-file-timing.ndjson) — that file is a
-// point-in-time, git-tracked artifact; this one is live-accumulating gate telemetry, and the two must never
-// be confused. Same per-row schema (kind:"file"/kind:"run-summary", same field names), so the two stay
-// trivially concatenable for comparison — plus one ADDITIVE field (`runUid` on both row kinds; see the
-// gate-timing emission block in the isMain run below for why `runIndex` alone isn't collision-safe here).
+// @decision 17069e7e — per-file emission must reuse this exact schema, run on the normal gate path
+// with no flag, and never treat the discovered-file count as stable — it moves within hours.
 //
-// Card 05056168: a THIRD row kind, kind:"run-start", is a WRITE-AHEAD record appended BEFORE the first test
-// spawn — carrying `selected` (the full run set by name). Before this card, both existing row kinds were
-// only ever written AFTER the whole suite finished, so a SIGKILLed run left no record at all — not even for
-// files that had already completed. The run-start row is the one line SIGKILL cannot defeat, and every
-// "file" row is now flushed INCREMENTALLY as each file completes (see runLane below), not batched into a
-// post-run loop. A reader pairs a run-start row with the run-summary row sharing its `runUid`: a run-start
-// with no matching run-summary is a run that never terminated normally, and subtracting the "file" rows'
-// names that DID land (same runUid) from `selected` names the file(s) in flight when it died — see the
-// exported `neverCompletedFiles` helper. Existing consumers (e.g.
-// docs/investigations/a591a654-gate-timing-attribution/scripts/compute-sum-wall-slack.mjs) already filter
-// by `kind`, so this additive row kind is silently ignored by anything that doesn't know about it yet.
+// @decision 05056168 — every row kind here must flush INCREMENTALLY, at the moment each file
+// completes, never batched into a post-run loop, with a write-ahead "run-start" row appended before
+// the first spawn — a SIGKILLed run must still leave a nameable in-flight file, not nothing at all.
 //
-// Card a496166a DoD-0 (REMAINING WORK): a FOURTH row kind, kind:"host-sample", is emitted PERIODICALLY
-// throughout the run (not just before/after, like `hostBefore`/`hostAfter` on the run-start/run-summary
-// rows above) — the missing piece that lets a fast run and a slow run be compared distribution-to-
-// distribution instead of by one point-in-time snapshot. Same `runUid` join key; same "unknown kind is
-// silently ignored" additivity. See `onHostSample` in the isMain run below for the emission site and
-// `cpuBusyPctDelta`'s own doc for why its `cpuBusyPct` field is a SAMPLED DELTA, never a cumulative total.
+// @decision a496166a — host-sample rows sample load PERIODICALLY via a delta, never a cumulative-CPU
+// ranking (a Get-Process-style ranking conflates "ran a long time" with "is busy now"); lane count
+// stays capped on the gates x lanes PRODUCT after an unbounded fallback starved a live sibling service.
 //
-// Card afd51f5d: the same "host-sample" row also carries `diskProbeMs` — the disk-I/O signal the CPU-only
-// schema was missing (an investigation reached UNATTRIBUTED on two gate reds that both waited on disk-
-// bound work, with no disk metric available to check). Same additive-field posture as `diskProbeMs` moving
-// forward: an older row simply lacks the key. See `diskProbeWriteMs`'s own doc for what it measures, why
-// this metric (not a subprocess-based OS counter, not raw I/O-operation counts), and its measured cost.
+// @decision afd51f5d — `diskProbeMs` on the host-sample row is a bulk-sequential-write latency probe
+// against a fixed, in-place-overwritten file, never grown; a flat reading does not prove disk isn't
+// the bottleneck for metadata-heavy I/O (git worktree / npm install), a different I/O shape.
 //
-// Card 237aa3a9: a FAILING "file" row now also carries `failureDetail` — before this card, a red recorded
-// only `ok:false`/`status:1` and nothing about WHY, so diagnosing a past gate rejection needed the merge
-// nudge's own bounded `outputTail` (a DIFFERENT surface, truncated exactly when a run has many failures —
-// see card e1183875, the incident this card was filed from) or was simply impossible once that tail was
-// gone. `failureDetail` is computed by `classifyFailureDetail` (below) from the SAME captured stdout/stderr
-// `runOne` already holds, and is attached on the SAME per-file flush `runLane` already performs THE MOMENT
-// EACH FILE COMPLETES (card 05056168) — not a close-time/summary pass, so it inherits that card's own
-// SIGKILL-survival property rather than reopening the hole it closed. A run killed mid-FILE still loses
-// that file's detail (nothing to attach — the file never completed) — that residue is the SAME accepted gap
-// `neverCompletedFiles` already names for the row's other fields, not a new one. ADDITIVE ONLY: `failureDetail`
-// is a NEW key; no existing key on this row is renamed or re-meant (`f8b176f7` DoD-4's concatenability
-// requirement, `1ec2e353`'s frozen-key convention). Present ONLY on a failing row — `JSON.stringify` drops
-// an `undefined`-valued property entirely, so a passing row has NO `failureDetail` key at all, never a
-// present-but-empty one; presence of the key IS the failure signal, unambiguous under a key-shape census
-// (the peer's own volunteered gap — see this card's design-input log).
+// @decision 237aa3a9 — a failing "file" row's `failureDetail` attaches on the SAME per-file flush as
+// the row itself (card 05056168), never a close-time pass, additive-only: presence of the key IS the
+// failure signal, never inferred from a key that merely exists with a false-y value.
 //
-// Card ec2d154b: the "run-summary" row now also carries `hostLoadAggregates` — a per-run SUMMARY of the
-// same `cpuBusyPct`/`diskProbeMs`/`freeMemMB` values the periodic "host-sample" rows above already carry.
-// Why: `gate-timing-retention.mjs` compacts every run older than its most recent `keepFullRuns` down to
-// its "run-summary" row alone, dropping the "host-sample" rows entirely (see that module's own doc) — so
-// before this card, host-load detail was UNRECOVERABLE for all but the most recent runs. Computed by
-// `computeHostLoadAggregates` (below) from the SAME in-memory sample arrays `onHostSample` already
-// accumulates for the human-readable summary lines — no new sampling, no new subprocess, just a second
-// consumer of data already being collected. `null` per field when there were no samples for it (a run too
-// short for a single tick, or every disk probe on this run failed), never a fabricated 0 — same convention
-// `cpuBusyPctDelta`/`diskProbeWriteMs` already use. ADDITIVE ONLY, same posture as `failureDetail` above:
-// a reader written before this card simply lacks the key.
+// @decision ec2d154b — the "run-summary" row's `hostLoadAggregates` is computed from the SAME
+// in-memory sample arrays the human-readable summary lines already accumulate, additive-only, with
+// every field null (never a fabricated 0) when its source array is empty for this run.
 const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
 const GATE_TIMING_NDJSON = path.join(LOOM_HOME, "gate-timing", "daemon-per-file-timing.ndjson");
 // Card afd51f5d: a FIXED, dedicated probe file — separate from GATE_TIMING_NDJSON, overwritten in place
@@ -253,68 +209,11 @@ export function formatHostLoadSummaryLine(busyPctSamples, intervalMs) {
   return `# host CPU busy — SAMPLED DELTA (not cumulative), ${busyPctSamples.length} sample(s) @ ${intervalMs}ms: min ${min.toFixed(1)}% / mean ${mean.toFixed(1)}% / max ${max.toFixed(1)}%`;
 }
 
-// Card afd51f5d: disk-I/O signal for the periodic "host-sample" row — the gap `5988a3fc`'s investigation
-// named: CPU was checked and RULED OUT (a clean contrast case, see project memory
-// `corroborating-a-premise-is-not-corroborating-the-inference`) as the discriminator for two gate reds
-// that both waited on DISK-bound work (a detached child process spawn; real git worktree provisioning),
-// but disk was never checked because nothing recorded it.
-//
-// METRIC CHOICE (DoD-2/3), decided empirically against this Windows host, not assumed:
-// - There is no Linux-`/proc/diskstats`-shaped counter on Windows, and the real system-wide, per-volume
-//   queue-depth/await-time metric (`typeperf`/`Get-Counter \PhysicalDisk(_Total)\...`) is ONLY reachable
-//   via a subprocess — measured directly on this host: a single `typeperf` sample costs ~454ms, a single
-//   `Get-Counter` sample ~1.35s. Riding a subprocess that expensive on the SAME 5s tick this sampler
-//   already uses would itself perturb the very host it's trying to measure (DoD-4) — the identical
-//   reasoning `createRssTracker`'s own doc comment already applies to a `tasklist`/`ps` shell-out for
-//   process-tree RSS ("would itself be the added subprocess DoD-6 forbids").
-// - `process.resourceUsage().fsRead`/`fsWrite` (libuv's Windows mapping of `GetProcessIoCounters`) IS
-//   cheap and genuinely obtainable — verified moving under real file I/O on this host (0/0 idle -> 301/300
-//   after 300 read+300 write ops) — but it counts THIS process's own I/O OPERATIONS, not disk latency: the
-//   count doesn't rise when the SAME operations take longer under contention, so it can't discriminate
-//   (DoD-5) and was rejected.
-// - CHOSEN: the wall-clock LATENCY of a small, fixed-size, forced-to-physical-media write (open + write +
-//   fsync + close) against a dedicated probe file — never the NDJSON itself, never grown, overwritten in
-//   place every tick. A contended physical disk queues this write behind other pending I/O, so its latency
-//   rises with contention. This answers "how long does a small synchronous disk write take on this host
-//   RIGHT NOW" — a directly-measured proxy for queue depth/await-time, not a guess. Verified empirically on
-//   this host (2026-08-06): idle mean ~2.2ms (range 1.6-2.6ms) vs. ~5.8ms mean (peak 31.7ms) while 4
-//   concurrent processes hammered the same disk with 4MB fsync'd writes, relaxing back to ~2.2ms once the
-//   contention stopped — see the card for the full trace.
-//
-// COST BOUND (DoD-4): synchronous, in-process, no added subprocess. Fixed 64KB buffer, one open+write+
-// fsync+close per 5s tick — measured ~2ms idle (<0.1% duty cycle at a 5000ms interval), ~32ms observed peak
-// under real induced contention. `writeFn` is injectable so a test can drive a synthetic slow/fast/throwing
-// writer instead of touching a real disk. Returns null (never throws) on ANY probe failure (unwritable
-// path, disk full) — same posture as every other reader feeding `onHostSample` below; a failed probe must
-// never affect this gate's own pass/fail or exit code.
-//
-// ⚠️ SCOPE LIMIT — READ BEFORE TREATING A FLAT READING AS "DISK WASN'T THE BOTTLENECK":
-// - This is a BULK SEQUENTIAL-WRITE canary (one 64KB open+write+fsync+close). `git worktree` creation —
-//   the actual workload behind card afd51f5d's two motivating specimens — is a DIFFERENT I/O shape:
-//   `createWorktree` (git/worktrees.ts) runs `git worktree add` (a checkout writing many small tracked
-//   files into the new tree) followed by `provisionWorktreeDeps` (a real `pnpm install`/`npm ci`/`npm
-//   install`, populating node_modules — a canonically massive small-file/metadata-heavy write pattern:
-//   many small creates + directory-entry updates, not one large sequential write). Metadata-heavy I/O can
-//   queue and stall independently of bulk-write latency on the same physical disk. **This probe may
-//   therefore be structurally insensitive to the exact contention this card was chasing** — a flat
-//   `diskProbeMs` is evidence this specific bulk-write pattern wasn't queued, NOT evidence disk wasn't
-//   the bottleneck for worktree/npm-install-shaped metadata I/O. Widening the probe to also measure a
-//   metadata-heavy pattern is a deliberate design decision for a SEPARATE card, not folded in here.
-// - MEASURED ON THIS HOST (2026-08-06): under two concurrent `test-daemon.mjs` gates running an 18-file
-//   worktree/merge-test selection (the `maxConcurrentGates=2` condition), host CPU pinned 80-99% in
-//   EVERY condition (including the "quiet" single-gate baseline) while this probe stayed flat (quiet mean
-//   2.73ms vs. contended 2.87-2.99ms — no clean separation). **CPU was pinned high throughout; the CAUSE
-//   is NOT isolated** — the "quiet" baseline was never checked against ambient third-party load on this
-//   shared self-hosting box, so the pinning cannot be cleanly attributed to this test population alone
-//   (a prior, unrelated investigation into this same box, `docs/investigations/e4a2e789-host-load-
-//   sampler`, already found its ambient CPU floor sits elevated — 40-56% — from non-gate fleet load with
-//   NOTHING under study running). Do not read the measurement above as "this workload is CPU-bound, not
-//   disk-bound" — read it only as "CPU was pinned and this probe was flat here; the cause of the pinning
-//   is unresolved." A flat reading elsewhere does not generalize to "disk is never the bottleneck" either
-//   way — check `cpuBusyPct` alongside `diskProbeMs`, and see project memory
-//   `disk-io-signal-windows-canary-write-not-op-counts` for the full trace (including a controlled
-//   experiment proving this SAME probe clearly separates idle vs. induced bulk
-//   disk contention, so the flatness above is a property of that workload/host, not of the instrument).
+// @decision afd51f5d — this disk probe is a bulk-sequential-write latency canary (fixed 64KB, one
+// open+write+fsync+close per 5s tick against an in-place-overwritten file), chosen because both a
+// subprocess-based OS counter and process-level I/O-operation counts were measured unusable here — a
+// flat reading proves only that THIS write pattern wasn't queued, never that disk isn't the bottleneck
+// for metadata-heavy I/O (git worktree add / npm install), a structurally different I/O shape.
 export function diskProbeWriteMs(probeFilePath, buf, writeFn = defaultDiskProbeWrite) {
   const t0 = performance.now();
   try {
@@ -362,25 +261,9 @@ function p95(samples) {
   return sorted[idx];
 }
 
-/** Card ec2d154b: per-run host-load AGGREGATES for the `run-summary` NDJSON row — see this file's own
- *  header comment (search `hostLoadAggregates`) for why this exists (the compactor drops the per-tick
- *  "host-sample" rows for every run older than `keepFullRuns`, so without this the CPU/disk distribution
- *  is unrecoverable for the bulk of run history). Pure and injectable: takes the SAME in-memory sample
- *  arrays `onHostSample` (isMain, below) already accumulates for the human-readable summary lines, so a
- *  test can drive it with synthetic arrays instead of a real gate run.
- *
- *  `cpuBusyPctSamples`/`diskProbeMsSamples` should already exclude null (no-prior-reading / failed-probe)
- *  entries, matching `formatHostLoadSummaryLine`/`formatDiskProbeSummaryLine`'s own convention.
- *  `freeMemMBSamples` is never null-filtered (every tick records a real reading — see `onHostSample`), so
- *  its own length is used as `sampleCount`: the count of host-sample TICKS this run actually took, which
- *  can exceed the CPU/disk sample counts (the sampler's first tick has no prior reading to delta against;
- *  an occasional disk probe can fail) without ever being smaller than either.
- *
- *  Every field is `null` when its own source array is empty — a run too short for a single tick, or (for
- *  disk) one where every probe on this run failed — never a fabricated 0, same posture as
- *  `cpuBusyPctDelta`/`diskProbeWriteMs` themselves. `p95` is nearest-rank (see that helper's own doc), not
- *  interpolated — deliberately simple over a small, host-generated sample count where sub-percentile
- *  precision isn't meaningful. */
+/** @decision ec2d154b — sampleCount comes from `freeMemMBSamples.length` (the only never-null-filtered
+ *  array) since it can exceed but never fall below the CPU/disk sample counts; every other field is
+ *  `null`, never a fabricated 0, when its own source array is empty for this run. */
 export function computeHostLoadAggregates(cpuBusyPctSamples, diskProbeMsSamples, freeMemMBSamples) {
   const mean = (arr) => (arr.length ? arr.reduce((sum, v) => sum + v, 0) / arr.length : null);
   const max = (arr) => (arr.length ? Math.max(...arr) : null);
