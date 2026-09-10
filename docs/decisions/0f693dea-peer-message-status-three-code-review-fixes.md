@@ -21,3 +21,11 @@ THREE fixes landed here after Code Review on this card's first pass, all measure
 ## Source
 
 JSDoc comment in `packages/daemon/src/mcp/orchestration.ts`, above `peerMessageStatusByMsgId`. Relocated by card 210cd10c (tranche 1 on `mcp/orchestration.ts`) — the by-construction ownership guard sentence stayed inline per `CLAUDE.md`'s class-A rule, compressed in place. No wording changed in the narrative moved here; wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+
+## DoD-2/mechanics, consumer side: `handleGiveUpExhausted` gains a third read branch
+
+Card 0f693dea DoD-2: a `peer_message` sender used to fall into the `[loom:redelivery-parked]` notice's unconditional "no read exists" branch — the dead end this card's own new-evidence measured verbatim off that notice. `peer_message_status` closes it: a third branch sits alongside `canCheckRecipient`'s worker case, gated on the sender's own `cross_project_message` audit event carrying this `rootMsgId` as its `msgId` (stamped by `messagePeerManager`) — the same signal `peerMessageStatusByMsgId`'s own resolver keys on, so the notice's pointer and its actual resolution can't drift apart. Computed lazily inside the ternary's else-arm (CR follow-up) — wasted work only when `canCheckRecipient` already short-circuits, and the park path is rare.
+
+## Source (2)
+
+Inline comment in `packages/daemon/src/sessions/service.ts` (`handleGiveUpExhausted`'s notice-building block), as of main `c461821e`. Relocated by card `1341fcde` (tranche 20 on `sessions/service.ts`).

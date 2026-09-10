@@ -7273,77 +7273,23 @@ export class SessionService {
       // asserting the middle case as if it were the last: PARKED ⇒ Loom stopped its OWN automatic retries,
       // NOT proof of non-delivery.
       //
-      // Card 417cea0a — THREE further corrections to this notice, each a "comment/notice is a claim" fix
-      // (read-only Code Reviewer audit `4474ffb7`, refuting this card's own v1 hypothesis first):
-      // (1) THE PRESCRIBED ACTION WAS IMPOSSIBLE FOR MOST SENDERS. The old text unconditionally said
-      //     "check <recipient>'s transcript/state" — but a manager has NO cross-project transcript read
-      //     (a `cross_project_message` audit event exists; nothing reads it — negative grep, 6 hits, all
-      //     non-readers) and, more generally, NO read at all into a session it doesn't manage. The ONE case
-      //     where a real read exists: the sender is a manager and `recipientId` is ITS OWN worker — then
-      //     `worker_list`/`worker_status` genuinely answers this. `canCheckRecipient` below is that exact,
-      //     narrow condition; every other sender (a peer project's manager via `peer_message` foremost
-      //     among them) gets the honest "no read exists" instead of an instruction that dead-ends.
-      // (2) THE "SAFE BY CONSTRUCTION" RESEND CLAIM WAS FALSE IN THE CASE IT ADDRESSED. The old text said a
-      //     same-content resend joins "automatically — no duplicate turn", full stop. Two ways that's
-      //     false: (a) the auto-join match is on the FRAMED text, which embeds the SENDER's own sessionId
-      //     (see `hasAmbiguousMatch`/`enqueueDurableMessage`'s framing) — a sender that has since been
-      //     recycled produces different framed text even for byte-identical content, so it does NOT join.
-      //     (b) the join window is `Live.ambiguousDispatches` — `purgeConfirmedGiveUpRequeue` DELETES that
-      //     entry the instant a confirming hook proves the original actually landed (see that method's own
-      //     doc). So in EXACTLY the case where the resend advice matters least — the original genuinely did
-      //     land late — a resend sent after that confirmation is no longer recognized as a duplicate and
-      //     becomes a second, real turn. The old text asserted the opposite of both.
-      // (3) "PARKED after ${GIVE_UP_REMINT_LIMIT} redelivery attempts" rendered as "PARKED after 1
-      //     redelivery attempts" — read literally, that seeds exactly the "the budget is tiny" inference
-      //     this card's own (refuted) v1 hypothesis made. Replaced with the real, constant-DERIVED effort
-      //     (see `PARK_SUBMIT_CYCLES`'s own doc above this method).
+      // @decision 417cea0a — the notice's prescribed action/claims must fit what THIS sender can actually
+      //  do/verify: no universal cross-project transcript read, no unqualified "safe by construction"
+      //  resend claim (docs/decisions/417cea0a-ongiveupconfirmed-defers-news-vs-noop-to-the-db-holding-implementer.md)
       //
-      // Card 085d9422 (DoD-3, shorten + relocate — NOT delete): the three-state confirmation hedge
-      // (`giveUpConfirmationHedge`, card 4a0af485's finding above) and the resend-auto-join caveats (a)/(b)
-      // (card 417cea0a's finding (2) above) together made up roughly 730 of this notice's ~1,150 measured
-      // characters, IDENTICAL on every single notice ever sent — the model already carries that doctrine
-      // via the `worker_message`/`worker_list`/`worker_status` tool descriptions it has in context on
-      // every turn, so repeating it per-event was pure duplication of text the reader already has. Their
-      // CONTENT is NOT deleted, only relocated: the hedge now lives on `worker_list`'s `parkedDirective`
-      // doc (mcp/orchestration.ts, the "NOT proof it was never received" / "MAY follow up" / "absence is
-      // NOT evidence it failed" language), and caveats (a)/(b) now live on `worker_message`'s own
-      // description (replacing its prior unqualified "so re-sending is safe" claim with the SAME two
-      // conditions this notice used to spell out per-event). What the reader loses here is the INLINE
-      // repetition, not the information: a sender who has never read those tool descriptions gets a
-      // pointer instead of the full prose; one who has (the common case, every turn) loses nothing.
+      // @decision 085d9422 — DoD-3 shortened this notice by relocating (not deleting) ~730 of its ~1,150
+      //  chars to worker_list/worker_message's own docs (docs/decisions/085d9422-suppressmootparknotice-three-staleness-checks.md)
       const recipient = this.db.getSession(recipientId);
       const canCheckRecipient = recipient?.role === "worker" && recipient.parentSessionId === sender;
-      // Card 085d9422 CR follow-up: the `parkedDirective`/`directive.state` pointer belongs ONLY in the
-      // canCheckRecipient branch — those are worker_list/worker_status FIELDS, so naming them is naming
-      // the tools, and the negative branch already says, conditionally (card 0ab96d24), that it knows of
-      // no such read for this sender. An earlier draft put that pointer in the notice's UNCONDITIONAL prefix, one sentence before this
-      // clause's own "no read exists" text — a self-contradiction shipped to exactly the peer-sender case
-      // card 417cea0a fixed (the recipient may not even BE a worker — a peer manager reached via
-      // peer_message — so asserting "this worker's" state in text a peer sender reads was ALSO wrong).
-      // Card 0f693dea DoD-2/mechanics ("update the tool description / any doctrine that teaches the old
-      // workaround"): a `peer_message` sender used to fall straight into the unconditional "no read exists"
-      // branch below — the EXACT dead end card 0f693dea's §NEW-EVIDENCE measured verbatim off this notice.
-      // `peer_message_status` now closes it, so a THIRD branch is needed alongside `canCheckRecipient`'s
-      // worker case, gated on the sender's OWN `cross_project_message` audit event carrying this exact
-      // `rootMsgId` as its `msgId` (stamped by `messagePeerManager`) — the same, tightly-coupled signal
-      // `peer_message_status`'s own resolver (`peerMessageStatusByMsgId`, mcp/orchestration.ts) keys on,
-      // so "this notice offers the pointer" and "the pointer actually resolves" can never drift apart the
-      // way a role-based heuristic (e.g. "recipient is a manager") could — a manager-to-manager delivery
-      // that ISN'T a peer_message (there is none today, but nothing stops one existing later) would never
-      // falsely earn this branch. Computed lazily, INSIDE the ternary's else-arm (CR follow-up, card
-      // 0f693dea) — this `db.listEvents` read is otherwise wasted whenever `canCheckRecipient` already
-      // short-circuits the ternary; the park path is rare, so this was never a hot-path cost, just a
-      // pointless one.
-      // Card 0ab96d24 — this else-arm used to assert, as a flat universal, "there is no cross-session
-      // transcript/state read available to a sender in your position." FALSE for the `platform` role: the
-      // Lead's `session_transcript` (mcp/platform.ts) reads ANY session's transcript by id alone, cross-
-      // project, unconditionally — and in two live incidents that exact read is what resolved the
-      // situation in a single call. A wrong claim about the WORLD invites verification; a wrong claim about
-      // the READER'S OWN CAPABILITIES suppresses it — nobody goes looking for a tool they were just told
-      // doesn't exist. Reworded to a conditional ("if you have one, use it") rather than hard-coding a
-      // `sender`-role check here: that phrasing stays true for the platform Lead TODAY, and for whatever
-      // future role/read this file doesn't yet know about — the old absolute claim already rotted once
-      // without this file changing at all (the Lead's session_transcript predates this fix).
+      // @decision 085d9422 — CR follow-up: the parkedDirective pointer belongs ONLY in the
+      //  canCheckRecipient branch, never the notice's unconditional prefix
+      //  (docs/decisions/085d9422-suppressmootparknotice-three-staleness-checks.md)
+      // @decision 0f693dea — a `peer_message` sender gets a THIRD branch (peer_message_status), gated on
+      //  its own cross_project_message audit event carrying this rootMsgId as msgId, computed lazily so
+      //  the canCheckRecipient fast path pays nothing for it (docs/decisions/0f693dea-peer-message-status-three-code-review-fixes.md)
+      // @decision 0ab96d24 — a wrong claim about the READER'S OWN CAPABILITIES ("no read exists")
+      //  suppresses verification the WORLD's own falseness would invite; reworded conditional, true for
+      //  the platform Lead's session_transcript today and any future role/read (docs/decisions/0ab96d24-wrong-capability-claims-suppress-verification-reword-conditional.md)
       const recipientCheckClause = canCheckRecipient
         ? `Check ${recipientId.slice(0, 8)} via worker_list/worker_status (parkedDirective/directive.state) before assuming it's gone.`
         : this.db.listEvents(sender).some((e) => e.kind === "cross_project_message" && e.detail?.msgId === rootMsgId)

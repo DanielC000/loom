@@ -69,3 +69,19 @@ comment markers stripped.
 
 - `docs/decisions/ccb407eb-carry-givenupexhausted-through-upgrade-requeue.md` — the give-up
   terminal-branch policy (`handleGiveUpExhausted`) this method's PARK site calls into.
+
+## Notice-text relocation (DoD-3), same card, second site
+
+Card 085d9422 also shortened the notice: the 4a0af485 confirmation hedge and the 417cea0a
+resend-auto-join caveats made up ~730 of its ~1,150 chars, identical every time. Relocated, not
+deleted, to `worker_list`'s `parkedDirective` doc and `worker_message`'s own description — a
+reader who has already seen those docs (every turn) loses nothing; one who hasn't gets a pointer
+instead of the inline prose. CR follow-up: the `parkedDirective` pointer belongs ONLY in
+`canCheckRecipient` — an earlier draft put it in the unconditional prefix, contradicting the
+negative branch's "no read exists" text for a peer sender (417cea0a: recipient may not be a
+worker).
+
+## Source (2)
+
+`sessions/service.ts`'s `handleGiveUpExhausted` notice block, main `c461821e`. Relocated by card
+`1341fcde` (tranche 20).
