@@ -71,13 +71,20 @@ two legal outcomes, no third:
 // @decision sha:<8hex commit sha> — <the prohibition or consequence>
 ```
 
-Source the sha off `git blame -L <range>` **at extraction time** — never guessed. The `sha:`
-sigil is *required* for the commit id-space; a bare 8-hex after `@decision`, with no sigil,
-*always* means a board card. `git blame` hands back a full 40-hex — **truncate to 8**; the lint
-flags a pasted 40-hex as `overlongAnchorIds`, but get it right rather than relying on that net to
-catch it. Recommended: put a one-line `Source: commit <sha>, no board card` inside the record
-body, so a human reader sees the namespace without parsing the anchor. The resolver verifies the
-sha with `git rev-parse --verify` and refuses an anchor whose sha doesn't resolve in this repo.
+Source the sha off `git blame -L <range>` **at extraction time** — never guessed.
+
+A resolvable sha isn't necessarily a useful one: if the block cites no id anywhere and `git
+blame`'s introducing commit is itself a bulk move or reformat, it tells you nothing about the
+decision, and outcome (a) — leaving the block inline — is still correct there, not a fallback
+of last resort. See DoD item 9 for reporting a block that lands in this case.
+
+The `sha:` sigil is *required* for the commit id-space; a bare 8-hex after `@decision`, with no
+sigil, *always* means a board card. `git blame` hands back a full 40-hex — **truncate to 8**; the
+lint flags a pasted 40-hex as `overlongAnchorIds`, but get it right rather than relying on that
+net to catch it. Recommended: put a one-line `Source: commit <sha>, no board card` inside the
+record body, so a human reader sees the namespace without parsing the anchor. The resolver
+verifies the sha with `git rev-parse --verify` and refuses an anchor whose sha doesn't resolve in
+this repo.
 
 ## One record file per id — mechanical, not stylistic
 
