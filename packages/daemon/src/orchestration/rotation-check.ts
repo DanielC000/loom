@@ -10,20 +10,12 @@ import type { RotationMarker } from "@loom/shared";
  * config (see config.ts).
  *
  * DELIBERATELY NOT SHARED CODE with `packages/daemon/scripts/rotation-gate.mjs` — that script is FROZEN
- * for this card (card 1069c8e1's own hard bound: "do NOT touch rotation-gate.mjs... migrate, then
- * retire, never the reverse"). This module is a FRESH TypeScript port of its algorithm, driven by
- * per-project config instead of a hardcoded array. Because it is a port of logic already debugged in
- * production, it does not automatically inherit any bug the script already fixed — see the two
- * regression tests in `test/rotation-check.mjs` for the two specific historical bugs this port must be
- * PROVEN not to have reintroduced:
- *   1. The section-boundary NAME-ANCHOR fail-open (card `a681aed5`) — anchoring the LIVE-COMMITMENTS-
- *      style section's END boundary on a heading's NAME silently fell back to end-of-file once that
- *      heading was renamed, sweeping in an unrelated trailing numbered list and INFLATING the count
- *      (fails OPEN — a doc that lost real commitments can still read as passing). `findSectionBoundary`
- *      below is anchored STRUCTURALLY by markdown heading DEPTH instead, exactly like the script's fix.
- *   2. The EQUALITY-VS-FLOOR bug (card `34a6f07e`) — an exact-count check let a doc dodge protection by
- *      keeping new commitments OUT of the counted section (a fixed arity doesn't merely fail to catch
- *      overflow, it CREATES an incentive to produce it). The floor check below is `>=`, never `===`.
+ * for this card: migrate off it, never edit it. This module is a fresh TypeScript port of its algorithm;
+ * because it is a port of logic already debugged in production, it does not automatically inherit any bug
+ * the script already fixed — see the two regression tests in `test/rotation-check.mjs` for the historical
+ * bugs this port must be proven not to have reintroduced: @decision a681aed5 (the section-boundary
+ * NAME-ANCHOR fail-open; `findSectionBoundary` below anchors STRUCTURALLY by heading DEPTH instead) and
+ * @decision 34a6f07e (the EQUALITY-VS-FLOOR bug; the floor check below is `>=`, never `===`).
  *
  * ⚠️ HONEST LIMIT (card 1069c8e1 DoD-4, carried verbatim from the script this succeeds): every marker
  * check here is an EXACT-SUBSTRING grep. It can prove a token's literal text is still present; it CANNOT
@@ -31,16 +23,8 @@ import type { RotationMarker } from "@loom/shared";
  * module means "nothing was blatantly deleted" — a candidate set that nothing obviously vanished — never
  * a verdict that no meaning was lost. This must never ship advertised as proof of preservation.
  *
- * LIVE COMMITMENTS FLOOR NOW UNIONED WITH `rules` TOO (card e312b207, owner-approved option (a): move
- * §LIVE COMMITMENTS into the non-rotating `Orchestrator Rules.md`, and move its count guard with it).
- * Before this card, `countNumberedSection` was called against `input.activeText` alone, while the marker
- * check already unioned against `rules` — so moving the section into the rules file would have made every
- * future rotation's floor check refuse a perfectly correct doc. `countNumberedSectionUnion` closes that
- * gap the same way the marker union already works: active tried first (byte-identical behavior while the
- * section stays in the active doc), rules only when active has no such heading, and a hard, fail-closed
- * refusal (never a vacuous "0 items, nothing to check, ok:true") when the heading is in neither file. See
- * `countNumberedSectionUnion`'s own doc below for the full reasoning — it mirrors `rotation-gate.mjs`'s
- * own extension of the exact same shape.
+ * @decision e312b207 — the LIVE COMMITMENTS floor is now UNIONED with `rules` too, mirroring the marker
+ * union's own precedence; see `countNumberedSectionUnion` below for the mechanism.
  */
 
 export const HONEST_LIMIT_NOTE =
@@ -182,29 +166,18 @@ export interface NumberedSectionUnionCount extends NumberedSectionCount {
 }
 
 /**
- * UNION over `activeText` and `rulesText` (card e312b207, owner-approved option (a): move
- * §LIVE COMMITMENTS into the non-rotating `Orchestrator Rules.md`, and move its count guard with it).
- * Mirrors `checkMarkers`'s own precedence exactly: `activeText` is tried FIRST, so a section still in
- * place there is measured byte-identically to before this card; `rulesText` is consulted ONLY when
- * `activeText` carries no such heading at all. This makes the two landings (this guard shipping the
- * union, the lead moving the section into the rules file) order-independent — the same red-window-free
- * reason the marker union exists (this module's own header + `rotation-gate.mjs`'s header for the full
- * reasoning): neither ordering of "guard ships" vs. "vault moves" ever produces a seat where a section
- * that genuinely still exists somewhere durable reads as missing.
+ * @decision e312b207 — UNION over `activeText` and `rulesText`: `activeText` tried FIRST (measured
+ * byte-identically to before this card while the section stays there), `rulesText` consulted ONLY when
+ * `activeText` carries no such heading at all. FAIL-CLOSED: `count: null, source: null` when the heading
+ * is in NEITHER text — callers must treat a null count as a hard failure, never a vacuous "0 items,
+ * nothing to check, ok:true".
  *
- * FAIL-CLOSED: `count: null, source: null` when the heading is in NEITHER text — the catastrophic "the
- * block was lost outright" case. Callers must treat a null count as a hard failure (never "0 items,
- * nothing to check, ok:true") exactly as the single-file `countNumberedSection` already required — the
- * union only widens WHERE a hit can come from, never what happens when there is no hit at all.
- *
- * AMBIGUITY (code review, card e312b207): `findHeadingLine` matches ANY heading containing the token, so
- * a post-move breadcrumb left in the active doc — e.g. "## §LIVE COMMITMENTS — moved to Orchestrator
- * Rules.md" — still counts as "found in active" and SHADOWS the now-authoritative rules-file section
- * (active wins by precedence; the rules file is never even read for the count). A doc in that shape can
- * green at exit 0 while the real, current block goes unmeasured. This function does not change WHICH
- * count wins (hard-failing "found in both" would reopen a red window during the migration, and is a
- * deliberate non-goal here) — it makes the shape VISIBLE via `ambiguous`/`otherCount`/`otherDiagnostic`
- * so a caller (`checkRotation` below) can surface a loud, non-gating warning instead of a silent green.
+ * AMBIGUITY: a post-move breadcrumb heading left in the active doc SHADOWS the now-authoritative
+ * rules-file section (active wins by precedence; the rules file is never even read for the count in that
+ * case). This function does not change WHICH count wins when that happens — hard-failing "found in both"
+ * would reopen a red window during the migration, and is a deliberate non-goal here — it only makes the
+ * shape VISIBLE via `ambiguous`/`otherCount`/`otherDiagnostic` so a caller (`checkRotation` below) can
+ * surface a loud, non-gating warning instead of a silent green.
  */
 export function countNumberedSectionUnion(activeText: string, rulesText: string | null, headingToken: string): NumberedSectionUnionCount {
   const inActive = countNumberedSection(activeText, headingToken);
@@ -416,17 +389,12 @@ export interface RotationCheckResult {
    *  means no rulesPath was supplied at all (silent, as before this card). `checked:true, ok:false` means
    *  one WAS supplied but could not be read — `resolvedPath` names exactly what was tried and `reason`
    *  explains it, so a wrong-based path (e.g. vault-root-relative instead of project-vault-relative) is
-   *  self-diagnosing instead of a mystery. This field is deliberately NOT itself folded into the overall
-   *  `ok` below (see the comment at that computation) — `rulesCheck.ok:false` never DIRECTLY flips `ok`.
-   *  ⚠️ It can still flip `ok` INDIRECTLY, though (card e312b207 correction — this was previously
-   *  overstated as "unaffected," full stop): if the active doc is missing a marker or the LIVE COMMITMENTS
-   *  heading, an unreadable `rulesPath` removes the union's only other place to look, so that marker/the
-   *  commitments floor then genuinely fails and `ok` follows it down. "Not folded into `ok`" only means a
-   *  failed READ is never itself an `ok`-flipping event when the active doc alone already satisfies
-   *  everything — it is not a promise that `ok` stays green regardless of what's missing from the active
-   *  doc. Always read this field alongside `ok`, the same way `unconfiguredWarning` must be read alongside
-   *  a vacuous `ok:true` — a red `ok` with `rulesCheck.ok:false` means "diagnose the rulesPath first,"
-   *  not "the content is genuinely gone." */
+   *  self-diagnosing instead of a mystery. This field is
+   *  deliberately NOT itself folded into the overall `ok` below (see the comment at that computation) —
+   *  `rulesCheck.ok:false` never DIRECTLY flips `ok`, though it still can INDIRECTLY, through
+   *  `liveCommitments`/`missingMarkers`. @decision e312b207 — always read this field alongside `ok`;
+   *  a red `ok` with `rulesCheck.ok:false` means "diagnose the rulesPath first," not necessarily "the
+   *  content is genuinely gone." */
   rulesCheck: { checked: boolean; ok: boolean; resolvedPath?: string; reason?: string };
   /** Card f6985338: per-`rulesFiles`-entry breakdown, ONE entry per file in `rulesFiles`, same order,
    *  mirroring `rulesCheck`'s own {checked,ok,resolvedPath,reason} shape (`checked` always true here — an
@@ -537,22 +505,13 @@ function deriveRulesUnreadableWarning(
 }
 
 /**
- * Builds the ordered, DEDUPED `RuleFileSource` list for the multi-file union (code review N3, card
- * f6985338) — `rules` first (if present, labeled "rules"), then every readable `rulesFiles` entry labeled
- * by its own `resolvedPath` — but an entry whose `resolvedPath` was ALREADY SEEN (from `rules` itself, or
- * an earlier `rulesFiles` entry) is SKIPPED, never pushed a second time.
- *
- * Without this, the SAME on-disk file counted more than once (`rulesPath` equal to one of `rulesPaths`, a
- * shape this tool's own description explicitly invites via "pass `rulesPaths` instead of/alongside
- * `rulesPath`" — or a duplicate entry within `rulesPaths` itself) reads as TWO DIFFERENT places the
- * heading/marker was found, tripping `ambiguous`/`otherSources`/the top-level `ambiguityWarning` even
- * though there is only ONE real file and nothing to migrate. That warning's own wording tells a reader
- * this is doc-migration residue to resolve — sending them hunting a duplicate heading that does not exist
- * is a false alarm on the module's loudest signal, worse than no signal at all. Dedup by resolvedPath
- * (not by content) is a strict subset of correct behavior: a caller who accidentally names the SAME file
- * twice always meant one file; a caller who genuinely wants two DIFFERENT files with the SAME content is
- * still free to do that (different resolvedPath ⇒ never merged), so this never removes real ambiguity, it
- * only removes duplicate reporting of what was never ambiguous to begin with.
+ * @decision f6985338 — builds the ordered, DEDUPED `RuleFileSource` list for the multi-file union:
+ * `rules` first (if present, labeled "rules"), then every readable `rulesFiles` entry labeled by its own
+ * `resolvedPath` — but an entry whose `resolvedPath` was ALREADY SEEN is SKIPPED, never pushed a second
+ * time. Without this, the same on-disk file passed as both `rulesPath` and in `rulesPaths` reads as TWO
+ * DIFFERENT places the heading/marker was found, tripping a false `ambiguous`/`ambiguityWarning`. Dedup
+ * by `resolvedPath` (not by content): a caller who names the same file twice always meant one file; two
+ * different files that happen to share content are never merged.
  */
 function buildRuleSources(rules: RulesInput | undefined, rulesFiles: readonly RulesFileEntry[]): RuleFileSource[] {
   const sources: RuleFileSource[] = [];
@@ -656,26 +615,12 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
   }
 
   const configured = input.markers.length > 0 || commitmentsEnabled;
-  // DoD-2 decision (card 870edbcf): rulesCheck deliberately does NOT drive `ok` here, unlike archiveCheck.
-  // Rejected: folding it in like archiveCheck — that would flip a green result to false purely because an
-  // OPTIONAL supplementary verification source was unavailable, even when every marker is still genuinely
-  // present in the active doc itself (the union's whole point is that this is a legitimate pass). That
-  // would also be a behavior change for any existing caller that passes rulesPath speculatively. Chosen
-  // instead: report-only, with `rulesCheck` always present and loud whenever a rulesPath was supplied and
-  // failed — the same "loud field" shape this module already uses for `unconfiguredWarning` on a vacuous
-  // `ok:true`. archiveCheck stays different on purpose: it validates a required rotation ARTIFACT (the
-  // archive this rotation is producing), not an optional verification aid.
-  //
-  // ⚠️ CORRECTION (card e312b207 code review): "ok unaffected" above describes `rulesCheck.ok` NOT being a
-  // DIRECT term in the `ok` formula below — it does NOT mean a failed rulesPath read can never change `ok`
-  // at all. It still can, INDIRECTLY, through `liveCommitments.ok`/`missing` themselves: once the union is
-  // the ONLY place a marker or the LIVE COMMITMENTS heading survives (e.g. after it moves out of the
-  // active doc into the rules file), an unreadable rulesPath removes that sole remaining source, and the
-  // corresponding check genuinely fails — dragging `ok` down with it, same as if the content were simply
-  // absent. This is correct behavior, not a bug: "the rules file couldn't be read" and "nothing durable
-  // protects this any more" are the same practical situation from the caller's side. The one thing that
-  // truly never happens is `rulesCheck.ok:false` flipping `ok` while everything it could have supplemented
-  // is ALREADY satisfied by the active doc alone — that is the shape this decision protects.
+  // @decision 870edbcf — rulesCheck deliberately does NOT drive `ok` here, unlike archiveCheck: it is an
+  // optional supplementary verification source (unlike archiveCheck, which validates a required rotation
+  // ARTIFACT), so an unreadable rulesPath must not flip an otherwise-green `ok` to false.
+  // @decision e312b207 — CORRECTION: "not folded into `ok`" does NOT mean `rulesCheck.ok:false` can never
+  // affect `ok` at all. It still can, INDIRECTLY, through `liveCommitments`/`missing`, once the union is
+  // the ONLY place a marker or the LIVE COMMITMENTS heading survives.
   const ok = missing.length === 0 && liveCommitments.ok && archiveCheck.ok && byteCheck.ok;
 
   const result: RotationCheckResult = {
@@ -717,20 +662,17 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
 }
 
 /**
- * Code review (🟡, card 1069c8e1): both `resume_doc_check` tool descriptions assert "there is NO path
- * argument, so you can never check the wrong file" — true for the ACTIVE doc (which this module always
- * resolves itself), overstated as written once `archivePath` is in play: it IS a caller-supplied host
- * path that reaches `fs.statSync`. Contain it under the project's own `vaultPath` — the same place the
- * rotation doctrine already documents an archive living (`<name>.archive/<date>.md`, a sibling of the
- * active doc) — rather than accepting an arbitrary absolute path, so `archivePath` can't be used to
- * probe (exists / is-a-file / is-empty) host paths outside the project's own vault. Mirrors
- * `resolveResumeDocPath`'s own containment check (`sessions/resume-doc-notes.ts`), but REFUSES on an
- * escape instead of silently falling back — there is no "authoritative default" to fall back to for an
- * optional, caller-supplied archive path the way there is for the resume doc's own basename.
- *
- * Card 3c30258f: also the containment used for `rulesPath` (a THIRD caller-supplied host path reaching
- * `fs.readFileSync`) — same vault-scoped treatment, never a third unguarded path. `fieldName` names the
- * offending field in the returned error so a caller can't misattribute which argument was rejected.
+ * Code review (card 1069c8e1): the `resume_doc_check` tool descriptions assert "no path argument, so you
+ * can never check the wrong file" — true for the ACTIVE doc, but overstated once `archivePath` (a
+ * caller-supplied host path reaching `fs.statSync`) is in play. Contain it under the project's own
+ * `vaultPath` — the same place the rotation doctrine already documents an archive living
+ * (`<name>.archive/<date>.md`, a sibling of the active doc) — rather than accepting an arbitrary absolute
+ * path, so it can't probe host paths outside the vault. Mirrors `resolveResumeDocPath`'s own containment
+ * check (`sessions/resume-doc-notes.ts`), but REFUSES on an escape instead of silently falling back —
+ * there is no authoritative default for an optional path the way there is for the resume doc's own
+ * basename. Card 3c30258f: also `rulesPath` (a THIRD caller-supplied host path), same treatment, never a
+ * third unguarded path. `fieldName` names the offending field in the returned error so a caller can't
+ * misattribute which argument was rejected.
  */
 export function containUnderVault(
   vaultPath: string,
