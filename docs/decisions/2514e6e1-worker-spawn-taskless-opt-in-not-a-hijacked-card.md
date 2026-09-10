@@ -69,3 +69,26 @@ ever sharing the author's worktree.
 Inline comment in `packages/daemon/src/sessions/service.ts` (`worker_spawn`'s worktree-key derivation):
 lines 6063-6067, same commit `970f0867d0c479a11a31199e6b9ebcea4404a6fa`. Relocated by card `61632c05`
 (tranche 15).
+
+## An exited taskless worker is asymmetrically skipped by the exited-without-report guard
+
+`notifyManagerOfExitedWorker` (see
+`docs/decisions/84151b99-exited-without-report-guard-catches-a-worker-that-never-idles.md`) requires a
+`taskId` and skips a taskless worker's exit (CR-flagged asymmetry, follow-up to this card). Unlike the
+idle/broken-spawn nudge (`notifyManagerOfIdleWorker`, card `df48366b`), extended to taskless workers,
+this guard tests only whether the task ever left the active lane — meaningless with no card. The
+spawning manager is expected to actively await and `worker_stop` a taskless worker directly
+(`worker_list` shows it no-longer-live), and its commits recover the same way a tasked worker's do
+(`worker_merge_confirm` needs no task) — so there is no silent, unrecoverable loss here.
+
+### Do not (4)
+
+- Do not extend `notifyManagerOfExitedWorker` to cover a taskless worker to mirror `df48366b`'s fix —
+  the two guards test different things (active-lane membership vs. "did a turn ever start"), and a
+  taskless exit is already recoverable via `worker_list` + `worker_merge_confirm`.
+
+## Source (4)
+
+Inline comment in `packages/daemon/src/sessions/service.ts` (`notifyManagerOfExitedWorker`'s body, the
+"TASKLESS intentionally skipped here" comment): lines 9858-9864, same commit
+`970f0867d0c479a11a31199e6b9ebcea4404a6fa`. Extraction tranche 36.

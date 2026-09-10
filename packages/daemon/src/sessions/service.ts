@@ -9801,20 +9801,9 @@ export class SessionService {
   }
 
   /**
-   * Fire-time correctness guard for the idle-worker watchdog (auditor finding 2e3a8e6f — a delivery-vs-
-   * watchdog TIMING race, distinct from the progress-vs-blocked guard on 5d41fc8a). Called on a WORKER's
-   * OWN busy(false→true) edge (index.ts's onBusy hook) — the instant it re-engages, whether because its
-   * manager replied (`worker_message`/`worker_redirect`) or it resumed on its own for any other reason.
-   *
-   * WHY: `notifyManagerOfIdleWorker` (above) classifies and enqueues its nudge the MOMENT a worker goes
-   * idle (or on IdleWatcher's periodic re-check) — correct when computed. But if the manager is busy right
-   * then, the nudge only QUEUES in its pending FIFO and drains on the manager's NEXT turn boundary. A
-   * manager can reply to that very worker LATER IN THE SAME still-in-flight turn and only end its turn
-   * afterward — at which point the STALE queued nudge (computed before the reply) drains as if fresh,
-   * falsely telling an already-responded manager "it IS parked awaiting your reply". Purging on THIS edge
-   * removes any such nudge before it can ever reach the manager. A worker that STAYS idle (no busy edge)
-   * never has its queued nudge touched — this can only remove a nudge whose "still idle" premise has since
-   * become false, so a genuinely-stranded worker with no reply is never silenced.
+   * @decision 2e3a8e6f — purge queued [loom:worker-idle]/[loom:worker-spawn-broken] nudges on a
+   *  worker's OWN busy(false→true) re-engage edge; a nudge computed while the manager was busy can
+   *  otherwise drain STALE after a same-turn reply, falsely claiming "parked awaiting your reply".
    */
   purgeStaleIdleNudgeForReengagedWorker(workerSessionId: string): void {
     const w = this.db.getSession(workerSessionId);
@@ -9825,43 +9814,18 @@ export class SessionService {
   }
 
   /**
-   * Exited-without-report guard (board card 84151b99). A worker's ONLY channel up is worker_report's
-   * push, and the idle nudge above (notifyManagerOfIdleWorker) fires on a busy→false EDGE — but a
-   * fast/first worker can EXIT before that edge ever lands: a pty exit routes through the onExit hook,
-   * NOT the onBusy callback, so notifyManagerOfIdleWorker is never called on exit. The manager — which
-   * has no idle/exit signal for its children — would then see a silent idle (or nothing) and have to
-   * self-rescue via worker_transcript (incident: a session, turns 80-86). Recurrence of the strand
-   * family but a DISTINCT mechanism: no report fires AT ALL (vs. worker_report_undelivered, where a
-   * report fired but reached an exited manager).
-   *
-   * Called from the pty onExit hook (index.ts), AFTER the row is marked `exited`. If an UNEXPECTEDLY-
-   * exited worker (intended===false — NOT a manager-issued worker_stop/recycle/merge stop, which set the
-   * pty's `stopping` flag) left its task STILL in_progress (worker_report would have moved it to
-   * review/waiting), record a DISTINCT, DURABLE `worker_exited_without_report` event AND push a
-   * [loom:worker-exited] nudge to the manager — the worker is GONE and will never report, so the manager
-   * must review its branch or re-dispatch. No-op for non-workers, parentless/taskless sessions, an
-   * intended stop, a recycled/superseded worker (its successor took over — intended), or a worker that
-   * already reported (its task moved out of in_progress).
-   *
-   * CRASH-RECOVERY COORDINATION (card 289586c7): worker ∈ RECOVERABLE_ROLES, so the CrashRecoveryWatcher
-   * may ALSO be about to auto-resume this exact exit — firing the definitive "will NOT come back,
-   * re-dispatch" nudge here would be actively WRONG in that case and races the resume (incident: worker
-   * a1c71a86 got the false nudge immediately before three auto-recovery re-confirmation worker_reports
-   * from that SAME worker). So when the worker is still crash-recovery ELIGIBLE (isCrashRecoveryEligible),
-   * this rewords to a provisional heads-up instead — the definitive "will NOT come back" nudge is left to
-   * the watchdog itself, fired ONLY once it actually gives up (session_recovery_abandoned; see
-   * crash-recovery-watcher's own pty.enqueueStdin at that point).
+   * @decision 84151b99 — a fast/first worker can EXIT before the busy→false edge ever fires (onExit,
+   *  not onBusy); record a durable worker_exited_without_report event + nudge so the manager isn't
+   *  left with a silent idle/gone child it must self-rescue via worker_transcript.
+   * @decision 289586c7 — if the worker is still crash-recovery ELIGIBLE, reword to a provisional
+   *  heads-up instead of the definitive "won't come back" nudge — firing the definitive one here
+   *  races the watchdog's own auto-resume (incident: worker a1c71a86 got a false nudge mid-recovery).
    */
   notifyManagerOfExitedWorker(workerSessionId: string, intended: boolean): void {
     if (intended) return; // a deliberate Loom stop() (worker_stop / recycle / merge-stop) — not a strand
     const w = this.db.getSession(workerSessionId);
-    // TASKLESS intentionally skipped here (CR-flagged asymmetry, card 2514e6e1-follow-up): this whole
-    // guard's "still worth a nudge" test is "the task never left the active lane" — meaningless for a
-    // worker with no card. Unlike the broken-spawn nudge above, an EXITED taskless worker isn't a distinct
-    // hazard worth its own signal: the manager that spawned it is expected to actively await its report
-    // and worker_stop it directly (worker_list already shows it as no-longer-live), and any taskless
-    // commits worth recovering land the same way a tasked worker's do (worker_merge_confirm doesn't
-    // require a task) — so there's no silent, unrecoverable loss this watchdog needs to catch here.
+    // @decision 2514e6e1 — an EXITED taskless worker gets no nudge here (this guard's "still worth a
+    // nudge" test needs an active-lane task); the spawning manager already owns watching it directly.
     if (!w || w.role !== "worker" || !w.parentSessionId || !w.taskId) return;
     if (this.db.hasSuccessor(workerSessionId)) return; // recycled/superseded — its successor owns the task
     const task = this.db.getTask(w.taskId);
@@ -9886,21 +9850,9 @@ export class SessionService {
   }
 
   /**
-   * True while a worker's exit is a genuinely-unreported strand still worth the manager's attention
-   * (card ae0b7891) — the archived counterpart to reportedState's "awaiting review" signal
-   * (mcp/orchestration.ts reportedProjection). reportedState:null is AMBIGUOUS between "never reported"
-   * and "reported, then a LATER event pushed it back to null" (e.g. the noChanges auto-retire path's own
-   * `stop_worker` bookkeeping event in workerReport — see that method's autoRetireNoCommit branch), so
-   * this deliberately does NOT derive from reportedState at all. It reuses
-   * notifyManagerOfExitedWorker's own gate instead: that method already writes a durable
-   * `worker_exited_without_report` event, and ONLY for a genuinely-unreported exit (gated on
-   * `intended:false` — never a Loom-issued pty.stop, which is exactly what auto-retire's own teardown
-   * uses, and on the task still sitting in the active lane — a noChanges report already moves it before
-   * any of this runs). Re-checked LIVE (not just "did the event ever fire") so the signal SELF-CLEARS
-   * once the manager resolves it — moves the task off the active lane, or a successor lands — instead of
-   * nagging forever from a stale historical event. The `archivedAt` check additionally guards against a
-   * flagged worker later being crash-resumed (restoreSession clears archivedAt) — it's live again, not
-   * "archived without report" anymore.
+   * @decision ae0b7891 — reuses notifyManagerOfExitedWorker's durable event instead of reportedState
+   *  (null is ambiguous: never-reported vs reset-by-noChanges-auto-retire); re-checked LIVE so a
+   *  resolved worker's flag self-clears rather than nagging forever from a stale historical event.
    */
   isArchivedWithoutReport(workerSessionId: string): boolean {
     const w = this.db.getSession(workerSessionId);
