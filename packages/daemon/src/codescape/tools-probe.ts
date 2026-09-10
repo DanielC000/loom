@@ -3,20 +3,12 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { toPrefixedCodescapeToolNames } from "../pty/host.js";
 
 /**
- * Card `350bc307`: wire `codescapeUnclassifiedTools` (`pty/host.ts`) to the REAL mounted Codescape MCP
- * server, not just the two in-memory arrays it partitions. This is the live-introspection caller that
- * function's own doc pointed at — `nothing calls this automatically against the REAL mounted server
- * today`.
+ * Wires `codescapeUnclassifiedTools` (`pty/host.ts`) to the REAL mounted Codescape MCP server, not just
+ * the two in-memory arrays it partitions — the live-introspection caller that function's own doc pointed
+ * at (`nothing calls this automatically against the REAL mounted server today`).
  *
- * Uses the SAME `@modelcontextprotocol/sdk` streamable-HTTP CLIENT class (already a daemon dependency —
- * it backs every `mcp/*.ts` SERVER this daemon runs) to speak the real MCP handshake (`initialize` then
- * `tools/list`) against a mounted Codescape entry (the same `/mcp/<codescapeId>` shape
- * `codescapeHttpMcpServer` in `pty/host.ts` builds, and the same shape a real `claude` spawn's own MCP
- * client talks to). This is deliberately NOT a hand-rolled single-shot POST — a prior fixture stand-in
- * (`fake-codescape-cli.mjs`'s `POST /mcp/*` route, used by `codescape-mcp-spawn.mjs`) explicitly
- * disclaims itself as "not a real MCP handshake"; speaking the protocol via the SDK is what makes this
- * probe trustworthy against whatever the peer's real server actually requires (session negotiation
- * included), without reading a line of their source.
+ * @decision 350bc307 — speaks the real MCP handshake via the SDK's streamable-HTTP client; never a
+ * hand-rolled single-shot POST — a fixture stand-in already disclaims itself as not a real handshake.
  */
 export interface AdvertisedToolsProbeResult {
   ok: boolean;

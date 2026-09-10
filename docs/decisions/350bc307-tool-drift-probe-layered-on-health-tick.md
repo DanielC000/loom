@@ -14,13 +14,18 @@ On a successful round-trip, it ALWAYS persists the result via `writeToolDriftSta
 
 This is deliberately NOT a board-card escalation (`platform_escalate`): that surface requires a live MANAGER session as its caller (`sessions/service.ts`, off-limits to card `350bc307` — see its own `caller.role !== "manager"` guard) and has no headless/daemon-internal entry point. Reusing this already-established prompt-injection channel avoids either reimplementing that machinery's dedupe/severity/attention-push wiring by hand from unrelated code, or bypassing it.
 
+## Narrative — speaking the handshake (`tools-probe.ts`)
+
+`probeAdvertisedTools` speaks the real MCP handshake (`initialize` then `tools/list`) via the SAME `@modelcontextprotocol/sdk` streamable-HTTP CLIENT class — already a daemon dependency, backing every `mcp/*.ts` SERVER this daemon runs — against a mounted Codescape entry: the same `/mcp/<codescapeId>` shape `codescapeHttpMcpServer` in `pty/host.ts` builds, and the same shape a real `claude` spawn's own MCP client talks to. This is deliberately NOT a hand-rolled single-shot POST — a prior fixture stand-in (`fake-codescape-cli.mjs`'s `POST /mcp/*` route, used by `codescape-mcp-spawn.mjs`) explicitly disclaims itself as "not a real MCP handshake"; speaking the protocol via the SDK is what makes this probe trustworthy against whatever the peer's real server actually requires (session negotiation included), without reading a line of their source.
+
 ## Do not
 
 - Do not skip persisting the tool-drift state file just because the unclassified set is empty — always persist on a successful round-trip, so `checkedAt` stays fresh.
 - Do not log the drift-finding line on every probe tick — only on a TRANSITION (new/changed finding, or recovery to clean).
 - Do not read the persisted tool-drift state file anywhere except `readCodescapeToolDriftNote` — it is the ONLY reader by design.
 - Do not route this notice through `platform_escalate` — that surface needs a live manager caller and has no headless/daemon-internal entry point; reuse the `[loom:*]` Platform Lead kickoff channel instead.
+- Do not replace the SDK streamable-HTTP client with a hand-rolled POST to speak this handshake — a fixture stand-in already disclaims that shape as "not a real MCP handshake".
 
 ## Source
 
-JSDoc method comment in `packages/daemon/src/codescape/supervisor.ts`, above `checkToolDrift`: originally lines 1500-1523, as of this tranche's HEAD. Relocated by card `725511f2` (tranche 1); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped. The read-side section above was relocated from a top-of-file block comment in `packages/daemon/src/codescape/drift-notice.ts` (originally lines 4-19, as of this tranche's HEAD) by card `e8798881` (tranche 1); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+JSDoc method comment in `packages/daemon/src/codescape/supervisor.ts`, above `checkToolDrift`: originally lines 1500-1523, as of this tranche's HEAD. Relocated by card `725511f2` (tranche 1); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped. The read-side section above was relocated from a top-of-file block comment in `packages/daemon/src/codescape/drift-notice.ts` (originally lines 4-19, as of this tranche's HEAD) by card `e8798881` (tranche 1); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped. The handshake-mechanism section above was relocated from a JSDoc module comment in `packages/daemon/src/codescape/tools-probe.ts` (originally lines 5-20, as of this tranche's HEAD; the module-purpose paragraph in that same block stayed inline as Class C) by card `9490f6a7` (tranche 1); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
