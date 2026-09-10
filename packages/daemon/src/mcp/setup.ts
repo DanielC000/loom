@@ -29,22 +29,11 @@ import { strictShape } from "./arg-alias.js";
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
 /**
- * Least-privilege guard for the UNGATED setup surface: a profile minted/edited here may carry ONLY
- * role manager|worker|setup|null — NEVER an elevated "platform"/"auditor" (or the end-user Auditor's
- * "workspace-auditor"). The shared validateProfile stays deliberately broader (it still allows
- * "platform" for the human REST + Platform Lead surfaces, and already forbids "auditor"/"workspace-auditor");
- * this narrow ALLOWLIST runs on the ALREADY-validated role so the ungated Setup Assistant can never mint
- * an elevated-role rig that a later default spawn could silently elevate. "workspace-auditor" is absent
- * from the allowlist, so the operator surface REJECTS it by construction (End-User Platform tier B1 —
- * it's caller-set only by the future startWorkspaceAuditor).
- * "operator" (card a933613e) and "assistant" are ALSO absent from the allowlist, but NOT for the same
- * "elevated" reason as platform/auditor/workspace-auditor above — neither is elevated (assistant's whole
- * surface is my_context + the companion-gated chat_reply; see roleDisplay.tsx). They're excluded because
- * their SESSION role is always locked by an explicit human/internal caller role at their own start* path
- * (startOperator / the assistant spawn path), never by this profile field alone — the same mechanism
- * PROFILE_SPAWNABLE_ROLES documents (sessions/service.ts) — so minting one here would be inert (or
- * misleading) rather than unsafe. Recorded here so this allowlist's own claim of "elevated roles only"
- * doesn't read as the complete story, the way it silently didn't for a month before this note existed.
+ * Least-privilege guard: SETUP_ALLOWED_PROFILE_ROLES permits ONLY manager|worker|setup|null — never
+ * an elevated platform/auditor/workspace-auditor (validateProfile stays deliberately broader, human/Lead-only).
+ * workspace-auditor is rejected here by construction, caller-set only by the future startWorkspaceAuditor.
+ * @decision a933613e — operator/assistant are ALSO excluded here, but not as elevated roles: their
+ * session role is locked at their own spawn path, never by this profile field alone.
  * Returns an error string when the role is forbidden, else null. Exported so the role-guard unit test can
  * exercise it directly.
  */
@@ -104,6 +93,8 @@ export function setupRoleError(role: string | null | undefined): string | null {
  * Mirrors PlatformMcpRouter / AuditMcpRouter exactly: keyed by the URL-path session id, resolved
  * SERVER-SIDE, role-gated (non-setup → 404, no surface). Stateless: a fresh McpServer+transport per
  * request, so no cached transport can be wedged by a dropped stream.
+ * @decision 3b015fc7 — end_me above must never take a target argument; binding it to the caller's
+ * own session id is the whole least-privilege guarantee.
  */
 export class SetupMcpRouter {
   // `db` drives the structural/profile/read ops directly (mirrors PlatformMcpRouter's direct-Db pattern —
