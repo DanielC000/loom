@@ -13,4 +13,4 @@ All three of the new sites dispatch `kind:"agent"` (a wake note / poll item / ma
 
 ## Source
 
-JSDoc comment in `packages/daemon/src/sessions/service.ts`, above `enqueueDurableNudge`: lines 4380-4394, as of this tranche's HEAD (tranche 10).
+JSDoc comment in `packages/daemon/src/sessions/service.ts`, above `enqueueDurableNudge`: lines 4380-4394, as of this tranche's HEAD (tranche 10). Second citing site (no new content): JSDoc comment above `recoverCrashOrphanedWorkers`, line 4820, as of this tranche's HEAD (tranche 14).

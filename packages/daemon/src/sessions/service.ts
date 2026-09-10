@@ -4809,85 +4809,32 @@ export class SessionService {
   }
 
   /**
-   * Boot-time crash recovery ACTION (card 9fc41af5) — resumes the candidates
-   * `deriveCrashOrphanedWorkers` (orchestration/crash-orphaned-workers.ts) derived from the pre-archive
-   * `recoverStaleSessions()` snapshot. The caller invokes this ONLY when no RestartIntent was captured
-   * this boot — the exit-75 path already recovers its own fleet (incl. these same workers) via
-   * resumeFleetOnBoot, so running both would double-nudge the same sessions.
-   *
-   * **One of the THREE resume-and-nudge paths card 9f7c59f1 CONVERGED — NOT a claim these are the only
-   * such sites** (`orchestration/wake.ts`/`poll.ts`/`event-triggers.ts` do the same shape too, and — since
-   * card 90b9e904 — share this SAME `enqueueDurableNudge` for durability + the MCP-seen gate too, though
-   * their nudge text/report-state/ordering facets don't apply to them at all — see `resumeFleetOnBoot`'s
-   * own doc for the full caveat and why "three" isn't repeated as a completeness claim here). Of the three
-   * THIS doc block is about: STRICTLY mutually exclusive per boot with {@link SessionService.resumeFleetOnBoot} (the
-   * deliberate `daemon_restart` path — see ITS doc for the full per-facet ruling: report-state handling,
-   * worker nudge text, AND durability (both route through `enqueueDurableNudge` — card 06ebbb78 converged
-   * this facet too) are CONVERGED between the two; only ordering (manager-before-its-workers here vs.
-   * requester-resumed-last there) is ruled separately there). The THIRD path, `CrashRecoveryWatcher.tick`, is the continuous
-   * runtime per-session auto-resume that runs on every boot regardless of which of these two fired — see
-   * its own doc for how it mirrors this function's report-state ruling on an isolated worker.
-   *
-   * Resumes each candidate's MANAGER first (`resume()` no-ops if already alive) — a worker whose manager
-   * can't be resumed (dead transcript, gone worktree, superseded) is left UNTOUCHED in its clean
-   * exited/archived state rather than half-resumed into an orphan with no live parent to see it. Once the
-   * manager is live, resuming the worker itself un-archives it via the SAME `db.restoreSession()` side
-   * effect `resume()` already performs — `listWorkers` (what `worker_list` reads) filters only
-   * `archived_at IS NULL`, so that's the whole "re-parent": parentSessionId was never touched.
-   *
-   * A worker that is still genuinely `awaitingReview` (card 959a5fb7 — a done/blocked report the manager
-   * has NOT yet acted on; see {@link CrashOrphanedWorker}) is recovered for VISIBILITY (it reappears in
-   * worker_list so the manager notices it's awaiting review) but does NOT get the generic "continue your
-   * task" nudge — it isn't mid-work. Card
-   * db05e657 (DoD-1) rules the two done/blocked sub-cases differently on top of that shared exclusion: a
-   * `done` report gets NO nudge at all (silence is correct — it's genuinely just awaiting merge review), but
-   * a `blocked` report gets a DISTINCT nudge reminding it to re-state its blocker to its manager — the
-   * generic nudge would tell a worker that structurally CANNOT continue to do exactly that, and staying
-   * silent would leave the worker that most needs its manager indistinguishable from one correctly waiting.
-   * A done report the manager already CONSUMED (a subsequent directive delivered against it) reads as NOT
-   * `awaitingReview` and gets the ordinary continue-nudge below like any other recovered worker — it's
-   * presumably mid-fix on whatever that directive assigned. Every other recovered worker gets the same
-   * "re-check your worktree's state, continue" nudge resumeFleetOnBoot sends. A PARKED (rate-limited)
-   * manager or worker is resumed live (so the rate-limit watcher can recover it in its own time) but its
-   * nudge is WITHHELD — mirrors resumeFleetOnBoot's `isParked`/`skippedParked` handling; a crash must
-   * never push a held turn back into a usage-limit cap. Each affected (non-parked) manager gets ONE
-   * summary nudge naming how many of its candidate workers were recovered (and how many of those are
-   * genuinely awaiting review, and how many couldn't be resumed at all) — sent even when EVERY candidate
-   * worker failed to resume, so the manager (already silently resumed with no other signal) still learns
-   * a crash happened and its workers didn't come back, rather than sitting there with no orientation at
-   * all.
-   *
-   * `opts.shutdownMarker` (card be79aea2): the caller reads+consumes `last-shutdown.json` ONCE per boot,
-   * unconditionally, and passes the result here. When it's a fresh clean-stop record (an OS signal or an
-   * intentional `loom stop`), the preceding stop was NOT a crash — this boot only reached the crash branch
-   * because a signal/service-manager stop raced ahead of a graceful session snapshot, not because anything
-   * actually broke. Every `[loom:crash-recovered]` nudge below is swapped for a `[loom:daemon-restarted]`
-   * clean-stop nudge in that case; `shutdownMarker` null (no marker, or the caller determined this boot
-   * really is unclassified) leaves the original crash phrasing untouched.
-   *
-   * `opts.hadCrashLogAtBoot` (card 2f146782): whether `crash.log` already existed the moment this boot
-   * started, captured by the caller BEFORE `installCrashHandlers()` rotates it away — i.e. whether the
-   * PRECEDING run actually wrote a JS-level fatal record. When `shutdownMarker` is absent (not a clean
-   * stop) and this is `false`, the preceding process was killed from outside mid-execution with no chance
-   * to run any handler (an OS-level kill, a host sleep/reboot, a crashed hosting terminal) — the
-   * `[loom:crash-recovered]` nudge says so instead of claiming a JS "crash" that never happened. Omitted
-   * (defaults to `true`) preserves the original "crashed" phrasing for every caller that doesn't pass it.
-   *
-   * `opts.bootedAt` (card 572dd777 DoD-3): this boot's own start time, appended to the nudge so a
-   * recipient can correlate against `daemon-output.log` without guessing which boot's lines they're
-   * reading. Omitted (defaults to `now`) rather than made mandatory, so an existing test caller that only
-   * ever passed `now` still gets a real (if slightly later-captured) timestamp instead of `undefined`.
-   *
-   * `opts.supervisorIteration` (card 572dd777 DoD-4): which pass of the restart supervisor's loop this
-   * boot ran under — see `supervisorIterationAtBoot`'s own doc (orchestration/restart.ts) for what
-   * iteration 1 vs >1 means. `null`/omitted means not running under the supervisor at all (or the caller
-   * genuinely doesn't know) — the clause is silently skipped rather than fabricating a number. Only ever
-   * surfaced on the crash-shaped branch (`cleanStop` false): a clean stop already fully explains itself,
-   * and the supervisor's own restart policy means iteration>1 should never actually co-occur with a
-   * missing shutdown marker — surfacing it there anyway would invite a reader to draw a conclusion from a
-   * combination that should be structurally impossible, rather than trusting what's actually true (see the
-   * card's own "Defect 2" writeup for why this is recorded as a directly observed fact rather than left as
-   * an inference chain the reader has to trust).
+   * Boot-time crash recovery ACTION — resumes the candidates `deriveCrashOrphanedWorkers`
+   * (orchestration/crash-orphaned-workers.ts) derived from the pre-archive `recoverStaleSessions()`
+   * snapshot. Strictly mutually exclusive per boot with {@link SessionService.resumeFleetOnBoot}; a
+   * third path, `CrashRecoveryWatcher.tick`, is a continuous runtime per-session auto-resume that runs
+   * regardless of which of these two fired.
+   * @decision 9fc41af5 — invoked ONLY when no RestartIntent was captured this boot, to avoid
+   *  double-nudging the fleet resumeFleetOnBoot already recovers
+   *  (docs/decisions/9fc41af5-recovercrashorphanedworkers-invoked-only-without-restartintent.md)
+   *  @decision sha:b65d9a5e — manager-first resume order + which recovered sessions get nudged
+   *  (docs/decisions/b65d9a5e-manager-first-resume-and-done-parked-nudge-suppression.md)
+   *  @decision 9f7c59f1 — one of three enqueueDurableNudge resume-and-nudge paths, NOT the only ones
+   *  (docs/decisions/9f7c59f1-enqueuedurablenudge-not-private-third-resume-path.md)
+   *  @decision 90b9e904 — shares enqueueDurableNudge's opts generalization for durability + the MCP-seen gate
+   *  (docs/decisions/90b9e904-enqueuedurablenudge-opts-param-generalizes-three-sites.md)
+   *  @decision 06ebbb78 — durability convergence facet shared with resumeFleetOnBoot
+   *  (docs/decisions/06ebbb78-resumefleetonboot-routes-through-enqueuedurablenudge.md)
+   *  @decision 959a5fb7 — gates the crash nudge on awaitingReview, not the wider reportedDone
+   *  (docs/decisions/959a5fb7-awaitingreview-not-reporteddone-gates-the-crash-nudge.md)
+   *  @decision db05e657 — a blocked worker gets a distinct re-state-your-blocker nudge, tallied apart from done
+   *  (docs/decisions/db05e657-blocked-worker-gets-a-distinct-restate-blocker-nudge.md)
+   *  @decision be79aea2 — opts.shutdownMarker distinguishes a clean stop from a real crash
+   *  (docs/decisions/be79aea2-shutdownmarker-distinguishes-clean-stop-from-crash.md)
+   *  @decision 2f146782 — opts.hadCrashLogAtBoot distinguishes an external kill from a JS crash
+   *  (docs/decisions/2f146782-hadcrashlogatboot-distinguishes-external-kill-from-js-crash.md)
+   *  @decision 572dd777 — opts.bootedAt + opts.supervisorIteration add correlatable boot diagnostics
+   *  (docs/decisions/572dd777-bootedat-and-supervisoriteration-in-the-crash-nudge.md)
    */
   recoverCrashOrphanedWorkers(
     candidates: CrashOrphanedWorker[],

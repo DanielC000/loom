@@ -16,4 +16,4 @@ Worker nudges pass the worker's own `taskId` (mirroring `recoverCrashOrphanedWor
 
 ## Source
 
-JSDoc comment in `packages/daemon/src/sessions/service.ts`, above `enqueueDurableNudge`: lines 4374-4378, as of this tranche's HEAD (tranche 10). Extended section's source: JSDoc comment above `resumeFleetOnBoot`, lines 4341-4368, as of this tranche's HEAD (tranche 11).
+JSDoc comment in `packages/daemon/src/sessions/service.ts`, above `enqueueDurableNudge`: lines 4374-4378, as of this tranche's HEAD (tranche 10). Extended section's source: JSDoc comment above `resumeFleetOnBoot`, lines 4341-4368, as of this tranche's HEAD (tranche 11). Third citing site (no new content): JSDoc comment above `recoverCrashOrphanedWorkers`, lines 4825-4826, as of this tranche's HEAD (tranche 14).

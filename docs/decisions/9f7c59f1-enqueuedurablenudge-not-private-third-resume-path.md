@@ -22,4 +22,4 @@ All three answer genuinely different questions, so they are NOT expected to conv
 
 ## Source
 
-JSDoc comment in `packages/daemon/src/sessions/service.ts`, above `enqueueDurableNudge`: lines 4371-4379, as of this tranche's HEAD (tranche 10). Second section's source: JSDoc comment above `resumeFleetOnBoot`, lines 4316-4335 and 4369-4375, as of this tranche's HEAD (tranche 11).
+JSDoc comment in `packages/daemon/src/sessions/service.ts`, above `enqueueDurableNudge`: lines 4371-4379, as of this tranche's HEAD (tranche 10). Second section's source: JSDoc comment above `resumeFleetOnBoot`, lines 4316-4335 and 4369-4375, as of this tranche's HEAD (tranche 11). Third citing site (no new content): JSDoc comment above `recoverCrashOrphanedWorkers`, lines 4818-4822, as of this tranche's HEAD (tranche 14).
