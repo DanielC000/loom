@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -3861,7 +3862,7 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_recycle",
       {
-        description: "Recycle a worker whose context has grown too large: closes it and spawns a FRESH worker in the SAME git worktree (code state kept) seeded with your handoff summary (intent kept). Same task + branch; gen+1. Read worker_transcript first and write the summary. `handoffSummary` is the canonical param; `continuationPrompt` (the sibling recycle_me tool's name for the same concept) is accepted as an ALIAS — pass either one (if both are given, handoffSummary wins).",
+        description: "Recycle a worker whose context has grown too large: closes it and spawns a FRESH worker in the SAME git worktree (code state kept) seeded with your handoff summary (intent kept). Same task + branch; gen+1. Read worker_transcript first and write the summary. `handoffSummary` is the canonical param; `continuationPrompt` (the sibling recycle_me tool's name for the same concept) is accepted as an ALIAS — pass either one (if both are given, handoffSummary wins). FAILURE SEMANTICS (card a187fc9b): the predecessor is hard-stopped BEFORE the fresh successor is ever spawned, so a failed recycle does NOT leave the old worker alive — never re-message it or wait for it to respond. On that failure the result names what actually happened: `predecessorStopped:true`, `worktreePath`/`branch` plus `worktreeExists` (a live `fs.existsSync` check on that path, taken at the moment this call fails — not an assumption), `cancelledWakes` (the predecessor's own pending wakes, cancelled so a due one can't resurrect it), and `queuedMessages` (what became of anything still queued for it — human/agent turns are forwarded to you as a separate `[loom:recycle-failed-queue]` notice, counted here as `forwardedToManager`/`contentCut`/`notShown`; moot Loom-operational nudges are counted as `droppedAsMoot`; anything durable is `durableUndelivered`, safe but not delivered). `recovery` names your next move: re-call `worker_recycle` on this SAME workerSessionId (verified — recreates a fresh successor without touching the worktree) is the SAFER retry; `worker_spawn` on the same task also works (same worktree/branch), but `createWorktree`'s reuse path (git/worktrees.ts) re-cuts a branch with 0 commits ahead of main via a destructive `git reset --hard` (`recutStaleReusedBranch`, gated by `mayRecutOntoMain`) — flagged via `discardedOnRecut` when it happens, never silent, but avoidable by preferring the recycle retry, which never calls that path at all. This enrichment is BEST-EFFORT and requires the teardown to have genuinely run DURING this call — an error thrown before the predecessor was ever touched (a bad workerSessionId, a blank handoffSummary), or a stale recycle_failed event left over from an EARLIER failed call on the same predecessor, both fall back to the plain `{error}` shape, since neither means this call itself did any of the above.",
         inputSchema: strictShape({ workerSessionId: z.string(), handoffSummary: z.string().optional(), continuationPrompt: z.string().optional() }),
       },
       async ({ workerSessionId, handoffSummary, continuationPrompt }) => {
@@ -3873,12 +3874,64 @@ export class OrchestrationMcpRouter {
         // z.string() that always accepted ""), this tool's canonical/alias pair predates that convention —
         // restoring it here is a bugfix, not a behavior change worth re-litigating (CR minor 1).
         if (!summary) return ok({ error: "handoffSummary (or continuationPrompt) is required" });
+        // Card a187fc9b, Code Review fix: captured BEFORE calling recycleWorker, so the catch below can
+        // tell "this call's own teardown wrote a NEW recycle_failed event" apart from "a STALE event from
+        // an earlier failed call on this same predecessor is still the latest one" — `recycledFrom`
+        // matching `workerSessionId` alone can't distinguish those two, since a retried recycle on the
+        // SAME predecessor that throws EARLY the second time (before any teardown) would otherwise still
+        // see the first attempt's own event and misreport its counts as this call's own.
+        const priorFailedEventId = db.getLatestEventForManagerByKind(managerSessionId, "recycle_failed")?.id;
         try {
           selfHealWorkerLink(workerSessionId, "worker_recycle");
           const fresh = await sessions.recycleWorker(managerSessionId, workerSessionId, summary);
           return ok({ newWorkerSessionId: fresh.id, gen: fresh.gen, recycledFrom: fresh.recycledFrom });
         } catch (e) {
-          return ok({ error: (e as Error).message });
+          const message = (e as Error).message;
+          // Card a187fc9b: recycleWorker's own catch (sessions/service.ts) already hard-stopped the
+          // predecessor, cancelled its wakes, and forwarded/dropped/counted its queued messages BEFORE
+          // rethrowing — a bare {error} here left a manager unable to tell that apart from "nothing
+          // happened yet, the old worker is still live". Recover the SAME facts recycleWorker's own
+          // `recycle_failed` event already recorded (this manager's most recent one — an indexed point
+          // lookup, not a history scan) instead of re-deriving them here.
+          const failedEvent = db.getLatestEventForManagerByKind(managerSessionId, "recycle_failed");
+          const detail = failedEvent?.detail as
+            | {
+                recycledFrom?: string; cancelledWakes?: number; carriedForwarded?: number; carriedDropped?: number;
+                carriedContentCut?: number; carriedTruncated?: number; carriedDurableUndelivered?: number;
+              }
+            | undefined;
+          // Only trust it when (a) it's a GENUINELY NEW event minted during THIS call — never the same
+          // row `priorFailedEventId` already named, which would mean this call threw before any teardown
+          // ran and the "latest" recycle_failed is really a leftover from an earlier attempt — and (b) it
+          // actually names THIS call's own predecessor, guarding a same-manager race with an unrelated
+          // recycle's own failure event. Both checks are needed: (a) alone would still misattribute a
+          // stale event for the SAME predecessor; (b) alone would still misattribute a stale event when
+          // no other recycle has run in between.
+          if (failedEvent && failedEvent.id !== priorFailedEventId && detail?.recycledFrom === workerSessionId) {
+            const predecessor = db.getSession(workerSessionId);
+            const worktreePath = predecessor?.worktreePath ?? predecessor?.cwd ?? null;
+            return ok({
+              error: message,
+              predecessorStopped: true,
+              worktreePath,
+              branch: predecessor?.branch ?? null,
+              // OBSERVED, not asserted: a real fs.existsSync check at the moment of this failure, since
+              // recycleWorker's failure path never itself removes the worktree — but nothing guarantees
+              // some other actor hasn't (a manual cleanup, a concurrent worker_merge_confirm elsewhere).
+              worktreeExists: worktreePath ? fs.existsSync(worktreePath) : null,
+              cancelledWakes: detail.cancelledWakes ?? 0,
+              queuedMessages: {
+                forwardedToManager: detail.carriedForwarded ?? 0,
+                droppedAsMoot: detail.carriedDropped ?? 0,
+                contentCut: detail.carriedContentCut ?? 0,
+                notShown: detail.carriedTruncated ?? 0,
+                durableUndelivered: detail.carriedDurableUndelivered ?? 0,
+              },
+              recovery:
+                "the predecessor is already stopped, not waiting for you — worker_recycle again on this SAME workerSessionId is the safer retry (recreates a fresh successor without touching the worktree); worker_spawn on the same task also works (same worktree/branch reused), but if that branch has 0 commits ahead of main createWorktree's reuse path re-cuts it with a destructive `git reset --hard` (surfaced via discardedOnRecut if it happens, never silent).",
+            });
+          }
+          return ok({ error: message });
         }
       },
     );
