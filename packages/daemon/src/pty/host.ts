@@ -1150,22 +1150,14 @@ const FIRST_TURN_STALE_MS = Number(process.env.LOOM_FIRST_TURN_STALE_MS) || 30_0
 const RAW_OWNER_SUBMIT_TTL_MS = Number(process.env.LOOM_RAW_OWNER_SUBMIT_TTL_MS) || 30_000;
 
 /**
- * Graceful-stop escalation — makes a graceful stop ALWAYS terminate the session (the deterministic-stop
- * fix). A double Ctrl-C EXITS an IDLE `claude` (the second press exits from an empty prompt), but on a
- * session that's mid-turn the two Ctrl-Cs only INTERRUPT the running turn — the pty stays alive at a (now)
- * idle prompt and, because no Stop hook fires after the interrupt, the busy flag stays stale. So the
- * operator sees a "stopped" session that's actually still live+busy (the board bug). Fix: after the
- * initial interrupt sequence, if the pty is STILL alive, RE-SEND the exit sequence (the turn has since
- * unwound to an idle prompt, where the double Ctrl-C exits); and if it STILL refuses to exit within a hard
- * bound (a wedged TUI / a tool call that swallows Ctrl-C), ESCALATE to a hard `pty.kill()` (node-pty Job
- * Object — orphan-free, kills the tree). An IDLE session exits on the very FIRST sequence, so the escalation
- * timers always find `!alive` and are pure no-ops — its graceful stop is unchanged. All three are
- * env-overridable so the hermetic test drives the whole escalation in milliseconds (default unset =
- * production behaviour: the first two Ctrl-Cs keep their original 600ms gap).
+ * Graceful-stop escalation: an IDLE session exits on the first double-Ctrl-C sequence; a mid-turn session
+ * only has that sequence INTERRUPT the turn, so it re-sends the exit sequence once idle and, if it still
+ * won't exit, escalates to a hard `pty.kill()`. All three timings below are env-overridable for tests.
  *   GAP   — gap between the two Ctrl-Cs of one exit sequence (was the inline 600ms literal)
  *   RETRY — re-send the exit sequence at this point if the session is still live after the interrupt
  *   KILL  — hard bound after which an un-exited pty is killed (RETRY+GAP < KILL, so the re-send gets a
  *           full window to land before the kill)
+ * @decision 316d0ecc — see docs/decisions/316d0ecc-graceful-stop-escalates-to-a-hard-kill-if-still-alive.md
  */
 const GRACEFUL_STOP_GAP_MS = Number(process.env.LOOM_GRACEFUL_GAP_MS) || 600;
 const GRACEFUL_STOP_RETRY_MS = Number(process.env.LOOM_GRACEFUL_RETRY_MS) || 2_000;
