@@ -22,3 +22,9 @@ no deadlock risk between the two.
 - Do not call `git add -A` / `git commit` / `git checkout` / `git checkout -b` against the canonical
   repo from `GitWriter` without holding `withCanonicalIndexLock` — an interleaved squash-merge can
   silently land under the wrong message, or on the wrong branch, with no thrown error.
+
+## Verified: the lock is not re-entrant, and nothing reachable from inside it re-enters
+
+`withCanonicalIndexLock` is NOT re-entrant — a holder that itself (directly or transitively) calls back into it for the SAME canonical repo path deadlocks permanently, and because callers queue via promise chaining, that hang wedges every LATER caller for that repo too, not just the re-entrant one. Verified for this card: no function reachable from inside a held lock — `mergeBranchLocked` and everything it calls (`findLandedSquashCommit`, `changedPathSetDigest`, `boundedMergeGit`, all in `git/worktrees.ts`) — imports or constructs a `GitWriter`; `commit()`/`checkout()`/`createBranch()` on `GitWriter` are the only OTHER acquirers of this lock, and none are reachable from inside a merge.
+
+- Do not let any code reachable from inside a held lock import or construct a `GitWriter` — that is the one change that would reintroduce the re-entrant deadlock. `test/merge-writer-index-lock.mjs` asserts `git/worktrees.ts` never imports `GitWriter`, as a static regression guard: a future change routing a merge-path call through `GitWriter` fails that test instead of silently wedging the daemon.

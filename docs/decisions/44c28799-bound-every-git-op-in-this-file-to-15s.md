@@ -29,6 +29,10 @@ BOUNDED + NON-INTERACTIVE, same pass as `mergeBranchLocked`: this ran an unbound
 
 A hung git op (a locked/busy directory, a wedged commit hook) now fails within ~15s instead of hanging the daemon indefinitely — critical during boot-reconcile, which runs before any worker session exists to notice a stall. A try/catch alone was never sufficient here — a hang doesn't throw — so every caller must go through the bounded wrapper rather than relying on its own error handling.
 
+## No timeout inside `withCanonicalIndexLock` (`repo-lock.ts`, same card)
+
+Deliberate: every caller is required to bound its own git calls (`boundedMergeGit`+`withTimeout` for merges; `GitWriter`'s own `withTimeout`+block-timeout `simpleGit` for writes), so `fn` always settles on its own — a wedged holder fails only its own op. A separate lock-level timeout was considered and rejected: it would let the next caller start while an abandoned `fn` might still run against the shared index, reopening the race this mutex closes.
+
 ## Source
 
-Inline comment in `packages/daemon/src/git/worktrees.ts`, `GIT_OP_TIMEOUT_MS`'s own doc comment (~line 97), as of commit `f8d18a2cbc315a3020b962ac7e85cf2194ca09ba`. Relocated by card `5b001dde`; wrapped source lines joined into a flowing paragraph, `*` comment markers stripped, no wording changed.
+Inline comment in `packages/daemon/src/git/worktrees.ts`, `GIT_OP_TIMEOUT_MS`'s own doc comment (~line 97), as of commit `f8d18a2cbc315a3020b962ac7e85cf2194ca09ba`. Relocated by card `5b001dde`; wrapped source lines joined into a flowing paragraph, `*` comment markers stripped, no wording changed. The `withCanonicalIndexLock` section is from `git/repo-lock.ts`'s own doc comment, as of this worktree's HEAD (card `4301fa9c`).
