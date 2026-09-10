@@ -10,21 +10,9 @@ import { writeMergeDangerLatch, clearMergeDangerLatch } from "./merge-danger-lat
  * 9e77050f/06b5c47f) then refuses the NEXT merge on — the "trigger-3" hazard — and it never auto-clears
  * without a human.
  *
- * Board card 5a7692a4: `gracefulShutdown` (index.ts) used to `process.exit(0)` unconditionally, with zero
- * awareness of an in-flight merge — a signal or an owner-initiated `loom stop` landing here (a real,
- * measured ~92s-margin near-miss) could exit mid-window. This module is what lets `gracefulShutdown` see
- * "is anything in the danger window right now" and delay its own exit by a short, BOUNDED grace before
- * exiting regardless — see {@link waitForMergeDangerWindowsToClear}. It is never a hard refusal of the
- * owner's stop: it only delays `process.exit`, and only up to a fixed ceiling, then exits either way.
- *
- * TWO persistence layers, deliberately different, for two different questions:
- *  - This Map is IN-MEMORY, live-process state, for `gracefulShutdown`'s own bounded wait above — a
- *    question only the still-running process can answer.
- *  - `enter`/`exit` below ALSO durably write/clear a per-repo latch file via merge-danger-latch.ts, for the
- *    boot-time EVENT question a hard death (SIGKILL, power loss, a crash that never runs any handler)
- *    leaves unanswered: "did THIS process die inside a merge squash" — see that module's own doc for why
- *    `scanCanonicalReposForMergeResidue`'s unconditional STATE probe (git/worktrees.ts, "is the tree dirty
- *    right now") answers a related but genuinely different question and cannot substitute for this.
+ * @decision 5a7692a4 — `gracefulShutdown` must not exit unconditionally while a repo is in this window (a
+ * real, measured ~92s-margin near-miss); it delays exit by a short bounded grace instead — never a hard
+ * refusal — and durably persists the same fact via merge-danger-latch.ts for a hard death to survive.
  */
 
 export interface MergeDangerWindowEntry {
@@ -44,16 +32,9 @@ const activeDangerWindows = new Map<string, MergeDangerWindowEntry>();
  * durably persists the SAME fact via {@link writeMergeDangerLatch} (synchronous, atomic, never throws)
  * — one call, two persistence layers, so the two can never drift out of sync with each other.
  *
- * ⚠️ NOT literally the attempt's first mutating git call, despite this module's own name (board card
- * c6a6f405 item 3 — corrects a prior version of this doc that claimed otherwise). When stale
- * in-progress-merge residue survives from an earlier interrupted attempt, `mergeBranchLocked`'s entry
- * check runs its OWN earlier `git reset --merge HEAD` to clear it (card 9e77050f/06b5c47f) — a real
- * mutating call, outside this window and outside the durable latch. Left uncovered deliberately narrow:
- * that clear only ever runs when residue ALREADY exists, and it only ever resets to the CURRENT HEAD (it
- * can't manufacture new staged content), so a death mid-clear reproduces the same pre-existing
- * unattributed-dirty-tree shape at a much smaller blast radius than the squash itself — not a new
- * regression this window needs to widen to cover. See git/worktrees.ts's residue-clear block (searches:
- * "residue clear") for the call site and its own cross-reference back here.
+ * @decision c6a6f405 — NOT literally the attempt's first mutating git call, despite this module's own
+ * name: a residue-clear `git reset --merge HEAD` can run earlier still (card 9e77050f/06b5c47f), outside
+ * this window and the latch — deliberately left uncovered; see this card's own record for why.
  */
 export function enterMergeDangerWindow(repoPath: string, branch: string, opId?: string): void {
   activeDangerWindows.set(canonicalRepoLockKey(repoPath), { repoPath, branch, opId, enteredAt: Date.now() });

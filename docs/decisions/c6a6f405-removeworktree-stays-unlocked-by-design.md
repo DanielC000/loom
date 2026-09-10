@@ -22,6 +22,20 @@ BOUNDED: every git call goes through the same `boundedDiffGit` + `withTimeout` c
 
 `workerDiff` shows a meaningful diff across a worker's entire lifecycle instead of an empty result or a 500, and every one of its git calls fails within a bounded window rather than hanging.
 
+## `enterMergeDangerWindow`'s doc corrected, not the window widened (item 3, unrelated decision, same card id, `git/merge-danger-window.ts`)
+
+`enterMergeDangerWindow`'s own doc used to claim it ran "right before its first mutating git call in this attempt" — false as written (a reviewer NITPICK, item 3 on this card): `mergeBranchLocked`'s residue-clear `git reset --merge HEAD` (card `9e77050f`/[[06b5c47f-resetorskip-skips-rather-than-mixed-resets-on-pre-existing-unstaged-dirt]], see also [[2eddf573-squash-merge-is-idempotent-and-refuses-on-ambiguous-dirty-state]]) can run earlier still, when stale in-progress-merge residue survives from an interrupted attempt — a real mutating call outside this window and outside the durable latch.
+
+The fix chosen was to correct the doc, not widen the window to cover that earlier clear. Left uncovered deliberately: that clear only ever runs when residue ALREADY exists, and it only ever resets to the CURRENT HEAD (it can't manufacture new staged content), so a death mid-clear reproduces the same pre-existing unattributed-dirty-tree shape at a much smaller blast radius than the squash itself — not a new regression this window needs to widen to cover.
+
+### Do not (this section only)
+
+- Do not widen `merge-danger-window.ts`'s tracked interval to also cover the residue-clear `git reset --merge HEAD` — it is a smaller, already-bounded blast radius, not a new regression.
+
+### Source (this section only)
+
+Inline comment in `packages/daemon/src/git/merge-danger-window.ts`, `enterMergeDangerWindow`'s own doc comment, as of this worktree's HEAD before this extraction. Wrapped source lines joined into a flowing paragraph, `*` comment markers stripped, no wording changed.
+
 ## Source
 
 Inline comments in `packages/daemon/src/git/worktrees.ts`: `removeWorktree`'s own doc comment (the "UNLOCKED BY DESIGN" / re-entrancy paragraphs, relocated by card `5b001dde`) and `workerDiff`'s own doc comment, as of this worktree's HEAD before this extraction. Wrapped source lines joined into a flowing paragraph, `*` comment markers stripped, no wording changed. The re-entrancy warning stays inline at the source too, compressed, as a class-A guard.
