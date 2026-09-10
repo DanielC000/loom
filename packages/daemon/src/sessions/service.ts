@@ -10768,21 +10768,21 @@ export class SessionService {
    * Update an agent's structural fields — its name (title) and/or startupPrompt (the injected
    * project-specifics). Capability-conferring fields (the profile) are NOT settable here; profile
    * assignment is the separate, validated assignAgentProfile path.
+   * @decision 3de74275 — Option B: capability-minting (profile CREATE/edit) stays human-only, so this
+   *  agent-facing path can never confer capability; assignAgentProfile only ATTACHES an existing one.
    *
-   * `startupPrompt` REPLACES the whole prompt (the original contract, unchanged). `appendToStartupPrompt`
-   * is the additive alternative (GAP 1): it CONCATENATES onto the agent's EXISTING prompt (joined with a
-   * blank line — or used bare when the existing prompt is empty) so a manager never has to round-trip the
-   * full text for a small addition.
+   * `startupPrompt` REPLACES the whole prompt. `appendToStartupPrompt` CONCATENATES onto the agent's
+   * EXISTING prompt (blank-line joined, or used bare when empty).
+   * @decision 86863348 — appendToStartupPrompt exists so a manager making a small addition never has
+   *  to round-trip (read, retype, rewrite) the full prompt text just to append to it.
    *
-   * `replaceInStartupPrompt` (card 6c411cdf) is the MID-DOCUMENT alternative: edit one clause of a large
-   * existing prompt without retyping the whole body as a tool argument — the exact hazard named in that
-   * card (a 40 KB `startupPrompt` argument with no diff instrument at the call site, so a dropped clause
-   * or mangled line has no natural detector). `{ old, new }` is applied against the agent's CURRENT
-   * server-side prompt (never a value the caller had to hold/paste): `old` must occur EXACTLY ONCE —
-   * zero occurrences or more than one is REJECTED with no write, so an ambiguous or already-stale `old`
-   * can never silently touch the wrong clause (or the wrong COPY of a repeated one). Only ONE of
-   * `startupPrompt` / `appendToStartupPrompt` / `replaceInStartupPrompt` may be passed per call —
-   * mutually exclusive, checked before any write.
+   * `replaceInStartupPrompt` edits one clause of the agent's CURRENT server-side prompt via `{ old,
+   * new }`; `old` must occur EXACTLY ONCE or the call is REJECTED with no write.
+   * @decision 6c411cdf — this mode REMOVES the 40 KB-retype hazard rather than merely detecting it:
+   *  the retype never happens, so there is nothing left to diff-verify after the fact.
+   *
+   * Only ONE of `startupPrompt` / `appendToStartupPrompt` / `replaceInStartupPrompt` may be passed
+   * per call — mutually exclusive, checked before any write.
    */
   updateAgentPreset(
     managerSessionId: string, agentId: string,
@@ -11005,23 +11005,10 @@ export class SessionService {
   }
 
   /**
-   * Self-scoped terminal exit (agent MCP `end_me`, card 3b015fc7) — the no-successor sibling of
-   * recycle_me. NO target arg: every registered surface binds this to the URL-path/caller session id,
-   * so a session can end ONLY itself (least-privilege — the whole safety story). Two gates; either
-   * REFUSES (does not stop, does not throw — a structured result the agent can act on):
-   *   1. INBOUND QUEUE — unconsumed `kind:"agent"` messages still queued (manager direction, a human
-   *      composer turn, companion inbound; see pty/host.ts QueuedMessageKind). Mirrors the intent of the
-   *      worker_report(done) pending-direction guard above (generalized to every agent-kind sender, not
-   *      just manager-origin). Operational `kind:"warning"` nudges (idle/context/usage watchdogs,
-   *      memory-recall) do NOT block — they coalesce, they aren't direction.
-   *   2. LIVE WORKERS — a manager (or platform Lead) caller with ≥1 LIVE worker/child session, so a
-   *      self-end can't strand a live fleet under a dead parent. Non-manager/non-platform roles skip
-   *      this gate. (A platform Lead's spawned sessions are never parented to it — recyclePlatformLead's
-   *      doc above — so listWorkers is naturally empty for a Lead and this gate is a structural no-op
-   *      for that role; the SAME check still runs, it just never trips, matching the architecture.)
-   * On pass: graceful-stops the caller's OWN pty (same path as stopSession(id,"graceful") — Ctrl-C×2,
-   * clean, resumable — the row lands on Archive), DEFERRED so this tool call's own MCP response flushes
-   * before the pty dies (mirrors recycleManager's close-after-delay above).
+   * @decision 3b015fc7 — end_me is a SELF-scoped terminal exit (no target arg, every router binds it
+   *  to the caller's own session id); it REFUSES rather than stops on unconsumed inbound `kind:"agent"`
+   *  direction, or on a manager/platform caller with ≥1 live worker/child (never on `kind:"warning"`
+   *  nudges, which coalesce and aren't direction).
    */
   endMe(sessionId: string): { stopped: boolean; reason?: "queued-inbound" | "live-workers"; pending?: number; count?: number; message?: string } {
     const session = this.db.getSession(sessionId);

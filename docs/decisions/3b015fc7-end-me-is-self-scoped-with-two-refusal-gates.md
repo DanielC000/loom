@@ -49,10 +49,14 @@ to run the session-end skill and then call `end_me` itself — that route only E
 
 ## Source
 
-Canonical implementation: `SessionService.endMe`, `packages/daemon/src/sessions/service.ts`,
-lines 11599-11656 (JSDoc + body), as of this tranche's HEAD. Pointer citations (each ≤3 lines,
-unchanged by this tranche): `packages/daemon/src/gateway/server.ts` (~line 5030, the wrap-up
-route), `packages/daemon/src/mcp/audit.ts` (~line 206), `packages/daemon/src/mcp/orchestration.ts`
-(~line 4753), `packages/daemon/src/mcp/platform.ts` (~line 1751),
-`packages/daemon/src/mcp/setup.ts` (line 80 and ~line 755), `packages/daemon/src/mcp/user-audit.ts`
-(~line 252), `packages/daemon/src/pty/host.ts` (`pendingAgentCount`, ~line 8019).
+Canonical implementation: `SessionService.endMe`, `packages/daemon/src/sessions/service.ts` — the
+JSDoc (originally lines 11007-11025, service.ts tranche 38's own frontier) is now the `@decision
+3b015fc7` anchor site; the body follows through line ~11051. Line numbers drift under every later
+tranche — locate by the anchor or the `endMe`/`end_me_refused` names, not by number. Pointer
+citations (each ≤3 lines, unchanged by this tranche): `packages/daemon/src/gateway/server.ts`
+(~line 5030, the wrap-up route), `packages/daemon/src/mcp/audit.ts` (~line 206),
+`packages/daemon/src/mcp/orchestration.ts` (~line 4753), `packages/daemon/src/mcp/platform.ts`
+(~line 1751), `packages/daemon/src/mcp/setup.ts` (line 80 and ~line 755; this file also already
+carries its own `@decision 3b015fc7` anchor, pre-dating this tranche),
+`packages/daemon/src/mcp/user-audit.ts` (~line 252), `packages/daemon/src/pty/host.ts`
+(`pendingAgentCount`, ~line 8019).
