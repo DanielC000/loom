@@ -14,3 +14,21 @@ SIZED FROM A MEASURED DISTRIBUTION, not guessed (real `claude` engine, card b64b
 ## Source
 
 Inline comment in `packages/daemon/src/pty/host.ts` (`REASSERT_SETTLE_POLL_MS`/`REASSERT_SETTLE_MAX_POLLS`'s top-of-const doc). Relocated by card a4818d7a (tranche 1 on `pty/host.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+
+## Half 2 — the orphaned composer clear, at `healIfStuck`'s stale-busy branch
+
+The residual accepted above (a slow-arriving reassert response landing after the settle bound) is exactly what `healIfStuck` backstops: when a session is caught busy-with-no-output past `staleMs`, and `!live.enterConfirmed && live.composerLen === 0 && live.lastPrompt`, that shape is exactly a give-up that was wrongly suppressed (or any other path leaving an unconfirmed submit stranded) — the composer holds a paste that was written but never confirmed. The OLD version of `healIfStuck` cleared `busy` but never un-typed the composer, so the stranded injection survived and the NEXT `drainPending` submit pasted on top of it — reintroducing the exact concatenation card `ee082fbb` fixed. `sendEnterAndVerify` can independently suppress its own give-up recovery (card `71de1f9c`) when it reads output after the final Enter write — but that read can be fooled: either by our own paste-reassert write provoking a deterministic engine response, or by a viewer's `repaint()` doing the same; either vector can leave a submit stranded this way. When it does, `live.enterConfirmed` stays false FOREVER: nothing else can ever flip it, because nothing can call `submit()` again — the sole writer of `lastPrompt`/`enterConfirmed=false` — while `live.busy` stays stuck true, and `enqueueStdin` only submits immediately when `!live.busy`. That permanence is exactly why `healIfStuck`'s backstop has to exist at all.
+
+This half reuses the SAME mechanism `sendEnterAndVerify`'s own give-up path already uses — do not invent a second clear path: an exact-count Backspace burst sized off `live.lastPrompt.length`, gated on `composerLen === 0` (card `e1829591` — never touch a real human draft), with `setBusy(false)` threaded through the burst's own completion (`writeChunked`'s `done` callback) so a concurrent `enqueueStdin` can't interleave a new turn's paste into the still-draining backspaces. This is deliberately UNCONDITIONAL on *why* `enterConfirmed` is false — robust to vectors nobody has enumerated yet, not just the two vectors above.
+
+A turn that's LEGITIMATELY still confirmed-and-running never reaches this branch at all: `UserPromptSubmit` sets `enterConfirmed = true` AND re-arms `busySince` (rising edge) the moment the turn actually starts, so a merely-slow-to-confirm turn's staleness clock restarts before `staleMs` can elapse — belt-and-suspenders with the `enterConfirmed` check itself.
+
+This half only CLEARS the stranded injection from the composer — it does not by itself restore the abandoned text anywhere. See card `2c3c4aff`'s own record for the gap that left and its fix.
+
+## Do not (2)
+
+- Do not invent a second composer-clear path for this branch — reuse the same backspace-burst mechanism `sendEnterAndVerify`'s give-up path already uses.
+
+## Source (3)
+
+Inline JSDoc in `packages/daemon/src/pty/host.ts` (`healIfStuck`'s doc comment, the Card b64b3726 Half 2 paragraphs). Extracted tranche 28.

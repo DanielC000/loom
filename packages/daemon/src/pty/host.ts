@@ -7696,40 +7696,12 @@ export class PtyHost {
 
   /**
    * Clear a phantom 'busy' (busy with no engine output for a stale window) so its queue can drain.
-   * A session that has NEVER started its first turn (`!firstTurnStarted`) uses the much SHORTER
-   * FIRST_TURN_STALE_MS instead of `busyStaleMs` — there's no such thing as a legitimately long tool
-   * call before turn 1 has even started, so stale output there already means broken (the kickoff
-   * delivery in scheduleKickoffGuarantee didn't recover it, or an engine that never got past boot),
-   * and it should surface via the onBusy→notifyManagerOfIdleWorker path fast rather than sit masked as
-   * "busy" for the full 5-minute window. Once a real turn starts, the normal, more generous window applies.
-   *
-   * Card b64b3726: also closes the ORPHANED COMPOSER half of a false give-up suppression. sendEnterAndVerify
-   * can suppress its own give-up recovery (card 71de1f9c) when it reads output after the final Enter write —
-   * but that read can be fooled (our own paste-reassert write provokes a deterministic engine response, or a
-   * viewer's repaint() does), and when it is, `live.enterConfirmed` stays false FOREVER: nothing else can ever
-   * flip it, because nothing can call submit() again (the sole writer of `lastPrompt`/`enterConfirmed=false`)
-   * while `live.busy` stays stuck true — enqueueStdin only submits immediately when `!live.busy`. So a session
-   * that reaches THIS stale-busy branch still carrying `enterConfirmed: false` is exactly a give-up that was
-   * wrongly suppressed (or any other path that leaves an unconfirmed submit stranded) — the OLD version of
-   * this method cleared `busy` but never un-typed the composer, so the stranded injection survived and the
-   * NEXT drainPending submit pasted on top of it (reintroducing the exact concatenation card ee082fbb fixed).
-   * Reuse that SAME mechanism here — do not invent a second clear path: an exact-count Backspace burst
-   * (`live.lastPrompt.length`), gated on `composerLen === 0` (card e1829591 — never touch a real human draft),
-   * with `setBusy(false)` threaded through the burst's own completion (writeChunked's `done` callback) so a
-   * concurrent enqueueStdin can't interleave a new turn's paste into the still-draining backspaces. This is
-   * deliberately UNCONDITIONAL on *why* enterConfirmed is false — robust to vectors nobody has enumerated yet,
-   * not just the two this card investigated.
-   *
-   * A turn that's LEGITIMATELY still confirmed-and-running never reaches this branch at all: UserPromptSubmit
-   * sets `enterConfirmed = true` AND re-arms `busySince` (rising edge) the moment the turn actually starts, so
-   * a merely-slow-to-confirm turn's staleness clock restarts before `staleMs` can elapse — belt-and-suspenders
-   * with the `enterConfirmed` check itself.
-   *
-   * Card 2c3c4aff: b64b3726 completed the CLEAR but not the RESTORE — the backspace burst un-typed the
-   * stranded injection from the composer, but the text itself (still held in `live.giveUpOrigin`, set by
-   * the original submit() and never consumed because this out-of-band path never reached
-   * `requeueGiveUpOrigin`) was silently discarded, with no signal. This path now restores it onto
-   * `live.pending` the SAME way card 441499ee's normal give-up recovery does — see `requeueGiveUpOrigin`.
+   * @decision sha:309d3ded — a session's FIRST turn uses the much shorter FIRST_TURN_STALE_MS, not
+   * busyStaleMs, so a broken pre-first-turn kickoff surfaces fast instead of masked as ordinary "busy".
+   * @decision b64b3726 — Half 2: clear a stale-busy stranded injection off the composer via the SAME
+   * backspace-burst mechanism sendEnterAndVerify's give-up path uses; never invent a second clear path.
+   * @decision 2c3c4aff — that clear must also RESTORE the abandoned text via requeueGiveUpOrigin, not
+   * just silently discard it.
    */
   private healIfStuck(live: Live, sessionId: string): void {
     const now = Date.now();
