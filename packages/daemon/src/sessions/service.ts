@@ -12342,22 +12342,23 @@ export class SessionService {
 
       // EMIT-COMPARE REDUCED GATE (card 2154b6ad): considered only when the diff wasn't ALREADY proven
       // fully inert above — a docs-only diff already skips everything, so there's nothing left to reduce.
-      // Unlike `inertSkip`, this does NOT touch `gateRan`/`gateBaseMainHead`/`gateBaseBranchHead` at all —
-      // a real gate still spawns below (`gateSemaphore.runExclusive` still runs, still takes the per-repo
+      // A real gate still spawns below (`gateSemaphore.runExclusive` still runs, still takes the per-repo
       // admission guard on a pass), just with `buildReducedGateCommand`'s smaller command substituted for
       // the project's real `gateCommand`. See `computeEmitCompareGate`'s own doc for the full safety case.
+      //
+      // @decision 2154b6ad — unlike `inertSkip`, this substitution never touches `gateRan`,
+      //  `gateBaseMainHead`, or `gateBaseBranchHead` — a real gate still runs, only its command changes.
       if (!inertSkip && !reuseResult && gateBaseMainHead) {
         // PRE-CLASSIFICATION BRANCH-TIP CAPTURE (card 7183540f — the emit-compare two-path sibling of
         // db413510, which closed the identical shape for the inert-skip path; read that card's own
-        // in-code doc before touching this). Captured HERE, strictly BEFORE `computeEmitCompareGate` runs,
-        // NOT after: that function resolves `ref` (branch) BY NAME internally (a `git diff --name-status
-        // base..branch` call), so a capture placed after it would leave a commit landing between
-        // classification and the capture invisible to classification yet folded into "the tip
-        // classification already saw" — db413510's own ordering-trap mistake, one call site over.
-        // `emitComparePreWaitMainHead` is a plain assignment, not a git read: `gateBaseMainHead` is
-        // already resolved above, so this just snapshots what THIS classification actually ran against —
-        // a later admission-time reunion that advances `gateBaseMainHead` (main moved during the wait) is
-        // then detectable by simple inequality, no second HEAD read needed.
+        // in-code doc before touching this). `emitComparePreWaitBranchHead` is captured fresh via
+        // `resolveGitRef`; `emitComparePreWaitMainHead` is a plain assignment (not a second git read) —
+        // `gateBaseMainHead` is already resolved above, so this just snapshots what THIS classification
+        // actually ran against, detectable later by simple inequality against an admission-time re-read.
+        //
+        // @decision 7183540f — capture strictly BEFORE `computeEmitCompareGate` runs, never after: that
+        //  call resolves `branch` BY NAME, so a late capture misses a commit landing between
+        //  classification and capture — db413510's ordering-trap mistake, recurring at this call site.
         emitComparePreWaitBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
         emitComparePreWaitMainHead = gateBaseMainHead;
         const emitCompare = await computeEmitCompareGate(worktreePath, gateBaseMainHead, branch, { timeoutMs: this.gitOpMs });
