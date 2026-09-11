@@ -59,7 +59,7 @@ import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG } from "..
 import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
-import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN } from "../orchestration/resume-nudge.js";
+import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTART_ORIGIN_AGENT, RESTART_ORIGIN_UNKNOWN, normalizeResumeOneResult, type ResumeOneResult } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, remainingGateSteps, mergeResumedGateResult, formatWeakerPassWarning, formatRetryAlsoFailedWarning, formatRetryRescuedButGateRejectedWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
@@ -4463,12 +4463,14 @@ export class SessionService {
     // @decision 08c81809 — Code Review round 5 minor (doc drift): `excludeRetiredIds` is NOT the
     // structural fix as of round 4 — `this.retiredRecycleSuccessorIds` (an instance field) is consulted
     // UNCONDITIONALLY below; this option is an ADDITIONAL override only, and index.ts no longer passes it.
-    opts: { resumeOne?: (id: string) => boolean; now?: Date; deployStaleness?: DeployStalenessResult; excludeRetiredIds?: Set<string> } = {},
+    opts: { resumeOne?: (id: string) => ResumeOneResult; now?: Date; deployStaleness?: DeployStalenessResult; excludeRetiredIds?: Set<string> } = {},
   ): { resumed: string[]; skippedParked: string[]; failed: string[]; retiredSkipped: string[] } {
     const now = opts.now ?? new Date();
     const deployStaleness = opts.deployStaleness ?? currentDeployStaleness();
-    const resumeOne = opts.resumeOne ?? ((id: string): boolean => {
-      try { this.resume(id); return true; } catch { return false; }
+    // Card ee05750e: the reason a resume attempt failed now survives past the bare boolean this used to
+    // return — see normalizeResumeOneResult's own doc for why the shape is a union, not a breaking change.
+    const resumeOne = opts.resumeOne ?? ((id: string): ResumeOneResult => {
+      try { this.resume(id); return { ok: true }; } catch (e) { return { ok: false, reason: (e as Error).message }; }
     });
     const retiredSkipped: string[] = [];
     // @decision 08c81809 — CRITICAL (round 3): a retired recycle successor must never be re-resumed
@@ -4494,9 +4496,13 @@ export class SessionService {
       projectId: string | null;
       taskId: string | null;
       wasBusy: boolean;
+      // Card ee05750e: the real thrown reason (e.g. "session is no longer resumable (engine transcript
+      // missing)"), when the failing resumeOne call supplied one — null otherwise (a caller that only
+      // ever returns a bare boolean has nothing to report). Already bounded by normalizeResumeOneResult.
+      reason: string | null;
     }
     const failedDetail: FleetResumeFailure[] = [];
-    const captureFailureDetail = (e: RestartResumeEntry): FleetResumeFailure => {
+    const captureFailureDetail = (e: RestartResumeEntry, reason?: string): FleetResumeFailure => {
       const row = this.db.getSession(e.sessionId);
       return {
         sessionId: e.sessionId,
@@ -4504,6 +4510,7 @@ export class SessionService {
         projectId: row?.projectId ?? null,
         taskId: row?.taskId ?? null,
         wasBusy: e.busy === true,
+        reason: reason ?? null,
       };
     };
 
@@ -4654,7 +4661,8 @@ export class SessionService {
     for (const e of entries) {
       if (e.sessionId === reqId) continue;
       const parked = isParked(e.sessionId);
-      if (!resumeOne(e.sessionId)) { failed.push(e.sessionId); failedDetail.push(captureFailureDetail(e)); continue; }
+      const attempt = normalizeResumeOneResult(resumeOne(e.sessionId));
+      if (!attempt.ok) { failed.push(e.sessionId); failedDetail.push(captureFailureDetail(e, attempt.reason)); continue; }
       resumed.push(e.sessionId);
       if (parked) { skippedParked.push(e.sessionId); continue; } // resumed live; honor the park — no nudge/replay
       replayPending(e.sessionId);
@@ -4796,7 +4804,7 @@ export class SessionService {
       // Round 5 nit: distinct from an ordinary resume failure — do NOT also push to `failed` (the final
       // `else` below is what handles a genuine `resumeOne` failure; this is a different, counted outcome).
       retiredSkipped.push(reqId);
-    } else if (resumeOne(reqId)) {
+    } else if (normalizeResumeOneResult(resumeOne(reqId)).ok) {
       resumed.push(reqId);
       if (isParked(reqId)) {
         skippedParked.push(reqId);
@@ -4946,7 +4954,7 @@ export class SessionService {
   recoverCrashOrphanedWorkers(
     candidates: CrashOrphanedWorker[],
     opts: {
-      resumeOne?: (id: string) => boolean; now?: Date; soloManagerIds?: string[]; shutdownMarker?: ShutdownMarkerRecord | null;
+      resumeOne?: (id: string) => ResumeOneResult; now?: Date; soloManagerIds?: string[]; shutdownMarker?: ShutdownMarkerRecord | null;
       hadCrashLogAtBoot?: boolean; bootedAt?: Date; supervisorIteration?: number | null;
       // @decision 08c81809 — round 5 minor (doc drift): an ADDITIONAL override only, same as
       // `resumeFleetOnBoot`'s own `excludeRetiredIds` — see that function's doc for the full reasoning.
@@ -4971,11 +4979,12 @@ export class SessionService {
     // failure instead of silently collapsing it to a bare boolean — a resume that doesn't happen must
     // never be a silent no-op (board evidence: a session was "marked dead-and-skipped" with nothing in
     // the log explaining why).
-    const resumeOne = opts.resumeOne ?? ((id: string): boolean => {
-      try { this.resume(id); return true; }
+    const resumeOne = opts.resumeOne ?? ((id: string): ResumeOneResult => {
+      try { this.resume(id); return { ok: true }; }
       catch (e) {
-        console.warn(`[crash-recovery] resume(${id.slice(0, 8)}) failed: ${(e as Error).message}`);
-        return false;
+        const reason = (e as Error).message;
+        console.warn(`[crash-recovery] resume(${id.slice(0, 8)}) failed: ${reason}`);
+        return { ok: false, reason };
       }
     });
     const isParked = (id: string): boolean => {
@@ -5012,7 +5021,8 @@ export class SessionService {
     }
     for (const [managerId, workers] of byManager) {
       const managerParked = isParked(managerId); // read BEFORE resume — resume() never touches the park fields
-      if (!resumeOne(managerId)) {
+      const managerAttempt = normalizeResumeOneResult(resumeOne(managerId));
+      if (!managerAttempt.ok) {
         failed.push(...workers.map((w) => w.workerSessionId));
         managersFailed.push(managerId);
         // @decision 0c90ebe4 — never leave this appendEvent unguarded: an uncaught throw here escapes
@@ -5022,6 +5032,9 @@ export class SessionService {
             id: randomUUID(), ts: now.toISOString(), managerSessionId: managerId, kind: "manager_crash_resume_failed",
             detail: {
               workerCount: workers.length,
+              // Card ee05750e: the manager's OWN resume failure reason — not per-worker (its workers were
+              // never individually attempted once the manager itself failed). Already bounded/normalized.
+              reason: managerAttempt.reason ?? null,
               workers: workers.map((w) => ({
                 workerSessionId: w.workerSessionId,
                 taskId: this.db.getSession(w.workerSessionId)?.taskId ?? null,
@@ -5058,7 +5071,7 @@ export class SessionService {
       let worktreeAtRiskCount = 0;
       for (const w of workers) {
         const workerParked = isParked(w.workerSessionId);
-        if (!resumeOne(w.workerSessionId)) { failed.push(w.workerSessionId); failedCount++; continue; }
+        if (!normalizeResumeOneResult(resumeOne(w.workerSessionId)).ok) { failed.push(w.workerSessionId); failedCount++; continue; }
         resumed.push(w.workerSessionId);
         recoveredCount++;
         const integrity = classifyWorktreeIntegrity(this.db.getSession(w.workerSessionId)?.worktreePath);

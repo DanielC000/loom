@@ -1463,11 +1463,21 @@ export type OrchestrationEventKind =
   // "worker-crashed", the `session_recovery_abandoned` precedent), which exists precisely so a fleet-
   // resume failure has a real owner even in the shipped (non-LOOM_DEV) product where no platform-role
   // session can ever exist to receive the identified nudge (see `paths.ts` › `isLoomDev`).
+  //
+  // Card ee05750e — each `failed[]` entry also carries a `reason: string | null` (always present, `null`
+  // when the failing `resumeOne` call didn't supply one): the real resume failure message, sanitized
+  // against a fail-closed ALLOWLIST of `resume()`'s own static throw messages (never an arbitrary
+  // re-thrown error, which can carry a host path or uuid — see `normalizeResumeOneResult`'s own doc,
+  // resume-nudge.ts) and truncated to `RESUME_FAILURE_REASON_MAX_CHARS`.
   | "fleet_resume_failed"
   // `recoverCrashOrphanedWorkers`'s crash-path sibling of `fleet_resume_failed` above — a manager that
   // could not be resumed after a genuine crash (no `reqId`-shaped restart-requester exists there).
   // @decision 0c90ebe4 — never batch this like `fleet_resume_failed`: file it PER FAILED MANAGER, under
   // that manager's OWN id, with `detail` describing only ITS OWN workers — never cross-project.
+  //
+  // Card ee05750e — `detail` also carries a top-level `reason: string | null` (same always-present,
+  // allowlist-sanitized shape as `fleet_resume_failed`'s own): the MANAGER's own resume-failure message —
+  // never per-worker, since a manager whose OWN resume fails never individually attempts its workers.
   | "manager_crash_resume_failed"
   // Canonical main advanced between a batch worktree being cut and its post-gate fast-forward, so the
   // batch's single gate never validated main's real current tree — abandoned, every candidate falls

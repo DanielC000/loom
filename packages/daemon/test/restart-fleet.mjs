@@ -747,6 +747,90 @@ try {
     msg8iii.length === 1 && msg8iii[0].includes(d3dead) && msg8iii[0].includes(B.proj));
   check("(8iii) Lead-as-requester's own notice names the idle (not busy) state accurately",
     msg8iii.length === 1 && /idle at capture/i.test(msg8iii[0]));
+
+  // (8iv) Card ee05750e: `fleet_resume_failed`/`manager_crash_resume_failed` used to record only THAT a
+  // resume failed, never WHY — the real thrown reason survived only in a `[crash-recovery]` console.warn
+  // (recoverCrashOrphanedWorkers's own default) or nowhere at all (resumeFleetOnBoot's own default never
+  // even logged it). d4.dead has no captured engine id, so a REAL `sessions8iv.resume()` call throws its
+  // real production message ("session has no engine id to resume") — resumeOne here bypasses ONLY the
+  // synthetic manager (mkSession's fake `eng-<id>` has no real transcript on disk, an unrelated
+  // harness limitation every other (8*) scenario already works around the same way) and otherwise
+  // replicates the production default's own try/catch shape, so the id under test drives the real throw.
+  // Asserts the reason reaches the durable event's `detail` — this assertion must FAIL on current main
+  // (the field does not exist there at all).
+  const D4 = { proj: `rf-D4-${sfx}`, agent: `rf-D4-ag-${sfx}` };
+  mkProject(D4.proj, "/tmp/rf-D4"); mkAgent(D4.agent, D4.proj);
+  const d4 = { mgr: `rf-D4-mgr-${sfx}`, dead: `rf-D4-dead-${sfx}` };
+  mkSession({ id: d4.mgr, projId: D4.proj, agentId: D4.agent, role: "manager" });
+  // Direct insertSession (not mkSession — its `?? eng-<id>` default treats an explicit `null` as
+  // nullish too, so it can't express a genuinely-absent engine id) — mirrors crash-orphaned-workers.mjs's
+  // own (9e)/(9b) pattern for the identical real-failure shape.
+  db.insertSession({
+    id: d4.dead, projectId: B.proj, agentId: B.agent, engineSessionId: null,
+    title: null, cwd: os.tmpdir(), processState: "live", resumability: "unknown",
+    busy: false, createdAt: now, lastActivity: now, lastError: null,
+    role: "worker", parentSessionId: id.mgrB, taskId: null, worktreePath: null, branch: null,
+  });
+  const pty8iv = new PtyStub();
+  const sessions8iv = new SessionService(db, pty8iv, new OrchestrationControl());
+  const resumeOne8iv = (sid) => {
+    if (sid === d4.mgr) return true; // bypass — no real engine transcript for this synthetic manager
+    try { sessions8iv.resume(sid); return { ok: true }; }
+    catch (e) { return { ok: false, reason: e.message }; }
+  };
+  sessions8iv.resumeFleetOnBoot(
+    { reason: "deploy", managerSessionId: d4.mgr, requestedAt: now, resume: [
+      { sessionId: d4.mgr, role: "manager", parentSessionId: null },
+      { sessionId: d4.dead, role: "worker", parentSessionId: id.mgrB, busy: false },
+    ] },
+    { resumeOne: resumeOne8iv, deployStaleness: CLEAN_STALENESS },
+  );
+  await flush();
+  const events8iv = db.listEvents(d4.mgr).filter((ev) => ev.kind === "fleet_resume_failed");
+  check("(8iv) a durable fleet_resume_failed event is filed for the real resume failure", events8iv.length === 1);
+  check("(8iv) the event's `detail` carries the REAL failure reason, not just identity (DoD-1 RED assertion)",
+    events8iv.length === 1 && Array.isArray(events8iv[0].detail?.failed) &&
+    events8iv[0].detail.failed.some((f) => f.sessionId === d4.dead && typeof f.reason === "string" && /no engine id/i.test(f.reason)));
+  const msg8iv = pty8iv.getPending(d4.mgr);
+  check("(8iv) the PLAIN requester's own count-only notice never leaks the reason text (5a9a963b's isolation invariant extends to it)",
+    msg8iv.length === 1 && !/no engine id/i.test(msg8iv[0]));
+
+  // (8v) Code Review B1 RED CONTROL (card ee05750e round 2): `resume()`'s try/catch RE-THROWS whatever
+  // `pty.spawn()` (and everything it calls in turn — e.g. pty/claude-settings.ts, pty/claude-config.ts)
+  // throws, not just resume()'s own 7 static messages — an arbitrary propagated error can carry an
+  // absolute host path and/or a full session uuid (reviewer-measured: an EPERM rename error naming the
+  // real OS username). `normalizeResumeOneResult` must sanitize against a fail-closed ALLOWLIST of those
+  // 7 messages, not merely bound length — a length-only bound still lets a 190-char path/uuid string
+  // through untouched. This assertion must FAIL before the allowlist exists (a length-only bound leaves
+  // the raw text present, just capped) and PASS after.
+  const D5 = { proj: `rf-D5-${sfx}`, agent: `rf-D5-ag-${sfx}` };
+  mkProject(D5.proj, "/tmp/rf-D5"); mkAgent(D5.agent, D5.proj);
+  const d5 = { mgr: `rf-D5-mgr-${sfx}`, dead: `rf-D5-dead-${sfx}` };
+  mkSession({ id: d5.mgr, projId: D5.proj, agentId: D5.agent, role: "manager" });
+  mkSession({ id: d5.dead, projId: B.proj, agentId: B.agent, role: "worker", parentSessionId: id.mgrB, busy: false });
+  const UNSAFE_REASON = `EPERM: operation not permitted, rename 'C:\\Users\\danie\\.claude\\projects\\${d5.dead}\\transcript.jsonl'`;
+  const pty8v = new PtyStub();
+  const sessions8v = new SessionService(db, pty8v, new OrchestrationControl());
+  sessions8v.resumeFleetOnBoot(
+    { reason: "deploy", managerSessionId: d5.mgr, requestedAt: now, resume: [
+      { sessionId: d5.mgr, role: "manager", parentSessionId: null },
+      { sessionId: d5.dead, role: "worker", parentSessionId: id.mgrB, busy: false },
+    ] },
+    { resumeOne: (sid) => sid === d5.dead ? { ok: false, reason: UNSAFE_REASON } : true, deployStaleness: CLEAN_STALENESS },
+  );
+  await flush();
+  const events8v = db.listEvents(d5.mgr).filter((ev) => ev.kind === "fleet_resume_failed");
+  check("(8v) B1: an unrecognized (propagated) reason is SANITIZED to the generic fallback, never rendered verbatim",
+    events8v.length === 1 && Array.isArray(events8v[0].detail?.failed) &&
+    events8v[0].detail.failed.some((f) => f.sessionId === d5.dead && f.reason === "unexpected error during resume"));
+  check("(8v) B1: the raw host path never reaches the durable event",
+    events8v.length === 1 && !JSON.stringify(events8v[0].detail).includes("C:\\Users\\danie"));
+  check("(8v) B1: the sanitized reason itself carries none of the raw message's host-path/uuid substring",
+    events8v.length === 1 && !events8v[0].detail.failed.find((f) => f.sessionId === d5.dead)?.reason.includes(d5.dead));
+  // Allowlist control (not a blanket wipe): a KNOWN-SAFE reason from (8iv) above still passed through
+  // unchanged — re-asserted here so this file demonstrates both halves of the allowlist in one run.
+  check("(8v) allowlist control: a genuinely static resume() message (8iv's) still passes through unchanged",
+    events8iv[0].detail.failed.some((f) => f.sessionId === d4.dead && f.reason === "session has no engine id to resume"));
 } finally {
   db.close();
   for (const repo of repoRoots) {

@@ -458,6 +458,11 @@ try {
   check("(9b) `detail` shape: workerCount + workers[] — this solo manager has 0 candidate workers",
     events9b.length === 1 && events9b[0].detail?.workerCount === 0 &&
     Array.isArray(events9b[0].detail?.workers) && events9b[0].detail.workers.length === 0);
+  // Card ee05750e (DoD-1 RED assertion): the REAL thrown reason ("engine transcript missing" — see the
+  // (9b) warn check above) now reaches the durable event's `detail`, not just the console.warn line.
+  check("(9b) the durable event's `detail` carries the real failure REASON, not just THAT it failed (card ee05750e)",
+    events9b.length === 1 && typeof events9b[0].detail?.reason === "string" &&
+    /engine transcript missing/i.test(events9b[0].detail.reason));
 
   // (9h) Code Review S1: the `manager_crash_resume_failed` appendEvent call must be try/catch'd — an
   // audit-write throw for ONE failed manager must never abort the `byManager` loop and strand every

@@ -592,7 +592,7 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   const detail = {
     count: 2,
     failed: [
-      { sessionId: "dead-session-aaaaaaaa", role: "worker", projectId: "proj-other-bbbbbbbb", taskId: "task-cccccccc", wasBusy: true },
+      { sessionId: "dead-session-aaaaaaaa", role: "worker", projectId: "proj-other-bbbbbbbb", taskId: "task-cccccccc", wasBusy: true, reason: "session is no longer resumable (engine transcript missing)" },
       { sessionId: "dead-session-dddddddd", role: "manager", projectId: "proj-other-eeeeeeee", taskId: null, wasBusy: false },
     ],
   };
@@ -602,9 +602,41 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   // or "a warning exists" would pass identically against the broken (count-only, unowned) behaviour.
   check("fleet_resume_failed alert line: carries the failed sessions' cross-project identity (role@project/session)",
     line.includes("worker@proj-oth/dead-ses") && line.includes("manager@proj-oth/dead-ses"));
+  // Card ee05750e (DoD-1/4 RED assertion): the entry carrying a `reason` renders it; the sibling with NO
+  // `reason` (a caller that only ever returns a bare boolean) must not render the literal word "undefined".
+  check("fleet_resume_failed alert line: carries the failure REASON when the entry has one (card ee05750e)",
+    line.includes("engine transcript missing"));
+  check("fleet_resume_failed alert line: an entry with no reason renders no 'undefined' artifact",
+    !line.includes("undefined"));
   // A malformed/missing detail degrades to the count alone, never throws.
   const lineNoIdentity = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "fleet_resume_failed", detail: { count: 3 } }, "worker-crashed", "Proj Z");
   check("fleet_resume_failed alert line: a missing `failed` array degrades to count-only, never throws", lineNoIdentity.includes("3 session(s)") && !lineNoIdentity.includes("undefined"));
+  // Card ee05750e (Code Review S4 — the ORIGINAL version of this check here was non-discriminating: a
+  // 500-char reason can never appear verbatim in a <=200-char line REGARDLESS of the local 60-char
+  // ALERT_RESUME_REASON_MAX_CHARS bound, since the outer ALERT_LINE_MAX_CHARS cap alone already forbids
+  // it — deleting the local bound would still pass that assertion). What the local bound + S2's reordering
+  // actually BUY, reproduced with the SAME shape the reviewer measured: 4 failed sessions (so a "+1 more"
+  // tail exists) with the two PREVIEWED-but-not-first entries carrying the longest allowlisted reason —
+  // under the OLD per-entry-interleaved placement this pushed the 3rd id and the "+1 more" tail past
+  // ALERT_LINE_MAX_CHARS entirely; S2's fix (ids+more computed complete BEFORE any reason is appended)
+  // must keep every previewed id and the count intact regardless of reason length.
+  const LONGEST_SAFE_REASON = "session was administratively retired (its recycle successor was superseded by the predecessor) — only a manual (human) resume may force it";
+  const detailFourFailures = {
+    count: 4,
+    failed: [
+      { sessionId: "sess-one-aaaaaaaa", role: "worker", projectId: "proj-x-11111111", taskId: null, wasBusy: false, reason: LONGEST_SAFE_REASON },
+      { sessionId: "sess-two-bbbbbbbb", role: "worker", projectId: "proj-y-22222222", taskId: null, wasBusy: false, reason: LONGEST_SAFE_REASON },
+      { sessionId: "sess-thr-cccccccc", role: "manager", projectId: "proj-z-33333333", taskId: null, wasBusy: false },
+      { sessionId: "sess-fou-dddddddd", role: "manager", projectId: "proj-w-44444444", taskId: null, wasBusy: false },
+    ],
+  };
+  const lineFourFailures = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "fleet_resume_failed", detail: detailFourFailures }, "worker-crashed", "Proj Z");
+  check("fleet_resume_failed alert line: S4 — ALL THREE previewed ids render even with 2 of them carrying the longest allowlisted reason",
+    lineFourFailures.includes("worker@proj-x-1/sess-one") && lineFourFailures.includes("worker@proj-y-2/sess-two") && lineFourFailures.includes("manager@proj-z-3/sess-thr"));
+  check("fleet_resume_failed alert line: S4 — the '+1 more' count tail also survives (this is exactly what the reviewer measured lost)",
+    lineFourFailures.includes("+1 more"));
+  check("fleet_resume_failed alert line: S4 — the reason itself is still visibly shortened by ALERT_RESUME_REASON_MAX_CHARS (the raw ~140-char message does not appear whole)",
+    !lineFourFailures.includes(LONGEST_SAFE_REASON) && lineFourFailures.includes("…"));
 }
 
 // --- 22. END-TO-END (card 9e4205f5, DoD-4 — the LOOM_DEV=0, no-live-Lead path): a real fleet_resume_failed
@@ -687,6 +719,9 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
 
   const detail = {
     workerCount: 2,
+    // Card ee05750e: the MANAGER's own resume-failure reason (not per-worker — its workers were never
+    // individually attempted once the manager itself failed to resume).
+    reason: "session has no engine id to resume",
     workers: [
       // N1 fix: `projectId` is NOT part of this kind's real `detail.workers[]` shape (unlike
       // fleet_resume_failed's `detail.failed[]` above) — planting one here makes the "never a project"
@@ -705,11 +740,43 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
     line.includes("w:wkr-aaaa/task:task-bb") && line.includes("w:wkr-cccc"));
   check("manager_crash_resume_failed alert line: never renders a per-worker projectId, even when the input detail carries one (this kind is NOT cross-project, unlike fleet_resume_failed's detail.failed[] above)",
     !line.includes("proj-should-never-render"));
+  // Card ee05750e (DoD-1/4 RED assertion): the exact motivating gap named by the card — "could not be
+  // resumed" with no reason — now carries the real reason.
+  check("manager_crash_resume_failed alert line: carries the manager's own failure REASON (card ee05750e — this IS the motivating gap)",
+    line.includes("session has no engine id to resume"));
   // A malformed/missing detail degrades to the count alone, never throws — mirrors fleet_resume_failed's
   // own degrade-gracefully check above.
   const lineNoWorkers = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "manager_crash_resume_failed", detail: { workerCount: 3 } }, "worker-crashed", "Proj Z");
   check("manager_crash_resume_failed alert line: a missing `workers` array degrades to count-only, never throws",
     lineNoWorkers.includes("3 in-flight worker(s)") && !lineNoWorkers.includes("undefined"));
+  // Card ee05750e (Code Review S4 — same non-discriminating defect + fix as fleet_resume_failed's own
+  // check above: a 500-char reason can never appear verbatim in a <=200-char line regardless of the
+  // local 60-char bound, so that alone proves nothing about what the local bound buys). Reproduced with
+  // the SAME shape the reviewer measured: 4 stranded workers (so a "+1 more" tail exists) + the longest
+  // allowlisted reason — under the OLD placement (reason inserted BEFORE the worker-count clause and the
+  // id preview) this could push the previewed ids + "+1 more" tail past ALERT_LINE_MAX_CHARS; S2's fix
+  // (reason appended AFTER the full id preview) must keep every previewed id and the count intact.
+  const longestSafeReason2 = "session was administratively retired (its recycle successor was superseded by the predecessor) — only a manual (human) resume may force it";
+  const detailLongReasonFourWorkers = {
+    workerCount: 4,
+    reason: longestSafeReason2,
+    workers: [
+      { workerSessionId: "wkr-first111", taskId: null, reportedState: null, awaitingReview: false },
+      { workerSessionId: "wkr-second22", taskId: null, reportedState: null, awaitingReview: false },
+      { workerSessionId: "wkr-third333", taskId: null, reportedState: null, awaitingReview: false },
+      { workerSessionId: "wkr-fourth44", taskId: null, reportedState: null, awaitingReview: false },
+    ],
+  };
+  const lineLongReasonFourWorkers = alertLine(
+    { id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "manager_crash_resume_failed", detail: detailLongReasonFourWorkers },
+    "worker-crashed", "Proj Z",
+  );
+  check("manager_crash_resume_failed alert line: S4 — all three previewed worker ids render even with the longest allowlisted reason",
+    lineLongReasonFourWorkers.includes("w:wkr-firs") && lineLongReasonFourWorkers.includes("w:wkr-seco") && lineLongReasonFourWorkers.includes("w:wkr-thir"));
+  check("manager_crash_resume_failed alert line: S4 — the '+1 more' count tail also survives",
+    lineLongReasonFourWorkers.includes("+1 more"));
+  check("manager_crash_resume_failed alert line: S4 — the reason itself is still visibly shortened by ALERT_RESUME_REASON_MAX_CHARS",
+    !lineLongReasonFourWorkers.includes(longestSafeReason2) && lineLongReasonFourWorkers.includes("…"));
 }
 
 // --- 26. END-TO-END (card 0c90ebe4): a real manager_crash_resume_failed event, filed under the

@@ -94,3 +94,68 @@ export function buildBlockedResumeNudgeBody(prefix: string, extra = ""): string 
     `on an answer, not mid-work. Re-state your blocker to your manager (worker_report again) rather than ` +
     `resuming the task as if nothing happened.${extra}`;
 }
+
+/**
+ * Bound applied to every captured resume-failure reason before it's written into a durable event's
+ * `detail` (`fleet_resume_failed`/`manager_crash_resume_failed`, sessions/service.ts). `resume()`'s own
+ * 7 direct throw sites are short, static, identity-free strings ("session has no engine id to resume",
+ * …) — but `resume()` also RE-THROWS whatever its `pty.spawn()` call (and everything it calls in turn,
+ * e.g. `pty/claude-settings.ts`/`pty/claude-config.ts`) throws, and THOSE can carry an absolute host path
+ * or a full session uuid (Code Review, card ee05750e B1/B2 — measured: an `EPERM …rename 'C:\Users\<real
+ * username>\...'` message). This length bound alone does NOT redact that — see
+ * {@link RESUME_KNOWN_SAFE_REASONS} and `normalizeResumeOneResult`'s own allowlist, the actual redaction
+ * boundary; this constant only bounds the SIZE of whatever survives that allowlist.
+ */
+export const RESUME_FAILURE_REASON_MAX_CHARS = 200;
+
+/**
+ * Fail-closed ALLOWLIST of `resume()`'s own 7 static throw messages (sessions/service.ts) — the only
+ * reason strings `normalizeResumeOneResult` ever passes through verbatim. Anything else (whatever
+ * `resume()` re-throws from its `pty.spawn()` call, e.g. an OS error naming a host path or a session
+ * uuid) is replaced with a generic, identity-free fallback. Deliberately an ALLOWLIST, not a
+ * pattern-based stripper (Code Review B1: a redaction boundary must fail CLOSED — a pattern-stripper is
+ * defeated by the first message shape nobody anticipated). The full, unsanitized message still reaches
+ * the daemon log via each caller's own `console.warn` (host-local, never pushed to chat), so diagnosis
+ * survives; only the chat/durable-event surface is sanitized.
+ */
+export const RESUME_KNOWN_SAFE_REASONS: ReadonlySet<string> = new Set([
+  "session not found",
+  "session has no engine id to resume",
+  "session is no longer resumable (engine transcript missing)",
+  "session is no longer resumable (worktree/cwd missing)",
+  "session was recycled — a successor exists; only a manual (human) resume may force it",
+  "session was administratively retired (its recycle successor was superseded by the predecessor) — only a manual (human) resume may force it",
+  "project not found",
+]);
+
+/** The sanitized stand-in for any resume-failure reason NOT on {@link RESUME_KNOWN_SAFE_REASONS}. */
+export const RESUME_UNKNOWN_REASON_FALLBACK = "unexpected error during resume";
+
+/**
+ * A `resumeOne` callback's return value — legacy callers (every existing test, and any future one) still
+ * return a bare `boolean`; production's own default (sessions/service.ts) now returns the richer shape so
+ * the real thrown message survives past it. `boolean` stays valid (`ok` with no `reason`) so no existing
+ * caller needs to change.
+ */
+export type ResumeOneResult = boolean | { ok: boolean; reason?: string };
+
+/**
+ * Normalize a `resumeOne` result to `{ ok, reason }` — the ONE place both `resumeFleetOnBoot` and
+ * `recoverCrashOrphanedWorkers` funnel a resume outcome through, so neither can forget the redaction or
+ * the bound. `reason` is sanitized against the {@link RESUME_KNOWN_SAFE_REASONS} allowlist BEFORE being
+ * truncated to {@link RESUME_FAILURE_REASON_MAX_CHARS} — an unrecognized reason (Code Review B1: anything
+ * `resume()` re-throws from `pty.spawn()`, not just its own 7 static messages) becomes
+ * {@link RESUME_UNKNOWN_REASON_FALLBACK} rather than being stored/rendered verbatim.
+ */
+export function normalizeResumeOneResult(r: ResumeOneResult): { ok: boolean; reason?: string } {
+  // Code Review N1: an untyped .mjs stub returning undefined/null (or any non-object, non-boolean value)
+  // used to mean "failed" under the old bare-boolean contract — treat it the same way here rather than
+  // throwing a TypeError out of the un-wrapped resume loop (which would abort the entire fleet resume).
+  if (!r || typeof r !== "object") return { ok: !!r };
+  if (!r.reason) return { ok: r.ok };
+  const safeReason = RESUME_KNOWN_SAFE_REASONS.has(r.reason) ? r.reason : RESUME_UNKNOWN_REASON_FALLBACK;
+  const reason = safeReason.length > RESUME_FAILURE_REASON_MAX_CHARS
+    ? `${safeReason.slice(0, RESUME_FAILURE_REASON_MAX_CHARS - 1)}…`
+    : safeReason;
+  return { ok: r.ok, reason };
+}

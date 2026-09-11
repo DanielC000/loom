@@ -78,6 +78,12 @@ const ALERT_LINE_MAX_CHARS = 200;
  *  decision-pending line) — keeps a long title from dominating the line before the overall cap even
  *  applies. */
 const ALERT_TITLE_MAX_CHARS = 100;
+/** Card ee05750e: same pattern as ALERT_TITLE_MAX_CHARS. By the time a reason reaches this surface it has
+ *  already passed `normalizeResumeOneResult`'s allowlist (resume-nudge.ts) — never an arbitrary re-thrown
+ *  message — but one of the 7 allowlisted messages is itself up to ~140 chars; this keeps ANY one reason
+ *  from dominating the fleet_resume_failed/manager_crash_resume_failed line before the overall
+ *  ALERT_LINE_MAX_CHARS cap even applies. */
+const ALERT_RESUME_REASON_MAX_CHARS = 60;
 
 /** Truncate `s` to at most `maxChars`, appending an ellipsis marker when cut. A no-op when already short
  *  enough — never lengthens or otherwise mutates a line that's already within bounds. */
@@ -221,8 +227,16 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
         })
         .join(", ");
       const more = rawFailed.length > 3 ? `, +${rawFailed.length - 3} more` : "";
+      // Card ee05750e (Code Review S2): rendered AFTER the full id preview + more tail, never interleaved
+      // per-entry — the ids (and the +N-more count) are the resolvable, load-bearing identity and must
+      // survive the final ALERT_LINE_MAX_CHARS trim; a reason is free text that should be what's
+      // sacrificed first on overflow, matching the same id-before-truncatable-text discipline
+      // question_asked/request_escalated already use below. One representative reason (the first failed
+      // entry that has one), not all of them — already allowlist-sanitized at the source, re-bounded here.
+      const firstReasoned = rawFailed.find((f) => typeof (f as Record<string, unknown> | null)?.reason === "string" && (f as Record<string, unknown>).reason);
+      const reasonSuffix = firstReasoned ? ` (${truncateText((firstReasoned as Record<string, unknown>).reason as string, ALERT_RESUME_REASON_MAX_CHARS)})` : "";
       line = `${projectName}: ${count} session(s) elsewhere in the fleet failed to resume after a restart` +
-        (idPreview ? ` — ${idPreview}${more}` : "");
+        (idPreview ? ` — ${idPreview}${more}` : "") + reasonSuffix;
       break;
     }
     case "manager_crash_resume_failed": {
@@ -240,8 +254,13 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
         })
         .join(", ");
       const more2 = rawWorkers.length > 3 ? `, +${rawWorkers.length - 3} more` : "";
+      // Card ee05750e (Code Review S2): the manager's OWN resume-failure reason — this is the specimen
+      // the card names ("could not be resumed" with no reason) — rendered AFTER the worker id preview +
+      // more tail (never before), same id-before-truncatable-text discipline as fleet_resume_failed above.
+      // Already allowlist-sanitized + bounded at the source (normalizeResumeOneResult), re-bounded here.
+      const reason2 = typeof detail.reason === "string" && detail.reason ? ` — ${truncateText(detail.reason, ALERT_RESUME_REASON_MAX_CHARS)}` : "";
       line = `${projectName}: manager could not be resumed after a crash, ${workerCount} in-flight worker(s) stranded — ${m8}` +
-        (idPreview2 ? ` (${idPreview2}${more2})` : "");
+        (idPreview2 ? ` (${idPreview2}${more2})` : "") + reason2;
       break;
     }
     case "question_asked": {
