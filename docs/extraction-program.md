@@ -344,6 +344,17 @@ thing it exists to do.
    touched file(s), and rewrite any hit among the anchors you wrote or edited this tranche before
    reporting done — lead review has sent this exact shape back 7 times across two seats without a
    mechanical check; don't add an 8th.
+   **Also check `overlongAnchorParagraphs` and `midSentenceAnchors` (card `5e5841dd`) for the
+   anchor(s) you personally write or edit this tranche.** The first flags an anchor whose own
+   paragraph runs longer than `GUARD_MAX_LINES` (3) — a Class-A guard/prohibition anchor must be
+   "compressed to <=3 lines" (`CLAUDE.md` comment taxonomy); the second flags a `@decision` token
+   that is not the first thing on its own line — embedded mid-sentence inside other prose instead of
+   opening its own paragraph, which is what lets a whole contract paragraph get silently relabelled
+   "anchored" by a token buried partway through it. Both REPORT-ONLY, same posture as
+   `pointerAnchors` above: the existing corpus already carries pre-existing hits of both shapes, so
+   neither is a zero-tolerance gate on the whole repo. You ARE responsible for your OWN tranche's
+   anchors — filter both fields to your touched file(s) and fix any hit among the anchors you wrote
+   or edited this tranche before reporting done.
 6. **Commit your changes first, then run `pnpm --filter @loom/daemon guards`.** `guards` is not
    `run_gate`. A `git add` short of a commit does not put your work through the diff-scoped core
    scan the merge gate itself re-runs — the guard list lives in `STATIC_GUARD_REPO_PATHS` in

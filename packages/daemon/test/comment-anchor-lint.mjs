@@ -58,6 +58,15 @@
 //      ordinary prose nowhere near an anchor OR in a later paragraph of the same block separated by one of
 //      those boundaries, are both confirmed NOT flagged. REPORT-ONLY (never fails `guards`) — see the card
 //      for the measured corpus count.
+//  14. overlongAnchorParagraphs (card 5e5841dd): an anchor whose own paragraph (the SAME window
+//      `findPointerAnchors` computes, via the shared `anchorParagraphEnd` helper) spans more than
+//      `GUARD_MAX_LINES` lines is flagged, with the measured paragraph length; a paragraph AT or under the
+//      cap is not, regardless of how long the enclosing block runs (a following, boundary-separated
+//      paragraph must never inflate the count). REPORT-ONLY — see the card for the measured baseline.
+//  15. midSentenceAnchors (card 5e5841dd): a `@decision` token that is NOT the first non-prefix token on
+//      its own line — embedded mid-sentence inside other prose — is flagged; an anchor that opens its own
+//      line (the target state) is not, even immediately adjacent to a mid-sentence one in the same block.
+//      REPORT-ONLY — see the card for the measured baseline.
 // Run: `node test/comment-anchor-lint.mjs` from packages/daemon (no build, no LOOM_HOME needed).
 import fs from "node:fs";
 import os from "node:os";
@@ -71,6 +80,8 @@ import {
   findOverlongAnchorIds,
   findSigilSpaceAnchors,
   findPointerAnchors,
+  findOverlongAnchorParagraphs,
+  findMidSentenceAnchors,
   findOversizedRecords,
   findCollidingRecords,
   listRecordIds,
@@ -678,6 +689,211 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
     check("computeReport: a prohibition-only anchor is not flagged, count 0", cleanReport.pointerAnchors?.count === 0);
     const cleanFileReport = computeFileReport(dir, srcPath, fs.readFileSync(srcPath, "utf8"));
     check("computeFileReport: a prohibition-only anchor is not flagged (hook path)", cleanFileReport?.pointerAnchors?.length === 0);
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+// --- findOverlongAnchorParagraphs (card 5e5841dd — flag an anchor paragraph over GUARD_MAX_LINES) --------
+
+{
+  // Positive control: a 6-line uninterrupted paragraph, well past GUARD_MAX_LINES (3) — the exact
+  // "Observed 2026-09-11" shape the card was filed over (a long paragraph silently counted as "anchored").
+  check("window boundary sanity: GUARD_MAX_LINES is 3 (this test assumes that)", GUARD_MAX_LINES === 3);
+  const lines = [
+    "// @decision aaaaaaaa — line 1 of the anchor, states nothing yet",
+    "// line 2, still narrating",
+    "// line 3, past the guard cap already",
+    "// line 4, still narrating",
+    "// line 5, still narrating",
+    "// line 6, the actual prohibition finally lands here",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  const overlong = findOverlongAnchorParagraphs(lines, blocks, anchors);
+  check("overlong anchor paragraph (6 lines): findOverlongAnchorParagraphs flags it with the measured length",
+    overlong.length === 1 && overlong[0].id === "aaaaaaaa" && overlong[0].line === 1 && overlong[0].length === 6);
+}
+
+{
+  // Negative control (DoD-1, boundary): a paragraph AT exactly GUARD_MAX_LINES must never be flagged —
+  // only strictly OVER the cap is a violation.
+  const lines = [
+    "// @decision bbbbbbbb — a short guard,",
+    "// exactly three lines long,",
+    "// never regrows past this.",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  check("anchor paragraph at exactly GUARD_MAX_LINES: not flagged",
+    findOverlongAnchorParagraphs(lines, blocks, anchors).length === 0);
+}
+
+{
+  // Negative control (DoD-1, target state): an isolated 1-line guard-class anchor must never be flagged.
+  const lines = ["// @decision cccccccc — states its own rule, completely, in one line"];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  check("one-line guard-class anchor: not flagged", findOverlongAnchorParagraphs(lines, blocks, anchors).length === 0);
+}
+
+{
+  // Negative control (false-positive direction, same boundary `findPointerAnchors` already relies on): a
+  // blank JSDoc line ends the anchor's own paragraph — an UNRELATED long paragraph later in the SAME block
+  // must never inflate this anchor's measured length.
+  const lines = [
+    "/**",
+    " * @decision dddddddd — states its own rule inline, completely, right here.",
+    " *",
+    " * Unrelated further discussion in the SAME doc comment, running on for several more lines just to",
+    " * pad this block well past GUARD_MAX_LINES on its own, entirely separate from the anchor above.",
+    " * Still unrelated, still padding, still not part of dddddddd's own paragraph at all.",
+    " */",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  check("blank JSDoc line ends the anchor's paragraph: an unrelated later paragraph does not inflate the length",
+    findOverlongAnchorParagraphs(lines, blocks, anchors).length === 0);
+}
+
+{
+  // Negative control (false-positive direction): a following `@decision` site ends the PREVIOUS anchor's
+  // paragraph — the first anchor's own 1-line paragraph must not be inflated by the second anchor's text.
+  const lines = [
+    "/**",
+    " * @decision eeeeeeee — states its own rule inline, one line only.",
+    " * @decision ffffffff — a DIFFERENT decision, whose own paragraph runs on for several more lines,",
+    " * still narrating,",
+    " * still narrating,",
+    " * finally landing the rule here, well past the cap.",
+    " */",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  const overlong = findOverlongAnchorParagraphs(lines, blocks, anchors);
+  check("next-anchor boundary: only the SECOND anchor's own (overlong) paragraph is flagged",
+    overlong.length === 1 && overlong[0].id === "ffffffff" && overlong[0].line === 3);
+}
+
+{
+  // `maxLines` is overridable (mirrors `minLines`'s own configurability elsewhere in this file) — the same
+  // 4-line paragraph flags under a smaller cap and does not under a larger one.
+  const lines = [
+    "// @decision 12121212 — line 1",
+    "// line 2",
+    "// line 3",
+    "// line 4, four lines total",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  check("findOverlongAnchorParagraphs: maxLines=3 flags a 4-line paragraph",
+    findOverlongAnchorParagraphs(lines, blocks, anchors, 3).length === 1);
+  check("findOverlongAnchorParagraphs: maxLines=10 does not flag the same 4-line paragraph",
+    findOverlongAnchorParagraphs(lines, blocks, anchors, 10).length === 0);
+}
+
+{
+  // computeReport (CLI scan) and computeFileReport (the live PostToolUse hook path), end to end.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-overlong-paragraph-"));
+  try {
+    fs.mkdirSync(path.join(dir, "packages", "daemon", "src"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "docs", "decisions"), { recursive: true });
+    const srcPath = path.join(dir, "packages", "daemon", "src", "fixture.ts");
+    fs.writeFileSync(srcPath, [
+      "// @decision aaaaaaaa — line 1",
+      "// line 2",
+      "// line 3",
+      "// line 4",
+      "// line 5, the rule finally lands here",
+      "",
+    ].join("\n"));
+    fs.writeFileSync(path.join(dir, "docs", "decisions", "aaaaaaaa-x.md"), "# aaaaaaaa\n\nA record.\n");
+    const report = computeReport(dir, { minLines: 15 });
+    check("computeReport: overlongAnchorParagraphs is a top-level field, count 1",
+      report.overlongAnchorParagraphs?.count === 1 && report.overlongAnchorParagraphs.items[0]?.id === "aaaaaaaa"
+      && report.overlongAnchorParagraphs.items[0]?.length === 5
+      && report.overlongAnchorParagraphs.items[0]?.file === "packages/daemon/src/fixture.ts");
+
+    const fileReport = computeFileReport(dir, srcPath, fs.readFileSync(srcPath, "utf8"));
+    check("computeFileReport: the overlong anchor paragraph is flagged too (hook path)",
+      fileReport?.overlongAnchorParagraphs?.length === 1 && fileReport.overlongAnchorParagraphs[0]?.id === "aaaaaaaa"
+      && fileReport.overlongAnchorParagraphs[0]?.length === 5);
+
+    fs.writeFileSync(srcPath, "// @decision aaaaaaaa — a short guard, all on one line\n");
+    const cleanReport = computeReport(dir, { minLines: 15 });
+    check("computeReport: a short guard-class anchor is not flagged, count 0", cleanReport.overlongAnchorParagraphs?.count === 0);
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+// --- findMidSentenceAnchors (card 5e5841dd — flag a @decision token embedded mid-sentence) ----------------
+
+{
+  // Positive control: the exact "Observed 2026-09-11" shape — a `@decision <id>` embedded MID-SENTENCE
+  // inside ANOTHER anchor's own text, both real anchors (`findFileAnchors` still finds both).
+  const lines = [
+    "// @decision aaaaaaaa — states its own rule, and mentions in passing that a related fix",
+    "// landed as part of the SAME change (see @decision bbbbbbbb for that other one) inline here.",
+  ];
+  const anchors = findFileAnchors(lines);
+  check("mid-sentence fixture: findFileAnchors still finds both anchors (sanity)", anchors.length === 2);
+  const mid = findMidSentenceAnchors(lines, anchors);
+  check("mid-sentence anchor embedded inside another anchor's own text: flagged, and ONLY the mid-sentence one",
+    mid.length === 1 && mid[0].id === "bbbbbbbb" && mid[0].line === 2);
+}
+
+{
+  // Negative control (DoD-1, target state): an anchor that opens its own line (after the comment prefix)
+  // must never be flagged, regardless of comment style (// vs /** ... */ vs *).
+  const cases = [
+    ["// @decision cccccccc — states its own rule directly"],
+    ["/** @decision dddddddd — states its own rule directly */"],
+    ["/**", " * @decision eeeeeeee — states its own rule directly", " */"],
+  ];
+  for (const lines of cases) {
+    const anchors = findFileAnchors(lines);
+    check(`anchor opening its own line ("${lines[lines.length > 1 ? 1 : 0]}"): not flagged as mid-sentence`,
+      findMidSentenceAnchors(lines, anchors).length === 0);
+  }
+}
+
+{
+  // Positive control, variant comment styles: a `@decision` buried after other text on the SAME line, in
+  // both `//` and `/** ... */`-prefixed styles.
+  const cases = [
+    ["// some narrative text first, then (@decision ffffffff) buried inline"],
+    ["/** some narrative text first, then @decision 11111111 buried inline */"],
+    ["/**", " * some narrative text first, then @decision 22222222 buried inline", " */"],
+  ];
+  for (const lines of cases) {
+    const anchors = findFileAnchors(lines);
+    check(`anchor buried mid-line ("${lines[lines.length > 1 ? 1 : 0]}"): flagged as mid-sentence`,
+      anchors.length === 1 && findMidSentenceAnchors(lines, anchors).length === 1);
+  }
+}
+
+{
+  // computeReport (CLI scan) and computeFileReport (the live PostToolUse hook path), end to end.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-mid-sentence-anchor-"));
+  try {
+    fs.mkdirSync(path.join(dir, "packages", "daemon", "src"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "docs", "decisions"), { recursive: true });
+    const srcPath = path.join(dir, "packages", "daemon", "src", "fixture.ts");
+    fs.writeFileSync(srcPath, "// some narrative text, then (@decision aaaaaaaa) buried inline here\n");
+    fs.writeFileSync(path.join(dir, "docs", "decisions", "aaaaaaaa-x.md"), "# aaaaaaaa\n\nA record.\n");
+    const report = computeReport(dir, { minLines: 15 });
+    check("computeReport: midSentenceAnchors is a top-level field, count 1",
+      report.midSentenceAnchors?.count === 1 && report.midSentenceAnchors.items[0]?.id === "aaaaaaaa"
+      && report.midSentenceAnchors.items[0]?.file === "packages/daemon/src/fixture.ts");
+
+    const fileReport = computeFileReport(dir, srcPath, fs.readFileSync(srcPath, "utf8"));
+    check("computeFileReport: the mid-sentence anchor is flagged too (hook path)",
+      fileReport?.midSentenceAnchors?.length === 1 && fileReport.midSentenceAnchors[0]?.id === "aaaaaaaa");
+
+    fs.writeFileSync(srcPath, "// @decision aaaaaaaa — opens its own line, states its rule directly\n");
+    const cleanReport = computeReport(dir, { minLines: 15 });
+    check("computeReport: an anchor opening its own line is not flagged, count 0", cleanReport.midSentenceAnchors?.count === 0);
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
   }

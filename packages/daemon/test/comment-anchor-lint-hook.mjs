@@ -11,6 +11,12 @@
 //      a real subprocess spawn against a fixture file carrying many pre-existing pointer anchors, proving
 //      the hook's OUTPUT stays bounded and a newly-written pointer anchor is still caught while untouched
 //      pre-existing ones are not.
+//   2b. `scopeHookAnchorSites` (card 5e5841dd): `scopeHookPointerAnchors`'s scoper generalized to also
+//      cover `overlongAnchorParagraphs`/`midSentenceAnchors` — the SAME flood risk (a main-tree baseline
+//      of 257/155, concentrated in the same giant files pointerAnchors already floods on) would otherwise
+//      apply to those two fields going into the hook unscoped. A real subprocess spawn against a fixture
+//      file carrying several pre-existing overlong/mid-sentence anchors proves an Edit touching ONE
+//      reports only that one, and an Edit touching none reports neither field's section at all.
 //   3. writeSessionSettings' wiring: card d92ec82b reworked this gate — the hook now wires on the EXPLICIT
 //      `docLint` param AND requires `repoPath`, independently of `vaultPath` (vault-lint's own, separate
 //      gate) — so a project with docLint on but no Obsidian vault still gets it. Imported from
@@ -29,6 +35,7 @@ import {
   formatHookMessage,
   extractWrittenText,
   scopeHookPointerAnchors,
+  scopeHookAnchorSites,
   HOOK_POINTER_ANCHOR_CAP,
 } from "../assets/comment-anchor-lint.mjs";
 
@@ -271,6 +278,100 @@ try {
         freshHit !== null && new RegExp(`^${HOOK_POINTER_ANCHOR_CAP} @decision anchor\\(s\\)`, "m").test(freshMsg));
     } finally {
       try { fs.rmSync(manyDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  }
+
+  // --- scopeHookAnchorSites (card 5e5841dd): generalized pure-function coverage ---------------------------
+  {
+    const overlongSites = [
+      { line: 1, id: "aaaaaaaa", ns: "card", length: 6 },
+      { line: 8, id: "bbbbbbbb", ns: "card", length: 5 },
+    ];
+    const overlongLines = [
+      "// @decision aaaaaaaa — line 1 of a pre-existing overlong paragraph, site one",
+      "// line 2", "// line 3", "// line 4", "// line 5", "// line 6, still site one",
+      "",
+      "// @decision bbbbbbbb — line 1 of a pre-existing overlong paragraph, site two",
+    ];
+    // Same substring-containment mechanism as scopeHookPointerAnchors — proven generic here by feeding it
+    // overlongAnchorParagraphs-shaped items instead of pointerAnchors-shaped ones.
+    const scopedOne = scopeHookAnchorSites(overlongSites, overlongLines, overlongLines[7]);
+    check("scopeHookAnchorSites: only the site whose anchor line appears in writtenText is kept (generalized)",
+      scopedOne.items.length === 1 && scopedOne.items[0].id === "bbbbbbbb" && scopedOne.omitted === 0);
+    const scopedNone = scopeHookAnchorSites(overlongSites, overlongLines, "unrelated text");
+    check("scopeHookAnchorSites: writtenText matching no anchor line keeps nothing (generalized)",
+      scopedNone.items.length === 0);
+    // A custom cap (never just the pointerAnchors-specific HOOK_POINTER_ANCHOR_CAP default) is honored.
+    const scopedCapped = scopeHookAnchorSites(overlongSites, overlongLines, null, 1);
+    check("scopeHookAnchorSites: a custom cap is honored (not hardcoded to HOOK_POINTER_ANCHOR_CAP)",
+      scopedCapped.items.length === 1 && scopedCapped.omitted === 1);
+  }
+
+  // --- overlongAnchorParagraphs / midSentenceAnchors HOOK scoping (card 5e5841dd) ---------------------------
+  // Mirrors the pointerAnchors flood fix above (card a862e8f0 round 2), generalized (card 5e5841dd) rather
+  // than a second bespoke scoper: a file already carrying several pre-existing overlong/mid-sentence
+  // anchors must not flood the advisory on every edit — only the site(s) the triggering edit actually wrote.
+  {
+    const scopeDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-overlong-mid-scope-hook-"));
+    try {
+      fs.mkdirSync(path.join(scopeDir, "packages", "daemon", "src"), { recursive: true });
+      const overlongBlock = (id) => [
+        `// @decision ${id} — line 1 of a paragraph that runs on far too long for a guard-class anchor,`,
+        `// line 2, still narrating for id ${id},`,
+        `// line 3, past the guard cap already for ${id},`,
+        `// line 4, the actual prohibition for ${id} finally lands here.`,
+      ];
+      const midSentenceLine = (id) => `// some narrative text first, then (@decision ${id}) buried inline`;
+      const preExisting = [
+        ...overlongBlock("aaaaaaa0"),
+        "",
+        ...overlongBlock("aaaaaaa1"),
+        "",
+        ...overlongBlock("aaaaaaa2"),
+        "",
+        midSentenceLine("aaaaaaa3"),
+        "",
+      ];
+      const newlyWrittenOverlong = overlongBlock("deadc0de"); // the site this edit "just wrote"
+      const scopePath = path.join(scopeDir, "packages", "daemon", "src", "scope.ts");
+      fs.writeFileSync(scopePath, [...preExisting, ...newlyWrittenOverlong, ""].join("\n"));
+
+      const runHookProc = (filePath, tool, toolInput) => {
+        const payload = { hook_event_name: "PostToolUse", tool_name: tool, tool_input: { file_path: filePath, ...toolInput }, cwd: scopeDir };
+        const r = spawnSync(process.execPath, [COMMENT_ANCHOR_LINT_SCRIPT, "--hook", scopeDir], { input: JSON.stringify(payload), encoding: "utf8" });
+        check(`runHook(${tool} ${path.basename(filePath)}, overlong/mid scoping): exits 0`, r.status === 0);
+        const out = (r.stdout || "").trim();
+        return out ? JSON.parse(out) : null;
+      };
+
+      // The Edit's new_string is EXACTLY the newly-written overlong paragraph (all 4 lines) — only THAT
+      // anchor's paragraph must be surfaced, none of the 3 pre-existing overlong/mid-sentence sites.
+      const scopedHit = runHookProc(scopePath, "Edit", { old_string: "placeholder", new_string: newlyWrittenOverlong.join("\n") });
+      const scopedMsg = scopedHit?.hookSpecificOutput?.additionalContext ?? "";
+      check("hook (Edit touching ONE overlong anchor): fires", scopedHit !== null);
+      check("hook (Edit touching ONE overlong anchor): the overlong-anchor-paragraph count is exactly 1, not 4",
+        /^1 over-long @decision anchor paragraph\(s\)/m.test(scopedMsg));
+      check("hook (Edit touching ONE overlong anchor): names ONLY the newly-written id, none of the 3 pre-existing",
+        /deadc0de \(4 lines\)/.test(scopedMsg) && !/aaaaaaa0 \(4 lines\)/.test(scopedMsg)
+        && !/aaaaaaa1 \(4 lines\)/.test(scopedMsg) && !/aaaaaaa2 \(4 lines\)/.test(scopedMsg));
+      // NOTE: orphanAnchors is a SEPARATE, unscoped check (same caveat as the pointerAnchors test above) —
+      // it legitimately still lists aaaaaaa3 (no matching record), so "not anywhere in scopedMsg" would
+      // wrongly fail on that unrelated section. Scope this assertion to the mid-sentence section itself.
+      check("hook (Edit touching ONE overlong anchor): the pre-existing mid-sentence anchor's OWN section is absent",
+        !/mid-sentence @decision anchor\(s\)/.test(scopedMsg));
+
+      // An Edit touching NONE of the overlong-paragraph/mid-sentence sites (an unrelated one-liner
+      // elsewhere in the file) — neither field's section appears at all. (orphanAnchors, a SEPARATE
+      // unscoped check, legitimately still fires since none of these ids have a matching record — that's
+      // expected and irrelevant to this assertion, which is scoped to the two fields under test.)
+      const noneHit = runHookProc(scopePath, "Edit", { old_string: "placeholder", new_string: "// a completely unrelated one-line comment, touches nothing" });
+      const noneMsg = noneHit?.hookSpecificOutput?.additionalContext ?? "";
+      check("hook (Edit touching none of the overlong/mid-sentence sites): no overlong-anchor-paragraph section at all",
+        !/over-long @decision anchor paragraph/.test(noneMsg));
+      check("hook (Edit touching none of the overlong/mid-sentence sites): no mid-sentence-anchor section at all",
+        !/mid-sentence @decision anchor/.test(noneMsg));
+    } finally {
+      try { fs.rmSync(scopeDir, { recursive: true, force: true }); } catch { /* ignore */ }
     }
   }
 

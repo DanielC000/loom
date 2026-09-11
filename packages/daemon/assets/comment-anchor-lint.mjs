@@ -24,7 +24,7 @@
 // `posttooluse-hook-honors-additionalcontext-not-systemmessage` and decision-records.mjs's own header for
 // the full method.
 //
-// Ten checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
+// Twelve checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
 //   1. unanchoredLongBlocks — a contiguous comment block >= `minLines` (default DEFAULT_MIN_LINES) with
 //      no `@decision <id>` anywhere in it. The "narrative is regrowing in source" signal.
 //   2. orphanAnchors — an `@decision <id>` whose id resolves to no record in ANY of the three stores this
@@ -118,13 +118,38 @@
 //      scan (`computeReport`/`computeFileReport` — the FULL, unscoped list, always) and the per-file hook,
 //      same ground as `bareCommitAnchors`/`overlongAnchorIds` — it needs only the one file's own
 //      blocks/anchors already computed for those checks, no repo-wide corpus. ⚠️ The HOOK's own advisory
-//      (`runHook`, not `computeFileReport`) additionally SCOPES this one field — and only this one — down
-//      to the site(s) the triggering edit actually just wrote (`extractWrittenText`/
-//      `scopeHookPointerAnchors`, both below), plus a hard cap (`HOOK_POINTER_ANCHOR_CAP`): a file already
+//      (`runHook`, not `computeFileReport`) additionally SCOPES this field — card 5e5841dd generalized
+//      this to `overlongAnchorParagraphs`/`midSentenceAnchors` below too, so it is no longer only this
+//      one — down to the site(s) the triggering edit actually just wrote (`extractWrittenText`/
+//      `scopeHookAnchorSites`, both below), plus a hard cap (`HOOK_POINTER_ANCHOR_CAP`): a file already
 //      carrying hundreds of pre-existing pointer anchors (measured: up to 197 in one file) would otherwise
 //      inject the WHOLE list on every single edit to that file, regardless of relevance (card a862e8f0
 //      lead review, round 2). `computeFileReport` itself is unaffected — it still always returns the
 //      file's complete `pointerAnchors`; only what `runHook` chooses to SURFACE is narrowed.
+//  11. overlongAnchorParagraphs (card 5e5841dd) — an `@decision <id>` (or `sha:<id>`) SITE whose own
+//      CONTIGUOUS PARAGRAPH (the anchor's line plus its continuation lines, up to the next blank comment
+//      line, a new JSDoc tag, the next `@decision` site, or the enclosing block's own end — the SAME window
+//      `findPointerAnchors` computes, via the shared `anchorParagraphEnd` helper, never a second parser)
+//      spans more than `GUARD_MAX_LINES` lines. CLAUDE.md's comment taxonomy requires a guard/prohibition
+//      anchor be "compressed to <=3 lines" — nothing enforced it, and a paragraph that carries a real
+//      `@decision <id>` is silently counted as "anchored" (excluded from `unanchoredLongBlocks`) no matter
+//      how long it runs. REPORT-ONLY (does not fail `guards`) — the existing corpus carries pre-existing
+//      overlong anchor paragraphs; fixing them is extraction-lane work, not this check's job. One entry per
+//      SITE, not deduped by id, same convention as `pointerAnchors`/`bareCommitAnchors` above. Runs in BOTH
+//      the CLI scan and the per-file hook, same ground as `pointerAnchors` — it needs only the one file's
+//      own `blocks`/`anchors` already computed for that check, no extra cost. ⚠️ The HOOK's own advisory
+//      SCOPES this field too, same mechanism and same reason as `pointerAnchors` above (a main-tree
+//      baseline of 257, concentrated in the same giant files, would otherwise flood every edit there).
+//  12. midSentenceAnchors (card 5e5841dd) — an `@decision` token that is NOT the first non-prefix token on
+//      its own line (comment-syntax markers stripped) — i.e. the anchor is embedded MID-SENTENCE inside
+//      other prose rather than opening its own line/paragraph. This lets a whole contract paragraph get
+//      silently relabelled "anchored" by a token buried partway through its own text, a defect no other
+//      check here catches (every other check cares about the id's own SHAPE, never the token's POSITION on
+//      the line). REPORT-ONLY, same posture as `overlongAnchorParagraphs` above. One entry per SITE, not
+//      deduped by id. Runs in BOTH the CLI scan and the per-file hook, same ground as
+//      `overlongAnchorParagraphs` — it needs only the one file's own `anchors` already computed. ⚠️ The
+//      HOOK's own advisory SCOPES this field too, same mechanism as `pointerAnchors`/
+//      `overlongAnchorParagraphs` (a main-tree baseline of 155, same flood risk).
 //
 // A <= GUARD_MAX_LINES-line block that DOES carry an anchor is the convention's TARGET STATE (Class A: a
 // short guard/prohibition, permanently inline) and is counted separately as `guardClassBlocks` — it is
@@ -491,6 +516,33 @@ function startsNewDocTag(line) {
   return /^@[A-Za-z]/.test(stripCommentMarkers(line));
 }
 
+/** Compute the END line (inclusive) of anchor `a`'s own contiguous paragraph within `blocks` — the SAME
+ * paragraph-boundary rule `findPointerAnchors` uses (card 347d37d2), factored out here so every
+ * paragraph-scoped check in this file (`findPointerAnchors`, `findOverlongAnchorParagraphs` below) shares
+ * ONE computation of what an anchor's "own paragraph" is, rather than a second hand-derived parser (card
+ * 5e5841dd's own DoD: "don't invent a second parser"). Starting at `a.line`, the window extends through
+ * continuation lines until the FIRST of — (a) the enclosing comment BLOCK's own end; (b) the next
+ * `@decision` SITE inside the same block (that site's own paragraph is not this anchor's text, however
+ * contiguous the block); (c) a blank JSDoc line (`isBlankCommentLine`) — the ordinary paragraph-break
+ * convention; or (d) a line starting a new JSDoc tag (`startsNewDocTag`, e.g. `@param`). A site whose line
+ * falls outside every block (should not happen for a real anchor — `ANCHOR_RE` only ever matches inside a
+ * comment) degrades to a one-line window rather than throwing. */
+function anchorParagraphEnd(a, lines, blocks, anchors) {
+  const block = blocks.find((b) => a.line >= b.startLine && a.line <= b.endLine);
+  let windowEnd = block ? block.endLine : a.line;
+  if (block) {
+    for (const other of anchors) {
+      if (other === a || other.line <= a.line || other.line > block.endLine) continue;
+      if (other.line - 1 < windowEnd) windowEnd = other.line - 1;
+    }
+  }
+  for (let ln = a.line + 1; ln <= windowEnd; ln++) {
+    const line = lines[ln - 1] ?? "";
+    if (isBlankCommentLine(line) || startsNewDocTag(line)) { windowEnd = ln - 1; break; }
+  }
+  return windowEnd;
+}
+
 /** Every anchor SITE in `anchors` (as returned by `findFileAnchors`) whose own TEXT WINDOW contains a
  * pointer phrase (card a862e8f0) — "see docs/", "docs/adr/", "docs/decisions/", "docs/investigations/",
  * "see the linked record", or "see the record" — instead of stating the prohibition/consequence itself,
@@ -501,43 +553,65 @@ function startsNewDocTag(line) {
  * continuation lines); a real anchor's own pointer tail landing on its 4th+ line was a false
  * negative on exactly the shape this check exists to catch.
  *
- * The window is the anchor's own CONTIGUOUS PARAGRAPH: starting at the anchor's own line, it extends
- * through continuation lines until the FIRST of — (a) the enclosing
- * comment BLOCK's own end (`blocks`, from `extractCommentBlocks`); (b) the next `@decision` SITE inside
- * the same block (that site's own paragraph is not this anchor's text, however contiguous the block);
- * (c) a blank JSDoc line (`isBlankCommentLine`) — the ordinary paragraph-break convention; or (d) a line
- * starting a new JSDoc tag (`startsNewDocTag`, e.g. `@param`) — never the whole block indiscriminately,
- * so a pointer phrase sitting in an UNRELATED later paragraph of the same block (separated from the
- * anchor by one of these boundaries) is never miscounted as part of this anchor's own text. A site whose
- * line falls outside every block (should not happen for a real anchor — `ANCHOR_RE` only ever matches
- * inside a comment) degrades to a one-line window rather than throwing. One entry per SITE, not deduped
- * by id (same convention as `findBareCommitAnchors` — every site needs its own fix, independent of how
- * many other sites share the id). `phrase` carries the matched text (trimmed), so a report can show
- * exactly what triggered it, not just a line number.
+ * The window is the anchor's own CONTIGUOUS PARAGRAPH — see `anchorParagraphEnd` above for exactly where
+ * it ends — so a pointer phrase sitting in an UNRELATED later paragraph of the same block (separated from
+ * the anchor by one of those boundaries) is never miscounted as part of this anchor's own text. One entry
+ * per SITE, not deduped by id (same convention as `findBareCommitAnchors` — every site needs its own fix,
+ * independent of how many other sites share the id). `phrase` carries the matched text (trimmed), so a
+ * report can show exactly what triggered it, not just a line number.
  *
  * @decision a862e8f0 — ships this check REPORT-ONLY: most of this repo's pre-existing anchors already
  * used the pointer-tail style, too many to gate `guards` on without a separate cleanup first. */
 export function findPointerAnchors(lines, blocks, anchors) {
   const found = [];
   for (const a of anchors) {
-    const block = blocks.find((b) => a.line >= b.startLine && a.line <= b.endLine);
-    let windowEnd = block ? block.endLine : a.line;
-    if (block) {
-      for (const other of anchors) {
-        if (other === a || other.line <= a.line || other.line > block.endLine) continue;
-        if (other.line - 1 < windowEnd) windowEnd = other.line - 1;
-      }
-    }
-    for (let ln = a.line + 1; ln <= windowEnd; ln++) {
-      const line = lines[ln - 1] ?? "";
-      if (isBlankCommentLine(line) || startsNewDocTag(line)) { windowEnd = ln - 1; break; }
-    }
+    const windowEnd = anchorParagraphEnd(a, lines, blocks, anchors);
     const windowLines = [];
     for (let ln = a.line; ln <= windowEnd; ln++) windowLines.push(lines[ln - 1] ?? "");
     const m = POINTER_PHRASE_RE.exec(windowLines.join(" "));
     if (m) found.push({ ...a, phrase: m[0].trim() });
   }
   return found;
+}
+
+/** Every anchor SITE in `anchors` whose own paragraph (see `anchorParagraphEnd` above — the SAME window
+ * `findPointerAnchors` uses) spans more than `maxLines` lines (default `GUARD_MAX_LINES`, card 5e5841dd) —
+ * CLAUDE.md's comment taxonomy requires a guard/prohibition anchor be "compressed to <=3 lines", and
+ * nothing enforced it: a 6+ line anchor paragraph is silently counted as "anchored" (it carries a real
+ * `@decision <id>`) with no signal that the whole paragraph has drifted past the Class-A guard shape into
+ * unbounded narrative. `length` is the paragraph's own line count (`windowEnd - a.line + 1`), so a report
+ * can show how far over the cap it ran. One entry per SITE, not deduped by id, same convention as
+ * `findPointerAnchors`/`findBareCommitAnchors` above — every site needs its own fix. REPORT-ONLY, same
+ * posture as `pointerAnchors` (see that check's own doc): the baseline is non-zero (card 5e5841dd's own
+ * DoD-2), so this is not a zero-tolerance gate on the existing corpus. */
+export function findOverlongAnchorParagraphs(lines, blocks, anchors, maxLines = GUARD_MAX_LINES) {
+  const found = [];
+  for (const a of anchors) {
+    const windowEnd = anchorParagraphEnd(a, lines, blocks, anchors);
+    const length = windowEnd - a.line + 1;
+    if (length > maxLines) found.push({ ...a, length });
+  }
+  return found;
+}
+
+/** True iff `line`'s own `@decision` token (once comment-prefix markers are stripped via
+ * `stripCommentMarkers`, already used by `isBlankCommentLine`/`startsNewDocTag` above — not a second
+ * prefix-stripping implementation) is NOT the first thing on the line — i.e. the anchor is embedded
+ * MID-SENTENCE inside other prose rather than opening its own line/paragraph (card 5e5841dd's DoD-1(b)).
+ * This is what lets a whole contract paragraph get silently relabelled "anchored" by a token buried
+ * partway through its own prose — a defect no other check in this file catches, since every other check
+ * cares about the id's own SHAPE, never the token's POSITION on the line. */
+function isMidSentenceAnchorLine(line) {
+  return !/^@decision\b/i.test(stripCommentMarkers(line));
+}
+
+/** Every anchor SITE (as returned by `findFileAnchors`) whose own line embeds the `@decision` token
+ * mid-sentence rather than opening the line (card 5e5841dd's DoD-1(b)) — see `isMidSentenceAnchorLine`
+ * above for the exact predicate. One entry per SITE, not deduped by id, same convention as the other
+ * per-site checks in this file. REPORT-ONLY, same posture as `pointerAnchors`/`findOverlongAnchorParagraphs`
+ * — see card 5e5841dd's own DoD-2 for the measured baseline. */
+export function findMidSentenceAnchors(lines, anchors) {
+  return anchors.filter((a) => isMidSentenceAnchorLine(lines[a.line - 1] ?? ""));
 }
 
 /** True iff `nameLower` is `id` followed by a real boundary — mirrors decision-records.mjs's own
@@ -720,6 +794,8 @@ export function computeReport(repoRoot, opts = {}) {
   const allOverlong = [];
   const allSigilSpace = [];
   const allPointer = [];
+  const allOverlongParagraph = [];
+  const allMidSentence = [];
 
   for (const file of files) {
     let raw;
@@ -733,6 +809,8 @@ export function computeReport(repoRoot, opts = {}) {
     for (const o of findOverlongAnchorIds(lines)) allOverlong.push({ ...o, file });
     for (const s of findSigilSpaceAnchors(lines)) allSigilSpace.push({ ...s, file });
     for (const p of findPointerAnchors(lines, blocks, anchors)) allPointer.push({ ...p, file });
+    for (const o of findOverlongAnchorParagraphs(lines, blocks, anchors)) allOverlongParagraph.push({ ...o, file });
+    for (const m of findMidSentenceAnchors(lines, anchors)) allMidSentence.push({ ...m, file });
   }
 
   const records = listRecordIds(repoRoot);
@@ -815,6 +893,16 @@ export function computeReport(repoRoot, opts = {}) {
       // future guard would; a worker reads this field directly per docs/extraction-program.md.
       items: allPointer.map((p) => ({ file: relPath(repoRoot, p.file), line: p.line, id: p.id, ns: p.ns, phrase: p.phrase })),
     },
+    overlongAnchorParagraphs: {
+      count: allOverlongParagraph.length,
+      // REPORT-ONLY (card 5e5841dd — see this file's header, check 11): same posture as pointerAnchors.
+      items: allOverlongParagraph.map((o) => ({ file: relPath(repoRoot, o.file), line: o.line, id: o.id, ns: o.ns, length: o.length })),
+    },
+    midSentenceAnchors: {
+      count: allMidSentence.length,
+      // REPORT-ONLY (card 5e5841dd — see this file's header, check 12): same posture as pointerAnchors.
+      items: allMidSentence.map((m) => ({ file: relPath(repoRoot, m.file), line: m.line, id: m.id, ns: m.ns })),
+    },
     distribution: bucketDistribution(allBlocks),
   };
 }
@@ -840,16 +928,17 @@ export function isInScope(repoRoot, filePath) {
 
 /**
  * The hook's actual per-file check: checks (1) unanchoredLongBlocks, (2) orphanAnchors, (4) brokenAnchors,
- * (7) overlongAnchorIds, (8) sigilSpaceAnchors, (9) bareCommitAnchors, and (10) pointerAnchors — see this
- * file's header for why (3) orphanRecords, (5) oversizedRecords, and (6) collidingRecords are deliberately
- * excluded (all three need the whole repo's record/anchor corpus, not just this one file) — scoped to ONE
- * file's already-read `content`, never a repo walk. `listRecordIds` is the only filesystem cost beyond the
- * one file read: a `readdirSync` of up to three small `docs/<kind>` directories (a handful of entries each
- * in this repo today), not a source-tree scan — see this function's own doc in `computeReport` above for
- * why it's cheap. `bareCommitAnchors` adds one `git cat-file --batch-check` call scoped to this file's own
- * (usually tiny) set of bare-anchor ids — the same cost model `orphanAnchors`' sha-verification already
- * pays per file. `pointerAnchors` is free beyond that — it reuses `blocks`/`anchors` already computed here
- * for the other per-file checks, no extra filesystem or git cost.
+ * (7) overlongAnchorIds, (8) sigilSpaceAnchors, (9) bareCommitAnchors, (10) pointerAnchors, (11)
+ * overlongAnchorParagraphs, and (12) midSentenceAnchors — see this file's header for why (3) orphanRecords,
+ * (5) oversizedRecords, and (6) collidingRecords are deliberately excluded (all three need the whole repo's
+ * record/anchor corpus, not just this one file) — scoped to ONE file's already-read `content`, never a
+ * repo walk. `listRecordIds` is the only filesystem cost beyond the one file read: a `readdirSync` of up to
+ * three small `docs/<kind>` directories (a handful of entries each in this repo today), not a source-tree
+ * scan — see this function's own doc in `computeReport` above for why it's cheap. `bareCommitAnchors` adds
+ * one `git cat-file --batch-check` call scoped to this file's own (usually tiny) set of bare-anchor ids —
+ * the same cost model `orphanAnchors`' sha-verification already pays per file. `pointerAnchors`,
+ * `overlongAnchorParagraphs`, and `midSentenceAnchors` are all free beyond that — they reuse
+ * `blocks`/`anchors` already computed here for the other per-file checks, no extra filesystem or git cost.
  * Returns `null` for a file outside `isInScope`'s scope; otherwise a report shaped for `formatHookMessage`
  * below (empty arrays when the file is in scope but has nothing to flag — a real, distinguishable "clean"
  * result, not the same `null` as "not even scanned").
@@ -866,6 +955,8 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
   const overlong = findOverlongAnchorIds(lines);
   const sigilSpace = findSigilSpaceAnchors(lines);
   const pointer = findPointerAnchors(lines, blocks, anchors);
+  const overlongParagraph = findOverlongAnchorParagraphs(lines, blocks, anchors);
+  const midSentence = findMidSentenceAnchors(lines, anchors);
   const unanchoredLong = blocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
 
   const recordIdSet = new Set(listRecordIds(repoRoot).map((r) => r.id));
@@ -890,15 +981,19 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
     sigilSpaceAnchors: sigilSpace.map((s) => ({ line: s.line, match: s.match })),
     bareCommitAnchors: bareCommitAnchors.map((a) => ({ line: a.line, id: a.id })),
     pointerAnchors: pointer.map((p) => ({ line: p.line, id: p.id, ns: p.ns, phrase: p.phrase })),
+    overlongAnchorParagraphs: overlongParagraph.map((o) => ({ line: o.line, id: o.id, ns: o.ns, length: o.length })),
+    midSentenceAnchors: midSentence.map((m) => ({ line: m.line, id: m.id, ns: m.ns })),
   };
 }
 
 /** Render a non-empty `computeFileReport` result as the advisory text handed back to the agent.
- * `pointerAnchorsOmitted` (default 0, card a862e8f0) is the count `scopeHookPointerAnchors` trimmed off
+ * `pointerAnchorsOmitted` (default 0, card a862e8f0) is the count `scopeHookAnchorSites` trimmed off
  * `report.pointerAnchors` before this call — when >0, an extra line says so, rather than the agent seeing
- * a shorter list with no explanation for why. Optional and additive: every existing call site (including
- * every prior test) that omits it keeps rendering byte-identical output. */
-export function formatHookMessage(report, pointerAnchorsOmitted = 0) {
+ * a shorter list with no explanation for why. `overlongAnchorParagraphsOmitted`/`midSentenceAnchorsOmitted`
+ * (default 0, card 5e5841dd) are the SAME convention for those two fields. All three are optional and
+ * additive: every existing call site (including every prior test) that omits them keeps rendering
+ * byte-identical output. */
+export function formatHookMessage(report, pointerAnchorsOmitted = 0, overlongAnchorParagraphsOmitted = 0, midSentenceAnchorsOmitted = 0) {
   const lines = [];
   if (report.unanchoredLongBlocks.length) {
     lines.push(`${report.unanchoredLongBlocks.length} unanchored long comment block(s) in ${report.file} (>= ${report.minLines} lines, no @decision anchor):`);
@@ -928,8 +1023,22 @@ export function formatHookMessage(report, pointerAnchorsOmitted = 0) {
     lines.push(`${report.pointerAnchors.length} @decision anchor(s) in ${report.file} whose text POINTS AT the out-of-band record instead of STATING the prohibition/consequence inline (CLAUDE.md comment taxonomy: the anchor's own text carries the rule; the record is reached by resolving the id, not by a "see docs/…" tail — card a862e8f0):`);
     for (const p of report.pointerAnchors) lines.push(`  - ${report.file}:${p.line} — @decision ${renderAnchorId(p)} (matched "${p.phrase}")`);
   }
+  if (report.overlongAnchorParagraphs.length) {
+    lines.push(`${report.overlongAnchorParagraphs.length} over-long @decision anchor paragraph(s) in ${report.file} (CLAUDE.md comment taxonomy: a guard/prohibition anchor is compressed to <=${GUARD_MAX_LINES} lines):`);
+    for (const o of report.overlongAnchorParagraphs) lines.push(`  - ${report.file}:${o.line} — @decision ${renderAnchorId(o)} (${o.length} lines)`);
+  }
+  if (report.midSentenceAnchors.length) {
+    lines.push(`${report.midSentenceAnchors.length} mid-sentence @decision anchor(s) in ${report.file} (the "@decision" token is not the first thing on its line — it is embedded inside other prose rather than opening its own paragraph):`);
+    for (const m of report.midSentenceAnchors) lines.push(`  - ${report.file}:${m.line} — @decision ${renderAnchorId(m)} embedded mid-sentence`);
+  }
   if (pointerAnchorsOmitted > 0) {
     lines.push(`(${pointerAnchorsOmitted} more pointer-anchor site(s) in ${report.file} not shown here — run the CLI scan, \`node comment-anchor-lint.mjs .\`, for the full \`pointerAnchors\` list.)`);
+  }
+  if (overlongAnchorParagraphsOmitted > 0) {
+    lines.push(`(${overlongAnchorParagraphsOmitted} more overlong-anchor-paragraph site(s) in ${report.file} not shown here — run the CLI scan, \`node comment-anchor-lint.mjs .\`, for the full \`overlongAnchorParagraphs\` list.)`);
+  }
+  if (midSentenceAnchorsOmitted > 0) {
+    lines.push(`(${midSentenceAnchorsOmitted} more mid-sentence-anchor site(s) in ${report.file} not shown here — run the CLI scan, \`node comment-anchor-lint.mjs .\`, for the full \`midSentenceAnchors\` list.)`);
   }
   return `comment-anchor-lint (CLAUDE.md comment taxonomy, card 90b19799) flagged ${report.file}:\n${lines.join("\n")}\n`
     + `Advisory only: a long unanchored block may want "// @decision <id> — <the prohibition/consequence>" `
@@ -940,7 +1049,9 @@ export function formatHookMessage(report, pointerAnchorsOmitted = 0) {
     + `it directly precedes the hex id; a bare-commit anchor needs the "sha:" sigil added if a commit was `
     + `genuinely intended, or a real board card id if one was; a pointer anchor needs its "see docs/…" tail `
     + `rewritten to state the actual prohibition/consequence — the record itself is reached by the id, not `
-    + `by a pointer phrase in the comment.`;
+    + `by a pointer phrase in the comment; an over-long anchor paragraph needs compressing back to <=`
+    + `${GUARD_MAX_LINES} lines; a mid-sentence anchor needs its "@decision <id>" moved to open its own line/`
+    + `paragraph, not buried inside other prose.`;
 }
 
 /**
@@ -1001,13 +1112,14 @@ export function extractWrittenText(toolName, toolInput) {
 export const HOOK_POINTER_ANCHOR_CAP = 5;
 
 /**
- * Scope `pointerAnchors` (as returned on a `computeFileReport` result) down to the sites the triggering
- * edit actually just wrote, for the HOOK's advisory only — never changes what `computeFileReport`/
- * `computeReport` themselves report; this function is applied by `runHook`, after computing the full
- * report, purely to decide what to SURFACE. `lines` is the edited file's OWN lines (post-edit, same
- * split the report was computed against) — used to read each anchor SITE's own raw line text (line
- * `p.line`, 1-indexed) for the containment test. `writtenText`, from `extractWrittenText` above: `null`
- * means the payload shape couldn't be read (falls back to a capped, unscoped slice of the full list
+ * Scope any list of anchor-paragraph SITES — `pointerAnchors`, `overlongAnchorParagraphs`, or
+ * `midSentenceAnchors` (anything carrying a `.line`), as returned on a `computeFileReport` result — down
+ * to the sites the triggering edit actually just wrote, for the HOOK's advisory only — never changes what
+ * `computeFileReport`/`computeReport` themselves report; this function is applied by `runHook`, after
+ * computing the full report, purely to decide what to SURFACE. `lines` is the edited file's OWN lines
+ * (post-edit, same split the report was computed against) — used to read each site's own raw line text
+ * (line `p.line`, 1-indexed) for the containment test. `writtenText`, from `extractWrittenText` above:
+ * `null` means the payload shape couldn't be read (falls back to a capped, unscoped slice of the full list
  * rather than either flooding or going silent — an unrecognized payload must never suppress a real
  * finding, but must also never dump everything); any string means "test each site's own anchor line for
  * containment in this text" — a site is kept IFF its own (trimmed) anchor line text is a substring of
@@ -1015,23 +1127,37 @@ export const HOOK_POINTER_ANCHOR_CAP = 5;
  * whose anchor line happens to be reproduced verbatim inside an unrelated large `new_string`/`content` —
  * accepted, since a false keep only ever costs a little extra advisory text, never a missed real one (the
  * failure mode this fix exists to prevent is the OPPOSITE: silently dropping a site the agent DID just
- * write). Always applies `HOOK_POINTER_ANCHOR_CAP` on top, regardless of scoping outcome, as the
- * belt-and-suspenders bound documented on that constant. Returns `{items, omitted}` — `omitted` is the
- * count trimmed by the cap (0 when nothing was trimmed), used by `formatHookMessage` to say so rather than
- * silently truncating.
+ * write). Always applies `cap` (default `HOOK_POINTER_ANCHOR_CAP`) on top, regardless of scoping outcome,
+ * as the belt-and-suspenders bound documented on that constant. Returns `{items, omitted}` — `omitted` is
+ * the count trimmed by the cap (0 when nothing was trimmed), used by `formatHookMessage` to say so rather
+ * than silently truncating.
  *
  * @decision a862e8f0 — never changes what `computeFileReport`/`computeReport` themselves report, only
  * what the hook's own advisory surfaces.
+ *
+ * Card 5e5841dd — generalized from the original `pointerAnchors`-only scoper (a862e8f0) to cover
+ * `overlongAnchorParagraphs`/`midSentenceAnchors` too, one shared scoper rather than a second one per
+ * field: a main-tree baseline of 257/155 (concentrated in the same giant files as pointerAnchors, e.g.
+ * sessions/service.ts, pty/host.ts) would flood the hook's advisory on every edit to those files exactly
+ * like the incident this scoper was built to fix, if either field went into the hook unscoped.
  */
-export function scopeHookPointerAnchors(pointerAnchors, lines, writtenText) {
+export function scopeHookAnchorSites(sites, lines, writtenText, cap = HOOK_POINTER_ANCHOR_CAP) {
   const candidates = writtenText === null
-    ? pointerAnchors
-    : pointerAnchors.filter((p) => {
+    ? sites
+    : sites.filter((p) => {
         const anchorLineText = (lines[p.line - 1] ?? "").trim();
         return anchorLineText.length > 0 && writtenText.includes(anchorLineText);
       });
-  if (candidates.length <= HOOK_POINTER_ANCHOR_CAP) return { items: candidates, omitted: 0 };
-  return { items: candidates.slice(0, HOOK_POINTER_ANCHOR_CAP), omitted: candidates.length - HOOK_POINTER_ANCHOR_CAP };
+  if (candidates.length <= cap) return { items: candidates, omitted: 0 };
+  return { items: candidates.slice(0, cap), omitted: candidates.length - cap };
+}
+
+/** `pointerAnchors`-specific alias of `scopeHookAnchorSites` (card a862e8f0's original name), kept so
+ * existing callers/imports (including `test/comment-anchor-lint-hook.mjs`) are unaffected by the
+ * generalization above — behaviorally identical to `scopeHookAnchorSites(pointerAnchors, lines,
+ * writtenText, HOOK_POINTER_ANCHOR_CAP)`. */
+export function scopeHookPointerAnchors(pointerAnchors, lines, writtenText) {
+  return scopeHookAnchorSites(pointerAnchors, lines, writtenText, HOOK_POINTER_ANCHOR_CAP);
 }
 
 /**
@@ -1045,16 +1171,22 @@ export function scopeHookPointerAnchors(pointerAnchors, lines, writtenText) {
  * file outside it can never do. A non-Write/Edit/MultiEdit tool, a missing/unreadable file, or a file
  * `isInScope` rejects are all fast, silent no-ops — byte-identical to a session with no hook wired at all.
  * Always exits 0 (see the dispatcher at the bottom of this file): a bug here must never block a real Write.
- * `pointerAnchors` gets ONE extra step here that no other check in this file needs: `computeFileReport`
- * still returns the file's FULL, unscoped `pointerAnchors` list (every check it computes always
- * describes the whole file — that contract doesn't change), but `runHook` narrows what it actually
- * SURFACES to `scopeHookPointerAnchors`'s output before calling `formatHookMessage` — every other field
- * is passed through untouched (see `extractWrittenText`/`scopeHookPointerAnchors` above for how the
- * scoping itself works).
+ * `pointerAnchors`, `overlongAnchorParagraphs`, and `midSentenceAnchors` each get ONE extra step here
+ * that no other check in this file needs: `computeFileReport` still returns the file's FULL, unscoped
+ * list for all three (every check it computes always describes the whole file — that contract doesn't
+ * change), but `runHook` narrows what it actually SURFACES to `scopeHookAnchorSites`'s output (one shared
+ * scoper, applied to all three) before calling `formatHookMessage` — every other field is passed through
+ * untouched (see `extractWrittenText`/`scopeHookAnchorSites` above for how the scoping itself works).
  *
  * @decision a862e8f0 — a single Edit to a file already carrying hundreds of pre-existing pointer anchors
  * would otherwise inject the ENTIRE list into the agent's context on EVERY edit, not just the site(s) it
  * actually just wrote.
+ *
+ * Card 5e5841dd — `overlongAnchorParagraphs`/`midSentenceAnchors` carry the SAME flood risk: a main-tree
+ * baseline of 257/155, concentrated in the same giant files `pointerAnchors` already floods on (e.g.
+ * sessions/service.ts, pty/host.ts), would otherwise inject a long list of pre-existing violations on
+ * EVERY edit to those files, regardless of relevance — the exact incident `scopeHookAnchorSites` exists
+ * to prevent, just for two more fields.
  */
 async function runHook(repoRootArg) {
   if (!repoRootArg) return;
@@ -1082,15 +1214,24 @@ async function runHook(repoRootArg) {
   if (!report) return;
 
   const writtenText = extractWrittenText(tool, payload.tool_input);
-  const pointerScope = scopeHookPointerAnchors(report.pointerAnchors, content.split(/\r?\n/), writtenText);
-  const scopedReport = { ...report, pointerAnchors: pointerScope.items };
+  const editedLines = content.split(/\r?\n/);
+  const pointerScope = scopeHookAnchorSites(report.pointerAnchors, editedLines, writtenText);
+  const overlongScope = scopeHookAnchorSites(report.overlongAnchorParagraphs, editedLines, writtenText);
+  const midSentenceScope = scopeHookAnchorSites(report.midSentenceAnchors, editedLines, writtenText);
+  const scopedReport = {
+    ...report,
+    pointerAnchors: pointerScope.items,
+    overlongAnchorParagraphs: overlongScope.items,
+    midSentenceAnchors: midSentenceScope.items,
+  };
 
   if (scopedReport.unanchoredLongBlocks.length === 0 && scopedReport.orphanAnchors.length === 0
     && scopedReport.brokenAnchors.length === 0 && scopedReport.overlongAnchorIds.length === 0
     && scopedReport.sigilSpaceAnchors.length === 0 && scopedReport.bareCommitAnchors.length === 0
-    && scopedReport.pointerAnchors.length === 0) return;
+    && scopedReport.pointerAnchors.length === 0 && scopedReport.overlongAnchorParagraphs.length === 0
+    && scopedReport.midSentenceAnchors.length === 0) return;
 
-  const msg = formatHookMessage(scopedReport, pointerScope.omitted);
+  const msg = formatHookMessage(scopedReport, pointerScope.omitted, overlongScope.omitted, midSentenceScope.omitted);
   await emitHook({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: msg } });
 }
 
