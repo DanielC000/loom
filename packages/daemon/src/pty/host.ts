@@ -8397,52 +8397,17 @@ export class PtyHost {
         console.log(`[submit] ${sessionId} Enter attempt ${attempt} NOT confirmed within ${SUBMIT_VERIFY_TIMEOUT_MS}ms — retrying`);
         this.sendEnterAndVerify(sessionId, attempt + 1, gen);
       } else {
-        // Card 71de1f9c: most give-ups are FALSE NEGATIVES — the Enter genuinely registered and a turn is
-        // running, only the confirming hook's round-trip is slow (observed under fleet load: 79% of a
-        // measured sample of give-ups WERE followed by a UserPromptSubmit for the same session). Treating
-        // every give-up as a real failure is actively harmful, not just imprecise: clearing busy here
-        // reopens enqueueStdin's `!live.busy` immediate-submit path, so the NEXT message can land — and get
-        // interleaved with — a turn that is actually still generating (the owner-reported "text sitting in
-        // the input field, unsent" symptom). Distinguish the two cases with `lastOutputAt` (bumped on every
-        // real pty.onData chunk, already used the same way by healIfStuck): if the engine produced ANY
-        // output after THIS attempt's own Enter write, the Enter almost certainly reached and registered
-        // with the engine — by attempt>1 (always true at give-up in production), the reassert above already
-        // guaranteed the paste was closed going into this Enter, so a landed keystroke here can only be a
-        // real submit, not paste-content-swallowing. Anchoring on the FINAL Enter write (not on submit()'s
-        // own start) is required: the pasted body's own render bumps lastOutputAt within the very first
-        // attempt, long before give-up, so anchoring any earlier makes the check vacuously true and useless.
-        // Real-engine measurement (not a guess): a claude sitting genuinely idle at the composer emitted
-        // ZERO pty output over an 85+ second observation window on this project's own live fleet, while a
-        // concurrently-busy session's output stream grew continuously in the same window — confirming idle
-        // claude does not emit periodic output (no spinner/repaint chatter) that could make this discriminator
-        // misfire on a genuine drop. If this read is ever wrong regardless, healIfStuck's existing stale
-        // backstop (busySince AND lastOutputAt both stale) still recovers a truly-wedged session — just not
-        // as fast as this branch would have.
-        //
-        // REJECTED ALTERNATIVE — do not "simplify" this back into a bigger SUBMIT_VERIFY_TIMEOUT_MS. Give-
-        // ups are CONTENTION-DRIVEN BURSTS, not uniformly-distributed slow hooks (measured: median gap
-        // between consecutive give-ups is 12 log lines vs ~39 expected under a uniform distribution, 34% land
-        // within 10 lines of each other, and local [submit]+[hook] log density around a give-up is 54.3 vs
-        // 43.7 baseline — give-ups cluster where the daemon is already busy). A larger constant is therefore
-        // LOAD-SENSITIVE: it just relocates the threshold to wherever fleet contention happens to peak next,
-        // the same anti-pattern this project has hit and reverted repeatedly (cards 595aad10, fea23514,
-        // 0fa5beef). Keying on `lastOutputAt` instead is LOAD-TOLERANT — it asks "did the engine actually do
-        // something" rather than "did enough wall-clock time pass," so it stays correct regardless of how
-        // bad the contention gets.
-        // Card 29b3c396: the OUTPUT discriminator below is a heuristic, not proof (card 3ce3fa39) — it
-        // used to `return` immediately on a positive read, committing FOREVER to "a turn is running" with
-        // no later re-check. A LIVE specimen showed that commitment can be wrong in a way that never
-        // self-corrects: our OWN reassert-paste write can provoke a deterministic engine echo (see
-        // `healIfStuck`'s doc for a first-hand confirmed instance), which satisfies this discriminator
-        // even when no turn ever starts — and because `busySince` only re-arms on a GENUINE confirming
-        // hook (`setBusy(sessionId, true, "user-prompt-submit-hook")`), a session stuck here never becomes
-        // stale enough for `healIfStuck`'s own OUTPUT-keyed backstop either: every `worker_flush` retry
-        // re-triggers the identical echo, indefinitely refreshing `lastOutputAt` out from under it. Fix:
-        // route BOTH discriminators (output-seen below, and the pre-existing no-output branch) through the
-        // SAME bounded hook-based re-check (`awaitGiveUpConfirmSettle` — the free, decisive signal is
-        // `enterConfirmed`, the local proxy for "a turnSeq-advancing hook fired for this generation") before
-        // treating EITHER as terminal. A session that never once confirms now always reaches GIVE-UP
-        // RECOVERY, regardless of which heuristic suppressed it first.
+        // @decision 71de1f9c — most give-ups are FALSE NEGATIVES: GIVE-UP SUPPRESSED when the engine
+        // produced output after THIS attempt's own final Enter write, never judged against submit()'s
+        // own start (that would be vacuously true from the pasted body's own render).
+
+        // @decision 0fa5beef — do not widen SUBMIT_VERIFY_TIMEOUT_MS to chase this: give-ups are
+        // CONTENTION-DRIVEN BURSTS, not uniformly slow hooks, and a bigger constant only relocates the
+        // threshold to wherever fleet contention peaks next (cards 595aad10, fea23514, 0fa5beef).
+
+        // @decision 29b3c396 — the output discriminator is a heuristic (card 3ce3fa39), not proof: route
+        // BOTH outcomes (output-seen below, and the no-output branch) through the same bounded
+        // `awaitGiveUpConfirmSettle` re-check before treating either as terminal.
         const outputSeen = l.lastOutputAt > enterWrittenAt;
         if (outputSeen) {
           // eslint-disable-next-line no-console
