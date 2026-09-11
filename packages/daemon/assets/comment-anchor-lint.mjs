@@ -142,16 +142,22 @@
 //      own `blocks`/`anchors` already computed for that check, no extra cost. ⚠️ The HOOK's own advisory
 //      SCOPES this field too, same mechanism and same reason as `pointerAnchors` above (a main-tree
 //      baseline of 257, concentrated in the same giant files, would otherwise flood every edit there).
-//  12. midSentenceAnchors (card 5e5841dd) — an `@decision` token that is NOT the first non-prefix token on
-//      its own line (comment-syntax markers stripped) — i.e. the anchor is embedded MID-SENTENCE inside
-//      other prose rather than opening its own line/paragraph. This lets a whole contract paragraph get
-//      silently relabelled "anchored" by a token buried partway through its own text, a defect no other
-//      check here catches (every other check cares about the id's own SHAPE, never the token's POSITION on
-//      the line). REPORT-ONLY, same posture as `overlongAnchorParagraphs` above. One entry per SITE, not
-//      deduped by id. Runs in BOTH the CLI scan and the per-file hook, same ground as
-//      `overlongAnchorParagraphs` — it needs only the one file's own `anchors` already computed. ⚠️ The
-//      HOOK's own advisory SCOPES this field too, same mechanism as `pointerAnchors`/
-//      `overlongAnchorParagraphs` (a main-tree baseline of 155, same flood risk).
+//  12. midSentenceAnchors (card 5e5841dd; per-occurrence fix card f3c054f3) — an `@decision` OCCURRENCE that
+//      is NOT the first non-prefix token before ITS OWN position on the line (comment-syntax markers
+//      stripped) — i.e. the anchor is embedded MID-SENTENCE inside other prose rather than opening its own
+//      line/paragraph. This lets a whole contract paragraph get silently relabelled "anchored" by a token
+//      buried partway through its own text, a defect no other check here catches (every other check cares
+//      about the id's own SHAPE, never the token's POSITION on the line). Judged per OCCURRENCE (`a.col`,
+//      card f3c054f3) rather than once per whole line: the original whole-line form could only ever reflect
+//      the FIRST `@decision` on a line, so a SECOND `@decision` sharing that same physical line silently
+//      inherited the first one's "opens the line" verdict regardless of where it actually sat — invisible to
+//      every check in this file, since `embeddedAnchors`/`overlongAnchorParagraphs` are both keyed off
+//      `anchorParagraphEnd`'s LINE-level window, never a same-line position. REPORT-ONLY, same posture as
+//      `overlongAnchorParagraphs` above. One entry per SITE, not deduped by id. Runs in BOTH the CLI scan and
+//      the per-file hook, same ground as `overlongAnchorParagraphs` — it needs only the one file's own
+//      `anchors` already computed. ⚠️ The HOOK's own advisory SCOPES this field too, same mechanism as
+//      `pointerAnchors`/`overlongAnchorParagraphs` (re-measure the main-tree baseline fresh — it moved with
+//      this card's fix — rather than trusting a number restated here).
 //  13. embeddedAnchors (card a873621e; round 2 lead review) — an `@decision` SITE whose own line ALSO
 //      opens correctly (checked via `isMidSentenceAnchorLine` — `midSentenceAnchors` above owns every site
 //      that doesn't; round-2 finding: 15 of the original 24 hits on this repo were exactly that population,
@@ -482,12 +488,14 @@ export function extractCommentBlocks(lines) {
 
 /** Every `@decision <id>` site in `lines`, independent of comment-block grouping (an anchor is still an
  * anchor even on a line this file's own block heuristic fails to classify as a comment). Each entry now
- * also carries `ns` (`"card"` or `"sha"`, card 969b0e1c) alongside the unchanged `id`/`line` fields —
- * purely additive, so existing callers that only read `.id`/`.line` are unaffected. */
+ * also carries `ns` (`"card"` or `"sha"`, card 969b0e1c) and `col` (the match's 0-based character offset
+ * on its own line, card f3c054f3 — lets `isMidSentenceAnchorLine` below judge a SPECIFIC anchor's own
+ * position rather than the whole line) alongside the unchanged `id`/`line` fields — both purely additive,
+ * so existing callers that only read `.id`/`.line` are unaffected. */
 export function findFileAnchors(lines) {
   const found = [];
   lines.forEach((line, i) => {
-    for (const m of line.matchAll(ANCHOR_RE)) found.push({ ...parseAnchorMatch(m), line: i + 1 });
+    for (const m of line.matchAll(ANCHOR_RE)) found.push({ ...parseAnchorMatch(m), line: i + 1, col: m.index });
   });
   return found;
 }
@@ -645,24 +653,32 @@ export function findOverlongAnchorParagraphs(lines, blocks, anchors, maxLines = 
   return found;
 }
 
-/** True iff `line`'s own `@decision` token (once comment-prefix markers are stripped via
- * `stripCommentMarkers`, already used by `isBlankCommentLine`/`startsNewDocTag` above — not a second
- * prefix-stripping implementation) is NOT the first thing on the line — i.e. the anchor is embedded
- * MID-SENTENCE inside other prose rather than opening its own line/paragraph (card 5e5841dd's DoD-1(b)).
- * This is what lets a whole contract paragraph get silently relabelled "anchored" by a token buried
- * partway through its own prose — a defect no other check in this file catches, since every other check
- * cares about the id's own SHAPE, never the token's POSITION on the line. */
-function isMidSentenceAnchorLine(line) {
-  return !/^@decision\b/i.test(stripCommentMarkers(line));
+/** True iff the text on `line` BEFORE character offset `col` (once comment-prefix markers are stripped,
+ * via the same single-application chain `stripCommentMarkers` uses — not a second implementation) is
+ * non-empty — i.e. THIS SPECIFIC `@decision` occurrence is not the first thing on the line, so it is
+ * embedded MID-SENTENCE inside other prose rather than opening its own line/paragraph (card 5e5841dd's
+ * DoD-1(b)). This is what lets a whole contract paragraph get silently relabelled "anchored" by a token
+ * buried partway through its own prose — a defect no other check in this file catches, since every other
+ * check cares about the id's own SHAPE, never the token's POSITION on the line. Judging a SPECIFIC
+ * occurrence's own prefix (not the whole line, card f3c054f3) is what lets this also catch a SECOND
+ * `@decision` sharing one physical line with a first: testing the whole line's own start (the original
+ * shape) could only ever see the FIRST occurrence's own position, so a second anchor on that same line
+ * inherited the first one's "opens the line" verdict no matter where it actually sat. */
+function isMidSentenceAnchorLine(line, col) {
+  const before = line.slice(0, col).trim().replace(/^\/\*\*?/, "").replace(/^\*/, "").replace(/^\/\//, "").trim();
+  return before.length > 0;
 }
 
-/** Every anchor SITE (as returned by `findFileAnchors`) whose own line embeds the `@decision` token
+/** Every anchor SITE (as returned by `findFileAnchors`) whose own `@decision` occurrence embeds the token
  * mid-sentence rather than opening the line (card 5e5841dd's DoD-1(b)) — see `isMidSentenceAnchorLine`
- * above for the exact predicate. One entry per SITE, not deduped by id, same convention as the other
- * per-site checks in this file. REPORT-ONLY, same posture as `pointerAnchors`/`findOverlongAnchorParagraphs`
- * — see card 5e5841dd's own DoD-2 for the measured baseline. */
+ * above for the exact predicate, now judged per-occurrence via `a.col` (card f3c054f3) rather than once
+ * per line, so a SECOND `@decision` sharing a line with a first is no longer invisible to this check just
+ * because the first one legitimately opens the line. One entry per SITE, not deduped by id, same
+ * convention as the other per-site checks in this file. REPORT-ONLY, same posture as
+ * `pointerAnchors`/`findOverlongAnchorParagraphs` — see card 5e5841dd's own DoD-2 for the measured
+ * baseline. */
 export function findMidSentenceAnchors(lines, anchors) {
-  return anchors.filter((a) => isMidSentenceAnchorLine(lines[a.line - 1] ?? ""));
+  return anchors.filter((a) => isMidSentenceAnchorLine(lines[a.line - 1] ?? "", a.col));
 }
 
 /** True iff `stripped` (already comment-marker-stripped) ends a sentence — card a873621e's own
@@ -747,8 +763,11 @@ export function findEmbeddedAnchors(lines, blocks, anchors) {
     if (!block) continue;
     // `midSentenceAnchors` already owns "the @decision token isn't first on its own line" — never count
     // that population here too (round-2 lead-review finding: 15 of 24 hits on main were exactly this,
-    // because this check never verified the anchor's OWN line before looking at its neighbors).
-    if (isMidSentenceAnchorLine(lines[a.line - 1] ?? "")) continue;
+    // because this check never verified the anchor's OWN line before looking at its neighbors). Passing
+    // `a.col` (card f3c054f3) keeps this skip correct when a second `@decision` shares `a`'s own line with
+    // a first — without it this call judged the LINE, not `a`'s own occurrence, and a second same-line
+    // anchor wrongly inherited the first one's "opens the line" verdict.
+    if (isMidSentenceAnchorLine(lines[a.line - 1] ?? "", a.col)) continue;
 
     let rawPrevViolation = false;
     let isStackedTail = false;
