@@ -484,6 +484,7 @@ export class ChatGateway {
    *       survives this "/new"/"/reset" clean-slate boundary.
    *       @decision 2b26035c — sessionId does NOT change across "/new"/"/reset"; skipping this call
    *       is what lets the grant/trust window silently survive a reset instead of closing with it.
+   *
    * Runs BEFORE the command's ack is sent (see handleInbound) — the persisted history is already empty and
    * any live viewer already cleared by the time the ack is recorded+pushed as the first message of the new,
    * empty conversation. Never throws.

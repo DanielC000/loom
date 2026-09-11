@@ -9,8 +9,9 @@ import { SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, DECISION_RECORDS_SCRIPT,
 export const PRE_TOOL_USE_ATTRIBUTION_MATCHER = "mcp__loom-orchestration__worker_report|mcp__loom-tasks__memory_write";
 
 /** @decision sha:29b22e7e — overrides both resume-gate env thresholds so the CLI's "resume from
- *  summary" gate never renders (default choice force-compacted 3 managers at once, 2026-07-10). Two
- *  independent layers — never rely on this override alone; keep host.ts's verify-retry as fallback.
+ *  summary" gate never renders (default choice force-compacted 3 managers at once, 2026-07-10).
+ *
+ *  Two independent layers — never rely on this override alone; keep host.ts's verify-retry as fallback.
  *  Do not lower either threshold back toward a value a real session could reach, either. */
 const RESUME_GATE_ENV_OVERRIDE: Record<string, string> = {
   // ~100 years — no real session is ever that old; suppresses the gate via the age check alone.
@@ -96,7 +97,9 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  * `--hook` mode (never a repo-wide scan — see that script's own doc for the whole-repo cost this
  * deliberately avoids), scoped to just the ONE file a Write/Edit just touched — gated on the explicit
  * `docLint` param (see {@link SpawnOpts.docLint} in host.ts) AND `repoPath` (a caller that omits
- * `repoPath` entirely never gets this hook wired). @decision d92ec82b — do not re-couple this gate
+ * `repoPath` entirely never gets this hook wired).
+ *
+ * @decision d92ec82b — do not re-couple this gate
  * to `vaultPath` truthiness: that reintroduces a docLint-on/no-vault project silently losing this
  * source-file lint, even though the hook never touches vault content. Advisory only — never blocks.
  *
@@ -109,7 +112,9 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  * is wired ONLY when `repoPath` resolves to a project that has adopted at least one of the three record
  * stores (see `anyDecisionRecordStoreExists` below, which mirrors `decision-records.mjs`'s own runtime
  * `anyStoreExists` bail — keep both in sync). `repoPath` OMITTED falls back to the pre-5244adc2 behavior
- * of always wiring the hook, so every existing caller stays byte-identical. @decision 5244adc2 — a
+ * of always wiring the hook, so every existing caller stays byte-identical.
+ *
+ * @decision 5244adc2 — a
  * session already LIVE when the first store appears is NOT rewired until its own next resume — an
  * accepted, documented gap, not a bug.
  *

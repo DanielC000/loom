@@ -6,7 +6,9 @@ import { computeDeployStaleness, type DeployStalenessResult } from "../deploy-st
 /**
  * Injects a "Where things live" context block (the project's absolute `repoPath` + `vaultPath`, plus the
  * fully-resolved resume-doc path) into a MANAGER session's startup prompt at spawn, so a cold-boot
- * orchestrator never has to Glob for its own resume doc. @decision sha:4dfda727
+ * orchestrator never has to Glob for its own resume doc.
+ *
+ * @decision sha:4dfda727
  *
  * The block is a PRE-block (context first, then the agent's own doctrine/kickoff) — mirrors how
  * `composeRunStartupPrompt` wraps a run's doctrine + input. PURE-ISH (one guarded `fs.statSync` on the

@@ -26,6 +26,7 @@ export interface TranscriptTurn {
  * @decision 2b099e48 — a zero from this coupling regex means genuine absence only because it is
  * POSITIVE-CONTROLLED against `pty/claude-config.ts` (20 known hits); widen the pattern and
  * re-control it before trusting a bare zero from a wider or narrower version.
+ *
  * ⚠️ **That regex is NOT the whole coupling surface** — widening it by hand (case-insensitive
  * bare `claude`) surfaced a 19th file the narrower pattern is structurally blind to:
  * `companion/chat-gateway.ts:491`, `this.submitTurn(sessionId, "/clear")` — Claude Code's own built-in

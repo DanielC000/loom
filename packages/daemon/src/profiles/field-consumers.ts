@@ -1,6 +1,7 @@
 /**
  * @decision d34dd208 — the "structured field that lies" class: a Profile field the validator accepts
  * (and the UI shows as set) that has NO real consumer on some supported harness's spawn/runtime path.
+ *
  * This registry is the machine-readable declaration `test/profile-field-consumer-guard.mjs` reads to
  * decide, PER FIELD × PER HARNESS, whether a real consumer exists, a legitimate exemption, or an
  * already-tracked open gap — so a fourth instance can no longer ship as silence. See that guard's own

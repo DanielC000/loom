@@ -490,6 +490,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // @decision 9ccedbee — never gate this hook by routeTier/Tier classification again: v1 did, left every
   // Tier-1 route open, and a real Loom agent exploited exactly that gap. This hook asks its own question
   // ("does an agent need this from a shell?"), not trust-tier.ts's "is this safe for a remote human?".
+  //
   //   - Scope: every non-GET/HEAD `/api/*` route, PLUS the `/ws/term` and `/ws/companion` upgrades (both
   //     viewing AND writing — card 351e89af), PLUS `POST /internal/shutdown`/`/internal/update` (card
   //     93249b52). Untouched: `/mcp/:sessionId`, `POST /internal/hook` (deliberate — see the comment at
@@ -1811,6 +1812,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // @decision sha:e6042f2f — ADD/upgrade needs a respawn (the companion PROCESS only fetches `tools/list`
   // once); REVOKE/downgrade is already live server-side with none needed. Never skip
   // `closeCompanionTrustWindow` on a grant write — a Tier-A warm window can otherwise outlive the change.
+  //
   // Grants are keyed on the natural key (sessionId, capability, projectId) — POST/PUT both upsert; POST
   // additionally 201s a fresh grant while PUT 404s when there's nothing existing to update (so a client
   // can tell "created" from "must exist").
@@ -2630,6 +2632,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // @decision a2407ed4 — never extend the loopback-secret bearer guard to /internal/hook (high-frequency,
   // not human-driven — gating it wrong breaks every spawn). verifyHookToken (a per-session token, not the
   // shared secret) instead closes the forge-against-any-session gap this exclusion otherwise left open.
+  //
   // ⛔ THIS IS NOT "HOOKS ARE NOW AUTHENTICATED" and does NOT achieve isolation — a co-resident caller that
   // deliberately reads the TARGET session's own settings.json can still extract the token; that ceiling is
   // inherited from 93249b52, not closed by this fix.
@@ -3589,7 +3592,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // MCP tool. HUMAN-only loopback read; READ-ONLY — no write/forget surface here.
   // @decision 41c3f546 — backlinks are resolved via findInboundBacklinksBulk over ONE fetched corpus,
   // never per-row (N+1 fetches + N full-corpus scans measured ~4.2s vs ~15ms bulk on this project's
-  // corpus). @decision d371a9bf — never repoint this route at mcp/memory.ts's listProjectMemoryEntries
+  // corpus).
+  //
+  // @decision d371a9bf — never repoint this route at mcp/memory.ts's listProjectMemoryEntries
   // (drags in requestAnnotations/everDelivered, which would mislead a human reader) — backlinks stays
   // the structured {keys,totalFound} shape here, never the agent-facing prose annotation lines.
   app.get("/api/projects/:id/memory", async (req, reply) => {
@@ -4220,7 +4225,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const v = validatePlatformConfigPatch((req.body as { config?: unknown })?.config ?? req.body);
     if (!v.ok) return reply.code(400).send({ error: `invalid platform config: ${v.error}` });
     // Shallow-merge the submitted top-level keys onto the PERSISTED config; an omitted key is left
-    // alone, an explicit `null` (card fd55ac8a) deletes it. @decision ba9ccd75 — DEEP_MERGE_GROUPS get a
+    // alone, an explicit `null` (card fd55ac8a) deletes it.
+    //
+    // @decision ba9ccd75 — DEEP_MERGE_GROUPS get a
     // FIELD-BY-FIELD merge instead — a shallow replace here silently wipes sibling fields in that group.
     const DEEP_MERGE_GROUPS = new Set(["rateLimit", "watchers", "timeouts", "backup", "gateRetry"]);
     const before = deps.db.getPlatformConfig();

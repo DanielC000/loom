@@ -121,7 +121,9 @@ export class ToolAttributionTracker {
   /**
    * Called at MCP-request time (`gateway/server.ts`, via `PtyHost.consumeToolAttribution`). Consumes
    * (removes) the matched entry ONLY in the unambiguous single-candidate case — the ambiguous case is
-   * left in place to age out via TTL instead of being drained or guessed (@decision cd0c7fee).
+   * left in place to age out via TTL instead of being drained or guessed.
+   *
+   * @decision cd0c7fee
    *
    * @decision cd0c7fee — "confirmed-main" is a positive assertion built on an ABSENCE (a fresh entry
    * with no `agentId`), with no version floor: a future Claude Code that stops populating `agent_id`

@@ -207,7 +207,10 @@ export function seedSetupProjectRename(db: Db): string | null {
  * fresh installs.
  *
  * Scoped tightly so it only ever touches that one agent:
- *   - @decision sha:aecc6551 — the reserved "Platform" setup home ONLY (resolved by name, never a
+ *
+ * @decision sha:aecc6551
+ *
+ *   - the reserved "Platform" setup home ONLY (resolved by name, never a
  *     name-agnostic reserved lookup — gotcha #1; first named at this exact site) — see record;
  *   - matched by the EXACT old literal — a user-renamed agent (any other name) is left alone;
  *   - AND it must run the setup-role profile (the operator's rig) — a stray same-named agent isn't renamed.

@@ -12,7 +12,11 @@
  * MECHANISM: a tail-poll over the durable `orchestration_events` log keyed on `Db.listEventsSince`'s `seq`
  * cursor — NEVER sqlite's own `rowid` (a hard-deleted row's rowid can be REUSED, which would silently
  * retire the watermark past a reused id and drop a real alert forever; `seq` is never-reused and monotonic
- * — see its doc in db.ts's SCHEMA). @decision sha:31ca9b5d. Also NOT the single-slot
+ * — see its doc in db.ts's SCHEMA).
+ *
+ * @decision sha:31ca9b5d
+ *
+ * Also NOT the single-slot
  * `Db.setEventListener` the alert-webhook emitter (orchestration/alert-webhook.ts) already occupies — that
  * slot can hold only one subscriber, and this watcher needs its OWN per-session watermark anyway (a
  * listener callback has no natural per-companion cursor). Each tick: resolve the grant, gate on
@@ -50,7 +54,9 @@ export type AttentionAlertClass = (typeof ATTENTION_ALERT_CLASSES)[number];
  * the remaining OWNER-SIGNAL classes, which genuinely need the owner's attention. Excluded ONLY from
  * Companion "lead mode"'s `"*"` wildcard PUSH subscription (the `"*"` branch in `resolveConfig` below, the
  * ONE place this list is consulted) — an explicit `alertClasses` entry naming one of these classes always
- * still gets pushed, wildcard or not. @decision b5c606aa
+ * still gets pushed, wildcard or not.
+ *
+ * @decision b5c606aa
  */
 export const FLEET_OPS_ALERT_CLASSES: ReadonlySet<AttentionAlertClass> = new Set(["merge-gate", "worker-blocked", "worker-crashed", "manager-idle"]);
 
@@ -520,7 +526,11 @@ export class AttentionPushWatcher {
    * Every row in `scanned` is TERMINAL by the time this runs — a qualifying row is delivered, a
    * non-qualifying row (wrong class or out of scope) is a PERMANENT skip (never re-classifies differently on
    * a later tick) — so the watermark always advances to the LAST SCANNED row's seq, even when `qualifying`
-   * is empty. Never revert to advancing only past DELIVERED rows — @decision sha:31ca9b5d. Only a TRANSIENT
+   * is empty. Never revert to advancing only past DELIVERED rows.
+   *
+   * @decision sha:31ca9b5d
+   *
+   * Only a TRANSIENT
    * defer (rate-limit park / no-stacking) may hold the watermark, and both of those bail the whole tick
    * BEFORE `scanned` is ever read (see `tick()`) — so every row that reaches this method is unconditionally
    * consumed.
@@ -609,7 +619,9 @@ export class AttentionPushWatcher {
    * NEVER pushed one — the current global max event seq (`Db.getMaxEventSeq`), so a brand-new grant fires
    * nothing for pre-existing backlog and only reacts to activity from this point forward. A never-pushed
    * companion re-armed after a restart re-seeds to the CURRENT max, not its original start() max — a
-   * narrow, accepted window (@decision sha:31ca9b5d).
+   * narrow, accepted window.
+   *
+   * @decision sha:31ca9b5d
    *
    * Also reconstructs `escalationSurfaced` from the SAME scan (no second read, no new table): each
    * `companion_alert_pushed` row's `escalationTaskId`/`escalationSignature` (stamped by `stampEscalation` at

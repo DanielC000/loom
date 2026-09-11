@@ -166,9 +166,12 @@ export interface CompanionReminder {
  * chat-gateway.ts's resetConversation). `senderId` (Companion Trust Window, optional trailing arg —
  * existing callers omit it, byte-identical) is the AUTHENTICATED sender id for a GROUP-scope route only
  * (mirrors {@link VoicePrefRoute}'s own group-only senderId rule — null/omitted for a DM route), read back
- * via `pty.getActiveTurnSenderId` to key a group route's trust window per-sender. @decision f286919e — on a
- * multi-sender coalesced batch, `submit()` nulls BOTH `activeTurnSenderId` and the owner-text primitive
- * together, never attributing one member's words to another's id. Returns the primitive's contract:
+ * via `pty.getActiveTurnSenderId` to key a group route's trust window per-sender.
+ *
+ * @decision f286919e — on a multi-sender coalesced batch, `submit()` nulls BOTH `activeTurnSenderId` and
+ * the owner-text primitive together, never attributing one member's words to another's id.
+ *
+ * Returns the primitive's contract:
  *   { delivered:true }               → submitted immediately as a turn
  *   { delivered:false, position:N }  → HELD in the session's FIFO (busy/not-ready) — still accepted
  *   { delivered:false }              → session not alive (DEAD) — nothing queued
@@ -246,8 +249,11 @@ export interface CompanionHistoryExport {
 }
 
 /**
- * The injected CHAT HISTORY recorder. @decision 7d63e200 — generalizes an earlier in-app-only "reload
+ * The injected CHAT HISTORY recorder.
+ *
+ * @decision 7d63e200 — generalizes an earlier in-app-only "reload
  * loses history" fix (bug 0f01f234) to every channel the gateway routes.
+ *
  * `record` is called for BOTH an accepted inbound turn (author:"user") and a delivered/voiced outbound
  * reply (author:"companion"); `viaVoice` is true for an inbound turn whose text is itself a voice-note STT
  * transcript, OR for an outbound reply actually DELIVERED as a synthesized voice clip (Companion Delivery

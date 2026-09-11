@@ -20,6 +20,7 @@
  * @decision 2b26035c — the (a)/(b) owner-suggested relaxations below widen HOW a verbatim quote can be
  * sourced, never loosen what "owner-attested" means. (b) is Primitive A/B's recent-turns widening
  * (`isVerbatimOwnerSubstringRecent` below); (a) is `AuthoredContentGrantStore` below.
+ *
  * `createOwnerAttestation` wires all of this into the ONE `OwnerAttestation` object threaded through
  * `GrantContext.attest` (capabilities.ts) — the shape a lever's `register()` closes over.
  */

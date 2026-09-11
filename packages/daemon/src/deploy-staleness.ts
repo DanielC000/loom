@@ -45,6 +45,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * @decision c6e7ebe7 — never raise `GIT_TIMEOUT_MS` without a measured stall (147–275ms IDLE / 220–465ms
  * at 3× oversubscription measured, never approached up to 9×) and never single out a timeout from the
  * `unavailable()` reason taxonomy on its own initiative — see `d3d4d432`'s record for the actual axis.
+ *
  * NEVER throws — any failure (not a git checkout, e.g. a packaged `loomctl` install; git unavailable; dist
  * not built; a timeout) degrades to `{available:false, reason}`, never a false stale/clean verdict — and
  * this applies uniformly to BOTH the restart signal and the web signal: a failure computing either degrades

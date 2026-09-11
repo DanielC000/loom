@@ -331,6 +331,7 @@ export function currentColumns(db: Db, projectId: string): KanbanColumn[] {
  * @decision a0cafef2 — `actor` identifies WHO made this write; every config-PATCH surface routes through
  * this ONE chokepoint for attribution instead of recording it separately at each call site (see record
  * for the actor-string convention and why hardcoding "human" is wrong on 3 of the 4 surfaces).
+ *
  * The "after" value recorded is the project's ACTUAL persisted config post-write (re-read fresh, not
  * reconstructed from `next`), so it's correct on both the blind path and the re-key path (which persists
  * via two separate writes — the non-column keys, then applyBoardColumnLayout's own kanbanColumns write).

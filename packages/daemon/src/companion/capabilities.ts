@@ -65,7 +65,9 @@ const TIER_A_ACT_SLUGS: readonly string[] = ["decisions-relay", "board-reach", "
 
 /** Compute the grant-time co-grant advisories for a companion session's WHOLE resolved grant set (pass
  *  every row from `listCompanionCapabilityGrantsForSession`). Pure + side-effect-free; returns `[]` for a
- *  benign grant set. @decision 4c33a1bc — never derive these advisories from per-act FrictionTier logic
+ *  benign grant set.
+ *
+ *  @decision 4c33a1bc — never derive these advisories from per-act FrictionTier logic
  *  (decided per-call; this is about which levers were CO-GRANTED, a static grant-set fact); never turn
  *  them into blocks — the owner chose warn-only, Option B. */
 export function computeCoGrantWarnings(grants: Pick<CompanionCapabilityGrant, "capability" | "mode">[]): CompanionCoGrantWarning[] {
@@ -161,7 +163,9 @@ export interface ResolvedGrantScope {
  *
  * Companion "lead mode" is checked FIRST, ahead of any grant-row read: when set on this session, this
  * SHORT-CIRCUITS to {@link synthesizeLeadModeScope}'s synthesized full-scope answer — SUPERSEDING the
- * rows, never deleting/mutating them. @decision b5c606aa — Option B, no guardrails: lead mode is a pure
+ * rows, never deleting/mutating them.
+ *
+ * @decision b5c606aa — Option B, no guardrails: lead mode is a pure
  * runtime supersede, never a mutation of the grant rows — toggling it off must instantly revert to
  * whatever was actually granted.
  */
@@ -214,7 +218,9 @@ export function isCompanionLeadModeEnabled(db: Db, sessionId: string): boolean {
  *  "lead mode". Iterates `db.listAllProjects()` LIVE on every call (never cached) — the INCLUSIVE list, so
  *  a project created after lead mode was enabled is included on the very next read. Returns `null` (never
  *  an empty-but-truthy scope) when there are zero live projects or `db` doesn't implement
- *  `listAllProjects`. @decision b5c606aa — Option B, no guardrails: every project resolves act-mode with
+ *  `listAllProjects`.
+ *
+ *  @decision b5c606aa — Option B, no guardrails: every project resolves act-mode with
  *  no role exclusion; but never relax `session-steer`'s `roleFilter` or `board-reach`'s `authoredContent`
  *  defaults here — Option B covers decision/alert visibility only, never verbatim-relay. */
 function synthesizeLeadModeScope(db: Db, capability: string): ResolvedGrantScope | null {
@@ -885,7 +891,9 @@ function pendingBoardKey(sessionId: string, route: CompanionRoute | null): strin
 
 /** Formats `updateProjectTask`'s additive `pendingRequestWarning` into one optional `pendingRequestNote`
  *  string, spread into the `board_update` ack only when non-empty — never a raw `{id,title}[]` dump, so
- *  it renders consistently in companion chat. @decision cc910aec — this note can only ever ADD a field to
+ *  it renders consistently in companion chat.
+ *
+ *  @decision cc910aec — this note can only ever ADD a field to
  *  an already-successful ack; it must never turn a success into an error (inherits card `c4355598`'s
  *  constraint that this warning can never block the write it decorates). */
 function pendingRequestWarningNote(warnings: PendingRequestWarning[] | undefined): { pendingRequestNote?: string } {
@@ -920,7 +928,9 @@ function pendingAuthoredGrantKey(sessionId: string, route: CompanionRoute | null
  *  module-scoped pending-payload maps. A caller must ALSO call `OwnerConfirmStore.clearSession`
  *  (attestation.ts) for the SAME sessionId — this only clears the levers' own remembered payloads, never
  *  the confirm tokens themselves. Prefix-matches on `${sessionId}::`, mirroring every pending*Key helper's
- *  own key shape. @decision 327bcaaa — never add a new ACT lever's pending-payload map without also
+ *  own key shape.
+ *
+ *  @decision 327bcaaa — never add a new ACT lever's pending-payload map without also
  *  adding it here (the `pendingSpawns` omission is the incident this guards against); never trust a test
  *  that only exercises the confirm-token path — assert on `pendingProposalCountForSession` directly. */
 export function clearPendingProposalsForSession(sessionId: string): void {
