@@ -10299,16 +10299,12 @@ export class PtyHost {
    *  signal to a reader (worker_list/worker_status) so a manager can tell "busy + progressing" from
    *  "possibly wedged" without spending a worker_transcript pull.
    *
-   *  Card a1916267: deliberately reads `this.live` (claude only), NEVER `findAnyLive` — mirrors
-   *  `getComposerDirtyLen`'s own claude-only convention (see that getter's own doc), for the SAME reason.
-   *  `CodexLive` has no `lastOutputAt` field at all (see its own doc, this file) because codex's TUI
-   *  repaints continuously with no turn running, so a per-chunk output timestamp does not discriminate
-   *  "working" from "idle and finished" on that harness — a codex row therefore always projects
-   *  `lastEngineOutputAt: null`, an honest "not applicable to this harness" absence rather than a value
-   *  that misleadingly keeps advancing on a dead-ended session. `undefined` here still also covers the
-   *  ordinary "not live in this process at all" case, same ambiguity `getComposerDirtyLen` already
-   *  accepts — a reader can't distinguish the two from this field alone, and doesn't need to: either way
-   *  there is nothing to read from this signal. */
+   *  `undefined` also covers the ordinary "not live in this process at all" case — a reader can't
+   *  distinguish the two from this field alone.
+   *
+   * @decision a1916267 — claude-only (never `findAnyLive`); a codex row always projects
+   *  `lastEngineOutputAt: null`, an honest "not applicable to this harness" absence.
+   */
   getLastOutputAt(sessionId: string): number | undefined {
     return this.live.get(sessionId)?.lastOutputAt;
   }
@@ -10318,70 +10314,42 @@ export class PtyHost {
    *  3ce3fa39), or undefined if the session isn't live. SET synchronously the moment a give-up/heal fires
    *  (no dependency on any later write); CLEARED via either of TWO independent, gated paths: a SUBSEQUENT
    *  submit()'s own defensive clear-prefix going on to CONFIRM (`composerDirtyLenClearedByGen` gates that
-   *  reset), or — card b932558c — `purgeConfirmedGiveUpRequeue` itself proving THIS generation's turn
-   *  actually started (content-match or its FIFO-position fallback; see `clearComposerDirtyOnConfirm`),
-   *  with no new submit() required. So in the specific case this getter exists to catch (text written,
-   *  never submitted, and NEITHER path above ever resolves it), the value stays non-zero and readable
-   *  indefinitely rather than requiring a later write to become observable. Card dcd8659c: surfaced to
-   *  worker_list/worker_status/my_context as a PULL read — this never touches
-   *  `submit()`/`enqueueStdin`/`drainPending`/the pty; it only reads the same in-memory field those write.
+   *  reset), or `purgeConfirmedGiveUpRequeue` itself proving THIS generation's turn actually started (see
+   *  `clearComposerDirtyOnConfirm`), with no new submit() required. So in the specific case this getter
+   *  exists to catch (text written, never submitted, and NEITHER path above ever resolves it), the value
+   *  stays non-zero and readable indefinitely rather than requiring a later write to become observable.
    *
-   *  ⚠️ Card c148f118 — READ THIS BEFORE trusting a non-zero value alone: this value is the CONSERVATIVE
-   *  reading only — it NEVER assumes a defensive clear-prefix actually landed, so it stays inflated by
-   *  whatever a still-unresolved clear attempt was trying to erase even if that clear genuinely worked.
-   *  It therefore can NOT by itself distinguish "a clear was attempted and failed" from "a clear was
-   *  attempted and worked, only the fresh write after it hasn't confirmed yet" — those two very different
-   *  situations read as the exact same number here. `getComposerDirtyLenBelieved` is the OPTIMISTIC
-   *  counterpart (assumes every attempted clear worked) — read the two together: equal means nothing to
-   *  doubt, a gap means a clear is unresolved and the gap size is how much is in doubt. */
+   * @decision b932558c — `purgeConfirmedGiveUpRequeue` proving this generation's turn started
+   *  (content-match or FIFO-position fallback) is decisive proof, not merely a later unrelated submit().
+   *
+   * @decision dcd8659c — a PULL read only; never touches `submit()`/`enqueueStdin`/`drainPending`/the pty.
+   *
+   * @decision c148f118 — the CONSERVATIVE reading only; read together with `getComposerDirtyLenBelieved`.
+   */
   getComposerDirtyLen(sessionId: string): number | undefined {
     return this.live.get(sessionId)?.composerDirtyLen;
   }
 
-  /** Card c148f118: the OPTIMISTIC counterpart to `getComposerDirtyLen` above (`Live.composerDirtyLenBelieved`
-   *  — see that field's own doc for the full mechanics). Same undefined-vs-0 discipline: `undefined` means
-   *  the session isn't live in this process, `0` is a genuine measured zero. Read ALONGSIDE
-   *  `getComposerDirtyLen`, never instead of it: equal values mean no defensive-clear attempt is currently
-   *  unresolved (nothing to doubt); a LOWER value here than `getComposerDirtyLen` means a clear WAS
-   *  attempted and its outcome is still unverified — the gap is exactly how many characters are in doubt,
-   *  bounding the truth between "the clear worked" (this getter) and "the clear did nothing"
-   *  (`getComposerDirtyLen`) instead of the single, ambiguity-collapsing number either field gave alone
-   *  before this card. Surfaced on worker_list/worker_status/my_context (mcp/orchestration.ts) alongside
-   *  `getComposerDirtyLen` — that's the reader this getter exists for; see those tools' own descriptions
-   *  for the same reading guide in their terms. */
+  /** The OPTIMISTIC counterpart to `getComposerDirtyLen` above (`Live.composerDirtyLenBelieved` — see that
+   *  field's own doc for the full mechanics). Same undefined-vs-0 discipline: `undefined` means the
+   *  session isn't live in this process, `0` is a genuine measured zero.
+   *
+   * @decision c148f118 — read ALONGSIDE `getComposerDirtyLen`, never instead of it: equal values mean
+   *  nothing to doubt; a lower value here means a clear was attempted and its outcome is unverified.
+   */
   getComposerDirtyLenBelieved(sessionId: string): number | undefined {
     return this.live.get(sessionId)?.composerDirtyLenBelieved;
   }
 
-  /** Card a33a72f7: milliseconds elapsed since the CURRENT generation's first Enter write
+  /** Milliseconds elapsed since the CURRENT generation's first Enter write
    *  (`Live.currentGenFirstWrittenAt`), for as long as that write remains unconfirmed
-   *  (`!Live.enterConfirmed`) — a PURELY ADDITIVE read of two fields `fireEnterAndVerify`/the
-   *  `UserPromptSubmit` hook already maintain for `latencyMs` logging; nothing here writes, times out, or
-   *  changes when Loom gives up. Exists to close the blind window named on this card: `composerDirtyLen`
-   *  (above) only ever becomes non-zero once a give-up/heal-if-stuck actually FIRES — `FIRST_TURN_STALE_MS`
-   *  (30s) or `GIVE_UP_HOLD_MS` (20s) plus retry time after the write — so a manager glancing at a worker in
-   *  THAT window sees a `0` indistinguishable from a genuinely clean composer. This getter has no such
-   *  floor: it reads non-null the INSTANT a write is outstanding and keeps counting every ms after.
+   *  (`!Live.enterConfirmed`); `undefined` if the session isn't live, `null` if nothing is currently
+   *  outstanding.
    *
-   *  Returns `undefined` if the session isn't live in this process (mirrors `getComposerDirtyLen`'s own
-   *  undefined-vs-0 discipline). Returns `null` if nothing is currently outstanding — either no submit()
-   *  has ever run, or the current generation already confirmed (`enterConfirmed === true`); these two are
-   *  NOT distinguished from each other, deliberately: no manager decision turns on telling them apart, and
-   *  conflating them costs nothing extra bad, unlike the ambiguity documented below.
-   *
-   *  ⚠️ WHAT THIS DOES NOT DISTINGUISH — read alongside `composerDirtyLen`, not instead of it:
-   *  a non-null reading means ONLY "the current generation's Enter has been written and no confirming hook
-   *  has landed for it yet." It stays non-null identically whether Loom is still WITHIN its own give-up
-   *  budget (still retrying, or in `awaitGiveUpConfirmSettle`'s short window) OR has ALREADY given up for
-   *  this exact generation (`fireEnterAndVerify`'s GIVE-UP RECOVERY/SUPPRESSED branches touch neither
-   *  `enterConfirmed` nor `currentGenFirstWrittenAt` — only `composerDirtyLen`) — give-up firing does not
-   *  make this field go null. So a large `unconfirmedDeliveryMs` alone never proves "still trying" vs.
-   *  "already gave up, outcome still unknown" for THIS generation — cross-check `composerDirtyLen`: zero
-   *  there while this reads non-null is the ONE case unambiguously new information ("in flight, this
-   *  session has never given up at all yet"); non-zero there is ambiguous (may be THIS generation's own
-   *  give-up, or stale residue from an earlier, already-superseded generation still awaiting its own
-   *  confirm-driven clear — see `composerDirtyLen`'s doc). Together the two are still strictly MORE
-   *  informative than either alone, which is the entire point of adding this rather than reworking that. */
+   * @decision a33a72f7 — never distinguishes "still retrying" from "already gave up" for this
+   *  generation; cross-check `composerDirtyLen` — zero there while this reads non-null is the one
+   *  unambiguous new signal.
+   */
   getPendingConfirmMs(sessionId: string): number | null | undefined {
     const live = this.live.get(sessionId);
     if (!live) return undefined;
@@ -10389,29 +10357,26 @@ export class PtyHost {
     return Date.now() - live.currentGenFirstWrittenAt;
   }
 
-  /** Card 68459420: the most recent occurrence of this session's `[loom:prompt-mismatch]` notice being
-   *  identified as a REPLAY of a prior generation (`Live.lastMismatchReplay` — see that field's own doc),
-   *  or `null` if none has fired since this session went live, or `undefined` if the session isn't live
-   *  in this process. This is the SENDER-directed arm of the notice: the recipient session can never
-   *  verify a loss it never saw, so this getter exists to be read by the party who CAN — worker_list/
-   *  worker_status, at the point its manager already looks — rather than relying solely on a longer
-   *  session-facing notice. Never cleared once set (see the field's own doc for why); a subsequent
-   *  occurrence overwrites rather than accumulates, so this always reflects the LATEST replay only. */
+  /** The most recent occurrence of this session's `[loom:prompt-mismatch]` notice being identified as a
+   *  REPLAY of a prior generation (`Live.lastMismatchReplay` — see that field's own doc), or `null` if
+   *  none has fired since this session went live, or `undefined` if the session isn't live in this
+   *  process. Never cleared once set; a subsequent occurrence overwrites rather than accumulates.
+   *
+   * @decision 68459420 — the SENDER-directed arm: a recipient can never verify a loss it never saw, so
+   *  this is read by the party who CAN act (worker_list/worker_status), not relayed as an advisory.
+   */
   getLastMismatchReplay(sessionId: string): Live["lastMismatchReplay"] | undefined {
     return this.live.get(sessionId)?.lastMismatchReplay;
   }
 
-  /** Card ac7884e3: the most recent resolution of a `worker_flush` attribution marker
-   *  (`Live.lastFlushAttribution` — see that field's own doc for the full three-way reading:
-   *  `null`/`{attributable:true,...}`/`{attributable:false, reason:"marker-superseded-before-confirm",...}`),
-   *  or `undefined` if the session isn't live in this process. Same PULL-surface mechanics as
-   *  `getLastMismatchReplay`: never cleared once set, overwritten (not accumulated) by a later resolution
-   *  — exists specifically so a manager can check LATER, after a `flushComposer` call already returned
-   *  `confirmed:false`, whether that flush eventually turned out to be the last action taken before its
-   *  targeted generation confirmed. `flushComposer`'s own return only carries this for the (uncommon) case
-   *  its own bounded wait happens to observe the resolution before returning; this getter is the read for
-   *  every other case, including the measured production specimen (confirmation ~60s after the call
-   *  returned) that motivated this card. */
+  /** The most recent resolution of a `worker_flush` attribution marker (`Live.lastFlushAttribution` — see
+   *  that field's own doc for the full three-way reading), or `undefined` if the session isn't live in
+   *  this process. Same PULL-surface mechanics as `getLastMismatchReplay`: never cleared once set,
+   *  overwritten (not accumulated) by a later resolution.
+   *
+   * @decision ac7884e3 — exists so a manager can check LATER whether a flush eventually turned out to be
+   *  the last action before its targeted generation confirmed, past `flushComposer`'s own bounded wait.
+   */
   getLastFlushAttribution(sessionId: string): Live["lastFlushAttribution"] | undefined {
     return this.live.get(sessionId)?.lastFlushAttribution;
   }
@@ -10473,26 +10438,19 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live) return;
     if (live.mismatchResolvedGens.has(gen)) return;
-    // Card 340b9dbe — PER-GEN DEDUP: a detector re-entry for an already-notified `(gen, writtenHash,
-    // reportedHash)` triple can arm a second timer for this SAME gen even though its own notice was
-    // correctly suppressed as an exact repeat (see `live.firedMismatchUnresolvedGens`' own doc) — without
-    // this guard, both timers would reach the `events.onPromptMismatchUnresolved?.(...)` call below and
-    // fire two durable "established loss" alarms for one underlying event.
+    // @decision 340b9dbe — a detector re-entry for an already-notified triple can arm a second timer for
+    // this SAME gen even though its notice was suppressed as an exact repeat; without this per-gen guard
+    // both timers would fire two durable "established loss" alarms for one underlying event.
     if (live.firedMismatchUnresolvedGens.has(gen)) return;
     live.firedMismatchUnresolvedGens.add(gen);
     // eslint-disable-next-line no-console
     console.error(`[prompt-mismatch-unresolved] ${sessionId} gen=${gen} writtenHash=${writtenHash} reportedHash=${reportedHash} intendedLen=${intendedLen} recognizedGen=${recognizedGen} matchedLen=${matchedLen} writtenAt=${writtenAt ?? "unrecorded"} — no confirming later generation resolved this within ${PROMPT_MISMATCH_RESOLVE_WINDOW_MS}ms; treating as an established loss and failing loud (card f9b1ea00).`);
-    // Card c23e2869 DoD-2: `recognizedGen`/`matchedLen` are `replayedEntry`'s own gen/length, captured at
-    // the ORIGINAL detection's own call site (see this method's own doc) — this branch is reachable only
-    // when `replayedEntry !== undefined`, a WHOLE-string match, so there is never a remainder to name here.
-    // Card a419a7e6: `messageExcerpt` is passed through RAW and UNCONDITIONALLY (see
-    // PtyHostEvents.onPromptMismatchUnresolved's own doc) — the content gate lives downstream, in
-    // SessionService.handlePromptMismatchUnresolved, not here.
-    // Card 280309d9: `writtenAt` is the real Enter-write instant captured at the ORIGINAL detection's own
-    // call site (mirrors recognizedGen/matchedLen above) — this event's own `ts` (stamped by the consumer,
-    // SessionService.handlePromptMismatchUnresolved) is the GIVE-UP instant, `PROMPT_MISMATCH_RESOLVE_
-    // WINDOW_MS` LATER; `writtenAt` is what lets a reader recover the true write time without an external
-    // `[prompt-echo]` log join.
+    // @decision c23e2869 — recognizedGen/matchedLen are a pass-through of replayedEntry's own whole-string
+    // match; there is never a remainder to name on this branch.
+    // @decision a419a7e6 — messageExcerpt is passed through RAW and UNCONDITIONALLY; the content gate
+    // lives downstream, in SessionService.handlePromptMismatchUnresolved, not here.
+    // @decision 280309d9 — writtenAt is the real Enter-write instant, captured at the ORIGINAL detection's
+    // own call site; this event's own ts is the GIVE-UP instant instead.
     this.events.onPromptMismatchUnresolved?.(sessionId, { gen, writtenHash, reportedHash, intendedLen, recognizedGen, matchedLen, leadingRemainderLen: 0, trailingRemainderLen: 0, messageExcerpt, writtenAt });
   }
 

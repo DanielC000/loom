@@ -8,6 +8,10 @@ Card a1916267: `pty.getLastOutputAt` reads `this.live` only, never `findAnyLive`
 
 - Do not widen `pty.getLastOutputAt` back to read every harness's live state — on codex that resurrects a false "busy and emitting" reading driven by pure TUI repaint, worse than the current absent (`null`) signal.
 
+## `getLastOutputAt`'s own site (`pty/host.ts`) — why `CodexLive` has no such field at all
+
+`CodexLive` carries no `lastOutputAt` field at all (unlike `Live`), not merely an unread one, because codex's TUI repaints continuously with no turn running, so a per-chunk output timestamp cannot discriminate "working" from "idle and finished" on that harness — the field would have nothing honest to mean there. `getLastOutputAt` deliberately reads `this.live` (claude only), mirroring `getComposerDirtyLen`'s own claude-only convention, for the same reason. `undefined` here also covers the ordinary "not live in this process at all" case — the same ambiguity `getComposerDirtyLen` already accepts, since no reader decision turns on telling the two apart.
+
 ## Source
 
 Inline comment in `packages/daemon/src/mcp/orchestration.ts` (the fleet-view builder, `lastEngineOutputAt`): lines 2620-2626, as of commit `f81f9c1108773e559efe78b7166cbf78b6201480`. Relocated by card `a2278b09` (tranche 2). See `PtyHost.getLastOutputAt`'s own doc (`pty/host.ts`) for the harness-level reasoning.

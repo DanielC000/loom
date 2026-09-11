@@ -8,6 +8,14 @@ Card c148f118: `composerDirtyLen` never assumes a defensive clear-prefix actuall
 
 `composerDirtyLenBelieved` mirrors every `composerDirtyLen` add (same sites, same amounts) EXCEPT the defensive clear-prefix branch in `submit()` (the `composerDirtyLen > 0 && composerLen === 0` case), which zeroes `composerDirtyLenBelieved` the moment it issues the backspace burst — optimistically ASSUMING that burst actually empties the composer, rather than letting the total keep compounding the way `composerDirtyLen` deliberately does. Before this pair existed, both possibilities ("the clear worked" and "the clear did nothing") collapsed onto one identical number — see the specimen recorded in `submit()`'s own comment, card `2960c3bf`. Both fields reset to 0 together only via the SAME three decisive-confirm sites (the `composerDirtyLenClearedByGen`-gated UserPromptSubmit/Stop hooks, and `clearComposerDirtyOnConfirm`'s `composerDirtyMarkedGens` gate) — a genuine confirmation proves the whole ordered byte stream landed, so both readings collapse back to true zero together. Like `composerDirtyLen`, this is pure write-side bookkeeping, never a readback of real terminal content — "optimistic" describes the ASSUMPTION, not a verification.
 
+## `getComposerDirtyLenBelieved`'s own site — bounding the truth, not just flagging doubt
+
+`getComposerDirtyLenBelieved` (`pty/host.ts`) frames the pairing as BOUNDING the truth between "the clear
+worked" (this getter) and "the clear did nothing" (`getComposerDirtyLen`) — instead of the single,
+ambiguity-collapsing number either field gave alone before this card existed. Both getters are surfaced on
+`worker_list`/`worker_status`/`my_context` (`mcp/orchestration.ts`) side by side — that's the reader this
+pairing exists for.
+
 ## Do not
 
 - Do not read `composerDirtyLen` alone as proof a clear-prefix failed — it cannot distinguish that from an unresolved-but-successful clear. Always pair it with `composerDirtyLenBelieved`.
