@@ -18,3 +18,33 @@ Left uncorrected, this is a THIRD site that would need re-deriving the identical
 ## Source
 
 Inline comment in `packages/daemon/src/pty/host.ts` (`enqueueStdin`'s same-sender reorder scan, the same-sender equality check just before the `insertAt = i + 1` splice), as of commit `5cb06da7d` (`fix(pty): archive at BOTH points a give-up signature can be superseded`). Relocated by card `9145a86f` (tranche 26 on `pty/host.ts`); wording condensed, no clause dropped.
+
+## MAJOR-2 — the route-keyed branch's own proactive equalization (the second of the "two other places")
+
+Card a9e4240f (MAJOR-2, sibling finding to card `66b78175`'s same-sender-branch fix — see
+`docs/decisions/66b78175-…md`): `drainPending`'s ROUTE-KEYED branch (`else`, the branch a
+`coalesceAgentMessages:true` agent-kind run actually takes) ALSO read `drained[0]!.proactive` HEAD-ONLY,
+the same hazard `66b78175` fixed in the same-sender branch above it. Equalized unconditionally (not gated
+on the `coalesceAgentMessages` toggle) — cheapest, safe-by-construction, and harmless on the untoggled
+default path, where no `"warning"`-kind producer sets `proactive` today.
+
+This IS the second of the "two other places" `drainPending`'s own coalescing condition already checks
+`proactive` correctly, referenced by this record's main Narrative above when describing `enqueueStdin`'s
+reorder scan as a "third copy" — `66b78175`'s same-sender-branch fix is the first.
+
+Regression-guarded by the SAME suite as `66b78175`
+(`packages/daemon/test/pty-agent-sender-coalesce-proactive.mjs`, cases D/E/F, run against a separate host
+instance constructed with `{ coalesceAgentMessages: true }`): differing `proactive` (both directions) must
+NOT coalesce on this branch either; matching `proactive` still does (positive control).
+
+## Do not (2)
+
+- Do not gate the route-keyed branch's own `proactive` equalization on the `coalesceAgentMessages` toggle —
+  apply it unconditionally, the same as the same-sender branch's fix.
+
+## Source (2)
+
+Inline comment in `packages/daemon/src/pty/host.ts` (`drainPending`'s route-keyed branch, the
+`proactiveKey` doc), commit `5cb06da7d` (2026-09-02). Relocated by card `0d9bbbf4` (tranche 31 on
+`pty/host.ts`); no wording changed beyond joining wrapped source lines into a flowing paragraph and
+stripping `//` comment markers.

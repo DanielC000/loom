@@ -7837,12 +7837,9 @@ export class PtyHost {
       // senderId), could wrongly coalesce/reorder together.
       const key = routeKeyOf(head.route);
       const senderKey = head.senderId ?? null;
-      // Card 66b78175: `submit()` below reads `drained[0]!.proactive` HEAD-ONLY (like route/senderId,
-      // NOT per-member) — so unlike route/senderId this run must equalize `proactive` itself, or a
-      // proactive-tagged tail member silently loses its flag the instant it coalesces behind a
-      // non-proactive head (or vice versa). `proactive` is always a real boolean by the time an entry
-      // reaches `pending` (enqueueStdin defaults the param to `false`, never leaves it undefined), but
-      // the `?? false` here matches the defensive style already used for `senderId` just above.
+      // @decision 66b78175 — `submit()` reads `drained[0]!.proactive` HEAD-ONLY, so unlike route/senderId
+      // this run must equalize `proactive` itself or a mismatched tail silently loses its flag. The
+      // `?? false` matches the defensive style already used for `senderId` just above.
       const proactiveKey = head.proactive ?? false;
       let n = 1;
       // Card f41d6617: bound on `projectedWrittenLength` (what `joinSubmittedText` will actually write
@@ -7877,56 +7874,18 @@ export class PtyHost {
       // DISTINCT next turn on the next Stop. So EVERY turn has EXACTLY ONE originating route ⇒ chat_reply
       // resolves it unambiguously and cross-delivery is impossible by construction (no runtime check needed).
       // ALSO bounded to same-KIND entries (never mix a warning and an agent message into one turn) UNLESS
-      // coalesceAgentMessages is on, in which case kind is ignored (today's legacy full-coalesce). ALSO
-      // bounded to non-held entries (card 73d5c34a) — a held entry immediately past the head stops the run
-      // rather than being folded into it, same reasoning as `startIdx` above.
-      // Card a9e4240f (MAJOR-2, sibling to card 66b78175's same-sender-branch fix above): `submit()` below
-      // reads `drained[0]!.proactive` HEAD-ONLY here too — this branch is what a `coalesceAgentMessages:true`
-      // agent-kind run actually takes (the `if` above only ever routes agent-kind here when the toggle is
-      // on), so without this equality check a proactive/non-proactive mismatch could silently coalesce and
-      // lose the tail's flag, exactly like the same-sender branch before 66b78175. Equalized unconditionally
-      // (not gated on the toggle) — cheapest, safe-by-construction, and harmless on the untoggled default
-      // path where no `warning`-kind producer sets `proactive` today.
+      // coalesceAgentMessages is on, in which case kind is ignored (today's legacy full-coalesce).
       //
-      // ⛔ DELIBERATELY UNBOUNDED by count/bytes, UNLIKE the agent-kind run above (card 8f1d7912, decided
-      // 2026-09-04 — filed from worker efbd63a9's DECLINED item on card a9e4240f/MINOR-3 after that worker
-      // correctly refused to fold this into a "safe-by-construction" batch). The in-code rationale for
-      // AGENT_COALESCE_MAX_COUNT/_MAX_BYTES ("coalescing makes writes bigger on a path with a live,
-      // unresolved confirmation-loss defect") applies here too, but a byte/count bound is NOT the same safe
-      // remedy on THIS branch — enumerated against every real `warning`-kind producer before deciding:
-      //   - Memory-recall digests (sessions/service.ts's resume-time companion + project recall, both
-      //     enqueued back-to-back via enqueueStdin with NO route between them, kind defaulting to
-      //     "warning") are the dominant payload and are DELIBERATELY meant to land as one coherent block.
-      //     Companion recall is hard-capped at MEMORY_RECALL_MAX_BYTES (companion/memory-recall.ts) =
-      //     8,000 body bytes (~8,350 framed); project recall is hard-capped via MEMORY_CONFIG_MAX.budgetTokens
-      //     (shared/src/config.ts) = 8,000 tokens × the project's own ~4-bytes/token estimator
-      //     (estimateTokens, sessions/project-memory-recall.ts) = 32,000 body bytes (~32,430 framed). The two
-      //     ALREADY routinely coalesce here today (same empty route, same "warning" kind) for a combined
-      //     worst case of ~40,780 bytes — over 2x AGENT_COALESCE_MAX_BYTES. A cap small enough to bite would
-      //     SPLIT this intentional pairing across turns, which is a WORSE outcome than the unbounded write
-      //     it would replace (exactly the hazard this card was filed to avoid); a cap large enough to never
-      //     split it protects against nothing that has ever been observed or is structurally possible today.
-      //   - Restart/boot continuation notes (crash-recovery-watcher.ts, resume-doc-watcher.ts) are fixed
-      //     single-sentence templates, ~200-500 bytes each — no unbounded list inside them.
-      //   - Idle/context/busy-stuck watchdog nudges (idle-watcher.ts, context-watcher.ts,
-      //     busy-worker-watcher.ts) are fixed templates plus, for the idle nudge only, a board-delta digest
-      //     capped at DELTA_LIST_CAP=10 entries per category (board-read.ts) — bounded to roughly 1-2 KB even
-      //     at max. Each watcher is independently cooldown/dedup-gated to at most ONE pending nudge per
-      //     session at a time (idle escalates-once, context re-nudges on a cadence, busy-worker is
-      //     once-per-episode, resume-doc has a 30-min cooldown) — no unbounded same-producer accumulation.
-      //   - "Rate-limit/usage nudges" turned out NOT to be a real producer on this branch:
-      //     resumeAfterRateLimit replays live.lastPrompt via a DIRECT this.submit() call, bypassing
-      //     enqueueStdin/live.pending entirely — it never reaches drainPending at all (card 8f1d7912;
-      //     the false claim it once left uncorrected in QueuedMessageKind's own doc above, CLAUDE.md,
-      //     and shared/src/config.ts was fixed by card ba690cc2).
-      //   - Fan-in risk (many small per-worker watchdog nudges landing on one manager's queue at once) is
-      //     structurally bounded by orchestration.maxConcurrentWorkers (shared/src/config.ts) — a hard cap
-      //     on live workers per manager, default 3 — so even a fleet-wide recovery burst keeps this branch's
-      //     total bytes in the low KB range for any project running the default.
-      // No enumerated producer today can drive an unbounded byte or count run on this branch — a cap would
-      // either break the one legitimate large/atomic case above or guard against a scenario nothing here can
-      // produce. See card 8f1d7912 for the full enumeration; do not reintroduce a bound without re-deriving
-      // these numbers fresh (they can drift as producers change).
+      // @decision 73d5c34a — also bounded to non-held entries: a held entry immediately past the head
+      // stops this run too, same reasoning as `startIdx`'s own held-entry skip above.
+      //
+      // @decision a9e4240f — `submit()` reads `drained[0]!.proactive` HEAD-ONLY here too (this branch is
+      // what a `coalesceAgentMessages:true` agent-kind run actually takes), so `proactive` is equalized
+      // unconditionally here, regardless of the toggle.
+      //
+      // @decision 8f1d7912 — DELIBERATELY UNBOUNDED by count/bytes, unlike the agent-kind run above: no
+      // enumerated `"warning"`-kind producer today can drive an unbounded run here, and a bound would
+      // either split the one legitimate large/atomic case (memory-recall) or guard nothing reachable.
       const key = routeKeyOf(head.route);
       const proactiveKey = head.proactive ?? false;
       let n = 1;
