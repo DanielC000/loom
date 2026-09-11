@@ -449,11 +449,12 @@ function deepMergeRecord(base: Record<string, unknown>, patch: Record<string, un
 export interface MergeConfigOverrideOptions {
   /**
    * @decision 1069c8e1 — when true, all THREE rotation-protection fields (rotationMarkers,
-   * rotationLiveCommitmentsFloor, rotationLiveCommitmentsHeading) merge ADDITIVE-ONLY: a marker can never
-   * be REMOVED, the floor never LOWERED, and a configured heading never CLEARED or RE-POINTED — only the
-   * ADD/RAISE/"" -> non-empty directions are allowed. Set true on every AGENT-facing config-write call
-   * site (manager/setup); leave unset (plain replace) on the human-equivalent Lead + human REST PATCH
-   * paths, which stay the deliberate release valve for a legitimate human-initiated retirement.
+   * rotationLiveCommitmentsFloor, rotationLiveCommitmentsHeading) merge ADDITIVE-ONLY:
+   *
+   * a marker can never be REMOVED, the floor never LOWERED, and a configured heading never CLEARED or
+   * RE-POINTED — only the ADD/RAISE/"" -> non-empty directions are allowed. Set true on every AGENT-facing
+   * config-write call site (manager/setup); leave unset (plain replace) on the human-equivalent Lead + human
+   * REST PATCH paths, which stay the deliberate release valve for a legitimate human-initiated retirement.
    */
   additiveOnlyRotationGuard?: boolean;
 }
@@ -2122,6 +2123,7 @@ export class PlatformMcpRouter {
 
     // @decision 5b221bf2 — cross-project task boarding (PL Auditor finding #4) uses createProjectTaskChecked
     // (card 0ef0270b), never the raw createProjectTask, checked against the DESTINATION project's board.
+    //
     // TRUST: cross-project WRITE is a PLATFORM-only capability, deliberately ABSENT from every agent-facing
     // surface (manager/worker/setup resolve projectId server-side and never take one).
     /**
@@ -2534,7 +2536,9 @@ export class PlatformMcpRouter {
           projectIds = db.listAllProjects().map((p) => p.id);
         }
         // @decision e9750bc2 — this is the Lead's ACTUAL board-read anchor (recordBoardRead's own tasks_list
-        // call site is never reached by Lead doctrine). Recorded on countsOnly TOO, deliberately: never
+        // call site is never reached by Lead doctrine).
+        //
+        // Recorded on countsOnly TOO, deliberately: never
         // "fix" this by skipping countsOnly recording — that resurrects the exact permanently-uncomputed
         // digest bug this card exists to close — a countsOnly result already surfaces the total-count move.
         if (callerSessionId) recordBoardReadForProjects(db, callerSessionId, projectIds, new Date().toISOString());

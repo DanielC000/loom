@@ -13,8 +13,10 @@ export interface IdlePty {
    * Nudge text into the session's busy-gated queue (waits if the target is mid-turn). `source`/`route`/
    * `kind`/`questionId` mirror PtyHost.enqueueStdin's own optional tail — the answered-stuck watchdog
    * passes `kind:"agent"` so its re-nudge drains as a distinct one-per-turn message, not a coalesced
-   * warning, and `questionId` so a LATER `question_pull` can purge this exact nudge (@decision bbc46336)
+   * warning, and `questionId` so a LATER `question_pull` can purge this exact nudge
    * via the SAME path the answer-route push-nudge already uses.
+   *
+   * @decision bbc46336
    *
    * The real PtyHost.enqueueStdin returns a richer `EnqueueResult` (see pty/host.ts) with THREE possible
    * outcomes, collapsed here to the two this watcher needs to distinguish: `delivered:true` or
@@ -326,6 +328,7 @@ export class IdleWatcher {
       // (sessions/service.ts) so the two stay consistent.
       // @decision 788274a9 — `held` is the SOLE owner brake, checked in ANY column; never infer it from a
       // card's title text — a legitimately-titled card starting with a hold-like word is a false positive.
+      //
       // `deferred` is the manager's OWN sequencing marker (orthogonal to `held`, never checked by
       // worker_spawn) — discounted from the count the same way, so a manager's deliberate defer never
       // triggers a recurring idle nudge. The REVIEW lane is ALSO discounted: a card there is awaiting the
@@ -441,7 +444,9 @@ export class IdleWatcher {
       // and no way to clear the gate → skip silently instead of deadlock-nudging. A truly empty board (no
       // cards at all) still nudges — the manager should `idle_report 'done'`.
       // @decision b9d479b0 — a live STRANDED worker must not be re-silenced by this skip even when every
-      // other card is non-actionable. @decision c90e9525 — neither may an undocumented manual deferral
+      // other card is non-actionable.
+      //
+      // @decision c90e9525 — neither may an undocumented manual deferral
       // (no `deferredReason` recorded) — both stay independently actionable here.
       //
       // @decision 8e87f3b5 — never short-circuit the moment a session has its own pending Request; fold
@@ -710,6 +715,7 @@ export class IdleWatcher {
    * @decision 8701bdbb / @decision f88e91f0 — never route this re-nudge to the exact asking session id;
    * resolve it by AGENT LINEAGE (`db.getLiveSessionForAgent`, whoever is CURRENTLY live for the asker's
    * agent) instead, so a recycle successor or a fresh non-recycle respawn is still reached.
+   *
    * Skips silently when there's no live session for that agent, it isn't a manager, is human-paused, is
    * rate-limited/parked (it'll auto-resume on its own), or has itself flagged non-'watching' via
    * idle_report — reusing the SAME idle-nudge-state policy the manager idle loop above reads. Nudged

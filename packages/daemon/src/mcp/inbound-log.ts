@@ -23,10 +23,14 @@ import { createHash } from "node:crypto";
  * Cheap by construction: no I/O beyond the one `console.log`, and the JSON.stringify of `arguments` (for
  * the length/hash) is bounded by whatever the MCP transport already parsed into memory for this request.
  *
- * `attribute` (@decision cd0c7fee) piggybacks sub-agent correlation (`attribution=confirmed-subagent`
+ * @decision cd0c7fee
+ *
+ * `attribute` piggybacks sub-agent correlation (`attribution=confirmed-subagent`
  * etc.) onto this SAME line/reader — observation only; nothing enforces a sub-agent's call yet.
  *
- * `onRepeatedCall` (@decision 2d8d2e42) reuses this loop's already-computed `argsHash` rather than
+ * @decision 2d8d2e42
+ *
+ * `onRepeatedCall` reuses this loop's already-computed `argsHash` rather than
  * recomputing it, and fires for EVERY tool call (wider than `attribute`'s `WATCHED_TOOL_NAMES` scope) —
  * advisory only, never gates the call.
  */

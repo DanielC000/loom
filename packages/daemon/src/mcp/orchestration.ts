@@ -161,8 +161,11 @@ const STALE_DIRECTIVE_TURN_THRESHOLD = 3;
 const STALE_REPORT_TURN_THRESHOLD = 3;
 
 /** `gate_status(opId)` is a read-only lookup, scoped per-caller, with no pass/fail outcome path of its
- *  own. @decision edc1ec12 — a scoped (worker) miss must never claim `never_existed`; the scoping filter
+ *  own.
+ *
+ *  @decision edc1ec12 — a scoped (worker) miss must never claim `never_existed`; the scoping filter
  *  can't tell "never existed" from "belongs to someone else" apart, so it returns `"unknown"` instead.
+ *
  *  @decision bed91595 — never reintroduce an in-process opId cache/reclassification for `deploy`; the
  *  durable `pending_gate_ops` tombstone already covers restart-survival and unbounded retention. */
 function registerGateStatus(server: McpServer, sessions: SessionService, db: Db, scopeSessionId?: string, getScopeProjectId?: () => string | undefined, getRedactCrossProjectCallerProjectId?: () => string | undefined): void {
@@ -994,6 +997,7 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
 
 // @decision a5d1ae04 — never register gate_intent_declare/withdraw on the worker surface; a worker has
 // no "intend to fire" phase (its only gate action is `run_gate`) and there is no use case for either.
+//
 // ⛔ STRUCTURALLY DECOUPLED FROM EVERY GATE-FIRING PATH, ON PURPOSE (DoD-4): neither handler below may ever
 // call runWorkerGate/confirmWorkerMerge/deployOwnProject/GateSemaphore/gate-runner.ts — only declareGateIntent/
 // withdrawGateIntent. test/gate-intent-no-firing-coupling.mjs asserts this mechanically.
@@ -1259,7 +1263,9 @@ function directiveByMsgId(
 
 /** Ownership is enforced BY CONSTRUCTION — every event this function consults comes from
  *  `managerLineageDirectiveStream` (the caller's OWN recycle lineage); NEVER a read into any other
- *  session's stream, peer or otherwise. @decision 0f693dea — never merge in the recipient's own event
+ *  session's stream, peer or otherwise.
+ *
+ *  @decision 0f693dea — never merge in the recipient's own event
  *  stream to answer this sender-side question; a weaker cross-project ownership property, rejected. */
 function peerMessageStatusByMsgId(
   db: Db, managerSessionId: string, ref: string,
@@ -1414,6 +1420,7 @@ export class OrchestrationMcpRouter {
   /** @decision 89257222 — never re-derive or hardcode `timeoutMs` here; always read it through the same
    *  `resolveConfig(...).orchestration.gateCommandTimeoutMs` path the gate itself enforces, or a
    *  per-project override silently stops tracking.
+   *
    *  TRUST BOUNDARY: this is READ-ONLY by design (PL Auditor finding #9). `gateCommand` runs arbitrary
    *  host shell at daemon privilege — HUMAN-only-to-SET; NO set/propose/confirm-queue surface exists here. */
   private resolvedGateCommand(projectId: string | undefined):
@@ -2655,10 +2662,12 @@ export class OrchestrationMcpRouter {
     // give-up/heal-if-stuck.
     // @decision dcd8659c — never conflate `composerDirtyLen: 0` (measured clean) with `null` (session not
     // live in this process); treating an absent signal as a measured zero is the exact bug this closes.
+    //
     // ⚠️ CONSERVATIVE reading only — cannot tell "a clear was attempted and failed" from "a clear worked
     // but hasn't confirmed yet"; read together with `composerDirtyLenBelieved`.
     // @decision c148f118 — never read `composerDirtyLen` alone as proof a clear-prefix failed; always pair
     // it with `composerDirtyLenBelieved`. Never reset the latter outside its three decisive-confirm sites.
+    //
     // WHAT THIS DOES NOT COVER: a MANAGER's own composer going dirty mid-session (no third-party
     // read surface reaches a manager the way this reaches its workers — see `my_context`, which folds in
     // the same getter for self-checking), and a human glancing at the web UI (no REST/web surface exists
@@ -4349,6 +4358,7 @@ export class OrchestrationMcpRouter {
     // Never add a `projectId` parameter — the project is always the caller's own, resolved server-side.
     // @decision ab1d1129 — never COALESCE two session-id columns that can independently hold `""` without
     // `NULLIF`-normalizing first — `""` is treated as present and wins over a real id in the other column.
+    //
     // ⚠️ A SEPARATE, still-live quirk this does NOT touch — COALESCE prefers the worker/target session for
     // attribution even when it resolves, so a `cross_project_message` sender can't see its own outbound
     // sends here — is documented on the tool description below (this comment is why, not what).

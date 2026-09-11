@@ -187,6 +187,7 @@ interface UntilSupersededVerdict {
  * @decision b9515beb — never reintroduce a bare claim-Set / throw-on-retry mutex here: a caller whose own
  * client-side MCP timeout fires on a minutes-long gate run needs a way to ask "did it land?", not just an
  * "already in flight" throw with no path to find out.
+ *
  * One op per `key` at a time (spawn: `spawn:${taskId}`; merge: `merge:${workerSessionId}`; gate:
  * `gate:${workerSessionId}` — card 7f96aa09, a worker's own daemon-mediated DoD self-check; merge-batch:
  * `merge-batch:${managerSessionId's LINEAGE ROOT}:${sorted, comma-joined LINEAGE ROOTS of the resolved
@@ -194,6 +195,7 @@ interface UntilSupersededVerdict {
  * @decision 3a2dac9c — never key a pending merge/merge-batch op on a raw session id a `worker_recycle`
  * could later replace: both the read side (`peekPendingMerge`) and the write side's key selection must
  * walk the `recycledFrom` chain (or lineage root), or a recycle mid-flight forks the dedupe in two.
+ *
  * The "gate" kind has no separate owning manager: its `managerSessionId` field holds the CALLING WORKER's own
  * session id (the caller and the beneficiary of the completion nudge are the same session), so it needs
  * none of the dead-owner reconciliation the "merge" kind does — there is no cross-session ownership split

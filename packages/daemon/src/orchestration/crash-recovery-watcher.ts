@@ -24,6 +24,7 @@ import { computeWakeImpact } from "./wake-impact.js";
  * @decision a933613e — do not revert this to a bare `SessionRole[]` array (that let `operator` go
  * unrecovered for a month with zero diagnostics) and never hand-edit RECOVERABLE_ROLES — it must stay
  * DERIVED from this map, or the compile-time exhaustiveness check is defeated.
+ *
  * DISCRIMINATOR for reusing this shape elsewhere: apply it to an EXHAUSTIVE-DISPOSITION list — one whose
  * own comment already claims to account for every role, the way this one always has — where a silent
  * omission is a bug. Do NOT apply it to a narrow CAPABILITY allowlist (e.g. "only these roles may request
@@ -81,6 +82,7 @@ export interface CrashRecoveryDeps {
    * worker/assistant/operator and manager/platform continuation nudges.
    * @decision 9f7c59f1 — do not mark `enqueueDurableNudge` `private`: reverting to a raw `pty.enqueueStdin`
    * call here reopens the exact give-up-exhaustion silent-loss gap it exists to close.
+   *
    * That raw call lacked `PtyHost.waitForMcpSeen` (a fresh MCP-client handshake can lose the race to an
    * immediate `enqueueStdin`, same role-gated defer `enqueueDurableNudge` itself applies via
    * `usesOrchestrationMcp`) and a durable give-up-exhaustion record. ABSENT (e.g. every existing hermetic
@@ -239,6 +241,7 @@ export function isCrashRecoveryEligible(
  * param (never hardcode `kind:"warning"` there — these three need `kind:"agent"`, one with `route`).
  * @decision 06ebbb78 — `resumeFleetOnBoot` also routes every continuation nudge through this same durable
  * dispatch; never reintroduce `enqueueNudge`/`deferredNudge` (or any other non-durable path) there.
+ *
  * ONE deliberate exception: the crash-loop escalation heads-up below (`session_recovery_abandoned`) stays
  * on raw `pty.enqueueStdin` on purpose, best-effort — see that call site's own comment.
  *
@@ -252,9 +255,11 @@ export function isCrashRecoveryEligible(
  *   • `session_died`              — an unexpected pty death (recordUnexpectedExit; intended stops + whole-
  *      daemon restarts are excluded — see there).
  *   • `worker_report_undelivered` — the strand backstop; see recordUndeliveredReport's own doc
- *      (@decision 22a44352) for the incident. This is the "keyed on delivered:false rather than
+ *      for the incident. This is the "keyed on delivered:false rather than
  *      process-death" recovery: a CLEANLY idle-exited manager has no `session_died`, so only this trigger
  *      can re-wake it.
+ *
+ * @decision 22a44352
  *
  * BOUNDED + CRASH-LOOP SAFE (the load-bearing property). Auto-resume is capped at `crashRecoveryMaxAttempts`
  * (per project; 0 = off) via a PERSISTED counter — the count of `session_resume_attempt` events since the
@@ -462,9 +467,12 @@ export class CrashRecoveryWatcher {
             dispatchNudge(s.id, s.role, note + RESUME_NUDGE_TAIL, s.taskId ?? null);
           }
         } else {
-          // manager or platform. @decision c9e51581 — a manager/platform with no stake in this isolated
+          // manager or platform.
+          //
+          // @decision c9e51581 — a manager/platform with no stake in this isolated
           // crash resumes SILENTLY (Path C extension of card 61cc91c6); if a manager and its own worker
           // crash in the SAME tick, that's a known, accepted one-tick undercount — not a bug to "fix".
+          //
           // causal:false (an isolated pty death isn't self-requested, unlike a daemon_restart requester).
           // liveWorkersResumed = the manager's CURRENT live worker count — this path has no "resume set"
           // list like Path A/B (it resumes ONE dead session per candidate), so "workers resumed alongside

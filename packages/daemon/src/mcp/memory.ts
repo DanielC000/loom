@@ -469,8 +469,11 @@ export function forgetProjectMemory(db: Db, projectId: string, key: string): { o
  *
  *  `backlinks` — every OTHER note in this project whose text `[[wikilink]]`s to THIS note's key, resolved
  *  fresh at read time exactly like `requestAnnotations` (see sessions/project-memory-backlinks.ts).
+ *
  *  @decision e4e180ad — closes the ONE-WAY-LINK gap: a byte-capped note often has no room left to list
- *  every note that already links TO it. Kept as its OWN field, deliberately never merged into
+ *  every note that already links TO it.
+ *
+ *  Kept as its OWN field, deliberately never merged into
  *  `requestAnnotations` — the two are unrelated kinds of link. ALWAYS an array (never omitted), so
  *  an empty `backlinks: []` is a MEASURED zero — "this note has no inbound links" — structurally
  *  distinguishable from absent. */
@@ -495,17 +498,22 @@ function withLinks(db: Db, projectId: string, entry: ProjectMemoryEntry, backlin
 
 /**
  * Full listing — pinned first, then most-recently-updated. Use `memory_forget`/re-`memory_write` to
- * curate. @decision 41c3f546 — the
- * "dozens to low-hundreds of short notes" corpus-size premise is stale, and this function stays safe at
- * that scale ONLY because it resolves `backlinks` via the bulk path ({@link annotateBacklinksBulk}), not
- * per row — see its own doc comment below.
+ * curate.
+ *
+ * @decision 41c3f546 — the "dozens to low-hundreds of short notes" corpus-size premise is stale, and
+ * this function stays safe at that scale ONLY because it resolves `backlinks` via the bulk path
+ * ({@link annotateBacklinksBulk}), not per row — see its own doc comment below.
+ *
  * Each row is annotated with its linked Requests' LIVE state (card e6d270b3): `memory_list` returns full
  * note BODIES (unlike a metadata-only listing), so the same stale-decided-voice text this card exists to
  * fix would otherwise stand unchallenged here too — annotating only kickoff-injection + `memory_read`
  * would leave this access path telling a different story.
  *
  * `backlinks` are resolved via {@link annotateBacklinksBulk} over the SAME fetched corpus — not per row
- * via {@link annotateBacklinks} — for the same N+1-fetch/N-full-corpus-scan cost @decision 41c3f546
+ * via {@link annotateBacklinks} — for the same N+1-fetch/N-full-corpus-scan cost
+ *
+ * @decision 41c3f546
+ *
  * measured at ~4.2s (bulk: ~15ms) against a 487-note corpus, and rejected as the per-row default.
  */
 export function listProjectMemoryEntries(db: Db, projectId: string): ProjectMemoryEntryWithLinks[] {

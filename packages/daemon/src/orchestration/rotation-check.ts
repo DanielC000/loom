@@ -13,7 +13,9 @@ import type { RotationMarker } from "@loom/shared";
  * for this card: migrate off it, never edit it. This module is a fresh TypeScript port of its algorithm;
  * because it is a port of logic already debugged in production, it does not automatically inherit any bug
  * the script already fixed — see the two regression tests in `test/rotation-check.mjs` for the historical
- * bugs this port must be proven not to have reintroduced: @decision a681aed5 (the section-boundary
+ * bugs this port must be proven not to have reintroduced:
+ *
+ * @decision a681aed5 (the section-boundary
  * NAME-ANCHOR fail-open; `findSectionBoundary` below anchors STRUCTURALLY by heading DEPTH instead) and
  * @decision 34a6f07e (the EQUALITY-VS-FLOOR bug; the floor check below is `>=`, never `===`).
  *
@@ -168,7 +170,9 @@ export interface NumberedSectionUnionCount extends NumberedSectionCount {
 /**
  * @decision e312b207 — UNION over `activeText` and `rulesText`: `activeText` tried FIRST (measured
  * byte-identically to before this card while the section stays there), `rulesText` consulted ONLY when
- * `activeText` carries no such heading at all. FAIL-CLOSED: `count: null, source: null` when the heading
+ * `activeText` carries no such heading at all.
+ *
+ * FAIL-CLOSED: `count: null, source: null` when the heading
  * is in NEITHER text — callers must treat a null count as a hard failure, never a vacuous "0 items,
  * nothing to check, ok:true".
  *
@@ -392,7 +396,9 @@ export interface RotationCheckResult {
    *  self-diagnosing instead of a mystery. This field is
    *  deliberately NOT itself folded into the overall `ok` below (see the comment at that computation) —
    *  `rulesCheck.ok:false` never DIRECTLY flips `ok`, though it still can INDIRECTLY, through
-   *  `liveCommitments`/`missingMarkers`. @decision e312b207 — always read this field alongside `ok`;
+   *  `liveCommitments`/`missingMarkers`.
+   *
+   *  @decision e312b207 — always read this field alongside `ok`;
    *  a red `ok` with `rulesCheck.ok:false` means "diagnose the rulesPath first," not necessarily "the
    *  content is genuinely gone." */
   rulesCheck: { checked: boolean; ok: boolean; resolvedPath?: string; reason?: string };
@@ -505,10 +511,11 @@ function deriveRulesUnreadableWarning(
 }
 
 /**
- * @decision f6985338 — builds the ordered, DEDUPED `RuleFileSource` list for the multi-file union:
- * `rules` first (if present, labeled "rules"), then every readable `rulesFiles` entry labeled by its own
- * `resolvedPath` — but an entry whose `resolvedPath` was ALREADY SEEN is SKIPPED, never pushed a second
- * time. Without this, the same on-disk file passed as both `rulesPath` and in `rulesPaths` reads as TWO
+ * @decision f6985338 — builds the ordered, DEDUPED `RuleFileSource` list for the multi-file union: `rules`
+ * first (if present, labeled "rules"), then every readable `rulesFiles` entry labeled by its own `resolvedPath`
+ * — but an entry whose `resolvedPath` was ALREADY SEEN is SKIPPED, never pushed a second time.
+ *
+ * Without this, the same on-disk file passed as both `rulesPath` and in `rulesPaths` reads as TWO
  * DIFFERENT places the heading/marker was found, tripping a false `ambiguous`/`ambiguityWarning`. Dedup
  * by `resolvedPath` (not by content): a caller who names the same file twice always meant one file; two
  * different files that happen to share content are never merged.

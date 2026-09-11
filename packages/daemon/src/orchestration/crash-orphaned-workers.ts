@@ -51,11 +51,13 @@ export function deriveCrashOrphanedWorkers(db: Db, recovered: Session[]): CrashO
   for (const w of recovered) {
     if (w.role !== "worker") continue;
     if (!w.engineSessionId) continue;
-    // A cached 'dead' stamp is RE-VERIFIED now rather than trusted outright (see @decision sha:a9c9a342 above) — it
+    // A cached 'dead' stamp is RE-VERIFIED now rather than trusted outright (see above) — it
     // may be stale from an earlier watcher race on a transcript that's actually fine. A worker that was
     // NEVER flagged dead skips this fs hit entirely (unchanged from before); `resume()` itself still
     // re-checks live at resume time regardless, so this only closes the "silently excluded on a stale
     // flag before ever reaching resume()" gap without adding a filesystem check to the common path.
+    //
+    // @decision sha:a9c9a342
     if (w.resumability === "dead") {
       if (engineTranscriptExists(w.cwd, w.engineSessionId, w.harness)) {
         db.setResumability(w.id, "resumable"); // self-heal — the stamp was wrong

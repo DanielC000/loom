@@ -352,7 +352,7 @@ export function deployBuildSteps(root: string): BuildStep[] {
     // sync, so a normal code-only deploy pays only a quick verify. CI=1 keeps pnpm non-interactive.
     { label: "install", command: "pnpm install --frozen-lockfile --prefer-offline", args: [], shell: true, timeoutMs: DEPLOY_INSTALL_TIMEOUT_MS },
     // STEP 2 — BUILD (closes face A: a stale FULL TURBO cache replaying a green build over broken/stale
-    // source). Invoke turbo via ABSOLUTE node + ABSOLUTE turbo JS, NO shell — see @decision 51522f05 below.
+    // source). Invoke turbo via ABSOLUTE node + ABSOLUTE turbo JS, NO shell — see below.
     // `--force` is a DIRECT turbo argument here (`node <turbo> build … --force`), which is what actually
     // bypasses turbo's content-keyed cache so a deploy ALWAYS does a real compile. ⚠️ Do NOT "simplify"
     // this to `pnpm --filter @loom/web build --force`: there `--force` is forwarded to the package's build

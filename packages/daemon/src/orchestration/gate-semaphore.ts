@@ -493,6 +493,7 @@ export class GateSemaphore {
    *  @decision b9e07a4a — IDENTITY-CHECKED FIRST: `holderId` MUST equal what's currently stored, or it's
    *  a SAFE NO-OP (`refused-not-owner`), never a throw — free only after that check, or a live sibling's
    *  hold can be deleted.
+   *
    *  ⚠️ Once identity is confirmed, a queued {@link acquireRepoGuardOnly} waiter for the SAME `repoPath`
    *  is handed the hold DIRECTLY, in the SAME synchronous turn — `activeMergeRepos` never actually loses
    *  the key. This atomicity is load-bearing: it is what makes a race with `acquire()`'s own synchronous
@@ -913,6 +914,7 @@ export class GateSemaphore {
    *  @decision e3e40167 — `kind:"none"` here is LIVE-ONLY and genuinely can't distinguish settled from
    *  never-existed; never report it as a plain "not found" — `SessionService.gateStatus` falls through
    *  to the durable tombstone table for the real terminal state.
+   *
    *  `scopeSessionId` (card fc243a43) and `scopeProjectId` (card 8d585277's `gate_cancel`, B2-3) both
    *  restrict the CANDIDATE SET itself before prefix resolution runs, never a post-hoc filter — see
    *  `cancelGateOp`'s own doc for why an unscoped call is still made first too. Omitted, either is

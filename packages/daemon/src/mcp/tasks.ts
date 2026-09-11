@@ -378,7 +378,9 @@ export function toBoardTasks(tasks: Task[], terminalKey: string | undefined): Bo
  * to whatever rows this call actually returns.
  *
  * Every row (summary or full) also carries `merged` — the task's git-derived ship state, or `null` if
- * not proven merged; see {@link getTaskMergedInfo}'s fail-safe contract. @decision 9983eed6
+ * not proven merged; see {@link getTaskMergedInfo}'s fail-safe contract.
+ *
+ * @decision 9983eed6
  */
 /**
  * The FILTER core shared by {@link listProjectTasks} and {@link countProjectTasks} — applies every
@@ -1079,6 +1081,7 @@ export async function updateProjectTask(
    * An ADDITIVE alternative to `body`: appends a timestamped "## Triage note — <ts>" section instead of
    * replacing the whole body. See docs/decisions/8636f761-....md for why this exists.
    * @decision 8636f761
+   *
    * ⛔ Mutually exclusive with `body` (both together is a whole-patch REJECT, nothing written) — a replace
    * and an append are different intents and mixing them is never correct. DELIBERATELY UNVERSIONED: the
    * write's version is computed from a fresh read taken immediately before appending, not from the
@@ -1152,7 +1155,9 @@ export async function updateProjectTask(
   }
   // repoKey guard: three checks, all whole-patch-reject (same convention as the held-clear guard below) —
   // WRITE is manager/platform-only (a dispatch decision), the shared unknown-key validator, and a
-  // task-scoped retarget guard against a live worktree. @decision 49136451
+  // task-scoped retarget guard against a live worktree.
+  //
+  // @decision 49136451
   if (patch.repoKey !== undefined) {
     if (actor?.role !== "manager" && actor?.role !== "platform") {
       return { error: "repoKey is a dispatch decision — only a manager or the Platform Lead may set it, not a worker" };
@@ -1167,7 +1172,11 @@ export async function updateProjectTask(
   }
   // deferredUntilTaskId guard — set-time validation, whole-patch-reject: each non-null id must resolve
   // to a REAL task on THIS board, self-reference rejected, normalized to its FULL id (a stored prefix
-  // would fail read-time exact-id lookup). @decision 793ac76d / @decision 022659ac
+  // would fail read-time exact-id lookup).
+  //
+  // @decision 793ac76d
+  //
+  // @decision 022659ac
   if (patch.deferredUntilTaskId !== undefined && patch.deferredUntilTaskId !== null) {
     const rawIds = Array.isArray(patch.deferredUntilTaskId) ? patch.deferredUntilTaskId : [patch.deferredUntilTaskId];
     if (rawIds.length === 0) {
@@ -1265,6 +1274,7 @@ export async function updateProjectTask(
   // is a field-only patch with NEITHER protection that guard offers, yet it routinely carries a card's
   // entire decision surface. See docs/decisions/a53b24ce-....md for the specimen this guards against.
   // @decision a53b24ce
+  //
   // Checked against the FINAL `deferredReasonPatch` computed above (post the `deferred:false` auto-clear
   // override) — never the raw
   // `patch.deferredReason` — so this guard fires ONLY on an actual REPLACE-with-a-sliver, never on:
@@ -1360,6 +1370,7 @@ export async function updateProjectTask(
   // sliver in one silent, successful write. See docs/decisions/09d68835-....md for the specimen this
   // guards against.
   // @decision 09d68835
+  //
   // Fires ONLY when (a) the CURRENT body is substantial (≥MIN_SUBSTANTIAL_BODY_CHARS — a short
   // body has little to lose) AND (b) the PROPOSED body keeps less than MAX_SURVIVING_FRACTION of it (a
   // genuine rewrite that merely trims some prose stays well above this) AND (c) the caller hasn't passed

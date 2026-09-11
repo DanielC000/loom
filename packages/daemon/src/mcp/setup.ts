@@ -34,6 +34,7 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * workspace-auditor is rejected here by construction, caller-set only by the future startWorkspaceAuditor.
  * @decision a933613e — operator/assistant are ALSO excluded here, but not as elevated roles: their
  * session role is locked at their own spawn path, never by this profile field alone.
+ *
  * Returns an error string when the role is forbidden, else null. Exported so the role-guard unit test can
  * exercise it directly.
  */

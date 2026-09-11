@@ -30,9 +30,7 @@ import type { OrchestrationEvent } from "@loom/shared";
  *
  * OTHER sites read related-but-narrower shapes and deliberately do NOT call {@link deriveAwaitingReview}
  * or this allowlist — each answers a genuinely different question, so none is a candidate to fold in, but
- * each is a place a change to what "resolves" a report here is worth checking against
- * (@decision cfffeda6 — this enumeration must stay exhaustive; it once silently named only one of
- * three sites):
+ * each is a place a change to what "resolves" a report here is worth checking against:
  *   - `SessionService.classifyIdleWorker`'s `ackedSince` local (sessions/service.ts) — answers "has this
  *     worker's report been directly acknowledged", for STRANDED-worker detection, not "is a manager still
  *     awaiting review". It also treats `progress` as a reportable status (this allowlist's callers only
@@ -51,6 +49,9 @@ import type { OrchestrationEvent } from "@loom/shared";
  *     still awaiting review" — a genuinely different predicate over an overlapping but not identical event
  *     set (resume attempts matter here and don't to {@link deriveAwaitingReview}; recycle/stop don't matter
  *     here and do there).
+ *
+ * @decision cfffeda6 — this enumeration must stay exhaustive; it once silently named only one of
+ * three sites
  *
  * `message_worker`/`redirect_worker` are a PROXY for the doc's actual stated condition ("resumes a
  * turn"), not the thing itself — Loom records the SEND here, not a confirmed turn resumption. Right in

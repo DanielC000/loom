@@ -456,6 +456,7 @@ export function cancelQuestionForAgent(
  * @decision 308259e5 — do not cancel-and-refile a conversationally-answered `question_ask` to mark it
  * resolved — that loses the owner's actual reasoning to chat scrollback (it lands 'cancelled'/moot);
  * use `question_resolve` instead to capture the owner's own words as the note.
+ *
  * Do NOT "harden" this into a second confirm round-trip to match that ladder — it defends against an
  * injection-exposed relay channel this loopback-only composer path was never exposed to.
  *
