@@ -8927,15 +8927,9 @@ export class PtyHost {
   }
 
   /**
-   * Card 441499ee: safety net for a FALSE-NEGATIVE give-up — production measurement (the card's own
-   * neighbourhood, card 04de8bbf) found GIVE-UP RECOVERY firing while the turn had actually started (zero
-   * SUPPRESSED in that sample), meaning the discriminator that decides RECOVERY-vs-SUPPRESSED can itself
-   * be wrong. If RECOVERY already requeued a duplicate copy of that turn's text (see
-   * `requeueGiveUpOrigin`'s `giveUpGen` tag) and were left to drain later, it would silently re-submit a
-   * message whose original ALREADY landed — converting a fixed silent-drop bug into a NEW silent-duplicate
-   * bug. `UserPromptSubmit` and `Stop`/`StopFailure` are the two hooks that PROVE a turn actually ran
-   * (this file's own long-standing convention — either is definitive even if the other was lost), so both
-   * call this the instant they fire.
+   * @decision 441499ee — a false-negative give-up can requeue a duplicate of a turn whose original already
+   * landed; `UserPromptSubmit` and `Stop`/`StopFailure` — the two hooks that prove a turn ran — both call
+   * this the instant they fire, so a late confirmation can still catch and purge the requeued duplicate.
    *
    * @decision 09e655d5 — a late confirming hook correlates against `live.giveUpConfirmQueue`'s FIFO FRONT
    * (oldest still-ambiguous generation), never `live.submitGeneration` directly; `UserPromptSubmit` purges
@@ -9030,32 +9024,9 @@ export class PtyHost {
    * falls straight through to the untouched fallback below — a false-negative MISS here is by construction
    * never worse than the pre-card behaviour, only ever a no-op improvement missed.
    *
-   * CARD bc0774c4 — BATCH-PROVENANCE DISCRIMINATION (closes the residual THIS card's own body originally
-   * documented as accepted, in the paragraph that used to sit where this one now does — "genuinely-
-   * distinct-but-same-text is indistinguishable from coalesced-together by signature alone"): a signature
-   * match can span MORE than one `batchId` whenever two GENUINELY DISTINCT give-up events happen to share
-   * byte-identical text — no hash collision needed, P=1 once two such entries coexist (see `textSignature`'s
-   * own doc). An age-based tie-break (purge whichever matched `batchId` is numerically smallest, i.e. the
-   * OLDEST give-up) was tried and REJECTED: it is refutable by a concrete trace, not merely "usually right".
-   * Consider batch A (older) and batch B (younger), both genuinely ambiguous and held, sharing a signature.
-   * If B's OWN held entry redrains on its normal hold-expiry path — an ordinary, unremarkable event this
-   * class already handles (see `isGiveUpHeld`/`GIVE_UP_HOLD_MS`) — it resubmits under a BRAND-NEW
-   * `submitGeneration`, and when THAT resubmission's own hook confirms normally, the confirming hook's
-   * content still matches BOTH A's and B's stored signatures (B's stale `ambiguousDispatches` entry is not
-   * itself cleared by a plain successful resubmission — only an explicit purge clears it). An age-based
-   * tie-break would purge A here — a message that was NEVER actually confirmed — while leaving B's own
-   * (truly resolved) entry to linger unpurged. That is loss through a narrower door than the one this card
-   * was originally carded for, not a fix. So: when a content match spans MORE than one `batchId`, this
-   * method purges NONE of them — every matched entry is left exactly as it was, still genuinely ambiguous,
-   * to be resolved later once the competing batch has separately resolved (making a future same-content
-   * hook a single-`batchId` match again) or via its own bounded give-up hold. It still returns `true` (see
-   * the method body) rather than falling through to the FIFO-position fallback below: that fallback is
-   * CONTENT-BLIND (it purges by queue position alone) and running it here could purge a `live.pending` entry
-   * whose text doesn't even match `reportedPrompt` — strictly worse than resolving nothing. Per this
-   * project's own "fail toward a duplicate, never a loss" principle (88f11385): this is the unconditional-
-   * safe choice over a heuristic that is right most of the time — worst case, both batches eventually
-   * redrain on their own bounded holds and one becomes a genuine duplicate delivery; never a silently
-   * resolved-and-dropped row.
+   * @decision bc0774c4 — a match spanning >1 batchId is two distinct give-ups sharing byte-identical text
+   * (no hash collision needed), not one coalesced batch: purge NONE and return true rather than run the
+   * content-blind FIFO fallback; an age-based tie-break was rejected (refutable by trace).
    *
    * ⚠️ SCOPE — WHAT THIS DOES NOT CLOSE (Requirement D; state this precisely, per this project's own
    * "a comment is a claim" rule — a claim of "duplicates prevented" here would be exactly the false-

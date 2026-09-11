@@ -47,3 +47,14 @@ before it can ever drain and double-deliver the same text.
 Inline comment in `packages/daemon/src/pty/host.ts` (the `giveUpRequeues`/`giveUpGen` field docs on
 `QueuedMessage`), as of commit `88f11385c2c863db682b8e0d37c9a5f0118b0d17` (`fix(pty): hold a give-up
 requeue and stop the purge misattributing it`). Relocated by card `3f45b7d8` (tranche 6 on `pty/host.ts`).
+
+## A third site re-cites this measurement as a bug-class conversion
+
+`purgeConfirmedGiveUpRequeueCore`'s doc also cites "zero SUPPRESSED in that sample," framing an unpurged
+duplicate as converting a FIXED silent-drop bug into a NEW silent-duplicate bug — the same consequence,
+reworded.
+
+## Source (4)
+
+`packages/daemon/src/pty/host.ts` (`purgeConfirmedGiveUpRequeueCore`'s method doc), commit
+`e17a8c2af20b2da570967744ef4e5f7f5f020fa0`. Extracted by card `47021afd` (tranche 44).
