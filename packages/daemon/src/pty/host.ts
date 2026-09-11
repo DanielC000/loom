@@ -1825,16 +1825,16 @@ export type QueuedMessageKind = "warning" | "agent";
  * announces (only the answer route sets it). Exists so `purgeQueuedByQuestionIds` can drop a nudge that's
  * gone stale.
  * @decision bbc46336 — `question_pull` consumes ALL of a session's answered questions atomically, so a
- * batch of N answers produces N queued nudges but only the FIRST pull is productive; see
- * docs/decisions/bbc46336-questionid-tags-a-stale-answer-nudge-for-batch-purge.md.
+ * batch of N answers produces N queued nudges but only the FIRST pull is productive: purge a stale
+ * queued nudge via `purgeQueuedByQuestionIds` rather than letting it drain and find nothing.
  */
 /**
  * `reportEventId` optionally tags a queued `[loom:worker-report] …` nudge with the `worker_report`
  * orchestration event's own id (the same id `worker_report_get` returns as `eventId`) — set ONLY by
  * `SessionService.workerReport`'s manager-bound push.
  * @decision 60b26261 — lets `purgeQueuedByReportEventIds` drop a still-queued copy of a report the manager
- * already read via `worker_report_get`, WITHOUT keying on worker id (ambiguous across a progress→done
- * pair); see docs/decisions/60b26261-reporteventid-purges-a-report-the-manager-already-read.md.
+ * already read via `worker_report_get`, WITHOUT keying on worker id — a worker id would drop an unread
+ * earlier report along with a read later one (`progress` then `done` in succession).
  */
 /**
  * `giveUpRequeues` optionally counts how many times THIS EXACT message has already been put back on
@@ -1847,25 +1847,24 @@ export type QueuedMessageKind = "warning" | "agent";
  * the correlation a LATE confirming hook (arriving after give-up already fired, proving the original turn
  * actually started) uses to find and purge the now-redundant requeued copy before it can drain and
  * double-deliver the same text (see `purgeConfirmedGiveUpRequeue`). undefined for an entry never requeued.
- * @decision 441499ee — the give-up discriminator's own measured false-negative rate is what makes this
- * correlation load-bearing (a late confirmation is the COMMON case, not the exception); see
- * docs/decisions/441499ee-give-up-confirm-settle-is-a-short-last-chance-check.md.
+ * @decision 441499ee — the give-up discriminator's own measured false-negative rate (~86%) is what makes
+ * this correlation load-bearing: a late confirmation is the COMMON case here, not the exception.
  */
 /**
  * `giveUpHeldUntil` is the epoch-ms deadline before which this SAME requeued entry is ineligible for
  * `drainPending` (see `isGiveUpHeld`). Stamped alongside `giveUpGen` in `requeueGiveUpOrigin`, never
  * elsewhere; undefined for an entry never requeued.
- * @decision 73d5c34a — see docs/decisions/73d5c34a-give-up-hold-window-outlasts-one-reconcile-tick.md for
- * why the window is sized past one reconcile tick and deliberately un-coupled from it.
+ * @decision 73d5c34a — sized past one reconcile tick so an ordinary reconcile pass can't win the race
+ * against a late confirming hook; deliberately NOT coupled to the live reconcile interval (this file has
+ * no access to that daemon-resolved config) — still a hard bound, never infinite.
  */
 /**
  * `onGiveUpExhausted` is the SAME shape of hook `onDeliver` is — a caller-supplied closure PtyHost invokes
  * and otherwise knows nothing about — but fired on the OPPOSITE outcome: `requeueGiveUpOrigin` calls it
  * instead of silently discarding a message whose `giveUpRequeues` has exceeded `GIVE_UP_REQUEUE_LIMIT`.
- * @decision ccb407eb — deliberately NOT `onDeliver` reused for this (already-fired by the time exhaustion
- * is detected, for a message that gives up); PtyHost stays DB-agnostic — everything upstream of "this
- * message's final attempt failed" is sessions/service.ts's concern; see
- * docs/decisions/ccb407eb-carry-givenupexhausted-through-upgrade-requeue.md.
+ * @decision ccb407eb — deliberately NOT `onDeliver` reused for this (already fired by the time exhaustion
+ * is detected, so reusing it would be an idempotent no-op, not a real second channel); PtyHost stays
+ * DB-agnostic — the give-up-exhausted policy (re-mint, park-and-notify) belongs to sessions/service.ts.
  */
 /**
  * `logicalId` is the STABLE identity of the logical content this entry carries, unifying two id spaces
@@ -1874,8 +1873,7 @@ export type QueuedMessageKind = "warning" | "agent";
  * own freshly-minted `id` when a caller doesn't supply one — fully additive.
  * @decision 4a0af485 — `enqueueDurableMessage` supplies its OWN `rootMsgId` here so a value that survives a
  * remint OR an auto-joined manual resend is the SAME value `Live.ambiguousDispatches` tracks, letting a
- * late confirmation purge a duplicate from a different dispatch, not just a same-generation retry; see
- * docs/decisions/4a0af485-ambiguousdispatches-signature-purge-scoped-to-one-batchid.md.
+ * late confirmation purge a duplicate from a different dispatch, not just a same-generation retry.
  */
 /**
  * `mintedAtGen` — the value of `Live.submitGeneration` at the moment THIS entry was minted, set ONLY by
@@ -1888,7 +1886,9 @@ export type QueuedMessageKind = "warning" | "agent";
  * boundary is crossed. Every caller that carries a `QueuedMessage` across such a boundary
  * (`carryPendingToSuccessor`, the `daemon_restart` replay) MUST NOT thread `mintedAtGen` through — see
  * `mintedAtWallClock` below for the field that survives a boundary honestly.
- * @decision 4af5aefa — see docs/decisions/4af5aefa-paste-recovery-age-annotates-never-suppresses.md.
+ * @decision 4af5aefa — MUST NOT thread `mintedAtGen` across a `worker_recycle`/`daemon_restart` boundary:
+ * comparing a predecessor's generation count against a fresh successor's (which always restarts at 0)
+ * is a unit error, not a smaller number.
  */
 /**
  * `mintedAtWallClock` — `Date.now()` at the SAME moment `mintedAtGen` is stamped. Unlike `mintedAtGen`, an
@@ -1896,9 +1896,8 @@ export type QueuedMessageKind = "warning" | "agent";
  * boundary honestly: both carry paths thread THIS field onto the far side while deliberately leaving
  * `mintedAtGen` behind. Its only consumer is `annotatePasteRecoveryAge`.
  * @decision 4af5aefa — when `mintedAtGen` is absent (a carried entry), this is the ONLY age evidence
- * available; when present, it's now ALSO read alongside the generation count (card 2d36337e) since a
- * relative count alone can't tell the recipient whether this predates a specific later message they've
- * already read; see docs/decisions/4af5aefa-paste-recovery-age-annotates-never-suppresses.md.
+ * available; when present, it's now ALSO read alongside the generation count, since a relative count
+ * alone can't tell the recipient whether this predates a specific later message they've already read.
  */
 /**
  * `leapfrogCount` — how many times this entry has been pushed back (displaced from its queue position) by
@@ -1906,8 +1905,7 @@ export type QueuedMessageKind = "warning" | "agent";
  * reaches `AGENT_COALESCE_MAX_COUNT`, the reorder scan treats this entry as a boundary and refuses to
  * displace it again.
  * @decision e01687ea — the FAIRNESS BOUND this caps: a chatty sender's burst can only delay a quiet
- * different-sender entry by a bounded amount, never unboundedly; see
- * docs/decisions/e01687ea-leapfrogcount-bounds-a-chatty-senders-delay-of-a-quiet-one.md.
+ * different-sender entry by a bounded amount, never unboundedly.
  */
 /**
  * `resolveTailAtDelivery` is an OPTIONAL caller-supplied closure. **PURITY CONTRACT: MUST be pure /
@@ -1918,14 +1916,12 @@ export type QueuedMessageKind = "warning" | "agent";
  *
  * `resolvedTailReady`/`resolvedTail` are the memoization cache `withDeliveryTail` writes onto this SAME
  * entry the first time it's touched — never set by any caller directly.
- * @decision 8e0d09e8 — exists so a message whose BODY must stay frozen at enqueue time can still carry a
- * small amount of LIVE state read as late as possible; names a real carry-boundary gap (not threaded
- * through `carryPendingToSuccessor`/`getPersistablePendingSnapshot`) and a caller-responsibility rule
- * (a resolver conveying freshness must embed its OWN read-time stamp, since `submit()` freezes the
- * assembled text into `live.lastPrompt` and a rate-limit replay can replay it hours later unchanged); see
- * docs/decisions/8e0d09e8-resolvetailatdelivery-purity-contract-and-carry-hole.md.
- * @decision ea77f71d — the memoization's own byte-identity + cost rationale is recorded separately; see
- * docs/decisions/ea77f71d-withdeliverytail-memoizes-once-for-byte-identity-and-cost.md.
+ * @decision 8e0d09e8 — a carried/recycled/restarted entry LOSES this closure silently; a freshness-
+ * conveying resolver must embed its OWN read-time stamp, since a rate-limit replay can replay the frozen
+ * text hours later unchanged.
+ * @decision ea77f71d — never remove this memoization: a live-reading resolver could otherwise return a
+ * different value between `drainPending`'s real write and `requeueGiveUpOrigin`'s later reconstruction,
+ * silently breaking the late-confirmation content-match/purge mechanism.
  */
 export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; reportEventId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number; leapfrogCount?: number; resolveTailAtDelivery?: () => string | undefined; resolvedTailReady?: boolean; resolvedTail?: string };
 /**
@@ -2025,7 +2021,8 @@ export type EnqueueStdinTail = {
  * however corrupted the shape: a dropped "warning" nudge (e.g. a gate-completion notice once its durable
  * `pending_gate_ops` row is already `state:"settled"`) is the ONLY remaining path to the result, stranding
  * a parked recipient with no way back. @decision 78a16dc5 — sanitize or log, never drop, a warning-kind
- * entry on shape alone; see docs/decisions/78a16dc5-warning-kind-guard-sanitizes-never-drops.md
+ * entry on shape alone, however corrupted the shape — a dropped gate-completion nudge after its
+ * `pending_gate_ops` row settles is the only remaining path to the result, stranding the parked recipient.
  *
  * `sanitizeLoneSurrogates` — replaces any LONE (unpaired) UTF-16 surrogate (`LONE_SURROGATE_RE`) with
  * U+FFFD (the replacement character): exactly the string-level signature of BYTES that were split mid
@@ -2141,13 +2138,11 @@ interface Live {
   // to have actually landed — see submit()'s own doc for why the clear is deliberately DEFERRED to the next
   // submit() rather than attempted at give-up time. ADDITIVE, never overwritten by a give-up: a second
   // unresolved give-up on top of an already-dirty composer must not lose track of the first.
-  // @decision d4b3fa6c — NOT AUTHORITATIVE ALONE, a documented limitation (deliberately not "fixed"): a
-  // GIVE-UP SUPPRESSED mark can leave this reading stale-nonzero against a genuinely empty composer; see
-  // docs/decisions/d4b3fa6c-composerdirtylen-suppressed-gap-is-a-documented-limitation.md for why the
-  // obvious fix was evaluated and rejected. The safe direction is fail-toward-DIRTY: consumers must treat
-  // a non-zero read as a SUSPICION, not proof, and call `worker_flush`'s submit-only, write-nothing
-  // recheck BEFORE trusting it or reaching for a destructive remedy (worker_recycle/worker_stop) — see
-  // worker_list/worker_status/my_context's own tool descriptions and the `/orchestrate` doctrine.
+  // @decision d4b3fa6c — NOT AUTHORITATIVE ALONE (deliberately not "fixed"): a GIVE-UP SUPPRESSED mark can
+  // leave this stale-nonzero against a genuinely empty composer.
+  //
+  // Fail-toward-DIRTY: treat a non-zero read as a SUSPICION, never proof — call `worker_flush`'s
+  // write-nothing recheck before trusting it or reaching for a destructive remedy (worker_recycle/worker_stop).
   composerDirtyLen: number;
   // @decision c148f118 — the OPTIMISTIC counterpart to `composerDirtyLen` above: read the two TOGETHER,
   // never alone (see `composerDirtyLen`'s own doc and c148f118's record for the full mechanics/reset gates).
@@ -2170,8 +2165,9 @@ interface Live {
   // real shape), and `busy` deliberately stays true afterward — so `healIfStuck` can ALSO observe the SAME
   // still-unconfirmed generation later (its own backstop for a suppression staleness itself never
   // resolves). `.has(gen)` is the guard against marking the identical abandoned text twice.
-  // @decision a6c1d413 — replaces a single scalar that couldn't tell partial resolution from total
-  // resolution; see docs/decisions/a6c1d413-composerdirtymarkedgens-replaces-a-single-scalar-that-lost-partial-resolution.md
+  // @decision a6c1d413 — replaces a single scalar that couldn't tell partial from total resolution: never
+  // collapse this back to one scalar — a confirm of the most recent generation would again blindly zero
+  // the whole total, un-marking still-unconfirmed earlier contributions as clean.
   composerDirtyMarkedGens: Map<number, number>;
   // Card b9b8f8db: the `submitGeneration` whose submit() actually wrote FRESH body bytes (the plain paste,
   // or the full defensive clear+repaste) — null/mismatched for a generation that took the Enter-only
@@ -2197,8 +2193,10 @@ interface Live {
                         // drain/submit (mirror of `stopping`) so the ~10s reconcile drain can't submit pending
                         // into the capped account and CLOBBER lastPrompt — the killed turn resumeAfterRateLimit
                         // must replay. Set when the StopFailure is detected as rate_limit; cleared on resume.
-  // @decision 2521bf51 — closes a race between a human's own Enter and the queue drain; see
-  // docs/decisions/2521bf51-humansubmitheldeuntil-closes-a-race-between-a-human-enter-and-the-drain.md
+  // @decision 2521bf51 — closes a race between a human's own Enter and the queue drain: never drain on
+  // local composer byte-counting alone right after an Enter — the human's turn may not have genuinely
+  // started yet (UserPromptSubmit hasn't fired), and draining early races the composer.
+  //
   // epoch ms deadline until which drainPending SUPPRESSES a queued turn after a genuine human Enter-SUBMIT
   // (`nextRawDraftState`'s `draft.submitted !== null`) — set by writeStdin instead of draining promptly.
   // Cleared to `null` the instant a confirming hook (UserPromptSubmit or
@@ -2256,9 +2254,8 @@ interface Live {
   // Stop/StopFailure chokepoint consumes it, so a leftover value never gets attributed to a LATER turn.
   // Best-effort by design, same spirit as composerLen/nextComposerLen — see nextRawDraftState.
   // @decision 183de1a4 — retention is a SINGLE ephemeral slot with a ONE-TURN lifetime, never persisted,
-  // reset to null on every spawn/resume/fork; see
-  // docs/decisions/183de1a4-lastrawsubmit-retention-is-one-turn-only-never-persisted.md for the
-  // investigated verdict and the resulting residual this bounds.
+  // reset to null on every spawn/resume/fork: never assume it can recover an older turn's raw paste — it
+  // does not survive a daemon restart and is overwritten/cleared well before an older turn could need it.
   lastRawSubmit: string | null;
   // Card b4b9b707: mirrors lastRawSubmit's capture (same writeStdin call site, same nextRawDraftState
   // reconstruction) but is a SEPARATE field with its OWN lifecycle, dedicated to owner-text attribution —
@@ -2307,7 +2304,7 @@ interface Live {
   // flush has ever been issued for this session, or the last one already resolved one way or the other.
   // @decision ac7884e3 — a gen-match verdict is the best available signal, not proof of physical
   // causation: flushComposer and an ordinary give-up retry for the same generation are indistinguishable
-  // to the engine. See docs/decisions/ac7884e3-flush-attribution-gen-match-is-not-causation-proof.md
+  // to the engine.
   flushMarkerGen: number | null;
   // Epoch ms `flushMarkerGen` above was stamped. Diagnostic only (folded into `lastFlushAttribution`'s own
   // `resolvedAt - flushMarkerWrittenAt` once resolved) — never itself gates anything.
@@ -2370,8 +2367,8 @@ interface Live {
   // a content match only when every matched entry shares ONE `batchId` (distinct dispatches sharing
   // byte-identical text get distinct `batchId`s).
   // @decision bc0774c4 — two genuinely distinct dispatches sharing byte-identical text used to be purged
-  // as one coalesced batch's members; batchId discrimination fixed it. See
-  // docs/decisions/bc0774c4-batchid-discriminates-identical-text-distinct-dispatches.md
+  // as one coalesced batch's members; `batchId` fixed it — never purge a content match spanning more
+  // than one `batchId`, and never resolve one with an age-based tie-break (considered and rejected).
   //
   // Card ee56a894: `memberSig` is a SECOND signature, added alongside `{len,hash}` (never replacing it —
   // `{len,hash}` stays the JOINED text's signature, load-bearing for `purgeConfirmedGiveUpRequeue`'s
@@ -2384,9 +2381,9 @@ interface Live {
   // resend can only ever carry ONE member's own text, never the joined text of a batch the sender never
   // knew was coalesced. See `hasAmbiguousMatch`'s own doc for why both are tried.
   ambiguousDispatches: Map<string, { len: number; hash: string; writtenAt: number; batchId: number; memberSig: { len: number; hash: string } }>;
-  // @decision dbc7ffea — archives every superseded give-up cycle's signature (3 paths feed it; only a
-  // PROVEN engine confirmation may ever consult it). Bounded by count, never time. See dbc7ffea's record:
-  // docs/decisions/dbc7ffea-retiredgiveupsignatures-archives-superseded-cycles.md
+  // @decision dbc7ffea — archives every superseded give-up cycle's signature (3 paths feed it); only a
+  // PROVEN engine confirmation may ever consult it, never `hasAmbiguousMatch`'s guess. Bounded by count,
+  // never time — never archive the count-eviction path (a memory-safety backstop, not a supersede event).
   retiredGiveUpSignatures: Map<string, Array<{ len: number; hash: string; writtenAt: number; batchId: number; memberSig: { len: number; hash: string } }>>;
   // Card 1bd1f045: monotonic per-session sequence number for the `[pty-write]` byte/call-sequence log —
   // bumped by `ptyWrite()` on every REAL `live.pty.write()` call (see that method's doc). THE load-bearing
@@ -2590,7 +2587,8 @@ interface Live {
  * `Live | CodexLive` union return type lets TypeScript resolve a shared field with NO narrowing at all
  * while still hard-erroring on any Claude-only field access.
  * @decision 353f6dc4 — a codex session's live state lives in its OWN map (`PtyHost.liveCodex`), never
- * inside `Live` itself; see docs/decisions/353f6dc4-codexlive-is-a-separate-map-not-a-live-widening.md
+ * inside `Live` itself: never widen `Live` with a `kind:"codex"` variant, and never give `CodexLive` a
+ * Claude-only field "just in case" — its absence must stay a compile error, not a runtime check.
  */
 export interface CodexLive {
   kind: "codex";
@@ -2757,10 +2755,9 @@ export interface CodexLive {
    *  never contain this pty's own eventual file, AND for the narrower, still-open case (with its own
    *  tracking card id) this field does NOT close. */
   excludeEngineSessionIds: ReadonlySet<string> | null;
-  /** @decision 361a5520 — submitOutstanding: NOT cleared by CASE 3 (retry) or CASE 4 (exhausted) in
-   *  armCodexBusyStaleTimer, since a later marker sighting can still resolve it; IS cleared by
-   *  interruptForRedirectCodex's enterPending branch (nothing was sent), never its common path — see
-   *  docs/decisions/361a5520-submitoutstanding-cleared-only-on-confirmed-completion.md */
+  /** @decision 361a5520 — submitOutstanding: NOT cleared by CASE 3/4 in armCodexBusyStaleTimer (a later
+   *  marker can still resolve it); IS cleared by interruptForRedirectCodex's enterPending branch (nothing
+   *  sent), never its common path — that outstanding turn is still the same one, settling via its timer. */
   submitOutstanding: boolean;
 }
 
@@ -2981,33 +2978,31 @@ export interface PtyHostEvents {
    * on top of the one being reported (the call site already wraps this in try/catch for that reason).
    */
   onCodexSubmitUnconfirmed?(sessionId: string, info: { attempts: number; maxAttempts: number }): void;
-  /** @decision 448f1b4a — onCodexBootStuck: bootReadyTimer's one-shot fail-loud ceiling (never retried,
-   *  unlike onCodexSubmitUnconfirmed); a late boot still resolves normally via the onData composite check.
-   *  info.readyMarker/modelLoaded/trustDialogResolved (card 4babeb43) name which condition(s) held; all-true
-   *  is a real outcome, not a contradiction. See docs/decisions/448f1b4a-*.md */
+  /** @decision 448f1b4a — onCodexBootStuck: bootReadyTimer's one-shot fail-loud ceiling (never retried);
+   *  a late boot still resolves normally via the onData composite check. info.readyMarker/modelLoaded/
+   *  trustDialogResolved: all-true is a real outcome (never simultaneous in one tick), not a contradiction. */
   onCodexBootStuck?(sessionId: string, info: { timeoutMs: number; pendingCount: number; readyMarker: boolean; modelLoaded: boolean; trustDialogResolved: boolean }): void;
   /** @decision b987f086 — onCodexUnsupportedCapability: two independent reasons (a stdio-only MCP server;
-   *  codescapeEnabled for codex), named distinctly in info.items[].reason, never blended. See
-   *  docs/decisions/b987f086-oncodexunsupportedcapability-two-independent-reasons-named-distinctly.md */
+   *  codescapeEnabled for codex), named distinctly in info.items[].reason, never blended — and never relied
+   *  on alone, since profiles/validate.ts's save-time rejection can't catch a profile that predates it. */
   onCodexUnsupportedCapability?(sessionId: string, info: { items: { id: string; reason: string }[] }): void;
   /** @decision 47c11741 — onPasteTripwireGiveUp: fires when Loom DID write the text (twice) and the
    *  one-shot automatic RECOVERY re-injection itself also collapsed — distinct from onPasteLengthLoss
-   *  (never wrote it at all). See
-   *  docs/decisions/47c11741-onpastetripwiregiveup-fires-when-the-recovery-injection-itself-collapsed.md */
+   *  (never wrote it at all). Never retry the re-injection a second time; it's one-shot by design. */
   onPasteTripwireGiveUp?(sessionId: string, info: { token: string | null; engineSessionId: string | null }): void;
   /** @decision f9b1ea00 — onPromptMismatchUnresolved: durable follow-up for an unresolved "recognized
-   *  replay" notice; ts is give-up time, not write time (see writtenAt). @decision c23e2869 — recognizedGen/
-   *  matchedLen field-naming rationale (2nd site, see that record). See
-   *  docs/decisions/f9b1ea00-orchestrationevent-prompt-mismatch-unresolved-ts-correction.md */
+   *  replay" notice; ts is give-up time, not write time (see writtenAt).
+   *  @decision c23e2869 — recognizedGen/matchedLen are named the same as findRecognizedSubstring's own
+   *  result fields (2nd site) so a future non-zero-remainder widening needs no schema change. */
   onPromptMismatchUnresolved?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; recognizedGen: number; matchedLen: number; leadingRemainderLen: number; trailingRemainderLen: number; messageExcerpt: string; writtenAt: string | null }): void;
   /** @decision 38d68b8d — onPromptMismatchUnmatched: the PUSH half getLastMismatchUnmatched's pull surface
-   *  (card 59757189) can't cover — a recipient can never self-diagnose (@decision 68459420). See
-   *  docs/decisions/38d68b8d-onpromptmismatchunmatched-is-the-push-half-a-pull-surface-cannot-cover.md */
+   *  (card 59757189) can't cover — a recipient can never self-diagnose.
+   *  @decision 68459420 — that pull surface is deliberately never cleared once set, a discovery aid for a
+   *  manager who hasn't looked yet, not a live/transient flag. */
   onPromptMismatchUnmatched?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; intendedText: string; detectedAt: number }): void;
   /** @decision 176bdb0c — onExit: intended stays the load-bearing crash-recovery discriminator; signal/
    *  codexStopDiag (+ ece98bd8's engineSessionIdCaptureEndReason) are diagnostic-only additions that never
-   *  change what counts as a successful/intended stop. signal is ALWAYS undefined on Windows/conpty. See
-   *  docs/decisions/176bdb0c-onexit-codexstopdiag-signal-are-diagnostic-only.md */
+   *  change what counts as a successful/intended stop. signal is ALWAYS undefined on Windows/conpty. */
   onExit(sessionId: string, code: number | null, info: {
     intended: boolean;
     signal?: number;
@@ -3047,8 +3042,8 @@ export const HUMAN_PROMPT_TOOLS: readonly string[] = ["AskUserQuestion", "ExitPl
 export const TASK_TRACKING_TOOLS: readonly string[] = ["TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate"];
 
 /** @decision 8dd1dd1c — human-prompt disallow: Loom-driven roles only (worker/setup/auditor/
- *  workspace-auditor/run/assistant), NEVER manager/platform. Task-tracking disallow (card 33f9f181) is
- *  separate/disjoint. See docs/decisions/8dd1dd1c-role-scoped-human-prompt-disallow.md */
+ *  workspace-auditor/run/assistant), NEVER manager/platform — they legitimately surface decisions to the
+ *  human. Task-tracking disallow (card 33f9f181) is separate/disjoint. */
 export function disallowedToolsForRole(role?: SessionRole | null): string[] {
   const out: string[] = [];
   switch (role) {
@@ -3141,9 +3136,9 @@ export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedToo
 /** @decision ac90ca8e — role-scoped transcript-root deny (extended by 44fa586a; moved to this chokepoint
  * by @decision 3388be4d): closes the native Read/Glob/Grep bypass of the MCP-mediated read gates; keyed off
  * the PINNED opts.role, UNIONed into .deny (never replaces); run is deliberately excluded.
- * @decision 31613c1e — LEAD RULING (implemented by @decision d78f8217): manager/platform/setup get the
- * BLANKET deny, worker gets a PROJECT-SCOPED one — the one-knob "blanket for all four" was rejected.
- * See docs/decisions/ac90ca8e-*.md and docs/decisions/31613c1e-*.md */
+ * @decision 31613c1e/@decision d78f8217 — LEAD RULING: BLANKET for manager/platform/setup, PROJECT-SCOPED
+ * for worker (the weaker one-knob "blanket for all four" was rejected). Best-effort DENY-LIST, FAILS OPEN
+ * on anything unenumerated: "CARRY ITS LIMIT VERBATIM OR THIS BECOMES THE NEXT OVERCLAIMED CONTAINMENT DOC." */
 export const TRANSCRIPT_ROOT_DENY_ROLES: ReadonlySet<SessionRole> = new Set(["assistant", "auditor", "workspace-auditor", "manager", "platform", "setup"]);
 export const TRANSCRIPT_ROOT_DENY_RULES: readonly string[] = [TRANSCRIPT_ROOT_READ_DENY_RULE];
 export function withTranscriptRootDenyForSpawn(
@@ -3207,7 +3202,7 @@ export function redactSecrets(text: string, secrets: string[]): string {
 
 /** Assemble the `claude` argv (extracted so the ordering is unit-testable).
  * @decision 0050a17e — the kickoff prompt is NEVER emitted into this argv, for any role; delivered
- * post-ready via `submit()` instead. See docs/adr/0050a17e-deliver-kickoff-prompt-post-ready-not-via-argv.md. */
+ * post-ready via `submit()` instead — never put it, or any other large/variable payload, back on argv. */
 export function buildSpawnArgs(o: {
   resumeId?: string;
   fork?: boolean;
@@ -3348,8 +3343,8 @@ export function windowsCommandLine(file: string, args: readonly string[]): strin
 /** @decision abcf0eba — preflight the EXACT command line (via the SAME buildSpawnArgs call the real
  * spawn uses) and fail actionably before Windows CreateProcess's opaque error 206; Windows-only.
  * @decision 0050a17e — the refusal message no longer breaks down "which knob to shorten" by startup-
- * prompt contributor, since the prompt no longer rides argv at all. See docs/decisions/abcf0eba-*.md and
- * docs/adr/0050a17e-*.md. */
+ * prompt contributor, since the prompt no longer rides argv at all — no per-part split to reintroduce
+ * until a real incident shows which remaining arg needs one. */
 export function preflightWindowsCommandLine(
   bin: string,
   args: readonly string[],
