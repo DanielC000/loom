@@ -5010,6 +5010,20 @@ export class Db {
     this.db.prepare("UPDATE sessions SET resumability = ? WHERE id = ?").run(r, id);
     this.notifySessionChanged(id);
   }
+  /** @decision 5a56bb0a — atomic: archiveSession + setResumability("dead") + the retirement marker event,
+   *  in ONE transaction, so a hard kill between them can never leave a dead+archived row with no marker
+   *  (unrefusable by resume()'s chokepoint, and un-retried — nothing re-derives "dead" for this reason). */
+  // The listeners (markSessionDirty, the alert-webhook emitter) fire mid-transaction here, not post-commit
+  // as their own docs describe — safe: markSessionDirty is pure in-memory bookkeeping (its own DB read
+  // fires ~200ms later, well after commit), and the webhook listener's synchronous prefix reads via this
+  // SAME connection (consistent with the transaction's own writes) before its first real `await`.
+  archiveDeadRecycleSuccessor(id: string, event: OrchestrationEvent): void {
+    this.db.transaction(() => {
+      this.archiveSession(id);
+      this.setResumability(id, "dead");
+      this.appendEvent(event);
+    })();
+  }
   /**
    * Set ONLY the human-readable lastError (without touching the rate-limit park, unlike
    * setRateLimitedUntil). Used by the CrashRecoveryWatcher to stamp a crash-loop give-up so Mission
@@ -5785,6 +5799,13 @@ export class Db {
     return (this.db.prepare(
       `SELECT DISTINCT worker_session_id AS id FROM orchestration_events WHERE kind IN (${kindList}) AND worker_session_id IS NOT NULL`,
     ).all() as { id: string }[]).map((r) => r.id);
+  }
+  /** @decision 5a56bb0a — a narrow, indexed (idx_orch_events_kind) point check for ONE session, unlike
+   *  listWorkerSessionIdsWithEventKind's fleet-wide scan; resume()'s own hot path needs index-only. */
+  hasWorkerEventKind(workerSessionId: string, kind: OrchestrationEventKind): boolean {
+    return this.db.prepare(
+      "SELECT 1 FROM orchestration_events WHERE kind = ? AND worker_session_id = ? LIMIT 1",
+    ).get(kind, workerSessionId) != null;
   }
   /**
    * EVERY orchestration event that TOUCHES a session — it appears as the manager OR the worker. The

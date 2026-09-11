@@ -3008,6 +3008,12 @@ export class SessionService {
     if (!opts.allowSuperseded && this.db.hasSuccessor(sessionId)) {
       throw new Error("session was recycled — a successor exists; only a manual (human) resume may force it");
     }
+    // @decision 5a56bb0a — mirrors hasSuccessor above: the retired-successor marker never self-heals for
+    // an automatic caller, and a human allowSuperseded revival is a ONE-TIME override, not a permanent
+    // lift — refuse on the marker ALONE (B1: a bare dead+archivedAt leg is defeated by a view-only Restore).
+    if (!opts.allowSuperseded && this.db.hasWorkerEventKind(session.id, "recycle_successor_retired")) {
+      throw new Error("session was administratively retired (its recycle successor was superseded by the predecessor) — only a manual (human) resume may force it");
+    }
     const project = this.db.getProject(session.projectId);
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
@@ -3083,6 +3089,10 @@ export class SessionService {
       this.reconcileFailedSpawn(session.id, e);
       throw e;
     }
+    // @decision 5a56bb0a — a successful spawn proves any prior "dead" stamp wrong (mirrors
+    // crash-orphaned-workers.ts's own self-heal); it does NOT lift a retirement — the marker-only
+    // guard above still refuses automatic callers regardless of this write.
+    if (session.resumability === "dead") this.db.setResumability(session.id, "resumable");
     // A freshly-resumed session has no turn in flight (resume injects no prompt) — clear any stale
     // busy=true carried in the DB across the restart. Without this the session shows/acts "busy"
     // forever, so enqueued worker reports queue instead of submitting and the idle guard can't fire.
@@ -10371,8 +10381,12 @@ export class SessionService {
     if (fresh.recycledFrom === oldId) this.db.setOrchestration(freshId, { recycledFrom: null });
     this.db.setLastError(freshId,
       `[loom:recycle-failed] this session never reached ready — its recycle predecessor ${oldId.slice(0, 8)} has recovered (or remains) the fleet owner; this session is not resumable.`);
-    this.db.archiveSession(freshId);
-    this.db.setResumability(freshId, "dead");
+    // @decision 5a56bb0a — the one unconditional marker for "retired by policy, not actually broken",
+    // filed atomically WITH the dead stamp + archive (see archiveDeadRecycleSuccessor's own doc).
+    this.db.archiveDeadRecycleSuccessor(freshId, {
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: oldId, workerSessionId: freshId,
+      kind: "recycle_successor_retired", detail: { predecessorId: oldId },
+    });
   }
 
   /**
