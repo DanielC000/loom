@@ -273,11 +273,13 @@ export class TaskMcpRouter {
     // grant-checked `board_create`/`board_update` (companion/capabilities.ts, mounted on loom-orchestration),
     // which take an EXPLICIT `project` param and are checked against a real `board-reach` act-mode grant.
     // Unlike those, tasks_create/tasks_update ALWAYS write to THIS session's own project with no grant
-    // check at all — for the Companion that silently meant "your own bound board", which is exactly the
-    // silent-wrong-board footgun this omission closes (a Companion asked to file to a NAMED project would
-    // reach for this tool and misfile to its home board instead). Every other role is unaffected — this is
-    // conditional TOOL REGISTRATION (an omitted tool never reaches tools/list), the same pattern already
-    // used by authenticated_request/vault_write below.
+    // check at all. Every other role is unaffected — this is conditional TOOL REGISTRATION (an omitted
+    // tool never reaches tools/list), the same pattern already used by authenticated_request/vault_write
+    // below.
+    //
+    // @decision sha:9d5fd461 — tasks_create/tasks_update must stay excluded for an "assistant" (Companion)
+    // session: unlike board_create/board_update they carry no grant check, so a Companion asked to file to
+    // a named project could silently misfile to its own home board instead.
     //
     // `session?.role !== "assistant"` reads fail-open on a null session (an unknown/expired sessionId
     // would take the TRUE branch and register the tools) — that's fine because it's UNREACHABLE, not
