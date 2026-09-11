@@ -784,6 +784,7 @@ export function formatMaxGapLine(gapMs, { partial = false } = {}) {
 // @decision e6e55f7a — a harness crash mid-run is the most opaque rejection mode this instrument
 // exists to illuminate; on failure this prints BOTH lines (labelled `partial: true`) then RETHROWS
 // THE SAME ERROR UNCHANGED — never swallowed, never a different exit code.
+//
 // `runFn` does the actual test-running work; `log` is injectable so a hermetic test can capture output
 // instead of asserting against real console.log side effects.
 // @decision a496166a — `onSample` is an OPTIONAL, ADDITIVE hook on the SAME RSS-sample timer tick;
@@ -1077,6 +1078,7 @@ function writeFullySync(fd, text) {
 // @decision sha:cad5d5d6 — four honest buckets, never a fifth: "assertionFailed" stays the PRIMARY signal
 // even when a file ALSO throws uncaught after a failed check() — attach a bounded `stderrExcerpt`
 // alongside it instead (present only when both FAIL lines and stderr exist), never reclassify or drop it.
+//
 //   "timeout"        — already fully named by `timeoutDetail` elsewhere on the row; this just labels it.
 //   "assertionFailed" — this project's own `check(label, cond)` helper prints "FAIL  <label>" to stdout for
 //                       every false assertion; pulling every such line names EVERY distinct failing

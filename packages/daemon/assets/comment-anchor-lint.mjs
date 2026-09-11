@@ -82,12 +82,14 @@
 //      text "sha" isn't hex) — so, exactly like `overlongAnchorIds` above, this shape produces no anchor,
 //      no orphanAnchors entry, no brokenAnchors entry (EOL-only, a different shape), no overlongAnchorIds
 //      entry (that pattern also requires the hex to immediately follow the sigil): silent, total no-op.
-//      @decision e708670b widened this from catching only whitespace AFTER the colon, once a sibling
-//      shape shipped unhandled the first time (see SIGIL_SPACE_RE below). Runs in BOTH the CLI scan
-//      and the per-file hook, same ground as brokenAnchors/overlongAnchorIds — it needs only the one
-//      file already being scanned. ⛔ Does NOT catch a same-line id that's too SHORT after/before the
-//      space (a different, rarer shape, the same carve-out every other check in this file already
-//      states) — requires 8+ hex chars, mirroring `overlongAnchorIds`'s own
+//
+//      @decision e708670b widened this from catching only whitespace AFTER the colon, once a sibling shape
+//      shipped unhandled the first time (see SIGIL_SPACE_RE below).
+//
+//      Runs in BOTH the CLI scan and the per-file hook, same ground as brokenAnchors/overlongAnchorIds — it
+//      needs only the one file already being scanned. ⛔ Does NOT catch a same-line id that's too SHORT
+//      after/before the space (a different, rarer shape, the same carve-out every other check in this file
+//      already states) — requires 8+ hex chars, mirroring `overlongAnchorIds`'s own
 //      `{8,}`-vs-well-formed-length distinction.
 //
 //   9. bareCommitAnchors (card a2fc4031) — a BARE `@decision <id>` (never `sha:`-sigil'd) whose id ALSO
@@ -282,32 +284,34 @@ function renderAnchorId(a) { return a.ns === "sha" ? `sha:${a.id}` : a.id; }
 // too short) — that's a different, rarer shape outside this card's DoD, which is specifically the wrap.
 const BROKEN_ANCHOR_RE = /@decision\b\s*$/i;
 
-// @decision afc56dcc — a same-line hex run of 9+ chars after `@decision` (optionally `sha:`-sigil'd, the
-// shape a verbatim 40-hex `git blame`/`git log` paste produces). `ANCHOR_RE` requires exactly 8 hex chars,
-// so this never matches it: silent, total no-op (no anchor, no orphanAnchors/brokenAnchors entry, no
-// error). Deliberately the NARROW shape, not the broader "@decision not followed by a valid id anywhere on
-// the line" form — that broader form was tried and rejected (card ad3a9a85, 26 false positives on this
-// repo's own mid-line "@decision" mentions). Positive-controlled, measured ZERO real hits against every
-// `@decision` occurrence in this repo — a proven-able zero, not an artifact of a broken pattern.
-// ⛔ Scope, stated plainly (mirrors BROKEN_ANCHOR_RE's own carve-out): does NOT catch the EOL-wrap shape
-// (that's BROKEN_ANCHOR_RE above) and does NOT catch a same-line id that's merely too SHORT (e.g.
+// @decision afc56dcc — a same-line hex run of 9+ chars after `@decision` (optionally `sha:`-sigil'd, the shape
+// a verbatim 40-hex `git blame`/`git log` paste produces).
+//
+// `ANCHOR_RE` requires exactly 8 hex chars, so this never matches it: silent, total no-op (no anchor, no
+// orphanAnchors/brokenAnchors entry, no error). Deliberately the NARROW shape, not the broader "@decision not
+// followed by a valid id anywhere on the line" form — that broader form was tried and rejected (card ad3a9a85,
+// 26 false positives on this repo's own mid-line "@decision" mentions). Positive-controlled, measured ZERO real
+// hits against every `@decision` occurrence in this repo — a proven-able zero, not an artifact of a broken
+// pattern. ⛔ Scope, stated plainly (mirrors BROKEN_ANCHOR_RE's own carve-out): does NOT catch the EOL-wrap
+// shape (that's BROKEN_ANCHOR_RE above) and does NOT catch a same-line id that's merely too SHORT (e.g.
 // "@decision 12ab") — a different, rarer shape outside this card's DoD.
 const OVERLONG_ANCHOR_ID_RE = /@decision\s+(sha:)?([0-9a-f]{9,})\b/gi;
 
-// @decision e708670b — a `sha:` sigil with whitespace adjacent to its colon, AFTER it, BEFORE it, or
-// both (e.g. "sha" then a space then the colon, or the colon then a space then the hex run, instead of
-// the colon sitting directly between "sha" and the hex with nothing in between). `ANCHOR_RE`'s `sha:`
-// alternative requires the colon to sit directly between "sha" and the hex run with no intervening
-// whitespace, and the bare alternative can't match either (the literal text "sha" isn't hex) — so there
-// is no position in the line the global scan can match: silent, total no-op (no anchor, no
-// orphanAnchors/brokenAnchors/overlongAnchorIds entry, no error). Matches ANY hex run of 8+ chars
-// adjacent to the malformed sigil (not just exactly 8), so a combined space-AND-overlong paste is also
-// caught by this one pattern rather than needing a second. A sibling defect its own originating card
-// named but shipped unhandled once already — never loosen the whitespace requirement to `\s*` on both
-// sides, that also matches the well-formed form. Measured ZERO real hits across every placement.
-// ⛔ Scope, stated plainly: does NOT catch a same-line id that's too SHORT after/before the space (a
-// different, rarer shape — mirrors every other too-short carve-out in this file, and mirrors
-// `overlongAnchorIds`'s own `{8,}` cutoff for the identical reason).
+// @decision e708670b — a `sha:` sigil with whitespace adjacent to its colon, AFTER it, BEFORE it, or both (e.g.
+// "sha" then a space then the colon, or the colon then a space then the hex run, instead of the colon sitting
+// directly between "sha" and the hex with nothing in between).
+//
+// `ANCHOR_RE`'s `sha:` alternative requires the colon to sit directly between "sha" and the hex run with no
+// intervening whitespace, and the bare alternative can't match either (the literal text "sha" isn't hex) — so
+// there is no position in the line the global scan can match: silent, total no-op (no anchor, no
+// orphanAnchors/brokenAnchors/overlongAnchorIds entry, no error). Matches ANY hex run of 8+ chars adjacent to
+// the malformed sigil (not just exactly 8), so a combined space-AND-overlong paste is also caught by this one
+// pattern rather than needing a second. A sibling defect its own originating card named but shipped unhandled
+// once already — never loosen the whitespace requirement to `\s*` on both sides, that also matches the
+// well-formed form. Measured ZERO real hits across every placement. ⛔ Scope, stated plainly: does NOT catch a
+// same-line id that's too SHORT after/before the space (a different, rarer shape — mirrors every other
+// too-short carve-out in this file, and mirrors `overlongAnchorIds`'s own `{8,}` cutoff for the identical
+// reason).
 const SIGIL_SPACE_RE = /@decision\s+sha(?:\s+:\s*|:\s+)([0-9a-f]{8,})\b/gi;
 
 // Card a862e8f0 — a phrase that POINTS AT the out-of-band record instead of STATING the
