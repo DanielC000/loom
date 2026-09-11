@@ -30,13 +30,9 @@ function readCapBytes(): number {
 }
 
 /**
- * Manager correction to this card's own original filing: an EXACT `poolSize`+`testCount` match is nearly
- * always statistically empty in practice. Measured live against the real 115MB file: the most recent real
- * run's own exact stratum had `n=2`; across the whole file, 127 distinct strata exist and 98 of them
- * (77%) have a clean `n < 5`. `testCount` increments on every single test file added or removed, so a
- * real full-suite stratum is a handful of runs at best and collapses to 0–2 for WEEKS after any test
- * lands — the band is emptiest exactly when someone has just changed the suite and most wants to know
- * whether it got slower.
+ * @decision sha:7ff0722c — an EXACT `poolSize`+`testCount` match is nearly always statistically
+ * empty in practice (measured live: 98 of 127 real strata had a clean n<5); this constant exists
+ * so a near-empty stratum still widens to a usable sample instead of reporting off n=2.
  *
  * Below this many CLEAN exact-stratum samples, widen the `testCount` match outward to the NEAREST
  * neighbouring `testCount` values (never `poolSize` — see `selectStratum`'s own doc for why `poolSize`

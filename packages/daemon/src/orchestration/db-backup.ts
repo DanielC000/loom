@@ -5,11 +5,14 @@ import { resolveConfig, type BackupConfig, type PlatformConfigOverride } from "@
 import { DB_PATH, AUTO_BACKUP_DIR } from "../paths.js";
 
 /**
- * Automatic SQLite DB backup service. The 2026-06-04 prod-wipe survived only by LUCK (the destructive
- * DELETEs were still in the WAL and the main file held a 23-min-old checkpoint) — this gives durable,
- * automatic recovery for ANY cause. Snapshots `loom.db` into `~/.loom/backups/auto/loom-<ISO>.db` via
- * better-sqlite3's ONLINE backup API (`db.backup(dest)` — safe on a live WAL DB; a flat file-copy of
- * an open WAL DB can capture a torn/stale main file, exactly the failure mode that nearly lost the DB).
+ * Automatic SQLite DB backup service, giving durable, automatic recovery for ANY cause of DB loss.
+ *
+ * @decision sha:8e8324cd — a 2026-06-04 prod-wipe survived only by luck (destructive DELETEs were
+ * still in the WAL, the main file held a 23-min-old checkpoint) — a flat file-copy of an open WAL
+ * DB can reproduce that exact near-loss, which is why this snapshots via the online backup API.
+ *
+ * Snapshots `loom.db` into `~/.loom/backups/auto/loom-<ISO>.db` via better-sqlite3's ONLINE backup
+ * API (`db.backup(dest)` — safe on a live WAL DB).
  *
  * Triggers (wired in index.ts / sessions/service.ts): on boot (before migrations/reconcile, so a bad
  * migration is recoverable to the pre-boot state), periodically (DbBackupWatcher), and before a
