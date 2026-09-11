@@ -179,12 +179,12 @@ function readLinesUpTo(filePath, maxLineIndex) {
 
 /**
  * The start of the blank-line-delimited block containing `start` (0-indexed), expanded UPWARD ONLY,
- * bounded by BLOCK_EXPAND_MAX lines. This is a heuristic stand-in for "the enclosing symbol" (card
- * 661b7d46's own wording) — not a real AST symbol boundary — chosen because it's cheap, dependency-free,
- * and mirrors a heuristic already used elsewhere in this repo (docs/investigations/
- * e3faa8ac-fixed-wait-polarity) for the same "which block is this line part of" question. It catches the
- * common case of an anchor comment sitting immediately above a function/section whose body starts
- * mid-window, without scanning the file.
+ * bounded by BLOCK_EXPAND_MAX lines. It catches the common case of an anchor comment sitting
+ * immediately above a function/section whose body starts mid-window, without scanning the file.
+ *
+ * @decision 661b7d46 — a heuristic stand-in for "the enclosing symbol" — not a real AST symbol
+ * boundary — chosen because it's cheap, dependency-free, and mirrors a heuristic already used
+ * elsewhere in this repo for the same "which block is this line part of" question.
  *
  * ⛔ Deliberately NOT symmetric (card-review B1): expanding DOWNWARD past the literally-requested range
  * would find an anchor for a LATER section the agent's `Read` call never actually returned, inject it

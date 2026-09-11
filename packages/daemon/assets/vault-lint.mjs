@@ -19,16 +19,12 @@
 // `hookSpecificOutput.additionalContext` ONLY — the non-blocking "flag" channel, NOT exit-2 (which is
 // the blocking channel).
 //
-// FIELD DETERMINATION (card 9b293b4b, 2026-09-09) — do not reintroduce a `systemMessage` copy: this
-// script used to emit the warning via BOTH `systemMessage` and `additionalContext`, "whichever the
-// running Claude honors" — a hedge never actually checked. Card da723d41 checked it empirically for
-// decision-records.mjs (three controlled `claude -p` trials, incl. a swapped-values control) and found
-// `additionalContext` is the ONLY field the model ever sees; `systemMessage` is UI-only and never reaches
-// it. This hook's own warning is addressed to the AGENT ("surfaces an ADVISORY warning to the agent" —
-// see above; the agent self-corrects), not to the human at the terminal, so the same determination
-// applies here: emitting `systemMessage` bought nothing but double the byte cost. See project memory
-// `posttooluse-hook-honors-additionalcontext-not-systemmessage` and decision-records.mjs's own header for
-// the full method.
+// FIELD DETERMINATION: emit the warning via `hookSpecificOutput.additionalContext` ONLY.
+// `systemMessage` is UI-only (surfaced to the human at the terminal) and never reaches the model.
+//
+// @decision 9b293b4b — do not reintroduce a `systemMessage` copy of this hook's warning: only
+// `additionalContext` reaches the model (card da723d41 verified this empirically for
+// decision-records.mjs); this hook's warning is agent-addressed, so the same determination applies here.
 import fs from "node:fs";
 import path from "node:path";
 
