@@ -6,6 +6,13 @@ One op per `key` at a time (spawn: `spawn:${taskId}`; merge: `merge:${workerSess
 
 The same walk was later needed for the merge-batch key too. That key (`merge-batch:${managerSessionId's LINEAGE ROOT}:${sorted, comma-joined LINEAGE ROOTS of the resolved candidate set's workerSessionIds}`) was originally minted from raw session ids by card f944d4e4; this card rebuilt both halves from `lineageRootId` (stable across a manager/candidate recycle, byte-identical to the raw id for a never-recycled session) for the same reason as the merge key above — a mid-batch manager or candidate recycle must not fracture the dedupe key into two. `SessionService.mergeBatchTracked`'s own doc has the full rationale for why the key is the RESOLVED candidate set (not the raw request), why `baseMainSha` is deliberately excluded from it, and why lineage-rooting specifically (not just recycledFrom) was needed on top.
 
+See [[f944d4e4-mergebatchtracked-dedupe-attach-key]] for that key's own design. This mattered MORE than an
+ordinary corner case because of card `81d795de` (see
+[[81d795de-mergebatch-settle-deferred-to-whole-batch-completion]]): deferring a batch's tombstone settle
+to whole-batch completion widened the finalize window to potentially tens of minutes, making a mid-batch
+recycle between the initial call and a client-timeout retry ORDINARY, not a corner case — a raw-id key
+change on retry would mint a genuinely SECOND, concurrent batch op for the same resolved worktrees.
+
 ## Do not
 
 - Do not key a pending merge/merge-batch op on a raw session id that a recycle could later replace — key on the lineage root (or walk the `recycledFrom` chain) on BOTH the read and write sides, or a recycle mid-flight silently forks the dedupe into two op identities for one underlying worktree.
@@ -48,3 +55,9 @@ this function used to make on every single call.
 Inline comment in `packages/daemon/src/sessions/service.ts`, above `peekPendingMerge`: lines 6296-6319,
 as of main `1cbc0d74`. Relocated by card `61632c05` (tranche 15); no wording changed, wrapped source
 lines joined into a flowing paragraph and the `*` comment markers stripped.
+
+### Source (3)
+
+Inline comment in `packages/daemon/src/sessions/service.ts`, `mergeBatchTracked`'s own JSDoc header, as of
+this tranche's HEAD. "Tens of minutes" is sourced from
+[[81d795de-mergebatch-settle-deferred-to-whole-batch-completion]].

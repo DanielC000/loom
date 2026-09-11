@@ -36,3 +36,26 @@ Inline comments in `packages/daemon/src/sessions/service.ts`: cited (not origina
 site; the primary `mergeBatchTracked`/`batchGateVerdict` design doc this card most fully belongs to is
 elsewhere in this file and out of this tranche's scope — extend this record there rather than creating a
 second file.
+
+## `mergeBatchTracked`'s own `attach()` call — the mechanism behind the deferred settle
+
+`opts.onSettle` (part of the `attach()` call cf803152 also extends — see
+[[cf803152-mergebatchtracked-attach-opts-verdict-identity-and-classification]]) is what actually implements
+the deferral above: it defers the tombstone's `settlePendingGateOp` WRITE until this whole `run()` —
+fast-forward and every per-branch finalize included, not just the gate run — has settled. This does NOT
+move when the verdict itself is computed: `deriveBatchGateVerdict` still runs at the exact same point in
+`runGate` it always did — after the gate run and any bounded retry settle, inside `runGate` — only the
+WRITE of that already-computed verdict into the tombstone row is held back, deliberately, until the wider
+span above has fully settled.
+
+### Do not (2)
+
+- Do not read `opts.onSettle`'s deferral as moving WHEN the verdict is computed — `deriveBatchGateVerdict` still runs at the same point inside `runGate` it always did; only the tombstone WRITE of that verdict is held back until the whole `run()` settles.
+
+### Source (2)
+
+Inline comment in `packages/daemon/src/sessions/service.ts`, `mergeBatchTracked`'s own JSDoc header (the
+deferred-settle claim itself), as of this tranche's HEAD. The "after the gate run and any bounded retry
+settle" timing detail is not stated in that JSDoc — read directly from the code around the
+`batchGateVerdict` declaration (`deriveBatchGateVerdict` is called after the first `gateSemaphore.runExclusive`
+AND after any bounded-retry `runExclusive`, never only the former).

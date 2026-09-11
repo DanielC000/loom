@@ -13857,118 +13857,50 @@ export class SessionService {
   /**
    * Card dbc6f660 — batch the merge gate: gate up to `orchestration.maxConcurrentWorkers` ready branches
    * (resolveConfig-resolved, never a caller-supplied param — K is fixed, not agent-settable) on ONE repo
-   * ONCE, landing each branch's OWN commits INDIVIDUALLY (card 6801c0a1 — NOT squashed, NOT byte-shape-
-   * identical to a solo confirm; only the solo path still squashes — see git/batch-merge.ts's own header
-   * doc for the full correction + rationale). Assembly happens git-side (batch-merge.ts, a rebase/cherry-
-   * pick primitive dedicated to this batched path — it does NOT reuse {@link mergeBranch}, which stays
-   * reserved for the solo squash path, untouched); this
-   * method is the orchestration glue: resolve/validate candidates, wire the shared gate run, and dispatch
-   * each outcome to the SAME finalize paths a solo merge already uses — never new finalize logic:
+   * ONCE, landing each branch's OWN commits INDIVIDUALLY. Assembly happens git-side (batch-merge.ts, a
+   * rebase/cherry-pick primitive dedicated to this batched path — it does NOT reuse {@link mergeBranch},
+   * which stays reserved for the solo squash path, untouched); this method is the orchestration glue:
+   * resolve/validate candidates, wire the shared gate run, and dispatch each outcome to the SAME finalize
+   * paths a solo merge already uses — never new finalize logic:
    *  - a branch the batch actually LANDED on canonical main is finished via {@link finishAlreadyMerged}
    *    (its content is now provably already on main — exactly the ALREADY_MERGED shape that method exists
    *    for — so it finalizes with NO extra gate run).
    *  - every OTHER candidate (dropped by assembly, over the batch cap, stranded, or — on a red gate/forfeit
    *    — the WHOLE batch) falls back to today's unchanged {@link confirmWorkerMergeTracked}, one at a time.
    *
+   * @decision 6801c0a1 — this landing is NOT squashed and NOT byte-shape-identical to a solo confirm; only
+   *  the solo path still squashes.
+   *
    * Deliberately simpler than confirmWorkerMergeTracked's own gate call in one respect only: no
    * transient-kill auto-retry (that stays exactly as it is on the (still fully exercised) per-branch
-   * fallback path). `computeEmitCompareGate` runs here on the ALREADY-ASSEMBLED, frozen batch worktree —
-   * `gateBaseMainSha..HEAD`, i.e. the UNION of every landed branch's own changes — reusing the SAME
-   * predicate `confirmWorkerMergeTracked` already reuses for a solo merge, never a second one. When that
-   * union proves eligible, `buildReducedGateCommand`'s smaller command is substituted for the real
-   * `gateCommand`, exactly as the solo path already does for one branch (card d422e279). This is a
-   * DIFFERENT decision from card dbc6f660's own "keep the assembler dumb" ruling: that one is about batch
-   * SELECTION — whether an individually-reduced-eligible branch should be excluded from a batch, which the
-   * Lead's measurement found doesn't pay at this K (a reduced branch riding an already-full batch costs
-   * nothing marginal) — and says nothing about a batch whose EVERY constituent branch is reduction-eligible,
-   * where the assembled tree's own diff still proves inert and running the full ~15-20min suite buys zero
-   * additional verification over the reduced command (observed in production: a K=2 batch of two test-only
-   * branches ran full for over 11 minutes past the reduced band). `chosen` membership stays exactly as dumb
-   * as dbc6f660 decided — only the ONE resulting gate run's OWN command can now reduce. Card 67030bb9's
-   * bounded single/multi-file retry (below) applies to whichever command actually ran, reduced or full —
-   * the same generic failure-classification path the solo side already exercises after ITS OWN reduced
-   * runs, so no new retry design is needed here.
+   * fallback path).
    *
-   * 🔴 A SECOND, DEEPER DEFECT THIS SAME CARD FIXED (see the `computeEmitCompareGate` call site's own
-   * comment below for the full mechanism): the call used to pass CANONICAL `finalRepoPath` as the
-   * predicate's `repoPath` while asking it to resolve the literal ref `"HEAD"` — which then meant
-   * CANONICAL's own checked-out HEAD, not the batch worktree's, and (since canonical hadn't advanced past
-   * `gateBaseMainSha` yet at that point) always diffed `gateBaseMainSha..gateBaseMainSha` — an EMPTY diff,
-   * unconditionally, regardless of what the batch actually changed. This — not merely "a batch's union is
-   * unlikely to qualify" — is the real reason every historical batched `gate_history` row read
-   * `emitCompareReduced:null`: the predicate was structurally unable to ever decide a batch, full stop.
-   * Confirmed directly against a real fixture batch before this fix landed. Passing `worktreePath` as
-   * BOTH the `repoPath` and `worktreePath` arguments fixes it — a linked worktree shares its parent's
-   * object database, so `gateBaseMainSha` still resolves fine; only the "HEAD" ref now means what it
-   * should.
+   * @decision dbc6f660 — a batch's own gate command can also reduce on the assembled union
+   *  (`computeEmitCompareGate`/`buildReducedGateCommand`), a DIFFERENT decision from batch SELECTION
+   *  staying dumb; that record has the fixed `repoPath`/`worktreePath` defect this depended on.
    *
-   * DEDUPE/ATTACH (card f944d4e4, following `46ebdf20`'s DoD-3 finding): a client-side timeout on this call
-   * (it awaits the whole batch synchronously) used to have no cheap re-poll — a re-fire minted a fresh
-   * `opId` and cut a whole new batch worktree before the pre-existing per-repo merge-admission guard
-   * (`GateSemaphore`'s `activeMergeRepos`) serialized it behind the first call, wasting real work every
-   * time (safe, never corrupting, but wasteful — see that card's own measurement). This method is now keyed
-   * through {@link PendingOpRegistry.attach} — kind `"merge"`, key `merge-batch:${managerSessionId's
-   * LINEAGE ROOT}:` plus the SORTED, comma-joined LINEAGE ROOTS of the resolved `chosen` batch's
-   * `workerSessionId`s (computed AFTER ownership/repo/stranded-work filtering, i.e. the set that will
-   * actually be gated together, not the raw request) — so a re-fire with the SAME resolved candidate set
-   * re-attaches to the already-running (or just-settled) op instead of starting a second one: no second
-   * worktree cut, no second `opId` minted, no second gate run. Two things are DELIBERATELY excluded from
-   * the key: `baseMainSha` (main can legitimately advance between a call and its retry — folding it in
-   * would make a genuine retry mint a fresh op, defeating the point) and the caller's raw, unsorted
-   * `workerSessionIds` array (an identical logical set reordered across a retry must still dedupe-hit).
-   * LINEAGE-ROOTED, not raw ids (card `3a2dac9c`, DoD-3): a raw-id key was SENSITIVE to a mid-batch
-   * `worker_recycle`/manager recycle — card 81d795de's own widened finalize window makes a recycle landing
-   * between the initial call and a client-timeout retry an ORDINARY event, not a corner case, and a
-   * raw-id key change on retry used to mint a genuinely SECOND, concurrent batch op for the same resolved
-   * worktrees. `lineageRootId` never changes across a recycle (a predecessor and every one of its
-   * successors share the same root), so this key is now stable across exactly that window, byte-identical
-   * to the raw-id key for the common never-recycled case (a session's own root is itself).
-   * RESIDUAL (intentionally left open, not closed by more machinery — SCOPE NARROWED by the fix above): if
-   * the resolved `chosen` set itself changes between attempt 1 and attempt 2 — a candidate dropping out
-   * via ownership/repo/stranded-work filtering in between (a mid-batch RECYCLE of the manager or a
-   * candidate no longer does this, see above) — the key differs and the retry runs fresh. This is believed
-   * correct (a different resolved set is a genuinely different batch), and stable for the ordinary
-   * client-timeout case (a `done`+`awaitingReview` candidate doesn't change resolution between a call and
-   * its retry) — but it is a real, named gap, not a proven-closed one.
+   * @decision f944d4e4 — a client-timeout retry now re-attaches to an already-running batch op via
+   *  {@link PendingOpRegistry.attach} instead of cutting a second worktree; see that record for the key,
+   *  the deliberate exclusions, and the residual gap.
    *
-   * This dedupe now ALSO carries `retainMs`/`retainVerdictUntilSuperseded`/`verdictIdentity`/
-   * `classifyOutcome`/`identityOptional` (card cf803152 — see this method's own `attach()` call, further
-   * down, for the exact opts and why, including two Code Review corrections: the first added
-   * `verdictIdentity`/`classifyOutcome` after the initial version shipped without them; the second added
-   * `identityOptional` after this card's OWN new test caught the initial "no mirror of the solo path's
-   * `alreadyFinished`" draft breaking recovery for the single most common real case, a batch that landed).
-   * It still carries no `onOpMinted`/`onSurfacedPending` — the batch's own `insertPendingGateOp` mint,
-   * inside the gate closure below, is unchanged, and still just receives the `opId` `attach()` mints
-   * instead of a locally-generated one. `opts.onSettle` IS now passed (card 81d795de), but ONLY to defer the tombstone's `settlePendingGateOp`
-   * WRITE until this whole `run()` (fast-forward and per-branch finalize included) has settled — the verdict
-   * itself is still computed at the exact same point in `runGate` it always was; see this method's own
-   * `batchGateVerdict` declaration, further down, for the full mechanism. Card
-   * `3d2afb53` deliberately kept this batch path out of `confirmWorkerMergeTracked`/`PendingOpRegistry`'s
-   * FINALIZE machinery ("no extra finalize logic, no extra gate run") — this does not reverse that: the
-   * bare form adds only the dedupe/coalesce primitive (a same-key call already running is awaited, never
-   * re-invoked), which is orthogonal to finalize logic and, if anything, extends 3d2afb53's own "no extra
-   * gate run" goal from per-call to per-batch-attempt. Card `be260976` already established that a
-   * `pending_gate_ops` tombstone row DOES exist for this op (correcting the ORIGINAL "never routes through
-   * PendingOpRegistry" framing) — this card is a continuation of that same, already-sanctioned direction,
-   * not a new reversal. The bounded `{settled:false}` return this produces mirrors `worker_merge_confirm`'s
-   * own `{opId, status:"pending"}` vocabulary at the MCP layer (`mcp/orchestration.ts`'s `merge_batch`
-   * handler translates it, same as that tool's own handler already does for `worker_merge_confirm`) rather
-   * than inventing a parallel shape.
+   * @decision 3a2dac9c — the attach key is LINEAGE-ROOTED, not raw session ids, so a mid-batch recycle
+   *  doesn't fracture the dedupe into two ops.
    *
-   * CROSS-PROJECT CONTRACT (card 0f1920e0, re-affirmed on dbc6f660): `LOOM_GATE_OP_ID` is NOT renamed or
-   * dropped here — `runGate` below stamps it via the SAME `gateOpIdEnvOverride` every other gate call site
-   * uses, passing the ACTUAL post-assembly landed-branch count (never the requested K) as its new
-   * `LOOM_GATE_BATCH_SIZE` (accepted peer request, same card): a real batch stamps that count, an ordinary
-   * solo merge stamps `1`, a worker self-check/deploy gate stamps `0` — see `gateOpIdEnvOverride`'s own doc
-   * for why this is unconditional on EVERY gate child, not merely batched ones. Batching also RE-MEANS
-   * `LOOM_GATE_OP_ID`'s own per-run unit (one opId now covers up to `maxConcurrentWorkers` branches, not one) — the
-   * per-branch `branches` list on this method's `build_gate`/`batch_merge_forfeited` events is what keeps
-   * that recoverable. `gate_history`'s `branch` column is NOT set by this event's own
-   * `detail` — it's a JOIN onto the SUBJECT session's `sessions.branch` (see `Db.listGateEvents`) — and a
-   * batch event is filed under the MANAGER (there is no single subject worker), so `gate_history.branch`
-   * reads **null** for a batch gate row, same as any other manager-subject event. This is a DELIBERATE,
-   * honest consequence of there being no single branch to name, not an oversight — the real per-branch set
-   * lives in `detail.branches`.
+   * @decision cf803152 — the `attach()` call also carries `retainMs`/`verdictIdentity`/`classifyOutcome`/
+   *  `identityOptional`; the bounded `{settled:false}` return mirrors `worker_merge_confirm`'s vocabulary.
+   *
+   * @decision 81d795de — `opts.onSettle` defers the tombstone's `settlePendingGateOp` WRITE until this
+   *  whole `run()` has settled; the verdict itself is still computed at the same point in `runGate` it
+   *  always was.
+   *
+   * @decision 3d2afb53 — this batch path still deliberately stays out of `confirmWorkerMergeTracked`/
+   *  `PendingOpRegistry`'s finalize machinery; the dedupe/coalesce primitive above doesn't reverse that.
+   *
+   * @decision be260976 — a `pending_gate_ops` tombstone row DOES exist for this op, correcting the
+   *  original "never routes through PendingOpRegistry" framing.
+   *
+   * @decision 0f1920e0 — `LOOM_GATE_OP_ID` is not renamed/dropped for a batch; `LOOM_GATE_BATCH_SIZE`
+   *  stamps the real post-assembly landed count, and `gate_history.branch` reads null for a batch row.
    */
   async mergeBatchTracked(managerSessionId: string, workerSessionIds: string[]): Promise<AttachResult<MergeBatchResult>> {
     if (workerSessionIds.length === 0) return { settled: true, ok: true, value: { ok: false, landed: [], fallback: [], reason: "no worker session ids given" } };
