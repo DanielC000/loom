@@ -11,14 +11,13 @@ import type { ProjectMemoryEntry } from "@loom/shared";
 // (callers supply the already-loaded {project, notes} pairs), bounded with an explicit `truncated`
 // flag. Two departures, both load-bearing per the card's triage history (see its DoD):
 //  (1) matches against BOTH `title` and `text` (agent prompts have no titled/text split);
-//  (2) collects EVERY match before capping, then orders by `retrievalCount` DESCENDING — a phrase
-//      census here is a triage tool, not a clearance, and the corrective finding on this very card
-//      (a carrier sitting unread inside an already-enumerated probe's own hit set) showed that ordering
-//      alone does not fix the failure that mattered (selectively skipping a probe's hits) but IS still
-//      useful for "where does the eye land" / severity — so it's kept, but as the SUPPORTING half, not
-//      the load-bearing one. The load-bearing half is simply returning every hit inline with its
-//      snippet in ONE result, same as agent_prompt_search already does, so there is no per-probe
-//      "go read this set" round-trip to be skipped in the first place.
+//  (2) collects EVERY match before capping, then orders by `retrievalCount` DESCENDING. The
+//      load-bearing half is simply returning every hit inline with its snippet in ONE result, same
+//      as agent_prompt_search already does, so there is no per-probe "go read this set" round-trip
+//      to be skipped in the first place.
+//
+// @decision 9fe04d18 — never rely on retrievalCount-DESCENDING ordering alone as triage protection;
+// it is the supporting half, not a substitute for returning every hit inline in one result.
 //
 // `retrievalCount:0` is measured-ambiguous (see project-memory-recall.ts / the card's own triage): it
 // cannot distinguish a note that has NEVER matched a kickoff from one that keeps matching and keeps
