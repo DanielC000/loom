@@ -5165,9 +5165,9 @@ export class SessionService {
   }
 
   /** @decision 2ca18433 — the single re-enqueue owner for a pre-boot undelivered durable message; the
-   *  restart-intent snapshot excludes these on purpose (docs/decisions/2ca18433-restart-pending-snapshot-excludes-durable-messages.md)
+   *  restart-intent snapshot excludes these on purpose.
    *  @decision 06ebbb78 — `mintedBefore` skips a record minted by THIS SAME BOOT's own resume pass, or a
-   *  fresh nudge gets redriven a 2nd time before it ever drains (docs/decisions/06ebbb78-resumefleetonboot-routes-through-enqueuedurablenudge.md) */
+   *  fresh nudge gets redriven a 2nd time before it ever drains. */
   recoverUndeliveredMessagesOnBoot(mintedBefore?: Date): { reEnqueued: number; retired: number; senderNudges: number } {
     let reEnqueued = 0, retired = 0, senderNudges = 0;
     // recipientId → sender(s) of messages we couldn't re-enqueue (stuck) → surfaced to live senders below.
@@ -5218,8 +5218,7 @@ export class SessionService {
    * live; caller decides what to do). Idempotent via the in-process {@link redriveInFlightMsgIds} guard
    * plus the durable delivered marker across restarts.
    * @decision bcaeab8d — the re-enqueued text is `framePossibleDuplicate`-tagged UNCONDITIONALLY: this is
-   * Loom's only redelivery route with no in-process signal of a prior attempt, so it never silently guesses
-   * (docs/decisions/bcaeab8d-redrive-always-tags-possible-duplicate-no-signal-to-guess.md)
+   * Loom's only redelivery route with no in-process signal of a prior attempt, so it never silently guesses.
    */
   private redriveQueuedMessage(e: OrchestrationEvent): "reEnqueued" | "retired" | "stuck" | "skip" {
     const recipientId = e.workerSessionId ?? null;
@@ -5262,10 +5261,9 @@ export class SessionService {
       this.redriveInFlightMsgIds.add(msgId);
       // @decision 129efe74 — read back kind/giveUpHeldUntil/rootMsgId/chainDepth from THIS record's own
       // persisted detail (never hardcode); a legacy pre-card row defaults to the exact old hardcoded
-      // behavior (docs/decisions/129efe74-redrive-reads-back-persisted-kind-hold-chain-legacy-defaults.md)
+      // behavior.
       // @decision ccb407eb — wired to the SAME handleGiveUpExhausted policy as every other durable
-      // dispatch (BLOCKING finding [2] — Specimen Z: a redrive that then gave up used to bare-drop)
-      // (docs/decisions/ccb407eb-carry-givenupexhausted-through-upgrade-requeue.md)
+      // dispatch (BLOCKING finding [2] — Specimen Z: a redrive that then gave up used to bare-drop).
       // `sender` (hoisted to the top of this method, card 0f693dea) mirrors recoverUndeliveredMessagesOnBoot's
       // own fallback (`e.detail.sender`, else `e.managerSessionId`).
       const kind: QueuedMessageKind = e.detail?.kind === "warning" ? "warning" : "agent";
@@ -5335,8 +5333,7 @@ export class SessionService {
   }
 
   /** @decision 02621025 — retires `e` only on a later, genuinely-distinct redirect or an already-landed
-   *  `worker_report`; NEVER on a newer plain `worker_message` (additive by contract)
-   *  (docs/decisions/02621025-stale-queued-message-retire-is-exception-scoped.md) */
+   *  `worker_report`; NEVER on a newer plain `worker_message` (additive by contract). */
   private staleQueuedMessageReason(recipientId: string, e: OrchestrationEvent): string | undefined {
     const ownMsgId = typeof e.detail?.msgId === "string" ? e.detail.msgId : null;
     const timeline = this.db.listEventsForWorker(recipientId);
@@ -5921,7 +5918,7 @@ export class SessionService {
 
   /** @decision f9b47cd1 — sibling-name collision detection is scoped to the SAME manager, never
    *  project-wide; `excludeIds` must explicitly name the caller's own fresh row (and, on recycle, the
-   *  predecessor) — insert-ordering alone doesn't exclude it (docs/decisions/f9b47cd1-workspace-auditor-create-only-not-singleton.md, Decision B) */
+   *  predecessor) — insert-ordering alone doesn't exclude it. */
   private siblingWorkerSessionNames(managerSessionId: string, projectName: string, excludeIds: ReadonlySet<string>): Set<string> {
     const names = new Set<string>();
     for (const w of this.db.listWorkers(managerSessionId)) {
@@ -5999,13 +5996,11 @@ export class SessionService {
       throw new Error(`cannot spawn a worker under the '${workerAgent.name}' agent (a ${profileRole}-role profile); pick a worker agent (Dev/Bugfix/QA/Docs)`);
     }
     // @decision sha:c56ba944 — validate taskId BEFORE any side effect (worktree/session/branch); a
-    // truncated id + a placeholder kickoff once bound a live worker to a bogus task (a zombie)
-    // (docs/decisions/c56ba944-worker-spawn-taskid-validated-before-side-effects.md)
+    // truncated id + a placeholder kickoff once bound a live worker to a bogus task (a zombie).
     // @decision 3e9e1d9f — taskId accepts a full id OR an unambiguous 8-char prefix, scanning only
-    // this manager's OWN project (docs/decisions/3e9e1d9f-worker-spawn-taskid-accepts-id-prefix.md)
+    // this manager's OWN project.
     // @decision 2514e6e1 — an empty/omitted taskId opts INTO a taskless worker instead of being
-    // rejected; the old hard-require forced an ad-hoc spawn to hijack an unrelated card
-    // (docs/decisions/2514e6e1-worker-spawn-taskless-opt-in-not-a-hijacked-card.md)
+    // rejected; the old hard-require forced an ad-hoc spawn to hijack an unrelated card.
     const taskRef = (opts.taskId ?? "").trim();
     let taskId: string | null = null;
     let taskTitle: string | null = null; // captured for the shipped-card advisory check below (tasked spawns only)
@@ -6150,20 +6145,19 @@ export class SessionService {
 
     // @decision sha:93a496a0 — the per-taskId spawn claim is a TRUE mutex (test-and-set with no `await`
     // between .has()/.add()), not a narrower TOCTOU window; claimed BEFORE createWorktree so a loser
-    // never creates an orphan worktree/branch (docs/decisions/93a496a0-worker-spawn-atomic-claim-closes-toctou-double-create.md)
+    // never creates an orphan worktree/branch.
     // @decision 2514e6e1 — a taskless spawn claims a FRESH per-call id, never `taskId`, so distinct
-    // taskless spawns run concurrently instead of serializing against each other
-    // (docs/decisions/2514e6e1-worker-spawn-taskless-opt-in-not-a-hijacked-card.md, Source (2))
+    // taskless spawns run concurrently instead of serializing against each other.
     const claimKey = taskId ?? randomUUID();
     if (this.inFlightSpawnTaskIds.has(claimKey)) {
       throw new Error(`worker_spawn taskId '${claimKey}' already has a spawn in flight; wait for it to finish before re-spawning`);
     }
     // @decision sha:173fdf61 — the concurrency-cap admit counts in-flight claims too, checked BEFORE
     // .add(), so N concurrent spawns for different taskIds can't all observe a stale liveWorkers and
-    // overshoot the cap (docs/decisions/173fdf61-worker-spawn-concurrency-cap-admit-is-atomic.md)
+    // overshoot the cap.
     // @decision 7234688b — the in-flight count summed here must be scoped PER-MANAGER, matching
     // liveWorkers' own scope; a daemon-global sum let a sibling manager's spawn wrongly cap-reject this
-    // one (docs/decisions/7234688b-worker-spawn-in-flight-count-scoped-per-manager.md)
+    // one.
     const liveWorkers = this.db.listWorkers(managerSessionId).filter((w) => w.processState === "live").length;
     const cap = config.orchestration.maxConcurrentWorkers;
     const inFlightForManager = this.inFlightSpawnCountByManager.get(managerSessionId) ?? 0;
@@ -6185,8 +6179,7 @@ export class SessionService {
     this.inFlightSpawnCountByManager.set(managerSessionId, (this.inFlightSpawnCountByManager.get(managerSessionId) ?? 0) + 1);
     // @decision 16637a9e — idempotent so it's safe to call both right after the row goes live (the normal
     // success path, closing the live+in-flight double-count window) and again from the outer `finally`
-    // (every failure-before-live path, unchanged) — see the field doc above for the full rationale
-    // (docs/decisions/16637a9e-worker-spawn-cap-claim-released-on-live-not-finally.md)
+    // (every failure-before-live path, unchanged) — see the field doc above for the full rationale.
     let capSlotClaimReleased = false;
     const releaseCapSlotClaim = () => {
       if (capSlotClaimReleased) return;
@@ -6197,13 +6190,10 @@ export class SessionService {
     };
     try {
       // @decision 503cd822 — a noCommit/read-only rig never runs a build GATE, but that no longer means
-      // the monorepo BUILD phase is unconditionally skipped for it — see `runBuild` below
-      // (docs/decisions/503cd822-build-review-worktrees-only-when-the-diff-needs-it.md)
-      // @decision 2514e6e1 — a taskless spawn keys its worktree/branch off `claimKey`, never `taskId`
-      // (docs/decisions/2514e6e1-worker-spawn-taskless-opt-in-not-a-hijacked-card.md, Source (3))
+      // the monorepo BUILD phase is unconditionally skipped for it — see `runBuild` below.
+      // @decision 2514e6e1 — a taskless spawn keys its worktree/branch off `claimKey`, never `taskId`.
       // @decision 49136451 — resolves which repo this worktree is cut from (task's repoKey, or the
-      // review target's own repo); a stale repoKey THROWS rather than silently degrading to primary
-      // (docs/decisions/49136451-repokey-axis-disambiguates-worktree-dirs-across-repos.md)
+      // review target's own repo); a stale repoKey THROWS rather than silently degrading to primary.
       const targetRepo = reviewForkFrom ? reviewForkFrom.repo : resolveRepo(project, taskId ? this.db.getTask(taskId) : null);
       // Card 503cd822: `noCommit` alone used to gate the build phase off unconditionally (`runBuild:
       // !noCommit`), on the premise that a build-free rig never runs a build GATE so a build has zero
@@ -6262,8 +6252,7 @@ export class SessionService {
       this.db.setProcessState(worker.id, "live");
       // @decision 16637a9e — release the cap-count claim HERE, synchronously, the instant the row is
       // live — not in the outer `finally` below, which runs only after further awaits (the shipped-card
-      // advisory's own git read) that used to leave this spawn double-counted against a concurrent
-      // spawn's cap check (docs/decisions/16637a9e-worker-spawn-cap-claim-released-on-live-not-finally.md)
+      // advisory's git read) that used to leave this spawn double-counted against a concurrent spawn's cap check.
       releaseCapSlotClaim();
       // Card fa1b77c1: the try below starts HERE, not at `pty.spawn` — the statements ahead of it
       // (project-memory retrieval/digest, codescape status) are synchronous, unguarded, and run after the
@@ -6445,7 +6434,7 @@ export class SessionService {
 
   /** @decision fb8df559 — spawnWorkerTracked dedups on the RAW caller taskId string, not the resolved
    *  id, so a genuine retry attaches to the same in-flight op; a taskless spawn gets a fresh per-call
-   *  key instead (docs/decisions/fb8df559-worker-list-pendingmerge-is-additive-with-a-placeholder-spawn-row.md, Source (2)) */
+   *  key instead. */
   async spawnWorkerTracked(
     managerSessionId: string,
     opts: { taskId?: string; agentId?: string; kickoffPrompt: string; reviewOfWorkerSessionId?: string; reviewOfTaskId?: string },
@@ -6460,7 +6449,7 @@ export class SessionService {
 
   /** @decision 3a2dac9c — walks the recycle lineage to find a predecessor's still-running merge op
    *  (a bare peek on the successor's id goes blind to it); `predecessorSessionId` attributes a hit that
-   *  isn't this session's own (docs/decisions/3a2dac9c-recycle-never-aliases-key-walk-the-ancestor-chain.md, Source (2)) */
+   *  isn't this session's own. */
   peekPendingMerge(worker: string | { id: string; recycledFrom?: string | null }): (PendingOpView & { predecessorSessionId?: string }) | undefined {
     const workerSessionId = typeof worker === "string" ? worker : worker.id;
     const found = lineageResolvedPendingOp(this.db, "merge", (key) => this.pendingOps.peek(key), worker);
@@ -6470,7 +6459,7 @@ export class SessionService {
 
   /** @decision 008f33f1 — the disambiguating half of `pendingMerge.gatePhase`: `state:"running"` is set
    *  the instant an op is minted, well before gate admission; this reads the live GateSemaphore lookup
-   *  for queued/running/null (docs/decisions/008f33f1-gatephase-disambiguates-minted-from-executing.md, Source (2)) */
+   *  for queued/running/null. */
   gatePhaseForOpId(opId: string): "queued" | "running" | null {
     const r = this.gateSemaphore.findByOpId(opId);
     return r.kind === "found" ? r.record.phase : null;
@@ -6490,14 +6479,13 @@ export class SessionService {
 
   /** @decision 27ea069e — a lineage is "dead" only when NO link anywhere in the recycle chain is live
    *  (never just the originating session); corrected by card 257d534d after a session-only check
-   *  wrongly evicted a recycled-but-alive lineage's running op (docs/decisions/27ea069e-dead-owner-recovery-the-one-eviction-exception.md, Source (2)) */
+   *  wrongly evicted a recycled-but-alive lineage's running op. */
   private isManagerLineageDead(managerSessionId: string): boolean {
     return liveLineageSuccessor(this.db, managerSessionId) == null;
   }
 
   /** @decision 05c36bf4 — re-resolves the settle-nudge target AT SETTLE TIME, never at attach()-call
-   *  time: a manager recycle mid-flight used to fire the nudge at a now-dead predecessor
-   *  (docs/decisions/05c36bf4-settle-nudge-target-resolved-at-settle-time-not-attach-time.md) */
+   *  time: a manager recycle mid-flight used to fire the nudge at a now-dead predecessor. */
   private resolveSettleNudgeTarget(sessionId: string): string {
     return liveLineageSuccessor(this.db, sessionId)?.id ?? sessionId;
   }
@@ -6505,8 +6493,7 @@ export class SessionService {
   /**
    * @decision 05c36bf4 — predecessor-attribution suffix for a settle nudge whose target was
    *  lineage-resolved to a recycled successor; also the gate kind's own sufficient mitigation for why
-   *  it stays per-originating-session rather than lineage-walked like merge (card 3a2dac9c)
-   *  (docs/decisions/05c36bf4-settle-nudge-target-resolved-at-settle-time-not-attach-time.md)
+   *  it stays per-originating-session rather than lineage-walked like merge (card 3a2dac9c).
    */
   private settleNudgeAttribution(target: string, originSessionId: string): string {
     return target === originSessionId ? "" : ` (started by your predecessor session ${originSessionId.slice(0, 8)} before you were recycled)`;
@@ -6515,8 +6502,7 @@ export class SessionService {
   /**
    * @decision 9d521792 — auto-cancels a parked session's fallback `wake_me` the instant its settle
    *  nudge lands (time-scoped by `createdAt >= opStartedAt`, never a settle-time re-derive — that raced
-   *  under concurrent load); unknown start time cancels nothing, logged, never silent
-   *  (docs/decisions/9d521792-auto-cancel-fallback-wakes-on-settle-nudge.md)
+   *  under concurrent load); unknown start time cancels nothing, logged, never silent.
    */
   private autoCancelSettleWakes(target: string, opStartedAt: string | undefined, opId: string): void {
     if (!opStartedAt) {
@@ -6534,8 +6520,7 @@ export class SessionService {
   /**
    * @decision 27ea069e — boot-time (and generally callable) dead-owner sweep for orphaned MERGE ops;
    *  lineage-corrected (card 257d534d, see isManagerLineageDead's own doc), belt-and-suspenders since
-   *  the in-memory registry it reads resets on an actual process restart
-   *  (docs/decisions/27ea069e-dead-owner-recovery-the-one-eviction-exception.md)
+   *  the in-memory registry it reads resets on an actual process restart.
    */
   reconcileDeadOwnerMergeOps(): number {
     let cleared = 0;
@@ -6557,20 +6542,15 @@ export class SessionService {
 
   /**
    * @decision edc1ec12 — boot-time sweep for RESTART-ORPHANED gate/merge ops, reading the durable
-   *  pending_gate_ops table since reconcileDeadOwnerMergeOps's in-memory registry is wiped by a restart
-   *  (docs/decisions/edc1ec12-gate-status-is-read-only-with-no-passfail-outcome.md)
+   *  pending_gate_ops table since reconcileDeadOwnerMergeOps's in-memory registry is wiped by a restart.
    * @decision e3e40167 — selects only surfaced_pending=1 AND state='pending' rows, never every
-   *  surviving row — the tombstone now mints one for every op regardless of speed
-   *  (docs/decisions/e3e40167-tombstone-fallback-supersedes-not-found.md)
+   *  surviving row — the tombstone now mints one for every op regardless of speed.
    * @decision 7d492f8b — recovers a real verdict from durable audit history before assuming orphan; a
-   *  settled-before-crash op must not be reported as orphaned, discarding its real outcome
-   *  (docs/decisions/7d492f8b-find-gate-op-events-is-an-unindexed-boot-only-scan.md)
+   *  settled-before-crash op must not be reported as orphaned, discarding its real outcome.
    * @decision c838aeac — a genuinely-unrecoverable row is tagged gate/merge-orphaned, never FAILED —
-   *  no verdict was ever reached, distinct from a verdict that failed
-   *  (docs/decisions/c838aeac-orphaned-tag-is-distinct-from-failed-no-verdict-reached.md)
+   *  no verdict was ever reached, distinct from a verdict that failed.
    * @decision d7f3416b — beforeInstant bounds the sweep to rows minted strictly before this boot, so a
-   *  genuinely-running fresh op is never mistaken for a restart orphan
-   *  (docs/decisions/d7f3416b-beforeinstant-bounds-boot-sweeps-to-pre-boot-rows.md)
+   *  genuinely-running fresh op is never mistaken for a restart orphan.
    */
   reconcileOrphanedGateOps(beforeInstant: string): number {
     let cleared = 0;
@@ -6641,13 +6621,10 @@ export class SessionService {
   /**
    * @decision 7239c712 — the STATE-ONLY complement to reconcileOrphanedGateOps, covering rows minted by
    *  a single-synchronous-span site (mergeBatch, deployOwnProject) that never flips surfaced_pending;
-   *  deliberately pushes no nudge, attempts no durable-history recovery, and covers all three op kinds
-   *  (docs/decisions/7239c712-tombstone-pending-covers-the-pre-registration-and-boot-reconcile-window.md)
+   *  deliberately pushes no nudge, attempts no durable-history recovery, and covers all three op kinds.
    * @decision 81d795de — mergeBatch's settle is deferred to whole-batch completion, so its
-   *  pending-exposure window is WIDER than deployOwnProject's back-to-back settle, not narrower
-   *  (docs/decisions/81d795de-mergebatch-settle-deferred-to-whole-batch-completion.md)
-   * @decision d7f3416b — beforeInstant bounds this sweep to rows minted strictly before this boot too
-   *  (docs/decisions/d7f3416b-beforeinstant-bounds-boot-sweeps-to-pre-boot-rows.md)
+   *  pending-exposure window is WIDER than deployOwnProject's back-to-back settle, not narrower.
+   * @decision d7f3416b — beforeInstant bounds this sweep to rows minted strictly before this boot too.
    */
   reconcileUnsurfacedPendingGateOps(beforeInstant: string): number {
     let cleared = 0;
@@ -6686,8 +6663,7 @@ export class SessionService {
   /**
    * @decision sha:ea61b16c — drains this manager's cap-queue by replaying each popped entry through the
    *  same spawnWorker a manual worker_spawn uses (never re-implementing its atomic guarantees),
-   *  fire-and-forget, suppressed during recycleWorker's own slot-reclaim, bounded by construction
-   *  (docs/decisions/ea61b16c-cap-queue-drain-reuses-spawnworker-fire-and-forget.md)
+   *  fire-and-forget, suppressed during recycleWorker's own slot-reclaim, bounded by construction.
    */
   async maybeDrainCapQueue(managerSessionId: string): Promise<void> {
     if ((this.recycleDrainSuppressed.get(managerSessionId) ?? 0) > 0) return;
