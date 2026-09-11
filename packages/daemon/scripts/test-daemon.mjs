@@ -1042,44 +1042,15 @@ function boundFailureMessages(failureType, lines) {
   return { failureType, messages, truncated };
 }
 
-// Card 14e733fb: Node documents process.stdout/process.stderr writes to a PIPE as SYNCHRONOUS on Windows
-// but ASYNCHRONOUS on POSIX ("process.stdout"/"process.stderr" — Synchronous vs asynchronous writes; see
-// card 776750ba's own test/fixtures/_stderr-sentinel-exit.mjs for the empirical proof). The isMain block
-// below used to print its `FAILURES:` epilogue — the ONLY surviving surface for a multi-line failure
-// detail (card 63664129) — via a `console.log` loop immediately followed by `process.exit(1)`: on a POSIX
-// gate host, `process.exit()` can tear this process down before those async writes ever reach the OS pipe,
-// silently losing exactly the diagnostic this block exists to preserve. `writeFullySync` replaces that
-// loop: it builds the whole block into one buffer and writes it via a real synchronous write(2) loop that
-// keeps writing until every byte is CONFIRMED out, never assuming one `fs.writeSync` call drained the
-// buffer. Two real gotchas a naive single call would miss (`fs.writeSync` can itself return fewer bytes
-// than requested against a pipe, and can throw EAGAIN if the fd isn't ready) — a fix that doesn't loop is
-// cosmetic (see this function's own regression test, test-daemon-failures-epilogue-flush.mjs, for the
-// BREAK/RED proof).
-//
-// OUTPUT ORDERING (manager review): writing directly to fd 1 here BYPASSES process.stdout's own pending
-// async queue on POSIX, so this epilogue can land BEFORE — or interleaved with — earlier console.log
-// output from this same run that's still buffered. Accepted as a net win: that earlier output was already
-// loss-prone (the exact defect this card fixes), and gate-runner's `failureBlockTracker` is FRONT-ANCHORED
-// on the `FAILURES:` marker, so it captures forward correctly regardless of what preceded it in the
-// stream — but it IS a real, deliberate behavioural change, not something a future reader should have to
-// discover by puzzling over scrambled CI output.
-//
-// `TEST_FORCE_WRITE_CHUNK_BYTES` is a test-only determinism knob (undefined/no-op in every real run) —
-// this host's own pipe writes are synchronous by construction (win32) or complete inside typical epilogue
-// sizes (posix), so nothing here can organically FORCE a real multi-call partial write in a hermetic test.
-// Clamping the per-call length to this many bytes makes the loop's own multi-iteration path exercised and
-// verifiable regardless of platform or payload size, without touching the code path a production run takes.
+// @decision 14e733fb — this epilogue's writeFullySync loop MUST keep writing until every byte is
+// confirmed out (never assume one fs.writeSync call drains the buffer): a POSIX process.exit() can tear
+// the process down mid-async-pipe-write and silently drop this file's own multi-line FAILURES: diagnostic.
 const TEST_FORCE_WRITE_CHUNK_BYTES = process.env.LOOM_TEST_FORCE_WRITE_CHUNK_BYTES
   ? Math.max(1, Number(process.env.LOOM_TEST_FORCE_WRITE_CHUNK_BYTES))
   : undefined;
-// Card 14e733fb (manager review): the EAGAIN/zero-byte retry below must be bounded on ELAPSED TIME, not
-// iteration count — each spin is sub-microsecond, so a count bound is meaningless, but an UNBOUNDED spin
-// against a non-blocking fd whose reader never drains would hang the gate's own FAILURE path forever, in a
-// shared gate lane (this project has already paid once for exactly this "rare but unbounded wait" shape in
-// this file's neighbourhood — card 53175055). A spawned child's fd 1 is normally a BLOCKING pipe (so
-// `fs.writeSync` blocks rather than returning EAGAIN or 0) — this is precisely why the bound needs to exist
-// rather than the branch being removed: rare enough nobody would hit it in testing, unbounded enough to
-// wedge a gate if it ever does.
+// @decision 14e733fb — bound the EAGAIN/zero-byte retry by ELAPSED TIME, never iteration count: an
+// unbounded spin against a non-blocking fd whose reader never drains would hang the gate's own FAILURE
+// path forever in a shared lane (commit 53175055's own prior "rare but unbounded wait" hazard here).
 const WRITE_FULLY_SYNC_DEADLINE_MS = 5_000;
 function writeFullySync(fd, text) {
   const buf = Buffer.from(text, "utf-8");
@@ -1103,28 +1074,13 @@ function writeFullySync(fd, text) {
   }
 }
 
-// Card 237aa3a9: classify one failing (non-skipped) run's OWN captured stdout/stderr into one of four
-// honest buckets — the peer's own design input, and the half of their `failureRecords` design that
-// "demonstrably worked" (it routed them to a race instead of a regression before they even read a stack).
-// Four buckets beat twelve; an explicit "unclassified" beats a wrong label (this card's own instruction).
-// Pure + exported so a test can drive every bucket directly against synthetic OR real-captured
-// stdout/stderr, without spawning a child for the classification logic itself.
+// @decision sha:cad5d5d6 — four honest buckets, never a fifth: "assertionFailed" stays the PRIMARY signal
+// even when a file ALSO throws uncaught after a failed check() — attach a bounded `stderrExcerpt`
+// alongside it instead (present only when both FAIL lines and stderr exist), never reclassify or drop it.
 //   "timeout"        — already fully named by `timeoutDetail` elsewhere on the row; this just labels it.
-//   "assertionFailed" — this project's own `check(label, cond)` helper (used across the whole test/ dir —
-//                       see e.g. merge-gate-reuse.mjs) prints "FAIL  <label>" to stdout for every false
-//                       assertion, independent of how many a single file makes. Pulling every such line
-//                       names EVERY distinct failing assertion in one read of this row — the exact property
-//                       card 237aa3a9's DoD-5 requires for a multi-failure run. CR follow-up (manager
-//                       review of cad5d5d6): a file can ALSO throw uncaught after one or more `check()`
-//                       calls already failed — a real, plausible shape (code that assumes a check passed
-//                       and dereferences something that isn't there once it didn't), and precisely the
-//                       kind of stray-stderr signal the peer's own `testThrew` insight was about. The
-//                       named assertions stay the PRIMARY signal (`failureType` stays "assertionFailed" —
-//                       a concrete, already-known-false check is more actionable than an incidental
-//                       downstream throw, and this card explicitly forbids a fifth bucket for it), but
-//                       the stderr is no longer silently dropped: a small bounded `stderrExcerpt` is
-//                       attached alongside `messages` whenever BOTH FAIL lines and stderr are present —
-//                       present only in that mixed case, absent (not an empty array) otherwise.
+//   "assertionFailed" — this project's own `check(label, cond)` helper prints "FAIL  <label>" to stdout for
+//                       every false assertion; pulling every such line names EVERY distinct failing
+//                       assertion in one read of this row.
 //   "testThrew"       — no FAIL line at all, but the process still exited nonzero and produced stderr: the
 //                       file's own code threw/rejected (an uncaught exception, a rejected promise, a syntax
 //                       error) rather than a false assertion. Node prints the thrown error's message + top
@@ -1489,29 +1445,9 @@ if (isMain) {
     console.warn(`⚠ test-daemon.mjs: ${gitAudit.walkedNotInGit.length} .mjs file(s) seen by the discovery walk are untracked by git (fine for a local run; invisible to the merge gate's own tracked-files-only check): ${gitAudit.walkedNotInGit.join(", ")}`);
   }
 
-  // Card 3791b14e (gate `39331d61` — my own merge-gate rejection, root-caused and fixed here): a
-  // TOP-LEVEL static import of CODEX_REAL_SPAWN_BASENAMES/SET from `../test/_codex-real-spawn-lock.mjs`
-  // broke `loadExcludedTestDirNames`/`loadNotHermeticNames` (git/worktrees.ts) — both dynamically
-  // `import()` this WHOLE FILE from an arbitrary/synthetic fixture repo just to read
-  // EXCLUDED_DIR_NAMES/NOT_HERMETIC, and a static import is resolved before the module can even start
-  // evaluating, so a fixture repo lacking that file threw ERR_MODULE_NOT_FOUND — caught by their own
-  // try/catch, silently returned `null`, and FAILED THE DIFF CLOSED to the full gate instead of the
-  // reduced one (confirmed via a two-arm control: same fixture repo, only that one file present vs.
-  // absent). Fixed the SAME way `compactGateTimingLogIfNeeded`'s import a few hundred lines down already
-  // is (see `_emit-compare-fixtures.mjs`'s own comment on that precedent): a LAZY, call-site
-  // `await import()`, placed HERE — inside `isMain`, at the earliest point it's actually needed — never
-  // at module top. This is safe by construction, not merely lucky for today's fixtures: `isMain` can only
-  // be true when `process.argv[1]` resolves to THIS file's own path, i.e. when this script is the real
-  // process entry point — an external dynamic-import consumer like those two loaders is, by definition,
-  // some OTHER running process (the daemon) importing this file as a module, so `isMain` is false for
-  // them unconditionally and this line can never even be reached in that scenario, regardless of whether
-  // the importing repo happens to carry `test/_codex-real-spawn-lock.mjs`. (Rejected: moving the array
-  // into a new shared leaf module — this needs no new file, and reuses an already-proven pattern in this
-  // exact file for this exact hazard class rather than adding a second one.)
-  // Card ce02e7e5: moved earlier than the phase-split use further below (this import's original call
-  // site) so `resolveSelectionForCliMode` (see its own doc) can resolve `--codex-real-spawn`/
-  // `--no-codex-real-spawn` FROM this same array — the single source of truth — instead of a second,
-  // hardcoded copy of the basename list.
+  // @decision 3791b14e — this import must stay a LAZY, call-site `await import()` inside `isMain`, never
+  // module-top: a top-level static import broke git/worktrees.ts's two dynamic-import-based loaders
+  // (gate `39331d61`) by throwing before a fixture repo lacking this file could even be caught.
   const { CODEX_REAL_SPAWN_BASENAMES, CODEX_REAL_SPAWN_SET } = await import("../test/_codex-real-spawn-lock.mjs");
 
   // Card 6185fbfc: resolve --only=/--exclude= against the discovered set, fail loudly on an unknown name
