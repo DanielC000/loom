@@ -9923,25 +9923,9 @@ export class PtyHost {
         live.pendingRawOwnerSubmit = draft.submitted;
         live.pendingRawOwnerSubmitAt = Date.now();
       }
-      // Card 2521bf51 (a human Enter never arms busy, so the drain races the turn it just started): a
-      // box-free transition is EITHER a genuine SUBMIT (`draft.submitted !== null` — an Enter with a
-      // non-empty draft) or a CLEAR (Ctrl-C/kill-line/Esc/backspace-to-empty — `draft.submitted === null`).
-      // ARM ON `draft.submitted !== null` ALONE (code review Major 2) — NOT `wasDirty && composerLen===0`.
-      // `draft.submitted` already requires a non-empty draft (`nextRawDraftState`'s own `text.length > 0`
-      // gate), so it can never false-arm; the arming condition and the discriminator are now the SAME
-      // fact. Gating on `wasDirty` too was the bug: a SINGLE chunk like `"abc\r"` accumulates its own
-      // draft and frees the box within the SAME writeStdin call, so `wasDirty` (computed from
-      // `composerLen` BEFORE this call) reads false even though this is a genuine submit — the whole
-      // block used to be skipped, arming nothing, leaving that chunk shape fully unprotected.
-      // A SUBMIT starts a REAL engine turn that Loom has NOT yet been told about — nothing arms `live.busy`
-      // on this path (that only happens once claude's own `UserPromptSubmit` hook actually fires,
-      // asynchronously, after it has genuinely processed the Enter). Draining here (directly, or via the
-      // ~10s reconcile tick — see `humanSubmitHeldUntil`'s own doc for why the reconcile tick alone isn't
-      // safe either) would write Loom's queued turn into a composer claude may still be transitioning out
-      // of — the exact race this card fixes. So arm the bounded hold instead of draining; it self-clears
-      // the instant a confirming hook arrives (deliverHook's UserPromptSubmit/Stop cases), letting the
-      // ordinary Stop-path drain (the M2 window) deliver once the human's own turn genuinely completes —
-      // DELAYED, never lost, even in the backstop-bound case where a hook is lost outright.
+      // @decision 2521bf51 — `writeStdin` arms the hold on `draft.submitted !== null` ALONE, never
+      // `wasDirty && composerLen===0`: a lone chunk (e.g. "abc\r") can dirty AND free the composer
+      // within the SAME call, reading `wasDirty` false while still being a genuine submit.
       if (draft.submitted !== null) {
         live.humanSubmitHeldUntil = Date.now() + HUMAN_SUBMIT_CONFIRM_HOLD_MS;
         // Card 3ff89cbc: snapshot whether an unrelated turn is ALREADY in flight right now — see
@@ -10026,19 +10010,9 @@ export class PtyHost {
     // the whole story (it exits here; the escalation below is a no-op). A BUSY/mid-turn session instead
     // has its turn INTERRUPTED by the two Ctrl-Cs and stays alive at an idle prompt (no Stop hook fires,
     // so busy stays stale) — escalateGracefulStop is what then drives it deterministically to exit.
-    // Card 5683c2e3: this is stop()'s OWN first graceful write — the one write/kill call in this method
-    // family ac20c8e7 left unguarded (the delayed resend just below, escalateGracefulStop's own stage-2
-    // resend, and its stage-3 kill all already check `killed`). A SECOND stop() call (either mode)
-    // landing here after an earlier kill was already issued — a prior hard stop(), or this same
-    // session's own escalateGracefulStop stage-3 — sails past the top-of-method `!live?.alive` guard
-    // (alive stays true until the async 'exit' event) and would otherwise write Ctrl-C into an
-    // already-destroyed socket. Guard on `killed`, matching every sibling site — do NOT hoist this to
-    // the top of stop() (that would also skip the `stopping`/`pending`/`submitGeneration` bookkeeping
-    // above, which a second stop legitimately still needs), and do NOT extend a `killed` guard to the
-    // HARD branch's kill() call above: `killed` is set BEFORE kill() runs (bb3d9005 S1) specifically to
-    // close the write race, so it records "a kill was issued," never "the kill succeeded" — gating
-    // kill() itself on it could leave a session that failed to die on its first kill attempt permanently
-    // unkillable through this API, which is strictly worse than a redundant write.
+    // @decision 5683c2e3 — guard this write on `killed`, matching every sibling site; do NOT hoist it
+    // to the top of `stop()` (would skip the `stopping`/`pending`/`submitGeneration` bookkeeping a
+    // second `stop()` call still needs) and do NOT extend a `killed` guard to the HARD branch's kill().
     if (!live.killed) this.ptyWrite(sessionId, live, "\x03", "stop-ctrl-c");
     // Card bb3d9005 (S1): also check `killed` here — this delayed resend runs concurrently with
     // escalateGracefulStop's own timers below, and ordinary setTimeout jitter can let it fire AFTER
