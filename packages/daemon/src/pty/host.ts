@@ -53,9 +53,9 @@ const CODEX_SUBMIT_ENTER_DELAY_MS = Number(process.env.LOOM_CODEX_SUBMIT_ENTER_D
  *  without a code change — the default stays 800, UNCHANGED, pending real-codex evidence one way or the
  *  other on whether widening it affects `stopCodex`'s observed intermittent non-zero exit. */
 const CODEX_STOP_GAP_MS = Number(process.env.LOOM_CODEX_STOP_GAP_MS) || 800;
-/** @decision 2ec60d9c — retry spacing corrected against a real codex spawn: the rollout file is created
- *  lazily (~13s after ready), not at boot — see
- *  docs/decisions/2ec60d9c-codex-engine-id-retry-spacing-corrected-against-real-spawn.md */
+/** @decision 2ec60d9c — do not revert to a single fixed-delay retry for engine-session-id discovery: the
+ *  rollout file is created lazily (~13s after ready, not at boot), so a one-shot ~2s check misses a
+ *  session whose first turn is slow to start. */
 const CODEX_ENGINE_ID_RETRY_MS = Number(process.env.LOOM_CODEX_ENGINE_ID_RETRY_MS) || 3_000;
 /**
  * Card 2ec60d9c (DoD-1): total retry COUNT for `captureCodexEngineSessionId` — see
@@ -70,10 +70,9 @@ const CODEX_ENGINE_ID_RETRY_MS = Number(process.env.LOOM_CODEX_ENGINE_ID_RETRY_M
  */
 const CODEX_ENGINE_ID_MAX_ATTEMPTS = Number(process.env.LOOM_CODEX_ENGINE_ID_MAX_ATTEMPTS) || 40;
 /**
- * @decision sha:ab549920 — busy is FRESHNESS-based (a bounded per-session stale timer, rearmed by each
- * sighting of codex's busy marker), never recomputed from a single output chunk/snapshot — see
- * docs/decisions/ab549920-codex-busy-is-freshness-based-not-per-chunk-snapshot.md for the C2/M3 race
- * this replaces.
+ * @decision sha:ab549920 — busy is FRESHNESS-based (a bounded per-session timer rearmed by each sighting
+ * of codex's busy marker); never recompute it from one output chunk/snapshot — a stale match lingers past
+ * completion, and a chunk merely missing the marker reads as a false idle edge.
  */
 const CODEX_BUSY_STALE_MS = Number(process.env.LOOM_CODEX_BUSY_STALE_MS) || 3_000;
 /**
@@ -150,8 +149,7 @@ function fnv1a32(s: string): string {
 }
 
 /** @decision d005f55b — extends a hash over prefix A with trailing B into fnv1a32(A + B) WITHOUT A's own
- *  bytes; lets recentReportedTurns retain only length+hash — see
- *  docs/decisions/d005f55b-diverged-prior-reported-chain-candidate.md (§3) */
+ *  bytes, so recentReportedTurns can retain only length+hash rather than full text (§3). */
 function fnv1a32Continue(priorHash: string, s: string): string {
   let h = parseInt(priorHash, 16) | 0;
   for (let i = 0; i < s.length; i++) {
@@ -161,9 +159,9 @@ function fnv1a32Continue(priorHash: string, s: string): string {
   return (h >>> 0).toString(16).padStart(8, "0");
 }
 
-/** @decision 4a0af485 — ambiguousDispatches signature purge is scoped to ONE batchId; a match spanning
- *  more than one is left untouched (genuinely-distinct-same-text, not a duplicate) — see
- *  docs/decisions/4a0af485-ambiguousdispatches-signature-purge-scoped-to-one-batchid.md */
+/** @decision 4a0af485 — do not purge an ambiguousDispatches signature match spanning more than one
+ *  batchId: that's the genuinely-distinct-same-text case, and purging it would drop a real,
+ *  still-undelivered message. */
 function textSignature(text: string): { len: number; hash: string } {
   return { len: text.length, hash: fnv1a32(text) };
 }
@@ -198,8 +196,8 @@ const COMPOSER_ACCUM_WINDOW = 8;
 const OFFSET_OMISSION_MAX_TAIL_CHARS = 2;
 
 /** @decision c2c750a9 — two-stage sum-then-hash accumulation detector (a sum alone can't pin ordering);
- *  coverage limit: detects only "at the next write", never a general duplicate census — see
- *  docs/decisions/c2c750a9-detectcomposeraccumulation-two-stage-trigger-and-confirm.md */
+ *  never report its output as "duplicates detected" — it can only say "accumulation detectable at the
+ *  next write", never a general duplicate census. */
 function detectComposerAccumulation(
   reportedLen: number,
   reportedHash: string,
@@ -219,8 +217,8 @@ function detectComposerAccumulation(
 }
 
 /** @decision d005f55b — the diverged-prior candidate reuses the PRIOR gen's REPORTED signature (never its
- *  written one), narrow to a single two-entry span; do not widen to a multi-generation chain — see
- *  docs/decisions/d005f55b-diverged-prior-reported-chain-candidate.md */
+ *  written one), narrow to one two-entry span; do not widen to a multi-generation chain — the ~22%
+ *  match rate (§1) only checked one hop back. */
 function detectComposerAccumulationOverDivergedPrior(
   reportedLen: number,
   reportedHash: string,
@@ -235,9 +233,9 @@ function detectComposerAccumulationOverDivergedPrior(
   return { confirmed: true, priorGen: priorReported.gen, sumOfLens: sum };
 }
 
-/** @decision d005f55b — names a recognized write, confirms nothing; NEVER pass the current gen's own
- *  just-pushed entry inside `window` (it would trivially self-match) — see
- *  docs/decisions/d005f55b-diverged-prior-reported-chain-candidate.md (§2) */
+/** @decision d005f55b — names a recognized write, confirms nothing (§2); never pass the current gen's own
+ *  just-pushed entry inside `window` — it would trivially self-match — and never treat a hit (or a
+ *  miss) as confirmation. */
 function findRecognizedSubstring(
   reported: string,
   window: ReadonlyArray<{ gen: number; text: string }>,
@@ -257,15 +255,15 @@ function findRecognizedSubstring(
   return null;
 }
 
-/** @decision 78e4b3f2 — marks a re-delivery only, NEVER a first-time directive (would train recipients to
- *  discount real direction); rootMsgId is the stable logicalId across every requeue/re-mint — see
- *  docs/decisions/78e4b3f2-possible-duplicate-tag-marks-only-a-redelivery.md */
+/** @decision 78e4b3f2 — marks a re-delivery only, NEVER a first-time directive: applying it to genuine
+ *  new direction would train recipients to discount real direction. rootMsgId is the stable logicalId
+ *  across every requeue/re-mint. */
 const POSSIBLE_DUPLICATE_TAG_RE = /^\[loom:possible-duplicate root:[0-9a-f]{8}\] /;
 const HEX8_RE = /^[0-9a-f]{8}$/;
 
-/** @decision 78e4b3f2 — rootMsgId is NOT always a UUID (resendOf is a raw unvalidated MCP string); any
- *  irregular value falls back to fnv1a32, never breaks the HEX8_RE regex invariant — see
- *  docs/decisions/78e4b3f2-possible-duplicate-tag-marks-only-a-redelivery.md (§2) */
+/** @decision 78e4b3f2 — do not assume rootMsgId is always a UUID: resendOf is a raw, unvalidated MCP
+ *  string, so any irregular value must fall back to fnv1a32 rather than break the HEX8_RE regex
+ *  invariant (§2). */
 export function possibleDuplicateRootLabel(rootMsgId: string): string {
   const slice = rootMsgId.slice(0, 8);
   return HEX8_RE.test(slice) ? slice : fnv1a32(rootMsgId);
@@ -305,7 +303,8 @@ export function stripPossibleDuplicateFrame(text: string): string {
 
 /** ⛔ NOT an accumulation/fusion — do not fold into detectComposerAccumulation/…OverDivergedPrior.
  *  ⛔ Do NOT chase the wrapper's delivery path from here — tracked separately (card 854d1632).
- *  @decision d005f55b — see docs/decisions/d005f55b-diverged-prior-reported-chain-candidate.md (§4) */
+ *  @decision d005f55b — a stale-echo ARTIFACT, not data loss; never word this output as a loss/deficit
+ *  (§4). */
 function detectPossibleDuplicateWrapperDeficit(reported: string, intended: string): { strippedTag: string } | null {
   const stripped = stripPossibleDuplicateFrame(intended);
   if (stripped === intended) return null; // no tag was present to strip
@@ -315,8 +314,7 @@ function detectPossibleDuplicateWrapperDeficit(reported: string, intended: strin
 
 /** ⛔ NEVER remove the strippedCurrent.length===0 guard below — a bare-tag-only write looks impossible
  *  today, but without it the loop degenerates to a plain whole-string match and silently disarms the
- *  follow-up loss timer. @decision c23e2869 — see
- *  docs/decisions/c23e2869-wrapper-stripped-current-fusion-candidate.md */
+ *  follow-up loss timer. @decision c23e2869 */
 function detectRecognizedFusionWithWrapperStrippedCurrent(
   reported: string,
   currentIntendedText: string,
@@ -339,9 +337,9 @@ function detectRecognizedFusionWithWrapperStrippedCurrent(
   return null;
 }
 
-/** ⛔ n=1 (one specimen, one shape) — classifies THIS byte-pattern only, no broader "mismatches are
- *  generally benign" claim. @decision a640c110 — see
- *  docs/decisions/a640c110-ansi-strip-deficit-is-a-rendering-artifact.md */
+/** @decision a640c110 — n=1 (one specimen, one shape): classifies THIS byte-pattern only, not a broader
+ *  "mismatches are generally benign" claim; word this shape's notice on its own terms, never as a
+ *  stale-confirmation-of-an-earlier-write (that's the wrapper-deficit framing, a different mechanism). */
 function detectAnsiEscapeStripDeficit(reported: string, intended: string): { strippedAnsiLen: number } | null {
   const stripped = intended.replace(ANSI_CSI, "");
   if (stripped === intended) return null; // no ANSI/CSI escape sequence was present to strip
@@ -349,17 +347,17 @@ function detectAnsiEscapeStripDeficit(reported: string, intended: string): { str
   return { strippedAnsiLen: intended.length - stripped.length };
 }
 
-/** ⛔ n=1 (one specimen) — classifies THIS byte-pattern only; never a general loss-confirmation. Deliberately
- *  NOT a suppression — the "possible LOSS" alarm still fires unchanged, this only enriches the wording.
- *  @decision 41950a38 — see docs/decisions/41950a38-task-notification-report-is-not-a-loss-confirmation.md */
+/** @decision 41950a38 — n=1 (one specimen) — classifies THIS byte-pattern only; never a general loss-
+ *  confirmation. Deliberately NOT a suppression — the "possible LOSS" alarm still fires unchanged, this
+ *  only enriches the wording. */
 function isEngineTaskNotificationReport(reported: string): boolean {
   const trimmed = reported.trim();
   return trimmed.startsWith("<task-notification>") && trimmed.endsWith("</task-notification>");
 }
 
 /** @decision 4af5aefa — annotates queue age only (never suppresses/gates/reorders); disclosed count is
- *  worded "submit generations", never "turns" (a give-up can consume a generation with none run) — see
- *  docs/decisions/4af5aefa-paste-recovery-age-annotates-never-suppresses.md */
+ *  worded "submit generations", never "turns" (a give-up can consume a generation with none run); checks
+ *  the STRIPPED text for PASTE_RECOVERY_TAG, not raw — else the most-redrained notices silently no-op. */
 function annotatePasteRecoveryAge(
   text: string, mintedAtGen: number | undefined, currentGen: number, mintedAtWallClock: number | undefined,
 ): string {
@@ -414,14 +412,14 @@ export const SUBMIT_MAX_ATTEMPTS = Number(process.env.LOOM_SUBMIT_MAX_ATTEMPTS) 
 export const GIVE_UP_REQUEUE_LIMIT = Number(process.env.LOOM_GIVE_UP_REQUEUE_LIMIT) || 1;
 
 /** @decision b64b3726 — sized from a MEASURED bimodal latency distribution (n=10), not guessed; do not
- *  just widen/halve on a future re-measurement, re-derive from the fresh distribution — see
- *  docs/decisions/b64b3726-reassert-settle-window-sized-from-a-measured-distribution.md */
+ *  just widen/halve on a future re-measurement — re-derive the bound from the fresh distribution, the
+ *  same way this one was sized. */
 const REASSERT_SETTLE_POLL_MS = Number(process.env.LOOM_REASSERT_SETTLE_POLL_MS) || 15;
 const REASSERT_SETTLE_MAX_POLLS = Number(process.env.LOOM_REASSERT_SETTLE_MAX_POLLS) || 20;
 
 /** @decision 441499ee — a SHORT last-chance check (catches only the fastest-confirming subset), NOT full
- *  hook-confirmation coverage; do not widen to chase fleet contention or reuse REASSERT_SETTLE's pair — see
- *  docs/decisions/441499ee-give-up-confirm-settle-is-a-short-last-chance-check.md */
+ *  hook-confirmation coverage; do not widen to chase fleet contention (reverted twice already, cards
+ *  595aad10/fea23514) or reuse REASSERT_SETTLE's pair (a different, faster mechanism). */
 const GIVE_UP_CONFIRM_SETTLE_POLL_MS = Number(process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_POLL_MS) || 15;
 const GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = Number(process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS) || 20;
 
@@ -438,8 +436,8 @@ const FLUSH_CONFIRM_POLL_MS = Number(process.env.LOOM_FLUSH_CONFIRM_POLL_MS) || 
 const FLUSH_CONFIRM_MAX_POLLS = Number(process.env.LOOM_FLUSH_CONFIRM_MAX_POLLS) || 50;
 
 /** @decision 73d5c34a — sized past one reconcile tick, deliberately NOT coupled to the live reconcile
- *  interval; sessions/service.ts's cross-turn re-mint MUST reuse this constant, never a second one — see
- *  docs/decisions/73d5c34a-give-up-hold-window-outlasts-one-reconcile-tick.md */
+ *  interval (this file has no access to that daemon config); sessions/service.ts's cross-turn re-mint
+ *  MUST reuse this constant, never a second one, or the two disciplines could silently drift apart. */
 export const GIVE_UP_HOLD_MS = Number(process.env.LOOM_GIVE_UP_HOLD_MS) || 20_000;
 
 /**
@@ -457,9 +455,8 @@ export const GIVE_UP_HOLD_MS = Number(process.env.LOOM_GIVE_UP_HOLD_MS) || 20_00
 export const HUMAN_SUBMIT_CONFIRM_HOLD_MS = Number(process.env.LOOM_HUMAN_SUBMIT_CONFIRM_HOLD_MS) || 20_000;
 
 /** @decision f9b1ea00 — sized past the measured p95 engine-confirmation lag (342s), deliberately not the
- *  median; env override MUST be bounded on both sides (0, 2^31-1] or it reproduces the instant-false-alarm
- *  bug from either direction — see
- *  docs/decisions/f9b1ea00-orchestrationevent-prompt-mismatch-unresolved-ts-correction.md (§2) */
+ *  median (a false "confirmed loss" alarm is worse than landing late); env override MUST be bounded on
+ *  both sides (0, 2^31-1] or it reproduces the instant-false-alarm bug from either direction (§2). */
 const rawPromptMismatchResolveWindowMs = Number(process.env.LOOM_PROMPT_MISMATCH_RESOLVE_WINDOW_MS);
 export const PROMPT_MISMATCH_RESOLVE_WINDOW_MS =
   Number.isFinite(rawPromptMismatchResolveWindowMs) && rawPromptMismatchResolveWindowMs > 0 && rawPromptMismatchResolveWindowMs <= 2_147_483_647
@@ -482,15 +479,13 @@ export const PROMPT_MISMATCH_RESOLVE_WINDOW_MS =
 export const PROMPT_MISMATCH_EXCERPT_MAX_LEN = 200;
 
 /** Card 87d2dc95 — stable prefix every `[loom:prompt-mismatch]` notice this file mints begins with; a
- *  `startsWith` PREFIX test (not substring), paired with the UNRESOLVED tag below so a persistent
- *  confirmation lag can't re-trigger its own notice forever. @decision 87d2dc95 — see
- *  docs/decisions/87d2dc95-prompt-mismatch-notice-tags-prevent-self-loop.md. */
+ *  strict `startsWith` PREFIX test (not substring) that does NOT alone recognize an `-unresolved`
+ *  notice — check both tags via `intendedIsOwnMismatchNotice`. @decision 87d2dc95 */
 export const PROMPT_MISMATCH_NOTICE_TAG = "[loom:prompt-mismatch]";
 
 /** Card 87d2dc95 — stable prefix of `SessionService.handlePromptMismatchUnresolved`'s own notice family
- *  (sessions/service.ts); exported so both mint and recognition sites share one source instead of two
- *  literals that could drift. @decision 87d2dc95 — see
- *  docs/decisions/87d2dc95-prompt-mismatch-notice-tags-prevent-self-loop.md. */
+ *  (sessions/service.ts); exported so both mint and recognition sites import ONE source — never
+ *  hardcode a second literal, or the two could silently drift apart. @decision 87d2dc95 */
 export const PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG = "[loom:prompt-mismatch-unresolved]";
 
 /**
@@ -508,8 +503,7 @@ export const PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG = "[loom:prompt-mismatch-unmat
 
 /** Card 4a0af485 — bounds `Live.ambiguousDispatches` by COUNT (not elapsed time): an OBSERVATION-WINDOW
  *  bound, not a retry deadline (the lag has no known ceiling — 232s measured, none established).
- *  @decision 4a0af485 — the cap is a memory-safety backstop, not a claim ambiguity is rare; see
- *  docs/decisions/4a0af485-ambiguousdispatches-signature-purge-scoped-to-one-batchid.md. */
+ *  @decision 4a0af485 — the cap is a memory-safety backstop, not a claim ambiguity is rare. */
 const AMBIGUOUS_DISPATCH_CAP = 20;
 
 /** Card dbc7ffea: per-logicalId cap on `Live.retiredGiveUpSignatures`'s own array of retired cycles — small,
@@ -575,17 +569,16 @@ const DRAIN_SEPARATOR = "\n\n────────\n\n";
 
 /** Card eac3464d — bounds on a SAME-SENDER agent-kind coalesced run (`drainPending`'s same-sender branch,
  *  `enqueueStdin`'s reorder-on-enqueue); COUNT also doubles as the reorder lookback, so the two never
- *  drift apart. @decision eac3464d — a DELIBERATE bound against a live confirmation-loss risk (cards
- *  c23e2869/3ce3fa39/8af2b9bd) that coalescing writes bigger amplifies; see
- *  docs/decisions/eac3464d-agent-coalesce-bounds-are-deliberate-against-a-live-confirmation-loss-risk.md. */
+ *  drift apart. @decision eac3464d — never raise or remove these bounds without accounting for the
+ *  live, unresolved confirmation-loss defect (cards c23e2869/3ce3fa39/8af2b9bd) that coalescing bigger
+ *  writes amplifies. */
 const AGENT_COALESCE_MAX_COUNT = Number(process.env.LOOM_AGENT_COALESCE_MAX_COUNT) || 5;
 const AGENT_COALESCE_MAX_BYTES = Number(process.env.LOOM_AGENT_COALESCE_MAX_BYTES) || 20_000;
 
 /** Card 21a281b6 — renders the shared MINT-TIME stamp onto an ordinary agent-message frame ONCE, at drain
  *  time (never baked into `QueuedMessage.text`), so `hasAmbiguousMatch`'s (card 4a0af485) content-match
  *  join still sees byte-identical text on a message's first write. @decision 21a281b6 — the two gates
- *  below are load-bearing, not optional; see
- *  docs/decisions/21a281b6-annotate-mint-stamp-gates-are-load-bearing.md. */
+ *  below (GATE 1/GATE 2) are load-bearing, not optional — see their own inline doc for why. */
 function annotateMintStamp(
   text: string, giveUpGen: number | undefined, mintedAtGen: number | undefined, currentGen: number,
   mintedAtWallClock: number | undefined,
@@ -600,10 +593,10 @@ function annotateMintStamp(
   return `${text}\n\n[loom:mint-time] Originally sent at ${new Date(mintedAtWallClock).toISOString()}.`;
 }
 
-/** Card ea77f71d — `m.resolveTailAtDelivery` is resolved ONCE, on first touch, and memoized onto the entry;
- *  load-bearing for byte-identity between `drainPending`'s real write and `requeueGiveUpOrigin`'s later
- *  reconstruction, and for cost (up to 3 calls/candidate otherwise). @decision ea77f71d — do not remove the
- *  memoization; see docs/decisions/ea77f71d-withdeliverytail-memoizes-once-for-byte-identity-and-cost.md. */
+/** Card ea77f71d — `m.resolveTailAtDelivery` is resolved ONCE, on first touch, memoized onto the entry —
+ *  load-bearing for byte-identity between `drainPending`'s write and `requeueGiveUpOrigin`'s later
+ *  reconstruction (a live-reading resolver could otherwise return a different value) and for cost.
+ *  @decision ea77f71d — never remove the memoization. */
 function withDeliveryTail(m: QueuedMessage): string {
   if (!m.resolveTailAtDelivery) return m.text;
   if (!m.resolvedTailReady) {
@@ -619,8 +612,7 @@ function withDeliveryTail(m: QueuedMessage): string {
 
 /** Card 78e4b3f2 — the text ACTUALLY submitted for a drained batch; SHARED verbatim between `drainPending`
  *  (the real write) and `requeueGiveUpOrigin` (must reconstruct that SAME text to seed a matching
- *  content-match signature). @decision 78e4b3f2 — do not let the two diverge; see
- *  docs/decisions/78e4b3f2-possible-duplicate-tag-marks-only-a-redelivery.md (§3). */
+ *  content-match signature). @decision 78e4b3f2 — never let the two diverge (§3). */
 function annotatedMessageText(m: QueuedMessage, currentGen: number): string {
   const base = withDeliveryTail(m);
   const t = m.giveUpGen !== undefined ? framePossibleDuplicate(base, m.logicalId) : base;
@@ -858,9 +850,9 @@ export function isResumeSummaryGate(flatCollapsed: string): boolean {
  * `❯N.` match (`resumeGateScan` is a CUMULATIVE rolling buffer — old frames stay concatenated in front
  * of the current one), same "last occurrence wins" reasoning as `detectPermissionMode`'s footer-mode
  * `lastIndexOf` scan above.
- * @decision sha:29b22e7e — lets `resolveResumeGate` CONFIRM a Down press landed before risking Enter;
- * see docs/decisions/29b22e7e-resume-gate-confirms-down-before-risking-enter.md for the 2026-07-10 race
- * this closes.
+ * @decision sha:29b22e7e — never fire Enter against the resume-summary gate without first confirming,
+ * via a fresh cursor-position read, that the preceding Down press landed — a blind Down+Enter pair can
+ * confirm the wrong (default) option under restart load (2026-07-10 incident).
  */
 export function resumeGateCursorOption(flatCollapsed: string): "1" | "2" | "3" | null {
   const matches = [...flatCollapsed.matchAll(/❯(\d)\./g)];
@@ -914,9 +906,9 @@ export function detectPermissionMode(recentOutput: string): { mode: LandedMode; 
 
 /** Cycle order Shift+Tab walks from the gate-free `acceptEdits` boot mode, AS OBSERVED (card f05e4897;
  *  re-verified card 8c60c068 — the real CLI handler is a conditional state machine, correct here only
- *  when `auto` is available). @decision f05e4897 — safe regardless: {@link runCycleToMode} never blind-
- *  presses off this array, it only LABELS a target from observed footer reads; see
- *  docs/decisions/f05e4897-converge-resume-mode-target-with-fresh-spawn.md. */
+ *  when `auto` is available). @decision f05e4897 — never treat this as a universal cycle guarantee or
+ *  add `bypassPermissions` (permanently unreachable here); {@link runCycleToMode} only LABELS a target
+ *  from observed footer reads, it never blind-presses off this array. */
 const ACCEPT_EDITS_CYCLE_ORDER: LandedMode[] = ["acceptEdits", "plan", "auto", "default"];
 /**
  * The permission mode reached after `cycles` Shift+Tab presses from the gate-free acceptEdits boot mode.
@@ -1001,8 +993,8 @@ const RESUME_MODE_MAX_PRESSES = Number(process.env.LOOM_RESUME_MODE_MAX_PRESSES)
 const HEALABLE_MODES: ReadonlySet<LandedMode> = new Set(["plan", "acceptEdits", "default", "bypassPermissions"]);
 /** Card 51926260 — `LandedMode`s the real `claude --permission-mode` flag accepts DIRECTLY as a boot value
  *  (probe-verified). @decision 016ee373 — typed `ReadonlySet<LandedMode & CliPermissionMode>` so a value
- *  that ISN'T also a CLI-accepted mode (e.g. `"default"`) can't be added without a `tsc` failure; see
- *  docs/decisions/016ee373-direct-boot-modes-typed-as-compile-time-guard.md. */
+ *  that ISN'T also a CLI-accepted mode (e.g. `"default"`) can't be added without a `tsc` failure — never
+ *  loosen this back to bare `ReadonlySet<LandedMode>`; bridge via `isDirectBootMode`'s type predicate. */
 const DIRECT_BOOT_MODES: ReadonlySet<LandedMode & CliPermissionMode> = new Set<LandedMode & CliPermissionMode>(["acceptEdits", "plan", "auto"]);
 /**
  * Bridges a plain `LandedMode` read (e.g. `resolveModeTarget`'s output) to the `LandedMode & CliPermissionMode`
@@ -1065,15 +1057,14 @@ export const READY_FALLBACK_MS = Number(process.env.LOOM_READY_FALLBACK_MS) || 2
 
 /** Card c469d54e — mode-cycle-scoped readiness fallback, re-armed from SessionStart's `deliverHook`
  *  DISPATCH (not spawn) — fixes a shrinking-residual race under host contention (2026-08-01 mass-restart:
- *  9/9 firings had SessionStart dispatched 5.3-11.6s late, 7/9 corrupted-footer). @decision c469d54e — an
- *  INVARIANT ties this to READY_FALLBACK_ABSOLUTE_CEILING_MS/READY_FALLBACK_MS; see
- *  docs/decisions/c469d54e-ready-fallback-reanchored-to-sessionstart-dispatch.md before changing any of
- *  the three. */
+ *  9/9 firings had SessionStart dispatched 5.3-11.6s late, 7/9 corrupted-footer). @decision c469d54e — do
+ *  not re-anchor this to spawn time again; and never raise READY_FALLBACK_MS past ~25s without checking
+ *  READY_FALLBACK_ABSOLUTE_CEILING_MS − MODE_CYCLE_FALLBACK_MS ≥ READY_FALLBACK_MS still holds. */
 export const MODE_CYCLE_FALLBACK_MS = Number(process.env.LOOM_MODE_CYCLE_FALLBACK_MS) || 20_000;
 
 /** Card c469d54e — absolute ceiling on the re-armed timer above, measured from SPAWN not SessionStart;
- *  deliberately NOT unbounded. @decision c469d54e — part of the same three-constant invariant as
- *  MODE_CYCLE_FALLBACK_MS; see docs/decisions/c469d54e-ready-fallback-reanchored-to-sessionstart-dispatch.md. */
+ *  deliberately NOT unbounded (a very-late-starting cycle still gets bounded runway). @decision c469d54e
+ *  — part of the same three-constant invariant as MODE_CYCLE_FALLBACK_MS/READY_FALLBACK_MS above. */
 export const READY_FALLBACK_ABSOLUTE_CEILING_MS = Number(process.env.LOOM_READY_FALLBACK_ABSOLUTE_CEILING_MS) || 45_000;
 
 /**
@@ -1127,7 +1118,8 @@ const RAW_OWNER_SUBMIT_TTL_MS = Number(process.env.LOOM_RAW_OWNER_SUBMIT_TTL_MS)
  *   RETRY — re-send the exit sequence at this point if the session is still live after the interrupt
  *   KILL  — hard bound after which an un-exited pty is killed (RETRY+GAP < KILL, so the re-send gets a
  *           full window to land before the kill)
- * @decision 316d0ecc — see docs/decisions/316d0ecc-graceful-stop-escalates-to-a-hard-kill-if-still-alive.md
+ * @decision 316d0ecc — never remove the re-send/escalation timers: a double Ctrl-C only exits an IDLE
+ * session, and never shrink RETRY+GAP below KILL — the re-send needs a full window to land first.
  */
 const GRACEFUL_STOP_GAP_MS = Number(process.env.LOOM_GRACEFUL_GAP_MS) || 600;
 const GRACEFUL_STOP_RETRY_MS = Number(process.env.LOOM_GRACEFUL_RETRY_MS) || 2_000;
@@ -1197,7 +1189,7 @@ const RECENT_OWNER_TURNS_WINDOW = 5;
  * an explicit screenshot — the MCP's default `snapshot.mode` writes the page's ARIA snapshot to
  * `page-{timestamp}.yml` in `outputDir` on essentially every browser tool call, so `outputDir` is a
  * HIGH-FREQUENCY write target, not an occasional one. @decision 61ab62e3 — never default `outputDir` to
- * `vaultPath` (or omit it); see docs/decisions/61ab62e3-playwright-outputdir-must-never-default-to-vault.md
+ * `vaultPath` (or omit it) — its default snapshot mode writes on essentially every browser call.
  * Omit `outputDir` and the flag is absent (byte-identical to the
  * pre-output-dir spawn) — the caller (`buildMcpServers`) always supplies a dir.
  *
@@ -1341,9 +1333,9 @@ let markitdownProvisioner: MarkitdownProvisioner = ensurePythonPackageAsync;
  * the resolved binary into the `markitdownBin` memo (subsequent spawns inject it) and the status → `ready`;
  * on failure it warn-logs the SPECIFIC classified reason + captured tail and the status → `failed`
  * (documentConversion sessions keep spawning WITHOUT the MCP, best-effort).
- * @decision sha:918bd712 — RETRYABLE, not a permanent one-shot: the dedupe guard is only a genuinely
- * in-flight install; see docs/decisions/918bd712-markitdown-provision-kick-is-retryable-not-permanent.md
- * for the prior permanent-flag defect this replaces.
+ * @decision sha:918bd712 — never reintroduce a permanent one-shot "already tried" flag here: the dedupe
+ * guard must stay scoped to a genuinely in-flight install, or every retry dead-ends until a daemon
+ * restart (the prior defect this replaces).
  */
 let markitdownProvisionInFlight: Promise<void> | null = null;
 let markitdownProvisionKicks = 0; // test observability (see __markitdownProvisionKicks)
@@ -1448,9 +1440,8 @@ export function markitdownMcpServer(pythonInterpreterPath?: string): { type: "st
 
 /** Card 088afc94 — streamable-HTTP MCP-config entry for a codescape-enabled session; returns `null` as a
  *  CLEAN SKIP (never a stale/absent fallback) when unresolvable. @decision 088afc94 — never add a
- *  fallback here, and never scope by Loom's own project.id (card 42f50ca1: the returned port is baked in
- *  and must stay stable for the session's life); see
- *  docs/decisions/088afc94-codescape-http-mcp-clean-skip-and-stable-id-resolution.md. */
+ *  fallback here, and never scope by Loom's own project.id; card 42f50ca1: the returned port is baked
+ *  in and must stay stable for as long as any session that mounted it is alive. */
 export function codescapeHttpMcpServer(opts: { repoPath: string; port: number | null; worktreeId?: string | null; resolveProjectId?: (repoPath: string) => string | null }): { type: "http"; url: string } | null {
   if (opts.port == null || !opts.resolveProjectId) return null;
   const id = opts.resolveProjectId(opts.repoPath);
@@ -1643,8 +1634,8 @@ export function buildMcpServers(o: {
   // Codescape MCP mount (per-project opt-in; card 088afc94). @decision 3e429d83 — GATE ORDERING IS
   // LOAD-BEARING: keep the cheap checks (`o.codescapeEnabled`, `isLoomDev()`) first; don't reorder or
   // hoist them behind `isCodescapeSupervisorEnabled`, which bottoms out in a synchronous PATH walk that
-  // must never run on the spawn hot path. See
-  // docs/decisions/3e429d83-codescape-mcp-mount-gate-ordering-and-clean-skip.md.
+  // must never run on the spawn hot path (test/pty-hot-path-no-path-walk.mjs won't catch a reorder of
+  // just this outer gate — its silence isn't proof nothing changed).
   if (o.codescapeEnabled && o.repoPath) {
     if (isLoomDev()) {
       if (isCodescapeSupervisorEnabled(o.integrationPaths?.codescape)) {
@@ -1674,8 +1665,8 @@ export function buildMcpServers(o: {
 
 /** Card C2 + card 5a7491d3 — `--allowedTools` for a mounted Codescape MCP: ONLY the 9 read tools, NEVER
  *  {@link CODESCAPE_WRITE_TOOLS}. @decision 5a7491d3 — classify a new tool by which file registers it AS
- *  A TOOL (`server.ts`), never by grepping the peer repo for the bare name (name-collision trap); see
- *  docs/decisions/5a7491d3-codescape-tool-allow-write-partition.md. */
+ *  A TOOL (`server.ts`), never by grepping the peer repo for the bare name — a name can collide with an
+ *  unrelated enum member (e.g. `declared_actions` in `open_view`'s VIEW enum). */
 export const CODESCAPE_TOOL_ALLOW: readonly string[] = [
   "mcp__codescape__list_flows",
   "mcp__codescape__trace_flow",
@@ -1690,9 +1681,9 @@ export const CODESCAPE_TOOL_ALLOW: readonly string[] = [
 
 /** Card C2 hardening + card 5a7491d3 — control/write Codescape tools, NEVER allowlisted; unioned into
  *  `--disallowedTools` whenever the MCP is mounted, so the write surface stays structurally unreachable
- *  even though the server still advertises it. @decision 5a7491d3 — don't quote a fixed partition total
- *  anywhere (use `codescapeUnclassifiedTools`'s drift check instead); see
- *  docs/decisions/5a7491d3-codescape-tool-allow-write-partition.md. */
+ *  even though the server still advertises it. @decision 5a7491d3 — never quote a fixed partition total
+ *  anywhere — use `codescapeUnclassifiedTools`'s drift check instead, or the count goes stale the
+ *  moment either list changes. */
 export const CODESCAPE_WRITE_TOOLS: readonly string[] = [
   "mcp__codescape__focus_flow",
   "mcp__codescape__highlight",
@@ -1767,9 +1758,8 @@ export const PLAYWRIGHT_DISALLOWED_TOOLS: readonly string[] = [
 
 /** Card f1609e1a (a residual OUTSIDE card 7159466a's RCE scope) — `browser_file_upload`/`browser_drop`
  *  take absolute HOST FILE PATHS; combined with `browser_navigate` to an attacker page that's a
- *  host-secret EXFILTRATION primitive. @decision f1609e1a — ROLE-SCOPED to `role === "assistant"` only
- *  (legitimately needed on worker rigs); see
- *  docs/decisions/f1609e1a-assistant-playwright-disallowed-tools-is-role-scoped-exfil-hardening.md. */
+ *  host-secret EXFILTRATION primitive. @decision f1609e1a — never disallow these for every role: keep
+ *  this ROLE-SCOPED to `role === "assistant"` only — worker rigs (QA Tester/Web Designer) need them. */
 export const ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS: readonly string[] = [
   "mcp__playwright__browser_file_upload",
   "mcp__playwright__browser_drop",
@@ -1800,9 +1790,9 @@ interface Subscriber {
 
 /** One entry in a session's busy-gated inbound FIFO. `id` lets the human UI delete/edit/reorder a
  *  SPECIFIC entry despite the FIFO draining autonomously; `source` ('human' vs 'system') is the trust
- *  boundary those mutators enforce. @decision 2ca18433 — `onDeliver` fires ONLY on a real drain/pull,
- *  never the immediate idle-submit path (would touch the load-bearing M1/M2 busy-gate ordering); see
- *  docs/decisions/2ca18433-restart-pending-snapshot-excludes-durable-messages.md. */
+ *  boundary those mutators enforce — never let one touch a 'system' entry. @decision 2ca18433 —
+ *  `onDeliver` fires ONLY on a real drain/pull, never the immediate idle-submit path, or it would
+ *  double-count delivery and risk the load-bearing M1/M2 busy-gate ordering. */
 export type QueueSource = "human" | "system";
 /**
  * An originating chat ROUTE pinned to a turn (Loom Companion multi-channel reply routing). An ALIAS of
@@ -1825,9 +1815,9 @@ export type TurnRoute = CompanionRoute;
  * byte-identical. Bias for anything genuinely ambiguous toward `"agent"`. Full legacy behavior (every
  * kind, every sender, the whole leading same-route run) is still available via `coalesceAgentMessages`
  * (see `drainPending`).
- * @decision eac3464d — the owner-directed 2026-07-03 classification + its 2026-08-28 same-sender-coalescing
- * amendment, and the deliberate trade (within-sender guarantee given up, cross-sender kept); see
- * docs/decisions/eac3464d-agent-coalesce-bounds-are-deliberate-against-a-live-confirmation-loss-risk.md.
+ * @decision eac3464d — the owner-directed 2026-07-03 classification + its 2026-08-28 same-sender-
+ * coalescing amendment; a deliberate trade (within-sender guarantee given up, cross-sender kept
+ * intact) — never let ambiguity default to "warning", it must bias toward "agent".
  */
 export type QueuedMessageKind = "warning" | "agent";
 /**
