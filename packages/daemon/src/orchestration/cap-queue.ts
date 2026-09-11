@@ -46,10 +46,11 @@ function toPublic(e: CapQueueEntry): CapQueuedSpawn {
 
 /**
  * BOUNDED, daemon-local, in-memory record of worker_spawn calls REJECTED purely because
- * `maxConcurrentWorkers` was at capacity. Before this, a cap-reject returned a bare `{error}` and
- * recorded NOTHING durable — the caller had to remember to re-spawn, and evidence showed a card sat
- * un-dispatched ~150 turns because a manager forgot. This registry makes the rejected intent VISIBLE
- * (worker_list surfaces a distinct placeholder row) instead of letting it silently disappear.
+ * `maxConcurrentWorkers` was at capacity.
+ *
+ * @decision sha:d6f3b7ab — a cap-reject once recorded nothing, so re-spawning relied on memory
+ * (a card sat un-dispatched ~150 turns); this registry makes the rejected intent visible
+ * instead.
  *
  * AUTO-DRAIN (card 81b7e346): this registry is the QUEUE OF RECORD, but it never dispatches anything
  * itself — {@link SessionService.maybeDrainCapQueue} owns draining it (FIFO, via {@link takeOldest}) at
