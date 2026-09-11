@@ -677,6 +677,64 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
     strandedLine.includes("Proj Z") && strandedLine.includes("mgr-1234"));
 }
 
+// --- 25. Card 0c90ebe4: manager_crash_resume_failed — recoverCrashOrphanedWorkers's crash-path sibling of
+//     fleet_resume_failed (section 21/22 above). Same worker-crashed family, but filed PER MANAGER (not
+//     aggregated) and carrying only that manager's OWN project's stranded workers — never cross-project
+//     identity like fleet_resume_failed's `detail.failed`. ---
+{
+  check("classify: manager_crash_resume_failed → worker-crashed (same family as fleet_resume_failed)",
+    classify("manager_crash_resume_failed", { workerCount: 1, workers: [] }) === "worker-crashed");
+
+  const detail = {
+    workerCount: 2,
+    workers: [
+      // N1 fix: `projectId` is NOT part of this kind's real `detail.workers[]` shape (unlike
+      // fleet_resume_failed's `detail.failed[]` above) — planting one here makes the "never a project"
+      // check below DISCRIMINATING: if alertLine's manager_crash_resume_failed case were ever changed to
+      // render `d.projectId`, this fixture value would show up in `line` and the check would catch it.
+      // Before this fix the check asserted `!line.includes("proj-")` against fixture ids that never
+      // contained that substring at all, so it could never fail either way.
+      { workerSessionId: "wkr-aaaaaaaa", taskId: "task-bbbbbbbb", reportedState: null, awaitingReview: false, projectId: "proj-should-never-render" },
+      { workerSessionId: "wkr-cccccccc", taskId: null, reportedState: "done", awaitingReview: true },
+    ],
+  };
+  const line = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "manager_crash_resume_failed", detail }, "worker-crashed", "Proj Z");
+  check("manager_crash_resume_failed alert line: names the project + accurate worker count + the manager's own id",
+    line.includes("Proj Z") && line.includes("2 in-flight worker(s) stranded") && line.includes("mgr-1234"));
+  check("manager_crash_resume_failed alert line: carries the stranded workers' (8-char) ids + task",
+    line.includes("w:wkr-aaaa/task:task-bb") && line.includes("w:wkr-cccc"));
+  check("manager_crash_resume_failed alert line: never renders a per-worker projectId, even when the input detail carries one (this kind is NOT cross-project, unlike fleet_resume_failed's detail.failed[] above)",
+    !line.includes("proj-should-never-render"));
+  // A malformed/missing detail degrades to the count alone, never throws — mirrors fleet_resume_failed's
+  // own degrade-gracefully check above.
+  const lineNoWorkers = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "manager_crash_resume_failed", detail: { workerCount: 3 } }, "worker-crashed", "Proj Z");
+  check("manager_crash_resume_failed alert line: a missing `workers` array degrades to count-only, never throws",
+    lineNoWorkers.includes("3 in-flight worker(s)") && !lineNoWorkers.includes("undefined"));
+}
+
+// --- 26. END-TO-END (card 0c90ebe4): a real manager_crash_resume_failed event, filed under the
+//     companion's OWN granted manager (mgrA/projA) — unlike fleet_resume_failed's cross-project e2e
+//     (section 22), this event is filed under the SAME project it describes, so there is no "other
+//     project's session" to relay; the manager's own id + its stranded workers reach the human directly. ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["worker-crashed"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "manager_crash_resume_failed", e.mgrA, {
+    workerCount: 1,
+    workers: [{ workerSessionId: "wkr-e2e-11111111", taskId: "task-e2e-22222222", reportedState: null, awaitingReview: false }],
+  });
+  e.watcher.tick(new Date());
+  check("e2e: a manager_crash_resume_failed event pushes exactly one turn", e.enqueued.length === 1);
+  check("e2e: framed [loom:alert]", e.enqueued.length === 1 && e.enqueued[0].text.startsWith(ALERT_TAG));
+  check("e2e: the pushed turn names the manager could not be resumed after a crash",
+    e.enqueued.length === 1 && e.enqueued[0].text.includes("manager could not be resumed after a crash"));
+  check("e2e: the pushed turn identifies the stranded worker's (8-char) id",
+    e.enqueued.length === 1 && e.enqueued[0].text.includes("wkr-e2e-"));
+  const pushed = events(e, "companion_alert_pushed");
+  check("e2e: emits one companion_alert_pushed audit row", pushed.length === 1 && pushed[0].detail.sourceKind === "manager_crash_resume_failed");
+  cleanupEnv(e);
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — AttentionPushWatcher stays DEFAULT-OFF with no grant, never replays backlog, pushes exactly the granted-project/subscribed-class events once each, survives a restart without re-pushing, respects rate-limit park + no-stacking (watermark held, one deferred event per streak), union-merges alertClasses/digestMinutes across granted projects, bundles a digest under its MIN cadence, renders a platform_escalate alert with a readable title instead of an opaque line, gives a fleet-resume failure a real human owner (fleet_resume_failed → worker-crashed) even with no live platform Lead, and a late-resolved manager/Lead recycle (recycle_fleet_resolved) reaches the same human surface as its unresolved sibling instead of being silently dropped."
   : `\n❌ ${failures} FAILURE(S).`);

@@ -245,6 +245,11 @@ try {
     db.listWorkers(realMgrId).some((w) => w.id === realWorkerId));
   check("(3) the worker got the 'continue your task' nudge", pty.getPending(realWorkerId).some((m) => m.includes("[loom:crash-recovered]") && /continue your assigned task/i.test(m)));
   check("(3) the manager got the summary nudge naming the recovered count", pty.getPending(realMgrId).some((m) => m.includes("[loom:crash-recovered]") && m.includes("1 of your")));
+  // Card 0c90ebe4 negative control: a manager that DOES resume successfully must emit ZERO
+  // `manager_crash_resume_failed` events — proves the new event is gated on the actual resume failure,
+  // not fired unconditionally on every crash-recovered manager.
+  check("(3) a manager whose resume SUCCEEDS emits no manager_crash_resume_failed event",
+    db.listEvents(realMgrId).filter((ev) => ev.kind === "manager_crash_resume_failed").length === 0);
 
   // Control: a SEPARATE, unprotected, exited worker with a clean (0-ahead) worktree IS reclaimed by the
   // SAME Pass B pass — proving PROTECTION (not luck) is what saved the real worker above.
@@ -287,6 +292,15 @@ try {
   check("(4) it received NO nudge (left untouched, not half-resumed)", pty.getPending(id.orphanMgr).length === 0);
   check("(4) the worker row is left in its clean exited+archived state (never touched)",
     db.getSession(id.orphanMgr).processState === "exited" && db.getSession(id.orphanMgr).archivedAt != null);
+  // Card 0c90ebe4: the (9b) detail-shape check above uses a ZERO-worker solo manager (vacuously true for
+  // the `workers[]` mapping); this manager has a REAL stranded candidate worker (id.orphanMgr, task t6),
+  // so this is the check that can actually catch a broken per-worker field mapping.
+  const events4 = db.listEvents(id.deadMgr).filter((ev) => ev.kind === "manager_crash_resume_failed");
+  check("(4) a durable event is filed under the manager, naming its 1 stranded worker + task",
+    events4.length === 1 && events4[0].detail?.workerCount === 1 &&
+    Array.isArray(events4[0].detail?.workers) && events4[0].detail.workers.length === 1 &&
+    events4[0].detail.workers[0].workerSessionId === id.orphanMgr &&
+    events4[0].detail.workers[0].taskId === t6);
 
   // ============================ (5) RATE-LIMIT PARK — resumed live, but no nudge (honor the hold) =====
   const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
@@ -431,6 +445,51 @@ try {
     result9b.managersFailed.includes(id9b.mgr));
   check("(9b) the real failure reason is LOGGED (not silently swallowed into a bare boolean)",
     warns.some((w) => w.includes("[crash-recovery]") && w.includes(id9b.mgr.slice(0, 8)) && w.includes("engine transcript missing")));
+  // Card 0c90ebe4: the crash path's manager-resume-failure asymmetry vs `fleet_resume_failed`
+  // (resumeFleetOnBoot, restart-fleet.mjs's (8i)) — a durable event is the ONLY way this leaves a trace
+  // that isn't the rotating daemon log. Filed under the failed manager's OWN id (its DB row still
+  // resolves — only its pty/resume failed — so attention-push's `db.getSession(e.managerSessionId)
+  // ?.projectId` scoping lookup still works), never a "restart requester" (no such party exists on a
+  // genuine crash boot).
+  const events9b = db.listEvents(id9b.mgr).filter((ev) => ev.kind === "manager_crash_resume_failed");
+  check("(9b) a durable event is filed when crash-path manager resume fails", events9b.length === 1);
+  check("(9b) it's filed under the FAILED MANAGER's own id, not a synthetic/aggregate party",
+    events9b.length === 1 && events9b[0].managerSessionId === id9b.mgr);
+  check("(9b) `detail` shape: workerCount + workers[] — this solo manager has 0 candidate workers",
+    events9b.length === 1 && events9b[0].detail?.workerCount === 0 &&
+    Array.isArray(events9b[0].detail?.workers) && events9b[0].detail.workers.length === 0);
+
+  // (9h) Code Review S1: the `manager_crash_resume_failed` appendEvent call must be try/catch'd — an
+  // audit-write throw for ONE failed manager must never abort the `byManager` loop and strand every
+  // LATER manager's own resume attempt. Two solo managers, both fail resumeOne; db.appendEvent is
+  // monkey-patched to throw ONLY for mgr1's event, proving mgr2 (processed AFTER mgr1 in Map insertion
+  // order) still gets its own resume attempt AND its own durable event. (Labeled 9h, not 9c — a distinct
+  // (9c) archived-pre-crash-manager scenario already exists below.)
+  const id9h = { mgr1: `cow-mgr9h1-${sfx}`, mgr2: `cow-mgr9h2-${sfx}` };
+  mkSession({ id: id9h.mgr1, projId: P.proj, agentId: P.agent, role: "manager" });
+  mkSession({ id: id9h.mgr2, projId: P.proj, agentId: P.agent, role: "manager" });
+  const origAppendEvent = db.appendEvent.bind(db);
+  db.appendEvent = (evt) => {
+    if (evt.kind === "manager_crash_resume_failed" && evt.managerSessionId === id9h.mgr1) {
+      throw new Error("simulated appendEvent failure (S1 RED probe)");
+    }
+    return origAppendEvent(evt);
+  };
+  let result9h;
+  try {
+    result9h = sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => false, soloManagerIds: [id9h.mgr1, id9h.mgr2] });
+    await flush();
+  } finally {
+    db.appendEvent = origAppendEvent;
+  }
+  check("(9h) BOTH managers still land in `managersFailed` — mgr1's appendEvent throw did not abort the loop",
+    result9h.managersFailed.includes(id9h.mgr1) && result9h.managersFailed.includes(id9h.mgr2));
+  check("(9h) the appendEvent failure for mgr1 is LOGGED (not silently swallowed)",
+    warns.some((w) => w.includes("[crash-recovery]") && w.includes("appendEvent(manager_crash_resume_failed)") && w.includes(id9h.mgr1.slice(0, 8))));
+  check("(9h) mgr1 itself has NO durable event (its own write genuinely threw)",
+    db.listEvents(id9h.mgr1).filter((ev) => ev.kind === "manager_crash_resume_failed").length === 0);
+  check("(9h) mgr2's OWN event is still filed normally — the guard is per-manager, not a whole-loop abort",
+    db.listEvents(id9h.mgr2).filter((ev) => ev.kind === "manager_crash_resume_failed").length === 1);
 
   // (9e) NO ENGINE ID — a manager caught mid-`starting` at crash time (no captured engine id yet) is
   // structurally NEVER resumable (there's no transcript to resume into) and must be excluded UP FRONT,

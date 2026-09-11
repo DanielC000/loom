@@ -1459,6 +1459,11 @@ export type OrchestrationEventKind =
   // resume failure has a real owner even in the shipped (non-LOOM_DEV) product where no platform-role
   // session can ever exist to receive the identified nudge (see `paths.ts` › `isLoomDev`).
   | "fleet_resume_failed"
+  // `recoverCrashOrphanedWorkers`'s crash-path sibling of `fleet_resume_failed` above — a manager that
+  // could not be resumed after a genuine crash (no `reqId`-shaped restart-requester exists there).
+  // @decision 0c90ebe4 — never batch this like `fleet_resume_failed`: file it PER FAILED MANAGER, under
+  // that manager's OWN id, with `detail` describing only ITS OWN workers — never cross-project.
+  | "manager_crash_resume_failed"
   // Canonical main advanced between a batch worktree being cut and its post-gate fast-forward, so the
   // batch's single gate never validated main's real current tree — abandoned, every candidate falls
   // back to its own individual gate. Filed under the confirming MANAGER; `detail` carries
@@ -1526,6 +1531,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   worker_spawn_usage_blocked: true, companion_alert_pushed: true, companion_alert_deferred: true,
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
+  manager_crash_resume_failed: true,
   repeated_tool_call: true, batch_merge_forfeited: true, engine_session_rotated: true,
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, codex_unsupported_capability: true,
@@ -2786,7 +2792,7 @@ export interface PollJob {
 export const EVENT_TRIGGER_EVENT_KINDS = [
   "merge_rejected", "merge_request",
   "worker_stuck", "worktree_vanished", "worker_report", "worker_exited_without_report", "session_recovery_abandoned",
-  "fleet_resume_failed",
+  "fleet_resume_failed", "manager_crash_resume_failed",
   "question_asked", "request_escalated",
   "idle_escalated", "idle_report",
   "context_escalated", "context_blind_turn", "context_emergency_interrupt",

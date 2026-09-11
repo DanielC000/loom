@@ -127,6 +127,11 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
     // sends when a Lead IS live (see sessions/service.ts's `liveLead` branch — unchanged by this card).
     case "fleet_resume_failed":
       return "worker-crashed";
+    // Card 0c90ebe4: `fleet_resume_failed`'s crash-path sibling — a manager `recoverCrashOrphanedWorkers`
+    // could not resume after a genuine crash. Same class: the manager itself has no live pty left to
+    // receive a direct nudge, and no platform-role session may exist to receive a Lead-only notice.
+    case "manager_crash_resume_failed":
+      return "worker-crashed";
     // Card e07b1b1a: a manager/platform recycle whose successor died before SessionStart — the fleet was
     // either recovered back onto the (still-live) predecessor or left in an unresolved state; either way
     // this is the same "unexpected fleet-ownership fault, human should know" shape as fleet_resume_failed.
@@ -218,6 +223,25 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       const more = rawFailed.length > 3 ? `, +${rawFailed.length - 3} more` : "";
       line = `${projectName}: ${count} session(s) elsewhere in the fleet failed to resume after a restart` +
         (idPreview ? ` — ${idPreview}${more}` : "");
+      break;
+    }
+    case "manager_crash_resume_failed": {
+      // Card 0c90ebe4: `detail.workers` describes only THIS event's own manager's stranded workers —
+      // no cross-project identity to redact, unlike `fleet_resume_failed` above (see the kind's own doc).
+      const rawWorkers = Array.isArray(detail.workers) ? detail.workers : [];
+      const workerCount = typeof detail.workerCount === "number" ? detail.workerCount : rawWorkers.length;
+      const idPreview2 = rawWorkers
+        .slice(0, 3)
+        .map((w) => {
+          const d = (w ?? {}) as Record<string, unknown>;
+          const sess = typeof d.workerSessionId === "string" ? d.workerSessionId.slice(0, 8) : "?";
+          const task = typeof d.taskId === "string" ? `/task:${d.taskId.slice(0, 8)}` : "";
+          return `w:${sess}${task}`;
+        })
+        .join(", ");
+      const more2 = rawWorkers.length > 3 ? `, +${rawWorkers.length - 3} more` : "";
+      line = `${projectName}: manager could not be resumed after a crash, ${workerCount} in-flight worker(s) stranded — ${m8}` +
+        (idPreview2 ? ` (${idPreview2}${more2})` : "");
       break;
     }
     case "question_asked": {

@@ -5001,6 +5001,24 @@ export class SessionService {
       if (!resumeOne(managerId)) {
         failed.push(...workers.map((w) => w.workerSessionId));
         managersFailed.push(managerId);
+        // @decision 0c90ebe4 — never leave this appendEvent unguarded: an uncaught throw here escapes
+        // this method AND the boot call site, aborting every LATER manager's resume attempt too.
+        try {
+          this.db.appendEvent({
+            id: randomUUID(), ts: now.toISOString(), managerSessionId: managerId, kind: "manager_crash_resume_failed",
+            detail: {
+              workerCount: workers.length,
+              workers: workers.map((w) => ({
+                workerSessionId: w.workerSessionId,
+                taskId: this.db.getSession(w.workerSessionId)?.taskId ?? null,
+                reportedState: w.reportedState,
+                awaitingReview: w.awaitingReview,
+              })),
+            },
+          });
+        } catch (e) {
+          console.warn(`[crash-recovery] appendEvent(manager_crash_resume_failed) failed for ${managerId.slice(0, 8)}: ${(e as Error).message}`);
+        }
         continue;
       }
       let recoveredCount = 0;
