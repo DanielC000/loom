@@ -103,10 +103,13 @@ export const PROFILE_FIELD_NAMES = Object.keys(profileSchema.shape) as (keyof z.
  * `capabilities` (agent-tooling P4) gets the SAME stricter posture, not the milder `browserTesting`/
  * `documentConversion` one: a capability grant launches a host process and can bind egress via a P1
  * connection, so it is owner-only end-to-end, never delegable to an elevated profile-writing agent.
- * `vaultWrite` (card be8be211) gets the SAME stricter posture as well: a write grant into a
- * human-reviewed vault corpus is exfil/tamper-adjacent, not a sandboxed capability — an elevated
- * profile-writing agent must never be able to grant itself (or any other rig) the ability to write
- * vault content a human will later trust as their own.
+ *
+ * @decision be8be211 — `vaultWrite` gets the SAME stricter posture: a write grant into a
+ * human-reviewed vault corpus is exfil/tamper-adjacent.
+ *
+ * An elevated profile-writing agent must never be able to grant itself (or any other rig) the ability
+ * to write vault content a human will later trust as their own.
+ *
  * `harness` (multi-harness epic df1f94b0 Phase 1, card 353f6dc4) gets the SAME stricter posture too, per
  * an explicit lead ruling on that card: selecting which vendor BINARY a session spawns is the same trust
  * class as `gateCommand`, not a sandboxed capability like `browserTesting`/`documentConversion` — an
@@ -141,19 +144,13 @@ export interface CapabilityGrantBindingDbStore {
 }
 
 /**
- * Guard the P4 capability-grant ↔ P1 connection binding at bind time — the human-facing REST surface
- * (POST/PUT /api/profiles, gateway/server.ts), called AFTER `validateProfile` on its already-normalized
- * `capabilities` array. A `requiresConnection` capability injects its bound connection's secret as a
- * STATIC env var at spawn (`capabilities/registry.ts` › `resolveCapabilityServer`) — but an `oauth2`
- * connection's secret never resolves that way: `getSecretForUse` (`connections/store.ts`) returns
- * undefined for an `oauth2` row BY DESIGN, since oauth2 must flow through refresh-on-use via the P2
- * `authenticated_request` tool, never a static token that would go stale with no refresh path
- * (`resolveConnectionSecret` in `index.ts` / the grant loop in `pty/host.ts` › `buildMcpServers` then
- * correctly omit the env injection — that fail-closed runtime behavior is UNCHANGED by this guard).
- * Without this check, binding an oauth2 connection to such a grant would save successfully and then
- * silently spawn every session under that profile credential-less. Rejects at bind time instead — safe
- * here because this is a human-only config action, never an agent-writable path. Returns an error string
- * for the FIRST offending grant, or null when every grant's binding is sound.
+ * @decision sha:8fbb634c — an oauth2 connection's secret can never resolve as a static env var, so
+ * binding one to a `requiresConnection` capability grant must be rejected here, not left to silently
+ * spawn a session credential-less.
+ *
+ * Called AFTER `validateProfile`, on its already-normalized `capabilities` array — human-only (the REST
+ * surface POST/PUT /api/profiles, gateway/server.ts), never an agent-writable path. Returns an error
+ * string for the FIRST offending grant, or null when every grant's binding is sound.
  */
 export function capabilityGrantBindingError(
   grants: { slug: string; connectionId?: string }[],
