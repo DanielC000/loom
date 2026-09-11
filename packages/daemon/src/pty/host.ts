@@ -314,7 +314,9 @@ function detectPossibleDuplicateWrapperDeficit(reported: string, intended: strin
 
 /** ⛔ NEVER remove the strippedCurrent.length===0 guard below — a bare-tag-only write looks impossible
  *  today, but without it the loop degenerates to a plain whole-string match and silently disarms the
- *  follow-up loss timer. @decision c23e2869 */
+ *  follow-up loss timer.
+ *
+ *  @decision c23e2869 */
 function detectRecognizedFusionWithWrapperStrippedCurrent(
   reported: string,
   currentIntendedText: string,
@@ -480,12 +482,16 @@ export const PROMPT_MISMATCH_EXCERPT_MAX_LEN = 200;
 
 /** Card 87d2dc95 — stable prefix every `[loom:prompt-mismatch]` notice this file mints begins with; a
  *  strict `startsWith` PREFIX test (not substring) that does NOT alone recognize an `-unresolved`
- *  notice — check both tags via `intendedIsOwnMismatchNotice`. @decision 87d2dc95 */
+ *  notice — check both tags via `intendedIsOwnMismatchNotice`.
+ *
+ *  @decision 87d2dc95 */
 export const PROMPT_MISMATCH_NOTICE_TAG = "[loom:prompt-mismatch]";
 
 /** Card 87d2dc95 — stable prefix of `SessionService.handlePromptMismatchUnresolved`'s own notice family
  *  (sessions/service.ts); exported so both mint and recognition sites import ONE source — never
- *  hardcode a second literal, or the two could silently drift apart. @decision 87d2dc95 */
+ *  hardcode a second literal, or the two could silently drift apart.
+ *
+ *  @decision 87d2dc95 */
 export const PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG = "[loom:prompt-mismatch-unresolved]";
 
 /**
@@ -569,7 +575,9 @@ const DRAIN_SEPARATOR = "\n\n────────\n\n";
 
 /** Card eac3464d — bounds on a SAME-SENDER agent-kind coalesced run (`drainPending`'s same-sender branch,
  *  `enqueueStdin`'s reorder-on-enqueue); COUNT also doubles as the reorder lookback, so the two never
- *  drift apart. @decision eac3464d — never raise or remove these bounds without accounting for the
+ *  drift apart.
+ *
+ *  @decision eac3464d — never raise or remove these bounds without accounting for the
  *  live, unresolved confirmation-loss defect (cards c23e2869/3ce3fa39/8af2b9bd) that coalescing bigger
  *  writes amplifies. */
 const AGENT_COALESCE_MAX_COUNT = Number(process.env.LOOM_AGENT_COALESCE_MAX_COUNT) || 5;
@@ -577,7 +585,9 @@ const AGENT_COALESCE_MAX_BYTES = Number(process.env.LOOM_AGENT_COALESCE_MAX_BYTE
 
 /** Card 21a281b6 — renders the shared MINT-TIME stamp onto an ordinary agent-message frame ONCE, at drain
  *  time (never baked into `QueuedMessage.text`), so `hasAmbiguousMatch`'s (card 4a0af485) content-match
- *  join still sees byte-identical text on a message's first write. @decision 21a281b6 — the two gates
+ *  join still sees byte-identical text on a message's first write.
+ *
+ *  @decision 21a281b6 — the two gates
  *  below (GATE 1/GATE 2) are load-bearing, not optional — see their own inline doc for why. */
 function annotateMintStamp(
   text: string, giveUpGen: number | undefined, mintedAtGen: number | undefined, currentGen: number,
@@ -612,7 +622,9 @@ function withDeliveryTail(m: QueuedMessage): string {
 
 /** Card 78e4b3f2 — the text ACTUALLY submitted for a drained batch; SHARED verbatim between `drainPending`
  *  (the real write) and `requeueGiveUpOrigin` (must reconstruct that SAME text to seed a matching
- *  content-match signature). @decision 78e4b3f2 — never let the two diverge (§3). */
+ *  content-match signature).
+ *
+ *  @decision 78e4b3f2 — never let the two diverge (§3). */
 function annotatedMessageText(m: QueuedMessage, currentGen: number): string {
   const base = withDeliveryTail(m);
   const t = m.giveUpGen !== undefined ? framePossibleDuplicate(base, m.logicalId) : base;
@@ -906,7 +918,9 @@ export function detectPermissionMode(recentOutput: string): { mode: LandedMode; 
 
 /** Cycle order Shift+Tab walks from the gate-free `acceptEdits` boot mode, AS OBSERVED (card f05e4897;
  *  re-verified card 8c60c068 — the real CLI handler is a conditional state machine, correct here only
- *  when `auto` is available). @decision f05e4897 — never treat this as a universal cycle guarantee or
+ *  when `auto` is available).
+ *
+ *  @decision f05e4897 — never treat this as a universal cycle guarantee or
  *  add `bypassPermissions` (permanently unreachable here); {@link runCycleToMode} only LABELS a target
  *  from observed footer reads, it never blind-presses off this array. */
 const ACCEPT_EDITS_CYCLE_ORDER: LandedMode[] = ["acceptEdits", "plan", "auto", "default"];
@@ -992,7 +1006,9 @@ const RESUME_MODE_MAX_PRESSES = Number(process.env.LOOM_RESUME_MODE_MAX_PRESSES)
  */
 const HEALABLE_MODES: ReadonlySet<LandedMode> = new Set(["plan", "acceptEdits", "default", "bypassPermissions"]);
 /** Card 51926260 — `LandedMode`s the real `claude --permission-mode` flag accepts DIRECTLY as a boot value
- *  (probe-verified). @decision 016ee373 — typed `ReadonlySet<LandedMode & CliPermissionMode>` so a value
+ *  (probe-verified).
+ *
+ *  @decision 016ee373 — typed `ReadonlySet<LandedMode & CliPermissionMode>` so a value
  *  that ISN'T also a CLI-accepted mode (e.g. `"default"`) can't be added without a `tsc` failure — never
  *  loosen this back to bare `ReadonlySet<LandedMode>`; bridge via `isDirectBootMode`'s type predicate. */
 const DIRECT_BOOT_MODES: ReadonlySet<LandedMode & CliPermissionMode> = new Set<LandedMode & CliPermissionMode>(["acceptEdits", "plan", "auto"]);
@@ -1057,13 +1073,17 @@ export const READY_FALLBACK_MS = Number(process.env.LOOM_READY_FALLBACK_MS) || 2
 
 /** Card c469d54e — mode-cycle-scoped readiness fallback, re-armed from SessionStart's `deliverHook`
  *  DISPATCH (not spawn) — fixes a shrinking-residual race under host contention (2026-08-01 mass-restart:
- *  9/9 firings had SessionStart dispatched 5.3-11.6s late, 7/9 corrupted-footer). @decision c469d54e — do
+ *  9/9 firings had SessionStart dispatched 5.3-11.6s late, 7/9 corrupted-footer).
+ *
+ *  @decision c469d54e — do
  *  not re-anchor this to spawn time again; and never raise READY_FALLBACK_MS past ~25s without checking
  *  READY_FALLBACK_ABSOLUTE_CEILING_MS − MODE_CYCLE_FALLBACK_MS ≥ READY_FALLBACK_MS still holds. */
 export const MODE_CYCLE_FALLBACK_MS = Number(process.env.LOOM_MODE_CYCLE_FALLBACK_MS) || 20_000;
 
 /** Card c469d54e — absolute ceiling on the re-armed timer above, measured from SPAWN not SessionStart;
- *  deliberately NOT unbounded (a very-late-starting cycle still gets bounded runway). @decision c469d54e
+ *  deliberately NOT unbounded (a very-late-starting cycle still gets bounded runway).
+ *
+ *  @decision c469d54e
  *  — part of the same three-constant invariant as MODE_CYCLE_FALLBACK_MS/READY_FALLBACK_MS above. */
 export const READY_FALLBACK_ABSOLUTE_CEILING_MS = Number(process.env.LOOM_READY_FALLBACK_ABSOLUTE_CEILING_MS) || 45_000;
 
@@ -1188,8 +1208,11 @@ const RECENT_OWNER_TURNS_WINDOW = 5;
  * governs the DEFAULT (implicit, no-filename) artifact for every snapshot-bearing tool response, not just
  * an explicit screenshot — the MCP's default `snapshot.mode` writes the page's ARIA snapshot to
  * `page-{timestamp}.yml` in `outputDir` on essentially every browser tool call, so `outputDir` is a
- * HIGH-FREQUENCY write target, not an occasional one. @decision 61ab62e3 — never default `outputDir` to
+ * HIGH-FREQUENCY write target, not an occasional one.
+ *
+ * @decision 61ab62e3 — never default `outputDir` to
  * `vaultPath` (or omit it) — its default snapshot mode writes on essentially every browser call.
+ *
  * Omit `outputDir` and the flag is absent (byte-identical to the
  * pre-output-dir spawn) — the caller (`buildMcpServers`) always supplies a dir.
  *
@@ -1439,7 +1462,9 @@ export function markitdownMcpServer(pythonInterpreterPath?: string): { type: "st
 }
 
 /** Card 088afc94 — streamable-HTTP MCP-config entry for a codescape-enabled session; returns `null` as a
- *  CLEAN SKIP (never a stale/absent fallback) when unresolvable. @decision 088afc94 — never add a
+ *  CLEAN SKIP (never a stale/absent fallback) when unresolvable.
+ *
+ *  @decision 088afc94 — never add a
  *  fallback here, and never scope by Loom's own project.id; card 42f50ca1: the returned port is baked
  *  in and must stay stable for as long as any session that mounted it is alive. */
 export function codescapeHttpMcpServer(opts: { repoPath: string; port: number | null; worktreeId?: string | null; resolveProjectId?: (repoPath: string) => string | null }): { type: "http"; url: string } | null {
@@ -1631,8 +1656,11 @@ export function buildMcpServers(o: {
       console.warn(`[pty] ${o.sessionId} capability '${grant.slug}' could not be resolved — spawning without it (provisioning may be in progress in the background).`);
     }
   }
-  // Codescape MCP mount (per-project opt-in; card 088afc94). @decision 3e429d83 — GATE ORDERING IS
-  // LOAD-BEARING: keep the cheap checks (`o.codescapeEnabled`, `isLoomDev()`) first; don't reorder or
+  // Codescape MCP mount (per-project opt-in; card 088afc94).
+  //
+  // @decision 3e429d83 — GATE ORDERING IS LOAD-BEARING:
+  //
+  // keep the cheap checks (`o.codescapeEnabled`, `isLoomDev()`) first; don't reorder or
   // hoist them behind `isCodescapeSupervisorEnabled`, which bottoms out in a synchronous PATH walk that
   // must never run on the spawn hot path (test/pty-hot-path-no-path-walk.mjs won't catch a reorder of
   // just this outer gate — its silence isn't proof nothing changed).
@@ -1664,7 +1692,9 @@ export function buildMcpServers(o: {
 }
 
 /** Card C2 + card 5a7491d3 — `--allowedTools` for a mounted Codescape MCP: ONLY the 9 read tools, NEVER
- *  {@link CODESCAPE_WRITE_TOOLS}. @decision 5a7491d3 — classify a new tool by which file registers it AS
+ *  {@link CODESCAPE_WRITE_TOOLS}.
+ *
+ *  @decision 5a7491d3 — classify a new tool by which file registers it AS
  *  A TOOL (`server.ts`), never by grepping the peer repo for the bare name — a name can collide with an
  *  unrelated enum member (e.g. `declared_actions` in `open_view`'s VIEW enum). */
 export const CODESCAPE_TOOL_ALLOW: readonly string[] = [
@@ -1681,7 +1711,9 @@ export const CODESCAPE_TOOL_ALLOW: readonly string[] = [
 
 /** Card C2 hardening + card 5a7491d3 — control/write Codescape tools, NEVER allowlisted; unioned into
  *  `--disallowedTools` whenever the MCP is mounted, so the write surface stays structurally unreachable
- *  even though the server still advertises it. @decision 5a7491d3 — never quote a fixed partition total
+ *  even though the server still advertises it.
+ *
+ *  @decision 5a7491d3 — never quote a fixed partition total
  *  anywhere — use `codescapeUnclassifiedTools`'s drift check instead, or the count goes stale the
  *  moment either list changes. */
 export const CODESCAPE_WRITE_TOOLS: readonly string[] = [
@@ -1758,7 +1790,9 @@ export const PLAYWRIGHT_DISALLOWED_TOOLS: readonly string[] = [
 
 /** Card f1609e1a (a residual OUTSIDE card 7159466a's RCE scope) — `browser_file_upload`/`browser_drop`
  *  take absolute HOST FILE PATHS; combined with `browser_navigate` to an attacker page that's a
- *  host-secret EXFILTRATION primitive. @decision f1609e1a — never disallow these for every role: keep
+ *  host-secret EXFILTRATION primitive.
+ *
+ *  @decision f1609e1a — never disallow these for every role: keep
  *  this ROLE-SCOPED to `role === "assistant"` only — worker rigs (QA Tester/Web Designer) need them. */
 export const ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS: readonly string[] = [
   "mcp__playwright__browser_file_upload",
@@ -1790,7 +1824,9 @@ interface Subscriber {
 
 /** One entry in a session's busy-gated inbound FIFO. `id` lets the human UI delete/edit/reorder a
  *  SPECIFIC entry despite the FIFO draining autonomously; `source` ('human' vs 'system') is the trust
- *  boundary those mutators enforce — never let one touch a 'system' entry. @decision 2ca18433 —
+ *  boundary those mutators enforce — never let one touch a 'system' entry.
+ *
+ *  @decision 2ca18433 —
  *  `onDeliver` fires ONLY on a real drain/pull, never the immediate idle-submit path, or it would
  *  double-count delivery and risk the load-bearing M1/M2 busy-gate ordering. */
 export type QueueSource = "human" | "system";
@@ -1938,8 +1974,12 @@ export type QueuedMessage = { id: string; text: string; source: QueueSource; onD
 export type EnqueueDeliveryReason = "session-dead" | "held";
 /**
  * `enqueueStdin`'s full return shape. `delivered` NEVER changes meaning — callers and tests read it
- * as-is (delivered now vs not-yet). @decision 13e32e1d — why these fields exist (a `held` outcome used
- * to be indistinguishable from a drop). These fields are ADDITIVE, present ALONGSIDE `delivered`/
+ * as-is (delivered now vs not-yet).
+ *
+ * @decision 13e32e1d — why these fields exist (a `held` outcome used
+ * to be indistinguishable from a drop).
+ *
+ * These fields are ADDITIVE, present ALONGSIDE `delivered`/
  * `reason`, and only meaningful on the `held` path:
  *   - `queued: true` — this text is durably recorded and will be retried at the recipient's next turn
  *     boundary; this is success, not failure. NOT an unconditional delivery guarantee though — a message
@@ -1948,6 +1988,7 @@ export type EnqueueDeliveryReason = "session-dead" | "held";
  *     surfaced to the sender rather than silently dropped, but genuinely never delivered. `queued: false`
  *     on the `session-dead` path makes the negative explicit too, instead of leaving it to be inferred
  *     from the absence of the field.
+ *
  *   - `landsAt: "next-turn-boundary"` — WHEN the NEXT delivery attempt lands: at the recipient's next
  *     Stop/turn-boundary drain (or the reconcile tick), not "eventually" or "if you're lucky". Silent
  *     about this before this card.
@@ -2020,7 +2061,9 @@ export type EnqueueStdinTail = {
  * Both tiers SANITIZE-OR-LOG, they NEVER DROP — dropping is never an acceptable outcome for this guard,
  * however corrupted the shape: a dropped "warning" nudge (e.g. a gate-completion notice once its durable
  * `pending_gate_ops` row is already `state:"settled"`) is the ONLY remaining path to the result, stranding
- * a parked recipient with no way back. @decision 78a16dc5 — sanitize or log, never drop, a warning-kind
+ * a parked recipient with no way back.
+ *
+ * @decision 78a16dc5 — sanitize or log, never drop, a warning-kind
  * entry on shape alone, however corrupted the shape — a dropped gate-completion nudge after its
  * `pending_gate_ops` row settles is the only remaining path to the result, stranding the parked recipient.
  *
@@ -2521,13 +2564,17 @@ interface Live {
   // its pty instance.
   mcpSeenWaiters: Array<(seen: boolean) => void>;
   // @decision 68459420 — a manager-facing PULL surface (never cleared, see getLastMismatchReplay), not an
-  // advisory. @decision b7158b99 — does NOT establish a loss; a later fusion may recover it.
+  // advisory.
+  //
+  // @decision b7158b99 — does NOT establish a loss; a later fusion may recover it.
   // @decision d0952a73 — explainedBenign threads the session notice's own verdict, never discards it.
   // @decision e1ac691b — one of FOUR sibling candidates surfaced together, chronologically; see that record.
   lastMismatchReplay: { gen: number; replayedGen: number; reportedLen: number; intendedLen: number; detectedAt: number; explainedBenign: "wrapper-deficit" | "ansi-strip" | "wrapper-aware-fusion" | null } | null;
   // @decision f5f6515a — accepts ANY confirmed span, no upper bound; the contract is DUPLICATION, not loss
   // (the fused span's last entry is always this turn's own write — never restate this as an "established
-  // loss"). @decision e1ac691b — one of FOUR sibling candidates surfaced together; see that record.
+  // loss").
+  //
+  // @decision e1ac691b — one of FOUR sibling candidates surfaced together; see that record.
   lastMismatchFusion: { gen: number; spanGens: number[]; reportedLen: number; intendedLen: number; detectedAt: number } | null;
   // Card f9b1ea00 — CONSUMED by `checkPromptMismatchUnresolved`'s bounded-window follow-up, NOT a reader-
   // facing pull surface like its siblings above. Every gen a CONFIRMED fusion's own `spanGens` has ever
@@ -2562,19 +2609,25 @@ interface Live {
   // arms a second timer for the same gen. See 340b9dbe's record.
   firedMismatchUnresolvedGens: Set<number>;
   // @decision 59757189 — captures content AT DETECTION time from `intended`, never a later lookup into the
-  // bounded recentWrittenTurns ring (which will have rotated past it). @decision e1ac691b — one of FOUR
+  // bounded recentWrittenTurns ring (which will have rotated past it).
+  //
+  // @decision e1ac691b — one of FOUR
   // sibling candidates surfaced together; see that record.
   lastMismatchUnmatched: { gen: number; intendedLen: number; intendedText: string; detectedAt: number } | null;
   // @decision c0323f8a — suppresses an exact-repeat notice on a (gen, writtenHash, reportedHash) triple
   // match; sound because submitGeneration cannot repeat across two distinct events (4-point proof in the
-  // record — checked specifically against the card 8a5bd0d0 rotated-session_id quirk). This is a
+  // record — checked specifically against the card 8a5bd0d0 rotated-session_id quirk).
+  //
+  // This is a
   // DATA-LOSS ALARM: do not loosen the match. See c0323f8a's record.
   lastMismatchNoticeSignature: { gen: number; writtenHash: string; reportedHash: string } | null;
   // @decision c0323f8a — durable, manager-visible counterpart; count resets to 1 on a different signature,
   // never a lifetime total. See c0323f8a's record, "lastMismatchNoticeSuppressed" section.
   lastMismatchNoticeSuppressed: { gen: number; writtenHash: string; reportedHash: string; count: number; detectedAt: number } | null;
   // @decision 72cab648 — a PULL surface, additive to the existing console.warn + attention-nudge channels
-  // (never a replacement). @decision e1ac691b — one of FOUR sibling candidates surfaced together,
+  // (never a replacement).
+  //
+  // @decision e1ac691b — one of FOUR sibling candidates surfaced together,
   // chronologically; a DIFFERENT family (give-up/redelivery, not composer-accumulation). See both records.
   lastPasteTripwireGiveUp: { gen: number; token: string | null; engineSessionId: string | null; detectedAt: number } | null;
 }
@@ -2903,7 +2956,9 @@ export interface PtyHostEvents {
   onEngineSessionId(sessionId: string, engineId: string, previousEngineId: string | null): void;
   /** @decision 08c81809 — durable counterpart to the in-memory `hasReachedReady`/`markReady` latch;
    *  fires exactly once per session, the FIRST time `markReady` runs (real SessionStart or the readiness
-   *  fallback timer) — never on a later idempotent re-entry. Optional so every existing PtyHostEvents
+   *  fallback timer) — never on a later idempotent re-entry.
+   *
+   *  Optional so every existing PtyHostEvents
    *  implementer (test doubles included) stays byte-identical without providing it. */
   onReady?(sessionId: string): void;
   /** Persist the turn-in-flight flag (rising on UserPromptSubmit, falling on Stop/StopFailure). */
@@ -3136,8 +3191,8 @@ export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedToo
   return merged;
 }
 
-/** @decision ac90ca8e — role-scoped transcript-root deny (extended by 44fa586a; moved to this chokepoint
- * by @decision 3388be4d): closes the native Read/Glob/Grep bypass of the MCP-mediated read gates; keyed off
+/** @decision ac90ca8e — role-scoped transcript-root deny (extended by 44fa586a; moved to this chokepoint by
+ * @decision 3388be4d): closes the native Read/Glob/Grep bypass of the MCP-mediated read gates; keyed off
  * the PINNED opts.role, UNIONed into .deny (never replaces); run is deliberately excluded.
  * @decision 31613c1e/@decision d78f8217 — LEAD RULING: BLANKET for manager/platform/setup, PROJECT-SCOPED
  * for worker (the weaker one-knob "blanket for all four" was rejected). Best-effort DENY-LIST, FAILS OPEN
@@ -4441,6 +4496,7 @@ export class PtyHost {
     // @decision d7657543 — codex's `-a never -s workspace-write` is deny-by-default, NOT "approves
     // everything" — denied actions fail back to the model, never silently auto-approved. A codex worker
     // on Windows also can never `git commit` in its own worktree — `.git` carries a sandbox DENY ACE.
+    //
     // Mounting "codescape" here unconditionally would hand a codex session full, unrestricted read+write
     // access to the code graph — a strictly WORSE posture than claude's carefully gated mount, not mere
     // parity. This is the "real design question" the card asked for, answered: don't mount it until codex
@@ -4958,9 +5014,11 @@ export class PtyHost {
    *   3. Genuinely stale, NO real marker since `enterWrittenAt` (the swallowed-keystroke case), retries
    *      remain (`submitConfirmAttempts < CODEX_SUBMIT_MAX_RETRIES`) → retry one bare Enter
    *      (`retryCodexEnter` — never re-types `text`) and re-arm from that write's own instant.
-   *   4. @decision 6bf0ee32 — exhausted: fail loud + STOP, never silent-retry forever. Nothing re-arms here,
+   *   4. exhausted: fail loud + STOP, never silent-retry forever. Nothing re-arms here,
    *      so the queue can't drain atop an unconfirmed turn — but a later real marker still re-arms via onData
    *      and resolves normally in CASE 2. Exhaustion pauses the ladder; it never disables it.
+   *
+   *      @decision 6bf0ee32
    *
    * ⚠️ CONFIRMS A TURN RAN, NOT THAT YOUR TEXT ARRIVED INTACT. A real busy-marker sighting proves codex
    * started processing SOMETHING; it is not a byte-level echo check — codex exposes no such signal today,
@@ -5949,6 +6007,7 @@ export class PtyHost {
             // @decision 7114838d — SELF-DIAGNOSING: log once per session when UserPromptSubmit carries no
             // usable `prompt` field, so a silently-never-firing detector reads distinctly from one that's
             // working and finding nothing.
+            //
             // If this line is never seen after deploy, that itself answers the question: the field isn't
             // there, and this detector has nothing to compare.
             if (!live.promptFieldAbsentDiagnosedOnce) {
@@ -5960,6 +6019,7 @@ export class PtyHost {
             // @decision 4a0af485 — manager directive #3: an ALWAYS-ON diagnostic (not mismatch-only) —
             // content-matching's own tests synthesize a matching echo by construction, so this measures the
             // real engine's byte-identical premise directly, on every confirmed turn, match or mismatch alike.
+            //
             // The mismatch-only block below can go quiet for two different reasons ("always matching" vs
             // "branch never reached") — this diagnostic distinguishes them.
             // @decision 7114838d — PREDICTION pre-registered before real data: a fast/current-gen echo is
@@ -5970,6 +6030,7 @@ export class PtyHost {
             // @decision 4a0af485 — Major 4: `byteIdentical` above validates only the CURRENT generation's
             // own echo; this ALSO reports (read-only) whether `hook.prompt`'s signature matches any entry
             // still in `Live.ambiguousDispatches` — an older, ambiguous generation's echo, recognized too.
+            //
             // Read-only: resolving/purging a real match is `purgeConfirmedGiveUpRequeue`'s job, called
             // separately from the same hook.
             // @decision dbc7ffea — also sweep `retiredGiveUpSignatures`, or this can report
@@ -5994,6 +6055,7 @@ export class PtyHost {
               // @decision 87d2dc95 — DoD-1 LOOP-BREAKER: if this generation's own intended text is itself
               // one of Loom's own prompt-mismatch-family notices (three tag constants — see 38d68b8d for
               // the third), it must never mint another notice about its own mismatch, whatever the engine reports.
+              //
               // See the guard this feeds, just before `mismatchText` is composed/delivered, for the
               // termination argument it establishes.
               const intendedIsOwnMismatchNotice = intended.startsWith(PROMPT_MISMATCH_NOTICE_TAG) || intended.startsWith(PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG) || intended.startsWith(PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG);
@@ -6023,6 +6085,7 @@ export class PtyHost {
               // @decision d005f55b — DoD-2: never folded into [composer-accumulation] above — that tag's
               // CONFIRMED claim requires "Loom wrote each of these EXACTLY ONCE", false here by
               // construction (the prior generation's own content reached via its own already-diverged report).
+              //
               // Mutually exclusive by construction with the clean detector (that sums WRITTEN lengths, this
               // sums one REPORTED length) — both matching the same reportedLen isn't excluded by the code
               // but has no known specimen.
@@ -6073,6 +6136,7 @@ export class PtyHost {
               // @decision 87d2dc95 — DoD-2 LAG-BY-ONE CHAIN: a plain single-entry replay proves
               // `replayedEntry.gen`'s content DID reach the engine, one gen late — mark it resolved now so a
               // still-pending `checkPromptMismatchUnresolved` timer for that gen stays silent, not alarms falsely.
+              //
               // Marked the instant this generation's own detection recognizes it — waiting on a stronger
               // multi-entry fusion isn't needed, since a lag chain structurally replays exactly ONE prior
               // entry per link. Left unconditional on which branch below ultimately classifies this mismatch
@@ -6152,8 +6216,9 @@ export class PtyHost {
                 // @decision 68459420 — DoD-3: a FOURTH, uncharacterized mismatch population (reported
                 // LONGER than intended, matching no recent write). Characterize/tag only — never fold
                 // into the replay shape or invent a suppression for it; not yet understood.
-                // @decision d005f55b — the `!accumulation?.confirmed && !divergedPriorAccumulation`
-                // guard: a confirmed fusion or diverged-prior fusion also satisfies this tag's own
+                // @decision d005f55b — the `!accumulation?.confirmed && !divergedPriorAccumulation` guard:
+                //
+                // a confirmed fusion or diverged-prior fusion also satisfies this tag's own
                 // condition and would otherwise inflate this UNCHARACTERIZED count for a shape the
                 // `[composer-accumulation]`/`[composer-accumulation-diverged-prior]` sweep lines
                 // already fully answer. `accumulation` (not `confirmedFusion`) since this check runs
@@ -6168,6 +6233,7 @@ export class PtyHost {
                 // @decision d0952a73 — `live.lastMismatchReplay`'s write moved PAST
                 // `confirmedWrapperDeficit`/`confirmedAnsiStripDeficit`/`confirmedWrapperAwareFusion`
                 // below; `explainedBenign` needs their verdict, unavailable this early.
+                //
                 // Card f5f6515a DoD-4: the FUSED counterpart to the single-entry replay above — reuses the
                 // SAME `accumulation` result `detectComposerAccumulation` already computed (no second
                 // matcher), captured ONCE here and reused below for BOTH the pull-surface field and the
@@ -6207,14 +6273,16 @@ export class PtyHost {
                 // `confirmedDivergedPrior` above (a stronger exact match, were one to also apply, wins) —
                 // reuses `wrapperDeficit`, already computed above alongside its own diagnostic log.
                 // @decision 854d1632 — deliberately does NOT require `replayedEntry === undefined`:
+                //
                 // a benign wrapper deficit IS, by construction, almost always a recognized replay, so
                 // gating on that condition nulled this verdict in exactly the case it exists to
                 // explain (the card's own live incident).
                 const confirmedWrapperDeficit = (!confirmedFusion && !confirmedDivergedPrior && wrapperDeficit) ? wrapperDeficit : null;
                 // @decision a640c110 — an exact ANSI-stripped match wins precedence whenever it
                 // fires (does not require `replayedEntry === undefined`), same posture as
-                // `confirmedWrapperDeficit`; guarded against it too so both exact-strip shapes
-                // stay mutually exclusive.
+                // `confirmedWrapperDeficit`
+                //
+                // ; guarded against it too so both exact-strip shapes stay mutually exclusive.
                 const confirmedAnsiStripDeficit = (!confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && ansiStripDeficit) ? ansiStripDeficit : null;
                 // Card c23e2869 — same precedence posture as `confirmedAnsiStripDeficit` just above (a
                 // stronger exact match, were one to also apply, wins) — reuses `wrapperAwareFusion`,
@@ -6231,7 +6299,9 @@ export class PtyHost {
                   live.mismatchResolvedGens.add(confirmedWrapperAwareFusion.recognizedGen);
                   live.mismatchResolvedGens.add(live.submitGeneration);
                 }
-                // @decision d0952a73 — the actual `live.lastMismatchReplay` write: threads the
+                // @decision d0952a73 — the actual `live.lastMismatchReplay` write:
+                //
+                // threads the
                 // already-computed `confirmed*` classification into `explainedBenign` instead of
                 // discarding it; `confirmedFusion`/`confirmedDivergedPrior` excluded since both
                 // require `replayedEntry === undefined`, always false on this branch. `null` — no independent classifier
@@ -6251,7 +6321,9 @@ export class PtyHost {
                 //
                 // @decision b7158b99 — a recognized replay is NOT an established loss: the composer
                 // may still hold the content, and a LATER generation's own submission may fuse it
-                // back in whole. Wait one generation and re-check before treating as a confirmed
+                // back in whole.
+                //
+                // Wait one generation and re-check before treating as a confirmed
                 // loss; the genuinely-unmatched branch below is unaffected (no prior entry to fuse
                 // back from).
                 // Card 00b5066e adds the two OFFSET-reconcilable branches below it — see `isOffsetInsertion`/
@@ -6293,7 +6365,9 @@ export class PtyHost {
                 // must never appear here), naming EVERY earlier generation in the span, not just `spanGens[0]`.
                 const earlierFusedGens = confirmedFusion ? confirmedFusion.spanGens.slice(0, -1) : [];
                 // @decision 59757189 — CAPTURE AT DETECTION, for the generic fallback (UNMATCHABLE)
-                // case: `recentWrittenTurns` will have rotated past this generation by the time any
+                // case:
+                //
+                // `recentWrittenTurns` will have rotated past this generation by the time any
                 // reader asks, so `intended`, still in scope here, is the only place this content
                 // still exists once detection has passed.
                 const isUnmatchableMismatch = replayedEntry === undefined && !confirmedFusion && !confirmedDivergedPrior && !confirmedWrapperDeficit && !confirmedAnsiStripDeficit && !confirmedWrapperAwareFusion;
@@ -6303,6 +6377,7 @@ export class PtyHost {
                 // @decision 3ff61275 — every mismatch-notice branch shares ONE lead-in identifying
                 // THIS turn by wall-clock time + message id, not just a bare gen number — a reader
                 // holding a later, unrelated generation cannot otherwise tell how stale the alarm is.
+                //
                 // Both fields render as an explicit "unrecorded"/"none recorded" word when absent,
                 // never a blank a reader could misread as "there was no write".
                 const writeWallClockAt = live.currentGenFirstWrittenAt !== null ? new Date(live.currentGenFirstWrittenAt).toISOString() : "an unrecorded time";
@@ -6336,7 +6411,9 @@ export class PtyHost {
                       `What YOU can check yourself: your own artifacts for whether you've now acted on any of generation ${confirmedDivergedPrior.priorGen}'s own content twice. There is no loss half to verify for THIS turn specifically — this turn's own intended text is in what arrived.`
                   // @decision d005f55b — §4: verified via `[submit-write]`/`[prompt-echo]` pairs that
                   // a wrapped write DOES reach the engine — a STALE, out-of-order confirmation of an
-                  // EARLIER bare write, not corruption or loss. Must NOT reuse `lossClause`'s
+                  // EARLIER bare write, not corruption or loss.
+                  //
+                  // Must NOT reuse `lossClause`'s
                   // "possible LOSS" framing.
                   : confirmedWrapperDeficit
                     ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
@@ -6412,7 +6489,9 @@ export class PtyHost {
                   const pendingMessageExcerpt = intended.slice(0, PROMPT_MISMATCH_EXCERPT_MAX_LEN);
                   // @decision 280309d9 — captured HERE, at classification time, not at the later
                   // `checkPromptMismatchUnresolved` timer fire (whose own `ts` is the GIVE-UP
-                  // instant, not this one). Real `null` (not a prose sentinel) since this travels
+                  // instant, not this one).
+                  //
+                  // Real `null` (not a prose sentinel) since this travels
                   // into a structured `detail`.
                   const pendingWrittenAt = live.currentGenFirstWrittenAt !== null ? new Date(live.currentGenFirstWrittenAt).toISOString() : null;
                   // Card f9b1ea00 — Code Review HIGH (confirmed): the handle is stored on `live.
@@ -6434,11 +6513,14 @@ export class PtyHost {
                 // @decision 0f9268cc — deferred via setTimeout(0), same reason as the paste-recovery
                 // injection: must land as the notice's OWN pty submission, never appended to another
                 // payload, and run OUTSIDE this hook handler's own synchronous call stack.
+                //
                 // kind:"warning" (an operational nudge, not agent-authored content) so it coalesces
                 // like other Loom watchdog notices rather than competing for the one-per-turn
                 // "agent" delivery slot.
                 //
-                // @decision 201d0d95 — SELF-REFERENCE, NOTED AND BOUNDED: this notice's own delivery
+                // @decision 201d0d95 — SELF-REFERENCE, NOTED AND BOUNDED:
+                //
+                // this notice's own delivery
                 // can itself mismatch ("a mismatch notice about a mismatch notice"). Deliberately NOT
                 // guarded (no recursion cap, no dedup) — the measured 0.39% base rate makes the
                 // expected chain length ~1.004, and `kind:"warning"` coalescing dampens any chain
@@ -6594,6 +6676,7 @@ export class PtyHost {
           // @decision 21a77e85 — NOT a tail-read: `turns` needs a whole-session total and `lastUserTurnText`
           // can sit arbitrarily far from EOF behind a long tool-only stretch, so a bounded tail-scan isn't
           // implementable here.
+          //
           // Done for EVERY session (the host doesn't know role — a manager's own occupancy matters too, "who
           // recycles the manager"). Keep it sync — see the M2 box above before making this (or anything
           // here) async.
@@ -6713,7 +6796,9 @@ export class PtyHost {
             live.recentPlaceholderTokens.push({ gen: live.submitGeneration, token: observedToken });
             if (live.recentPlaceholderTokens.length > PASTE_TRIPWIRE_TOKEN_WINDOW) live.recentPlaceholderTokens.shift();
           }
-          // @decision b68d1f5b — a SEPARATE check from the tripwire above, not a replacement: catches an
+          // @decision b68d1f5b — a SEPARATE check from the tripwire above, not a replacement:
+          //
+          // catches an
           // UNEXPLAINED placeholder that check structurally can't (no/too-short `submittedText`), and stays
           // silent when EXPLAINED (current-gen collapse already owned above, or a stale older-gen re-render
           // per `abeac33a`) via its own dedicated ring, not `c2c750a9`'s.
@@ -6749,7 +6834,9 @@ export class PtyHost {
           }
           // @decision 343441bd — bump HERE, immediately before drain, never at the setBusy(false) falling
           // edge above: both usage-cap park breaks are non-opportunities that must stay excluded, or
-          // `staleDirective` would false-fire on a turn that never ran. Every other path between the
+          // `staleDirective` would false-fire on a turn that never ran.
+          //
+          // Every other path between the
           // falling edge and here (a failed/successful context-stats read, the paste-placeholder tripwire
           // detect/recover) falls through to this exact line — not just the two excluded park breaks.
           this.events.onTurnCompleted?.(sessionId);
@@ -6774,8 +6861,11 @@ export class PtyHost {
    *   - composer-dirty: writing onto the human's half-typed raw-terminal text concatenates the two
    *     into one garbled message (the observed manager/worker collision) — so we HOLD until the human
    *     frees their box (Enter/Ctrl-C/Esc/kill-line, or backspaces it empty). See deferForHumanDraft.
-   *   - @decision 2521bf51 — human-submit-unconfirmed: HOLD a message arriving before claude's engine
+   *   - human-submit-unconfirmed: HOLD a message arriving before claude's engine
    *     confirms a human Enter-submit actually started the turn, same as one queued before the Enter.
+   *
+   *     @decision 2521bf51
+   *
    * Also self-heals a STUCK-busy session first, so a report can't strand behind a phantom 'busy'.
    * Returns whether it went out now, or its 1-based queue position. A `delivered:false` result also
    * carries `reason` (see EnqueueDeliveryReason) so a caller can tell a dead-drop (`"session-dead"` —
@@ -6896,7 +6986,9 @@ export class PtyHost {
     // unlike the `held` path below, where `queued: true` is exactly as durable/successful as it sounds.
     if (!live?.alive) return { delivered: false, reason: "session-dead", queued: false, deliveryState: "dropped" };
     // @decision 21a281b6 — captureMintGen must stay a strict, EXPLICIT opt-in, never a
-    // `mintedAtWallClock`-presence fallback: skipping it seeds `Live.ambiguousDispatches`'s
+    // `mintedAtWallClock`-presence fallback:
+    //
+    // skipping it seeds `Live.ambiguousDispatches`'s
     // `hasAmbiguousMatch` (card 4a0af485) resend-auto-join signature from an ANNOTATED write,
     // silently disabling that join. This is NOT cosmetic — see `annotateMintStamp` (called via
     // `joinSubmittedText`)'s own GATE 1 for the byte-identical-first-write / `currentGen`
@@ -7001,6 +7093,7 @@ export class PtyHost {
       // @decision e01687ea — the delay this reorder can impose on a quiet different-sender entry is
       // capped by the per-entry `leapfrogCount` field (below), NOT by this lookback window — the
       // window alone never ages a quiet entry out of eligibility.
+      //
       // The reorder always inserts at `matchIndex + 1`, right in front of whatever is already queued
       // after the sender's own last entry, so a quiet entry sitting there is leapfrogged again on
       // EVERY subsequent same-sender arrival; its absolute index grows in lockstep with the window's
@@ -7024,6 +7117,7 @@ export class PtyHost {
           // @decision e01687ea — MATCH is checked BEFORE the leapfrogCount freeze so an over-cap
           // entry stays a legitimate coalescing target: a match places the new entry at `i + 1`,
           // strictly AFTER `candidate`'s own index, so a match here never displaces `candidate`
+          //
           // itself. (Reachable: it can accrue leapfrogCount from OTHER senders'/routes' scans,
           // then later be the correct match for its own sender+route once that sender sends again.)
           // @decision a9e4240f — a third copy of the same-sender equality set (route/senderId/
@@ -7327,7 +7421,9 @@ export class PtyHost {
    * the same `live.pending`, so it can't also drain.
    *
    * @decision 9e27f4d2 — DELIBERATELY splices EVERY entry, including one still `isGiveUpHeld` (assessed
-   * against `drainPending`'s hold-respecting skip and left as-is): the hold exists to keep a BACKGROUND
+   * against `drainPending`'s hold-respecting skip and left as-is):
+   *
+   * the hold exists to keep a BACKGROUND
    * drain/reconcile tick from resubmitting a possibly-already-delivered entry before a late confirming
    * hook can prove it. `inbox_pull` is not a background tick — it is the recipient itself explicitly
    * asking for its own inbox right now, which is exactly the kind of affirmative act the hold is meant
@@ -7699,7 +7795,9 @@ export class PtyHost {
    *
    * @decision eac3464d — ONE-PER-TURN ACROSS SENDERS for AGENT messages, COALESCE for WARNING messages
    * (owner-directed, 2026-07-03; amended 2026-08-28); `kind` (QueuedMessageKind) decides whether a queued
-   * entry may share a turn with its neighbors. When `coalesceAgentMessages` is OFF (the default), an
+   * entry may share a turn with its neighbors.
+   *
+   * When `coalesceAgentMessages` is OFF (the default), an
    * `"agent"`-kind head entry coalesces ONLY with a CONSECUTIVE same-sender run (bounded by
    * `AGENT_COALESCE_MAX_COUNT`/`AGENT_COALESCE_MAX_BYTES` — the branch below excludes any giveUpGen-
    * tagged entry). A DIFFERENT sender still breaks the run exactly as a route mismatch always did, so
@@ -7840,7 +7938,9 @@ export class PtyHost {
       ) n++;
       drained = live.pending.splice(startIdx, n); // the leading eligible same-route (+ same-kind unless toggled, + same-proactive) run
     }
-    // @decision 4a0af485 — Major 2: a `giveUpGen`-tagged entry actually being RE-DRAINED (its hold expired
+    // @decision 4a0af485 — Major 2:
+    //
+    // a `giveUpGen`-tagged entry actually being RE-DRAINED (its hold expired
     // or was purged elsewhere, and it's now eligible again) is a fresh, deliberate resubmission attempt —
     // the OLD tracked ambiguity (seeded from its FIRST failed write) is moot the instant this happens for
     // `hasAmbiguousMatch`'s purposes. Clear the "current" slot so it can never linger to wrongly
@@ -7850,7 +7950,9 @@ export class PtyHost {
     // ambiguous on its own, has nothing stale to clear here).
     //
     // @decision dbc7ffea — BEFORE clearing it, archive the entry's own signature into
-    // `retiredGiveUpSignatures` (via the shared `archiveAmbiguousDispatch` — see its own doc) — this is ONE
+    // `retiredGiveUpSignatures` (via the shared `archiveAmbiguousDispatch` — see its own doc)
+    //
+    // — this is ONE
     // of TWO points in the give-up pipeline where a logicalId's "current" entry can be superseded (the other is
     // `requeueGiveUpOrigin`'s own `.set()`, for the auto-joined-resend case — see that call site).
     // Without this, a message that gives up MORE THAN ONCE loses all memory of every cycle but its last,
@@ -7864,7 +7966,9 @@ export class PtyHost {
     }
     // @decision 78e4b3f2 — `joinSubmittedText` frames any `giveUpGen`-tagged member — a genuine physical
     // re-delivery of a message whose first write was never confirmed — as a possible duplicate, so the
-    // recipient can tell it apart from new direction. For THIS mechanism specifically (an in-session
+    // recipient can tell it apart from new direction.
+    //
+    // For THIS mechanism specifically (an in-session
     // requeue), the mark is applied ONLY here, at the actual write — never when the entry is merely
     // requeued/held (`QueuedMessage.text` itself is never mutated by `requeueGiveUpOrigin`'s kept branch,
     // so a reader of a still-giveUpGen-tagged-but-not-yet-redrained entry sees the pristine original): it
@@ -7873,8 +7977,11 @@ export class PtyHost {
     // handleGiveUpExhausted) is a SEPARATE trigger that bakes the tag into `.text` at message CREATION,
     // before it's ever enqueued, so a re-minted entry sitting in `pending` already carries the tag (see
     // `purgeQueuedWorkerIdleNudges`'s own doc for a real consumer this distinction mattered to).
+    //
     // @decision 4af5aefa — `live.submitGeneration` here is still the PRE-increment value — submit() below
-    // does its own `++` for THIS write. Code review correction: this is NOT "the last completed turn's own
+    // does its own `++` for THIS write.
+    //
+    // Code review correction: this is NOT "the last completed turn's own
     // generation number" — `submitGeneration` counts submit ATTEMPTS ISSUED (`submit()`'s own `++`) plus
     // out-of-band bumps (`healIfStuck`, both stop paths), so a give-up that consumed a generation with NO
     // turn ever running would be silently folded into a "turns" count. `annotatePasteRecoveryAge`'s own
@@ -8103,11 +8210,15 @@ export class PtyHost {
     };
     // @decision 3ce3fa39 — the composer clear-prefix is DEFERRED to the next submit(), never attempted at
     // give-up time itself (a fresh submit is the only point that gets real corroboration for free); gated
-    // on composerLen===0 so a live human draft is NEVER touched. Force-closes the paste bracket first so a
+    // on composerLen===0 so a live human draft is NEVER touched.
+    //
+    // Force-closes the paste bracket first so a
     // later backspace burst can't be misread as literal paste content. See 3ce3fa39's record.
     //
     // @decision b9b8f8db (the composer-runaway fix) — a REDELIVERY of an already-attempted message (every
-    // `origin` member already `giveUpGen`-tagged) retries ONLY the Enter, never repastes the body: without
+    // `origin` member already `giveUpGen`-tagged) retries ONLY the Enter, never repastes the body:
+    //
+    // without
     // this, an unconfirmed wedged session compounds its own backspace+repaste every cycle without bound
     // (measured: a 45,934 B kickoff grew to 184,967 B — 4× — across 4 cycles in ~2.5min). Assumes the
     // composer still holds this message's own prior physical write — see b9b8f8db's record for the stated
@@ -8388,6 +8499,7 @@ export class PtyHost {
           // @decision 3ce3fa39 — do NOT clear the composer HERE: no confirming hook arrived, so a
           // backspace burst is least safely interpreted at this point (2 specimens resurfaced,
           // doubled, on a later submit) — mark it additively; the next submit() clears it instead.
+          //
           // Same composerLen===0 human-draft gate as every clear in this file — never destroy a
           // user's uncommitted draft (card e1829591).
 
@@ -8787,7 +8899,9 @@ export class PtyHost {
    * would carry — the tag embeds the logicalId itself, so it must be reconstructed per-entry, not once
    * outside the loop.
    *
-   * @decision ee56a894 — a COALESCED batch (2+ members) seeds every member's entry with the SAME joined
+   * @decision ee56a894 — a COALESCED batch (2+ members)
+   *
+   * seeds every member's entry with the SAME joined
    * `{len,hash}` signature, which no single member's own text can ever equal once there's more than one —
    * so this method ALSO tries each entry's `memberSig` (that member's own text alone), both as-is and
    * tag-marked, alongside the joined check above.
@@ -8932,7 +9046,9 @@ export class PtyHost {
    * daemon-restart-shaped bypass is covered" independent of this paragraph.
    *
    * @decision 73d5c34a — the FIFO-front correlation's destructive delete loop runs ONLY when
-   * `live.submitGeneration` is still `gen` itself or is itself present in `giveUpConfirmQueue` (also an
+   * `live.submitGeneration` is still `gen` itself or is itself present in `giveUpConfirmQueue`
+   *
+   * (also an
    * ambiguous give-up) — never against a demonstrably fresh, non-ambiguous generation, which would
    * misattribute its hook and silently delete a still-genuinely-unconfirmed entry.
    *
@@ -9089,6 +9205,7 @@ export class PtyHost {
         //
         // @decision bc0774c4 — a content match spanning more than one give-up `batchId` (two genuinely
         // distinct give-ups sharing byte-identical text) is left COMPLETELY untouched, never guessed at.
+        //
         // Resolve ONLY when every match belongs to ONE batch — the coalesced case, including every
         // single-member batch (the common, non-coalesced case is itself a trivially-one-member "batch").
         //
@@ -10460,7 +10577,9 @@ export class PtyHost {
 
   /**
    * @decision f349f5cb — whether `markReady` (claude) / the boot-ready composite (codex) EVER latched for
-   *  this session, i.e. whether a kickoff could ever have been WRITTEN to its stdin at all. `false` here is
+   *  this session, i.e. whether a kickoff could ever have been WRITTEN to its stdin at all.
+   *
+   *  `false` here is
    *  sound even under `dc1604c7`'s own counterexample: `hasFirstTurnStarted`/`engineSessionId` both depend
    *  on a hook (UserPromptSubmit/SessionStart) that can itself be LOST even when the engine genuinely ran
    *  (see `hasFirstTurnStarted`'s own doc) — but `ready`/`bootReady` latch from PtyHost's OWN in-process
