@@ -28,3 +28,15 @@ A branch that conflicts textually or semantically with what landed on main after
 ## Source
 
 Inline comments in `packages/daemon/src/git/worktrees.ts`: `mergeMainIntoWorktree`'s own doc comment and `FALLBACK_GIT_IDENTITY`'s own doc comment, as of this worktree's HEAD before this extraction. Wrapped source lines joined into a flowing paragraph, `*` comment markers stripped, no wording changed.
+
+## Reap runs before the union-merge too, not just before the gate
+
+The pre-gate reap (card [[c21487e8-pre-gate-worktree-reap-prevents-a-spurious-eperm-on-the-gates-install-build-step|c21487e8]]) runs before BOTH steps below it, not just the gate: the union-merge itself WRITES tracked files in the worktree, so it is at least as lock-sensitive as the gate this reap was originally built for. An escaped watcher still holding a handle on a tracked file that main also touched would otherwise make the union-merge's own file-write fail with a spurious EPERM, misreported as `union_merge_failed` rather than the lock issue it actually is. Reaping first, before either step, clears that risk for both.
+
+### Do not (this section)
+
+- Do not assume the reap is only relevant to the gate — the union-merge's own file-writes are equally lock-sensitive, and skipping the reap before it would misreport a lock collision as `union_merge_failed`.
+
+### Source (this section)
+
+Inline comment in `packages/daemon/src/sessions/service.ts`, `confirmWorkerMerge`'s pre-gate cleanup block (the "RUNS BEFORE THE UNION-MERGE TOO" paragraph), as of this tranche's HEAD before this extraction. Wrapped source lines joined into a flowing paragraph, `//` comment markers stripped, no wording changed.

@@ -11892,8 +11892,8 @@ export class SessionService {
     // squash time, entirely independent of the worktree's own unioned tree — so THIS sha, not any later
     // read, is what ties the squash back to what the gate actually tested.
     // @decision eda70da6 — the canonical main sha this merge's gate-validated tree is based on, threaded
-    //  into mergeBranch as requireCanonicalHead so it can re-verify main hasn't moved since; three
-    //  mutually-exclusive producers (reuse / union-merged / preLanded) feed this one var, never more than one.
+    //  into mergeBranch as requireCanonicalHead so it can re-verify main hasn't moved since; never more
+    //  than one producer per merge (mutually exclusive on `gateRan`) — preLanded can be overwritten by reuse.
     let gateBaseMainHead: string | undefined;
     // @decision eda70da6 — companion capture, preLanded producer only: an unchanged branch tip inside the
     //  lock SKIPS the requireCanonicalHead re-check entirely, so a routine preLanded re-confirm isn't
@@ -11918,35 +11918,25 @@ export class SessionService {
     let releaseInertRepoGuard: (() => void) | undefined;
     try {
     if (gate) {
-      // PRE-GATE CLEANUP (finding c21487e8 — Windows EPERM): a lingering dev-server/build process the
-      // worker left running (an escaped vite/esbuild that detached from the pty's process tree) can hold
-      // a lock on this worktree's node_modules, making the gate's own install/build step fail with a
-      // spurious EPERM/sharing-violation even though the code is fine. Reap it BEFORE running the gate —
-      // reusing the EXACT SAME worktree-scoped predicate {@link reapProcessesRootedInWorktree} already
-      // uses to clear a worktree right before removal (task 8e5a7a5e, wired via the same injectable
-      // `reapWorktreeProcesses` seam as gcWorktreeDir): matched STRICTLY by executable path / cwd /
-      // command line rooted under THIS worker's OWN `worktreePath`, at a path-segment boundary (never a
-      // bare image-name or port match — see that function's SAFETY doc for the full scoping proof), and
-      // never the daemon's own pid. No new kill logic is introduced here — this is the identical, already
-      // safety-reviewed helper applied at an earlier point in the same lifecycle.
-      //
-      // WORKER SELF-EXCLUSION (Code Review finding on card 864e79fe): unlike gcWorktreeDir's reap — which
-      // only ever runs AFTER the confirming worker has already been hard-stopped (finalizeMerge stops it
-      // before this method retires the worktree) — THIS sweep runs BEFORE that stop. The worker's own
-      // claude pty is genuinely rooted in `worktreePath` (cwd==worktreePath on Linux; the worktree path
-      // appears in its own spawn argv on Windows) and would otherwise match and get killed here. That's
-      // wrong: on a subsequent real gate FAILURE this method fails closed and RETAINS the worktree for
-      // re-tasking — but a worker killed here can't be re-tasked, it can only be resumed (losing its
-      // in-context reasoning). The worker's own pty does not hold the node_modules lock this sweep exists
-      // to clear (that's always an escaped/detached build child, e.g. vite/esbuild) — so excluding it costs
-      // nothing. Do NOT instead hard-stop the worker before this sweep: that would break the fail-closed
-      // retain-for-re-task contract on a genuine gate failure.
-      //
-      // RUNS BEFORE THE UNION-MERGE TOO (Code Review finding on card c0aeb5b2): the union-merge below
-      // WRITES tracked files in the worktree, so it is at least as lock-sensitive as the gate this reap
-      // was built for — an escaped watcher holding a handle on a tracked file main also touched would
-      // make the merge's file-write fail with a spurious EPERM, misreported as `union_merge_failed`
-      // rather than the lock issue it actually is. Reaping first clears that before either step runs.
+      // @decision c21487e8 — reap escaped worktree-rooted processes (excludePids-guarded) BEFORE the gate
+      //  runs too, not just before worktree removal — an escaped vite/esbuild holding a node_modules lock
+      //  otherwise fails the gate's install/build step with a spurious EPERM that looks like a real bug.
+
+      // @decision 864e79fe — this sweep must exclude the confirming worker's own pty (still live, not yet
+      //  hard-stopped — finalizeMerge only stops it after this method retires the worktree) from the reap,
+      //  unlike gcWorktreeDir's reap, which always runs after that stop.
+      // The worker's own claude pty is genuinely rooted in `worktreePath` (cwd==worktreePath on Linux; the
+      // worktree path appears in its own spawn argv on Windows) and would otherwise match and get killed
+      // here. That's wrong: on a subsequent real gate FAILURE this method fails closed and RETAINS the
+      // worktree for re-tasking — but a worker killed here can't be re-tasked, it can only be resumed
+      // (losing its in-context reasoning). The worker's own pty does not hold the node_modules lock this
+      // sweep exists to clear (that's always an escaped/detached build child, e.g. vite/esbuild) — so
+      // excluding it costs nothing. Do NOT instead hard-stop the worker before this sweep: that would break
+      // the fail-closed retain-for-re-task contract on a genuine gate failure.
+
+      // @decision c0aeb5b2 — this reap must also run before the union-merge below, not just before the
+      //  gate: an escaped watcher still holding a handle on a tracked file main touched would otherwise
+      //  make the union-merge's own file-write fail with a spurious EPERM, misreported as a merge failure.
       const workerPid = this.pty.getPid?.(workerSessionId);
       const reap = this.reapWorktreeProcesses ?? ((p: string, o?: { excludePids?: number[] }) => reapProcessesRootedInWorktree(p, { excludePids: o?.excludePids }));
       try {
@@ -11956,27 +11946,16 @@ export class SessionService {
         // must never abort the gate/merge it's only meant to help along.
       }
 
-      // UNION-MERGE (card c0aeb5b2 — the post-merge union hole): merge canonical main's CURRENT tip INTO
-      // the worktree, IN the worktree, IMMEDIATELY BEFORE the gate below — so the gate validates the
-      // actual POST-MERGE union rather than the branch's stale pre-merge state, and a hard textual
-      // conflict against a main that advanced since the branch was cut is caught HERE, fail-closed,
-      // before any squash is attempted (worktree retained, canonical repo untouched — see
-      // mergeMainIntoWorktree's doc for why the later squash still lands only the branch's own net
-      // changes after this). Scoped to `if (gate)`: with no gate configured, nothing downstream reads the
-      // worktree's content before the squash below (which operates on `repoPath`, not `worktreePath`),
-      // so union-merging into a worktree with no gate to validate it would only add risk (and touch
-      // `worktreePath` as a git cwd) for zero benefit — the existing "unverified: no gateCommand" warning
-      // already flags that case as unchecked.
-      //
-      // SKIPPED when this exact branch has ALREADY landed on main (a stale confirm racing a prior —
-      // possibly out-of-band — merge; see the early-idempotency doc above, and
-      // merge-reject-notify-suppress.mjs scenario B: worktree still present, branch already squashed into
-      // main). Merging main's own landed squash back into such a worktree would make the branch descend
-      // from its own `Loom-Worker-Branch` trailer commit — indistinguishable from a RE-CUT branch carrying
-      // genuinely new work, which is exactly what `findLandedSquashCommit`'s re-task guard (below, via
-      // `mergeBranch`'s own noop classification) exists to detect. That would misclassify a legitimate
-      // ALREADY_MERGED re-confirm as STAGE_EMPTY_RETRY. `mergeBranch`'s own noop/ALREADY_MERGED handling
-      // already covers this case correctly, untouched.
+      // @decision c0aeb5b2 — this union-merge only runs when `if (gate)`: with no gate to validate the
+      //  worktree, merging main into it before the squash adds pure risk (untested content, an extra git
+      //  cwd) for zero benefit — the existing "unverified: no gateCommand" warning already covers that case.
+
+      // @decision eda70da6 — this union-merge is SKIPPED when the branch has ALREADY landed on main (the
+      //  `preLanded` case) — merging main's own landed squash back into the worktree would make the branch
+      //  descend from its own `Loom-Worker-Branch` trailer commit, corrupting ALREADY_MERGED classification.
+      // Indistinguishable from a RE-CUT branch carrying genuinely new work, which is exactly what
+      // `findLandedSquashCommit`'s re-task guard (below, via `mergeBranch`'s own noop classification) exists
+      // to detect — misclassifying a legitimate ALREADY_MERGED re-confirm as STAGE_EMPTY_RETRY otherwise.
       const preLanded = await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
       if (!preLanded) {
         const union = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs });
@@ -12002,33 +11981,12 @@ export class SessionService {
         // doc (declared above, outer scope) for why.
         unionMergeMovedHead = union.merged;
       } else {
-        // GATE-BASE CAPTURE, preLanded path (card b0ab78d6): the union-merge above is skipped on THIS
-        // branch — deliberately, to protect ALREADY_MERGED classification (see the doc above) — so there
-        // is no "sha the gate's tree was unioned from" to capture. What we CAN still capture, at this same
-        // point, is canonical main's CURRENT tip: the gate about to run (if the reuse path below doesn't
-        // short-circuit it) validates whatever the worktree already holds, UN-unioned, and the eventual
-        // squash re-derives fresh against canonical HEAD at squash time. Threading THIS sha through as
-        // `gateBaseMainHead` proves, inside mergeBranch's own lock, that canonical main has not moved
-        // between "we decided to treat this branch as preLanded and started gating it" and "we squash" —
-        // closing the same class of race (main advancing during an 8-14min gate + unbounded semaphore
-        // queue wait) that the union-merge capture above closes for the normal path, via the identical
-        // `requireCanonicalHead` re-check.
-        //
-        // ⚠️ WHAT THIS DOES NOT PROVE: unlike the union path, the gate here never validated this branch's
-        // content TOGETHER with main's — only that main itself didn't move. A preLanded branch that gains a
-        // genuinely new commit (the concrete race: a redirected/still-active worker keeps committing WHILE
-        // the gate is in flight — the worker's pty is not stopped until AFTER this method returns) is
-        // gate-tested in isolation, not as a union; whether that new commit integrates cleanly with main's
-        // (unchanged, but never union-tested) current content is unverified either way. That gap is
-        // inherent to skipping the union-merge and predates this card — this capture closes the "un-gated
-        // content lands on an advanced main" race the DoD names, not the narrower "new work never
-        // integration-tested" gap, which stays open by design (fixing THAT would mean union-merging here,
-        // which is exactly what corrupts ALREADY_MERGED classification above).
-        //
-        // Fail-safe: `resolveGitRef` returning null (a git error/timeout) leaves `gateBaseMainHead`
-        // `undefined` — same as before this capture existed for this path — rather than passing a bad sha
-        // through. Possibly overwritten below by the reuse path's own capture, exactly like the union
-        // branch's capture above.
+        // @decision eda70da6 — on the preLanded path, thread main's CURRENT tip through as gateBaseMainHead
+        //  anyway (even with no union-merge to capture it from) — it proves inside mergeBranch's lock that
+        //  main hasn't moved since gating started, closing that race without ever union-testing the branch.
+        // A failed `resolveGitRef` (git error/timeout) leaves `gateBaseMainHead` `undefined` rather than
+        // passing a bad sha through — same fail-safe as the union path's own capture above. Possibly
+        // overwritten below by the reuse path's own capture, exactly like the union branch's capture above.
         gateBaseMainHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs }) ?? undefined;
         // COMPANION CAPTURE (card b0ab78d6, CR follow-up): the branch's OWN current tip, at this exact same
         // moment — see `gateBaseBranchHead`'s own doc (above, alongside its declaration) for the full
