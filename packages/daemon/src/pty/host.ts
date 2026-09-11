@@ -9391,21 +9391,20 @@ export class PtyHost {
   }
 
   /**
-   * GENERAL permission-mode convergence primitive (card f05e4897, generalized off resume-only in card
-   * b99d3d67) — used by BOTH a fresh spawn and a `--resume` to drive the footer to an ABSOLUTE `target`
-   * mode. Historically both booted at the gate-free acceptEdits mode (`--resume` honours
-   * `--permission-mode` and does NOT restore the persisted mode; probe-verified on 2.1.163) and needed
-   * the SAME climb off that boot default. Card 51926260: `computeBootMode` now boots directly AT `target`
-   * whenever it's directly expressible, so on the common path this primitive's very first footer read
-   * already equals `target` and it presses NOTHING — it remains the FALLBACK for a target that isn't
-   * directly expressible, the runtime `worker_set_mode` override, and `logLandedMode`'s auto-heal, all of
-   * which still need a real climb. Rather than cycle a fixed COUNT (unreliable — a dropped/mistimed press half-lands mid-cycle
-   * and stays there; that was the FRESH path's old blind `sendModeCycles`, and the resume/summary-gate
-   * path's original blind approach before this), drive the footer to `target` ABSOLUTELY: read the mode,
-   * and while it isn't the target press ONE Shift+Tab and then WAIT for the footer to actually CHANGE
-   * before deciding again — so a laggy repaint can never trick us into over-pressing past the target. The
-   * per-step decision is the pure `nextCycleAction`; this method only supplies the timing + the footer
-   * reads (the real-claude probe validates the live sequencing).
+   * The per-step decision is the pure `nextCycleAction`; this method only supplies the timing + the
+   * footer reads (the real-claude probe validates the live sequencing).
+   *
+   * @decision f05e4897 — `--resume` HONOURS `--permission-mode` and does NOT restore the persisted
+   * mode (probe-verified on claude 2.1.163) — this is why resume needs the same climb off the
+   * acceptEdits boot default a fresh spawn does, not merely a restore of a previously-set mode.
+   *
+   * @decision b99d3d67 — never give the fresh-spawn mode cycle a blind fixed press count again (this
+   * generalizes card f05e4897's resume-only convergence primitive to fresh spawns too): a dropped or
+   * mistimed blind press can strand the session at an intermediate mode a worker can't self-exit.
+   *
+   * @decision 51926260 — computeBootMode's direct-boot optimization does not retire this method: it
+   * remains the fallback whenever a target isn't directly expressible at boot, for a runtime
+   * worker_set_mode override, and for logLandedMode's auto-heal — all still need a real climb.
    *
    * BOUNDED + GRACEFUL — it NEVER infinite-loops and NEVER wedges boot: every terminating branch (reached
    * the target / hit the press cap / footer unreadable / a press didn't move the footer / pty gone) calls
