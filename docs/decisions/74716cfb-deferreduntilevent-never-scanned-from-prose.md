@@ -33,6 +33,30 @@ a bespoke query — this only ever runs on a gate FAILURE, never a hot path, and
 - Do not tack the appendix onto the rejection notify as a separate string at the merge-confirm site — append it into the shared `detailText` variable so both of that variable's consumers carry it.
 - Do not give `deferredTriggerNotice` a bespoke query for its own performance — reuse `db.listTasks`; it only ever runs on a gate failure, never a hot path.
 
+## The same card also made `runWorkerGate`'s settle callback async, to await the join-key read (separate decision, same card id, `sessions/service.ts` async-conversion)
+
+Card 74716cfb also converted `runWorkerGate`'s `onSettledAfterPending` callback from sync to async, to
+`await readFailedNamesForOp(opId)` before composing the `[loom:gate-failed]` nudge's deferred-trigger
+appendix above. Safe for the CALLER as originally reasoned: `PendingOpRegistry.attach` invokes it
+fire-and-forget with no `await` of its own, and its `=> void` declared type is one TypeScript accepts from
+an async function like every other void-typed callback here already does (e.g. the analogous merge-settle
+callback's own `enqueueDurableMessage` calls never await anything either) — so going async changes nothing
+about the CALLER's own ordering or error handling.
+
+⚠️ That "changes nothing" claim was later corrected: see
+[[c4b70fe8-async-callback-safe-for-caller-not-for-observers]] for why it is true about the caller and false
+about every OBSERVER of this op's settle state, plus the dependency it creates on `worker-run-gate.mjs`'s
+scenario (K).
+
+## Do not (2)
+
+- Do not read this site's original "changes nothing about ordering" claim as covering observers of the op's
+  settle state — see the linked `c4b70fe8` record for the corrected scope.
+
+Source (this section only): inline comment in `packages/daemon/src/sessions/service.ts`, `runWorkerGate`'s
+`onSettledAfterPending` callback declaration, commits `691a2184` (original) and `ab325cc8` (the `c4b70fe8`
+wording correction). Not the same decision as the join-key-appendix narrative above — shared card id only.
+
 ## Source
 
 JSDoc comment in `packages/shared/src/types.ts` (`DeferredUntilEvent`'s own doc). Extracted by card 04705438 (tranche 2 on `packages/shared/src/types.ts`); reworded into flowing prose (the connecting sentence was restructured), but the concrete specimen — the "NAME a file it swept with a NEGATIVE result" example — is carried verbatim.

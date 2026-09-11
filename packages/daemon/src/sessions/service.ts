@@ -13398,35 +13398,11 @@ export class SessionService {
             // though the first attempt already ran.
             if (err instanceof GateCancelledError) {
               concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
-              // CARD 318ac7b2 — DoD-1/2: unlike the FIRST attempt's own identical-shaped catch above (where
-              // a cancel here means the gate never got to run at all — merge-gate `runGateSeq` calls never
-              // forward a live `cancelSignal`, so a merge gate can only ever be withdrawn WHILE QUEUED, never
-              // mid-run; see the `_cancelSignal` doc on this retry's own callback above), a cancel HERE is
-              // different: attempt 1 already genuinely spawned and failed a full suite (`gateRan &&
-              // classifyGateFailure(gateResult) === "genuine"` gated us into this retry in the first place),
-              // and this retry's own `evt("build_gate", ...)` call further below (the one every OTHER outcome
-              // of this method reaches) is never reached on this return path — so without this, that real,
-              // measured run vanishes from `gate_history` entirely (the defect this card fixes).
               //
-              // Emit `build_gate` (unlike `merge_cancelled` below, `build_gate` IS in `GATE_HISTORY_KINDS` —
-              // db.ts) carrying attempt 1's own real numbers, with `cancelled: true` set explicitly.
-              // `gateOutcomeFromDetail` (db.ts) checks `detail.cancelled === true` BEFORE `detail.passed` —
-              // the exact precedence a mid-run WORKER-gate cancel already relies on (see that function's own
-              // doc) — so this row reads as the distinct `"cancelled"` outcome, never `"pass"` and never
-              // `"reject"` (DoD-2: a cancelled op must be distinguishable from a genuine rejection — folding
-              // it into `"reject"` would inflate the rejection rate with an op that reached no real verdict;
-              // dropping the row, as before this fix, silently deflates both the rejection rate AND the
-              // duration series by discarding a real, completed full-suite run). `passed: gateResult.passed`
-              // (always `false` here — the guard above requires a genuine, i.e. non-passing, attempt 1) rides
-              // along purely as an honest record of what attempt 1 itself produced; it never wins the outcome
-              // classification over `cancelled:true`. `durationMs: gateAttempt1DurationMs` is attempt 1's own
-              // real measured run time (captured right after its admission settled, above) — the exact figure
-              // that used to vanish from the duration series. `gateSpawned: gateRan` mirrors every other
-              // `build_gate` emission in this method (`gateRan` is provably `true` to have reached this
-              // retry at all). `retriedFile` (already assigned above) records that a retry WAS identified and
-              // attempted; `retryPassed` is deliberately omitted — the retry never ran to completion, so
-              // there is no verdict to report for it (never assume `retriedFile` alone implies a pass — see
-              // `ConfirmMergeResult.retriedFile`'s own doc).
+              // @decision 318ac7b2 — unlike the FIRST attempt's own catch above, attempt 1 here already ran
+              // for real, so this must still emit `build_gate` (cancelled:true over passed:false) or that
+              // run silently vanishes from `gate_history` and its rejection-rate/duration series.
+              //
               evt("build_gate", {
                 passed: gateResult.passed, cancelled: true, cancelKind: err.kind, cancelDetail: err.detail,
                 durationMs: gateAttempt1DurationMs, gateSpawned: gateRan, gateCap, concurrentGates: concurrentAtStart,
@@ -16111,25 +16087,15 @@ export class SessionService {
           if (admitStamp !== undefined && this.gateAdmitStamps.get(key) === admitStamp) this.gateAdmitStamps.delete(key);
         }
       },
-      // Card 74716cfb: ASYNC (was sync) — this callback now `await`s readFailedNamesForOp before composing
-      // the `[loom:gate-failed]` nudge's deferred-trigger appendix (see that call site below). Safe FOR
-      // THE CALLER: `PendingOpRegistry.attach` (pending-ops.ts) invokes this fire-and-forget with no
-      // `await` of its own (`onSettledAfterPending?.(...)`, never `await onSettledAfterPending?.(...)`)
-      // and its declared type is `=> void`, which TypeScript accepts from an async function exactly like
-      // every other void-typed callback in this file already returns unawaited promises from (e.g. every
-      // `enqueueDurableMessage` call inside the analogous merge-settle callback below never awaits
-      // anything either) — so this changes nothing about the CALLER's own ordering or error handling.
-      // ⚠️ CORRECTION (card c4b70fe8, from ccf23ffb's diagnosis): the claim above is TRUE about the
-      // caller and FALSE about every OBSERVER of this op's settle state. The op's `state` already flips
-      // to done/failed SYNCHRONOUSLY, strictly BEFORE this callback body runs — that part predates this
-      // card and is unchanged. But making this callback `async` pushed everything after its first
-      // `await` (including the `[loom:gate-failed]` nudge composed and pushed below) into a LATER turn:
-      // the push slid from "the same synchronous turn as the settle" to "after an fs read". A caller
-      // polling `pendingOps.peek(key)?.state` (or `gate_status`) can now observe "settled" before the
-      // nudge has actually been enqueued — worker-run-gate.mjs's scenario (K) did exactly this and flaked
-      // in-suite under real host contention (see memory `worker-run-gate-scenario-k-async-nudge-race`).
-      // Wait on the actual nudge delivery, never on this op's settle state, if you need to know the push
-      // landed.
+      //
+      // @decision 74716cfb — converting this callback to async is safe for its CALLER only
+      // (`PendingOpRegistry.attach` invokes it fire-and-forget, no `await` of its own) — never assume
+      // nothing changed for an OBSERVER of this op's settle state; see the `c4b70fe8` correction below.
+      //
+      // @decision c4b70fe8 — a caller polling this op's settle state can observe "settled" before the
+      // `[loom:gate-failed]` nudge is actually enqueued, since going async pushed the push into a later
+      // turn; wait on actual nudge DELIVERY, never on settle state, if you need to know it landed.
+      //
       // ⚠️ DEPENDENCY A FUTURE EDIT HERE CAN SILENTLY BREAK (card c4b70fe8): `packages/daemon/test/
       // worker-run-gate.mjs`'s scenario (K) "exactly ONE [loom:gate-failed] nudge" check no longer waits
       // on this op's settle state (see its own wait-site comment for the full argument) — it waits for
