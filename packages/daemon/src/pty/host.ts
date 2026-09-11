@@ -8253,98 +8253,28 @@ export class PtyHost {
 
   /**
    * Write ONE Enter attempt, then wait `SUBMIT_VERIFY_TIMEOUT_MS` for confirmation (`enterConfirmed`,
-   * set by deliverHook on `UserPromptSubmit`/`Stop`/`StopFailure`) before deciding what's next — the
-   * verify-and-retry loop that closes card 9549e322 (a swallowed/dropped lone Enter strands the
-   * composer with busy stuck true).
-   *
-   * `gen` is the `submitGeneration` this chain was scheduled under (captured once in `submit()`, threaded
-   * through every recursive retry of the SAME submit). Every fire — the write AND the verify-timeout
-   * callback — bails the instant `live.submitGeneration !== gen`: a NEWER submit() (or an out-of-band
-   * busy-clear — healIfStuck / interruptForRedirect / stop, which all bump the generation too) means this
-   * chain belongs to an ALREADY-SUPERSEDED turn, so its `enterConfirmed`/`busy` reads are meaningless for
-   * whatever is live now — checking `enterConfirmed` alone is not enough (a fast turn can confirm+Stop
-   * and a brand-new submit can reset `enterConfirmed` back to false WHILE this chain is still waiting,
-   * which would otherwise read as "still unconfirmed" and retry-Enter into the new turn's window).
+   * set by deliverHook on `UserPromptSubmit`/`Stop`/`StopFailure`) before deciding what's next.
+   * @decision 9549e322 — the Enter that submits a turn is not fire-and-forget: this loop verifies and
+   * retries until confirmed or given up, and bails the instant `live.submitGeneration !== gen` too.
    *
    *  - Confirmed / stale generation / the session died by the time the wait elapses → stop, nothing more.
    *  - Not confirmed and attempts remain → log it (this IS the live validation the merge gate wants:
    *    it proves whether a real drop/swallow happened) and re-send `\r` for the next attempt.
-   *  - Not confirmed and out of attempts → GIVE-UP SUPPRESSED (card 71de1f9c) if the engine produced any
-   *    output after this final Enter write — that's strong evidence the Enter registered and a turn is
-   *    actually running, just with a slow-to-confirm hook; do nothing and let the real Stop/UserPromptSubmit
-   *    (however late) finalize normally. Otherwise (genuinely no output at all) → GIVE-UP RECOVERY: log an
-   *    error, recover busy (setBusy(false)) so the session is never left busy=true with an unsent composer
-   *    forever, AND clear the stranded injection
-   *    (card ee082fbb) — but ONLY when `composerLen === 0`. `composerLen` tracks ONLY human raw-terminal
-   *    keystrokes (never our own `pty.write`), so `===0` proves the composer holds NOTHING but this
-   *    give-up'd injection — a human never got a chance to start a draft during the failed retries (if one
-   *    did, `composerLen > 0` and we leave the box alone; `deferForHumanDraft`'s existing hold still
-   *    protects it — see card e1829591, never destroy a user's uncommitted draft). This is exactly the
-   *    HUMAN-DRAFT SAFETY half of the fix; the CLEAR-EFFICACY half (does a clear byte actually empty a
-   *    real multi-line composer, or does it truncate/strand a partial remnant?) needed real-engine
-   *    validation, not just hermetic bytes-written assertions:
+   *  - Not confirmed and out of attempts:
+   *    @decision 71de1f9c — GIVE-UP SUPPRESSED if the engine produced output after this final Enter
+   *    write (do nothing, let the real Stop/UserPromptSubmit finalize); else GIVE-UP RECOVERY instead.
+   *    @decision ee082fbb — recovery logs an error, clears `busy`, and clears the stranded injection,
+   *    but ONLY when `composerLen === 0` — a real human draft in progress is never touched this way
+   *    (`deferForHumanDraft`'s hold protects it — card e1829591, never destroy a user's draft).
    *
-   *    REAL-CLAUDE FINDINGS (claude 2.1.207, card ee082fbb probe — test/_probe-composer-clear{,-2}.mjs):
-   *      - The TUI COLLAPSES a multi-line/long bracketed paste into a single "[Pasted text #N +K lines]"
-   *        placeholder token — the raw lines are NOT individually editable once pasted.
-   *      - A single Esc does NOT clear it — it only ARMS a "Esc again to clear" confirm; a second Esc (or
-   *        any other key right after) leaves the composer in an inconsistent, still-dirty state. REJECTED.
-   *      - Ctrl-U (kill-line) cleared the COLLAPSED placeholder in one shot (it reads as one "line" to
-   *        readline-style kill semantics) — but on a SHORT multi-line paste that stayed under the
-   *        placeholder-collapse threshold (rendered as literal editable lines, not a placeholder), Ctrl-U
-   *        only killed the CURRENT line and SILENTLY STRANDED the earlier line(s) — confirmed via the
-   *        engine's own transcript, which recorded the stranded first line concatenated with the next
-   *        turn. Exactly the "partial clear worse than concatenation" risk this card was deferred over.
-   *        REJECTED as a general-purpose clear.
-   *      - Exact-count Backspace (`\x7f` × the injected text's length) reliably emptied the composer in
-   *        EVERY case tested: the collapsed placeholder (backspace #1 deletes the whole atomic token, the
-   *        rest floor at 0 and no-op — safe even though the count overshoots the placeholder's own visual
-   *        length; a VERSION-PINNED assumption about claude 2.1.207's composer/backspace handling — worth
-   *        re-verifying against the probes if a future claude version changes that behavior), a short
-   *        un-collapsed multi-line paste (backspace walks back through the embedded newlines exactly like
-   *        nextComposerLen's own counting model), and a single-line paste. ADOPTED.
-   *    The exact length to un-type is `live.lastPrompt` — already the literal text `submit()` pinned for
-   *    THIS turn (line ~3007) — so no new state is needed; give-up walks it back char-by-char via the
-   *    same `writeChunked` large-write path submit() itself uses (a giant Backspace burst is just as
-   *    subject to ConPTY's write-size limits as a giant paste).
+   * @decision 97558183 — every retry (attempt > 1) also re-asserts the paste-close before the `\r`.
    *
-   * VALIDATED against a real claude engine (v2.1.206, card 9549e322 review item ②): forcing
-   * SUBMIT_VERIFY_TIMEOUT_MS well below a normal UserPromptSubmit round-trip (so the retry ALWAYS fires a
-   * real second Enter into an already-genuinely-submitted, still-generating turn) still produced exactly
-   * ONE UserPromptSubmit + ONE Stop for the one logical turn sent — the redundant bare `\r` landing on the
-   * by-then-empty, mid-generation composer is INERT (no stray blank turn, no corruption). A retry firing
-   * into a turn that actually already started is therefore harmless; the real risk this loop guards
-   * against is a retry NOT firing when the Enter genuinely never registered.
+   * @decision b64b3726 — Half 1: this re-assert is itself a confirmed output source on the FINAL
+   * attempt; the fix is SEQUENCING (`awaitReassertSettle`), not detection — see its own record.
    *
-   * RETRY re-asserts the paste-close too (card 97558183): `submit()`'s own `BRACKET_PASTE_END` write is
-   * JUST as fire-and-forget as the Enter it precedes, and the SAME ConPTY drop class can lose it. When it
-   * does, Ink stays mid-paste and swallows every retried `\r` as paste CONTENT (never a submit) — worse,
-   * each swallowed byte resets Ink's paste idle-timer, actively preventing self-heal, so the old code's
-   * bare-Enter retry could NEVER recover from this and would burn all attempts before giving up. Every
-   * retry (attempt > 1; the FIRST attempt follows immediately after submit()'s own END write, so
-   * re-asserting there would just be redundant) re-sends a zero-length `START+END` pair — not a bare END
-   * — as ONE write, before the `\r`:
-   *   - Already closed (the common case — only the Enter dropped, not the END): Ink is idle, sees a fresh
-   *     START immediately followed by END, and treats it as an empty paste — a true no-op. A bare END
-   *     alone sent while idle is NOT verified safe (Ink may not recognize an out-of-context terminator the
-   *     same way a fresh START+END pair is defined to behave either idle or mid-paste — see this file's
-   *     own `CONTROL_CHAR_RE` note for the sibling risk of a stripped-ESC CSI turning into literal text).
-   *   - Still genuinely open (the bug): the extra bytes fold in as a few stray literal paste-content
-   *     characters, but END is found and the paste closes — recovering the turn (submitted with a small
-   *     cosmetic tail) instead of losing it entirely after 4 failed attempts.
-   * Real-`claude` confirmation of both branches (does an idle START+END truly no-op; does a still-open
-   * paste truly close and submit with just a small stray tail) is the Lead's live-verification pass — the
-   * fake pty this file's own test drives can't model Ink's paste state machine, only that the BYTES this
-   * host writes are exactly what's intended.
-   *
-   * Card b64b3726 Half 1: on the FINAL attempt only (`attempt === SUBMIT_MAX_ATTEMPTS`), this re-assert is
-   * itself a confirmed output source INSIDE the give-up branch's own anchor window (see
-   * `REASSERT_SETTLE_POLL_MS`'s doc for the measured evidence) — a Code Reviewer finding on this method's
-   * own suppression logic below. The fix is SEQUENCING, not detection: let the re-assert's response (if
-   * any) land BEFORE writing this attempt's Enter and capturing `enterWrittenAt`, via `awaitReassertSettle`
-   * (bounded, observed not guessed). Intermediate retries (attempt 2/3 here) never consult `lastOutputAt` —
-   * only the give-up branch below does — so they skip straight to `fireEnterAndVerify` unchanged; waiting
-   * there would tax every retry chain for zero discriminating benefit.
+   * (A Code Reviewer finding on this method's own suppression logic above.) Intermediate retries
+   * (attempt 2/3) never consult `lastOutputAt` — only the give-up branch above does — so they skip
+   * straight to `fireEnterAndVerify` unchanged; waiting there would tax every retry for no benefit.
    */
   private sendEnterAndVerify(sessionId: string, attempt: number, gen: number): void {
     const live = this.live.get(sessionId);
