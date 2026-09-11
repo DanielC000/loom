@@ -9604,18 +9604,13 @@ export class PtyHost {
         // Re-checked here (not just before the wait) because `waitForMcpSeen` can take up to
         // MCP_READY_TIMEOUT_MS — anything could have happened to this pty in the meantime.
         if (!l?.alive || l.firstTurnStarted) return; // something else already started a turn (see this function's own doc) — no-op
-        // Card 78a16dc5 (mirrors resumeAfterRateLimit's card-81f9c887 fix): `firstTurnStarted` is set ONLY
-        // by the UserPromptSubmit hook, which CAN be lost (see the Stop/StopFailure handler's own comment) —
-        // so this can fire while a turn genuinely already ran and its Stop's own drainPending() just started
-        // writing a QUEUED message. A direct submit() here would race THAT in-flight writeChunked chain —
-        // its own staggered pty.write()s would interleave with this one's, splicing two different messages
-        // together mid-word (the observed corruption).
+        // @decision 78a16dc5 — a direct submit() here can race an in-flight Stop's writeChunked chain
+        // and splice two messages mid-word; `firstTurnStarted` can miss that race (its UserPromptSubmit
+        // hook can be lost) (mirrors resumeAfterRateLimit's card-81f9c887 fix).
         //
-        // `busy` alone is NOT the right signal for "a write is genuinely in flight": it is ALSO true from
-        // spawn()'s own OPTIMISTIC set (the common, intended case this delivery exists for — a fresh spawn
-        // whose kickoff hasn't attempted to submit yet) with NO submit() ever having run — deferring on bare
-        // `busy` would wrongly hold the kickoff in `pending` FOREVER in exactly that case, since nothing will
-        // ever fire a Stop to drain it (worker-kickoff-guarantee.mjs's H1a/H1e/H1f pinned this regression).
+        // ⛔ Don't defer on bare `busy`: spawn()'s optimistic setBusy makes it true before any submit(),
+        // so a fresh kickoff would sit in `pending` forever (worker-kickoff-guarantee.mjs H1a/H1e/H1f).
+        //
         // The precise signal is `submitGeneration > 0 && !enterConfirmed`: `submitGeneration` only advances
         // inside submit() itself (never by the spawn-time optimistic setBusy), so `0` means "no submit() has
         // EVER run for this pty" (direct-write is unconditionally safe — nothing to race); `enterConfirmed`
@@ -9630,12 +9625,10 @@ export class PtyHost {
         // next safe boundary — never dropped), it just never races an in-flight write. kind:"agent" — this is
         // substantive directed content (the kickoff itself), not a bracket-tagged Loom nudge, so it drains
         // alone (not coalesced) and is exempt from the [loom:*] shape guard below (scoped to "warning" only).
-        // Tolerated rare duplicate (CR-noted): if `rateLimited` is what makes this branch unsafe, resumeAfterRateLimit
-        // will INDEPENDENTLY replay `lastPrompt` once unparked — and lastPrompt is USUALLY still this exact
-        // kickoff (nothing else has submitted yet). That means the kickoff can be delivered TWICE (the
-        // enqueued copy below, plus resumeAfterRateLimit's own replay) rather than lost — strictly better
-        // than pre-fix (which could interleave/corrupt it), and rare enough (needs a lost UserPromptSubmit
-        // hook AND a rate-limit park on the SAME never-confirmed turn) not to special-case further here.
+        //
+        // @decision 78a16dc5 — a rateLimited-caused defer here may duplicate-deliver the kickoff (this
+        // queued copy plus resumeAfterRateLimit's own independent replay) rather than lose it; tolerated
+        // as strictly better than the pre-fix interleave, and too rare to special-case further.
         const submitOutstanding = l.submitGeneration > 0 && !l.enterConfirmed;
         if (submitOutstanding || l.stopping || l.drainHeld || l.rateLimited) {
           // eslint-disable-next-line no-console
@@ -10353,15 +10346,11 @@ export class PtyHost {
    * time (if ever) this method's body runs, `live` is either a still-alive claude session or one of the
    * genuinely-deletable other kinds.
    *
-   * UNRESOLVED: fires `PtyHostEvents.onPromptMismatchUnresolved` AT MOST ONCE PER GEN — enforced here via
-   * `live.firedMismatchUnresolvedGens` (card 340b9dbe), not merely assumed from the caller's own scheduling.
-   * ⚠️ CORRECTED (card 340b9dbe): this doc used to say the event "fires exactly once (this method is only
-   * ever scheduled once per detection)". That parenthetical was true but the guarantee it implied was not:
-   * "once per detection" is not "once per gen" — the `UserPromptSubmit` detector's own arming site can, on a
-   * re-entry for an already-notified `(gen, writtenHash, reportedHash)` triple, schedule a SECOND timer for
-   * the SAME gen even though its own notice gets correctly suppressed as an exact repeat (see that call
-   * site's own doc). Without a per-gen guard here, both timers would fire this event, producing two durable
-   * "established loss" alarms for one underlying event. So the implementer (sessions/service.ts, via
+   * @decision 340b9dbe — fires `PtyHostEvents.onPromptMismatchUnresolved` AT MOST ONCE PER GEN via
+   * `live.firedMismatchUnresolvedGens`, not merely once per detection as an earlier version of this doc
+   * claimed — a detector re-entry can arm a second timer for an already-notified gen.
+   *
+   * So the implementer (sessions/service.ts, via
    * index.ts) can fail loud to both the recipient and, where one exists, the sender — mirroring
    * `handlePasteLengthLoss`'s established two-recipient, durable-event shape (see that method's own doc;
    * the independent worker confirmation on this card's own board body names this exact sibling asymmetry
