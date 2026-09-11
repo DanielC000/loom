@@ -13086,34 +13086,17 @@ export class SessionService {
         // invocation — a REUSED result never actually ran, so it must not feed the circuit breaker.
         await this.recordGateTimeoutOutcome(branch, worktreePath, !!gateResult.failedTimedOut);
       }
-      // TRANSIENT-KILL AUTO-RETRY (card bcba83a1 — the gate "lies" under memory pressure): an OOM/SIGKILL
-      // (or our OWN gateTimeoutMs bound) killing a step used to surface identically to a genuine test/build
-      // failure as the flat "build gate failed" — managers learned not to trust it under load and hand-
-      // rolled `git merge --squash --no-verify`, defeating the review/merge safety rail entirely. On a
-      // retry-eligible classification ONLY (never a clean non-zero exit — see classifyGateFailure), settle
-      // briefly then re-run the SAME gate ONCE before reporting anything. A pass here falls through to the
-      // normal squash-merge below exactly as if the gate had been green the first time — the squash
-      // decision itself is UNCHANGED by this retry ever having happened. CORRECTED, card 39da2570: this
-      // used to also claim the manager "never even sees" that a transient kill happened at all — that was
-      // true of the squash decision but not, since this card, of the `[loom:merge-done]` nudge: a pass via
-      // this retry now sets `transientRetried:true` on the return (see that field's own doc), which the
-      // nudge renders as a WEAKER-PASS note beside the concurrency triple. (`gateRetried` itself is
-      // declared at the method's outer scope, above the `if (gate)` block — see card 39da2570's doc on
-      // that declaration for why.)
-      // BUDGET-EXCEEDED SHORT-CIRCUIT (card 73a847f5): a timeout that already consumed its one output-gated
-      // auto-extend (`anyExtended` — card 24642c3d) cannot pass this retry, which always runs
-      // `allowExtend:false` (see that flag's own comment a few lines below) — a hard-bounded rerun of a run
-      // that only survived its FIRST attempt because of the net it no longer has. Yet running it anyway
-      // burns up to a full `gateTimeoutMs` of this daemon's shared, capped GateSemaphore lane (a co-tenant
-      // may be queued behind it) to reach a foregone conclusion, then reports a generic "gate failed" that
-      // recruits the wrong fix. Skip ONLY this exact precondition — a "kill" classification, or a "timeout"
-      // that never got to extend, are both untouched and still retry exactly as before; the existing
-      // no-extension rationale for the retry ITSELF (the 4x-worst-case reasoning below) is unchanged.
-      // ⚠️ NOT "don't re-fire a failed merge": a manager re-firing `worker_merge_confirm` mints a brand-new
-      // op — a new FIRST attempt with its own full budget, including its own one auto-extend — and is
-      // completely unaffected by this skip. See the wording below and card 73a847f5's "READ THIS FIRST" for
-      // why that distinction is spelled out explicitly rather than left implicit (a peer manager already
-      // misread this exact card's title as the broader claim).
+      // @decision bcba83a1 — on a retry-eligible gate-failure classification (kill/timeout, never a clean
+      //  non-zero exit), settle briefly then re-run the SAME gate ONCE before reporting anything; a pass
+      //  falls through to the normal squash-merge exactly as if the gate had been green the first time.
+      //
+      // @decision 39da2570 — a pass via this retry is not invisible to the manager: it sets
+      //  `transientRetried:true` on the return, rendered as a WEAKER-PASS note on the `[loom:merge-done]`
+      //  nudge, even though the squash decision itself is unaffected.
+      //
+      // @decision 73a847f5 — skip this retry when the failing timeout already consumed its one auto-extend:
+      //  it always runs `allowExtend:false` and cannot pass, so running it anyway burns a full
+      //  `gateTimeoutMs` on a foregone conclusion; a manager re-firing `worker_merge_confirm` is unaffected.
       const gateRetrySkippedFutile = !gateResult.passed && orchestration.gateRetry.enabled
         && classifyGateFailure(gateResult) === "timeout" && anyExtended;
       if (!gateResult.passed && orchestration.gateRetry.enabled && classifyGateFailure(gateResult) !== "genuine" && !gateRetrySkippedFutile) {
@@ -13159,35 +13142,9 @@ export class SessionService {
             // DISTINCT EVENT KIND, NOT merge_rejected — see the first attempt's identical catch above for
             // the full reasoning (card 361520a0, Half Four).
             concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
-            // CARD 518e7ff6 — THE SIBLING GAP 318ac7b2 explicitly left open (see gate_history's tool doc
-            // and gateOutcomeFromDetail's doc, db.ts, both updated alongside this). NOT the same shape as
-            // 318ac7b2's fix: THAT retry's own `evt("build_gate", ...)` sits AFTER its retry block, so a
-            // cancel there means NO row exists yet for the op (318ac7b2 fills that void). THIS retry's
-            // sibling `evt("build_gate", ...)` for attempt 1 (line ~12297, ABOVE this block) already ran —
-            // attempt 1 genuinely spawned and genuinely failed a retry-eligible (kill/timeout, never
-            // "genuine" — see the guard gating this whole retry, above) run, and that row correctly reads
-            // `outcome:"reject"`. It is NOT wrong and is NOT touched here: orchestration_events is
-            // append-only (no UPDATE path), and attempt 1's own failure is a true, measured fact worth
-            // keeping regardless of what happens to the retry.
-            //
-            // What's missing without this: a record of what happened to the RETRY itself. Every OTHER way
-            // this transient-kill retry can end (a pass, a further failure) reaches its own
-            // `evt("build_gate_retry", ...)` a few lines below — a cancel-while-queued is the ONE path
-            // that skipped it, leaving attempt 1's "reject" as the ONLY row `gate_history` shows for this
-            // op — indistinguishable from a definitive, no-second-chance rejection, when the truth is "we
-            // don't know: the mechanism built to tell a real bug from a transient kill (card bcba83a1) was
-            // itself withdrawn before it could answer."
-            //
-            // Emit the missing `build_gate_retry` row here too: `cancelled:true` (checked FIRST by
-            // `gateOutcomeFromDetail`, db.ts — reads `outcome:"cancelled"`, never "pass"/"reject") and
-            // `gateSpawned:false` (this retry's OWN admission never happened — no process spawned for IT,
-            // unlike attempt 1's row, which correctly keeps `gateRan:true`). No `passed` field: fabricating
-            // one would claim a verdict this retry never reached. DoD-2: a consumer computing a REJECTION
-            // RATE from `gate_history` must read this PAIRING — a `build_gate` "reject" row immediately
-            // followed (same `opId`) by a `build_gate_retry` "cancelled" row — as ONE unresolved op, not a
-            // rejection: the retry that could have confirmed or salvaged attempt 1's failure never ran.
-            // Counting the reject row alone (ignoring the paired cancellation) reproduces exactly the
-            // inflation 318ac7b2 fixed on the sibling path.
+            // @decision 518e7ff6 — a cancel-while-queued on THIS retry emits its own `build_gate_retry` row
+            //  (cancelled:true, gateSpawned:false, no passed field) rather than leaving attempt 1's "reject"
+            //  row as the only record — read the pairing as ONE unresolved op, never a rejection.
             evt("build_gate_retry", {
               cancelled: true, cancelKind: err.kind, cancelDetail: err.detail, gateSpawned: false,
               gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
@@ -13229,50 +13186,20 @@ export class SessionService {
       // `gateStepsResult`'s own "nothing to report" discipline just above.
       gateOutputTailForRecord = gateRan && gateResult.outputTail ? gateResult.outputTail.replace(CONTROL_CHAR_RE, "") : undefined;
       gateOutputFileForRecord = gateRan ? gateResult.outputFile : undefined;
-      // Card e2b6f900: capture the SAME concurrency triple the CONCURRENCY NEIGHBOURHOOD comment above
-      // (and every `evt()` call in this block) already computes, onto the outer-scope fields BOTH the
-      // rejection branch below AND the plain-green return further down can read — mirrors
-      // `gateStepsResult`/`gateExtended`/`gateProximity`/`gateOutputTailForRecord`'s own "set once here,
-      // read from either branch" pattern, one line above. `concurrentAtStart`/`concurrentGatesMax` already
-      // hold their FINAL values here. RESOLVED (Code Review, card b9e07a4a): both retry paths — the
-      // TRANSIENT-KILL AUTO-RETRY below AND the SINGLE-FILE RETRY above (card 344ce950, re-admitted
-      // through `runExclusive` since card b9e07a4a's Critical fix — see that block's own doc) — re-run
-      // through `runExclusive` and re-assign both (a fresh admission, its own concurrency snapshot), so
-      // this triple correctly describes whichever admission the FINAL verdict is actually about on EITHER
-      // retry path, not just the first attempt. See `ConfirmMergeResult.gateCap`'s own doc for the
-      // now-resolved caveat this used to carry.
-      // ⚠️ `durationMs` on the `build_gate` audit event (below) is NOT part of "this triple" and does NOT
-      // share its resolution above — it is a SEPARATE field with its own fix (card b9e07a4a, follow-up to
-      // this one): `gateAttempt1DurationMs`, captured right after attempt 1's own admission settles and
-      // BEFORE the single-file retry can run. On a merge the single-file retry saved, that means
-      // `build_gate.durationMs` describes attempt 1's own run ALONE, while the triple right beside it on
-      // that SAME row describes the RETRY's admission — a deliberate, DIFFERENT scope for each field, not
-      // a bug: `durationMs` answers "how long did the run that actually failed take", the triple answers
-      // "what concurrency produced the verdict this row's `passed`/`retriedFile`/`retryPassed` describe".
-      // Before this fix `durationMs` was neither of those — it was `Date.now()` read at THIS call site,
-      // AFTER the retry had already queued and run, so it silently spanned both admissions at once (queue
-      // wait included) while the triple beside it described only the second. Read them as two independent
-      // measurements on the same row, never as jointly describing one admission.
+      // @decision e2b6f900 — capture this triple once here, read from either branch; it always describes
+      //  whichever admission the final verdict is about, since retries re-admit through `runExclusive`.
+      //  `durationMs` on the same row is a SEPARATE field with its own scope — never read the two as one.
       gateCapForRecord = gateRan ? gateCap : undefined;
       concurrentGatesForRecord = gateRan ? concurrentAtStart : undefined;
       concurrentGatesMaxForRecord = gateRan ? concurrentGatesMax : undefined;
       if (!gateResult.passed) {
-        // DIAGNOSTIC DETAIL (card 4b8f2b6e): the old bare "build gate failed" string discarded the
-        // failing phase/step, the first failing test/assertion, and the child's own output — a manager
-        // burned whole cycles blind-diagnosing (a real test failure vs. an fs.rmSync teardown flake vs.
-        // a self-wiped node_modules TS2688 all looked identical). Enrich BOTH the sync result and the
-        // `[loom:merge-rejected]` signal text with the same detail.
+        // @decision 4b8f2b6e — enrich BOTH the sync result and the `[loom:merge-rejected]` signal text with
+        //  the failing phase/step, first failing test/assertion, and the child's own output — a bare
+        //  "build gate failed" string makes a real test failure indistinguishable from a teardown flake.
         //
-        // KILL CLASSIFICATION (card bcba83a1): `reason`/the headline now vary for a retry-eligible
-        // classification — "gate killed by <signal> [(possibly OOM/resource)] — <retry outcome>" / "gate
-        // timed out (possibly resource-starved under load) — <retry outcome>" instead of the flat "build
-        // gate failed" — but ONLY for those two classes; a genuine clean non-zero exit keeps the exact
-        // bare "build gate failed" string, so the existing back-compat contract for a real test/build
-        // failure (merge-gate-diagnostic.mjs case A) is untouched. The "kill" headline names the ACTUAL
-        // signal rather than asserting OOM outright (CR follow-up on bcba83a1): a SIGSEGV/SIGABRT from a
-        // broken native addon is a genuine deterministic crash, not memory pressure, and mislabeling it
-        // "likely OOM" would misdirect a manager diagnosing a real bug. The "(possibly OOM/resource)" hint
-        // is appended ONLY for SIGKILL — the signal an OOM-killer/cgroup limit actually sends.
+        // @decision bcba83a1 — the rejection headline names the ACTUAL signal for a "kill" classification
+        //  rather than asserting OOM outright, with the "(possibly OOM/resource)" hint appended ONLY for
+        //  SIGKILL; a genuine clean non-zero exit keeps the plain "build gate failed" string unchanged.
         const finalClass = classifyGateFailure(gateResult);
         // Card 73a847f5: the skipped-as-futile case gets its OWN wording, distinct from both a real retry
         // outcome and the generic "auto-retry disabled" (which covers the unrelated case of the retry
