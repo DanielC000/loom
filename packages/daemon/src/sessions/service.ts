@@ -13873,11 +13873,35 @@ export class SessionService {
    *
    * Deliberately simpler than confirmWorkerMergeTracked's own gate call in one respect only: no
    * transient-kill auto-retry (that stays exactly as it is on the (still fully exercised) per-branch
-   * fallback path).
+   * fallback path). `computeEmitCompareGate` runs here on the ALREADY-ASSEMBLED, frozen batch worktree —
+   * `gateBaseMainSha..HEAD`, i.e. the UNION of every landed branch's own changes — reusing the SAME
+   * predicate `confirmWorkerMergeTracked` already reuses for a solo merge, never a second one. When that
+   * union proves eligible, `buildReducedGateCommand`'s smaller command is substituted for the real
+   * `gateCommand`, exactly as the solo path already does for one branch (card d422e279). This is a
+   * DIFFERENT decision from card dbc6f660's own "keep the assembler dumb" ruling: that one is about batch
+   * SELECTION — whether an individually-reduced-eligible branch should be excluded from a batch, which the
+   * Lead's measurement found doesn't pay at this K (a reduced branch riding an already-full batch costs
+   * nothing marginal) — and says nothing about a batch whose EVERY constituent branch is reduction-eligible,
+   * where the assembled tree's own diff still proves inert and running the full ~15-20min suite buys zero
+   * additional verification over the reduced command (observed in production: a K=2 batch of two test-only
+   * branches ran full for over 11 minutes past the reduced band). `chosen` membership stays exactly as dumb
+   * as dbc6f660 decided — only the ONE resulting gate run's OWN command can now reduce. Card 67030bb9's
+   * bounded single/multi-file retry (below) applies to whichever command actually ran, reduced or full —
+   * the same generic failure-classification path the solo side already exercises after ITS OWN reduced
+   * runs, so no new retry design is needed here.
    *
-   * @decision dbc6f660 — a batch's own gate command can also reduce on the assembled union
-   *  (`computeEmitCompareGate`/`buildReducedGateCommand`), a DIFFERENT decision from batch SELECTION
-   *  staying dumb; that record has the fixed `repoPath`/`worktreePath` defect this depended on.
+   * 🔴 A SECOND, DEEPER DEFECT THIS SAME CARD (d422e279) FIXED (see the `computeEmitCompareGate` call
+   * site's own comment below for the full mechanism): the call used to pass CANONICAL `finalRepoPath` as
+   * the predicate's `repoPath` while asking it to resolve the literal ref `"HEAD"` — which then meant
+   * CANONICAL's own checked-out HEAD, not the batch worktree's, and (since canonical hadn't advanced past
+   * `gateBaseMainSha` yet at that point) always diffed `gateBaseMainSha..gateBaseMainSha` — an EMPTY diff,
+   * unconditionally, regardless of what the batch actually changed. This — not merely "a batch's union is
+   * unlikely to qualify" — is the real reason every historical batched `gate_history` row read
+   * `emitCompareReduced:null`: the predicate was structurally unable to ever decide a batch, full stop.
+   * Confirmed directly against a real fixture batch before this fix landed. Passing `worktreePath` as
+   * BOTH the `repoPath` and `worktreePath` arguments fixes it (card `fe848bfc`, commit `30f54f5e`, later
+   * dropped the second argument entirely) — a linked worktree shares its parent's object database, so
+   * `gateBaseMainSha` still resolves fine; only the "HEAD" ref now means what it should.
    *
    * @decision f944d4e4 — a client-timeout retry now re-attaches to an already-running batch op via
    *  {@link PendingOpRegistry.attach} instead of cutting a second worktree; see that record for the key,
