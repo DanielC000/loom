@@ -43,11 +43,11 @@ function RequestNeedsChip({ type }: { type: QuestionType }) {
 }
 
 // ── RequestProvenance — the immutable FILER and the current ROUTING TARGET, side by side ──────────
-// Card 5b22b262. Every identity/history meta line on this surface used to render `agent <sessionId>`,
-// but `sessionId` is the MUTABLE routing target (`reparentQuestions` rewrites it onto a successor on
-// every recycle), never provenance — so after any recycle the inbox attributed the ask to a seat that
-// never made it. Owner's decision (Request 68b06c50): show BOTH, visibly distinguished —
-// "filed by 3f2a · now routed to 9b1c". A legacy row whose `filedBySessionId` is permanently null reads
+//
+// @decision 5b22b262 — sessionId is the mutable routing target, never provenance; show BOTH the
+// immutable filer and the current routing target, visibly distinguished.
+//
+// A legacy row whose `filedBySessionId` is permanently null reads
 // "filer unknown"; it must NEVER fall back to `sessionId`, which is precisely the bug.
 // Distinction is carried by the label words (inherited muted meta color) with the ids a shade brighter —
 // no new color system, no new component; it drops into the existing meta line as one inline run. ONE

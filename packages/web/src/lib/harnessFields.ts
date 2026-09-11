@@ -27,9 +27,8 @@ export const harnessOf = (value: Harness | null | undefined): Harness => value ?
 // editing, and positive-control any grep (a pattern that finds nothing in the codex range must be shown
 // to find the same field in the claude one).
 //
-// SEVERITY IS THE FAILURE DIRECTION, NOT THE FIELD COUNT — `0770d916`'s own triage rule. A dropped
-// SAFETY toggle fails OPEN and is categorically worse than a dropped capability, which merely fails
-// closed; flattening them into one "unsupported" grey would hide exactly the distinction that matters.
+// @decision 0770d916 — severity is the failure DIRECTION, never the field count: a dropped SAFETY
+// toggle fails OPEN and is categorically worse than a dropped capability, which merely fails closed.
 export type DropSeverity = "fail-open" | "fail-closed" | "inert";
 
 export interface HarnessDrop {

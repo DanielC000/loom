@@ -8,11 +8,18 @@ Threading the argument is deliberately NOT treated as equivalent to the capabili
 
 This is a sibling fix to card `7fa73e2c`'s own remedy on the same shape ("no-mechanism-reject-or-warn"): `profiles/validate.ts` rejects a NEW `harness:"codex"` profile that sets `browserTesting`/`documentConversion:true` (or a non-empty `capabilities` array) at save time (`codexStdioCapabilityUnsupportedError`) — see card `7fa73e2c`'s own record for that validation-time counterpart in full. The threading this card adds is defense-in-depth for a profile that predates that save-time guard, not the primary enforcement point.
 
+## Severity is the failure direction, not the field count
+
+SEVERITY IS THE FAILURE DIRECTION, NOT THE FIELD COUNT — `0770d916`'s own triage rule. A dropped SAFETY toggle fails OPEN and is categorically worse than a dropped capability, which merely fails closed; flattening them into one "unsupported" grey would hide exactly the distinction that matters. The web Profiles editor's per-field harness-consumption warning (`lib/harnessFields.ts`) uses this rule to classify each unconsumed field's `DropSeverity` as `"fail-open"` | `"fail-closed"` | `"inert"`, rather than treating every drop the same.
+
 ## Do not
 
 - Do not treat threading `browserTesting`/`documentConversion`/`capabilities` into `buildMcpServers()` as having made the capability available on codex — none of the three can ever resolve to a `{type:"http"}` entry, so none can ever actually mount for this harness.
 - Do not re-derive capability resolution for codex separately from claude's — always route through the same `buildMcpServers()` call so the two harnesses' capability resolution cannot drift apart.
+- Do not flatten a fail-open drop (a SAFETY toggle) and a fail-closed drop (a capability) into one "unsupported" severity — the failure direction is what matters, not merely that a field is unconsumed.
 
 ## Source
 
 Inline comment in `packages/daemon/src/pty/host.ts` (the JSDoc above `createCodexPty`), as of this tranche's HEAD. Relocated by card `8dcf8521` (tranche 15 on `pty/host.ts`); wording unchanged beyond joining wrapped source lines into flowing paragraphs and stripping `*` comment markers.
+
+Additional source: `packages/web/src/lib/harnessFields.ts` (the "codex consumption gap" module doc, "SEVERITY IS THE FAILURE DIRECTION" paragraph), as of this tranche's HEAD. Relocated by card `ea0a844f` (`docs(web): extract decision prose from web components and lib, tranche 2`); wording unchanged beyond joining wrapped source lines into a flowing paragraph and stripping `//` comment markers.
