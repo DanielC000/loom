@@ -9053,58 +9053,17 @@ export class PtyHost {
    * cleanup discipline, not an independent claim about how rarely sessions give up.
    */
   /**
-   * Card b932558c: a CONFIRMED give-up — this generation's turn genuinely started, proven either by
-   * `purgeConfirmedGiveUpRequeue`'s content-match branch or its FIFO-position fallback — is decisive
-   * proof THIS generation's own composer content was submitted, not stranded. The daemon already acts
-   * on that proof (purging the requeued duplicate right where this is called from); `composerDirtyLen`
-   * contradicting it until some LATER, unrelated submit()'s own defensive clear-prefix happens to
-   * confirm is the bug this closes — previously the ONLY clear path (`composerDirtyLenClearedByGen`,
-   * gated on a fresh submit()'s own confirmation) never fired for a give-up resolved this way, since no
-   * new submit() is involved: the ORIGINAL generation's own late-arriving hook is what confirms it.
-   *
-   * Card a6c1d413 RE-SHAPE: only ever touches `gen`'s own entry (if any) in `composerDirtyMarkedGens` —
-   * never a blind whole-field reset. `decisive` selects HOW MUCH of the map that resolves:
-   *
-   * - `decisive: true` (the content-match branch below): confirming `gen` means the engine's reported
-   *   prompt is an EXACT match for `gen`'s OWN pasted text alone — that could only be true if `gen`'s own
-   *   defensive clear-prefix genuinely landed (a botched clear would have left stray older text glued
-   *   onto `gen`'s paste, making the reported prompt diverge from `gen`'s clean signature, and this
-   *   content-match would simply never have fired — see this file's own "stray text glued onto a later
-   *   submit" specimens, card 3ce3fa39). submit() does NOT unconditionally run a defensive clear-prefix —
-   *   two of its branches skip it (card 2a7f8040; see submit()'s own doc for both): the Enter-only
-   *   redelivery branch (`isGiveUpRedelivery && composerBelievedTrustworthy`) writes no clear-prefix and
-   *   repastes nothing at all, and the plain `else` taken when `composerLen > 0` (a human typing at the
-   *   raw terminal) also skips the clear-prefix even though `composerDirtyLen` can still be `> 0` there.
-   *   The Enter-only skip is harmless HERE ONLY because such a `gen` can never reach this branch with its
-   *   own entry present in the first place — see the early-return just below for why. The `composerLen >
-   *   0` skip used to NOT be similarly protected: that branch used to stamp `composerBodyWrittenForGen`
-   *   unconditionally, so it COULD acquire an entry and later be decisively resolved despite never having
-   *   attempted a clear — a genuine false-zero gap, pre-existing (not introduced by this re-shape) and
-   *   CLOSED by card ef78c885, which stamps that branch only when `composerDirtyLen === 0` (see its own
-   *   comment there) — so a `gen` that skips the clear-prefix this way now can no longer acquire an entry
-   *   here either, the same protection the Enter-only branch already had. For every `gen` that DOES reach
-   *   this branch with an
-   *   entry present, `gen`'s OWN submission already attempted to backspace away every OLDER still-marked
-   *   contribution, in the SAME ordered pty write, immediately ahead of `gen`'s own text. `gen`'s own
-   *   exact-match confirmation is therefore transitive proof of the WHOLE preceding write chain, not just
-   *   `gen`'s own slice — resolve every entry with generation `<= gen`. A STRICTLY LATER entry (a
-   *   still-unresolved give-up from a generation that hadn't happened yet when `gen` dispatched) reflects
-   *   a chain `gen`'s own clear-prefix never touched — leave it marked.
-   * - `decisive: false` (the FIFO-position fallback below, content-blind): resolves by generation position
-   *   alone, with no verification of what was actually echoed, so it carries none of the transitive proof
-   *   above — the SAME trust level the PRE-EXISTING `composerDirtyLenClearedByGen` gate already accepts
-   *   for a bare Stop hook (not a new gap this fix introduces), but not license to also discharge OTHER
-   *   generations' marks on its say-so. Resolve ONLY `gen`'s own entry.
-   *
-   * If `gen` has no entry at all, the early return below is NOT a mere no-op for an unmatched/stale
-   * generation — for the Enter-only redelivery branch above it is LOAD-BEARING: that branch never sets
-   * `composerBodyWrittenForGen = gen` (contrast the two branches that DO write a fresh body), so a
-   * generation that took it can never acquire an entry here, which is what stops ITS OWN decisive
-   * confirmation from being wrongly read as transitive proof that a clear-prefix it never ran succeeded.
    * ⛔ DO NOT make the Enter-only branch stamp `composerBodyWrittenForGen` as a drive-by — doing so would
    * let that generation acquire an entry and silently turn its own future decisive confirmation into a
    * false-zero machine, discharging earlier generations' marks that its submission never attempted to
    * clear. (Card 2a7f8040.)
+   *
+   * @decision b932558c — a CONFIRMED give-up clears `composerDirtyLen` right where it's proven, not at
+   * some later unrelated submit()'s own confirm.
+   *
+   * @decision a6c1d413 — `decisive` gates how much of `composerDirtyMarkedGens` a confirmation may
+   * resolve: content-match is transitive proof of the whole preceding write chain (`<= gen`), the
+   * FIFO-position fallback resolves only `gen`'s own entry.
    */
   private clearComposerDirtyOnConfirm(sessionId: string, live: Live, gen: number, decisive: boolean): void {
     if (!live.composerDirtyMarkedGens.has(gen)) return;
@@ -9189,12 +9148,11 @@ export class PtyHost {
       }
       if (matches.length > 0) {
         const matchedLogicalIds = [...new Set(matches.map((m) => m.logicalId))];
-        // Card bc0774c4 (see this method's own big doc block, "CARD bc0774c4 — BATCH-PROVENANCE
-        // DISCRIMINATION", for the full reasoning and the rejected age-based tie-break): a content match can
-        // span more than one give-up `batchId` whenever two GENUINELY DISTINCT give-up events happen to
-        // share byte-identical text — resolve ONLY when every match belongs to ONE batch (the coalesced
-        // case, including every single-member batch); a match spanning more than one batch is left
-        // COMPLETELY untouched rather than guessed at.
+        //
+        // @decision bc0774c4 — a content match spanning more than one give-up `batchId` (two genuinely
+        // distinct give-ups sharing byte-identical text) is left COMPLETELY untouched, never guessed at.
+        // Resolve ONLY when every match belongs to ONE batch — the coalesced case, including every
+        // single-member batch (the common, non-coalesced case is itself a trivially-one-member "batch").
         //
         // Card dbc7ffea (Code Review Major 2 fix): checking `batchIds.size` ALONE stopped being sufficient
         // once ONE logicalId could carry MULTIPLE its-own-history batchIds (current + N retired cycles —

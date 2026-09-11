@@ -25,3 +25,20 @@ Inline comment in `packages/daemon/src/pty/host.ts` (the `composerDirtyMarkedGen
 ## Source (2)
 
 Inline comment in `packages/daemon/src/pty/host.ts` (the `UserPromptSubmit` case in `deliverHook`), as of `main` `0cac46b89a9d2ad236117c355fb93d43f4f0f03f` (this tranche's starting HEAD). Extracted by card `7f448888` (tranche 19 on `pty/host.ts`).
+
+## RE-SHAPE: `clearComposerDirtyOnConfirm` only touches `gen`'s own entry (or a proven-earlier chain), never a blind whole-field reset
+
+Card `a6c1d413` RE-SHAPE: `decisive` gates HOW MUCH of the map a given confirmation may resolve.
+
+- `decisive: true` (content-match, card `b932558c`): `gen`'s reported prompt exactly matches `gen`'s own pasted text — only possible if `gen`'s own clear-prefix landed (a botched clear glues stray text onto the paste, so the match never fires — see `3ce3fa39`'s "stray text glued onto a later submit" specimens). `submit()` doesn't always run that clear-prefix — two branches skip it (card `2a7f8040`): Enter-only redelivery (`isGiveUpRedelivery && composerBelievedTrustworthy`, repastes nothing) and plain `composerLen > 0` (raw-terminal typing), even though `composerDirtyLen` can still be `> 0`. Enter-only is harmless only because such a `gen` can never acquire an entry (see the early-return below). `composerLen > 0` used NOT to be protected — it stamped `composerBodyWrittenForGen` unconditionally, so it COULD acquire an entry and be wrongly resolved despite never clearing (pre-existing, not introduced by this re-shape — CLOSED by card `ef78c885`: stamp only when `composerDirtyLen === 0`, giving it the SAME protection Enter-only already had). Every `gen` reaching here WITH an entry already backspaced every OLDER contribution, same ordered write, immediately ahead of its own text — its match is transitive proof of the WHOLE chain, so this branch resolves every entry `<= gen`; a strictly LATER entry (unresolved when `gen` dispatched) stays marked.
+- `decisive: false` (FIFO-position fallback, content-blind): resolves by queue position alone, no verification of what echoed — the SAME trust `composerDirtyLenClearedByGen` accepts for a bare Stop hook, but not license to discharge OTHER generations' marks. Resolves ONLY `gen`'s own entry.
+
+**The early return is load-bearing:** an absent entry for `gen` is LOAD-BEARING for the Enter-only branch — it never stamps `composerBodyWrittenForGen = gen` (unlike the branches that DO write a fresh body), so it can never acquire an entry, stopping its own future decisive confirmation from being wrongly read as proof a clear-prefix it never ran succeeded.
+
+### Do not (3)
+
+- Do not make the Enter-only branch stamp `composerBodyWrittenForGen` as a drive-by (card `2a7f8040`) — that would let it acquire an entry and turn its future confirmation into a false-zero machine, discharging earlier generations' marks it never attempted to clear.
+
+## Source (3)
+
+Inline JSDoc in `packages/daemon/src/pty/host.ts` (`clearComposerDirtyOnConfirm`'s doc, "Card a6c1d413 RE-SHAPE"), commit `e17a8c2af20b2da570967744ef4e5f7f5f020fa0`. Extracted by card `8ebdd7d3` (t45); condensed, not verbatim.
