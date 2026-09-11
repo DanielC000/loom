@@ -860,18 +860,20 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "exposes, so cross-project redaction doesn't apply to them. `opId` is the SAME id `gate_status(opId)` accepts (full or an " +
         "unambiguous 8-char prefix), so you can chain into a live per-op read if you want one. An entry " +
         "belonging to YOUR OWN project ALSO " +
-        "carries {taskId, branch, workerLabel} (\"<agent> · <short task title>\"); an entry from a " +
-        "DIFFERENT project omits those three fields entirely (never redacted-to-null) and instead carries " +
+        "carries {taskId, branch, workerLabel, fallbackOfBatchOpId} (\"<agent> · <short task title>\"); " +
+        "an entry from a " +
+        "DIFFERENT project omits those four fields entirely (never redacted-to-null) and instead carries " +
         "`redacted: true` (card 80d54122) so the omission reads as deliberate rather than an ambiguous " +
-        "gap. Card 1cf0ced1: WHAT IS OMITTED cross-project is EXACTLY {taskId, branch, workerLabel} — " +
+        "gap. Card 1cf0ced1: WHAT IS OMITTED cross-project is EXACTLY {taskId, branch, workerLabel, " +
+        "fallbackOfBatchOpId} — " +
         "everything else in the enumeration above (`opId` in FULL, chainable into `gate_status` same as " +
         "for an own-project entry; `gateType`/`projectId`/`projectName`; the phase-scoped `since`/" +
         "`elapsedMs`/`idleMs`/`extended`/`attempt`/`priorAttemptMs`; `queuePosition`/`repoContended`; and, on its own separate " +
         "has-a-branch condition unrelated to project ownership, `recentTimeoutStreak`) still rides the " +
-        "wire cross-project, un-redacted. That three-field omission — not 'project + gate kind + age', " +
+        "wire cross-project, un-redacted. That four-field omission — not 'project + gate kind + age', " +
         "which undercounted what a foreign entry actually carries — is enough to tell 'someone else " +
         "legitimately holds the slot' apart from 'this looks leaked' without exposing another project's " +
-        "task/branch identity. " +
+        "task/branch identity, or which of its own batch merges a per-branch fallback row descends from. " +
         "`repoContended` (bool, every entry) is `true` ONLY for a QUEUED `merge`-kind entry whose target " +
         "repo is currently held by another RUNNING merge gate (card 92e960d1's per-repo merge-admission " +
         "guard — at most one merge gate per canonical repo runs at once, so two same-repo merges never " +

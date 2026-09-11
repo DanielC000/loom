@@ -715,10 +715,12 @@ what you checked. Found none? Treat it as live.
      exposes a `gate_queue` read tool, call it: ONE read returns the resolved concurrency cap plus every
      `running`/`queued` gate run (merge/deploy/worker self-check alike), so "who holds the slot, how deep is
      the queue, is this normal" is answered directly instead of inferred from how long you've waited. A
-     cross-project entry is deliberately named only by project + gate kind + age (never its task title or
-     branch) — enough to see "a different project legitimately holds this" without leaking that project's
-     internals; it also carries an explicit `redacted: true` (card 80d54122) so that omission reads as
-     deliberate, not as a gap you should chase.
+     cross-project entry deliberately withholds identity — its task, branch, worker label, and any
+     batch-fallback link — while its timing/queue/op-id fields stay visible, enough to see "a different
+     project legitimately holds this slot" without leaking that project's task-level internals; it also
+     carries an explicit `redacted: true` so the omission reads as deliberate, not as a gap you should
+     chase. Don't assume a fixed field list from this description — it drifts; the tool's own description
+     is the contract for exactly what's included and excluded.
    - **Treat "queued"/"running" as a belief, not a fact — a real incident showed the two can diverge.** A
      gate timeout can settle (freeing the slot) without its process tree actually dying, so a fresh op can be
      legitimately admitted (or correctly reported "queued") while an ORPHANED process from an earlier,
