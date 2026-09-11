@@ -2912,18 +2912,21 @@ export interface PtyHostEvents {
   onContextStats(sessionId: string, stats: ContextStats): void;
   /** @decision 343441bd — onTurnCompleted fires once per turn, excluded from the file's other 5
    *  setBusy(false) sites (never-confirmed-started, redirect settle, 2 usage-cap parks) to avoid a false
-   *  staleDirective fire; codex has its own site (@decision 361a5520). See Decision B in
-   *  docs/decisions/343441bd-stale-directive-is-a-pull-signal-not-a-watchdog.md */
+   *  staleDirective fire.
+   *  @decision 361a5520 — codex's own turn-completion chokepoint is armCodexBusyStaleTimer's CASE 2, not
+   *  this hook (onTurnCompleted never fires for a codex session — no hook relay). */
   onTurnCompleted?(sessionId: string): void;
   /** @decision 417cea0a — onGiveUpConfirmed: content-match confirmation only; PtyHost has no DB, so the
    *  implementer (sessions/service.ts) decides "news vs no-op". NEVER fired from the batchIds.size > 1
-   *  branch (@decision bc0774c4 — unresolved by design). See
-   *  docs/decisions/417cea0a-ongiveupconfirmed-defers-news-vs-noop-to-the-db-holding-implementer.md */
+   *  branch.
+   *  @decision bc0774c4 — that branch is left unresolved by design: an ambiguous match spanning more than
+   *  one batchId is never guessed via an age/FIFO tie-break; it resolves later once the competing batch
+   *  settles on its own. */
   onGiveUpConfirmed?(sessionId: string, logicalId: string, latencyMs: number): void;
   /** @decision a8f8a8f2 — onKickoffGiveUpExhausted: PtyHost has no DB/manager access; implementer decides
-   *  park+notify. @decision 00bd3b4a — msgId/rootMsgId let a LATE confirming hook find a "parked" record
-   *  to retract. @decision 7772176d — kickoffText gives it the same cross-turn re-mint an ordinary message
-   *  gets. See docs/decisions/{a8f8a8f2,00bd3b4a,7772176d}-onkickoffgiveupexhausted-*.md */
+   *  park+notify.
+   *  @decision 00bd3b4a — msgId/rootMsgId let a LATE confirming hook find a "parked" record to retract.
+   *  @decision 7772176d — kickoffText gives it the same cross-turn re-mint an ordinary message gets. */
   onKickoffGiveUpExhausted?(sessionId: string, msgId: string, rootMsgId: string, kickoffText: string): void;
   /**
    * §19c: the turn ended in a usage-limit StopFailure. `until` is the ISO resume instant; the
@@ -3294,8 +3297,8 @@ export function buildSpawnArgs(o: {
 export const WINDOWS_COMMAND_LINE_LIMIT = 32766;
 
 /** @decision 9fea4196 — hand-maintained ADAPTATION of node-pty's argv quoting (NOT a byte-for-byte port,
- * NOT imported from node-pty's internal lib/ path); covers only the array-args path, verified against
- * test/node-pty-quoting-parity.mjs. See docs/decisions/9fea4196-*.md. */
+ * NOT imported from node-pty's internal lib/ path); covers only the array-args path, verified byte-
+ * identical to node-pty's own output against test/node-pty-quoting-parity.mjs. */
 export function windowsCommandLine(file: string, args: readonly string[]): string {
   // node-pty's isCommandLine branch (raw string args) is not implemented here — see this function's
   // own doc. A TS type is compile-time only; this function is reachable from compiled JS where the
@@ -3367,8 +3370,8 @@ export function preflightWindowsCommandLine(
  * project override still wins.
  * @decision sha:28985a08 — GIT_PAGER/PAGER/GIT_TERMINAL_PROMPT close the unattended pty pager/auth wedge.
  * @decision sha:6e6399fa — LOOM_WORKTREE is a known-good cwd anchor, not a cwd reset.
- * @decision 5d8888b6 — PYTHONIOENCODING/PYTHONUTF8 force UTF-8 for every child Python interpreter.
- * See docs/decisions/28985a08-*.md, docs/decisions/6e6399fa-*.md, docs/decisions/5d8888b6-*.md. */
+ * @decision 5d8888b6 — PYTHONIOENCODING/PYTHONUTF8 force UTF-8 for every child Python interpreter, told
+ * to every session (not gated behind browserTesting/mcpServers). */
 export function buildSpawnEnv(
   processEnv: Record<string, string | undefined>,
   sessionEnv: Record<string, string>,
@@ -3425,11 +3428,9 @@ export function detectDefaultShell(): string {
   return process.env.SHELL || "/bin/bash";
 }
 
-/** @decision 621ef252 — best-effort reap, at pty `onExit`, of any descendant process a torn-down root
- * escapes node-pty's own containment into (e.g. a backgrounded `pnpm dev` vite server — six stale
- * servers observed live). Enumerates the WHOLE process list (CIM/`ps -eo pid,ppid`) since taskkill /T
- * cannot walk a tree whose root is already dead; tracks `seen` pids to survive a PID-reuse cycle.
- * See docs/decisions/621ef252-*.md. */
+/** @decision 621ef252 — best-effort reap, at pty `onExit`, of any descendant a torn-down root escapes
+ * node-pty's containment into (a backgrounded `pnpm dev` vite server — six stale servers observed live);
+ * enumerates the whole process list (a dead root breaks taskkill /T) with a `seen`-pid guard for reuse. */
 export function reapOrphanedDescendants(rootPid: number): void {
   const sweep = (out: string): void => {
     const byParent = new Map<number, number[]>();
@@ -3553,11 +3554,9 @@ async function enumerateProcessesPosix(_timeoutMs: number): Promise<WorktreeProc
  *  (exported) in sessions/service.ts to sanitize gate output before it's piped through `enqueueStdin`. */
 export const CONTROL_CHAR_RE = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}]`, "g");
 
-/** @decision sha:16b7c38c — THROWS on a malformed CIM payload (never silently drops to `[]`): a real P1
- * had a non-UTF8 console codepage corrupt `ConvertTo-Json`'s own output, breaking JSON.parse for the
- * WHOLE array; enumerateProcessesWin32 now forces UTF8, and any remaining surprise must still not go
- * silent (7 call sites in sessions/service.ts would otherwise no-op indistinguishably from "nothing to
- * kill"). Also strips control chars + a leading BOM. See docs/decisions/16b7c38c-*.md. */
+/** @decision sha:16b7c38c — THROWS on a malformed CIM payload, never silently drops to `[]`: a non-UTF8
+ * console codepage once corrupted ConvertTo-Json's own output mid-array, so the query now forces UTF8 —
+ * any remaining surprise must still throw, or 7 sessions/service.ts call sites no-op as "nothing to kill". */
 export function parseWin32CimStdout(raw: string): WorktreeProcess[] {
   const withoutBom = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
   const sanitized = withoutBom.replace(CONTROL_CHAR_RE, " ");
@@ -3586,10 +3585,8 @@ export function parseWin32CimStdout(raw: string): WorktreeProcess[] {
 const STDERR_TAIL_BYTES = 4096;
 
 /** @decision sha:266afe3f — a `powershell.exe` closing CLEANLY with EMPTY CIM stdout is ALWAYS anomalous
- * (the querying process is always in its own `Get-CimInstance` result set), never a legitimate "nothing
- * running" answer — treated as the `empty-output` failure kind, same severity as a parse error; stderr
- * (previously discarded) is captured and folded into whichever failure fires. See
- * docs/decisions/266afe3f-*.md. */
+ * (the querying process is always in its own result set), never legitimate "nothing running" — same
+ * severity as a parse error; stderr (previously discarded) is now captured and folded into the failure. */
 export function classifyWin32EnumerationClose(stdout: string, stderrTail: string): WorktreeProcess[] {
   const stderrSuffix = stderrTail ? ` — stderr: ${stderrTail}` : "";
   if (!stdout.replace(CONTROL_CHAR_RE, "").trim()) {
@@ -3605,9 +3602,8 @@ export function classifyWin32EnumerationClose(stdout: string, stderrTail: string
 }
 
 /** @decision sha:459e9dab — queries ExecutablePath+CommandLine (never cwd, unavailable via win32 CIM);
- * SELF-BOUNDED (arms its own timer + force-kills its `powershell.exe` child, unlike the outer caller
- * race which only stops the CALLER waiting). UTF8-forced + loud-on-failure per `sha:16b7c38c` /
- * `sha:266afe3f`. See docs/decisions/459e9dab-*.md. */
+ * SELF-BOUNDED — arms its own timer and force-kills its `powershell.exe` child itself, unlike the outer
+ * caller race which only stops the CALLER waiting (UTF8-forced + loud-on-failure per sha:16b7c38c/266afe3f). */
 function enumerateProcessesWin32(timeoutMs: number): Promise<WorktreeProcess[]> {
   return new Promise((resolve, reject) => {
     const cmd = spawnProcess("powershell.exe", [
@@ -4888,7 +4884,6 @@ export class PtyHost {
       // @decision 184fd82e — do not size the per-cwd-lock decision off the ~120s ladder ceiling; measure
       // the real exposure instead. `sameCwdStillCapturing`: other live codex entries sharing this cwd
       // whose OWN id is still unresolved right now — the actual race precondition, not a proxy for it.
-      // See docs/adr/184fd82e-defer-serializing-fresh-codex-spawns-per-cwd.md.
       const sameCwdStillCapturing = Array.from(this.liveCodex.values())
         .filter((other) => other !== live && other.alive && other.cwd === cwd && !other.engineSessionId).length;
       const elapsedMs = Date.now() - live.startedAt;
@@ -5342,8 +5337,8 @@ export class PtyHost {
   }
 
   /** Codex counterpart of `writeStdin`'s raw-keystroke passthrough — no composer-dirty tracking, no busy
-   *  gate; a human must always type regardless of turn state. @decision fd799f0f — do not ASCII-fold this
-   *  write without a fresh owner ask (see docs/decisions/fd799f0f-do-not-ascii-fold-human-keystrokes-in-writestdincodex.md). */
+   *  gate; a human must always type regardless of turn state.
+   *  @decision fd799f0f — do not ASCII-fold this write without a fresh owner ask. */
   private writeStdinCodex(live: CodexLive, data: string): void {
     if (!live.alive || live.killed) return;
     live.pty.write(data);
@@ -8125,13 +8120,9 @@ export class PtyHost {
     // at a number this large (a measured specimen read 88606 with the real composer content unknown either
     // way). See 2960c3bf's record for the specimen and the two still-open candidate causes.
     //
-    // @decision 4796f999 — an Enter-only redelivery is safe ONLY when composerDirtyLenBelieved ===
-    // composerDirtyLen (no OTHER generation's clear is currently unresolved) — an intervening generation's
-    // own unverified clear can otherwise silently fuse or lose a message (two real specimens:
-    // docs/investigations/f779b3da-giveup-redrain-race/findings.md). A gap falls through to the full
-    // clear+repaste branch below, which re-pastes THIS redelivery's own real body (never a foreign one —
-    // see fa27d262 below for why that's still true when several entries coalesce into one batch). This
-    // check's own exposure to an a6c1d413-shaped stale gap is closed — see 4796f999's record.
+    // @decision 4796f999 — Enter-only redelivery is safe ONLY when composerDirtyLenBelieved ===
+    // composerDirtyLen (no OTHER generation's clear unresolved) — a gap can silently fuse or lose a
+    // message, so it falls through to a full clear+repaste of THIS redelivery's own body instead.
     //
     // @decision fa27d262 — `every`, not `some`: ALL of `origin` must already be `giveUpGen`-tagged before
     // trusting Enter-only, or a batch mixing a fresh, never-written neighbour silently loses that
@@ -9561,7 +9552,7 @@ export class PtyHost {
   }
 
   // @decision 0050a17e — kickoff text must never ride spawn argv (Windows CreateProcess's 32766-char
-  // ceiling); deliver post-ready via submit() instead. See docs/adr/0050a17e-deliver-kickoff-prompt-post-ready-not-via-argv.md.
+  // ceiling); deliver post-ready via submit() instead.
   /**
    * KICKOFF DELIVERY (card 0050a17e — formerly a "guarantee" racing the vendor CLI's own auto-submit of a
    * positional prompt; that race no longer exists, since no role's boot ever carries a positional prompt
