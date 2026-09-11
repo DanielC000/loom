@@ -35,32 +35,44 @@
 // USAGE:
 //   node rotation-gate.mjs --active <path-to-post-rotation-active-doc> --archive <path-to-this-rotation's-archive-file>
 //   node rotation-gate.mjs --active <path> --archive <path> --rules <path-to-non-rotating-rules-file>
+//   node rotation-gate.mjs --active <path> --archive <path> --rules <path1> --rules <path2> [--rules <path3> ...]
 //   node rotation-gate.mjs --active <path> --lint
 // --active is always REQUIRED and is read as given — this script never hardcodes a vault path. The doc
 // lives outside this repo, at a location that differs per machine. --archive is REQUIRED unless --lint
 // is passed (see LINT MODE below).
 //
-// --rules <path> (OPTIONAL, card 9a5837b2; extended to the LIVE COMMITMENTS floor by card e312b207): a
-// UNION, not a replacement. A marker is satisfied if it is present in --active, OR — when --rules is
-// supplied — in the --rules file. Omitting --rules leaves behavior byte-identical to before this flag
-// existed: every marker must still be found in --active alone. The union exists because some of the
-// durable-marker content is meant to move OUT of the rotating doc into the non-rotating
-// `Operations/Orchestrator Rules.md`, and the gate must not go blind to a marker the moment it's
-// relocated there — this makes the two landings (script change, vault move) order-independent: the gate
-// passes via --active alone before the move and via --rules after, with no window where a marker that
-// still genuinely exists somewhere durable is treated as missing. A marker absent from BOTH files still
-// fails — this never weakens what "present" means, it only adds a second durable place to look. On
-// success, the script names WHICH file satisfied each marker (see below) so a green never obscures where
-// a rule now actually lives. The SAME union now also governs the LIVE COMMITMENTS section itself (card
-// e312b207): the section is counted wherever its heading is actually found — --active first, --rules
-// only when --active has none — and refused (never a silent pass) if it is in neither file. See
-// `countLiveCommitments` below. A green ALWAYS names which file the count came from now, "(via --active)"
-// as well as "(via --rules)" — never an unlabelled green (code review ruling (i)). And if the heading is
-// found in BOTH files at once (the expected transient shape of a doc mid-migration, where a leftover
-// heading in --active shadows the now-authoritative --rules section — --active still wins by precedence),
-// the script prints a loud "AMBIGUOUS" notice to stderr, unconditionally, on every exit path — this is
-// advisory only and NEVER changes the exit code (a hard failure here was considered and rejected: it would
-// reopen a red window during the migration itself, ruling (iii)).
+// --rules <path> (OPTIONAL, card 9a5837b2; extended to the LIVE COMMITMENTS floor by card e312b207;
+// REPEATABLE by card 115f2ba9): a UNION, not a replacement. A marker is satisfied if it is present in
+// --active, OR in ANY --rules file. --rules may be passed MORE THAN ONCE — every occurrence is UNIONED
+// together (mirroring the server-side `resume_doc_check` MCP tool's own `rulesPaths[]`), never a
+// last-one-wins overwrite: before card 115f2ba9, a repeated --rules silently kept only the LAST file,
+// which could only false-REFUSE (fewer files read can only satisfy fewer markers), never false-green —
+// but its refusal named a marker as missing from "--active or --rules" even when it lived in a file the
+// caller DID pass, which is exactly the diagnostic that steers a reader into writing that marker into the
+// active doc instead — the one edit that disarms a rules-file-only guard. Omitting --rules entirely
+// leaves behavior byte-identical to before this flag existed: every marker must still be found in
+// --active alone. Passing exactly ONE --rules also stays byte-identical to the original single-file
+// behavior (marker/section sources are labeled "rules", not the file's path). Passing TWO OR MORE labels
+// each satisfying source by its OWN path, so a green names exactly which file supplied what. The union
+// exists because some of the durable-marker content is meant to move OUT of the rotating doc into the
+// non-rotating `Operations/Orchestrator Rules.md` (or split across more than one such file), and the gate
+// must not go blind to a marker the moment it's relocated there — this makes the landings (script change,
+// vault move(s)) order-independent: the gate passes via --active alone before the move and via --rules
+// after, with no window where a marker that still genuinely exists somewhere durable is treated as
+// missing. A marker absent from ALL files still fails — this never weakens what "present" means, it only
+// adds more durable places to look. On success, the script names WHICH file satisfied each marker (see
+// below) so a green never obscures where a rule now actually lives. The SAME union now also governs the
+// LIVE COMMITMENTS section itself (card e312b207): the section is counted wherever its heading is
+// actually found — --active first, then each --rules file in the order given — and refused (never a
+// silent pass) if it is in none of them. See `countLiveCommitments` below. A green ALWAYS names which
+// source the count came from now, "(via --active)" / "(via --rules)" (single-file) / "(via <path>)"
+// (multi-file) — never an unlabelled green (code review ruling (i)). And if the heading is found in MORE
+// THAN ONE place at once (the expected transient shape of a doc mid-migration, where a leftover heading in
+// --active shadows the now-authoritative --rules section, or where the section is being split across two
+// rules files — the first-found source still wins by the precedence above), the script prints a loud
+// "AMBIGUOUS" notice to stderr, unconditionally, on every exit path — this is advisory only and NEVER
+// changes the exit code (a hard failure here was considered and rejected: it would reopen a red window
+// during the migration itself, ruling (iii)).
 //
 // LINT MODE (--lint, card 9a5837b2): runs the SAME marker + LIVE COMMITMENTS checks against --active
 // (plus --rules if given) WITHOUT requiring or checking --archive at all. Rotation only happens at a
@@ -150,16 +162,20 @@ const HELP = `rotation-gate.mjs — refuse to promote a resume-doc rotation that
 USAGE:
   node rotation-gate.mjs --active <path-to-post-rotation-active-doc> --archive <path-to-this-rotation's-archive-file>
   node rotation-gate.mjs --active <path> --archive <path> --rules <path-to-non-rotating-rules-file>
-  node rotation-gate.mjs --active <path> --lint [--rules <path>]
+  node rotation-gate.mjs --active <path> --archive <path> --rules <path1> --rules <path2> [--rules <path3> ...]
+  node rotation-gate.mjs --active <path> --lint [--rules <path> ...]
   node rotation-gate.mjs --active <path> [--archive <path> | --lint] --was <bytes>
   node rotation-gate.mjs --active <path> [...] --audit-vault <path-to-Orchestrator-Rules.md>
   node rotation-gate.mjs --help
 
 Exit 0 = rotation/lint may proceed. Exit 1 = refused (see stderr for every failure). Exit 2 = usage error.
 
---rules <path> (OPTIONAL): a marker is satisfied if present in --active OR in --rules (a union, never a
-  replacement — a marker in neither still fails). On success, the script names which file satisfied each
-  marker. Omit it and behavior is byte-identical to a script with no --rules flag at all.
+--rules <path> (OPTIONAL, REPEATABLE): a marker is satisfied if present in --active OR in ANY --rules
+  file (a union, never a replacement — a marker in none of them still fails). --rules may be passed more
+  than once; every occurrence is UNIONED together (never a last-one-wins overwrite). On success, the
+  script names which file satisfied each marker — "rules" when exactly one --rules was given (unchanged
+  from before this flag was repeatable), or that file's own path when two or more were given. Omit it
+  entirely and behavior is byte-identical to a script with no --rules flag at all.
 
 --lint: skip the --archive requirement/check entirely and run only the marker + LIVE COMMITMENTS checks
   against --active (and --rules, if given). For running the gate against the LIVE doc any time, not only
@@ -220,8 +236,11 @@ const HONEST_LIMIT_NOTE =
   "[rotation-gate] limit: every check above is an exact-substring grep — it proves literal text survived, " +
   "not that no meaning was lost to rewording. Treat a green as a candidate set, not a verdict.";
 
+// `rules` accumulates as a LIST (card 115f2ba9) — every --rules occurrence is pushed, never overwritten,
+// so a repeated flag is unioned rather than silently keeping only the last one (see the file header's
+// --rules paragraph for why a last-wins scalar was a real defect here, not just an inconvenience).
 function parseArgs(argv) {
-  const out = { active: null, archive: null, rules: null, was: null, auditVault: null, lint: false, help: false };
+  const out = { active: null, archive: null, rules: [], was: null, auditVault: null, lint: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "-h" || a === "--help") {
@@ -231,7 +250,7 @@ function parseArgs(argv) {
     } else if (a === "--archive") {
       out.archive = argv[++i];
     } else if (a === "--rules") {
-      out.rules = argv[++i];
+      out.rules.push(argv[++i]);
     } else if (a === "--was") {
       out.was = argv[++i];
     } else if (a === "--audit-vault") {
@@ -243,7 +262,7 @@ function parseArgs(argv) {
     } else if (a.startsWith("--archive=")) {
       out.archive = a.slice("--archive=".length);
     } else if (a.startsWith("--rules=")) {
-      out.rules = a.slice("--rules=".length);
+      out.rules.push(a.slice("--rules=".length));
     } else if (a.startsWith("--was=")) {
       out.was = a.slice("--was=".length);
     } else if (a.startsWith("--audit-vault=")) {
@@ -296,19 +315,27 @@ function textIncludes(text, marker) {
   return haystack.includes(needle);
 }
 
-// Returns { missing: Marker[], satisfiedBy: Map<token, "active"|"rules"> }. A marker is satisfied by
-// --active first (checked first so an --active hit is never reported as coming from --rules even if the
-// token also happens to appear there); only if absent from --active AND rulesText is non-null is --rules
-// consulted. A marker absent from BOTH is missing — the union only ever ADDS a place to look, it never
-// removes --active as a valid source.
-function checkMarkers(activeText, rulesText) {
+// Returns { missing: Marker[], satisfiedBy: Map<token, string> }. A marker is satisfied by --active first
+// (checked first so an --active hit is never reported as coming from a --rules file even if the token
+// also happens to appear there); only if absent from --active is `rulesSources` consulted, IN THE ORDER
+// GIVEN — the first source whose text contains the token wins. A marker absent from --active and every
+// entry in `rulesSources` is missing — the union only ever ADDS places to look, it never removes --active
+// as a valid source. `rulesSources` is `{ label, text }[]` (see `readRulesFiles`): empty when no --rules
+// was given at all (byte-identical to the pre-115f2ba9 no-rules behavior), a single `{label:"rules", ...}`
+// entry when exactly one --rules was given (byte-identical to the pre-115f2ba9 single-file behavior —
+// `satisfiedBy` still reports plain "rules"), or one entry per --rules file (each labeled by its own path)
+// when --rules was given more than once (card 115f2ba9 — the fix for the last-wins overwrite bug).
+function checkMarkers(activeText, rulesSources) {
   const missing = [];
   const satisfiedBy = new Map();
   for (const marker of MARKERS) {
     if (textIncludes(activeText, marker)) {
       satisfiedBy.set(marker.token, "active");
-    } else if (rulesText !== null && textIncludes(rulesText, marker)) {
-      satisfiedBy.set(marker.token, "rules");
+      continue;
+    }
+    const hit = rulesSources.find((s) => textIncludes(s.text, marker));
+    if (hit) {
+      satisfiedBy.set(marker.token, hit.label);
     } else {
       missing.push(marker);
     }
@@ -382,25 +409,54 @@ function countLiveCommitmentsIn(text) {
   return { count: matches ? matches.length : 0, diagnostic: `measured from ${startDesc} to ${endDesc}` };
 }
 
-// UNION over --active and --rules — mirrors `checkMarkers`'s own precedence: --active is
-// tried FIRST, --rules only when --active carries no LIVE COMMITMENTS heading at all.
-// `source` names which file the count came from ("active"|"rules"|null) so a green
-// never obscures where the section now actually lives — mirroring `satisfiedBy` for markers.
+// UNION over --active and every `rulesSources` entry — mirrors `checkMarkers`'s own precedence: --active
+// is tried FIRST, then each rules source IN THE ORDER GIVEN, only when --active carries no LIVE
+// COMMITMENTS heading at all. `source` names which source the count came from ("active", "rules" for the
+// single-file case, or a file's own path for the multi-file case — see `checkMarkers`) so a green never
+// obscures where the section now actually lives — mirroring `satisfiedBy` for markers.
+//
+// Two ambiguity shapes, kept SEPARATE so the exactly-one-extra-file case stays byte-identical to before
+// card 115f2ba9 (`otherCount`/`otherDiagnostic`, singular): `others` (plural, an array) appears instead
+// only when the heading is found in more than one place BESIDES the winner — i.e. genuinely two or more
+// --rules files were given and more than one candidate exists.
 //
 // @decision e312b207 — fail CLOSED (never a vacuous "0 items" green) when the
-// heading is in neither file; surface an active/rules ambiguity as a loud
-// non-gating notice, never a hard failure (would reopen a migration red window).
-function countLiveCommitments(activeText, rulesText) {
+// heading is in none of the sources; surface an ambiguity as a loud non-gating
+// notice, never a hard failure (would reopen a migration red window).
+function countLiveCommitments(activeText, rulesSources) {
   const inActive = countLiveCommitmentsIn(activeText);
-  const inRules = rulesText !== null ? countLiveCommitmentsIn(rulesText) : null;
+  const inRules = rulesSources
+    .map((s) => ({ label: s.label, result: countLiveCommitmentsIn(s.text) }))
+    .filter((s) => s.result.count !== null);
+  const singleRulesFile = rulesSources.length === 1;
+
   if (inActive.count !== null) {
-    if (inRules !== null && inRules.count !== null) {
-      return { count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: true, otherCount: inRules.count, otherDiagnostic: inRules.diagnostic };
+    if (inRules.length === 1 && singleRulesFile) {
+      // Byte-identical to the pre-115f2ba9 single-file shape.
+      return { count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: true, otherCount: inRules[0].result.count, otherDiagnostic: inRules[0].result.diagnostic };
+    }
+    if (inRules.length > 0) {
+      return {
+        count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: true,
+        others: inRules.map((s) => ({ source: s.label, count: s.result.count, diagnostic: s.result.diagnostic })),
+      };
     }
     return { count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: false, otherCount: null, otherDiagnostic: null };
   }
-  if (inRules !== null && inRules.count !== null) {
-    return { count: inRules.count, diagnostic: `${inRules.diagnostic} (in --rules)`, source: "rules", ambiguous: false, otherCount: null, otherDiagnostic: null };
+  if (inRules.length > 0) {
+    const [first, ...rest] = inRules;
+    if (singleRulesFile) {
+      // Byte-identical to the pre-115f2ba9 single-file shape.
+      return { count: first.result.count, diagnostic: `${first.result.diagnostic} (in --rules)`, source: "rules", ambiguous: false, otherCount: null, otherDiagnostic: null };
+    }
+    return {
+      count: first.result.count,
+      diagnostic: `${first.result.diagnostic} (in ${first.label})`,
+      source: first.label,
+      ...(rest.length > 0
+        ? { ambiguous: true, others: rest.map((s) => ({ source: s.label, count: s.result.count, diagnostic: s.result.diagnostic })) }
+        : { ambiguous: false, otherCount: null, otherDiagnostic: null }),
+    };
   }
   return {
     count: null,
@@ -409,9 +465,11 @@ function countLiveCommitments(activeText, rulesText) {
     otherCount: null,
     otherDiagnostic: null,
     diagnostic:
-      rulesText !== null
-        ? "no heading line matching /^#{1,6}\\s.*live commitments/i found in --active or --rules"
-        : "no heading line matching /^#{1,6}\\s.*live commitments/i found anywhere in --active",
+      rulesSources.length === 0
+        ? "no heading line matching /^#{1,6}\\s.*live commitments/i found anywhere in --active"
+        : singleRulesFile
+          ? "no heading line matching /^#{1,6}\\s.*live commitments/i found in --active or --rules"
+          : "no heading line matching /^#{1,6}\\s.*live commitments/i found in --active or any supplied --rules file",
   };
 }
 
@@ -487,16 +545,34 @@ function readRequiredFile(flagName, filePath) {
   }
 }
 
-// --rules is OPTIONAL: null (not provided) is a valid, distinct state from "provided but unreadable"
-// (a real error, exit 1) — unlike readRequiredFile, an absent path here is never a usage error.
-function readOptionalFile(flagName, filePath) {
-  if (!filePath) return null;
-  try {
-    return fs.readFileSync(filePath, "utf8");
-  } catch (err) {
-    console.error(`[rotation-gate] cannot read --${flagName} ${filePath}: ${err.message}`);
-    process.exit(1);
+// --rules is OPTIONAL and REPEATABLE (card 115f2ba9): `rulesPaths` is `[]` when never given (a valid,
+// distinct state from "provided but unreadable" — a real error, exit 1 — same as readRequiredFile below).
+// Returns `{ label, text }[]`, one entry per DISTINCT path (a literal duplicate --rules <same-path> is
+// deduped by exact string so a caller repeating itself never manufactures a false "found in two places"
+// ambiguity) — labeled "rules" when there is exactly one distinct path (byte-identical to the pre-115f2ba9
+// single-file behavior), or that path itself when there are two or more (so a green names exactly which
+// file satisfied what). An unreadable path is a real error (exit 1), reported against the FIRST such path
+// encountered, in argument order — mirrors the pre-115f2ba9 single-file error message exactly.
+function readRulesFiles(rulesPaths) {
+  const distinct = [];
+  const seen = new Set();
+  for (const p of rulesPaths) {
+    if (!p) continue; // "--rules" given with no following value — silently ignored, as before this card.
+    if (seen.has(p)) continue;
+    seen.add(p);
+    distinct.push(p);
   }
+  const multi = distinct.length > 1;
+  return distinct.map((p) => {
+    let text;
+    try {
+      text = fs.readFileSync(p, "utf8");
+    } catch (err) {
+      console.error(`[rotation-gate] cannot read --rules ${p}: ${err.message}`);
+      process.exit(1);
+    }
+    return { label: multi ? p : "rules", text };
+  });
 }
 
 function main() {
@@ -516,7 +592,7 @@ function main() {
   const wasBytes = args.was !== null ? parseWasBytes(args.was) : null;
 
   const activeText = readRequiredFile("active", args.active);
-  const rulesText = readOptionalFile("rules", args.rules);
+  const rulesSources = readRulesFiles(args.rules);
 
   let archiveStat = null;
   const archiveFailures = [];
@@ -535,21 +611,36 @@ function main() {
     }
   }
 
-  const { missing, satisfiedBy } = checkMarkers(activeText, rulesText);
-  const live = countLiveCommitments(activeText, rulesText);
+  const { missing, satisfiedBy } = checkMarkers(activeText, rulesSources);
+  const live = countLiveCommitments(activeText, rulesSources);
 
   // AMBIGUITY notice (code review, card e312b207, product ruling (i)+(ii) — NOT (iii), a hard failure is
-  // explicitly rejected): printed UNCONDITIONALLY and IMMEDIATELY, before either the failure or success
-  // path decides anything, so it can never be swallowed by whichever branch runs next — a doc in this
-  // shape must never green (or refuse) silently. See countLiveCommitments's own comment for the mechanism.
+  // explicitly rejected; generalized to N rules files by card 115f2ba9): printed UNCONDITIONALLY and
+  // IMMEDIATELY, before either the failure or success path decides anything, so it can never be swallowed
+  // by whichever branch runs next — a doc in this shape must never green (or refuse) silently. See
+  // countLiveCommitments's own comment for the mechanism and for why the single-extra-file shape
+  // (`others` absent) stays worded exactly as it did before this card.
   if (live.ambiguous) {
-    console.error(
-      `[rotation-gate] ⚠️ AMBIGUOUS: LIVE COMMITMENTS heading found in BOTH --active (${live.count} item(s)) ` +
-        `and --rules (${live.otherCount} item(s)) — --active wins by precedence and --rules was NOT used ` +
-        `for this result. This is the expected transient residue of a doc mid-migration into --rules (e.g. ` +
-        `a leftover heading where only a plain prose pointer should remain) — it should be resolved (trim ` +
-        `--active's heading section down to prose), not left standing.`
-    );
+    if (live.others) {
+      const winnerLabel = live.source === "active" ? "--active" : live.source;
+      console.error(
+        `[rotation-gate] ⚠️ AMBIGUOUS: LIVE COMMITMENTS heading found in MULTIPLE places — the winner is ` +
+          `${winnerLabel} (${live.count} item(s)); also found in: ` +
+          `${live.others.map((o) => `${o.source === "active" ? "--active" : o.source} (${o.count} item(s))`).join(", ")}. ` +
+          `The winner's count is what this result uses (see countLiveCommitments) — the others were NOT ` +
+          `used. This is the expected transient residue of a doc mid-migration between rules files (e.g. a ` +
+          `leftover heading where only a plain prose pointer should remain) — it should be resolved, not ` +
+          `left standing.`
+      );
+    } else {
+      console.error(
+        `[rotation-gate] ⚠️ AMBIGUOUS: LIVE COMMITMENTS heading found in BOTH --active (${live.count} item(s)) ` +
+          `and --rules (${live.otherCount} item(s)) — --active wins by precedence and --rules was NOT used ` +
+          `for this result. This is the expected transient residue of a doc mid-migration into --rules (e.g. ` +
+          `a leftover heading where only a plain prose pointer should remain) — it should be resolved (trim ` +
+          `--active's heading section down to prose), not left standing.`
+      );
+    }
   }
 
   // The byte check reads --active's REAL on-disk byte count (fs.statSync, not a decoded-string length)
@@ -619,7 +710,12 @@ function main() {
     failures.push(vaultAuditLine.replace(/^\[rotation-gate\] vault audit: /, "vault audit: "));
   }
   if (missing.length > 0) {
-    const source = rulesText !== null ? "--active or --rules" : "--active";
+    const source =
+      rulesSources.length === 0
+        ? "--active"
+        : rulesSources.length === 1
+          ? "--active or --rules"
+          : "--active or any supplied --rules file";
     failures.push(
       `missing ${missing.length}/${MARKERS.length} marker(s) from ${source}: ${missing.map((m) => m.token).join(", ")}`
     );
@@ -627,8 +723,9 @@ function main() {
   if (live.count === null) {
     failures.push(`could not locate the LIVE COMMITMENTS section (heading missing) — cannot verify its item count (${live.diagnostic})`);
   } else if (live.count < LIVE_COMMITMENTS_FLOOR) {
+    const liveFailSource = live.source === "active" ? "--active" : live.source === "rules" ? "--rules" : live.source;
     failures.push(
-      `LIVE COMMITMENTS section in ${live.source === "rules" ? "--rules" : "--active"} holds ${live.count} numbered item(s), fewer than the required floor of ${LIVE_COMMITMENTS_FLOOR} (${live.diagnostic})`
+      `LIVE COMMITMENTS section in ${liveFailSource} holds ${live.count} numbered item(s), fewer than the required floor of ${LIVE_COMMITMENTS_FLOOR} (${live.diagnostic})`
     );
   }
 
@@ -648,7 +745,8 @@ function main() {
   // the count came from the doc still being edited or a rules-file fallback nobody would otherwise notice
   // was even consulted. `live.source` is guaranteed non-null on every path that reaches this line (a null
   // source only ever accompanies `live.count === null`, which took the `failures` branch above instead).
-  const liveSourceSuffix = ` (via --${live.source})`;
+  const liveSourceLabel = live.source === "active" ? "--active" : live.source === "rules" ? "--rules" : live.source;
+  const liveSourceSuffix = ` (via ${liveSourceLabel})`;
   if (args.lint) {
     console.log(
       `[rotation-gate] LINT OK — ${args.active} carries all ${MARKERS.length} markers and ${live.count} ` +
@@ -661,10 +759,11 @@ function main() {
         `(${archiveStat.size} bytes). Rotation may proceed.`
     );
   }
-  if (rulesText !== null) {
-    const fromRules = MARKERS.filter((m) => satisfiedBy.get(m.token) === "rules");
+  if (rulesSources.length > 0) {
+    const fromRules = MARKERS.filter((m) => satisfiedBy.get(m.token) !== "active");
     if (fromRules.length > 0) {
-      console.log(`[rotation-gate] ${fromRules.length}/${MARKERS.length} marker(s) satisfied via --rules (absent from --active): ${fromRules.map((m) => m.token).join(", ")}`);
+      const label = rulesSources.length === 1 ? "--rules" : "a --rules file";
+      console.log(`[rotation-gate] ${fromRules.length}/${MARKERS.length} marker(s) satisfied via ${label} (absent from --active): ${fromRules.map((m) => m.token).join(", ")}`);
     } else {
       console.log(`[rotation-gate] all ${MARKERS.length} markers satisfied via --active alone (--rules supplied but not needed)`);
     }
