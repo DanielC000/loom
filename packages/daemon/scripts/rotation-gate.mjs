@@ -337,15 +337,8 @@ function headingLevel(line) {
 // Finds the first line at or after `fromIndex` that is a markdown heading whose LEVEL is <= `maxLevel` —
 // i.e. a SIBLING or ANCESTOR section boundary of a heading at `maxLevel`. Returns the line index, or -1.
 //
-// Deliberately structural: this depends only on heading DEPTH, never on any heading's NAME/text. Card
-// `a681aed5` (2026-09-02): the prior version of `countLiveCommitments` closed the LIVE COMMITMENTS
-// section by searching for a heading containing the literal string "my-peer-send-ledger" — a NAME anchor,
-// independent of the MARKERS array, that a later vault edit (retiring that exact heading) silently broke
-// (falling back to end-of-file — safe that day only because nothing else in the doc held a numbered list
-// below the section, but a fail-OPEN exposure: any future numbered list added below LIVE COMMITMENTS
-// would silently inflate the count instead of ever being caught — see the file header). Re-pointing the
-// search at a DIFFERENT specific heading name would only relocate the same defect to a new string the
-// next rewrite is free to delete; the fix instead drops the dependence on a name entirely.
+// @decision a681aed5 — this boundary MUST stay keyed to heading DEPTH, never a
+// heading's NAME — a name-anchored search fails OPEN (silently) on rename.
 //
 // "Same level or shallower," not "any heading" and not "the immediate next `##`": a deeper heading
 // (e.g. a `###` sub-note nested INSIDE the commitments list, should one ever be added) must not
@@ -368,14 +361,9 @@ function findSectionBoundary(lines, fromIndex, maxLevel) {
 // reading this script's source (card d78a6d5d DoD-3). Single-file only — see `countLiveCommitments` below
 // for the --active/--rules union built on top of this.
 //
-// The START boundary is anchored to a markdown HEADING LINE, never a bare substring search — card
-// d78a6d5d: the prior version used plain case-insensitive `indexOf` on the raw text, so a PROSE mention
-// of the boundary token anywhere above its real heading (e.g. a doc's own header block documenting this
-// gate's contract in these exact words) silently redefined the measured span, producing a
-// maximally-alarming false "0 numbered item(s), expected 14" on a perfectly correct document. Anchoring
-// to a heading line makes a prose mention inert: it is never itself a heading line, so it can never open
-// the section. The END boundary is anchored the same way, structurally, by heading DEPTH rather than by a
-// second boundary token's name — see findSectionBoundary's own comment (card a681aed5).
+// @decision d78a6d5d — the START boundary must anchor on a heading LINE, never a
+// bare substring search — a prose mention of the token elsewhere must stay inert.
+// The END boundary anchors the same way, by heading DEPTH (see a681aed5 above).
 function countLiveCommitmentsIn(text) {
   const lines = text.split(/\r\n|\r|\n/);
   const startLine = findHeadingLine(lines, "live commitments", 0);
@@ -394,28 +382,14 @@ function countLiveCommitmentsIn(text) {
   return { count: matches ? matches.length : 0, diagnostic: `measured from ${startDesc} to ${endDesc}` };
 }
 
-// UNION over --active and --rules (card e312b207) — mirrors `checkMarkers`'s own precedence exactly:
-// --active is tried FIRST, so a section still in place there is measured byte-identically to before this
-// card (DoD-4); --rules is consulted ONLY when --active carries no LIVE COMMITMENTS heading at all. This
-// makes the two landings (this guard shipping the union, the vault lead moving the section into the
-// rules file) order-independent, the same red-window-free reason the marker union exists (see the file
-// header). `source` names which file the count came from ("active"|"rules"|null) so a green never
-// obscures where the section now actually lives — mirroring `satisfiedBy` for markers.
+// UNION over --active and --rules — mirrors `checkMarkers`'s own precedence: --active is
+// tried FIRST, --rules only when --active carries no LIVE COMMITMENTS heading at all.
+// `source` names which file the count came from ("active"|"rules"|null) so a green
+// never obscures where the section now actually lives — mirroring `satisfiedBy` for markers.
 //
-// FAIL-CLOSED (DoD-3): `count: null, source: null` when the heading is in NEITHER file — this is the
-// catastrophic "the block was lost" case and must never be read as "0 items, nothing to check, green".
-// The caller (main, below) treats a null count as "could not locate the section," a hard failure, exactly
-// as it always has for the single-file case — the union only widens WHERE a hit can come from, it never
-// changes what happens when there is no hit at all.
-//
-// AMBIGUITY (code review, card e312b207): `findHeadingLine` matches ANY heading containing "live
-// commitments", so a post-move breadcrumb left in --active — e.g. "## §LIVE COMMITMENTS — moved to
-// Operations/Orchestrator Rules.md" — still counts as "found in --active" and SHADOWS the now-
-// authoritative --rules section (--active wins by precedence; --rules is never even read for the count).
-// A doc in that shape can exit 0 while the real, current block goes unmeasured. This function does not
-// change WHICH count wins (hard-failing "found in both" would reopen a red window during the migration,
-// and is a deliberate non-goal) — it makes the shape VISIBLE via `ambiguous`/`otherCount`/`otherDiagnostic`
-// so `main` (below) can print a loud, non-gating notice instead of a silent green.
+// @decision e312b207 — fail CLOSED (never a vacuous "0 items" green) when the
+// heading is in neither file; surface an active/rules ambiguity as a loud
+// non-gating notice, never a hard failure (would reopen a migration red window).
 function countLiveCommitments(activeText, rulesText) {
   const inActive = countLiveCommitmentsIn(activeText);
   const inRules = rulesText !== null ? countLiveCommitmentsIn(rulesText) : null;
@@ -441,15 +415,16 @@ function countLiveCommitments(activeText, rulesText) {
   };
 }
 
-// Card d8062fbb — the drift DETECTOR for this file's own MARKERS/LIVE_COMMITMENTS_FLOOR copy: not a new
-// source of truth (see the file header's DECISION note for why runtime-authoritative parsing was
-// rejected), just a check of the existing hardcoded copy against the vault section it was copied from.
+// The drift DETECTOR for this file's own MARKERS/LIVE_COMMITMENTS_FLOOR copy — not a
+// new source of truth, just a check of the existing hardcoded copy against the vault
+// section it was copied from. Locates a real markdown heading line containing
+// "rotation-gate" (case-insensitive; a prose mention that isn't itself a heading line
+// is inert) and measures the text strictly between it and the next heading at the
+// same level or shallower (or EOF).
 //
-// Reuses the SAME structural (heading-depth, never name) boundary functions already proven for
-// countLiveCommitments — locates the vault's §ROTATION-GATE heading (a real markdown heading line
-// containing "rotation-gate", case-insensitive; a prose mention that isn't itself a heading line is
-// inert, exactly like every other heading anchor in this file) and measures the text strictly between it
-// and the next heading at the same level or shallower (or EOF).
+// @decision d8062fbb — this boundary stays keyed to heading DEPTH, never a name;
+// this audit is never the primary gate's source of truth, only a drift check on
+// the hardcoded copy (see the file header's DECISION note).
 //
 // Returns:
 //   sectionFound  — false only when no such heading line exists anywhere in vaultText.

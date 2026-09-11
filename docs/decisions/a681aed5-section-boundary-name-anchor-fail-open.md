@@ -6,6 +6,8 @@
 
 `rotation-check.ts` is a fresh TypeScript port of the same algorithm (card 1069c8e1) and does not automatically inherit any bug the script already fixed, so this port carries a regression test proving it reproduces the fix, not the bug. `findSectionBoundary` (in `rotation-check.ts`) anchors the section's end STRUCTURALLY by markdown heading DEPTH instead: the first line at or after the section start whose heading level is <= the section heading's own level ends the section, regardless of that heading's name or wording. A deeper heading (e.g. a sub-note nested inside the section) does not prematurely end it; a shallower or same-level heading ends it even if its name has changed. "Same level or shallower" is what gets both cases right.
 
+Re-pointing the original search at a DIFFERENT specific heading name (a patch that keeps the name-based approach but updates the literal string) was rejected as insufficient: it would only relocate the same defect to a new string the next rewrite is just as free to delete or rename. The fix instead drops the dependence on any heading NAME entirely, rather than choosing a better one.
+
 ## Do not
 
 - Do not anchor a section boundary on a heading's NAME/text — a rename silently reopens the fail-open behavior this fix closes.
