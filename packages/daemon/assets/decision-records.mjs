@@ -35,18 +35,12 @@
 // On a hit, writes a JSON object to stdout carrying the record via PostToolUse
 // `hookSpecificOutput.additionalContext` ONLY. This hook never blocks or denies a `Read`.
 //
-// FIELD DETERMINATION (card da723d41, 2026-09-09) — do not reintroduce a `systemMessage` copy: a prior
-// version of this script emitted the record via BOTH `systemMessage` and `hookSpecificOutput.
-// additionalContext`, "whichever the running Claude honors" — pure hedging, never actually checked. It
-// was checked here, empirically: a real `claude` process, wired via a scratch `.claude/settings.json`
-// PostToolUse hook to a synthetic script emitting distinct marker strings in each field, was asked to
-// read a file and report verbatim any hook text it saw in its own context. Across three trials (both
-// fields set, the two field values SWAPPED to rule out a labeling/ordering artifact, and `systemMessage`
-// set ALONE with no `additionalContext`) the model's context carried the `additionalContext` value every
-// time and NEVER the `systemMessage` value — including the isolation trial, where `systemMessage` alone
-// produced zero injected text. `systemMessage` is a UI-only field (a warning surfaced to the human at the
-// terminal); it never reaches the model. Emitting both cost 100% overhead on every injection for a field
-// the model never sees.
+// FIELD DETERMINATION: emit the record via `hookSpecificOutput.additionalContext` ONLY. `systemMessage`
+// is a UI-only field (a warning surfaced to the human at the terminal) and never reaches the model.
+//
+// @decision da723d41 — do not reintroduce a `systemMessage` copy: 3 controlled trials against a real
+// claude process (fields swapped, then systemMessage alone) found additionalContext delivered every
+// time and systemMessage never — emitting both is unchecked hedging, 100% overhead for nothing.
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
@@ -107,14 +101,17 @@ function verifyCommitSha(repoRoot, sha) {
 // its existing convention nests each report under its own `<id>-<slug>/` directory (see any
 // docs/investigations/*/findings.md), not a flat file.
 const FLAT_STORES = ["adr", "decisions"];
-// A single oversized record is truncated WITH an explicit signal, never silently. Raised from 4000 to
-// 6000 (card da723d41, 2026-09-09): the three largest records in this repo's docs/adr at the time (4,515 /
-// 4,475 / 4,017 bytes) all exceeded the old 4000 cap and were silently truncating on every injection —
-// 6000 clears the whole then-current set with headroom. Record authors: if a NEW record in docs/adr or
-// docs/decisions exceeds this cap, it will be truncated (head+tail kept, an explicit marker names the cut
-// and the full path to read directly) — this is a real, load-bearing limit, not just an implementation
-// detail; keep records under it, or accept the truncation and expect it may be re-raised. See CLAUDE.md's
-// "Comment taxonomy — the source-vs-record split" for the docs/adr and docs/decisions convention.
+// A single oversized record is truncated WITH an explicit signal, never silently.
+//
+// @decision da723d41 — raised 4000→6000: the three largest docs/adr records (4,515/4,475/4,017 bytes)
+// were silently truncating on every injection under the old 4000 cap; 6000 cleared that whole
+// then-current set, with headroom.
+//
+// Record authors: if a NEW record in docs/adr or docs/decisions exceeds this cap, it will be truncated
+// (head+tail kept, an explicit marker names the cut and the full path to read directly) — this is a real,
+// load-bearing limit, not just an implementation detail; keep records under it, or accept the truncation
+// and expect it may be re-raised. See CLAUDE.md's "Comment taxonomy — the source-vs-record split" for the
+// docs/adr and docs/decisions convention.
 // Exported (card d0d0401b): comment-anchor-lint.mjs imports this so its over-cap census reads the SAME
 // constant this injector actually truncates against — one source of truth, so raising the cap here can
 // never leave that lint silently checking a stale number. Safe to import despite the "assets are
