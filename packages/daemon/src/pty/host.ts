@@ -732,8 +732,6 @@ const RESUME_GATE_MAX_POLLS = Number(process.env.LOOM_RESUME_GATE_MAX_POLLS) || 
  * Recompute the human's RAW-terminal composer draft length from ONE input chunk, given the prior
  * length. PURE + exported for the hermetic test. "Composer-dirty" is simply `len > 0`; while dirty,
  * a programmatic turn is HELD (never delivered onto the half-typed text) — see deferForHumanDraft.
- * We track LENGTH, not a bool, only so a human who BACKSPACES the whole line back to empty also
- * releases the hold (a bare bool couldn't tell that from a still-dirty box).
  *
  * Classification of the chunk:
  *  - A LONE Esc (\x1b) dismisses/clears the box → 0.
@@ -741,9 +739,7 @@ const RESUME_GATE_MAX_POLLS = Number(process.env.LOOM_RESUME_GATE_MAX_POLLS) || 
  *    bracketed-paste span:
  *      - A BARE box-FREEING control encountered OUTSIDE a paste span — Enter (\r/\n), Ctrl-C (\x03),
  *        or kill-line (Ctrl-U \x15) — means the human submitted/interrupted/killed the line → 0.
- *        (We can't whole-chunk short-circuit on these: a MULTI-LINE paste body carries \r/\n that is
- *        draft CONTENT, not a free — that would wrongly zero a held paste and let a queued turn drain
- *        onto it.) Inside a span, \r/\n is counted as one draft char.
+ *        Inside a span, \r/\n is counted as one draft char.
  *      - backspace/DEL (\x7f/\b) decrements (floored at 0).
  *      - printable chars (>= 0x20) increment.
  *      - an escape sequence (arrow keys / navigation / the bracketed-paste markers) is skipped to its
@@ -752,6 +748,10 @@ const RESUME_GATE_MAX_POLLS = Number(process.env.LOOM_RESUME_GATE_MAX_POLLS) || 
  *
  * Best-effort BY DESIGN — it can't perfectly mirror Claude's Ink editor (e.g. cursor-mid-line edits),
  * but it only ever errs toward HOLDING a delivery, never toward clobbering the human's text.
+ *
+ * @decision sha:c1d71ff2 — LENGTH not a bool (a full backspace-to-empty must still release the hold),
+ * and never a whole-chunk short-circuit on a freeing control (a paste's own \r/\n is draft content,
+ * not a free).
  */
 export function nextComposerLen(prevLen: number, data: string): number {
   if (data === ESC_KEY) return 0;                 // a lone Esc dismisses/clears the box
