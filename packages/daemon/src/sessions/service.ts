@@ -14025,33 +14025,11 @@ export class SessionService {
     // `1c51de69` extracted the expression to `buildBatchDedupeKey`, below — see ITS doc for the full
     // rationale, not duplicated here).
     const batchKey = buildBatchDedupeKey(this.db, managerSessionId, chosen);
-    // VERDICT IDENTITY (Code Review, card cf803152 — a REPRODUCED regression in this card's first attempt:
-    // `retainVerdictUntilSuperseded` with no `verdictIdentity` made a rejected batch's cached verdict
-    // IMMORTAL — both workers could commit the actual fix and a re-fire with the same resolved candidate
-    // set still replayed the stale rejection forever, because `batchKey` is manager+workerSessionIds only,
-    // never branch content, and `verdictIdentity` mismatch is the ONLY non-`bypassRetained` route to a
-    // fresh mint under an existing key. Mirrors confirmWorkerMergeTracked's own `verdictIdentity` exactly
-    // (this file, below, on the solo merge key) — resolved BEFORE the dedupe decision, from EVERY chosen
-    // candidate's CURRENT branch HEAD (sorted so identical content in a different `chosen` order still
-    // matches), so a re-fire after ANY of them moves (a worker pushes the actual fix; a candidate's branch
-    // is later deleted post-landing) is gated FOR REAL instead of replayed. Fail-safe to `undefined` on ANY
-    // resolution issue (a candidate's branch gone, a git error/timeout) — `undefined` never dedupe-hits
-    // against a cached entry that itself carries a real identity (see attach()'s exact-match rule), so an
-    // unresolvable identity here means "don't trust the cache," never "trust it anyway," same fail-safe
-    // direction the solo path's own doc states.
-    // ALREADY-FINISHED SHORT-CIRCUIT FOR THE WHOLE BATCH (Code Review, card cf803152 — the PRACTICAL gap
-    // an initial "no `identityOptional` mirror" draft of this comment got wrong, caught by this card's own
-    // added test: a successful batch landing deletes EVERY landed candidate's branch, via the SAME
-    // `finishAlreadyMerged`/`finalizeMerge` the solo path already has to handle — so a recovery re-call
-    // made right after a batch actually LANDS would, absent this check, resolve every branch as gone,
-    // compute `verdictIdentity: undefined`, mismatch the cached (real) identity, and re-mint — defeating
-    // this whole card's recoverability goal for the single most common real-world case, a batch that
-    // landed. Mirrors the solo path's OWN two-part `alreadyFinished` formula EXACTLY (worktree gone OR task
-    // already terminal — see that method's own doc for why either alone is insufficient), generalized from
-    // one worker to the WHOLE `chosen` set: true only when EVERY candidate independently satisfies it — a
-    // MIXED batch (one candidate finished, another still genuinely live) still requires a real identity
-    // match, since only a WHOLLY finished batch is safe to assume "this exact question was already
-    // answered."
+    //
+    // @decision cf803152 — `verdictIdentity` (sorted candidate branch HEADs, fail-safe to `undefined`) is
+    //  required to avoid an immortal cached rejection; `batchAlreadyFinished` short-circuits only when
+    //  EVERY candidate is finished, never a mixed batch.
+    //
     const batchAlreadyFinished = chosen.every((c) => {
       const worker = this.db.getSession(c.workerSessionId);
       const worktreeGone = !(worker?.worktreePath ?? worker?.cwd) || !fs.existsSync((worker.worktreePath ?? worker.cwd)!);
@@ -14075,21 +14053,11 @@ export class SessionService {
         if (allResolved) verdictIdentity = heads.slice().sort().join(",");
       } catch { /* fail-safe: undefined identity never dedupe-hits, see doc above */ }
     }
-    // DEFERRED SETTLE (card 81d795de — fixes `gate_status(opId)` reading "settled" while the batch is
-    // still finalizing, confirmed at source: `runGate` below used to call `settlePendingGateOp` itself,
-    // which resolved BEFORE `runBatchedMerge`'s own fast-forward onto canonical main even began, let
-    // alone this method's own post-fast-forward per-branch `finishAlreadyMerged` finalize below). The
-    // SOLO path (`confirmWorkerMergeTracked`) never has this problem: it passes `onOpMinted`/`onSettle`
-    // to `pendingOps.attach` itself, so the durable tombstone settles in lockstep with the WHOLE
-    // operation (via `run()`'s own settle), never with an inner sub-step. This batch path is the one
-    // outlier that mint+settled the tombstone by hand, from inside a nested closure invoked partway
-    // through `run()` — so `gate_status(opId)` could read "settled" the instant the gate itself finished,
-    // while canonical main had not yet moved and no branch had been finalized. Fixed the SAME way the solo
-    // path already works: `runGate` below still computes the verdict at the same point it always did
-    // (mint timing is UNCHANGED — see `insertPendingGateOp`'s own comment for why it must stay late), but
-    // only STORES it here; the actual `settlePendingGateOp` write is deferred to the `onSettle` opts hook
-    // below, which `pendingOps.attach` fires only once `run()` — this whole batch, fast-forward and
-    // finalize included — has genuinely settled.
+    //
+    // @decision 81d795de — the tombstone WRITE (not the verdict compute) is deferred to `onSettle`; unlike
+    //  the solo path, which passes `onOpMinted`/`onSettle` to `attach()` itself, this batch path mint+
+    //  settles by hand from a nested closure, which is why the write had to move.
+    //
     let batchGateVerdict: { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } | undefined;
     return this.pendingOps.attach<MergeBatchResult>(
       batchKey, "merge", managerSessionId, this.syncAttachBudgetMs,

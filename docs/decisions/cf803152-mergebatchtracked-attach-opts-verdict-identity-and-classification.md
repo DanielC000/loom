@@ -33,3 +33,38 @@ inventing a parallel shape.
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts`, `mergeBatchTracked`'s own JSDoc header, as of this tranche's HEAD.
+
+## `verdictIdentity` and the whole-batch `alreadyFinished` short-circuit — the mechanism itself
+
+VERDICT IDENTITY: a REPRODUCED regression in this card's first attempt — `retainVerdictUntilSuperseded`
+with no `verdictIdentity` made a rejected batch's cached verdict IMMORTAL: both workers could commit the
+actual fix and a re-fire with the same resolved candidate set still replayed the stale rejection forever,
+because `batchKey` is manager+workerSessionIds only, never branch content, and a `verdictIdentity`
+mismatch is the ONLY non-`bypassRetained` route to a fresh mint under an existing key. Mirrors
+`confirmWorkerMergeTracked`'s own `verdictIdentity` exactly (this file, on the solo merge key) — resolved
+BEFORE the dedupe decision, from EVERY chosen candidate's CURRENT branch HEAD, sorted so identical content
+in a different `chosen` order still matches — so a re-fire after ANY of them moves (a worker pushes the
+actual fix; a candidate's branch is later deleted post-landing) is gated FOR REAL instead of replayed.
+Fails safe to `undefined` on ANY resolution issue (a candidate's branch gone, a git error/timeout) —
+`undefined` never dedupe-hits against a cached entry that itself carries a real identity, so an
+unresolvable identity here means "don't trust the cache," never "trust it anyway," the same fail-safe
+direction the solo path's own doc states.
+
+ALREADY-FINISHED SHORT-CIRCUIT FOR THE WHOLE BATCH: the PRACTICAL gap an initial "no `identityOptional`
+mirror" draft of this comment got wrong, caught by this card's own added test — a successful batch landing
+deletes EVERY landed candidate's branch, via the SAME `finishAlreadyMerged`/`finalizeMerge` the solo path
+already has to handle, so a recovery re-call made right after a batch actually LANDS would, absent this
+check, resolve every branch as gone, compute `verdictIdentity: undefined`, mismatch the cached (real)
+identity, and re-mint — defeating this whole card's recoverability goal for the single most common
+real-world case, a batch that landed. Mirrors the solo path's OWN two-part `alreadyFinished` formula
+exactly (worktree gone OR task already terminal — see that method's own doc for why either alone is
+insufficient), generalized from one worker to the WHOLE `chosen` set:
+true only when EVERY candidate independently satisfies it — a MIXED batch (one candidate finished, another
+still genuinely live) still requires a real identity match, since only a WHOLLY finished batch is safe to
+assume "this exact question was already answered."
+
+### Source (2)
+
+Inline comment in `packages/daemon/src/sessions/service.ts`, `mergeBatchTracked`'s body, immediately before
+the `batchAlreadyFinished` computation (the VERDICT IDENTITY / ALREADY-FINISHED SHORT-CIRCUIT block), as of
+this tranche's HEAD.

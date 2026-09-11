@@ -4,7 +4,8 @@
 
 Card 81d795de (Code Review): `mergeBatch`'s own `insertPendingGateOp` tombstone (kind:"merge", key
 `merge-batch:<managerSessionId>`) used to settle back-to-back right after its one `runExclusive` gate
-call resolved, the same shape `deployOwnProject`'s tombstone still uses today (see
+call resolved — confirmed at source, not inferred — the same shape `deployOwnProject`'s tombstone still
+uses today (see
 `docs/decisions/bed91595-deploy-tombstone-removes-the-in-process-workaround.md`). This card deferred that
 settle to `onSettle`, firing only once the WHOLE batch — fast-forward and every per-branch finalize
 included, not just the gate run — has actually settled. A `mergeBatch` finalize can now span tens of
@@ -46,7 +47,8 @@ fast-forward and every per-branch finalize included, not just the gate run — h
 move when the verdict itself is computed: `deriveBatchGateVerdict` still runs at the exact same point in
 `runGate` it always did — after the gate run and any bounded retry settle, inside `runGate` — only the
 WRITE of that already-computed verdict into the tombstone row is held back, deliberately, until the wider
-span above has fully settled.
+span above has fully settled. The MINT timing is likewise unchanged — see `insertPendingGateOp`'s own
+call-site comment for why it must stay late; only the settle WRITE moved, never the mint.
 
 ### Do not (2)
 
@@ -59,3 +61,17 @@ deferred-settle claim itself), as of this tranche's HEAD. The "after the gate ru
 settle" timing detail is not stated in that JSDoc — read directly from the code around the
 `batchGateVerdict` declaration (`deriveBatchGateVerdict` is called after the first `gateSemaphore.runExclusive`
 AND after any bounded-retry `runExclusive`, never only the former).
+
+## Why the solo path never had this problem
+
+The SOLO path (`confirmWorkerMergeTracked`) passes `onOpMinted`/`onSettle` to `pendingOps.attach` itself,
+so its durable tombstone settles in lockstep with the WHOLE operation (via `run()`'s own settle), never
+with an inner sub-step. This batch path was the one outlier that minted and settled the tombstone by hand,
+from inside a nested closure invoked partway through `run()` — which is exactly why `gate_status(opId)`
+could read `"settled"` the instant the gate itself finished, while canonical main had not yet moved and no
+branch had been finalized.
+
+### Source (3)
+
+Inline comment in `packages/daemon/src/sessions/service.ts`, `mergeBatchTracked`'s body, the DEFERRED
+SETTLE block immediately before the `pendingOps.attach` call, as of this tranche's HEAD.
