@@ -124,8 +124,7 @@ export interface GateQueueEntry {
    *  — it carries no more than the redacted age already does, so cross-project redaction doesn't apply. */
   idleMs: number | null;
   /** @decision 33aa0291 — a `.running` entry with `idleMs === null` is `liveness:"pending"`, a MEASURED
-   *  admission→first-liveness gap (≥140ms observed, n=27), never "wedged" or "queued"
-   *  (docs/decisions/33aa0291-liveness-pending-vs-observed-measures-a-real-gap.md) */
+   *  admission→first-liveness gap (≥140ms observed, n=27), never "wedged" or "queued". */
   liveness?: "pending" | "observed";
   /** Whether this run's CURRENT step has already used its one-time auto-extend (see
    *  `GATE_EXTEND_IDLE_MS`'s doc — the extension is `!extended`-gated and fires at most once per step).
@@ -172,17 +171,16 @@ export interface GateQueueEntry {
    *  announcing the absence of. */
   redacted?: true;
   /** @decision 4f151331 — `recentTimeoutStreak` is a second, independently-derived signal, not the
-   *  semaphore's own live-phase belief; a nonzero count means verify no orphaned process survives before
-   *  trusting "queued"/"running" (docs/decisions/4f151331-recenttimeoutstreak-is-a-second-independent-signal.md)
+   *  semaphore's own live-phase belief; a nonzero count means verify no orphaned process survives
+   *  before trusting "queued"/"running".
    *
-   *  @decision 80d54122 — this field is computed unconditionally, cross-project, unlike `taskId`/`branch`/
-   *  `workerLabel` (docs/decisions/80d54122-recenttimeoutstreak-redaction-scope-resolved.md) */
+   *  @decision 80d54122 — this field is computed unconditionally, cross-project, unlike `taskId`/
+   *  `branch`/`workerLabel` — a bare integer discloses nothing those identify. */
   recentTimeoutStreak?: number;
 }
 
 /** @decision b9e07a4a — `RepoGuardOnlyQueueEntry` exists so a cap-unadmitted repo-guard holder/waiter
- *  isn't invisible to `gate_queue`; `repoPath` (an absolute host path) stays own-project only
- *  (docs/decisions/b9e07a4a-repoguardonlyqueueentry-exists-and-hides-repopath.md) */
+ *  isn't invisible to `gate_queue`; `repoPath` (an absolute host path) stays own-project only. */
 export interface RepoGuardOnlyQueueEntry {
   /** CORRECTED (Code Review, card b9e07a4a — an earlier version of this doc claimed the OPPOSITE and was
    *  false): pass `opId` (below), NOT this internal `id`, to `gate_cancel` — `cancelGateOp` resolves a
@@ -249,7 +247,7 @@ export interface SquashQueueEntry {
 
 /** @decision a5d1ae04 — `GateIntentEntry` deliberately omits `sessionId` on both sides of the redaction
  *  boundary; the dead-seat check runs server-side before this entry is built, so residue is structurally
- *  absent, not merely tagged (docs/decisions/a5d1ae04-gate-intent-is-manager-only-registered-off-the-worker-tool-list.md, §2) */
+ *  absent, not merely tagged. */
 export interface GateIntentEntry {
   projectId: string;
   projectName: string;
@@ -396,14 +394,14 @@ export interface DanglingWorkerEntry {
 
 /** {@link SessionService.confirmWorkerMerge}'s settled result shape — named so it can be threaded
  *  through {@link PendingOpRegistry} (card fb8df559 Part 1) without repeating the inline object type.
- *  @decision 9eea3901 — `notified` lets confirmWorkerMergeTracked's completion callback skip a redundant
- *  generic echo when the manager was already told (docs/decisions/9eea3901-notified-lets-the-tracked-echo-skip-a-redundant-nudge.md)
- *  @decision 369d8824 — `opId` lets a manager juggling concurrent merges match a settled outcome back to
- *  its own call (docs/decisions/369d8824-opid-lets-a-manager-match-outcome-to-call.md)
- *  @decision a2873f7e — `gateSteps` is widened to the rejection return too, purely diagnostic, never
- *  branch on it (docs/decisions/a2873f7e-gatesteps-widened-to-the-rejection-return.md) */
-/** @decision 4b8f2b6e — `GateRejectionDetail` lets a manager tell a real gate failure apart from a
- *  teardown flake without re-running blind (docs/decisions/4b8f2b6e-gaterejectiondetail-lets-a-manager-tell-real-failure-from-flake.md) */
+ *  @decision 9eea3901 — check `notified` before firing the generic echo, or a manager already told via
+ *  the rich `[loom:merge-rejected]`/`[loom:already-merged]` push gets a redundant duplicate.
+ *  @decision 369d8824 — keep the fresh-mint `opId` fallback branch; it's dead for every current caller
+ *  but a deliberate defensive path for `confirmWorkerMerge` called directly again, not an oversight.
+ *  @decision a2873f7e — `gateSteps` is widened to the rejection return too, purely diagnostic; never
+ *  branch on it. */
+/** @decision 4b8f2b6e — populate `GateRejectionDetail` only for a genuinely failed gateCommand step, so a
+ *  manager can tell a real failure from an fs-teardown flake or a self-wiped node_modules TS2688. */
 type GateRejectionDetail = {
   phase?: "typecheck" | "test" | "build";
   failedStep?: string;
@@ -451,14 +449,12 @@ type GateRejectionDetail = {
  *  `confirmWorkerMergeTracked`'s `AttachResult<ConfirmMergeResult>`) is new. */
 type MergeBatchResult = {
   ok: boolean;
-  /** @decision c85f842d — `opId` closes the solo-vs-batch asymmetry a Code Review surfaced; OPTIONAL
-   *  (unlike the solo path) because real early bail-outs return before any op is ever minted
-   *  (docs/decisions/c85f842d-mergebatchresult-opid-closes-a-solo-batch-asymmetry.md) */
+  /** @decision c85f842d — keep `opId` OPTIONAL, unlike the solo path's — this method has real early
+   *  bail-outs (ownership/repo-mismatch, too-few-candidates, no gateCommand) with no op minted yet. */
   opId?: string;
   landed: { workerSessionId: string; taskId: string | null; branch: string; sha: string; strippedTrailerCount?: number }[];
-  /** @decision 553ea58c — `landedCount` is the real git-verified total; `landed.length` can under-report
-   *  if a worker session row was hard-deleted between selection and finalize
-   *  (docs/decisions/553ea58c-batchlanded-is-a-separate-later-fact.md, §2) */
+  /** @decision 553ea58c — use `landedCount`, the real git-verified total, never `landed.length` — that
+   *  array under-reports if a worker session row was hard-deleted between selection and finalize. */
   landedCount?: number;
   fallback: { workerSessionId: string; reason: string }[];
   reason?: string;
@@ -484,8 +480,8 @@ type MergeBatchResult = {
   retriedFile?: string;
   retryPassed?: boolean;
   /** @decision 67030bb9 — `retryWarning`'s three cases (weaker-pass, weaker-pass-no-landing,
-   *  retry-also-failed); CORRECTED to also be present on `ok:false`, not just `ok:true`
-   *  (docs/decisions/67030bb9-retrywarning-three-cases-corrected-present-on-fail-too.md) */
+   *  retry-also-failed) are present on `ok:false` too, not just `ok:true` — don't gate it on `ok:true`
+   *  alone. */
   retryWarning?: string;
   /** Card d422e279: mirrors `BatchGateResult.reducedGateWarning`'s own doc (git/batch-merge.ts) — present
    *  only when this batch's gate actually substituted the reduced command, so a manager reading either the
@@ -512,7 +508,7 @@ type ConfirmMergeResult = {
   skipped?: boolean;
   /** @decision a1a8c5c4 — `outputTail` covers only the two dominant paths (a plain gate-fail rejection, a
    *  plain successful merge); check `gateExtended`, never this field's absence, to tell "no gate ran"
-   *  apart from "one ran on an unwired path" (docs/decisions/a1a8c5c4-outputtail-covers-only-the-two-dominant-return-paths.md) */
+   *  apart from "one ran on a rarer path this never wired up". */
   outputTail?: string;
   /** Card a16c580b: sibling of `outputTail` immediately above — the FULL-output spill path, same
    *  population scope (set alongside `outputTail` on the identical two dominant paths, `undefined` under
@@ -543,16 +539,15 @@ type ConfirmMergeResult = {
    *  drift apart. `undefined` only for the plain GREEN merge return (there is no rejection detail to carry). */
   detailText?: string;
   /** @decision 361520a0 — `cancelled` is a "no verdict" outcome, never a rejection; only reachable while
-   *  QUEUED (docs/decisions/361520a0-cancelled-is-no-verdict-never-a-rejection.md)
+   *  QUEUED.
    *  @decision 318ac7b2 — the single-file retry's cancel-while-queued path doesn't lose attempt 1's real
-   *  failure; it's on the sibling build_gate event (docs/decisions/318ac7b2-single-file-retry-cancel-while-queued-attempt1-not-lost.md)
+   *  failure; it's on the sibling build_gate event.
    *  @decision 518e7ff6 — the transient-kill retry's cancel-while-queued path uses its own
-   *  build_gate_retry row instead (docs/decisions/518e7ff6-transient-kill-retry-cancel-while-queued-uses-its-own-row.md) */
+   *  build_gate_retry row instead. */
   cancelled?: boolean;
   cancelKind?: GateCancelKind;
   /** @decision 99a1cf6f — `gateBaseInvalidated` is a real, resolved verdict about canonical main, never
-   *  an ordinary rejection against the branch; `NEVER_CACHED_OUTCOMES` must never serve it from cache
-   *  (docs/decisions/99a1cf6f-gatebaseinvalidated-is-a-real-verdict-never-cache-it.md) */
+   *  an ordinary rejection against the branch; `NEVER_CACHED_OUTCOMES` must never serve it from cache. */
   gateBaseInvalidated?: boolean;
   /** Card 344ce950 (bounded multi-file since card 67030bb9): the bare name(s) of the test file(s) this
    *  merge's gate retried together in isolation before reaching this verdict (see gate-runner.ts's
@@ -585,11 +580,9 @@ type ConfirmMergeResult = {
    *  retries can never both fire for the same gate attempt). See `formatTransientRetryWarning`. */
   transientRetried?: boolean;
   /** @decision e2b6f900 — the gate concurrency triple (`gateCap`/`concurrentGates`/`concurrentGatesMax`)
-   *  is two imperfect lenses on contention, never THE condition itself
-   *  (docs/decisions/e2b6f900-gate-concurrency-triple-is-two-imperfect-lenses.md)
+   *  is two imperfect lenses on contention, never THE condition itself.
    *  @decision b9e07a4a — RESOLVED: the single-file retry now re-admits through `runExclusive` like the
-   *  transient-kill retry, so this triple always describes the admission the final verdict is about
-   *  (docs/decisions/b9e07a4a-repoguardonlyqueueentry-exists-and-hides-repopath.md) */
+   *  transient-kill retry, so this triple always describes the admission the final verdict is about. */
   gateCap?: number;
   concurrentGates?: number;
   concurrentGatesMax?: number;
@@ -661,16 +654,18 @@ type ConfirmMergeResult = {
  *  tunable independent of the dedupe safety net, deliberately kept short so a stale card doesn't linger. */
 const MERGE_OP_RETAIN_MS = 5_000;
 
-/** @decision 7f96aa09 — `WorkerGateResult` routes the worker DoD self-gate through the daemon
- *  `GateSemaphore` (docs/decisions/7f96aa09-workergateresult-routes-through-the-daemon-gatesemaphore.md)
+/** @decision 7f96aa09 — `runWorkerGate` routes the worker DoD self-gate through the daemon
+ *  `GateSemaphore`/`maxConcurrentGates` cap, so N parallel workers self-gating can't structurally
+ *  exceed the shared lane budget; reuses `gateCommand` rather than a second config field.
  *  @decision 50c1e0d0 — `validatedHead` lets a caller tell, after the fact, which commit the result is
- *  about, on both pass and fail (docs/decisions/50c1e0d0-validatedhead-lets-a-caller-tell-which-commit-a-result-is-about.md)
+ *  about, on both pass and fail.
  *  @decision 2d72595c — `durationMs` excludes queue wait, but not general fleet load or concurrent-gate
- *  overlap (docs/decisions/2d72595c-durationms-excludes-queue-wait-not-fleet-load.md)
- *  @decision 39196378 — `headCurrent`/`headWarning` catch the queued-gate-validates-a-stale-tree trap
- *  (docs/decisions/39196378-headcurrent-catches-the-queued-gate-validates-stale-tree-trap.md)
+ *  overlap.
+ *  @decision 39196378 — `headCurrent`/`headWarning` catch the queued-gate-validates-a-stale-tree trap; a
+ *  `false` always carries a `headWarning` distinguishing a benign relabel (moved during the queue wait)
+ *  from a racy one (moved while the gate was actually running).
  *  @decision 4c5bf820 — `steps`/`outputTail` are forwarded on a passing self-check too, not just a
- *  failure (docs/decisions/4c5bf820-merge-gate-row-verdict-derivation-and-honest-null-payload.md, §2) */
+ *  failure. */
 type WorkerGateResult = {
   ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string;
   validatedHead?: string | null; durationMs?: number; headCurrent?: boolean; headWarning?: string;
@@ -691,8 +686,7 @@ type WorkerGateResult = {
 };
 
 /** @decision 4c5bf820 — the durable tombstone write derives from the SAME four shapes (error/cancelled/
- * pass/fail) the completion-nudge builder branches on, or the two can tell different stories
- * (docs/decisions/4c5bf820-merge-gate-row-verdict-derivation-and-honest-null-payload.md, §3) */
+ * pass/fail) the completion-nudge builder branches on, or the two can tell different stories. */
 function deriveWorkerGateVerdict(
   outcome: { ok: true; value: WorkerGateResult } | { ok: false; error: unknown },
 ): { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } | undefined {
@@ -723,14 +717,13 @@ function deriveWorkerGateVerdict(
   };
 }
 
-/** @decision 9f6598dd — the merge-kind verdict derivation closes the settled-merge gap Finding 1 measured
- * (docs/decisions/9f6598dd-mergeverdict-derivation-closes-the-settled-merge-gap.md)
+/** @decision 9f6598dd — do not leave a merge-kind `onSettle` call site without a verdict write; before
+ * this card a settled merge op's `gate_status` read carried no `extended`, duration, or outcome at all.
  * @decision 361520a0 — `cancelled` (Half Two) maps to `"cancelled"`, checked before `merged`; `gateDetail`
- * (Half Three) also carries `stderrTail`/`steps` (docs/decisions/361520a0-cancelled-is-no-verdict-never-a-rejection.md)
- * @decision a228dfb5 — a `skipped:true` merge maps to `"skipped"`, never `"pass"`
- * (docs/decisions/a228dfb5-skipped-merge-verdict-must-map-to-skipped-not-pass.md)
+ * (Half Three) also carries `stderrTail`/`steps`.
+ * @decision a228dfb5 — a `skipped:true` merge maps to `"skipped"`, never `"pass"`.
  * @decision a1a8c5c4 — both branches also carry `outputTail`, closing the prior total absence of gate
- * output on a "merge" row's verdict (docs/decisions/a1a8c5c4-outputtail-covers-only-the-two-dominant-return-paths.md) */
+ * output on a "merge" row's verdict. */
 function deriveMergeGateVerdict(
   outcome: { ok: true; value: ConfirmMergeResult } | { ok: false; error: unknown },
   opStartedAt: string | undefined,
@@ -870,11 +863,11 @@ function deriveDeployGateVerdict(
 
 /** @decision be260976 — the batch verdict derivation closes the "never_existed" tombstone gap;
  * `settledAt`/`totalDurationMs` genuinely differ from `durationMs` (mint precedes admission by the full
- * queue wait) (docs/decisions/be260976-batch-verdict-derivation-closes-the-never-existed-gap.md)
+ * queue wait).
  * @decision 67030bb9 — `attempt1DurationMs` must be the pre-captured attempt-1-bounded duration, never
- * recomputed at settle (finding [1]) (docs/decisions/67030bb9-retrywarning-three-cases-corrected-present-on-fail-too.md)
+ * recomputed at settle (finding [1]).
  * @decision 553ea58c — `batchBranchCount` is ASSEMBLED count, never necessarily landed (finding [5],
- * corrected) (docs/decisions/553ea58c-batchlanded-is-a-separate-later-fact.md, §2) */
+ * corrected). */
 function deriveBatchGateVerdict(
   result: GateSequentialResult, attempt1DurationMs: number, opMintedAtMs: number, nowMs: number,
   gateCap: number, concurrentGates: number, concurrentGatesMax: number, batchBranchCount: number,
@@ -909,8 +902,7 @@ function deriveBatchGateVerdict(
 
 /** @decision 7d492f8b — recovers a settled gate/merge op's verdict from durable audit events when its
  *  own tombstone was lost to a crash; "merge" deliberately does NOT recover a bare passing gate as a
- *  merge pass (the unlogged squash step could still have failed) — see
- *  docs/decisions/7d492f8b-find-gate-op-events-is-an-unindexed-boot-only-scan.md (§2) */
+ *  merge pass (the unlogged squash step could still have failed). */
 function recoverGateOpVerdict(
   kind: "gate" | "merge", events: OrchestrationEvent[],
 ): { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } | undefined {
@@ -1043,8 +1035,7 @@ function formatRecoveredGateOpNudge(
 
 /** @decision e50600d2 — records a worker's most recent SETTLED run_gate outcome for merge-time reuse;
  *  in-memory only, so a daemon restart loses it and the reuse check must fail closed, never assume
- *  "nothing changed" — see
- *  docs/adr/e50600d2-keep-run-gate-for-workers-and-lean-on-reuse.md */
+ *  "nothing changed". */
 type LastWorkerGateCheck = { passed: boolean; headCurrent: boolean; stamp: WorktreeGateStamp; opId: string; branch: string };
 
 /** How long a settled `run_gate` op stays `peek()`-able (as a RETAINED terminal view) — and, more to the
@@ -1057,13 +1048,13 @@ type LastWorkerGateCheck = { passed: boolean; headCurrent: boolean; stamp: Workt
 const GATE_OP_RETAIN_MS = 5_000;
 
 /** @decision 68920f5b — pins the worker self-gate's own test-lane pool to MATCH the merge gate's default
- *  (currently 3), admitted through the shared gateSemaphore — see
- *  docs/decisions/68920f5b-worker-gate-concurrency-pin-matches-merge-gate.md */
+ *  (currently 3), admitted through the shared gateSemaphore. Do not raise this without re-deriving
+ *  `maxConcurrentGates × pin` against the documented 8-lane host-starvation failure level. */
 const WORKER_GATE_ENV_OVERRIDE: NodeJS.ProcessEnv = { LOOM_GATE_TEST_CONCURRENCY: "3" };
 
 /** @decision 720bb7ad — stamps `LOOM_GATE_OP_ID` (+ required `LOOM_GATE_BATCH_SIZE`) onto every gate
- *  child so a `test-daemon.mjs` run-summary row joins back to its op — see
- *  docs/decisions/720bb7ad-gate-op-id-env-stamp-and-batch-size-requirement.md
+ *  child so a `test-daemon.mjs` run-summary row joins back to its op; never replace the `{ ...base, ... }`
+ *  spread with a plain assignment, or a caller's own override (e.g. the concurrency pin) silently drops.
  *  ⚠️ CROSS-PROJECT CONTRACT (card 0f1920e0): Codescape reads `LOOM_GATE_OP_ID` in production from
  *  inside the gate child. Renaming it, or dropping it from any `runGateSeq(` call site, is a BREAKING
  *  CHANGE for that external consumer — tell them first (a manager reaches them via `peer_message`). */
