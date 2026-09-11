@@ -7448,27 +7448,27 @@ export class SessionService {
   /**
    * @decision a8f8a8f2 — handleKickoffGiveUpExhausted: PtyHost decides nothing DB-aware on kickoff
    * give-up-exhaustion; scoped to worker/null-role + real parentSessionId, notifies via the durable
-   * enqueueSystemNudge (not a bare push), verification-before-recovery wording. docs/decisions/a8f8a8f2-*.md
+   * enqueueSystemNudge (not a bare push), verification-before-recovery wording.
    */
   /**
    * @decision 7772176d — below GIVE_UP_REMINT_LIMIT, re-mints the kickoff (shared rootMsgId logicalId,
    * giveUpHeldUntil-held) via raw pty.enqueueStdin (never enqueueDurableMessage — no durable origin, no
-   * generic sender); recurses on further exhaustion. docs/decisions/7772176d-*.md
+   * generic sender); recurses on further exhaustion.
    */
   /**
    * @decision c8660ac7 — root cause of f91c8634's stuck-turn-1 specimens: the kickoff had NO re-mint
    * parity with an ordinary durable message's give-up-exhaustion (straight to permanent park after one
-   * requeue). Fixed by 7772176d, above. docs/decisions/c8660ac7-*.md
+   * requeue). Fixed by 7772176d, above.
    */
   /**
    * @decision f91c8634 — reference discriminator for "did this session ever really start": busy:false +
    * non-empty on-disk transcript, never give-up-budget exhaustion alone (root of the 00bd3b4a incident
-   * below). Re-mint parity does NOT close this card. docs/decisions/f91c8634-*.md
+   * below). Re-mint parity does NOT close this card.
    */
   /**
    * @decision 00bd3b4a — records the SAME durable session_message_gave_up(outcome:"parked") event on
    * kickoff park as handleGiveUpExhausted's own park branch, so 417cea0a's late-confirmation retraction
-   * machinery can reach the kickoff path too. docs/decisions/00bd3b4a-*.md
+   * machinery can reach the kickoff path too.
    */
   // @decision 417cea0a — the kickoff park path above reuses this SAME already-correct late-confirmation
   // retraction machinery rather than inventing a second one for the kickoff's synthetic origin.
@@ -9531,10 +9531,10 @@ export class SessionService {
 
   /**
    * @decision b9d479b0 — notifyManagerOfIdleWorker and IdleWatcher's periodic/manager-loop check must
-   * share ONE idle-worker classification, never independently-drifting copies (docs/decisions/b9d479b0-single-sourced-idle-worker-classification.md)
+   * share ONE idle-worker classification, never independently-drifting copies.
    *
    * - @decision 6101d7f7 — a busy worker's redirectWorker busy-clear-before-drain window is not a
-   *   strand (docs/decisions/6101d7f7-not-evaluable-spurious-nudge-guard-on-busy-redirect.md)
+   *   strand.
    * - `not-stranded` — legitimately NOT a strand:
    *     • RATE-LIMIT GUARD (CR blocker) — a usage-capped worker goes `busy=false` (setBusy(false) fires
    *       BEFORE the rate-limit park) with its task still active; it never failed to report, it's
@@ -9542,11 +9542,10 @@ export class SessionService {
    *       for the entire cap window (up to a week on the weekly cap).
    *     • already reported/merged — its task left the `active` lane.
    *     • @decision a1f06bcc — the task-column check is only a PROXY for "did the worker report"; check
-   *       the manager's own pending queue for its `[loom:worker-report]` text (docs/decisions/a1f06bcc-queued-report-guard-detects-a-report-that-already-fired.md)
-   *     • @decision dfa87343 — a worker self-parked on a pending wake_me is not a strand
-   *       (docs/decisions/dfa87343-wake-guard-self-parked-worker-is-not-stranded.md)
+   *       the manager's own pending queue for its `[loom:worker-report]` text.
+   *     • @decision dfa87343 — a worker self-parked on a pending wake_me is not a strand.
    * - @decision 2281009d — a non-null engineSessionId alone is not proof a turn ran; also check
-   *   hasFirstTurnStarted/a non-empty transcript (docs/decisions/2281009d-broken-spawn-needs-two-proofs-a-turn-actually-started.md)
+   *   hasFirstTurnStarted/a non-empty transcript.
    * - `parked-ack` — its LATEST `worker_report` (status `progress`, `done`, OR `blocked` — CR fold-in: a
    *   `done` report on a board with no review-role column never moves the task off `active`, so it looks
    *   identical to a progress-park; a `blocked` report is the same shape — the worker correctly stopped
@@ -9555,9 +9554,9 @@ export class SessionService {
    *   manager DOES reply and the worker goes idle again without a fresh report, this no longer holds — a
    *   real stall still classifies `stranded`, so an acked-then-stalled worker is never silently missed.
    * - @decision 95b2abb3 — parked-wake's wording must not claim the manager owes a reply, unlike
-   *   parked-ack (docs/decisions/95b2abb3-parked-wake-wording-differs-from-parked-ack.md)
+   *   parked-ack.
    * - @decision c36bac53 — a worker's self-reported awaiting:"background" flag has no backing row;
-   *   check the wake lookup FIRST (docs/decisions/c36bac53-parked-background-self-attributed-flag-is-unverifiable.md)
+   *   check the wake lookup FIRST.
    * - `parked-background-stale` — round-2 CR Major: `parked-background` alone would let the flag promise
    *   "no reply owed; it will continue on its own" FOREVER if the background task dies silently and the
    *   worker never re-engages (no fresh report, no `wake_me`, nothing to decay it) — a SILENT, PERMANENT
@@ -9567,13 +9566,12 @@ export class SessionService {
    *   ack/re-report, classification falls through to this actionable kind instead of repeating the "no
    *   reply owed" promise — nothing backs or bounds a bare self-attribution past that window.
    * - @decision 8e0bd254 — check the daemon-owned run_gate op via PendingOpRegistry.peek, never rely on
-   *   a worker self-report (docs/decisions/8e0bd254-parked-gate-is-a-daemon-owned-structural-replacement.md)
-   * - @decision 422d3003 — a parked gate needs idleMs, not elapsed time alone, to call it stale
-   *   (docs/decisions/422d3003-parked-gate-stale-needs-idlems-not-elapsed-alone.md)
+   *   a worker self-report.
+   * - @decision 422d3003 — a parked gate needs idleMs, not elapsed time alone, to call it stale.
    * - @decision 865c528e — measure minutesSinceStart from GateSemaphore admission, never
-   *   PendingOpRegistry's own startedAt (docs/decisions/865c528e-minutessincestart-measured-from-admission-not-registry-startedat.md)
+   *   PendingOpRegistry's own startedAt.
    * - @decision 0e5de8e6 — check peekPendingMerge's daemon-owned state before the report-derived
-   *   branches; no stale-escalation sibling needed (docs/decisions/0e5de8e6-parked-merge-checks-daemon-owned-merge-state-first.md)
+   *   branches; no stale-escalation sibling needed.
    * - `stranded` — genuinely finished a turn, never (usefully) reported, and none of the above apply.
    */
   private classifyIdleWorker(workerSessionId: string):
@@ -10110,8 +10108,7 @@ export class SessionService {
         const cancelledWakes = this.db.cancelWakesForSession(workerSessionId);
         // @decision 7b1fda57 — hand `carried`'s NON-durable, `kind:"agent"` entries to the MANAGER as ONE
         // framed, blockquoted notice (never re-enqueued verbatim — role confusion) via the SAME durable
-        // `enqueueDurableNudge` mechanism every other `[loom:*]`-to-manager notice already uses. Full
-        // rationale, rejected alternatives, and the durable-content ruling: docs/decisions/7b1fda57-*.md.
+        // `enqueueDurableNudge` mechanism every other `[loom:*]`-to-manager notice already uses.
         const nonDurableCarried = carried.filter((m) => !m.onDeliver);
         const forwardable = nonDurableCarried.filter((m) => m.kind === "agent");
         const carriedDropped = nonDurableCarried.length - forwardable.length;
@@ -12579,7 +12576,7 @@ export class SessionService {
       // "no prior stamp to compare".
       const stampDiffers = hasLastCheck ? gateStampsDiffer(lastCheck.stamp, freshStamp) : undefined;
       // @decision e50600d2 — a green run_gate self-check is reused here at merge time; do not remove
-      // run_gate to cut shared gate load, only widen/tighten reuse. See docs/adr/e50600d2-keep-run-gate-for-workers-and-lean-on-reuse.md.
+      // run_gate to cut shared gate load, only widen/tighten reuse.
       if (hasLastCheck && branchMatches && checkPassed && checkHeadCurrent) {
         if (freshHead && !freshStamp.dirty && stampDiffers === false && freshBehindMain === 0) {
           // TOCTOU NOTE (CR follow-up): `freshBehindMain === 0` only proves main hadn't moved AS OF
