@@ -176,9 +176,10 @@ interface LandResult {
  * ADDITIONALLY gets `Loom-Worker-Branch: <branch>` appended, PLUS `Loom-Worker-Base`/`Loom-Worker-PathSet`
  * (card d62dad73 phase 2) via a follow-up `git commit --amend` once the tip's real sha exists — every
  * earlier commit from this branch lands with its (trailer-stripped) message and nothing else appended.
- * See docs/decisions/d62dad73-loom-worker-base-trailer-stamps-the-landed-base-not-the-fork-point.md for
- * why the PathSet base must be `batchHeadBefore` (this branch's own pre-cherry-pick batch tip), never the
- * branch's own pre-landing diff.
+ *
+ * @decision d62dad73 — the PathSet base is `batchHeadBefore` (this branch's own pre-cherry-pick batch
+ * tip), never the branch's own pre-landing diff (`merge-base(HEAD, branch)`) — they diverge once main
+ * has advanced past the fork point.
  *
  * ALL-OR-NOTHING PER BRANCH: if ANY commit in the range fails to cherry-pick (a real conflict, or any
  * other failure), the cherry-pick is aborted and the batch worktree is HARD-RESET back to exactly where it
