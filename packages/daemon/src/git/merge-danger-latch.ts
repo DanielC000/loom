@@ -110,6 +110,7 @@ export function readAndClearMergeDangerLatches(): MergeDangerLatchRecord[] {
  * @decision b272d215 — PURE classification of a latch against `dirty`/`scannedRepoPaths`: `dirty` alone
  * can't tell "scanned and clean" from "never scanned at all" — those two must never share one message;
  * a repo absent from `scannedRepoPaths` gets its own "tree state UNKNOWN" wording, never the clean-tree one.
+ *
  * Extracted as its own function so it is independently testable without driving the whole boot
  * sequence — see test/merge-danger-latch.mjs. Never throws (pure string formatting).
  *
