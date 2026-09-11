@@ -107,20 +107,15 @@ export interface MemoryWriteTooLong {
 }
 
 /**
- * Card 835a8d67 — an informational signal returned ALONGSIDE a successful write, never a rejection: the
- * write above has ALREADY succeeded by the time this is computed, exactly as it did before this card.
- * Present only when the note's (post-write) `tags` include {@link NEVER_DROP_TAG}; absent otherwise (an
- * ordinary write is byte-identical to before this card).
+ * An informational signal returned alongside a successful write, never a rejection — present only
+ * when the note's (post-write) `tags` include {@link NEVER_DROP_TAG}. Two mutually exclusive shapes:
+ * `inert: true` when the tag sits on an UNPINNED note (the floor tier is `pinned && never-drop`, so
+ * an unpinned tagged note is never in it); else the floor-tier numbers (`floorTokens`/`budgetTokens`/
+ * `overBudget`) when the note actually IS pinned+never-drop.
  *
- * Two, mutually exclusive shapes:
- * - `inert: true` — the tag is set on an UNPINNED note. The floor tier the packer builds is
- *   `pinned && never-drop` (see `computeFloorTierStatus`/`isNeverDrop` in project-memory-recall.ts), so an
- *   unpinned tagged note is never in it — the tag does nothing for this note until it's also pinned.
- * - the floor-tier numbers — this note IS pinned+never-drop, so it's actually IN the tier being measured.
- *   `floorTokens`/`budgetTokens`/`overBudget` come from `computeFloorTierStatus`, the SAME helper
- *   `composeProjectMemoryDigest`'s own in-digest ALARM line uses internally (via `floorSectionTokens`) —
- *   one function, so the number reported here and what the packer actually drops on the next kickoff
- *   cannot disagree.
+ * @decision 835a8d67 — computed strictly AFTER the write succeeds, so it can only inform, never
+ * prevent an over-cap write; shares `computeFloorTierStatus` with the digest's own ALARM line so
+ * the two can never disagree.
  */
 export interface NeverDropSignal {
   message: string;
@@ -166,32 +161,14 @@ export interface TriggerGateSignal {
 }
 
 /**
- * Card cf8d773f — an informational signal returned alongside a successful write for an UNPINNED note once
- * this project's memory store is at (or over) its `memory.maxNotes` cap, mirroring {@link NeverDropSignal}/
- * {@link RestTierSignal}/{@link TriggerGateSignal}'s "compute the consequence at the ONE moment the author
- * can act on it, never block the write" posture. `undefined` when the note is pinned (pinned rows are
- * never evicted), the cap is disabled (`maxNotes <= 0`), or the store isn't yet at cap (no eviction risk to
- * report) — same "absent when inapplicable" convention as the sibling signals. Computed via
- * {@link Db.projectMemoryEvictionRank}, which shares its candidate ORDER BY with the real sweep
- * ({@link Db.evictProjectMemoryOverCap}) through one constant, so this can never silently diverge from what
- * the sweep actually deletes.
+ * An informational signal returned alongside a successful write for an UNPINNED note once the
+ * project's memory store is at (or over) its `memory.maxNotes` cap — mirroring the sibling signals'
+ * "compute the consequence at write time, never block the write" posture. `undefined` when the note
+ * is pinned, the cap is disabled (`maxNotes <= 0`), or the store isn't yet at cap.
  *
- * Root cause this closes (see the card): a brand-new never-retrieved note, at a project already sitting at
- * `maxNotes`, is by construction in the most-evictable class — the eviction sweep that runs after EVERY
- * subsequent write in the project (by anyone) deletes it the moment it becomes the sweep's top candidate,
- * often within minutes, with no prior signal to the writer that it happened.
- *
- * MEASURED (manager review of the first cut, 2026-09-10): `last_retrieved_at` — the column this whole
- * signal's rank is computed against — is written by exactly ONE production-reachable call site,
- * `db.touchProjectMemoryRetrieved`, called from `sessions/project-memory-recall.ts`'s
- * `retrieveProjectMemoryForKickoff` (`if (framed) db.touchProjectMemoryRetrieved(includedIds)`) — i.e. only
- * a note ACTUALLY RENDERED into an injected kickoff digest resets its rank. `gateway/server.ts`'s
- * `/internal/test/seed` route also calls it, but that route is gated `if (inTestMode())` — structurally
- * absent from a real daemon's route table, not a second production retrieval path. An explicit
- * `memory_read`/`memory_list` call does NOT touch this column at all (mirrors `everDelivered`'s own doc
- * comment on {@link ProjectMemoryEntryWithLinks}) — a clean read-back is NOT a reprieve; the message below
- * says so explicitly, because this exact confusion (a clean write + clean read-back, then silent deletion)
- * is the card's own root incident.
+ * @decision cf8d773f — only a note actually rendered into a kickoff digest resets its eviction
+ * rank; an explicit `memory_read`/`memory_list` does NOT. Shares one `ORDER BY` with the real
+ * sweep ({@link Db.evictProjectMemoryOverCap}) so this can never diverge from what it deletes.
  */
 export interface EvictionCandidateSignal {
   message: string;
@@ -267,30 +244,23 @@ function computeTriggerGateStatus(entry: ProjectMemoryEntry): TriggerGateSignal 
 }
 
 /**
- * UPSERT by `key` (owner decision #2: always-update in place) — a second write to the same key updates
- * the note rather than piling a contradictory duplicate. Enforces the per-project bounded-store cap
- * (`memory.maxNotes`, resolveConfig) on every write; pinned notes are exempt (see
- * `evictProjectMemoryOverCap` in db.ts).
+ * UPSERT by `key` — a second write to the same key updates the note in place.
  *
- * Card a5f98bb4 (Lore audit F3): updating an EXISTING key requires `baseVersion` to match the row's
- * current `version` (a monotonic counter, NOT the `updatedAt` timestamp — a coarse/colliding clock could
- * let two distinct writes share a timestamp and defeat a timestamp-based check) — a racing/stale write is
- * REJECTED with the current note attached (`conflict`) instead of silently clobbering it. A brand-new key
- * needs no base. See {@link Db.upsertProjectMemoryChecked} for the full rationale.
+ * @decision sha:5a7c88e4 — always-update in place (owner decision #2), never a hard reject or a
+ * second row; every write also enforces `memory.maxNotes` (resolveConfig), pinned notes exempt.
  *
- * Card 835a8d67: a successful write whose (post-write) `tags` include `NEVER_DROP_TAG` also carries a
- * `neverDropStatus` on the returned entry — see {@link NeverDropSignal}. Purely informational: it can
- * never turn a write that would otherwise succeed into a rejection.
+ * @decision a5f98bb4 — updating an existing key requires `baseVersion` to match the row's current
+ * `version` (a monotonic counter, never `updatedAt`); a stale/omitted version on an update REJECTS
+ * with the current note attached rather than silently clobbering it.
  *
- * Card 249004c3: an update is a true PATCH, not a hard overwrite — `title`/`pinned`/`tags` the caller
- * OMITS from `input` are left unchanged on the stored row (only `text` + the version bump apply); passing
- * one explicitly (incl. `pinned:false`/`tags:[]`) still writes it verbatim. See
- * {@link Db.upsertProjectMemory} for the COALESCE mechanics that implement this.
+ * @decision 835a8d67 — a write whose (post-write) tags include NEVER_DROP_TAG also carries
+ * `neverDropStatus` on the returned entry; purely informational, never turns success into rejection.
  *
- * Card 145e8d72: `text` now joins that same patch model on an UPDATE — omitting it re-reads the existing
- * row's own stored body and resends THAT (never a caller-retyped copy), so the persisted text is
- * byte-identical and every cap/floor-tier check below still runs against the note's real effective size.
- * `text` stays REQUIRED to create a brand-new key (nothing to fall back to) — see the `!existing` check.
+ * @decision 249004c3 — an update is a true PATCH: `title`/`pinned`/`tags` the caller OMITS are left
+ * unchanged; passing one explicitly (incl. `pinned:false`/`tags:[]`) still writes it verbatim.
+ *
+ * @decision 145e8d72 — `text` joins that same patch model on update: omitting it resends the
+ * existing row's own stored body (never a caller-retyped copy); still REQUIRED to create a new key.
  */
 export function writeProjectMemory(
   db: Db,
