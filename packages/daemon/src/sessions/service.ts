@@ -1835,7 +1835,7 @@ export class SessionService {
   private readonly reapWorktreeProcesses: ((worktreePath: string, opts?: { excludePids?: number[] }) => Promise<{ killedPids: number[] }>) | undefined;
   // @decision 3564fd1e — per-branch consecutive gate-TIMEOUT circuit breaker; in-memory/daemon-uptime-
   // scoped on purpose (never persist), keyed by branch not workerSessionId, cleared only when the
-  // worktree HEAD advances (docs/decisions/3564fd1e-gate-timeout-circuit-breaker-streak.md)
+  // worktree HEAD advances
   private readonly gateTimeoutStreak = new Map<string, { count: number; sha: string | null }>();
   /** Read-only accessor for {@link gateTimeoutStreak} (card fa359824 follow-up, escalation 4f151331) — the
    *  live registry a `gate_queue` entry is built from only ever reflects what {@link GateSemaphore} BELIEVES
@@ -1864,7 +1864,6 @@ export class SessionService {
   private readonly gateStartStamps = new Map<string, WorktreeGateStamp>();
   // @decision a0d912f5 — gateAdmitStamps is a deliberately SEPARATE, LATER checkpoint than
   // gateStartStamps (fire-time vs admission-time); do not "simplify" the two set-sites back into one
-  // (docs/decisions/a0d912f5-gate-admit-stamps-is-a-separate-later-checkpoint-than-start-stamps.md)
   private readonly gateAdmitStamps = new Map<string, WorktreeGateStamp>();
   /** {@link LastWorkerGateCheck} per worker session — see that type's doc. Keyed by `workerSessionId`
    *  (not `gate:${workerSessionId}` like {@link gateStartStamps} — this outlives a single run_gate call's
@@ -3222,9 +3221,9 @@ export class SessionService {
   // Never exit or record restart intent before the rebuild succeeds — a broken build must abort and leave the daemon running.
   // @decision f05e5a06 — must itself await the merge-danger-window guard before exiting; a bare
   // process.exit() emits no signal, so the SIGINT/SIGTERM/SIGHUP-bound guard never fires for this path
-  // (docs/decisions/f05e5a06-daemon-restart-awaits-merge-danger-window-since-exit-emits-no-signal.md)
-  // @decision d671f1b8 — runs the shared vault-flush/codescape-stop cleanup, deliberately AFTER the
-  // 300ms response-flush delay, not before it (docs/decisions/d671f1b8-daemon-restart-runs-shared-vault-flush-cleanup-after-the-response-flush.md)
+  // @decision d671f1b8 — runs the shared vault-flush/codescape-stop cleanup deliberately AFTER the
+  // 300ms response-flush delay: running it before would delay the MCP response by however long the
+  // git flush itself takes
   async requestDaemonRestart(
     callerSessionId: string, reason: string,
     deps: { buildDeps?: BuildDeps; exit?: (code: number) => void; mergeDangerGraceMs?: number } = {},
@@ -3267,9 +3266,9 @@ export class SessionService {
     // continuation nudge, honoring the park (see resumeFleetOnBoot).
     const resume: RestartResumeEntry[] = this.liveFleetResumeSet();
     // @decision 2ca18433 — do not include durable-tracked messages in this restart-intent pending
-    // snapshot; recoverUndeliveredMessagesOnBoot is their sole re-enqueue owner (docs/decisions/2ca18433-restart-pending-snapshot-excludes-durable-messages.md)
+    // snapshot; recoverUndeliveredMessagesOnBoot is their sole re-enqueue owner
     // @decision 9e27f4d2 — do not put giveUpHeldUntil on the pending entry itself; carry it in
-    // RestartIntent's separate, additive `holds` map keyed by index (docs/decisions/9e27f4d2-giveupheldsuntil-rides-restart-intents-holds-map.md)
+    // RestartIntent's separate, additive `holds` map keyed by index
     const PENDING_MAX_MSGS = 50;
     const PENDING_MAX_MSG_LEN = 100_000;
     const pending: Record<string, string[]> = {};
@@ -3294,7 +3293,7 @@ export class SessionService {
       }
     }
     // @decision a1b79655 — do not re-queue/re-admit a cap-queued worker_spawn intent from this restart
-    // snapshot; it is informational only, the loss is deliberate by the card's own DoD (docs/decisions/a1b79655-restart-intent-snapshots-cap-queued-worker-spawn-intents.md)
+    // snapshot; it is informational only, the loss is deliberate by the card's own DoD
     const CAP_QUEUED_SNAPSHOT_MAX = 20;
     const capQueuedSnapshot: Record<string, CapQueuedSpawn[]> = {};
     for (const { sessionId, role } of resume) {
@@ -3516,7 +3515,7 @@ export class SessionService {
         gateTimeoutMs: project ? resolveConfig(project.config, platformConfig).orchestration.gateCommandTimeoutMs : null,
         // @decision 4cacc6f9 — do not redact/scope fallbackOfBatchOpId by caller project on this
         // human-only /api/gates/active payload, unlike gateQueueForManager's agent-facing field of the
-        // same name (docs/decisions/4cacc6f9-gates-active-payload-leaves-fallback-batch-opid-unredacted.md)
+        // same name — this surface is unscoped by design and already emits taskId/branch/workerLabel
         fallbackOfBatchOpId: e.fallbackOfBatchOpId,
       };
     });
@@ -3525,31 +3524,31 @@ export class SessionService {
 
   /**
    * @decision edc1ec12 — read-only live-state lookup for one gate/merge run by opId; opId accepts a
-   * full id or unambiguous prefix (docs/decisions/edc1ec12-gate-status-is-read-only-with-no-passfail-outcome.md)
+   * full id or unambiguous prefix
    * @decision e3e40167 — a live-registry miss falls through to the permanent tombstone table rather
    * than "not_found"; a SCOPED caller's miss is "unknown", never a false "never_existed"
-   * @decision 7239c712 — tombstone "pending" also covers the pre-registration/boot-reconcile window
-   * (docs/decisions/7239c712-tombstone-pending-covers-the-pre-registration-and-boot-reconcile-window.md)
-   * @decision 4c5bf820 — a settled "gate" row's recorded verdict is spread onto the return inline
-   * (docs/decisions/4c5bf820-merge-gate-row-verdict-derivation-and-honest-null-payload.md)
-   * @decision 3aec1df6 — CORRECTION: a settled "merge" row carries the same verdict spread, since 9f6598dd
-   * (docs/decisions/3aec1df6-settled-merge-rows-now-carry-a-verdict-correction.md)
-   * @decision eb9348b0 — CORRECTION: gate_history.failingTest also reads this payload as a fallback
-   * (docs/decisions/eb9348b0-gate-history-failingtest-reads-the-settled-verdict-payload-as-fallback.md)
-   * @decision bed91595 — the "never_existed" positive assertion now covers deploy opIds too
-   * (docs/decisions/bed91595-deploy-tombstone-removes-the-in-process-workaround.md)
+   * @decision 7239c712 — tombstone "pending" also covers the pre-registration/boot-reconcile window;
+   * never collapse that window to never_existed — the row already exists
+   * @decision 4c5bf820 — a settled "gate" OR "merge" row's recorded verdict is spread onto the return
+   * inline; payload/settledAt/totalDurationMs/extended stay honest-null/absent when a row predates
+   * them or its stored blob is corrupt, never fabricated
+   * @decision 3aec1df6 — CORRECTION: a settled "merge" row carries the same verdict spread a "gate"
+   * row does, since card 9f6598dd — do not assume it never reports pass/fail
+   * @decision eb9348b0 — CORRECTION: gate_history.failingTest is no longer unconditionally null for a
+   * merge row; its mapper also reads this settled verdict payload as a fallback
+   * @decision bed91595 — a real pending_gate_ops tombstone for deploy means "never_existed" now covers
+   * deploy opIds too; do not reintroduce an in-process opId cache/reclassification for deploy
    */
   /**
    * @decision a16c580b — cross-project redaction of output/diagnostic fields uses a wrapper object,
    * never a bare optional string; widened by 5ef78900 to cover outputTail/gateDetail/steps too
-   * (docs/decisions/a16c580b-cross-project-gate-redaction-uses-a-wrapper-object.md)
    */
   gateStatus(opId: string, scopeSessionId?: string, scopeProjectId?: string, redactCrossProject?: { readonly callerProjectId: string | undefined }): {
     state: "queued" | "running" | "pending" | "settled" | "evicted-dead-owner" | "orphaned-by-restart" | "never_existed" | "unknown" | "ambiguous";
     gateType: GateType | null;
     /** @decision d5e67146 — for tombstone state:"pending", elapsedMs re-bases to time-since-MINT, a
      *  third origin on top of the live queued/running phases, never an exemption from reading `state`
-     *  first (docs/decisions/d5e67146-tombstone-pending-liveness-signal.md) */
+     *  first */
     elapsedMs: number | null;
     /** How long since the run's CURRENT step last showed a liveness event (started, or produced a
      *  stdout/stderr byte) — see {@link GateQueueEntry.idleMs}'s doc for why this (not `elapsedMs`) is the
@@ -3577,9 +3576,8 @@ export class SessionService {
      *  same population scope as `extended` immediately above. */
     attempt?: number | null; priorAttemptMs?: number | null;
     /** @decision 4c5bf820 — settled-verdict fields are scoped PER FIELD, not uniformly "gate"-only
-     *  (docs/decisions/4c5bf820-merge-gate-row-verdict-derivation-and-honest-null-payload.md)
      *  @decision a228dfb5 — passed reads false for a "merge" row with outcome:"skipped" (inert-diff,
-     *  no gate spawned) (docs/decisions/a228dfb5-skipped-merge-verdict-must-map-to-skipped-not-pass.md) */
+     *  no gate spawned) — never map a skipped merge to "pass" */
     passed?: boolean; cancelled?: boolean; reason?: string; durationMs?: number;
     validatedHead?: string; headWarning?: string; steps?: GateStepDuration[]; outputTail?: string;
     /** Card a16c580b: absolute path to this op's FULL captured gate output — the recovery path for
@@ -3596,13 +3594,13 @@ export class SessionService {
      *  capability. Populated for BOTH "gate" and "merge" rows. */
     proximity?: PendingGateOpVerdict["proximity"];
     /** @decision 9f6598dd — admittedAt is the op's own mint instant, present for every tombstone-branch
-     *  result (docs/decisions/9f6598dd-mergeverdict-derivation-closes-the-settled-merge-gap.md)
+     *  result
      *  @decision 720bb7ad — TRAP: admittedAt is MINT time, not admission time; totalDurationMs silently
-     *  includes queue wait (docs/decisions/720bb7ad-gate-op-id-env-stamp-and-batch-size-requirement.md) */
+     *  includes queue wait */
     admittedAt?: string;
     /** @decision d5e67146 — ownerSessionAlive: the liveness signal for tombstone state:"pending",
      *  derived via liveLineageSuccessor (not a bare session-dead check); present only for the unscoped
-     *  manager surface, omitted cross-project (docs/decisions/d5e67146-tombstone-pending-liveness-signal.md) */
+     *  manager surface, omitted cross-project */
     ownerSessionAlive?: boolean;
     /** Card 9f6598dd — closes Finding 1 (a settled "merge" op used to report NEITHER of these three
      *  fields at all: `{state:"settled",gateType:"merge",elapsedMs:null,idleMs:null}`, nothing else).
@@ -3636,9 +3634,9 @@ export class SessionService {
     emitCompareReduced?: boolean; emitCompareIdenticalCount?: number;
     emitCompareTestFiles?: string[]; emitCompareNotHermeticExcluded?: string[];
     /** @decision 9f6598dd — outcome surfaces the same pass/fail/error/cancelled classification as one
-     *  literal string, purely additive (docs/decisions/9f6598dd-mergeverdict-derivation-closes-the-settled-merge-gap.md)
-     *  @decision a228dfb5 — "skipped" (merge rows only) means landed with no gate spawned (inert diff)
-     *  (docs/decisions/a228dfb5-skipped-merge-verdict-must-map-to-skipped-not-pass.md) */
+     *  literal string, purely additive
+     *  @decision a228dfb5 — "skipped" (merge rows only) means landed with no gate spawned (inert diff);
+     *  never collapse it into "pass" */
     outcome?: PendingGateOpVerdictKind;
     /** Card 7a1a76e9 DoD-2: the landed squash subject (`ConfirmMergeResult.commitSubject`, card b88704bb) —
      *  the documented "if you need the answer sooner" poll for a QUEUED merge, which previously could not
@@ -3747,17 +3745,15 @@ export class SessionService {
       const gateType: GateType = t.record.kind === "merge" ? "merge" : t.record.kind === "deploy" ? "deploy" : "worker";
       // @decision 4c5bf820 — do not leave a merge-kind row's verdict/verdictPayload NULL by construction;
       // derive it, and never fabricate payload/settledAt/totalDurationMs/extended when absent
-      // (docs/decisions/4c5bf820-merge-gate-row-verdict-derivation-and-honest-null-payload.md)
       const payload = t.record.verdictPayload;
       // @decision a16c580b — use the redactCrossProject wrapper object for this redaction, not a bare
       // optional string, and do not special-case an unresolved caller project or a legacy projectId:null
-      // row; the plain !== comparison already fails safe for both (docs/decisions/a16c580b-cross-project-gate-redaction-uses-a-wrapper-object.md)
+      // row; the plain !== comparison already fails safe for both
       const crossProjectRedacted = redactCrossProject !== undefined && t.record.projectId !== redactCrossProject.callerProjectId;
       /**
        * @decision 753b9699 — cross-project gate-verdict redaction is an exhaustive, compiler-enforced
-       * field classification (not a per-line guard or a deny-Set), covering the OUTER return fields
-       * too, not just verdictFields
-       * (docs/decisions/753b9699-gate-verdict-field-classification-is-exhaustive-and-covers-outer-fields-too.md)
+       * field classification (not a per-line guard or a deny-Set), covering the OUTER return fields too
+       * — an unclassified field must fail to compile, never silently default to visible
        */
       type GateVerdictDerivedKey = "passed" | "cancelled" | "retryWarning" | "transientRetryWarning";
       type GateOuterFieldKey = "state" | "gateType" | "elapsedMs" | "idleMs" | "admittedAt" | "ownerSessionAlive" | "outcome";
@@ -3834,11 +3830,11 @@ export class SessionService {
         ...(payload?.extended !== undefined ? { extended: payload.extended } : {}),
       };
       // @decision a228dfb5 — "skipped" shares this pass/fail branch too; `passed` reads false for it, not
-      // just the OUTER `outcome` field (docs/decisions/a228dfb5-skipped-merge-verdict-must-map-to-skipped-not-pass.md)
+      // just the OUTER `outcome` field
       // @decision 5ef78900 — spreads below are unconditional; redaction is the ONE post-hoc filter, never
-      // per-spread gating (docs/decisions/5ef78900-timingband-cross-project-numeric-disclosure-is-deliberate.md)
+      // per-spread gating
       // @decision 553ea58c — batchRenderCount is computed once here (a const can't sit mid-object-literal);
-      // see the retryWarning dispatch below for what it gates (docs/decisions/553ea58c-batchlanded-is-a-separate-later-fact.md)
+      // see the retryWarning dispatch below for what it gates
       const batchRenderCount = payload?.batchLanded === false ? undefined : payload?.batchBranchCount;
       const rawVerdictFields = t.record.verdict === "pass" || t.record.verdict === "fail" || t.record.verdict === "skipped"
         ? {
@@ -3854,10 +3850,8 @@ export class SessionService {
           ...(payload?.proximity !== undefined ? { proximity: payload.proximity } : {}),
           // @decision 6dcb9cd3 — retriedFile spread `!== undefined` (not truthy): a `null` here IS a
           // positive measured negative and must pass through as-is, never fabricated or omitted
-          // (docs/decisions/6dcb9cd3-retriedfile-is-a-positive-measured-negative.md)
           // @decision 5ef78900 — retryWarning is the one field here that's DERIVED, not spread verbatim;
           // classified "sensitive" so it's still dropped by the post-hoc redaction filter below
-          // (docs/decisions/5ef78900-timingband-cross-project-numeric-disclosure-is-deliberate.md)
           ...(payload?.retriedFile !== undefined ? { retriedFile: payload.retriedFile } : {}),
           ...(payload?.retryPassed !== undefined ? { retryPassed: payload.retryPassed } : {}),
           // Card 9966c52d: `payload.outputTail` (attempt 1's own captured tail, spread a few lines above)
@@ -3865,11 +3859,10 @@ export class SessionService {
           // assertion failure — see `formatWeakerPassWarning`'s/`formatRetryAlsoFailedWarning`'s own doc.
           // @decision 553ea58c — batchRenderCount hides landedCount from the weaker-PASS prose only when
           // batchLanded===false; the raw field and the REJECTED-retry branch are both unaffected
-          // (docs/decisions/553ea58c-batchlanded-is-a-separate-later-fact.md)
           // @decision 9bdc8ea5 — retryWarning's presence also requires retryPassed to be a strict boolean,
-          // not merely retriedFile truthy (docs/decisions/9bdc8ea5-format-retry-also-failed-warning-is-a-separate-function.md)
-          // @decision 7ad12202 — dispatch checks t.record.verdict==="pass" first, never retryPassed alone
-          // (docs/decisions/7ad12202-dispatch-on-gate-verdict-not-retrypassed.md)
+          // not merely retriedFile truthy, or a cancelled-while-queued retry gets a dishonest warning
+          // @decision 7ad12202 — dispatch checks t.record.verdict==="pass" first, never retryPassed alone;
+          // a rescued single-file retry can still fail a LATER step, leaving retryPassed:true beside "fail"
           ...(payload?.retriedFile && typeof payload?.retryPassed === "boolean"
             ? { retryWarning: t.record.verdict === "pass"
               ? formatWeakerPassWarning(payload.retriedFile, payload?.outputTail, batchRenderCount)
@@ -3998,23 +3991,23 @@ export class SessionService {
   }
 
   /** @decision 5ef78900 — standalone because `gate_status`'s `timingBand` join happens AFTER `gateStatus`
-   *  returns, so that method's own redaction can't gate it; reuses the same fail-safe comparison
-   *  (docs/decisions/5ef78900-timingband-cross-project-numeric-disclosure-is-deliberate.md) */
+   *  returns, so that method's own redaction can't gate it; reuses the same fail-safe comparison —
+   *  never re-derive this by hand at a new call site */
   isCrossProjectGateOp(opId: string, redactCrossProject?: { readonly callerProjectId: string | undefined }): boolean {
     if (redactCrossProject === undefined) return false;
     const t = this.db.findPendingGateOpByOpId(opId);
     return t.kind === "found" && t.record.projectId !== redactCrossProject.callerProjectId;
   }
 
-  /** @decision fa359824 — gate_queue's ONE-read scoping: an own-project row carries full detail
-   *  (taskId/branch/workerLabel); a foreign row is named only by project + gate kind + age + queue position
-   *  (docs/decisions/fa359824-gate-queue-is-the-one-read-answer-to-am-i-stuck.md) */
+  /** @decision fa359824 — gate_queue's ONE-read scoping: a foreign-project row omits taskId/branch/
+   *  workerLabel/fallbackOfBatchOpId (redacted:true makes the omission self-evident); everything else,
+   *  opId included, still rides the wire */
   /** @decision 4f151331 — recentTimeoutStreak is a second, independently-tracked signal surfaced beside
-   *  phase/queuePosition, never merged into them — a nonzero streak doesn't change phase
-   *  (docs/decisions/4f151331-recenttimeoutstreak-is-a-second-independent-signal.md) */
+   *  phase/queuePosition, never merged into them — a nonzero streak means verify no orphaned process
+   *  survives before trusting phase/queuePosition alone */
   /** @decision 80d54122 — recentTimeoutStreak is unconditional/cross-project; only taskId/branch/
-   *  workerLabel stay own-project (a foreign row also carries redacted:true)
-   *  (docs/decisions/80d54122-recenttimeoutstreak-redaction-scope-resolved.md) */
+   *  workerLabel stay own-project — its old co-location with those three was an implementation accident;
+   *  never re-gate it behind that same conditional */
   gateQueueForManager(callerProjectId: string): GateQueueSnapshot {
     const snap = this.gateSemaphore.snapshot();
     const cap = resolveConfig({}, this.db.getPlatformConfig()).orchestration.maxConcurrentGates;
@@ -4197,14 +4190,11 @@ export class SessionService {
    * `worker_merge_confirm` pending response or `gate_queue` entry already names (full id or an unambiguous
    * prefix, via the same `GateSemaphore.findByOpId` resolution `gate_status` uses).
    * @decision 8d585277 — QUEUED is zero-risk cancel-immediately for ANY gate type (worker or merge);
-   * RUNNING stays refused for merge/deploy (mid-squash residue needs a human to clear) and, for a worker
-   * self-check, is only reported `cancelled` once the kill is independently VERIFIED within
-   * `DEFAULT_GATE_CANCEL_VERIFY_MS` — an unverified kill leaves the slot held, not freed on assumption
-   * (docs/decisions/8d585277-gate-cancel-queued-zero-risk-running-worker-only.md)
+   * RUNNING stays refused for merge/deploy (mid-squash residue needs a human to clear); a worker
+   * self-check's RUNNING cancel reports "cancelled" only once independently VERIFIED — never on assumption
    * @decision a0d912f5 — `params.scope` is a REQUIRED discriminator (`{kind:"project"}` manager-wide vs
    * `{kind:"own",sessionId}` a worker's own run_gate self-check only, gated on `gateType==="worker"` too) —
    * making it optional risks a future caller silently inheriting manager-level cancel power
-   * (docs/decisions/a0d912f5-gate-admit-stamps-is-a-separate-later-checkpoint-than-start-stamps.md)
    */
   async cancelGateOp(
     callerSessionId: string, opId: string,
