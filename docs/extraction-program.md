@@ -271,13 +271,17 @@ thing it exists to do.
    is the correct shape when only one of three occurrences was inside the touched block. Any
    shape you can't explain: read the diff and explain it; don't "fix" it to match a pattern. This
    same "by line number, not by count" rule is also the fix for item 4's false-negative mode below.
-4. **Whole-branch loss check.** Take every distinctive token (`[a-z][a-z0-9_]{7,}`, plus
-   `\b[0-9a-f]{8}\b` for 8-hex ids, minus stopwords) from the base source's comments; subtract
-   those still present in the branch source; every remainder must appear in the branch's
-   new/changed records. Anything in neither is a candidate loss to read by hand. Positive-control
-   it — confirm genuinely-removed tokens *are* found in the records. Measured on two branches: 63
-   removed tokens ⇒ 2 candidates, 27 removed ⇒ 3 candidates — both sets resolved on inspection to
-   legitimate rewording, not loss.
+4. **Loss scan, scoped to added lines + records.** Run
+   `node packages/daemon/scripts/extraction-loss-scan.mjs <file>` — it tokenizes the diff's REMOVED
+   lines and reports any token found in NEITHER the ADDED lines NOR the record(s) an added
+   `@decision` id resolves to, and NEVER consults the unchanged remainder of the source file.
+   Subtracting against the whole branch source (the prior method here) masks a real loss: a token
+   that recurs anywhere else in a large file reads as "still present" even when the clause
+   carrying it was deleted — measured directly on two lanes that reported "0 misses" against the
+   whole-file method while this scoped scan found real losses (card `1c218980`, `host.ts` tranche
+   43; card `a6d52081`, `service.ts` tranche 51). Anything the script prints is advisory, a
+   candidate loss to read by hand, never a decided verdict; it exits non-zero only for a
+   non-comment removed/added line or an over-length added line, never for a miss.
    Its own false-positive mode: an ordinary English word dropped in a rewrite — check whether the
    *constraint* survived under different words before calling it a loss.
    **Its false-negative mode — the item-3 "resolve by line number, never by count alone" rule
