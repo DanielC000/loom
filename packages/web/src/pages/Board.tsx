@@ -413,8 +413,11 @@ function workerStatus(w: SessionListItem): { tone: Tone; label: string; glow?: b
 // construction: the hairline is absolutely positioned over the card's existing bottom edge, so it adds
 // NO card height.
 //
-// The settled op is RETAINED in the registry for a brief window after it settles (see PendingOpRegistry's
-// "RETAINED TERMINAL VIEW" doc), so the terminal fill below has a real chance to render before
+// @decision d1aee5f1 — A settled merge op stays visible via PendingOpRegistry's retained-view opt-in for
+// a brief window after it settles, instead of reverting to nothing the instant `peek()` would otherwise
+// show it gone.
+//
+// That retained window is what gives the terminal fill below a real chance to render before
 // `pendingMerge` reverts to null and the card falls back to its normal worker-status row. `pm.outcome`
 // (not the raw `pm.state`, which can't tell a merge SUCCESS from a gate REJECTION — both resolve to
 // "done") drives which of the four fills renders: "merged" (phosphor), "cancelled" (cyan — card
