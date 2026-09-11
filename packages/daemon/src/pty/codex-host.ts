@@ -1,4 +1,4 @@
-import { TRUST_DIALOG_MARKER, TRUST_DIALOG_ANSWER, BUSY_STATUS_MARKER, BUSY_TITLE_SPINNER_RE, CODEX_READY_PLACEHOLDER, CODEX_MODEL_LOADED_RE, stripAnsiCsi } from "./codex-doctrine.js";
+import { TRUST_DIALOG_MARKER, TRUST_DIALOG_ANSWER, BUSY_STATUS_MARKER, BUSY_TITLE_SPINNER_RE, CODEX_READY_PLACEHOLDER, CODEX_MODEL_LOADED_RE, stripAnsiCsi, normalizeCodexScreenText } from "./codex-doctrine.js";
 
 /**
  * Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4: the PURE, testable decision logic for the codex
@@ -10,11 +10,15 @@ import { TRUST_DIALOG_MARKER, TRUST_DIALOG_ANSWER, BUSY_STATUS_MARKER, BUSY_TITL
  * Live/CodexLive entry points at — that split is what keeps this out of the ~8,000-line host file.
  */
 
-/** True iff `screen` (a raw pty-output frame, or any accumulated buffer of one) contains the literal,
+/** True iff `screen` (a raw pty-output frame, or any accumulated buffer of one) contains the
  *  undocumented first-use-per-directory trust dialog (`codex-doctrine.ts#TRUST_DIALOG_MARKER`) — checked
- *  BEFORE ever writing a real prompt, per the card's own landmine #1. */
+ *  BEFORE ever writing a real prompt, per the card's own landmine #1.
+ *
+ *  @decision c0933e57 — matched against {@link normalizeCodexScreenText}'s output, never raw `screen`
+ *  directly: codex sometimes renders the marker's inter-word spaces as CSI cursor-forward instead of a
+ *  literal space byte, which a raw `.includes()` can never match (see that function's own doc). */
 export function isTrustDialogPrompt(screen: string): boolean {
-  return screen.includes(TRUST_DIALOG_MARKER);
+  return normalizeCodexScreenText(screen).includes(TRUST_DIALOG_MARKER);
 }
 
 /** The keystroke sequence to write when {@link isTrustDialogPrompt} is true — accepts the highlighted
@@ -28,9 +32,14 @@ export function trustDialogAnswer(): string {
  *  (`codex-doctrine.ts#BUSY_STATUS_MARKER`/`BUSY_TITLE_SPINNER_RE`). Idle is this function's ABSENCE from
  *  the LATEST frame, never the input-placeholder's presence (card's landmine #2 — the placeholder is
  *  static chrome shown during busy too). Callers must re-evaluate this on every fresh frame, not cache a
- *  stale `true`. */
+ *  stale `true`.
+ *
+ *  @decision c0933e57 — `BUSY_STATUS_MARKER` is tested against {@link normalizeCodexScreenText}'s output
+ *  (never raw `screen`) as a defensive hardening against the SAME CSI-cursor-forward-as-space rendering
+ *  `isTrustDialogPrompt` was confirmed exposed to — unconfirmed here (no specimen captures codex's real
+ *  busy state), but a strict no-op on every currently-passing case, so there is no regression risk. */
 export function isCodexBusy(screen: string): boolean {
-  return BUSY_STATUS_MARKER.test(screen) || BUSY_TITLE_SPINNER_RE.test(screen);
+  return BUSY_STATUS_MARKER.test(normalizeCodexScreenText(screen)) || BUSY_TITLE_SPINNER_RE.test(screen);
 }
 
 /**

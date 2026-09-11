@@ -145,6 +145,21 @@ export function stripAnsiCsi(s: string): string {
   return s.replace(ANSI_CSI_RE, "");
 }
 
+/**
+ * Card `c0933e57`: codex sometimes renders a text-separating SPACE as CSI cursor-forward (`ESC[<n>C`)
+ * instead of a literal space byte — a raw literal-space marker match can silently never fire against that
+ * rendering. See docs/decisions/c0933e57-codex-csi-cursor-forward-space.md for the measured specimens and
+ * which sibling markers are/aren't exposed.
+ * @decision c0933e57 — do NOT `stripAnsiCsi` the whole buffer instead of converting `ESC[<n>C` to spaces
+ * first: that glues adjacent words together with nothing left to match on ("Doyoutrust").
+ */
+const CSI_CURSOR_FORWARD_RE = /\x1b\[(\d*)C/g;
+const OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+export function normalizeCodexScreenText(s: string): string {
+  const spaced = s.replace(CSI_CURSOR_FORWARD_RE, (_m: string, n: string) => " ".repeat(n ? parseInt(n, 10) : 1));
+  return stripAnsiCsi(spaced).replace(OSC_RE, "").replace(/[ \t]+/g, " ");
+}
+
 const md5 = (buf: Buffer | string): string => createHash("md5").update(buf).digest("hex");
 
 /**

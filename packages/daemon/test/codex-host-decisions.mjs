@@ -18,7 +18,7 @@ const {
   codexAsciiFold, codexCharNeedsAsciiFold, codexNfkcFold,
 } = await import("../dist/pty/codex-host.js");
 const {
-  TRUST_DIALOG_MARKER, BUSY_STATUS_MARKER, CODEX_READY_PLACEHOLDER, CODEX_MODEL_LOADED_RE, stripAnsiCsi, hashConfigBefore, diffConfigAfterSpawn,
+  TRUST_DIALOG_MARKER, BUSY_STATUS_MARKER, CODEX_READY_PLACEHOLDER, CODEX_MODEL_LOADED_RE, stripAnsiCsi, normalizeCodexScreenText, hashConfigBefore, diffConfigAfterSpawn,
 } = await import("../dist/pty/codex-doctrine.js");
 const fs = await import("node:fs");
 const path = await import("node:path");
@@ -36,6 +36,40 @@ check(
 );
 check("isTrustDialogPrompt: empty screen ⇒ false", isTrustDialogPrompt("") === false);
 check("trustDialogAnswer(): returns a non-empty keystroke sequence", typeof trustDialogAnswer() === "string" && trustDialogAnswer().length > 0);
+
+// --- Card c0933e57: codex's CSI-cursor-forward-as-space rendering (normalizeCodexScreenText) ---------
+// REAL captured bytes — NOT fabricated — extracted verbatim from the archived mechanism-A specimen
+// ~/.loom/gate-output-archive/427590d2-mechA-trust-dialog-9c2ecef0.log (byte range confirmed via `od -c`;
+// the identical CSI-cursor-forward rendering was also confirmed present, od -c, in the other three
+// archived specimens: 7ad449f1, 9bde96e3, b21383f6). Every inter-word space in the dialog's body is
+// rendered as `\x1b[1C` (CSI cursor-forward) instead of a literal space byte.
+const REAL_CAPTURED_CSI_TRUST_DIALOG_BYTES = "\x1b[3;3HDo\x1b[1Cyou\x1b[1Ctrust\x1b[1Cthe\x1b[1Ccontents\x1b[1Cof\x1b[1Cthis\x1b[1Cdirectory?";
+check(
+  "RED PROOF (pre-fix behavior, still true of a bare `.includes()`): a raw literal-space match against the real captured bytes reads false — 0 literal-marker hits, matching the card's own measured finding across all four archived specimens",
+  REAL_CAPTURED_CSI_TRUST_DIALOG_BYTES.includes(TRUST_DIALOG_MARKER) === false,
+);
+check(
+  "FIX: normalizeCodexScreenText converts each CSI-cursor-forward into a real space, recovering the literal marker text",
+  normalizeCodexScreenText(REAL_CAPTURED_CSI_TRUST_DIALOG_BYTES).includes(TRUST_DIALOG_MARKER) === true,
+);
+check(
+  "DoD-1 (RED→GREEN against the REAL captured bytes): isTrustDialogPrompt now correctly detects the trust dialog rendered with CSI cursor-forward",
+  isTrustDialogPrompt(REAL_CAPTURED_CSI_TRUST_DIALOG_BYTES) === true,
+);
+check(
+  "DoD-1 (no regression): isTrustDialogPrompt still detects the already-working literal-space form",
+  isTrustDialogPrompt(`some boot chrome\n${TRUST_DIALOG_MARKER}\n1. Yes, continue\n2. No, quit`) === true,
+);
+check(
+  "normalizeCodexScreenText: does NOT glue adjacent words together the way a bare stripAnsiCsi would (⛔ the DoD's own explicit anti-pattern) — recovers a real space, not nothing",
+  normalizeCodexScreenText("Do\x1b[1Cyou") === "Do you" && stripAnsiCsi("Do\x1b[1Cyou") === "Doyou",
+);
+check("normalizeCodexScreenText: ESC[C with no explicit count still means one cell forward (ECMA-48 default)", normalizeCodexScreenText("Do\x1b[Cyou") === "Do you");
+check("normalizeCodexScreenText: a multi-cell cursor-forward collapses to one space under the whitespace-run rule", normalizeCodexScreenText("Do\x1b[3Cyou") === "Do you");
+check("normalizeCodexScreenText: strips an unrelated CSI sequence (color/positioning) with NO replacement — only cursor-forward stands in for a space", normalizeCodexScreenText("\x1b[38;5;6mhello\x1b[m") === "hello");
+check("normalizeCodexScreenText: strips an OSC sequence (e.g. the title-bar spinner) with no replacement", normalizeCodexScreenText("\x1b]0;⠠ codex\x07idle") === "idle");
+check("normalizeCodexScreenText: plain text with no escapes passes through unchanged", normalizeCodexScreenText("plain text") === "plain text");
+check("normalizeCodexScreenText: empty string ⇒ empty string", normalizeCodexScreenText("") === "");
 
 // --- isCodexBusy -----------------------------------------------------------------------------------
 
@@ -63,6 +97,38 @@ check(
   "isCodexBusy regex sanity: BUSY_STATUS_MARKER itself matches the exact literal used above (proves the fixture isn't testing a stale/wrong pattern)",
   BUSY_STATUS_MARKER.test("Working (12s • esc to interrupt)") === true,
 );
+
+// --- Card c0933e57 DoD-3: sibling-marker sweep for the same CSI-cursor-forward-as-space exposure -----
+// CODEX_READY_PLACEHOLDER and CODEX_MODEL_LOADED_RE: MEASURED NOT exposed in the four archived
+// mechanism-A specimens (od -c confirmed literal space bytes) — see
+// docs/decisions/c0933e57-codex-csi-cursor-forward-space.md. Deliberately left UNCHANGED (this project's
+// own minimal-change discipline: normalize only where a real defect was confirmed). These two checks pin
+// that they still work via their ORIGINAL, un-normalized match, proving this fix didn't touch them.
+check(
+  "DoD-3: isCodexReadyMarkerPresent is UNCHANGED by this fix — still a raw literal-space `.includes()` (measured not exposed in the archived specimens)",
+  isCodexReadyMarkerPresent(`codex booted\n> ${CODEX_READY_PLACEHOLDER}\n`) === true,
+);
+check(
+  "DoD-3: isCodexModelLoaded is UNCHANGED by this fix — still tested via stripAnsiCsi alone, not normalizeCodexScreenText (measured not exposed in the archived specimens)",
+  isCodexModelLoaded("model: gpt-6-astra medium") === true,
+);
+// BUSY_STATUS_MARKER: UNMEASURED against a real CSI-cursor-forward rendering — no archived specimen ever
+// reaches codex's busy state (mechanism A wedges at the trust dialog before any turn starts). isCodexBusy
+// was hardened defensively anyway (normalizeCodexScreenText is a no-op on every already-passing case, see
+// this file's own doc comment). The fixture below is SYNTHETIC — disclosed as such, not a captured
+// specimen — built by substituting CSI cursor-forward for the marker's own literal inter-word spaces, to
+// prove the hardening would actually work if codex ever does render this line the same way.
+const SYNTHETIC_CSI_BUSY_MARKER = "Working\x1b[1C(12s\x1b[1C•\x1b[1Cesc\x1b[1Cto\x1b[1Cinterrupt)";
+check(
+  "DoD-3 (SYNTHETIC fixture, disclosed — no real specimen captures codex's busy state): isCodexBusy detects a busy marker rendered with CSI cursor-forward instead of literal spaces",
+  isCodexBusy(SYNTHETIC_CSI_BUSY_MARKER) === true,
+);
+check("DoD-3 no-regression: isCodexBusy still detects the ordinary literal-space busy marker", isCodexBusy("Working (12s • esc to interrupt)") === true);
+// Update-available dialog: no runtime screen-text marker/detector exists for it at all (swept via grep —
+// `Update available|update_available|UPDATE_DIALOG` across packages/daemon/src returns only
+// CODEX_UPDATE_CHECK_OVERRIDE_ARGS's own doc comment and an unrelated gateway/server.ts hit) — it is
+// suppressed entirely via the per-invocation `-c check_for_update_on_startup=false` config override,
+// never detected-and-answered from screen text, so this exposure class doesn't apply.
 
 // --- mcpServersToCodexArgs ---------------------------------------------------------------------------
 
