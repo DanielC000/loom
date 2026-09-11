@@ -12756,19 +12756,20 @@ export class SessionService {
       // bounds it to attempt 1's own run, unconditionally, whether or not a retry later fires.
       const gateAttempt1DurationMs = Date.now() - gateStartedAt;
       // BOUNDED MULTI-FILE RETRY (card 344ce950 single-file; card 67030bb9 bounded multi-file, manager-
-      // approved — a MEASURED source of waste in the merge pipeline: a failure narrowed to a small set of
-      // identifiable, re-runnable test files that then pass together in isolation costs a full second run
-      // of the whole suite when the manager just re-fires worker_merge_confirm by hand instead, and — per
-      // card 67030bb9's own investigation — a multi-file failure used to be refused this retry OUTRIGHT,
-      // regardless of whether every file in it would pass alone). Fires ONLY for a "genuine" classification
-      // (a clean non-zero exit — never a kill/timeout, which the TRANSIENT-KILL AUTO-RETRY below already
-      // owns, and never twice: this runs exactly once, before that section, so the two retries can never
-      // both fire for the same gate attempt) that names UP TO `MULTI_FILE_RETRY_MAX` identifiable,
-      // re-runnable files together (see gate-runner.ts's `identifyRetriableTestFiles` for the deliberately
-      // narrow, fail-closed match, applied to EVERY name in the set — a project without this exact suite,
-      // or a failure that doesn't cleanly name every file, always declines and this block is a no-op for
-      // that project, byte-identical to before either card). NO CAUSE IS ASSERTED anywhere in this block or
-      // its wording.
+      // approved).
+      //
+      // @decision 344ce950 — exists to avoid a full second suite run for a failure already narrowed to
+      //  a small, identifiable, re-runnable set; a multi-file failure used to be refused this retry
+      //  outright.
+      //
+      // Fires ONLY for a "genuine" classification (a clean non-zero exit — never a kill/timeout, which
+      // the TRANSIENT-KILL AUTO-RETRY below already owns, and never twice: this runs exactly once, before
+      // that section, so the two retries can never both fire for the same gate attempt) that names UP TO
+      // `MULTI_FILE_RETRY_MAX` identifiable, re-runnable files together (see gate-runner.ts's
+      // `identifyRetriableTestFiles` for the deliberately narrow, fail-closed match, applied to EVERY name
+      // in the set — a project without this exact suite, or a failure that doesn't cleanly name every
+      // file, always declines and this block is a no-op for that project, byte-identical to before either
+      // card). NO CAUSE IS ASSERTED anywhere in this block or its wording.
       //
       // Card 0e5b2045: reads `failTierAll`/`failTierTestCount`, NOT `failingTest`/`failingTestCount` — the
       // FAIL/not-ok tier's OWN lines, independent of whichever tier `failingTest` was drawn from for
@@ -12935,14 +12936,8 @@ export class SessionService {
             retriedFile, retryPassed, priorFailingTest: gateResult.failingTest,
             gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax, durationMs: Date.now() - singleFileRetryStartedAt,
           });
-          // THE NON-NEGOTIABLE PART (card 344ce950 §3): a pass-after-retry is WEAKER evidence than a clean
-          // pass — an order-dependent/cross-test-pollution bug can pass in isolation and fail in the full
-          // suite, which is EXACTLY the class this single-file retry would otherwise mask. `retriedFile`/
-          // `retryPassed` (stamped on the SAME `build_gate` event below, and on this method's own return —
-          // see `ConfirmMergeResult.retryPassed`'s own doc) are the ONLY thing keeping such a bug visible;
-          // this absorbs the retry into `gateResult.passed` for the squash decision below but NEVER erases
-          // the fact that a retry happened. The single-file retry itself is never looped — it runs exactly
-          // once regardless of outcome.
+          // @decision 344ce950 — a pass-after-retry is WEAKER evidence than a clean pass, never promoted
+          //  past that (retriedFile/retryPassed stay stamped), and never looped more than once.
           //
           // CARD 7ad12202 — RESUME ANY STEPS THE ORIGINAL `&&` SHORT-CIRCUIT NEVER RAN: a multi-step
           // `effectiveGate` whose failure was on a NON-FINAL step means `gateResult.steps` (attempt 1) is
