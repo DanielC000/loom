@@ -11314,43 +11314,10 @@ export class SessionService {
   }
 
   /**
-   * RECONCILE-BEFORE-NOTIFY (Auditor finding 8fb05b2d): a `[loom:merge-rejected]` pty notification can
-   * otherwise fire long after the situation it describes has resolved out-of-band — e.g. a client-timeout
-   * on `worker_merge_confirm` leaves the manager to manually squash-merge the task itself, then the
-   * ORIGINAL confirmWorkerMerge run (or a retry that re-invoked it from scratch once the pendingOps entry
-   * had already settled+evicted) finishes and delivers a stale "build gate failed" — burning the manager's
-   * turns confirming an echo of something already resolved. Suppress the NOTIFY only (never the caller's
-   * `merged:false`/`reason` return, nor the `merge_rejected` event — those stay accurate bookkeeping) when:
-   *  - the task's card is already in its project's terminal lane (Done) — the situation resolved another
-   *    way, or
-   *  - the branch's work is already reachable from main — reuses the SAME ancestry check the ALREADY_MERGED
-   *    path derives from ({@link findLandedSquashCommit}'s deterministic `Loom-Worker-Branch` trailer scan),
-   *    not a second one, or
-   *  - an IDENTICAL rejection (same worker + reason + SHA — see DISCRIMINATOR below) was already recorded
-   *    for this task — de-dupe, so a stale re-run reproducing the same failure doesn't notify twice.
-   * FAILS SAFE throughout: any read/git error is treated as "not resolved yet" (never suppress a genuine
-   * first notification on a flaky check).
-   *
-   * DISCRIMINATOR (card e21c756a): the third bullet used to key ONLY on `worker + reason`, so a SECOND,
-   * genuinely distinct op on the same worker that happened to reject with the same generic reason string
-   * (e.g. `"gate"`) had its push silently swallowed — the manager was never told about a real, separate
-   * failure. The obvious-looking fix — key on `opId` instead — is WRONG: `confirmWorkerMergeTracked`'s own
-   * `PendingOpRegistry.attach()` mints a genuinely FRESH `opId` for a retry of the exact SAME situation
-   * whenever its identity-gated verdict cache misses for a reason that has nothing to do with new work —
-   * e.g. a transient git-ref read failure, or `forceRemoveWorktree`'s deliberate cache bypass (see
-   * `confirmWorkerMergeTracked`'s own `verdictIdentity`/`bypassRetained` doc) — and `merge-reject-notify-
-   * suppress.mjs` scenario (D) calls `confirmWorkerMerge` directly (bypassing that registry entirely, so
-   * EVERY call mints its own random `opId`) to prove that two calls reproducing the identical rejection for
-   * the identical commit must still notify only ONCE. Keying on `opId` would fail that: same commit, same
-   * reason, different `opId` ⇒ wrongly treated as distinct.
-   * The actual discriminator is WHAT COMMIT WAS BEING VALIDATED: {@link getWorktreeLatestNonMergeSha} (the
-   * SAME "did real new work land" signal the gate-timeout circuit breaker already uses, immediately above)
-   * — invariant to the pre-gate union-merge, so it doesn't move just because canonical main advanced, but
-   * DOES move the moment the worker pushes a genuine new commit. Two rejections for the same worker + same
-   * reason + same sha are the SAME underlying situation (retry, re-poll, a re-mint with a fresh opId) ⇒
-   * suppress; a sha mismatch is genuinely distinct new work rejecting again ⇒ notify. A failed sha read
-   * (`null`) never matches — including against a prior `null` — so a flaky/unreadable worktree always fails
-   * toward notifying, never toward suppressing.
+   * @decision 8fb05b2d — suppress the `[loom:merge-rejected]` NOTIFY only (never the return value/event)
+   *  once the situation resolved out-of-band: terminal column, already-merged, or an identical prior reject
+   * @decision e21c756a — dedupe key is the validated sha (getWorktreeLatestNonMergeSha), never worker+reason
+   *  alone (swallows a real distinct failure) or `opId` (a same-situation retry mints a fresh one)
    */
   private async shouldSuppressMergeReject(
     workerSessionId: string, taskId: string | null, branch: string, repoPath: string, worktreePath: string, reason: string,
@@ -11373,24 +11340,17 @@ export class SessionService {
   }
 
   /**
-   * Gate-timeout circuit breaker (card 3564fd1e) — read side. Checked BEFORE spawning a gate for `branch`,
-   * so a branch already tripped gets ZERO more gate processes, not one more before the distinct message
-   * appears. Cheap in the common (untripped) case: no git call unless `branch` already has a streak at or
-   * past {@link GATE_TIMEOUT_BREAKER_THRESHOLD}. When it does, re-reads the worktree's latest commit the
-   * WORKER itself authored via {@link getWorktreeLatestNonMergeSha} — NOT the raw worktree HEAD, which on
-   * the confirmWorkerMerge path is a union-merge commit that changes every time main advances even with no
-   * worker fix (see that function's doc for the full defeat this closes). If it has advanced past the sha
-   * the trip was recorded against, a real new commit landed (the plausible fix), so the entry is cleared
-   * and this returns `false` — gating resumes on the very next call, no daemon restart needed. An
-   * unreadable signal (git error/timeout) is treated as "can't tell" and stays tripped — the safe
+   * @decision 3564fd1e — gate-timeout breaker, read side: checked BEFORE spawning, cheap when untripped
+   *
+   * SELF-HEAL: a null `entry.sha` — left behind if the sha read at trip-recording time failed — used to
+   * permanently lock the branch out, since `currentSha && entry.sha` can never both be truthy again. When
+   * `currentSha` reads successfully but `entry.sha` is null, adopt it as the new baseline (without clearing
+   * the trip) so the very next genuine advance is detectable again, instead of every future call being stuck
+   * comparing against `null` forever.
+   *
+   * An unreadable signal (git error/timeout) is treated as "can't tell" and stays tripped — the safe
    * direction, since spawning more gates against an unreadable worktree is the exact hazard this breaker
    * exists to prevent.
-   *
-   * SELF-HEAL (Code Review finding on card 3564fd1e): a null `entry.sha` — left behind if the sha read at
-   * trip-recording time failed — used to permanently lock the branch out, since `currentSha && entry.sha`
-   * can never both be truthy again. When `currentSha` reads successfully but `entry.sha` is null, adopt it
-   * as the new baseline (without clearing the trip) so the very next genuine advance is detectable again,
-   * instead of every future call being stuck comparing against `null` forever.
    */
   private async checkGateTimeoutBreaker(branch: string, worktreePath: string): Promise<boolean> {
     const entry = this.gateTimeoutStreak.get(branch);
