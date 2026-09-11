@@ -10454,48 +10454,52 @@ export class PtyHost {
     this.events.onPromptMismatchUnresolved?.(sessionId, { gen, writtenHash, reportedHash, intendedLen, recognizedGen, matchedLen, leadingRemainderLen: 0, trailingRemainderLen: 0, messageExcerpt, writtenAt });
   }
 
-  /** Card f5f6515a DoD-4: the FUSED counterpart to `getLastMismatchReplay` above — see `Live.lastMismatchFusion`'s
-   *  own doc for what it fires on (ANY confirmed composer-accumulation, no span cap — see that doc for why an
-   *  earlier `spanGens.length <= 2` bound was removed) and why it's a separate field rather than widening the
-   *  single-entry one. ⚠️ Its CONTRACT is DUPLICATION, not loss — see the field's own doc before reusing this
-   *  language elsewhere; do not describe it as "re-send if this postdates your last message" (that is
-   *  `lastMismatchReplay`'s contract, not this one). Same PULL-surface mechanics otherwise: `null` = none fired
-   *  yet since this session went live, `undefined` = session not live in this process, never cleared once set,
-   *  overwritten (not accumulated) by a later occurrence. */
+  /** The FUSED counterpart to `getLastMismatchReplay` above (`Live.lastMismatchFusion` — see that field's own
+   *  doc for what it fires on and the full mechanics). `null` = none fired yet since this session went live,
+   *  `undefined` = session not live in this process, never cleared once set, overwritten (not accumulated) by
+   *  a later occurrence.
+   *
+   * @decision f5f6515a — its CONTRACT is DUPLICATION, not loss; never describe it as "re-send if this
+   *  postdates your last message" (that is `lastMismatchReplay`'s contract, not this one).
+   */
   getLastMismatchFusion(sessionId: string): Live["lastMismatchFusion"] | undefined {
     return this.live.get(sessionId)?.lastMismatchFusion;
   }
 
-  /** Card 59757189 DoD-1/3: the UNMATCHABLE counterpart to `getLastMismatchReplay`/`getLastMismatchFusion`
-   *  above — see `Live.lastMismatchUnmatched`'s own doc for what it fires on (a mismatch that matched NONE
-   *  of the recognized/confirmed shapes) and why it captures `intended` directly rather than relying on
-   *  `recentWrittenTurns` (a bounded ring that rotates). Same PULL-surface mechanics otherwise: `null` =
+  /** The UNMATCHABLE counterpart to `getLastMismatchReplay`/`getLastMismatchFusion` above (`Live.
+   *  lastMismatchUnmatched` — see that field's own doc for what it fires on and the full mechanics). `null` =
    *  no unmatchable mismatch has fired yet since this session went live, `undefined` = session not live in
-   *  this process, never cleared once set, overwritten (not accumulated) by a later occurrence. This is a
-   *  DELIBERATE pull-only surface — nothing in this codebase currently pushes its content anywhere (a
-   *  parent/manager delivery path is a separate, still-undecided question — see card 59757189's own
-   *  DoD-2 note); reading it never has side effects. */
+   *  this process, never cleared once set, overwritten (not accumulated) by a later occurrence.
+   *
+   * @decision 59757189 — a DELIBERATE pull-only surface: nothing in this codebase currently pushes its
+   *  content anywhere (a parent/manager delivery path is a separate, still-undecided question); reading
+   *  it never has side effects.
+   */
   getLastMismatchUnmatched(sessionId: string): Live["lastMismatchUnmatched"] | undefined {
     return this.live.get(sessionId)?.lastMismatchUnmatched;
   }
 
-  /** Card c0323f8a — the durable PULL surface for `Live.lastMismatchNoticeSuppressed`: how many times, and
-   *  under what signature, the EXACT-REPEAT SUPPRESSION guard (see the `UserPromptSubmit` case) has held
-   *  back a byte-identical `[loom:prompt-mismatch]` resend instead of delivering it as a fresh turn. `null`
-   *  = no suppression has fired yet this session, `undefined` = session not live in this process. Same
-   *  PULL-surface mechanics as `getLastMismatchReplay`/`getLastMismatchFusion`: never cleared once set,
-   *  overwritten (not accumulated as a struct — only its own `count` field accumulates, and only across
-   *  repeats of the SAME signature) by a later occurrence. */
+  /** The durable PULL surface for `Live.lastMismatchNoticeSuppressed`: how many times, and under what
+   *  signature, the EXACT-REPEAT SUPPRESSION guard (see the `UserPromptSubmit` case) has held back a
+   *  byte-identical `[loom:prompt-mismatch]` resend instead of delivering it as a fresh turn. `null` = no
+   *  suppression has fired yet this session, `undefined` = session not live in this process.
+   *
+   * @decision c0323f8a — same PULL-surface mechanics as `getLastMismatchReplay`/`getLastMismatchFusion`:
+   *  never cleared once set, overwritten (not accumulated as a struct — only its own `count` field
+   *  accumulates, and only across repeats of the SAME signature) by a later occurrence.
+   */
   getLastMismatchNoticeSuppressed(sessionId: string): Live["lastMismatchNoticeSuppressed"] | undefined {
     return this.live.get(sessionId)?.lastMismatchNoticeSuppressed;
   }
 
-  /** Card 72cab648: the SENDER pull-surface for the bare-paste-placeholder tripwire's own GIVE-UP — see
-   *  `Live.lastPasteTripwireGiveUp`'s own doc for what it fires on (the one-shot auto-recovery re-injection
-   *  ALSO collapsed) and why it exists alongside the `console.warn` (eef4883c) and the attention-path
-   *  `enqueueSystemNudge` (47c11741) rather than replacing either. Same PULL-surface mechanics as its
-   *  siblings: `null` = no give-up has fired yet since this session went live, `undefined` = session not
-   *  live in this process, never cleared once set, overwritten (not accumulated) by a later occurrence. */
+  /** The SENDER pull-surface for the bare-paste-placeholder tripwire's own GIVE-UP (`Live.
+   *  lastPasteTripwireGiveUp` — see that field's own doc for what it fires on and the full mechanics).
+   *  `null` = no give-up has fired yet since this session went live, `undefined` = session not live in this
+   *  process, never cleared once set, overwritten (not accumulated) by a later occurrence.
+   *
+   * @decision 72cab648 — exists alongside the `console.warn` (`eef4883c`) and the attention-path
+   *  `enqueueSystemNudge` (`47c11741`) as an ADDITIVE pull surface, never a replacement for either.
+   */
   getLastPasteTripwireGiveUp(sessionId: string): Live["lastPasteTripwireGiveUp"] | undefined {
     return this.live.get(sessionId)?.lastPasteTripwireGiveUp;
   }
@@ -10504,17 +10508,22 @@ export class PtyHost {
    *  true on the first `UserPromptSubmit` hook (turn START — see that field's own doc); for codex,
    *  `CodexLive.firstTurnStarted` flips true on the first CONFIRMED turn COMPLETION instead (see that
    *  field's own doc for why codex is latched at a different chokepoint — it has no start-confirming hook
-   *  that can't also false-positive from boot/MCP-startup output). Card 361a5520: routed through
-   *  `findAnyLive` (was `this.live.get` — a codex session lives in the separate `liveCodex` map, so this
-   *  used to read structurally, permanently `false` for every codex session, indistinguishable from a
-   *  session that genuinely never started). Card 00bd3b4a: the discriminator
-   *  `handleKickoffGiveUpExhausted` (sessions/service.ts) reads before treating an exhausted kickoff
-   *  give-up as a genuine "nothing began at all" drop — Loom's own delivery-confirmation budget exhausting
-   *  proves only that ITS confirmation is stale, never that the engine never received the write (see pinned
-   *  memory `engine-confirmation-can-lag-minutes-timeouts-assume-seconds`); a session already past its
-   *  first confirmed turn is proof-by-construction that the kickoff was NOT dropped, whatever Loom's own
-   *  give-up signal reads. `false` (never `undefined`) for a session that isn't live — not-live also means
-   *  not-started, the correct read for that case too. */
+   *  that can't also false-positive from boot/MCP-startup output).
+   *
+   * @decision 361a5520 — routed through `findAnyLive`, never `this.live.get`: a codex session lives in
+   *  the separate `liveCodex` map, so the old `this.live.get` read this permanently `false` for every
+   *  codex session, indistinguishable from one that genuinely never started.
+   *
+   *  Card 00bd3b4a: the discriminator `handleKickoffGiveUpExhausted` (sessions/service.ts) reads before
+   *  treating an exhausted kickoff give-up as a genuine "nothing began at all" drop — Loom's own
+   *  delivery-confirmation budget exhausting proves only that ITS confirmation is stale, never that the
+   *  engine never received the write (see pinned memory
+   *  `engine-confirmation-can-lag-minutes-timeouts-assume-seconds`); a session already past its first
+   *  confirmed turn is proof-by-construction that the kickoff was NOT dropped, whatever Loom's own
+   *  give-up signal reads.
+   *
+   *  `false` (never `undefined`) for a session that isn't live — not-live also means not-started, the
+   *  correct read for that case too. */
   hasFirstTurnStarted(sessionId: string): boolean {
     return this.findAnyLive(sessionId)?.firstTurnStarted ?? false;
   }

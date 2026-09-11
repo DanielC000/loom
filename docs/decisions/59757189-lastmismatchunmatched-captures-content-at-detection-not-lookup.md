@@ -13,6 +13,10 @@ CAPTURED AT THE MOMENT OF DETECTION, directly from `intended` (the local in the 
 - Do not recover this field's content via a later lookup into `recentWrittenTurns` — that ring is bounded and will have rotated past the generation by the time any reader asks. Capture directly from `intended` at detection time.
 - Do not let an empty-string `intendedText` read as "nothing captured" — only `null`/`undefined` means that; a real object with an empty string is still a captured occurrence.
 
+## `getLastMismatchUnmatched`'s own site (`pty/host.ts`) — a deliberate pull-only surface (DoD-2)
+
+This is a DELIBERATE pull-only surface — nothing in this codebase currently pushes its content anywhere (a parent/manager delivery path is a separate, still-undecided question — see card `59757189`'s own DoD-2 note); reading it never has side effects.
+
 ## Source
 
-Inline comment in `packages/daemon/src/pty/host.ts` (the `Live.lastMismatchUnmatched` field doc), as of `main` `d8b3076b`. Extracted by card `b19e70d3` (tranche 10 on `pty/host.ts`); wording unchanged beyond joining wrapped lines and stripping `//` markers.
+Inline comment in `packages/daemon/src/pty/host.ts` (the `Live.lastMismatchUnmatched` field doc), as of `main` `d8b3076b`. Extracted by card `b19e70d3` (tranche 10 on `pty/host.ts`); wording unchanged beyond joining wrapped lines and stripping `//` markers. The `getLastMismatchUnmatched`'s own site section above is a second site, same card: `getLastMismatchUnmatched`'s own doc, extracted by tranche 54.

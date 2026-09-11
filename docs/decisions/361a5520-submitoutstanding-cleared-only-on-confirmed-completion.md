@@ -21,6 +21,14 @@ The Round 2 false positive this record's Narrative section already describes was
 - Do not clear `submitOutstanding` on CASE 3 (retry) or CASE 4 (exhausted) in `armCodexBusyStaleTimer` — a later marker sighting can still resolve an exhausted turn into a genuine completion.
 - Do not clear `submitOutstanding` on `interruptForRedirectCodex`'s common (already-confirmed) path — the outstanding turn is still the same one, now settling via its own re-armed timer.
 
+## `hasFirstTurnStarted`'s own site (`pty/host.ts`) — routed through `findAnyLive`, never `this.live.get`
+
+`PtyHost.hasFirstTurnStarted` is routed through `findAnyLive`, never `this.live.get`: a codex session lives in the separate `liveCodex` map, so the old `this.live.get` read used to return this permanently `false` for every codex session — indistinguishable from a session that genuinely never started.
+
+## Do not (2)
+
+- Do not read `hasFirstTurnStarted` via bare `this.live.get` — a codex session lives in the separate `liveCodex` map and would read structurally, permanently `false`, indistinguishable from a session that genuinely never started.
+
 ## Source
 
-Inline comment in `packages/daemon/src/pty/host.ts` (the `Live.submitOutstanding` field doc), as of `main` `8d9fe59d`. Extracted by card `a2a6b2ad` (tranche 11 on `pty/host.ts`); wording unchanged beyond joining wrapped lines and stripping `*` markers. The "CASE 2 is codex's only turn-completion chokepoint" section above is a second site, same card: `armCodexBusyStaleTimer`'s own CASE 2, extracted by tranche 18.
+Inline comment in `packages/daemon/src/pty/host.ts` (the `Live.submitOutstanding` field doc), as of `main` `8d9fe59d`. Extracted by card `a2a6b2ad` (tranche 11 on `pty/host.ts`); wording unchanged beyond joining wrapped lines and stripping `*` markers. The "CASE 2 is codex's only turn-completion chokepoint" section above is a second site, same card: `armCodexBusyStaleTimer`'s own CASE 2, extracted by tranche 18. The `hasFirstTurnStarted`'s own site section above is a third site, same card: `PtyHost.hasFirstTurnStarted`'s own doc, extracted by tranche 54.
