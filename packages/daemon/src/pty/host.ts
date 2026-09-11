@@ -8064,24 +8064,12 @@ export class PtyHost {
     // stays null exactly like activeTurnRoute does today. `lastPromptOwnerText` mirrors lastPromptRoute so a
     // rate-limit-killed companion turn's replay (resumeAfterRateLimit) still attests correctly.
     //
-    // Card 438973ce: `origin` — when present — is the FULL set of QueuedMessage this turn was built from
-    // (drainPending's `drained` array, or a single-element synthetic origin for the immediate/kickoff-
-    // guarantee callers), in FIFO order. Attribute EVERY member that carries its own `ownerText`, not just
-    // the single `ownerText` param (which is only ever `drained[0]!.ownerText` — the head). A coalesced
-    // drain (card eac3464d) can fold several same-sender owner turns into ONE submit(); iterating `origin`
-    // here — the same array whose ARITY already tracks the drain's own coalescing — means a future change
-    // to that arity can't silently re-break attribution the way eac3464d did, since there is no separate
-    // "just the head" value left to fall out of sync. FIFO order + `attributeOwnerText`'s own `unshift`
-    // leaves `recentOwnerTurns` newest-first, byte-identical to the pre-existing single-entry ordering.
-    // Falls back to the plain `ownerText` param only when no `origin` was supplied at all (rate-limit
-    // replay, `resumeAfterRateLimit`'s "rate-limit-replay" caller) — unchanged from before this card.
-    // Card f286919e: derive the attested owner text AND the trust-window sender key from ONE check, so a
-    // multi-sender batch can never split them — the legacy `coalesceAgentMessages:true` branch in
-    // drainPending has NO per-member sender check (unlike the default agent-kind branch, which enforces
-    // `senderId` equality via its own run condition), so `origin` there can legitimately span more than
-    // one sender. `originSenderId` is the batch's single common senderId when every member agrees, else
-    // null; it's computed once here and reused below to pin `activeTurnSenderId`, so the two facts share
-    // one derivation instead of this loop plus a separate `drained[0]` read.
+    // @decision 438973ce — attribute owner text from EVERY `origin` member, not just the head param,
+    // so a future coalescing-arity change can't silently re-break attribution the way eac3464d once
+    // did; falls back to the plain `ownerText` param only when no `origin` was supplied.
+    // @decision f286919e — derive `originSenderId` and the attested owner text from ONE same-sender
+    // check, reused below to pin `activeTurnSenderId`, so a multi-sender coalesced batch can never
+    // split the two facts across two separate reads.
     let originSenderId: string | null = null;
     if (origin && origin.length > 0) {
       const firstSenderId = origin[0]!.senderId ?? null;

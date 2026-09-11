@@ -25,3 +25,25 @@ Inline comment in `packages/daemon/src/companion/types.ts` (the `SubmitTurn` typ
 `export type SubmitTurn = ...`): lines 169-175, as of this tranche's HEAD. Relocated by card `d8bd1cde`
 (tranche on `companion/types.ts`); no wording changed beyond joining wrapped source lines into a flowing
 paragraph and stripping `*` comment markers.
+
+## `submit()` derives both facts from ONE check
+
+Card f286919e: `submit()` (`pty/host.ts`) derives `originSenderId` — the batch's single common
+`senderId` when every `origin` member agrees, else `null` — and the attested owner text together,
+from the SAME same-sender check. The legacy `coalesceAgentMessages:true` branch in `drainPending` has
+NO per-member sender check (unlike the default agent-kind branch, which enforces `senderId` equality
+via its own run condition), so `origin` there can legitimately span more than one sender.
+`originSenderId` is computed once and reused to pin `activeTurnSenderId`, so the two facts share one
+derivation instead of this loop plus a separate `drained[0]` read that could drift apart.
+
+## Do not (2)
+
+- Do not derive `activeTurnSenderId` and the owner-text attribution from two separate reads of
+  `origin` — share the one `originSenderId` derivation, or the two facts can drift apart on a future
+  change.
+
+## Source (2)
+
+Inline comment in `packages/daemon/src/pty/host.ts` (`submit()`'s body, the sender-key/owner-text
+derivation), commit `7aeb8b24b8658b107ae54211460882a85dfb3aab` (2026-09-01). Relocated by card
+`fc865948` (tranche 34 on `pty/host.ts`).
