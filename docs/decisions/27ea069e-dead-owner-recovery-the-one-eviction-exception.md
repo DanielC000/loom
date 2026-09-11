@@ -41,6 +41,10 @@ by reusing the SAME `liveLineageSuccessor` primitive both `ownerSessionAlive` an
 already resolve through, so "will eviction fire" and "will anyone actually be told" can never drift apart
 again. Fails toward evicting on doubt, unchanged.
 
+`confirmWorkerMergeTracked`'s own call site is unaffected on the healthy path: two managers/retries
+racing a genuinely in-flight merge, or a manager that recycled mid-merge, stay byte-identical to before
+this check existed.
+
 ### Do not (2)
 
 - Do not check only the minting session's own `processState`/`archivedAt` to decide a lineage is dead —

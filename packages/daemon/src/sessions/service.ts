@@ -14776,24 +14776,8 @@ export class SessionService {
    * duplicate confirm idempotently (card 2eddf573); this registry adds no new merge-side idempotency of
    * its own, it only changes how/when the result is DELIVERED to the caller.
    *
-   * COMPLETION NUDGE (card fb8df559 Part 2, widened by 369d8824/187f5b76): when this degrades to the
-   * pending path, the asking manager is left to spin-poll (re-call this tool / `worker_list.pendingMerge`)
-   * to learn the outcome. `pendingOps.attach`'s `onSettledAfterPending` fires exactly once, only for a key
-   * that was actually surfaced pending, straight from the op's terminal settle — so a manager that went
-   * off and did something else instead of polling still gets pushed a turn the moment the gate/merge
-   * actually finishes. `kind:"warning"` because this is a Loom operational nudge (same-route coalescing is
-   * correct), mirroring the decision-inbox answer nudge / answered-stuck watchdog's use of the same
-   * `enqueueStdin` rail. The FAST (already-fast) path never reaches this callback at all — that caller
-   * already has the outcome inline via its own return value.
-   *
-   * EXACTLY-ONE-SIGNAL (card 187f5b76): `outcome.value.notified`/the `opId` param are threaded from the
-   * SAME single {@link confirmWorkerMerge} invocation this callback is reporting on, so this generic echo
-   * and any rich direct push (rejectNotify's `[loom:merge-rejected]`, finishAlreadyMerged's
-   * `[loom:already-merged]`) can never both land for one op — see `notified`'s doc on {@link
-   * ConfirmMergeResult} for exactly which branches set it. `opId` is echoed on EVERY branch (including the
-   * synchronously-thrown-error branch, which has no `outcome.value` of its own to carry one) so a manager
-   * running several concurrent merges can always match this nudge back to the `worker_merge_confirm` call
-   * that produced it.
+   * @decision 187f5b76 — EXACTLY-ONE-SIGNAL (this card's own): the completion nudge (fb8df559 Part 2,
+   * widened here and by 369d8824) never lands alongside a rich direct push for the same op.
    */
   /**
    * AUTO-SUPERSEDE (card 8d585277 — the manager's own primary ask, and the live incident: three
@@ -14891,34 +14875,17 @@ export class SessionService {
     // the worker's own self-check) and is a no-op when nothing is queued there, so repeating it costs
     // nothing and still supersedes a self-check that gets queued mid-loop.
     this.supersedeQueuedSelfCheck(workerSessionId, this.db.getSession(managerSessionId)?.projectId ?? null);
-    // DEAD-OWNER RECOVERY (card 27ea069e; CORRECTED by card 257d534d — see isManagerLineageDead's own doc):
-    // an existing RUNNING op for this key whose owning manager's WHOLE LINEAGE has no live session
-    // anywhere in it — not just the originating session — can never settle for anyone again — nobody left
-    // in that lineage could ever be pushed its outcome. Without this
-    // check, attach() below would dedup-attach THIS fresh call to that zombie op forever ({status:"pending"}
-    // on every retry, no gate ever actually running — the exact incident this card fixes). Evict it so this
-    // call starts a genuinely fresh confirm instead. SCOPED TO A CONFIRMED-DEAD LINEAGE ONLY: a live (or
-    // still-resuming) owner's op — including one whose ORIGINATING manager recycled but has a live
-    // successor — is left completely alone, so the healthy path — two managers/retries racing a genuinely
-    // in-flight merge, or a manager that recycled mid-merge — is byte-identical to before this card.
+    // @decision 27ea069e — a RUNNING op whose owning manager's whole lineage is dead is evicted here so
+    // this call starts a genuinely fresh confirm; a live (or still-resuming) owner's op is left alone.
+    // Without this check, attach() below would dedup-attach THIS fresh call to that zombie op forever
+    // ({status:"pending"} on every retry, no gate ever actually running — the exact incident this card
+    // fixes).
     //
-    // NOTE (card 33172f01): `existing` here can ALSO be a settled RETAINED view (peek() surfaces both
-    // shapes — see pending-ops.ts). `evictDeadOwner` only ever removes a RUNNING entry, so it's correctly a
-    // no-op for a retained one regardless of whose manager owned the op that produced it — a retained
-    // result is a FINISHED answer, not a stuck zombie, so there is nothing to evict; `attach()` below will
-    // short-circuit to that cached outcome for ANY caller within the retention window, which is exactly
-    // right (the merge already happened; ownership of the op that ran it doesn't change the answer).
+    // @decision 33172f01 — evictDeadOwner only ever removes a RUNNING entry, so it's correctly a no-op
+    // for a settled RETAINED view; attach() below still short-circuits to that cached outcome.
     //
-    // SKIPPED ON A skipDeadOwnerRecovery RETRY (card 361520a0, Half Four): a RUNNING op is never a stuck
-    // zombie from THIS call sequence's own point of view — `confirmWorkerMergeUntilSettled`'s first call
-    // (which never sets this flag) already ran this exact check once, either finding nothing to evict or
-    // evicting a genuine zombie and minting a fresh op. Every retry after that is this SAME caller racing
-    // the SAME op's settlement, regardless of whether the ORIGINAL `managerSessionId` happens to die
-    // mid-wait (a manager recycle/stop is an ordinary event, not an edge case) — re-running the check on
-    // every retry evicted-and-re-minted a genuinely in-flight op on every ~12s poll, each mint driving a
-    // real `git merge main` + a real queued gate command with no cap, the fleet-wide merge-lane DoS this
-    // option closes. A settled (retained) entry is unaffected either way — evictDeadOwner is already a
-    // no-op for it, per the NOTE above.
+    // @decision 361520a0 — skipDeadOwnerRecovery skips this check on every retry after the first, or a
+    // retry storm evicts-and-re-mints a genuinely in-flight op every ~12s (fleet-wide merge-lane DoS).
     if (!opts?.skipDeadOwnerRecovery) {
       const existing = this.pendingOps.peek(key);
       if (existing && this.isManagerLineageDead(existing.managerSessionId)) {

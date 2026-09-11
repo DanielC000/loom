@@ -16,3 +16,22 @@ The identity guard on `entries` (see `attach()`) also gates the `retained` write
 ## Source
 
 Inline comments in `packages/daemon/src/orchestration/pending-ops.ts`: the class doc's "RETAINED TERMINAL VIEW" paragraphs on the dedupe mechanism (lines 263-286) and `attach()`'s own `opts.bypassRetained` doc, as of commit `507e966583ff18068f5e7e56942acfe67001ee94`. Relocated by card `a1491009` (tranche 1); no wording changed beyond joining wrapped source lines into flowing paragraphs and stripping `*` comment markers.
+
+## Dead-owner recovery does not touch a RETAINED view
+
+`peek()` surfaces either shape — a RUNNING op or a settled RETAINED view — and `evictDeadOwner` only ever
+removes a RUNNING entry, so it's correctly a no-op for a retained one, regardless of whose manager owned
+the op that produced it: a retained result is a FINISHED answer, not a stuck zombie, so there is nothing
+to evict; `attach()` still short-circuits to that cached outcome for ANY caller within the retention
+window — the merge already happened, and ownership of the op that ran it doesn't change the answer (see
+[[27ea069e-dead-owner-recovery-the-one-eviction-exception]] for the dead-owner check this composes with).
+
+### Do not (2)
+
+- Do not let dead-owner eviction touch a settled RETAINED view — `evictDeadOwner` only removes a RUNNING
+  entry; a retained result is a finished answer, not a zombie.
+
+### Source (2)
+
+Inline comment in `packages/daemon/src/sessions/service.ts`, `confirmWorkerMergeTracked`'s own NOTE
+comment above the dead-owner-recovery block, as of this tranche's HEAD.
