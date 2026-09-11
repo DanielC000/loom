@@ -8692,6 +8692,15 @@ export class PtyHost {
     // age annotation baked into what was actually sent would have its reconstructed signature disagree
     // with what the engine really echoes back — exactly the class of bug this function's OWN doc already
     // documents for the possible-duplicate tag.
+    //
+    // @decision 4a0af485 — a coalesced batch's stored signature must derive from the text ACTUALLY
+    // WRITTEN, not any one member's own `.text`, or content matching can never fire for a joined turn.
+    //
+    // @decision 78e4b3f2 — `annotatedMessageText` (the SAME transform `drainPending` used to write it)
+    // is what must be reconstructed here, since it also decided the possible-duplicate framing.
+    //
+    // @decision 4af5aefa — `currentGen` is threaded through for the same reason as the paste-recovery
+    // age annotation: both must reconstruct the EXACT text a prior `drainPending` actually wrote.
     const submittedText = joinSubmittedText(origin, gen - 1);
     const submittedSig = textSignature(submittedText);
     const kept: QueuedMessage[] = [];
@@ -8712,13 +8721,15 @@ export class PtyHost {
       // call, so it's a free, already-threaded batch identity — the SAME value already stamped onto each
       // kept `QueuedMessage.giveUpGen` below — no new counter needed.
       //
-      // Card ee56a894: ALSO seed `memberSig` — THIS member's own text alone, transformed the SAME way
-      // `joinSubmittedText` transforms each element before joining (`annotatedMessageText`, not a bare
-      // `.text`), so it stays byte-identical to `submittedSig` for the common single-member case (joining
-      // one element is that element itself) and diverges only once a batch actually has 2+ members. This
-      // is an ADD alongside `submittedSig`, never a replacement — `hasAmbiguousMatch` is the only consumer
-      // that needs it; `purgeConfirmedGiveUpRequeue`'s engine-echo match still keys off `submittedSig`
-      // alone, unchanged.
+      // @decision 4a0af485 — every member of a coalesced origin is seeded here regardless of which branch
+      // below runs, including the budget-exhausted one — nothing else preserves this for a late confirm.
+      //
+      // @decision bc0774c4 — every member of ONE coalesced batch shares the SAME `batchId`, which is what
+      // lets a later purge tell "coalesced together" apart from "coincidentally identical same text".
+      //
+      // @decision ee56a894 — `memberSig` (this member's own text alone, transformed the SAME way as
+      // `submittedSig`) is ADDITIVE, never a replacement; only `hasAmbiguousMatch` reads it — the
+      // engine-echo purge still keys off `submittedSig` alone.
       const memberSig = textSignature(annotatedMessageText(m, gen - 1));
       // Card dbc7ffea: this `.set()` can genuinely OVERWRITE a still-live prior entry for the SAME
       // logicalId, not just create a fresh one — the auto-join case `capAmbiguousDispatches`'s own doc
