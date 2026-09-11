@@ -110,13 +110,11 @@ function appendObsidianFragment(skillDir: string, fragment: string): void {
 /**
  * Deliver Loom's managed skills to a session by mirroring ~/.loom/skills/<name> into
  * <cwd>/.claude/skills/<name>. Claude discovers these as PROJECT-LOCAL skills (bare names) —
- * WITHOUT touching the user's personal set or CLAUDE_CONFIG_DIR. CORRECTION (2026-07-20, card
- * d63585ca): project-local does NOT shadow same-named personal skills — Claude Code's documented
- * precedence is the OPPOSITE (enterprise overrides personal, personal overrides project; see
- * https://code.claude.com/docs/en/skills.md). A bundled Loom skill whose name collides with one the
- * user already has under ~/.claude/skills loses the collision and never fires. There is no config
- * lever to reverse this, so Loom's own skill names must simply not collide (e.g. `pickup` was
- * renamed to `loom-pickup` after a real collision with a personal skill of the same name).
+ * WITHOUT touching the user's personal set or CLAUDE_CONFIG_DIR.
+ *
+ * @decision d63585ca — project-local does NOT shadow same-named personal skills (Claude Code's
+ * precedence is the OPPOSITE); a bundled name colliding with a personal skill loses the collision
+ * and never fires, with no config lever to reverse it — so Loom's own skill names must never collide.
  *
  * `subset` (profile-pinned, per session): when a non-empty list, deliver ONLY those skills; null/empty ⇒
  * ALL store skills (today's behavior — the regression-guarded default). A subset name not in the store is

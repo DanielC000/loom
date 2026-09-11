@@ -20,21 +20,18 @@ const ASSET_SKILLS = process.env.LOOM_ASSET_SKILLS || path.join(__dirname, "..",
  * reverse) — see injectSkills' doc comment — so bundled skill names must not collide with common
  * personal ones.
  *
- * Seeds each bundled skill ONLY IF its SKILL.md is absent, so a user's UI edits to a skill survive
- * reboots (the old behavior force-copied every boot, which would clobber edits). A future "reset to
- * bundled" can force-refresh a single skill on demand.
+ * @decision sha:93c5f26c — seeds a bundled skill ONLY IF its SKILL.md is absent, so a user's UI edits
+ * survive reboots; if a skill's store dir exists but is EMPTY (a hollow dir left by a since-fixed
+ * junction bug), this still (re)copies the bundled asset so the store self-heals on the next boot.
  *
- * Self-heal: the gate is the skill's SKILL.md, not the dir. If a skill's dir exists but is EMPTY
- * (the historical junction bug let worktree removal delete the store's SKILL.md contents, leaving
- * a hollow dir that a dir-keyed "if absent" check would never refill), this (re)copies the bundled
- * asset so the store repopulates on the next boot. A present SKILL.md means a genuine skill (possibly
- * UI-edited) and is left untouched — EXCEPT that non-SKILL.md asset entries (a `scripts/` helper, a
- * `references/` doc, `NOTICE`, …) shipped by a LATER asset update are still backfilled here so a
- * BRAND-NEW file lands even for a skill seeded before it existed (card 7f73979f) — an EXISTING
- * reference/script file's own content updates are the separate, per-file base-tracked fast-forward
- * below (seedFileBaseSnapshots / autoFastForwardPristineSkills, card 75a0755d), not this seed-if-absent
- * copy. `force:false` copies only entries ABSENT from the store; every existing file (incl. an edited
- * SKILL.md) is left completely untouched.
+ * @decision 7f73979f — a present SKILL.md means a genuine (possibly UI-edited) skill and is left
+ * untouched, EXCEPT that a non-SKILL.md asset entry shipped by a LATER asset update is still
+ * backfilled here, so a brand-new bundled file reaches a skill seeded before that file existed.
+ *
+ * An EXISTING reference/script file's own content updates are the separate, per-file base-tracked
+ * fast-forward below (seedFileBaseSnapshots / autoFastForwardPristineSkills, card 75a0755d), not this
+ * seed-if-absent copy. `force:false` copies only entries ABSENT from the store; every existing file
+ * (incl. an edited SKILL.md) is left completely untouched.
  */
 export function seedGlobalSkills(): string[] {
   let entries: fs.Dirent[];

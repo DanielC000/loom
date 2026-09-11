@@ -6,13 +6,11 @@ import { nonInteractiveEnv } from "../git/writer.js";
 import type { SkillStoreStaleness } from "./store.js";
 
 /**
- * Card bb76b8d8 — `skillStoreStaleness()` (store.ts) compares the STORE against the assets WORKING TREE
- * (`customizationState`'s `shipped = readFileOrNull(assetMd(name))`, a plain `fs.readFileSync`) and never
- * consults git. That makes a live, uncommitted `assets/skills/**` edit invisible: once the edit is also
- * reflected in the store (however that happened — a manual sync, a publish, hand-copying), `shipped ===
- * base === mine` and `skillStoreStaleness()` reports a clean bill — even though the edit exists in NO
- * commit, and a `git checkout -- .` / `git stash` / clean clone would silently destroy it. This module is
- * the missing git-aware half: does `packages/daemon/assets/skills` differ from HEAD right now?
+ * @decision bb76b8d8 — deliberately a visibility signal only; never a blocking check or a boot
+ * refusal.
+ *
+ * This module is the missing git-aware half: does `packages/daemon/assets/skills` differ from HEAD
+ * right now?
  *
  * Mirrors `deploy-staleness.ts`'s discipline exactly (same reasoning, read it before touching this):
  * bounded `execFileSync` git calls (`GIT_TIMEOUT_MS`), NEVER throws, and degrades to an explicit
@@ -20,7 +18,6 @@ import type { SkillStoreStaleness } from "./store.js";
  * never report a false "uncommitted" there) or any other git failure (a timeout, git missing, a corrupt
  * repo) — same two-way `reasonKind` split (`"not-applicable"` vs `"could-not-measure"`) as that module.
  *
- * DELIBERATELY a VISIBILITY signal only (card bb76b8d8 DoD #3) — never a blocking check or a boot refusal.
  * Surfaced on `served_status` (served-status.ts), the same human-facing surface `skillStoreStaleness`
  * already uses, rather than a new standalone tool — a manager/human diagnosing "why is this skill stale"
  * already reads that one place.
