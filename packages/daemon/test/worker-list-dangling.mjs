@@ -27,11 +27,24 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       successor querying it (lineage-tolerant, mirrors orchestration.ts's archivedUnreported category).
 //   (H) CROSS-LINEAGE NEGATIVE CONTROL: an archived worker parented to a COMPLETELY UNRELATED manager →
 //       EXCLUDED from this manager's view.
+//   (I) card dc1604c7: a NEVER-STARTED recycle successor — the exact worker-recycle-retry-after-prespawn-
+//       failure.mjs attempt-1 shape: a synchronous pre-spawn throw archives the fresh row before
+//       `pty.spawn` is ever reached, and recycleWorker's own catch (@decision 08320d02) appends a
+//       `recycle_failed` event naming it — archived alongside its PREDECESSOR (real commit, archived the
+//       same way archiveOnExit archives a real exit) → the successor is EXCLUDED (it never ran a turn, so
+//       it never held any work), but the predecessor's genuinely-unmerged work still APPEARS — the fix
+//       must not hide the real dangling branch along with the phantom row pointing at the same worktree.
+//   (J) card dc1604c7's own REJECTED-alternative regression guard: a worker with engineSessionId:null that
+//       DID actually run — the pty/host.ts spawn-armed readiness-fallback path (SessionStart hook missed,
+//       but `markReady`'s own timer still delivers the kickoff via submit()) — with a real commit and NO
+//       `recycle_failed` event → still APPEARS. Proves the fix keys off genuine pre-spawn-failure evidence,
+//       not off `engineSessionId IS NULL` (which this scenario would wrongly exclude).
 //
 // REAL git on temp repos, NO claude + NO live daemon. Run: 1) build daemon, 2) node test/worker-list-dangling.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 
@@ -112,6 +125,12 @@ const H = mk("h"); // cross-lineage negative control — a DIFFERENT MANAGER in 
 H.projId = G.projId;
 H.agentId = G.agentId;
 
+const I = mk("i"); // never-started recycle successor, alongside its real predecessor
+I.predWorkerId = `${I.workerId}-pred`;
+I.succWorkerId = `${I.workerId}-succ`;
+
+const J = mk("j"); // readiness-fallback recovered: engineSessionId null, but genuinely ran + committed
+
 try {
   // --- (A) tasked, genuinely unmerged ---
   seedProject(A);
@@ -182,6 +201,54 @@ try {
     commitToBranch(worktreePath, "h.txt");
     seedWorker(H, { worktreePath, branch, taskId: H.taskId, archived: true, parentId: `${H.mgrId}-other` }); H.worktreePath = worktreePath; }
 
+  // --- (I) card dc1604c7: a never-started recycle successor alongside its real predecessor — SAME
+  // worktree/branch/task (a recycle reuses the predecessor's own worktree), both archived. ---
+  seedProject(I);
+  initRepo(I.repo, "# wld-i\n");
+  { const { worktreePath, branch } = await createWorktree(I.repo, I.projId, I.taskId);
+    commitToBranch(worktreePath, "i.txt");
+    // predecessor: a genuine worker that ran and committed, then was archived normally.
+    db.insertSession({
+      id: I.predWorkerId, projectId: I.projId, agentId: I.agentId, engineSessionId: `eng-${I.predWorkerId}`,
+      title: null, cwd: worktreePath, processState: "exited", resumability: "resumable", busy: false,
+      createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: I.mgrId,
+      taskId: I.taskId, worktreePath, branch,
+    });
+    db.archiveSession(I.predWorkerId);
+    // successor: recycleWorker's fresh row, minted then killed by a synchronous pre-spawn throw BEFORE
+    // pty.spawn (worker-recycle-retry-after-prespawn-failure.mjs's attempt-1 shape), reconciled to
+    // 'exited' and archived by card 08320d02's catch handler, same worktree/branch/task, recycledFrom the
+    // predecessor — PLUS the `recycle_failed` event that same catch appends (@decision 08320d02), which is
+    // the actual signal the fix keys off (not engineSessionId — see scenario (J) below for why).
+    db.insertSession({
+      id: I.succWorkerId, projectId: I.projId, agentId: I.agentId, engineSessionId: null, title: null,
+      cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now,
+      lastActivity: now, lastError: "session spawn failed before it could start: injected", role: "worker",
+      parentSessionId: I.mgrId, taskId: I.taskId, worktreePath, branch, recycledFrom: I.predWorkerId, gen: 1,
+    });
+    db.archiveSession(I.succWorkerId);
+    db.appendEvent({
+      id: randomUUID(), ts: now, managerSessionId: I.mgrId, workerSessionId: I.succWorkerId, taskId: I.taskId,
+      kind: "recycle_failed",
+      detail: { recycledFrom: I.predWorkerId, failedSuccessorId: I.succWorkerId, cancelledWakes: 0, error: "injected" },
+    });
+    I.worktreePath = worktreePath; }
+
+  // --- (J) card dc1604c7's own rejected-alternative regression guard: engineSessionId:null, but a
+  // GENUINE worker that ran (the readiness-fallback path) and committed — no recycle_failed event. ---
+  seedProject(J);
+  initRepo(J.repo, "# wld-j\n");
+  { const { worktreePath, branch } = await createWorktree(J.repo, J.projId, J.taskId);
+    commitToBranch(worktreePath, "j.txt");
+    db.insertSession({
+      id: J.workerId, projectId: J.projId, agentId: J.agentId, engineSessionId: null, title: null,
+      cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now,
+      lastActivity: now, lastError: null, role: "worker", parentSessionId: J.mgrId, taskId: J.taskId,
+      worktreePath, branch,
+    });
+    db.archiveSession(J.workerId);
+    J.worktreePath = worktreePath; }
+
   // ============================== assertions ==============================
 
   const a = await sessions.getDanglingWorkers(A.mgrId);
@@ -228,9 +295,19 @@ try {
   const hFromG = await sessions.getDanglingWorkers(`${H.mgrId}-other`);
   check("(H) CROSS-LINEAGE CONTROL — the unrelated manager sees its OWN worker", hFromG.some((e) => e.workerSessionId === H.workerId));
   check("(H) but NOT (G)'s predecessor-owned worker", !hFromG.some((e) => e.workerSessionId === G.workerId));
+
+  const i = await sessions.getDanglingWorkers(I.mgrId);
+  check("(I) the never-started recycle successor (recycle_failed event on record) is EXCLUDED",
+    !i.some((e) => e.workerSessionId === I.succWorkerId));
+  check("(I) its predecessor's genuinely-unmerged work still APPEARS — the fix doesn't hide the real branch",
+    i.some((e) => e.workerSessionId === I.predWorkerId));
+
+  const j = await sessions.getDanglingWorkers(J.mgrId);
+  check("(J) REGRESSION GUARD — engineSessionId:null but a GENUINE (readiness-fallback-recovered) worker with a real commit and NO recycle_failed event still APPEARS",
+    j.some((e) => e.workerSessionId === J.workerId));
 } finally {
   db.close();
-  for (const p of [A, B, C, D, E, F, G, H]) {
+  for (const p of [A, B, C, D, E, F, G, H, I, J]) {
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
     try { fs.rmSync(p.repo, { recursive: true, force: true }); } catch { /* ignore */ }
   }
@@ -238,6 +315,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — getDanglingWorkers surfaces a stopped-but-genuinely-unmerged worker (task-level mergedSha, not branch content/existence), correctly EXCLUDES a taskless zero-commit rig (the Code Reviewer shape) while still surfacing a taskless worker with real commits, respects current on-disk truth, ignores live workers, and is lineage- (not exact-parent-) scoped."
+  ? "\n✅ ALL PASS — getDanglingWorkers surfaces a stopped-but-genuinely-unmerged worker (task-level mergedSha, not branch content/existence), correctly EXCLUDES a taskless zero-commit rig (the Code Reviewer shape) while still surfacing a taskless worker with real commits, respects current on-disk truth, ignores live workers, is lineage- (not exact-parent-) scoped, EXCLUDES a never-started recycle successor (keyed on its recycle_failed event, not engineSessionId) while still surfacing its predecessor's real unmerged work, and still surfaces a genuine engineSessionId:null worker that actually ran via the readiness-fallback path."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

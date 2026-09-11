@@ -41,10 +41,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // EXTENDED by card 08320d02 (Code Review pass 1+2 on 4be56c33) with more assertions against the SAME
 // attempt-1 failure, proving: (1) the dead successor is ARCHIVED — off `db.listWorkers`/`listAllSessions`
-// (the live rail), NOT off MCP `worker_list` altogether: that tool's own dangling-worker pool
-// (getDanglingWorkers) still surfaces an archived-but-unmerged worker as processState:"dangling" (a
-// SEPARATE, not-yet-carded gap this card deliberately leaves alone) — listChildSessions, which includes
-// archived rows, is used to find the row for these assertions instead of listWorkers; (2) a
+// (the live rail) — listChildSessions, which includes archived rows, is used to find the row for these
+// assertions instead of listWorkers. (card 08320d02 left a SEPARATE gap alone here: MCP `worker_list`'s
+// own dangling-worker pool (getDanglingWorkers) used to still surface this exact never-started successor
+// as processState:"dangling" — fixed by card dc1604c7, which excludes an archived worker candidate that
+// has a `recycle_failed` event recorded under its own id (this file's own assertion (2) below proves that
+// event is appended for exactly this shape); see worker-list-dangling.mjs's own scenario (I) for that
+// coverage, not this file.); (2) a
 // `recycle_failed` event records {recycledFrom, failedSuccessorId, cancelledWakes, error}, with the right
 // workerSessionId/taskId; (3) a wake pending on the predecessor BEFORE the recycle attempt is CANCELLED
 // (counted, not silently dropped), not left to auto-resume the hard-killed worker once hasSuccessor(old)

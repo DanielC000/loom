@@ -17626,8 +17626,15 @@ export class SessionService {
       return parentRoot(w.parentSessionId) === managerRoot;
     });
 
+    // @decision dc1604c7 — keyed on `recycle_failed`, never `engineSessionId`: the READY_FALLBACK
+    // path runs a real worker with a null engine id; scenario (J) in worker-list-dangling.mjs pins
+    // this against regressing back to `engineSessionId IS NULL`.
+    const neverStartedRecycleSuccessorIds = new Set(this.db.listWorkerSessionIdsWithEventKind(["recycle_failed"]));
+
     const entries: DanglingWorkerEntry[] = [];
     for (const w of candidates) {
+      // CHEAPEST (Set membership, no I/O): see the `neverStartedRecycleSuccessorIds` doc above.
+      if (neverStartedRecycleSuccessorIds.has(w.id)) continue;
       // CHEAP (fs stat, no subprocess): nothing left on disk to recover.
       if (!w.worktreePath || !fs.existsSync(w.worktreePath)) continue;
       // CHEAP (plain DB read): the TASK already shipped — not unmerged, whichever branch did it.
