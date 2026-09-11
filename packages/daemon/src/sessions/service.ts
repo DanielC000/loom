@@ -6283,8 +6283,10 @@ export class SessionService {
           harness, // multi-harness epic df1f94b0 P1: spawn the worker's profile-pinned vendor CLI (undefined ⇒ "claude")
           // Card f9b47cd1: `loom-<project>-<agent>-<taskslug>` (or "-adhoc" for a taskless spawn), collision
           // suffix appended only if it matches a currently-live sibling worker under this same manager.
-          // EXCLUDE worker.id itself — the row is already inserted+live by this point (M5 ordering above),
-          // so listWorkers would otherwise see this very spawn as its own "collision" (code review fix).
+          //
+          // @decision f9b47cd1 — EXCLUDE worker.id itself: the row is already live here, so listWorkers
+          // would otherwise see this spawn as its own collision.
+          //
           sessionName: composeWorkerSessionName(project.name, workerAgent.name, taskTitle, worker.id, this.siblingWorkerSessionNames(managerSessionId, project.name, new Set([worker.id]))),
         });
       } catch (e) {
@@ -15196,19 +15198,16 @@ export class SessionService {
     }
     const result = await this.pendingOps.attach<ConfirmMergeResult>(
       key, "merge", managerSessionId, this.syncAttachBudgetMs,
-      // RACE RECOVERY (card 479f449f): a thrown error here does NOT mean the merge failed — the dead-owner
-      // eviction check above is a STATIC "owner exited" test that can evict a genuinely RUNNING op and let
-      // THIS call re-mint a fresh confirmWorkerMerge while the evicted op's own orphaned run() is still
-      // executing in the background (evictDeadOwner never cancels it — see PendingOpRegistry's DEAD-OWNER
-      // RECOVERY doc). `finalizeMerge` removes the worktree BEFORE a fresh mint's own early-idempotency
-      // check can catch up to it, so the fresh confirm can throw operating on a directory its own
-      // predecessor just deleted — AFTER that predecessor's squash had already committed (finalizeMerge only
-      // ever runs post-squash, never before). Re-derive the truth from git instead of trusting the throw: if
-      // the branch's work is already on main, report the REAL outcome (merged) via the same idempotent path
-      // a stale retry already uses (`finishAlreadyMerged`, safe to call redundantly), instead of a false
-      // failure for work that already landed. NEVER swallows a genuine failure — if the branch never
-      // landed, this falls through and rethrows the original error unchanged, so the classification below
-      // still reports it (as "unknown", not "failed" — see that doc).
+      //
+      // @decision 479f449f — a thrown error here can come from a fresh mint racing its evicted-but-
+      //  still-running predecessor, whose squash already landed.
+      //
+      // Re-derive the truth from git instead of trusting the throw: if the branch's work is already on
+      // main, report the REAL outcome (merged) via the same idempotent path a stale retry already uses
+      // (`finishAlreadyMerged`, safe to call redundantly), instead of a false failure for work that
+      // already landed. NEVER swallows a genuine failure — if the branch never landed, this falls
+      // through and rethrows the original error unchanged, so the classification below still reports it
+      // (as "unknown", not "failed" — see that doc).
       async (opId) => {
         try {
           return await this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt, opts?.fallbackOfBatchOpId);

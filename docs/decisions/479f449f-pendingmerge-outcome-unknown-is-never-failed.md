@@ -16,6 +16,20 @@ renders a thrown-exception op as "failed" (red) via the entry's own raw `state` 
 classified `outcome` string — deliberately left as-is: `state` is a true, unambiguous fact ("an exception
 was thrown"), unlike the softer, honest-non-answer `outcome`.
 
+## Race recovery: why a thrown error in the `attach` run callback does not mean the merge failed
+
+A thrown error here does NOT mean the merge failed — the dead-owner eviction check above (inside `confirmWorkerMergeTracked`, at the `pendingOps.attach` call) is a STATIC "owner exited" test that can evict a genuinely RUNNING op and let THIS call re-mint a fresh `confirmWorkerMerge` while the evicted op's own orphaned `run()` is still executing in the background (`evictDeadOwner` never cancels it — see `PendingOpRegistry`'s DEAD-OWNER RECOVERY doc). `finalizeMerge` removes the worktree BEFORE a fresh mint's own early-idempotency check can catch up to it, so the fresh confirm can throw operating on a directory its own predecessor just deleted — AFTER that predecessor's squash had already committed (`finalizeMerge` only ever runs post-squash, never before). Re-derive the truth from git instead of trusting the throw: if the branch's work is already on main, report the REAL outcome (merged) via the same idempotent path a stale retry already uses (`finishAlreadyMerged`, safe to call redundantly), instead of a false failure for work that already landed. NEVER swallows a genuine failure — if the branch never landed, this falls through and rethrows the original error unchanged, so the classification below still reports it (as `"unknown"`, not `"failed"`).
+
+### Do not (this section)
+
+- Do not treat a thrown error from the `pendingOps.attach` run callback as a confirmed merge failure — the dead-owner eviction check above it can evict a genuinely running op and let a fresh call re-mint while the evicted op's own orphaned `run()` is still executing, so the throw can strike a directory `finalizeMerge` already cleaned up post-squash.
+- Do not skip the git re-derive before reporting failure — a stale retry's own idempotent path (`finishAlreadyMerged`) already exists for exactly this case and is safe to call redundantly.
+- Do not swallow a genuine failure either — if the branch never landed, the original error is rethrown unchanged so the classification still reports it as `"unknown"`, never silently.
+
+### Source (this section)
+
+Inline comment in `packages/daemon/src/sessions/service.ts`, above the `pendingOps.attach` call inside `confirmWorkerMergeTracked` (the run-callback's "RACE RECOVERY" comment). Relocated by card `f885351f` (service.ts pre-frontier residue); no wording changed, wrapped source lines joined into a flowing paragraph and the `//` comment markers stripped.
+
 ## Do not
 
 - Do not map a `worker_merge_confirm` throw to `outcome: "failed"` — a genuine confirmed failure is always a resolved `merged:false` ("rejected"); a throw whose git-log recheck couldn't prove either way is `"unknown"`, a distinct, honest non-answer.
