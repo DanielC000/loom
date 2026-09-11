@@ -1,16 +1,9 @@
 #!/usr/bin/env node
 // extraction-loss-scan.mjs — comment-extraction loss scan scoped to ADDED lines + records (card 69f3bd03).
 //
-// WHY THIS EXISTS: docs/extraction-program.md item 4 told a tranche worker to take every distinctive
-// token from a removed comment, "subtract those still present in the branch source", and check the
-// remainder against records. Subtracting the WHOLE branch source masks a real loss: a token that recurs
-// ANYWHERE else in a 17k-line file reads as "present" even when the specific clause carrying it was
-// deleted. Two lanes reported "0 misses" on their own DoD-4 whole-file check while a scoped scan (added
-// lines + the records the added @decision ids resolve to — and ONLY those) found real losses: host.ts
-// tranche 43 (card 1c218980 — a dropped serial-ordering justification, a dropped example, a dropped
-// "fail toward a duplicate" parenthetical, enumerated-case labels) and service.ts tranche 51 (card
-// a6d52081). This script is that scoped instrument, so every worker runs the SAME check instead of
-// hand-rolling a weaker one.
+// @decision 69f3bd03 — subtracting a removed comment's tokens against the WHOLE branch source masks a
+// real loss: a token recurring anywhere else in a large file reads as "present" even when the clause
+// carrying it was deleted. This script checks only the added lines and the records the added ids resolve to.
 //
 // ⛔ THIS SCRIPT NEVER CONSULTS THE UNCHANGED REMAINDER OF THE SOURCE FILE. That whole-file lookup is
 // exactly the masking mode being fixed — a token present anywhere in the file, not just in what actually

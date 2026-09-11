@@ -2,15 +2,9 @@
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // negative-control.mjs — one-call RED→GREEN→clean-tree proof (card 616e5ec2, half 1).
 //
-// WHY THIS EXISTS: the /worker doctrine mandates "prove your check can FAIL before you report its
-// green — show it going RED on a known-bad case, then GREEN after." Every worker on this project
-// performs that by hand: edit a marker/regression into the source, build, run the test, confirm RED,
-// edit it back out, build, run the test again, confirm GREEN, then grep to prove nothing was left
-// behind. Six manual steps plus a live correctness hazard (a temporary marker surviving into a real
-// commit) that the last step exists purely to guard against. Measured directly from one archived
-// session (`c6b53877`, 732 turns): this exact cycle ran FIVE separate times, 18 `pnpm --filter
-// @loom/daemon build` invocations total, ~50 turns, ~25M cache-read tokens — for a procedure that is
-// entirely mechanical and identical every time. This script is that procedure as ONE call.
+// @decision 616e5ec2 — the hand-run cycle this replaces is six manual steps plus a live correctness
+// hazard (a temporary marker surviving into a real commit); measured at FIVE reruns, 18 builds, ~50
+// turns, ~25M cache-read tokens in one archived session, for a procedure identical every time.
 //
 // MECHANISM: for each `--file`, snapshot its CURRENT on-disk bytes exactly (the fix, as it sits in
 // your worktree right now — committed or not), overwrite it with the content at `--ref` (default
@@ -23,15 +17,14 @@
 // the hand-run procedure's own step 7 (`grep -n TEMP-NEGATIVE-CONTROL ...; echo exit=$?`) — a leftover
 // marker of ANY shape fails this, not just one specific string.
 //
-// WHY A REF-KEYED FS SNAPSHOT, NOT THE `--revert-to <sha|patch>` SHAPE THE FILING CARD SKETCHED: the
-// card is explicit that shape is "a described outcome, NOT a checked API." A `git apply`-based patch
-// restore can fail on whitespace/context fuzz and (via `git checkout <ref> -- <file>`) touches the git
-// INDEX as a side effect — leaving a file's staged blob out of sync with its working-tree bytes if the
-// process is interrupted mid-run. Reading `--ref`'s content once via `git show <ref>:<path>` and doing
-// every mutation/restore as a raw in-memory Buffer write is index-free (only working-tree bytes ever
-// move) and restore-exact by construction — a byte-for-byte comparison, not a text/whitespace-fuzzy
-// one. It also generalizes past a single hunk: any-shaped drift between --ref and your current file is
-// covered, not just one inserted marker line.
+// @decision 616e5ec2 — a ref-keyed FS snapshot, not the `--revert-to <sha|patch>` shape the filing
+// card sketched (explicitly "a described outcome, NOT a checked API"): a `git apply`/`git checkout`
+// restore can leave the git INDEX out of sync mid-run; an in-memory Buffer write is index-free.
+//
+// Reading `--ref`'s content once via `git show <ref>:<path>` and doing every mutation/restore as a
+// raw in-memory Buffer write is restore-exact by construction — a byte-for-byte comparison, not a
+// text/whitespace-fuzzy one. It also generalizes past a single hunk: any-shaped drift between --ref
+// and your current file is covered, not just one inserted marker line.
 //
 // This mutates and rebuilds your OWN worktree in place; it is not safe to run concurrently with
 // anything else touching the same --file paths (a `run_gate` in flight on this worktree, e.g. — see

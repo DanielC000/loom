@@ -1,11 +1,9 @@
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // run-static-guards.mjs — runs exactly `STATIC_GUARD_REPO_PATHS` (card 245a3708).
 //
-// WHY THIS EXISTS: `CLAUDE.md` documents `grep -l readdirSync packages/daemon/test/*guard*.mjs` BY NAME
-// as an unmaintained folk recipe that answers a DIFFERENT question than "which guards does the merge
-// gate always run" — it found its way into six card bodies anyway, because a worker who needs to run
-// "the static guards" had no single command to reach for and reinvented one from memory. This script is
-// that command, so there is nothing left to reinvent.
+// @decision 245a3708 — `grep -l readdirSync packages/daemon/test/*guard*.mjs` is an unmaintained
+// folk recipe answering a DIFFERENT question than "which guards does the merge gate always run" —
+// it found its way into six card bodies anyway, for lack of a single command to reach for.
 //
 // It NEVER restates the guard list — it imports `STATIC_GUARD_REPO_PATHS` from the one authoritative
 // definition (`src/git/worktrees.ts`, compiled to `dist/git/worktrees.js`), the same constant
@@ -21,23 +19,16 @@
 // looks older than `src/git/worktrees.ts` — see the freshness check below for why: this script's whole
 // job is catching a silent skip, so it must never BE one itself.
 //
-// QUIET IS THE DEFAULT (card 616e5ec2, half 2 — flipped from an opt-in `--quiet` after review: the
-// reduced/merge gate never runs through this script at all — `buildReducedGateCommand` invokes each
-// guard directly via its own `node <path>` step — and no test parses this script's own stdout, so there
-// was no real consumer an opt-in was protecting; the thing that needed protecting was the FLEET, which
-// gets this by default now). Every guard here prints one `PASS  <label>` / `FAIL  <label>` line per
-// assertion via the identical `check()` helper each guard file defines independently — across ~13-16
-// guards that's several thousand chars of pass-noise even on a fully green run (the card measured a
-// single invocation truncated at +9442 chars even piped through `| tail -n 100`). Workers reached for
-// that `| tail` to contain it, which broke `$?` (`tail`'s exit code, not the guard's — CLAUDE.md already
-// warns about this in prose; session `a3f48a8f` hit it for real and reported "both checkers green" on a
-// check that had never actually run). The default now collapses a PASSING guard's own PASS/FAIL lines to
-// one summary line (`OK  <path>  (N check(s))`, counted straight from its own stdout, no guard-side
-// change needed) and prints a FAILING guard's output IN FULL — never swallowed, so a failure stays fully
-// diagnosable — with exit-code semantics unchanged either way. Piping is no longer needed to contain the
-// output, so the `| tail` footgun this exists to remove has nothing left to reach for. Pass `--verbose`
-// for the pre-616e5ec2 behavior (every guard's full output inline, no summarizing) — a human debugging
-// interactively, not a worker's default reflex before committing.
+// @decision 616e5ec2 — quiet is the default (half 2): no reduced gate runs through this script and
+// no test parses its stdout, so an opt-in `--quiet` protected no real consumer; a full-output run
+// once measured +9442 chars, and containing it via `| tail` broke `$?`, reporting a false "green".
+//
+// The default now collapses a PASSING guard's own PASS/FAIL lines to one summary line (`OK  <path>
+// (N check(s))`, counted straight from its own stdout, no guard-side change needed) and prints a
+// FAILING guard's output IN FULL — never swallowed, so a failure stays fully diagnosable — with
+// exit-code semantics unchanged either way. Pass `--verbose` for the pre-616e5ec2 behavior (every
+// guard's full output inline, no summarizing) — a human debugging interactively, not a worker's
+// default reflex before committing.
 //
 // A QUIET-MODE-ONLY BONUS: because this path is the only one that actually PARSES a guard's own output
 // (the old/`--verbose` path pipes straight through via `stdio:"inherit"` and never sees it), it can catch

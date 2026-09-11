@@ -13,13 +13,15 @@
 // than the one you're running from. Prints {worktreePath, matched, totalProcessesScanned, ...}
 // as JSON.
 //
-// ⚠️ KNOWN COVERAGE GAP (measured, card 3ab5c540 §THE FIX WAS WRONG): only a process whose OWN
-// path/cwd/commandLine names this worktree is matched. In the one measured sample this covered 8
-// of 17 live node.exe processes (47%) — the daemon itself, its `codescape serve` child,
+// ⚠️ Only a process whose OWN path/cwd/commandLine names this worktree is matched. A
+// `matched: []` result is NOT evidence the host — or even this project — is idle; pair with
+// host-quiet-check.mjs for that question. The daemon itself, its `codescape serve` child,
 // `daemon-supervisor.mjs`, and other repo-root-rooted processes are NEVER matched by design, and
-// are not descendants of anything this WOULD match either (ParentProcessId chaining was tested
-// and found zero of them). A `matched: []` result is NOT evidence the host — or even this
-// project — is idle; pair with host-quiet-check.mjs for that question.
+// are not descendants of anything this WOULD match either.
+//
+// @decision 3ab5c540 — MEASURED: in one sample this covered 8 of 17 live node.exe processes
+// (47%), and `ParentProcessId` chaining from a matched root was tested and found to add none of
+// the rest.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
