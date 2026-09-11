@@ -4814,22 +4814,9 @@ export class PtyHost {
 
     pty.onExit(({ exitCode, signal }) => {
       live.alive = false;
-      // Card baa3435a DoD-2: one last best-effort strip attempt, in case codex's config.toml persist
-      // landed AFTER the bounded poll above had already given up (or the poll simply hadn't reached a
-      // fresh check yet when this pty happened to exit — the poll's own promise chain keeps running
-      // independently of the pty's lifetime, so this is a genuine belt-and-suspenders catch, not the only
-      // chance). Run on EVERY exit, not just an intended stop: a crash leaves the trust block behind just
-      // as surely as a graceful stop does, and this session isn't coming back to retry later. Guarded on
-      // `trustDialogAnswered` — if the dialog never appeared, this spawn never touched config.toml, so
-      // there's nothing to diff. Re-diffs against the SAME `configHashBefore` this spawn captured before
-      // any write, so it's idempotent by construction: once the block is already stripped, the file's
-      // current bytes hash back to that same pre-spawn value and diffConfigAfterSpawn reports
-      // `changed:false` — this can run any number of times (including racing the poll's own in-flight
-      // final iteration) without ever double-stripping. Routed through the SAME `codexTrustDialogLock`
-      // every other config.toml read/write in this file uses — the real file is shared across every codex
-      // session on this host, so this must serialize against a DIFFERENT session's own trust-answer cycle
-      // too, not just this session's own (already-finished-or-not) one. Fire-and-forget (onExit itself
-      // isn't async); best-effort (never throws — matches every other cleanup step in this handler).
+      // @decision baa3435a — this exit-time trust-block strip is a genuine belt-and-suspenders catch, not
+      // the bounded poll's only chance; it is idempotent against this spawn's own configHashBefore and
+      // serializes on the SAME shared codexTrustDialogLock every config.toml read/write in this file uses.
       if (live.trustDialogAnswered) {
         codexTrustDialogLock.withLock(async () => {
           const finalDiff = diffConfigAfterSpawn(configHashBefore, opts.cwd);
@@ -5297,32 +5284,18 @@ export class PtyHost {
    * Codex counterpart of `interruptForRedirect` — SIMPLER than claude's own (no settle-timer/busySince-
    * snapshot dance needed): a single Ctrl+C interrupts the in-flight turn, and codex's own busy-marker
    * staleness ladder (`armCodexBusyStaleTimer`) naturally observes the resulting busy->idle transition once
-   * a timer for this turn goes stale — its CASE 2 is what actually calls `drainCodexPending` on that edge.
-   * (Code Review finding 5 / card 7c2a6dc0: this doc previously claimed the `spawnCodexProcess` onData
-   * handler "already calls `drainCodexPending` on that edge" on "the very next output chunk" — false;
-   * onData only ever ARMS the timer on a marker sighting, it never drains directly, and the drain is a
-   * bounded timeout later, not an immediate edge read.) Unlike claude's Esc-cancel, which fires NO
-   * confirming signal at all and therefore needs an artificial settle-and-self-heal window. NO-OP for a
-   * dead/stopping/idle session, mirroring claude's own guard.
+   * a timer for this turn goes stale — its CASE 2 is what actually calls `drainCodexPending` on that edge,
+   * never this call directly. Unlike claude's Esc-cancel, which fires NO confirming signal at all and
+   * therefore needs an artificial settle-and-self-heal window. NO-OP for a dead/stopping/idle session,
+   * mirroring claude's own guard.
    *
    * Card 7c2a6dc0: also neutralizes the same two things `stopCodex` does — clears any armed staleness
    * timer and bumps `busyStaleGen`, so a still-outstanding retry/give-up-ladder callback from the
    * interrupted turn can't fire against what this redirect just cut short.
    *
-   * 🔴 Code Review (post-7c2a6dc0, BLOCKING regression, reproduced with a positive control): clearing the
-   * timer unconditionally on the COMMON path — a genuinely busy turn whose own Enter already went out,
-   * `!live.enterPending` — used to leave NOTHING that would ever drain the redirect: the timer just
-   * cleared WAS the only thing that would have called `drainCodexPending`, `retryCodexEnter` needs a fired
-   * timer to run at all, and `submitCodex`'s own delayed closure needs a drain to even be scheduled — so
-   * `busy` stayed pinned true forever, the exact hang this card exists to fix, moved onto the primary path
-   * `worker_redirect` actually targets. Fixed by re-arming a FRESH timer (valid gen, since we just bumped
-   * it) for that path: this turn's `lastBusyMarkerAt` is already `>= enterWrittenAt` from its own earlier
-   * real confirmation, so once codex's busy marker genuinely goes stale (documented absent once idle — it
-   * stops the instant the Ctrl+C takes effect) this lands in CASE 2 and drains, exactly as it would have
-   * without this card's neutralization ever touching the timer. This also gives codex a real
-   * `CODEX_BUSY_STALE_MS` window to actually process the interrupt before anything is written into its
-   * composer, rather than a synchronous write straight after `\x03` — see this method's own ⚠️ KNOWN,
-   * UN-VERIFIED RISK note below for the ONE path that still writes synchronously.
+   * @decision 7c2a6dc0 — the COMMON path (turn already busy, its own Enter already out) MUST re-arm a
+   * fresh staleness timer after clearing the old one, never just clear it — with nothing left to fire,
+   * the redirect can never drain and `busy` stays pinned true forever.
    *
    * If the interrupt instead lands inside `submitCodex`'s own `CODEX_SUBMIT_ENTER_DELAY_MS` text->\r gap
    * (`live.enterPending`), no busy-marker was EVER seen for this turn — re-arming a timer here would just
@@ -5364,20 +5337,10 @@ export class PtyHost {
     } else {
       // The COMMON path — re-arm a fresh timer so the ordinary busy->idle staleness edge resumes and
       // drains this once codex actually goes idle (see this method's own doc for why this is safe/correct).
-      // Card 361a5520 round 2 (reconciled, not changed — Code Reviewer flagged as a documented divergence,
-      // not a defect): `live.submitOutstanding` is deliberately left untouched here. This turn already had
-      // a CONFIRMED marker before the interrupt (`lastBusyMarkerAt >= enterWrittenAt` from its own earlier
-      // real confirmation — see the doc above), so it is the SAME outstanding submitted turn, now settling
-      // via its own re-armed timer; once that timer reaches CASE 2, `onTurnCompleted` WILL fire for it.
-      // This diverges from claude's own `interruptForRedirect` settle site, which `onTurnCompleted`'s own
-      // contract doc deliberately EXCLUDES (claude under-counts a redirected turn on purpose, since that
-      // settle site is architecturally separate from the Stop-hook chokepoint). Codex has no such separate
-      // settle mechanism — CASE 2 is the ONLY drain path for a redirected turn, natural completion, or
-      // anything else — so there is no way to drain this queue without also passing through the same edge
-      // that fires the completion signal. Given the turn genuinely ran (a real marker was seen) before
-      // being cut short, counting it here is arguably MORE accurate than claude's conservative exclusion,
-      // not less — and splitting it out would need a THIRD state distinguishing "settling from a redirect"
-      // from "settling normally" for no concretely-named benefit. Left as-is, deliberately.
+      //
+      // @decision 361a5520 — `live.submitOutstanding` is deliberately left untouched here: this turn
+      // already had a confirmed marker before the interrupt, so it is the same outstanding submitted
+      // turn, now settling via its own re-armed timer, not a fresh one to be independently tracked.
       this.armCodexBusyStaleTimer(sessionId, live);
       // eslint-disable-next-line no-console
       console.log(`[pty] ${sessionId} codex redirect: Ctrl+C sent — re-armed a fresh staleness timer; busy->idle detection will drain the redirect`);
