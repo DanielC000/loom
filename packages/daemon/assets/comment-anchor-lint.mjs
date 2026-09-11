@@ -342,15 +342,9 @@ function relPath(repoRoot, p) {
  * `/* ... *\/` block comments (single- or multi-line); does not attempt to distinguish trailing code on
  * the line a block comment closes on — this repo's own style never puts code there.
  *
- * Card 01e09f28 — a SECOND boundary, independent of blank lines: a `*\/` that closes a `/* ... *\/`
- * comment (single- or multi-line), immediately followed (no blank line) by a fresh `//`, `/*`, or `/**`
- * starting the NEXT comment, also splits — two abutting doc comments are two blocks, never one merged
- * run. Without this, anchoring the FIRST of two abutting doc comments makes the SECOND vanish from
- * `unanchoredLongBlocks` entirely (it's contiguous with an anchored neighbour, not because it was itself
- * anchored) — see project memory `doc-comment-boundary-split-01e09f28` for the measured before/after.
- * Deliberately narrow: two abutting `//` lines (a normal multi-line `//` run) never split on their own,
- * since neither line "closes a `/* ... *\/` comment" — only a transition OUT of `/* ... *\/` form
- * triggers this.
+ * @decision 01e09f28 — a `*\/` closing a `/* ... *\/` comment, immediately followed (no blank line) by
+ * a fresh `//`, `/*`, or `/**`, splits into a new block (two abutting doc comments are never one merged
+ * run). Narrow: two abutting `//` lines never split (neither closes a `/* ... *\/` comment).
  */
 export function extractCommentBlocks(lines) {
   const blocks = [];
@@ -503,12 +497,12 @@ function startsNewDocTag(line) {
  * per the convention (CLAUDE.md comment taxonomy, docs/extraction-program.md: "≤3 lines, no 'See docs/…'
  * pointer").
  *
- * Card 347d37d2: the window used to be a FIXED `GUARD_MAX_LINES`-line cap (the anchor's line plus 2
- * continuation lines) — too narrow. Real specimens in this repo's own source (anchors `545ef479`/
- * `90550a97`) carry a genuine, single, uninterrupted paragraph whose "See docs/decisions/…" tail lands on
- * the 4th or 5th line, past that cap — a false negative on exactly the
- * shape this check exists to catch. The window is now the anchor's own CONTIGUOUS PARAGRAPH: starting at
- * the anchor's own line, it extends through continuation lines until the FIRST of — (a) the enclosing
+ * @decision 347d37d2 — the window was a fixed `GUARD_MAX_LINES`-line cap (the anchor's line plus 2
+ * continuation lines); a real anchor's own pointer tail landing on its 4th+ line was a false
+ * negative on exactly the shape this check exists to catch.
+ *
+ * The window is the anchor's own CONTIGUOUS PARAGRAPH: starting at the anchor's own line, it extends
+ * through continuation lines until the FIRST of — (a) the enclosing
  * comment BLOCK's own end (`blocks`, from `extractCommentBlocks`); (b) the next `@decision` SITE inside
  * the same block (that site's own paragraph is not this anchor's text, however contiguous the block);
  * (c) a blank JSDoc line (`isBlankCommentLine`) — the ordinary paragraph-break convention; or (d) a line
@@ -519,7 +513,10 @@ function startsNewDocTag(line) {
  * inside a comment) degrades to a one-line window rather than throwing. One entry per SITE, not deduped
  * by id (same convention as `findBareCommitAnchors` — every site needs its own fix, independent of how
  * many other sites share the id). `phrase` carries the matched text (trimmed), so a report can show
- * exactly what triggered it, not just a line number. */
+ * exactly what triggered it, not just a line number.
+ *
+ * @decision a862e8f0 — ships this check REPORT-ONLY: most of this repo's pre-existing anchors already
+ * used the pointer-tail style, too many to gate `guards` on without a separate cleanup first. */
 export function findPointerAnchors(lines, blocks, anchors) {
   const found = [];
   for (const a of anchors) {
@@ -963,22 +960,23 @@ function emitHook(obj) {
 
 /**
  * Best-effort extraction of the TEXT the triggering tool call itself just wrote, from the PostToolUse
- * payload's `tool_input` (card a862e8f0 lead review: `pointerAnchors` was flooding the hook's advisory
- * with EVERY pre-existing pointer anchor in the edited file — measured up to 197 sites in one file on
- * a single Edit — instead of only the site(s) the agent actually just authored). Mirrors the SAME
- * Edit/Write/MultiEdit tool schemas this hook's own harness (Claude Code) invokes these tools with —
- * not a guess: `Write`'s `tool_input.content` is the file's ENTIRE new content (for a brand-new file
- * that genuinely IS "everything just written"; for a full rewrite of an existing file it over-includes
- * pre-existing content too — an accepted, narrow trade, since `Write` on an EXISTING file is rare here
- * by convention, see `CLAUDE.md`: "Prefer editing existing files... prefer the Edit tool"); `Edit`'s
- * `tool_input.new_string` is the one replacement snippet; `MultiEdit`'s `tool_input.edits` is an array
- * of `{new_string, ...}` entries, joined. Returns `null` (never `""`) when the shape doesn't match any
- * of these known tools/fields — a caller MUST treat `null` as "cannot determine what was written", never
- * as "nothing was written" (those are different: the former means fall back to a bounded cap, the latter
- * would wrongly suppress every real finding). No test in this repo currently observes MultiEdit's real
- * payload shape (only Edit/Write appear in captured fixtures) — this function's `edits` branch is
- * therefore UNVERIFIED against a real MultiEdit payload; it degrades safely to the `null`/cap path if the
- * shape ever differs from this file's own belief about it.
+ * payload's `tool_input`. Mirrors the SAME Edit/Write/MultiEdit tool schemas this hook's own harness
+ * (Claude Code) invokes these tools with — not a guess: `Write`'s `tool_input.content` is the file's
+ * ENTIRE new content (for a brand-new file that genuinely IS "everything just written"; for a full
+ * rewrite of an existing file it over-includes pre-existing content too — an accepted, narrow trade,
+ * since `Write` on an EXISTING file is rare here by convention, see `CLAUDE.md`: "Prefer editing
+ * existing files... prefer the Edit tool"); `Edit`'s `tool_input.new_string` is the one replacement
+ * snippet; `MultiEdit`'s `tool_input.edits` is an array of `{new_string, ...}` entries, joined.
+ * Returns `null` (never `""`) when the shape doesn't match any of these known tools/fields — a caller
+ * MUST treat `null` as "cannot determine what was written", never as "nothing was written" (those are
+ * different: the former means fall back to a bounded cap, the latter would wrongly suppress every real
+ * finding). No test in this repo currently observes MultiEdit's real payload shape (only Edit/Write
+ * appear in captured fixtures) — this function's `edits` branch is therefore UNVERIFIED against a real
+ * MultiEdit payload; it degrades safely to the `null`/cap path if the shape ever differs from this
+ * file's own belief about it.
+ *
+ * @decision a862e8f0 — without this, the hook's advisory would flood with EVERY pre-existing pointer
+ * anchor in the edited file, instead of only the site(s) the agent actually just authored.
  */
 export function extractWrittenText(toolName, toolInput) {
   if (!toolInput || typeof toolInput !== "object") return null;
@@ -1004,15 +1002,15 @@ export const HOOK_POINTER_ANCHOR_CAP = 5;
 
 /**
  * Scope `pointerAnchors` (as returned on a `computeFileReport` result) down to the sites the triggering
- * edit actually just wrote, for the HOOK's advisory only (card a862e8f0) — never changes what
- * `computeFileReport`/`computeReport` themselves report; this function is applied by `runHook`, after
- * computing the full report, purely to decide what to SURFACE. `lines` is the edited file's OWN lines
- * (post-edit, same split the report was computed against) — used to read each anchor SITE's own raw line
- * text (line `p.line`, 1-indexed) for the containment test. `writtenText`, from `extractWrittenText`
- * above: `null` means the payload shape couldn't be read (falls back to a capped, unscoped slice of the
- * full list rather than either flooding or going silent — an unrecognized payload must never suppress a
- * real finding, but must also never dump everything); any string means "test each site's own anchor line
- * for containment in this text" — a site is kept IFF its own (trimmed) anchor line text is a substring of
+ * edit actually just wrote, for the HOOK's advisory only — never changes what `computeFileReport`/
+ * `computeReport` themselves report; this function is applied by `runHook`, after computing the full
+ * report, purely to decide what to SURFACE. `lines` is the edited file's OWN lines (post-edit, same
+ * split the report was computed against) — used to read each anchor SITE's own raw line text (line
+ * `p.line`, 1-indexed) for the containment test. `writtenText`, from `extractWrittenText` above: `null`
+ * means the payload shape couldn't be read (falls back to a capped, unscoped slice of the full list
+ * rather than either flooding or going silent — an unrecognized payload must never suppress a real
+ * finding, but must also never dump everything); any string means "test each site's own anchor line for
+ * containment in this text" — a site is kept IFF its own (trimmed) anchor line text is a substring of
  * `writtenText`. This is a SUBSTRING test, not a diff: it can theoretically false-keep a pre-existing site
  * whose anchor line happens to be reproduced verbatim inside an unrelated large `new_string`/`content` —
  * accepted, since a false keep only ever costs a little extra advisory text, never a missed real one (the
@@ -1021,6 +1019,9 @@ export const HOOK_POINTER_ANCHOR_CAP = 5;
  * belt-and-suspenders bound documented on that constant. Returns `{items, omitted}` — `omitted` is the
  * count trimmed by the cap (0 when nothing was trimmed), used by `formatHookMessage` to say so rather than
  * silently truncating.
+ *
+ * @decision a862e8f0 — never changes what `computeFileReport`/`computeReport` themselves report, only
+ * what the hook's own advisory surfaces.
  */
 export function scopeHookPointerAnchors(pointerAnchors, lines, writtenText) {
   const candidates = writtenText === null
@@ -1044,14 +1045,16 @@ export function scopeHookPointerAnchors(pointerAnchors, lines, writtenText) {
  * file outside it can never do. A non-Write/Edit/MultiEdit tool, a missing/unreadable file, or a file
  * `isInScope` rejects are all fast, silent no-ops — byte-identical to a session with no hook wired at all.
  * Always exits 0 (see the dispatcher at the bottom of this file): a bug here must never block a real Write.
- * `pointerAnchors` gets ONE extra step here (card a862e8f0 lead review) that no other check in this file
- * needs: `computeFileReport` still returns the file's FULL, unscoped `pointerAnchors` list (every check
- * it computes always describes the whole file — that contract doesn't change), but `runHook` narrows what
- * it actually SURFACES to `scopeHookPointerAnchors`'s output before calling `formatHookMessage` — every
- * other field is passed through untouched. See `extractWrittenText`/`scopeHookPointerAnchors`'s own docs
- * above for why: without this, a single Edit to a file already carrying hundreds of pre-existing pointer
- * anchors (measured: up to 197 in one file) would inject the ENTIRE list into the agent's context on
- * EVERY edit, not just the site(s) it actually just wrote.
+ * `pointerAnchors` gets ONE extra step here that no other check in this file needs: `computeFileReport`
+ * still returns the file's FULL, unscoped `pointerAnchors` list (every check it computes always
+ * describes the whole file — that contract doesn't change), but `runHook` narrows what it actually
+ * SURFACES to `scopeHookPointerAnchors`'s output before calling `formatHookMessage` — every other field
+ * is passed through untouched (see `extractWrittenText`/`scopeHookPointerAnchors` above for how the
+ * scoping itself works).
+ *
+ * @decision a862e8f0 — a single Edit to a file already carrying hundreds of pre-existing pointer anchors
+ * would otherwise inject the ENTIRE list into the agent's context on EVERY edit, not just the site(s) it
+ * actually just wrote.
  */
 async function runHook(repoRootArg) {
   if (!repoRootArg) return;
