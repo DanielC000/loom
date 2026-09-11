@@ -79,7 +79,9 @@ export const DEFAULT_SESSION_SUMMARY_CAP = 50;
 // @decision b6e3493f — sentinel is against SessionListItem, not bare Session: every real caller
 // (list_all_sessions, list_sessions) feeds enriched rows, so a bare `keyof Session` sentinel would
 // silently drop projectName/agentName today, not just hypothetically.
-const SESSION_LIST_FIELDS: Record<keyof SessionListItem, 1> = {
+// @decision 08c81809 — reachedReadyAt excluded: purely internal boot-reconcile machinery (the durable
+// settle-reconcile discriminator), never a field an agent-facing view should carry.
+const SESSION_LIST_FIELDS: Record<Exclude<keyof SessionListItem, "reachedReadyAt">, 1> = {
   id: 1, projectId: 1, agentId: 1, engineSessionId: 1, title: 1, cwd: 1, processState: 1,
   resumability: 1, busy: 1, createdAt: 1, lastActivity: 1, lastError: 1, role: 1,
   parentSessionId: 1, taskId: 1, worktreePath: 1, branch: 1, reviewBaseSha: 1, repoKey: 1,

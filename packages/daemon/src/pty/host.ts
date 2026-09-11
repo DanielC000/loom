@@ -2904,6 +2904,11 @@ export interface PtyHostEvents {
    * this callback, so a consumer that wants the old id must take it NOW or lose it forever.
    */
   onEngineSessionId(sessionId: string, engineId: string, previousEngineId: string | null): void;
+  /** @decision 08c81809 — durable counterpart to the in-memory `hasReachedReady`/`markReady` latch;
+   *  fires exactly once per session, the FIRST time `markReady` runs (real SessionStart or the readiness
+   *  fallback timer) — never on a later idempotent re-entry. Optional so every existing PtyHostEvents
+   *  implementer (test doubles included) stays byte-identical without providing it. */
+  onReady?(sessionId: string): void;
   /** Persist the turn-in-flight flag (rising on UserPromptSubmit, falling on Stop/StopFailure). */
   onBusy(sessionId: string, busy: boolean): void;
   /** Persist measured engine-context occupancy, refreshed at each turn boundary (Stop). */
@@ -4736,6 +4741,10 @@ export class PtyHost {
         isCodexReadyMarkerPresent(live.screenScan) && isCodexModelLoaded(live.screenScan)
       ) {
         live.bootReady = true;
+        // @decision 08c81809 — mirrors claude's `markReady` `onReady` fire (round 3 finding 5), so a codex
+        // successor's `reachedReadyAt` also latches; guarded by the same `!live.bootReady` check above.
+        // Wrapped (round 4 item 4): a throw here must never skip the kickoff delivery immediately below.
+        try { this.events.onReady?.(opts.sessionId); } catch (e) { console.error(`[pty] onReady threw for ${opts.sessionId}: ${(e as Error)?.message ?? e}`); }
         if (live.bootReadyTimer) { clearTimeout(live.bootReadyTimer); live.bootReadyTimer = null; } // resolved — the fail-loud ceiling no longer applies
         // Code Review C1 fix: deliver the one-time startup prompt now that boot is ready. Routed through
         // the PUBLIC enqueueStdin (which dispatches straight back to enqueueStdinCodex, since this
@@ -9523,6 +9532,9 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live?.alive || live.ready) return;
     live.ready = true;
+    // @decision 08c81809 — durable latch, fired exactly once (guarded by `live.ready` above), so a boot
+    // reconcile can observe reach-ready after a restart. Wrapped (round 4 item 4): must never skip below.
+    try { this.events.onReady?.(sessionId); } catch (e) { console.error(`[pty] onReady threw for ${sessionId}: ${(e as Error)?.message ?? e}`); }
     // Card c469d54e: cancel whichever readiness-fallback timer is still pending (the original spawn-armed
     // one, or the SessionStart-rearmed one — see Live.readyFallbackTimer's own doc) now that readiness is
     // ACTUALLY achieved, so it can't fire a redundant (harmless, but wasteful) late no-op call later. The

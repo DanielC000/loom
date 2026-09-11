@@ -26,6 +26,7 @@ import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
+import type { RecycleSettleEarlyResult } from "./recycle-settle-reconcile.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
 import { readRunUsage, readRunUsageFromFile, readContextStats } from "./context.js";
 import { computeRunCostUsd } from "./pricing.js";
@@ -1796,6 +1797,11 @@ export class SessionService {
    * {@link getRetainedWorktrees} for the read-time derivation of the fuller {@link RetainedWorktreeEntry} shape.
    */
   private retainedWorktreeRecords: RetainedWorktreeRecord[] = [];
+
+  /** @decision 08c81809 — populated by `finishReconcilingRecycleSettles`, CONSULTED unconditionally by
+   *  `resumeFleetOnBoot`/`recoverCrashOrphanedWorkers` — never gate this behind an opt-in option, or an
+   *  omitted one can resume a retired recycle successor alongside its recovered predecessor. */
+  private readonly retiredRecycleSuccessorIds = new Set<string>();
 
   /**
    * Memoizes {@link commitsAheadOfMain} per ARCHIVED worker (card ba41b402 mgr review). Keyed on
@@ -4453,14 +4459,25 @@ export class SessionService {
     // gets the live `currentDeployStaleness()` read of THIS (freshly-booted, post-restart) process's own
     // signature; a hermetic test injects a fixed result so it can assert the withheld-vs-emitted "code is
     // live" wording deterministically, without a real git checkout + rebuilt dist.
-    opts: { resumeOne?: (id: string) => boolean; now?: Date; deployStaleness?: DeployStalenessResult } = {},
-  ): { resumed: string[]; skippedParked: string[]; failed: string[] } {
+    // @decision 08c81809 — Code Review round 5 minor (doc drift): `excludeRetiredIds` is NOT the
+    // structural fix as of round 4 — `this.retiredRecycleSuccessorIds` (an instance field) is consulted
+    // UNCONDITIONALLY below; this option is an ADDITIONAL override only, and index.ts no longer passes it.
+    opts: { resumeOne?: (id: string) => boolean; now?: Date; deployStaleness?: DeployStalenessResult; excludeRetiredIds?: Set<string> } = {},
+  ): { resumed: string[]; skippedParked: string[]; failed: string[]; retiredSkipped: string[] } {
     const now = opts.now ?? new Date();
     const deployStaleness = opts.deployStaleness ?? currentDeployStaleness();
     const resumeOne = opts.resumeOne ?? ((id: string): boolean => {
       try { this.resume(id); return true; } catch { return false; }
     });
-    const entries = resumeSetFromIntent(intent);
+    const retiredSkipped: string[] = [];
+    // @decision 08c81809 — CRITICAL (round 3): a retired recycle successor must never be re-resumed
+    // alongside its already-recovered predecessor. Consults `this.retiredRecycleSuccessorIds`
+    // UNCONDITIONALLY (round 4) — `opts.excludeRetiredIds` is an ADDITIONAL override only, never required.
+    const isRetired = (id: string): boolean => this.retiredRecycleSuccessorIds.has(id) || !!opts.excludeRetiredIds?.has(id);
+    const entries = resumeSetFromIntent(intent).filter((e) => {
+      if (isRetired(e.sessionId)) { retiredSkipped.push(e.sessionId); return false; }
+      return true;
+    });
     const reqId = intent.managerSessionId;
     const resumed: string[] = [];
     const skippedParked: string[] = [];
@@ -4767,7 +4784,14 @@ export class SessionService {
     }
 
     // The requesting manager last: bring it back with its "your code is live, verify + continue" prompt.
-    if (resumeOne(reqId)) {
+    // @decision 08c81809 — round 4 nit (item 7): respect the SAME exclusion the fleet loop above applies,
+    // so "structural" is literally true — reqId can't practically BE a retired successor (it just issued
+    // the daemon_restart MCP call), but this closes the special case rather than assuming it.
+    if (isRetired(reqId)) {
+      // Round 5 nit: distinct from an ordinary resume failure — do NOT also push to `failed` (the final
+      // `else` below is what handles a genuine `resumeOne` failure; this is a different, counted outcome).
+      retiredSkipped.push(reqId);
+    } else if (resumeOne(reqId)) {
       resumed.push(reqId);
       if (isParked(reqId)) {
         skippedParked.push(reqId);
@@ -4875,7 +4899,7 @@ export class SessionService {
       failed.push(reqId);
     }
 
-    return { resumed, skippedParked, failed };
+    return { resumed, skippedParked, failed, retiredSkipped };
   }
 
   /**
@@ -4911,8 +4935,11 @@ export class SessionService {
     opts: {
       resumeOne?: (id: string) => boolean; now?: Date; soloManagerIds?: string[]; shutdownMarker?: ShutdownMarkerRecord | null;
       hadCrashLogAtBoot?: boolean; bootedAt?: Date; supervisorIteration?: number | null;
+      // @decision 08c81809 — round 5 minor (doc drift): an ADDITIONAL override only, same as
+      // `resumeFleetOnBoot`'s own `excludeRetiredIds` — see that function's doc for the full reasoning.
+      excludeRetiredIds?: Set<string>;
     } = {},
-  ): { resumed: string[]; skippedParked: string[]; failed: string[]; managersFailed: string[] } {
+  ): { resumed: string[]; skippedParked: string[]; failed: string[]; managersFailed: string[]; retiredSkipped: string[] } {
     const now = opts.now ?? new Date();
     const cleanStop = !!opts.shutdownMarker; // fresh marker present ⇒ the preceding stop was NOT a crash
     const hadCrashLog = opts.hadCrashLogAtBoot ?? true; // undecided ⇒ keep the original "crashed" phrasing
@@ -4946,8 +4973,16 @@ export class SessionService {
     const skippedParked: string[] = [];
     const failed: string[] = [];
     const managersFailed: string[] = [];
+    const retiredSkipped: string[] = [];
+    // @decision 08c81809 — same UNCONDITIONAL instance-field consultation as `resumeFleetOnBoot`'s own
+    // `isRetired` (round 4 hardening item 2) — `opts.excludeRetiredIds` is an override only.
+    const isRetired = (id: string): boolean => this.retiredRecycleSuccessorIds.has(id) || !!opts.excludeRetiredIds?.has(id);
     const byManager = new Map<string, CrashOrphanedWorker[]>();
     for (const c of candidates) {
+      // @decision 08c81809 — a retired recycle successor must never be re-resumed as a manager here
+      // either. Defensive rather than primary (its workers were already reparented off it before this
+      // candidate derivation ran) — the `soloManagerIds` filter just below is the primary guard.
+      if (isRetired(c.managerSessionId)) { retiredSkipped.push(c.managerSessionId); continue; }
       const list = byManager.get(c.managerSessionId) ?? [];
       list.push(c);
       byManager.set(c.managerSessionId, list);
@@ -4957,6 +4992,9 @@ export class SessionService {
     // here so it still gets ONE independent resume attempt, not silence (crash-orphaned-workers.ts ›
     // deriveCrashOrphanedManagers).
     for (const soloId of opts.soloManagerIds ?? []) {
+      // @decision 08c81809 — this IS the primary guard: a retired successor whose reparented fleet leaves
+      // it with zero candidates lands here, as a solo manager, and must never get its own resume attempt.
+      if (isRetired(soloId)) { if (!retiredSkipped.includes(soloId)) retiredSkipped.push(soloId); continue; }
       if (!byManager.has(soloId)) byManager.set(soloId, []);
     }
     for (const [managerId, workers] of byManager) {
@@ -5123,7 +5161,7 @@ export class SessionService {
         this.enqueueDurableNudge(managerId, managerRole, note);
       } catch { /* not ready yet — the resume stands */ }
     }
-    return { resumed, skippedParked, failed, managersFailed };
+    return { resumed, skippedParked, failed, managersFailed, retiredSkipped };
   }
 
   /** @decision 2ca18433 — the single re-enqueue owner for a pre-boot undelivered durable message; the
@@ -10272,31 +10310,40 @@ export class SessionService {
    */
   private async settleRecycleHandoff(params: { oldId: string; freshId: string; role: "manager" | "platform" }): Promise<void> {
     const { oldId, freshId, role } = params;
-    // Preserves the original delay's own purpose: let the recycle_me tool call's own MCP response flush
-    // before anything touches the predecessor's pty.
-    await new Promise((r) => setTimeout(r, SessionService.RECYCLE_SUCCESSOR_SETTLE_FLUSH_DELAY_MS));
-    const deadline = Date.now() + SessionService.RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS;
-    let alerted = false;
-    for (;;) {
-      if (this.pty.hasReachedReady(freshId)) {
-        try { this.pty.stop(oldId, "hard"); } catch { /* already gone */ }
-        if (alerted) {
-          this.db.appendEvent({
-            id: randomUUID(), ts: new Date().toISOString(), managerSessionId: oldId,
-            kind: "recycle_fleet_resolved", detail: { successorId: freshId },
-          });
+    // @decision 08c81809 — the durable settle-in-flight marker (set by insertRecycleSuccessor, in the
+    // SAME transaction as freshId's own recycled_from link, well before this async function even starts
+    // running) is cleared here on EVERY terminal outcome — the ready branch, the dead-successor recovery
+    // branch, and any unexpected throw — via this finally, never inline in each branch. A daemon restart
+    // before this finally ever runs is exactly the gap reconcileStrandedRecycleSettles exists to close.
+    try {
+      // Preserves the original delay's own purpose: let the recycle_me tool call's own MCP response flush
+      // before anything touches the predecessor's pty.
+      await new Promise((r) => setTimeout(r, SessionService.RECYCLE_SUCCESSOR_SETTLE_FLUSH_DELAY_MS));
+      const deadline = Date.now() + SessionService.RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS;
+      let alerted = false;
+      for (;;) {
+        if (this.pty.hasReachedReady(freshId)) {
+          try { this.pty.stop(oldId, "hard"); } catch { /* already gone */ }
+          if (alerted) {
+            this.db.appendEvent({
+              id: randomUUID(), ts: new Date().toISOString(), managerSessionId: oldId,
+              kind: "recycle_fleet_resolved", detail: { successorId: freshId },
+            });
+          }
+          return;
         }
-        return;
+        if (!this.pty.isAlive(freshId)) {
+          this.recoverFleetAfterFailedRecycleSuccessor(oldId, freshId, role);
+          return;
+        }
+        if (!alerted && Date.now() >= deadline) {
+          this.recordUnresolvedRecycleOutcome(oldId, freshId, role, "timeout");
+          alerted = true;
+        }
+        await new Promise((r) => setTimeout(r, alerted ? SessionService.RECYCLE_SUCCESSOR_SETTLE_SLOW_POLL_MS : SessionService.RECYCLE_SUCCESSOR_SETTLE_POLL_MS));
       }
-      if (!this.pty.isAlive(freshId)) {
-        this.recoverFleetAfterFailedRecycleSuccessor(oldId, freshId, role);
-        return;
-      }
-      if (!alerted && Date.now() >= deadline) {
-        this.recordUnresolvedRecycleOutcome(oldId, freshId, role, "timeout");
-        alerted = true;
-      }
-      await new Promise((r) => setTimeout(r, alerted ? SessionService.RECYCLE_SUCCESSOR_SETTLE_SLOW_POLL_MS : SessionService.RECYCLE_SUCCESSOR_SETTLE_POLL_MS));
+    } finally {
+      this.db.clearRecycleSettlePending(oldId);
     }
   }
 
@@ -10428,6 +10475,176 @@ export class SessionService {
   }
 
   /**
+   * @decision 08c81809 — the LATER half of the boot-time recovery for a manager/platform recycle settle
+   * lost to a daemon restart mid-window (see `reconcileStrandedRecycleSettlesEarly`,
+   * sessions/recycle-settle-reconcile.ts, for the EARLY, DB-only half this consumes — and for WHY the
+   * split exists: `SessionService`/`PtyHost` do not exist yet when the early half must run). Called ONCE
+   * at boot, from index.ts, at the SAME point the old single-phase version used to run — MUST run BEFORE
+   * `resumeFleetOnBoot`/`recoverCrashOrphanedWorkers` compute their own resume sets: this ordering is now
+   * genuinely LOAD-BEARING (Code Review round 4 hardening item 2, correcting round 3's own "harmless
+   * either way" framing here, which was FALSE) — this method's `finalizeRecovery` is what populates
+   * `this.retiredRecycleSuccessorIds`, the set BOTH resume paths consult UNCONDITIONALLY to structurally
+   * exclude a retired successor from being re-resumed alongside its already-recovered predecessor. Run
+   * this method AFTER either resume path and a retired successor is NOT yet excluded when they run.
+   *
+   * Exists because NONE of the three automatic resume paths can ever revisit a lineage stuck in this
+   * state on their own: `resume()` refuses the predecessor forever (`hasSuccessor`, since `recycled_from`
+   * is never unlinked) and refuses a never-started successor forever too (no engine id, thrown before any
+   * pty spawn — so no `onExit` ever fires and `reconcileNeverStartedRecycleSuccessor` is unreachable);
+   * `CrashRecoveryWatcher`'s own candidate filters independently exclude both for the identical two
+   * reasons. Traced and confirmed on card 08c81809 — see that card's own decision record for the full
+   * trace and the Code Review round that reshaped this into the current two-phase design.
+   *
+   * Three buckets, handled differently:
+   *  - `early.recovered` — the early phase already unlinked + reparented (workers/wakes/questions) onto
+   *    the predecessor, using the durable `isDurablyResumable` pre-check. This phase finishes the job:
+   *    archive the dead successor (`unlinkAndArchiveDeadRecycleSuccessor`), then actually `resume()` the
+   *    predecessor. A pre-check pass does not guarantee `resume()` itself succeeds (it can't catch every
+   *    failure mode, e.g. a `pty.spawn` throw) — on failure this still falls through to the stranded
+   *    banner below, exactly like the `deferred` fallback does.
+   *  - `early.deferred` — the successor durably reached ready; provisionally the legitimate owner, lineage
+   *    untouched. This phase actually attempts `resume(freshId)` — the ONLY point that can truly verify
+   *    it, since the early phase has no `PtyHost` to ask. Success: done, the successor is the owner.
+   *    Failure: FALL THROUGH to recovering the predecessor — mirrors the live loop's own NEVER RESURRECT
+   *    order (verify the predecessor resumes BEFORE touching the successor's lineage at all), achievable
+   *    here (unlike the early phase) because `resume()` is actually callable. The reparent in this branch
+   *    runs AFTER `recoverStaleSessions()`/`deriveCrashOrphanedWorkers` already ran in index.ts — a KNOWN,
+   *    NARROW residual (see the inline comment at that reparent call) the early phase's own pre-check
+   *    design exists specifically to make rare, not to eliminate: it requires BOTH a durable ready-latch
+   *    AND a subsequent, otherwise-unpredicted resume failure.
+   *  - `early.stranded` — neither the successor nor the predecessor can serve as an automatic owner. The
+   *    successor was left completely untouched by the early phase (NEVER RESURRECT). This phase's only
+   *    job is making the predecessor's stranded state VISIBLE: `snapshotAndArchiveRecovered` (index.ts,
+   *    running between the early and this later phase) already archived it, so `listAllSessions`/
+   *    `isOrphanedFleet` would otherwise never see the `[loom:orphaned-fleet]` banner — `restoreSession`
+   *    un-archives it right alongside stamping that banner (Code Review finding 3).
+   */
+  finishReconcilingRecycleSettles(early: RecycleSettleEarlyResult): { recoveredPredecessors: string[]; strandedPredecessors: string[]; confirmedLiveSuccessors: string[]; retiredSuccessorIds: string[] } {
+    const recoveredPredecessors: string[] = [];
+    const strandedPredecessors: string[] = [];
+    const confirmedLiveSuccessors: string[] = [];
+    const retiredSuccessorIds: string[] = [];
+
+    // @decision 08c81809 — un-archives the predecessor (snapshotAndArchiveRecovered, index.ts, already
+    // ran between the early and this later phase) so the banner is actually visible on the live rail
+    // (Code Review finding 3), stamps it, files the distinct event, and clears the marker. Idempotent:
+    // clearing an already-clear marker is a harmless no-op UPDATE, so this is safe to call unconditionally
+    // regardless of which caller reaches it.
+    const stampStranded = (predecessorId: string, freshId: string, reason: string): void => {
+      this.db.restoreSession(predecessorId);
+      this.db.setProcessState(predecessorId, "exited");
+      this.db.setLastError(predecessorId,
+        `[loom:orphaned-fleet] A recycle settle for this session was lost to a daemon restart (card 08c81809) — its successor ${freshId.slice(0, 8)} ${reason}, and this predecessor is also not resumable. No automatic owner exists for its fleet; a human must intervene.`);
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: predecessorId,
+        kind: "recycle_fleet_stranded_across_restart", detail: { deadSuccessorId: freshId },
+      });
+      this.db.clearRecycleSettlePending(predecessorId);
+      strandedPredecessors.push(predecessorId);
+    };
+
+    // @decision 08c81809 — finishes a `recovered` decision (early phase already unlinked + reparented):
+    // archive the dead successor, then actually attempt to resume the predecessor. Falls through to
+    // `stampStranded` if that attempt fails — the pre-check that classified this as "recovered" cannot
+    // guarantee `resume()` itself succeeds.
+    const finalizeRecovery = (predecessorId: string, freshId: string, reparentedWorkers: number): void => {
+      // @decision 08c81809 — record the retirement BEFORE any step below that can throw, so the CRITICAL
+      // exclusion is already in effect even if this function throws partway through; the durable marker
+      // (cleared only at the very end, on success) then stays SET for the next boot to retry.
+      retiredSuccessorIds.push(freshId);
+      this.retiredRecycleSuccessorIds.add(freshId);
+      // Code Review round 3 finding 2: mirror `recoverFleetAfterFailedRecycleSuccessor`'s own
+      // `carryPendingToSuccessor` call — the dead successor's durable queue (a `session_message`/
+      // `worker_report` etc. still addressed to it) must follow the fleet back onto the predecessor, or
+      // `recoverUndeliveredMessagesOnBoot` (index.ts, running further below in this same boot) retires
+      // every one of them as "recipient-gone-or-superseded" once this archives the successor below. This
+      // boot's PtyHost has no live in-memory entry for the dead successor (its process never survived to
+      // this boot), so there is nothing to flush — `[]` — only the DURABLE half applies; reuse the same
+      // helper anyway rather than re-implement its re-mint logic. MUST run BEFORE the archive below: once
+      // archived, the successor is exactly the "recipient gone" shape that later retire pass looks for.
+      this.carryPendingToSuccessor(freshId, predecessorId, [], this.db.listUnresolvedQueuedMessagesForWorker(freshId));
+      this.unlinkAndArchiveDeadRecycleSuccessor(predecessorId, freshId);
+      let resumed: Session;
+      try {
+        resumed = this.resume(predecessorId, { allowSuperseded: true });
+      } catch (e) {
+        console.warn(`[recycle-settle-reconcile] predecessor ${predecessorId.slice(0, 8)} also failed to resume: ${(e as Error)?.message ?? e}`);
+        stampStranded(predecessorId, freshId, "never reached SessionStart"); // clears the marker itself
+        return;
+      }
+      void resumed;
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: predecessorId,
+        kind: "recycle_fleet_recovered", detail: { deadSuccessorId: freshId, oldStillLive: true, reparentedWorkers },
+      });
+      const role = this.db.getSession(predecessorId)?.role === "platform" ? "platform" : "manager";
+      const fleetNote = role === "manager"
+        ? "your workers/wakes/questions are back on you — re-read worker_list to continue"
+        : "your wakes/questions are back on you";
+      this.enqueueDurableNudge(predecessorId, role,
+        `[loom:recycle-failed] a recycle settle for this session was lost to a daemon restart (card 08c81809) — your successor ${freshId.slice(0, 8)} never reached SessionStart; ${fleetNote}.`);
+      // @decision 08c81809 — clear the marker LAST, only once every step above genuinely succeeded (was
+      // cleared as the FIRST statement, which lost the durable trace on a throw anywhere below it).
+      this.db.clearRecycleSettlePending(predecessorId);
+      recoveredPredecessors.push(predecessorId);
+    };
+
+    for (const { predecessorId, freshId, reparentedWorkers } of early.recovered) {
+      try { finalizeRecovery(predecessorId, freshId, reparentedWorkers); }
+      catch (e) { console.error(`[recycle-settle-reconcile] later pass (recovered) failed for predecessor ${predecessorId.slice(0, 8)}: ${(e as Error)?.message ?? e}`); }
+    }
+
+    for (const { predecessorId, freshId } of early.deferred) {
+      try {
+        try {
+          this.resume(freshId);
+          confirmedLiveSuccessors.push(freshId);
+          this.db.clearRecycleSettlePending(predecessorId);
+          continue;
+        } catch { /* durably-ready successor still failed to actually resume — fall through below */ }
+        // NEVER RESURRECT order: verify the PREDECESSOR resumes BEFORE touching the successor's lineage
+        // at all — achievable here (unlike the early phase) because resume() is actually callable now.
+        let resumedPredecessor: Session;
+        try {
+          resumedPredecessor = this.resume(predecessorId, { allowSuperseded: true });
+        } catch (e) {
+          console.warn(`[recycle-settle-reconcile] deferred predecessor ${predecessorId.slice(0, 8)} also failed to resume: ${(e as Error)?.message ?? e}`);
+          stampStranded(predecessorId, freshId, "reached ready durably but could not actually be resumed");
+          continue;
+        }
+        void resumedPredecessor;
+        if (this.db.getSession(freshId)?.recycledFrom === predecessorId) this.db.setOrchestration(freshId, { recycledFrom: null });
+        // @decision 08c81809 — KNOWN, NARROW RESIDUAL: this reparent runs AFTER index.ts's
+        // recoverStaleSessions()/deriveCrashOrphanedWorkers() already snapshotted the (still-wrong)
+        // lineage — a crash-path boot may already have attributed these workers to the dead successor and
+        // excluded them from THIS boot's own resume attempt. They ARE correctly re-parented here going
+        // forward (worker_list etc. reflect reality from this point on) — this residual only affects
+        // whether this specific boot's crash-path resume attempt reached them, not the DB's correctness
+        // after. Requires BOTH a durable ready-latch AND a later resume failure — rare by construction —
+        // and, unlike the early phase's own pre-check design, unavoidable: sessions/pty (needed to
+        // actually verify the resume, the only way to tell this branch apart from a genuinely-fine
+        // successor) don't exist before index.ts's derivation steps run.
+        const reparentedWorkers = this.db.reparentAllChildren(freshId, predecessorId);
+        this.db.reparentWakes(freshId, predecessorId);
+        this.db.reparentQuestions(freshId, predecessorId);
+        finalizeRecovery(predecessorId, freshId, reparentedWorkers);
+      } catch (e) {
+        // @decision 08c81809 — round 4 item 3: do NOT clear the marker here — a throw anywhere in this
+        // branch (including inside `finalizeRecovery`, before it reaches its own success-path clear)
+        // must leave the marker set for the next boot to retry, not silently lose the trace.
+        console.error(`[recycle-settle-reconcile] later pass (deferred) failed for predecessor ${predecessorId.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
+      }
+    }
+
+    for (const { predecessorId, freshId } of early.stranded) {
+      try { stampStranded(predecessorId, freshId, "never reached SessionStart"); }
+      catch (e) { console.error(`[recycle-settle-reconcile] later pass (stranded) failed for predecessor ${predecessorId.slice(0, 8)}: ${(e as Error)?.message ?? e}`); }
+    }
+
+    return { recoveredPredecessors, strandedPredecessors, confirmedLiveSuccessors, retiredSuccessorIds };
+  }
+
+  /**
    * Recycle a MANAGER near its context limit (the `recycle_me` flow). The manager has already run
    * /loom-session-end and written `continuationPrompt`; here Loom boots a FRESH successor manager seeded
    * with the agent warm-up prompt + that continuation (NOT --resume — fresh context, intent carried),
@@ -10516,7 +10733,10 @@ export class SessionService {
       gen: newGen,
       recycledFrom: old.id,
     };
-    this.db.insertSession(fresh);
+    // @decision 08c81809 — insertRecycleSuccessor stamps the durable settle-in-flight marker on
+    // oldManagerId in the SAME transaction as fresh's own recycled_from link above, rather than a bare
+    // insertSession — see that method's own doc for why any later point would leave a gap.
+    this.db.insertRecycleSuccessor(fresh, oldManagerId);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(fresh.id, "live");
     // Card 6ca4155f: wrapped through pty.spawn so a synchronous throw in this window reconciles the row
@@ -10556,6 +10776,10 @@ export class SessionService {
       // @decision 4be56c33 — unlink only here: `fresh` was inserted in this same synchronous
       // call and no process for it ever existed.
       this.db.setOrchestration(fresh.id, { recycledFrom: null });
+      // @decision 08c81809 — the settle loop that clears this on every OTHER path is never reached from
+      // this catch (settleRecycleHandoff is only invoked after this try block succeeds) — clear it here
+      // too, or a failed recycle attempt would leave the marker permanently stuck on the predecessor.
+      this.db.clearRecycleSettlePending(oldManagerId);
       // @decision 08320d02 — archive the failed successor (listAllSessions excludes archived rows) and
       // file the failure under the PREDECESSOR: it's the one still live (never flipped off `live` before
       // this attempt) — `fresh` never was, so filing there would be discoverable only by timestamp
@@ -10725,7 +10949,11 @@ export class SessionService {
     // crash-recovery/superseded checks key off this). Other unrelated Leads stay live throughout — this is
     // a per-lineage replacement, not a global singleton.
     this.db.setProcessState(old.id, "exited");
-    this.db.insertSession(fresh);
+    // @decision 08c81809 — insertRecycleSuccessor stamps the durable settle-in-flight marker on
+    // oldLeadId in the SAME transaction as fresh's own recycled_from link above, rather than a bare
+    // insertSession — see that method's own doc for why any later point would leave a gap. Still
+    // fully synchronous (no await), so it does not disturb the atomic handoff's own no-await guarantee.
+    this.db.insertRecycleSuccessor(fresh, oldLeadId);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(fresh.id, "live");
     // Card 6ca4155f: wrapped so a synchronous throw in this window reconciles the fresh row to 'exited'
@@ -10763,6 +10991,10 @@ export class SessionService {
       // @decision 4be56c33 — unlink only here: `fresh` was inserted in this same synchronous
       // call and no process for it ever existed.
       this.db.setOrchestration(fresh.id, { recycledFrom: null });
+      // @decision 08c81809 — the settle loop that clears this on every OTHER path is never reached from
+      // this catch (settleRecycleHandoff is only invoked after this try block succeeds) — clear it here
+      // too, or a failed recycle attempt would leave the marker permanently stuck on the predecessor.
+      this.db.clearRecycleSettlePending(oldLeadId);
       // @decision 08320d02 — archive the failed successor and file the failure under the PREDECESSOR
       // (restored to `live` above, the still-queryable identity) — same reasoning as recycleManager's
       // identical catch.

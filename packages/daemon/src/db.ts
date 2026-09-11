@@ -380,6 +380,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   project_id TEXT NOT NULL REFERENCES projects(id),
   agent_id TEXT NOT NULL REFERENCES agents(id),
   engine_session_id TEXT,
+  -- @decision 08c81809 — durable counterpart to PtyHost.hasReachedReady (in-memory only, lost on
+  -- restart): the ISO instant markReady first latched, or NULL if never. See Session.reachedReadyAt's
+  -- own doc for why this, not engine_session_id, is the correct boot-time recycle-settle discriminator.
+  reached_ready_at TEXT,
   title TEXT,
   cwd TEXT NOT NULL,
   process_state TEXT NOT NULL DEFAULT 'none',
@@ -428,6 +432,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   review_base_sha TEXT,
   gen INTEGER DEFAULT 0,
   recycled_from TEXT,
+  -- @decision 08c81809 — durable "settle in flight" marker, set on the PREDECESSOR row only (never
+  -- fresh's own row) in the SAME transaction as fresh's recycled_from link (insertRecycleSuccessor), so
+  -- a daemon restart mid-settle can be reconciled at boot instead of stranding the lineage forever.
+  -- NULL = no recycle settle in flight for this session. See reconcileStrandedRecycleSettles.
+  recycle_settle_pending_for TEXT,
   ctx_input_tokens INTEGER,
   ctx_turns INTEGER,
   ctx_updated_at TEXT,
@@ -1514,6 +1523,9 @@ export interface MergeReconcileWedgeEntry {
 
 /** Columns added to `sessions` after phase-1; applied to existing DBs by migrateSessions(). */
 const SESSION_ADDED_COLUMNS: Record<string, string> = {
+  // @decision 08c81809 — durable markReady latch (see the CREATE TABLE comment above); nullable, no
+  // DEFAULT needed, so every legacy row backfills to NULL = "never durably observed ready".
+  reached_ready_at: "TEXT",
   role: "TEXT",
   // opt-in browser-automation (pinned at spawn from the Profile; carried across respawns). NOT NULL +
   // constant DEFAULT is legal on ALTER TABLE ADD COLUMN, so legacy rows backfill to 0 (off).
@@ -1554,6 +1566,9 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   repo_key: "TEXT",
   gen: "INTEGER DEFAULT 0",
   recycled_from: "TEXT",
+  // @decision 08c81809 — durable settle-in-flight marker (see the CREATE TABLE comment above); nullable,
+  // no DEFAULT needed, so every legacy row backfills to NULL = "no recycle settle in flight".
+  recycle_settle_pending_for: "TEXT",
   ctx_input_tokens: "INTEGER",
   ctx_turns: "INTEGER",
   ctx_updated_at: "TEXT",
@@ -4960,6 +4975,19 @@ export class Db {
       .run(engineId, new Date().toISOString(), id);
     this.notifySessionChanged(id);
   }
+  /** @decision 08c81809 — durable counterpart to `PtyHost.markReady`'s in-memory latch. Called from the
+   *  `onReady` PtyHostEvents hook, the FIRST time (and only the first time — `markReady` itself is
+   *  idempotent past its own `live.ready` guard) a session's TUI is considered booted, whether via a
+   *  real SessionStart hook or the readiness fallback timer. See `Session.reachedReadyAt`'s own doc. */
+  setReachedReady(id: string): void {
+    // Code Review round 3 finding 8 (nit): first-only at the SQL level, matching this method's own doc
+    // ("the FIRST time") — a session resumed across multiple restarts re-runs markReady/the codex
+    // bootReady composite on each Live instance, so without this guard a later resume's ready latch would
+    // silently overwrite the ORIGINAL reachedReadyAt timestamp instead of leaving it as the first-ever one.
+    this.db.prepare("UPDATE sessions SET reached_ready_at = ? WHERE id = ? AND reached_ready_at IS NULL")
+      .run(new Date().toISOString(), id);
+    this.notifySessionChanged(id);
+  }
   setProcessState(id: string, state: ProcessState): void {
     this.db.prepare("UPDATE sessions SET process_state = ?, last_activity = ? WHERE id = ?")
       .run(state, new Date().toISOString(), id);
@@ -5420,6 +5448,26 @@ export class Db {
     return changes;
   }
   /**
+   * @decision 08c81809 — the boot-reconcile counterpart to `reparentLiveWorkers`, deliberately NOT
+   * gated on `process_state = 'live'`. `reparentLiveWorkers` is correct for the LIVE in-memory settle
+   * loop, where 'live' genuinely reflects the real process. At BOOT, nothing is live yet — a worker
+   * captured into a restart-intent/crash-recovery candidate set is identified by its PRE-restart row
+   * state, not by a 'live' flag that (if this runs after `recoverStaleSessions()`) has already been
+   * unconditionally flipped to 'exited' for every session in the fleet, live worker included — using
+   * the live-gated method there would silently reparent ZERO rows. Used ONLY by the recycle-settle boot
+   * reconcile (both its early, pre-`recoverStaleSessions()` pass and its late fallback) — never by the
+   * live settle loop, which keeps using `reparentLiveWorkers` unchanged.
+   */
+  reparentAllChildren(oldManagerId: string, newManagerId: string): number {
+    const ids = (this.db.prepare(
+      "SELECT id FROM sessions WHERE parent_session_id = ?",
+    ).all(oldManagerId) as Row[]).map((r) => r.id as string);
+    const changes = this.db.prepare("UPDATE sessions SET parent_session_id = ? WHERE parent_session_id = ?")
+      .run(newManagerId, oldManagerId).changes;
+    for (const id of ids) this.notifySessionChanged(id);
+    return changes;
+  }
+  /**
    * Fleet-lockout self-heal (P1): repair EXACTLY ONE worker row's stale `parent_session_id`, on demand,
    * regardless of process_state. Unlike `reparentLiveWorkers` (bulk, `process_state='live'`-gated, called
    * only from recycleManager/boot-reconcile), this is called from the per-op guard path in
@@ -5466,6 +5514,42 @@ export class Db {
       "SELECT * FROM sessions WHERE recycled_from = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
     ).get(sessionId) as Row | undefined;
     return r ? toSession(r) : undefined;
+  }
+  /** @decision 08c81809 — atomically inserts a recycle successor row AND stamps the durable
+   *  settle-in-flight marker on the PREDECESSOR, in the SAME transaction as the `recycled_from` lineage
+   *  link `fresh` itself carries. Card 08c81809: `settleRecycleHandoff`'s poll loop is purely in-memory
+   *  and lost on a daemon restart — this marker is what lets a boot-time reconcile
+   *  (`reconcileStrandedRecycleSettles`) re-derive the right outcome instead of leaving the lineage
+   *  permanently stranded (nothing else ever revisits it — see that method's own doc). Setting the
+   *  marker any later than THIS insert (e.g. at the top of the async settle loop, after several
+   *  reparenting steps) would leave a real gap: a restart between this insert and the settle loop
+   *  actually starting would see `recycled_from` linked with no marker at all — indistinguishable from a
+   *  lineage that was never mid-settle. */
+  insertRecycleSuccessor(fresh: Session, predecessorId: string): void {
+    this.db.transaction(() => {
+      this.insertSession(fresh);
+      this.db.prepare("UPDATE sessions SET recycle_settle_pending_for = ? WHERE id = ?").run(fresh.id, predecessorId);
+    })();
+    this.notifySessionChanged(predecessorId);
+  }
+  /** @decision 08c81809 — clears the durable settle-in-flight marker (see `insertRecycleSuccessor`).
+   *  Called on every terminal outcome of `settleRecycleHandoff` (stopped-M1, recovered-fleet, or an
+   *  unexpected throw — via its own `finally`), by the pre-spawn-failure catches in
+   *  `recycleManager`/`recyclePlatformLead` (the settle loop is never reached in that case), and by
+   *  `reconcileStrandedRecycleSettles` once it has resolved the lineage at boot. A no-op if already clear. */
+  clearRecycleSettlePending(predecessorId: string): void {
+    this.db.prepare("UPDATE sessions SET recycle_settle_pending_for = NULL WHERE id = ?").run(predecessorId);
+    this.notifySessionChanged(predecessorId);
+  }
+  /** @decision 08c81809 — every predecessor row still carrying a settle-in-flight marker, read ONCE at
+   *  boot by `reconcileStrandedRecycleSettles`, BEFORE either mutually-exclusive boot-resume path
+   *  computes its own resume set. Rare in practice (0 or 1 rows): a marker set by
+   *  `insertRecycleSuccessor` and never cleared because the daemon restarted before
+   *  `settleRecycleHandoff`'s in-memory loop resolved. */
+  listRecycleSettlePending(): { predecessorId: string; freshId: string }[] {
+    return this.db.prepare(
+      "SELECT id AS predecessorId, recycle_settle_pending_for AS freshId FROM sessions WHERE recycle_settle_pending_for IS NOT NULL",
+    ).all() as { predecessorId: string; freshId: string }[];
   }
   /**
    * Count of currently-LIVE SCHEDULER-SPAWNED manager sessions — the Scheduler's OWN manager-cap gate
@@ -7586,6 +7670,7 @@ function toSession(r0: unknown): Session {
   return {
     id: r.id as string, projectId: r.project_id as string, agentId: r.agent_id as string,
     engineSessionId: (r.engine_session_id as string) ?? null, title: (r.title as string) ?? null,
+    reachedReadyAt: (r.reached_ready_at as string) ?? null,
     cwd: r.cwd as string,
     processState: r.process_state as ProcessState, resumability: r.resumability as Resumability,
     busy: (r.busy as number) === 1,

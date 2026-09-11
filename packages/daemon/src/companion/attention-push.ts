@@ -132,6 +132,11 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
     // whatever surface already carries them, rather than being silently dropped by the `default: null` below.
     case "recycle_fleet_resolved":
       return "worker-crashed";
+    // @decision 08c81809 — the settle loop that would have fired recycle_fleet_recovered/unresolved
+    // above never ran at all (lost to a daemon restart mid-window); the boot-time reconcile found no
+    // possible automatic owner. Same "unexpected fleet-ownership fault" shape, same class.
+    case "recycle_fleet_stranded_across_restart":
+      return "worker-crashed";
     case "question_asked":
       return "decision-pending";
     // Card 99d41588: a Request going STALE is still fundamentally "a decision needs the human" — same
@@ -304,6 +309,12 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
     // discipline as the other two recycle_fleet_* cases (never generic "worker crashed" wording).
     case "recycle_fleet_resolved":
       line = `${projectName}: manager/Lead recycle resolved late — the successor took over — ${m8}`;
+      break;
+    // @decision 08c81809 — distinct from recycle_fleet_unresolved on purpose: that case still has a live
+    // predecessor watching and the loop still running; this one has neither — a daemon restart lost the
+    // settle loop entirely, and the boot-time reconcile confirmed no automatic owner exists.
+    case "recycle_fleet_stranded_across_restart":
+      line = `${projectName}: manager/Lead recycle settle lost to a daemon restart — no automatic owner exists for its fleet, human intervention needed — ${m8}`;
       break;
     default:
       line = `${projectName}: ${alertClass} — ${m8}`;

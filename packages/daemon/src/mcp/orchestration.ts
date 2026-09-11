@@ -2744,7 +2744,9 @@ export class OrchestrationMcpRouter {
     //
     // @decision 2961dd3b — never write this sentinel's values as the boolean literal; use the numeric `1`,
     // so this file's compiled output can't collide with `agent-runs-keys.mjs`'s G3 endpoint-flip scan.
-    const SESSION_ROW_FIELDS: Record<Exclude<keyof Session, "pendingMerge">, 1> = {
+    // @decision 08c81809 — reachedReadyAt is ALSO excluded: purely internal boot-reconcile machinery
+    // (the durable settle-reconcile discriminator), never a field an agent-facing view should carry.
+    const SESSION_ROW_FIELDS: Record<Exclude<keyof Session, "pendingMerge" | "reachedReadyAt">, 1> = {
       id: 1, projectId: 1, agentId: 1, engineSessionId: 1, title: 1, cwd: 1, processState: 1,
       resumability: 1, busy: 1, createdAt: 1, lastActivity: 1, lastError: 1, role: 1,
       parentSessionId: 1, taskId: 1, worktreePath: 1, branch: 1, reviewBaseSha: 1, repoKey: 1,
@@ -2753,10 +2755,10 @@ export class OrchestrationMcpRouter {
       restrictedTools: 1, noCommit: 1, skills: 1, connections: 1, vaultWrite: 1, companionLeadMode: 1,
       capabilities: 1, archivedAt: 1, scheduledSpawn: 1, harness: 1,
     };
-    const SESSION_ROW_KEYS = Object.keys(SESSION_ROW_FIELDS) as (keyof Omit<Session, "pendingMerge">)[];
+    const SESSION_ROW_KEYS = Object.keys(SESSION_ROW_FIELDS) as (keyof Omit<Session, "pendingMerge" | "reachedReadyAt">)[];
 
     /** The wire-only shape `projectSessionRowFields` actually returns: identical to `Omit<Session,
-     *  "pendingMerge">` except `harness` is widened to include `null`, so an UNSET worker can be told
+     *  "pendingMerge" | "reachedReadyAt">` except `harness` is widened to include `null`, so an UNSET worker can be told
      *  apart from one explicitly holding the shipped default. This type exists ONLY for this
      *  projection's return value (never assigned back into a real `Session`, which stays
      *  `?: "claude" | "codex"` with no `null` member — see entityRowFields.ts's `ProfileWireView` for

@@ -663,6 +663,13 @@ export interface Session {
   agentId: AgentId;
   /** Claude Code's engine session id, captured via the SessionStart hook. */
   engineSessionId: string | null;
+  /** @decision 08c81809 — durable counterpart to `PtyHost.hasReachedReady` (in-memory, does not survive
+   *  a restart): the ISO instant `markReady` first latched for this session, or null if it never has.
+   *  Deliberately NOT the same fact as `engineSessionId` being set — the readiness fallback timer can
+   *  call `markReady` even when SessionStart never landed, and conversely a captured `engineSessionId`
+   *  with a session that died before ready leaves this null. See reconcileStrandedRecycleSettles's own
+   *  doc for why this, not `engineSessionId`, is the correct boot-time discriminator. */
+  reachedReadyAt?: string | null;
   title: string | null; // auto-derived from the first turn, user-overridable
   cwd: string;          // = project repoPath
   processState: ProcessState;
@@ -912,6 +919,13 @@ export type OrchestrationEventKind =
   // reparented onto it at spawn time on its own; only these three kinds attest to the actual outcome
   // (recovered / still unresolved / resolved late after an unresolved alert already fired).
   | "recycle_fleet_recovered" | "recycle_fleet_unresolved" | "recycle_fleet_resolved"
+  // @decision 08c81809 — the settle loop that would have decided recovered-vs-unresolved never ran at
+  // all (lost to a daemon restart mid-window, before the in-memory `settleRecycleHandoff` poll loop
+  // resolved). Filed by the boot-time `reconcileStrandedRecycleSettles` ONLY when NEITHER the successor
+  // (no engine id — never reached SessionStart) NOR the predecessor (itself unresumable) can serve as an
+  // automatic fleet owner. Distinct from `recycle_fleet_unresolved` on purpose: that case still has a
+  // live predecessor watching and the loop still running; this one has neither.
+  | "recycle_fleet_stranded_across_restart"
   | "merge_request" | "merge_done"
   | "merge_rejected"
   // A queued merge-gate confirm was CANCELLED before it was ever admitted (`gate_cancel`, card 8d585277,
@@ -1484,7 +1498,8 @@ export type OrchestrationEventKind =
 const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> = {
   spawn_worker: true, message_worker: true, worker_report: true, stop_worker: true,
   redirect_worker: true, recycle_begin: true, recycle_complete: true, recycle_failed: true,
-  recycle_fleet_recovered: true, recycle_fleet_unresolved: true, recycle_fleet_resolved: true, merge_request: true,
+  recycle_fleet_recovered: true, recycle_fleet_unresolved: true, recycle_fleet_resolved: true,
+  recycle_fleet_stranded_across_restart: true, merge_request: true,
   merge_done: true, merge_rejected: true, merge_cancelled: true, build_gate: true,
   kill_switch: true, schedule_fired: true, build_gate_retry_attempt: true, build_gate_retry: true,
   build_gate_single_file_retry: true, schedule_fire_failed: true, schedule_fire_deferred: true,

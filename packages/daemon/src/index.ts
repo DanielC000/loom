@@ -11,8 +11,7 @@ import { canOpenRemoteListener, isTrustTierHookActive, tlsRequirementSatisfied, 
 import { getOrCreateLoopbackSecret } from "./gateway/loopback-secret.js";
 import { sweepDeadSessions, watchClaudeProjects, watchCodexSessions } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
-import { snapshotAndArchiveRecovered } from "./sessions/boot-backstop.js";
-import { deriveCrashOrphanedWorkers, deriveCrashOrphanedManagers } from "./orchestration/crash-orphaned-workers.js";
+import { runBootRecoveryPrefix } from "./sessions/boot-backstop.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
 import { seedDefaultCapabilities, migrateGithubCapabilityToBinary } from "./capabilities/seed.js";
@@ -289,23 +288,18 @@ async function main(): Promise<void> {
   } catch (err) {
     console.warn(`[boot] held backfill failed (continuing boot): ${(err as Error).message}`);
   }
-  const recovered = db.recoverStaleSessions();
+  // @decision 08c81809 — the EARLY, DB-only half of the recycle-settle boot reconcile, THEN
+  // recoverStaleSessions(), THEN the crash-orphaned-worker candidate derivation (card 9fc41af5), THEN the
+  // crash-path archive backstop (card b37750a4) — in that exact order, because both later steps depend on
+  // seeing the CORRECTED lineage (reparented workers) the early reconcile is what produces, not the stale
+  // one. Code Review round 3 finding 6: this exact sequence is now ONE shared, exported function
+  // (`runBootRecoveryPrefix`, sessions/boot-backstop.ts) that both this file and
+  // test/recycle-settle-lost-to-restart.mjs's own `runRealBootSequenceUpToResume` call, so the two can
+  // never silently drift apart on ordering again — see that function's own doc for the full reasoning.
+  // The LATER half (sessions.finishReconcilingRecycleSettles) runs further below, once SessionService/
+  // PtyHost exist, consuming `recycleSettleEarly`.
+  const { early: recycleSettleEarly, recovered, crashOrphanedWorkers, crashOrphanedManagers } = runBootRecoveryPrefix(db);
   if (recovered.length > 0) console.log(`[boot] reconciled ${recovered.length} stale session(s) -> exited`);
-  // Crash-orphaned-worker recovery (card 9fc41af5): derive candidates from `recovered` NOW, BEFORE the
-  // archive pass below stamps archived_at on every one of them — deriveCrashOrphanedWorkers's own
-  // "wasn't archived pre-crash" guard would otherwise always fail. Pure DB read; the actual resume runs
-  // later (after `listen`, alongside the restart-intent resume block) and ONLY when no RestartIntent was
-  // captured this boot (the exit-75 path already recovers its own fleet, incl. these same workers).
-  const crashOrphanedWorkers = deriveCrashOrphanedWorkers(db, recovered);
-  // A manager/platform session whose ENTIRE worker set is legitimately excluded (all landed, all
-  // recycled, all archived pre-crash) has no entry above at all — without this it would never get an
-  // independent resume attempt, even though it was just as much a live/starting victim of THIS crash as
-  // any manager that happens to still have a worker (see crash-orphaned-workers.ts's DIAGNOSIS).
-  const crashOrphanedManagers = deriveCrashOrphanedManagers(db, recovered, crashOrphanedWorkers);
-  // Crash-path backstop (card b37750a4): a daemon crash fires no onExit, so snapshot the transcript +
-  // auto-archive each recovered session HERE, while the JSONL still exists (before sweepDeadSessions can
-  // mark it dead / Claude can prune it). The ONLY snapshot+archive point on the crash path. See module.
-  snapshotAndArchiveRecovered(db, recovered);
   const dead = sweepDeadSessions(db);
   if (dead > 0) console.log(`[boot] marked ${dead} session(s) dead (engine transcript gone)`);
   // Keep dead-ID state fresh as Claude's transcripts come and go.
@@ -328,6 +322,8 @@ async function main(): Promise<void> {
       db.setEngineSessionId(sessionId, engineId);
       if (previousEngineId) sessions.handleEngineSessionRotated(sessionId, previousEngineId, engineId);
     },
+    // @decision 08c81809 — durable counterpart to hasReachedReady; see PtyHostEvents.onReady's own doc.
+    onReady: (sessionId) => db.setReachedReady(sessionId),
     // Persist busy, and on the falling edge nudge the manager if a worker went idle without
     // reporting (stranded-worker guard; no-op for non-workers). On the RISING edge, purge any
     // still-queued idle-worker nudge for this worker from its manager's FIFO — it re-engaged, so a
@@ -1445,6 +1441,20 @@ async function main(): Promise<void> {
   db.setEventListener((evt) => { void alertWebhook.onEvent(evt); });
   console.log("[boot] alert-webhook emitter registered (external delivery on configured projects)");
 
+  // @decision 08c81809 — the LATER half of the recycle-settle boot reconcile. MUST run BEFORE either
+  // resume path below — this ordering is LOAD-BEARING: `finalizeRecovery` populates the SessionService
+  // exclusion set both resume paths consult unconditionally (see SessionService's own doc for why).
+  {
+    const { recoveredPredecessors, strandedPredecessors, confirmedLiveSuccessors } = sessions.finishReconcilingRecycleSettles(recycleSettleEarly);
+    if (recoveredPredecessors.length || strandedPredecessors.length || confirmedLiveSuccessors.length) {
+      console.log(
+        `[boot] recycle-settle reconcile: ${recoveredPredecessors.length} predecessor(s) recovered, ` +
+        `${confirmedLiveSuccessors.length} successor(s) confirmed the legitimate owner, ` +
+        `${strandedPredecessors.length} lineage(s) left with no automatic owner (check [loom:orphaned-fleet] banners)`,
+      );
+    }
+  }
+
   // Self-host restart recovery (consume the intent read above): a manager deliberately restarted the
   // daemon (daemon_restart) to make merged code live. The daemon is ONE process for ALL projects, so the
   // restart tore down the WHOLE cross-project fleet — re-resume ALL of it (every manager, worker, plain
@@ -1453,11 +1463,12 @@ async function main(): Promise<void> {
   // rest a continuation nudge, and honors a parked session's usage hold. Best-effort + runs once.
   if (restartIntent) {
     clearRestartIntent();
-    const { resumed, skippedParked, failed } = sessions.resumeFleetOnBoot(restartIntent);
+    const { resumed, skippedParked, failed, retiredSkipped } = sessions.resumeFleetOnBoot(restartIntent);
     console.log(
       `[boot] self-host restart: resumed ${resumed.length} session(s) across the fleet` +
       (skippedParked.length ? `, ${skippedParked.length} resumed-but-parked (usage hold honored)` : "") +
       (failed.length ? `, ${failed.length} unresumable (skipped)` : "") +
+      (retiredSkipped.length ? `, ${retiredSkipped.length} skipped as a retired recycle successor (see the reconcile line above)` : "") +
       ` (requester ${restartIntent.managerSessionId.slice(0, 8)})`,
     );
   } else if (crashOrphanedWorkers.length > 0 || crashOrphanedManagers.length > 0) {
@@ -1465,7 +1476,7 @@ async function main(): Promise<void> {
     // OS-service restart), not a deliberate daemon_restart — resumeFleetOnBoot never ran, so this is the
     // ONLY path that brings these workers' managers (and any solo manager with no surviving worker) back.
     // Best-effort + runs once.
-    const { resumed, skippedParked, failed, managersFailed } =
+    const { resumed, skippedParked, failed, managersFailed, retiredSkipped } =
       sessions.recoverCrashOrphanedWorkers(crashOrphanedWorkers, {
         soloManagerIds: crashOrphanedManagers, shutdownMarker, hadCrashLogAtBoot, bootedAt: bootStartedAt, supervisorIteration,
       });
@@ -1474,6 +1485,7 @@ async function main(): Promise<void> {
       (skippedParked.length ? `, ${skippedParked.length} resumed-but-parked (usage hold honored)` : "") +
       (failed.length ? `, ${failed.length} unresumable (skipped)` : "") +
       (managersFailed.length ? `, ${managersFailed.length} manager(s) themselves unresumable (check [crash-recovery] logs above for why)` : "") +
+      (retiredSkipped.length ? `, ${retiredSkipped.length} skipped as a retired recycle successor (see the reconcile line above)` : "") +
       (shutdownMarker ? ` (clean ${shutdownMarker.reason} stop marker found — nudges classified as a restart, not a crash)` : "") +
       (supervisorIteration !== null ? ` (supervisor iteration ${supervisorIteration})` : ""),
     );

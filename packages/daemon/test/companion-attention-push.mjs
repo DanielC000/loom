@@ -658,6 +658,25 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
     resolvedLine.includes("Proj Z") && resolvedLine.includes("mgr-1234"));
 }
 
+// --- 24. Card 08c81809 (Code Review finding 6): recycle_fleet_stranded_across_restart — fired only when
+//     a daemon restart lost the settle loop entirely AND the boot-time reconcile found NO possible
+//     automatic owner (neither the successor nor the predecessor could be resumed). Same worker-crashed
+//     family as its three recycle_fleet_* siblings above, but with its OWN distinct wording — never
+//     folded into recycle_fleet_unresolved's text, since that case still has a live predecessor watching
+//     and the settle loop still running; this one has neither. ---
+{
+  check("classify: recycle_fleet_stranded_across_restart → worker-crashed (same family as its recycle_fleet_* siblings)",
+    classify("recycle_fleet_stranded_across_restart", { deadSuccessorId: "s-1" }) === "worker-crashed");
+
+  const strandedLine = alertLine(
+    { id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "recycle_fleet_stranded_across_restart", detail: { deadSuccessorId: "succ-87654321" } },
+    "worker-crashed", "Proj Z");
+  check("recycle_fleet_stranded_across_restart alert line: named explicitly as a lost-to-restart strand, distinct from recycle_fleet_unresolved's wording",
+    strandedLine.includes("daemon restart") && strandedLine.includes("no automatic owner") && !strandedLine.includes("successor's fate never confirmed"));
+  check("recycle_fleet_stranded_across_restart alert line: names the project + the predecessor's (8-char) id",
+    strandedLine.includes("Proj Z") && strandedLine.includes("mgr-1234"));
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — AttentionPushWatcher stays DEFAULT-OFF with no grant, never replays backlog, pushes exactly the granted-project/subscribed-class events once each, survives a restart without re-pushing, respects rate-limit park + no-stacking (watermark held, one deferred event per streak), union-merges alertClasses/digestMinutes across granted projects, bundles a digest under its MIN cadence, renders a platform_escalate alert with a readable title instead of an opaque line, gives a fleet-resume failure a real human owner (fleet_resume_failed → worker-crashed) even with no live platform Lead, and a late-resolved manager/Lead recycle (recycle_fleet_resolved) reaches the same human surface as its unresolved sibling instead of being silently dropped."
   : `\n❌ ${failures} FAILURE(S).`);
