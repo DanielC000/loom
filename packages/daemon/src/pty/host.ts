@@ -7898,18 +7898,18 @@ export class PtyHost {
       ) n++;
       drained = live.pending.splice(startIdx, n); // the leading eligible same-route (+ same-kind unless toggled, + same-proactive) run
     }
-    // Card 4a0af485 Major 2: a `giveUpGen`-tagged entry actually being RE-DRAINED (its hold expired or was
-    // purged elsewhere, and it's now eligible again) is a fresh, deliberate resubmission attempt — the OLD
-    // tracked ambiguity (seeded from its FIRST failed write) is moot the instant this happens for
+    // @decision 4a0af485 — Major 2: a `giveUpGen`-tagged entry actually being RE-DRAINED (its hold expired
+    // or was purged elsewhere, and it's now eligible again) is a fresh, deliberate resubmission attempt —
+    // the OLD tracked ambiguity (seeded from its FIRST failed write) is moot the instant this happens for
     // `hasAmbiguousMatch`'s purposes. Clear the "current" slot so it can never linger to wrongly
     // `hasAmbiguousMatch`-join a LATER, unrelated same-content directive; if THIS fresh attempt also gives
     // up, `requeueGiveUpOrigin` re-seeds it with an accurate, fresh `writtenAt`. Scoped to `giveUpGen !==
     // undefined` only (an entry that never itself gave up, e.g. an auto-joined resend that never became
     // ambiguous on its own, has nothing stale to clear here).
     //
-    // Card dbc7ffea: BEFORE clearing it, archive the entry's own signature into `retiredGiveUpSignatures`
-    // (via the shared `archiveAmbiguousDispatch` — see its own doc) — this is ONE of TWO points in the
-    // give-up pipeline where a logicalId's "current" entry can be superseded (the other is
+    // @decision dbc7ffea — BEFORE clearing it, archive the entry's own signature into
+    // `retiredGiveUpSignatures` (via the shared `archiveAmbiguousDispatch` — see its own doc) — this is ONE
+    // of TWO points in the give-up pipeline where a logicalId's "current" entry can be superseded (the other is
     // `requeueGiveUpOrigin`'s own `.set()`, for the auto-joined-resend case — see that call site).
     // Without this, a message that gives up MORE THAN ONCE loses all memory of every cycle but its last,
     // and a genuine but LATE engine confirmation of an earlier cycle's own write can never content-match
@@ -7920,7 +7920,7 @@ export class PtyHost {
       this.archiveAmbiguousDispatch(live, m.logicalId);
       live.ambiguousDispatches.delete(m.logicalId);
     }
-    // Card 78e4b3f2: `joinSubmittedText` frames any `giveUpGen`-tagged member — a genuine physical
+    // @decision 78e4b3f2 — `joinSubmittedText` frames any `giveUpGen`-tagged member — a genuine physical
     // re-delivery of a message whose first write was never confirmed — as a possible duplicate, so the
     // recipient can tell it apart from new direction. For THIS mechanism specifically (an in-session
     // requeue), the mark is applied ONLY here, at the actual write — never when the entry is merely
@@ -7931,8 +7931,8 @@ export class PtyHost {
     // handleGiveUpExhausted) is a SEPARATE trigger that bakes the tag into `.text` at message CREATION,
     // before it's ever enqueued, so a re-minted entry sitting in `pending` already carries the tag (see
     // `purgeQueuedWorkerIdleNudges`'s own doc for a real consumer this distinction mattered to).
-    // Card 4af5aefa: `live.submitGeneration` here is still the PRE-increment value — submit() below does
-    // its own `++` for THIS write. Code review correction: this is NOT "the last completed turn's own
+    // @decision 4af5aefa — `live.submitGeneration` here is still the PRE-increment value — submit() below
+    // does its own `++` for THIS write. Code review correction: this is NOT "the last completed turn's own
     // generation number" — `submitGeneration` counts submit ATTEMPTS ISSUED (`submit()`'s own `++`) plus
     // out-of-band bumps (`healIfStuck`, both stop paths), so a give-up that consumed a generation with NO
     // turn ever running would be silently folded into a "turns" count. `annotatePasteRecoveryAge`'s own
