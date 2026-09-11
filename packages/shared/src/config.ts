@@ -507,20 +507,23 @@ export interface OrchestrationConfig {
    */
   crashRecoveryMaxAttempts: number;
   /**
-   * Card c1f2f095 — the BASENAME of this project's manager resume doc, resolved against the project's
-   * `vaultPath` (via `resolveResumeDocPath`, `daemon/sessions/resume-doc-notes.ts`) into the ABSOLUTE
-   * path injected into every manager's "Where things live" spawn/recycle block AND checked by
-   * `ResumeDocWatcher` — ONE resolution both sites share, so they can never derive two different
-   * answers. Default `"Orchestrator Log.md"` (Loom's own convention) preserves today's behavior for
-   * every project that doesn't override it. A project whose real doc uses a different filename (e.g.
-   * a translated/renamed title) sets this so the daemon-injected path is actually authoritative,
-   * instead of a hand-written "Resume doc:" prompt line drifting from the real file on disk.
+   * The BASENAME of this project's manager resume doc, resolved against the project's `vaultPath`
+   * (via `resolveResumeDocPath`, `daemon/sessions/resume-doc-notes.ts`) into the ABSOLUTE path
+   * injected into every manager's "Where things live" spawn/recycle block AND checked by
+   * `ResumeDocWatcher`. Default `"Orchestrator Log.md"` (Loom's own convention) preserves today's
+   * behavior for every project that doesn't override it. A project whose real doc uses a different
+   * filename (e.g. a translated/renamed title) sets this so the daemon-injected path is actually
+   * authoritative, instead of a hand-written "Resume doc:" prompt line drifting from the real file
+   * on disk.
    * Benign string (no host-launch/exfil capability) — stays on the agent-facing config path, but is
    * validated there as a STRICT BARE FILENAME (no path separators, no `..`) precisely because it's a
    * PATH COMPONENT the daemon then vouches for as authoritative in a TRUSTED prompt block; an
    * unvalidated value could otherwise be used to make a cold successor Read+trust an arbitrary host
    * file as its handoff state. See the validator in `daemon/mcp/platform.ts` and the defense-in-depth
    * vault-containment check in `resolveResumeDocPath`.
+   *
+   * @decision c1f2f095 — resolved into ONE absolute path server-side and shared by every consumer,
+   * so no site can ever derive a different answer than another.
    */
   resumeDocFilename: string;
   /**

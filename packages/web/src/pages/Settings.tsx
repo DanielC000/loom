@@ -755,13 +755,9 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // = leave alone" now holds at the field level too — no need to read back and re-carry the persisted
   // override's non-grid keys the way the old shallow-merge server contract required.
   //
-  // Code-review catch (card ba9ccd75): widening the per-field schema to accept `null` removed a guard
-  // this grid was leaning on WITHOUT its own backstop — a garbage entry (`Number("abc")` → NaN,
-  // `Number("1e999")` → Infinity) JSON-serializes to `null`, which is now the SAME wire shape as the
-  // legitimate clear sentinel above, so it would silently "succeed" as a clear instead of 400ing. Same
-  // hazard, same fix as `maxConcurrentGates` below: route a non-finite result through as the ORIGINAL
-  // STRING rather than the NaN/Infinity number, so it fails the `number|null` shape check server-side
-  // and still 400s readably.
+  // @decision ba9ccd75 — a non-finite parse (`Number("abc")` → NaN, `Number("1e999")` → Infinity)
+  // must be sent as the ORIGINAL STRING, never the number: both JSON-serialize to `null`, the same
+  // wire shape as the clear sentinel above, so a raw NaN/Infinity would silently "succeed" as a clear.
   function buildGlobalOverride(): PlatformConfigPatch {
     const o: PlatformConfigPatch = {};
     const msGroups = ["rateLimit", "watchers", "timeouts"] as const;

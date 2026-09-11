@@ -201,20 +201,20 @@ export function isSupervised(): boolean {
 }
 
 /**
- * Card 572dd777 DoD-4: which pass of the restart supervisor's `for(;;)` loop (scripts/daemon-
- * supervisor.mjs) this boot is running under, if any — a DIRECTLY RECORDED fact, not a deduction from
- * restart-intent/exit-code reasoning. Iteration 1 means the supervisor PROCESS ITSELF was just started
- * (the loop's first pass) — on the self-host path that means a human ran `pnpm daemon:stable` (or
+ * Which pass of the restart supervisor's `for(;;)` loop (scripts/daemon-supervisor.mjs) this boot is
+ * running under, if any. Iteration 1 means the supervisor PROCESS ITSELF was just started (the loop's
+ * first pass) — on the self-host path that means a human ran `pnpm daemon:stable` (or
  * `:stable:detach`), since nothing else launches that process. An iteration >1 means the supervisor's
  * OWN loop relaunched the daemon in-process, without the supervisor process itself restarting — today
  * that only ever follows the RESTART_EXIT_CODE `continue` (see the loop's own restart-policy comment:
- * any OTHER exit ends the loop for good), so it should never actually co-occur with a missing shutdown
- * marker — but recording it directly, rather than re-deriving that from the restart-intent/exit-code
- * chain, means a reader doesn't have to trust the chain to see it.
+ * any OTHER exit ends the loop for good).
  * Returns null when not running under the supervisor at all (the shipped, supervisor-less loomctl path,
  * an OS service manager, or a bare `tsx watch` dev daemon) — never fabricate an iteration for a boot the
  * supervisor never saw. Also null on a malformed/non-positive value (defensive: the env var crosses a
  * process boundary written by a sibling script, not a compile-time-checked contract).
+ *
+ * @decision 572dd777 — this value is recorded directly at boot, never re-derived from the
+ * restart-intent/exit-code chain, so a reader doesn't have to trust that chain to see it.
  */
 export function supervisorIterationAtBoot(env: NodeJS.ProcessEnv = process.env): number | null {
   const raw = env.LOOM_SUPERVISOR_ITERATION;

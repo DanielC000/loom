@@ -22,6 +22,7 @@
 // @decision 3ab5c540 — MEASURED: in one sample this covered 8 of 17 live node.exe processes
 // (47%), and `ParentProcessId` chaining from a matched root was tested and found to add none of
 // the rest.
+//
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
