@@ -40,16 +40,27 @@ cheap enough to run on every hex string you're about to write down or rely on.
 
 ## Classifying a block
 
+- **A block reduced to ONLY an `@decision` anchor is almost always wrong — expect a split.** A
+  reader opening the file must still learn what it does, and what it must never do, *without*
+  the record. Two lanes reduced a whole module/page/section doc to a bare anchor and were sent
+  back; the fix in both cases was to keep the Class A/C content inline and move only the Class B
+  narrative.
 - **Class A (guard/prohibition) stays inline forever**, compressed to ≤3 lines. Never relocate
   it — prose sitting AT the predicate is what has, more than once, stopped a "fix" from undoing a
-  deliberate choice, or stopped a real defect from looking safe unreviewed.
+  deliberate choice, or stopped a real defect from looking safe unreviewed. This covers every
+  "HARD INVARIANT", "SAFETY", "NEVER", "must not", "no agent MCP path" or trust-boundary
+  statement — keep its words; compress only if it's long.
 - **Class B (decision record/incident narrative) moves out** to `docs/adr/` or `docs/decisions/`,
-  keyed by an id, leaving an anchor.
-- **Class C (contract/API docs) and Class D (restates the code)** are not this program's concern
-  the way A/B are — leave C as-is; delete D outright.
-- **Class A and B are routinely interleaved inside one block.** Read the whole block; split the
-  one-line guard that stays from the narrative that goes. This is not mechanical — no automated
-  split is safe here.
+  keyed by an id, leaving an anchor. This is the WHY, the alternatives considered, the incident or
+  specimen, the measurement behind a constant, and "card X decided …" history.
+- **Class C (contract/API docs) is not this program's concern the way A/B are — leave it inline,
+  as-is, verbatim.** This covers what a module, page, section or function IS; what it shows or
+  controls; which REST routes or tools it calls; the enumerated list of its parts or states;
+  section banner lines (`// ── Name ──`); and what a return value or exported type means. **Class
+  D (restates the code)** gets deleted outright.
+- **Class A, B and C are routinely interleaved inside one block.** Read the whole block; split the
+  guard and the contract/description content that stay from the narrative that goes. This is not
+  mechanical — no automated split is safe here.
 - **Ambiguous ⇒ leave it inline, and say so per block, with the reason.** A remainder of a third
   to two-thirds of a file's blocks, each individually justified, is the *correct* outcome, not a
   shortfall. **Measured class-B yield across five tranches: 4/18 · 5/15 · 7/15 · 9/19 · 12/15**
@@ -57,6 +68,10 @@ cheap enough to run on every hex string you're about to write down or rely on.
   file identity — no prior tranche's ratio predicts the next one's, on the same file or a
   different one. Don't let an expected yield push a genuine narrative into staying inline, or a
   guard out of the source.
+- **Report the split, per block: "kept inline: `<which sentences, Class A/C>`; moved:
+  `<which sentences>`."** A block with nothing kept inline needs a one-line justification of why
+  it had no contract or guard content — that justification is what distinguishes a legitimate
+  all-moved block from the anchor-only mistake above.
 
 ## The anchor grammar
 
@@ -66,6 +81,15 @@ cheap enough to run on every hex string you're about to write down or rely on.
 
 ≤3 lines. **Keep `@decision <id>` on one line** (card `ad3a9a85`) — the lint reports a line break
 inside the anchor as `brokenAnchors`.
+
+**The anchor states the prohibition or consequence in the source's own terms — it is never a
+pointer.** "…is recorded, not restated here.", "…are recorded.", "see the record" and similar are
+all forbidden anchor texts: the text itself must carry the rule, not send the reader to fetch it.
+Nor may it state a claim the source didn't make — a pty-lane anchor once said a constant was
+"tuned against" two measured rates when the source said it was deliberately *NOT* tuned to either.
+Before reporting, re-read each anchor you wrote or edited against its own source sentence. An
+anchor is also always its own paragraph — never a bullet body, and never carrying a second
+`@decision` mid-sentence.
 
 **Never invent, guess, or mint an id you were not handed.** A block citing no id anywhere — not
 in the block, not elsewhere in the file, not in `git blame`'s introducing commit — has exactly
