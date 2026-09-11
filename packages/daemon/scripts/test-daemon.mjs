@@ -1846,26 +1846,16 @@ if (isMain) {
   }
 
   if (failed.length) {
-    // Echo each failed test's FULL captured stdout/stderr (not just the last line) — the individual
-    // check() failures inside a test file were otherwise invisible in the CI log, which is exactly why a
-    // Linux-only failure (card 45a23c27) shipped undiagnosable from CI output alone.
-    // Card 63664129: THIS echo — front-anchored by orchestration/gate-runner.ts's `outputTail` capture,
-    // not this file's own bytes — is the ONLY surface that survives for a test whose decisive failure
-    // detail is multi-line (a stack, a timeline, a stdout/stderr dump): `failingTest` keeps just one line
-    // per tier, or `undefined` entirely for a thrown message matching no recognized marker. See
-    // GateStepResult.failingTest's own doc (gate-runner.ts) for the full constraint and its known gaps —
-    // don't restate it here, it drifts.
-    //
-    // Card 14e733fb: built into ONE string and flushed via writeFullySync (see its own doc above) instead
-    // of a `console.log` loop — the loop's writes are exactly the ones a POSIX gate host could lose to
-    // process.exit() below tearing the process down before they reach the pipe. `epilogueLines.join("\n")
-    // + "\n"` reproduces the SAME bytes the old per-call console.log sequence produced (each call wrote its
-    // argument plus one trailing "\n"; join("\n") + a final "\n" is byte-identical to that).
-    // Card e26f3199: on a timeout, name WHICH of the two failure modes this was — before this card, the
-    // child's real exit status was discarded, so "completed successfully, 'close' was just late" printed
-    // identically to "genuinely wedged, killed, never exited". They must not print the same. Card 5e3ebc80:
-    // per-entry line-building moved to `buildFailureEntryLines` (above `runOne`) — same lines, same order,
-    // for every non-empty-output case; see that function's own doc for what's new (the zero-output marker).
+    // @decision 45a23c27 — echo each failed test's FULL captured stdout/stderr, not just the last
+    // line: a Linux-only failure shipped undiagnosable from CI output alone.
+    // @decision 63664129 — this echo, front-anchored by gate-runner.ts's outputTail capture, is the
+    // ONLY surface that survives for a multi-line failure detail; failingTest keeps just one line.
+    // @decision 14e733fb — built into ONE string, flushed via writeFullySync, never a console.log
+    // loop — POSIX process.exit() can tear the process down before async writes reach the pipe.
+    // @decision e26f3199 — on a timeout, name WHICH of the two failure modes this was; a late
+    // 'close' must never print the same as a genuine kill.
+    // @decision 5e3ebc80 — per-entry line-building lives in buildFailureEntryLines; see its own
+    // doc for what's new (the zero-output marker).
     const epilogueLines = ["FAILURES:"];
     for (const f of failed) epilogueLines.push(...buildFailureEntryLines(f));
     writeFullySync(1, epilogueLines.join("\n") + "\n");

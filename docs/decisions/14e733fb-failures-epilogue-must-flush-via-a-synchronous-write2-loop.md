@@ -12,8 +12,8 @@ loss expected. No record created for `776750ba` in this tranche — its full nar
 test file, outside this program's file fence for `scripts/test-daemon.mjs`.
 
 `isMain`'s own `FAILURES:` epilogue — the ONLY surviving surface for a multi-line failure detail (card
-`63664129`; full decision recorded at this file's ~1913-1932 block, a future tranche) — used to print via
-a `console.log` loop immediately followed by `process.exit(1)`: on a POSIX gate host, `process.exit()` can
+`63664129`, its own record) — used to print via a `console.log` loop immediately followed by
+`process.exit(1)`: on a POSIX gate host, `process.exit()` can
 tear the process down before those async writes ever reach the OS pipe, silently losing exactly the
 diagnostic this block exists to preserve.
 
@@ -21,7 +21,9 @@ diagnostic this block exists to preserve.
 synchronous write(2) loop that keeps writing until every byte is CONFIRMED out, never assuming one
 `fs.writeSync` call drained the buffer. Two real gotchas a naive single call would miss: `fs.writeSync` can
 itself return fewer bytes than requested against a pipe, and can throw `EAGAIN` if the fd isn't ready — a
-fix that doesn't loop is cosmetic.
+fix that doesn't loop is cosmetic. The caller hands it `epilogueLines.join("\n") + "\n"` — byte-identical
+to the OLD per-call `console.log` sequence it replaces (each old call wrote its argument plus one
+trailing `"\n"`, so join-plus-final-`"\n"` reproduces exactly that).
 
 **Bounded, deliberately (`WRITE_FULLY_SYNC_DEADLINE_MS = 5_000`):** the EAGAIN/zero-byte retry is bounded
 on ELAPSED TIME, not iteration count — each spin is sub-microsecond, so a count bound is meaningless, but
@@ -69,5 +71,5 @@ Inline comment in `packages/daemon/scripts/test-daemon.mjs`, immediately precedi
 following EAGAIN/deadline paragraph (originally lines 1075-1082), as of this tranche's HEAD. Card
 `14e733fb`. Related: `776750ba` (the POSIX/Windows pipe-semantics investigation this fix relies on, no
 record created here — see that card's own test file), `63664129` (why the epilogue is the only surviving
-surface for multi-line detail — recorded separately at this file's own ~1913-1932 block), `53175055` (the
-prior "rare but unbounded wait" incident that motivates the elapsed-time bound).
+surface for multi-line detail — see its own record), `53175055` (the prior "rare but unbounded wait"
+incident that motivates the elapsed-time bound).
