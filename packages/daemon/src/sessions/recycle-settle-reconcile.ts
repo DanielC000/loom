@@ -6,9 +6,10 @@ import { engineTranscriptExists } from "./transcript.js";
 /**
  * @decision 08c81809 — the EARLY, DB-ONLY half of the boot-time recovery for a manager/platform recycle
  * settle lost to a daemon restart mid-window (`SessionService.settleRecycleHandoff`'s poll loop is purely
- * in-memory — see its own doc). MUST run in `index.ts` BEFORE `Db.recoverStaleSessions()` — two real boot
- * steps that run before any prior version of this reconcile ever did depend on seeing the CORRECTED
- * lineage, not the stale one:
+ * in-memory — see its own doc).
+ *
+ * MUST run in `index.ts` BEFORE `Db.recoverStaleSessions()` — two real boot steps that run before any
+ * prior version of this reconcile ever did depend on seeing the CORRECTED lineage, not the stale one:
  *  - `Db.reparentLiveWorkers` (the live in-memory settle loop's own reparent) filters
  *    `process_state = 'live'`. `recoverStaleSessions()` unconditionally flips EVERY session still
  *    'live'/'starting' to 'exited' before a later, SessionService-based reconcile pass could ever run —
