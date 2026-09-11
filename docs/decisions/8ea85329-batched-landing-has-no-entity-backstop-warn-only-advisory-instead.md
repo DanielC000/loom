@@ -21,7 +21,9 @@ path.
 Instead, `SessionService.reviewWorkerMerge` (`sessions/service.ts`) surfaces a WARN-ONLY advisory from the
 same `ownTipSubject`/`ownNonTipCommitSubjects` fields a manager already reviews before choosing solo vs.
 batch — before batch time, while the worker is typically still alive to amend. That advisory is
-non-blocking: a manager can still ignore it and batch anyway.
+non-blocking: a manager can still ignore it and batch anyway. Concretely, it is an `entityWarning` folded
+into `reviewWorkerMerge`'s own `warning` string, firing when `ownTipSubject` or any
+`ownNonTipCommitSubjects` entry carries an HTML entity.
 
 ## Do not
 

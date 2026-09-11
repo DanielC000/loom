@@ -55,3 +55,10 @@ a solo confirm.
   `packages/daemon/src/git/batch-merge.ts` (the per-commit cherry-pick loop, where every commit lands
   with `--no-commit` and its message passes through unmodified) was unheld. A `// @decision a32533a1`
   anchor was added there.
+- OBSERVED (docs-extraction tranche 39, 2026-09-11): `SessionService.reviewWorkerMerge`'s own JSDoc
+  (`sessions/service.ts`) added two implementation details not previously captured here. First,
+  `ownTipSubject` is computed the SAME way for every worker regardless of task, by reusing
+  `deriveTasklessSubject` — a helper whose implementation was already task-agnostic even though its
+  name and original call site used to gate it behind "no task". Second, `ownTipSubject`/
+  `ownTipSubjectConventional` are absent (like `tasklessSubjectPreview`) only when the branch has no
+  readable commit at all — not merely when the worker is taskless.

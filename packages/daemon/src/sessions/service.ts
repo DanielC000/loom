@@ -11051,33 +11051,8 @@ export class SessionService {
   }
 
   /**
-   * Auto-archive-on-exit gate (card 6cd3ce9e — the orphaned-fleet strand). index.ts's onExit archives
-   * EVERY exited non-run session by default (every "stopped" session leaves the live rail for Archive).
-   * That default is wrong for a manager/platform that still owns ≥1 LIVE worker/child session at the
-   * instant it exits — ANY exit cause (a deliberate human Stop, an interrupt, an unexpected death):
-   * archiving would silently strand the fleet, since Archive drops the row off every rail/god's-eye list
-   * (listSessions/listWorkers exclude archived rows) while its children stay live+busy with no live
-   * parent to review/merge/stop them — invisible until a human happens to notice.
-   *
-   * This is the after-the-fact twin of `endMe`'s "live-workers" gate: that one REFUSES a VOLUNTARY
-   * self-stop up front (the pty is still alive, so the stop itself can be blocked); here the pty is
-   * ALREADY DEAD by the time onExit runs, so there's nothing left to refuse — the only lever is what
-   * happens to the ROW. So: skip the archive (leave it exited-but-unarchived — still on the live rail,
-   * still resumable via the normal resume flow, which un-archives regardless) and file a DISTINCT durable
-   * `manager_exited_with_live_workers` event naming the stranded count — the audit-trail record (mirrors
-   * the strand-family events `worker_report_undelivered`/`worker_exited_without_report`), retrievable via
-   * listEventsForSession/a Lead's audit sweep. useAttention (web) only polls orchestration events for LIVE
-   * managers, so a dead manager's event alone would never reach Mission Control — the SAME `lastError`
-   * banner ALSO stamped here (`[loom:orphaned-fleet]`) is what actually surfaces it: web/src/lib/
-   * attention.ts's `isOrphanedFleet` reads this role-agnostic session-row signal exactly like the existing
-   * `isCrashLooped`/`[loom:crash-loop]` pair, turning it into a red "ORPHANED FLEET" attention item + shell
-   * bell regardless of role/liveness.
-   *
-   * Deliberately does NOT change auto-resume policy: an INTENDED stop is still never auto-resumed by the
-   * crash-recovery watchdog (recordUnexpectedExit's `intended` gate is untouched) — this only keeps the
-   * row (and its orphaned children) VISIBLE so a human (or a resumed successor) can act. A manager/
-   * platform with NO live children — the overwhelming common case — archives exactly as before, and every
-   * non-manager/platform role (worker/run/assistant/etc.) is byte-identical to the old unconditional call.
+   * @decision 6cd3ce9e — a manager/platform that exits with live workers is deliberately NOT
+   *  archived; the row stays visible+resumable and files an orphaned-fleet event+banner instead.
    */
   archiveOnExit(session: Session): void {
     if (session.role === "manager" || session.role === "platform") {
@@ -11109,43 +11084,17 @@ export class SessionService {
    * Step 1 of the two-step merge gate (#16): show the manager a worker's branch diff. NO merge
    * happens — this is the review the manager cannot skip (there is no worker-side merge tool).
    *
-   * Card b88704bb: ALSO surfaces the exact prospective squash-commit subject — post-{@link
-   * toConventionalSubject}, byte-for-byte what {@link mergeBranch} will actually commit if this manager
-   * confirms — because until this card the subject was only ever computed LATER, inside
-   * confirmWorkerMerge, after review had already happened; the reviewer never saw the immutable commit
-   * subject they were implicitly approving. Mirrors mergeBranch's own subject derivation (task title's
-   * first line, trimmed) so the preview can never drift from what actually lands. `rawTitle`/
-   * `commitSubject`/`coerced` are present ONLY when this worker has a task with a non-empty title —
-   * a taskless worker (no card) has no title to preview, so these fields are simply ABSENT (never a
-   * fabricated subject derived from the branch name, which is a mergeBranch-internal fallback, not
-   * something surfaced here as if it were a real title). `coerced` is a plain string comparison against
-   * what {@link toConventionalSubject} does to the raw title — NOT a judgment of whether the title is
-   * accurate; see the card for why a heuristic accuracy check is explicitly out of scope.
+   * @decision b88704bb — `reviewWorkerMerge` previews the exact prospective squash-commit subject,
+   *  post-`toConventionalSubject`, since it was previously computed only later, after review; a
+   *  taskless worker leaves these fields absent, never a fabricated subject from the branch name.
    *
-   * Card a32533a1: `commitSubject`/`tasklessSubjectPreview` above preview ONLY the SOLO squash path — the
-   * card title (or the branch's tip commit, coerced) rewritten via {@link toConventionalSubject}. A
-   * BATCHED landing (`merge_batch`) never rewrites or coerces anything: it lands each candidate branch's
-   * OWN commit subjects verbatim (see `batch-merge.ts`'s own doc). Until this card a manager had no way to
-   * see, before choosing solo vs. batch, what a batch would actually commit for a TASKED worker (the
-   * taskless path already exposed its own tip subject via `tasklessSubjectPreview`, just never coerced the
-   * same way batch leaves it — see below). `ownTipSubject`/`ownTipSubjectConventional` close that gap:
-   * `ownTipSubject` is the branch's tip commit subject, UNCOERCED (byte-for-byte what a batch would commit
-   * for this branch), computed the SAME way for every worker regardless of task — reusing {@link
-   * deriveTasklessSubject}, whose own implementation was already task-agnostic even though its name and
-   * call site here used to gate it behind "no task". `ownTipSubjectConventional` is a plain, honest
-   * `toConventionalSubject(ownTipSubject) === ownTipSubject` fact (mirrors `coerced`'s own framing) — a
-   * manager can title-check THIS field the way they already title-check `coerced` before a solo confirm,
-   * before deciding to route this worker into a `merge_batch` instead. Absent (like `tasklessSubjectPreview`)
-   * only when the branch has no readable commit at all.
+   * @decision a32533a1 — `ownTipSubject`/`ownTipSubjectConventional` preview the UNCOERCED branch
+   *  tip subject a `merge_batch` would actually commit, so a manager can title-check it before
+   *  choosing solo vs. batch for this worker.
    *
-   * Card 8ea85329: an `entityWarning` folded into the `warning` string (WARN-ONLY, never blocking) fires
-   * when `ownTipSubject` or any `ownNonTipCommitSubjects` entry carries an HTML entity — the same class of
-   * defect {@link checkTitleHtmlEntities}'s hard refusal in `mergeBranchLocked` (`git/worktrees.ts`, card
-   * f324e8fa) closes for the SOLO squash path, which `merge_batch` has no equivalent hard check for (see
-   * `batch-merge.ts`'s own residual-gap doc). A refusal HERE was deliberately rejected: a worker-authored
-   * commit message has no cheap fix once the worker may be retired, unlike a card title a manager retitles
-   * in seconds — so this stays advisory, giving a manager the chance to catch it before batching while the
-   * worker is typically still alive to amend, without stranding anyone who batches past it anyway.
+   * @decision 8ea85329 — an `entityWarning` (WARN-ONLY, never blocking) fires when `ownTipSubject`
+   *  or `ownNonTipCommitSubjects` carries an HTML entity, since `merge_batch` has no hard refusal
+   *  for that class of defect the way the solo squash path does.
    */
   async reviewWorkerMerge(
     managerSessionId: string, workerSessionId: string,
