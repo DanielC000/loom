@@ -15233,15 +15233,11 @@ export class SessionService {
         // TOMBSTONE ALREADY MARKED (card e3e40167): the `onSettle` opt below (fires unconditionally, for
         // EVERY settle — not just a surfaced-pending one, unlike this callback) has already flipped the
         // durable row to `state:"settled"` by the time this runs — nothing to do here for the row itself.
-        // DOUBLE-NOTIFY FIX (card 9eea3901, widened by 187f5b76 to cover the ALREADY_MERGED success path
-        // too): a branch that already sent its own rich/direct push (`outcome.value.notified` — the
-        // `[loom:merge-rejected]` rejection path OR the `[loom:already-merged]` success path) needs no
-        // generic echo here — sending both wastes a manager turn on the SAME event and, for a manager
-        // running several merges concurrently, is genuinely ambiguous about which op just settled. Only
-        // send this generic nudge for: a plain green merge (no direct push of its own), or a rejection the
-        // rich path did NOT already announce (`!notified` — either shouldSuppressMergeReject reconciled it
-        // away, or an unexpected error means rejectNotify never ran at all) — so the manager still gets
-        // exactly one terminal signal per async confirm.
+        // @decision 9eea3901 — `notified` gates this generic echo so a manager already told via the rich
+        // push never gets a redundant duplicate for the same settle.
+        //
+        // @decision 187f5b76 — EXACTLY-ONE-SIGNAL, widened to cover the ALREADY_MERGED path too: sending
+        // both wastes a manager turn on the same event and is ambiguous across concurrent merges.
         // CANCELLED (card 361520a0, Half Two) — mirrors runWorkerGate's identical cancelled branch above:
         // a distinct "no verdict" settle that must NEVER fall through to the merged/failed branching below,
         // which would otherwise read as a real (albeit failed) merge attempt. `cancelKind` is always
@@ -15264,9 +15260,8 @@ export class SessionService {
           return;
         }
         if (outcome.ok && outcome.value.notified) return;
-        // Card a2873f7e: fold the per-step durations onto the GREEN echo, self-labelled diagnostic-only IN
-        // THE TEXT (formatGateStepsDiagnostic's own doc) — absent when the gate was reused/gateless
-        // (outcome.value.gateSteps only ever set non-empty, see confirmWorkerMerge's `gateStepsResult`).
+        // @decision a2873f7e — folds the per-step durations onto the green echo; purely diagnostic, never
+        // branch on it; absent when the gate was reused/gateless.
         const stepsLine = outcome.ok && outcome.value.merged && outcome.value.gateSteps
           ? ` ${formatGateStepsDiagnostic(outcome.value.gateSteps)}`
           : "";
@@ -15283,26 +15278,17 @@ export class SessionService {
         const proximityNote = outcome.ok && outcome.value.merged && outcome.value.gateProximity?.nearBudget
           ? ` ⚠ gate budget proximity: step '${outcome.value.gateProximity.step}' used ${Math.round(outcome.value.gateProximity.fraction * 100)}% of its HARD gateCommandTimeoutMs retry ceiling (no auto-extend on a retry, card 24642c3d — a first attempt may run ~2× further while still producing output) — consider raising it, splitting the suite, or investigating what got slower before it starts timing out.`
           : "";
-        // Card 344ce950 §3 (NON-NEGOTIABLE): a pass-after-single-file-retry is WEAKER evidence than a clean
-        // pass — a manager must be able to tell "green" from "green after a retry" from this nudge alone,
-        // never just from the durable gate_history row. No cause is asserted here (see the card's own
-        // "measured n=30" finding) — this states only that a retry happened and passed, nothing about why
-        // the first attempt failed.
-        // Card 9966c52d: `outcome.value.outputTail` (attempt 1's own tail — see `ConfirmMergeResult
-        // .outputTail`'s own doc) is passed through so a genuine timeout kill isn't mislabelled as an
-        // order-dependent/cross-test-pollution bug — see `formatWeakerPassWarning`'s own doc.
+        // @decision 344ce950 — a pass-after-single-file-retry is weaker evidence than a clean pass; the
+        // nudge alone must make that visible, never just the durable gate_history row.
+        //
+        // @decision 9966c52d — `outputTail` is threaded through so a genuine timeout kill on the retried
+        // file isn't mislabelled as an order-dependent/cross-test-pollution bug.
         const retryNote = outcome.ok && outcome.value.merged && outcome.value.retriedFile
           ? ` ${formatWeakerPassWarning(outcome.value.retriedFile, outcome.value.outputTail)}`
           : "";
-        // Card 39da2570: the sibling of `retryNote` immediately above, for the OTHER retry that can produce
-        // a `merged:true` verdict — the TRANSIENT-KILL AUTO-RETRY (card bcba83a1). Before this card, a
-        // merge saved by this retry was "absorbed silently" (per that retry's own doc): the nudge handed a
-        // reader the SAME `cap=…/concurrentGates=…/concurrentGatesMax=…` triple `concurrencyNote` renders
-        // just below, with nothing telling them it describes the retry's own (later) admission rather than
-        // attempt 1's — exactly the unlicensed-`cgMax` read this card exists to close. Mutually exclusive
-        // with `retryNote` above (the two retries can never both fire for the same gate attempt — see
-        // `ConfirmMergeResult.transientRetried`'s own doc), so at most one of the two notes is ever
-        // non-empty on a given nudge.
+        // @decision 39da2570 — the sibling of `retryNote`, for the TRANSIENT-KILL AUTO-RETRY (card
+        // bcba83a1): a pass via this retry is visible on the nudge as a weaker-pass note, not silent.
+        // Mutually exclusive with `retryNote` — at most one of the two notes is ever non-empty.
         const transientRetryNote = outcome.ok && outcome.value.merged && outcome.value.transientRetried
           ? ` ${formatTransientRetryWarning()}`
           : "";
@@ -15317,41 +15303,23 @@ export class SessionService {
         const concurrencyNote = outcome.ok && outcome.value.merged && outcome.value.concurrentGates !== undefined
           ? ` cap=${outcome.value.gateCap} concurrentGates=${outcome.value.concurrentGates} concurrentGatesMax=${outcome.value.concurrentGatesMax}`
           : "";
-        // Card 64a30c79 DoD 1: the SAME skill-liveness warning the sync result carries on `skillWarning`
-        // (see confirmWorkerMerge's own computation, above the `warning`/return construction) — echoed here
-        // too so a manager who only reads this async nudge (the common case for a slow gate) still sees it,
-        // not only a manager who happened to read the original tool-call return. Absent (stays "") for
-        // every merge that never touched packages/daemon/assets/skills/**, byte-identical to before this
-        // card existed.
+        // @decision 64a30c79 — echoes `skillWarning` here too, so a manager who only reads this async
+        // nudge (the common case for a slow gate) still sees it, not only one who read the sync return.
         const skillNote = outcome.ok && outcome.value.merged && outcome.value.skillWarning
           ? ` ⚠ ${outcome.value.skillWarning}`
           : "";
-        // Card 65336570: the SAME reduced-gate declaration the sync result carries on `reducedGateWarning`
-        // (see confirmWorkerMerge's own `emitCompareWarning` computation, above the `warning`/return
-        // construction) — echoed here too, mirroring `skillNote` immediately above EXACTLY. Without this, a
-        // manager who only reads this async nudge — the ONLY path a real gate ever takes (a real gate
-        // ALWAYS returns `{status:"pending",opId}`, 13m+ runs) — never learns the gate was reduced at all,
-        // let alone which NOT_HERMETIC file(s) it excluded, even though the sync `warning` field carried it
-        // the whole time on the rare fast/reused/gateless settle. Absent (stays "") for every merge that
-        // didn't run the reduced-gate substitution, byte-identical to before this card existed.
+        // @decision 65336570 — echoes `reducedGateWarning` here too, mirroring `skillNote` exactly — a real
+        // gate never settles synchronously, so the sync `warning` field alone never reaches a manager.
         const reducedGateNote = outcome.ok && outcome.value.merged && outcome.value.reducedGateWarning
           ? ` ⚠ ${outcome.value.reducedGateWarning}`
           : "";
-        // Card 522cf573 DoD 1: this is the "genuinely hard" case — a `merge-failed` echo fires ONLY when
-        // the rich `[loom:merge-rejected]`/`[loom:already-merged]` push above was itself suppressed
-        // (shouldSuppressMergeReject reconciled it away) or never ran at all (a thrown error). Use
-        // `outcome.value.detailText` — the SAME rich suffix (headline/step/phase/failingTest/exitCode/
-        // signal/timedOut/stderrTail, the squash-phase-began state, and the canonical-repo-state clause)
-        // the rich notify would have carried, captured verbatim at every rejection return site — instead of
-        // the bare `reason` string, so this echo is never the empty "build gate failed" the card's two
-        // incidents were about. Falls back to `reason` only for a return site that predates `detailText`
-        // (none currently exist — this is a belt-and-suspenders honest-degrade, not an expected path).
-        // Card 7a1a76e9 DoD-1: the landed squash subject (card b88704bb's `commitSubject`, already on the
-        // sync return above) was unreachable on the QUEUED path — this async nudge is the ONE surface every
-        // queued merge is guaranteed to reach, and it never carried it. Always set on a landed merge
-        // (`merge.subject` in confirmWorkerMerge's own return construction is unconditional on this path),
-        // so this is present on every ordinary green settle, not gated on a rarer condition like the notes
-        // above it.
+        // @decision 522cf573 — fires only when the rich push was itself suppressed or never ran; reads
+        // `outcome.value.detailText`, the SAME variable the rich notify was built from, so this echo is
+        // never the empty "build gate failed" text and can never drift from the rich push's own detail.
+        //
+        // @decision 7a1a76e9 — the landed squash subject (see b88704bb's `commitSubject`) was unreachable
+        // on the QUEUED path; this async nudge is the one surface every queued merge is guaranteed to
+        // reach, so it carries the subject unconditionally on every ordinary green settle.
         const subjectNote = outcome.ok && outcome.value.merged && outcome.value.commitSubject
           ? ` subject="${outcome.value.commitSubject}"`
           : "";
@@ -15377,11 +15345,9 @@ export class SessionService {
         if (!outcome.ok || (outcome.ok && !outcome.value.merged)) {
           console.log(`[merge opId=${opId}] worker ${workerSessionId} task ${taskId ?? "none"} settled failed — ${msg}`);
         }
-        // LINEAGE-RESOLVED (card 05c36bf4): re-resolve to whoever is CURRENTLY live in managerSessionId's
-        // recycle lineage at settle time — not the (possibly long-recycled) asking manager captured when
-        // this op started. See resolveSettleNudgeTarget's doc for the incident this fixes. Attributed to
-        // the predecessor when routed, so a manager juggling several concurrent merges across a recycle can
-        // tell this nudge apart from one of its own.
+        // @decision 05c36bf4 — re-resolves to whoever is CURRENTLY live in the recycle lineage at settle
+        // time, not the asking manager captured when the op started; attributed to the predecessor when
+        // routed, so a manager juggling concurrent merges can tell this apart from one of its own.
         const target = this.resolveSettleNudgeTarget(managerSessionId);
         try {
           // Card ccb407eb: THE specimen this card fixed — this generic settle echo used to be a bare
@@ -15389,31 +15355,18 @@ export class SessionService {
           // give-up here was a total, unrecoverable loss even across a daemon restart. A ONE-SHOT TERMINAL
           // signal (never re-sent) — now durable like every other settle nudge.
           const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId), { sender: "system", taskId, kind: "warning" });
-          // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — see
-          // autoCancelSettleWakes's doc for why a failed/undelivered push must leave every pending wake
-          // untouched. `opStartedAt` is the CLOSED-OVER value captured right before `attach()` above —
-          // NOT a settle-time `peek(key)`, which raced the registry's retain-then-notify ordering under
-          // concurrent test load (op 473b8596) even though both happen in one synchronous callback.
+          // @decision 9d521792 — only reaps fallback wakes after a successful delivery; `opStartedAt` is
+          // the CLOSED-OVER value captured before `attach()`, never a settle-time `peek()` re-derive.
           if (r.delivered) this.autoCancelSettleWakes(target, opStartedAt, opId);
         } catch { /* manager not live — best-effort, mirrors every other completion nudge; wakes deliberately left untouched */ }
       },
       {
-        // RETAIN + CLASSIFY (card d1aee5f1 follow-up): keep the settled op briefly `peek()`-able (see
-        // PendingOpRegistry's "RETAINED TERMINAL VIEW" doc) with a distinct terminal outcome, so the Board
-        // card's merge-gate hairline can render merged/rejected/cancelled/(failed by raw state) instead of
-        // reverting the instant the gate settles. `merged:true` → "merged"; `cancelled:true` (card 361520a0,
-        // Half Four — checked BEFORE the merged/rejected branch below, since a cancelled outcome also
-        // carries `merged:false` and would otherwise misclassify as "rejected", the exact DoD-3 class this
-        // card fixes) → "cancelled"; a RESOLVED `merged:false` with no `cancelled` flag (the gate/
-        // stranded-work/empty-stage rejection paths — none of these throw) → "rejected"; a genuinely THROWN
-        // error (a real exception, not a rejection result) → "unknown", NEVER "failed" (card 479f449f — the
-        // recovery attempt wired into the `run` callback above already reports a real "merged" whenever the
-        // throw can be proven to have struck after a landed squash; reaching this classification at all
-        // means that recovery could not prove it either way, which is a materially weaker claim than
-        // "failed" and must not be worded as one — see the `[loom:merge-unknown]` echo's own doc). The
-        // Board's `mergeDisplay` still renders a thrown-exception op as "failed" (red) via the entry's raw
-        // `state` field, which is unaffected by this string — deliberately left as-is: `state` is a true,
-        // unambiguous fact ("an exception was thrown"), unlike this classified `outcome`.
+        // @decision d1aee5f1 — keeps the settled op briefly `peek()`-able with a distinct terminal outcome
+        // per settle (merged/cancelled/rejected/unknown), so the Board's merge-gate hairline has a chance
+        // to render before reverting.
+        //
+        // @decision 479f449f — a genuinely thrown error classifies as "unknown", never "failed"; the
+        // Board still renders it red via the entry's own raw `state` field, unaffected by this string.
         retainMs: MERGE_OP_RETAIN_MS,
         // UNTIL-SUPERSEDED RE-CALL DEDUPE (card 1555e361 — the merge-gate re-call trap): DECOUPLED from
         // `retainMs` above on purpose. `retainMs` only governs the brief, cosmetic worker_list/Board display
@@ -15441,25 +15394,16 @@ export class SessionService {
         // breaking the pre-existing "re-poll returns the EXACT SAME opId" invariant. `identityOptional`
         // tells attach() to trust the cached verdict regardless in exactly (and only) this case.
         identityOptional: alreadyFinished,
-        // Card 99a1cf6f: `gateBaseInvalidated` checked BEFORE the plain `merged`-else-`"rejected"` fallback
-        // — see `ConfirmMergeResult.gateBaseInvalidated`'s own doc and `NEVER_CACHED_OUTCOMES`
-        // (orchestration/pending-ops.ts) for why this outcome must classify distinctly from an ordinary
-        // `"rejected"` (a real test failure, safe to replay) rather than falling into it.
+        // @decision 99a1cf6f — `gateBaseInvalidated` classifies distinctly from an ordinary "rejected",
+        // checked before the plain merged-else-rejected fallback — a real test failure is safe to replay,
+        // a stale-base one is not.
         classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.cancelled ? "cancelled" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.merged ? "merged" : "rejected"),
-        // BYPASS BOTH CACHES ON AN EXPLICIT FORCE (CR BLOCKER 1, card 33172f01; extended by card 1555e361 to
-        // also cover the new until-superseded dedupe above — same reasoning, same flag): the dedupe (see
-        // PendingOpRegistry.attach's `opts.bypassRetained` doc) is keyed ONLY on `workerSessionId`, not on
-        // `forceRemoveWorktree` — so without this, a manager that read a nested-repo-guard warning telling it
-        // to "re-run worker_merge_confirm with forceRemoveWorktree:true" and did EXACTLY that would get back
-        // the IDENTICAL cached (unforced) warning, `confirmWorkerMerge` never re-entered, the worktree never
-        // actually removed, and no signal that the flag was silently ignored. `forceRemoveWorktree` is the
-        // ONE explicit, named escalation that genuinely re-runs a settled merge — it must never be served
-        // from a cache built by an earlier, non-forced call, no matter which of the two caches that cache hit
-        // came from.
+        // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
+        // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
+        // cache built by an earlier, unforced call.
         bypassRetained: forceRemoveWorktree === true,
-        // DURABLE TOMBSTONE (card edc1ec12, generalized by e3e40167): mints the row the MOMENT this op is
-        // created — see runWorkerGate's identical `onOpMinted` doc for why this must cover the fast path
-        // too, not just the surfaced-pending one.
+        // @decision e3e40167 — originated by card edc1ec12, generalized here: mints the durable tombstone
+        // row the MOMENT this op is created, covering the fast path too, not just surfaced-pending.
         onOpMinted: (opId) => {
           this.db.insertPendingGateOp({
             opId, kind: "merge", key, ownerSessionId: managerSessionId, projectId, taskId,
@@ -15467,34 +15411,23 @@ export class SessionService {
             state: "pending", surfacedPending: false,
           });
         },
-        // Fires synchronously, strictly before any possible settle for this op (see
-        // PendingOpRegistry.attach's onSurfacedPending doc) — flips the row's surfaced_pending flag so a
-        // real process death before this op settles can still be reconciled at the next boot
-        // (SessionService.reconcileOrphanedGateOps) instead of leaving the manager waiting on a nudge that
-        // can now never come.
+        // @decision e3e40167 — flips the row's surfaced_pending flag before any possible settle, so a real
+        // process death before this op settles can still be reconciled at the next boot.
         onSurfacedPending: (_op, opId) => {
           this.db.markPendingGateOpSurfaced(opId);
         },
-        // Fires for EVERY genuine settle (fast or surfaced-pending) — see PendingOpRegistry.attach's
-        // `onSettle` doc for why this must be unconditional, unlike the completion-nudge push above.
-        // Card 9f6598dd: now ALSO derives + persists a verdict (see `deriveMergeGateVerdict`'s own doc) —
-        // previously this called `settlePendingGateOp(opId)` with NO verdict, the exact root cause of
-        // Finding 1 (a settled "merge" tombstone row carrying no extended/duration/outcome at all).
+        // @decision 9f6598dd — derives and persists a verdict on EVERY genuine settle; previously this
+        // called `settlePendingGateOp` with no verdict, leaving a settled tombstone row with no
+        // extended/duration/outcome at all.
         onSettle: (outcome, opId) => {
           this.db.settlePendingGateOp(opId, deriveMergeGateVerdict(outcome, opStartedAt));
           pruneGateSpills();
         },
       },
     );
-    // CURRENT-IDENTITY ENRICHMENT (card 615967c5 — the cached-verdict-legibility fix): `result.freshMint`
-    // (set by the registry ONLY for a genuine fresh mint — never for a cache hit, see PendingOpRegistry's
-    // own doc) carries the CACHED verdict's identity (`priorIdentity`) but not THIS call's own
-    // freshly-resolved one — the registry is deliberately identity-vocabulary-agnostic (it never
-    // interprets `verdictIdentity`, just compares it), so it has no notion of "current" beyond what this
-    // caller already resolved above, before `attach()` ever ran. Folded in HERE, the one place both are in
-    // scope, rather than widen the registry's own generic contract for this one caller. A cache hit (no
-    // `freshMint`) is untouched — this only ever adds information to a result that already announces a
-    // fresh gate ran, never changes whether one did.
+    // @decision 615967c5 — folds this call's own freshly-resolved identity onto a genuine fresh mint (a
+    // cache hit is untouched), closing the cached-verdict legibility gap: a re-gate from a moved base used
+    // to look identical to a forced re-run or a genuine cache hit.
     if (result.freshMint) {
       return { ...result, freshMint: { ...result.freshMint, currentIdentity: verdictIdentity } };
     }
@@ -15540,20 +15473,10 @@ export class SessionService {
    * second confirm, so this preserves the pre-existing synchronous REST contract while fully sharing the
    * dedupe/tombstone machinery the MCP tool already gets.
    *
-   * BOUNDED so a genuinely wedged op can't hang the HTTP handler forever: the ceiling is sized off the
-   * project's OWN configured `gateCommandTimeoutMs` (falling back to {@link DEFAULT_REST_MERGE_CEILING_MS}
-   * only when it can't be resolved at all) at 6x — one merge attempt can itself cost up to ~3x
-   * `gateCommandTimeoutMs` (one auto-extend on the first try, plus one un-extended retry — see
-   * `confirmWorkerMerge`'s own `gateRetry` doc), and this op can ALSO sit queued behind roughly one more
-   * gate of the same worst-case size before it is ever admitted — 6x covers both without needing to read
-   * live queue depth. This budget ALSO has to absorb the real, un-gated git subprocess work that happens
-   * around the gate step itself — the union-merge/checkout/squash `confirmWorkerMerge` performs before and
-   * after `runGate` resolves is real, unbounded-by-`gateCommandTimeoutMs` work, not merely gate attempts
-   * (card 6144fe32: a test wired with a tiny `gateCommandTimeoutMs` to keep this ceiling small in a targeted
-   * run learned this the hard way — its OWN post-release re-attach raced a real squash against a 6-second
-   * ceiling and lost under host load). On exceeding the ceiling, returns `{settled:false, opId}` rather than
-   * fabricating a result — the caller must report "still running", NEVER a synthesized "not merged" (a false
-   * negative here would invite exactly the duplicate re-trigger this card exists to prevent).
+   * @decision 6144fe32 — BOUNDED so a genuinely wedged op can't hang the HTTP handler forever: the ceiling
+   * is sized off `gateCommandTimeoutMs` (fallback `DEFAULT_REST_MERGE_CEILING_MS`) at 6x, which has to
+   * absorb both retry headroom and the real, un-gated git work around the gate step, not just gate
+   * attempts.
    */
   async confirmWorkerMergeUntilSettled(
     managerSessionId: string, workerSessionId: string, forceRemoveWorktree?: boolean,

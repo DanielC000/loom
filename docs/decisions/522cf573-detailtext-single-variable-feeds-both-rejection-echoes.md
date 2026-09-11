@@ -14,6 +14,16 @@ two to drift apart, because neither is a separate re-derivation; both read the s
 At this specific rejection site, "squash phase never reached" is always true in the composed detail: the
 gate runs strictly before the squash, so a gate rejection can never have reached the squash phase.
 
+`confirmWorkerMergeTracked`'s generic fallback echo falls back to the bare `reason` string only for a
+return site that predates `detailText` — none currently exist; this is a belt-and-suspenders honest
+degrade, not an expected path, kept so the echo is never the empty "build gate failed" text the card's
+originating incidents were about.
+
+The echo's own site names `detailText`'s full composition explicitly: `detailBits`'s own fields
+(`headline`/`step`/`phase`/`failingTest`/`exitCode`/`signal`/`timedOut`/`stderrTail`), the
+squash-phase-began state, and the canonical-repo-state clause — the same enumeration as the rich notify's
+own construction, so a reader of either surface sees the identical field manifest.
+
 ## Do not
 
 - Do not build a second, separately-derived string for the generic `[loom:merge-failed]` fallback echo —

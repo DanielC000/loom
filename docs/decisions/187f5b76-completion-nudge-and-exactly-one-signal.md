@@ -26,12 +26,23 @@ synchronously-thrown-error branch, which has no `outcome.value` of its own to ca
 running several concurrent merges can always match this nudge back to the `worker_merge_confirm` call
 that produced it.
 
+## Why "both" is worse than "neither" (site: `confirmWorkerMergeTracked`'s async settle nudge)
+
+Sending the generic echo ALONGSIDE an already-sent rich push doesn't just duplicate information — it
+wastes a manager turn on the SAME event and, for a manager running several concurrent merges, is
+genuinely ambiguous about which op just settled. The generic echo fires only for: a plain green merge
+(no direct push of its own), or a rejection the rich path did NOT already announce (`!notified` —
+either `shouldSuppressMergeReject` reconciled it away, or an unexpected error meant `rejectNotify`
+never ran at all).
+
 ## Do not
 
 - Do not let a manager degraded to the pending path spin-poll for the outcome — `onSettledAfterPending`
   pushes it a turn the moment the op actually settles.
 - Do not fire both the generic completion echo and a rich direct push for the same op — `notified` gates
   the generic echo so exactly one signal ever lands per op (EXACTLY-ONE-SIGNAL, card 187f5b76's own).
+- Do not send the generic echo when a rich push already landed — it wastes a manager turn on the same
+  event and is ambiguous across several concurrent merges.
 
 ## Source
 

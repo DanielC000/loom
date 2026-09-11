@@ -10,6 +10,9 @@ RESOLVED by card `b9e07a4a`'s Code Review (Critical fix), not by this card itsel
 
 `durationMs` on the `build_gate` audit event is NOT part of this triple and does not share its resolution: it is a separate field with its own fix (card b9e07a4a, a follow-up to this one) — `gateAttempt1DurationMs`, captured right after attempt 1's own admission settles and BEFORE the single-file retry can run. On a merge the single-file retry saved, `build_gate.durationMs` describes attempt 1's own run ALONE, while the triple right beside it on that same row describes the RETRY's admission — a deliberate, different scope for each field, not a bug: `durationMs` answers "how long did the run that actually failed take"; the triple answers "what concurrency produced the verdict this row's `passed`/`retriedFile`/`retryPassed` describe". Before this fix, `durationMs` was neither of those — it was `Date.now()` read after the retry had already queued and run, silently spanning both admissions at once (queue wait included) while the triple beside it described only the second.
 
+Echoed on the async `[loom:merge-done]` nudge too, matching the rejection text's own wording, so a
+manager comparing a green run against a red one never has to pivot to `gate_status(opId)`.
+
 ## Do not
 
 - Do not read `concurrentGates` (instant-at-admission) or `concurrentGatesMax` (true max-over-run) as THE contention condition — both are real, imperfect lenses; `concurrentGates` understates a second gate joining later, `concurrentGatesMax` overstates a brief late overlap as full contention.

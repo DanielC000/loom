@@ -6,6 +6,16 @@ Card 479f449f: `"unknown"` is set when `worker_merge_confirm` itself threw and a
 
 This is what lets the Board distinguish a rejected merge (amber) from a merged one (phosphor) instead of both reading as green "merged" via `state === "done"` — and, since the `"cancelled"` outcome (card 361520a0, Half Four) landed, from a cancelled one (neither).
 
+## Why reaching this classification at all is meaningful (site: `confirmWorkerMergeTracked`'s `classifyOutcome`)
+
+The recovery attempt wired into `confirmWorkerMergeTracked`'s own `run` callback already reports a real
+`"merged"` whenever the throw can be PROVEN to have struck after a landed squash — so reaching this
+`"unknown"` classification at all means that recovery could NOT prove it either way, which is a
+MATERIALLY weaker claim than `"failed"` and must not be worded as one. The Board's `mergeDisplay` still
+renders a thrown-exception op as "failed" (red) via the entry's own raw `state` field, unaffected by this
+classified `outcome` string — deliberately left as-is: `state` is a true, unambiguous fact ("an exception
+was thrown"), unlike the softer, honest-non-answer `outcome`.
+
 ## Do not
 
 - Do not map a `worker_merge_confirm` throw to `outcome: "failed"` — a genuine confirmed failure is always a resolved `merged:false` ("rejected"); a throw whose git-log recheck couldn't prove either way is `"unknown"`, a distinct, honest non-answer.

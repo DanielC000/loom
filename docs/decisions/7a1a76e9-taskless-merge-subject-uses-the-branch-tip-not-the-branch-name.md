@@ -17,6 +17,27 @@ FAILS SAFE to `undefined` (never throws) on any git error/timeout/empty-branch �
 
 A taskless worker's squash-merge commit carries a real, findable subject instead of the one string that could never be found by the successor-check convention afterward.
 
+## Decision B (unrelated decision, same card id, `sessions/service.ts`) — DoD-1: the landed subject reaches the async completion nudge too
+
+Card 7a1a76e9's DoD-1, a separate decision from `deriveTasklessSubject` above, sharing only the card id
+(see `resolveRecord()`'s one-file-per-id shadowing, `packages/daemon/assets/decision-records.mjs`): the
+landed squash subject (surfaced on the sync return via `commitSubject`, [[b88704bb-review-worker-merge-surfaces-the-prospective-commit-subject]])
+was unreachable on the QUEUED path — `confirmWorkerMergeTracked`'s async settle nudge is the ONE surface
+every queued merge is guaranteed to reach, and it never carried the subject before this card. Set
+unconditionally on a landed merge (`merge.subject` in `confirmWorkerMerge`'s own return construction is
+unconditional on that path), so it is present on every ordinary green settle, not gated on a rarer
+condition like the diagnostic notes beside it.
+
+### Do not (Decision B)
+
+- Do not assume a queued merge's landed subject is visible anywhere before the async settle nudge — the
+  sync return is unreachable on that path; the nudge is the one surface guaranteed to carry it.
+
+## Source (Decision B)
+
+Inline comment in `packages/daemon/src/sessions/service.ts`, `confirmWorkerMergeTracked`'s async settle
+callback (`subjectNote`), as of this tranche's HEAD.
+
 ## Source
 
 Inline comment in `packages/daemon/src/git/worktrees.ts`, `deriveTasklessSubject`'s own doc comment, as of this worktree's HEAD before this extraction. Wrapped source lines joined into a flowing paragraph, `*` comment markers stripped, no wording changed.

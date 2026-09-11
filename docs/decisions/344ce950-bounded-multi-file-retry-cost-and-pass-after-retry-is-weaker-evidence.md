@@ -21,12 +21,19 @@ absorbed into `gateResult.passed` for the squash decision, but that stamping nev
 that a retry happened. The single-file retry itself is never looped — it runs exactly once regardless
 of outcome.
 
+VISIBLE ON THE NUDGE ITSELF, NOT JUST THE DURABLE ROW: a manager must be able to tell "green" from
+"green after a retry" from the `[loom:merge-done]` nudge alone, never only from the durable
+`gate_history` row — the nudge states only that a retry happened and passed, asserting no cause for
+why the first attempt failed.
+
 ## Do not
 
 - Do not treat a pass-after-single-file-retry as equivalent to a clean pass — a bug that only
   reproduces under full-suite conditions (ordering/pollution) can pass in isolation; keep
   `retriedFile`/`retryPassed` stamped so the weaker evidence stays visible downstream, never silently
   promote it to an unqualified pass.
+- Do not leave the weaker-pass signal only on the durable `gate_history` row — the `[loom:merge-done]`
+  nudge must carry it too, so a manager reading only the nudge still sees it.
 - Do not loop the single-file retry more than once, regardless of outcome.
 - Do not assume a multi-file failure can never use this retry — that was the old, now-replaced
   posture (see card 67030bb9's own record for the bounded multi-file design that replaced it).
