@@ -15,6 +15,14 @@ DELIBERATELY NOT sized to cover the full hook-confirmation latency distribution 
 
 Inline comment in `packages/daemon/src/pty/host.ts` (`GIVE_UP_CONFIRM_SETTLE_POLL_MS`/`GIVE_UP_CONFIRM_SETTLE_MAX_POLLS`'s top-of-const doc). Relocated by card a4818d7a (tranche 1 on `pty/host.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
 
+## `awaitGiveUpConfirmSettle` itself — independent of the output discriminator, mirrors `awaitReassertSettle`'s bail shape
+
+The method that runs this wait is called from the GIVE-UP branch of `fireEnterAndVerify` the instant the OUTPUT discriminator (`lastOutputAt`) has already failed to suppress the give-up — this is a SEPARATE, independent check against a DIFFERENT signal (the hook-set `enterConfirmed`, not inferred output), not a change to that discriminator's own logic. It bails silently (no `onSettled` callback at all) when the generation is no longer live or has been superseded by a newer `submit()` — there is nothing of that generation's left to confirm or recover — mirroring `awaitReassertSettle`'s identical bail-without-calling-back shape for the same dead/superseded case; the newer submit's own give-up chain, if it ever needs one, runs this same check fresh under its own generation.
+
+## Source (3)
+
+Inline JSDoc in `packages/daemon/src/pty/host.ts` (`awaitGiveUpConfirmSettle`'s own method doc), a second site for the same card; condensed, not verbatim. Extracted by tranche 36 (card `73415052`).
+
 ## `giveUpRequeues`/`giveUpGen` are per-message identity-scoped counters guarding the same false-negative
 
 `giveUpRequeues` (QueuedMessage field) counts how many times THIS EXACT message object has already been

@@ -23,3 +23,11 @@ A gen-match verdict is therefore the best available signal, not proof of physica
 Inline comment in `packages/daemon/src/pty/host.ts` (the `Live.flushMarkerGen` field doc), as of commit 41336cdba9e3c80849be6c64c84a8d52c3c06dce. Relocated by card a2604faf (tranche 4 on `pty/host.ts`); no wording changed beyond joining wrapped source lines into a flowing paragraph and stripping `//` comment markers.
 
 The shape section above is a second site for the same card, extracted from the `lastFlushAttribution` field doc (`Live` interface, immediately below `flushMarkerGen`) as of commit `ca1117e261e56fcff271d6a0f2e5dce4579500b6` (tranche 7's HEAD). Extracted by card `0f3c76a4` (tranche 8 on `pty/host.ts`); no wording changed beyond joining wrapped lines and stripping `//` comment markers.
+
+## Call sites — duplicated by design, not shared
+
+`resolveFlushMarker` (the function that actually resolves the marker into `lastFlushAttribution`) is called from BOTH confirming-hook sites (`UserPromptSubmit` and `Stop`/`StopFailure`), right after each one sets `live.enterConfirmed = true` — mirroring how `composerDirtyLenClearedByGen`'s own gated reset is duplicated at both of those same sites rather than factored into one shared call.
+
+## Source (3)
+
+Inline JSDoc in `packages/daemon/src/pty/host.ts` (`resolveFlushMarker`'s own method doc), a third site for the same card; condensed, not verbatim. Extracted by tranche 36 (card `73415052`).

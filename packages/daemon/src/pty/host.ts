@@ -8305,21 +8305,15 @@ export class PtyHost {
   }
 
   /**
-   * Card 441499ee: bounded, OBSERVED wait for `enterConfirmed` to flip true — see
-   * `GIVE_UP_CONFIRM_SETTLE_POLL_MS`'s doc for why this is short and deliberately does not try to cover
-   * the full hook-confirmation latency distribution. Called from the GIVE-UP branch of `fireEnterAndVerify`
-   * the instant the OUTPUT discriminator (`lastOutputAt`) has already failed to suppress it — this is a
-   * SEPARATE, independent check against a DIFFERENT signal (the hook-set `enterConfirmed`, not inferred
-   * output), not a change to that discriminator's own logic.
+   * Bounded, OBSERVED wait for `enterConfirmed` to flip true — see `GIVE_UP_CONFIRM_SETTLE_POLL_MS`'s
+   * doc for why it is short. `onSettled` carries WHY this settled — `confirmed:true` (a hook arrived;
+   * treat exactly like GIVE-UP SUPPRESSED, do nothing else) vs `confirmed:false` (bound elapsed,
+   * unconfirmed; proceed to GIVE-UP RECOVERY) drive entirely different actions, unlike
+   * `awaitReassertSettle`'s plain callback.
    *
-   * UNLIKE `awaitReassertSettle`, the caller needs to know WHY this settled — `confirmed:true` (a hook
-   * arrived; treat exactly like GIVE-UP SUPPRESSED, do nothing else) vs `confirmed:false` (the bound
-   * elapsed with no confirmation; proceed to GIVE-UP RECOVERY) lead to entirely different actions — so
-   * `onSettled` takes that boolean. Mirrors `awaitReassertSettle`'s bail-silently-without-calling-back
-   * shape for the dead/superseded case: if this generation is no longer live or has been superseded by a
-   * newer submit(), there is nothing of THIS generation's left to confirm or recover, so it simply stops
-   * (the newer submit's own give-up chain, if it ever needs one, runs this same check fresh under its own
-   * generation).
+   * @decision 441499ee — bails silently (no callback) when the generation is stale/dead, mirroring
+   * `awaitReassertSettle`'s shape; a separate, independent check on `enterConfirmed`, not a change to
+   * the output discriminator's own logic.
    */
   private awaitGiveUpConfirmSettle(sessionId: string, gen: number, polls: number, onSettled: (confirmed: boolean) => void): void {
     const live = this.live.get(sessionId);
@@ -8345,22 +8339,18 @@ export class PtyHost {
   }
 
   /**
-   * Card ac7884e3: resolve any outstanding `worker_flush` attribution marker against the generation
-   * that JUST proved it started (`live.submitGeneration`, current at the moment this runs) — called from
-   * BOTH confirming-hook sites (UserPromptSubmit and Stop/StopFailure), right after each sets
-   * `live.enterConfirmed = true`, mirroring how `composerDirtyLenClearedByGen`'s gated reset is duplicated
-   * at both sites rather than shared. No-ops instantly when no flush marker is outstanding
-   * (`flushMarkerGen === null`) — the overwhelming majority of confirmations have nothing to do with
-   * worker_flush, and this must never manufacture a verdict for those.
+   * Resolves any outstanding `worker_flush` attribution marker against the generation that JUST
+   * proved it started (`live.submitGeneration`, current at the moment this runs). No-ops instantly
+   * when no flush marker is outstanding (`flushMarkerGen === null`) — the overwhelming majority of
+   * confirmations have nothing to do with worker_flush, and this must never manufacture a verdict for
+   * those. Same-generation match ⇒ `attributable:true` (best-available signal, not proof of
+   * causation); a marker for an OLDER, superseded generation ⇒ `attributable:false`,
+   * `reason:"marker-superseded-before-confirm"`. Both outcomes consume (clear) the marker — see
+   * `Live.lastFlushAttribution`'s own doc for the full reading guide.
    *
-   * Two outcomes, both consuming (clearing) the marker — see `Live.lastFlushAttribution`'s own doc for
-   * the full reading guide:
-   *  - `flushMarkerGen === live.submitGeneration`: the flush's targeted generation is the SAME one that
-   *    just confirmed — `attributable:true`. Best-available signal, not proof of physical causation (see
-   *    `flushMarkerGen`'s own doc for the concurrent-natural-retry ambiguity this cannot resolve).
-   *  - otherwise (marker set for an OLDER generation): that generation was superseded before it ever
-   *    confirmed — `attributable:false`, `reason:"marker-superseded-before-confirm"`. This confirmation is
-   *    definitively about something else; the flush's own attempt is a separate, already-lost cycle.
+   * @decision ac7884e3 — called from BOTH confirming-hook sites (UserPromptSubmit and Stop/StopFailure)
+   * rather than shared, mirroring how `composerDirtyLenClearedByGen`'s gated reset is duplicated at
+   * both sites too.
    */
   private resolveFlushMarker(sessionId: string, live: Live): void {
     if (live.flushMarkerGen === null) return;
