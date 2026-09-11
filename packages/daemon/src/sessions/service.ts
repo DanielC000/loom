@@ -16505,9 +16505,12 @@ export class SessionService {
    * re-detection; idempotency instead comes from Pass A's `task done AND worktree gone → skip` short-circuit
    * plus deleteBranch being a no-op on an already-gone branch. A crash anywhere before deleteBranch leaves
    * the branch present-and-squash-landed, which Pass A idempotently re-finalizes; a crash after it can only
-   * happen once merge_done is already durable. This closes the window where a crash between deleteBranch and
-   * merge_done lost the terminal event AND pruned the branch, leaving a merge_request dangling forever (the
-   * lingering-MERGE-REQUEST-alert root cause).
+   * happen once merge_done is already durable.
+   *
+   * @decision sha:252e57ec — a crash between deleteBranch and merge_done used to lose the terminal
+   * event and prune the branch, leaving a merge_request dangling forever (the lingering-MERGE-REQUEST-
+   * alert root cause); the mandated order above closes that window.
+   *
    */
   private async finalizeMerge(args: {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
@@ -16596,10 +16599,11 @@ export class SessionService {
     // falls back to last).
     // ONLY on the FIRST finalize for this worker (no prior merge_done event) — a REPLAY (an idempotent
     // worktree-GC retry, or a reconnect/boot reconciliation re-run finding the merge already landed) must
-    // never force the column back over a manual move a human made AFTER the merge landed. That
-    // clobber was the bug: a card the manager moved to a non-terminal "ready for owner review" lane got
-    // silently reset to the terminal column on the next reconnect/boot reconcile, which then made
-    // worker_spawn wrongly refuse it as a terminal-column task.
+    // never force the column back over a manual move a human made AFTER the merge landed.
+    //
+    // @decision sha:61446519 — a REPLAY silently resetting a manually-moved-to-non-terminal card
+    // back to terminal made worker_spawn wrongly refuse it as a terminal-column task; that was the bug.
+    //
     // REPLAY DETECTION (card daaf7fc9): `hadPriorMergeDone` is TRUE the moment ANY earlier finalizeMerge
     // call for this exact workerSessionId already recorded a merge_done event — independent of `taskId`,
     // unlike `alreadyFinalized` below (which additionally requires one, since it exists only to gate the
@@ -16608,14 +16612,11 @@ export class SessionService {
     // (reconcileOrchestrationOnBoot Pass A), an idempotent worktree-GC retry, or a stale
     // worker_merge_confirm redelivery landing on finishAlreadyMerged's own finalizeMerge call — never a
     // call where main just advanced again. See the reingest call site below for what this gates and why.
-    // ONE KNOWN EXCEPTION: `hadPriorMergeDone` can also be satisfied by reconcile Pass A2 (the OTHER
-    // `merge_done` writer besides this method — search this same file for `reconciled: true`), which
-    // infers "landed" from BOARD STATE (the task's terminal column) rather than from git. A task
-    // manually moved to the terminal column, on a worker that filed a merge_request but never actually
-    // merged, would get an A2 merge_done — and a genuine FIRST finalizeMerge for that worker would then
-    // see `hadPriorMergeDone:true` and skip a reingest that was legitimately due. Narrow, pre-existing to
-    // A2, and low-consequence (a best-effort reingest is skipped; the graph is merely stale until the
-    // next merge) — not fixed here.
+    //
+    // @decision daaf7fc9 — hadPriorMergeDone can also be set by reconcile Pass A2's board-state
+    // inference; a merge_request-only worker moved to terminal by hand then also skips a
+    // legitimately-due reingest. Narrow, pre-existing, low-consequence — not fixed here.
+    //
     const hadPriorMergeDone = this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
     const alreadyFinalized = args.taskId != null && hadPriorMergeDone;
     if (args.taskId && !alreadyFinalized) {
@@ -16852,11 +16853,13 @@ export class SessionService {
         // signal) — it's a "there was never anything to land" signal, and it must be checked BEFORE
         // repoKey resolution, not folded into it: a stale/deregistered repoKey on a no-op session
         // would otherwise throw UnknownRepoKeyError and wedge FOREVER for a repo it was never going to
-        // touch. Root cause of the incident that named this card: two archived no-commit probe
-        // sessions (`f9feeccc`, `1bf634de`) stamped `repoKey:"api"` from a since-deregistered
-        // multi-repo live-test repo (`project.repos` went from naming "api" to `[]`) — neither ever
-        // called worker_merge, so there was no merge to lose, yet Pass A retried repoKey resolution
-        // for them every boot for 26+ days. `!worktreeOnDisk` guards against firing on a still-live
+        // touch.
+        //
+        // @decision 6f73da1a — two archived no-commit sessions once stamped repoKey "api" from a
+        // since-deregistered repo, so Pass A retried repoKey resolution for them every boot for
+        // 26+ days even though neither ever called worker_merge; hence this must run first.
+        //
+        // `!worktreeOnDisk` guards against firing on a still-live
         // worker whose task a human moved to the terminal column early (the worktree only disappears
         // once the session has actually stopped); `isTerminalTask` guards against a worker still
         // mid-task that simply hasn't requested its merge yet. `terminalKey` is checked for `undefined`
@@ -17009,22 +17012,21 @@ export class SessionService {
     }
 
     // B. GC orphaned worktrees (exited/dead, dir on disk, not handled in A) — but NEVER one that still
-    // holds work. SAFE-TO-DISCARD guard (P0 data-loss fix, 2026-06-05): recoverStaleSessions marks EVERY
-    // prior-run session `exited` at boot, so without this the worktree of an UNRELATED manager's live
-    // worker (exited here, NOT in protectedSessionIds — only the requesting manager's workers are) was
-    // deleted mid-task, pre-commit. We now delete a worktree ONLY when it is provably disposable: no
-    // commits ahead of main AND a clean working tree (see worktreeHasWork, which FAILS SAFE → keep on
-    // any timeout/error). Anything still holding work is left on disk for a human/next pass. This holds
-    // for ALL sessions in Pass B, not just protected ones.
+    // holds work.
     //
-    // Card 40b63f1c: liveness protection must be keyed on the WORKTREE, not the iterated session row. A
-    // `worker_recycle` chain aliases ONE worktreePath across TWO session rows — a dangling predecessor
-    // (exited/dead, NOT in protectedSessionIds) and the live successor (protected-for-resume, or simply
-    // still running). Keying the skip below on `s.id` let the predecessor row slip past every filter and
-    // reap the SAME worktree the successor is actively using — its own protected row never got a say,
-    // because the loop only ever asked "is THIS row protected?", never "does anyone still hold this
-    // worktree?". Build the set of paths held by any protected-for-resume OR currently-live session up
-    // front, ONCE, so whichever row Pass B visits first for a shared path, the decision is identical.
+    // @decision 9cb0287a — Pass B deletes a worktree only when worktreeHasWork proves it disposable
+    // (no commits ahead + clean tree, fail-safe to keep); this closed a P0 where an unrelated live
+    // worker's worktree was deleted mid-task, pre-commit.
+    //
+    // Anything still holding work is left on disk for a human/next pass. This holds for ALL sessions
+    // in Pass B, not just protected ones.
+    //
+    // @decision 40b63f1c — liveness protection here keys on the worktree PATH, never the iterated
+    // session row; a worker_recycle chain aliases one worktreePath across two rows, and keying on
+    // s.id let a dangling predecessor reap the live successor's worktree.
+    //
+    // Build the set of paths held by any protected-for-resume OR currently-live session up front,
+    // ONCE, so whichever row Pass B visits first for a shared path, the decision is identical.
     const protectedWorktreePaths = new Set<string>();
     for (const s of all) {
       if (!s.worktreePath) continue;
