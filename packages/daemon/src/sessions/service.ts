@@ -10165,10 +10165,12 @@ export class SessionService {
         // @decision 4be56c33 — unlink only here: `fresh` was inserted in this same synchronous
         // call and no process for it ever existed.
         this.db.setOrchestration(fresh.id, { recycledFrom: null });
-        // @decision 08320d02 — archive the failed successor (worker_list excludes archived rows) and
-        // cancel the predecessor's own pending wakes: `old` was hard-killed above, before this spawn
-        // attempt, and hasSuccessor(old) is now false (just unlinked above) — a due wake would otherwise
-        // auto-resume the exact worker the manager just tried to retire.
+        // @decision 08320d02 — archive the failed successor (worker_list excludes archived rows) and cancel
+        // the predecessor's own pending wakes:
+        //
+        // `old` was hard-killed above, before this spawn attempt, and hasSuccessor(old) is now false (just
+        // unlinked above) — a due wake would otherwise auto-resume the exact worker the manager just tried to
+        // retire.
         this.db.archiveSession(fresh.id);
         const cancelledWakes = this.db.cancelWakesForSession(workerSessionId);
         // @decision 7b1fda57 — hand `carried`'s NON-durable, `kind:"agent"` entries to the MANAGER as ONE
@@ -10292,26 +10294,30 @@ export class SessionService {
   }
 
   /** @decision e07b1b1a — never lower the DEFAULT below CODEX_BOOT_READY_TIMEOUT_MS or
-   *  READY_FALLBACK_ABSOLUTE_CEILING_MS. Code Review correction: claude's own re-armed mode-cycle fallback
-   *  (pty/host.ts, the SessionStart handler) is bounded at READY_FALLBACK_ABSOLUTE_CEILING_MS from spawn —
-   *  NOT the smaller spawn-armed READY_FALLBACK_MS, which only covers the window before SessionStart ever
-   *  lands. A successor whose SessionStart is merely slow can legitimately take up to that full ceiling to
-   *  reach ready; codex has no forced-ready fallback at all. The `Math.max` below (present since this
-   *  card's first commit, `00ac223f`) is what makes this default correct independent of whether the two
-   *  constants are ever equal — it is named against whichever ceiling is larger, not against one of them by
-   *  assumption. Code Review round 2 nit: this comment previously claimed the default "only stays correct
-   *  because the two constants happen to be equal," which was stale relative to that `Math.max` — corrected
-   *  here to state the actual, stronger guarantee the code already had.
+   *  READY_FALLBACK_ABSOLUTE_CEILING_MS.
+   *
+   *  Code Review correction: claude's own re-armed mode-cycle fallback (pty/host.ts, the SessionStart handler)
+   *  is bounded at READY_FALLBACK_ABSOLUTE_CEILING_MS from spawn — NOT the smaller spawn-armed
+   *  READY_FALLBACK_MS, which only covers the window before SessionStart ever lands. A successor whose
+   *  SessionStart is merely slow can legitimately take up to that full ceiling to reach ready; codex has no
+   *  forced-ready fallback at all. The `Math.max` below (present since this card's first commit, `00ac223f`) is
+   *  what makes this default correct independent of whether the two constants are ever equal — it is named
+   *  against whichever ceiling is larger, not against one of them by assumption. Code Review round 2 nit: this
+   *  comment previously claimed the default "only stays correct because the two constants happen to be equal,"
+   *  which was stale relative to that `Math.max` — corrected here to state the actual, stronger guarantee the
+   *  code already had.
    *  Env-overridable (mirrors READY_FALLBACK_MS/CODEX_BOOT_READY_TIMEOUT_MS's own convention) so a
    *  hermetic test can shrink it instead of waiting out the real default. */
   private static readonly RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS =
     Number(process.env.LOOM_RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS) || Math.max(READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS) + 10_000;
   private static readonly RECYCLE_SUCCESSOR_SETTLE_POLL_MS = Number(process.env.LOOM_RECYCLE_SUCCESSOR_SETTLE_POLL_MS) || 250;
-  /** @decision e07b1b1a — Code Review MAJOR fix: RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS bounds the
-   *  UNRESOLVED ALERT, never the observation itself — `settleRecycleHandoff` keeps watching past it
-   *  (see that method's own doc). This is the slower cadence it falls back to once past the bound, since
-   *  by then the successor is presumed to need much longer (a genuine hang, or a codex boot right at its
-   *  own diagnostic ceiling) and a tight poll would just burn cycles for no benefit. */
+  /** @decision e07b1b1a — Code Review MAJOR fix: RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS bounds the UNRESOLVED
+   *  ALERT, never the observation itself — `settleRecycleHandoff` keeps watching past it (see that method's
+   *  own doc).
+   *
+   *  This is the slower cadence it falls back to once past the bound, since by then the successor is presumed
+   *  to need much longer (a genuine hang, or a codex boot right at its own diagnostic ceiling) and a tight poll
+   *  would just burn cycles for no benefit. */
   private static readonly RECYCLE_SUCCESSOR_SETTLE_SLOW_POLL_MS = Number(process.env.LOOM_RECYCLE_SUCCESSOR_SETTLE_SLOW_POLL_MS) || 15_000;
   /** The initial flush-only floor (@decision e07b1b1a — preserves the pre-existing "let recycle_me's own
    *  MCP response flush first" 3s delay); env-overridable for the same hermetic-test reason as the two
@@ -10320,7 +10326,9 @@ export class SessionService {
 
   /**
    * @decision e07b1b1a — settles a manager/platform recycle's deferred predecessor-stop against REAL
-   * successor signals instead of an unconditional fixed delay. Waits the original 3s flush floor, then
+   * successor signals instead of an unconditional fixed delay.
+   *
+   * Waits the original 3s flush floor, then
    * polls, CHECKING READY FIRST EVERY ITERATION (ready always wins), for either:
    *  - `hasReachedReady(freshId)` → stop the predecessor exactly as before — even if this fires long
    *    after the unresolved alert already fired below, in which case it also records that the recycle
@@ -10345,11 +10353,12 @@ export class SessionService {
    */
   private async settleRecycleHandoff(params: { oldId: string; freshId: string; role: "manager" | "platform" }): Promise<void> {
     const { oldId, freshId, role } = params;
-    // @decision 08c81809 — the durable settle-in-flight marker (set by insertRecycleSuccessor, in the
-    // SAME transaction as freshId's own recycled_from link, well before this async function even starts
-    // running) is cleared here on EVERY terminal outcome — the ready branch, the dead-successor recovery
-    // branch, and any unexpected throw — via this finally, never inline in each branch. A daemon restart
-    // before this finally ever runs is exactly the gap reconcileStrandedRecycleSettles exists to close.
+    // @decision 08c81809 — the durable settle-in-flight marker (set by insertRecycleSuccessor, in the SAME
+    // transaction as freshId's own recycled_from link, well before this async function even starts running)
+    //
+    // is cleared here on EVERY terminal outcome — the ready branch, the dead-successor recovery branch, and
+    // any unexpected throw — via this finally, never inline in each branch. A daemon restart before this
+    // finally ever runs is exactly the gap reconcileStrandedRecycleSettles exists to close.
     try {
       // Preserves the original delay's own purpose: let the recycle_me tool call's own MCP response flush
       // before anything touches the predecessor's pty.
@@ -10384,6 +10393,7 @@ export class SessionService {
 
   /**
    * @decision e07b1b1a — makes a confirmed-dead recycle successor ineligible for crash-recovery resume:
+   *
    * unlink its stray `recycled_from` (if not already unlinked — f349f5cb's own onExit-driven
    * `reconcileNeverStartedRecycleSuccessor` may have gotten there first, for the case it covers), archive
    * it with a durable, human-readable `lastError`, AND (Code Review round 2, MAJOR) mark it
@@ -10426,7 +10436,9 @@ export class SessionService {
 
   /**
    * @decision e07b1b1a — the successor's real PROCESS is confirmed dead (`!pty.isAlive(freshId)`),
-   * independent of whether it ever reached SessionStart. NEVER RESURRECT (checked FIRST, Code Review
+   * independent of whether it ever reached SessionStart.
+   *
+   * NEVER RESURRECT (checked FIRST, Code Review
    * round 2 MINOR m1): if the predecessor is no longer really alive either (a human stopped it, or it died
    * independently), do NOT touch the dead successor's row AT ALL — no unlink, no archive, no lastError
    * overwrite, no resumability change — and do NOT reparent anything back onto the predecessor or restore
@@ -10481,16 +10493,17 @@ export class SessionService {
   }
 
   /**
-   * @decision e07b1b1a — neither settle signal fired within the bound: the successor is neither
-   * confirmed ready nor confirmed dead (a hang, or — for codex — a boot genuinely still in progress past
-   * this bound; see RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS's own doc for why that's still a safe bound to
-   * alert on). No reparenting — the successor might still come up — just alert that this recycle's
-   * outcome is unresolved. Code Review MAJOR fix: `settleRecycleHandoff` keeps polling after this fires
-   * (this bounds the NOTICE, never the wait) — a late `hasReachedReady`/`!isAlive` is still caught, just
-   * later, by that same loop, and recorded as resolved-late or recovered respectively. A daemon restart
-   * before either resolves loses this in-memory loop entirely; on the next boot `hasSuccessor(oldId)` is
-   * still true, so a durably-queued redrive of this same nudge is retired as superseded rather than
-   * re-delivered (card 08c81809 owns tracing/fixing that gap — not re-litigated here).
+   * @decision e07b1b1a — neither settle signal fired within the bound:
+   *
+   * the successor is neither confirmed ready nor confirmed dead (a hang, or — for codex — a boot genuinely
+   * still in progress past this bound; see RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS's own doc for why that's still a
+   * safe bound to alert on). No reparenting — the successor might still come up — just alert that this
+   * recycle's outcome is unresolved. Code Review MAJOR fix: `settleRecycleHandoff` keeps polling after this
+   * fires (this bounds the NOTICE, never the wait) — a late `hasReachedReady`/`!isAlive` is still caught,
+   * just later, by that same loop, and recorded as resolved-late or recovered respectively. A daemon restart
+   * before either resolves loses this in-memory loop entirely; on the next boot `hasSuccessor(oldId)` is still
+   * true, so a durably-queued redrive of this same nudge is retired as superseded rather than re-delivered
+   * (card 08c81809 owns tracing/fixing that gap — not re-litigated here).
    */
   private recordUnresolvedRecycleOutcome(oldId: string, freshId: string, role: "manager" | "platform", reason: "timeout"): void {
     const oldStillLive = this.pty.isAlive(oldId);
@@ -10569,11 +10582,12 @@ export class SessionService {
     const confirmedLiveSuccessors: string[] = [];
     const retiredSuccessorIds: string[] = [];
 
-    // @decision 08c81809 — un-archives the predecessor (snapshotAndArchiveRecovered, index.ts, already
-    // ran between the early and this later phase) so the banner is actually visible on the live rail
-    // (Code Review finding 3), stamps it, files the distinct event, and clears the marker. Idempotent:
-    // clearing an already-clear marker is a harmless no-op UPDATE, so this is safe to call unconditionally
-    // regardless of which caller reaches it.
+    // @decision 08c81809 — un-archives the predecessor (snapshotAndArchiveRecovered, index.ts, already ran
+    // between the early and this later phase)
+    //
+    // so the banner is actually visible on the live rail (Code Review finding 3), stamps it, files the distinct
+    // event, and clears the marker. Idempotent: clearing an already-clear marker is a harmless no-op UPDATE, so
+    // this is safe to call unconditionally regardless of which caller reaches it.
     const stampStranded = (predecessorId: string, freshId: string, reason: string): void => {
       this.db.restoreSession(predecessorId);
       this.db.setProcessState(predecessorId, "exited");
@@ -10588,6 +10602,7 @@ export class SessionService {
     };
 
     // @decision 08c81809 — finishes a `recovered` decision (early phase already unlinked + reparented):
+    //
     // archive the dead successor, then actually attempt to resume the predecessor. Falls through to
     // `stampStranded` if that attempt fails — the pre-check that classified this as "recovered" cannot
     // guarantee `resume()` itself succeeds.
@@ -10658,15 +10673,16 @@ export class SessionService {
         }
         void resumedPredecessor;
         if (this.db.getSession(freshId)?.recycledFrom === predecessorId) this.db.setOrchestration(freshId, { recycledFrom: null });
-        // @decision 08c81809 — KNOWN, NARROW RESIDUAL: this reparent runs AFTER index.ts's
-        // recoverStaleSessions()/deriveCrashOrphanedWorkers() already snapshotted the (still-wrong)
-        // lineage — a crash-path boot may already have attributed these workers to the dead successor and
-        // excluded them from THIS boot's own resume attempt. They ARE correctly re-parented here going
-        // forward (worker_list etc. reflect reality from this point on) — this residual only affects
-        // whether this specific boot's crash-path resume attempt reached them, not the DB's correctness
-        // after. Requires BOTH a durable ready-latch AND a later resume failure — rare by construction —
-        // and, unlike the early phase's own pre-check design, unavoidable: sessions/pty (needed to
-        // actually verify the resume, the only way to tell this branch apart from a genuinely-fine
+        // @decision 08c81809 — KNOWN, NARROW RESIDUAL:
+        //
+        // this reparent runs AFTER index.ts's recoverStaleSessions()/deriveCrashOrphanedWorkers() already
+        // snapshotted the (still-wrong) lineage — a crash-path boot may already have attributed these workers
+        // to the dead successor and excluded them from THIS boot's own resume attempt. They ARE correctly
+        // re-parented here going forward (worker_list etc. reflect reality from this point on) — this
+        // residual only affects whether this specific boot's crash-path resume attempt reached them, not the
+        // DB's correctness after. Requires BOTH a durable ready-latch AND a later resume failure — rare by
+        // construction — and, unlike the early phase's own pre-check design, unavoidable: sessions/pty
+        // (needed to actually verify the resume, the only way to tell this branch apart from a genuinely-fine
         // successor) don't exist before index.ts's derivation steps run.
         const reparentedWorkers = this.db.reparentAllChildren(freshId, predecessorId);
         this.db.reparentWakes(freshId, predecessorId);
@@ -10829,10 +10845,11 @@ export class SessionService {
       // this catch (settleRecycleHandoff is only invoked after this try block succeeds) — clear it here
       // too, or a failed recycle attempt would leave the marker permanently stuck on the predecessor.
       this.db.clearRecycleSettlePending(oldManagerId);
-      // @decision 08320d02 — archive the failed successor (listAllSessions excludes archived rows) and
-      // file the failure under the PREDECESSOR: it's the one still live (never flipped off `live` before
-      // this attempt) — `fresh` never was, so filing there would be discoverable only by timestamp
-      // proximity.
+      // @decision 08320d02 — archive the failed successor (listAllSessions excludes archived rows) and file
+      // the failure under the PREDECESSOR:
+      //
+      // it's the one still live (never flipped off `live` before this attempt) — `fresh` never was, so filing
+      // there would be discoverable only by timestamp proximity.
       this.db.archiveSession(fresh.id);
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
@@ -11003,10 +11020,11 @@ export class SessionService {
     // crash-recovery/superseded checks key off this). Other unrelated Leads stay live throughout — this is
     // a per-lineage replacement, not a global singleton.
     this.db.setProcessState(old.id, "exited");
-    // @decision 08c81809 — insertRecycleSuccessor stamps the durable settle-in-flight marker on
-    // oldLeadId in the SAME transaction as fresh's own recycled_from link above, rather than a bare
-    // insertSession — see that method's own doc for why any later point would leave a gap. Still
-    // fully synchronous (no await), so it does not disturb the atomic handoff's own no-await guarantee.
+    // @decision 08c81809 — insertRecycleSuccessor stamps the durable settle-in-flight marker on oldLeadId in
+    // the SAME transaction as fresh's own recycled_from link above, rather than a bare insertSession — see
+    // that method's own doc for why any later point would leave a gap.
+    //
+    // Still fully synchronous (no await), so it does not disturb the atomic handoff's own no-await guarantee.
     this.db.insertRecycleSuccessor(fresh, oldLeadId);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(fresh.id, "live");
