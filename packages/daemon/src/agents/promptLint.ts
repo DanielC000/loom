@@ -3,8 +3,8 @@ import type { SessionRole } from "@loom/shared";
 
 /**
  * Warn (never block) at agent create/update time when a startupPrompt names a tool that is NOT on
- * the resolved role's actual tool surface (card 5338a86a) — e.g. a Reddit Scout's kickoff saying
- * "use vault_write" when its role never mounts that tool, burning failed lookups every cold run.
+ * the resolved role's actual tool surface — e.g. a Reddit Scout's kickoff saying "use vault_write"
+ * when its role never mounts that tool, burning failed lookups every cold run.
  *
  * Two independent gaps this closes vs. hoping the prompt author remembers the surface by heart:
  *  (1) match precision — scans for BOTH `mcp__<server>__<tool>` tokens AND bare snake_case tool
@@ -17,21 +17,12 @@ import type { SessionRole } from "@loom/shared";
  *      are HAND-AUTHORED from the real router registrations (verified against a live introspection
  *      dump at authoring time) and are guarded against drift by
  *      test/agent-prompt-lint-surface-drift.mjs, which instantiates the REAL routers and asserts
- *      their registered tool sets still equal these tables — so a future tool added to a router
+ *      their registered tool sets still equal these tables — a future tool added to a router
  *      without updating this file fails that test instead of silently rotting this lint.
  *
- * Deliberately NOT modeled here (accepted approximation gaps, all erring toward NOT warning):
- *  - Companion-only tools (chat_reply, skill_author/list/read/remove, board_create/board_update on
- *    loom-orchestration) are gated on a LIVE `companionSessionIds` binding, not resolvable from a
- *    role alone, and reachable from manager OR worker OR assistant — see COMPANION_APPROX_ALLOW.
- *  - Manager tools further gated on live DB/project state (peer links, deployCommand configured)
- *    are treated as always-on-surface for "manager" here (the manager static list already includes
- *    them) — an approximation that never causes a spurious "did you mean" for a live-gated tool.
- *  - operator role's platform.operatorEnabled live gate: not modeled; a profile with role:"operator"
- *    is checked against the full operator tool list regardless of whether the flag is currently on.
- *  - External/dynamic MCP servers (playwright's full tool set, any owner-added capability-catalog
- *    server) are NOT enumerated — their tool names aren't statically known in this codebase, so a
- *    prompt naming one of those tools is never flagged (false-negative, not false-positive).
+ * @decision 5338a86a — this lint's known gaps (companion-only tools, live-gated manager tools, the
+ * operator-flag gate, external/dynamic MCP servers) are deliberately left unmodeled; every one errs
+ * toward NOT warning rather than a false positive.
  */
 
 // --- Layer B: hand-authored per-router tool tables (verified against a live buildServer() dump) ---

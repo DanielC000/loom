@@ -53,23 +53,14 @@ export function __setProcessBuiltInfoForTest(sha: string | null, dirty: boolean 
 }
 
 /**
- * Card 062fa934, Code Review MINOR — the one production read of `computeDeployStaleness()` that carries
- * the captured `processBuiltSha`/`processBuiltDirty` pair (module-level, captured once above), so
- * `buildServedStatus` (the `served_status` tool / `GET /api/deploy-status`) and
- * `SessionService.resumeFleetOnBoot`'s post-restart "your merged code is now live" nudge (sessions/
- * service.ts) read the identical signal rather than two independently-wired calls that could silently
- * drift (e.g. one passing the pair, the other forgetting to and always reading
- * `deploySignatureMismatch: false`). Every other positional param stays at its real-production default
- * (undefined) — see `computeDeployStaleness`'s own doc for what each of those defaults to.
+ * The one production read of `computeDeployStaleness()` that carries the captured
+ * `processBuiltSha`/`processBuiltDirty` pair (module-level, captured once above). Every other
+ * positional param stays at its real-production default (undefined) — see `computeDeployStaleness`'s
+ * own doc for what each of those defaults to.
  *
- * NOT the only production caller of `computeDeployStaleness()` — `manager-prompt.ts`'s
- * `composeManagerStartupPrompt` (the `[loom:deploy-stale]` manager-spawn advisory) calls it directly, with
- * no override, and so always reads `deploySignatureMismatch: false`. That is deliberate, not an
- * oversight: that call site only ever reads the mtime-derived `stale`/`commitsBehind`/`runningCodeBuiltAt`
- * fields — it has no use for the signature-mismatch detector this function's captured pair exists to feed,
- * so it was never worth wiring through the same module-level state. If a THIRD caller ever needs
- * `deploySignatureMismatch` too, route it through this function rather than adding a fourth independent
- * `computeDeployStaleness()` call site.
+ * @decision 062fa934 — never add another `computeDeployStaleness()` call site that needs
+ * `deploySignatureMismatch`; route it through this function so `buildServedStatus` and
+ * `resumeFleetOnBoot` keep reading the identical signal instead of silently drifting apart.
  */
 export function currentDeployStaleness(): DeployStalenessResult {
   return computeDeployStaleness({ processBuiltSha, processBuiltDirty });

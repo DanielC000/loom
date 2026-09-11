@@ -283,20 +283,14 @@ export function bundledProfileByName(name: string): Omit<Profile, "id"> | undefi
  * ALSO advances the `base` snapshot to shipped (mirrors resetSkillToBundled's base re-sync) so the
  * post-reset state is PRISTINE (mine == base == shipped) rather than a stale "update available".
  *
- * ⚠️ FIXED at card 11c3dc70 — previously a raw `{ ...bundled }` spread, NOT a `MERGEABLE_PROFILE_FIELDS`-
- * filtered patch, unlike `adoptProfileUpdate`. `db.updateProfile` treats an absent key as "leave column
- * as-is", so ANY optional field a `BUNDLED_PROFILES` entry OMITS (not just `harness` — also
- * `browserTesting`/`documentConversion`/`restrictedTools`/`noCommit`/`connections`/`vaultWrite`/
- * `capabilities`) was simply absent from the raw spread and silently survived reset (proven empirically
- * per field, card 11c3dc70's DoD-1 probe — each showed `STILL_CUSTOM_AFTER_RESET` before this fix, with a
- * `description` positive control proving the probe itself could detect a real revert). Root fix: overlay
- * `normalizedShippedFields(bundled)` (customization.ts) — the SAME normalization `adoptProfileUpdate`
- * already gets via `mergeProfile`'s `ns[f]` lookups — so every `MERGEABLE_PROFILE_FIELDS` entry always
- * carries a concrete, defined value in the patch, never an absence for `updateProfile` to skip. This also
- * resolves reset and adopt disagreeing about what "every shipped field" means (both now derive it from
- * ONE normalization instead of reset's own one-off `?? "claude"` literal). Per-field null-vs-absent
- * contracts stay exactly as `normalizeFields` already documents them (e.g. `harness` has no `null`
- * member, so its absence there is a defined `"claude"` literal, not `?? null`).
+ * Every `MERGEABLE_PROFILE_FIELDS` entry in the patch is overlaid via `normalizedShippedFields(bundled)`
+ * (customization.ts) — the SAME normalization `adoptProfileUpdate` already gets via `mergeProfile`'s
+ * `ns[f]` lookups — so the patch always carries a concrete, defined value, never an absence for
+ * `db.updateProfile` (which treats an absent key as "leave column as-is") to silently skip.
+ *
+ * @decision 11c3dc70 — never revert to a raw `{ ...bundled }` spread here without the
+ * `normalizedShippedFields` overlay; any `MERGEABLE_PROFILE_FIELDS` entry a bundled profile omits would
+ * then silently survive reset instead of reverting.
  */
 export function resetProfileToBundled(db: Db, id: string): boolean {
   const existing = db.getProfile(id);
