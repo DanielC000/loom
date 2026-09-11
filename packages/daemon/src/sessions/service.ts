@@ -15504,141 +15504,58 @@ export class SessionService {
   }
 
   /**
-   * Worker self-gate (orchestration `run_gate`, card 7f96aa09 — structural fix B for d5c5ccdf): run THIS
-   * project's OWN configured `gateCommand` in the CALLING worker's own worktree, daemon-mediated and bound
-   * by the SAME `gateSemaphore`/`maxConcurrentGates` cap the merge/deploy gates already share — so N
-   * parallel workers self-gating can no longer structurally exceed the total-lane budget, regardless of
-   * whether each worker remembers the `LOOM_GATE_TEST_CONCURRENCY=1` convention (fix A, d5c5ccdf — which stays
-   * documented as the fallback for a project with no `gateCommand` configured at all, or an ad-hoc local
-   * run outside `run_gate`).
+   * @decision 7f96aa09 — Worker self-gate (`run_gate`) reuses the merge gate's own `gateCommand` so a
+   * worker's pre-merge preview and the merge gate itself can never silently diverge; it is a preview/
+   * rehearsal only, never a second merge gate.
    *
-   * REUSES `gateCommand` rather than a second "worker DoD command" config field — `gateCommand` already
-   * runs in the worker's own worktree at merge-confirm time (after main is merged into it); calling
-   * `run_gate` pre-merge just previews the SAME command a little earlier, on the branch's own pre-merge
-   * state. This avoids a divergence footgun where a worker's self-check and the actual merge gate could
-   * silently differ.
+   * @decision 50c1e0d0 — the result-consumption fix closes three footguns: a settle-grace re-call must
+   * be served from cache rather than re-run, mid-flight staleness needs its own independent signal, and
+   * every `ran:true` outcome carries `validatedHead`.
    *
-   * A SINGLE run — unlike `confirmWorkerMerge`, no transient-kill auto-retry (the caller can just re-call
-   * `run_gate` itself), no union-merge, no stranded-work check, no squash/finalize: this is a preview/
-   * rehearsal, not the merge gate itself.
+   * VALIDATED-HEAD STAMP (footgun 3): every `ran:true` settled outcome (pass or fail) carries
+   * `validatedHead` — the worktree `HEAD` `run()` stamped at its own start — so a caller reading a
+   * `[loom:gate-done]`/`[loom:gate-failed]` nudge (or a cached settle-grace result) can tell exactly
+   * which commit it's about, without having to trust that "the worktree hasn't moved since."
    *
-   * LONG-RUNNING (mirrors `confirmWorkerMergeTracked`): wrapped in `PendingOpRegistry.attach` under kind
-   * "gate", key `gate:${workerSessionId}` — a fast run (under `SYNC_ATTACH_BUDGET_MS`) returns inline; a
-   * genuinely slow one degrades to `{settled:false, op, attachedToInFlight, staleAgainstWorktree}` and, on
-   * its eventual settle, pushes a `[loom:gate-done]`/`[loom:gate-failed]` nudge straight to the WORKER's
-   * own session (not a manager — the caller and the beneficiary are the same session here) via
-   * `pty.enqueueStdin`. The key is single-flight per worker and needs no dead-owner eviction: unlike the
-   * "merge" kind (owned by a manager distinct from the worker being confirmed), a "gate" op's only possible
-   * caller IS the session named by its own key.
+   * RESIDUAL BOUNDARY: `headCurrent`/`validatedHead` are computed ONCE at the original settle — not
+   * fixed by ALSO stamping+comparing on EVERY cache hit, which would mean re-running
+   * `computeWorktreeGateStamp` on every cache hit just to potentially discard it, adding a git
+   * round-trip to the fast path this retention window exists to keep fast, for a case (a fast-gate
+   * project + an edit inside a 5s window, striking AFTER an already-clean settle) the origin incidents
+   * never actually hit.
    *
-   * RESULT-CONSUMPTION FIX (card 50c1e0d0 — three footguns the pending note used to paper over):
-   *  (1) SETTLE-GRACE RE-CALL: `retainMs: GATE_OP_RETAIN_MS` on `attach()`'s opts means a re-call landing
-   *      within that window AFTER the op settles is served the SAME settled result (keyed by the SAME
-   *      `opId`) straight out of `PendingOpRegistry`'s retention cache — `run()` below is NOT invoked again
-   *      — instead of silently starting a brand-new ~gate-timeout-long run (the origin incident: a re-call
-   *      meant to "fetch the passed result" instead ran a whole fresh gate that then failed on unrelated
-   *      flakes). "Served" here means served WHEN USABLE — `isRetainedResultUsable` below (card 79b0ee52,
-   *      polarity-inverted by card ec994992) states what IS usable rather than enumerating what isn't: only
-   *      a value that actually ran, reached a real pass/fail verdict, and settled with a current HEAD is
-   *      served from cache. A cancelled, never-ran, or tree-contaminated cache hit falls through to a
-   *      genuinely fresh run instead, same as a real cache miss.
-   *      RESIDUAL BOUNDARY (Code Review, card 50c1e0d0 hardening — narrowed by card 79b0ee52, narrowed
-   *      again by card ec994992): a USABLE cached path (`ran:true`, a real `passed` verdict, `headCurrent`
-   *      exactly `true`) is still served straight out of `PendingOpRegistry` without re-deriving
-   *      computed ONCE at the original settle (`validatedHead`, plus `headCurrent`/`headWarning` — card
-   *      39196378, a caller CAN detect a HEAD change by comparing `validatedHead` to their own HEAD even
-   *      without re-deriving it), not a fresh dirty-state comparison taken NOW. A caller who makes an
-   *      UNCOMMITTED edit AFTER the cached run already settled CLEAN (`headCurrent:true`) and re-calls
-   *      within the grace window still sees that cached `{passed, validatedHead:<unchanged>,
-   *      headCurrent:true}` with NO fresh staleness signal for the NEW edit — footgun #2 stays closed for
-   *      the MID-FLIGHT branch above, and (as of 79b0ee52) for a run that settled already-contaminated, but
-   *      NOT for an edit made entirely AFTER an already-clean settle. In practice this only matters for a
-   *      fast (<`SYNC_ATTACH_BUDGET_MS`) `gateCommand`: Loom's own ~8-minute gate always degrades to the
-   *      covered in-flight path first.
+   * @decision 39196378 — a caller CAN detect a HEAD change by comparing `validatedHead` to their own
+   * HEAD even without re-deriving it.
    *
-   *      Deliberately not fixed by ALSO stamping+comparing on EVERY cache hit: that would mean re-running
-   *      `computeWorktreeGateStamp` on every cache hit just to potentially discard it, adding a git round-trip
-   *      to the fast path this retention window exists to keep fast, for a case (a fast-gate project + an
-   *      edit inside a 5s window, striking AFTER an already-clean settle) the origin incidents never actually
-   *      hit. `isRetainedResultUsable` already closes the higher-value cases — a settled result that KNOWS
-   *      it's contaminated, or never reached a real verdict at all (cancelled) — for free, since `ran`,
-   *      `passed`, and `headCurrent` are all computed once at settle regardless of whether anyone ever
-   *      re-calls; it's the free half of this tradeoff, not a substitute for the rest of it. If
-   *      the residual above becomes a real footgun in practice, the fix is comparing `validatedHead`/a fresh
-   *      dirty stamp on every cache-hit path too — not today's fix.
-   *  (2) MID-FLIGHT STALENESS: `attachedToInFlight` (computed via a `peek()` BEFORE this call's own
-   *      `attach()`, so it reflects whether SOME EARLIER call — not this one — already has an op running
-   *      under this key) tells a re-caller it attached to an already-running op rather than starting one.
-   *      `staleAgainstWorktree` (via `gateStampsDiffer` against the {@link WorktreeGateStamp} `run()`
-   *      recorded in `gateStartStamps` at the moment IT started) tells the caller whether the worktree has
-   *      moved on since — a new commit, or an uncommitted edit — since that in-flight op is validating
-   *      whatever was on disk when IT started, not necessarily what's on disk now. Both fields are computed
-   *      independently of each other and are meaningful even for the ORIGINATING call itself (a slow gate
-   *      degrading past `SYNC_ATTACH_BUDGET_MS` on its own first call reports `attachedToInFlight:false`
-   *      but can still report `staleAgainstWorktree:true` if the worktree was edited during that same wait).
-   *  (3) VALIDATED-HEAD STAMP: every `ran:true` settled outcome (pass or fail) carries `validatedHead` — the
-   *      worktree `HEAD` `run()` stamped at its own start — so a caller reading a `[loom:gate-done]`/
-   *      `[loom:gate-failed]` nudge (or a cached settle-grace result) can tell exactly which commit it's
-   *      about, without having to trust that "the worktree hasn't moved since."
+   * @decision 79b0ee52 — `isRetainedResultUsable` states what IS usable rather than enumerating what
+   * isn't; an unusable cache hit falls through to a fresh run exactly like a real cache miss.
    *
-   * CRASH-SAFETY: the gate's child process is spawned by the DAEMON (`runGateStep`), never the worker's own
-   * pty — `gateSemaphore.runExclusive`'s `finally{release()}` fires on the child's own close/error/timeout
-   * regardless of whether the calling worker session is still alive, so a worker dying mid-gate cannot leak
-   * a held semaphore slot. A worker that dies before ever consuming a `{status:"pending"}` result just
-   * wastes one gate run — harmless.
+   * CRASH-SAFETY: the gate child is spawned by the daemon, never the worker's own pty, so a worker
+   * dying mid-gate cannot leak a held semaphore slot; dying before consuming a pending result just
+   * wastes one harmless gate run.
    */
   async runWorkerGate(workerSessionId: string, opts?: { force?: boolean }): Promise<
     | { settled: true; ok: true; value: WorkerGateResult }
     | { settled: true; ok: false; error: unknown }
     | { settled: false; op: PendingOpView; attachedToInFlight: boolean; staleAgainstWorktree: boolean }
-    // REFUSED RE-ATTACH (card a0d912f5): a re-call that would otherwise attach to an in-flight op ALREADY
-    // known (before ever attaching) to be running against a stale worktree — refused outright rather than
-    // spending the sync-attach budget on a result the caller would just have to discard. `opts.force`
-    // bypasses this and falls through to the ordinary attach path below.
+    // @decision a0d912f5 — a refused re-attach is not unconditional: `opts.force` bypasses it and falls
+    // through to the ordinary attach path, for a caller that has already decided to proceed against a
+    // known-stale in-flight op.
+    //
+    // WHY REFUSE OUTRIGHT: a re-call that would otherwise attach to an in-flight op ALREADY known
+    // (before ever attaching) to be running against a stale worktree is refused outright rather than
+    // spending the sync-attach budget on a result the caller would just have to discard.
     | { settled: false; refused: true; op: PendingOpView; attachedToInFlight: true; staleAgainstWorktree: true }
   > {
-    // FUNCTION-ENTRY CAPTURE (card 7dc0cca5): stamped as the FIRST statement, before `checkGateTimeoutBreaker`
-    // or anything else below that can `await` and yield. SEMANTIC: `opStartedAt` means the instant this
-    // call to run_gate WAS ISSUED, not whenever this function happened to get around to stamping it after
-    // some incidental prefix work — a wake scheduled any time at-or-after the call was issued genuinely
-    // was "scheduled while parked on this op" and belongs in `autoCancelSettleWakes`'s
-    // `createdAt >= opStartedAt` reap. Capturing it here (before ANY await) is what makes that true by
-    // construction, instead of by luck.
+    // @decision 7dc0cca5 — `run_gate`'s own start instant must be captured as the first statement,
+    // before any await — closing a real cross-request race with a batched `wake_me` call that could
+    // otherwise slip a fallback wake past the auto-cancel reap (finding 23d8864a, card 9d521792).
     //
-    // THE RACE THIS CLOSES IS A REAL CROSS-REQUEST ONE, NOT MERELY "THE CALLER DIDN'T AWAIT": `run_gate`
-    // (this file, served at /mcp-orch/:sessionId) and `wake_me` (mcp/server.ts, served at the SEPARATE
-    // /mcp/:sessionId task-MCP route — see gateway/server.ts) are two independent MCP router instances
-    // behind two independent Fastify routes, with NO shared per-session lock between them. A worker whose
-    // turn emits both as parallel tool calls (Claude routinely batches tool calls it judges independent,
-    // and nothing here tells it not to) can have `wake_me`'s `db.insertWake` land on the SAME event loop
-    // WHILE this function's own prefix is still running, at any await point below (`checkGateTimeoutBreaker`
-    // — a no-op in the common case, but a REAL bounded git subprocess call, up to `gitOpMs`/15s, once this
-    // branch has tripped the GATE_TIMEOUT_BREAKER_THRESHOLD=3 circuit — so the vulnerable window is normally
-    // ~2ms but can legitimately reach SECONDS under load once a branch's gate has been timing out).
-    //
-    // THIS IS NOT AN EDGE CASE THE WIDER WINDOW HAPPENS TO TOLERATE — IT IS THE FEATURE'S OWN PRIMARY USE
-    // CASE (card 9d521792): "kick off the gate, and set a fallback wake in case it never comes back" IS
-    // auto-cancel-on-settle's whole reason to exist, and expressing that as ONE batched turn (rather than
-    // waiting a full turn to see run_gate's pending reply before scheduling the wake) is the single most
-    // natural way for a worker to say it. Under the OLD late stamp, that exact natural expression could
-    // land the wake's `createdAt` BEFORE `opStartedAt` and slip through un-reaped — quietly reproducing
-    // the original stale-fallback-wake bug (finding 23d8864a) the whole feature exists to close, for
-    // precisely the pattern it was built to cover. So this earlier capture doesn't just remove a test
-    // race; it closes a real gap in the feature's primary use case. The PREVIOUS fallback (`new Date()`
-    // captured after `preAttachPeek` below, i.e. after that await) raced exactly this: under host CPU
-    // contention the resume could land in the NEXT millisecond, making `opStartedAt` read LATER than a wake
-    // the caller created earlier in wall time, silently excluding it from the reap (evidence: instrumented
-    // repro, wake createdAt/opStartedAt 1ms apart, no fail-safe branch hit — see card 7dc0cca5's worker_report
-    // history for the full instrumented trace and the deterministic 10/10-fail / 10/10-pass injection test).
-    // Fixing this at the SOURCE (capture earlier) rather than loosening the comparison — a slack/fudge
-    // factor on `>=` would only lower the failure rate, not remove the race (the exact anti-pattern
-    // card 9d521792 already rejected once for the settle-time-peek version of this same class of bug).
-    //
-    // RESIDUAL (accepted, not a bug): once the breaker HAS tripped and the window runs to seconds, an
-    // UNRELATED wake the same worker created for something else in that window is also reaped — this
-    // enlarges an EXISTING class (the design already reaps any wake created after `opStartedAt` regardless
-    // of purpose) rather than creating a new one, and the settle nudge wakes the worker anyway, so the
-    // worst case is a redundant wake lost, never a stranded worker.
+    // `run_gate` (this file) and `wake_me` (`mcp/server.ts` — see `gateway/server.ts`) are two
+    // independent MCP router instances with no shared per-session lock: expressing "kick off the gate,
+    // set a fallback wake" as ONE batched turn — rather than waiting a full turn to see run_gate's
+    // pending reply before scheduling the wake — is the single most natural way for a worker to say it,
+    // and is exactly what the old late stamp raced.
     const fnEntryInstant = new Date().toISOString();
     this.requireWorker(workerSessionId, "run_gate");
     const worker = this.db.getSession(workerSessionId);
@@ -15685,68 +15602,35 @@ export class SessionService {
     // found here was started by an EARLIER call (this one is merely attaching), never by this call itself.
     const preAttachPeek = this.pendingOps.peek(key);
     const attachedToInFlight = preAttachPeek?.state === "running";
-    // OP-START CAPTURE (card 9d521792 CR follow-up, fallback re-sourced by card 7dc0cca5): an
-    // already-running entry's OWN `startedAt` always wins — this call is merely attaching/re-observing,
-    // never the one that started that op. Only the FALLBACK (no RUNNING entry — either nothing peeked at
-    // all, or a settled/RETAINED terminal view — this call is about to mint a fresh one) changed: it now
-    // reuses `fnEntryInstant` (captured above, before ANY await in this function) instead of a fresh
-    // `new Date()` read here — see `fnEntryInstant`'s own doc for why a post-await capture raced the
-    // caller's own wake-scheduling under host load.
+    // @decision 7dc0cca5 — the fallback op-start stamp (no running entry to attach to) reuses the
+    // single `fnEntryInstant` captured above rather than a fresh timestamp here, so the retained/
+    // expired-race window this ternary guards against can never reopen via a "simpler" `??` rewrite.
     //
-    // WHY THE CONDITION STAYS `attachedToInFlight ? … : …` INSTEAD OF `preAttachPeek?.startedAt ?? …`
-    // (Code Review, card 7dc0cca5): a RETAINED (settled-but-cached) peek is CURRENTLY unreachable-by-
-    // consumption here — `attach()`'s own retained-hit check (pending-ops.ts ~347-365) reads the SAME
-    // `this.retained` map this `preAttachPeek` just read, and short-circuits BEFORE ever creating a fresh
-    // entry or invoking the settle closure that reads `opStartedAt` (via `autoCancelSettleWakes`) — so
-    // today, whichever value `opStartedAt` takes in the retained case is dead: never consumed either way.
-    // We deliberately do NOT rely on that to justify a `preAttachPeek?.startedAt ?? fnEntryInstant`
-    // simplification, because that "currently unreachable" conclusion itself rests on a TIMING assumption:
-    // `peek()` and `attach()` each evaluate `Date.now() < retainedHit.expiresAt` with their OWN `Date.now()`
-    // read, moments apart. If a retained entry's expiry falls between those two reads, `peek()` sees it as
-    // retained (non-running) while `attach()` sees it as expired and mints a FRESH op — and THEN the settle
-    // closure genuinely runs and would consume a stale PREVIOUS op's `startedAt`, over-cancelling wakes
-    // created any time since that earlier op began. The window is microsecond-wide, but this whole card
-    // exists because a comparably narrow window (a single await's microtask-resume gap) turned out to be
-    // real under host load, not theoretical — so a form that rests on nothing (this ternary: a retained/
-    // non-running peek can NEVER supply `startedAt`, full stop) beats a form that's merely correct by
-    // today's control-flow analysis. If you're reading this because `??` looks like a clean simplification:
-    // it was considered and rejected for exactly this reason — don't reintroduce it.
+    // Only the FALLBACK (no RUNNING entry — either nothing peeked at all, or a settled/RETAINED
+    // terminal view — this call is about to mint a fresh one) changed: it now reuses `fnEntryInstant`
+    // instead of a fresh `new Date()` read here. So a form that rests on nothing (this ternary: a
+    // retained/non-running peek can NEVER supply `startedAt`, full stop) beats a form that's merely
+    // correct by today's control-flow analysis.
     const opStartedAt = attachedToInFlight ? preAttachPeek!.startedAt : fnEntryInstant;
-    // PRE-EMPTIVE STALE-ATTACH REFUSAL (card a0d912f5, NARROWED by Code Review): only reachable when
-    // `attachedToInFlight` — i.e. this call is merely RE-ATTACHING to an op an EARLIER call already
-    // started (the originating call itself has nothing to pre-emptively refuse). PendingOpRegistry's own
-    // "running" state means only that SOME earlier call's `run()` closure is executing — NOT that the
-    // underlying GateSemaphore op has been ADMITTED: a "low"-priority worker self-check routinely sits
-    // QUEUED behind higher-priority merge/deploy gates for a long time while its OWN closure (and
-    // therefore `attachedToInFlight`) already reads "running". Refusing a merely-QUEUED op against its
-    // FIRE-TIME stamp would be exactly the "cries wolf on the benign case" mistake `describeGateHeadCurrency`'s
-    // own doc warns against — a commit made during the queue wait is fully covered by whatever the gate
-    // builds once it's actually admitted (RELABELED, not RACY), so there is nothing to refuse there; fall
-    // through to the ordinary attach + advisory `staleAgainstWorktree` flag instead, byte-identical to
-    // before this card. Only a GENUINELY ADMITTED op — confirmed via a FRESH `gateSemaphore.snapshot()`
-    // read, never inferred from `attachedToInFlight` alone — is eligible, and it's compared against
-    // {@link gateAdmitStamps} (the ADMISSION checkpoint), never {@link gateStartStamps} (fire time).
+    // @decision a0d912f5 — a merely RE-ATTACHING call's own `attachedToInFlight` means only that some
+    // earlier call's closure is running, never that the semaphore op is ADMITTED; the refusal fires only
+    // for a genuinely admitted op, confirmed via a fresh `gateSemaphore.snapshot()` read.
+    //
+    // @decision 39196378 — refusing a merely-QUEUED op against its fire-time stamp would be exactly the
+    // "cries wolf on the benign case" mistake this card warns against: a commit made during the queue
+    // wait is RELABELED, not RACY, and is fully covered by whatever the gate builds once admitted.
     if (attachedToInFlight && !opts?.force) {
       const semEntry = this.gateSemaphore.snapshot().entries.find(
         (e) => e.sessionId === workerSessionId && e.gateType === "worker" && e.projectId === worker.projectId,
       );
       if (semEntry?.phase === "running") {
         const inFlightAdmitStamp = this.gateAdmitStamps.get(key);
-        // UNREADABLE-HEAD GUARD (Code Review, Minor [3]): `computeWorktreeGateStamp` never throws — on a
-        // git error/timeout it returns `{head:null}`, and `gateStampsDiffer` treats a null head as
-        // "differs" BY DESIGN (an unreadable read never gets to assert unchanged) — correct for the
-        // existing ADVISORY flag, but wrong here: a REFUSAL's note asserts as FACT that a commit landed,
-        // which an unreadable stamp never actually established. Both stamps must have a real head before
-        // this ever refuses; an unreadable one falls through to the ordinary attach instead, same as the
-        // "not genuinely admitted" case above — never a refusal built on a claim the code couldn't verify.
+        // UNREADABLE HEAD: a null worktree-stamp head never proves a commit landed — this refusal must
+        // never fire on an unreadable stamp; fall through to the ordinary attach instead.
         if (inFlightAdmitStamp && inFlightAdmitStamp.head !== null) {
           const preCheckStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
-          // RE-PEEK (Code Review): the git read just above is a real, bounded await — the in-flight op can
-          // genuinely settle DURING it. A refusal naming an opId that's already gone would send the caller
-          // to `gate_cancel` for an op it would report `not_found` for. Confirm the op is STILL attachable
-          // (still "running" in PendingOpRegistry) before ever refusing — a settle in this narrow window
-          // instead falls through to the ordinary attach, which correctly serves whatever the op actually
-          // settled to (a real result, or a retained/cancelled outcome — never this refusal's business).
+          // RE-PEEK: the git read above is a real await; confirm the op is STILL running before ever
+          // refusing, so a settle in this window is never mistaken for a live op to cancel.
           const postCheckPeek = this.pendingOps.peek(key);
           if (postCheckPeek?.state === "running" && preCheckStamp.head !== null && gateStampsDiffer(inFlightAdmitStamp, preCheckStamp)) {
             return { settled: false, refused: true, op: postCheckPeek, attachedToInFlight: true, staleAgainstWorktree: true };

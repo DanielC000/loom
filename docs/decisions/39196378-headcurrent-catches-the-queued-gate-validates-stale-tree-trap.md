@@ -16,6 +16,8 @@ Four outcomes, worded differently so a genuine warning doesn't get trained out b
 
 Deliberately not a fix to snapshot semantics: this reports on reality, it does not change what gets tested — re-snapshotting at admission would silently change what a queued gate validates and invalidate the `attachedToInFlight`/`staleAgainstWorktree` contract elsewhere in the file. The `admitStamp` read is read-only diagnostics, exactly like `startStamp`/`settleStamp` — it never feeds back into what `runGateSequential` executes against.
 
+A third site cites this card inside its own RESIDUAL BOUNDARY paragraph (card 50c1e0d0 hardening, narrowed by 79b0ee52, narrowed again by ec994992) — about `headCurrent`/`validatedHead` being computed ONCE at the original settle — to make exactly one further claim: a caller CAN detect a HEAD change by comparing `validatedHead` to their own HEAD even without re-deriving it.
+
 ## Do not
 
 - Do not skip stating `headCurrent`/`headWarning` on a settled result — this closes a confirmed live incident (a queued gate validating an already-stale tree) on a peer daemon; a `false` value must always come with a `headWarning` explaining which of the two shapes it is.
@@ -26,3 +28,5 @@ Deliberately not a fix to snapshot semantics: this reports on reality, it does n
 Inline comment in `packages/daemon/src/sessions/service.ts` (`WorkerGateResult.headCurrent`/`headWarning`): lines 664-695, as of commit `f9caa77e30d5c1a6dd994b6203261968c0dbf94f`. Relocated by card `8f4c8a8f`; no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
 
 The Mechanism section above is from a second site citing the same card: the JSDoc directly above `SessionService.describeGateHeadCurrency` (tranche 41, service.ts, ~lines 11388-11435 as of commit `c3751783`) — genuinely new nuance (the code-traced mechanism proof, the three-stamp rationale, the four-way outcome split) not previously captured by this record; anchored there, not duplicated as a second file, per the one-record-per-id rule.
+
+The detect-a-HEAD-change paragraph above is from that THIRD site: `runWorkerGate`'s own JSDoc in `packages/daemon/src/sessions/service.ts` (tranche 61, ~lines 15527-15528 as of this tranche's HEAD).

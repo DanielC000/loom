@@ -14,14 +14,19 @@ Why a separate map, not a reuse of `gateStartStamps`: the pre-emptive stale-atta
 
 This map is read ONLY once the caller has independently confirmed (via a fresh `gateSemaphore.snapshot()` read) that the op is genuinely admitted, not merely queued — never trust its mere presence as proof of that on its own, since a raced entry could theoretically outlive its own queued phase in this map's absence rather than its presence (in practice this is only ever written from inside the admitted branch, so this is belt-and-suspenders, not a known gap).
 
+The refusal built on this map is not unconditional: `opts.force` bypasses it and falls through to the ordinary attach path, for a caller that has already decided to proceed against a known-stale in-flight op.
+
+`PendingOpRegistry`'s "running" state means only that SOME earlier call's closure is executing, NOT that the `GateSemaphore` op is ADMITTED: a "low"-priority self-check routinely sits QUEUED behind higher-priority gates while its closure already reads "running" — the refusal fires only once this map confirms genuine admission, never on `attachedToInFlight` alone.
+
 ### Do not
 
 - Do not "simplify" `gateAdmitStamps` back into `gateStartStamps` — collapsing the two set-sites (fire-time vs admission-time) reintroduces the queued-op false refusal `run-gate-result-consumption.mjs` scenario (D) exists to prevent.
 - Do not treat this map's mere presence as proof the op is admitted — always independently confirm via a fresh `gateSemaphore.snapshot()` read first.
+- Do not treat the refusal as unconditional — `opts.force` is the intended bypass.
 
 ### Source
 
-Inline comment in `packages/daemon/src/sessions/service.ts` (the `gateAdmitStamps` field doc, `SessionService`): originally lines 1899-1924, as of this tranche's HEAD. Relocated by card `9f4f8e5a` (tranche 7); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+Inline comment in `packages/daemon/src/sessions/service.ts` (the `gateAdmitStamps` field doc, `SessionService`): originally lines 1899-1924, as of this tranche's HEAD. Relocated by card `9f4f8e5a` (tranche 7); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped. `opts.force`/`attachedToInFlight` above: `runWorkerGate`'s return-type/refusal comments (tranche 61).
 
 ## Decision B: `gate_cancel`'s `params.scope` is a REQUIRED discriminator, never optional (unrelated decision, same card id)
 
