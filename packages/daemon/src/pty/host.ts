@@ -9494,31 +9494,15 @@ export class PtyHost {
   }
 
   /**
-   * Resolve the resume-summary gate (see `isResumeSummaryGate`/`resumeGateCursorOption`) by pressing
-   * Down EXACTLY ONCE and then CONFIRMING the ❯ cursor actually landed on option 2 "Resume full session
-   * as-is" before ever sending Enter — replacing the old blind fire-and-forget Down+(150ms later)Enter
-   * pair that caused the 2026-07-10 incident (a delayed/reordered Down under restart load let Enter
-   * confirm the still-default option 1 "Resume from summary", silently compacting three managers' full
-   * context simultaneously).
+   * Resolve the resume-summary gate (see `isResumeSummaryGate`/`resumeGateCursorOption`).
    *
-   * Code-review catch on the first draft of this fix: a version that RETRIED the Down (re-pressing once
-   * the current press's poll window elapsed unconfirmed) reintroduced the exact class of bug it was
-   * meant to kill — if Down #1 was merely SLOW to render (not dropped), a retried Down #2 could land
-   * right after, overshooting the cursor 1→2→3 and selecting "Don't ask me again" (worse than the
-   * original bug: that persists the gate-disable AND still compacts this turn). So this presses Down
-   * ONCE and never again for the normal path — the poll BUDGET is generous (RESUME_GATE_MAX_POLLS) rather
-   * than the press being retried, which makes a two-Down-in-flight race structurally impossible.
+   * @decision sha:29b22e7e — resolveResumeGate must press Down EXACTLY ONCE and confirm the ❯ cursor
+   * landed on option 2 before ever sending Enter, or if it reads "3" instead correct with one Up and
+   * never confirm — a blind Down+Enter can confirm the wrong default option under restart load.
    *
-   * Defensive-only (should be unreachable with a single Down ever written): if the cursor is ever read at
-   * option 3 anyway, this corrects with exactly ONE Up press (never a second Down) and keeps polling —
-   * see the "3" branch below. NO path may confirm/Enter while the cursor reads "3": that would durably
-   * persist "don't ask me again" (an ONGOING config change) on top of still compacting this one time,
-   * which is a strictly worse outcome than the belt-and-suspenders give-up (still sends Enter — the
-   * pre-fix behavior — but only when the cursor is NOT known to be sitting on 3).
-   *
-   * This is the belt-and-suspenders fallback, not the primary defense — see the caller's doc comment:
-   * writeSessionSettings' env override is meant to keep this gate from ever rendering for a Loom-spawned
-   * session, so this loop should rarely if ever actually run in production.
+   * @decision c7353d24 — a retry-based first draft re-pressed Down on an unconfirmed poll window,
+   * which could let a retried press land behind a merely-slow (not dropped) first one and overshoot
+   * onto "Don't ask me again"; the shipped design presses Down once instead, with a generous budget.
    */
   private resolveResumeGate(sessionId: string): void {
     const live = this.live.get(sessionId);
