@@ -15,8 +15,7 @@ import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
 // each manager is a top-level row with the workers it spawned NESTED and folding out under it; orphan/
 // plain sessions (no manager in the set) sit at top level. Nesting keys off `dispatchedBySessionId`
 // (falling back to `parentSessionId` only when the server had no spawn_worker event to resolve from) —
-// NOT `parentSessionId` alone, which is reparented onto a recycle successor for a worker that was still
-// live when its manager recycled (card af87a9ff). This is a HISTORICAL view, so it shows who actually
+// NOT `parentSessionId` alone (card af87a9ff). This is a HISTORICAL view, so it shows who actually
 // dispatched the worker, not who owns it now; the live fleet views (Overview/Mission Control/Terminals)
 // correctly keep nesting by `parentSessionId` — see that field's own doc comment in @loom/shared. Managers
 // fold COLLAPSED by default so a large archive stays scannable. View a session's captured transcript
@@ -25,10 +24,13 @@ import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
 //
 // Pages accumulate via TRUE offset paging (React Query's useInfiniteQuery), not a client-grown `limit` —
 // a grown-limit request would eventually exceed the server's MAX_ARCHIVED_PAGE clamp and get silently
-// truncated, dead-ending "Load more" forever while `total` kept claiming more rows existed (code review
-// finding on the first pass of this card, on the live instance's real 2137-row archive). Each page stays
-// a small, bounded ARCHIVE_PAGE_SIZE request; `hasNextPage` (derived from `total` vs. rows loaded so far)
-// tells the truth about whether every row is reachable.
+// truncated, dead-ending "Load more" forever while `total` kept claiming more rows existed. Each page
+// stays a small, bounded ARCHIVE_PAGE_SIZE request; `hasNextPage` (derived from `total` vs. rows loaded
+// so far) tells the truth about whether every row is reachable.
+//
+// @decision af87a9ff — a recycled manager's still-live worker gets REPARENTED onto its successor,
+// which is why nesting can't key off parentSessionId alone; TRUE offset paging avoids a client-grown
+// limit silently truncating past the server's clamp.
 const ARCHIVE_PAGE_SIZE = 100;
 
 export default function Archive() {
