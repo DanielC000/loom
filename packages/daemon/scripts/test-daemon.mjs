@@ -827,32 +827,17 @@ const POOL_SIZE = Math.max(
 );
 
 const TEST_TIMEOUT_MS = 120_000;
-// Card cc595ca7: a HANDFUL of git-locking/merge tests do heavy REAL git subprocess work (dozens to
-// hundreds of real `git` spawns — worktree creation, concurrent merges, content-integrity sweeps) with
-// no internal timing assertion of their own; under the full suite's ~540-concurrent-git contention, that
-// real work alone can blow past the blanket TEST_TIMEOUT_MS even though nothing is actually wedged
-// (confirmed: merge-repo-mutex.mjs timed out on an unrelated card's gate, all-green standalone;
-// merge-stranded-backstop.mjs flaked the same way at cap=2/concurrent=2; gate-timeout-circuit-breaker.mjs
-// — card 6436bd5a — timed out under concurrent gate load but measured ~50-52s standalone on a quiet host,
-// 3/3 runs, with every stubbed gate call resolving instantly: its cost is entirely the real
-// `confirmWorkerMerge` union-merges + createWorktree + commits across its 8 blocks, not a hang;
-// merge-gate-reuse.mjs — card 2bb7a114 — rejected an innocent card's merge gate with `exit timeout`
-// despite being the HEAVIEST of these by real git-work volume (50 git invocations · 52
-// createWorktree/confirmWorkerMerge calls); measured 7/7 standalone runs on a quiet host: 6 clustered
-// 52-58s, but one (immediately after a fresh build) spiked to 130s — already past the blanket ceiling
-// even standalone, before any concurrent-gate contention is added on top).
-// Raising TEST_TIMEOUT_MS itself would dull fast-fail for the ~296 OTHER hermetic tests that have nothing
-// to do with git contention, so instead this is a small, explicit per-test override — same documented-list
-// shape as NOT_HERMETIC above — giving just these git-heavy tests real headroom. A genuine infinite hang
-// in any of them still gets killed and reported (verified: the same kill-and-report path fires and
-// reports `status:"timeout"` regardless of the ceiling value), just at a ceiling actually sized for their
-// real workload instead of one with zero margin.
-// merge-confirm-completion-nudge.mjs used to carry an entry here too (measured 83-84s standalone,
-// dominated by 6 deliberately real, un-injectable ~13s gate waits) — card 63bdd2cc made its sync-wait
-// budget injectable (SessionService's `syncAttachBudgetMs` opt, card 0faaaa55's DI seam) so each real
-// gate only needs to outlive a shrunk budget instead of the full 12s production one; measured 3/3
-// standalone runs (single lane, post-e082bf4d-rebase build, commit 88915101): 33.5-33.8s — no measurable
-// cost at the resolution that matters, ~3.5x under the 120s blanket TEST_TIMEOUT_MS with no override.
+// @decision cc595ca7 — do not raise the blanket TEST_TIMEOUT_MS for the handful of git-heavy
+// merge/lock tests; use a small per-test override map instead (dulls fast-fail for ~296 unrelated
+// hermetic tests otherwise) — a real hang is still killed+reported regardless of ceiling value.
+// @decision 6436bd5a — gate-timeout-circuit-breaker's cost is real confirmWorkerMerge/
+// createWorktree/commits across its 8 blocks, not a hang; measured ~50-52s standalone, 3/3 runs.
+// @decision 2bb7a114 — merge-gate-reuse is the HEAVIEST of this family by git-work volume and the
+// one that actually rejected a real production merge gate with `exit timeout`; measured up to 130s
+// standalone (7 runs), already past the blanket ceiling alone, before any gate contention.
+// @decision 63bdd2cc — merge-confirm-completion-nudge no longer needs an override: its sync-wait
+// budget is now injectable (0faaaa55's DI seam) so real gate waits only need to outlive a shrunk
+// budget; measured 3/3 standalone: 33.5-33.8s, ~3.5x under the 120s blanket ceiling.
 const TEST_TIMEOUT_OVERRIDES = {
   "merge-repo-mutex": 300_000, // 15 trials x 2 concurrent real merges + a full content-integrity sweep
   "merge-stranded-backstop": 300_000, // 2x createWorktree + reviewWorkerMerge/confirmWorkerMerge, all real git
@@ -861,22 +846,9 @@ const TEST_TIMEOUT_OVERRIDES = {
   "merge-canonical-dirty-overlap-backstop": 300_000, // card 4b7ff996, Code Review follow-up: 1x Db/SessionService boot, 4x createWorktree + 2 real submodule clones across 6 scenarios (A/E/S/U/D/G); measured 16.8s standalone (quiet host) — well under the blanket ceiling on its own. Carries this override for consistency with merge-stranded-backstop's DEMONSTRATED near-cap risk (comparable real-git-subprocess volume — both are in the ISOLATED_REAL_SPAWN_BASENAMES classification below), not a risk measured for this file itself: a proactive buffer, not a mechanism. That classification is ONLY consumed by the sequential isolation phase (ISOLATED_REAL_SPAWN_PHASE_ENABLED below), which is opt-in and default OFF, so membership in it confers no runtime scheduling protection today — this override applies unconditionally either way.
   "merge-canonical-untracked-overlap-backstop": 300_000, // card 98d6264d, sibling of merge-canonical-dirty-overlap-backstop above: 1x Db/SessionService boot, 4x createWorktree across 5 scenarios (A/B/U/I/C); measured 12.6s standalone (quiet host) — well under the blanket ceiling on its own. Carries this override for the same reason as its sibling above: consistency with the real-git-subprocess-heavy classification (ISOLATED_REAL_SPAWN_BASENAMES below), not a risk measured for this file itself — and that classification triggers no runtime scheduling on its own, since the sequential isolation phase it feeds (ISOLATED_REAL_SPAWN_PHASE_ENABLED below) is opt-in and default OFF; this override applies unconditionally regardless of that flag.
   "merge-gate-inert-diff": 300_000, // cards e5a75b65/55ea3b32: already in ISOLATED_REAL_SPAWN_BASENAMES below ("11x Db/SessionService boot, 15x real createWorktree") but was the ONLY member of that class with no override, running on the blanket 120s ceiling. Per-file history (~/.loom/gate-timing/daemon-per-file-timing.ndjson), n=15: 14 passes at 71,229-85,432ms (median 75,189ms, max 85,432ms) and 1 fail SIGTERM-killed AT the 120,000ms ceiling (censored — true cost unknown, bounded only from below, not a duration). Margin at the observed max pass vs the 120s ceiling: 1.40x. A same-window sibling gate ran this file concurrently and PASSED at 82,476ms, refuting concurrent load as the discriminating cause (present in both the failing and a passing run) — the honest attribution is a thin margin plus ordinary variance, not a race. 300k gives 3.51x margin at the observed max, matching the proactive-buffer posture already granted to merge-canonical-dirty-overlap-backstop/merge-canonical-untracked-overlap-backstop above (measured 16.8s/12.6s standalone).
-  // Card 3791b14e: DETERMINISTIC mechanism, not a probabilistic one — codex-doctrine-real-spawn.mjs:225's
-  // own internal "turn completes" waitUntil is 150_000ms (widened from 90s by card 887e10b8's own
-  // development: "150s, not the sibling file's 90s ... this host's real ~/.codex carries several bundled
-  // plugin skills that inflate the system prompt"), but this file was never added here, so it ran under
-  // the blanket TEST_TIMEOUT_MS=120_000 — an outer per-file kill ceiling SMALLER than its own inner wait.
-  // An outer ceiling below an inner wait can NEVER let that inner wait mature: the harness's own
-  // `child.kill()` fires at 120s regardless of whether the real codex turn was about to land at, say,
-  // 130s. This needs no trial count to justify (found reading the two constants against each other, not
-  // by observing a flake) and is independent of _codex-real-spawn-lock.mjs's own budget/scheduling fix
-  // alongside it in this same card — a perfect lock fix cannot rescue a wait that the outer harness kills
-  // before it can complete. 300_000 clears the 150_000 inner wait with 2x margin (consistent with this
-  // file's own siblings above), leaving headroom for the earlier ready-placeholder(20s)/busy-settle(60s)/
-  // kickoff-retry(30s)/engine-id(30s) steps plus a hard-stop(8s) to ALSO run long under real host load
-  // without the outer ceiling ever again undercutting a legitimate inner wait. RULE FOR THIS FILE: this
-  // override must stay numerically ABOVE codex-doctrine-real-spawn.mjs's own largest internal waitUntil
-  // timeout, whatever that becomes — if that file's own wait ever grows again, this must grow with it.
+  // @decision 3791b14e — this override must stay numerically ABOVE codex-doctrine-real-spawn.mjs's
+  // own largest internal waitUntil timeout (currently 150_000ms, widened from 90s per card
+  // 887e10b8) — an outer ceiling below an inner wait can never let that wait mature.
   "codex-doctrine-real-spawn": 300_000,
 };
 
