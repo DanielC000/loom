@@ -2026,12 +2026,22 @@ export type PendingGateOpState = "pending" | "settled" | "evicted-dead-owner" | 
 export type PendingGateOpVerdictKind = "pass" | "fail" | "error" | "cancelled" | "skipped";
 
 /**
- * The `verdict_payload_json` column's parsed shape (@decision 4c5bf820) — one JSON blob, not one column
+ * The `verdict_payload_json` column's parsed shape — one JSON blob, not one column
  * per field, since every field's meaning depends on BOTH `verdict` and which KIND ("gate" vs "merge") of
- * row this is. `outputTail`/`steps` are the two fields both kinds populate on both "pass"/"fail"
- * (@decision a1a8c5c4); a fail-path tail is content-selected, not positional (@decision 6ffee3e2).
- * `gateCap`/`concurrentGates`/`concurrentGatesMax` are a third such trio (@decision e2b6f900). A row
- * written before 4c5bf820/9f6598dd has NO payload at all — `null`, never a fabricated shape.
+ * row this is.
+ *
+ * @decision 4c5bf820
+ *
+ * `outputTail`/`steps` are the two fields both kinds populate on both "pass"/"fail"
+ * (@decision a1a8c5c4); a fail-path tail is content-selected, not positional.
+ *
+ * @decision 6ffee3e2
+ *
+ * `gateCap`/`concurrentGates`/`concurrentGatesMax` are a third such trio.
+ *
+ * @decision e2b6f900
+ *
+ * A row written before 4c5bf820/9f6598dd has NO payload at all — `null`, never a fabricated shape.
  */
 export interface PendingGateOpVerdict {
   reason?: string;
@@ -2062,10 +2072,16 @@ export interface PendingGateOpVerdict {
     exitCode?: number | null;
     signal?: string | null;
     timedOut?: boolean;
-    /** A fail-only stdout+stderr tail, content-selected not positional (@decision 6ffee3e2). Fail-only, so
-     *  unlike the top-level `outputTail` it has no separate pass-path case. On a "merge" rejection this and
-     *  the top-level `outputTail` deliberately carry IDENTICAL bytes (@decision a1a8c5c4) — independently
-     *  motivated, never two signals to cross-check or reconcile. */
+    /** A fail-only stdout+stderr tail, content-selected not positional.
+     *
+     *  @decision 6ffee3e2
+     *
+     *  Fail-only, so unlike the top-level `outputTail` it has no separate pass-path case. On a "merge"
+     *  rejection this and the top-level `outputTail` deliberately carry IDENTICAL bytes — independently
+     *  motivated, never two signals to cross-check or reconcile.
+     *
+     *  @decision a1a8c5c4
+     */
     stderrTail?: string;
     /** Card 361520a0, Half Three: per-step `{step, durationMs, status}` — originally the ONLY place a
      *  "merge" rejection's step timings lived, since the top-level `steps` field above was "gate"-kind
@@ -2102,14 +2118,20 @@ export interface PendingGateOpVerdict {
    *  and "fail" — this is not a failure-only signal. Populated for both "gate" and "merge" rows. */
   proximity?: { nearBudget: boolean; step: string; fraction: number };
   /** The gate concurrency triple this op's gate ran under — two imperfect lenses, not the condition
-   *  itself (@decision e2b6f900). On a "merge" row carrying `retriedFile`, the single-file retry now
+   *  itself.
+   *
+   *  @decision e2b6f900
+   *
+   *  On a "merge" row carrying `retriedFile`, the single-file retry now
    *  re-admits through `runExclusive` so this correctly describes the retry's OWN admission, except when
    *  the retry itself is cancelled while queued (@decision b9e07a4a; card 318ac7b2). */
   gateCap?: number;
   concurrentGates?: number;
   concurrentGatesMax?: number;
   /** Retrospective, tri-state persistence of the reduced-gate facts on the settled op. `true`/`false` are
-   *  both measured; only `undefined` means unrecoverable/not-applicable. (@decision 725dc89a) */
+   *  both measured; only `undefined` means unrecoverable/not-applicable.
+   *
+   *  @decision 725dc89a */
   emitCompareReduced?: boolean;
   emitCompareIdenticalCount?: number;
   emitCompareTestFiles?: string[];
@@ -2133,8 +2155,12 @@ export interface PendingGateOpVerdict {
    *  is set unconditionally on every landed squash regardless of which return branch is taken. */
   commitSubject?: string;
   /** Plumbs card 344ce950's single-file-retry fact onto this durable payload, with a DELIBERATE
-   *  measured-negative discipline (@decision 6dcb9cd3): `null` is a positive "no retry fired" assertion,
-   *  never conflate it with `undefined` (predates this card / a cancelled/error row). */
+   *  measured-negative discipline:
+   *
+   *  @decision 6dcb9cd3
+   *
+   *  `null` is a positive "no retry fired" assertion, never conflate it with `undefined` (predates this
+   *  card / a cancelled/error row). */
   retriedFile?: string | null;
   /** Card 6dcb9cd3, sibling of `retriedFile` immediately above — same measured-negative discipline: `null`
    *  whenever `retriedFile` is `null` (no retry at all). When `retriedFile` IS a real filename, this is
@@ -2146,7 +2172,9 @@ export interface PendingGateOpVerdict {
   retryPassed?: boolean | null;
   /** `retriedFile`/`retryPassed`'s sibling for the OTHER retry, the transient-kill auto-retry — same
    *  measured-negative discipline, and mutually exclusive with `retriedFile` being non-null on the same
-   *  row by construction (@decision a0d1165c). */
+   *  row by construction.
+   *
+   *  @decision a0d1165c */
   transientRetried?: boolean;
   /** The count of branches ASSEMBLED into the batch worktree — corrected naming: it is NOT necessarily
    *  the landed count (@decision 553ea58c, reusing the record already covering this exact correction). */
@@ -3023,8 +3051,11 @@ export class Db {
     return this.db.prepare("DELETE FROM app_meta WHERE key LIKE ? ESCAPE '\\'").run(`${escaped}%`).changes;
   }
   /** Purge every board-read snapshot a session left behind, at every real per-session removal point
-   *  including the soft archive path, deliberately (@decision 15bdb031). Idempotent; returns the count
-   *  removed. */
+   *  including the soft archive path, deliberately.
+   *
+   *  @decision 15bdb031
+   *
+   *  Idempotent; returns the count removed. */
   private purgeBoardReadSnapshots(sessionId: string): number {
     return this.deleteMetaPrefix(`${BOARD_READ_META_PREFIX}${sessionId}:`);
   }
@@ -4505,7 +4536,11 @@ export class Db {
   }
 
   /** Best-effort ACTIVITY signal for ContextWatcher's blind-turn detector — a per-interval billed-usage
-   *  SUM, never a context-occupancy estimate (@decision fdf1291f). `null` means no sample has landed yet. */
+   *  SUM, never a context-occupancy estimate.
+   *
+   *  @decision fdf1291f
+   *
+   *  `null` means no sample has landed yet. */
   getUsageActivitySince(sessionId: string, sinceIso: string): { totalTokens: number; sampleCount: number } | null {
     const r = this.db.prepare(
       `SELECT COUNT(*) AS n,
@@ -4761,7 +4796,7 @@ export class Db {
   }
   /** BOUNDED page of a project's archived sessions + total; effective (post-clamp) `limit` returned so a
    *  client can detect the server cap. Optional `q` filters server-side, BEFORE limit/offset.
-   *  (@decision b9161ad2) */
+   *  @decision b9161ad2 */
   listArchivedSessionsPage(projectId: string, limit: number, offset = 0, q?: string | null): { rows: SessionListItem[]; total: number; limit: number } {
     const lim = Math.max(1, Math.min(limit, MAX_ARCHIVED_PAGE));
     const search = q?.trim();
@@ -4788,7 +4823,7 @@ export class Db {
   }
   /** Cross-project mirror of listArchivedSessionsPage. `role` filter applies BEFORE limit/offset
    *  (@decision 9f010283); `q` is the same server-side substring filter, plus project name.
-   *  (@decision b9161ad2) */
+   *  @decision b9161ad2 */
   listAllArchivedSessionsPage(limit: number, offset = 0, role?: SessionRole | null, q?: string | null): { rows: SessionListItem[]; total: number; limit: number } {
     const lim = Math.max(1, Math.min(limit, MAX_ARCHIVED_PAGE));
     const roleClause = role ? " AND s.role = @role" : "";
@@ -4839,7 +4874,9 @@ export class Db {
       .all(managerSessionId) as Row[]).map(toSession);
   }
   /** The dangling-worker candidate pool ({@link SessionService.getDanglingWorkers}): bounded to the
-   *  newest `limit`, accepting a real coverage loss on an older dangling branch (@decision ba41b402). */
+   *  newest `limit`, accepting a real coverage loss on an older dangling branch.
+   *
+   *  @decision ba41b402 */
   listArchivedWorkersInProject(projectId: string, limit = 50): Session[] {
     return (this.db.prepare(
       "SELECT * FROM sessions WHERE project_id = ? AND role = 'worker' AND archived_at IS NOT NULL AND branch IS NOT NULL ORDER BY created_at DESC LIMIT ?",
@@ -4857,7 +4894,11 @@ export class Db {
     this.notifySessionChanged(id);
   }
   /** One-time boot backfill of `archived_at` for legacy pre-auto-archive rows, stamped with each row's
-   *  REAL end-time, never `now()` (@decision b37750a4). One-shot via an app_meta marker. */
+   *  REAL end-time, never `now()`.
+   *
+   *  @decision b37750a4
+   *
+   *  One-shot via an app_meta marker. */
   backfillArchivedAtOnce(): number {
     if (this.getMeta(ARCHIVED_AT_BACKFILL_KEY) !== undefined) return 0; // guard: already run (one-shot)
     const affectedIds = (this.db.prepare(
@@ -4975,10 +5016,11 @@ export class Db {
       .run(engineId, new Date().toISOString(), id);
     this.notifySessionChanged(id);
   }
-  /** @decision 08c81809 — durable counterpart to `PtyHost.markReady`'s in-memory latch. Called from the
-   *  `onReady` PtyHostEvents hook, the FIRST time (and only the first time — `markReady` itself is
-   *  idempotent past its own `live.ready` guard) a session's TUI is considered booted, whether via a
-   *  real SessionStart hook or the readiness fallback timer. See `Session.reachedReadyAt`'s own doc. */
+  /** @decision 08c81809 — durable counterpart to `PtyHost.markReady`'s in-memory latch.
+   *
+   *  Called from the `onReady` PtyHostEvents hook, the FIRST time (and only the first time — `markReady`
+   *  itself is idempotent past its own `live.ready` guard) a session's TUI is considered booted, whether
+   *  via a real SessionStart hook or the readiness fallback timer. See `Session.reachedReadyAt`'s own doc. */
   setReachedReady(id: string): void {
     // Code Review round 3 finding 8 (nit): first-only at the SQL level, matching this method's own doc
     // ("the FIRST time") — a session resumed across multiple restarts re-runs markReady/the codex
@@ -4996,12 +5038,13 @@ export class Db {
   /**
    * @decision e07b1b1a — restore a recycle predecessor's row to "live" once `settleRecycleHandoff`
    * (sessions/service.ts) confirms its real pty never actually died (`recyclePlatformLead`'s atomic
-   * handoff flips it to "exited" synchronously, before ever touching the real process). A DELIBERATELY
-   * separate, purpose-named wrapper over `setProcessState` rather than a bare `setProcessState(id, "live")`
-   * call at that call site: this is a state CORRECTION after confirmed liveness, never a flip-before-spawn
-   * — `live-flip-reconcile-guard.mjs` polices exactly that OTHER pattern (a literal `setProcessState(id,
-   * "live")` in sessions/service.ts must precede a reconciled `pty.spawn`), which does not apply here (no
-   * spawn is involved at all).
+   * handoff flips it to "exited" synchronously, before ever touching the real process).
+   *
+   * A DELIBERATELY separate, purpose-named wrapper over `setProcessState` rather than a bare
+   * `setProcessState(id, "live")` call at that call site: this is a state CORRECTION after confirmed
+   * liveness, never a flip-before-spawn — `live-flip-reconcile-guard.mjs` polices exactly that OTHER
+   * pattern (a literal `setProcessState(id, "live")` in sessions/service.ts must precede a reconciled
+   * `pty.spawn`), which does not apply here (no spawn is involved at all).
    */
   restoreLiveAfterConfirmedAlive(id: string): void {
     this.setProcessState(id, "live");
@@ -5089,7 +5132,9 @@ export class Db {
   }
   /** Re-pin the FULL companion capability-shaping surface on the session ROW directly. Most fields need a
    *  respawn to take live effect (caller's job); `connections`/`vaultWrite` are the exception — they're
-   *  re-resolved off this row fresh on every request, for a stateless-router reason (@decision 1a048349). */
+   *  re-resolved off this row fresh on every request, for a stateless-router reason.
+   *
+   *  @decision 1a048349 */
   setSessionCapabilitySurface(id: string, patch: {
     browserTesting?: boolean; documentConversion?: boolean;
     capabilities?: CapabilityGrant[]; restrictedTools?: boolean; noCommit?: boolean;
@@ -5463,14 +5508,15 @@ export class Db {
   }
   /**
    * @decision 08c81809 — the boot-reconcile counterpart to `reparentLiveWorkers`, deliberately NOT
-   * gated on `process_state = 'live'`. `reparentLiveWorkers` is correct for the LIVE in-memory settle
-   * loop, where 'live' genuinely reflects the real process. At BOOT, nothing is live yet — a worker
-   * captured into a restart-intent/crash-recovery candidate set is identified by its PRE-restart row
-   * state, not by a 'live' flag that (if this runs after `recoverStaleSessions()`) has already been
-   * unconditionally flipped to 'exited' for every session in the fleet, live worker included — using
-   * the live-gated method there would silently reparent ZERO rows. Used ONLY by the recycle-settle boot
-   * reconcile (both its early, pre-`recoverStaleSessions()` pass and its late fallback) — never by the
-   * live settle loop, which keeps using `reparentLiveWorkers` unchanged.
+   * gated on `process_state = 'live'`.
+   *
+   * `reparentLiveWorkers` is correct for the LIVE in-memory settle loop, where 'live' genuinely reflects
+   * the real process. At BOOT, nothing is live yet — a worker captured into a restart-intent/crash-recovery
+   * candidate set is identified by its PRE-restart row state, not by a 'live' flag that (if this runs after
+   * `recoverStaleSessions()`) has already been unconditionally flipped to 'exited' for every session in the
+   * fleet, live worker included — using the live-gated method there would silently reparent ZERO rows. Used
+   * ONLY by the recycle-settle boot reconcile (both its early, pre-`recoverStaleSessions()` pass and its
+   * late fallback) — never by the live settle loop, which keeps using `reparentLiveWorkers` unchanged.
    */
   reparentAllChildren(oldManagerId: string, newManagerId: string): number {
     const ids = (this.db.prepare(
@@ -5502,8 +5548,11 @@ export class Db {
     return this.db.prepare("UPDATE wakes SET session_id = ? WHERE session_id = ?")
       .run(newSessionId, oldSessionId).changes;
   }
-  /** Move a manager's decision-inbox questions to its recycle successor, every state, unconditionally
-   *  (@decision 8701bdbb). ⛔ Touches ONLY `session_id` — NEVER write `filed_by_session_id` here; that
+  /** Move a manager's decision-inbox questions to its recycle successor, every state, unconditionally.
+   *
+   *  @decision 8701bdbb
+   *
+   *  ⛔ Touches ONLY `session_id` — NEVER write `filed_by_session_id` here; that
    *  immutability is the entire fix (card cb7d6998). Do not add a second column without re-reading it first. */
   reparentQuestions(oldSessionId: string, newSessionId: string): number {
     return this.db.prepare("UPDATE questions SET session_id = ? WHERE session_id = ?")
@@ -5531,14 +5580,15 @@ export class Db {
   }
   /** @decision 08c81809 — atomically inserts a recycle successor row AND stamps the durable
    *  settle-in-flight marker on the PREDECESSOR, in the SAME transaction as the `recycled_from` lineage
-   *  link `fresh` itself carries. Card 08c81809: `settleRecycleHandoff`'s poll loop is purely in-memory
-   *  and lost on a daemon restart — this marker is what lets a boot-time reconcile
-   *  (`reconcileStrandedRecycleSettles`) re-derive the right outcome instead of leaving the lineage
-   *  permanently stranded (nothing else ever revisits it — see that method's own doc). Setting the
-   *  marker any later than THIS insert (e.g. at the top of the async settle loop, after several
-   *  reparenting steps) would leave a real gap: a restart between this insert and the settle loop
-   *  actually starting would see `recycled_from` linked with no marker at all — indistinguishable from a
-   *  lineage that was never mid-settle. */
+   *  link `fresh` itself carries.
+   *
+   *  Card 08c81809: `settleRecycleHandoff`'s poll loop is purely in-memory and lost on a daemon restart —
+   *  this marker is what lets a boot-time reconcile (`reconcileStrandedRecycleSettles`) re-derive the
+   *  right outcome instead of leaving the lineage permanently stranded (nothing else ever revisits it —
+   *  see that method's own doc). Setting the marker any later than THIS insert (e.g. at the top of the
+   *  async settle loop, after several reparenting steps) would leave a real gap: a restart between this
+   *  insert and the settle loop actually starting would see `recycled_from` linked with no marker at all
+   *  — indistinguishable from a lineage that was never mid-settle. */
   insertRecycleSuccessor(fresh: Session, predecessorId: string): void {
     this.db.transaction(() => {
       this.insertSession(fresh);
@@ -5547,6 +5597,7 @@ export class Db {
     this.notifySessionChanged(predecessorId);
   }
   /** @decision 08c81809 — clears the durable settle-in-flight marker (see `insertRecycleSuccessor`).
+   *
    *  Called on every terminal outcome of `settleRecycleHandoff` (stopped-M1, recovered-fleet, or an
    *  unexpected throw — via its own `finally`), by the pre-spawn-failure catches in
    *  `recycleManager`/`recyclePlatformLead` (the settle loop is never reached in that case), and by
@@ -5557,9 +5608,10 @@ export class Db {
   }
   /** @decision 08c81809 — every predecessor row still carrying a settle-in-flight marker, read ONCE at
    *  boot by `reconcileStrandedRecycleSettles`, BEFORE either mutually-exclusive boot-resume path
-   *  computes its own resume set. Rare in practice (0 or 1 rows): a marker set by
-   *  `insertRecycleSuccessor` and never cleared because the daemon restarted before
-   *  `settleRecycleHandoff`'s in-memory loop resolved. */
+   *  computes its own resume set.
+   *
+   *  Rare in practice (0 or 1 rows): a marker set by `insertRecycleSuccessor` and never cleared
+   *  because the daemon restarted before `settleRecycleHandoff`'s in-memory loop resolved. */
   listRecycleSettlePending(): { predecessorId: string; freshId: string }[] {
     return this.db.prepare(
       "SELECT id AS predecessorId, recycle_settle_pending_for AS freshId FROM sessions WHERE recycle_settle_pending_for IS NOT NULL",
@@ -5592,7 +5644,9 @@ export class Db {
    * A BOUNDED, newest-first page of schedule-fire history plus the TOTAL count for the current filter —
    * backing the Schedules page's lazy run-history section. Enrichment is a SINGLE query with LEFT JOINs,
    * never a per-row lookup — this DB is synchronous, so a 100-row page resolved one-query-per-row would be
-   * 100 blocking round-trips stalling every other concurrent handler (the N+1 trap). (@decision sha:51970e9a)
+   * 100 blocking round-trips stalling every other concurrent handler (the N+1 trap).
+   *
+   * @decision sha:51970e9a
    */
   listScheduleHistory(opts: { scheduleId?: string; kind?: ScheduleHistoryEntry["kind"]; limit: number; offset?: number }): ScheduleHistoryPage {
     const lim = Math.max(1, Math.min(opts.limit, MAX_SCHEDULE_HISTORY_PAGE));
@@ -5639,9 +5693,17 @@ export class Db {
     return r ? toOrchestrationEvent(r) : undefined;
   }
 
-  /** The HISTORY half of the Gates page. Enrichment is one JOIN, never a per-row lookup (@decision a1c86452).
+  /** The HISTORY half of the Gates page. Enrichment is one JOIN, never a per-row lookup.
+   *
+   *  @decision a1c86452
+   *
    *  The emit-compare fields join `pending_gate_ops` by `opId`, not `detail_json` directly.
-   *  (@decision 6ca4b1a0) `batchForfeited` is a correlated subquery, deliberately (@decision b480dda9). */
+   *
+   *  @decision 6ca4b1a0
+   *
+   *  `batchForfeited` is a correlated subquery, deliberately.
+   *
+   *  @decision b480dda9 */
   listGateEvents(opts: { projectId?: string | null; limit: number; offset: number }): GateHistoryPage {
     const limit = Math.max(1, Math.min(opts.limit, MAX_GATE_HISTORY_PAGE));
     const offset = Math.max(0, opts.offset);
@@ -5675,7 +5737,11 @@ export class Db {
     return { items: rows.map(toGateHistoryRow), total, limit };
   }
   /** Generalizes `listGateEvents`' bounded/paginated/JOIN-enriched shape to an ARBITRARY caller-supplied
-   *  `kind` set (@decision 80b7a33b). ⛔ `kind` is caller-supplied: every value is bound as a query
+   *  `kind` set.
+   *
+   *  @decision 80b7a33b
+   *
+   *  ⛔ `kind` is caller-supplied: every value is bound as a query
    *  PARAMETER, never interpolated into SQL text — it can never reach the query as raw text. */
   listOrchestrationEventsBounded(opts: {
     kind?: string[]; projectId?: string | null; sessionId?: string | null; taskId?: string | null;
@@ -5703,8 +5769,12 @@ export class Db {
     }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     // An empty-string session-id sentinel must be NULLIF-normalized before COALESCE, or it wins wrongly
-    // over a real id in the other field (@decision ab1d1129). Two independent, additive fallbacks below;
-    // does NOT recover `session_message_delivered`, whose event carries no taskId in this shape.
+    // over a real id in the other field.
+    //
+    // @decision ab1d1129
+    //
+    // Two independent, additive fallbacks below; does NOT recover `session_message_delivered`, whose
+    // event carries no taskId in this shape.
     const from =
       `FROM orchestration_events oe
        LEFT JOIN sessions s ON s.id = COALESCE(NULLIF(oe.worker_session_id, ''), NULLIF(oe.manager_session_id, ''))
@@ -5776,8 +5846,11 @@ export class Db {
       .all(workerSessionId) as Row[]).map(toOrchestrationEvent);
   }
   /** Every durable audit event stamped with a given op's `opId`, `seq ASC` — recovers a genuinely-settled
-   *  op's real outcome from durable history (@decision 7d492f8b). Unindexed scan, accepted: boot-time
-   *  sweep only, never a hot path. */
+   *  op's real outcome from durable history.
+   *
+   *  @decision 7d492f8b
+   *
+   *  Unindexed scan, accepted: boot-time sweep only, never a hot path. */
   findGateOpEventsByOpId(opId: string): OrchestrationEvent[] {
     return (this.db.prepare(
       "SELECT * FROM orchestration_events WHERE json_extract(detail_json, '$.opId') = ? ORDER BY seq ASC",
@@ -5989,7 +6062,9 @@ export class Db {
       deferredUntilEvent: serializeDeferredUntilEvent(next.deferredUntilEvent) });
   }
   /** Optimistic-concurrency-guarded wrapper around {@link updateTask} — `version` bumps only on
-   *  title/body writes, and only THIS wrapper gates on it, never a field-only move (@decision d0978321). */
+   *  title/body writes, and only THIS wrapper gates on it, never a field-only move.
+   *
+   *  @decision d0978321 */
   updateTaskChecked(
     id: string,
     patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "heldRequestId" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId" | "deferredStuck" | "deferredAt" | "deferredReason" | "deferredUntilEvent">>,
@@ -6249,7 +6324,10 @@ export class Db {
     return written;
   }
   /**
-   * Optimistic-concurrency-guarded upsert (@decision a5f98bb4) — the memory_write MCP tool's write path.
+   * Optimistic-concurrency-guarded upsert — the memory_write MCP tool's write path.
+   *
+   * @decision a5f98bb4
+   *
    * Compare-and-sets against the existing row's monotonic `version`, never `updatedAt` (see the decision
    * record for why a timestamp is not a safe CAS token here). `baseVersion` is the `version` the caller
    * last read for this key (via memory_read/memory_list/a prior memory_write response):
@@ -6474,9 +6552,11 @@ export class Db {
   }
   /** @decision 08320d02 — bulk-cancel every pending wake for a session, for the ONE case where a session
    *  is being permanently retired with no live successor to `reparentWakes` onto (a `recycleWorker`
-   *  pre-spawn failure: the predecessor was hard-killed before the spawn attempt, and its failed
-   *  successor's `recycled_from` link is unlinked in the same catch — so a due wake would otherwise
-   *  auto-`resume()` the exact worker the manager just tried to retire). Returns the count deleted. */
+   *  pre-spawn failure:
+   *
+   *  the predecessor was hard-killed before the spawn attempt, and its failed successor's
+   *  `recycled_from` link is unlinked in the same catch — so a due wake would otherwise auto-`resume()`
+   *  the exact worker the manager just tried to retire). Returns the count deleted. */
   cancelWakesForSession(sessionId: string): number {
     return this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sessionId).changes;
   }
@@ -6587,7 +6667,11 @@ export class Db {
   }
   /** Boot-time read of the COMPLEMENT set: rows never told "pending" (a single-synchronous-span mint that
    *  never flips `surfaced_pending`, or a crash between mint and flip) — no synthetic nudge is owed for
-   *  these. (@decision 7239c712) `beforeInstant` (ISO string, card d7f3416b): bounds the sweep to rows
+   *  these.
+   *
+   *  @decision 7239c712
+   *
+   *  `beforeInstant` (ISO string, card d7f3416b): bounds the sweep to rows
    *  minted strictly before it, for the same reason as {@link listSurfacedPendingGateOps} above — without
    *  this bound the sweep would also catch an op minted moments after boot, before this process ever got a
    *  chance to run it. */
@@ -6928,9 +7012,14 @@ export class Db {
   }
   /**
    * Cancel a still-'pending' request — the terminal, retained-in-history counterpart to answerQuestion/
-   * answerCredentialQuestion (@decision sha:becc7581). The UPDATE's own `AND state = 'pending'` guard is
-   * what actually protects the DATA (never relies solely on the pre-check above being uncontended) — and
-   * its outcome is OBSERVED, not assumed: `run()`'s `changes` is checked, so a 0-row UPDATE (the guard
+   * answerCredentialQuestion.
+   *
+   * @decision sha:becc7581
+   *
+   * The UPDATE's own `AND state = 'pending'` guard is what actually protects the DATA (never relies
+   * solely on the pre-check above being uncontended) — and its outcome is OBSERVED, not assumed:
+   *
+   * `run()`'s `changes` is checked, so a 0-row UPDATE (the guard
    * tripped) throws the SAME "already <state>" error the pre-check does, rather than silently returning
    * the row in whatever state it now actually has. Never hard-deletes: a cancelled row keeps every prior
    * field and gains cancelled_reason/cancelled_by/cancelled_at.
@@ -7016,9 +7105,14 @@ export class Db {
     })();
   }
   /**
-   * The manager/Lead pull/consume, scoped to an AGENT LINEAGE rather than one exact session id
-   * (@decision f88e91f0): a FRESH (non-recycle) successor on the SAME agent must still see decisions its
-   * predecessor filed. Joins through `sessions.agent_id` (a session row persists after exit — only
+   * The manager/Lead pull/consume, scoped to an AGENT LINEAGE rather than one exact session id:
+   *
+   * @decision f88e91f0
+   *
+   * a FRESH (non-recycle) successor on the SAME agent must still see decisions its
+   * predecessor filed.
+   *
+   * Joins through `sessions.agent_id` (a session row persists after exit — only
    * `deleteSession`, which cascades its questions away first, removes it) rather than `project_id`:
    * agent-scope is a strict SUBSET of project-scope, and the only one still correct when a project runs
    * more than one manager/Lead agent concurrently — e.g. the Platform Lead's reserved project, where
@@ -7041,8 +7135,13 @@ export class Db {
   }
   /**
    * Whether SESSION `sessionId` itself has ANY still-`pending` question_ask outstanding — the
-   * idle-watcher's session-level suppression predicate (@decision cb56cf80). SESSION-scoped, deliberately
-   * NOT agent-lineage-scoped — see the decision record before joining this off `session.agent_id` again.
+   * idle-watcher's session-level suppression predicate.
+   *
+   * @decision cb56cf80
+   *
+   * SESSION-scoped, deliberately NOT agent-lineage-scoped — see the decision record before joining
+   * this off `session.agent_id` again.
+   *
    * A fresh non-recycle successor is unaffected and nudges normally. Deliberately NON-CONSUMING (never
    * touches `state`).
    */
@@ -7064,8 +7163,12 @@ export class Db {
    * `getProjectTaskRequest`'s own `q.projectId !== projectId` check on the single-request get path. Uses
    * `idx_questions_task` (task_id-leading, so the extra project_id filter is applied post-index-lookup).
    *
-   * **Legacy prefix-linked rows** (@decision a3f1319f): also matches rows whose `task_id` is a legacy
-   * 8-char id-PREFIX, not the full 36-char task UUID — see the decision record for why. The
+   * @decision a3f1319f
+   *
+   * **Legacy prefix-linked rows**: also matches rows whose `task_id` is a legacy
+   * 8-char id-PREFIX, not the full 36-char task UUID — see the decision record for why.
+   *
+   * The
    * `length(task_id) = 8` guard cleanly distinguishes a legacy prefix from a full id (a UUID's first
    * block is always exactly 8 hex chars) so an empty/short `task_id` can't accidentally match everything,
    * and the trailing `-` in the LIKE pattern requires the match land on a UUID block boundary, not just a
@@ -7113,9 +7216,12 @@ export class Db {
   }
   /**
    * Every request (any state), newest-first — the backing read for the Platform Auditor's cross-project
-   * `requests_list` AND the manager's own project-scoped `requests_list` (@decision 59489267). Filters are
-   * optional/AND'd; omit all (no `projectId`) for the whole platform — the Auditor's use; the manager
-   * surface always passes its own `projectId` so it can never read another project's requests.
+   * `requests_list` AND the manager's own project-scoped `requests_list`.
+   *
+   * @decision 59489267
+   *
+   * Filters are optional/AND'd; omit all (no `projectId`) for the whole platform — the Auditor's use;
+   * the manager surface always passes its own `projectId` so it can never read another project's requests.
    */
   listQuestionsForAudit(filters: {
     projectId?: string; state?: QuestionState; type?: QuestionType; since?: string; excludeConsumed?: boolean; agentId?: string;
@@ -7151,9 +7257,13 @@ export class Db {
    * naturally yield `linked_task_column_key`/`linked_task_title` of `NULL` rather than dropping the row.
    *
    * `agent_name` is joined via `filed_by_session_id` (the IMMUTABLE filer), NOT `session_id` (the mutable
-   * routing target `reparentQuestions` rewrites on every recycle) — @decision 24a8b8c3, before joining
-   * this off `session_id` again. `session_process_state`/`session_resumability` stay joined off
-   * `session_id` on purpose: those describe the CURRENT routed seat, not who filed it.
+   * routing target `reparentQuestions` rewrites on every recycle) — before joining this off `session_id`
+   * again.
+   *
+   * @decision 24a8b8c3
+   *
+   * `session_process_state`/`session_resumability` stay
+   * joined off `session_id` on purpose: those describe the CURRENT routed seat, not who filed it.
    */
   listOpenQuestions(includeConsumed = false): QuestionInboxItem[] {
     const rows = this.db.prepare(
@@ -7828,7 +7938,11 @@ function gateOutcomeFromDetail(detail: Record<string, unknown>): GateOutcome {
   return "reject";
 }
 
-/** Derive {@link GateHistoryRow.gateRan} (@decision 3a6f04cc). Checked in order: explicit `gateSpawned`
+/** Derive {@link GateHistoryRow.gateRan}.
+ *
+ *  @decision 3a6f04cc
+ *
+ *  Checked in order: explicit `gateSpawned`
  *  wins when present; else `reused:true`; else, for a cancelled worker-gate row with no explicit stamp,
  *  `durationMs` being a number as a FALLBACK (an honest "was this admitted before it was cancelled", not
  *  "did a process spawn" — a cancel-before-first-step still stamps a real `durationMs`). Every other
@@ -7912,9 +8026,15 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   // `retriedFile`/`retryPassed`). `false` for every other kind this function ever sees.
   const transientRetried = r.kind === "build_gate_retry";
   // Deliberately NOT read from `detail` above — it can't tell "genuinely full run" from "reduction never
-  // computed" (@decision 6ca4b1a0). A BATCHED merge gate (`detail.batched === true`) is the one exception
-  // — its own `build_gate` event stamps a genuine DECIDABLE tri-state directly in `detail` instead, so
-  // recovering it from `detail` is safe ONLY for this one kind (@decision 3d2afb53).
+  // computed".
+  //
+  // @decision 6ca4b1a0
+  //
+  // A BATCHED merge gate (`detail.batched === true`) is the one exception — its own `build_gate` event
+  // stamps a genuine DECIDABLE tri-state directly in `detail` instead, so recovering it from `detail` is
+  // safe ONLY for this one kind.
+  //
+  // @decision 3d2afb53
   const emitCompareReduced = typeof verdictPayload.emitCompareReduced === "boolean"
     ? verdictPayload.emitCompareReduced
     : (detail.batched === true && typeof detail.emitCompareReduced === "boolean") ? detail.emitCompareReduced : null;
