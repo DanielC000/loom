@@ -513,7 +513,6 @@ function withLinks(db: Db, projectId: string, entry: ProjectMemoryEntry, backlin
  * via {@link annotateBacklinks} — for the same N+1-fetch/N-full-corpus-scan cost
  *
  * @decision 41c3f546
- *
  * measured at ~4.2s (bulk: ~15ms) against a 487-note corpus, and rejected as the per-row default.
  */
 export function listProjectMemoryEntries(db: Db, projectId: string): ProjectMemoryEntryWithLinks[] {

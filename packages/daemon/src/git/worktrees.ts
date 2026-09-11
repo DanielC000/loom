@@ -895,7 +895,6 @@ export async function createWorktree(
       // @decision 1a858805 — best-effort recovery of a locked .git/worktrees/ admin record left by a killed
       // `worktree add`, via `git worktree remove -f -f` inside this SAME canonical lock (never outside it —
       // that would reopen the race the lock exists to close);
-      //
       // relies on worktreePath being deterministic per task, not an arbitrary path.
       //
       // @decision fdfe8a56 — SKIP that recovery when the add's child isn't confirmed dead (PATH-2 "giving up
@@ -1162,7 +1161,6 @@ const REMOVE_DIR_CLEAN_RETRY_DELAY_MS = 500;
  * @decision 79b8d8a9 — bounded, best-effort git removal (`-f -f`, closing a Windows handle-release race and a
  * locked-admin-record ghost) backed by the killable filesystem removal, which already deletes dirty/untracked
  * content unconditionally;
- *
  * a KILLED (wedged) attempt is never retried here — only a clean reject gets short
  * in-session retries.
  */
@@ -1246,7 +1244,6 @@ export async function resolveMainlineBranch(repoPath: string, deps: BoundedGitDe
 
 /** @decision f96b9d7c — every local `loom/*` branch merged into `mainlineBranch` (which MUST come from {@link
  *  resolveMainlineBranch}, never a literal/`HEAD`);
- *
  *  fails safe to `{branches:[]}` on error, with a `failed`
  *  discriminator + logged cause — never restore the old silent catch that made this indistinguishable from a
  *  genuine zero. */
@@ -1628,7 +1625,6 @@ export interface CanonicalUntrackedOverlap {
 /** @decision 98d6264d — sibling admission-time preflight to {@link detectCanonicalDirtyOverlap} for an
  *  UNTRACKED collision: unlike the tracked case, git refuses REGARDLESS of content identity (verified on real
  *  git 2.47) — never apply the tracked case's identical-content narrowing here;
- *
  *  use an existence check
  *  against the branch tip instead. */
 export async function detectCanonicalUntrackedOverlap(
@@ -1886,7 +1882,6 @@ export interface DiffstatFile {
 /** @decision 91d847db — a bare leading `*` with no `/` anywhere (e.g. `*service.ts`) is auto-prefixed with
  *  `**​/` before translation — as written `*` stays within one path segment and would silently match 0
  *  files for a nested path, indistinguishable from "no changes";
- *
  *  never widen this to a pattern already
  *  containing `/` or `**`. */
 function pathGlobToRegExp(rawGlob: string): RegExp {
@@ -3247,13 +3242,11 @@ export async function computeEmitCompareGate(
     }
     if (p.startsWith(EMIT_COMPARE_TEST_PREFIX) && p.endsWith(".mjs")) {
       // @decision 815b4b30 — an excluded-dir path (fixtures/, census/) isn't a test at all;
-      //
       // reuses the REAL
       // EXCLUDED_DIR_NAMES via a dynamic import of this diff's own test-daemon.mjs — never hand-copy a second
       // list, and never re-check loom:not-a-test:/loom:gate-exempt: markers here (banner-only annotations,
       // carry no information for this decision).
       // @decision 44968963 — any such path then fails the WHOLE diff closed;
-      //
       // never treat the forced full gate
       // on a fixture-plus-unrelated-test-file diff as a regression to fix — it's the accepted cost of closing
       // a real, measured cross-consumer exposure (this repo's own fixtures have 6 and 3 consumers
@@ -3595,7 +3588,6 @@ function walkTsFiles(dir: string, out: string[] = []): string[] {
  *  0s, no assertion run). `changedTestFiles` must already exclude `NOT_HERMETIC` names; never re-filter here.
  *  @decision abaaf16e — `changedTsPaths` folds {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} into `steps` instead
  *  (bare `node <path>`, the {@link STATIC_GUARD_REPO_PATHS} shape), never into `testPaths`/`--only=` —
- *
  *  every
  *  member is independently verified to set up its own hermetic env, so it needs none of what the harness
  *  wrapper exists to provide. See that list's own doc for the full membership + trigger reasoning.
@@ -3608,7 +3600,6 @@ function walkTsFiles(dir: string, out: string[] = []): string[] {
  *  `EmitCompareGateResult` fails this call SITE, not silently.
  *  @decision f862f9c5 — `changedScriptFiles` folds {@link CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS} in on ITS
  *  OWN condition, independent of `changedTsPaths` —
- *
  *  never gate it on the `.ts` trigger, or on the combined
  *  `identicalFileCount` (which counts both populations together for an unrelated diagnostic reason; see that
  *  field's own doc). A diff can set either trigger, both, or neither. */
@@ -4749,7 +4740,6 @@ async function mergeBranchLocked(
       const cleanupIssue = await resetOrSkip("rawError cleanup");
       // @decision 4b7ff996 — squash-time backstop for the race window between the admission-time preflight
       // and this squash: classify a matching rawError as dirtyOverlap:true, never a generic failure —
-      //
       // and
       // always include rawErrorMessage regardless of cleanupIssue, the only place the overwritten path is
       // named.

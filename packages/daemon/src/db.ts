@@ -7130,7 +7130,6 @@ export class Db {
    * The manager/Lead pull/consume, scoped to an AGENT LINEAGE rather than one exact session id:
    *
    * @decision f88e91f0
-   *
    * a FRESH (non-recycle) successor on the SAME agent must still see decisions its
    * predecessor filed.
    *
