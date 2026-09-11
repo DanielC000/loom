@@ -1056,6 +1056,7 @@ const WORKER_GATE_ENV_OVERRIDE: NodeJS.ProcessEnv = { LOOM_GATE_TEST_CONCURRENCY
 /** @decision 720bb7ad — stamps `LOOM_GATE_OP_ID` (+ required `LOOM_GATE_BATCH_SIZE`) onto every gate
  *  child so a `test-daemon.mjs` run-summary row joins back to its op; never replace the `{ ...base, ... }`
  *  spread with a plain assignment, or a caller's own override (e.g. the concurrency pin) silently drops.
+ *
  *  ⚠️ CROSS-PROJECT CONTRACT (card 0f1920e0): Codescape reads `LOOM_GATE_OP_ID` in production from
  *  inside the gate child. Renaming it, or dropping it from any `runGateSeq(` call site, is a BREAKING
  *  CHANGE for that external consumer — tell them first (a manager reaches them via `peer_message`). */
@@ -2056,15 +2057,18 @@ export class SessionService {
 
   /**
    * @decision f349f5cb — set ONLY by recycleWorker, from just before its own synchronous hard-kill of
-   *  `workerSessionId` until that call settles (success or throw). recycleWorker is the ONE recycle path
-   *  that hard-kills its predecessor and WAITS for the real exit before inserting the fresh successor row
-   *  — so if that predecessor is ITSELF a never-started recycle successor, its own onExit is GUARANTEED to
-   *  fire (and thus reach `reconcileNeverStartedRecycleSuccessor`) BEFORE `hasSuccessor(workerSessionId)`
-   *  can ever read true. Without this marker, that reconciliation would wrongly unlink the predecessor's
-   *  OWN `recycled_from` link mid-chain (A→B→C becomes A | B→C, with A wrongly read as un-superseded while
-   *  C is the real live continuation). recycleManager/recyclePlatformLead need no such marker: both insert
-   *  their fresh row BEFORE ever touching the old session's pty (a deferred stop, seconds later), so
-   *  `hasSuccessor(sessionId)` alone is already true by the time that old session actually exits.
+   *  `workerSessionId` until that call settles (success or throw).
+   *
+   *  recycleWorker is the ONE recycle path that hard-kills its predecessor and WAITS for the real exit
+   *  before inserting the fresh successor row — so if that predecessor is ITSELF a never-started recycle
+   *  successor, its own onExit is GUARANTEED to fire (and thus reach `reconcileNeverStartedRecycleSuccessor`)
+   *  BEFORE `hasSuccessor(workerSessionId)` can ever read true. Without this marker, that reconciliation
+   *  would wrongly unlink the predecessor's OWN `recycled_from` link mid-chain (A→B→C becomes A | B→C, with
+   *  A wrongly read as un-superseded while C is the real live continuation).
+   *
+   *  recycleManager/recyclePlatformLead need no such marker: both insert their fresh row BEFORE ever
+   *  touching the old session's pty (a deferred stop, seconds later), so `hasSuccessor(sessionId)` alone
+   *  is already true by the time that old session actually exits.
    */
   private readonly recycleTeardownInFlight = new Set<string>();
 
@@ -4401,9 +4405,11 @@ export class SessionService {
    * @decision 9f7c59f1 — one of three resume-and-nudge paths converged onto `enqueueDurableNudge`; never
    *  runs in the same boot as `recoverCrashOrphanedWorkers` (index.ts picks exactly one, keyed on whether
    *  a RestartIntent was captured); its report-state/ordering/nudge-text rulings are per-facet, not shared.
+   *
    * @decision 06ebbb78 — every continuation nudge here must route through `enqueueDurableNudge`, never a
    *  bare/non-durable dispatch, since a freshly-resumed pty is never `ready` this early; the actual
    *  duplicate-delivery guard is `recoverUndeliveredMessagesOnBoot`'s `mintedBefore` cutoff, not ordering.
+   *
    * Continuation NUDGES are post-resume enqueues (a resumed session gets no
    * startup prompt, so without a nudge a worker/manager would sit idle — the stranded-worker hook can't
    * catch a resume's direct setBusy(false)):
@@ -5289,6 +5295,7 @@ export class SessionService {
       // behavior.
       // @decision ccb407eb — wired to the SAME handleGiveUpExhausted policy as every other durable
       // dispatch (BLOCKING finding [2] — Specimen Z: a redrive that then gave up used to bare-drop).
+      //
       // `sender` (hoisted to the top of this method, card 0f693dea) mirrors recoverUndeliveredMessagesOnBoot's
       // own fallback (`e.detail.sender`, else `e.managerSessionId`).
       const kind: QueuedMessageKind = e.detail?.kind === "warning" ? "warning" : "agent";
@@ -7994,9 +8001,11 @@ export class SessionService {
    * Returns a `deliveryStatus` (delivered-live | queued | boarded) so the caller gets an HONEST outcome:
    *  - LIVE target → the durable stdin-enqueue channel (submitted as a turn if idle = delivered-live;
    *    held FIFO if busy = queued).
+   *
    * @decision 5519559c — a NOT-LIVE target with a live recycle successor routes there via the same
    *  durable channel instead of boarding — the id was superseded, not gone; distinct from card
    *  2ca18433 (a still-live recipient that recycles after the message is already queued).
+   *
    *  - NOT-LIVE target with NO live successor anywhere in its lineage → it has no PTY to take a turn, so
    *    instead of THROWING (which silently drops the message), we BOARD a durable note onto the target's
    *    OWN project board — the same durable-board fallback platformEscalate uses for an offline Lead —
@@ -9510,6 +9519,7 @@ export class SessionService {
         // @decision ce7d99bb — a BOUNDED wait for the worker's turn to end NATURALLY, never a flat
         // setTimeout — a flat timer routinely Ctrl-C'd an in-flight generation, skipped the Stop hook
         // (ctx metrics stayed null), and stamped a false "[Request interrupted by user]" line.
+        //
         // `.catch` here is defensive, not load-bearing — every awaited call is a bare setTimeout or a
         // fallible call already wrapped in its own try/catch, so nothing here can reject; this just
         // future-proofs a later refactor that adds one, so it can never surface as an unhandled rejection.
@@ -9559,7 +9569,9 @@ export class SessionService {
    * @decision b9d479b0 — notifyManagerOfIdleWorker and IdleWatcher's periodic/manager-loop check must
    * share ONE idle-worker classification, never independently-drifting copies.
    *
-   * - @decision 6101d7f7 — a busy worker's redirectWorker busy-clear-before-drain window is not a
+   * @decision 6101d7f7
+   *
+   * - a busy worker's redirectWorker busy-clear-before-drain window is not a
    *   strand.
    * - `not-stranded` — legitimately NOT a strand:
    *     • RATE-LIMIT GUARD (CR blocker) — a usage-capped worker goes `busy=false` (setBusy(false) fires
@@ -9567,10 +9579,19 @@ export class SessionService {
    *       waiting out the cap and will auto-resume itself. Without this, a PERIODIC caller would re-nag
    *       for the entire cap window (up to a week on the weekly cap).
    *     • already reported/merged — its task left the `active` lane.
-   *     • @decision a1f06bcc — the task-column check is only a PROXY for "did the worker report"; check
+   *
+   *     @decision a1f06bcc
+   *
+   *     • the task-column check is only a PROXY for "did the worker report"; check
    *       the manager's own pending queue for its `[loom:worker-report]` text.
-   *     • @decision dfa87343 — a worker self-parked on a pending wake_me is not a strand.
-   * - @decision 2281009d — a non-null engineSessionId alone is not proof a turn ran; also check
+   *
+   *     @decision dfa87343
+   *
+   *     • a worker self-parked on a pending wake_me is not a strand.
+   *
+   * @decision 2281009d
+   *
+   * - a non-null engineSessionId alone is not proof a turn ran; also check
    *   hasFirstTurnStarted/a non-empty transcript.
    * - `parked-ack` — its LATEST `worker_report` (status `progress`, `done`, OR `blocked` — CR fold-in: a
    *   `done` report on a board with no review-role column never moves the task off `active`, so it looks
@@ -9579,9 +9600,15 @@ export class SessionService {
    *   land since (the manager hasn't replied yet) — a healthy await-ack park, not a stall. Once the
    *   manager DOES reply and the worker goes idle again without a fresh report, this no longer holds — a
    *   real stall still classifies `stranded`, so an acked-then-stalled worker is never silently missed.
-   * - @decision 95b2abb3 — parked-wake's wording must not claim the manager owes a reply, unlike
+   *
+   * @decision 95b2abb3
+   *
+   * - parked-wake's wording must not claim the manager owes a reply, unlike
    *   parked-ack.
-   * - @decision c36bac53 — a worker's self-reported awaiting:"background" flag has no backing row;
+   *
+   * @decision c36bac53
+   *
+   * - a worker's self-reported awaiting:"background" flag has no backing row;
    *   check the wake lookup FIRST.
    * - `parked-background-stale` — round-2 CR Major: `parked-background` alone would let the flag promise
    *   "no reply owed; it will continue on its own" FOREVER if the background task dies silently and the
@@ -9591,12 +9618,24 @@ export class SessionService {
    *   BOUNDED here: once `BACKGROUND_PARK_STALE_MINUTES` has elapsed since the flagged report with no
    *   ack/re-report, classification falls through to this actionable kind instead of repeating the "no
    *   reply owed" promise — nothing backs or bounds a bare self-attribution past that window.
-   * - @decision 8e0bd254 — check the daemon-owned run_gate op via PendingOpRegistry.peek, never rely on
+   *
+   * @decision 8e0bd254
+   *
+   * - check the daemon-owned run_gate op via PendingOpRegistry.peek, never rely on
    *   a worker self-report.
-   * - @decision 422d3003 — a parked gate needs idleMs, not elapsed time alone, to call it stale.
-   * - @decision 865c528e — measure minutesSinceStart from GateSemaphore admission, never
+   *
+   * @decision 422d3003
+   *
+   * - a parked gate needs idleMs, not elapsed time alone, to call it stale.
+   *
+   * @decision 865c528e
+   *
+   * - measure minutesSinceStart from GateSemaphore admission, never
    *   PendingOpRegistry's own startedAt.
-   * - @decision 0e5de8e6 — check peekPendingMerge's daemon-owned state before the report-derived
+   *
+   * @decision 0e5de8e6
+   *
+   * - check peekPendingMerge's daemon-owned state before the report-derived
    *   branches; no stale-escalation sibling needed.
    * - `stranded` — genuinely finished a turn, never (usefully) reported, and none of the above apply.
    */
@@ -11555,11 +11594,15 @@ export class SessionService {
    */
   reconcileNeverStartedRecycleSuccessor(sessionId: string, intended: boolean): void {
     // @decision f349f5cb — this session's OWN recycleWorker attempt is mid-hard-killing it right now; skip
-    // (see recycleTeardownInFlight's own doc). ACCEPTED, timing-dependent GAP if that attempt then THROWS
+    // (see recycleTeardownInFlight's own doc).
+    //
+    // ACCEPTED, timing-dependent GAP if that attempt then THROWS
     // while this session died within recycleWorker's own ~5s wait: this skipped exit was this session's
     // only chance to be reconciled (the synchronous catch never touches THIS session's own recycled_from,
     // only the failed fresh row's) — its own predecessor stays superseded by a dead end, recoverable via a
-    // manual worker_recycle(this session). Not universal: exiting only AFTER the whole call has settled
+    // manual worker_recycle(this session).
+    //
+    // Not universal: exiting only AFTER the whole call has settled
     // (the marker is cleared either way) reconciles normally, since hasSuccessor already reflects reality.
     if (this.recycleTeardownInFlight.has(sessionId)) return;
     const s = this.db.getSession(sessionId);
@@ -11570,10 +11613,13 @@ export class SessionService {
     // chain-continuing retirement (A→B→C), never a dead end. Unlinking here would sever B→A while C is
     // the real live continuation, corrupting the lineage exactly the way this fix must not.
     if (this.db.hasSuccessor(sessionId)) return;
-    // @decision f349f5cb — the PRIMARY proof of "genuinely nothing could have happened": markReady never
-    // ran for this session (neither the real SessionStart hook nor the spawn-armed readiness fallback), so
-    // no kickoff text was EVER written to its stdin — no turn could possibly have started, engine-hook
-    // relay loss or not. See hasReachedReady's own doc for why this is sounder than a hook-observed signal.
+    // @decision f349f5cb — the PRIMARY proof of "genuinely nothing could have happened":
+    //
+    // markReady never ran for this session (neither the real SessionStart hook nor the spawn-armed
+    // readiness fallback), so no kickoff text was EVER written to its stdin — no turn could possibly have
+    // started, engine-hook relay loss or not.
+    //
+    // See hasReachedReady's own doc for why this is sounder than a hook-observed signal.
     if (this.pty.hasReachedReady(sessionId)) return;
     // EXTRA gates (belt-and-suspenders, not the primary proof — both ride the SAME hook relay
     // hasReachedReady does not depend on, so either firing despite hasReachedReady:false would itself be
@@ -12246,6 +12292,7 @@ export class SessionService {
     //  spawnSync: a shared memory footprint across lint+test+build was OOM-killing a worker's gate.
     // @decision e50600d2 — `gateRan`/`reusedOpId` declared at outer scope so the plain GREEN return,
     //  outside the `if (gate)` block, can report which path this merge's gate actually took.
+    //
     // `gateRan` defaults `false` for a project with no gate at all (nothing ran, nothing was reused
     // either — the existing `gateWarning` already explains that case); flipped `true` the moment the
     // `if (gate)` block below decides to actually spawn one, then flipped back `false` (with
@@ -12425,6 +12472,7 @@ export class SessionService {
     // @decision c24dd48a — this whole span, through the mergeBranch call, is wrapped in ONE try/finally so
     //  a passing gate's per-repo admission guard can NEVER leak; endSquash is confined to `gateRan` (card
     //  96d5f76b DoD-4: not called at all when false) and its release is identity-checked (card b9e07a4a).
+    //
     // A narrower wrap (just around mergeBranch, an earlier draft) left a real gap: `evt("build_gate", ...)`
     // (a synchronous db.appendEvent, CAN throw), `recordGateTimeoutOutcome` (an await), and the `taskTitle`
     // db.getTask read all run strictly BETWEEN the gate settling (guard already held) and beginSquash —
@@ -12446,6 +12494,7 @@ export class SessionService {
       // @decision 864e79fe — this sweep must exclude the confirming worker's own pty (still live, not yet
       //  hard-stopped — finalizeMerge only stops it after this method retires the worktree) from the reap,
       //  unlike gcWorktreeDir's reap, which always runs after that stop.
+      //
       // The worker's own claude pty is genuinely rooted in `worktreePath` (cwd==worktreePath on Linux; the
       // worktree path appears in its own spawn argv on Windows) and would otherwise match and get killed
       // here. That's wrong: on a subsequent real gate FAILURE this method fails closed and RETAINS the
@@ -12474,6 +12523,7 @@ export class SessionService {
       // @decision eda70da6 — this union-merge is SKIPPED when the branch has ALREADY landed on main (the
       //  `preLanded` case) — merging main's own landed squash back into the worktree would make the branch
       //  descend from its own `Loom-Worker-Branch` trailer commit, corrupting ALREADY_MERGED classification.
+      //
       // Indistinguishable from a RE-CUT branch carrying genuinely new work, which is exactly what
       // `findLandedSquashCommit`'s re-task guard (below, via `mergeBranch`'s own noop classification) exists
       // to detect — misclassifying a legitimate ALREADY_MERGED re-confirm as STAGE_EMPTY_RETRY otherwise.
@@ -12505,6 +12555,7 @@ export class SessionService {
         // @decision eda70da6 — on the preLanded path, thread main's CURRENT tip through as gateBaseMainHead
         //  anyway (even with no union-merge to capture it from) — it proves inside mergeBranch's lock that
         //  main hasn't moved since gating started, closing that race without ever union-testing the branch.
+        //
         // A failed `resolveGitRef` (git error/timeout) leaves `gateBaseMainHead` `undefined` rather than
         // passing a bad sha through — same fail-safe as the union path's own capture above. Possibly
         // overwritten below by the reuse path's own capture, exactly like the union branch's capture above.
@@ -12544,6 +12595,7 @@ export class SessionService {
       // @decision e50600d2 — reuse a green run_gate self-check instead of re-running this merge's
       //  IDENTICAL gate; every condition below is independently re-derived from recorded/fresh state
       //  right now, never inferred from elapsed time — any gap falls through to a real gate run.
+      //
       //   1. The worker's LATEST run_gate self-check (this.lastWorkerGateCheck, recorded by
       //      runWorkerGate on every settle) passed, AND its OWN settle already proved current (headCurrent)
       //      — this alone excludes BOTH a self-check that settled RACY/"UNVERIFIED" (headCurrent:false)
@@ -12559,9 +12611,11 @@ export class SessionService {
       //      main's current HEAD is already an ancestor of the branch. This is the hard constraint: a main
       //      that moved past what the branch contains ALWAYS fails this check (`undefined` on a git error
       //      also fails it, strict `=== 0`), forcing a real re-gate.
+      //
       //      @decision 24cc40f9 — freshHead is captured ONCE and threaded through both this proof and
-      //       gateBaseMainHead below, never re-read, so the two can't observe different tips of a moving
-      //       main.
+      //      gateBaseMainHead below, never re-read, so the two can't observe different tips of a moving
+      //      main.
+      //
       // Any gap in this proof (no self-check on record for this exact branch, one that failed or settled
       // racy, a dirty worktree, a moved HEAD, or main having advanced) leaves `reuseResult` unset below and
       // the gate runs for real, unchanged from before this existed.
@@ -15303,6 +15357,7 @@ export class SessionService {
     this.supersedeQueuedSelfCheck(workerSessionId, this.db.getSession(managerSessionId)?.projectId ?? null);
     // @decision 27ea069e — a RUNNING op whose owning manager's whole lineage is dead is evicted here so
     // this call starts a genuinely fresh confirm; a live (or still-resuming) owner's op is left alone.
+    //
     // Without this check, attach() below would dedup-attach THIS fresh call to that zombie op forever
     // ({status:"pending"} on every retry, no gate ever actually running — the exact incident this card
     // fixes).
@@ -15441,6 +15496,7 @@ export class SessionService {
         //
         // @decision 187f5b76 — EXACTLY-ONE-SIGNAL, widened to cover the ALREADY_MERGED path too: sending
         // both wastes a manager turn on the same event and is ambiguous across concurrent merges.
+        //
         // CANCELLED (card 361520a0, Half Two) — mirrors runWorkerGate's identical cancelled branch above:
         // a distinct "no verdict" settle that must NEVER fall through to the merged/failed branching below,
         // which would otherwise read as a real (albeit failed) merge attempt. `cancelKind` is always
@@ -15676,10 +15732,11 @@ export class SessionService {
    * second confirm, so this preserves the pre-existing synchronous REST contract while fully sharing the
    * dedupe/tombstone machinery the MCP tool already gets.
    *
-   * @decision 6144fe32 — BOUNDED so a genuinely wedged op can't hang the HTTP handler forever: the ceiling
-   * is sized off `gateCommandTimeoutMs` (fallback `DEFAULT_REST_MERGE_CEILING_MS`) at 6x, which has to
-   * absorb both retry headroom and the real, un-gated git work around the gate step, not just gate
-   * attempts.
+   * @decision 6144fe32 — BOUNDED so a genuinely wedged op can't hang the HTTP handler forever:
+   *
+   * the ceiling is sized off `gateCommandTimeoutMs` (fallback `DEFAULT_REST_MERGE_CEILING_MS`) at 6x,
+   * which has to absorb both retry headroom and the real, un-gated git work around the gate step, not
+   * just gate attempts.
    */
   async confirmWorkerMergeUntilSettled(
     managerSessionId: string, workerSessionId: string, forceRemoveWorktree?: boolean,
