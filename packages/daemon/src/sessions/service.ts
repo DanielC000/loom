@@ -16073,17 +16073,16 @@ export class SessionService {
         // reached a real verdict at all (cancelled) — `isRetainedResultUsable` below rejects both outright,
         // so this closure DOES run again for either case (a fresh gate, against the current tree).
         retainMs: this.gateOpRetainMs,
-        // USABLE-BY-CONSTRUCTION (card ec994992 — polarity-inverted from the original card 79b0ee52 guard,
-        // which enumerated ONE unusable shape (`ran:true` + `headCurrent:false`) and so silently kept
-        // serving every OTHER unusable shape it never named, including a CANCELLED result: cancel always
-        // settles `ran:false` — see `WorkerGateResult`'s cancelled branch above — which the old
-        // `!(value.ran && …)` form vacuously passed as "usable" since `value.ran` was already false).
-        // States what IS usable instead: a retained value is worth re-serving only if it's a run that
-        // genuinely executed, reached a real pass/fail verdict, and settled against a current tree.
-        // Everything else — cancelled, never-ran, errored-out-of-shape, or contaminated — is unusable BY
-        // DEFAULT, so a NEW kind of unusable outcome added later (one this comment's author never
-        // anticipated) fails closed automatically instead of silently falling through: it would have to
-        // affirmatively satisfy all three conjuncts below to be served from cache.
+        // @decision ec994992 — polarity-inverted from the original card 79b0ee52 guard, which enumerated
+        // ONE unusable shape and silently kept serving every OTHER one it never named, including a
+        // CANCELLED result; states what IS usable instead (below), never what isn't.
+        //
+        // States what IS usable: a retained value is worth re-serving only if it's a run that genuinely
+        // executed, reached a real pass/fail verdict, and settled against a current tree. Everything else
+        // — cancelled, never-ran, errored-out-of-shape, or contaminated — is unusable BY DEFAULT, so a NEW
+        // kind of unusable outcome added later (one this comment's author never anticipated) fails closed
+        // automatically instead of silently falling through: it would have to affirmatively satisfy all
+        // three conjuncts below to be served from cache.
         //   - `value.ran === true`               — excludes every `ran:false` shape, cancelled included.
         //     (The other two `ran:false` shapes in this file — "no gateCommand configured" and the
         //     circuit-breaker short-circuit — never reach this predicate at all: both return directly from
@@ -16328,16 +16327,17 @@ export class SessionService {
   }
 
   /**
+   * @decision dea6728e — the single removal chokepoint below was widened by card b6d41db1's follow-up to
+   * be the ONE place the nested-repo guard lives, so all four callers inherit it — a guard planted only in
+   * finalizeMerge left the other three force-removing past a nested clone with no scan at all.
+   *
    * Slow-retry-aware wrapper around {@link removeWorktree} — the single removal chokepoint shared by
-   * finalizeMerge, boot-reconcile Pass B's two GC sites, and the background wedge sweep (task dea6728e,
-   * widened by card b6d41db1's follow-up to be the ONE place the nested-repo guard below lives, so all
-   * four callers inherit it — a guard planted only in finalizeMerge left the other three force-removing
-   * past a nested clone with no scan at all, the exact same data-loss shape via a sibling path). A
-   * worktree that's given up on (`needsHuman`, past the long give-up bound) is SKIPPED entirely — no
-   * removal is even attempted. Everything else ALWAYS attempts the removal: most wedges are eventually
-   * resolvable (a held OS-indexer/Defender-scan handle releases on its own, or a pnpm-junction structure
-   * `rmdir` succeeds where the old `fs.rm` choked), so a dir that was wedged before is NOT skipped here —
-   * it's retried, safely, because every attempt is the same killable removal (never a threadpool op).
+   * finalizeMerge, boot-reconcile Pass B's two GC sites, and the background wedge sweep. A worktree that's
+   * given up on (`needsHuman`, past the long give-up bound) is SKIPPED entirely — no removal is even
+   * attempted. Everything else ALWAYS attempts the removal: most wedges are eventually resolvable (a held
+   * OS-indexer/Defender-scan handle releases on its own, or a pnpm-junction structure `rmdir` succeeds
+   * where the old `fs.rm` choked), so a dir that was wedged before is NOT skipped here — it's retried,
+   * safely, because every attempt is the same killable removal (never a threadpool op).
    * On success, any wedge tracking for the path is cleared. On a fresh/repeat wedge, the attempt is
    * recorded and — past {@link wedgeGiveUpAttempts}/{@link wedgeGiveUpMs} (whichever of the two trips
    * FIRST — a heavy restart cadence can rack up the attempt bound long before the elapsed-time one) —
@@ -16345,24 +16345,25 @@ export class SessionService {
    * retrying slowly" and the low-frequency background sweep is armed so it keeps getting retried even
    * between boots.
    *
-   * NESTED-REPO GUARD (card b6d41db1 — the incident): `git worktree remove --force` happily deletes
-   * EVERYTHING under the worktree, including a repo a manager (or, on the boot-reconcile paths below, an
-   * orphaned pre-merge crash) left cloned in a gitignored subdirectory with unpushed work — silently,
-   * unrecoverably. `findNestedGitRepos` scans for that BEFORE any removal is attempted; a hit (or an
-   * inconclusive TRUNCATED scan — see its own doc for why that must fail safe too) returns
-   * `"nested-repo-blocked"` and skips the removal entirely, RETAINING the worktree intact. Skippable via
-   * `opts.forceRemoveWorktree` — but ONLY finalizeMerge's manager-facing caller ever sets that; boot-
-   * reconcile Pass B's two GC sites and the background wedge sweep have no manager to warn and no
-   * override to pass, so they NEVER set it and always fail safe on a hit (a retained orphaned worktree is
-   * recoverable; a destroyed one is not).
+   * @decision b6d41db1 — `git worktree remove --force` happily deletes EVERYTHING under the worktree,
+   * including a repo left cloned in a gitignored subdirectory with unpushed work — silently, unrecoverably;
+   * the guard below exists to close that hole.
+   *
+   * `findNestedGitRepos` scans for that BEFORE any removal is attempted; a hit (or an inconclusive
+   * TRUNCATED scan — see its own doc for why that must fail safe too) returns `"nested-repo-blocked"` and
+   * skips the removal entirely, RETAINING the worktree intact. Skippable via `opts.forceRemoveWorktree` —
+   * but ONLY finalizeMerge's manager-facing caller ever sets that; boot-reconcile Pass B's two GC sites and
+   * the background wedge sweep have no manager to warn and no override to pass, so they NEVER set it and
+   * always fail safe on a hit (a retained orphaned worktree is recoverable; a destroyed one is not).
+   *
+   * @decision 8e5a7a5e — an escaped esbuild service / vite dev-server holds a file handle open inside the
+   * worktree dir and would make the removal below fail with `ERROR_SHARING_VIOLATION` (the confirmed root
+   * cause) — the sweep below exists to close that window before removal is even attempted.
    *
    * BEFORE every removal attempt (guard included), sweeps and kills any OS process still ROOTED in
-   * `worktreePath` (task 8e5a7a5e — the dangling-worktree PREVENTION: an escaped esbuild service / vite
-   * dev-server holds a file handle open inside the dir and would make the removal below fail with
-   * `ERROR_SHARING_VIOLATION`, the confirmed root cause). See {@link reapProcessesRootedInWorktree} for
-   * the safety scoping — it only ever matches THIS `worktreePath`, so a caller that only ever reaches
-   * this method with a worktree it has already decided to discard (every call site here does) can never
-   * sweep a live/protected one.
+   * `worktreePath`. See {@link reapProcessesRootedInWorktree} for the safety scoping — it only ever
+   * matches THIS `worktreePath`, so a caller that only ever reaches this method with a worktree it has
+   * already decided to discard (every call site here does) can never sweep a live/protected one.
    */
   private async gcWorktreeDir(
     repoPath: string,

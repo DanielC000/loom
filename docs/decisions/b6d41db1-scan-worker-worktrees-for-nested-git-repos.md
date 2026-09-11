@@ -12,6 +12,14 @@ The scan is ASYNC + BOUNDED: it walks with `fs.promises.readdir` (never a synchr
 - Do not use a synchronous recursive walk here — the scan must never block the daemon's event loop.
 - Do not let hitting `NESTED_REPO_SCAN_MAX_ENTRIES` on a wide, ordinary build-output sibling silently pass as clean — that was the exact gap the follow-up fixed.
 
+## Narrative (2): the incident behind `gcWorktreeDir`'s nested-repo guard
+
+Card b6d41db1 (the incident): `git worktree remove --force` happily deletes EVERYTHING under the worktree, including a repo a manager (or, on the boot-reconcile paths, an orphaned pre-merge crash) left cloned in a gitignored subdirectory with unpushed work — silently, unrecoverably. This is the hole `gcWorktreeDir`'s own guard (its retain-on-hit behavior and the `opts.forceRemoveWorktree` restriction, both kept inline in `packages/daemon/src/sessions/service.ts` right after this record's anchor) exists to close.
+
+### Source (2)
+
+Inline comment in `packages/daemon/src/sessions/service.ts`, `gcWorktreeDir`'s own doc comment (the incident sentence only): originally the first sentence of the "NESTED-REPO GUARD" paragraph, as of this tranche's HEAD (tranche 62). The guard's own retain-on-hit/override contract was kept inline per lead review and is not part of this record's extracted text.
+
 ## Source
 
 Inline comment in `packages/daemon/src/git/worktrees.ts`, `findNestedGitRepos`'s own doc comment (~line 1339), as of commit `f8d18a2cbc315a3020b962ac7e85cf2194ca09ba`. Relocated by card `5b001dde`; wrapped source lines joined into a flowing paragraph, `*` comment markers stripped, no wording changed.
