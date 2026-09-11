@@ -46,15 +46,21 @@ export interface RecycleSettleEarlyResult {
    *  here, if reversed incorrectly, would resurrect a genuinely-fine successor's fleet onto the wrong
    *  owner). */
   deferred: { predecessorId: string; freshId: string }[];
-  /** Neither the successor (never durably ready) NOR the predecessor (fails `isDurablyResumable`) can
-   *  serve as an automatic owner. The successor is left COMPLETELY UNTOUCHED (mirrors
-   *  `recoverFleetAfterFailedRecycleSuccessor`'s own NEVER RESURRECT reasoning — it is the only possible
-   *  EVENTUAL owner, and touching its `recycled_from`/archived state here would only make that worse).
+  /** The predecessor fails `isDurablyResumable` — but "the successor can't serve either" covers TWO
+   *  distinct shapes, told apart by `successorReachedReadyButUnlinked`. FALSE (the successor never
+   *  durably reached ready): mirrors `recoverFleetAfterFailedRecycleSuccessor`'s own NEVER RESURRECT
+   *  reasoning — it is the only possible EVENTUAL owner, and touching its `recycled_from`/archived state
+   *  here would only make that worse. TRUE (card `59bfc939`): the successor DID durably reach ready, but
+   *  is no longer LINKED to this predecessor — a PRIOR boot already recovered/superseded it in favor of
+   *  this predecessor, and that boot's own later phase never reached its own completion (marker left set
+   *  on a throw — see `finalizeRecovery`'s ordering). It is NOT a fallback owner here; it was already
+   *  retired, and the predecessor's own resumability failing since is what leaves nobody to serve. Either
+   *  way the successor is left COMPLETELY UNTOUCHED by this phase.
    *  Code Review round 3 finding 4: the durable marker STAYS SET here too — the later phase's own
    *  `stampStranded` clears it, once it has actually made the predecessor's stranded state VISIBLE
    *  (the `[loom:orphaned-fleet]` banner survives `snapshotAndArchiveRecovered`'s archive only if the row
    *  is un-archived afterward — see `finishReconcilingRecycleSettles`). */
-  stranded: { predecessorId: string; freshId: string }[];
+  stranded: { predecessorId: string; freshId: string; successorReachedReadyButUnlinked: boolean }[];
 }
 
 /**
@@ -97,7 +103,10 @@ export function reconcileStrandedRecycleSettlesEarly(db: Db): RecycleSettleEarly
         // the later phase ever gets to un-archive the predecessor and stamp its [loom:orphaned-fleet]
         // banner. `stampStranded` (the later phase's own handler) clears it once that actually happens —
         // mirrors the `deferred` bucket just above, which already never cleared it here either.
-        stranded.push({ predecessorId, freshId });
+        // Card 59bfc939: `fresh?.reachedReadyAt` here means the successor DID durably reach ready but
+        // isn't `stillLinked` — the row is already past the `deferred` check above, so this can only be
+        // the already-superseded shape (see `stranded`'s own doc), never "never became ready".
+        stranded.push({ predecessorId, freshId, successorReachedReadyButUnlinked: !!fresh?.reachedReadyAt });
         continue;
       }
       if (fresh && fresh.recycledFrom === predecessorId) db.setOrchestration(freshId, { recycledFrom: null });

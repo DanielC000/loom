@@ -4460,10 +4460,7 @@ export class SessionService {
     // gets the live `currentDeployStaleness()` read of THIS (freshly-booted, post-restart) process's own
     // signature; a hermetic test injects a fixed result so it can assert the withheld-vs-emitted "code is
     // live" wording deterministically, without a real git checkout + rebuilt dist.
-    // @decision 08c81809 — Code Review round 5 minor (doc drift): `excludeRetiredIds` is NOT the
-    // structural fix as of round 4 — `this.retiredRecycleSuccessorIds` (an instance field) is consulted
-    // UNCONDITIONALLY below; this option is an ADDITIONAL override only, and index.ts no longer passes it.
-    opts: { resumeOne?: (id: string) => ResumeOneResult; now?: Date; deployStaleness?: DeployStalenessResult; excludeRetiredIds?: Set<string> } = {},
+    opts: { resumeOne?: (id: string) => ResumeOneResult; now?: Date; deployStaleness?: DeployStalenessResult } = {},
   ): { resumed: string[]; skippedParked: string[]; failed: string[]; retiredSkipped: string[] } {
     const now = opts.now ?? new Date();
     const deployStaleness = opts.deployStaleness ?? currentDeployStaleness();
@@ -4475,8 +4472,8 @@ export class SessionService {
     const retiredSkipped: string[] = [];
     // @decision 08c81809 — CRITICAL (round 3): a retired recycle successor must never be re-resumed
     // alongside its already-recovered predecessor. Consults `this.retiredRecycleSuccessorIds`
-    // UNCONDITIONALLY (round 4) — `opts.excludeRetiredIds` is an ADDITIONAL override only, never required.
-    const isRetired = (id: string): boolean => this.retiredRecycleSuccessorIds.has(id) || !!opts.excludeRetiredIds?.has(id);
+    // UNCONDITIONALLY (round 4; card 59bfc939 removed the `excludeRetiredIds` override — no production caller).
+    const isRetired = (id: string): boolean => this.retiredRecycleSuccessorIds.has(id);
     const entries = resumeSetFromIntent(intent).filter((e) => {
       if (isRetired(e.sessionId)) { retiredSkipped.push(e.sessionId); return false; }
       return true;
@@ -4956,9 +4953,6 @@ export class SessionService {
     opts: {
       resumeOne?: (id: string) => ResumeOneResult; now?: Date; soloManagerIds?: string[]; shutdownMarker?: ShutdownMarkerRecord | null;
       hadCrashLogAtBoot?: boolean; bootedAt?: Date; supervisorIteration?: number | null;
-      // @decision 08c81809 — round 5 minor (doc drift): an ADDITIONAL override only, same as
-      // `resumeFleetOnBoot`'s own `excludeRetiredIds` — see that function's doc for the full reasoning.
-      excludeRetiredIds?: Set<string>;
     } = {},
   ): { resumed: string[]; skippedParked: string[]; failed: string[]; managersFailed: string[]; retiredSkipped: string[] } {
     const now = opts.now ?? new Date();
@@ -4997,8 +4991,8 @@ export class SessionService {
     const managersFailed: string[] = [];
     const retiredSkipped: string[] = [];
     // @decision 08c81809 — same UNCONDITIONAL instance-field consultation as `resumeFleetOnBoot`'s own
-    // `isRetired` (round 4 hardening item 2) — `opts.excludeRetiredIds` is an override only.
-    const isRetired = (id: string): boolean => this.retiredRecycleSuccessorIds.has(id) || !!opts.excludeRetiredIds?.has(id);
+    // `isRetired` (round 4 hardening item 2; card 59bfc939 removed the `excludeRetiredIds` override).
+    const isRetired = (id: string): boolean => this.retiredRecycleSuccessorIds.has(id);
     const byManager = new Map<string, CrashOrphanedWorker[]>();
     for (const c of candidates) {
       // @decision 08c81809 — a retired recycle successor must never be re-resumed as a manager here
@@ -10714,8 +10708,14 @@ export class SessionService {
       }
     }
 
-    for (const { predecessorId, freshId } of early.stranded) {
-      try { stampStranded(predecessorId, freshId, "never reached SessionStart"); }
+    for (const { predecessorId, freshId, successorReachedReadyButUnlinked } of early.stranded) {
+      // Card 59bfc939: the generic "never reached SessionStart" reason is FALSE for a successor that
+      // durably reached ready but was already unlinked in favor of this predecessor by an earlier boot
+      // (see `RecycleSettleEarlyResult.stranded`'s own doc for the shape) — say what actually happened.
+      const reason = successorReachedReadyButUnlinked
+        ? "reached SessionStart and was already superseded by this predecessor in an earlier boot, but that boot's own recovery never completed, and this predecessor is no longer resumable either"
+        : "never reached SessionStart";
+      try { stampStranded(predecessorId, freshId, reason); }
       catch (e) { console.error(`[recycle-settle-reconcile] later pass (stranded) failed for predecessor ${predecessorId.slice(0, 8)}: ${(e as Error)?.message ?? e}`); }
     }
 

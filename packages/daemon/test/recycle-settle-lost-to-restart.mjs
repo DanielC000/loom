@@ -259,7 +259,7 @@ try {
       db2.listUnresolvedQueuedMessagesForWorker(m1.id).some((e) => e.detail?.text === QUEUED_MESSAGE_TEXT));
 
     const restartIntent = { reason: "test", managerSessionId: m1.id, resume: preRestartFleet };
-    const { resumed, failed } = sessions2.resumeFleetOnBoot(restartIntent, { deployStaleness: CLEAN_STALENESS, excludeRetiredIds: new Set(finish.retiredSuccessorIds) });
+    const { resumed, failed } = sessions2.resumeFleetOnBoot(restartIntent, { deployStaleness: CLEAN_STALENESS });
     check("(A) resumeFleetOnBoot did not ALSO fail M1 (already resumed by the reconcile; resume()'s isAlive short-circuit made this a no-op)", !failed.includes(m1.id));
     void resumed;
 
@@ -313,7 +313,7 @@ try {
     // reparented too late for this to ever be true on the crash path.
     check("(B) FIX: deriveCrashOrphanedWorkers groups the worker under the RECOVERED M1, not the dead M2", crashOrphanedWorkers.some((c) => c.workerSessionId === workerId && c.managerSessionId === m1.id));
 
-    const { resumed, failed, managersFailed } = sessions2.recoverCrashOrphanedWorkers(crashOrphanedWorkers, { soloManagerIds: crashOrphanedManagers, excludeRetiredIds: new Set(finish.retiredSuccessorIds) });
+    const { resumed, failed, managersFailed } = sessions2.recoverCrashOrphanedWorkers(crashOrphanedWorkers, { soloManagerIds: crashOrphanedManagers });
     check("(B) FIX: the worker is ACTUALLY resumed via the crash path's own candidate derivation", resumed.includes(workerId));
     check("(B) the worker did not end up in the crash path's own failed list", !failed.includes(workerId));
     check("(B) M1 itself was not left in managersFailed (already resumed by the reconcile)", !managersFailed.includes(m1.id));
@@ -473,6 +473,61 @@ try {
     check("(K) FIX: the durable marker is finally cleared", db3.listRecycleSettlePending().length === 0);
   }
 
+  // ==================== (L) STRANDED, ALREADY-SUPERSEDED SUCCESSOR — the banner must not lie ====================
+  // Card 59bfc939 — 5th Code Review of 08c81809: mirrors (K)'s boot1+boot2 exactly (a deferred-branch
+  // throw-after-unlink leaves the marker set with M2 already unlinked + durably ready), but at boot 3,
+  // instead of M2's transcript reappearing, M1's OWN transcript vanishes — the shape the card names:
+  // "needs the predecessor's transcript or cwd to vanish between boots AFTER it had resumed." Before the
+  // fix, `stampStranded` always said the successor "never reached SessionStart" — FALSE here, since M2
+  // durably reached ready (asserted at (L pre)). This is the RED case: it fails on unfixed `stampStranded`.
+  {
+    const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
+    const P = "rslr-l";
+    seedProject(db1, P);
+    db1.setProjectConfig(P, { permission: { startupModeCycles: 0 } }); // markReady runs SYNCHRONOUSLY off the hook below
+    const m1 = sessions1.startManager(`${P}-mgr`);
+    host1.deliverHook(m1.id, { hook_event_name: "SessionStart", session_id: "eng-m1-l" });
+    writeFakeTranscript(m1.cwd, "eng-m1-l");
+    const m2 = await sessions1.recycleManager(m1.id, "handoff — boot 1: the successor reaches ready but its transcript is missing");
+    host1.deliverHook(m2.id, { hook_event_name: "SessionStart", session_id: "eng-m2-l" });
+    // Deliberately NO writeFakeTranscript for M2 (mirrors (K)) — its own resume(freshId) attempt in the
+    // deferred fallback below must fail, driving the NEVER-RESURRECT fallback that resumes M1 and unlinks M2.
+    check("(L pre) FIX: M2 durably reached ready (reachedReadyAt set)", db1.getSession(m2.id)?.reachedReadyAt != null);
+    db1.close();
+
+    // ---- BOOT 2: mirrors (K)'s boot 2 — the deferred fallback resumes M1 and unlinks M2, then a LATER
+    // step inside finalizeRecovery throws, leaving the marker set (round 4's own fix).
+    const { db: db2, host: host2 } = makeBoot();
+    const origCarryPending = SessionService.prototype.carryPendingToSuccessor;
+    const injectedError = new Error("(L) boot2 injected throw — carryPendingToSuccessor mid-finalizeRecovery");
+    SessionService.prototype.carryPendingToSuccessor = function () { throw injectedError; };
+    try {
+      runRealBootSequenceUpToResume(db2, host2);
+    } finally {
+      SessionService.prototype.carryPendingToSuccessor = origCarryPending;
+    }
+    check("(L boot2) M1 WAS resumed (the deferred fallback's own resume(predecessor) succeeded before the later throw)", host2.isAlive(m1.id) === true);
+    check("(L boot2) M2 is already unlinked (recycledFrom: null) — the unlink ran BEFORE the throw", db2.getSession(m2.id)?.recycledFrom === null);
+    check("(L boot2) the durable marker STAYS SET despite the successful predecessor resume", db2.listRecycleSettlePending().some((r) => r.predecessorId === m1.id && r.freshId === m2.id));
+    db2.close();
+
+    // ---- BOOT 3: M1's OWN transcript vanishes (e.g. Claude pruned the JSONL) — the predecessor already
+    // established as owner in boot 2 is now itself unresumable. The row is genuinely stranded — but the
+    // successor DID reach SessionStart, so the banner must say so truthfully, never "never reached SessionStart".
+    const m1EngineDir = path.join(os.homedir(), ".claude", "projects", encodeProjectDir(path.resolve(m1.cwd)));
+    fs.rmSync(m1EngineDir, { recursive: true, force: true });
+    check("(L pre-boot3) M1's transcript is genuinely gone", !fs.existsSync(m1EngineDir));
+    const { db: db3, host: host3 } = makeBoot();
+    void host3;
+    const { finish: finish3 } = runRealBootSequenceUpToResume(db3, host3);
+    check("(L) FIX: the row is reported stranded (M1 no longer resumable either)", finish3.strandedPredecessors.includes(m1.id));
+    check("(L) FIX: the durable marker is cleared (nothing left to auto-retry)", db3.listRecycleSettlePending().length === 0);
+    const banner = db3.getSession(m1.id)?.lastError ?? "";
+    check("(L) FIX: the banner does NOT falsely claim the successor never reached SessionStart", !/never reached SessionStart/.test(banner));
+    check("(L) FIX: the banner truthfully says the successor already reached SessionStart and was superseded", /reached SessionStart/.test(banner) && /supersed/i.test(banner));
+    check("(L) FIX: M1 is VISIBLE on the live rail (un-archived)", db3.getSession(m1.id)?.archivedAt == null);
+  }
+
   // ==================== (C) MANAGER, ENGINE ID CAPTURED BUT NEVER READY — daemon_restart path ====================
   {
     const { db: db1, host: host1, sessions: sessions1 } = makeHarness();
@@ -511,12 +566,14 @@ try {
     check("(C) FIX: M2 is in retiredSuccessorIds (finalizeRecovery retired it)", finish.retiredSuccessorIds.includes(m2.id));
 
     const restartIntent = { reason: "test", managerSessionId: m1.id, resume: preRestartFleet };
-    // @decision 08c81809 — Code Review round 3 finding 1 (CRITICAL, reproduced): WITHOUT `excludeRetiredIds`,
-    // M2 is still in `preRestartFleet` (captured while genuinely alive, pre-restart) AND now durably
-    // resumable (the transcript written above) — resumeFleetOnBoot would resume it right alongside the
-    // already-recovered M1, producing TWO live managers on one lineage. Assert the fix below.
-    const excludeRetiredIds = new Set(finish.retiredSuccessorIds);
-    const { resumed, failed, retiredSkipped } = await sessions2.resumeFleetOnBoot(restartIntent, { deployStaleness: CLEAN_STALENESS, excludeRetiredIds });
+    // @decision 08c81809 — Code Review round 3 finding 1 (CRITICAL, reproduced): M2 is still in
+    // `preRestartFleet` (captured while genuinely alive, pre-restart) AND now durably resumable (the
+    // transcript written above) — resumeFleetOnBoot would resume it right alongside the already-recovered
+    // M1, producing TWO live managers on one lineage, if nothing excluded it. `this.retiredRecycleSuccessorIds`
+    // (populated by `finalizeRecovery`, consulted UNCONDITIONALLY — round 4) is the actual guard; this
+    // scenario passes no `excludeRetiredIds` override (card 59bfc939 — that option has no production
+    // caller) so it exercises exactly the real production path.
+    const { resumed, failed, retiredSkipped } = await sessions2.resumeFleetOnBoot(restartIntent, { deployStaleness: CLEAN_STALENESS });
     check("(C) FIX: M1 is ACTUALLY resumed", host2.isAlive(m1.id) === true);
     check("(C) FIX: the worker is reparented back onto M1", db2.getSession(workerId)?.parentSessionId === m1.id);
     check("(C) FIX: M2 is unlinked + archived", db2.getSession(m2.id)?.recycledFrom === null && !!db2.getSession(m2.id)?.archivedAt);
@@ -558,7 +615,7 @@ try {
     check("(D) FIX: M1 is NOT in recoveredPredecessors", !finish.recoveredPredecessors.includes(m1.id));
 
     const restartIntent = { reason: "test", managerSessionId: m2.id, resume: preRestartFleet };
-    await sessions2.resumeFleetOnBoot(restartIntent, { deployStaleness: CLEAN_STALENESS, excludeRetiredIds: new Set(finish.retiredSuccessorIds) });
+    await sessions2.resumeFleetOnBoot(restartIntent, { deployStaleness: CLEAN_STALENESS });
     check("(D) FIX: M2 is ACTUALLY resumed (live)", host2.isAlive(m2.id) === true);
     check("(D) FIX: M1 stays correctly superseded — NEVER resumed", host2.isAlive(m1.id) === false);
     check("(D) FIX: hasSuccessor(M1) stays true — M2 is the real, live owner", db2.hasSuccessor(m1.id) === true);
@@ -593,7 +650,7 @@ try {
     // The condition-3 proof: L1 is resumed by THIS reconcile pass directly (it calls resume() itself),
     // never merely unlinked-and-left for resumeFleetOnBoot's own entries (which never named it).
     const restartIntent = { reason: "test", managerSessionId: l1.id, resume: preRestartFleet };
-    await sessions2.resumeFleetOnBoot(restartIntent, { deployStaleness: CLEAN_STALENESS, excludeRetiredIds: new Set(finish.retiredSuccessorIds) }); // l1 is NOT in `resume` — proves the reconcile alone did it
+    await sessions2.resumeFleetOnBoot(restartIntent, { deployStaleness: CLEAN_STALENESS }); // l1 is NOT in `resume` — proves the reconcile alone did it
     check("(E) FIX: L1 is ACTUALLY resumed (live), regardless of which boot-resume path runs after this", host2.isAlive(l1.id) === true);
     check("(E) FIX: L1's processState is restored to live", db2.getSession(l1.id)?.processState === "live");
     check("(E) FIX: hasSuccessor(L1) is now false (L2 unlinked)", db2.hasSuccessor(l1.id) === false);
@@ -697,7 +754,7 @@ try {
     check("(H) FIX: M2 is in retiredSuccessorIds (finalizeRecovery retired it via the fallback path)", finish.retiredSuccessorIds.includes(m2.id));
 
     const restartIntent = { reason: "test", managerSessionId: m1.id, resume: preRestartFleet };
-    const { resumed, failed, retiredSkipped } = await sessions2.resumeFleetOnBoot(restartIntent, { deployStaleness: CLEAN_STALENESS, excludeRetiredIds: new Set(finish.retiredSuccessorIds) });
+    const { resumed, failed, retiredSkipped } = await sessions2.resumeFleetOnBoot(restartIntent, { deployStaleness: CLEAN_STALENESS });
     check("(H) FIX: M1 is ACTUALLY resumed", host2.isAlive(m1.id) === true);
     check("(H) FIX: the worker is reparented back onto M1 — finding 7's exact load-bearing case for reparentAllChildren in the deferred-fallback branch", db2.getSession(workerId)?.parentSessionId === m1.id);
     check("(H) FIX: M2 is unlinked + archived", db2.getSession(m2.id)?.recycledFrom === null && !!db2.getSession(m2.id)?.archivedAt);

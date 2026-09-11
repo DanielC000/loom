@@ -204,8 +204,10 @@ try {
   check("(setup) FIX 08c81809: the reconcile recovered M1 and retired M2", finish.recoveredPredecessors.includes(m1.id) && finish.retiredSuccessorIds.includes(m2.id));
 
   const restartIntent = { reason: "test", managerSessionId: m1.id, resume: preRestartFleet };
-  const excludeRetiredIds = new Set(finish.retiredSuccessorIds);
-  await sessions2.resumeFleetOnBoot(restartIntent, { deployStaleness: CLEAN_STALENESS, excludeRetiredIds });
+  // Card 59bfc939: no `excludeRetiredIds` override passed — that option has no production caller
+  // (`this.retiredRecycleSuccessorIds`, populated by `finalizeRecovery`, is consulted unconditionally), so
+  // this exercises the real production path.
+  await sessions2.resumeFleetOnBoot(restartIntent, { deployStaleness: CLEAN_STALENESS });
 
   check("(setup) M2 is dead+archived (unlinkAndArchiveDeadRecycleSuccessor's own effect), transcript+cwd genuinely intact", db2.getSession(m2.id)?.resumability === "dead" && !!db2.getSession(m2.id)?.archivedAt);
   check("(setup) card 5a56bb0a's own marker: recycle_successor_retired event exists for M2", db2.hasWorkerEventKind(m2.id, "recycle_successor_retired"));
