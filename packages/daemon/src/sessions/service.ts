@@ -1759,6 +1759,9 @@ const defaultRunWebhookPost: RunWebhookPoster = async (url, body, timeoutMs) => 
  * mergeBranchLocked's own in-lock re-check reports at squash time): this is a REAL git failure — a hard
  * conflict, or the union write itself erroring — encountered while TRYING to close that staleness gap,
  * not the staleness itself.
+ *
+ * @decision b798e706 — always a defined, observable rejection, never a silent vanish or silent proceed
+ *  on the stale base, distinct from the benign `gateBaseInvalidated` staleness race reported at squash.
  */
 class AdmissionReunionFailedError extends Error {
   constructor(
@@ -12440,6 +12443,9 @@ export class SessionService {
       // backfilled) and is populated only on runs from this card forward — any analysis spanning older
       // and newer rows must handle both fields being present separately, never assume one implies the
       // other.
+      //
+      // @decision 424ed9a8 — never prune concurrentGates/concurrentGatesMax as unused, and never rename
+      //  or reinterpret concurrentGates' meaning: a 600+-row historical baseline depends on both.
       let concurrentAtStart = 0;
       let concurrentGatesMax = 0;
       let getConcurrentGatesMax: (() => number) | undefined;
@@ -12522,6 +12528,10 @@ export class SessionService {
       // written for the analogous — and already-expected — `runWorkerGate` gap this one now mirrors) — a
       // manager reading `gate_queue`'s `idleMs` to judge "working hard" vs. "hung" on a merge entry should
       // read a small, early, non-growing-past-a-couple-seconds `idleMs` as this window, not a stall.
+      //
+      // @decision b798e706 — before this, a queued merge ran its full gate against the pre-queue base and
+      //  self-aborted at squash time on ANY main movement during the wait, re-paying the entire gate cost.
+      //  Does NOT by itself close the same-repo-sibling-squash case above (needs card c24dd48a).
       const reunionAtAdmission = async (): Promise<void> => {
         if (!preLanded && gateBaseMainHead) {
           const admissionHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs });
@@ -12533,6 +12543,10 @@ export class SessionService {
             // THIS write fail with a spurious EPERM, misreported below as a real git failure rather than
             // the lock issue it actually is. `reap`/`workerPid` are the SAME closures the pre-gate sweep
             // above already captured — reused here, not re-derived.
+            //
+            // @decision b798e706 — this admission-time re-union writes tracked files exactly like the
+            //  first union-merge, so it needs the same pre-write reap (card c0aeb5b2) or an escaped
+            //  watcher/build child can fail it with a spurious EPERM, misreported as a git failure.
             try {
               await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] });
             } catch {
@@ -12664,6 +12678,10 @@ export class SessionService {
       // of which are actually "main advanced" as the PROBLEM, even though main did move (that's WHY this
       // ran at all). Asserting causation there would misattribute an unrelated git/filesystem failure and
       // send a manager chasing the wrong fix.
+      //
+      // @decision b798e706 — the wording below must NOT assert "main advanced" as the CAUSE for a
+      //  non-conflict failure: only `union_conflict_at_admission` proves that; misattributing the other
+      //  reason sends a manager chasing the wrong fix.
       const rejectAdmissionReunionFailure = async (err: AdmissionReunionFailedError): Promise<ConfirmMergeResult> => {
         const cause = err.failReason === "union_conflict_at_admission"
           ? " (canonical main advanced while this merge waited in the gate queue, and the advance conflicts with this branch's own content — re-confirm once resolved.)"
@@ -13335,6 +13353,9 @@ export class SessionService {
           // name (`concurrentGates`, matching `ConfirmMergeResult`/`PendingGateOpVerdict`/`gate_history`'s
           // column/`gate_status`'s field) is greppable across the nudge text and every structured surface;
           // no test asserted the old label's exact text (checked before renaming).
+          //
+          // @decision 424ed9a8 — this label is `concurrentGates=`, renamed from the bare `concurrentAtStart`
+          //  echo (Code Review, card e2b6f900) so ONE name is greppable across every structured surface.
           `cap=${gateCap} concurrentGates=${concurrentAtStart} concurrentGatesMax=${concurrentGatesMax}`,
           // Card 8fb09f4c: `failingTest` alone is a FLOOR, not a complete account, whenever more than one
           // line matched the same tier it was drawn from — say so inline rather than let a single named
