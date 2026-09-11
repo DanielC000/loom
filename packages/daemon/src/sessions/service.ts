@@ -10263,6 +10263,11 @@ export class SessionService {
       // due wake can't resurrect the retired worker) and re-drive the held messages onto the fresh worker
       // (busy-gated; they drain on its first turn boundary, after its handoff turn).
       this.db.reparentWakes(workerSessionId, fresh.id);
+      // Card df9d1c71: a wake-mode trigger/poll/webhook can target ANY session (no role restriction at
+      // create time), a worker included — re-point it onto the successor for the same reason wakes are.
+      this.db.reparentEventTriggerTargets(workerSessionId, fresh.id);
+      this.db.reparentPollJobTargets(workerSessionId, fresh.id);
+      this.db.reparentWebhookTargets(workerSessionId, fresh.id);
       this.carryPendingToSuccessor(workerSessionId, fresh.id, carried, carriedDurable);
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
@@ -10454,6 +10459,11 @@ export class SessionService {
     const reparentedWorkers = role === "manager" ? this.db.reparentLiveWorkers(freshId, oldId) : 0;
     this.db.reparentWakes(freshId, oldId);
     this.db.reparentQuestions(freshId, oldId);
+    // Card df9d1c71: the successor died before taking over — carry its wake-mode trigger/poll/webhook
+    // targets back onto the recovered predecessor, same direction as the wakes/questions above.
+    this.db.reparentEventTriggerTargets(freshId, oldId);
+    this.db.reparentPollJobTargets(freshId, oldId);
+    this.db.reparentWebhookTargets(freshId, oldId);
     if (role === "manager") {
       this.capQueue.reparent(freshId, oldId);
       void this.maybeDrainCapQueue(oldId);
@@ -10661,6 +10671,11 @@ export class SessionService {
         const reparentedWorkers = this.db.reparentAllChildren(freshId, predecessorId);
         this.db.reparentWakes(freshId, predecessorId);
         this.db.reparentQuestions(freshId, predecessorId);
+        // Card df9d1c71: same direction as reparentWakes/reparentQuestions above — the successor is
+        // being recovered off onto the predecessor, so its wake-mode targets go with it.
+        this.db.reparentEventTriggerTargets(freshId, predecessorId);
+        this.db.reparentPollJobTargets(freshId, predecessorId);
+        this.db.reparentWebhookTargets(freshId, predecessorId);
         finalizeRecovery(predecessorId, freshId, reparentedWorkers);
       } catch (e) {
         // @decision 08c81809 — round 4 item 3: do NOT clear the marker here — a throw anywhere in this
@@ -10842,6 +10857,11 @@ export class SessionService {
     // question_pull's exact-session_id scoping strands an 'answered' (or still-'pending') question the
     // predecessor asked, unreachable from the successor's own session id.
     this.db.reparentQuestions(oldManagerId, fresh.id);
+    // Card df9d1c71: move any wake-mode event-trigger/poll/webhook target aimed at the predecessor onto
+    // the successor too — otherwise a fire on it calls resume(predecessor), which hasSuccessor refuses.
+    this.db.reparentEventTriggerTargets(oldManagerId, fresh.id);
+    this.db.reparentPollJobTargets(oldManagerId, fresh.id);
+    this.db.reparentWebhookTargets(oldManagerId, fresh.id);
     // Card daf7dfa1: move any of the predecessor's still-queued cap-queue entries onto the successor too —
     // otherwise a spawn queued behind the cap gets permanently orphaned under a manager id that no future
     // retirement will ever drain again (see CapQueueRegistry.reparent's own doc). Fire-and-forget catch-up
@@ -11055,6 +11075,11 @@ export class SessionService {
     // predecessor asked, unreachable from the successor's own session id (mirrors recycleManager's
     // identical reparentQuestions call, card 8701bdbb).
     this.db.reparentQuestions(oldLeadId, fresh.id);
+    // Card df9d1c71: mirrors recycleManager's identical reparentEventTriggerTargets/reparentPollJobTargets/
+    // reparentWebhookTargets calls above — a wake-mode target aimed at the predecessor Lead.
+    this.db.reparentEventTriggerTargets(oldLeadId, fresh.id);
+    this.db.reparentPollJobTargets(oldLeadId, fresh.id);
+    this.db.reparentWebhookTargets(oldLeadId, fresh.id);
     const carried = this.pty.flushPending(oldLeadId);
     const carriedDurable = this.db.listUnresolvedQueuedMessagesForWorker(oldLeadId);
     this.carryPendingToSuccessor(oldLeadId, fresh.id, carried, carriedDurable);

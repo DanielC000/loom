@@ -104,6 +104,10 @@ export function reconcileStrandedRecycleSettlesEarly(db: Db): RecycleSettleEarly
       const reparentedWorkers = db.reparentAllChildren(freshId, predecessorId);
       db.reparentWakes(freshId, predecessorId);
       db.reparentQuestions(freshId, predecessorId);
+      // Card df9d1c71: same direction as reparentWakes/reparentQuestions above.
+      db.reparentEventTriggerTargets(freshId, predecessorId);
+      db.reparentPollJobTargets(freshId, predecessorId);
+      db.reparentWebhookTargets(freshId, predecessorId);
       // Code Review round 3 finding 4: same reasoning as the `stranded` branch above — the marker stays
       // set until the LATER phase's `finalizeRecovery` actually archives the dead successor and resumes
       // the predecessor. A boot dying between the two phases with this cleared would silently lose the

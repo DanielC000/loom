@@ -5558,6 +5558,28 @@ export class Db {
     return this.db.prepare("UPDATE questions SET session_id = ? WHERE session_id = ?")
       .run(newSessionId, oldSessionId).changes;
   }
+  /** Move a wake-mode event trigger's fixed `target_session_id` onto a recycle successor — mirrors
+   *  reparentWakes/reparentQuestions exactly (an unconditional row move at recycle time, not a
+   *  lineage-walk at fire time). Without this, `EventTriggerService.fire` calls `resume(predecessor)`
+   *  forever once a successor exists; `resume()` refuses that (`hasSuccessor`), so the trigger reads
+   *  enabled but is dead for good. Card df9d1c71. */
+  reparentEventTriggerTargets(oldSessionId: string, newSessionId: string): number {
+    return this.db.prepare("UPDATE event_triggers SET target_session_id = ? WHERE target_session_id = ?")
+      .run(newSessionId, oldSessionId).changes;
+  }
+  /** Same as `reparentEventTriggerTargets`, for local poll-job wake targets. NOTE the column is
+   *  `session_id` here (like `wakes`/`questions`), NOT `target_session_id` — `poll_jobs` predates
+   *  event_triggers/webhook_endpoints and never adopted their column name. Card df9d1c71. */
+  reparentPollJobTargets(oldSessionId: string, newSessionId: string): number {
+    return this.db.prepare("UPDATE poll_jobs SET session_id = ? WHERE session_id = ?")
+      .run(newSessionId, oldSessionId).changes;
+  }
+  /** Same as `reparentEventTriggerTargets`, for inbound webhook wake targets
+   *  (`webhook_endpoints.target_session_id`). Card df9d1c71. */
+  reparentWebhookTargets(oldSessionId: string, newSessionId: string): number {
+    return this.db.prepare("UPDATE webhook_endpoints SET target_session_id = ? WHERE target_session_id = ?")
+      .run(newSessionId, oldSessionId).changes;
+  }
   /** True once a session has been recycled — a successor row points back at it via recycled_from.
    *  resume() uses this to refuse resurrecting a superseded session from ANY path (wake/rate-limit/boot). */
   hasSuccessor(sessionId: string): boolean {

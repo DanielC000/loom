@@ -30,7 +30,9 @@ Round 1 shipped `resumability==="dead"` AND `archivedAt!=null` AND the marker (b
 
 ## Reachability (verified, not assumed)
 
-Wakes/Questions are NOT reachable: `reparentWakes`/`reparentQuestions` run either in the early DB-only boot phase BEFORE the row is dead-marked, or synchronously right after `unlinkAndArchiveDeadRecycleSuccessor` live, with no `await` gap for a watcher tick. Poll/trigger/webhook ARE reachable: no reparent helper exists for any of their `target_session_id`s, and target validation imposes no role restriction. That non-reparenting gap is separate and already-carded (it also strands a trigger against an ordinary recycled predecessor, refused by `hasSuccessor`); this fix makes the retired-successor case REFUSE instead of resurrect, not fix the gap itself.
+Wakes/Questions are NOT reachable: `reparentWakes`/`reparentQuestions` run either in the early DB-only boot phase BEFORE the row is dead-marked, or synchronously right after `unlinkAndArchiveDeadRecycleSuccessor` live, with no `await` gap for a watcher tick.
+
+Poll/trigger/webhook WERE reachable: no reparent helper existed for any of their `target_session_id`s, and target validation imposes no role restriction. That gap was separate and already-carded (it also stranded a trigger aimed at an ordinary recycled predecessor, refused by `hasSuccessor`); this fix only made the retired-successor case REFUSE instead of resurrect, not fix it. **Card `df9d1c71` closed it**: `reparentEventTriggerTargets`/`reparentPollJobTargets`/`reparentWebhookTargets` now run alongside every `reparentWakes`/`reparentQuestions` call, including `recoverFleetAfterFailedRecycleSuccessor` and `reconcileStrandedRecycleSettlesEarly` — so they are NOT reachable either.
 
 ## Source
 
