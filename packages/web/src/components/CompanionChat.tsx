@@ -52,33 +52,22 @@ function blobToBase64(blob: Blob): Promise<string> {
  * assembly (day dividers, consecutive-sender grouping, per-group timestamps, delivery state, reset markers,
  * proactive event lines) — live in the pure, unit-tested lib/companionChat (`buildTimeline`).
  *
- * THE "REAL CHAT" REBUILD (card bbd1ced9): the panel no longer renders a flat, timeless bubble wall that
- * grows without anchors. `buildTimeline` segments the stream by day, collapses same-sender runs under one
- * header, and marks delivery + channel state; the scroll sticks to the bottom while you're there and offers a
- * floating "Jump to latest · N new" anchor once you scroll up — the direct fix for "grows endlessly".
+ * @decision bbd1ced9 — the panel is a structured, day-segmented timeline (not a flat bubble wall) with
+ * consecutive-sender grouping; scroll sticks to the bottom, never yanks a scrolled-up reader back down.
  *
  * Connection lifecycle mirrors Terminal.tsx's discipline (open/close/reconnect, and the CONNECTING-state
  * close guard so a pane abandoned mid-handshake never logs a spurious close) — but with JSON chat framing,
  * never raw pty bytes.
  *
- * HISTORY (bug 0f01f234 — reload used to lose the whole conversation): on every sessionId mount, this LOADS
- * the durable history first (GET /api/companion/messages/:sessionId) and seeds `messages` from it, THEN
- * opens the WebSocket — load-then-connect, so no live frame can arrive before the history snapshot is taken.
- * A cross-channel live push is still deduped by its persisted row id (see the ws handler). A fetch failure
- * degrades to an empty seed and still connects live (never blocks the chat on a history read).
+ * @decision 0f01f234 — history loads BEFORE the WebSocket opens (load-then-connect), so no live frame can
+ * land before the history snapshot; a history-fetch failure must still let the chat connect live.
  *
  * `armed` (optional) is whether this companion actually has an in-app route. When false, we surface a gentle
  * "not wired" notice: a message to an unbound companion gets no reply frame, so we must not imply it was
  * delivered. Unknown (undefined) ⇒ no upfront notice, but the reply-timeout backstop still applies.
  *
- * ZERO-REPLY ALERT (card 8bda9fc6): this panel is the NAMED READER for the daemon's zero-reply detector
- * (`companion/reply-watch.ts`). The detector's own outputs — a durable orchestration event and a
- * `console.warn` — are both internal, and it cannot push the alert through the companion because a silent
- * companion structurally cannot report its own silence. So the alert is PULLED here, from the dedicated
- * runtime read `GET /api/companion/status/:sessionId`, and rendered as a red banner at the top of the
- * chat. The incident that motivated the detector ended with the owner typing "Hello?" into this exact box
- * — this panel is where a human's eye already is at the moment the failure is felt. It also upgrades the
- * existing 25s reply-timeout backstop below from a hedge ("may be offline") to the known fact.
+ * @decision 8bda9fc6 — this panel is the zero-reply detector's PULLED, NAMED READER (never pushed through
+ * the companion channel); rendered as the top-of-chat alert banner.
  */
 
 const RECONNECT_MIN_MS = 1000;
