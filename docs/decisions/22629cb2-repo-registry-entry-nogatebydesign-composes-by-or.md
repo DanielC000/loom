@@ -8,10 +8,13 @@ The two flags compose with OR, not with layering/inheritance. `Project.noGateByD
 
 Default/omitted is `false` (still warns, subject to the project-level flag as today) — additive, so every existing entry is unaffected. Same human-only trust posture as the rest of `RepoRegistryEntry`/`repos`: no agent MCP tool ever declares this key (it rides inside `repos`, which is itself never agent-settable).
 
+A merge site reads this flag as `targetRepo.noGateByDesign` (`targetRepo` resolved via `resolveRepoByKey`, the accessor over the `repos` registry) — never re-derived some other way. For the primary repo specifically, `ResolvedRepo`'s own construction hardcodes `noGateByDesign` to `false` unconditionally (the primary has no registry entry of its own to read a per-entry flag from in the first place), which is the concrete mechanism behind "a registry entry's flag can never suppress the primary repo's warning" above — not a separate carve-out, just what falls out of there being nothing to read.
+
 ## Do not
 
 - Do not read the two `noGateByDesign` flags (project-level and per-entry) as layered/inheriting — they compose with OR, each independently checked; clearing one never re-enables a warning the other is also suppressing.
 - Do not expose `noGateByDesign` on an agent-facing write surface — it rides inside `repos`, which is itself never agent-settable, same trust class as `gateCommand`.
+- Do not treat the primary repo's hardcoded `false` as a special-cased exception needing its own guard — it is a direct consequence of the primary having no registry entry to read this field from.
 
 ## Source
 

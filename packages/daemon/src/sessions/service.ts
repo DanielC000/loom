@@ -13694,26 +13694,17 @@ export class SessionService {
     // needs-human — distinct from the nested-repo BLOCK above (which retains the worktree deliberately).
     // Purely additive: `undefined` on a clean removal, so this never fires on the common path.
     const worktreeWarning = finalizeResult.worktreeGcOutcome ? worktreeGcWarning(finalizeResult.worktreeGcOutcome, worktreePath) : undefined;
-    // NO-GATE WARNING (finding 8363e602; made repo-aware by CARRIED item 2, multi-repo epic 49136451
-    // phase 2): with no gateCommand configured FOR THE TARGET REPO, the branch above merges
-    // unconditionally — carry that forward explicitly so the manager knows this merge was NOT verified by
-    // any build/DoD check, rather than silently rubber-stamping it with no signal either way. `gate` is
-    // `targetRepo.gateCommand` (resolved above) — a gateless REGISTRY repo warns exactly like a gateless
-    // PROJECT did before this phase, since it flows through the SAME variable/warning path; the message
-    // names which repo when it isn't the primary, so the warning stays honest instead of blaming
-    // "this project" for a per-repo gap. `notified` is left undefined here (unlike every other branch):
-    // the GREEN path sends no direct nudge of its own, so confirmWorkerMergeTracked's generic
-    // `[loom:merge-done]` echo is the sole terminal signal. SUPPRESSED when the project is flagged
-    // `noGateByDesign` (card 58b0bb60) — a deliberately gateless project (vault/markdown/knowledge, no
-    // buildable code) opted OUT of this signal; an UNFLAGGED gateless project/repo still warns, so a
-    // genuinely missing gate stays surfaced. `project.noGateByDesign`'s reach is UNCHANGED by the
-    // per-entry flag below: it still suppresses project-WIDE (primary or any registry entry), exactly
-    // as before. ALSO suppressed when `targetRepo.noGateByDesign` (card 22629cb2, the per-entry
-    // counterpart — `RepoRegistryEntry.noGateByDesign` via `resolveRepoByKey`) is set: a registry entry
-    // can declare ITSELF gatelessly-by-design independent of the project flag. `targetRepo.noGateByDesign`
-    // is hardcoded `false` when `targetRepo.key === "primary"` (see `ResolvedRepo`'s doc), so an entry's
-    // flag can never reach the primary repo's warning, and each merge only ever reads its OWN target
-    // repo's flag, so it can never suppress a sibling entry's warning either.
+    // @decision 8363e602 — with no gateCommand configured for the target repo, a merge still lands
+    //  unconditionally; `gateWarning` carries that forward explicitly instead of rubber-stamping a merge
+    //  that was never verified by any build/DoD check.
+    //
+    // @decision 58b0bb60 — a project flagged deliberately gateless (`noGateByDesign`) suppresses this
+    //  warning project-wide (primary or any registry entry); an unflagged gateless project/repo still
+    //  warns, so a genuinely missing gate stays surfaced.
+    //
+    // @decision 22629cb2 — `targetRepo.noGateByDesign` (the per-entry counterpart) ALSO suppresses this
+    //  warning for one registry entry independent of the project flag; hardcoded `false` for the primary
+    //  repo, so an entry's flag can never reach the primary's warning or a sibling entry's.
     const gateWarning = gate || project.noGateByDesign || targetRepo.noGateByDesign
       ? undefined
       : `unverified: no gateCommand is configured for ${targetRepo.key === "primary" ? "this project" : `repo "${targetRepo.key}"`} — the merge was NOT checked by any build/DoD gate`;
@@ -13762,24 +13753,21 @@ export class SessionService {
       ...(concurrentGatesForRecord !== undefined ? { concurrentGates: concurrentGatesForRecord } : {}),
       ...(concurrentGatesMaxForRecord !== undefined ? { concurrentGatesMax: concurrentGatesMaxForRecord } : {}),
     };
-    // Card 725dc89a: the STRUCTURED sibling of `emitCompareWarning` above (mirrors the rejection return's
-    // own `emitCompareReduced` fields, just above in this method). Gated on `gateRan` — NOT just present
-    // unconditionally like `emitCompareWarning`/`emitCompareSkip` themselves — because this GREEN return is
-    // ALSO reached by the reuse and inert-diff-skip paths, where `emitCompareSkip` never gets a chance to be
-    // set true at all (it stays its initial `false`); reporting `emitCompareReduced:false` there would be a
-    // fabricated "genuinely not reduced" claim for a merge whose gate never spawned to be reduced OR not —
-    // same "nothing to report" discipline `gateCapForRecord`/`gateExtended` already follow.
+    // @decision 725dc89a — `emitCompareStructuredFields` is the STRUCTURED sibling of `emitCompareWarning`
+    //  above, gated on `gateRan` (not present unconditionally) since this GREEN return is ALSO reached by
+    //  the reuse/inert-diff-skip paths, where a fabricated `emitCompareReduced:false` must never stand in.
+    //
     // WIDENED, card 2db8a3dd: `gateRan` alone covers only ONE of the two causes of "never had a chance to
     // be eligible" — the other is a gate that genuinely spawned and ran (`gateRan:true`) on a repo whose
     // layout `computeEmitCompareGate`'s predicate structurally can never evaluate (every project that
     // isn't this one — see `EmitCompareGateResult.notApplicable`'s own doc, git/worktrees.ts). `false`
     // there would be the identical fabricated claim this guard already exists to prevent for the
     // never-spawned case; `emitCompareNotApplicable` (set only from the predicate's own verdict, never
-    // re-derived here) closes it. FIXED, card 4def0708: closing it depended on `emitCompareNotApplicable`
-    // actually being `true` whenever the predicate never ran — its declaration DEFAULTED to `false`
-    // instead, so a real gate that spawned via the `!gateBaseMainHead` route (predicate skipped) and then
-    // PASSED still fabricated `emitCompareReduced:false` here, this guard's own intent notwithstanding.
-    // The default is now the uninformative `true`, so this same expression is correct without change.
+    // re-derived here) closes it.
+    //
+    // @decision 4def0708 — this guard's `emitCompareNotApplicable` used to default to the informative
+    //  `false`, fabricating `emitCompareReduced:false` whenever a route skipped the predicate entirely;
+    //  the default is now the uninformative `true`, so this same expression is correct without change.
     const emitCompareStructuredFields = (gateRan && !emitCompareNotApplicable)
       ? { emitCompareReduced: emitCompareSkip, ...(emitCompareSkip ? { emitCompareIdenticalCount, emitCompareTestFiles, emitCompareNotHermeticExcluded } : {}) }
       // Card fd0d34da: mirrors the rejection return's own `emitCompareNotApplicableKind` stamp just
@@ -13802,28 +13790,13 @@ export class SessionService {
    * caller only ever reaches this on an already-confirmed-landed branch, so the ancestry check would
    * suppress it unconditionally.
    *
-   * STALE-REDELIVERY GUARD (card 369d8824, the "already consumed" facet): the EARLY entry above can be
-   * reached again by a genuinely stale retry — a manager re-calling `worker_merge_confirm` (documented
-   * idempotent-retryable) AFTER a PRIOR call already fully finalized this exact worker. That prior call's
-   * OWN `finalizeMerge` already appended a `merge_done` event for it, so this call's own path resolves
-   * via the FAST early-idempotency branch (before the gate even runs) — the manager gets its answer
-   * synchronously from ITS OWN tool call return, needs no async push, and a second `[loom:already-merged]`
-   * would just be a duplicate echo of something it already knows. So: skip the direct push (only) when a
-   * `merge_done` event already exists for this worker; still always finish the (idempotent, best-effort)
-   * cleanup below. `notified` on the return is unconditionally `true` regardless — this path OWNS the
-   * announcement for an ALREADY_MERGED outcome, whether THIS call fired it or a prior one already did, so
-   * confirmWorkerMergeTracked's generic echo must stay suppressed either way.
+   * @decision 369d8824 — a genuinely stale, already-finalized retry resolves via the fast early-idempotency
+   *  branch and skips only the DIRECT push (a `merge_done` event already exists); `notified` still comes
+   *  back `true` since this path owns the ALREADY_MERGED announcement either way.
    *
-   * BATCH CALLER SUPPRESSION (card c35b60c4): `mergeBatchTracked` calls this once per LANDED branch, and
-   * on that path every one of these branches legitimately resolves ALREADY_MERGED (the batch's own single
-   * fast-forward already put every branch's work on main — see that method's own header doc) — none of
-   * them is a stale retry, so `alreadyFinalized` above is `false` for every one and this method's push
-   * would otherwise fire K times for one batch (measured live: card c35b60c4's specimen). `suppressNotify`
-   * (set ONLY by that caller) skips this method's own per-branch push entirely; `mergeBatchTracked` sends
-   * ONE aggregate notice for the whole batch instead, once, naming every landed branch — see its own
-   * settle callback. This is a NEW, EXPLICIT opt-out, not a widening of the `alreadyFinalized` guard above
-   * (which stays reserved for the stale-retry case it was built for) — every non-batch caller omits this
-   * flag and keeps today's push behavior byte-identical.
+   * @decision c35b60c4 — `mergeBatchTracked` suppresses this method's own per-branch push via
+   *  `suppressNotify` and sends ONE aggregate notice for the whole batch instead — a new, explicit opt-out,
+   *  not a widening of the stale-retry guard above.
    */
   private async finishAlreadyMerged(args: {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
@@ -13831,7 +13804,7 @@ export class SessionService {
     forceRemoveWorktree?: boolean; opStartedAt?: string;
     /** Ship-state to persist (card 1eebc46a) — forwarded verbatim into {@link finalizeMerge}; see its own doc. */
     mergedSha?: string | null; repoKey?: string | null;
-    /** Card c35b60c4 — see this method's own "BATCH CALLER SUPPRESSION" doc above. */
+    /** See the `@decision c35b60c4` anchor in this method's doc above. */
     suppressNotify?: boolean;
   }): Promise<ConfirmMergeResult> {
     if (!args.suppressNotify) {
