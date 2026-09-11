@@ -9,6 +9,18 @@ Card 96d5f76b: forensics for `activeMergeRepos`'s add/delete lifecycle — this 
 - Do not reconstruct a repo-guard mutation's timing from a LATER stamp (e.g. an op's own `settledAt`) — it measurably postdates the real mutation by an unmeasured margin; log the mutation itself, at the instant it happens, via `performance.now()`.
 - Do not use `Date.now()`/an ISO string as the ordering-authoritative clock for this forensics log — it rides alongside `performance.now()` purely for correlation against wall-clock-only tables, never as the timing source of truth.
 
+## DoD-4 correction: `endSquash` is not called at all for a gateless/reuse op
+
+The same card's own DoD-4 review corrected a separate, smaller documentation error in `confirmWorkerMerge` (`sessions/service.ts`): the try/finally wrapping the gate-through-squash span had described its `finally`-block `endSquash` call (guarded by `if (gateRan)`) as a harmless NO-OP call for a `gateRan:false` op (the reuse path or a gateless project/repo). That description matched the PRE-confinement design this card replaced — `endSquash` is now not CALLED at all in that case, not called-and-a-no-op. The distinction matters for a reader auditing which paths actually touch `activeMergeRepos`: a "called, no-ops" op still reaches `freeRepoPath`; a "not called" op never does.
+
+### Do not (DoD-4 correction)
+
+- Do not describe `endSquash` as a harmless no-op call for `gateRan:false` — it is guarded by `if (gateRan)` and is not called at all in that case.
+
+### Source (DoD-4 correction)
+
+Inline comment in `packages/daemon/src/sessions/service.ts`, the try/finally wrap around `confirmWorkerMerge`'s gate-through-squash span (the "Code Review follow-up, same card" paragraph), as of this tranche's HEAD before this extraction.
+
 ## Source
 
 Inline comment in `packages/daemon/src/orchestration/gate-semaphore.ts` (`logRepoGuardMutation`): lines 560-575, as of commit `5f6d9fd981336bfafd530fada633b229677aa081`. Relocated by card `9641742e`; no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.

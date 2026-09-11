@@ -11435,22 +11435,9 @@ export class SessionService {
   }
 
   /**
-   * Core of the ON-DEMAND worktree-scoped process reap (card cf17ebf3 — the classifier-blocked-cleanup
-   * finding: a Lead's zombie-vitest kill got blocked by Claude Code's own auto-mode safety classifier
-   * twice during a fleet-down incident, forcing a manual owner one-liner. A daemon-executed kill of the
-   * daemon's OWN children is not a classifier question — this gives Lead/manager a structural way to
-   * reap a lingering escaped process WITHOUT routing through that classifier at all, and WITHOUT having
-   * to stop the session it's scoped to). Reuses the EXACT SAME `reapWorktreeProcesses`/
-   * `reapProcessesRootedInWorktree` machinery {@link sweepWorktreeStrays} already uses on stop — matched
-   * STRICTLY by executable path/cwd/command line rooted under THIS session's OWN worktreePath (never a
-   * bare image-name or port match — see `reapProcessesRootedInWorktree`'s SAFETY doc for the full
-   * scoping proof), excludes this session's own live pty pid (a routine reap must never kill the very
-   * session it's scoped to — mirrors sweepWorktreeStrays' worker self-exclusion), and never the
-   * daemon's own pid (that function's unconditional self-exclusion). UNLIKE sweepWorktreeStrays this is
-   * AWAITED and returns the actual `killedPids`, so an explicit tool call/test can see what happened
-   * instead of firing-and-forgetting. REFUSES (throws) for a session with NO worktree at all
-   * (manager/plain/run/Lead) — see the guard's own comment for why falling back to `cwd` would be a
-   * daemon-crash-class bug, not a convenience.
+   * @decision cf17ebf3 — on-demand worktree-scoped reap of a session's own strays, routed around Claude
+   *  Code's auto-mode safety classifier entirely; AWAITED (returns `killedPids`), unlike the
+   *  fire-and-forget {@link sweepWorktreeStrays} it reuses the same matching machinery from.
    */
   private async reapSessionStraysCore(session: Session): Promise<{ killedPids: number[] }> {
     // NO `?? session.cwd` FALLBACK (Code Review, card cf17ebf3 — CRITICAL): a manager/plain/run/Lead
@@ -11498,19 +11485,12 @@ export class SessionService {
    * the canonical repo UNTOUCHED and the worktree RETAINED (so the manager can re-task a fix).
    * Merge is daemon-executed; workers have no merge tool.
    *
-   * IDEMPOTENT (board card 2eddf573): the staged set is re-derived inside {@link mergeBranch} at confirm
-   * time (never trusted from the review-step snapshot), so a stale-index "nothing staged" on a valid
-   * +N-commit branch no longer happens — the merge lands on the FIRST call. When there is GENUINELY
-   * nothing to stage, the result is DISTINGUISHABLE via `emptyKind`:
-   *   - `ALREADY_MERGED`   — the branch already landed in main → treated as a successful idempotent
-   *                          completion: the worktree is retired and the task finished (`merged:true`).
-   *   - `STAGE_EMPTY_RETRY` — no diff to merge → fail-closed (`merged:false`), worktree RETAINED so the
-   *                          manager can investigate why the worker produced no change. SPLIT by whether the
-   *                          worker REPORTED work (PL Auditor finding #2, card 1550eb87): a 0-ahead branch
-   *                          WHILE the worker reported done/blocked is the orphaned-commit-to-main signature
-   *                          (the reported work landed on main, not the branch; a later sync can orphan it) →
-   *                          HARD error (`hardError:true`, `reportedState`), loud refusal so the manager
-   *                          recovers the commit. A 0-ahead branch with NO report stays the gentle soft retry.
+   * @decision 2eddf573 — squash merge is idempotent: the staged set is re-derived fresh at confirm time,
+   *  never trusted from the review-step snapshot, and `emptyKind` distinguishes `ALREADY_MERGED` from a
+   *  genuine `STAGE_EMPTY_RETRY` no-op.
+   * @decision 1550eb87 — `STAGE_EMPTY_RETRY` further splits on whether the worker reported work: a
+   *  0-ahead branch alongside a reported done/blocked is the orphaned-commit-to-main signature and
+   *  refuses loud (`hardError:true`), never the soft retry a genuine no-op gets.
    */
   async confirmWorkerMerge(
     managerSessionId: string, workerSessionId: string, opId?: string, forceRemoveWorktree?: boolean, opStartedAt?: string,
@@ -11565,41 +11545,9 @@ export class SessionService {
     const gate = targetRepo.gateCommand;
     const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
 
-    // EARLY IDEMPOTENCY (finding 864e79fe — false-negative "build gate failed" after a SUCCESSFUL merge;
-    // widened by the re-poll terminal-result-read fix below): a stale confirm retry (e.g. a client-timeout
-    // on the FIRST call — see confirmWorkerMergeTracked — followed by a re-call that lands after the
-    // pending-op entry already settled+evicted) re-invokes this method for real, but a PRIOR call may have
-    // already merged + finalized this exact worker: worktree removed, branch deleted, task moved to done.
-    // Running the gate below against that now-gone worktreePath used to make the gate fail (its cwd doesn't
-    // exist) and falsely report a build-gate failure for a merge that had already SUCCEEDED.
-    //
-    // WORKTREE-GONE is not the only proof of "this daemon already finished." removeWorktree's dir removal
-    // is best-effort (a Windows handle-release race — see its doc — can outlast its own bounded retries),
-    // so finalizeMerge can complete the ENTIRE merge (branch deleted, task moved to done) while the worktree
-    // DIRECTORY itself lingers on disk, leaked for a later GC pass. A stale retry landing in exactly that
-    // window used to see `fs.existsSync(worktreePath) === true`, skip this whole idempotency block, and
-    // re-run the gate against that leaked/de-registered worktree — which can genuinely fail (broken git
-    // state) and misreport "build gate failed" for a worker that had already merged successfully. So the
-    // worktree-existence check is widened with an OR: the task ALREADY being in its terminal (done) lane is
-    // an equally authoritative "this daemon's own finalizeMerge already ran for this worker" signal.
-    //
-    // Gated on BOTH signals, not just one — worktree gone (or task done) AND the branch's landing itself
-    // independently proven:
-    //  - worktreePath is GONE from disk, OR the task is already in its terminal lane — cheap, checked
-    //    first; a branch that's landed but whose worktree is still genuinely present AND whose task is NOT
-    //    yet terminal (e.g. merge-reject-notify-suppress.mjs scenario B: an out-of-band manual squash-merge
-    //    racing a daemon confirm whose gate is STILL failing for its own real reason) must keep running the
-    //    gate/report the real failure — only the manager-facing NOTIFY is reconciled away there
-    //    (shouldSuppressMergeReject), never the return value or the gate itself skipped.
-    //  - the branch's work is reachable from main via the deterministic `Loom-Worker-Branch` trailer
-    //    (findLandedSquashCommit — same signal mergeBranch's own ALREADY_MERGED classification uses, incl.
-    //    its re-task guard: a branch RE-CUT onto a prior squash with genuine NEW work returns null, so a
-    //    live re-task is never short-circuited here). This is what keeps merge-reject-notify-suppress.mjs
-    //    scenario C (task already Done for an UNRELATED reason, gate genuinely still fails, branch never
-    //    actually merged) reporting the real failure: task-done alone never short-circuits without this
-    //    independent landing proof.
-    // Only when (the worktree is gone OR the task is already done) AND the landing is proven do we finish
-    // idempotently without touching the gate or any git state that's already been retired.
+    // @decision 864e79fe — worktree-gone alone false-negatives "build gate failed" for an already-successful
+    //  merge (best-effort removal can lag finalizeMerge); OR in the task's own terminal-lane state, but
+    //  still require the branch's landing independently proven before finishing idempotently.
     const taskAlreadyTerminal = taskId != null && (() => {
       const task = this.db.getTask(taskId);
       const terminalKey = task ? this.columnKeyForProjectRole(task.projectId, "terminal") : undefined;
@@ -11692,21 +11640,9 @@ export class SessionService {
       return { merged: false, reason: `canonical repo has staged, uncommitted changes unrelated to '${branch}' — a human must resolve the canonical checkout by hand`, detailText, notified: !suppressed, opId: thisOpId };
     }
 
-    // BACKSTOP (BEFORE the gate/merge) — card 4b7ff996: refuse at ADMISSION, before burning a gate lane
-    // (~8-17min observed live on this repo), when the canonical repo already has UNSTAGED tracked changes
-    // on a path this branch also touches AND `git merge --squash` would actually need to write there (see
-    // detectCanonicalDirtyOverlap's own doc for the three narrowing steps a first-round Code Review found
-    // missing — an already-landed-content false refusal, an unstaged-delete false refusal, and a submodule
-    // gitlink false refusal, each now excluded). `git merge --squash` cannot overwrite unstaged local
-    // modifications — it errors instead — so a branch whose own changes overlap that path can NEVER land,
-    // no matter how many times it's re-gated; the branch itself is not the problem (a rebase cannot touch
-    // the canonical repo's own working tree) and only a HUMAN resolving the canonical checkout by hand
-    // fixes it. Canonical-repo git writes are a human-only surface (the Platform Lead, above all
-    // projects) — project managers have none — so the correct next step is escalation, named explicitly
-    // here rather than left for the manager to diagnose (card DoD-3). Fail-safe like the stranded-work
-    // check above: any probe error/timeout returns `{overlap:false}`, so a flaky check never blocks a
-    // legitimate merge — it just proceeds to the real gate, which still (now diagnosably, see
-    // mergeBranchLocked's own dirtyOverlap signature check) catches the genuine case as a backstop.
+    // @decision 4b7ff996 — admission-time preflight for a canonical-dirty-tracked overlap that can never
+    //  land via `--squash`; escalates to the Platform Lead (project managers have no canonical-repo git
+    //  write access), and fails safe (`{overlap:false}`) on any probe error rather than blocking a merge.
     const dirtyOverlap = await detectCanonicalDirtyOverlap(repoPath, branch, { timeoutMs: this.gitOpMs });
     if (dirtyOverlap.overlap) {
       const paths = (dirtyOverlap.paths ?? []).join(", ");
@@ -11736,47 +11672,9 @@ export class SessionService {
       return { merged: false, reason: `canonical repo has an untracked file on a path '${branch}' also adds (${paths}); a rebase will not help — escalate to the Platform Lead to resolve the canonical checkout`, detailText, notified: !suppressed, opId: thisOpId };
     }
 
-    // BACKSTOP (BEFORE the gate/merge) — card f324e8fa: refuse before burning a gate lane when a SOLO
-    // merge's squash subject would carry a literal HTML entity. `mergeBranchLocked` (git/worktrees.ts)
-    // uses this task's `title` VERBATIM as the commit subject (`taskTitle`, resolved fresh past the gate)
-    // — and a squash commit is permanent, unrewritable mainline history under this repo's do-not-rewrite
-    // rule. This has already shipped once (commit fe2c1c6b). `checkTitleHtmlEntities` is the SAME guard
-    // `createProjectTaskChecked`/`updateProjectTask` (mcp/tasks.ts, card 267fd215) already enforce at
-    // write time — reused here (now living in tasks/title-guard.ts, a leaf module both this file and
-    // git/worktrees.ts can import without a cycle), not re-derived, so the write-boundary and
-    // merge-boundary predicates can never drift apart.
-    //
-    // ⚠️ THIS IS AN EARLY ADVISORY, NOT THE LAST LINE OF DEFENSE — that line is
-    // `mergeBranchLocked`'s OWN check at the point `subject` is actually built (git/worktrees.ts, right
-    // after `toConventionalSubject`), which this check cannot substitute for: the title read here is a
-    // SNAPSHOT, and the human REST edit route (`POST /api/tasks/:id`, gateway/server.ts) writes `title`
-    // with no entity check at all, so a title can change out from under this read during the minutes a
-    // gate can run. This check exists purely to save a gate lane on the COMMON case (an entity present
-    // right now); it is not, by itself, a correctness guarantee.
-    //
-    // DESIGN DECISION (card f324e8fa's own required design question): this ALWAYS passes `allow:false` —
-    // there is no caller-supplied override threaded through `worker_merge_confirm` to honor OR ignore.
-    // Measured (Code Review, card f324e8fa follow-up): NOTHING is persisted anywhere that could carry a
-    // card's create-time `allowHtmlEntities:true` forward to merge time — `Task` (shared/src/types.ts)
-    // has no such field, the `tasks` table (db.ts) has no such column, and every `allowHtmlEntities` hit
-    // outside dist/ is a transient zod/function param, never a stored one. `checkTitleHtmlEntities`'s
-    // `allow` is a PER-CALL argument, full stop — there is no create-time flag sitting on the task for
-    // this site to read. Argued for why one must NOT be added here, rather than merely absent:
-    //  1. Neither known specimen (fe2c1c6b, and the independent 2026-07-17 origination) was a title
-    //     genuinely ABOUT escaped HTML — both were accidental escapes of an ordinary title. This repo's
-    //     own commit-subject convention (a subject states WHAT THE COMMIT DOES, never the defect it
-    //     removes — see CLAUDE.md) already pushes a defect-titled card toward a fix-shaped retitle before
-    //     it ships, so a genuinely-about-escaping title has little reason to reach a solo merge carrying
-    //     its entities verbatim. This is a convention, though, not something mechanically enforced on
-    //     card titles — it narrows the risk, it doesn't eliminate it.
-    //  2. Even granting a genuine edge case, the fix costs nothing: a manager can retitle the CARD
-    //     immediately before confirming the merge — a false refusal costs seconds, while a false accept
-    //     is permanent unrewritable mainline history. That asymmetry is why adding a per-call override
-    //     parameter to the merge path (which 1. alone wouldn't fully justify) still isn't worth it: the
-    //     one boundary meant to be the last line of defense should stay maximally strict rather than grow
-    //     a bypass for a case that has never actually occurred.
-    // Taskless merges (`taskId === null`) have no card title to check — `mergeBranchLocked` falls back to
-    // a branch-derived subject there; its own check (git/worktrees.ts) covers that subject too.
+    // @decision f324e8fa — pre-gate HTML-entity title check is an early advisory (a snapshot, saves a gate
+    //  lane on the common case), never the last line of defense; ALWAYS `allow:false` — no caller-supplied
+    //  override exists or should, since a false refusal costs seconds but a false accept is permanent.
     if (taskId) {
       // TENSION (Code Review, card f324e8fa follow-up): this check runs before the union-merge/preLanded
       // capture below, so without this lookup it would refuse a pure re-confirm of work ALREADY on main
@@ -11811,27 +11709,21 @@ export class SessionService {
 
     // Build/DoD gate (fail-closed): run the configured command in the WORKTREE; non-zero rejects.
     //
-    // ⚠️ TRUST BOUNDARY — HOST RCE BY DESIGN. `gate` is `orchestration.gateCommand` from the project
-    // config and is executed here as an arbitrary HOST shell command (`shell: true`). `shell:true` is
-    // intentional: real gates need it (e.g. `pnpm build && pnpm test`). This makes gateCommand
-    // host-RCE-capable, so it is TRUSTED / HUMAN-SET ONLY and MUST NEVER be agent-writable. The
-    // agent-facing loom-platform MCP path (project_create / project_configure) validates config with
-    // `validateAgentProjectConfigOverride`, which REJECTS `orchestration.gateCommand` (see
-    // mcp/platform.ts). Only the human/trusted REST path (PATCH /api/projects/:id/config) may set it.
-    // If you add another config-write surface reachable by an agent, it MUST use the agent validator.
+    // ⚠️ TRUST BOUNDARY — HOST RCE BY DESIGN: `gate` (orchestration.gateCommand) runs as an arbitrary
+    // HOST shell command (`shell:true`, needed for real gates) — TRUSTED/HUMAN-SET ONLY, MUST NEVER be
+    // agent-writable. The agent-facing loom-platform MCP path (project_create/project_configure) uses
+    // `validateAgentProjectConfigOverride` (mcp/platform.ts) to REJECT it; only the human/trusted REST
+    // path (PATCH /api/projects/:id/config) may set it. Any new agent-reachable config-write surface
+    // MUST use that same validator.
     //
-    // Run as SEPARATE sequential processes (runGateSequential), NOT one `&&`-chained spawnSync — a
-    // shared memory footprint across lint+test+build was OOM-killing a worker's gate (exit 137,
-    // Auditor finding b9515beb). Same fail-closed short-circuit semantics as the old `&&` chain: the
-    // first non-zero step stops the run.
-    //
-    // `gateRan`/`reusedOpId` (card e50600d2): declared at THIS outer scope (not inside `if (gate)`
-    // below) so the plain GREEN merge return at the bottom of this method — which sits OUTSIDE that
-    // block — can report which path this merge's gate took. `gateRan` defaults `false` for a project
-    // with no gate at all (nothing ran, nothing was reused either — the existing `gateWarning` already
-    // explains that case); flipped `true` the moment the `if (gate)` block below decides to actually
-    // spawn one, then flipped back `false` (with `reusedOpId` set) only when the reuse check proves it
-    // doesn't need to.
+    // @decision b9515beb — gate steps run as SEPARATE sequential processes, never one `&&`-chained
+    //  spawnSync: a shared memory footprint across lint+test+build was OOM-killing a worker's gate.
+    // @decision e50600d2 — `gateRan`/`reusedOpId` declared at outer scope so the plain GREEN return,
+    //  outside the `if (gate)` block, can report which path this merge's gate actually took.
+    // `gateRan` defaults `false` for a project with no gate at all (nothing ran, nothing was reused
+    // either — the existing `gateWarning` already explains that case); flipped `true` the moment the
+    // `if (gate)` block below decides to actually spawn one, then flipped back `false` (with
+    // `reusedOpId` set) only when the reuse check proves it doesn't need to.
     let gateRan = false;
     let reusedOpId: string | undefined;
     // Card 2e52bf99: EVERY reuse-condition that refused, not just the first one hit — declared at this
@@ -11967,21 +11859,8 @@ export class SessionService {
     // Card a16c580b: sibling of `gateOutputTailForRecord` immediately above — same "set once, read from
     // either branch" pattern.
     let gateOutputFileForRecord: string | undefined;
-    // Card e2b6f900: the gate concurrency triple this merge's gate ran under — declared at THIS outer
-    // scope for the SAME reason `gateOutputTailForRecord`/`gateExtended` are: the plain GREEN return at
-    // the bottom of this method sits OUTSIDE the `if (gate)` block below, where `gateCap`/`concurrentAtStart`/
-    // `concurrentGatesMax` are actually computed (see the CONCURRENCY NEIGHBOURHOOD doc inside that block).
-    // Before this card a FAILING merge's rejection embedded this triple as TEXT ONLY, baked into the
-    // `[loom:merge-rejected]` nudge's `detailBits` string — never structured on the return value, so it
-    // never reached the durable `verdict_payload_json` store either; a PASSING merge carried it on NEITHER
-    // of those two channels. (`gate_history`, backed by the pre-existing `build_gate` audit event, DID
-    // already carry the triple for both outcomes — this closes the opId-keyed, per-op-result channel that
-    // event never fed, not a total absence.) This is the fix: both outcomes now carry the SAME three
-    // fields structurally on THIS channel, so a reader comparing a pass and a fail (the whole point of
-    // this card) reads identical shapes instead of parsing one out of prose and finding nothing for the
-    // other. `undefined` for a gateless project or a
-    // REUSED gate (`gateRan:false` — nothing was ever admitted, so there is nothing to report), same
-    // "nothing to report" discipline `gateExtended`/`gateStepsResult` already follow.
+    // @decision e2b6f900 — the gate concurrency triple now carries structurally on BOTH pass and fail
+    //  outcomes on this opId-keyed channel; `undefined` only for a gateless or reused gate (nothing ran).
     let gateCapForRecord: number | undefined;
     let concurrentGatesForRecord: number | undefined;
     let concurrentGatesMaxForRecord: number | undefined;
@@ -12009,97 +11888,27 @@ export class SessionService {
     // gates on `merged:true` so a still-failing retry never reports this on a rejection, where the
     // rejection's own `detailBits`/`reason` text already names the retry by other means).
     let gateRetried = false;
-    // The canonical main sha this merge's GATE-VALIDATED tree is provably based on — threaded into
-    // `mergeBranch` as `requireCanonicalHead` so it can re-verify, INSIDE its own merge lock, that main
-    // provably hasn't moved since. mergeBranch's own squash re-derives fresh against whatever canonical
-    // HEAD is at squash time (`git merge --squash branch`, entirely independent of the worktree's own
-    // unioned tree) — so THIS sha, not any later read, is what ties the squash back to what actually got
-    // tested. Three distinct producers feed this ONE var, never more than one per merge (mutually
-    // exclusive on `gateRan`; the preLanded producer can itself be overwritten by the reuse producer, see
-    // below):
-    //   - REUSE path (card e50600d2 CR follow-up): the sha `confirmWorkerMerge` observed at the moment it
-    //     decided to skip a redundant gate run — proven safe because `freshBehindMain === 0`, checked
-    //     moments earlier, already shows main is an ancestor of the branch.
-    //   - REAL gate-run path, union-merged (card eda70da6): the sha {@link mergeMainIntoWorktree}'s own
-    //     union-merge actually unioned into the worktree — captured AT THAT CALL, not later at gate
-    //     admission. The gap between the union-merge and admission is unbounded SEMAPHORE QUEUE WAIT
-    //     (routinely 10+ minutes at `maxConcurrentGates=2` with an 8-14min gate, easily longer than the
-    //     gate's own run time) — an admission-time capture leaves that entire window open, closing only
-    //     the smaller admission→squash half of it (a real gap found on review of this card's first
-    //     attempt). Capturing at the union-merge instead closes the FULL window: union-merge → [queue
-    //     wait] → gate run → squash lock.
-    //   - REAL gate-run path, preLanded (card b0ab78d6): the union-merge above is deliberately SKIPPED for
-    //     a branch whose squash already landed on main (see `preLanded` below), so there is no unioned sha
-    //     to capture — instead this captures a plain `resolveGitRef(repoPath, "HEAD", ...)` at the same
-    //     point the union would have run. This proves only that canonical main hasn't moved since the gate
-    //     started, NOT that the gate validated this branch's content together with main's (it never did,
-    //     on this path) — see the capture site's own doc for the full distinction. Paired with a SECOND
-    //     capture, `gateBaseBranchHead` (below) — see that variable's own doc for why the preLanded
-    //     producer needs a companion signal the other two producers don't.
-    // `undefined` only when no gate ran at all (no gateCommand configured), or — solely on the preLanded
-    // producer above — canonical HEAD couldn't be resolved (a git error/timeout), in which case
-    // `mergeBranch` skips the re-check entirely rather than re-checking against a bad sha.
+    // gateBaseMainHead: mergeBranch's own squash re-derives fresh against whatever canonical HEAD is at
+    // squash time, entirely independent of the worktree's own unioned tree — so THIS sha, not any later
+    // read, is what ties the squash back to what the gate actually tested.
+    // @decision eda70da6 — the canonical main sha this merge's gate-validated tree is based on, threaded
+    //  into mergeBranch as requireCanonicalHead so it can re-verify main hasn't moved since; three
+    //  mutually-exclusive producers (reuse / union-merged / preLanded) feed this one var, never more than one.
     let gateBaseMainHead: string | undefined;
-    // Companion to `gateBaseMainHead`, set ONLY by the preLanded producer above (the union and reuse
-    // producers leave this `undefined`, at the single `mergeBranch` call site below — see that call's own
-    // doc for why `undefined` there is byte-identical to today's behavior). WHY THIS EXISTS (card b0ab78d6,
-    // CR follow-up): a bare `gateBaseMainHead` capture on the preLanded path over-refuses. A preLanded
-    // re-confirm with genuinely NOTHING new to squash is IDEMPOTENT by design (see the `preLanded` doc
-    // below) — main moving elsewhere during its gate is routine on an active fleet and harmless to it,
-    // since nothing from this branch is landing either way. Enforcing `requireCanonicalHead`
-    // UNCONDITIONALLY there — refusing every time main so much as twitches during an 8-14min gate —
-    // regresses that idempotency into a routine refusal for the COMMON case, not the dangerous one.
-    // `gateBaseBranchHead`, captured as the branch's OWN tip sha at the same moment as `gateBaseMainHead`,
-    // is the fix: `mergeBranch` re-reads the branch's CURRENT tip inside its own lock and, if it still
-    // matches this captured sha, SKIPS the `requireCanonicalHead` enforcement entirely rather than
-    // re-checking main. This is sound, but only as far as it's actually proven (card 24c22912) —
-    // `preLanded` proved (via `branchContentLandedInCommit`) that this branch's content matched what's
-    // landed AS OF `findLandedSquashCommit`'s OWN read, BEFORE this capture, not AT it: two more separate
-    // awaited git calls run in between (the `resolveGitRef(repoPath, "HEAD", ...)` just above for
-    // `gateBaseMainHead`, then this `resolveGitRef(repoPath, branch, ...)` itself) — three sequential
-    // awaits total, never one atomic read. What THIS capture actually proves is narrower and
-    // forward-only — an UNCHANGED tip FROM HERE ON shows that match still holds, regardless of anything
-    // main did meanwhile — but a commit landing in the window BETWEEN `findLandedSquashCommit` returning
-    // and this capture resolving would be captured here as the new "stable" tip with `preLanded` never
-    // having proved anything about it. Given that, the eventual squash can only land as a true no-op
-    // (safe) or hit a genuine line-level conflict on the branch's own already-landed paths (already
-    // handled elsewhere, fails loud, zero side effects) — never silently land unverified new content. Only
-    // when the branch itself has moved since capture (new commits landed during the gate — see
-    // `gateBaseMainHead`'s preLanded doc above for that race) does this signal no longer apply, and
-    // `mergeBranch` falls through to the ordinary `requireCanonicalHead` check, protecting exactly the
-    // content this card's mechanism exists to protect. This also keeps `requireCanonicalHead`'s own
-    // re-check sitting in its documented "first thing after the lock, zero side effects" position for
-    // EVERY caller (see `mergeBranchLocked`'s own doc) — a candidate fix that instead deferred the check
-    // until the squash's staged set was known would have needed to move it there, or to duplicate/reorder
-    // that side-effect-free guarantee. This is cheaper AND leaves that property untouched.
+    // @decision eda70da6 — companion capture, preLanded producer only: an unchanged branch tip inside the
+    //  lock SKIPS the requireCanonicalHead re-check entirely, so a routine preLanded re-confirm isn't
+    //  spuriously refused just because main moved during an 8-14min gate.
+    // @decision 24c22912 — that stability proof is narrower than "matched at capture": three sequential
+    //  awaits run in between, so it proves forward-only stability from an earlier read, never one atomic read.
     let gateBaseBranchHead: string | undefined;
-    // CARD c24dd48a: this whole span — the "if (gate) { ... }" block below, THROUGH the `mergeBranch` call
-    // further down — is wrapped in ONE try/finally so the per-repo merge-admission guard a passing gate
-    // holds via `holdRepoGuardOnExit` can NEVER leak. A narrower wrap (just around `mergeBranch` itself, an
-    // earlier draft of this fix) left a real gap: `evt("build_gate", ...)` (a synchronous `db.appendEvent`
-    // — CAN throw), `recordGateTimeoutOutcome` (an `await`), and the `taskTitle` lookup (a synchronous
-    // `db.getTask` read) below ALL run strictly BETWEEN the gate settling (guard already held, via
-    // `holdRepoGuardOnExit`) and `beginSquash`/`mergeBranch` — any one of them throwing, uncaught, would
-    // leak the guard for the process's lifetime, queueing every later same-repo merge forever (a strictly
-    // worse failure than the starvation this card fixes: starvation eventually resolves, a leaked guard
-    // never does). `endSquash` (in the `finally` below) is idempotent — `GateSemaphore.freeRepoPath`
-    // (card b9e07a4a) refuses a repoPath it doesn't own as a safe no-op, so it never under- or
-    // over-releases relative to how many times THIS op actually acquired it — so wrapping this ENTIRE
-    // span, including every gate-failed early-return path where nothing was ever held, is always safe and
-    // never a double-release bug. `merge` is declared here (not inside the try) so it's still in scope for
-    // the `if (!merge.ok)` handling that follows the `finally`.
-    //
-    // Code Review follow-up, same card: `beginSquash`/`endSquash` themselves (down at the `mergeBranch`
-    // call) are CONFINED to `gateRan` — see that call site's own doc for why an unconditional call was a
-    // real cross-op hazard for the REUSE/gateless paths specifically. This try/finally's OWN scope (this
-    // comment) is unaffected by that confinement: it still wraps the whole span regardless of `gateRan`,
-    // because a throw anywhere in here must still be caught to keep `merge` well-defined for the code
-    // after — the `finally`'s `endSquash` call is guarded by that SAME `if (gateRan)` (card 96d5f76b
-    // DoD-4 correction: it is NOT called at all for a `gateRan:false` op — describing it as a no-op call
-    // described the pre-confinement design this card replaced). Card b9e07a4a: a REDUNDANT call from THIS
-    // op's own gate-failed early-return path (which never arises for reuse/gateless in the first place) is
-    // harmless for the SAME reason any mismatched call is — `freeRepoPath`'s identity check, not mere
-    // membership idempotence.
+    // @decision c24dd48a — this whole span, through the mergeBranch call, is wrapped in ONE try/finally so
+    //  a passing gate's per-repo admission guard can NEVER leak; endSquash is confined to `gateRan` (card
+    //  96d5f76b DoD-4: not called at all when false) and its release is identity-checked (card b9e07a4a).
+    // A narrower wrap (just around mergeBranch, an earlier draft) left a real gap: `evt("build_gate", ...)`
+    // (a synchronous db.appendEvent, CAN throw), `recordGateTimeoutOutcome` (an await), and the `taskTitle`
+    // db.getTask read all run strictly BETWEEN the gate settling (guard already held) and beginSquash —
+    // any one throwing, uncaught, would leak the guard for the process's lifetime. `merge` is declared here
+    // (not inside the try) so it's still in scope for the `if (!merge.ok)` handling after the `finally`.
     let merge: Awaited<ReturnType<typeof mergeBranch>>;
     // Card b9e07a4a: the inert-diff skip's OWN repo-guard release, set only when `acquireRepoGuardOnly`
     // below actually acquired one — mirrors `merge`'s own "declared outside the try, so it's still in

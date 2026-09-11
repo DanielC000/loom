@@ -22,7 +22,7 @@ FAILS SAFE like `detectStrandedWork`: any error/timeout returns `{overlap:false,
 
 ## The squash-time backstop, and its regex covering BOTH git wordings
 
-`mergeBranchLocked` still catches the residual race window (the gate can run for minutes between this preflight and the squash, during which canonical can newly go dirty): a `rawError` matching `/would be overwritten by merge/i` is classified `dirtyOverlap:true` rather than a generic failure — the correct remedy is NOT a rebase. ONE regex matches BOTH git wordings ("Your local changes to..." unstaged TRACKED; "The following untracked..." UNTRACKED, deliberately not detected at admission) — the caller-facing wording is generic enough for either. `rawErrorMessage` (naming the specific path) is ALWAYS included even when a cleanup issue is also set — an earlier draft dropped it whenever cleanup was skipped.
+`mergeBranchLocked` still catches the residual race window (the gate can run for minutes between this preflight and the squash, during which canonical can newly go dirty): a `rawError` matching `/would be overwritten by merge/i` is classified `dirtyOverlap:true`, diagnosably, rather than a generic failure — the correct remedy is NOT a rebase. ONE regex matches BOTH git wordings ("Your local changes to..." unstaged TRACKED; "The following untracked..." UNTRACKED, deliberately not detected at admission) — the caller-facing wording is generic enough for either. `rawErrorMessage` (naming the specific path) is ALWAYS included even when a cleanup issue is also set — an earlier draft dropped it whenever cleanup was skipped.
 
 ## Do not
 
