@@ -58,6 +58,12 @@ cheap enough to run on every hex string you're about to write down or rely on.
   controls; which REST routes or tools it calls; the enumerated list of its parts or states;
   section banner lines (`// ── Name ──`); and what a return value or exported type means. **Class
   D (restates the code)** gets deleted outright.
+- **Class C explicitly includes:** what an ABSENT/`undefined` parameter or field means; a
+  cost, ordering, or caching contract (bounds, memoization, per-tick steps, invariants); and
+  what a key or return value is COMPOSED of, including what it deliberately excludes.
+  Specimens: `36641df4`, `f273f8ed`, `c73f300c`.
+- **A function/class doc whose first paragraph is now only an `@decision` anchor has almost
+  certainly lost its contract — re-read it.**
 - **Class A, B and C are routinely interleaved inside one block.** Read the whole block; split the
   guard and the contract/description content that stay from the narrative that goes. This is not
   mechanical — no automated split is safe here.
