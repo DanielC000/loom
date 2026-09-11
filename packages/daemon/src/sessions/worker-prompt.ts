@@ -27,14 +27,13 @@ export interface ReviewOfInfo {
  * task's current one — a manager may retarget the card after the worktree already exists, and the
  * worktree is physically rooted in the repo it was cut from (see `Session.repoKey`'s own doc).
  *
- * `targetGateCommand` is that repo's OWN gate, and `undefined` genuinely means "this repo has no gate
- * configured" — it does NOT fall back to the project-level command, by design (a gate that exits 0 for
- * an unrelated reason would report a FALSE green on code it never tested). The block says so explicitly,
- * because "will my work be verified?" is the single fact a worker most needs from the registry.
+ * `targetGateCommand` is that repo's OWN gate. `undefined` genuinely means "this repo has no gate
+ * configured" and does NOT fall back to the project-level command — a gate that exits 0 for an
+ * unrelated reason would report a FALSE green on code it never tested.
  *
- * `targetNoGateByDesign` (card 22629cb2) is that resolved repo's OWN `noGateByDesign` — when true (and
- * `targetGateCommand` is unset), the missing gate is DELIBERATE, not an oversight, so the composed block
- * below says so instead of reading like an unverified accident.
+ * @decision 22629cb2 — `targetNoGateByDesign` true (with `targetGateCommand` unset) means the missing
+ * gate is DELIBERATE, not an oversight, so the composed block says so instead of reading like an
+ * unverified accident.
  */
 export interface WorkerRepoContext {
   targetKey: string | null;
@@ -71,13 +70,11 @@ export function buildWorkerRepoContext(
 }
 
 /**
- * Card af902717 — compose a WORKER session's opening from its agent BASE BRIEF + the dynamic part.
+ * Compose a WORKER session's opening from its agent BASE BRIEF + the dynamic part.
  *
- * Before this, a manager-spawned worker only ever received the dynamic text (the manager's kickoff on
- * spawn, the `[loom:handoff]…` summary on recycle); its agent's `startupPrompt` (the Dev/Bugfix/Web
- * Designer brief — "Step 0: run `/worker`", "CLAUDE.md is law", reproduce-first) was DEAD config in the
- * orchestrated flow. The manager path already composed its brief (`composeManagerStartupPrompt`); this
- * is the worker mirror.
+ * @decision af902717 — a worker's agent `startupPrompt` (its standing doctrine brief) composes into
+ * every opening, mirroring the manager path, instead of going unused as dead config in the orchestrated
+ * flow.
  *
  * Order: a worktree LOCATION block FIRST, then the agent BASE BRIEF, then the dynamic part (kickoff /
  * handoff) — the location block names the worker's edit dir, the brief is the standing doctrine, the
@@ -85,9 +82,9 @@ export function buildWorkerRepoContext(
  * part ALONE. PURE + exported so the hermetic test can assert the composition.
  *
  * The location block mirrors `composeManagerStartupPrompt`'s shape and exists for the same class of bug:
- * nothing in a worker's context names its WORKTREE, so an absolute main-repo path elsewhere in its
- * context (e.g. an agent brief) out-prioritizes the actual worktree cwd and the worker leaks edits into
- * the main checkout. Naming the worktree as the edit dir, present even on an empty brief, is the guard.
+ * without it, an absolute main-repo path elsewhere in a worker's context (e.g. an agent brief) can
+ * out-prioritize the actual worktree cwd and the worker leaks edits into the main checkout. Present even
+ * on an empty brief — this is the guard.
  *
  * `cwd` is OPTIONAL and backward-compatible: when it's falsy/omitted, the OLD output is returned verbatim
  * (no block) — so the pure-function callers/tests that pass only `(brief, dynamicPart)` stay byte-stable.
@@ -101,24 +98,26 @@ export function buildWorkerRepoContext(
  * `reusedDirtyWorktree` (board card 2250836c) is likewise OPTIONAL: `undefined` omits the block entirely
  * (byte-identical to before this param existed — a fresh worktree or a clean reuse never sets it). When
  * present (this spawn REUSED a worktree retained from a prior hard-stopped/rejected-merge attempt, and it
- * still carries real leftover uncommitted work), a reconcile note is injected naming the leftover paths —
- * this is what removes the need for a manager to hand-instruct a `git status; reconcile` note on every
- * retry (the finding this card fixes).
+ * still carries real leftover uncommitted work), a reconcile note is injected naming the leftover paths.
+ *
+ * @decision 2250836c — this is what removes the need for a manager to hand-instruct a
+ * `git status; reconcile` note on every retry.
  *
  * `staleBase` (board card 5150fdc2, part 2) is likewise OPTIONAL: `undefined` omits the block entirely
  * (a fresh branch, a 0-ahead branch, or a stale branch that was auto-forwarded cleanly never sets it — see
  * `createWorktree`'s `resolveStaleBase`). When present, a forward-merge note is injected naming how many
- * commits behind main this branch's base is and what changed on main since — the fix for the incident
- * this card exists to close: a re-spawn onto a commits-ahead branch used to silently keep building on its
+ * commits behind main this branch's base is and what changed on main since.
+ *
+ * @decision 5150fdc2 — this is the fix for a re-spawn that used to silently keep building on its
  * ORIGINAL fork point forever, with no signal to the worker that main had moved on.
  *
- * `reviewOf` (card 47bbdc3f) is likewise OPTIONAL: `undefined` omits the block entirely (every non-review
- * spawn stays byte-identical). When present (this worker's OWN branch was cut from the tip of a reviewed
- * branch via `reviewOfWorkerSessionId`/`reviewOfTaskId` — see `spawnWorker`'s `reviewForkFrom`), a block
- * names that branch + sha SO THE MANAGER NEVER HAND-TYPES IT AGAIN, and says explicitly that this
- * worktree's content already IS that reviewed branch's committed tip — ordinary Read/Grep is correct by
- * construction, no `git show`/diff gymnastics needed — while also flagging that it's a PINNED SNAPSHOT
- * (a later push to the reviewed branch is not reflected without a fresh spawn).
+ * `reviewOf` (card 47bbdc3f) is likewise OPTIONAL: `undefined` omits the block entirely (every
+ * non-review spawn stays byte-identical). When present (this worker's OWN branch was cut from the tip
+ * of a reviewed branch via `reviewOfWorkerSessionId`/`reviewOfTaskId` — see `spawnWorker`'s
+ * `reviewForkFrom`), a block names that branch + sha so the manager never hand-types it again, and says
+ * explicitly that this worktree's content already IS that reviewed branch's committed tip — ordinary
+ * Read/Grep is correct by construction, no `git show`/diff gymnastics needed — while also flagging that
+ * it's a PINNED SNAPSHOT (a later push to the reviewed branch is not reflected without a fresh spawn).
  *
  * `discardedOnRecut` (board card 13cc2300) is likewise OPTIONAL, and deliberately the LAST parameter
  * (appended rather than inserted earlier) so every existing positional call site — including every test
@@ -128,9 +127,10 @@ export function buildWorkerRepoContext(
  * `dirtyBlock` below fires: `reusedDirtyWorktree` means "this survived and needs reconciling before you
  * build on it"; this one means the OPPOSITE — prior tracked edits on this reused worktree were ALREADY
  * DESTROYED by Loom's own pre-spawn re-cut (a 0-ahead branch's `git reset --hard` onto the mainline,
- * fired before this worker was ever spawned), so there is nothing left in the tree to reconcile — the
- * block exists purely so a worker whose task looks under-progressed knows WHY, instead of silently
- * assuming no prior attempt happened.
+ * fired before this worker was ever spawned), so there is nothing left in the tree to reconcile.
+ *
+ * @decision 13cc2300 — the block exists purely so a worker whose task looks under-progressed knows WHY,
+ * instead of silently assuming no prior attempt happened.
  */
 export function composeWorkerStartupPrompt(
   brief: string | undefined,

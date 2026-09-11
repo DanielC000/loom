@@ -135,44 +135,47 @@ export function findFreshestSiblingResumeDoc(homePath: string, excludePath: stri
 /**
  * Compose the operational note block injected ahead of the resume-doc pointer (mirrors the other
  * `[loom:*]` nudges elsewhere in Loom). IMPURE (stats the filesystem) but never throws and never blocks a
- * spawn — every fs call is guarded. Two independent checks, either/both/neither may fire:
+ * spawn — every fs call is guarded. Up to four independent checks, any subset may fire:
  *
  * 1. **Size** — the resolved doc is nearing the harness Read caps, so a successor sees the warning
  *    BEFORE its first Read fails rather than silently exceeding it. Delegates to the shared
- *    `resumeDocSizeWarning` (`resume-doc-notes.ts`) — the SAME check a project manager's
- *    `Orchestrator Log.md` gets, card 809cc4b5.
+ *    `resumeDocSizeWarning` (`resume-doc-notes.ts`) — the SAME check a project manager's own
+ *    `Orchestrator Log.md` gets.
  * 2. **Staleness** — the resolved doc's own mtime materially lags a sibling resume doc (the shared base,
  *    or another lineage's own file) living in the same home. Surfaced as a DIRECTED pointer — the
  *    daemon already knows which sibling is freshest — so the agent needn't hand-sort the directory
  *    itself (mirrors the /platform-lead doctrine's own "inherit the freshest sibling handoff" guidance).
  *    Fires whenever a fresher sibling exists and either the resolved doc doesn't exist yet or the gap
  *    exceeds {@link SIBLING_STALENESS_MS}.
- * 3. **Codescape tool drift** (card `350bc307`) — {@link readCodescapeToolDriftNote} reports whether the
+ * 3. **Codescape tool drift** (`350bc307`) — {@link readCodescapeToolDriftNote} reports whether the
  *    RUNNING Codescape MCP server currently advertises a tool `pty/host.ts`'s CODESCAPE_TOOL_ALLOW/
- *    CODESCAPE_WRITE_TOOLS partition hasn't classified yet. This is the ADDRESSED signal for that check
- *    (not a log line) — the Lead owns platform-wide concerns and reads every `[loom:*]` kickoff note as
- *    a directive, so a non-empty finding rides the SAME already-established channel as the two checks
- *    above rather than a new, easy-to-ignore surface. Fails soft like the others: no state yet, or
- *    codescape disabled/never probed, silently contributes nothing.
- * 4. **Codescape build drift** (card `ce1bed6e`) — {@link readCodescapeBuildDriftNote}, the SAME
+ *    CODESCAPE_WRITE_TOOLS partition hasn't classified yet. Fails soft: no state yet, or codescape
+ *    disabled/never probed, silently contributes nothing.
+ * 4. **Codescape build drift** (`ce1bed6e`) — {@link readCodescapeBuildDriftNote}, the SAME
  *    ADDRESSED-signal shape as check 3, for the drift-restart starvation problem: a build-drift restart
  *    deferred (or its one allowance already spent) with the remaining stability window unstated, so a
  *    rebuild of the SAME commit looks safe when it would actually replace the candidate and starve the
- *    restart. This is the REMEDIATION audience only (the Lead notices and can intervene) — it does not
- *    reach the PREVENTION audience (a codescape-enabled project's own session, who could just not rebuild
- *    again); that is a separate, shared channel out of this card's scope. Fails soft like the others.
+ *    restart. Fails soft like the others.
  *
  * Returns "" when none of the checks above fire (the common, healthy-state case).
  *
- * Card `7f0888b5` — reported by another Loom project, the sibling of `f17c5a76`'s size-warning fix: the
- * staleness note used to compare two mtimes and render NEITHER, handing the recipient a bare verdict
- * ("your doc is stale") with no way to check it against an action they themselves took. Worse than the
- * size note's old defect — that one at least carried the raw measurement — because the recommended action
- * here is a doc ROTATION (destructive-ish, irreversible-ish): the originating incident was a Lead told to
- * rotate a doc it had rotated 7 minutes earlier. `now` (default `Date.now()`, injectable like
- * `resumeDocSizeWarning`'s own param) stamps WHEN this comparison ran, distinct from send/delivery time;
- * both compared mtimes are rendered as absolute ISO-8601 timestamps and labelled which is which, so the
- * recipient can diff them directly against their own actions instead of trusting the derived verdict.
+ * @decision 809cc4b5 — the size check is the SAME shared check a project manager's own resume doc
+ * gets, not a second near-duplicate implementation.
+ *
+ * `now` (default `Date.now()`, injectable like `resumeDocSizeWarning`'s own param) stamps WHEN this
+ * comparison ran, distinct from send/delivery time; both compared mtimes are rendered as absolute
+ * ISO-8601 timestamps and labelled which is which.
+ *
+ * @decision 7f0888b5 — this lets the recipient diff both timestamps directly against their own actions
+ * instead of trusting a bare derived verdict, for a recommended action (a doc ROTATION) that is
+ * destructive-ish and irreversible-ish.
+ *
+ * @decision 350bc307 — this note rides the SAME already-established Lead kickoff channel as the size/
+ * staleness checks above, not a new surface, because the Lead already reads every `[loom:*]` note as
+ * a directive.
+ *
+ * @decision ce1bed6e — this note reaches the REMEDIATION audience (the Lead, who can intervene) only,
+ * never the PREVENTION audience (the rebuilding session) — that is a separate, out-of-scope channel.
  */
 export function composeResumeDocOperationalNotes(homePath: string, resumeDocPath: string, now: number = Date.now()): string {
   const notes: string[] = [];

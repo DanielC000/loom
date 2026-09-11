@@ -2,23 +2,22 @@ import fs from "node:fs";
 import path from "node:path";
 
 /**
- * Shared resume-doc size-warning check (card 809cc4b5) — factored out of `platform-lead-prompt.ts`'s
- * `composeResumeDocOperationalNotes` so the SAME check + threshold + message covers both the Platform
- * Lead's resume doc AND a project manager's `Orchestrator Log.md`, instead of drifting into two
- * near-duplicate implementations.
+ * Shared resume-doc size-warning check ({@link resumeDocSizeWarning}) — the SAME check + threshold +
+ * message covers both the Platform Lead's resume doc and a project manager's `Orchestrator Log.md`.
  *
- * Threshold derivation: a real Loom resume doc broke the harness `Read` tool at 60,522 bytes / ~26.6k
- * tokens (~2.3 bytes/token for dense markdown) — well under the 256KB byte cap but already past the
- * tighter ~25k-token cap, which is the one that actually bites. That puts the real break point around
- * ~57KB for prose this dense. Warn with real margin below THAT, not just under the byte cap.
+ * @decision 809cc4b5 — one shared check, not two near-duplicate implementations, and this byte
+ * threshold is set with real margin below the harness's actual measured break point, not just under
+ * its raw byte cap.
  *
- * ⚠️ Card 774a9701: this byte number is a COARSE PRE-FILTER for whether the note fires at all, NOT a
- * predictor of where a given doc sits against the real (token) cap — bytes-per-token swings hard with
- * markup density (measured as low as ~2.0 bytes/token on an emoji/bold-heavy resume doc, vs. the ~4-5
- * bytes/token rule of thumb for plain prose, i.e. roughly double the token count for the SAME byte size).
- * Do NOT add a tokenizer here to make this precise — the harness already reports the real count on every
- * `Read`, for free; {@link resumeDocSizeWarning}'s message tells the agent to check THAT number instead of
- * trusting this byte figure.
+ * This byte number is a coarse PRE-FILTER for whether the note fires at all, never a predictor of where
+ * a given doc actually sits against the harness's real (token) cap — bytes-per-token density swings too
+ * hard with markup for that. Do NOT add a tokenizer here to make it precise: the harness already reports
+ * the real token count on every `Read`, for free; {@link resumeDocSizeWarning}'s message tells the agent
+ * to check that number instead of trusting this byte figure.
+ *
+ * @decision 774a9701 — this figure decides only whether the warning fires, never how close a doc
+ * actually is to the harness's real cap; bytes-per-token swings too far with markup density for a byte
+ * count to answer that on its own.
  */
 export const RESUME_DOC_WARN_BYTES = 45 * 1024;
 
@@ -26,19 +25,16 @@ export const RESUME_DOC_WARN_BYTES = 45 * 1024;
 export const DEFAULT_RESUME_DOC_FILENAME = "Orchestrator Log.md";
 
 /**
- * Card c1f2f095 — resolve a project's manager resume-doc ABSOLUTE path from its vault dir + an optional
- * per-project `orchestration.resumeDocFilename` override. The ONE resolution function both
- * `composeManagerStartupPrompt` (spawn/recycle time) and `ResumeDocWatcher` (mid-session) call, so the
- * daemon-injected "Resume doc:" path and the size-watchdog's own check can never derive two different
- * answers — closing the drift this card exists to fix (a hand-written prompt line, or a second hardcoded
- * derivation, silently diverging from the real file on disk).
+ * @decision c1f2f095 — resolve every resume-doc consumer's path through this ONE function; two
+ * independent resolution formulas can silently diverge on a project with a non-default
+ * `resumeDocFilename`.
  *
- * Defense-in-depth: `filenameOverride` is ALREADY validated as a strict bare filename (no separators, no
- * `..`) by the agent-facing config schema (`mcp/platform.ts`'s `resumeDocFilenameSchema`) before it's ever
- * stored — but this resolver re-checks the joined result independently, rather than trusting that
- * upstream gate alone: if the resolved path ever ends up outside `vaultPath` (a bypassed/corrupted stored
- * value — e.g. a direct DB edit, or a future caller that skips the validator), it silently falls back to
- * the default filename rather than let the daemon vouch for an escaped path in a TRUSTED prompt block.
+ * Defense-in-depth: `filenameOverride` is already validated as a strict bare filename (no separators, no
+ * `..`) by the agent-facing config schema (`mcp/platform.ts`'s `resumeDocFilenameSchema`) before it's
+ * ever stored, but this resolver re-checks the joined result independently — if it ever resolves outside
+ * `vaultPath` (a bypassed/corrupted stored value, e.g. a direct DB edit, or a future caller that skips
+ * the validator), it silently falls back to the default filename rather than let the daemon vouch for an
+ * escaped path in a TRUSTED prompt block.
  */
 export function resolveResumeDocPath(vaultPath: string, filenameOverride?: string | null): string {
   // No vault bound (`""`) — there's no vault root to resolve against; every caller MUST check this
@@ -60,31 +56,22 @@ export function resolveResumeDocPath(vaultPath: string, filenameOverride?: strin
  * permission error, or a locked file all resolve to "nothing to warn about" — this runs on both a
  * spawn-composition path and a periodic watcher tick, neither of which may ever fail on a stat error.
  *
- * Card f17c5a76 — reported by another Loom project: the note used to carry ONLY the
- * measurement itself, with no timestamp of when that measurement was taken. A recipient could not tell a
- * fresh reading from one that had gone stale sitting in a busy-gated/coalesced delivery queue or a
- * paste-recovery re-injection — both of which can widen the gap between "when this was stat'd" and "when
- * you're actually reading it" arbitrarily. `now` (default `Date.now()`, injectable for deterministic
- * tests — mirrors `ResumeDocWatcher.tick`'s own `now` param) is stamped into the note as `measured-at`,
- * DISTINCT from whatever send/delivery timestamp the surrounding transport may show. Deliberately NOT
- * suppressed when stale (a silent drop is its own silent decision that loses the signal entirely) —
- * instead the note tells the recipient how to tell staleness apart from a fresh reading and how to
- * recover cheaply (re-check the doc's own current size) rather than trusting the number blindly.
+ * `now` (default `Date.now()`, injectable for deterministic tests — mirrors `ResumeDocWatcher.tick`'s
+ * own `now` param) is stamped into the note as `measured-at`, distinct from whatever send/delivery
+ * timestamp the surrounding transport may show. Deliberately NOT suppressed when stale — the note
+ * instead tells the recipient how to check freshness and recover cheaply.
  *
- * Card 774a9701 (two independent fixes to the message text, same measured incident):
- * (1) the byte figure above is only a PRE-FILTER for whether this note fires — it does not predict where
- *     the doc actually sits against the harness's real (token) cap, so the message now points the agent
- *     at the token count their own last `Read` of this file already printed, instead of implying the KB
- *     number itself is the test.
- * (2) the rotation recipe no longer tells the agent to unconditionally reduce to "only current state" —
- *     a resume doc can be mostly standing rules/method rather than transient state, and blindly archiving
- *     that unread would discard it (the exact failure mode `1a1b0670` already identified: "the fix is
- *     homing discipline, not gate code"). The recipe now conditions on that and gives a safe way to read
- *     the archived copy first when content needs to be carried forward — reading is not itself the hazard;
- *     Writing back to the SAME path after a cap-truncated Read of it is (verified live, card 774a9701: a
- *     Write immediately following such a Read on the same path fails "File has not been read yet", even
- *     though a Read did occur — reading the archived copy at its own, different, never-Written-to path
- *     carries no such risk).
+ * @decision f17c5a76 — the note is timestamped at the moment it's stat'd, never silently dropped for
+ * being possibly stale, because a silent drop loses the signal entirely.
+ *
+ * The byte figure is a pre-filter only, so the message points the agent at their own last `Read`'s real
+ * token count rather than the KB number. The rotation recipe conditions on the doc's actual content
+ * (standing rules/method vs. transient state) instead of assuming a blind reduce-to-state-only rewrite
+ * is always safe.
+ *
+ * @decision 774a9701 — a `Write` immediately following a cap-truncated `Read` of this SAME path fails
+ * "File has not been read yet", so the recipe never has the agent Read then Write back to the same
+ * resume-doc path.
  */
 export function resumeDocSizeWarning(absPath: string, now: number = Date.now()): string {
   try {
