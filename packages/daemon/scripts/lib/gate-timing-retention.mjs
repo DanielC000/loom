@@ -6,20 +6,9 @@
 // this module's whole design is shaped around staying compatible with that read window, not around that
 // module's code).
 //
-// THE CORE IDEA: `kind:"file"` and `kind:"host-sample"` rows are the overwhelming majority of every run's
-// bytes (~86% of rows per gate-timing-band.ts's own measurement) but are USELESS to cross-run trend
-// analysis — only `kind:"run-summary"` rows (one per run, a few hundred bytes) feed `computeGateTimingBand`
-// at all. So instead of deleting old history (which would starve that consumer exactly the way card
-// f8b176f7's own kickoff measured: `n:8, nExact:3` — already sample-starved before this module existed),
-// this module COMPACTS old runs down to their `run-summary` row alone and drops their `file`/`host-sample`/
-// `run-start` rows. A `run-summary` row survives forever (subject to the hard ceiling below); only the
-// bulk detail expires. This is the third candidate the card names and pre-blesses none of: "compact old
-// runs to their run-summary rows and drop the per-file detail" — chosen over straightforward segment
-// rotation (rename-on-overflow, e.g. this repo's OWN `scripts/lib/rotating-log.mjs`) because that consumer
-// reads ONLY the canonical path — a rotated-away segment is invisible to it forever, which would make
-// cross-run comparability WORSE on every rotation, not better. Compaction never moves the canonical file
-// out of that path, so a `run-summary` row this module preserves stays visible to that reader for as long
-// as it survives the ceiling below.
+// @decision f8b176f7 — compaction (not rotation) chosen: rotating would make old runs invisible
+// to gate-timing-band.ts's canonical-path-only reader, worsening cross-run comparability, not
+// fixing it.
 //
 // RETENTION POLICY, and why it's enough for both known consumers:
 //  - The most recent `keepFullRuns` runs (by write order — this file is append-only, so first-appearance
@@ -52,24 +41,8 @@
 // the 16MB window — they eat directly INTO it, leaving only (16MB − full-detail bytes) of that same window
 // for the compacted `run-summary`-only rows that precede them in the file.
 //
-// MEASURED on the live `~/.loom` corpus, 2026-09-10 (n=1509 run-summary rows total): the 1501 rows written
-// before card ec2d154b's `hostLoadAggregates` field average ~675 B/row; the 8 rows that now carry it —
-// small sample, but the figure that governs going forward since every new row carries the field — average
-// ~1002 B/row. The `~200KB/run` full-detail estimate (`DEFAULT_KEEP_FULL_RUNS`'s own doc, below) is an
-// UNMEASURED blended average over a strongly bimodal population — MEASURED (same corpus, same date):
-// full-suite runs are ~459-473KB each (mean ~467KB, n=5 of the last 20 runs), `--only=`-targeted runs are
-// ~1-20KB each (n=15 of that same window) — so the real full-detail share for `keepFullRuns=20` kept runs
-// depends on the live run mix, not a fixed number:
-//   - worst case (all 20 kept runs are full-suite): ~20 * 467KB ≈ 9.3MB full-detail share, leaving
-//     (16MB − 9.3MB) / ~1002 B/row ≈ ~7,400 compacted `run-summary` rows visible in the tail window.
-//   - best case (all 20 kept runs are targeted): full-detail share stays well under 1MB, leaving
-//     ~16,350 compacted rows visible — close to the unadjusted 16MB / ~1002 B figure.
-// So "up to ~20,000" `run-summary` rows visible is not achievable even in the best case at today's
-// `hostLoadAggregates` row size — the true figure is somewhere in the ~7,400-16,350 range depending on the
-// run mix, always well past `MIN_BAND_N=8` for any `poolSize` stratum that has run even a handful of times
-// (closing the exact sample-starvation `nExact:3` the card's kickoff measured), but never the full ceiling.
-// Whether to lower `maxCompactedSummaries` to restore closer-to-full-ceiling coverage is a retention-policy
-// call for a separate card, not this one.
+// @decision ec2d154b — hostLoadAggregates raised per-row bytes ~675 to ~1002; the 16MB tail
+// window's visible run-summary count is now ~7,400-16,350 depending on run mix, not ~20,000.
 import fs from "node:fs";
 import path from "node:path";
 
