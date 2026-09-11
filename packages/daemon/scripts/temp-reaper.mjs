@@ -1,13 +1,13 @@
 // temp-reaper.mjs — bounded, age-gated reaper for orphaned `loom-*` temp dirs (card f273ebb9).
-// Full diagnosis: docs/investigations/temp-fixture-leak-f273ebb9-diagnosis.md; mechanism also recorded in
-// project memory `temp-fixture-leak-f273ebb9-killtree-mechanism`.
+// Mechanism also recorded in project memory `temp-fixture-leak-f273ebb9-killtree-mechanism`.
 //
-// WHY THIS EXISTS: the daemon test suite's own cleanup (`cleanupPathSync`/`mkdtempManaged` in
-// _tmp-fixture.mjs) is bypassed whenever the gate force-kills its own process tree (`taskkill /pid <pid>
-// /T /F` on win32, fired on BOTH a step timeout and a cancel — see gate-runner.ts's
-// `killGateProcessTree`) — a forced kill bypasses Node's `beforeExit`/`exit` hooks entirely, regardless of
-// how correct the killed file's own cleanup code is. This reaper is the backstop: run on a LATER suite
-// invocation, it sweeps the OS temp root for anything a prior (possibly force-killed) run left behind.
+// @decision f273ebb9 — the gate's win32 force-kill (`taskkill /T /F`, fired on both a step
+// timeout and a cancel) bypasses every process's `beforeExit`/`exit` cleanup hooks regardless
+// of the killed file's own cleanup code.
+//
+// This reaper is the backstop: run on a LATER suite invocation, it sweeps the OS temp root for
+// anything a prior (possibly force-killed) run left behind. See gate-runner.ts's
+// `killGateProcessTree` for the kill site.
 //
 // HARD SAFETY CONSTRAINTS (from the card — do not relax):
 //  - Scope STRICTLY to entries named `loom-*` DIRECTLY under the given temp root. Never a blanket sweep —
