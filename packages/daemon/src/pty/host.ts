@@ -8828,51 +8828,51 @@ export class PtyHost {
   }
 
   /**
-   * Card 4a0af485, Requirement A (manager directive: "defend at the resource, not the caller"): does
-   * `text` exactly content-match a still-ambiguous (given-up, possibly PARKED) prior dispatch for this
-   * session? Called by sessions/service.ts's `enqueueDurableMessage` BEFORE minting a fresh, self-rooted
-   * `rootMsgId` — a manual resend (a manager reacting to a "could not be confirmed delivered" notice, with
-   * no idea what msgId to cite) whose text matches gets AUTO-JOINED to the original logical chain instead
-   * of starting a disconnected one, with no caller opt-in required. Returns the matching `logicalId`, or
-   * null if there's no ambiguity for this session or nothing matches. Read-only; does not consume/delete
-   * the entry (only an actual confirming hook, via `purgeConfirmedGiveUpRequeue`, resolves it) — a caller
-   * may legitimately query this more than once before the ambiguity actually resolves.
+   * Does `text` exactly content-match a still-ambiguous (given-up, possibly PARKED) prior dispatch for
+   * this session? Called by sessions/service.ts's `enqueueDurableMessage` BEFORE minting a fresh,
+   * self-rooted `rootMsgId` — e.g. a manager resending after a "could not be confirmed delivered" notice,
+   * with no idea what msgId to cite. Returns the matching `logicalId`, or null if there's no ambiguity for
+   * this session or nothing matches. Read-only; does not consume/delete the entry (only an actual
+   * confirming hook, via `purgeConfirmedGiveUpRequeue`, resolves it) — a caller may legitimately query
+   * this more than once before the ambiguity actually resolves.
    *
-   * Card 78e4b3f2: a stored entry's signature is seeded from `joinSubmittedText` — EXACTLY what was
-   * physically written for the failing attempt, which is now the possible-duplicate-TAGGED text once an
-   * entry has itself already been redelivered once in-session (`giveUpGen` set). A human/agent typing a
-   * manual resend after a `[loom:redelivery-parked]` notice has no way to know about that internal tag —
-   * they resend the plain ORIGINAL content the notice's own (tag-stripped) head quoted back to them. So
-   * `text` is tried BOTH as-is AND with the tag this SPECIFIC candidate `logicalId` would carry — the tag
-   * embeds the logicalId itself, so it must be reconstructed per-entry, not once outside the loop.
+   * @decision 4a0af485 — Requirement A (manager directive: "defend at the resource, not the caller"): a
+   * manual resend whose text matches gets AUTO-JOINED to the original logical chain instead of starting a
+   * disconnected one, with no caller opt-in required.
    *
-   * Card ee56a894: an entry's `{len,hash}` is the JOINED text's signature — correct for a single-member
-   * batch (the common case), but a COALESCED batch (2+ members, e.g. same-sender agent coalescing, card
-   * 8d4f9a08) seeds every member's entry with that SAME joined signature, which no single member's own
-   * text can ever equal once there's more than one. A manual resend can only ever carry ONE message's own
-   * text — the sender has no way to know it was ever coalesced with anything else — so this method now
-   * ALSO tries each entry's `memberSig` (that member's own text alone; see `Live.ambiguousDispatches`'s
-   * own doc), both as-is and tag-marked, exactly like the joined `{len,hash}` check above. An ADD, never a
-   * swap: `{len,hash}` stays checked too, since `purgeConfirmedGiveUpRequeue`'s engine-echo path — the
-   * other, unrelated consumer of this same map — still needs the joined shape to keep matching, and this
-   * method must keep resolving a resend of the FULL joined text too (a caller who happens to paste back
-   * everything the notice showed, joined text included).
+   * @decision 78e4b3f2 — the possible-duplicate tag (stamped via `giveUpGen` on redelivery) may already
+   * sit on a candidate's own stored signature if that entry was itself redelivered once already.
    *
-   * Card 2b73179b — BATCH-PROVENANCE DISCRIMINATION, mirroring `purgeConfirmedGiveUpRequeue`'s own
-   * `batchId` guard (card bc0774c4): this method reads the SAME map for the SAME hazard that guard exists
-   * for — a content match spanning more than one GENUINELY DISTINCT give-up event (two DIFFERENT batchIds)
-   * is NOT attributable by content alone, no hash collision needed, P=1 once two such entries coexist (see
-   * `textSignature`'s own doc). Pre-fix this method returned the FIRST match in `Map` insertion order —
-   * silently performing exactly the oldest-first tie-break `purgeConfirmedGiveUpRequeue`'s own doc records
-   * as CONSIDERED AND REJECTED (refutable by a concrete trace, not merely "usually right" — see that
-   * method's "CARD bc0774c4" doc block for the trace). Now: collect EVERY candidate logicalId that matches
-   * any of the four signature shapes above, then apply the identical single-`batchId` rule — a match
-   * spanning more than one batch resolves to null (refuse to guess) instead of the first hit. A caller with
-   * no guess self-roots a fresh, disconnected chain rather than being silently joined to the wrong one —
-   * this project's own "fail toward a duplicate, never a loss" principle (88f11385), the SAME trade
-   * `purgeConfirmedGiveUpRequeue` already makes. Multiple matches sharing ONE batchId (the ordinary
-   * coalesced-batch case, including every single-member batch) are unaffected: returns that shared id, same
-   * as before.
+   * A human/agent resending after a `[loom:redelivery-parked]` notice has no way to know about that
+   * internal tag — they resend the plain ORIGINAL content the notice's own (tag-stripped) head quoted
+   * back to them. So `text` is tried BOTH as-is AND with the tag this SPECIFIC candidate `logicalId`
+   * would carry — the tag embeds the logicalId itself, so it must be reconstructed per-entry, not once
+   * outside the loop.
+   *
+   * @decision ee56a894 — a COALESCED batch (2+ members) seeds every member's entry with the SAME joined
+   * `{len,hash}` signature, which no single member's own text can ever equal once there's more than one —
+   * so this method ALSO tries each entry's `memberSig` (that member's own text alone), both as-is and
+   * tag-marked, alongside the joined check above.
+   *
+   * An ADD, never a swap: `{len,hash}` stays checked too, since `purgeConfirmedGiveUpRequeue`'s
+   * engine-echo path — the other, unrelated consumer of this same map — still needs the joined shape to
+   * keep matching, and this method must keep resolving a resend of the FULL joined text too (a caller who
+   * happens to paste back everything the notice showed, joined text included).
+   *
+   * @decision bc0774c4 — `batchId` discriminates dispatches that share byte-identical text but come from
+   * GENUINELY DISTINCT give-up events; a content match is attributable only when every candidate shares
+   * ONE `batchId`.
+   *
+   * @decision 2b73179b — collects EVERY candidate `logicalId` matching any of the four signature shapes
+   * above, then applies that same single-`batchId` rule across the whole set — not just the first hit in
+   * `Map` insertion order, which is what this method did before this fix (a real, since-fixed bug).
+   *
+   * @decision sha:88f11385 — a match spanning more than one batch resolves to null (refuse to guess), so
+   * a resend with no reliable target self-roots a fresh chain rather than being silently joined to the
+   * wrong one — this project's "fail toward a duplicate, never a loss" principle.
+   *
+   * Multiple matches sharing ONE batchId (the ordinary coalesced-batch case, including every
+   * single-member batch) are unaffected: returns that shared id, same as before.
    */
   hasAmbiguousMatch(sessionId: string, text: string): string | null {
     const live = this.live.get(sessionId);
