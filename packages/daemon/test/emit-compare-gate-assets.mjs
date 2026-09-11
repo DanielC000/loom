@@ -139,7 +139,7 @@ try {
     // probe: mutating a call site to drop an argument used to trip ZERO tests). This replaces the old
     // "no second argument" backward-compat check, which is no longer expressible now that every field is
     // required — same assertion (empty changedAssetPaths folds in nothing), spelled out explicitly instead.
-    const builtNoAssets = buildReducedGateCommand({ changedTestFiles: direct.changedTestFiles, changedAssetPaths: [], changedTsPaths: [] });
+    const builtNoAssets = buildReducedGateCommand({ changedTestFiles: direct.changedTestFiles, changedAssetPaths: [], changedTsPaths: [], changedScriptFiles: [] });
     check("(R) buildReducedGateCommand with changedAssetPaths:[] omits every certified asset-reading test", !ASSET_TEST_BASENAMES.some((n) => builtNoAssets.includes(n)));
   }
 

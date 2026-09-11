@@ -1286,6 +1286,10 @@ export interface ReducedGateWarningInput {
    *  omitting it left the warning claiming "static guards only" on a run that also ran ten runtime tests
    *  (record d422e279's exact defect class, caught by Code Review on card abaaf16e itself). */
   changedTsPaths: string[];
+  /** Card f862f9c5: mirrors `changedTsPaths` immediately above, for the SEPARATE `changedScriptFiles`
+   *  trigger — drives `changedScriptScannerClause` below on its own condition, independent of
+   *  `changedTsPaths`. */
+  changedScriptFiles: string[];
 }
 
 /**
@@ -1300,7 +1304,8 @@ export interface ReducedGateWarningInput {
  * tell which went unrun.
  */
 export function formatReducedGateWarning(
-  result: ReducedGateWarningInput, assetReadingTestCount: number, changedTsScannerTestCount: number, batchLandedCount?: number,
+  result: ReducedGateWarningInput, assetReadingTestCount: number, changedTsScannerTestCount: number,
+  changedScriptScannerTestCount: number, batchLandedCount?: number,
 ): string {
   const compiledClause = result.identicalFileCount > 0
     ? `${result.identicalFileCount} file(s) proven transpile/parse-identical (card 2154b6ad, 82662e98)`
@@ -1319,6 +1324,13 @@ export function formatReducedGateWarning(
   const changedTsScannerClause = result.changedTsPaths.length
     ? `; a compiled .ts changed — also ran the ${changedTsScannerTestCount} compiled-source/dist text-scanner test(s) (cards abaaf16e, fab07aba)`
     : "";
+  // Card f862f9c5: mirrors changedTsScannerClause immediately above, on the SEPARATE changedScriptFiles
+  // trigger — a scripts/**-only diff (changedTsPaths empty) must still say so, or the warning claims
+  // "static guards only" on a run that also ran the scripts-text-scanner test(s), the same defect class
+  // record d422e279 already closed for the .ts case.
+  const changedScriptScannerClause = result.changedScriptFiles.length
+    ? `; a packages/daemon/scripts/** file changed — also ran the ${changedScriptScannerTestCount} scripts-text-scanner test(s) (card f862f9c5)`
+    : "";
   const subject = batchLandedCount !== undefined ? `batch merge gate reduced across ${batchLandedCount} landed branch(es)` : "merge gate reduced";
-  return `${subject}: ${compiledClause} — ran build + static guards only${result.changedTestFiles.length ? ` + ${result.changedTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite${result.notHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${result.notHermeticExcluded.join(", ")}` : ""}${result.inertPathsSkipped.length ? `; also skipped as proven inert (docs/, card db9b0130): ${result.inertPathsSkipped.join(", ")}` : ""}${assetClause}${changedTsScannerClause}${isolationCaveat}`;
+  return `${subject}: ${compiledClause} — ran build + static guards only${result.changedTestFiles.length ? ` + ${result.changedTestFiles.length} changed test file(s)` : ""}, skipped the full daemon test suite${result.notHermeticExcluded.length ? `; NOT gated (NOT_HERMETIC, same as the full suite): ${result.notHermeticExcluded.join(", ")}` : ""}${result.inertPathsSkipped.length ? `; also skipped as proven inert (docs/, card db9b0130): ${result.inertPathsSkipped.join(", ")}` : ""}${assetClause}${changedTsScannerClause}${changedScriptScannerClause}${isolationCaveat}`;
 }

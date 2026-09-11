@@ -48,8 +48,16 @@ process.env.LOOM_HOME = path.join(process.env.TEMP ?? process.env.TMPDIR ?? "/tm
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const {
-  GIT_ID, FULL_GATE, ASSET_TEST_BASENAMES, CHANGED_TS_SCANNER_BASENAMES, mk, mkdirp, makeRepoWithBaseSrcFile, writeRealTestDaemonScript, BASE_SRC, now,
+  GIT_ID, FULL_GATE, ASSET_TEST_BASENAMES, CHANGED_TS_SCANNER_BASENAMES, CHANGED_SCRIPT_SCANNER_BASENAMES, mk, mkdirp, makeRepoWithBaseSrcFile, writeRealTestDaemonScript, BASE_SRC, now,
 } = await import("./_emit-compare-fixtures.mjs");
+
+// Card f862f9c5 — (SCRIPT) below's own small synthetic `.mjs` fixture, same shape/spirit as BASE_SRC above
+// (a comment line to flip), scoped local to this file since no other scenario here needs it.
+const BASE_SCRIPT = [
+  "// prints a friendly status line",
+  "console.log(\"ready\");",
+  "",
+].join("\n");
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -145,7 +153,7 @@ try {
     // Self-consistent, not order-assumed: builds the EXPECTED reduced command from the SAME recorded file
     // list the event actually carries, rather than guessing git's own diff-entry order.
     check("(POS) captured command is BYTE-IDENTICAL to buildReducedGateCommand's output for the recorded file set",
-      Array.isArray(recordedTestFiles) && capturedGate === buildReducedGateCommand({ changedTestFiles: recordedTestFiles, changedAssetPaths: [], changedTsPaths: [] }));
+      Array.isArray(recordedTestFiles) && capturedGate === buildReducedGateCommand({ changedTestFiles: recordedTestFiles, changedAssetPaths: [], changedTsPaths: [], changedScriptFiles: [] }));
 
     // Code Review fold-in [4] + blocker [1]'s own positive control: the PROJECTED gate_history row (what a
     // manager actually reads via `listGateEvents`/`toGateHistoryRow`), not the raw event above. RED against
@@ -305,6 +313,62 @@ try {
       check("(TS) reducedGateWarning names the compiled-source/dist text-scanner count", typeof value.reducedGateWarning === "string" && value.reducedGateWarning.includes(`also ran the ${CHANGED_TS_SCANNER_BASENAMES.length} compiled-source/dist text-scanner test`));
     } else {
       console.log("(TS) NOTE: settled via the async degrade path — skipping the sync-return assertions. The DB/command checks above are unconditional and still ran.");
+    }
+  }
+
+  // ── (SCRIPT) card f862f9c5 — a batch of one branch with a COMMENT-ONLY packages/daemon/scripts/**/*.mjs
+  //        edit PLUS one test-only branch -> the batch's ONE gate run REDUCES, and the captured command
+  //        folds in every CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS member too — the batch path's own version
+  //        of the fold-in (TS) above proves for the .ts trigger, on the SEPARATE changedScriptFiles trigger
+  //        instead. `buildReducedGateCommand(batchEmitCompare!)` needed no code change for this (it already
+  //        passes the whole EmitCompareGateResult object through); this proves the batch path's own
+  //        `formatReducedGateWarning` call was correctly threaded the new count. ─────────────────────────
+  {
+    const SC = mk("bmrg-script");
+    makeRepoWithBaseSrcFile(SC, BASE_SRC);
+    // A real scripts/test-daemon.mjs must be present in the ASSEMBLED batch worktree too — the
+    // added-test-file branch's own top-level test/*.mjs classification dynamically imports it (from the
+    // worktree, not this daemon's own copy) to resolve NOT_HERMETIC; without it, loadNotHermeticNames
+    // fails closed to notApplicable (harness-config-unavailable), same as (TS) above already needs it for.
+    writeRealTestDaemonScript(SC.repo);
+    mkdirp(path.join(SC.repo, "packages", "daemon", "scripts"));
+    fs.writeFileSync(path.join(SC.repo, "packages", "daemon", "scripts", "example.mjs"), BASE_SCRIPT);
+    commitAll(SC.repo, "chore: add example script", GIT_ID);
+
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0; let capturedGate;
+    const fakeGate = async (gate) => { calls++; capturedGate = gate; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    seedBatchProject(db, SC);
+
+    const wScript = await createWorktree(SC.repo, SC.projId, `${SC.taskId}-script`);
+    worktrees.push(wScript.worktreePath);
+    fs.writeFileSync(path.join(wScript.worktreePath, "packages", "daemon", "scripts", "example.mjs"),
+      BASE_SCRIPT.replace("prints a friendly status line", "prints a friendly status line (typo fixed)"));
+    commitAll(wScript.worktreePath, "docs: fix script comment", GIT_ID);
+    const workerScript = { taskId: `${SC.taskId}-script`, workerId: `${SC.workerId}-script`, branch: wScript.branch, worktreePath: wScript.worktreePath, label: "comment-only-script" };
+    seedWorker(db, SC, workerScript);
+
+    const wTest = await createWorktree(SC.repo, SC.projId, `${SC.taskId}-test`);
+    worktrees.push(wTest.worktreePath);
+    mkdirp(path.join(wTest.worktreePath, "packages", "daemon", "test"));
+    fs.writeFileSync(path.join(wTest.worktreePath, "packages", "daemon", "test", "bmrg-script-added.mjs"), "console.log(\"PASS  bmrg-script-added\");\nprocess.exit(0);\n");
+    commitAll(wTest.worktreePath, "test: add bmrg-script-added", GIT_ID);
+    const workerTest = { taskId: `${SC.taskId}-test`, workerId: `${SC.workerId}-test`, branch: wTest.branch, worktreePath: wTest.worktreePath, label: "test-only" };
+    seedWorker(db, SC, workerTest);
+
+    const { value } = await runBatch(sessions, db, SC.projId, SC.mgrId, [workerScript.workerId, workerTest.workerId]);
+    check("(SCRIPT) the gate command was called exactly once for the whole batch", calls === 1);
+    check("(SCRIPT) captured command is NOT the full gate — a comment-only scripts/** edit never blocks eligibility", capturedGate !== FULL_GATE);
+    check("(SCRIPT) captured command's --only= names the added test file", capturedGate.includes("bmrg-script-added"));
+    for (const s of CHANGED_SCRIPT_SCANNER_BASENAMES) check(`(SCRIPT) captured command runs scripts-text scanner ${s} bare (a scripts/** file changed in the union)`, capturedGate.includes(`node packages/daemon/test/${s}`));
+
+    if (value) {
+      check("(SCRIPT) both branches landed via the batch, none fell back", value.ok === true && value.landed.length === 2 && value.fallback.length === 0);
+      check("(SCRIPT) reducedGateWarning names the scripts-text-scanner count", typeof value.reducedGateWarning === "string" && value.reducedGateWarning.includes(`also ran the ${CHANGED_SCRIPT_SCANNER_BASENAMES.length} scripts-text-scanner test`));
+    } else {
+      console.log("(SCRIPT) NOTE: settled via the async degrade path — skipping the sync-return assertions. The DB/command checks above are unconditional and still ran.");
     }
   }
 

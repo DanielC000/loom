@@ -2862,15 +2862,27 @@ export const ASSET_READING_TEST_REPO_PATHS = [
  *        {@link STATIC_GUARD_REPO_PATHS} above. Already immune by construction; adding it here would be
  *        redundant with running it on every reduced gate anyway.
  *    (4) a PRESENCE-ONLY assertion of a real code token — `loopback-secret.mjs` (D) asserts
- *        `/timingSafeEqual\(/.test(src)` against compiled `dist/gateway/loopback-secret.js`: a comment-only
- *        diff leaves every real code token unchanged by construction (that's what "transpile-identical"
- *        means), so a genuine call already present in code stays present regardless of any comment; a
- *        comment could only ever ADD a spurious match, which for a PRESENCE check can't flip pass→fail —
- *        the direction this list cares about. Immune by POLARITY, not by where it looks (contrast (1)-(3)).
- *        `test-daemon-codex-real-spawn-preset.mjs`'s own `scripts/test-daemon.mjs` presence check is the
- *        same shape one level up (a real `packages/daemon/scripts/**` reader, not `dist/**`; noted by card
- *        `fab07aba` — not added to this list, since its correct trigger would be `changedScriptFiles`, the
- *        SAME deferred gap this file's closing paragraph below documents).
+ *        `/timingSafeEqual\(/.test(src)` against compiled `dist/gateway/loopback-secret.js`. ⚠️ CORRECTED
+ *        (card `f862f9c5`, Code Review): this entry previously claimed a single-token regex like this one
+ *        "has no internal position for a comment to land" — MEASURED FALSE. `ts.transpileModule` shows real
+ *        tsc emit REPRINTS from the parsed AST rather than preserving source bytes verbatim: a WHITESPACE-only
+ *        source edit (e.g. a bare newline before the `(`) does NOT survive into the emitted output (both
+ *        before/after reprint to the identical text), but a COMMENT DOES survive — tsc keeps comment trivia
+ *        attached to its nearest node — so `timingSafeEqual /* c *\/(a, b)` emits with the comment intact and
+ *        breaks this exact regex. `loopback-secret.mjs` (D) is therefore a KNOWN, PRE-EXISTING fail-open
+ *        vector for an inline-comment diff specifically (not a whitespace-only one) — tracked on a separate
+ *        follow-up card, NOT fixed by this one; do not cite this entry as proof the check is immune.
+ *        ⚠️ `test-daemon-codex-real-spawn-preset.mjs`'s own `scripts/test-daemon.mjs` check
+ *        (`scriptSource.includes("resolveSelectionForCliMode(HERMETIC, cliMode, CODEX_REAL_SPAWN_BASENAMES)")`)
+ *        was PREVIOUSLY documented here as "the same shape one level up" and therefore ALSO immune —
+ *        MEASURED FALSE for a further, independent reason: a `.mjs` script has no compile/emit step at all,
+ *        so the raw scanner reads the committed file's bytes directly, with no AST-reprint to normalize
+ *        whitespace away the way real tsc emit does for `dist/**`. BOTH a comment AND a plain whitespace-only
+ *        edit (an added newline, altered spacing) survive unchanged into what this scanner reads — confirmed
+ *        directly against `gate-runner-harness-marker-coupling.mjs`'s own needle locator, where a bare newline
+ *        inserted right after its `callPrefix` (no comment at all) already makes `.find()` miss the line. This
+ *        file is therefore a genuine member of {@link CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS} below, not an
+ *        exclusion — see that list's own doc.
  *    (5) a BYTE-LEVEL / non-textual property — `no-nul-in-tracked-ts.mjs` scans every tracked `.ts` file for
  *        embedded NUL bytes. An ordinary comment edit (added, moved, or deleted prose) can never introduce
  *        or remove a NUL byte, so this is immune by the KIND of property it checks, not by where it looks
@@ -2896,19 +2908,15 @@ export const ASSET_READING_TEST_REPO_PATHS = [
  *  these scanners carry (a real, separate improvement worth doing), but wouldn't by itself fix WHERE a
  *  real hit gets reported, so it doesn't replace this list.
  *
- *  ⚠️ KNOWN, DELIBERATELY DEFERRED GAP — `packages/daemon/scripts/**` readers (card `fab07aba` DoD-1's
- *  other half): `gate-runner-harness-marker-coupling.mjs` raw-scans real `scripts/test-daemon.mjs` text via
- *  a needle-based line locator (not AST, not stripped) and is genuinely flip-able the same way every member
- *  below is — but its correct trigger is `changedScriptFiles.length > 0` (card `82662e98`'s population),
- *  which `EmitCompareGateResult` does not currently expose as its own field and `buildReducedGateCommand`
- *  does not currently read — only `changedTsPaths` reaches this list's fold-in condition below. Folding
- *  this specific test into the EXISTING `changedTsPaths` trigger would be WRONG (it would run on any `.ts`
- *  change that never touched `scripts/test-daemon.mjs`, and still miss the actual case — a `scripts/**`-only
- *  diff — this test needs it for). NOT fixed by this card: exposing `changedScriptFiles` as a new
- *  `EmitCompareGateResult` field and threading it into `buildReducedGateCommand`'s two non-batch call sites
- *  needs an edit to `sessions/service.ts`, which was a live fleet lane owned by a different card at the time
- *  `fab07aba` shipped — see docs/decisions/fab07aba-src-text-scanners-share-the-dist-text-scanners-trigger.md
- *  for the full reasoning and the follow-up this left behind.
+ *  ✅ FIXED by card `f862f9c5` (was a known, deliberately deferred gap under card `fab07aba` DoD-1's other
+ *  half): `packages/daemon/scripts/**` readers on the `changedScriptFiles.length > 0` trigger — a DIFFERENT
+ *  trigger than this list's own `changedTsPaths.length > 0` (folding a `scripts/**` reader into THIS list
+ *  would be wrong both ways: it would run on any `.ts` change that never touched `scripts/**`, and still
+ *  miss the actual case — a `scripts/**`-only diff — such a reader needs it for) — now have their own list,
+ *  {@link CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS}, folded into `buildReducedGateCommand` on that trigger.
+ *  See that list's own doc for the sweep that re-derived its membership (including the correction to this
+ *  list's own shape-(4) entry above) and docs/decisions/fab07aba-src-text-scanners-share-the-dist-text-scanners-trigger.md
+ *  for the original deferral's reasoning.
  *
  *  `packages/daemon/test/_emit-compare-fixtures.mjs`'s `CHANGED_TS_SCANNER_BASENAMES` is DERIVED from this
  *  list at test-load time, not hand-copied — same reuse discipline `GUARD_BASENAMES`/`ASSET_TEST_BASENAMES`
@@ -2942,6 +2950,23 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   "packages/daemon/test/setup-templates-rest.mjs",
   "packages/daemon/test/shell-terminal.mjs",
   "packages/daemon/test/skill-edit.mjs",
+];
+
+/** @decision f862f9c5 — never fold this list into {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} or its
+ *  `changedTsPaths` trigger: this list's trigger is the SEPARATE `changedScriptFiles.length > 0` (a changed
+ *  `packages/daemon/scripts/**\/*.mjs` file) — folding it into the `.ts` trigger would run it on unrelated
+ *  `.ts` diffs and still miss a `scripts/**`-only one. Never re-derive membership from a script-name grep
+ *  alone (83 raw hits, only 2 genuine members) — import/execution of a script is comment-immune, never a
+ *  member; only a RAW, UNSTRIPPED text scan a comment can flip qualifies.
+ *
+ *  `packages/daemon/test/_emit-compare-fixtures.mjs`'s `CHANGED_SCRIPT_SCANNER_BASENAMES` is DERIVED from
+ *  this list at test-load time, not hand-copied — same reuse discipline `GUARD_BASENAMES`/
+ *  `ASSET_TEST_BASENAMES`/`CHANGED_TS_SCANNER_BASENAMES` already establish, so an addition or removal here
+ *  needs no matching edit there.
+ */
+export const CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS = [
+  "packages/daemon/test/gate-runner-harness-marker-coupling.mjs",
+  "packages/daemon/test/test-daemon-codex-real-spawn-preset.mjs",
 ];
 
 /** @decision fd0d34da — a coarse, PATH-FREE classification of WHY `notApplicable:true`, safe to leave
@@ -3021,6 +3046,13 @@ export interface EmitCompareGateResult {
    *  scripts-only diff cannot possibly change what a dist-text scanner reads and must NOT trigger this
    *  list. See {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS}'s own doc for the full membership reasoning. */
   changedTsPaths: string[];
+  /** Card `f862f9c5`: repo-relative paths of changed `packages/daemon/scripts/**\/*.mjs` files (the SAME
+   *  population classified into `changedScriptFiles` internally, just surfaced — mirrors `changedTsPaths`
+   *  immediately above) — populated only when `eligible`. Drives {@link buildReducedGateCommand}'s
+   *  conditional fold-in of {@link CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS}, on ITS OWN trigger, independent
+   *  of `changedTsPaths` (a diff can set either, both, or neither) — see that list's own doc for why a
+   *  `scripts/**` reader must never fold into the `.ts`-triggered list instead. */
+  changedScriptFiles: string[];
   /** Count of changed compiled `.ts` files PLUS changed `packages/daemon/scripts/**\/*.mjs` files (card
    *  82662e98) proven transpile/parse-identical — diagnostic only, surfaced by the caller so a skip is
    *  never silent (card 2154b6ad DoD-5). Deliberately ONE combined count, not two: both populations are
@@ -3063,11 +3095,11 @@ export async function computeEmitCompareGate(
   // and an unparseable line, none of which are verdicts about reducibility). Two explicitly-named
   // constructors mean a call site can no longer express the wrong one BY OMISSION — every return below
   // picks one on purpose. See {@link EmitCompareGateResult.notApplicable}'s own doc.
-  const notReducible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], changedTsPaths: [], identicalFileCount: 0, reason, notApplicable: false });
+  const notReducible = (reason: string): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], changedTsPaths: [], changedScriptFiles: [], identicalFileCount: 0, reason, notApplicable: false });
   // Card fd0d34da: `kind` is now a required second argument (never a defaulted/optional param) — the same
   // "no call site can express the wrong thing by omission" discipline card 4def0708 already applied to the
   // `notReducible`/`notApplicableHere` split itself, one layer in.
-  const notApplicableHere = (reason: string, kind: EmitCompareNotApplicableKind): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], changedTsPaths: [], identicalFileCount: 0, reason, notApplicable: true, notApplicableKind: kind });
+  const notApplicableHere = (reason: string, kind: EmitCompareNotApplicableKind): EmitCompareGateResult => ({ eligible: false, changedTestFiles: [], notHermeticExcluded: [], inertPathsSkipped: [], changedAssetPaths: [], changedTsPaths: [], changedScriptFiles: [], identicalFileCount: 0, reason, notApplicable: true, notApplicableKind: kind });
   const { git, timeoutMs } = boundedGit(worktreePath, deps);
 
   let entries: string[];
@@ -3350,6 +3382,11 @@ export async function computeEmitCompareGate(
     // EmitCompareGateResult.changedTsPaths's own doc for why this drives buildReducedGateCommand's
     // CHANGED_TS_TEXT_SCANNER_REPO_PATHS fold-in and why it's deliberately NOT the combined identicalFileCount.
     changedTsPaths: changedTsFiles,
+    // Card f862f9c5: mirrors changedTsPaths immediately above, surfacing the SAME changedScriptFiles
+    // population classified during the loop — see EmitCompareGateResult.changedScriptFiles's own doc for
+    // why this drives buildReducedGateCommand's CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS fold-in on its own,
+    // independent trigger.
+    changedScriptFiles,
     // Card 82662e98: both populations are "proven inert via parse/transpile comparison" — folded into ONE
     // diagnostic count rather than a second field threaded through every persisted consumer of this one
     // (sessions/service.ts's emitCompareIdenticalCount is part of a reconciliation event payload, not just
@@ -3478,19 +3515,24 @@ function walkTsFiles(dir: string, out: string[] = []): string[] {
  *  (bare `node <path>`, the {@link STATIC_GUARD_REPO_PATHS} shape), never into `testPaths`/`--only=` — every
  *  member is independently verified to set up its own hermetic env, so it needs none of what the harness
  *  wrapper exists to provide. See that list's own doc for the full membership + trigger reasoning.
- *  Card abaaf16e (Code Review MINOR): the three fields are a REQUIRED single object, not positional
+ *  Card abaaf16e (Code Review MINOR): the fields are a REQUIRED single object, not positional
  *  arguments with defaults — a default let a caller silently drop an argument (Code Review's own probe:
  *  mutating the two admission-reclassification/batch call sites to omit the 3rd argument tripped ZERO
  *  tests) and the SAME latent shape already existed on `changedAssetPaths` before this card, so both are
  *  fixed together rather than fixing only the newly-added one. `Pick<EmitCompareGateResult, …>` (not a
  *  hand-typed object shape) so the two can never drift out of sync — a field renamed on
- *  `EmitCompareGateResult` fails this call SITE, not silently. */
+ *  `EmitCompareGateResult` fails this call SITE, not silently.
+ *  @decision f862f9c5 — `changedScriptFiles` folds {@link CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS} in on ITS
+ *  OWN condition, independent of `changedTsPaths` — never gate it on the `.ts` trigger, or on the combined
+ *  `identicalFileCount` (which counts both populations together for an unrelated diagnostic reason; see that
+ *  field's own doc). A diff can set either trigger, both, or neither. */
 export function buildReducedGateCommand(
-  input: Pick<EmitCompareGateResult, "changedTestFiles" | "changedAssetPaths" | "changedTsPaths">,
+  input: Pick<EmitCompareGateResult, "changedTestFiles" | "changedAssetPaths" | "changedTsPaths" | "changedScriptFiles">,
 ): string {
-  const { changedTestFiles, changedAssetPaths, changedTsPaths } = input;
+  const { changedTestFiles, changedAssetPaths, changedTsPaths, changedScriptFiles } = input;
   const steps = ["pnpm build", ...STATIC_GUARD_REPO_PATHS.map((p) => `node ${p}`)];
   if (changedTsPaths.length > 0) steps.push(...CHANGED_TS_TEXT_SCANNER_REPO_PATHS.map((p) => `node ${p}`));
+  if (changedScriptFiles.length > 0) steps.push(...CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS.map((p) => `node ${p}`));
   const testPaths = changedAssetPaths.length > 0
     ? [...new Set([...changedTestFiles, ...ASSET_READING_TEST_REPO_PATHS])]
     : changedTestFiles;

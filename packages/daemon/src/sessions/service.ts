@@ -18,7 +18,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
@@ -11983,6 +11983,12 @@ export class SessionService {
     // table (unlike emitCompareTestFiles/emitCompareAssetPaths, which those DO cover) stays untouched —
     // Code Review reviewed this exact boundary on card abaaf16e and did not ask for it to go further.
     let emitCompareTsPaths: string[] = [];
+    // Card f862f9c5: mirrors emitCompareTsPaths immediately above, for the SEPARATE changedScriptFiles
+    // trigger — see EmitCompareGateResult.changedScriptFiles's own doc (git/worktrees.ts) for why ANY such
+    // path folds CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS into buildReducedGateCommand's command, independent
+    // of emitCompareTsPaths. Diagnostic too, same as its siblings above — surfaced via
+    // formatReducedGateWarning's changedScriptScannerClause.
+    let emitCompareScriptFiles: string[] = [];
     // Card 2db8a3dd: `true` only when `computeEmitCompareGate` itself said the predicate could not have
     // been eligible for THIS repo's layout at all (see `EmitCompareGateResult.notApplicable`'s own doc,
     // git/worktrees.ts) — NOT re-derived here, just carried. Gates the two `emitCompareReduced` record
@@ -12772,6 +12778,7 @@ export class SessionService {
           emitCompareInertPathsSkipped = emitCompare.inertPathsSkipped;
           emitCompareAssetPaths = emitCompare.changedAssetPaths;
           emitCompareTsPaths = emitCompare.changedTsPaths;
+          emitCompareScriptFiles = emitCompare.changedScriptFiles;
           emitCompareIdenticalCount = emitCompare.identicalFileCount;
           // Card 4def0708: the predicate DID run and decided this diff IS applicable (it's eligible for
           // the reduced gate) — an explicit `false` here, not left to fall through on the new
@@ -12787,7 +12794,7 @@ export class SessionService {
       // `let`, not `const` (card 7183540f): re-assigned by the admission-time re-derivation inside
       // `reunionAtAdmission` below when a branch/main move during the CAP-queue wait invalidates this
       // pre-wait classification — see that function's own doc for the full mechanism.
-      let effectiveGate = emitCompareSkip ? buildReducedGateCommand({ changedTestFiles: emitCompareTestFiles, changedAssetPaths: emitCompareAssetPaths, changedTsPaths: emitCompareTsPaths }) : gate;
+      let effectiveGate = emitCompareSkip ? buildReducedGateCommand({ changedTestFiles: emitCompareTestFiles, changedAssetPaths: emitCompareAssetPaths, changedTsPaths: emitCompareTsPaths, changedScriptFiles: emitCompareScriptFiles }) : gate;
 
       const runGateSeq = this.runGate ?? runGateSequential;
       // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
@@ -13013,8 +13020,9 @@ export class SessionService {
               emitCompareInertPathsSkipped = reclassified.inertPathsSkipped;
               emitCompareAssetPaths = reclassified.changedAssetPaths;
               emitCompareTsPaths = reclassified.changedTsPaths;
+              emitCompareScriptFiles = reclassified.changedScriptFiles;
               emitCompareIdenticalCount = reclassified.identicalFileCount;
-              effectiveGate = buildReducedGateCommand({ changedTestFiles: emitCompareTestFiles, changedAssetPaths: emitCompareAssetPaths, changedTsPaths: emitCompareTsPaths });
+              effectiveGate = buildReducedGateCommand({ changedTestFiles: emitCompareTestFiles, changedAssetPaths: emitCompareAssetPaths, changedTsPaths: emitCompareTsPaths, changedScriptFiles: emitCompareScriptFiles });
               // Card 4def0708: mirrors the pre-wait classification's own explicit `false` on its
               // `eligible:true` branch, above — the re-derivation DID run and decided this diff is
               // applicable.
@@ -13035,6 +13043,7 @@ export class SessionService {
               emitCompareTestFiles = [];
               emitCompareAssetPaths = [];
               emitCompareTsPaths = [];
+              emitCompareScriptFiles = [];
               emitCompareIdenticalCount = 0;
               // Card 2db8a3dd (DEFAULT CORRECTED, card 4def0708): carry the re-derivation's own
               // applicability verdict when it ran one (`reclassified` defined but not eligible). An
@@ -14149,8 +14158,8 @@ export class SessionService {
     // renders byte-identical to the pre-extraction text.
     const emitCompareWarning = emitCompareSkip
       ? formatReducedGateWarning(
-        { identicalFileCount: emitCompareIdenticalCount, changedTestFiles: emitCompareTestFiles, notHermeticExcluded: emitCompareNotHermeticExcluded, inertPathsSkipped: emitCompareInertPathsSkipped, changedAssetPaths: emitCompareAssetPaths, changedTsPaths: emitCompareTsPaths },
-        ASSET_READING_TEST_REPO_PATHS.length, CHANGED_TS_TEXT_SCANNER_REPO_PATHS.length,
+        { identicalFileCount: emitCompareIdenticalCount, changedTestFiles: emitCompareTestFiles, notHermeticExcluded: emitCompareNotHermeticExcluded, inertPathsSkipped: emitCompareInertPathsSkipped, changedAssetPaths: emitCompareAssetPaths, changedTsPaths: emitCompareTsPaths, changedScriptFiles: emitCompareScriptFiles },
+        ASSET_READING_TEST_REPO_PATHS.length, CHANGED_TS_TEXT_SCANNER_REPO_PATHS.length, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS.length,
       )
       : undefined;
     // Card e1ac691b — see composerIntegrityWarning's own doc: computed HERE (inside the async operation
@@ -15005,7 +15014,7 @@ export class SessionService {
             // isolation caveat's singular/plural, driven by `changedTestFiles.length`, never hardcoded)
             // scales to every landed branch — see that function's own doc.
             const reducedGateWarning = batchReduced
-              ? formatReducedGateWarning(batchEmitCompare!, ASSET_READING_TEST_REPO_PATHS.length, CHANGED_TS_TEXT_SCANNER_REPO_PATHS.length, landedCount)
+              ? formatReducedGateWarning(batchEmitCompare!, ASSET_READING_TEST_REPO_PATHS.length, CHANGED_TS_TEXT_SCANNER_REPO_PATHS.length, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS.length, landedCount)
               : undefined;
             return {
               passed: r.passed, emitCompareReduced: !!batchEmitCompare?.eligible, ...(reducedGateWarning ? { reducedGateWarning } : {}), reason: r.passed ? undefined : (r.outputTail ?? "batch gate failed"), detail: { steps: r.steps },

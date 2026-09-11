@@ -66,6 +66,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       CHANGED_TS_TEXT_SCANNER_REPO_PATHS in (bare `node`) iff a changed compiled .ts path is passed — a changed
 //       test/*.mjs file alone does not trigger it. (A)/(D) above carry the same two legs through a REAL
 //       end-to-end diff instead of a direct call.
+//   (V) card f862f9c5 — RED-PROOF, direct unit-level: buildReducedGateCommand folds
+//       CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS in (bare `node`) iff a changed packages/daemon/scripts/**/*.mjs
+//       path is passed, on ITS OWN trigger independent of changedTsPaths — (P) above carries the same real
+//       end-to-end leg through a REAL diff instead of a direct call, and now also asserts the fold-in.
 //   (S) card fe848bfc — THE DISCRIMINATING CASE for dropping computeEmitCompareGate's repoPath arg: `ref`
 //       is `"HEAD"`, a PER-WORKTREE ref (unlike the branch NAME every other scenario above passes, which
 //       resolves identically from canonical or the worktree) — resolved against a worktree whose own HEAD
@@ -99,8 +103,8 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 // prod-DB guard then correctly refuses `new Db()` below). Importing it dynamically, after LOOM_HOME is
 // set, keeps this file's own env setup ahead of anything that reads it.
 const {
-  GIT_ID, FULL_GATE, GUARD_BASENAMES, CHANGED_TS_SCANNER_BASENAMES, seed, mkdirp, mk, BASE_SRC, makeRepoWithBaseSrcFile,
-  writeRealTestDaemonScript, STATIC_GUARD_REPO_PATHS, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS,
+  GIT_ID, FULL_GATE, GUARD_BASENAMES, CHANGED_TS_SCANNER_BASENAMES, CHANGED_SCRIPT_SCANNER_BASENAMES, seed, mkdirp, mk, BASE_SRC, makeRepoWithBaseSrcFile,
+  writeRealTestDaemonScript, STATIC_GUARD_REPO_PATHS, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS,
 } = await import("./_emit-compare-fixtures.mjs");
 
 // Card 82662e98 — (P)/(Q)/(R)'s own small synthetic `.mjs` fixture, same shape/spirit as BASE_SRC above
@@ -286,7 +290,7 @@ try {
   //        packages/daemon/test/<file>.mjs` for each changed file — that is what made
   //        test/dev-server.mjs refuse with exit 99 at 0s and block a real release merge. ─────────────────
   {
-    const cmd = buildReducedGateCommand({ changedTestFiles: ["packages/daemon/test/dev-server.mjs", "packages/daemon/test/other-thing.mjs"], changedAssetPaths: [], changedTsPaths: [] });
+    const cmd = buildReducedGateCommand({ changedTestFiles: ["packages/daemon/test/dev-server.mjs", "packages/daemon/test/other-thing.mjs"], changedAssetPaths: [], changedTsPaths: [], changedScriptFiles: [] });
     check("(M) still runs pnpm build", cmd.includes("pnpm build"));
     for (const g of GUARD_BASENAMES) check(`(M) still runs guard ${g} bare (card 49c50b80: safe under any LOOM_HOME via _guard.mjs's isTestCreatedHome, not because guards avoid touching it)`, cmd.includes(`node packages/daemon/test/${g}`));
     check("(M) routes BOTH changed files through test:daemon --only=, comma-joined",
@@ -296,7 +300,7 @@ try {
     check("(M) never runs the ~668-test suite UNFILTERED (any test:daemon step here always carries --only=)",
       !cmd.includes("test:daemon") || cmd.includes("--only="));
     // A diff with NO changed test files must still omit the test:daemon step entirely (build + guards only).
-    const noTestFilesCmd = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: [] });
+    const noTestFilesCmd = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: [], changedScriptFiles: [] });
     check("(M) zero changed test files -> no test:daemon step at all", !noTestFilesCmd.includes("test:daemon"));
   }
 
@@ -311,19 +315,55 @@ try {
   //        positional args with defaults) precisely so a call site can't silently drop a field the way the
   //        old 3rd positional argument could — every call below spells out all three fields explicitly. ──
   {
-    const withTs = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: ["packages/daemon/src/example.ts"] });
+    const withTs = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: ["packages/daemon/src/example.ts"], changedScriptFiles: [] });
     check("(T) still runs pnpm build", withTs.includes("pnpm build"));
     for (const g of GUARD_BASENAMES) check(`(T) still runs static guard ${g}`, withTs.includes(`node packages/daemon/test/${g}`));
     for (const s of CHANGED_TS_SCANNER_BASENAMES) check(`(T) a changed .ts file folds in dist-text scanner ${s}, bare (not through --only=)`, withTs.includes(`node packages/daemon/test/${s}`));
     check("(T) no test:daemon step (no changed test/*.mjs or assets path passed)", !withTs.includes("test:daemon"));
 
-    const withoutTs = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: [] });
+    const withoutTs = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: [], changedScriptFiles: [] });
     for (const s of CHANGED_TS_SCANNER_BASENAMES) check(`(T) NO changed .ts file -> dist-text scanner ${s} does NOT run (the pre-fix shape — must stay RED before this card, GREEN after)`, !withoutTs.includes(`node packages/daemon/test/${s}`));
 
     // A changed test/*.mjs file alone (no .ts) must not fold the dist-text scanners in either — mirrors
     // scenario (D)'s real-integration negative leg at the unit level.
-    const withTestFileOnly = buildReducedGateCommand({ changedTestFiles: ["packages/daemon/test/dev-server.mjs"], changedAssetPaths: [], changedTsPaths: [] });
+    const withTestFileOnly = buildReducedGateCommand({ changedTestFiles: ["packages/daemon/test/dev-server.mjs"], changedAssetPaths: [], changedTsPaths: [], changedScriptFiles: [] });
     for (const s of CHANGED_TS_SCANNER_BASENAMES) check(`(T) a changed TEST file (not .ts) -> dist-text scanner ${s} still does NOT run`, !withTestFileOnly.includes(`node packages/daemon/test/${s}`));
+
+    // A changed packages/daemon/scripts/**/*.mjs file alone (no .ts) must NOT fold the .ts-triggered
+    // dist-text scanners in either — the two triggers are independent (card f862f9c5).
+    const withScriptFileOnly = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: [], changedScriptFiles: ["packages/daemon/scripts/test-daemon.mjs"] });
+    for (const s of CHANGED_TS_SCANNER_BASENAMES) check(`(T) a changed SCRIPT file (not .ts) -> dist-text scanner ${s} still does NOT run`, !withScriptFileOnly.includes(`node packages/daemon/test/${s}`));
+  }
+
+  // ── (V) card f862f9c5 — RED-PROOF: buildReducedGateCommand must fold CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS
+  //        in (bare `node <path>`, the STATIC_GUARD_REPO_PATHS shape) whenever a changed
+  //        packages/daemon/scripts/**/*.mjs file is passed, on ITS OWN trigger (changedScriptFiles),
+  //        independent of changedTsPaths — and must NOT fold it in otherwise. Direct unit-level call
+  //        (no git/daemon plumbing) — pre-fix, buildReducedGateCommand's input had no changedScriptFiles
+  //        field at all, so this scenario's positive assertions are RED (TypeError reading .length off
+  //        undefined, or simply never folding the scanners in) against the reverted code and GREEN once
+  //        the field is threaded through. Labelled (V), not (U) — (U) is the pre-existing member-existence
+  //        check below (card fab07aba). ────────────────────────────────────────────────────────────────
+  {
+    const withScript = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: [], changedScriptFiles: ["packages/daemon/scripts/test-daemon.mjs"] });
+    check("(V) still runs pnpm build", withScript.includes("pnpm build"));
+    for (const g of GUARD_BASENAMES) check(`(V) still runs static guard ${g}`, withScript.includes(`node packages/daemon/test/${g}`));
+    for (const s of CHANGED_SCRIPT_SCANNER_BASENAMES) check(`(V) a changed scripts/** file folds in scripts-text scanner ${s}, bare (not through --only=)`, withScript.includes(`node packages/daemon/test/${s}`));
+    check("(V) no test:daemon step (no changed test/*.mjs or assets path passed)", !withScript.includes("test:daemon"));
+
+    const withoutScript = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: [], changedScriptFiles: [] });
+    for (const s of CHANGED_SCRIPT_SCANNER_BASENAMES) check(`(V) NO changed scripts/** file -> scripts-text scanner ${s} does NOT run`, !withoutScript.includes(`node packages/daemon/test/${s}`));
+
+    // A changed compiled .ts file alone (no scripts/**) must not fold the scripts-text scanners in either —
+    // the two triggers are independent.
+    const withTsOnly = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: ["packages/daemon/src/example.ts"], changedScriptFiles: [] });
+    for (const s of CHANGED_SCRIPT_SCANNER_BASENAMES) check(`(V) a changed .ts file (not scripts/**) -> scripts-text scanner ${s} still does NOT run`, !withTsOnly.includes(`node packages/daemon/test/${s}`));
+
+    // BOTH triggers set at once must fold in BOTH lists — proves the two conditions are independently
+    // evaluated, not mutually exclusive branches of a single if/else.
+    const withBoth = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: ["packages/daemon/src/example.ts"], changedScriptFiles: ["packages/daemon/scripts/test-daemon.mjs"] });
+    for (const s of CHANGED_TS_SCANNER_BASENAMES) check(`(V) BOTH triggers set -> dist-text scanner ${s} still runs`, withBoth.includes(`node packages/daemon/test/${s}`));
+    for (const s of CHANGED_SCRIPT_SCANNER_BASENAMES) check(`(V) BOTH triggers set -> scripts-text scanner ${s} still runs`, withBoth.includes(`node packages/daemon/test/${s}`));
   }
 
   // ── (E) SCOPE BOUNDARY — an ADDED .ts file (status A) -> FULL gate ─────────────────────────────────
@@ -415,6 +455,14 @@ try {
     check("(P) captured command DOES still run pnpm build", capturedGate.includes("pnpm build"));
     check("(P) a distinguishing warning is present", typeof confirm.warning === "string" && /reduced/.test(confirm.warning));
     check("(P) the reduced-gate warning names the file(s) count", typeof confirm.warning === "string" && /1 file\(s\) proven transpile\/parse-identical/.test(confirm.warning));
+    // Card f862f9c5 — RED-PROOF (real integration leg, call site 1: the pre-wait classification in
+    // sessions/service.ts): a REAL changed scripts/**/*.mjs file (proven transpile-identical, this
+    // scenario's own shape) must fold every CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS member into the reduced
+    // command actually spawned — pre-fix, EmitCompareGateResult carried no changedScriptFiles field at all,
+    // so buildReducedGateCommand had nothing to fold this list in on.
+    for (const s of CHANGED_SCRIPT_SCANNER_BASENAMES) check(`(P) card f862f9c5: captured command runs scripts-text scanner ${s} (a scripts/** file changed)`, capturedGate.includes(`node packages/daemon/test/${s}`));
+    check("(P) card f862f9c5: the warning names the scripts-text scanners actually ran",
+      typeof confirm.warning === "string" && new RegExp(`also ran the ${CHANGED_SCRIPT_SCANNER_BASENAMES.length} scripts-text-scanner test\\(s\\)`).test(confirm.warning));
   }
 
   // ── (Q) card 82662e98 — an ADDED packages/daemon/scripts/**/*.mjs file (status A, not M) -> FULL gate ──
@@ -650,18 +698,20 @@ try {
     check("(S) direct call: notApplicable:false — a real, decided verdict about the worktree's own content, never a git-mechanism failure", direct.notApplicable === false);
   }
 
-  // ════════ (U) card fab07aba Code Review — MEMBER-EXISTENCE CHECK for all three reduced-gate lists ════════
+  // ════════ (U) card fab07aba Code Review — MEMBER-EXISTENCE CHECK for all FOUR reduced-gate lists ════════
   // Nothing previously asserted these files actually EXIST. A later rename/delete of any member passes its
-  // OWN full gate (the full suite never runs any of these three lists as a group — STATIC_GUARD_REPO_PATHS
+  // OWN full gate (the full suite never runs any of these four lists as a group — STATIC_GUARD_REPO_PATHS
   // members run individually as part of the corpus-wide guard sweep, but nothing runs `node <path>` against
   // every list member the way `buildReducedGateCommand` does), then every LATER reduced merge gate
   // fleet-wide fails on `node <missing-path>` — misattributed to whoever's branch happened to trigger the
-  // reduced path next, not to the rename/delete that actually broke it.
+  // reduced path next, not to the rename/delete that actually broke it. Card f862f9c5 widened this from
+  // three lists to four, adding CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS — the identical fleet-wide-failure
+  // risk applies to it too, and nothing else asserted its members exist on disk either.
   {
-    const allListedPaths = [...STATIC_GUARD_REPO_PATHS, ...ASSET_READING_TEST_REPO_PATHS, ...CHANGED_TS_TEXT_SCANNER_REPO_PATHS];
-    check("(U) sanity: the three lists together name a non-trivial number of files (control isn't vacuous over an empty union)", allListedPaths.length > 30);
+    const allListedPaths = [...STATIC_GUARD_REPO_PATHS, ...ASSET_READING_TEST_REPO_PATHS, ...CHANGED_TS_TEXT_SCANNER_REPO_PATHS, ...CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS];
+    check("(U) sanity: the four lists together name a non-trivial number of files (control isn't vacuous over an empty union)", allListedPaths.length > 30);
     const missingReal = allListedPaths.filter((p) => !fs.existsSync(path.join(REPO_ROOT, p)));
-    check(`(U) every STATIC_GUARD_REPO_PATHS/ASSET_READING_TEST_REPO_PATHS/CHANGED_TS_TEXT_SCANNER_REPO_PATHS member exists on disk (missing: ${JSON.stringify(missingReal)})`, missingReal.length === 0);
+    check(`(U) every STATIC_GUARD_REPO_PATHS/ASSET_READING_TEST_REPO_PATHS/CHANGED_TS_TEXT_SCANNER_REPO_PATHS/CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS member exists on disk (missing: ${JSON.stringify(missingReal)})`, missingReal.length === 0);
 
     // NEGATIVE CONTROL: prove this check can actually FAIL — a synthetic path that does NOT exist must be
     // reported missing. Without this, "missingReal.length === 0" above is indistinguishable from a broken/
