@@ -11385,54 +11385,9 @@ export class SessionService {
     this.gateTimeoutStreak.set(branch, entry);
   }
 
-  /**
-   * Card 39196378 — the "queued gate validates fire-time, not run-time" trap (a confirmed live incident
-   * on a peer daemon): `run_gate`'s `validatedHead` is stamped at the moment a run STARTS (`startStamp`,
-   * captured before this run is even admitted past the gate semaphore — a cap-1 queue routinely runs
-   * 30+ minutes, easily long enough for the SAME worker to keep committing in the meantime). A caller who
-   * reads a GREEN result and assumes it covers whatever is on the branch NOW — without checking whether
-   * `validatedHead` is still the branch HEAD — can act on a false signal.
-   *
-   * VERIFIED MECHANISM (do not restate this claim from the card alone — it was checked against this
-   * exact code, since an earlier draft of this doc mis-stated it): the actual build/test child process
-   * does NOT start at fire time. `runWorkerGate` computes `startStamp` and only THEN calls {@link
-   * GateSemaphore.runExclusive}, which `await`s `acquire()` — the queue — before ever invoking its `fn`
-   * (gate-semaphore.ts `runExclusive`: `await this.acquire(...); ...; return await fn(...)`). Once
-   * admitted, `fn` calls `runGateSequential` → `runGateStep`, which `spawn(command, { cwd, shell: true,
-   * ... })`s directly against the worktree path (gate-runner.ts, no checkout/stash/snapshot anywhere in
-   * that file) — i.e. against whatever is PHYSICALLY on disk at that later moment. So a commit that
-   * lands during the QUEUE WAIT (before admission) is fully present in what the gate actually builds and
-   * tests; only the fire-time LABEL fails to say so. A commit landing WHILE the gate is already spawned
-   * and running is a genuinely different, riskier case — the running process may read a torn mix of old
-   * and new files.
-   *
-   * This is why the check below takes THREE stamps, not two: `startStamp` (fire, before the queue),
-   * `admitStamp` (the moment `fn` actually runs, i.e. right before the child process is spawned — see the
-   * `runExclusive` call site below), and `settleStamp` (right after the run settles). Comparing
-   * start→admit vs admit→settle is what separates "the label is stale but the tested tree matches current
-   * HEAD" from "the worktree moved WHILE the gate was literally executing." A cruder start-vs-settle-only
-   * comparison (an earlier version of this fix) could not tell those apart and would warn identically for
-   * both — which is exactly the "cries wolf on the benign case" failure mode the card warned against.
-   *
-   * Deliberately NOT a fix to snapshot semantics — this reports on reality, it does not change what gets
-   * tested (see the card: re-snapshotting at admission would silently change what a queued gate validates
-   * and invalidate the `attachedToInFlight`/`staleAgainstWorktree` contract elsewhere in this file). The
-   * extra `admitStamp` read is READ-ONLY diagnostics, exactly like `startStamp`/`settleStamp` — it never
-   * feeds back into what `runGateSequential` executes against.
-   *
-   * Three outcomes, worded differently so a genuine warning doesn't get trained out by a benign one:
-   *  - CURRENT: `startStamp` === `settleStamp` (transitively === `admitStamp`) — nothing moved. No warning.
-   *  - RELABELED (benign): the worktree moved between `startStamp` and `admitStamp` (during the QUEUE
-   *    WAIT) but NOT between `admitStamp` and `settleStamp` — the gate's own execution window saw a
-   *    single stable tree, and that tree is what's still on the branch now. `validatedHead` merely
-   *    understates what got covered; the content was tested.
-   *  - RACY (concerning): the worktree moved between `admitStamp` and `settleStamp` — something changed
-   *    WHILE the gate command was actually running. This run's coverage of the current tree is genuinely
-   *    unverified, not just mislabeled.
-   *  - UNKNOWN (fail toward "not current"): any stamp's `head` is unreadable (a git error/timeout) —
-   *    mirrors {@link gateStampsDiffer}'s own fail-safe direction: an unreadable comparison never gets to
-   *    assert "unchanged".
-   */
+  /** @decision 39196378 — never collapse RELABELED (queue-wait move, tree still tested) and RACY
+   *  (moved mid-run, unverified) into one warning; a start-vs-settle-only check cannot tell them
+   *  apart and cries wolf on the benign case. */
   private describeGateHeadCurrency(
     startStamp: WorktreeGateStamp, admitStamp: WorktreeGateStamp, settleStamp: WorktreeGateStamp,
   ): { headCurrent: boolean; headWarning?: string } {
