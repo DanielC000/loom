@@ -16,10 +16,14 @@ candidate set re-attaches to the already-running (or just-settled) op instead of
 second worktree cut, no second `opId` minted, no second gate run. Two things are DELIBERATELY excluded from
 the key: `baseMainSha` (main can legitimately advance between a call and its retry — folding it in would
 make a genuine retry mint a fresh op, defeating the point) and the caller's raw, unsorted
-`workerSessionIds` array (an identical logical set reordered across a retry must still dedupe-hit). See
+`workerSessionIds` array (an identical logical set reordered across a retry must still dedupe-hit). The
+key needs no I/O to compute — it excludes any git-derived identity — and the failure it prevents is the
+batch-path analogue of `confirmWorkerMergeTracked`'s own key doc's "surface 2" on the solo path. See
 [[3a2dac9c-recycle-never-aliases-key-walk-the-ancestor-chain]] for why the roots are LINEAGE roots and not
 raw session ids — a card `3a2dac9c` refinement of this same key, needed because a mid-batch recycle became
 an ordinary event once card `81d795de` widened the finalize window.
+
+The key is computed by a standalone function, `buildBatchDedupeKey` — extracted (card `1c51de69`, out of Code Review `f96c209a` on card `3a2dac9c`) so it's unit-testable without driving the whole batch method, rather than left inline in `mergeBatchTracked` itself.
 
 RESIDUAL (intentionally left open, not closed by more machinery — scope narrowed by the lineage-rooting
 fix above): if the resolved `chosen` set itself changes between attempt 1 and attempt 2 — a candidate
@@ -44,3 +48,5 @@ This dedupe/attach primitive is orthogonal to the batch path's own finalize logi
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts`, `mergeBatchTracked`'s own JSDoc header, as of this tranche's HEAD.
+
+Also cited in `packages/daemon/src/sessions/service.ts`, `buildBatchDedupeKey`'s own JSDoc header (~line 17500), as of this worktree's HEAD before this extraction (tranche 64); wrapped source lines joined into a flowing paragraph, comment markers stripped, no wording changed.

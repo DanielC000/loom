@@ -17132,15 +17132,11 @@ export class SessionService {
       }
     }
 
-    // C. Reclaim merged `loom/*` branch refs (card 09f268a5). Pass B (above) intentionally never deletes
-    // a branch, and its own loop only ever revisits a session whose worktree DIR still exists (`if
-    // (!fs.existsSync(worktreePath)) continue`) — once a worktree is gone, by Pass B or any other means
-    // (including from a PRIOR boot, before this pass existed), nothing ever revisits its branch again. A
-    // branch that's fully merged just orphans forever. This pass closes that gap directly and repo-wide,
-    // independent of any session row, so it also naturally reclaims whatever Pass B just freed up above
-    // (its worktree removal makes the branch no longer "checked out," and if merged, this pass deletes it
-    // in the SAME boot) — one shared mechanism for both the existing backlog and all future leftovers,
-    // not a second sweeper.
+    // C. Reclaim merged `loom/*` branch refs.
+    //
+    // @decision 09f268a5 — Pass C reclaims merged branches repo-wide, independent of session
+    // rows, sharing one mechanism with Pass B's worktree removal rather than running a second
+    // sweeper — a merged branch would otherwise orphan forever once Pass B never revisits it.
     //
     // Anchored on the repo's actual MAINLINE (`resolveMainlineBranch`), NEVER `HEAD` — the human-only
     // `git_checkout` writer can leave the PRIMARY repo checked out on an arbitrary branch, and a
@@ -17148,18 +17144,17 @@ export class SessionService {
     // CLOSED (skips the repo) when mainline can't be resolved, same as any other uncertainty in this pass.
     //
     // `listCheckedOutBranches` (git's own `git worktree list` truth, independent of the DB) is the final
-    // safety gate: it protects the primary checkout, every live worker, and every one of the unmerged
-    // leftover worktrees this card's investigation found — none of those are `--merged` anyway, but a
-    // branch that's ALSO still checked out (e.g. the primary repo itself, or a just-cut worker with zero
-    // commits yet) is skipped even if it were. No `fs.rm`/directory removal is involved anywhere in this
-    // pass — branch-ref deletion is a small metadata op, structurally outside the bd9fc808 threadpool-leak
-    // hazard class, so it needs none of removeWorktree's killable-process handling.
-    // Card f96b9d7c (round 2): a manager sampling the log a couple minutes into boot — before Pass C
-    // (which runs AFTER Passes A/B walk every session) has even started — saw no reclaim/no-origin/skip
-    // line and concluded the sweep silently did nothing. That's a FOURTH silent-failure shape none of the
-    // counters above cover: "hasn't run yet" was indistinguishable from "ran and found nothing" and from
-    // "ran and failed". This start-of-pass line closes that gap — it fires the moment Pass C begins, so
-    // its absence now unambiguously means "still waiting on Passes A/B", not "the sweep is broken".
+    // safety gate: it protects the primary checkout, every live worker, and every unmerged leftover
+    // worktree — none of those are `--merged` anyway, but a branch that's ALSO still checked out (e.g. the
+    // primary repo itself, or a just-cut worker with zero commits yet) is skipped even if it were. No
+    // `fs.rm`/directory removal is involved anywhere in this pass — branch-ref deletion is a small
+    // metadata op, structurally outside the bd9fc808 threadpool-leak hazard class, so it needs none of
+    // removeWorktree's killable-process handling.
+    //
+    // @decision f96b9d7c — a start-of-pass log line fires the moment Pass C begins, closing a
+    // silent-failure shape where "hasn't run yet" looked identical to "ran and found nothing" or
+    // "ran and failed"; its absence now means still waiting on Passes A/B, not that Pass C broke.
+    //
     const sweptRepoPaths = new Set<string>();
     for (const project of this.db.listProjects()) {
       for (const repoPath of [project.repoPath, ...project.repos.map((r) => r.path)]) {
@@ -17374,18 +17369,9 @@ export class SessionService {
    * the bad state looks identical to the healthy one. This surfaces the candidates that make it look
    * different.
    *
-   * THE DISCRIMINATOR IS THE BOUND TASK'S `mergedSha`, NOT branch content or branch existence — measured
-   * against this project's own real history, not assumed. A branch-NAME-keyed check (grep main for THIS
-   * branch's `Loom-Worker-Branch:` trailer, the mechanism behind {@link findLandedSquashCommit}) still
-   * false-positives when a SIBLING branch shipped the same task's content under a different name
-   * (confirmed on this box: `loom/334766209ca5` and `loom/519072235f5d`'s content actually landed as
-   * `loom/049954da61c5` → squash commit `b4fa85a4`, task `0050a17e`). A content/path-set-hash equivalence
-   * check across ALL landed commits (not just same-named) ALSO false-positives when the task was
-   * resolved by a genuinely different superseding fix — not a re-dispatch of the same diff (confirmed:
-   * `loom/fe8f48e20cde`'s task `4af5aefa` landed via `loom/f5994214094c` → `31eace03`, a different diff
-   * entirely). `Task.mergedSha` doesn't care which branch or diff shipped, only whether the TASK is
-   * resolved — it resolves BOTH false-positive modes in one DB read, no git shellout for the common
-   * (tasked) case.
+   * @decision ba41b402 — the discriminator for whether a stopped worker's branch is genuinely
+   * dangling is the bound task's `mergedSha`, not branch name or content-hash equivalence — both
+   * alternatives have MEASURED false-positive modes on this project's own history.
    *
    * A TASKLESS worker has no task-level signal at all. Rather than always surfacing it — which would
    * permanently flag every zero-commit, no-task rig (e.g. this project's own Code Reviewer, spawned
@@ -17407,10 +17393,10 @@ export class SessionService {
    * points at whichever manager session issued the stop, which may be a recycled predecessor — the exact
    * incident this card documents (a manager recovering a branch its own earlier session had stopped).
    *
-   * Excludes anything whose worktree dir no longer exists on disk — current truth, not a stale snapshot
-   * (mirrors {@link getRetainedWorktrees}'s own "gone since boot → exclude" convention). Nothing here
-   * changes any GC policy or runs a destructive op — purely observational, same posture as
-   * `getRetainedWorktrees`.
+   * Excludes anything whose worktree dir no longer exists on disk — current truth, not a stale
+   * snapshot (mirrors {@link getRetainedWorktrees}'s own "gone since boot → exclude" convention).
+   * Nothing here changes any GC policy or runs a destructive op — purely observational, same
+   * posture as `getRetainedWorktrees`.
    *
    * COST (mgr review, card ba41b402): this runs on EVERY `worker_list`/`worker_status({})` call — the
    * manager's most-polled tool — so cost matters here in a way it doesn't for a one-off read.
@@ -17525,25 +17511,19 @@ export function filterRetainedWorktreesByProject(
 }
 
 /**
- * The DEDUPE/ATTACH key for `mergeBatchTracked` (card f944d4e4; lineage-rooted by card `3a2dac9c` DoD-3)
- * — extracted to a standalone function (card `1c51de69`, out of Code Review `f96c209a` on `3a2dac9c`) so
- * it's unit-testable without driving the whole batch method. Sorted, comma-joined LINEAGE-ROOT ids of
- * the RESOLVED `chosen` set — the batch that will actually be gated together, not the raw request —
- * scoped under the owning manager's OWN lineage root too. Deliberately excludes `baseMainSha` (a
- * legitimate retry can land after main advances) and any git-derived identity (no I/O needed to compute
- * this key). Sorted so a client that reorders the same logical set across a retry still dedupe-hits.
+ * @decision f944d4e4 — this dedupe/attach key was extracted to its own unit-testable function
+ * (card `1c51de69`) rather than left inline in `mergeBatchTracked`, so its stability across a
+ * recycle is provable without driving the whole batch method.
  *
- * LINEAGE-ROOTED, NOT RAW session ids: this key used to embed the raw `managerSessionId`/
- * `workerSessionId`s verbatim, which made it SENSITIVE to a mid-batch `worker_recycle`/manager recycle —
- * card 81d795de deliberately widened this batch's finalize window to comfortably outlive one manager
- * turn, so a recycle of the manager OR of any candidate landing between the initial call and a
- * client-timeout retry is an ORDINARY event here, not a corner case. A raw-id key change on retry means
- * a SECOND, genuinely concurrent batch op mints for the same resolved worktrees — precisely the failure
- * this dedupe exists to prevent (the batch analogue of the solo path's surface 2 — see
- * `confirmWorkerMergeTracked`'s own `key` doc). `lineageRootId` never changes across a recycle — a
- * predecessor and every one of its successors share the SAME root — so this key is stable across exactly
- * the recycle window that used to fracture it, with zero behavior change for the common (never-recycled)
- * case, where a session's root is itself.
+ * Sorted, comma-joined LINEAGE-ROOT ids of the RESOLVED `chosen` set — the batch that will
+ * actually be gated together, not the raw request — scoped under the owning manager's OWN
+ * lineage root too. Deliberately excludes `baseMainSha` (a legitimate retry can land after main
+ * advances) and any git-derived identity (no I/O needed to compute this key). Sorted so a client
+ * that reorders the same logical set across a retry still dedupe-hits.
+ *
+ * @decision 3a2dac9c — this key used to embed raw session ids, which a mid-batch manager or
+ * candidate recycle could fracture into two dedupe identities for the same worktree; it is now
+ * built from each id's LINEAGE ROOT instead, stable across exactly that recycle window.
  */
 export function buildBatchDedupeKey(
   db: Db,
