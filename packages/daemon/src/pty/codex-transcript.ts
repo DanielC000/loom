@@ -111,12 +111,9 @@ function scanForConversationId(root: string, conversationId: string): string | n
  * has. Every lookup is a scan; bounded to `depth:3` (YYYY/MM/DD) and cached by conversation id so a
  * repeat lookup (e.g. a live session's own liveness re-check) doesn't re-walk the tree.
  *
- * Card b8124a1f: falls back to {@link codexRolloutArchiveRoot} when not found live — an archived
- * rollout (`codex-rollout-archive.ts`) is a byte-identical relocation, never a transform, so this
- * fallback keeps every caller (worker_transcript, exit-time `snapshotTranscript`, `sessions/scratch-
- * gc.ts`'s resumability check, `sessions/liveness.ts`'s watcher re-check) working unchanged for an
- * archived session — see that file's own header doc for why archiving never needs to prove a rollout
- * is safe against a live-or-resumable session before moving it.
+ * @decision b8124a1f — an archived rollout is a byte-identical relocation, never a transform: the
+ * {@link codexRolloutArchiveRoot} fallback keeps every caller working unchanged whether a session's
+ * rollout file is live or archived. Never special-case an archived session here.
  */
 export function resolveTranscriptFile(_cwd: string, conversationId: string): string | null {
   const cachedHit = resolvedPathCache.get(conversationId);
@@ -217,28 +214,21 @@ function readSessionMeta(file: string): { sessionId: string; cwd: string } | nul
 }
 
 /**
- * DoD-1 (card 2ec60d9c): codex has no SessionStart-hook equivalent to REPORT its own conversation id the
- * way claude's engine does — `CodexLive.engineSessionId` (`pty/host.ts`) would stay permanently null
- * without this. Codex writes its rollout file's FIRST line (`session_meta`, carrying `session_id`+`cwd`)
- * essentially at conversation start — well before any TUI output a human/Loom would ever observe — so this
- * DISCOVERS the id instead of being told it: scan every rollout file created at/after `sinceMs` (a cheap
- * `stat`-only filter BEFORE ever reading a candidate's content) and return the `session_id` of the one
- * whose OWN `session_meta.payload.cwd` matches `cwd` — the newest such match, if more than one candidate
- * somehow qualifies (e.g. two sessions spawned into the same cwd within the same window). Unlike
- * {@link resolveTranscriptFile} (which matches an ALREADY-KNOWN id against a filename substring), this has
- * no id to match against yet — cwd + recency is the only correlator available at spawn time. Returns null
- * (never throws) when nothing matches, including a genuinely-not-yet-written file — the caller
- * (`pty/host.ts`'s `captureCodexEngineSessionId`) is responsible for any retry.
+ * Discovers a fresh spawn's own codex conversation id: no id is known yet, so cwd + recency is the only
+ * available correlator (unlike {@link resolveTranscriptFile}, which matches an ALREADY-KNOWN id against a
+ * filename substring). Scans every rollout file created at/after `sinceMs` (a cheap `stat`-only filter
+ * before ever reading a candidate's content) and returns the `session_id` of the newest one whose OWN
+ * `session_meta.payload.cwd` matches `cwd`; returns null (never throws) when nothing matches, including a
+ * genuinely-not-yet-written file — the caller (`pty/host.ts`'s `captureCodexEngineSessionId`) is
+ * responsible for any retry.
  *
- * `excludeSessionIds` (card `cbae4520`): a candidate whose OWN `session_id` is in this set is skipped
- * OUTRIGHT — never becomes `best`, regardless of how fresh its mtime is or how small the skew. This closes
- * the SEQUENTIAL-reuse shape of the recycle race {@link MTIME_SKEW_TOLERANCE_MS}'s own doc only BOUNDS:
- * `pty/host.ts` passes a snapshot of every rollout file already on disk for this cwd, taken BEFORE the new
- * (non-resume) codex process was even spawned — see {@link snapshotExistingConversationIdsForSpawn}'s own
- * doc for why that snapshot can never contain the successor's own eventual file, AND for the narrower,
- * still-open concurrent-same-cwd shape it does not close. Omitted (undefined) ⇒ byte-identical to before
- * this card — every existing caller (a resume spawn's own re-discovery of its OWN pre-existing file
- * legitimately NEEDS to match a pre-existing candidate, so it must never pass this).
+ * @decision 2ec60d9c — a discovery SCAN, not a hook report: codex has no SessionStart-hook equivalent to
+ * report its own conversation id, so `CodexLive.engineSessionId` (`pty/host.ts`) would stay permanently
+ * null without this — codex writes `session_meta` essentially at conversation start, well before any TUI.
+ *
+ * @decision cbae4520 — `excludeSessionIds` skips a candidate OUTRIGHT regardless of mtime/skew, closing
+ * the SEQUENTIAL recycle-race shape by construction (identity, not timing). Never pass it for a caller
+ * that must still match a pre-existing file, e.g. a resume spawn re-discovering its own.
  */
 export function findConversationIdForSpawn(cwd: string, sinceMs: number, excludeSessionIds?: ReadonlySet<string>): string | null {
   const resolvedCwd = path.resolve(cwd);
