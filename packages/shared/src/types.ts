@@ -908,6 +908,10 @@ export type OrchestrationEventKind =
   // would make this discoverable only by timestamp proximity to a bare `recycle_begin`.
   // @decision 08320d02 — never file this under the failed (never-live, archived) successor's own id.
   | "recycle_failed"
+  // @decision e07b1b1a — a manager/platform `recycle_failed` successor never reverses the fleet
+  // reparented onto it at spawn time on its own; only these three kinds attest to the actual outcome
+  // (recovered / still unresolved / resolved late after an unresolved alert already fired).
+  | "recycle_fleet_recovered" | "recycle_fleet_unresolved" | "recycle_fleet_resolved"
   | "merge_request" | "merge_done"
   | "merge_rejected"
   // A queued merge-gate confirm was CANCELLED before it was ever admitted (`gate_cancel`, card 8d585277,
@@ -1479,7 +1483,8 @@ export type OrchestrationEventKind =
  */
 const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> = {
   spawn_worker: true, message_worker: true, worker_report: true, stop_worker: true,
-  redirect_worker: true, recycle_begin: true, recycle_complete: true, recycle_failed: true, merge_request: true,
+  redirect_worker: true, recycle_begin: true, recycle_complete: true, recycle_failed: true,
+  recycle_fleet_recovered: true, recycle_fleet_unresolved: true, recycle_fleet_resolved: true, merge_request: true,
   merge_done: true, merge_rejected: true, merge_cancelled: true, build_gate: true,
   kill_switch: true, schedule_fired: true, build_gate_retry_attempt: true, build_gate_retry: true,
   build_gate_single_file_retry: true, schedule_fire_failed: true, schedule_fire_deferred: true,

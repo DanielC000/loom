@@ -4965,6 +4965,19 @@ export class Db {
       .run(state, new Date().toISOString(), id);
     this.notifySessionChanged(id);
   }
+  /**
+   * @decision e07b1b1a — restore a recycle predecessor's row to "live" once `settleRecycleHandoff`
+   * (sessions/service.ts) confirms its real pty never actually died (`recyclePlatformLead`'s atomic
+   * handoff flips it to "exited" synchronously, before ever touching the real process). A DELIBERATELY
+   * separate, purpose-named wrapper over `setProcessState` rather than a bare `setProcessState(id, "live")`
+   * call at that call site: this is a state CORRECTION after confirmed liveness, never a flip-before-spawn
+   * — `live-flip-reconcile-guard.mjs` polices exactly that OTHER pattern (a literal `setProcessState(id,
+   * "live")` in sessions/service.ts must precede a reconciled `pty.spawn`), which does not apply here (no
+   * spawn is involved at all).
+   */
+  restoreLiveAfterConfirmedAlive(id: string): void {
+    this.setProcessState(id, "live");
+  }
   setResumability(id: string, r: Resumability): void {
     this.db.prepare("UPDATE sessions SET resumability = ? WHERE id = ?").run(r, id);
     this.notifySessionChanged(id);

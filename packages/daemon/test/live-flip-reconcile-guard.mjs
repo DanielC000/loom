@@ -98,6 +98,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 //     function/try block is not specially handled — none exist in this corpus today (verified: every
 //     real flip is a direct statement in its function body or an outer try block). Real interprocedural
 //     analysis (a flip inside a helper THIS method calls) is out of scope, as it is for the sibling guard.
+//   - `@decision e07b1b1a` — `Db.restoreLiveAfterConfirmedAlive(id)` (db.ts) is a DELIBERATE, purpose-named
+//     wrapper over `setProcessState(id, "live")` for a genuinely different invariant (restoring a row
+//     after CONFIRMED liveness, never a flip-before-spawn) — its call sites in service.ts are invisible to
+//     `isLiveFlipCall` by construction (it matches the literal method name `setProcessState`, not this
+//     wrapper), which is correct, not a blind spot: this file's own falsification block below asserts NO
+//     call to it is ever followed by a `pty.spawn` in the same block, so a future misuse of the wrapper AS
+//     a flip-before-spawn site is still caught.
 //
 // Run: node packages/daemon/test/live-flip-reconcile-guard.mjs (no build needed — pure source-text/AST scan)
 import ts from "typescript";
@@ -136,6 +143,32 @@ function isPtySpawnCall(node) {
   if (!ts.isPropertyAccessExpression(node.expression) || node.expression.name.text !== "spawn") return false;
   const obj = node.expression.expression;
   return ts.isPropertyAccessExpression(obj) && obj.name.text === "pty";
+}
+
+/** @decision e07b1b1a — is `node` a call `<expr>.restoreLiveAfterConfirmedAlive(...)`? This wrapper
+ *  (db.ts) is DELIBERATELY invisible to `isLiveFlipCall` (see the header's own "WHAT THIS CANNOT SEE"
+ *  note) — a genuinely different invariant (restore after confirmed liveness, never a flip-before-spawn).
+ *  `checkNeverPrecedesSpawn` below is the guard that keeps that exemption honest: it must never itself be
+ *  used as a flip-before-spawn site. */
+function isRestoreLiveConfirmedAliveCall(node) {
+  return ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "restoreLiveAfterConfirmedAlive";
+}
+
+/** @decision e07b1b1a — for a `restoreLiveAfterConfirmedAlive(...)` call site, confirm no `pty.spawn(...)`
+ *  appears ANYWHERE later in the same enclosing block — unlike `checkFlip`'s stricter "immediately
+ *  followed by a reconciling try" rule (this call has no spawn/reconcile relationship to police at all;
+ *  it would only be a problem if one were ever added). Returns a `{line, snippet}` hit, or null if clean. */
+function checkNeverPrecedesSpawn(sf, node) {
+  const loc = enclosingBlockStatement(node);
+  if (!loc) return null;
+  const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+  const snippet = node.getText(sf).slice(0, 100);
+  const stmts = loc.block.statements;
+  const startIdx = stmts.indexOf(loc.statement) + 1;
+  for (let i = startIdx; i < stmts.length; i++) {
+    if (containsMatching(stmts[i], isPtySpawnCall)) return { line, snippet };
+  }
+  return null;
 }
 
 /** Walk up from `node` to the nearest ancestor that is itself a direct member of an enclosing Block's
@@ -385,6 +418,35 @@ function scanSnippet(text) {
     "[documented gap] does NOT see a 'live' flip spelled via a variable (`setProcessState(id, liveStr)`) — accepted gap, not observed in this real corpus",
     scanSnippet(`class S { f() { const liveStr = "live"; this.db.setProcessState(id, liveStr); return session; } }`).length === 0
   );
+
+  // --- @decision e07b1b1a — restoreLiveAfterConfirmedAlive must never itself become a flip-before-spawn
+  // site. Proven both ways: the BAD synthetic case (a pty.spawn added later in the same block) IS flagged,
+  // and the REAL shape this call is actually used in (nothing after it but ordinary reparent/event calls,
+  // no spawn anywhere) is left clean — so this check discriminates, it doesn't just always pass. ---
+  check(
+    "[falsification] restoreLiveAfterConfirmedAlive: FLAGS a pty.spawn appearing later in the same block (the exact misuse this check exists to catch)",
+    scanRestoreLiveHits(`class S { f() { this.db.restoreLiveAfterConfirmedAlive(oldId); this.pty.spawn(x); } }`).length > 0
+  );
+  check(
+    "[falsification] restoreLiveAfterConfirmedAlive: CLEARS the real shape (ordinary reparent/event calls after it, no spawn anywhere in the block)",
+    scanRestoreLiveHits(`class S { f() { this.db.restoreLiveAfterConfirmedAlive(oldId); this.db.reparentWakes(freshId, oldId); this.db.appendEvent(x); } }`).length === 0
+  );
+}
+
+/** Scan a snippet for `restoreLiveAfterConfirmedAlive(...)` calls and check each is never followed by a
+ *  `pty.spawn(...)` in the same block — see `checkNeverPrecedesSpawn`'s own doc. */
+function scanRestoreLiveHits(text) {
+  const sf = ts.createSourceFile("synthetic.ts", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const hits = [];
+  const visit = (node) => {
+    if (isRestoreLiveConfirmedAliveCall(node)) {
+      const hit = checkNeverPrecedesSpawn(sf, node);
+      if (hit) hits.push(hit);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return hits;
 }
 
 // =====================================================================================================
@@ -431,6 +493,25 @@ check(`every live-flip spawn site in service.ts is followed by a reconciling try
 for (const h of realHits) {
   console.log(`  VIOLATION  service.ts:${h.line}  ${h.reason}`);
   console.log(`             ${h.snippet}`);
+}
+
+// @decision e07b1b1a — the real-file counterpart to the falsification pair above: every REAL
+// restoreLiveAfterConfirmedAlive(...) call site in service.ts must never precede a pty.spawn in its own
+// block either.
+const restoreLiveHits = [];
+{
+  const visit = (node) => {
+    if (isRestoreLiveConfirmedAliveCall(node)) {
+      const hit = checkNeverPrecedesSpawn(sf, node);
+      if (hit) restoreLiveHits.push(hit);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+}
+check(`every real restoreLiveAfterConfirmedAlive(...) call site in service.ts is never followed by a pty.spawn in the same block (found ${restoreLiveHits.length} violation(s))`, restoreLiveHits.length === 0);
+for (const h of restoreLiveHits) {
+  console.log(`  VIOLATION  service.ts:${h.line}  ${h.snippet}`);
 }
 
 console.log(failures === 0

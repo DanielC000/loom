@@ -66,7 +66,13 @@ commitAll(repo, "init", "-c user.email=lr@loom -c user.name=lr");
 
 const now = new Date().toISOString();
 const db = new Db();
-db.insertProject({ id: "pHome", name: "Loom Platform", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: true });
+// @decision e07b1b1a — startupModeCycles:0 so a delivered SessionStart hook below reaches `markReady`
+// SYNCHRONOUSLY instead of behind an async mode-cycle the fake pty can never respond to (mirrors
+// recycle-successor-dies-before-session-start.mjs's own (A2) scenario). Needed because
+// settleRecycleHandoff now waits for `hasReachedReady` before stopping a retired predecessor — without a
+// driven hook, that only ever resolves via the real ~20s READY_FALLBACK_MS fallback, blowing the (2)
+// checks' pre-existing 8s budget below.
+db.insertProject({ id: "pHome", name: "Loom Platform", repoPath: repo, vaultPath: repo, config: { permission: { startupModeCycles: 0 } }, createdAt: now, archivedAt: null, reserved: true });
 db.insertAgent({ id: "agentLead", projectId: "pHome", name: "Platform", startupPrompt: "LEAD WARMUP BRIEF", position: 0, profileId: null });
 db.insertAgent({ id: "agentMgr", projectId: "pHome", name: "Mgr", startupPrompt: "MGR", position: 1, profileId: null });
 
@@ -105,6 +111,9 @@ try {
   const spawnsBefore = host.spawned.length;
 
   const succ = await svc.recyclePlatformLead(pred.id, "HANDOFF: 3 projects stood up; backlog drained; next wire X");
+  // @decision e07b1b1a — drive a real SessionStart hook so settleRecycleHandoff's hasReachedReady(succ.id)
+  // check (which gates stopping `pred` below) resolves promptly instead of waiting the real ~20s fallback.
+  host.deliverHook(succ.id, { hook_event_name: "SessionStart" });
 
   // The CORE invariant — asserted SYNCHRONOUSLY right after the (await-free critical-section) call returns.
   check("(1) EXACTLY ONE live Lead afterward (the successor)", liveLeads("agentLead").length === 1);
@@ -153,6 +162,8 @@ try {
 
   // ============================ (5) CHAIN — recycle the successor again ===============================
   const succ2 = await svc.recyclePlatformLead(succ.id, "SECOND HANDOFF: continue from here");
+  // @decision e07b1b1a — same reasoning as above: lets settleRecycleHandoff stop `succ` promptly below.
+  host.deliverHook(succ2.id, { hook_event_name: "SessionStart" });
   check("(5) chained recycle → gen+2", (succ2.gen ?? 0) === (pred.gen ?? 0) + 2);
   check("(5) chained recycle → STILL exactly one live Lead (the newest successor)", liveLeads("agentLead").length === 1 && liveLeads("agentLead")[0]?.id === succ2.id);
   check("(5) the first successor is now exited + has its own successor", db.getSession(succ.id)?.processState === "exited" && db.hasSuccessor(succ.id) === true);

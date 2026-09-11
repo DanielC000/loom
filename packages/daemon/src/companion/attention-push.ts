@@ -121,6 +121,17 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
     // sends when a Lead IS live (see sessions/service.ts's `liveLead` branch — unchanged by this card).
     case "fleet_resume_failed":
       return "worker-crashed";
+    // Card e07b1b1a: a manager/platform recycle whose successor died before SessionStart — the fleet was
+    // either recovered back onto the (still-live) predecessor or left in an unresolved state; either way
+    // this is the same "unexpected fleet-ownership fault, human should know" shape as fleet_resume_failed.
+    case "recycle_fleet_recovered":
+    case "recycle_fleet_unresolved":
+      return "worker-crashed";
+    // Code Review round 2 (m2): a human who got the "unresolved" push for this same recycle never heard it
+    // was later resolved without this — map it into the SAME class as its siblings above so it reaches
+    // whatever surface already carries them, rather than being silently dropped by the `default: null` below.
+    case "recycle_fleet_resolved":
+      return "worker-crashed";
     case "question_asked":
       return "decision-pending";
     // Card 99d41588: a Request going STALE is still fundamentally "a decision needs the human" — same
@@ -273,6 +284,26 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
     }
     case "session_rate_limited":
       line = `${projectName}: usage limit reached, parked — s:${e.managerSessionId.slice(0, 8)}`;
+      break;
+    // Card e07b1b1a: named explicitly as a MANAGER/PLATFORM recycle failure, never as "worker crashed" —
+    // reusing the worker-crashed CLASS (above) is fine, but this event's own subject is the predecessor
+    // manager/Lead named by managerSessionId, not a worker.
+    case "recycle_fleet_recovered":
+      line = `${projectName}: manager/Lead recycle failed (successor died before SessionStart) — fleet recovered onto the predecessor — ${m8}`;
+      break;
+    case "recycle_fleet_unresolved": {
+      const oldStillLive = detail.oldStillLive === true;
+      const reasonClause = detail.reason === "timeout"
+        ? `successor's fate never confirmed — fleet still parented to it${oldStillLive ? "" : ", predecessor also not live"}`
+        : "successor died before SessionStart, predecessor also not live — fleet may be stranded, unowned";
+      line = `${projectName}: manager/Lead recycle unresolved (${reasonClause}) — ${m8}`;
+      break;
+    }
+    // Code Review round 2 (m2): the resolution counterpart to recycle_fleet_unresolved above — a late
+    // genuine success after an "unresolved" push already fired for the same recycle. Named explicitly, same
+    // discipline as the other two recycle_fleet_* cases (never generic "worker crashed" wording).
+    case "recycle_fleet_resolved":
+      line = `${projectName}: manager/Lead recycle resolved late — the successor took over — ${m8}`;
       break;
     default:
       line = `${projectName}: ${alertClass} — ${m8}`;

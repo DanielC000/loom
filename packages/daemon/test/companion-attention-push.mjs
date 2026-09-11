@@ -635,7 +635,30 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   cleanupEnv(e);
 }
 
+// --- 23. FIX (card e07b1b1a, Code Review round 2 m2): recycle_fleet_resolved (a late-but-genuine recycle
+//     success AFTER an "unresolved" push already fired for the same recycle) must reach the same human
+//     surface as its two siblings — classify() previously fell through to `default: null`, silently
+//     dropping the resolution. classify()/alertLine() sanity for all three recycle_fleet_* kinds. ---
+{
+  check("classify: recycle_fleet_recovered → worker-crashed (same family as fleet_resume_failed)",
+    classify("recycle_fleet_recovered", { deadSuccessorId: "s-1", oldStillLive: true }) === "worker-crashed");
+  check("classify: recycle_fleet_unresolved → worker-crashed",
+    classify("recycle_fleet_unresolved", { deadSuccessorId: "s-1", oldStillLive: true, reason: "timeout" }) === "worker-crashed");
+  // THE FIX: before this card, recycle_fleet_resolved fell through classify()'s default case (null) — a
+  // human who got the "unresolved" push for this recycle never heard it was later resolved.
+  check("classify: recycle_fleet_resolved → worker-crashed (FIX — was null, silently dropped, before this card)",
+    classify("recycle_fleet_resolved", { successorId: "s-2" }) === "worker-crashed");
+
+  const resolvedLine = alertLine(
+    { id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "recycle_fleet_resolved", detail: { successorId: "succ-87654321" } },
+    "worker-crashed", "Proj Z");
+  check("recycle_fleet_resolved alert line: named explicitly as a recycle resolution, not generic 'worker-crashed' text",
+    resolvedLine.includes("recycle resolved late") && resolvedLine.includes("successor took over"));
+  check("recycle_fleet_resolved alert line: names the project + the predecessor's (8-char) id",
+    resolvedLine.includes("Proj Z") && resolvedLine.includes("mgr-1234"));
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — AttentionPushWatcher stays DEFAULT-OFF with no grant, never replays backlog, pushes exactly the granted-project/subscribed-class events once each, survives a restart without re-pushing, respects rate-limit park + no-stacking (watermark held, one deferred event per streak), union-merges alertClasses/digestMinutes across granted projects, bundles a digest under its MIN cadence, renders a platform_escalate alert with a readable title instead of an opaque line, and gives a fleet-resume failure a real human owner (fleet_resume_failed → worker-crashed) even with no live platform Lead."
+  ? "\n✅ ALL PASS — AttentionPushWatcher stays DEFAULT-OFF with no grant, never replays backlog, pushes exactly the granted-project/subscribed-class events once each, survives a restart without re-pushing, respects rate-limit park + no-stacking (watermark held, one deferred event per streak), union-merges alertClasses/digestMinutes across granted projects, bundles a digest under its MIN cadence, renders a platform_escalate alert with a readable title instead of an opaque line, gives a fleet-resume failure a real human owner (fleet_resume_failed → worker-crashed) even with no live platform Lead, and a late-resolved manager/Lead recycle (recycle_fleet_resolved) reaches the same human surface as its unresolved sibling instead of being silently dropped."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

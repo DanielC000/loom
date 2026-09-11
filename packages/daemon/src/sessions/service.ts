@@ -13,7 +13,7 @@ import {
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, MergeReconcileWedgeEntry } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
-import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG } from "../pty/host.js";
+import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG, READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS } from "../pty/host.js";
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
@@ -10215,12 +10215,222 @@ export class SessionService {
     }
   }
 
+  /** @decision e07b1b1a — never lower the DEFAULT below CODEX_BOOT_READY_TIMEOUT_MS or
+   *  READY_FALLBACK_ABSOLUTE_CEILING_MS. Code Review correction: claude's own re-armed mode-cycle fallback
+   *  (pty/host.ts, the SessionStart handler) is bounded at READY_FALLBACK_ABSOLUTE_CEILING_MS from spawn —
+   *  NOT the smaller spawn-armed READY_FALLBACK_MS, which only covers the window before SessionStart ever
+   *  lands. A successor whose SessionStart is merely slow can legitimately take up to that full ceiling to
+   *  reach ready; codex has no forced-ready fallback at all. The `Math.max` below (present since this
+   *  card's first commit, `00ac223f`) is what makes this default correct independent of whether the two
+   *  constants are ever equal — it is named against whichever ceiling is larger, not against one of them by
+   *  assumption. Code Review round 2 nit: this comment previously claimed the default "only stays correct
+   *  because the two constants happen to be equal," which was stale relative to that `Math.max` — corrected
+   *  here to state the actual, stronger guarantee the code already had.
+   *  Env-overridable (mirrors READY_FALLBACK_MS/CODEX_BOOT_READY_TIMEOUT_MS's own convention) so a
+   *  hermetic test can shrink it instead of waiting out the real default. */
+  private static readonly RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS =
+    Number(process.env.LOOM_RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS) || Math.max(READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS) + 10_000;
+  private static readonly RECYCLE_SUCCESSOR_SETTLE_POLL_MS = Number(process.env.LOOM_RECYCLE_SUCCESSOR_SETTLE_POLL_MS) || 250;
+  /** @decision e07b1b1a — Code Review MAJOR fix: RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS bounds the
+   *  UNRESOLVED ALERT, never the observation itself — `settleRecycleHandoff` keeps watching past it
+   *  (see that method's own doc). This is the slower cadence it falls back to once past the bound, since
+   *  by then the successor is presumed to need much longer (a genuine hang, or a codex boot right at its
+   *  own diagnostic ceiling) and a tight poll would just burn cycles for no benefit. */
+  private static readonly RECYCLE_SUCCESSOR_SETTLE_SLOW_POLL_MS = Number(process.env.LOOM_RECYCLE_SUCCESSOR_SETTLE_SLOW_POLL_MS) || 15_000;
+  /** The initial flush-only floor (@decision e07b1b1a — preserves the pre-existing "let recycle_me's own
+   *  MCP response flush first" 3s delay); env-overridable for the same hermetic-test reason as the two
+   *  constants above. */
+  private static readonly RECYCLE_SUCCESSOR_SETTLE_FLUSH_DELAY_MS = Number(process.env.LOOM_RECYCLE_SUCCESSOR_SETTLE_FLUSH_DELAY_MS) || 3000;
+
+  /**
+   * @decision e07b1b1a — settles a manager/platform recycle's deferred predecessor-stop against REAL
+   * successor signals instead of an unconditional fixed delay. Waits the original 3s flush floor, then
+   * polls, CHECKING READY FIRST EVERY ITERATION (ready always wins), for either:
+   *  - `hasReachedReady(freshId)` → stop the predecessor exactly as before — even if this fires long
+   *    after the unresolved alert already fired below, in which case it also records that the recycle
+   *    resolved late (`recycle_fleet_resolved`).
+   *  - `!pty.isAlive(freshId)` → the successor's real PROCESS is confirmed dead, independent of whether
+   *    it ever reached SessionStart. Code Review MAJOR: relying only on `!hasSuccessor(oldId)` (f349f5cb's
+   *    own onExit-driven unlink) missed a successor that captured an `engineSessionId` (SessionStart
+   *    landed) and then died before `markReady` — that unlink early-returns once `engineSessionId` is set,
+   *    so `hasSuccessor(oldId)` stays wrongly true forever in that case. Testing `isAlive` directly here
+   *    catches BOTH shapes uniformly.
+   * Crossing RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS with NEITHER signal yet raises the unresolved alert
+   * EXACTLY ONCE (`recordUnresolvedRecycleOutcome`), then the loop keeps going at a slower cadence — Code
+   * Review MAJOR fix: the bound gates the ALERT, never the observation, so this can never end with the
+   * loop simply giving up while a split-brain (M1 kept, M2 later takes the fleet too) goes undetected.
+   * A successor the crash-recovery watcher resumes AFTER a transient not-alive reading is never wrongly
+   * treated as confirmed-dead, because `isAlive`/`hasReachedReady` are re-read fresh every iteration, and
+   * ready is always checked first (Code Review: "handle both orders" — a late resume-then-ready still
+   * lands in the ready branch, a resume-then-death-again still lands in the not-alive branch next tick).
+   * Fire-and-forget from its two call sites; never throws (each branch is a best-effort DB/pty operation,
+   * mirroring every other post-recycle cleanup in this file). Does NOT survive a daemon restart — see
+   * card 08c81809 (separately scoped, not this card's fix).
+   */
+  private async settleRecycleHandoff(params: { oldId: string; freshId: string; role: "manager" | "platform" }): Promise<void> {
+    const { oldId, freshId, role } = params;
+    // Preserves the original delay's own purpose: let the recycle_me tool call's own MCP response flush
+    // before anything touches the predecessor's pty.
+    await new Promise((r) => setTimeout(r, SessionService.RECYCLE_SUCCESSOR_SETTLE_FLUSH_DELAY_MS));
+    const deadline = Date.now() + SessionService.RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS;
+    let alerted = false;
+    for (;;) {
+      if (this.pty.hasReachedReady(freshId)) {
+        try { this.pty.stop(oldId, "hard"); } catch { /* already gone */ }
+        if (alerted) {
+          this.db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(), managerSessionId: oldId,
+            kind: "recycle_fleet_resolved", detail: { successorId: freshId },
+          });
+        }
+        return;
+      }
+      if (!this.pty.isAlive(freshId)) {
+        this.recoverFleetAfterFailedRecycleSuccessor(oldId, freshId, role);
+        return;
+      }
+      if (!alerted && Date.now() >= deadline) {
+        this.recordUnresolvedRecycleOutcome(oldId, freshId, role, "timeout");
+        alerted = true;
+      }
+      await new Promise((r) => setTimeout(r, alerted ? SessionService.RECYCLE_SUCCESSOR_SETTLE_SLOW_POLL_MS : SessionService.RECYCLE_SUCCESSOR_SETTLE_POLL_MS));
+    }
+  }
+
+  /**
+   * @decision e07b1b1a — makes a confirmed-dead recycle successor ineligible for crash-recovery resume:
+   * unlink its stray `recycled_from` (if not already unlinked — f349f5cb's own onExit-driven
+   * `reconcileNeverStartedRecycleSuccessor` may have gotten there first, for the case it covers), archive
+   * it with a durable, human-readable `lastError`, AND (Code Review round 2, MAJOR) mark it
+   * `setResumability(freshId, "dead")` — unlinking `recycled_from` alone leaves it a plain exited,
+   * engine-id-bearing row that `isCrashRecoveryEligible`/the watchdog tick would otherwise happily resume
+   * later as a SECOND live manager/platform alongside the just-recovered predecessor; `resumability ===
+   * "dead"` is the SAME gate both of those already check for every other unresumable row (a missing engine
+   * transcript, a missing worktree), so this reuses the existing mechanism rather than inventing a new one.
+   * Called ONLY from the branch of `recoverFleetAfterFailedRecycleSuccessor` where the predecessor is
+   * confirmed alive and the fleet is actually being recovered onto it — never when the predecessor is also
+   * dead (see that method's own NEVER RESURRECT branch: touching M2 at all in that case would archive the
+   * only viable fleet owner and overwrite its TRUE orphaned-fleet banner with a false one).
+   * Defensive (a no-op past the getSession check if the row is gone) but NOT gated on "already archived" —
+   * a Lead successor with no live workers attached (unlike a manager successor, which always inherits at
+   * least the reparented worker set) gets archived by the ORDINARY `archiveOnExit` path on its own exit,
+   * with NO lastError of its own, before this ever runs; unconditionally overwriting the lastError
+   * (archiveSession is idempotent either way) is what still gets the clear reason onto that row. This must
+   * handle BOTH orders Code Review named: f349f5cb's unlink already ran before this fires, or never runs at
+   * all (a successor that captured an `engineSessionId` before dying is outside that method's own gate).
+   * This ALSO clears the stale `[loom:orphaned-fleet] … Resume this session` banner `archiveOnExit` stamps
+   * on a MANAGER successor that inherited live workers at recycle time — its own onExit, running before
+   * this settle loop ever observes the death, sees them still attached and refuses to archive (@decision 6cd3ce9e).
+   * That banner becomes actively wrong the moment the fleet moves back to the predecessor, and overwriting
+   * the lastError + archiving here is what corrects it — correct ONLY because this call site is now
+   * reached exclusively on the predecessor-alive branch, where the fleet genuinely did just move.
+   */
+  private unlinkAndArchiveDeadRecycleSuccessor(oldId: string, freshId: string): void {
+    const fresh = this.db.getSession(freshId);
+    if (!fresh) return;
+    if (fresh.recycledFrom === oldId) this.db.setOrchestration(freshId, { recycledFrom: null });
+    this.db.setLastError(freshId,
+      `[loom:recycle-failed] this session never reached ready — its recycle predecessor ${oldId.slice(0, 8)} has recovered (or remains) the fleet owner; this session is not resumable.`);
+    this.db.archiveSession(freshId);
+    this.db.setResumability(freshId, "dead");
+  }
+
+  /**
+   * @decision e07b1b1a — the successor's real PROCESS is confirmed dead (`!pty.isAlive(freshId)`),
+   * independent of whether it ever reached SessionStart. NEVER RESURRECT (checked FIRST, Code Review
+   * round 2 MINOR m1): if the predecessor is no longer really alive either (a human stopped it, or it died
+   * independently), do NOT touch the dead successor's row AT ALL — no unlink, no archive, no lastError
+   * overwrite, no resumability change — and do NOT reparent anything back onto the predecessor or restore
+   * its processState. M2 is the ONLY possible fleet owner in that case, and a later crash-recovery resume
+   * of M2 is exactly what should re-adopt the workers; archiving it here would pull the orphaned fleet off
+   * the live rail and overwrite the TRUE `[loom:orphaned-fleet] … Resume this session` banner
+   * `archiveOnExit` already stamped on it (@decision 6cd3ce9e: its own onExit saw the live workers still
+   * attached and refused to archive) with a false "predecessor recovered the fleet" one. Record + alert
+   * instead (`recycle_fleet_unresolved`, reason "successor-died"). Only once the predecessor is confirmed
+   * alive does this unlink + archive the dead successor (`unlinkAndArchiveDeadRecycleSuccessor`) — a live
+   * predecessor recovering the fleet must never leave a dead successor still resumable, or a later
+   * crash-recovery tick can resurrect it as a SECOND live manager/platform alongside the recovered
+   * predecessor.
+   */
+  private recoverFleetAfterFailedRecycleSuccessor(oldId: string, freshId: string, role: "manager" | "platform"): void {
+    if (!this.pty.isAlive(oldId)) {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: oldId,
+        kind: "recycle_fleet_unresolved", detail: { deadSuccessorId: freshId, oldStillLive: false, reason: "successor-died" },
+      });
+      return;
+    }
+    this.unlinkAndArchiveDeadRecycleSuccessor(oldId, freshId);
+    // recyclePlatformLead's atomic handoff flips this row to `exited` SYNCHRONOUSLY, before ever touching
+    // the real pty (see its own doc) — now that isAlive above confirmed the real process never actually
+    // died, restore the DB row to match reality (mirrors the identical restore-to-live line its own
+    // pre-spawn-throw catch already uses). recycleManager never touches oldId's processState, so there is
+    // nothing to restore for that role.
+    if (role === "platform") this.db.restoreLiveAfterConfirmedAlive(oldId);
+    const reparentedWorkers = role === "manager" ? this.db.reparentLiveWorkers(freshId, oldId) : 0;
+    this.db.reparentWakes(freshId, oldId);
+    this.db.reparentQuestions(freshId, oldId);
+    if (role === "manager") {
+      this.capQueue.reparent(freshId, oldId);
+      void this.maybeDrainCapQueue(oldId);
+    }
+    this.carryPendingToSuccessor(freshId, oldId, this.pty.flushPending(freshId), this.db.listUnresolvedQueuedMessagesForWorker(freshId));
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: oldId,
+      kind: "recycle_fleet_recovered", detail: { deadSuccessorId: freshId, oldStillLive: true, reparentedWorkers },
+    });
+    const fleetNote = role === "manager"
+      ? "your workers/wakes/questions/cap-queue/pending are back on you — re-read worker_list to continue"
+      : "your wakes/questions/pending are back on you";
+    this.enqueueDurableNudge(oldId, role,
+      `[loom:recycle-failed] your successor ${freshId.slice(0, 8)} died before becoming ready — your recycle did not take effect; ${fleetNote}.`);
+  }
+
+  /**
+   * @decision e07b1b1a — neither settle signal fired within the bound: the successor is neither
+   * confirmed ready nor confirmed dead (a hang, or — for codex — a boot genuinely still in progress past
+   * this bound; see RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS's own doc for why that's still a safe bound to
+   * alert on). No reparenting — the successor might still come up — just alert that this recycle's
+   * outcome is unresolved. Code Review MAJOR fix: `settleRecycleHandoff` keeps polling after this fires
+   * (this bounds the NOTICE, never the wait) — a late `hasReachedReady`/`!isAlive` is still caught, just
+   * later, by that same loop, and recorded as resolved-late or recovered respectively. A daemon restart
+   * before either resolves loses this in-memory loop entirely; on the next boot `hasSuccessor(oldId)` is
+   * still true, so a durably-queued redrive of this same nudge is retired as superseded rather than
+   * re-delivered (card 08c81809 owns tracing/fixing that gap — not re-litigated here).
+   */
+  private recordUnresolvedRecycleOutcome(oldId: string, freshId: string, role: "manager" | "platform", reason: "timeout"): void {
+    const oldStillLive = this.pty.isAlive(oldId);
+    // Platform's atomic handoff flipped this row to "exited" synchronously at recycle time (see
+    // recyclePlatformLead's own doc) — restore it now that we've confirmed the real process is still
+    // alive, so the DB stops lying about an elevated Lead's liveness for however long this stays
+    // unresolved (recycleManager never touches oldId's processState, so nothing to restore for that role).
+    if (role === "platform" && oldStillLive) this.db.restoreLiveAfterConfirmedAlive(oldId);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: oldId,
+      kind: "recycle_fleet_unresolved", detail: { deadSuccessorId: freshId, oldStillLive, reason },
+    });
+    if (oldStillLive) {
+      // Code Review: "a human has been alerted" is FALSE on a default install (no companion attention-push
+      // grant, no alertWebhook configured) — say what Loom actually did (recorded the event; classified
+      // for a human ONLY if alerting happens to be configured), never overclaim delivery this call can't
+      // itself guarantee.
+      // Code Review round 2 nit: the deadline this alert fires against is measured from the START of
+      // settleRecycleHandoff's poll loop, which itself starts AFTER the RECYCLE_SUCCESSOR_SETTLE_FLUSH_DELAY_MS
+      // flush floor has already elapsed since spawn — so the true elapsed-since-spawning figure is the SUM
+      // of both constants, not the timeout alone (which understates by that ~3s flush floor).
+      const secondsSinceSpawn = Math.round((SessionService.RECYCLE_SUCCESSOR_SETTLE_TIMEOUT_MS + SessionService.RECYCLE_SUCCESSOR_SETTLE_FLUSH_DELAY_MS) / 1000);
+      this.enqueueDurableNudge(oldId, role,
+        `[loom:recycle-failed] your successor ${freshId.slice(0, 8)} never confirmed reaching SessionStart within ${secondsSinceSpawn}s of spawning — its fate is unknown and your fleet is still parented to it; Loom recorded this and is still watching. A human is alerted only if attention-push or an alertWebhook is configured for this event — check worker_list/its status yourself before assuming it is running normally.`);
+    }
+  }
+
   /**
    * Recycle a MANAGER near its context limit (the `recycle_me` flow). The manager has already run
    * /loom-session-end and written `continuationPrompt`; here Loom boots a FRESH successor manager seeded
    * with the agent warm-up prompt + that continuation (NOT --resume — fresh context, intent carried),
-   * RE-PARENTS the old manager's live workers onto the successor so the fleet survives, then closes
-   * the old manager (deferred, so this call's tool response flushes first). gen+1; recycledFrom = old.
+   * RE-PARENTS the old manager's live workers onto the successor so the fleet survives, then settles the
+   * old manager's teardown against the successor actually proving itself (see settleRecycleHandoff's own
+   * doc — never an unconditional fixed delay). gen+1; recycledFrom = old.
    */
   async recycleManager(oldManagerId: string, continuationPrompt: string): Promise<Session> {
     const old = this.db.getSession(oldManagerId);
@@ -10230,9 +10440,10 @@ export class SessionService {
     // front so the predecessor stays live and the manager can re-issue a real continuation.
     if (!continuationPrompt || !continuationPrompt.trim()) throw new Error("continuationPrompt must not be blank");
     // IDEMPOTENCY / anti-double-recycle: a manager may be recycled at MOST once. recycle_me is self-scoped
-    // (the target is always the caller's own session) and the predecessor's pty isn't hard-stopped until a
-    // deferred 3s timeout below — a SECOND recycle_me call in that window (e.g. a double tool-call in one
-    // turn, a client-side retry) would spawn a SECOND successor for the SAME lineage. Refuse if a successor
+    // (the target is always the caller's own session) and the predecessor's pty isn't hard-stopped until
+    // settleRecycleHandoff settles it (never before its own 3s flush floor, often well after) — a SECOND
+    // recycle_me call in that window (e.g. a double tool-call in one turn, a client-side retry) would spawn
+    // a SECOND successor for the SAME lineage. Refuse if a successor
     // already exists (mirrors recyclePlatformLead's identical guard — recyclePlatformLead's own doc names
     // this exact threat; recycleManager, which it explicitly mirrors, never got the guard, card 386178a8).
     // The whole pre-spawn block runs synchronously, so this check + the retire/spawn below are one atomic
@@ -10362,8 +10573,9 @@ export class SessionService {
     // turns held while it was busy, plus any durable cross-tree platform message) onto the successor — it
     // owns the fleet now, so these are its to handle. Re-pointing the wakes also guarantees nothing fires
     // at the retired manager (which would zombie-resurrect it). FLUSH the queue (not getPending) while the
-    // old pty is still alive (its 3s deferred stop is below) so each entry's source + durable onDeliver
-    // come with it; durable records are re-minted onto the successor — see carryPendingToSuccessor.
+    // old pty is still alive (its teardown is settled below, never before its own 3s flush floor) so each
+    // entry's source + durable onDeliver come with it; durable records are re-minted onto the successor
+    // — see carryPendingToSuccessor.
     this.db.reparentWakes(oldManagerId, fresh.id);
     // Card 8701bdbb: move the predecessor's decision-inbox questions onto the successor too — otherwise
     // question_pull's exact-session_id scoping strands an 'answered' (or still-'pending') question the
@@ -10416,9 +10628,12 @@ export class SessionService {
       detail: { injected: codescapeStatus.injected, reason: codescapeStatus.reason, stamped: codescapeStatus.stamped },
     });
 
-    // Close the predecessor AFTER a short delay so the recycle_me tool response (it's the old manager's
-    // own MCP call) flushes before its pty is killed.
-    setTimeout(() => { try { this.pty.stop(oldManagerId, "hard"); } catch { /* already gone */ } }, 3000);
+    // Close the predecessor once the successor SETTLES (@decision e07b1b1a) — either it reaches
+    // SessionStart (the ordinary case, same flush-first delay as before) or it dies before ever getting
+    // there, in which case the predecessor's fleet is recovered instead of being stranded.
+    void this.settleRecycleHandoff({ oldId: oldManagerId, freshId: fresh.id, role: "manager" }).catch((e) => {
+      console.error(`[recycle] settle failed for manager ${oldManagerId.slice(0, 8)} -> ${fresh.id.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
+    });
 
     return { ...fresh, processState: "live" };
   }
@@ -10561,9 +10776,10 @@ export class SessionService {
     // Carry the predecessor's scheduled wakes + in-flight inbound queue (durable cross-tree platform
     // messages + held human turns) onto the successor — it owns the platform now. Re-pointing the wakes
     // also guarantees nothing fires at the retired predecessor (which would zombie-resurrect it). FLUSH
-    // the queue while the old pty is still alive (its 3s deferred stop is below) so each entry's source
-    // + durable onDeliver come with it; durable records are re-minted onto the successor — see
-    // carryPendingToSuccessor. Mirrors recycleManager, minus the worker re-parent (the Lead has none).
+    // the queue while the old pty is still alive (its teardown is settled below, never before its own 3s
+    // flush floor) so each entry's source + durable onDeliver come with it; durable records are re-minted
+    // onto the successor — see carryPendingToSuccessor. Mirrors recycleManager, minus the worker re-parent
+    // (the Lead has none).
     this.db.reparentWakes(oldLeadId, fresh.id);
     // Card bb4ff73e: move the predecessor's decision-inbox questions onto the successor too — otherwise
     // question_pull's exact-session_id scoping strands an 'answered' (or still-'pending') question the
@@ -10580,10 +10796,12 @@ export class SessionService {
       detail: { kind: "platform", recycledFrom: old.id, gen: newGen },
     });
 
-    // Close the predecessor AFTER a short delay so the recycle_me tool response (the old Lead's own MCP
-    // call) flushes before its pty is killed. Its row is already `exited` (above), so this only tears
-    // down the lingering pty; hasSuccessor(old.id) keeps crash-recovery from resurrecting it.
-    setTimeout(() => { try { this.pty.stop(oldLeadId, "hard"); } catch { /* already gone */ } }, 3000);
+    // Close the predecessor once the successor SETTLES (@decision e07b1b1a — same reasoning as
+    // recycleManager's identical call). Its row is already `exited` (above); settleRecycleHandoff's own
+    // recovery branch restores it to `live` if the real process turns out to have never actually died.
+    void this.settleRecycleHandoff({ oldId: oldLeadId, freshId: fresh.id, role: "platform" }).catch((e) => {
+      console.error(`[recycle] settle failed for platform lead ${oldLeadId.slice(0, 8)} -> ${fresh.id.slice(0, 8)}: ${(e as Error)?.message ?? e}`);
+    });
 
     return { ...fresh, processState: "live" };
   }
@@ -11062,8 +11280,10 @@ export class SessionService {
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: sessionId, kind: "end_me_complete", detail: {},
     });
-    // Deferred so THIS tool call's own MCP response flushes before the pty dies (mirrors recycleManager's
-    // close-after-delay at :3765 / recyclePlatformLead's below).
+    // Deferred so THIS tool call's own MCP response flushes before the pty dies — same flush reasoning
+    // recycleManager/recyclePlatformLead's own deferred teardowns use, but unlike those two (which settle
+    // against the successor actually proving itself — see settleRecycleHandoff), there is no successor
+    // here to wait on, so a bare fixed delay is still correct for this self-stop.
     setTimeout(() => { try { this.pty.stop(sessionId, "graceful"); } catch { /* already gone */ } }, 3000);
     return { stopped: true };
   }

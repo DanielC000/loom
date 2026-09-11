@@ -100,7 +100,7 @@ const CODEX_SUBMIT_MAX_RETRIES = Number(process.env.LOOM_CODEX_SUBMIT_MAX_RETRIE
  * MCP-startup episode, bounded enough that a genuinely wedged boot is still reported within a reasonable
  * time — not a value derived from a specific observed worst case. Env-overridable for hermetic tests.
  */
-const CODEX_BOOT_READY_TIMEOUT_MS = Number(process.env.LOOM_CODEX_BOOT_READY_TIMEOUT_MS) || 45_000;
+export const CODEX_BOOT_READY_TIMEOUT_MS = Number(process.env.LOOM_CODEX_BOOT_READY_TIMEOUT_MS) || 45_000;
 /**
  * Gap between writing a turn's text and writing the FIRST Enter (\r) that submits it. A SINGLE
  * `text + "\r"` write does NOT submit a second turn to a running claude v2.1.150 session — the
