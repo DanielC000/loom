@@ -23,6 +23,18 @@ This same mechanism (exact-count Backspace burst sized off `live.lastPrompt.leng
 - Do not invent a second clear path — reuse the exact-count Backspace burst via `writeChunked`, the same mechanism `healIfStuck`'s backstop reuses (card `b64b3726`, Half 2).
 - Do not assume Backspace's overshoot-is-safe behavior holds on a future claude version without re-running the probes — it is version-pinned to 2.1.207.
 
+## CR item ② — the retired `attempt > 1` proxy on `markGiveUpDirty`'s own call sites
+
+`markGiveUpDirty`'s callers used to gate the dirty-mark itself on `attempt > 1` — a cheap proxy for "the paste bracket is closed" (only a RETRIED attempt had sent its own re-assert first), skipping the mark at `attempt === 1` to avoid folding raw backspaces in as literal paste content while the bracket might still be open. Once this card's clear-prefix started ALWAYS force-closing the bracket first (a fresh START+END pair, before backspacing), that residual risk was covered structurally instead — the proxy was retired as redundant (guarded by `pty-giveup-clear-single-attempt.mjs`), not as a correctness fix.
+
+### Do not (2)
+
+- Do not skip the dirty-mark at `attempt === 1` "to be safe" — that reintroduces the original stray-text bug the force-closing clear-prefix already covers.
+
 ## Source
 
 Inline JSDoc in `packages/daemon/src/pty/host.ts` (`sendEnterAndVerify`'s own method doc, the GIVE-UP RECOVERY paragraph and its embedded REAL-CLAUDE FINDINGS probe narrative). Not shared with `packages/daemon/src/sessions/service.ts`. Extracted by tranche 35 (card `905cf0ce`).
+
+## Source (2)
+
+Inline comment in `packages/daemon/src/pty/host.ts` (`awaitGiveUpConfirmSettle`'s `confirmed:false` callback), lines 8461-8468, as of `main` `5fa1465e` (this tranche's starting HEAD). Condensed, not verbatim. Not shared with `sessions/service.ts`. Extracted by tranche 38 (card `639cf9ae`).

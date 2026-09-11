@@ -8447,30 +8447,19 @@ export class PtyHost {
           if (!l2?.alive || l2.enterConfirmed || l2.submitGeneration !== gen) return; // re-check: state may have changed during the settle wait
           // eslint-disable-next-line no-console
           console.error(`[submit] ${sessionId} GIVE-UP RECOVERY after ${attempt} Enter attempts — no confirming hook observed${outputSeen ? " despite output after the final Enter write (the output discriminator's suppression was never confirmed by an actual hook)" : " since the final Enter write"}; turn never confirmed started; recovering busy so the session doesn't wedge`);
-          // Card 3ce3fa39 (superseding card ee082fbb's immediate clear): do NOT attempt the clear HERE.
-          // Give-up reaching this point means no CONFIRMING HOOK ever arrived — i.e. the engine wasn't
-          // reading — which is exactly the condition under which a raw backspace burst is LEAST likely to
-          // be safely interpreted (first-hand confirmed: two specimens' abandoned text survived a
-          // backspace-clear attempted at THIS point fully intact, only to resurface — once doubled — glued
-          // onto a much later, unrelated submit). Mark the amount possibly-stranded instead (ADDITIVE — see
-          // `composerDirtyLen`'s doc: a second unresolved give-up on top of an already-dirty composer must
-          // not lose track of the first) and let the NEXT submit() clear it right before writing fresh
-          // content, when the engine is demonstrably about to read again. Same composerLen===0 human-draft
-          // gate as before (card e1829591).
-          //
-          // No more `attempt > 1` gate: that used to be a cheap proxy for "the paste bracket is closed"
-          // (only a retried attempt had sent its own re-assert first), skipping the clear entirely at
-          // attempt===1 to avoid folding raw backspaces in as literal paste content. submit()'s own
-          // defensive clear-prefix ALWAYS force-closes via a fresh START+END pair immediately before
-          // backspacing, regardless of how this give-up happened — so that residual risk (card ee082fbb CR
-          // item ②, guarded by pty-giveup-clear-single-attempt.mjs) is now covered structurally instead of
-          // by this proxy, and skipping the mark here would just reintroduce the original stray-text bug for
-          // the attempt===1 case.
-          //
-          // ALSO gated on `composerBodyWrittenForGen` (card b9b8f8db): a generation that took the Enter-only
-          // redelivery path never wrote a fresh body, so this give-up has nothing new to mark — marking it
-          // anyway would inflate composerDirtyLen for bytes that were never actually (re)typed this
-          // generation, which is exactly the wasted-byte accounting this card's fix removes.
+          // @decision 3ce3fa39 — do NOT clear the composer HERE: no confirming hook arrived, so a
+          // backspace burst is least safely interpreted at this point (2 specimens resurfaced,
+          // doubled, on a later submit) — mark it additively; the next submit() clears it instead.
+          // Same composerLen===0 human-draft gate as every clear in this file — never destroy a
+          // user's uncommitted draft (card e1829591).
+
+          // @decision ee082fbb — no more `attempt > 1` gate on this mark: submit()'s clear-prefix
+          // now ALWAYS force-closes the paste bracket first (card 3ce3fa39), so the old proxy's
+          // residual risk (CR item ②, guarded by pty-giveup-clear-single-attempt.mjs) is covered.
+
+          // @decision b9b8f8db — ALSO gated on `composerBodyWrittenForGen`: an Enter-only redelivery
+          // never wrote a fresh body, so marking it would inflate composerDirtyLen for bytes never
+          // (re)typed this generation.
           this.markGiveUpDirty(l2, gen);
           this.setBusy(sessionId, false, "give-up-recovery");
           this.requeueGiveUpOrigin(sessionId, gen); // card 441499ee — see the method doc

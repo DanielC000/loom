@@ -21,6 +21,14 @@ A second site, in the `UserPromptSubmit` case of `deliverHook`: the reset (`comp
 
 - Do not reset `composerDirtyLen` at `UserPromptSubmit` without checking `composerDirtyLenClearedByGen === live.submitGeneration` first — an unrelated hook can fire and flip `enterConfirmed` without proving this generation's clear-prefix actually landed.
 
+## Why not clear at the GIVE-UP RECOVERY callback specifically
+
+A third site applies the same deferred-clear rule at `awaitGiveUpConfirmSettle`'s `confirmed:false` callback (the branch `sendEnterAndVerify` falls through to when no confirming hook settles the give-up). Reaching that callback means no confirming hook ever arrived — i.e. the engine wasn't reading — which is exactly the condition under which a raw backspace burst is LEAST likely to be safely interpreted. First-hand confirmed: two specimens' abandoned text survived a backspace-clear attempted at this exact point fully intact, only to resurface — once doubled — glued onto a much later, unrelated submit. This is a sharper instance of the general deferred-clear rationale above (give-up time itself can't corroborate a clear would land), not a separate decision.
+
+## Do not (3)
+
+- Do not attempt the clear at this GIVE-UP RECOVERY callback either — the same "give-up time can't corroborate a clear will land" rule applies, and it is measurably worse here: no confirming hook arriving at all is the least-corroborated case of the three sites this record covers.
+
 ## Source
 
 Inline comment in `packages/daemon/src/pty/host.ts` (`submit()`, the composer clear-prefix / give-up-redelivery block), lines 9808-9825, as of commit `dc53c7111807e103baf99544d3890df80e9a1c92` (this tranche's starting HEAD). Extracted by card `dfde8c66` (tranche 9). This record covers only the deferred-clear-timing design at this specific call site — 3ce3fa39's own root-cause question (which of two candidate mechanisms makes a clear-prefix's success unverifiable) remains OPEN; see `docs/spikes/frame-splice-3ce3fa39-*.md` and `2960c3bf`'s record. 3ce3fa39 is cited at many other sites in this file (`git grep -n "3ce3fa39" -- packages/daemon/src/pty/host.ts`); this record does not attempt to cover all of them.
@@ -28,3 +36,7 @@ Inline comment in `packages/daemon/src/pty/host.ts` (`submit()`, the composer cl
 ## Source (2)
 
 Inline comment in `packages/daemon/src/pty/host.ts` (the `UserPromptSubmit` case in `deliverHook`), as of `main` `0cac46b89a9d2ad236117c355fb93d43f4f0f03f` (this tranche's starting HEAD). Extracted by card `7f448888` (tranche 19 on `pty/host.ts`).
+
+## Source (3)
+
+Inline comment in `packages/daemon/src/pty/host.ts` (`awaitGiveUpConfirmSettle`'s `confirmed:false` callback, the GIVE-UP RECOVERY branch), lines 8450-8459, as of `main` `5fa1465eccf00042d4946cf05ed5e2b775013859` (this tranche's starting HEAD). Condensed, not verbatim. Not shared with `packages/daemon/src/sessions/service.ts`. Extracted by tranche 38 (card `639cf9ae`).
