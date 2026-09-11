@@ -17,6 +17,10 @@
 //      apply to those two fields going into the hook unscoped. A real subprocess spawn against a fixture
 //      file carrying several pre-existing overlong/mid-sentence anchors proves an Edit touching ONE
 //      reports only that one, and an Edit touching none reports neither field's section at all.
+//   2c. `embeddedAnchors`/`splitAnchorParagraphs` HOOK scoping (card a873621e): the SAME
+//      `scopeHookAnchorSites` mechanism applied to the two newest checks — an Edit touching one
+//      pre-existing site of either shape surfaces only that site, and an Edit touching neither omits
+//      both fields' sections entirely.
 //   3. writeSessionSettings' wiring: card d92ec82b reworked this gate — the hook now wires on the EXPLICIT
 //      `docLint` param AND requires `repoPath`, independently of `vaultPath` (vault-lint's own, separate
 //      gate) — so a project with docLint on but no Obsidian vault still gets it. Imported from
@@ -372,6 +376,73 @@ try {
         !/mid-sentence @decision anchor/.test(noneMsg));
     } finally {
       try { fs.rmSync(scopeDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  }
+
+  // --- embeddedAnchors / splitAnchorParagraphs HOOK scoping (card a873621e) --------------------------------
+  // Same flood-prevention mechanism as the overlongAnchorParagraphs/midSentenceAnchors block above, for the
+  // two NEW checks this card adds — a file already carrying several pre-existing embedded/split sites must
+  // not flood the advisory on every edit; only the site(s) the triggering edit actually wrote.
+  {
+    const scopeDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "loom-embedded-split-scope-hook-"));
+    try {
+      fs.mkdirSync(path.join(scopeDir2, "packages", "daemon", "src"), { recursive: true });
+      // embeddedAnchors shape: the anchor opens its own line, but the PRECEDING line doesn't end a
+      // sentence — real specimen shape (host.ts ac90ca8e/3388be4d), parameterized by id.
+      const embeddedPair = (prevId, id) => [
+        `/** @decision ${prevId} — role-scoped transcript-root deny (extended by 44fa586a; moved to this chokepoint by`,
+        ` * @decision ${id}): closes the native Read/Glob/Grep bypass of the MCP-mediated read gates; keyed off`,
+        ` * the PINNED opts.role, UNIONed into .deny (never replaces); run is deliberately excluded.`,
+        ` */`,
+      ];
+      // splitAnchorParagraphs shape: a blank comment line forces the paragraph short before the sentence
+      // ends — real specimen shape (round-1's reverted host.ts fix), parameterized by id.
+      const splitPair = (id, tailId) => [
+        `/** @decision ${id} — role-scoped transcript-root deny (extended by 44fa586a; moved to this chokepoint`,
+        ` * by`,
+        ` *`,
+        ` * @decision ${tailId}): closes the native Read/Glob/Grep bypass of the MCP-mediated read gates; keyed off`,
+        ` */`,
+      ];
+      const preExisting = [
+        ...embeddedPair("aaaaaaa0", "aaaaaaa1"),
+        "",
+        ...splitPair("aaaaaaa2", "aaaaaaa3"),
+        "",
+      ];
+      const newlyWrittenEmbedded = embeddedPair("deadc0d0", "deadc0d1"); // the site this edit "just wrote"
+      const scopePath2 = path.join(scopeDir2, "packages", "daemon", "src", "scope2.ts");
+      fs.writeFileSync(scopePath2, [...preExisting, ...newlyWrittenEmbedded, ""].join("\n"));
+
+      const runHookProc2 = (filePath, tool, toolInput) => {
+        const payload = { hook_event_name: "PostToolUse", tool_name: tool, tool_input: { file_path: filePath, ...toolInput }, cwd: scopeDir2 };
+        const r = spawnSync(process.execPath, [COMMENT_ANCHOR_LINT_SCRIPT, "--hook", scopeDir2], { input: JSON.stringify(payload), encoding: "utf8" });
+        check(`runHook(${tool} ${path.basename(filePath)}, embedded/split scoping): exits 0`, r.status === 0);
+        const out = (r.stdout || "").trim();
+        return out ? JSON.parse(out) : null;
+      };
+
+      // The Edit's new_string is EXACTLY the newly-written embedded-anchor pair — only THAT site must be
+      // surfaced, none of the pre-existing embedded/split sites.
+      const scopedHit2 = runHookProc2(scopePath2, "Edit", { old_string: "placeholder", new_string: newlyWrittenEmbedded.join("\n") });
+      const scopedMsg2 = scopedHit2?.hookSpecificOutput?.additionalContext ?? "";
+      check("hook (Edit touching ONE embedded anchor): fires", scopedHit2 !== null);
+      check("hook (Edit touching ONE embedded anchor): the embedded-anchor count is exactly 1, not 2",
+        /^1 embedded @decision anchor\(s\)/m.test(scopedMsg2));
+      check("hook (Edit touching ONE embedded anchor): names ONLY the newly-written id, not the pre-existing one",
+        /deadc0d1 embedded/.test(scopedMsg2) && !/aaaaaaa1 embedded/.test(scopedMsg2));
+      check("hook (Edit touching ONE embedded anchor): no split-anchor-paragraph section at all (that edit never touched one)",
+        !/split @decision anchor paragraph/.test(scopedMsg2));
+
+      // An Edit touching NONE of the embedded/split sites — neither field's section appears at all.
+      const noneHit2 = runHookProc2(scopePath2, "Edit", { old_string: "placeholder", new_string: "// a completely unrelated one-line comment, touches nothing" });
+      const noneMsg2 = noneHit2?.hookSpecificOutput?.additionalContext ?? "";
+      check("hook (Edit touching none of the embedded/split sites): no embedded-anchor section at all",
+        !/embedded @decision anchor/.test(noneMsg2));
+      check("hook (Edit touching none of the embedded/split sites): no split-anchor-paragraph section at all",
+        !/split @decision anchor paragraph/.test(noneMsg2));
+    } finally {
+      try { fs.rmSync(scopeDir2, { recursive: true, force: true }); } catch { /* ignore */ }
     }
   }
 

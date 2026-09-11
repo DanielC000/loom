@@ -67,6 +67,24 @@
 //      its own line — embedded mid-sentence inside other prose — is flagged; an anchor that opens its own
 //      line (the target state) is not, even immediately adjacent to a mid-sentence one in the same block.
 //      REPORT-ONLY — see the card for the measured baseline.
+//  16. embeddedAnchors (card a873621e): an anchor whose own line opens correctly (so #15 above stays
+//      silent) but whose immediately preceding comment line is non-blank and doesn't end a sentence, or
+//      whose immediately following comment line continues one with `)`/`]`/`;`/`,` — the "opens its own
+//      line but is still swallowed by a larger sentence" shape neither #14 (paragraph LENGTH) nor #15
+//      (line POSITION) can see. A leading-lowercase continuation on the next line is deliberately NOT
+//      flagged (measured: it's the ordinary, legal shape of any compliant multi-line anchor and produced
+//      ~1250 false positives on this repo's own corpus before being dropped). `embeddedAnchors.
+//      stackedUnterminated` carves out a legitimate stacked-anchors run (the preceding line is another
+//      anchor's own paragraph tail, AND that anchor's own line reads as an independent statement, not a
+//      continuation) into a separate, uncounted informational sub-list — a missing period between two
+//      real, distinct decisions is a punctuation nit, not a swallowed anchor. REPORT-ONLY.
+//  17. splitAnchorParagraphs (card a873621e): an anchor's own paragraph (the SAME window #14 computes)
+//      ends because the next comment line is genuinely blank, and the paragraph's own last content line
+//      doesn't end a sentence — a blank line used to bound the REPORTED paragraph short of where the real
+//      sentence finishes, defeating #14's length check by construction. Excludes the block's own bare
+//      closing delimiter (never an inserted blank) and a bare `@decision <id>`-only citation (a legitimate
+//      style) UNLESS the content right after the blank itself continues the sentence, in which case the
+//      "citation" is really where a real sentence got cut. REPORT-ONLY.
 // Run: `node test/comment-anchor-lint.mjs` from packages/daemon (no build, no LOOM_HOME needed).
 import fs from "node:fs";
 import os from "node:os";
@@ -82,6 +100,8 @@ import {
   findPointerAnchors,
   findOverlongAnchorParagraphs,
   findMidSentenceAnchors,
+  findEmbeddedAnchors,
+  findSplitAnchorParagraphs,
   findOversizedRecords,
   findCollidingRecords,
   listRecordIds,
@@ -1027,6 +1047,385 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
     const fileReportSigiled = computeFileReport(dir, srcPath, fs.readFileSync(srcPath, "utf8"));
     check("computeFileReport: the sigil'd form of the same id is not flagged",
       fileReportSigiled?.bareCommitAnchors?.length === 0);
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+// --- findEmbeddedAnchors (card a873621e; round 2 lead review) -----------------------------------------
+
+{
+  // RED/GREEN, Fixture A: REAL, current-main content, packages/daemon/src/pty/host.ts:3194-3197 verbatim
+  // (untouched by any merged reflow lane — invisible to it, which is why it survived). `3388be4d` opens
+  // its own physical line (so #15 midSentenceAnchors stays silent) but is the tail of `ac90ca8e`'s own
+  // unfinished sentence ("...chokepoint by [3388be4d]: closes...") — a citation, not an independent
+  // statement, so it must land in `items`, NEVER in `stacked` despite `ac90ca8e` being a real, immediately
+  // preceding anchor (the specimen this exact carve-out exists to get right).
+  const lines = [
+    "/** @decision ac90ca8e — role-scoped transcript-root deny (extended by 44fa586a; moved to this chokepoint by",
+    " * @decision 3388be4d): closes the native Read/Glob/Grep bypass of the MCP-mediated read gates; keyed off",
+    " * the PINNED opts.role, UNIONed into .deny (never replaces); run is deliberately excluded.",
+    " */",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  check("findFileAnchors: Fixture A carries both real anchors (sanity)", anchors.length === 2);
+  check("findMidSentenceAnchors: Fixture A's 3388be4d opens its own line, so #15 stays silent (proves the OLD check is blind)",
+    findMidSentenceAnchors(lines, anchors).length === 0);
+  check("findOverlongAnchorParagraphs: Fixture A's paragraphs are short, so #14 stays silent too (proves the OLD check is blind)",
+    findOverlongAnchorParagraphs(lines, blocks, anchors).length === 0);
+  const { items, stacked } = findEmbeddedAnchors(lines, blocks, anchors);
+  check("findEmbeddedAnchors: Fixture A's 3388be4d IS flagged, via prevViolation, NOT stacked",
+    items.length === 1 && items[0].id === "3388be4d" && items[0].prevViolation === true && items[0].nextViolation === false);
+  check("findEmbeddedAnchors: ac90ca8e itself is not flagged (its own neighbors are fine)",
+    !items.some((i) => i.id === "ac90ca8e"));
+  check("findEmbeddedAnchors: nothing here lands in the stacked carve-out (3388be4d's own text is a continuation, not an independent statement)",
+    stacked.length === 0);
+}
+
+{
+  // Negative controls: a clean single-line anchor, and a legitimate 2-line anchor whose continuation is
+  // lowercase — the ordinary, LEGAL shape of any compliant multi-line anchor. Neither may ever be flagged.
+  check("findEmbeddedAnchors: a clean single-line anchor is not flagged",
+    findEmbeddedAnchors(
+      ["// @decision cccccccc — states its own rule directly, ending in a proper full stop."],
+      extractCommentBlocks(["// @decision cccccccc — states its own rule directly, ending in a proper full stop."]),
+      findFileAnchors(["// @decision cccccccc — states its own rule directly, ending in a proper full stop."]),
+    ).items.length === 0);
+
+  const lowercaseContinuation = [
+    "// @decision dddddddd — a short guard whose own sentence continues onto a second line and",
+    "// finishes here with a proper stop.",
+  ];
+  const blocks2 = extractCommentBlocks(lowercaseContinuation);
+  const anchors2 = findFileAnchors(lowercaseContinuation);
+  check("findEmbeddedAnchors: a legitimate 2-line anchor with a lowercase continuation is NOT flagged "
+    + "(measured: including lowercase in the next-line check produced ~1250 false positives of exactly this shape)",
+    findEmbeddedAnchors(lowercaseContinuation, blocks2, anchors2).items.length === 0);
+}
+
+{
+  // Positive control, next-line clause: the anchor's own line ends properly and its PREVIOUS line ends
+  // properly too, but the line right after it continues with `)` — isolates nextViolation from
+  // prevViolation (both independently reachable, not just an OR that happens to always trip on prev).
+  const lines = [
+    "// Ends properly here.",
+    "// @decision aaaaaaaa",
+    "// ) continues weirdly, for test purposes only",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  const { items } = findEmbeddedAnchors(lines, blocks, anchors);
+  check("findEmbeddedAnchors: nextViolation alone (next line starts with ')') is flagged, prevViolation is false",
+    items.length === 1 && items[0].id === "aaaaaaaa" && items[0].prevViolation === false && items[0].nextViolation === true);
+}
+
+{
+  // stackedUnterminated carve-out: a LEGITIMATE stacked-anchors run (the program already accepts this
+  // shape — anchorParagraphEnd treats the next @decision as a boundary) — each anchor states its OWN
+  // independent text right after its id; only a missing trailing period separates them. Must be counted
+  // in `stacked`, NEVER in `items` (a punctuation nit between two real decisions, not a swallowed anchor).
+  const lines = [
+    "// @decision eeeeeeee — must itself await the merge-danger-window guard before exiting; a bare",
+    "// process.exit() emits no signal, so the guard never fires for this path",
+    "// @decision ffffffff — runs the shared vault-flush/codescape-stop cleanup deliberately after the",
+    "// 300ms response-flush delay: running it before would delay the response.",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  const { items, stacked } = findEmbeddedAnchors(lines, blocks, anchors);
+  check("findEmbeddedAnchors: a legitimate stacked-anchors run is NOT counted as an embedded-anchor violation",
+    !items.some((i) => i.id === "ffffffff"));
+  check("findEmbeddedAnchors: ...but IS surfaced, informationally, in stackedUnterminated",
+    stacked.length === 1 && stacked[0].id === "ffffffff");
+  check("findEmbeddedAnchors: the FIRST anchor of the stacked pair is never itself flagged either way",
+    !items.some((i) => i.id === "eeeeeeee") && !stacked.some((s) => s.id === "eeeeeeee"));
+}
+
+{
+  // ROUND-2 FALSE POSITIVE 1 (real specimen: orchestration/gate-runner.ts:961): the previous line ends
+  // with a quote after a full stop ("...already said \"yes, proceed.\""). Round 1's narrow `.`/`!`/`?`/`:`
+  // punctuation set missed this; the doctrine set (`.`/`!`/`?`/`:`/`)`/`]`/backtick/`"`) clears it.
+  const lines = [
+    " * retry is eligible; a caller calls this only after {@link classifyGateFailure}/",
+    " * {@link identifyRetriableTestFiles} have already said \"yes, proceed.\"",
+    " * @decision 7ad12202 — never report a gate passed:true after a rescued single-file retry without first checking",
+    " * this — steps after the original failure may never have run at all.",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  check("findEmbeddedAnchors: a previous line ending in a quote-after-period is NOT flagged (doctrine punctuation set)",
+    findEmbeddedAnchors(lines, blocks, anchors).items.length === 0);
+}
+
+{
+  // ROUND-2 FALSE POSITIVE 2 (real specimen shape: db.ts:2024): a MID-LINE anchor — `midSentenceAnchors`'
+  // own population. Round 1 never checked the anchor's OWN line before inspecting its neighbors, so a
+  // mid-line anchor's unrelated neighbors could still trip prevViolation/nextViolation.
+  const midLineOnly = [
+    "// some prose ending without any terminal punctuation at all",
+    "// mid-line text before the token (@decision aaaaaaaa) and more mid-line text after it",
+  ];
+  check("findEmbeddedAnchors: a mid-line anchor is never counted, isolated case",
+    findEmbeddedAnchors(midLineOnly, extractCommentBlocks(midLineOnly), findFileAnchors(midLineOnly)).items.length === 0);
+
+  // The REAL db.ts:2023-2025 specimen, unmodified — proves the mid-line skip and a genuine embed COEXIST
+  // in one block: 361520a0/a228dfb5 (both mid-line) are excluded; 4c5bf820 (opens its own line) is caught.
+  const real = [
+    "/** The `verdict` column's own value. `\"cancelled\"` is never a rejection (@decision 361520a0); `\"skipped\"`",
+    " *  is a merge that landed via a proven-inert diff, never collapsed into `\"pass\"` (@decision a228dfb5); see",
+    " *  @decision 4c5bf820 for the full derivation + honest-null-payload discipline. */",
+  ];
+  const realBlocks = extractCommentBlocks(real);
+  const realAnchors = findFileAnchors(real);
+  check("findFileAnchors: the real db.ts specimen carries all three anchors (sanity)", realAnchors.length === 3);
+  const realResult = findEmbeddedAnchors(real, realBlocks, realAnchors);
+  check("findEmbeddedAnchors (real db.ts:2023-2025): the two mid-line anchors (361520a0, a228dfb5) are never counted",
+    !realResult.items.some((i) => i.id === "361520a0") && !realResult.items.some((i) => i.id === "a228dfb5")
+    && !realResult.stacked.some((s) => s.id === "361520a0") && !realResult.stacked.some((s) => s.id === "a228dfb5"));
+  check("findEmbeddedAnchors (real db.ts:2023-2025): the genuine embed (4c5bf820, opens its own line) IS still caught",
+    realResult.items.length === 1 && realResult.items[0].id === "4c5bf820");
+}
+
+{
+  // ROUND-2 FALSE POSITIVE 3 (real specimens: mcp/orchestration.ts:5305-5306, pty/host.ts:6624-6625): a
+  // structural section-divider line is a real paragraph BOUNDARY, not "doesn't end a sentence" — whether
+  // it's pure box-drawing/dashes, or a banner line that also carries a label.
+  const bannerDivider = [
+    "    // --- Manager cross-project channel ------------------------------------------------------",
+    "    // @decision 2349d90c — never give an agent an MCP path to create/modify a `project_links` row; links",
+    "    // are owner-declared, human-only — a manager can only USE a link the owner already made.",
+  ];
+  check("findEmbeddedAnchors: a dash-banner divider line (with a label) is a boundary, not a violation",
+    findEmbeddedAnchors(bannerDivider, extractCommentBlocks(bannerDivider), findFileAnchors(bannerDivider)).items.length === 0);
+
+  const boxDivider = [
+    "        // └────────────────────────────────────────────────────────────────────────────────────────┘",
+    "        // @decision sha:c433346f — a Stop/StopFailure is itself proof the outstanding submit()'s Enter",
+    "        // registered (even if UserPromptSubmit's own hook was lost); neutralize any pending verify-retry",
+    "        // before the M2 window below.",
+  ];
+  check("findEmbeddedAnchors: a pure box-drawing divider line (no letters/digits) is a boundary, not a violation",
+    findEmbeddedAnchors(boxDivider, extractCommentBlocks(boxDivider), findFileAnchors(boxDivider)).items.length === 0);
+
+  // Negative control (false-negative direction): companion/store.ts:177's real preceding line uses TWO
+  // em-dashes ("—", a different codepoint from the ASCII/box-drawing rule characters) and is genuine
+  // prose, not a divider — it must still be flagged. Without this, isDecorativeSeparatorLine's own
+  // detection could be too eager and silently swallow a real embed sharing an em-dash.
+  const emDashProse = [
+    "    // Only LIVE, non-archived sessions may compete for — or be silenced by — this guard (see the",
+    "    // @decision 134368ac note above for the reverse gap — a winner's exit — and how it's re-armed).",
+  ];
+  const emDashResult = findEmbeddedAnchors(emDashProse, extractCommentBlocks(emDashProse), findFileAnchors(emDashProse));
+  check("findEmbeddedAnchors (real companion/store.ts:176-177): em-dash prose is NOT a divider, still flagged",
+    emDashResult.items.length === 1 && emDashResult.items[0].id === "134368ac");
+}
+
+{
+  // computeReport (CLI scan) and computeFileReport (the live PostToolUse hook path), end to end — proves
+  // the top-level `embeddedAnchors`/`embeddedAnchorsStacked` shapes, and that Fixture A's specimen
+  // survives the full pipeline (walkSourceFiles + relPath), not just the pure per-line functions above.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-embedded-anchors-"));
+  try {
+    fs.mkdirSync(path.join(dir, "packages", "daemon", "src"), { recursive: true });
+    const srcPath = path.join(dir, "packages", "daemon", "src", "fixture.ts");
+    fs.writeFileSync(srcPath, [
+      "/** @decision ac90ca8e — role-scoped transcript-root deny (extended by 44fa586a; moved to this chokepoint by",
+      " * @decision 3388be4d): closes the native Read/Glob/Grep bypass of the MCP-mediated read gates; keyed off",
+      " * the PINNED opts.role, UNIONed into .deny (never replaces); run is deliberately excluded.",
+      " */",
+      "",
+      "// @decision eeeeeeee — must itself await the merge-danger-window guard before exiting; a bare",
+      "// process.exit() emits no signal, so the guard never fires for this path",
+      "// @decision ffffffff — runs the shared vault-flush/codescape-stop cleanup deliberately after the",
+      "// 300ms response-flush delay: running it before would delay the response.",
+      "",
+    ].join("\n"));
+    const report = computeReport(dir, { minLines: 15 });
+    check("computeReport: embeddedAnchors is a top-level field, count 1, the citation site only",
+      report.embeddedAnchors?.count === 1 && report.embeddedAnchors.items[0]?.id === "3388be4d"
+      && report.embeddedAnchors.items[0]?.file === "packages/daemon/src/fixture.ts");
+    check("computeReport: embeddedAnchors.stackedUnterminated is a SEPARATE sub-field, count 1, never counted above",
+      report.embeddedAnchors?.stackedUnterminated?.count === 1
+      && report.embeddedAnchors.stackedUnterminated.items[0]?.id === "ffffffff");
+
+    const fileReport = computeFileReport(dir, srcPath, fs.readFileSync(srcPath, "utf8"));
+    check("computeFileReport: the embedded anchor is flagged too (hook path)",
+      fileReport?.embeddedAnchors?.length === 1 && fileReport.embeddedAnchors[0]?.id === "3388be4d");
+    check("computeFileReport: the stacked-unterminated sub-list is surfaced too (hook path)",
+      fileReport?.embeddedAnchorsStacked?.length === 1 && fileReport.embeddedAnchorsStacked[0]?.id === "ffffffff");
+
+    fs.writeFileSync(srcPath, "// @decision aaaaaaaa — a short guard, all on one line, ending properly.\n");
+    const cleanReport = computeReport(dir, { minLines: 15 });
+    check("computeReport: a clean anchor is not flagged, count 0", cleanReport.embeddedAnchors?.count === 0);
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
+// --- findSplitAnchorParagraphs (card a873621e; round 2 lead review) -------------------------------------
+
+{
+  // RED/GREEN, Fixture B: reproduction of card be56de67's ROUND-1 (reverted, never merged) attempted fix
+  // for the SAME real ac90ca8e/3388be4d specimen above — verbatim from
+  // `git show 46979650 -- packages/daemon/src/pty/host.ts` (lines ~296-299 of that diff). A blank comment
+  // line was inserted between "by" (mid-sentence, no terminal punctuation) and the next @decision, to keep
+  // the FIRST anchor's own paragraph short — exactly the shape this check exists to catch. This is also
+  // the specimen that keeps the `afterBlankContinues`'s own `@decision`-line branch alive: the line right
+  // after the blank IS an anchor, not ordinary prose.
+  const lines = [
+    "/** @decision ac90ca8e — role-scoped transcript-root deny (extended by 44fa586a; moved to this chokepoint",
+    " * by",
+    " *",
+    " * @decision 3388be4d): closes the native Read/Glob/Grep bypass of the MCP-mediated read gates; keyed off",
+    " */",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  check("findOverlongAnchorParagraphs: Fixture B's ac90ca8e paragraph is only 2 lines (proves #14 is blind to the blank-line split)",
+    findOverlongAnchorParagraphs(lines, blocks, anchors).every((o) => o.id !== "ac90ca8e"));
+  const { items, unterminated } = findSplitAnchorParagraphs(lines, blocks, anchors);
+  check("findSplitAnchorParagraphs: Fixture B's ac90ca8e IS flagged (counted), at the inserted blank line",
+    items.length === 1 && items[0].id === "ac90ca8e" && items[0].blankLine === 3);
+  check("findSplitAnchorParagraphs: Fixture B's ac90ca8e is NOT also in unterminated (it's a counted violation, not a nit)",
+    !unterminated.some((u) => u.id === "ac90ca8e"));
+}
+
+{
+  // RED/GREEN, Fixture C (card a873621e's own DoD-5): a REAL specimen found on a sibling lane's branch,
+  // `git show 6035db41:packages/shared/src/types.ts` (the `gateRan` doc). Passed that worker's own scan
+  // AND the lead's first scan. A `sha:`-sigil'd anchor; ns must render correctly through this check too.
+  const lines = [
+    "  /** @decision sha:cc086436 — DERIVED, not a raw stamp everywhere;",
+    "   *",
+    "   *  exactness depends on which signal was available when the row was written (exact for `reused:true`",
+    "   *   and any explicitly-stamped row, a `durationMs`-presence heuristic otherwise, which can read `true`",
+    "   *   for a row where nothing actually spawned). */",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  const { items } = findSplitAnchorParagraphs(lines, blocks, anchors);
+  check("findSplitAnchorParagraphs: Fixture C (sha:cc086436) IS flagged, ns rendered correctly",
+    items.length === 1 && items[0].id === "cc086436" && items[0].ns === "sha" && items[0].blankLine === 2);
+}
+
+{
+  // Negative controls: a clean single-line anchor (no blank at all), and the block's own bare closing
+  // delimiter immediately after a short anchor — `isBlankCommentLine` would otherwise misclassify " */"
+  // as an inserted blank paragraph-separator (an earlier draft of this check did exactly that).
+  const oneLiner = ["// @decision cccccccc — states its own rule directly, ending in a proper full stop."];
+  const oneLinerResult = findSplitAnchorParagraphs(oneLiner, extractCommentBlocks(oneLiner), findFileAnchors(oneLiner));
+  check("findSplitAnchorParagraphs: a clean single-line anchor is not flagged (neither items nor unterminated)",
+    oneLinerResult.items.length === 0 && oneLinerResult.unterminated.length === 0);
+
+  const closingDelimiterOnly = [
+    "/** @decision dddddddd — a short guard, deliberately with no trailing period",
+    " */",
+  ];
+  const blocks = extractCommentBlocks(closingDelimiterOnly);
+  const anchors = findFileAnchors(closingDelimiterOnly);
+  const closingResult = findSplitAnchorParagraphs(closingDelimiterOnly, blocks, anchors);
+  check("findSplitAnchorParagraphs: the block's own bare closing delimiter is never mistaken for an inserted blank",
+    closingResult.items.length === 0 && closingResult.unterminated.length === 0);
+}
+
+{
+  // ROUND-2: a paragraph whose own last line ALREADY ends properly (doctrine punctuation) is CLEAN no
+  // matter what follows the blank — continuation only matters for a paragraph that did NOT terminate
+  // properly. Real specimens: git/worktrees.ts:1774 (ends "...breaker)"), :2186 (ends "...branch)`").
+  const endsInCloseParen = [
+    "/** @decision aaaaaaaa — the gate-timeout breaker's own signal, invariant to X (which otherwise makes",
+    " *  Y return a new value every confirm once main advances, permanently defeating the breaker)",
+    " *",
+    " *  — walks first-parent, skipping merges. Fails safe to null. */",
+  ];
+  const r1 = findSplitAnchorParagraphs(endsInCloseParen, extractCommentBlocks(endsInCloseParen), findFileAnchors(endsInCloseParen));
+  check("findSplitAnchorParagraphs: a paragraph ending in ')' is clean, even though the next line continues with '—'",
+    r1.items.length === 0 && r1.unterminated.length === 0);
+
+  const endsInBacktick = [
+    "/** @decision bbbbbbbb — the trailer stamps the LANDED base, never merge-base(HEAD, branch)",
+    " *",
+    " *  — that's the branch's pre-landing fork point, which diverges once main has advanced. */",
+  ];
+  const r2 = findSplitAnchorParagraphs(endsInBacktick, extractCommentBlocks(endsInBacktick), findFileAnchors(endsInBacktick));
+  check("findSplitAnchorParagraphs: a paragraph ending in a backtick is clean, even though the next line continues with '—'",
+    r2.items.length === 0 && r2.unterminated.length === 0);
+}
+
+{
+  // ROUND-2 FALSE POSITIVE 4 (real specimen: orchestration/report-resolution.ts:53): the paragraph's own
+  // last line lacks doctrine terminal punctuation ("...only one of\nthree sites"), but what follows the
+  // blank is a genuinely FRESH paragraph (backtick-led, not a continuation) — a missing-period nit, not a
+  // cut sentence. Must land in `unterminated`, NEVER in the counted `items`.
+  const lines = [
+    "/**",
+    " * @decision cfffeda6 — this enumeration must stay exhaustive; it once silently named only one of",
+    " * three sites",
+    " *",
+    " * `message_worker`/`redirect_worker` are a PROXY for the doc's actual stated condition (\"resumes a",
+    " * turn\"), not the thing itself.",
+    " */",
+  ];
+  const blocks = extractCommentBlocks(lines);
+  const anchors = findFileAnchors(lines);
+  const { items, unterminated } = findSplitAnchorParagraphs(lines, blocks, anchors);
+  check("findSplitAnchorParagraphs (real report-resolution.ts:53): NOT counted in items",
+    !items.some((i) => i.id === "cfffeda6"));
+  check("findSplitAnchorParagraphs (real report-resolution.ts:53): IS surfaced in unterminated",
+    unterminated.length === 1 && unterminated[0].id === "cfffeda6");
+}
+
+{
+  // Continuation via an @decision-line follow-on (the `afterBlankContinues` @decision branch, beyond
+  // Fixture B above): a bare citation whose surrounding prose genuinely continues (lowercase after the
+  // blank) IS flagged as a counted item — verbatim shape from real specimens db.ts:7107 (f88e91f0) and
+  // mcp/memory.ts:515 (41c3f546).
+  const bareCitationContinues = [
+    "/** The manager/Lead pull/consume, scoped to an AGENT LINEAGE rather than one exact session id:",
+    " *",
+    " * @decision bbbbbbbb",
+    " *",
+    " * a FRESH (non-recycle) successor on the SAME agent must still see decisions its predecessor filed. */",
+  ];
+  const blocks2 = extractCommentBlocks(bareCitationContinues);
+  const anchors2 = findFileAnchors(bareCitationContinues);
+  const { items: items2 } = findSplitAnchorParagraphs(bareCitationContinues, blocks2, anchors2);
+  check("findSplitAnchorParagraphs: a bare citation anchor whose surrounding prose actually CONTINUES (lowercase after the blank) IS counted",
+    items2.length === 1 && items2[0].id === "bbbbbbbb");
+}
+
+{
+  // computeReport (CLI scan) and computeFileReport (the live PostToolUse hook path), end to end.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-split-anchor-paragraph-"));
+  try {
+    fs.mkdirSync(path.join(dir, "packages", "daemon", "src"), { recursive: true });
+    const srcPath = path.join(dir, "packages", "daemon", "src", "fixture.ts");
+    fs.writeFileSync(srcPath, [
+      "/** @decision ac90ca8e — role-scoped transcript-root deny (extended by 44fa586a; moved to this chokepoint",
+      " * by",
+      " *",
+      " * @decision 3388be4d): closes the native Read/Glob/Grep bypass of the MCP-mediated read gates; keyed off",
+      " */",
+      "",
+    ].join("\n"));
+    const report = computeReport(dir, { minLines: 15 });
+    check("computeReport: splitAnchorParagraphs is a top-level field, count 1, at the inserted blank line",
+      report.splitAnchorParagraphs?.count === 1 && report.splitAnchorParagraphs.items[0]?.id === "ac90ca8e"
+      && report.splitAnchorParagraphs.items[0]?.blankLine === 3
+      && report.splitAnchorParagraphs.items[0]?.file === "packages/daemon/src/fixture.ts");
+    check("computeReport: splitAnchorParagraphs.unterminated is a SEPARATE sub-field, count 0 here",
+      report.splitAnchorParagraphs?.unterminated?.count === 0);
+
+    const fileReport = computeFileReport(dir, srcPath, fs.readFileSync(srcPath, "utf8"));
+    check("computeFileReport: the split anchor paragraph is flagged too (hook path)",
+      fileReport?.splitAnchorParagraphs?.length === 1 && fileReport.splitAnchorParagraphs[0]?.id === "ac90ca8e");
+    check("computeFileReport: splitAnchorParagraphsUnterminated is present (empty here)",
+      Array.isArray(fileReport?.splitAnchorParagraphsUnterminated) && fileReport.splitAnchorParagraphsUnterminated.length === 0);
+
+    fs.writeFileSync(srcPath, "// @decision aaaaaaaa — a short guard, all on one line, ending properly.\n");
+    const cleanReport = computeReport(dir, { minLines: 15 });
+    check("computeReport: a clean anchor is not flagged, count 0", cleanReport.splitAnchorParagraphs?.count === 0);
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
   }

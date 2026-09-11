@@ -97,6 +97,15 @@ Before reporting, re-read each anchor you wrote or edited against its own source
 anchor is also always its own paragraph — never a bullet body, and never carrying a second
 `@decision` mid-sentence.
 
+**Two more forbidden shapes, both FORBIDDEN even though the anchor's own line opens correctly
+(card `a873621e`):** (1) the anchor is still the tail of a LARGER sentence spanning an adjacent
+line — a parenthetical citation like "...moved to this chokepoint by\n@decision X): closes..." —
+never leave a token that only LOOKS like it opens its own paragraph while the sentence around it
+still runs through it; and (2) an inserted blank comment line ends the anchor's paragraph before
+its own sentence actually finishes — never use a blank line to make a paragraph LOOK short. The
+lint's `embeddedAnchors`/`splitAnchorParagraphs` fields catch both (see the tranche-DoD's own
+paragraph on these two fields, item 5 below).
+
 **Never invent, guess, or mint an id you were not handed.** A block citing no id anywhere — not
 in the block, not elsewhere in the file, not in `git blame`'s introducing commit — has exactly
 two legal outcomes, no third:
@@ -385,6 +394,32 @@ thing it exists to do.
    neither is a zero-tolerance gate on the whole repo. You ARE responsible for your OWN tranche's
    anchors — filter both fields to your touched file(s) and fix any hit among the anchors you wrote
    or edited this tranche before reporting done.
+   **Also check `embeddedAnchors` and `splitAnchorParagraphs` (card `a873621e`) for the anchor(s)
+   you personally write or edit this tranche.** Both catch a shape that opens its own line/paragraph
+   correctly (so `midSentenceAnchors`/`overlongAnchorParagraphs` above stay silent) but is still
+   forbidden: `embeddedAnchors` flags an anchor whose adjacent line reveals it's still the tail of a
+   LARGER sentence (a parenthetical or dangling-word citation, e.g. "...moved to this chokepoint
+   by\n@decision X): closes..."); `splitAnchorParagraphs` flags an anchor whose paragraph ends at an
+   INSERTED blank comment line before its own sentence actually finishes. Both REPORT-ONLY, same
+   posture as `pointerAnchors`/`overlongAnchorParagraphs` above. `embeddedAnchors.stackedUnterminated`
+   is a separate, uncounted informational sub-list for a legitimate stacked-anchors run (two real,
+   adjacent decisions, just missing a period between them) — **the exemption "the previous line is
+   itself an `@decision` line" is NOT by itself enough to wave a hit through: that other anchor's own
+   line must also END A SENTENCE** (state its own text right after its id, not continue into the next
+   anchor's), or it's the SAME embedded-anchor defect this check exists to catch, not a punctuation
+   nit (measured finding, card `a873621e`: host.ts's `ac90ca8e`/`3388be4d` is exactly this — the
+   preceding line IS another anchor's own line, and it is still a real embed). `splitAnchorParagraphs.
+   unterminated` is the mirror-image sub-list: a paragraph whose own last line lacks terminal
+   punctuation but whose follow-on is a genuinely FRESH paragraph (not a continuation) — also a
+   punctuation nit, also uncounted. **"Ends a sentence" (both fields) means `.`/`!`/`?`/`:`/`)`/`]`/
+   backtick/`"` — the exact doctrine set lead review actually scans with, not a narrower guess** —
+   and a structural section-divider line (pure box-drawing/dashes, or a banner line that also carries
+   a label) is always a valid paragraph BOUNDARY, never a "doesn't end a sentence" violation. `@decision
+   <id>` with nothing else on its line is never itself flagged by either check — only whether its
+   NEIGHBORS look embedded/split. You ARE responsible for your OWN tranche's anchors — filter both
+   fields (and `embeddedAnchors`' own line, per `isMidSentenceAnchorLine` — a MID-LINE anchor is
+   `midSentenceAnchors`' population, never `embeddedAnchors`') to your touched file(s) and fix any hit
+   among the anchors you wrote or edited this tranche before reporting done.
 6. **Commit your changes first, then run `pnpm --filter @loom/daemon guards`.** `guards` is not
    `run_gate`. A `git add` short of a commit does not put your work through the diff-scoped core
    scan the merge gate itself re-runs — the guard list lives in `STATIC_GUARD_REPO_PATHS` in

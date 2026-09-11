@@ -24,7 +24,7 @@
 // `posttooluse-hook-honors-additionalcontext-not-systemmessage` and decision-records.mjs's own header for
 // the full method.
 //
-// Twelve checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
+// Fourteen checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
 //   1. unanchoredLongBlocks — a contiguous comment block >= `minLines` (default DEFAULT_MIN_LINES) with
 //      no `@decision <id>` anywhere in it. The "narrative is regrowing in source" signal.
 //   2. orphanAnchors — an `@decision <id>` whose id resolves to no record in ANY of the three stores this
@@ -152,6 +152,53 @@
 //      `overlongAnchorParagraphs` — it needs only the one file's own `anchors` already computed. ⚠️ The
 //      HOOK's own advisory SCOPES this field too, same mechanism as `pointerAnchors`/
 //      `overlongAnchorParagraphs` (a main-tree baseline of 155, same flood risk).
+//  13. embeddedAnchors (card a873621e; round 2 lead review) — an `@decision` SITE whose own line ALSO
+//      opens correctly (checked via `isMidSentenceAnchorLine` — `midSentenceAnchors` above owns every site
+//      that doesn't; round-2 finding: 15 of the original 24 hits on this repo were exactly that population,
+//      because round 1 never checked it) but is still embedded inside a LARGER sentence spanning an
+//      adjacent line: its immediately PRECEDING comment line is non-blank and does not end a sentence (see
+//      `endsSentence`'s DOCTRINE punctuation set below, and `isDecorativeSeparatorLine` for the "a section-
+//      banner/box-drawing divider line is a real boundary" carve-out — round-2 finding: 4 hits were cleared
+//      by the wider punctuation set, 2 by the divider carve-out), or its immediately FOLLOWING comment line
+//      starts with `)`, `]`, `;`, or `,` (closing/continuing punctuation only — round-1 also tried a
+//      leading-lowercase test and an em-dash here and DROPPED both once measured: a lowercase second line
+//      is the ordinary, LEGAL shape of any compliant <= GUARD_MAX_LINES-line multi-line anchor, and
+//      including it flagged ~1250 of ~1309 raw hits — almost all ordinary compliant anchors, not embeds).
+//      Neither `midSentenceAnchors` (line-position only) nor `overlongAnchorParagraphs` (paragraph LENGTH
+//      only) can see this shape: `anchorParagraphEnd` happily counts the embed as part of one short,
+//      compliant-length paragraph. `embeddedAnchors.stackedUnterminated` (same field, a SEPARATE sub-list,
+//      never counted in `embeddedAnchors.count`) is one deliberate carve-out: when the preceding line is
+//      the LAST line of a DIFFERENT anchor's own already-computed paragraph (a legitimate stacked-anchors
+//      run — the shape `anchorParagraphEnd` already treats as a boundary) AND that other anchor's own line
+//      reads as an independent statement (`ownStatementLooksWellFormed`, not a continuation like the real
+//      `ac90ca8e`/`3388be4d` specimen), a missing trailing period there is a punctuation nit between two
+//      real, distinct decisions, not "an anchor swallowed by unrelated prose" — counting it there would
+//      bury the genuine embeds under a much larger, less actionable population. Round-2 measured final:
+//      3 real sites on this repo's own corpus (see docs/extraction-program.md and this card's report for
+//      the exact file:line list). REPORT-ONLY. Runs in BOTH the CLI scan and the per-file hook (scoped like
+//      `pointerAnchors`/`overlongAnchorParagraphs`/`midSentenceAnchors` above) — it needs only the one
+//      file's own `blocks`/`anchors` already computed for those checks.
+//  14. splitAnchorParagraphs (card a873621e; round 2 lead review) — an `@decision` SITE whose own paragraph
+//      (the SAME `anchorParagraphEnd` window `overlongAnchorParagraphs`/`pointerAnchors` share) ends
+//      because the NEXT comment line is genuinely BLANK (never the block's own bare closing delimiter, e.g.
+//      a lone ` */` — `stripCommentMarkers` strips a trailing `*/` and would otherwise misclassify it as
+//      blank), keyed on CONTINUATION rather than the paragraph's own last character (round-1 keyed on "does
+//      the last line end a sentence" and produced 7 false positives that already ended properly in `)`/`]`/
+//      backtick/`"` once the doctrine punctuation set — see `endsSentence` — was applied): flags when the
+//      first content line after the blank CONTINUES the sentence — ordinary prose starting with a lowercase
+//      letter or `)`/`]`/`;`/`,`, OR an `@decision` line whose own text after the id is itself a
+//      continuation (`afterBlankContinues`; this is what keeps the round-1 Fixture B shape, where the line
+//      right after the blank IS another anchor, not ordinary prose). `splitAnchorParagraphs.unterminated`
+//      (same field, a SEPARATE sub-list, never counted in `splitAnchorParagraphs.count`, mirrors
+//      `embeddedAnchors.stackedUnterminated`'s shape) is the round-1 bare-citation exclusion's natural
+//      successor: a paragraph whose own last line lacks doctrine terminal punctuation but whose follow-on
+//      is a genuinely FRESH paragraph (not a continuation) — a missing-period nit, not a cut sentence. A
+//      paragraph that both terminates properly AND has no continuing follow-on is CLEAN, reported nowhere.
+//      Round-2 measured final: 12 real sites (see docs/extraction-program.md and this card's report for
+//      the exact file:line list — the `unterminated` population is comparatively large, since it also
+//      picks up the pervasive bare-citation-only style; re-measure fresh rather than trusting a number
+//      restated here). REPORT-ONLY. Runs in BOTH the CLI scan and the
+//      per-file hook, same scoping convention as `overlongAnchorParagraphs`/`embeddedAnchors` above.
 //
 // A <= GUARD_MAX_LINES-line block that DOES carry an anchor is the convention's TARGET STATE (Class A: a
 // short guard/prohibition, permanently inline) and is counted separately as `guardClassBlocks` — it is
@@ -618,6 +665,190 @@ export function findMidSentenceAnchors(lines, anchors) {
   return anchors.filter((a) => isMidSentenceAnchorLine(lines[a.line - 1] ?? ""));
 }
 
+/** True iff `stripped` (already comment-marker-stripped) ends a sentence — card a873621e's own
+ * `embeddedAnchors`/`splitAnchorParagraphs` primitive. The DOCTRINE set (lead review, card a873621e round
+ * 2): `.`/`!`/`?`/`:`/`)`/`]`/backtick/`"` — the exact set standing kickoff line 14 and every lead-review
+ * scan actually runs; a lint that disagreed with the scan reviewers actually use would be the two-
+ * instrument-asymmetry anti-pattern (a bare word or code-quoted term closing a citation, e.g. "...already
+ * said \"yes, proceed.\"" or "...sends again.)", is a real sentence end, not a dangling clause). See
+ * `isDecorativeSeparatorLine` below for the companion boundary this doesn't cover (a line with no prose at
+ * all). Measured, not assumed: see this card's own checkpoint/round-2 report for the corpus-wide count. */
+function endsSentence(stripped) {
+  return /[.!?:)\]`"]$/.test(stripped);
+}
+
+/** True iff `stripped` carries no letters or digits at all (a pure box-drawing/rule line, e.g.
+ * "└────...────┘"), or is dominated by a long run (6+) of horizontal-rule characters even alongside a
+ * section-banner label (e.g. "--- Manager cross-project channel ------...------") — round-2 lead-review
+ * finding: a structural section divider is a real paragraph BOUNDARY, never a "doesn't end a sentence"
+ * violation, whether or not it also carries a banner label. Deliberately narrow to ASCII/box-drawing rule
+ * characters (`-─━═`), never an em-dash (`—`, a different codepoint) — an em-dash is ordinary prose
+ * punctuation (see `companion/store.ts:177`'s real, still-flagged specimen, whose preceding line uses two
+ * em-dashes and is NOT decorative). */
+function isDecorativeSeparatorLine(stripped) {
+  if (!/[a-zA-Z0-9]/.test(stripped)) return true;
+  return /[-─━═]{6,}/.test(stripped);
+}
+
+// card a873621e — the SAME "does the next line continue the sentence" shape used by both
+// `findEmbeddedAnchors` (narrow: punctuation only) and `findSplitAnchorParagraphs`'s continuation check
+// (wide: punctuation OR a leading lowercase letter). Kept as two separate predicates, not one parameterized
+// function, because the two call sites deliberately disagree on whether lowercase counts — collapsing them
+// risks a future edit silently re-coupling two constants the checkpoint proved must differ.
+const EMBEDDED_NEXT_CONTINUES_RE = /^[)\];,]/;
+function looksLikeContinuation(stripped) {
+  return EMBEDDED_NEXT_CONTINUES_RE.test(stripped) || /^[a-z]/.test(stripped);
+}
+
+// card a873621e — the anchor token itself, so `findEmbeddedAnchors`'s stacking carve-out can look at what
+// comes AFTER the id on the anchor's OWN line, not just whether the PRECEDING line belongs to another
+// anchor. A legitimate stacked decision states its OWN text right after the id (typically " — <text>",
+// matching the anchor grammar in docs/extraction-program.md); a citation embedded mid-sentence (the
+// specimen this card was filed over, host.ts's `ac90ca8e`/`3388be4d`) instead continues with closing/
+// continuing punctuation ("): closes the native...") — never its own independent statement at all.
+const ANCHOR_TOKEN_RE = /^@decision\s+(?:sha:)?[0-9a-f]{8}\b\s*/i;
+function textAfterAnchorToken(stripped) {
+  return stripped.replace(ANCHOR_TOKEN_RE, "");
+}
+/** True iff `a`'s own line, immediately after its id, reads as an independent statement rather than a
+ * continuation of someone else's clause — see `ANCHOR_TOKEN_RE`'s own doc above. Empty (a bare citation
+ * with no dash-explanation at all) also counts as well-formed-enough here — a stacked bare citation is a
+ * legitimate style, and `afterBlankContinues` below relies on this same emptiness test for its own
+ * `@decision`-line branch. */
+function ownStatementLooksWellFormed(strippedOwnLine) {
+  const after = textAfterAnchorToken(strippedOwnLine);
+  return after.length === 0 || !looksLikeContinuation(after);
+}
+
+/** True iff `rawLine` is NOTHING but a block comment's own closing delimiter (one or more asterisks then a
+ * closing slash, optionally lead-padded — e.g. a lone " " + star + slash) — `isBlankCommentLine` above would
+ * otherwise misclassify it as an inserted blank paragraph-separator, since `stripCommentMarkers` strips that
+ * trailing delimiter and leaves nothing. `findSplitAnchorParagraphs` below is the only caller that needs this
+ * distinction (the block's own mandatory closing line is never an "inserted" artifact); `anchorParagraphEnd`'s
+ * own existing blank-line handling, shared by `overlongAnchorParagraphs`/`pointerAnchors`, is UNCHANGED and
+ * untouched by this. */
+function isBareClosingDelimiterLine(rawLine) {
+  return /^\*+\/$/.test(rawLine.trim());
+}
+
+/** Every anchor SITE in `anchors` whose own line opens correctly (so `midSentenceAnchors` above stays
+ * silent) but is still embedded inside a LARGER sentence spanning an adjacent comment line (card a873621e).
+ * See this file's header, check 13, for the full rationale and the measured reason the "next line continues"
+ * side deliberately excludes a leading lowercase letter and an em-dash. Returns `{items, stacked}`:
+ * `items` is the reportable `embeddedAnchors` population; `stacked` is the carved-out "previous line is
+ * another anchor's own unterminated paragraph tail" population (surfaced separately, never counted here) —
+ * see `computeReport`/`computeFileReport` for how the two are assembled into `embeddedAnchors`'s own shape.
+ * One entry per SITE, not deduped by id, same convention as every other per-site check in this file. */
+export function findEmbeddedAnchors(lines, blocks, anchors) {
+  const items = [];
+  const stacked = [];
+  for (const a of anchors) {
+    const block = blocks.find((b) => a.line >= b.startLine && a.line <= b.endLine);
+    if (!block) continue;
+    // `midSentenceAnchors` already owns "the @decision token isn't first on its own line" — never count
+    // that population here too (round-2 lead-review finding: 15 of 24 hits on main were exactly this,
+    // because this check never verified the anchor's OWN line before looking at its neighbors).
+    if (isMidSentenceAnchorLine(lines[a.line - 1] ?? "")) continue;
+
+    let rawPrevViolation = false;
+    let isStackedTail = false;
+    if (a.line > block.startLine) {
+      const prevStripped = stripCommentMarkers(lines[a.line - 2] ?? "");
+      if (prevStripped.length > 0 && !endsSentence(prevStripped) && !isDecorativeSeparatorLine(prevStripped)) {
+        rawPrevViolation = true;
+        // Is the preceding line exactly the LAST line of a DIFFERENT anchor's own already-computed
+        // paragraph (a legitimate stacked-anchors run, no blank line between them) AND does `a`'s OWN line
+        // read as an independent statement (not a continuation of that other anchor's own clause)? Both
+        // must hold — the second is what tells `ac90ca8e`/`3388be4d` (a citation, "): closes...") apart
+        // from a genuine adjacent decision like `eeeeeeee`/`ffffffff` (its own "— runs the shared..." text).
+        let prevAnchor = null;
+        for (const other of anchors) {
+          if (other === a || other.line < block.startLine || other.line >= a.line) continue;
+          if (!prevAnchor || other.line > prevAnchor.line) prevAnchor = other;
+        }
+        const ownLineStripped = stripCommentMarkers(lines[a.line - 1] ?? "");
+        if (prevAnchor && anchorParagraphEnd(prevAnchor, lines, blocks, anchors) === a.line - 1
+          && ownStatementLooksWellFormed(ownLineStripped)) {
+          isStackedTail = true;
+        }
+      }
+    }
+    const prevViolation = rawPrevViolation && !isStackedTail;
+
+    let nextViolation = false;
+    if (a.line < block.endLine) {
+      const nextStripped = stripCommentMarkers(lines[a.line] ?? "");
+      if (nextStripped.length > 0 && EMBEDDED_NEXT_CONTINUES_RE.test(nextStripped)) nextViolation = true;
+    }
+
+    if (prevViolation || nextViolation) items.push({ ...a, prevViolation, nextViolation });
+    if (rawPrevViolation && isStackedTail) stacked.push({ ...a });
+  }
+  return { items, stacked };
+}
+
+/** True iff `strippedLine` (the first content line right after an inserted blank) reads as a CONTINUATION
+ * of the sentence that preceded the blank (card a873621e round 2) — the defect signal `findSplitAnchor
+ * Paragraphs` below now keys on, replacing the old "last character" test. Two shapes: (1) ordinary prose
+ * starting with a lowercase letter or closing/continuing punctuation (`looksLikeContinuation`); or (2) an
+ * `@decision` line whose OWN text after the id is itself a continuation (`!ownStatementLooksWellFormed`) —
+ * the shape Fixture B needs (the blank sits between "by" and the `3388be4d` anchor line, "...): closes...",
+ * so the line right after the blank IS an anchor line, not ordinary prose, and its own trailing text is
+ * what reveals the cut). A bare citation-only anchor never matches either branch of `ownStatementLooksWellFormed`'s
+ * OWN test (empty trailing text reads as well-formed there), so this correctly leaves a genuine citation
+ * alone while still catching one whose surrounding prose actually continues. */
+function afterBlankContinues(strippedLine) {
+  if (strippedLine.length === 0) return false;
+  if (/^@decision\b/i.test(strippedLine)) return !ownStatementLooksWellFormed(strippedLine);
+  return looksLikeContinuation(strippedLine);
+}
+
+/** Every anchor SITE in `anchors` whose own paragraph (the SAME `anchorParagraphEnd` window
+ * `overlongAnchorParagraphs`/`pointerAnchors` share) ends at a genuinely blank comment line (card a873621e;
+ * round 2 lead review) — see this file's header, check 14, for the full rationale. Returns `{items,
+ * unterminated}`: `items` is the reportable `splitAnchorParagraphs` population — the content right after
+ * the blank CONTINUES the sentence (`afterBlankContinues` above), meaning the blank line genuinely cut a
+ * live sentence in two. `unterminated` (never counted in `items`, mirrors `embeddedAnchors.stacked`'s
+ * carve-out shape) is a SEPARATE, informational population: the paragraph's own last line lacks doctrine
+ * terminal punctuation (`endsSentence`/`isDecorativeSeparatorLine`) but what follows the blank is a
+ * genuinely FRESH paragraph, not a continuation — a missing-period nit, not a cut sentence. A paragraph
+ * whose last line DOES end properly AND whose follow-on doesn't continue is CLEAN — not reported anywhere
+ * (round-2 measured: 7 of the original 21 hits were exactly this, once the doctrine's real punctuation set
+ * — see `endsSentence` — is applied). The old bare-citation special case falls out of this naturally: a
+ * bare `@decision <id>` token's own trailing text is empty, so `afterBlankContinues`'s `@decision` branch
+ * only fires when a FOLLOWING `@decision` line's own text continues, never for the citation's own (non-
+ * `@decision`) follow-on prose — which is judged by the SAME ordinary continuation test as everything else.
+ * One entry per SITE, not deduped by id, same convention as every other per-site check in this file. */
+export function findSplitAnchorParagraphs(lines, blocks, anchors) {
+  const items = [];
+  const unterminated = [];
+  for (const a of anchors) {
+    const block = blocks.find((b) => a.line >= b.startLine && a.line <= b.endLine);
+    if (!block) continue;
+    const windowEnd = anchorParagraphEnd(a, lines, blocks, anchors);
+    const afterLn = windowEnd + 1;
+    if (afterLn > block.endLine) continue; // paragraph ended at the block's own end, not a blank line
+    const afterLine = lines[afterLn - 1] ?? "";
+    if (isBareClosingDelimiterLine(afterLine)) continue; // the block's own closing "*/", not an inserted blank
+    if (!isBlankCommentLine(afterLine)) continue; // ended due to the next anchor / a new doc tag
+
+    const lastContent = stripCommentMarkers(lines[windowEnd - 1] ?? "");
+    if (lastContent.length === 0) continue;
+
+    // A paragraph whose own last line ALREADY ends properly (doctrine punctuation, or a decorative
+    // divider) is clean regardless of what happens to follow it — an ordinary blank-line paragraph break
+    // is legitimate, and the text after it is a NEW paragraph's business, not this anchor's. Continuation
+    // only means anything for a paragraph that did NOT terminate properly in the first place.
+    const terminatesProperly = endsSentence(lastContent) || isDecorativeSeparatorLine(lastContent);
+    if (terminatesProperly) continue;
+
+    const nextContentStripped = stripCommentMarkers(lines[afterLn] ?? "");
+    if (afterBlankContinues(nextContentStripped)) items.push({ ...a, blankLine: afterLn });
+    else unterminated.push({ ...a, blankLine: afterLn });
+  }
+  return { items, unterminated };
+}
+
 /** True iff `nameLower` is `id` followed by a real boundary — mirrors decision-records.mjs's own
  * `idBoundaryMatch` (same rationale: never let id `deadbeef` bare-prefix-match `deadbeefcafe-other.md`). */
 function idBoundaryMatch(nameLower, id) {
@@ -800,6 +1031,10 @@ export function computeReport(repoRoot, opts = {}) {
   const allPointer = [];
   const allOverlongParagraph = [];
   const allMidSentence = [];
+  const allEmbedded = [];
+  const allEmbeddedStacked = [];
+  const allSplitParagraph = [];
+  const allSplitParagraphUnterminated = [];
 
   for (const file of files) {
     let raw;
@@ -815,6 +1050,12 @@ export function computeReport(repoRoot, opts = {}) {
     for (const p of findPointerAnchors(lines, blocks, anchors)) allPointer.push({ ...p, file });
     for (const o of findOverlongAnchorParagraphs(lines, blocks, anchors)) allOverlongParagraph.push({ ...o, file });
     for (const m of findMidSentenceAnchors(lines, anchors)) allMidSentence.push({ ...m, file });
+    const embedded = findEmbeddedAnchors(lines, blocks, anchors);
+    for (const e of embedded.items) allEmbedded.push({ ...e, file });
+    for (const e of embedded.stacked) allEmbeddedStacked.push({ ...e, file });
+    const splitParagraph = findSplitAnchorParagraphs(lines, blocks, anchors);
+    for (const s of splitParagraph.items) allSplitParagraph.push({ ...s, file });
+    for (const s of splitParagraph.unterminated) allSplitParagraphUnterminated.push({ ...s, file });
   }
 
   const records = listRecordIds(repoRoot);
@@ -907,6 +1148,29 @@ export function computeReport(repoRoot, opts = {}) {
       // REPORT-ONLY (card 5e5841dd — see this file's header, check 12): same posture as pointerAnchors.
       items: allMidSentence.map((m) => ({ file: relPath(repoRoot, m.file), line: m.line, id: m.id, ns: m.ns })),
     },
+    embeddedAnchors: {
+      count: allEmbedded.length,
+      // REPORT-ONLY (card a873621e — see this file's header, check 13): same posture as pointerAnchors.
+      items: allEmbedded.map((e) => ({ file: relPath(repoRoot, e.file), line: e.line, id: e.id, ns: e.ns, prevViolation: e.prevViolation, nextViolation: e.nextViolation })),
+      // Stacked-anchor "previous anchor's own tail lacks a period" sites, carved OUT of `count`/`items`
+      // above (see `findEmbeddedAnchors`'s own doc) — informational only, never a violation by itself.
+      stackedUnterminated: {
+        count: allEmbeddedStacked.length,
+        items: allEmbeddedStacked.map((e) => ({ file: relPath(repoRoot, e.file), line: e.line, id: e.id, ns: e.ns })),
+      },
+    },
+    splitAnchorParagraphs: {
+      count: allSplitParagraph.length,
+      // REPORT-ONLY (card a873621e — see this file's header, check 14): same posture as pointerAnchors.
+      items: allSplitParagraph.map((s) => ({ file: relPath(repoRoot, s.file), line: s.line, id: s.id, ns: s.ns, blankLine: s.blankLine })),
+      // Missing-a-period-before-a-FRESH-paragraph sites, carved OUT of `count`/`items` above (see
+      // `findSplitAnchorParagraphs`'s own doc) — informational only, mirrors `embeddedAnchors.
+      // stackedUnterminated`'s shape: a punctuation nit, never a cut sentence.
+      unterminated: {
+        count: allSplitParagraphUnterminated.length,
+        items: allSplitParagraphUnterminated.map((s) => ({ file: relPath(repoRoot, s.file), line: s.line, id: s.id, ns: s.ns, blankLine: s.blankLine })),
+      },
+    },
     distribution: bucketDistribution(allBlocks),
   };
 }
@@ -961,6 +1225,8 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
   const pointer = findPointerAnchors(lines, blocks, anchors);
   const overlongParagraph = findOverlongAnchorParagraphs(lines, blocks, anchors);
   const midSentence = findMidSentenceAnchors(lines, anchors);
+  const embedded = findEmbeddedAnchors(lines, blocks, anchors);
+  const splitParagraph = findSplitAnchorParagraphs(lines, blocks, anchors);
   const unanchoredLong = blocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
 
   const recordIdSet = new Set(listRecordIds(repoRoot).map((r) => r.id));
@@ -987,6 +1253,10 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
     pointerAnchors: pointer.map((p) => ({ line: p.line, id: p.id, ns: p.ns, phrase: p.phrase })),
     overlongAnchorParagraphs: overlongParagraph.map((o) => ({ line: o.line, id: o.id, ns: o.ns, length: o.length })),
     midSentenceAnchors: midSentence.map((m) => ({ line: m.line, id: m.id, ns: m.ns })),
+    embeddedAnchors: embedded.items.map((e) => ({ line: e.line, id: e.id, ns: e.ns, prevViolation: e.prevViolation, nextViolation: e.nextViolation })),
+    embeddedAnchorsStacked: embedded.stacked.map((e) => ({ line: e.line, id: e.id, ns: e.ns })),
+    splitAnchorParagraphs: splitParagraph.items.map((s) => ({ line: s.line, id: s.id, ns: s.ns, blankLine: s.blankLine })),
+    splitAnchorParagraphsUnterminated: splitParagraph.unterminated.map((s) => ({ line: s.line, id: s.id, ns: s.ns, blankLine: s.blankLine })),
   };
 }
 
@@ -994,10 +1264,13 @@ export function computeFileReport(repoRoot, filePath, content, opts = {}) {
  * `pointerAnchorsOmitted` (default 0, card a862e8f0) is the count `scopeHookAnchorSites` trimmed off
  * `report.pointerAnchors` before this call — when >0, an extra line says so, rather than the agent seeing
  * a shorter list with no explanation for why. `overlongAnchorParagraphsOmitted`/`midSentenceAnchorsOmitted`
- * (default 0, card 5e5841dd) are the SAME convention for those two fields. All three are optional and
+ * (default 0, card 5e5841dd) are the SAME convention for those two fields. `embeddedAnchorsOmitted`/
+ * `splitAnchorParagraphsOmitted` (default 0, card a873621e) are the SAME convention for those two fields —
+ * `embeddedAnchors.stackedUnterminated` is never scoped/capped (it's informational, not a violation, and in
+ * practice small — see this file's header, check 13). All five omitted-count params are optional and
  * additive: every existing call site (including every prior test) that omits them keeps rendering
  * byte-identical output. */
-export function formatHookMessage(report, pointerAnchorsOmitted = 0, overlongAnchorParagraphsOmitted = 0, midSentenceAnchorsOmitted = 0) {
+export function formatHookMessage(report, pointerAnchorsOmitted = 0, overlongAnchorParagraphsOmitted = 0, midSentenceAnchorsOmitted = 0, embeddedAnchorsOmitted = 0, splitAnchorParagraphsOmitted = 0) {
   const lines = [];
   if (report.unanchoredLongBlocks.length) {
     lines.push(`${report.unanchoredLongBlocks.length} unanchored long comment block(s) in ${report.file} (>= ${report.minLines} lines, no @decision anchor):`);
@@ -1035,6 +1308,22 @@ export function formatHookMessage(report, pointerAnchorsOmitted = 0, overlongAnc
     lines.push(`${report.midSentenceAnchors.length} mid-sentence @decision anchor(s) in ${report.file} (the "@decision" token is not the first thing on its line — it is embedded inside other prose rather than opening its own paragraph):`);
     for (const m of report.midSentenceAnchors) lines.push(`  - ${report.file}:${m.line} — @decision ${renderAnchorId(m)} embedded mid-sentence`);
   }
+  if (report.embeddedAnchors.length) {
+    lines.push(`${report.embeddedAnchors.length} embedded @decision anchor(s) in ${report.file} (the anchor opens its own line, but the line before it doesn't end a sentence, or the line after it continues one — the anchor is still swallowed by a LARGER sentence spanning an adjacent line):`);
+    for (const e of report.embeddedAnchors) lines.push(`  - ${report.file}:${e.line} — @decision ${renderAnchorId(e)} embedded across a line boundary`);
+  }
+  if (report.embeddedAnchorsStacked.length) {
+    lines.push(`${report.embeddedAnchorsStacked.length} stacked @decision anchor(s) in ${report.file} whose PRECEDING anchor's own paragraph lacks a trailing period (a punctuation nit between two distinct decisions, not a swallowed anchor — informational only, not counted as an embedded-anchor violation):`);
+    for (const e of report.embeddedAnchorsStacked) lines.push(`  - ${report.file}:${e.line} — @decision ${renderAnchorId(e)} follows an unterminated preceding anchor`);
+  }
+  if (report.splitAnchorParagraphs.length) {
+    lines.push(`${report.splitAnchorParagraphs.length} split @decision anchor paragraph(s) in ${report.file} (an inserted blank comment line ends the anchor's REPORTED paragraph before its own sentence actually finishes):`);
+    for (const s of report.splitAnchorParagraphs) lines.push(`  - ${report.file}:${s.line} — @decision ${renderAnchorId(s)} (paragraph cut short by the blank line at ${report.file}:${s.blankLine})`);
+  }
+  if (report.splitAnchorParagraphsUnterminated.length) {
+    lines.push(`${report.splitAnchorParagraphsUnterminated.length} @decision anchor paragraph(s) in ${report.file} missing a trailing period before a FRESH paragraph (a punctuation nit, not a cut sentence — informational only, not counted as a split-anchor-paragraph violation):`);
+    for (const s of report.splitAnchorParagraphsUnterminated) lines.push(`  - ${report.file}:${s.line} — @decision ${renderAnchorId(s)} unterminated before the blank line at ${report.file}:${s.blankLine}`);
+  }
   if (pointerAnchorsOmitted > 0) {
     lines.push(`(${pointerAnchorsOmitted} more pointer-anchor site(s) in ${report.file} not shown here — run the CLI scan, \`node comment-anchor-lint.mjs .\`, for the full \`pointerAnchors\` list.)`);
   }
@@ -1043,6 +1332,12 @@ export function formatHookMessage(report, pointerAnchorsOmitted = 0, overlongAnc
   }
   if (midSentenceAnchorsOmitted > 0) {
     lines.push(`(${midSentenceAnchorsOmitted} more mid-sentence-anchor site(s) in ${report.file} not shown here — run the CLI scan, \`node comment-anchor-lint.mjs .\`, for the full \`midSentenceAnchors\` list.)`);
+  }
+  if (embeddedAnchorsOmitted > 0) {
+    lines.push(`(${embeddedAnchorsOmitted} more embedded-anchor site(s) in ${report.file} not shown here — run the CLI scan, \`node comment-anchor-lint.mjs .\`, for the full \`embeddedAnchors\` list.)`);
+  }
+  if (splitAnchorParagraphsOmitted > 0) {
+    lines.push(`(${splitAnchorParagraphsOmitted} more split-anchor-paragraph site(s) in ${report.file} not shown here — run the CLI scan, \`node comment-anchor-lint.mjs .\`, for the full \`splitAnchorParagraphs\` list.)`);
   }
   return `comment-anchor-lint (CLAUDE.md comment taxonomy, card 90b19799) flagged ${report.file}:\n${lines.join("\n")}\n`
     + `Advisory only: a long unanchored block may want "// @decision <id> — <the prohibition/consequence>" `
@@ -1055,7 +1350,10 @@ export function formatHookMessage(report, pointerAnchorsOmitted = 0, overlongAnc
     + `rewritten to state the actual prohibition/consequence — the record itself is reached by the id, not `
     + `by a pointer phrase in the comment; an over-long anchor paragraph needs compressing back to <=`
     + `${GUARD_MAX_LINES} lines; a mid-sentence anchor needs its "@decision <id>" moved to open its own line/`
-    + `paragraph, not buried inside other prose.`;
+    + `paragraph, not buried inside other prose; an embedded anchor needs moving so a real sentence boundary `
+    + `(a period, or a blank line) sits on both sides of it, not a dangling word or continuing punctuation; a `
+    + `split anchor paragraph needs its inserted blank line removed (or moved to a genuine sentence end) so `
+    + `the anchor's own full text is what gets measured against the <=${GUARD_MAX_LINES}-line cap.`;
 }
 
 /**
@@ -1191,6 +1489,11 @@ export function scopeHookPointerAnchors(pointerAnchors, lines, writtenText) {
  * sessions/service.ts, pty/host.ts), would otherwise inject a long list of pre-existing violations on
  * EVERY edit to those files, regardless of relevance — the exact incident `scopeHookAnchorSites` exists
  * to prevent, just for two more fields.
+ *
+ * Card a873621e — `embeddedAnchors`, `embeddedAnchors.stackedUnterminated` (surfaced here as the separate
+ * `embeddedAnchorsStacked` field), and `splitAnchorParagraphs` get the SAME scoping, same reasoning: a
+ * main-tree baseline in the low hundreds (see this file's header, checks 13/14) would otherwise flood the
+ * advisory on every edit to the files that carry the most of them.
  */
 async function runHook(repoRootArg) {
   if (!repoRootArg) return;
@@ -1222,20 +1525,30 @@ async function runHook(repoRootArg) {
   const pointerScope = scopeHookAnchorSites(report.pointerAnchors, editedLines, writtenText);
   const overlongScope = scopeHookAnchorSites(report.overlongAnchorParagraphs, editedLines, writtenText);
   const midSentenceScope = scopeHookAnchorSites(report.midSentenceAnchors, editedLines, writtenText);
+  const embeddedScope = scopeHookAnchorSites(report.embeddedAnchors, editedLines, writtenText);
+  const embeddedStackedScope = scopeHookAnchorSites(report.embeddedAnchorsStacked, editedLines, writtenText);
+  const splitParagraphScope = scopeHookAnchorSites(report.splitAnchorParagraphs, editedLines, writtenText);
+  const splitParagraphUnterminatedScope = scopeHookAnchorSites(report.splitAnchorParagraphsUnterminated, editedLines, writtenText);
   const scopedReport = {
     ...report,
     pointerAnchors: pointerScope.items,
     overlongAnchorParagraphs: overlongScope.items,
     midSentenceAnchors: midSentenceScope.items,
+    embeddedAnchors: embeddedScope.items,
+    embeddedAnchorsStacked: embeddedStackedScope.items,
+    splitAnchorParagraphs: splitParagraphScope.items,
+    splitAnchorParagraphsUnterminated: splitParagraphUnterminatedScope.items,
   };
 
   if (scopedReport.unanchoredLongBlocks.length === 0 && scopedReport.orphanAnchors.length === 0
     && scopedReport.brokenAnchors.length === 0 && scopedReport.overlongAnchorIds.length === 0
     && scopedReport.sigilSpaceAnchors.length === 0 && scopedReport.bareCommitAnchors.length === 0
     && scopedReport.pointerAnchors.length === 0 && scopedReport.overlongAnchorParagraphs.length === 0
-    && scopedReport.midSentenceAnchors.length === 0) return;
+    && scopedReport.midSentenceAnchors.length === 0 && scopedReport.embeddedAnchors.length === 0
+    && scopedReport.embeddedAnchorsStacked.length === 0 && scopedReport.splitAnchorParagraphs.length === 0
+    && scopedReport.splitAnchorParagraphsUnterminated.length === 0) return;
 
-  const msg = formatHookMessage(scopedReport, pointerScope.omitted, overlongScope.omitted, midSentenceScope.omitted);
+  const msg = formatHookMessage(scopedReport, pointerScope.omitted, overlongScope.omitted, midSentenceScope.omitted, embeddedScope.omitted, splitParagraphScope.omitted);
   await emitHook({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: msg } });
 }
 
