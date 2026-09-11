@@ -1037,9 +1037,11 @@ export const api = {
   // the server truth the Capabilities panel compares each grant's createdAt against to derive an
   // apply-pending state that survives a page reload (a grant newer than the running process isn't yet on
   // its respawn-fixed tool surface).
-  // `warnings` = server-computed grant-time co-grant advisories over the WHOLE grant set (owner decision
-  // 4c33a1bc) — the Capabilities panel renders them as a persistent risk banner (a risky pair stays
-  // flagged across reloads, since GET re-derives it every refetch). `[]` for a benign grant set.
+  // @decision 4c33a1bc — `warnings` are grant-time co-grant risk advisories, computed server-side over
+  // the WHOLE grant set: they never block, only warn. `[]` for a benign grant set.
+  //
+  // The Capabilities panel renders them as a persistent risk banner — a risky pair stays flagged across
+  // reloads, since GET re-derives it every refetch.
   companionGrants: (sessionId: string) =>
     get<{ grants: CompanionCapabilityGrant[]; liveProcessStartedAt: string | null; warnings: CompanionCoGrantWarning[] }>(`/api/companion/${encodeURIComponent(sessionId)}/grants`),
   upsertCompanionGrant: (sessionId: string, b: { capability: string; projectId?: string | null; mode?: "read" | "act"; config?: Record<string, unknown> }) =>

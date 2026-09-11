@@ -21,3 +21,5 @@ Measured in-page on one clock (n=5, local e2e fixture): mechanism 1 wins every t
 ## Source
 
 Inline comment in `packages/web/src/lib/api.ts` (`ORCH_STATUS_STALE_MS`'s doc comment, lines 1176-1193 as of commit `a1a89b726`). Introduced by that commit's own worker sub-commit "docs(web): record why orchStatusQuery's staleTime is load-bearing." Extracted by card `56d6cc53` (tranche 1); wording condensed, no substantive detail dropped.
+
+Additional source: `packages/web/src/components/FleetSocketProvider.tsx` (`seedStatus`'s own doc comment, the "It goes through the SHARED react-query entry" / "Two mechanisms can do the collapse" paragraphs), lines 140-149 as of the same commit `a1a89b726` (`refactor(web): route all orchestration-status reads through one query factory`) — a second site restating the same measured collapse mechanism from `seedStatus`'s own vantage point. Extracted by card `7071275f`; the restated narrative is dropped in favor of this record, and the site keeps only its own non-duplicate `force`-override explanation inline.

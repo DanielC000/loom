@@ -137,16 +137,13 @@ export function FleetSocketProvider() {
     // arbitrary gap, so this HTTP read is what makes a change-ONLY feed complete. It stays precisely
     // because it is not a poll: it fires once per (re)connect, never on a timer.
     //
-    // It goes through the SHARED react-query entry (fetchQuery on the factory) rather than calling the
-    // endpoint directly, and that is what makes the COLD load cost one request instead of two — measured
-    // on the C6 spec, cold-load `seed` 2 -> 1. Calling the endpoint directly, as this used to, is a fetch
-    // site OUTSIDE react-query and so can never dedupe with the consumers, however the keys are arranged.
+    // @decision sha:a1a89b72 — goes through the SHARED react-query factory (fetchQuery), never a direct
+    // endpoint call, so a cold load costs ONE request instead of two; calling the endpoint directly can't
+    // dedupe with the consumers' own mount fetch.
     //
-    // Two mechanisms can do the collapse, and it is worth knowing which: locally the socket opens while the
-    // consumers' mount fetch is still IN FLIGHT (so react-query hands back that promise), but only by
-    // 0.9-9.6ms measured — a race, not an ordering guarantee. What actually makes it deterministic is the
-    // factory's staleTime covering the other order; see ORCH_STATUS_STALE_MS in lib/api.ts for the
-    // measurement and the forced-inversion control behind that claim.
+    // What actually makes it deterministic is the factory's staleTime covering the other order; see
+    // ORCH_STATUS_STALE_MS in lib/api.ts for the measurement and the forced-inversion control behind that
+    // claim.
     //
     // `force` (every seed after a DROP) overrides that staleTime to 0. A reconnect can follow an arbitrary
     // gap, so a cached value is exactly what must not be trusted there — and there is no concurrent mount

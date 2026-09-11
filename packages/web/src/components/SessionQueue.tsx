@@ -6,15 +6,18 @@ import { color, font, radius } from "../theme";
 
 // ── SessionQueue — the "ledger bar" for a session's QUEUED inbound messages ─────────────────────────
 //
-// Direction B, owner-approved 2026-07-06 (`Projects/Loom/Design/Queue Redesign.md`). When ≥1 message is
-// held (session busy / human mid-compose) the queue renders as ONE constant-height "ledger bar" directly
-// under the terminal: an amber tick, "QUEUED (n)", a one-line peek of the next-up message, and a chevron.
-// The bar's footprint NEVER changes with backlog depth — a card with 1 queued and a card with 50 queued
-// look identical at rest — and (in TerminalCard's HUG height model) the bar GROWS THE CARD rather than
-// shrinking the terminal: TerminalCard excludes this element from the terminal's height budget, so the
-// terminal region holds a fixed height in every queue state. Clicking the bar expands a BOUNDED,
-// internally-scrollable drawer listing every queued message with its full affordances; collapse returns
-// to the one-liner. Renders nothing when empty, so it stays completely out of the way.
+// @decision sha:eb96f3e4 — the ledger bar's CONSTANT footprint (never growing with backlog depth) is a
+// deliberately chosen direction (owner-approved 2026-07-06), not an incidental default — don't let it
+// grow/shrink with queue depth.
+//
+// When ≥1 message is held (session busy / human mid-compose) the queue renders as ONE constant-height
+// "ledger bar" directly under the terminal: an amber tick, "QUEUED (n)", a one-line peek of the next-up
+// message, and a chevron. The bar's footprint NEVER changes with backlog depth — a card with 1 queued and
+// a card with 50 queued look identical at rest — and (in TerminalCard's HUG height model) the bar GROWS
+// THE CARD rather than shrinking the terminal: TerminalCard excludes this element from the terminal's
+// height budget, so the terminal region holds a fixed height in every queue state. Clicking the bar
+// expands a BOUNDED, internally-scrollable drawer listing every queued message with its full affordances;
+// collapse returns to the one-liner. Renders nothing when empty, so it stays completely out of the way.
 //
 // Three row species share the one FIFO and render together in the drawer:
 //   • 'human' entries (composer turns) are fully adjustable: reorder (↑/↓), edit in place (✎), remove (✕);

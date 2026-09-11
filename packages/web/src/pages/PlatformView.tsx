@@ -18,14 +18,17 @@ import {
   operatorSpawnDisabled, auditorSpawnDisabled,
 } from "./platformEdition";
 
-// The UNIFIED Platform surface — ONE shell driven by an `edition` config (platformEdition.ts). It replaces
-// the near-duplicate DeveloperPlatformView + EndUserPlatformView (card 8adccd37, the "unify up" tail): the
-// DEV surface is the canonical rendering, and the four genuine behavioral forks stay REAL as explicit,
-// config-selected leaves — NOT homogenized (Bucket-2b isn't shipping):
+// The UNIFIED Platform surface — ONE shell driven by an `edition` config (platformEdition.ts). The DEV
+// surface is the canonical rendering, and the four genuine behavioral forks stay REAL as explicit,
+// config-selected leaves:
 //   1. Multi-Lead vs singleton operator      → operatorSpawnDisabled(edition, …)  (edition.operatorSingleton)
 //   2. Auditor schedule data model            → auditorScheduleVariant "list" (dev) | "single-form" (enduser)
 //   3. Endpoints/roles                        → homeQueryKey + operatorRole/auditorRole (static per edition)
 //   4. Layout                                 → sessionLayout "grid" | "split"; historyCollapsed
+//
+// @decision 8adccd37 — this shell replaces the near-duplicate DeveloperPlatformView + EndUserPlatformView;
+// the four forks above stay REAL and config-selected, never homogenized, because Bucket-2b (the operator's
+// elevated surface) isn't shipping to end users.
 //
 // It shows + controls, for whichever edition mounts:
 //   1. the operator + auditor agents, with human spawn/stop controls + live status,

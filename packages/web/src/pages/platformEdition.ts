@@ -3,10 +3,11 @@
 export type PlatformSpawnRole = "platform" | "auditor" | "setup" | "workspace-auditor";
 
 // The EDITION CONFIG for the unified Platform shell (PlatformView.tsx). The Developer and End-User
-// Platform surfaces are ONE shared shell driven by this data-only config — the four genuine behavioral
-// forks (multi-Lead vs singleton, list vs single-form auditor schedules, roles/endpoints, layout) stay
-// REAL, selected here by config, NOT homogenized (Bucket-2b isn't shipping, so the forks exist on
-// purpose — see card 8adccd37 / vault Design/[[Platform Divergence — Unify Up + Thin Local Overlay]]).
+// Platform surfaces are ONE shared shell driven by this data-only config.
+//
+// @decision 8adccd37 — the four genuine behavioral forks (multi-Lead vs singleton, list vs single-form
+// auditor schedules, roles/endpoints, layout) stay REAL, selected here by config, and are never
+// homogenized: Bucket-2b (the operator's elevated surface) isn't shipping to end users.
 //
 // JSX-FREE ON PURPOSE: this module holds only data + pure functions (no React, no `api` import, no side
 // effects), so the hermetic test (`test/platform-edition.mjs`, run under node --experimental-strip-types)

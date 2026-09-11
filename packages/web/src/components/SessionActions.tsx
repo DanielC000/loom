@@ -13,13 +13,9 @@ import { canResumeSession } from "../lib/sessions";
 // Manual archive was REMOVED (archiving is now automatic on session exit — Card A); stopped sessions
 // live on the Archive page. There is no manual-archive button here anymore.
 //
-// Resume is gated by the shared canResumeSession (lib/sessions.ts) — NOT a bare
-// `processState === "exited"` check. A session leaves "exited" for "archived" within the same
-// onExit handler that set it, so a caller sourced from the rail/god-eye lists (which exclude
-// archived rows) would otherwise never see the exited state long enough to offer Resume (finding
-// #15). canResumeSession also treats an already-archived row (archivedAt set) as resumable, so a
-// caller that folds archived sessions in (e.g. the Overview fleet accordion) gets a working Resume
-// through that path too — both branches call the same resumeSession mutation.
+// @decision b37750a4 — Resume is gated by the shared canResumeSession (lib/sessions.ts), never a bare
+// `processState === "exited"` check: a session can leave "exited" for "archived" within the same onExit
+// handler that set it, so canResumeSession also treats an already-archived row as resumable.
 //
 // Note the `ev.stopPropagation()` on Fork/Stop/Clear: these buttons can sit next to a
 // click-to-select row, so the click must not bubble to the row's onSelect. Resume keeps no

@@ -19,3 +19,5 @@ Cross-project by design: `transcript-read` on project X + `session-steer` on pro
 ## Source
 
 Inline comment in `packages/daemon/src/companion/capabilities.ts` (`computeCoGrantWarnings`'s top-of-function doc): lines 66-81, as of this tranche's HEAD. Relocated by card `2e703a3d` (tranche on `companion/capabilities.ts`); no wording changed beyond joining wrapped source lines into flowing paragraphs and stripping `*` comment markers.
+
+Additional source: `packages/web/src/lib/api.ts` (the `companionGrants` client method's doc, the `warnings` field paragraph), lines 1040-1042 as of this tranche's HEAD. Extracted by card `7071275f`; the client-side site only labeled the field and pointed at this decision, no new narrative to fold in.

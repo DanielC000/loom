@@ -29,11 +29,12 @@ import { font, color } from "../theme";
 // Overview `SessionCockpit` is its first consumer (lifted from its old hand-rolled inline tab bar).
 // No-tabs stays byte-identical.
 //
-// STAGE 4 (`ShellTile` + `CompanionTerminal`) resolved the deferred non-"busy" status question in favor
-// of the `title` OVERRIDE rather than implementing the `statusMode` "static"/"conn" branches: a raw shell
-// and a read-only companion window are not DB Sessions with a live busy signal, so each supplies its own
-// header node (a "shell" / "read-only" StatusPill) via `title`. `statusMode` therefore stays typed (the
-// enum keeps the call sites shaped) with only the "busy" path implemented; no consumer needs the others.
+// @decision sha:a5544837 — STAGE 4 resolved the non-"busy" status question via a `title` OVERRIDE, never
+// by implementing the `statusMode` "static"/"conn" branches — a raw shell / read-only companion isn't a
+// DB Session with a live busy signal, so each supplies its own header node instead.
+//
+// `statusMode` stays typed (the enum keeps call sites shaped) with only the "busy" path implemented; no
+// consumer needs the others.
 
 export type TerminalLifecycle = "stop" | "kill" | "none";
 export type TerminalStatusMode = "busy" | "static" | "conn";

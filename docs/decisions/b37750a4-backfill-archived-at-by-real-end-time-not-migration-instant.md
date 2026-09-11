@@ -16,3 +16,16 @@ It runs one-shot via an `app_meta` marker (same fire-exactly-once pattern as the
 ## Source
 
 Inline comment in `packages/daemon/src/db.ts` (`backfillArchivedAtOnce`): lines 5088-5111, as of this tranche's HEAD.
+
+## Resume gating must check archivedAt too, not just processState (web-side consequence)
+
+Auto-archive-on-exit (this same card) stamps `archivedAt` in the SAME `onExit` handler that flips `processState` to `"exited"`, and the rail/god-eye lists (`listAllSessions`) exclude archived rows outright. So gating a Resume affordance on `processState === "exited"` alone is already too late by the time any poll observes a row: it either hasn't archived yet (a window of effectively zero) or has archived and vanished from the rail entirely (UI-audit findings #14/#15). `canResumeSession` (`packages/web/src/lib/sessions.ts`) gates on EITHER signal — still-exited-but-not-yet-archived, OR already archived (`archivedAt` set) — so Resume has a durable path through the Archive, not just the ephemeral rail window. A caller that folds archived sessions back into its own list (e.g. the Overview fleet accordion) gets a working Resume through that path too. `resume()`/`resumeSession` un-archives + respawns in one call regardless of which state it finds the row in, so both branches call the exact same mutation. Shared by `SessionActions` and `RunHistory` so the two surfaces don't drift onto separate resume mechanisms.
+
+### Do not (2)
+
+- Do not gate a Resume affordance on a bare `processState === "exited"` check — a session can leave "exited" for "archived" within the same `onExit` handler that set it, so a caller sourced from a list that excludes archived rows would otherwise never see the exited state long enough to offer Resume.
+- Do not implement Resume gating twice (once per surface) — `SessionActions` and `RunHistory` both call the shared `canResumeSession`, so they can't drift onto separate mechanisms.
+
+### Source (2)
+
+Inline comment in `packages/web/src/components/SessionActions.tsx` (the component's top-of-file doc) and `packages/web/src/lib/sessions.ts` (`canResumeSession`'s own JSDoc, lines 92-103, uncondensed and out of this program's scope since under the 15-line flag threshold), as of commit `b645773be0e2cf5f702d42b80a4cb26f6e392f0d` (`fix(web): route SessionActions resume through Archive`). Extracted from the `SessionActions.tsx` site by card `7071275f`; wording condensed, no substantive detail dropped — the fuller narrative already lived in `lib/sessions.ts`'s own JSDoc, untouched by this extraction.
