@@ -29,3 +29,11 @@ Inline comment in `packages/daemon/src/pty/host.ts` (the JSDoc above `createCode
 ## Source
 
 Header doc comment in `packages/daemon/src/pty/claude-transcript.ts` (lines 6-23 pre-extraction), introduced by commit `f6e652be` (`refactor(pty): extract a HarnessAdapter seam from the claude driver`).
+
+## The coupling-audit's measurement methodology
+
+Card `2b099e48`'s coupling audit enumerated every non-`pty/` file that reads a claude-specific path/format — measured at 18 files by a positive-controlled `\.claude\b|engineSessionId` regex, POSITIVE-CONTROLLED against `pty/claude-config.ts` (20 known hits) so a zero elsewhere means genuine absence, not a broken pattern. (The finding that this regex is NOT the whole coupling surface, the `companion/chat-gateway.ts:491` gap it missed, and the corrected 19-file scope stay inline at the call site, verbatim — see `pty/adapter.ts`'s own doc comment above `HarnessCapabilities`.)
+
+### Source (this section only)
+
+Inline comment in `packages/daemon/src/pty/adapter.ts` (the module-level doc comment above `HarnessCapabilities`, "## Coupling audit → method mapping"), as of this tranche's HEAD. Extracted by this card's tranche 1 on `pty/adapter.ts`; no wording changed beyond joining wrapped source lines into flowing paragraphs and stripping `*` comment markers.

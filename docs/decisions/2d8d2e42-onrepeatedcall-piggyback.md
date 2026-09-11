@@ -50,3 +50,11 @@ Relocated by card `d6bd207b` (extraction tranche 1).
 The "Consumption" section above is from a second inline comment, `handleRepeatedToolCall`'s own JSDoc
 in `packages/daemon/src/sessions/service.ts`, as of `main` `b4721fd1`. Extracted by card `da28e0a5`
 (tranche 22 on `sessions/service.ts`).
+
+## The incident this defends against
+
+Card `2d8d2e42` is defence in depth behind card `45390f74`'s cheap primary fix (an anti-poll `note` on `gate_status`'s live reply). That fix relies on the caller actually reading and heeding the note; `pty/repeated-call-tracker.ts` gives a repeated-identical-call loop a SEPARATE, mechanical signal that fires regardless of whether any note was ever read — the real incident this defends against consumed ~800k of context in a loop that never reached a turn boundary, so `ctx_input_tokens` stayed null and `ContextWatcher` was structurally blind to it (the loop suppressed the very alarm that would otherwise have caught it). (What the signal IS and is NOT — never a call-volume rate limit, consecutive-identical-args only — stays inline at the call site, verbatim, as does the module's own description of itself; see `pty/repeated-call-tracker.ts`'s own module-level doc comment.)
+
+### Source (this section only)
+
+Module-level doc comment at the top of `packages/daemon/src/pty/repeated-call-tracker.ts`, as of this tranche's HEAD. Extracted by this card's tranche 1 on `pty/repeated-call-tracker.ts`; no wording changed beyond joining wrapped source lines into flowing paragraphs and stripping `*` comment markers.

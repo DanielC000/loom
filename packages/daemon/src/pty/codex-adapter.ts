@@ -31,14 +31,11 @@ import { watchCodexLiveness, getCachedCodexVersion } from "./codex-doctrine.js";
  * confirming hook event. Codex has NO hook relay at all (`CodexLive.hookToken` is permanently empty and
  * never checked — see that field's own doc, `pty/host.ts`) — so even a hypothetical field-shape-correct
  * `readContextStats` implementation on this adapter would still never be INVOKED for a codex session; the
- * capture is hook-triggered, and codex never fires one. MEASURED: grepped `codex-host.ts` for
- * `setContextCounters`/`ctxInputTokens`/`ctxTurns` — zero hits. A real Phase-2 fix for codex context
- * telemetry needs BOTH pieces: a confirmed `token_count`/footer-percentage field shape (this file's
- * existing note) AND a non-hook capture chokepoint for this harness (e.g. keyed off the same screen-scan
- * markers `armCodexBusyStaleTimer` already polls, or a periodic read) — neither exists today, and this is
- * the explicit ruling that gap is DEFERRED, not silently unhandled: card a1916267 found the symptom
- * (null DB columns on a live codex worker row) but did not resolve either piece, both being real,
- * separately-scoped engineering work beyond a diagnostics bugfix.
+ * capture is hook-triggered, and codex never fires one.
+ *
+ * @decision a1916267 — codex context telemetry is DEFERRED, not silently unhandled: a real fix
+ * needs BOTH a confirmed `token_count` field shape AND a non-hook capture chokepoint for codex,
+ * and neither exists today.
  */
 const capabilities: HarnessCapabilities = {
   contextTelemetry: false, // see header note — unconfirmed token_count field shape, not a real absence

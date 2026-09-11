@@ -23,10 +23,10 @@ export interface TranscriptTurn {
  * CLI harness (Phase 1+) implements the same shape instead of forking the daemon.
  *
  * ## Coupling audit → method mapping (Scope-1's deliverable)
- * The card's coupling audit enumerated every non-`pty/` file that reads a claude-specific path/format —
- * measured at 18 files by a positive-controlled `\.claude\b|engineSessionId` regex, POSITIVE-CONTROLLED
- * against `pty/claude-config.ts` (20 known hits) so a zero elsewhere means genuine absence, not a broken
- * pattern. ⚠️ **That regex is NOT the whole coupling surface** — widening it by hand (case-insensitive
+ * @decision 2b099e48 — a zero from this coupling regex means genuine absence only because it is
+ * POSITIVE-CONTROLLED against `pty/claude-config.ts` (20 known hits); widen the pattern and
+ * re-control it before trusting a bare zero from a wider or narrower version.
+ * ⚠️ **That regex is NOT the whole coupling surface** — widening it by hand (case-insensitive
  * bare `claude`) surfaced a 19th file the narrower pattern is structurally blind to:
  * `companion/chat-gateway.ts:491`, `this.submitTurn(sessionId, "/clear")` — Claude Code's own built-in
  * slash-command literal matches neither `\.claude\b` nor `engineSessionId`. Any future re-derivation of

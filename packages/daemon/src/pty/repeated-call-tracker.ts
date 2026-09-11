@@ -1,10 +1,10 @@
 /**
- * Card 2d8d2e42 — defence in depth behind card 45390f74 (the cheap primary fix: an anti-poll `note` on
- * `gate_status`'s live reply). That fix relies on the caller actually reading and heeding the note; this
- * module gives a repeated-identical-call loop a SEPARATE, mechanical signal that fires regardless of
- * whether any note was ever read — the real incident this defends against consumed ~800k of context in a
- * loop that never reached a turn boundary, so `ctx_input_tokens` stayed null and `ContextWatcher` was
- * structurally blind to it (the loop suppressed the very alarm that would otherwise have caught it).
+ * This module gives a repeated-identical-call loop a SEPARATE, mechanical signal that fires
+ * regardless of whether any note was ever read.
+ *
+ * @decision 2d8d2e42 — a mechanical backstop that fires whether or not card 45390f74's anti-poll
+ * `note` was ever read; the incident it defends against burned ~800k of context in a loop that
+ * never hit a turn boundary, leaving `ContextWatcher` structurally blind to it.
  *
  * ⛔ NOT a rate limit on tool calls — real workers routinely run 88-201 turns/day, and a volume cap would
  * punish that AND miss a loop that varies its arguments. The signal is IDENTICAL-ARGS REPETITION TO THE
