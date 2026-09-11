@@ -1115,9 +1115,9 @@ function zeroCommitMergeHazardNote(): string {
   return "⚠️ an empty branch closes done via worker_merge_confirm with full credit and no visible error EITHER WAY — confirm WHY it's empty (nothing to do vs. blocked/unable) before confirming, not just that it's empty";
 }
 
-/** @decision e1ac691b — surfaces every live mismatch/paste-tripwire candidate (≤4), chronologically —
- *  see docs/decisions/e1ac691b-worker-merge-confirm-surfaces-every-mismatch-candidate-chronologically.md
- *  ⛔ NON-BLOCKING, ALWAYS: must never gate, refuse, or require clearing to merge. */
+/** @decision e1ac691b — surfaces ALL ≤4 live mismatch/paste-tripwire candidates, chronologically, never
+ *  just the most-recent-of-four: a later resolving fusion can hide an earlier unresolved possible-loss,
+ *  and vice versa. ⛔ NON-BLOCKING, ALWAYS: must never gate, refuse, or require clearing to merge. */
 function composerIntegrityWarning(pty: PtyHost, workerSessionId: string): string | undefined {
   // Guarded with `typeof … === "function"`, not a plain call: many existing merge-confirm tests drive
   // `confirmWorkerMerge`/`finishAlreadyMerged` (this function's two call sites) against a minimal
@@ -1216,9 +1216,9 @@ function confirmationLatencyProportionalityClause(): string {
     `range is routine, not itself evidence of breakage (see memory engine-confirmation-can-lag-minutes-timeouts-assume-seconds).`;
 }
 
-/** @decision 92902cc2 — computes broken-spawn cause from `engineSessionId`, never asserts one unconditionally
- *  (two structurally distinct triggers); `composerDirtyLen` unset is NOT proof of a clean composer — see
- *  docs/decisions/92902cc2-worker-spawn-broken-notice-computes-cause-from-the-real-field.md */
+/** @decision 92902cc2 — computes broken-spawn cause from `engineSessionId`, never a hardcoded string (two
+ *  structurally distinct triggers: no session vs. session-but-no-turn-started); guards `getComposerDirtyLen`
+ *  with `typeof` (hermetic PtyStub fakes may lack it) — an unset reading is NOT proof the composer is clean. */
 function buildBrokenSpawnMsg(pty: PtyHost, w: Session): string {
   const composerDirtyLen = typeof pty.getComposerDirtyLen === "function" ? (pty.getComposerDirtyLen(w.id) ?? null) : null;
   const startedAt = typeof pty.liveStartedAt === "function" ? pty.liveStartedAt(w.id) : null;
@@ -1243,24 +1243,22 @@ function buildBrokenSpawnMsg(pty: PtyHost, w: Session): string {
     `(0 turns, no engine output) is worker_stop + a fresh worker_spawn the right recovery.`;
 }
 
-/** @decision 6651bf24 — never claims a completion that never happened for a taskless worker mid its
- *  first turn (turnSeq=0); reworded, not silenced; leads with a live re-check before any escalation —
- *  see docs/decisions/6651bf24-never-completed-first-turn-notice-rechecks-live-before-escalating.md */
+/** @decision 6651bf24 — never claims a completion that never happened for a taskless worker mid its first
+ *  turn (turnSeq=0, a busy:false reading can be a stale snapshot). Reworded, not silenced: leads with a
+ *  live worker_status re-check before escalating to transcript/message/stop — never skip straight there. */
 function buildNeverCompletedTurnMsg(w: Session): string {
   return `[loom:worker-idle] worker ${w.id}${w.taskId ? ` (task ${w.taskId})` : ""} started its first turn but has NOT completed one (turnSeq=0, taskless — no board card to check) and has never called worker_report. Do NOT read this as a completion — it isn't one. This may be a genuinely wedged first turn, or a transient busy(false) reading mid an otherwise-healthy long turn (a single point-in-time snapshot — it can already be stale by the time you see it, the engine may already be back at work). ` +
     `${confirmationLatencyProportionalityClause()} Re-check LIVE first: worker_status({workerSessionId:"${w.id}"}) for a fresh busy/turnSeq read — free, no risk. Only if it's STILL busy:false with turnSeq:0 after that re-check should you pull worker_transcript ${w.id} to see what it's actually doing, and only worker_message it or worker_stop it once that confirms it's genuinely stuck, not just caught between busy-flag edges.`;
 }
 
 /** @decision 738f2109 — set just above the MEASURED p90 confirmation latency (n=177: p50=8.5s, p90=45.9s,
- *  p95=342s, p99=675s, max=970s); deliberately NO env override (a `Number(process.env.X) || default`
- *  idiom would silently coerce `0` back to default) — see
- *  docs/decisions/738f2109-broken-spawn-holdoff-set-above-measured-p90-no-env-override.md */
+ *  p95=342s, p99=675s, max=970s; do not lower without re-checking that tail). Deliberately NO env override:
+ *  `Number(process.env.X) || default` would silently coerce `0` — the escape hatch an operator would want. */
 const BROKEN_SPAWN_HOLDOFF_MS = 60_000;
 
-/** @decision 738f2109 — measured from `pty.liveStartedAt` (the live PROCESS start), never
- *  `w.lastActivity`/`w.createdAt` (both reset/stale in ways that defeat the holdoff); an unmeasurable
- *  stub defaults to PAST the holdoff, never suppress — see
- *  docs/decisions/738f2109-broken-spawn-holdoff-set-above-measured-p90-no-env-override.md */
+/** @decision 738f2109 — measured from `pty.liveStartedAt` (the live PROCESS start), never `w.lastActivity`
+ *  (resets on every busy-flip, so a give-up/retry chain would never elapse it) or `w.createdAt` (stale
+ *  across a resume). Unmeasurable (hermetic PtyStub) defaults to PAST the holdoff — never suppress. */
 function pastBrokenSpawnHoldoff(pty: PtyHost, workerSessionId: string): boolean {
   const startedAt = typeof pty.liveStartedAt === "function" ? pty.liveStartedAt(workerSessionId) : null;
   return startedAt === null ? true : Date.now() - startedAt >= BROKEN_SPAWN_HOLDOFF_MS;
@@ -1577,9 +1575,9 @@ const UPGRADE_BUSY_WAIT_MS = Number(process.env.LOOM_UPGRADE_BUSY_WAIT_MS) || 3_
  */
 const AUTO_RETIRE_IDLE_WAIT_MS = Number(process.env.LOOM_AUTO_RETIRE_IDLE_WAIT_MS) || 25_000;
 
-/** @decision ccb407eb — pinned at 1, by MEASURED compounding cost (a 1→3 raise turned a ~26s test
- *  into a >60s timeout), not a guess. ⛔ Never widen `GIVE_UP_REQUEUE_LIMIT` to fix a loss instead —
- *  see docs/decisions/ccb407eb-give-up-remint-limit-pinned-at-1-measured-cost.md */
+/** @decision ccb407eb — pinned at 1, by MEASURED compounding cost (a 1→3 raise turned a ~26s test into a
+ *  >60s timeout across the whole suite), not a guess. ⛔ Never widen `GIVE_UP_REQUEUE_LIMIT` to fix a loss
+ *  instead — `GIVE_UP_REMINT_LIMIT` exists precisely so re-minting itself can't become a new unbounded loop. */
 const GIVE_UP_REMINT_LIMIT = Number(process.env.LOOM_GIVE_UP_REMINT_LIMIT) || 1;
 
 /**
@@ -1618,9 +1616,9 @@ let warnedMissingHasAmbiguousMatch = false;
  */
 const BACKGROUND_PARK_STALE_MINUTES = 20;
 
-/** @decision aa4e24ff — the `worker_redirect` advisory triggers on OBSERVABLE `busyForMs` (5min),
- *  never on the message's own text (a phrase list is lexically unbounded) — see
- *  docs/decisions/aa4e24ff-redirect-advisory-triggers-on-observable-hold-time-not-message-text.md */
+/** @decision aa4e24ff — the `worker_redirect` advisory triggers on OBSERVABLE `busyForMs` (5min), never
+ *  on the message's own text (a phrase list is lexically unbounded and fires falsely on an immediate
+ *  delivery to an idle worker). Do not lower the threshold casually — it avoids "manager tunes it out". */
 const WORKER_MESSAGE_HELD_ADVISORY_MS = 5 * 60_000;
 
 /**
@@ -1661,9 +1659,9 @@ type CodescapeGraphGateReason = "no-supervisor" | "not-enabled" | "no-port" | "n
  */
 export type CodescapeInjectionReason = CodescapeGraphGateReason | "asset-unreadable" | "asset-empty" | "task-class-excluded";
 
-/** @decision bed49000 — the codescape kickoff block is GATED by conventional-commit type
- *  (excludes `docs`/`style` only), not deleted — a false KEEP is cheap, a false EXCLUDE is not — see
- *  docs/decisions/bed49000-codescape-kickoff-block-gated-by-conventional-commit-type-not-deleted.md */
+/** @decision bed49000 — the codescape kickoff block is GATED by conventional-commit type (excludes
+ *  `docs`/`style` only), never deleted: a false KEEP is cheap (one skippable paragraph), a false EXCLUDE
+ *  is not. Do not add a brittle keyword heuristic for "single-file"/"test-fixture" — no dispatch-time signal exists. */
 export function isCodescapeExcludedTaskClass(taskTitle: string | null | undefined): boolean {
   if (!taskTitle) return false;
   const match = /^([a-z]+)\([^)]*\):\s/.exec(taskTitle.trim());
@@ -1685,9 +1683,9 @@ export interface CodescapeInjectionStatus {
   text: string | null;
 }
 
-/** @decision badba5a8 — pure composition (no `this`/`fs`/I/O) so all 8 outcomes are unit-testable via
- *  fixtures, never the real shared asset file; `taskTitle` checked LAST, after both infra gates — see
- *  docs/decisions/badba5a8-codescape-injection-status-is-pure-and-unit-testable-without-the-real-asset.md */
+/** @decision badba5a8 — pure composition (no `this`/`fs`/I/O), so all 8 outcomes are unit-testable via
+ *  fixtures without ever touching the real shared asset file (which would race every other codescape
+ *  test in the gate). `taskTitle` checked LAST, after both infra gates — an unset title always reads "keep". */
 export function composeCodescapeInjectionStatus(
   info: { ok: true; lastIngestedAt: string | null } | { ok: false; reason: CodescapeGraphGateReason },
   asset: ReturnType<typeof readCodescapePromptBlockAsset> | undefined,
@@ -1718,8 +1716,8 @@ export function composeCodescapeInjectionStatus(
 const FROM_MANAGER_HEADER_RE = new RegExp(`^\\[${FROM_MANAGER_TAG}(?::[a-z-]+)?\\]\\n`);
 
 // @decision f907c8c4 — matches ONLY messagePeerManager's richer cross-project peer-frame variant, never
-// a plain worker-directed frame; do not "fix" the [^\]]* first-] stop without re-checking
-// peer-message-recycle-inheritance.mjs's negative control (docs/decisions/f907c8c4-peer-message-frame-regex-is-distinct-from-worker-frame.md)
+// a plain worker-directed frame. Do not "fix" the [^\]]* first-] stop without re-checking
+// peer-message-recycle-inheritance.mjs's negative control — under-labelling fails closed, over-matching does not.
 const PEER_MESSAGE_FRAME_RE = new RegExp(`^\\[${FROM_MANAGER_TAG} · [^\\]]*\\]\\n`);
 
 /** Default run-webhook poster: one bounded `fetch` POST; the AbortController caps a hung endpoint. */
@@ -1980,8 +1978,8 @@ export class SessionService {
   private readonly platformMessageDedupe = new Map<string, { result: { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string }; atMs: number }>();
   private static readonly PLATFORM_MESSAGE_DEDUP_TTL_MS = 5 * 60_000;
   // @decision ea648f89 — resume-half memory-recall dedup gate; hash the framed block and compare against
-  // the digest persisted on the session row (never an in-memory cache — must survive a daemon restart)
-  // (docs/decisions/ea648f89-dedupe-resume-time-memory-reinjection-by-digest.md)
+  // the digest persisted on the session row — never an in-memory cache, since self-hosting restarts on
+  // every merge touching packages/daemon/src/**, which is routine, not rare.
   private stampProjectMemoryDigest(sessionId: string, framed: string | null): void {
     this.db.setLastProjectMemoryDigest(sessionId, framed ? createHash("sha256").update(framed).digest("hex") : null);
   }
@@ -2013,9 +2011,9 @@ export class SessionService {
    * half of that comparison) already is. Summing a daemon-global count against a per-manager count was
    * exactly the bug this card fixes — do NOT "simplify" this back into one shared structure; that
    * reintroduces the scope mismatch.
-   * @decision 16637a9e — released EARLY (right after the row goes live), no longer strictly in lockstep
-   * with `inFlightSpawnTaskIds`'s own finally-only release
-   * (docs/decisions/16637a9e-worker-spawn-cap-claim-released-on-live-not-finally.md)
+   * @decision 16637a9e — released EARLY, synchronously right after the row goes live (no await in
+   * between) so a slot is never counted by both liveWorkers and inFlightForManager. The idempotence
+   * guard on releaseCapSlotClaim is LOAD-BEARING — a double release silently drops a SIBLING spawn's claim.
    */
   private readonly inFlightSpawnCountByManager = new Map<string, number>();
   /**
@@ -2175,10 +2173,9 @@ export class SessionService {
     this.shutdownCleanup = fn;
   }
 
-  // @decision 0e4a859a — MUST stay presence-gated on purpose (codescape is a private product): mirrors
-  // codescapeHttpMcpServer's own mount gate exactly, never a looser/separate check, so
-  // resolveCodescapeBlockText can never tell a session to load a graph that isn't actually served
-  // (docs/decisions/0e4a859a-resolve-codescape-graph-context-caching-and-degrade.md)
+  // @decision 0e4a859a — MUST stay presence-gated on purpose (codescape is a private product), mirroring
+  // codescapeHttpMcpServer's own mount gate exactly, so this check can never diverge from what actually
+  // mounts. A stamp-read hiccup degrades to an unstamped block, never hides the whole feature.
   private resolveCodescapeGraphContext(project: Project): { ok: true; lastIngestedAt: string | null } | { ok: false; reason: CodescapeGraphGateReason } {
     if (!this.codescape) return { ok: false, reason: "no-supervisor" };
     const codescapeEnabled = resolveCodescapeConfig(project.config).enabled;
@@ -2191,8 +2188,8 @@ export class SessionService {
   }
 
   // @decision badba5a8 — the SINGLE source of truth for the rendered block text + the three
-  // observability facts; thin wiring over composeCodescapeInjectionStatus, never a second gate mirror
-  // (docs/decisions/badba5a8-codescape-injection-status-is-pure-and-unit-testable-without-the-real-asset.md)
+  // observability facts; thin wiring over composeCodescapeInjectionStatus. Never create a second/third
+  // parallel gate mirror — resolveCodescapeBlockText must stay a thin delegator over this.
   private resolveCodescapeInjectionStatus(project: Project, taskTitle?: string | null): CodescapeInjectionStatus {
     const info = this.resolveCodescapeGraphContext(project);
     const asset = info.ok ? readCodescapePromptBlockAsset(CODESCAPE_PROMPT_BLOCK_ASSET) : undefined;
@@ -2200,18 +2197,17 @@ export class SessionService {
   }
 
   // @decision f3ce53f1 — PRIVACY GUARD: reads the block's prose from the dev-only codescape skill asset,
-  // NEVER a string literal in this source — the prose must never reach a published dist/ (a compiled
-  // identifier is fine, owner ruling Request e685f273, but the leaked-feature text is not)
-  // (docs/decisions/f3ce53f1-codescape-prose-lives-only-in-a-dev-only-asset-file.md)
-  // @decision badba5a8 — thin delegator over resolveCodescapeInjectionStatus, one source of truth
-  // (docs/decisions/badba5a8-codescape-injection-status-is-pure-and-unit-testable-without-the-real-asset.md)
+  // NEVER a string literal in this source (a missing/unreadable file degrades to no block, never an
+  // embedded fallback) — a compiled identifier is fine (owner ruling, Request e685f273), leaked prose is not.
+  // @decision badba5a8 — resolveCodescapeBlockText is a THIN DELEGATOR over resolveCodescapeInjectionStatus,
+  // never a second/third parallel gate mirror that could drift from the one source of truth.
   private resolveCodescapeBlockText(project: Project): string | null {
     return this.resolveCodescapeInjectionStatus(project).text;
   }
 
   // @decision 547d5fc4 — profile-driven spawn resolution is fully additive: profileId===null is
-  // byte-identical to before; an explicit caller role always wins over the profile's role
-  // (docs/decisions/547d5fc4-profile-driven-spawn-resolution-is-fully-additive.md)
+  // byte-identical to before; an explicit caller role ALWAYS wins over the profile's role. Never
+  // re-resolve the profile's skills subset on resume/fork/recycle — read the PINNED value off the row.
   private resolveAgentSpawn(
     agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false, companionName?: string,
   ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; connections: string[]; vaultWrite: boolean; harness: "claude" | "codex" | undefined } {
@@ -2238,11 +2234,13 @@ export class SessionService {
     // undefined (today's plain). The force-plain path passes no explicitRole, so it resolves null.
     const role = explicitRole ?? profileRole ?? undefined;
     // @decision 760cd01d — do not let config.permission.startupModeCycles determine a worker's boot-cycle
-    // target; it is pinned to `auto` via withRolePermissionModeCyclesPin (docs/decisions/760cd01d-pin-worker-boot-mode-to-auto.md)
-    // @decision 5603f40f — the assistant role gets the SAME `auto` pin, for the same no-live-TUI-human
-    // reason as worker (docs/decisions/5603f40f-pin-assistant-boot-mode-to-auto.md)
-    // @decision 3388be4d — the role-scoped transcript-root deny lives solely at PtyHost.createPty, never
-    // recomputed here (docs/decisions/3388be4d-role-scoped-transcript-root-deny-lives-at-createpty.md)
+    // target: a spawned worker has no human at its TUI to answer an acceptEdits-only prompt, so it is
+    // pinned to `auto` independent of that project-level knob, via withRolePermissionModeCyclesPin.
+    // @decision 5603f40f — the assistant role gets the SAME `auto` pin (a companion's "human" reaches it
+    // over chat, never a live TUI either) — NOT a ruling that auto-approve is right for a chat-facing
+    // role, only that it preserves today's existing effective default; a stricter default is undecided.
+    // @decision 3388be4d — the role-scoped transcript-root deny lives solely at PtyHost.createPty, keyed
+    // off opts.role — never recompute it here or at any other call site.
     const permission = withRolePermissionModeCyclesPin(baselinePermission, role);
     // Same `|| undefined` empties-to-undefined coercion today's start paths use on the agent prompt.
     const ownPrompt = resolved.startupPrompt || undefined;
@@ -2292,9 +2290,9 @@ export class SessionService {
     };
   }
 
-  // @decision a92ea138 — companion "/new" reinject is COMPOSE-ONLY (never spawns/writes/re-arms) and
-  // reads the PINNED role, never re-resolving the agent's current profile
-  // (docs/decisions/a92ea138-companion-reinject-is-compose-only-and-role-pinned.md)
+  // @decision a92ea138 — companion "/new" reinject is COMPOSE-ONLY (never spawns/writes/re-arms): passes
+  // explicitRole:"assistant" rather than re-resolving the agent's CURRENT profile, so a profile edited
+  // after companion creation can't change what a reinject composes for it.
   composeCompanionReinjectPrompt(sessionId: string): string | undefined {
     const session = this.db.getSession(sessionId);
     if (!session || session.role !== "assistant") return undefined;
@@ -2464,8 +2462,8 @@ export class SessionService {
   }
 
   // @decision 53edd8d5 — a scheduled manager's custom prompt + scheduledSpawn flag are both additive;
-  // every non-Scheduler caller stays byte-identical to before either existed
-  // (docs/decisions/53edd8d5-scheduled-manager-prompt-and-cap-are-additive.md)
+  // every non-Scheduler caller stays byte-identical to before either existed. Never fold the Scheduler's
+  // own manager-cap budget into the standing human/Lead-spawned fleet's cap — they are separate budgets.
   startManager(agentId: string, prompt?: string | null, opts?: { scheduled?: boolean }): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
@@ -2572,8 +2570,9 @@ export class SessionService {
   // Card 26aa4322 — this is NOT the trust boundary: platform-spawn is HUMAN-REST only (+ self-recycle);
   // session_spawn REFUSES role:"platform", so no agent/MCP path can mint one — the create-only/singleton
   // shape below is an operational guarantee, never the boundary.
-  // @decision 8ddcf787 — create-only, multiple concurrent Leads allowed
-  // (docs/decisions/8ddcf787-platform-lead-spawn-is-create-only-multiple-concurrent-leads.md)
+  // @decision 8ddcf787 — create-only, multiple concurrent Leads allowed: a manual Spawn always mints a
+  // FRESH platform session, never reusing an already-live one. Never reintroduce a "never two LIVE
+  // Leads" singleton short-circuit here — resuming an exited Lead stays an explicit human action.
   startPlatformLead(agentId: string): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
@@ -2735,8 +2734,9 @@ export class SessionService {
   }
 
   /**
-   * @decision f9b47cd1 — CREATE-ONLY, not a singleton (design gotcha #9); do NOT copy startSetup's
-   * live-reuse guard here (docs/decisions/f9b47cd1-workspace-auditor-create-only-not-singleton.md)
+   * @decision f9b47cd1 — CREATE-ONLY, not a singleton (design gotcha #9): each "Review my workspace" run
+   * is a fresh ephemeral session. Do NOT copy startSetup's live-reuse guard here — that would attach a
+   * repeated click to a stale, already-finished run.
    */
   startWorkspaceAuditor(agentId: string, prompt?: string | null): Session {
     const agent = this.db.getAgent(agentId);
@@ -2810,8 +2810,9 @@ export class SessionService {
 
   // HUMAN-REST only (gateway POST /api/agents/:id/sessions {role:"setup"}) — no agent/MCP path mints one
   // (session_spawn on the setup surface itself REFUSES role "setup", so a setup session can't self-clone).
-  // @decision ad131671 — SINGLETON = "never two LIVE", not "one row ever"
-  // (docs/decisions/ad131671-setup-assistant-singleton-is-never-two-live-not-one-row-ever.md)
+  // @decision ad131671 — SINGLETON = "never two LIVE", not "one row ever": reuse an already-LIVE setup
+  // session as-is (an EXITED row is fine to leave behind, never resumed here). Never find a reuse
+  // candidate without filtering to LIVE first — db.liveSessions already does this.
   startSetup(agentId: string): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
@@ -2889,8 +2890,9 @@ export class SessionService {
 
   // HUMAN-REST only (gateway POST /api/agents/:id/sessions {role:"operator"}, flag-gated 403 when off) —
   // no agent/MCP path mints one (session_spawn on every agent-facing surface refuses role "operator").
-  // @decision 89d8e17d — create-only (not a singleton), and flag-gated at the CALLER, not here
-  // (docs/decisions/89d8e17d-elevated-operator-is-create-only-and-caller-flag-gated.md)
+  // @decision 89d8e17d — create-only, deliberately NOT startSetup's live-reuse guard: a human may want
+  // several independent operator sessions live at once. Flag-gated at the CALLER (REST route), never
+  // re-checked inside this method — the router's resolveRole is the separate live-read enforcement point.
   startOperator(agentId: string): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
@@ -3005,7 +3007,8 @@ export class SessionService {
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
     // @decision e98877b1 — on agent-row-missing resume, still apply the role-keyed pin via
-    // withRolePermissionModeCyclesPin(config.permission, session.role) — never bare config.permission (docs/decisions/e98877b1-preserve-role-mode-pin-when-agent-row-missing.md)
+    // withRolePermissionModeCyclesPin(config.permission, session.role), keyed off the row's PINNED role
+    // (not the deleted agent's profile) — never fall back to bare config.permission alone.
     const agent = this.db.getAgent(session.agentId);
     const resumePermission = agent
       ? this.resolveAgentSpawn(agent, config, session.role ?? undefined).permission
@@ -3031,8 +3034,9 @@ export class SessionService {
       this.pty.spawn({
         sessionId: session.id,
         cwd: session.cwd, // SAME cwd — Claude keys sessions to the project dir
-        // @decision f05e4897 — do not give --resume a blind Shift-Tab count; pass resumeModeTarget so a
-        // resumed session converges to the same mode a fresh spawn of this config would reach (docs/decisions/f05e4897-converge-resume-mode-target-with-fresh-spawn.md)
+        // @decision f05e4897 — do not give --resume a blind Shift-Tab count (or blind startupModeCycles:0
+        // alone); pass resumeModeTarget explicitly so a resumed session converges to wherever a FRESH
+        // spawn of this config would land — --resume honours --permission-mode, never restores the persisted mode.
         permission: { ...resumePermission, startupModeCycles: 0 },
         resumeModeTarget: modeAfterCyclesFromAcceptEdits(resumePermission.startupModeCycles ?? 0),
         geometry: config.pty,
@@ -3079,7 +3083,7 @@ export class SessionService {
     // forever, so enqueued worker reports queue instead of submitting and the idle guard can't fire.
     this.db.setBusy(session.id, false);
     // @decision ea648f89 — do not re-enqueue this block unconditionally on every resume; compare its
-    // digest against the one persisted on the session row and skip when unchanged (docs/decisions/ea648f89-dedupe-resume-time-memory-reinjection-by-digest.md)
+    // digest against the one persisted on the session row and skip when unchanged.
     if (session.role === "assistant") {
       const recall = buildFramedMemoryRecall(listCompanionMemories(session.id), (name) => readCompanionMemory(session.id, name));
       const recallDigest = recall ? createHash("sha256").update(recall).digest("hex") : null;
@@ -3088,8 +3092,8 @@ export class SessionService {
         this.db.setLastCompanionMemoryDigest(session.id, recallDigest);
       }
     }
-    // @decision ea648f89 — do not re-enqueue this block unconditionally on every resume; compare its
-    // digest against the one persisted on the session row and skip when unchanged (docs/decisions/ea648f89-dedupe-resume-time-memory-reinjection-by-digest.md)
+    // @decision ea648f89 — companion-recall sibling above: same dedup gate for project-memory notes —
+    // compare the digest against the one persisted on the session row and skip when unchanged.
     {
       const boundTask = session.taskId ? this.db.getTask(session.taskId) : undefined;
       const kickoffText = boundTask ? `${boundTask.title}\n${boundTask.body}` : (agent?.startupPrompt ?? "");
@@ -3111,9 +3115,8 @@ export class SessionService {
   }
 
   // @decision d88163b7 — companion-specific CONVERSATION-PRESERVING respawn: re-resolve + re-pin the
-  // capability surface, stop the old pty, then resume() into the SAME transcript; a deliberate,
-  // human-triggered escape hatch, never auto-fired from a grant write
-  // (docs/decisions/d88163b7-hold-drain-surface-and-bounded-busy-wait.md)
+  // capability surface, stop the old pty, then resume() into the SAME transcript. A deliberate,
+  // human-triggered escape hatch (REST only) — never auto-fire this from a capability-grant write.
   async upgradeCompanionCapabilities(sessionId: string): Promise<Session> {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
@@ -3124,20 +3127,23 @@ export class SessionService {
     const agent = this.db.getAgent(session.agentId);
     if (!agent) throw new Error("agent not found");
     const config = resolveConfig(project.config);
-    // @decision 1a048349 — `connections`/`vaultWrite` are re-pinned here for a stateless-router
-    // reason, not a respawn one (docs/decisions/1a048349-repin-connections-vaultwrite-stateless-router-reason.md)
+    // @decision 1a048349 — `connections`/`vaultWrite` are re-pinned here for a stateless-router reason,
+    // not a respawn one: TaskMcpRouter re-resolves them fresh off this ROW on every request, so the row
+    // write alone takes effect on the very next tool call — never assume they need the respawn below.
     const { browserTesting, documentConversion, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite } =
       this.resolveAgentSpawn(agent, config, "assistant");
     this.db.setSessionCapabilitySurface(sessionId, { browserTesting, documentConversion, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite });
     const carried: QueuedMessage[] = [];
     const drain = (): void => { carried.push(...this.pty.flushPending(sessionId)); };
     if (this.pty.isAlive(sessionId)) {
-      // @decision d88163b7 — hold the drain surface for this session's entire stop sequence before
-      // the busy-wait below, or a message can bypass drain() (docs/decisions/d88163b7-hold-drain-surface-and-bounded-busy-wait.md)
+      // @decision d88163b7 — hold the drain surface for this session's ENTIRE stop sequence before the
+      // busy-wait even starts, or a queued/arriving message can bypass drain() — lost, or wrongly
+      // submitted as a fresh turn via drainPending's synchronous Stop-hook splice.
       this.pty.holdDrain(sessionId);
       try {
-        // @decision d88163b7 — the busy-wait bound only protects queued messages, never the busy
-        // turn itself; not a free knob to raise (docs/decisions/d88163b7-hold-drain-surface-and-bounded-busy-wait.md)
+        // @decision d88163b7 — the busy-wait bound only protects QUEUED messages (drain() catches those
+        // regardless of whether the bound is hit); it does NOT protect the busy turn itself — a turn
+        // still busy at the bound is still force-interrupted, its in-flight reply still lost. Not a free knob.
         const waitDeadline = performance.now() + UPGRADE_BUSY_WAIT_MS;
         while (this.pty.isBusy(sessionId) && performance.now() < waitDeadline) {
           await new Promise((r) => setTimeout(r, 100));
@@ -3164,12 +3170,14 @@ export class SessionService {
           drain();
         }
         if (!died) {
-          // @decision f25bf3bf — preserve the give-up hold when requeuing back onto the still-alive
-          // pty (docs/decisions/f25bf3bf-preserve-give-up-hold-on-requeue.md)
-          // @decision ccb407eb — carry msg.onGiveUpExhausted through this requeue too (finding [6])
-          // (docs/decisions/ccb407eb-carry-givenupexhausted-through-upgrade-requeue.md)
-          // @decision 02baa3a5 — also carry logicalId/mintedAtGen/mintedAtWallClock — mintedAtGen is
-          // still valid age evidence here, no resume boundary crossed (docs/decisions/02baa3a5-carry-logicalid-mintedat-through-upgrade-requeue.md)
+          // @decision f25bf3bf — preserve the give-up hold when requeuing back onto the still-alive pty:
+          // same session/process, never stopped, so a still-held entry is exactly as ambiguous as when
+          // we drained it — putting it back with the hold intact just restores the status quo.
+          // @decision ccb407eb — carry msg.onGiveUpExhausted through this requeue too, even though it's
+          // always undefined in practice on this durable-only-skipped loop (finding [6]).
+          // @decision 02baa3a5 — carry ALL THREE: logicalId, mintedAtGen, mintedAtWallClock. No resume
+          // boundary crossed here (same still-alive pty), so mintedAtGen is still valid age evidence —
+          // unlike the post-resume loop below, which deliberately omits it.
           for (const msg of carried) {
             this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, {
               giveUpHeldUntil: msg.giveUpHeldUntil, onGiveUpExhausted: msg.onGiveUpExhausted, logicalId: msg.logicalId,
@@ -3184,14 +3192,16 @@ export class SessionService {
       }
     }
     const resumed = this.resume(sessionId);
-    // @decision f25bf3bf — preserve the give-up hold across this resume too; an immediate replay
-    // into the resumed transcript is the confusing-duplicate shape the hold prevents (docs/decisions/f25bf3bf-preserve-give-up-hold-on-requeue.md)
+    // @decision f25bf3bf — preserve the give-up hold across this resume too: the resumed transcript
+    // already reflects what the predecessor's engine did, so an immediate replay is exactly the
+    // confusing-duplicate shape the hold exists to delay. Do NOT carry this to the recycle path (opposite conclusion there).
     for (const msg of carried) {
       if (msg.onDeliver) continue;
-      // @decision ccb407eb — carry msg.onGiveUpExhausted through this requeue too (finding [6])
-      // (docs/decisions/ccb407eb-carry-givenupexhausted-through-upgrade-requeue.md)
-      // @decision 02baa3a5 — carry logicalId/mintedAtWallClock but deliberately omit mintedAtGen —
-      // resume() resets submitGeneration to 0 (docs/decisions/02baa3a5-carry-logicalid-mintedat-through-upgrade-requeue.md)
+      // @decision ccb407eb — carry msg.onGiveUpExhausted through this requeue too, even though it's
+      // always undefined in practice on this durable-only-skipped loop (finding [6]).
+      // @decision 02baa3a5 — carry logicalId/mintedAtWallClock but deliberately OMIT mintedAtGen: a
+      // fresh Live's submitGeneration restarts at 0 after resume(), so the predecessor's generation count
+      // compared against it would be a unit error, not evidence.
       this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, {
         giveUpHeldUntil: msg.giveUpHeldUntil, onGiveUpExhausted: msg.onGiveUpExhausted, logicalId: msg.logicalId,
         mintedAtGen: undefined, // DELIBERATELY OMITTED — fresh Live's submitGeneration restarts at 0 (see comment above)
@@ -3202,8 +3212,8 @@ export class SessionService {
   }
 
   // @decision 39fcaad3 — daemon_restart's safety gates (supervisor-check, rebuild-first) are ROLE-
-  // INDEPENDENT: a platform-Lead caller gets the identical path a manager gets, never a weaker one
-  // (docs/decisions/39fcaad3-daemon-restart-safety-is-role-independent.md)
+  // INDEPENDENT: a platform-Lead caller gets the identical path a manager gets, never a weaker one.
+  // Never exit or record restart intent before the rebuild succeeds — a broken build must abort and leave the daemon running.
   // @decision f05e5a06 — must itself await the merge-danger-window guard before exiting; a bare
   // process.exit() emits no signal, so the SIGINT/SIGTERM/SIGHUP-bound guard never fires for this path
   // (docs/decisions/f05e5a06-daemon-restart-awaits-merge-danger-window-since-exit-emits-no-signal.md)
