@@ -4907,27 +4907,35 @@ export class SessionService {
    * snapshot. Strictly mutually exclusive per boot with {@link SessionService.resumeFleetOnBoot}; a
    * third path, `CrashRecoveryWatcher.tick`, is a continuous runtime per-session auto-resume that runs
    * regardless of which of these two fired.
-   * @decision 9fc41af5 — invoked ONLY when no RestartIntent was captured this boot, to avoid
-   *  double-nudging the fleet resumeFleetOnBoot already recovers
-   *  (docs/decisions/9fc41af5-recovercrashorphanedworkers-invoked-only-without-restartintent.md)
-   *  @decision sha:b65d9a5e — manager-first resume order + which recovered sessions get nudged
-   *  (docs/decisions/b65d9a5e-manager-first-resume-and-done-parked-nudge-suppression.md)
-   *  @decision 9f7c59f1 — one of three enqueueDurableNudge resume-and-nudge paths, NOT the only ones
-   *  (docs/decisions/9f7c59f1-enqueuedurablenudge-not-private-third-resume-path.md)
-   *  @decision 90b9e904 — shares enqueueDurableNudge's opts generalization for durability + the MCP-seen gate
-   *  (docs/decisions/90b9e904-enqueuedurablenudge-opts-param-generalizes-three-sites.md)
-   *  @decision 06ebbb78 — durability convergence facet shared with resumeFleetOnBoot
-   *  (docs/decisions/06ebbb78-resumefleetonboot-routes-through-enqueuedurablenudge.md)
-   *  @decision 959a5fb7 — gates the crash nudge on awaitingReview, not the wider reportedDone
-   *  (docs/decisions/959a5fb7-awaitingreview-not-reporteddone-gates-the-crash-nudge.md)
-   *  @decision db05e657 — a blocked worker gets a distinct re-state-your-blocker nudge, tallied apart from done
-   *  (docs/decisions/db05e657-blocked-worker-gets-a-distinct-restate-blocker-nudge.md)
-   *  @decision be79aea2 — opts.shutdownMarker distinguishes a clean stop from a real crash
-   *  (docs/decisions/be79aea2-shutdownmarker-distinguishes-clean-stop-from-crash.md)
-   *  @decision 2f146782 — opts.hadCrashLogAtBoot distinguishes an external kill from a JS crash
-   *  (docs/decisions/2f146782-hadcrashlogatboot-distinguishes-external-kill-from-js-crash.md)
-   *  @decision 572dd777 — opts.bootedAt + opts.supervisorIteration add correlatable boot diagnostics
-   *  (docs/decisions/572dd777-bootedat-and-supervisoriteration-in-the-crash-nudge.md)
+   * @decision 9fc41af5 — do not call this on a boot where a RestartIntent was captured (or
+   *  resumeFleetOnBoot on one that wasn't) — both would double-nudge the same candidate fleet on one boot.
+   *  @decision sha:b65d9a5e — resume each candidate's MANAGER before its own workers (an unresumed manager
+   *  leaves a worker orphaned); withhold the nudge from a `done`/awaiting-review worker and from any parked
+   *  (rate-limited) session; still send the per-manager summary nudge even when every worker failed to resume.
+   *  @decision 9f7c59f1 — one of three resume-and-nudge paths converged onto `enqueueDurableNudge`; never
+   *  runs in the same boot as `resumeFleetOnBoot` (index.ts picks exactly one, keyed on whether a
+   *  RestartIntent was captured); its report-state/ordering/nudge-text rulings are per-facet, not shared.
+   *  @decision 90b9e904 — do not add `opts` to these calls casually: every enqueueDurableNudge call here
+   *  omits it, relying on the `kind:"warning"` default the wake/poll/event-trigger generalization preserved
+   *  byte-for-byte for this pre-existing caller.
+   *  @decision 06ebbb78 — this method's nudges share the durability convergence 06ebbb78 gave `resumeFleetOnBoot`:
+   *  never route them through a bare/non-durable dispatch (`enqueueNudge`/`deferredNudge`/raw `pty.enqueueStdin`)
+   *  — give-up exhaustion during a fleet-wide boot resume would otherwise silently drop the nudge.
+   *  @decision 959a5fb7 — gate nudge-suppression (and the "awaiting review/merge" summary count) on
+   *  `awaitingReview`, never the wider `reportedDone` (stays true forever even once the manager has consumed
+   *  and followed up on the report) — that would wrongly withhold the nudge from a worker mid-fix on a new directive.
+   *  @decision db05e657 — give a recovered `blocked` worker its own re-state-your-blocker nudge, never the
+   *  generic continue-nudge or silence; tally it as `awaitingReviewBlockedCount`, apart from a `done` report's
+   *  `awaitingReviewDoneCount`, so the summary never claims a blocked-only recovery has something to merge.
+   *  @decision be79aea2 — swap the `[loom:crash-recovered]` phrasing for `[loom:daemon-restarted]` when
+   *  `opts.shutdownMarker` holds a fresh clean-stop record — a signal/service-manager stop racing ahead of
+   *  a graceful snapshot is not a crash; a missing/null marker means unclassified, not proof of a crash.
+   *  @decision 2f146782 — when `shutdownMarker` is absent and `hadCrashLogAtBoot` is false, say the process
+   *  was killed from outside (no crash record was written), never claim a JS crash — the flag reflects
+   *  whether `crash.log` existed before `installCrashHandlers()` rotated it; omitted it defaults to `true`.
+   *  @decision 572dd777 — every crash-recovered/daemon-restarted nudge variant must append `bootedAt`
+   *  (correlate against `daemon-output.log`) and the conditional `iterationClause`; never surface
+   *  `supervisorIteration` on the clean-stop branch — that combination should be structurally impossible.
    */
   recoverCrashOrphanedWorkers(
     candidates: CrashOrphanedWorker[],
