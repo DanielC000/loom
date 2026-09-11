@@ -320,6 +320,12 @@ thing it exists to do.
    enough pre-existing corpus makes almost any token "present" somewhere, so the check would pass
    unconditionally. Handle a token that resolves to a pre-existing, unrelated record as a
    separately-explained exception; never fold it into the automated pass condition.
+   **A removed clause counts as carried ONLY by a record anchored AT THAT SITE.** A token that
+   survives in some OTHER record — one not anchored at the site the clause was removed from —
+   does NOT carry it: the reader of that site never gets that record injected. Measured specimen:
+   `host.ts` tranche 44 (card `47021afd`) credited removed tokens to `4a0af485`'s record while the
+   site's own anchor pointed at `bc0774c4`; the scan counted the tokens as surviving, but a reader
+   following that site's anchor would never see them.
 5. **Lint before/after: `orphanAnchors` must not grow, *and* `collidingRecords` must not grow.**
    Checking only `orphanAnchors` is unsafe — a same-id sibling record satisfies "the id still
    resolves" while the other file sharing that id goes permanently dark, and `orphanAnchors` stays

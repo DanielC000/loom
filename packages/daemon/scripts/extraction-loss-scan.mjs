@@ -28,6 +28,14 @@
 //      [a-z][a-z0-9_]{7,}, \b[0-9a-f]{8}\b) not found in the added lines or in those record files —
 //      printed as an advisory miss with its removed-line context.
 //
+// ⚠️ RECORD FILES ARE POOLED ACROSS THE WHOLE DIFF, not scoped to any one removed clause's own site:
+// step 3 collects every @decision id from ANY added line in the file, and step 4 checks EVERY removed
+// line's tokens against the union of all resolved record files. A clean run does NOT prove a removed
+// clause was credited to a record anchored AT the site it was removed from — only that its tokens
+// appear somewhere in that pooled corpus. Per docs/extraction-program.md item 4: a token that survives
+// in some OTHER record (one not anchored at the removed clause's own site) does not carry it, and this
+// script cannot see that distinction — resolve site-crediting by hand, per removed clause.
+//
 // Exit non-zero iff there is a non-comment removed/added line or an over-length added line — that is a
 // structural violation of the "comment-only tranche" contract. A miss (item 4) is NEVER a reason to
 // exit non-zero: it is a candidate to read by hand, and ordinary rewording produces them (see
@@ -68,6 +76,10 @@ Exit 0 unless a non-comment removed/added line or an over-${MAX_ADDED_LINE_BYTES
 found (both are printed either way) — those are structural violations of "comment-only tranche", not
 advisory. Every reported miss (a removed-line token absent from both the added lines and the records its
 added @decision ids resolve to) is advisory only and never affects the exit code.
+
+Record files are POOLED across the whole diff, not scoped to any one removed clause's own site — a
+clean run does not prove a removed clause was credited to a record anchored AT the site it came from.
+Per docs/extraction-program.md item 4, resolve site-crediting by hand, per removed clause.
 `;
 
 function parseArgs(argv) {
