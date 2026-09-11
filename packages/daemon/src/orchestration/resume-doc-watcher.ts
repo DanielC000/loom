@@ -33,18 +33,14 @@ const DEFAULT_COOLDOWN_MS = 30 * 60_000;
  * (card c1f2f095) instead of a second hardcoded guess — and nudging with the SAME `resumeDocSizeWarning`
  * check used at spawn time — one threshold, one message, two trigger points.
  *
- * Structural twin of ContextWatcher/IdleWatcher, but SIMPLER on purpose: unlike context occupancy (which
- * only grows within a session and needs an explicit recycle to reset), a resume doc's size is
- * SELF-CLEARING — the moment a manager rotates it (the nudge's own ask), the file shrinks back under
- * threshold and the very next tick naturally stops nudging. There is no "acknowledged" state to survive
- * a restart, so the cooldown is a plain IN-MEMORY `Map`, not a persisted DB column: a daemon restart just
- * clears it, and the worst case is one extra nudge on the next tick if the doc is still oversized — never
- * a correctness issue, and deliberately cheaper than ContextWatcher's persisted escalation state.
- *
  * Bounded + never-throw like every other watcher tick: `resumeDocSizeWarning` itself never throws (a
  * missing file — a fresh project with no doc yet — or a permission/lock error is a silent no-op), and
  * this tick() additionally wraps each manager's own iteration so one bad project/session lookup can never
  * abort the rest of the sweep.
+ *
+ * @decision 809cc4b5 — simpler than its structural twins (ContextWatcher/IdleWatcher) on purpose: the
+ * cooldown stays in-memory, never persisted, because the doc's size is self-clearing.
+ *
  */
 export class ResumeDocWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;

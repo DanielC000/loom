@@ -84,10 +84,9 @@ export class Scheduler {
    *  - MANAGER CAP (finding 3, NARROWED by card 53edd8d5): stop once `maxConcurrentManagers` live
    *    SCHEDULER-SPAWNED managers exist (`countLiveScheduledManagers`) — NOT the daemon-wide live-manager
    *    count. A standing human/Lead-spawned fleet never counts against this budget, however large it
-   *    grows, so it can never permanently starve a cadence (the bug this narrowing fixes: the cap used
-   *    to count every live manager, so an account with ≥cap standing managers could never fire a
-   *    schedule again). The remaining due schedules are deferred to the next tick (next_fire_at
-   *    untouched) — like the pause gate — and the deferral is recorded (see DEFERRAL OBSERVABILITY below).
+   *    grows, so it can never permanently starve a cadence. The remaining due schedules are deferred to
+   *    the next tick (next_fire_at untouched) — like the pause gate — and the deferral is recorded (see
+   *    DEFERRAL OBSERVABILITY below).
    *  - AUDITOR BUDGET: auditor-kind schedules ('auditor' / 'workspace-auditor') draw from a SEPARATE small
    *    budget, NOT the manager cap — a read-mostly audit run never burns a manager slot and is never blocked
    *    by a full manager cap (and vice versa). An over-budget auditor is `continue`-skipped (left due),
@@ -95,15 +94,23 @@ export class Scheduler {
    *  - DEFERRAL OBSERVABILITY (card 53edd8d5): a budget-deferred schedule stamps `lastDeferredAt`/
    *    `lastDeferredReason` (Db.markDeferred) and emits a `schedule_fire_deferred` event — but ONLY on a
    *    TRANSITION into deferred (first defer, or the reason changing since last tick), never once per
-   *    tick for a schedule that stays blocked for the SAME reason. A schedule starved for hours would
-   *    otherwise write a near-identical event every 60s tick, flooding the event log. Both are cleared by
-   *    `markFired` on the schedule's next successful fire.
+   *    tick for a schedule that stays blocked for the SAME reason. Both are cleared by `markFired` on
+   *    the schedule's next successful fire.
    *  - OWNER-REQUEST SPAWN GATE (card 0ad1ca68): a "manager"-kind schedule whose project board is fully
    *    gated on an unanswered owner Request is deferred, via the SAME transition-only bookkeeping as the
-   *    manager-cap defer above, rather than booting an identical seat that would just re-derive the same
-   *    "0 actionable" conclusion a predecessor already reached. See pending-request-gate.ts for the
-   *    predicate itself (and the guardrail it's built to respect: never suppress on 0-actionable alone).
-   *    Auditor-kind schedules are exempt — read-mostly, not the respawn cost this gate targets.
+   *    manager-cap defer above. See pending-request-gate.ts for the predicate itself (and the guardrail
+   *    it's built to respect: never suppress on 0-actionable alone). Auditor-kind schedules are exempt —
+   *    read-mostly, not the respawn cost this gate targets.
+   *
+   * @decision 53edd8d5 — the manager cap counts only scheduler-spawned managers: it once counted every
+   * live manager and could permanently starve a schedule once the standing fleet reached the cap.
+   *
+   * @decision 53edd8d5 — schedule_fire_deferred fires only on a transition into deferred, never every
+   * tick for the same reason, to avoid flooding the event log.
+   *
+   * @decision 0ad1ca68 — the owner-request spawn gate exists so a fresh seat isn't re-booted only to
+   * re-derive a predecessor's already-reached 0-actionable conclusion.
+   *
    */
   async tick(now: Date = new Date()): Promise<void> {
     const due = this.deps.db.listDueSchedules(now.toISOString());

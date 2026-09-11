@@ -16,8 +16,18 @@ Standing human/Lead-spawned managers do NOT count against this cap and can never
 - Do not fold the Scheduler's manager-cap budget (`countLiveScheduledManagers`) into the standing human/Lead-spawned fleet's cap — they are deliberately separate budgets.
 - Do not assume a large standing manager fleet can starve a schedule — only scheduler-spawned managers compete for this budget; a schedule can never be blocked by however large the standing human/Lead-spawned fleet grows.
 
+## The scheduler-side fix: the incident and its narrowing rationale
+
+`Scheduler.tick()`'s MANAGER CAP (finding 3, narrowed) and DEFERRAL OBSERVABILITY bullets are still stated in full inline at `orchestration/scheduler.ts` (each carries its own `@decision 53edd8d5` anchor) — the mechanism belongs at the call site, not here. What doesn't fit at the call site is the WHY behind each, landed in the same commit, `c07bcdb89914598085e5c60b81bc554e8b3148d4`:
+
+**The bug this narrowing fixes:** the cap used to count every live manager, so an account with ≥cap standing managers could never fire a schedule again.
+
+**Why `schedule_fire_deferred` fires only on a transition, never every tick:** a schedule starved for hours would otherwise write a near-identical event every 60s tick, flooding the event log.
+
 ## Source
 
 Inline comment in `packages/daemon/src/sessions/service.ts` (`startManager`'s doc): originally lines 2606-2621, as of this tranche's HEAD. Relocated by card `9f4f8e5a` (tranche 7); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
 
 The "can never block a cadence" clause above was also carried by the `maxConcurrentManagers` doc in `packages/shared/src/config.ts` (`OrchestrationConfig`), originally lines 344-362 as of the `shared/config.ts` tranche 1 HEAD, and was dropped from source there without landing in this record at the time — added by card `6377d105` (tranche 1 on `shared/config.ts`) to close that gap; no wording changed from the original clause.
+
+The "scheduler-side fix" section above: the two parenthetical/appended clauses in the MANAGER CAP and DEFERRAL OBSERVABILITY bullets above `Scheduler.tick()` in `packages/daemon/src/orchestration/scheduler.ts` — the rest of each bullet (the mechanism) stays inline at that site. No wording changed.

@@ -16,3 +16,8 @@ The agent Reads the emitted path verbatim, with zero derivation of its own, inst
 JSDoc comment above `composeManagerStartupPrompt` in `packages/daemon/src/sessions/manager-prompt.ts`: originally lines 19-27, as of this tranche's HEAD. Introduced by commit `7b26153e2cde8e544b0b44c177b2c496326b4cec` (`feat(orchestration): make the daemon-resolved manager resume-doc path the single source of truth`). Relocated by card `4c6a1edf` ("manager-prompt.ts, tranche 1"); no wording changed, `*`-prefixed lines joined into a flowing paragraph.
 
 This card is ALSO cited in `packages/daemon/src/sessions/resume-doc-notes.ts` (the `resolveResumeDocPath` function's own doc comment) — no lane was open on that file this tranche; a future tranche there extends this record with a new section rather than a second file.
+
+Also cited (Class C only, left inline, nothing moved) at the `ResumeDocWatcher` class docstring in
+`packages/daemon/src/orchestration/resume-doc-watcher.ts`, which names this card in passing for honoring
+`orchestration.resumeDocFilename` via the same `resolveResumeDocPath` — that whole comment stays at the
+call site in full.

@@ -22,26 +22,18 @@ export interface BusyWorkerWatcherDeps {
 /**
  * Busy-worker LONG-TURN advisory. STRUCTURAL TWIN of IdleWatcher, but for the inverse failure: where
  * IdleWatcher nudges an IDLE manager, this surfaces a LIVE WORKER that's been `busy` in one long turn to
- * its OWNING MANAGER. Motivated by the cc9a41cc incident: a worker hung `busy` ~77min with an empty
- * transcript / no commits, undetected until a manual `worker_status`.
+ * its OWNING MANAGER.
  *
  * SIGNAL — `busy` + `lastActivity` staleness, and ONLY that. Justified by the spawn/PTY mechanics:
  * `db.setBusy` re-stamps `last_activity` on EVERY turn edge (rising at turn start, falling at
  * end-of-turn — see PtyHost.setBusy), and nothing else bumps it mid-turn. So for a `busy=true` session,
  * `now - lastActivity` is exactly how long the worker has been in ONE uninterrupted turn: a worker
  * churning through turns keeps a fresh `lastActivity` (each edge re-stamps it); a worker in one long turn
- * past the window has a stale one.
- *
- * WHY NOT ALSO GATE ON PTY OUTPUT (tried and reverted): PtyHost's own `healIfStuck` already clears
- * `busy=false` once pty output has been stale ≥`busyStaleMs` (5min) — so a session can never stay
- * `busy=true` with stale output for a full `stuckWorkerMinutes` window (30–60min by construction); an
- * "AND no recent pty output" gate is provably unreachable dead code, not a real second signal. Nor is
- * there a cheap progress proxy that helps: `ctxTurns`/commit counts don't advance mid-turn either, and a
- * live-repainting hung TUI is indistinguishable from a legitimate long build/test gate on pty bytes
- * alone. So `lastActivity` staleness is the ONLY signal, and this watcher is deliberately a SOFT,
- * INFORMATIONAL advisory ("this worker has been busy a while, likely a long gate") rather than a hang
- * detector — the manager decides whether it's worth a look. `healIfStuck` (5min, output-based) already
- * catches the actually-silent-hang case; this catches the long-single-turn case it can't.
+ * past the window has a stale one. `lastActivity` staleness is the ONLY signal, and this watcher is
+ * deliberately a SOFT, INFORMATIONAL advisory ("this worker has been busy a while, likely a long gate")
+ * rather than a hang detector — the manager decides whether it's worth a look. `healIfStuck` (5min,
+ * output-based) already catches the actually-silent-hang case; this catches the long-single-turn case it
+ * can't.
  *
  * ONCE PER EPISODE — persisted, self-resetting, no new column. On trip we append ONE `worker_stuck`
  * orchestration event (filed under the owning manager; the durable, human-/manager-facing signal) and
@@ -56,6 +48,10 @@ export interface BusyWorkerWatcherDeps {
  * — not this watcher's concern; that's awaiting-review / IdleWatcher territory); not stale long enough;
  * the owning manager is missing/not-live (nothing to surface to — orphans are boot-reconcile's job); the
  * worker or its manager is human-paused; or the project disabled it (`stuckWorkerMinutes === 0`).
+ *
+ * @decision cc9a41cc — motivated by an incident where a worker hung `busy` for an extended period with
+ * an empty transcript and no commits, undetected until a manual `worker_status`.
+ *
  */
 export class BusyWorkerWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;

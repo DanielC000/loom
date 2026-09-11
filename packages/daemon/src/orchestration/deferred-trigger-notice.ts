@@ -16,9 +16,9 @@ import type { Db } from "../db.js";
  * (`[loom:merge-rejected]` and `[loom:gate-failed]`) — the card's own binding constraint: a partial
  * rollout to only one of the two sibling nudges is the exact failure this mechanism exists to prevent.
  *
- * Reads `db.listTasks` (the plain project-scoped read every other board tool already uses) rather than a
- * bespoke query — this only ever runs on a gate FAILURE, never a hot path, and a project's
- * `deferredUntilEvent`-carrying cards are expected to be a small minority of its board.
+ * @decision 74716cfb — reads `db.listTasks`, the plain read every other board tool already uses,
+ * rather than a bespoke query: this only ever runs on a gate failure, never a hot path.
+ *
  */
 export function deferredTriggerNotice(db: Db, projectId: string, failedNames: string[] | undefined): string {
   if (!failedNames || failedNames.length === 0) return "";

@@ -212,12 +212,15 @@ export class WakeService {
         // kind:"agent" — a scheduled wake-up carries the agent's own arbitrary, specific note-to-self
         // (or, when routed, a companion reminder); it must land as its own turn, never mashed with
         // anything else queued behind it.
-        // Card 61a012ce: DURABLE dispatch (was a bare `pty.enqueueStdin`) — the wake row is already
-        // deleted above (claim-first, so a re-fire loop is impossible), which used to mean a HELD
-        // delivery (busy target) lost to a restart before drain had NO surviving record anywhere. This
-        // now persists a `session_message_queued` record on the held path, redriven by
-        // `recoverUndeliveredMessagesOnBoot` — the wake row's lifecycle (anti-re-fire) and the message's
-        // durability (anti-loss) are now separate, orthogonal mechanisms.
+        // DURABLE dispatch, not a bare `pty.enqueueStdin`: the wake row is already deleted above
+        // (claim-first, so a re-fire loop is impossible). This persists a `session_message_queued`
+        // record on the held path, redriven by `recoverUndeliveredMessagesOnBoot` — the wake row's
+        // lifecycle (anti-re-fire) and the message's durability (anti-loss) are separate, orthogonal
+        // mechanisms.
+        //
+        // @decision 61a012ce — before this card, the same claim-first deletion paired with a bare
+        // enqueue meant a held delivery lost to a restart before drain had no surviving record anywhere.
+        //
         // Card 90b9e904: MCP-seen-gated dispatch via the injected enqueueDurableNudge (see its own doc)
         // when wired (production); ABSENT falls back to the pre-90b9e904 enqueueDurable call, unchanged.
         if (this.deps.enqueueDurableNudge) {
