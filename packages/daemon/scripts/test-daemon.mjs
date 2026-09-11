@@ -852,74 +852,21 @@ const TEST_TIMEOUT_OVERRIDES = {
   "codex-doctrine-real-spawn": 300_000,
 };
 
-// Card 0f0816e2: a JUDGMENT-CURATED set of real-spawn/daemon-boot-heavy basenames that run FIRST and
-// SEQUENTIALLY (pool size 1 — ISOLATED_PHASE_POOL_SIZE below), fully to completion, before the remainder
-// runs in the existing concurrent pool exactly as before this card. Same discipline `STATIC_GUARD_REPO_PATHS`
-// (git/worktrees.ts) already uses, for the same reason: a `*real*`/`*gate*` name-pattern derivation is a
-// folk recipe that answers the wrong question later — this list is curated by reading each file, not by
-// grepping a naming convention, and it changes over time by the same discipline.
+// @decision 0f0816e2 — this JUDGMENT-CURATED set of real-spawn/daemon-boot-heavy basenames runs FIRST and
+// SEQUENTIALLY (pool size 1) before the remainder runs in the existing concurrent pool, unchanged; it does
+// not itself prove or fix the intermittent full-suite hang it targets — full reasoning in the record.
 //
-// ⛔ THIS DOES NOT CLAIM (and must not be read as claiming) that running these sequentially fixes the
-// intermittent full-suite timeouts documented in project memory `repo-guard-only-handoff-intermittent-hang`.
-// That note is explicit that no code-level mechanism was ever identified, and that the always-concurrent
-// internal pool is present in every run including passes, so it does not discriminate on its own — this is
-// a plausible contributing condition with no specimen proving causation. This change stands on its own
-// merit regardless: a real-spawn test competing with pool-sized siblings for the box (real OS subprocess
-// spawns, repeated in-process Db/SessionService boots, real `git worktree add` calls) is a known-bad
-// scheduling shape independent of whether it explains those timeouts.
+// Membership is curated by reading each file, never derived by a `*real*`/`*gate*` name-pattern grep —
+// same discipline as STATIC_GUARD_REPO_PATHS (git/worktrees.ts), for the same reason. See the record for
+// the full per-basename grep-count accounting (every measured number kept there) and the
+// test-daemon-gate-timing-sigkill.mjs export-driven incident this list caused when merge-repo-mutex moved
+// into it. merge-canonical-dirty-overlap-backstop/merge-canonical-untracked-overlap-backstop (cards
+// 4b7ff996/98d6264d) are members here for the same real-git-subprocess-volume reasoning; the production
+// preflight mechanisms each exercises are those cards' own decisions against git/worktrees.ts, not this one.
 //
-// Membership, verified by reading each file (not by name pattern) — grep counts are `new Db(`/
-// `new SessionService(` (in-process daemon boot) and `createWorktree`/`createPty`/`PtyHost` (real OS
-// subprocess spawns), each measured directly against the file at card-filing time:
-//   kickoff-real-spawn              — real node-pty child spawns (createPty x5): the paradigm real-spawn file.
-//   merge-gate-inert-diff           — 11x Db/SessionService boot, 15x real createWorktree.
-//   emit-compare-gate               — 10x Db/SessionService boot, 10x real createWorktree.
-//   gate-status                     — 11x Db/SessionService boot, 11x real createWorktree, 920 lines — by far
-//                                      the heaviest of the gate-status-*.mjs family; the other three
-//                                      (gate-status-deploy-opid/-reduced-gate-facts/-timing-band, 121-189
-//                                      lines each) are narrower splits and deliberately NOT included here.
-//   merge-confirm-completion-nudge  — real PtyHost (x3) + real createWorktree (x7).
-//   merge-spawn-tracked             — real PtyHost (x4) + real createWorktree (x7).
-//   gate-timeout-circuit-breaker    — 7x Db/SessionService boot, 5x real createWorktree; already carries a
-//                                      TEST_TIMEOUT_OVERRIDES entry above with a MEASURED standalone cost
-//                                      (~50-52s, 3/3 runs) entirely from real confirmWorkerMerge/
-//                                      createWorktree/commits.
-//   merge-repo-mutex                — ADDED (not one of the 7 memory-note files): already in
-//                                      TEST_TIMEOUT_OVERRIDES above with documented evidence of timing out
-//                                      under concurrent gate load ("timed out on an unrelated card's gate,
-//                                      all-green standalone") — 15 trials x 2 concurrent real merges plus a
-//                                      full content-integrity sweep, real git throughout.
-//   merge-stranded-backstop         — ADDED, same reason: TEST_TIMEOUT_OVERRIDES documents it "flaked the
-//                                      same way at cap=2/concurrent=2".
-//   merge-gate-reuse                — ADDED, same reason: TEST_TIMEOUT_OVERRIDES names it the HEAVIEST of
-//                                      this family by real git-work volume (50 git invocations, 52
-//                                      createWorktree/confirmWorkerMerge calls) and the one that actually
-//                                      rejected a real production merge gate with `exit timeout` (card
-//                                      2bb7a114); measured up to 130s standalone (7 runs, quiet host, zero
-//                                      concurrent contention) — already past the blanket 120s ceiling alone.
-//   merge-canonical-dirty-overlap-backstop — ADDED (card 4b7ff996, Code Review follow-up): 1x Db/
-//                                      SessionService boot, 4x real createWorktree, plus 2 real submodule
-//                                      clones (the (G) gitlink scenario) across 6 confirmWorkerMerge-driven
-//                                      scenarios — comparable real-git-subprocess volume to
-//                                      merge-stranded-backstop above, on the same "in-process daemon boot +
-//                                      real OS git spawns competing with pool-sized siblings" reasoning.
-//                                      Not itself observed to flake yet; added proactively rather than
-//                                      waiting for a specimen, since the shape is already established here.
-//   merge-canonical-untracked-overlap-backstop — ADDED (card 98d6264d, sibling of the dirty-overlap entry
-//                                      just above, same reasoning): 1x Db/SessionService boot, 4x real
-//                                      createWorktree across 5 confirmWorkerMerge/mergeBranch-driven
-//                                      scenarios (A/B/U/I/C) — comparable real-git-subprocess volume to
-//                                      merge-canonical-dirty-overlap-backstop. Not itself observed to flake
-//                                      yet; added proactively for the same "in-process daemon boot + real OS
-//                                      git spawns competing with pool-sized siblings" reasoning.
-// Exported (not just module-local) so a test that depends on two specific basenames landing on the SAME
-// side of this split — e.g. test-daemon-gate-timing-sigkill.mjs's FAST/SLOW race, which needs both to run
-// in the SAME phase for its `--concurrency=1` ordering assumption to hold — can assert that at import time
-// instead of discovering a silent membership drift as an inexplicable timeout months later. This is
-// exactly the failure this card's own verification hit: adding merge-repo-mutex here (see the membership
-// comment above) moved it out of that test's flat pool and into this sequential phase, breaking the race
-// it was chosen to win; test-daemon-gate-timing-sigkill.mjs was fixed alongside this list and now asserts
-// its own SLOW/FAST pairing against this exported set directly.
+// Exported (not module-local): test-daemon-gate-timing-sigkill.mjs asserts its own FAST/SLOW basenames
+// land in the SAME phase against this exact set at import time — do not stop exporting it, or drop this
+// list's discipline for a name-pattern shortcut; see the record for the incident that made this necessary.
 export const ISOLATED_REAL_SPAWN_BASENAMES = [
   "kickoff-real-spawn",
   "merge-gate-inert-diff",
@@ -940,27 +887,16 @@ export const ISOLATED_REAL_SPAWN_SET = new Set(ISOLATED_REAL_SPAWN_BASENAMES);
 // unchanged by this card).
 const ISOLATED_PHASE_POOL_SIZE = 1;
 
-// Card 0f0816e2 CR follow-up (Loom lead direction, 2026-08-28): OPT-IN, default OFF. MEASURED wall-clock
-// cost of running exactly these 10 files sequentially instead of in the existing 3-lane pool, on this host
-// (`--only=<these 10 basenames>`, from packages/daemon):
-//   BEFORE (flat pool, --concurrency=3, this subset alone): aggregate 493.2s, wall-clock 196.7s.
-//   AFTER  (isolated sequential, pool 1):                   aggregate 426.0s, wall-clock 426.1s (pool 1
-//                                                            means wall-clock tracks aggregate, as expected).
-//   Net for this subset alone: +229.4s / +117%.
-// Estimated marginal cost once embedded in the real ~774-file full gate (not directly measured — a
-// standalone 10-file run has less lane-backfill contention than a saturated real gate, so the true full-
-// gate number sits somewhere between this subset's own +229s delta and an aggregate/poolSize-based
-// saturated-pool estimate, roughly +230s to +285s): on the order of +24% to +30% of a ~16-minute gate.
-// Either end of that range is a PERMANENT tax on every merge gate on this daemon-global, capped, SHARED
-// resource (a busy fleet's other projects queue behind it too) — for a benefit this card's own DoD-4
-// forbids claiming (no causal mechanism behind the intermittent timeouts was ever identified). So: default
-// OFF, byte-identical scheduling to before this card (isolatedNames is empty, concurrentNames === SELECTED,
-// same as the original flat-pool dispatch). Set LOOM_GATE_ISOLATED_REAL_SPAWN_PHASE=1 to opt in
-// deliberately — e.g. to run the DoD-5 timeout-rate observation against a real corpus, both ways, on
-// purpose — never as a default, and never via the gate command or any daemon config pin (same posture as
-// `gate-cap-is-2-by-owner-decision-never-change-silently`: a daemon-global setting is never flipped
-// silently). With the flag off, isolatedPhaseFileCount/isolatedPhasePoolSize on the NDJSON rows both read
-// 0 — the honest signal that a run was flat, not a fabricated "1" for a phase that never actually ran.
+// @decision 0f0816e2 — this CR follow-up (Loom lead direction, 2026-08-28) is OPT-IN, default OFF: a
+// measured wall-clock tax (+229.4s/+117% on a 10-file subset; est. +230-285s embedded in the real gate) for
+// a benefit this card's own DoD-4 forbids claiming, so it must never default on or be flipped via config.
+//
+// See the record for the full measurement (before/after, aggregate vs. wall-clock) and the staleness note:
+// this estimate was taken against a 10-file list and the membership list is 12 today, so enabling now
+// costs MORE than quoted. LOOM_GATE_ISOLATED_REAL_SPAWN_PHASE=1 opts in deliberately (e.g. a DoD-5
+// timeout-rate observation) — never via the gate command or a daemon config pin (same posture as
+// `gate-cap-is-2-by-owner-decision-never-change-silently`). Flag off ⇒ isolatedPhaseFileCount/
+// isolatedPhasePoolSize on the NDJSON rows both read 0 — a flat run's honest signal, not a fabricated "1".
 const ISOLATED_REAL_SPAWN_PHASE_ENABLED = process.env.LOOM_GATE_ISOLATED_REAL_SPAWN_PHASE === "1";
 
 // Card 3791b14e: the real-codex-spawn family (CODEX_REAL_SPAWN_BASENAMES, imported above from
