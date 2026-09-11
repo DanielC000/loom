@@ -2953,6 +2953,11 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   "packages/daemon/test/pty-codex-agnostic-methods.mjs",
   "packages/daemon/test/redelivery-parked-notice-suppression.mjs",
   "packages/daemon/test/redirect-discoverability.mjs",
+  // Card f349f5cb: reads real packages/daemon/src/index.ts SOURCE directly (never dist/**, so shape-(4)'s
+  // tsc-emit-reprint reasoning does not apply here) and asserts, by comment-stripped substring search,
+  // that the onExit hook wires reconcileNeverStartedRecycleSuccessor(exited.id, info.intended) after
+  // archiveOnExit(exited) — a literal call-text/ordering match with no other check re-verifying it.
+  "packages/daemon/test/recycle-successor-onexit-wiring.mjs",
   "packages/daemon/test/setup-project-init-rest.mjs",
   "packages/daemon/test/setup-templates-rest.mjs",
   "packages/daemon/test/shell-terminal.mjs",

@@ -10632,6 +10632,23 @@ export class PtyHost {
     return this.findAnyLive(sessionId)?.firstTurnStarted ?? false;
   }
 
+  /**
+   * @decision f349f5cb — whether `markReady` (claude) / the boot-ready composite (codex) EVER latched for
+   *  this session, i.e. whether a kickoff could ever have been WRITTEN to its stdin at all. `false` here is
+   *  sound even under `dc1604c7`'s own counterexample: `hasFirstTurnStarted`/`engineSessionId` both depend
+   *  on a hook (UserPromptSubmit/SessionStart) that can itself be LOST even when the engine genuinely ran
+   *  (see `hasFirstTurnStarted`'s own doc) — but `ready`/`bootReady` latch from PtyHost's OWN in-process
+   *  code (`markReady` / the codex onData composite), independent of any external hook relay, so `false`
+   *  here means no kickoff text was EVER submitted, full stop. Reads each engine's own field directly
+   *  (never `findAnyLive`, matching `isCodexBootReady`'s own convention) — `Live`/`CodexLive` name this
+   *  differently (`ready` vs `bootReady`), and only one of the two live maps can hold a given sessionId.
+   */
+  hasReachedReady(sessionId: string): boolean {
+    const codexLive = this.liveCodex.get(sessionId);
+    if (codexLive) return codexLive.bootReady;
+    return this.live.get(sessionId)?.ready ?? false;
+  }
+
   private appendRing(live: Live | CodexLive, buf: Buffer): void {
     live.ring.chunks.push(buf);
     live.ring.bytes += buf.length;

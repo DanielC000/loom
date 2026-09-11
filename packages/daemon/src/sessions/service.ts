@@ -2059,6 +2059,21 @@ export class SessionService {
     if (n > 0) this.recycleDrainSuppressed.set(managerSessionId, n);
     else this.recycleDrainSuppressed.delete(managerSessionId);
   }
+
+  /**
+   * @decision f349f5cb — set ONLY by recycleWorker, from just before its own synchronous hard-kill of
+   *  `workerSessionId` until that call settles (success or throw). recycleWorker is the ONE recycle path
+   *  that hard-kills its predecessor and WAITS for the real exit before inserting the fresh successor row
+   *  — so if that predecessor is ITSELF a never-started recycle successor, its own onExit is GUARANTEED to
+   *  fire (and thus reach `reconcileNeverStartedRecycleSuccessor`) BEFORE `hasSuccessor(workerSessionId)`
+   *  can ever read true. Without this marker, that reconciliation would wrongly unlink the predecessor's
+   *  OWN `recycled_from` link mid-chain (A→B→C becomes A | B→C, with A wrongly read as un-superseded while
+   *  C is the real live continuation). recycleManager/recyclePlatformLead need no such marker: both insert
+   *  their fresh row BEFORE ever touching the old session's pty (a deferred stop, seconds later), so
+   *  `hasSuccessor(sessionId)` alone is already true by the time that old session actually exits.
+   */
+  private readonly recycleTeardownInFlight = new Set<string>();
+
   /**
    * CLIENT-TIMEOUT RESILIENCE registry (card fb8df559 Part 1) — a THIN OUTER layer around
    * spawnWorker/confirmWorkerMerge (via {@link spawnWorkerTracked}/{@link confirmWorkerMergeTracked}),
@@ -9944,6 +9959,10 @@ export class SessionService {
 
       // Close the old worker HARD: reliable, and we spawn fresh (never resume) so a clean graceful
       // exit isn't needed. Wait until the pty is actually gone before reusing the worktree.
+      // @decision f349f5cb — mark BEFORE stop(): see recycleTeardownInFlight's own doc for why this
+      // predecessor's real onExit is guaranteed to fire (and reach reconcileNeverStartedRecycleSuccessor)
+      // before hasSuccessor(workerSessionId) can read true.
+      this.recycleTeardownInFlight.add(workerSessionId);
       this.pty.stop(workerSessionId, "hard");
       for (let i = 0; i < 50 && this.pty.isAlive(workerSessionId); i++) {
         await new Promise((r) => setTimeout(r, 100));
@@ -10192,6 +10211,7 @@ export class SessionService {
       });
       return { ...fresh, processState: "live" };
     } finally {
+      this.recycleTeardownInFlight.delete(workerSessionId);
       this.unsuppressCapQueueDrain(managerSessionId);
       // A drain suppressed during the window above may have left real headroom on the table (e.g. the
       // manager's cap was raised mid-recycle, or another slot freed independently while suppressed) — catch
@@ -11081,6 +11101,64 @@ export class SessionService {
       }
     }
     this.db.archiveSession(session.id);
+  }
+
+  /**
+   * @decision f349f5cb — unlink + record `recycle_failed` for a successor that dies before SessionStart
+   *  too (4be56c33 only covers a pre-spawn throw); gate on `hasReachedReady` (never bare
+   *  `engineSessionId IS NULL`) so a genuinely-dangling branch is never hidden from dc1604c7's exclusion.
+   */
+  reconcileNeverStartedRecycleSuccessor(sessionId: string, intended: boolean): void {
+    // @decision f349f5cb — this session's OWN recycleWorker attempt is mid-hard-killing it right now; skip
+    // (see recycleTeardownInFlight's own doc). ACCEPTED, timing-dependent GAP if that attempt then THROWS
+    // while this session died within recycleWorker's own ~5s wait: this skipped exit was this session's
+    // only chance to be reconciled (the synchronous catch never touches THIS session's own recycled_from,
+    // only the failed fresh row's) — its own predecessor stays superseded by a dead end, recoverable via a
+    // manual worker_recycle(this session). Not universal: exiting only AFTER the whole call has settled
+    // (the marker is cleared either way) reconciles normally, since hasSuccessor already reflects reality.
+    if (this.recycleTeardownInFlight.has(sessionId)) return;
+    const s = this.db.getSession(sessionId);
+    if (!s || !s.recycledFrom || s.engineSessionId) return; // not a recycle successor, or SessionStart landed at some point
+    // This session ALREADY has its own successor — recycleManager/recyclePlatformLead both insert their
+    // fresh row BEFORE ever touching the old session's pty (a deferred stop, seconds later), so by the
+    // time such an old session actually exits, hasSuccessor(sessionId) is already true: a legitimate,
+    // chain-continuing retirement (A→B→C), never a dead end. Unlinking here would sever B→A while C is
+    // the real live continuation, corrupting the lineage exactly the way this fix must not.
+    if (this.db.hasSuccessor(sessionId)) return;
+    // @decision f349f5cb — the PRIMARY proof of "genuinely nothing could have happened": markReady never
+    // ran for this session (neither the real SessionStart hook nor the spawn-armed readiness fallback), so
+    // no kickoff text was EVER written to its stdin — no turn could possibly have started, engine-hook
+    // relay loss or not. See hasReachedReady's own doc for why this is sounder than a hook-observed signal.
+    if (this.pty.hasReachedReady(sessionId)) return;
+    // EXTRA gates (belt-and-suspenders, not the primary proof — both ride the SAME hook relay
+    // hasReachedReady does not depend on, so either firing despite hasReachedReady:false would itself be
+    // surprising, but cheap to check and consistent with 2281009d/6651bf24's own combined discriminator).
+    if (this.pty.hasFirstTurnStarted(sessionId)) return;
+    if (this.db.listEventsForWorker(sessionId).some((e) => e.kind === "worker_report")) return;
+    // @decision f349f5cb — setOrchestration (the unlink) is called from INSIDE each branch below, AFTER
+    // its own guard, never once unconditionally up here — so a branch that returns without appending an
+    // audit event (the worker branch's own parentSessionId guard) can never unlink silently either.
+    const detail = { recycledFrom: s.recycledFrom, failedSuccessorId: s.id, diedBeforeSessionStart: true, intended };
+    if (s.role === "worker") {
+      // A worker row always carries a real parentSessionId (recycleWorker requires one to even begin) —
+      // guard rather than fall back to `s.recycledFrom` (the PREDECESSOR WORKER's own id), which would
+      // wrongly file a worker id as a managerSessionId.
+      if (!s.parentSessionId) return;
+      this.db.setOrchestration(sessionId, { recycledFrom: null });
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: s.parentSessionId, workerSessionId: s.id, taskId: s.taskId ?? null,
+        kind: "recycle_failed", detail,
+      });
+    } else if (s.role === "manager" || s.role === "platform") {
+      // Mirrors 08320d02's own convention for these two roles: filed under the PREDECESSOR (the identity
+      // still discoverable) rather than the dead, never-live successor.
+      this.db.setOrchestration(sessionId, { recycledFrom: null });
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: s.recycledFrom, kind: "recycle_failed", detail,
+      });
+    }
   }
 
   /**
@@ -17531,9 +17609,9 @@ export class SessionService {
       return parentRoot(w.parentSessionId) === managerRoot;
     });
 
-    // @decision dc1604c7 — keyed on `recycle_failed`, never `engineSessionId`: the READY_FALLBACK
-    // path runs a real worker with a null engine id; scenario (J) in worker-list-dangling.mjs pins
-    // this against regressing back to `engineSessionId IS NULL`.
+    // @decision dc1604c7 — keyed on `recycle_failed` (now two producers, see f349f5cb), never
+    // `engineSessionId`: the READY_FALLBACK path runs a real worker with a null engine id; scenario (J)
+    // in worker-list-dangling.mjs pins this against regressing back to `engineSessionId IS NULL`.
     const neverStartedRecycleSuccessorIds = new Set(this.db.listWorkerSessionIdsWithEventKind(["recycle_failed"]));
 
     const entries: DanglingWorkerEntry[] = [];

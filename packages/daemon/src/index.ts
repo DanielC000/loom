@@ -494,6 +494,9 @@ async function main(): Promise<void> {
       // is NOT archived (it would silently strand that fleet off every rail/god's-eye list); every other
       // case archives exactly as before. See that method's doc for the full reasoning.
       if (exited && exited.role !== "run") sessions.archiveOnExit(exited);
+      // @decision f349f5cb — unlink a recycle successor's stray `recycled_from` on an async post-spawn
+      // death too (the synchronous pre-spawn-throw catches never observe this); see the method's own doc.
+      try { if (exited) sessions.reconcileNeverStartedRecycleSuccessor(exited.id, info.intended); } catch { /* never disturb the exit path */ }
       // AUTO-DRAIN the cap-queue (card 81b7e346): the DEFAULT slot-free trigger — covers manual
       // worker_stop, confirmWorkerMerge's own hard-stop of the merged worker, and a crash/kill. The
       // no-commit auto-retire, sibling-retirement, and finalizeMerge paths retire a worker's DB row
