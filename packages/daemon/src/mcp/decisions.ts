@@ -7,30 +7,12 @@ import { strictShape } from "./arg-alias.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
-/**
- * `decisions_for(query)` — the underlying index over `@decision <id>` anchors + their out-of-band records
- * (card dbad4b59), reused across every project session via `TaskMcpRouter` (mcp/server.ts). Backed by a
- * TRIVIAL index built by grepping the CALLER'S OWN project repo at call time — never a persisted snapshot
- * (DoD-2). Design note (CLAUDE.md's comment-taxonomy convention, card 90b19799): the `Read`-hook
- * (`assets/decision-records.mjs`) is the PRIMARY delivery path (costs the agent zero extra lookups); this
- * tool is an explicit ESCAPE HATCH for what the hook can't answer positionally — "what decisions touch
- * this file/flow", "what does this record govern" (reverse lookup), and enumerating records before a
- * refactor. Never redesign this into the primary path (see the card body's own warning about that).
- *
- * ⚠️ NOT Loom-source-specific, unlike `comment-anchor-lint.mjs` (a Loom-internal lint tool with a
- * hardcoded SOURCE_ROOTS over Loom's OWN package layout). This tool runs against ANY project's repo via
- * `TaskMcpRouter`'s server-derived `repoPath` — so the file walk below is repo-root-relative and
- * layout-agnostic (mirrors `repo-read.ts`'s own generic `walkFiles`), never assuming a fixed
- * `packages/<pkg>/src` layout.
- *
- * Mirrors `assets/decision-records.mjs`'s resolution across all THREE stores it resolves at runtime
- * (`docs/adr/`, `docs/decisions/`, `docs/investigations/<id>-<slug>/findings.md`) — kept as separate,
- * independently-maintained logic here (not imported), the SAME asset-vs-compiled duplication already
- * accepted between `decision-records.mjs` and `comment-anchor-lint.mjs` (assets ship standalone, invoked
- * by a bare `node <path>`; this ships compiled into the daemon). Do NOT import from
- * `assets/decision-records.mjs` — that asset's independence from `dist/` is load-bearing (see its own
- * scope-fence note) and importing it here would couple the two.
- */
+/** `decisions_for(query)` — the index over `@decision` anchors + their records, reused via
+ *  `TaskMcpRouter`; built by grepping the caller's own repo at call time, never persisted. */
+
+/** @decision dbad4b59 — an escape-hatch index over `@decision` anchors, never the primary
+ *  lookup path (the `Read`-hook is): never redesign it into one, and never import from
+ *  `assets/decision-records.mjs`, which would couple its `dist/`-independent asset to this. */
 
 // Comment-syntax-agnostic — semantically equal to decision-records.mjs's/comment-anchor-lint.mjs's own
 // ANCHOR_RE (card 969b0e1c: a THIRD, independently-typed copy — see those assets' own doc for why the
