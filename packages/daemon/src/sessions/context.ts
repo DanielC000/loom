@@ -90,14 +90,9 @@ function userTurnText(content: unknown): string | null {
  * `turns` counts assistant lines (with a message) as a coarse secondary signal.
  * Returns null if the transcript file is missing or no assistant line carries usage.
  *
- * Resolves the file via {@link resolveTranscriptFile} (computed path first, else a scan of
- * `~/.claude/projects/*` by the globally-unique engine session id) rather than the direct computed
- * path alone — card 7c1fc117: the direct path is exposed to the SAME project-dir-encoding-drift class
- * `resolveTranscriptFile` already exists to guard `engineTranscriptExists` against (see its doc), and a
- * miss here used to fail SILENTLY (a caught `readFileSync` ENOENT → `null`), permanently freezing the
- * caller's persisted context counter with zero signal. Defense-in-depth only, not the fix for every
- * freeze cause — see host.ts's SessionStart handler for the OTHER (confirmed, more common) cause: the
- * engine itself rotating to a new transcript file mid-session.
+ * @decision 7c1fc117 — resolves via {@link resolveTranscriptFile}, not the bare computed path alone — a
+ * miss on the bare path used to fail SILENTLY and permanently freeze the persisted context counter with
+ * zero signal. Defense-in-depth only; see host.ts's SessionStart handler for the other, more common cause.
  */
 export function readContextStats(cwd: string, engineSessionId: string): ContextStats | null {
   const file = resolveTranscriptFile(cwd, engineSessionId);
@@ -238,8 +233,8 @@ function statsFromAccumulator(acc: UsageAccumulator): RunUsageStats {
  * exactly once. Lines without an id (shouldn't happen) fall back to counting individually. Returns null
  * if the file is missing or no assistant line carries usage.
  *
- * SYNCHRONOUS + whole-file: still used by the boot backfill + Agent-Runs cost readout (NOT the sampler
- * hot path). The sampler tick uses {@link IncrementalRunUsageReader}, which returns a cumulative
+ * @decision sha:8591caf8 — still used by the boot backfill + Agent-Runs cost readout (NOT the sampler hot
+ * path); the sampler tick uses {@link IncrementalRunUsageReader} instead, which returns a cumulative
  * byte-identical to this via the shared {@link accumulateUsageLine} fold.
  */
 export function readRunUsageFromFile(file: string): RunUsageStats | null {
@@ -282,8 +277,11 @@ interface IncrementalUsageCache {
  * cumulative RunUsageStats BYTE-IDENTICAL to what a full {@link readRunUsageFromFile} would return — but by
  * parsing only the bytes APPENDED since the last tick, off the event loop (`fs.promises`), instead of
  * re-reading + re-parsing every live session's WHOLE transcript synchronously each tick (the fleet-scale
- * event-loop stall this replaces). Because the cumulative is identical to a full parse, the sampler's delta
- * layer (`recordDelta`) — including the restart-double-count fix — is preserved unchanged by construction.
+ * event-loop stall this replaces).
+ *
+ * @decision sha:8591caf8 — byte-identical to a full parse by construction (same {@link accumulateUsageLine}
+ * fold), so the sampler's delta layer (`recordDelta`), including the restart-double-count fix, is
+ * preserved unchanged.
  *
  * Per-session cache holds { engineSessionId, offset (at a `\n` boundary), partialBytes, acc (running totals
  * + the dedup `seen` set) }. Each tick, for a session:

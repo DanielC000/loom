@@ -20,6 +20,18 @@ See `CODEX_ENGINE_ID_MAX_ATTEMPTS` (same file) for the retry COUNT this spacing 
 
 - Do not revert to a single fixed-delay retry for engine-session-id discovery — a real-spawn test showed a one-shot ~2s-later check misses sessions whose first turn is slow to start.
 
+## Single resolution site, not a per-caller conditional (DoD-2, `sessions/transcript.ts`'s own site)
+
+A separate DoD item on this card: `sessions/transcript.ts`'s harness-dependent exports each take an optional trailing `harness` param and dispatch through `transcriptOpsFor`, ONE resolver — mirroring `PtyHost.findAnyLive`'s own "one resolver, not a per-caller conditional" shape: scattering a `harness === "codex"` check across each of this module's ~20 call sites would let the codex/claude branches drift independently, the way the reverted `Live.kind` discriminator did (card `353f6dc4` M10). `harness` mirrors `Session.harness`'s own type (undefined/null/`"claude"` ⇒ claude; `"codex"` ⇒ codex) so a call site passes a session's own `.harness` field verbatim.
+
+### Do not (2)
+
+- Do not add a per-call-site `harness === "codex"` conditional to `sessions/transcript.ts` — route through `transcriptOpsFor` instead, or the codex/claude branches risk drifting independently (as `Live.kind` did).
+
+### Source (2)
+
+JSDoc header comment, `packages/daemon/src/sessions/transcript.ts`, lines 35-42 as of this tranche's HEAD.
+
 ## Source
 
 Inline comment in `packages/daemon/src/pty/host.ts` (`CODEX_ENGINE_ID_RETRY_MS`'s top-of-const doc): lines 56-71, as of this tranche's HEAD. Relocated by card a4818d7a (tranche 1 on `pty/host.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped. The "Discovery scan, not a hook report" section above is a second site, same card: `captureCodexEngineSessionId`'s own JSDoc, extracted by tranche 18. The "`findConversationIdForSpawn`'s own doc" section above is a third site, same card: `findConversationIdForSpawn`'s own JSDoc (`packages/daemon/src/pty/codex-transcript.ts`) — extracted by tranche 2 on that file (card `32d90bb2`); source lines joined into a flowing paragraph and `*` comment markers stripped, with no change to the facts or the argument's structure.

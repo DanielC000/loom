@@ -18,6 +18,32 @@ resolution) versus the file exists but no assistant line in it carries a `usage`
 - Do not swallow a null context-stats read at this chokepoint without logging which of the two causes it
   was — doing so silently and permanently freezes the persisted context counter with no trace.
 
+## `readContextStats` resolves via `resolveTranscriptFile`, not the bare computed path — defense in depth
+
+`readContextStats` resolves the transcript file via `resolveTranscriptFile` (computed path first, else a
+scan of `~/.claude/projects/*` by the globally-unique engine session id) rather than the direct computed
+path alone: the direct path is exposed to the SAME project-dir-encoding-drift class `resolveTranscriptFile`
+already exists to guard `engineTranscriptExists` against, and a miss here used to fail SILENTLY (a caught
+`readFileSync` ENOENT → `null`), permanently freezing the caller's persisted context counter with zero
+signal — the same freeze this card's diagnostic-branch fix targets, from the read-resolution side rather
+than the null-cause-logging side.
+
+This is defense-in-depth only, not the fix for every freeze cause — the engine itself rotating to a new
+transcript file mid-session (handled by `pty/host.ts`'s SessionStart handler) is the OTHER, confirmed more
+common cause, and is a separate mechanism this resolution change does not address.
+
+### Do not (2)
+
+- Do not resolve `readContextStats`' transcript file via the bare computed path alone — route through
+  `resolveTranscriptFile` so a project-dir-encoding-drift miss doesn't silently freeze the context counter.
+- Do not treat this defense-in-depth resolution fix as covering the mid-session transcript-rotation freeze
+  cause — that is a separate, more common cause handled by `pty/host.ts`'s SessionStart handler.
+
+### Source (2)
+
+JSDoc comment above `readContextStats` in `packages/daemon/src/sessions/context.ts`, lines 93-100 as of
+this tranche's HEAD.
+
 ## Source
 
 Inline comment in `packages/daemon/src/pty/host.ts` (`deliverHook`'s `Stop`/`StopFailure` case, the

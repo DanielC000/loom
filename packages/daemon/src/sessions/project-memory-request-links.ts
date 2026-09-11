@@ -1,10 +1,12 @@
 import type { Db } from "../db.js";
 
 /**
- * Resolve a memory note's linked Request ids against the LIVE requests store, at RECALL time — the half
- * (b) fix for card e6d270b3. Half (a) (shipped 2026-07-22) only changed how a note is WRITTEN — asking
- * voice ("PENDING request `<id>` asks the owner to authorize X") instead of decided voice — but a note
- * still froze that state at write time; once the owner answered, the note kept reading PENDING forever.
+ * Resolve a memory note's linked Request ids against the LIVE requests store, at RECALL time.
+ *
+ * @decision e6d270b3 — half (a) (shipped 2026-07-22) only changed how a note is WRITTEN — asking voice
+ * instead of decided voice — but a note still froze that state at write time; once the owner answered,
+ * the note kept reading PENDING forever. This module is half (b).
+ *
  * This module is the fix: every surface that surfaces a note (kickoff injection, `memory_read`,
  * `memory_list`) re-resolves each linked id fresh, right before the note is shown, so the annotation can
  * never outlive the state it describes.

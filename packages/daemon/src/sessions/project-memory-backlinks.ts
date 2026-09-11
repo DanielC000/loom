@@ -119,8 +119,11 @@ export function findInboundBacklinks(
  * `extractWikilinkKeys` then runs exactly ONCE per note — not once per note per target — and the
  * per-target match/sort runs through the SAME {@link matchesFor} helper {@link findInboundBacklinks}
  * uses, over those already-extracted key lists, never a fresh regex scan — which is what turns the cost
- * from O(N × corpus bytes) into O(N × average links-per-note) per target (still O(N²) overall; see the
- * card d305f1a2 note on {@link findInboundBacklinks} above for why that's left as-is for now).
+ * from O(N × corpus bytes) into O(N × average links-per-note) per target.
+ *
+ * @decision d305f1a2 — still O(N²) overall even resolved in one bulk pass over the corpus, left unindexed
+ * anyway — bounded by `memory.maxNotes` (config), not luck; re-measure before reaching for an index if
+ * that cap is raised.
  *
  * Keyed by note `key`, with exactly one entry per note in `corpus`. Semantics — self-link exclusion,
  * most-recently-updated-first ordering, the `cap`/`totalFound` split — are IDENTICAL to calling

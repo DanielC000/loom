@@ -48,22 +48,24 @@ export interface UsageSamplerDeps {
  * Each stored row is a per-interval DELTA (additive), so the read-side aggregation is a plain SUM. The
  * delta is `current_cumulative − lastSeen[sessionId]`, with two correctness wrinkles:
  *
+ * @decision c9924bcd — the two wrinkles below (mid-run rotation, restart double-count) are load-bearing:
+ * getting either wrong either emits a negative delta or re-counts a still-live session on every restart.
+ *
  *  • **Mid-run rotation (FORK/RECYCLE):** `readRunUsage` is monotonic WITHIN one transcript, but a fork or
  *    recycle rotates to a new engine id → a new transcript whose cumulative restarts at 0. When the engine
  *    id changed (or any cumulative dropped) we treat it as a fresh segment and the delta IS the new
  *    cumulative (never subtract → never emit a negative).
  *
- *  • **Restart double-count (the load-bearing one):** `lastSeen` is IN-MEMORY and wiped on every daemon
+ *  • **Restart double-count:** `lastSeen` is IN-MEMORY and wiped on every daemon
  *    restart, and a plain `--resume` REUSES the same engine id + the SAME transcript file — which still
  *    holds the full pre-restart cumulative. So a naive first-sight delta (`prev === undefined` → emit the
  *    whole cumulative) would re-count, on every restart, everything a still-live session already recorded.
  *    The fix: first-sight is DB-AWARE — delta = `current_cumulative − the session's already-persisted SUM`
  *    (`db.usagePersistedTotalsBySession`, snapshotted once per process). A session resumed across the
  *    restart counts only the UNCOUNTED remainder (incl. the gap-window usage between its last sample and
- *    the restart — exact, unlike a seed-only "emit nothing" prime); a genuinely new session (no prior rows)
- *    still counts its full cumulative-so-far. This makes priming automatic on EVERY boot (the first tick
- *    self-corrects) — independent of the one-time backfill marker. `correctiveResetOnce` is the one-shot
- *    that scrubs the historical inflation this fix corrects.
+ *    the restart); a genuinely new session (no prior rows) still counts its full cumulative-so-far. This
+ *    makes priming automatic on EVERY boot (the first tick self-corrects). `correctiveResetOnce` is the
+ *    one-shot that scrubs the historical inflation this fix corrects.
  */
 export class UsageSampler {
   private timer: ReturnType<typeof setInterval> | null = null;

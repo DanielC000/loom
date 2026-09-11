@@ -14,14 +14,9 @@ import { annotateBacklinks, MAX_BACKLINKS_DIGEST } from "./project-memory-backli
  * rendered/estimated size (the exact class of bug `floorSectionTokens`/`computeFloorTierStatus` were
  * already written to avoid for the floor-tier total itself — see project-memory-recall.ts).
  *
- * Card e4e180ad follow-up (manager review, measured live against this project's real corpus): EVERY note
- * this function annotates is a digest-rendered note — it's SIZED against the shared kickoff budget
- * whether or not it survives the pack — so backlinks here always use the MUCH tighter {@link
- * MAX_BACKLINKS_DIGEST}, never the general `MAX_BACKLINKS`. An earlier version of this only tightened
- * `never-drop` floor-tier notes; that predicate was an unexamined default, not a reasoned boundary — the
- * real line is DIGEST vs ON-DEMAND, and every note reaching this function sits on the digest side of it
- * regardless of tier (see `MAX_BACKLINKS_DIGEST`'s own doc comment for the measured byte cost across BOTH
- * floor and ordinary pinned notes that motivated dropping the tier-specific predicate).
+ * @decision e4e180ad — every note this function annotates is DIGEST-rendered, sized against the shared
+ * kickoff budget whether or not it survives the pack, so backlinks here always use the tighter {@link
+ * MAX_BACKLINKS_DIGEST} — never `MAX_BACKLINKS`, and never scoped to just the never-drop floor tier.
  *
  * NOT used by mcp/memory.ts's `withLinks` (the memory_read/memory_list read path) — there, request
  * annotations and backlinks are deliberately kept as two SEPARATE fields (`requestAnnotations`,

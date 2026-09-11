@@ -21,24 +21,28 @@ import {
 } from "../pty/codex-transcript.js";
 
 /**
- * HarnessAdapter seam (card 2b099e48, threaded through card 2ec60d9c): this file is the harness-AGNOSTIC
- * half of transcript handling — pagination, spill-to-scratch-file, and Loom's OWN archive store
- * (`LOOM_HOME/archives`), all of which operate on the generic {@link TranscriptTurn} shape and Loom's own
- * on-disk layout, never a claude-format literal. The claude-JSONL-specific half (path resolution,
- * wire-format parsing) lives in `pty/claude-transcript.ts`; the codex rollout-JSONL-specific mirror lives
- * in `pty/codex-transcript.ts`. `encodeProjectDir`/`engineTranscriptPath`/`TOOL_RESULT_BODY_CAP` are
- * re-exported UNCHANGED (claude-only utilities with no codex equivalent — every real caller of these is
- * itself already inside claude-only code, e.g. `pty/host.ts`'s context-stats give-up ladder).
+ * HarnessAdapter seam: this file is the harness-AGNOSTIC half of transcript handling — pagination,
+ * spill-to-scratch-file, and Loom's OWN archive store (`LOOM_HOME/archives`), all of which operate on the
+ * generic {@link TranscriptTurn} shape and Loom's own on-disk layout, never a claude-format literal.
+ * `encodeProjectDir`/`engineTranscriptPath`/`TOOL_RESULT_BODY_CAP` are re-exported UNCHANGED (claude-only
+ * utilities with no codex equivalent — every real caller of these is itself already inside claude-only
+ * code, e.g. `pty/host.ts`'s context-stats give-up ladder).
+ *
+ * @decision 2b099e48 — the claude-JSONL-specific half (path resolution, wire-format parsing) lives in
+ * `pty/claude-transcript.ts`, never here; the codex rollout-JSONL-specific mirror lives in
+ * `pty/codex-transcript.ts`. This file holds only the harness-agnostic pagination/spill/archive-store half.
  *
  * `resolveTranscriptFile`/`engineTranscriptExists`/`readTranscript`/`snapshotTranscript`/
- * `readArchivedTranscript` below are no longer bare re-exports — each now takes an optional trailing
- * `harness` param and dispatches through {@link transcriptOpsFor}, THE single resolution site (card
- * `2ec60d9c` DoD-2 — mirrors `PtyHost.findAnyLive`'s own "one resolver, not a per-caller conditional"
- * shape for the identical reason: scattering a `harness === "codex"` check across each of this module's
- * ~20 call sites would let the codex/claude branches drift independently the way the reverted `Live.kind`
- * discriminator did, card `353f6dc4` M10). `harness` mirrors `Session.harness`'s own type exactly
- * (undefined/null/`"claude"` ⇒ claude, today's legacy default — zero data migration for the fleet's
- * existing rows; `"codex"` ⇒ codex) so every call site can pass a session's own `.harness` field verbatim.
+ * `readArchivedTranscript` below take an optional trailing `harness` param and dispatch through {@link
+ * transcriptOpsFor}, THE single resolution site — mirrors `PtyHost.findAnyLive`'s own shape.
+ *
+ * @decision 2ec60d9c — one resolver, not a per-caller conditional: scattering a `harness === "codex"`
+ * check across this module's ~20 call sites would let the codex/claude branches drift independently, the
+ * way the reverted `Live.kind` discriminator did (card `353f6dc4` M10).
+ *
+ * `harness` mirrors `Session.harness`'s own type exactly (undefined/null/`"claude"` ⇒ claude, today's
+ * legacy default — zero data migration for the fleet's existing rows; `"codex"` ⇒ codex) so every call
+ * site can pass a session's own `.harness` field verbatim.
  */
 export type { TranscriptTurn };
 export { encodeProjectDir, engineTranscriptPath, TOOL_RESULT_BODY_CAP };
