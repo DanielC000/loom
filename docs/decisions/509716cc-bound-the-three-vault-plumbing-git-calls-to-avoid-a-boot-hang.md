@@ -14,8 +14,13 @@ A bound on either of `resolveVaultRepoContext`'s two calls (`checkIsRepo`/`revpa
 
 `resolveVaultRepoContext` detects an Obsidian-Git-managed repo (where a real external auto-committer already owns history, so Loom must back off) by the presence of the `.obsidian/plugins/obsidian-git` marker directory under the repo root — NOT by "subfolder ≠ root", the OLD, WRONG proxy that backed off for EVERY subfolder, including subfolders of an ordinary plain repo with no Obsidian Git plugin at all. The marker is deterministic (exists iff the Obsidian Git plugin — the thing that actually creates the external committer — is installed for that vault) and is one cheap `fs.existsSync`, preferred over a commit-message heuristic (fragile: depends on the user's message template, reads empty on a fresh repo, false positive/negative).
 
+## A fourth site: `checkVaultPushStatus` — bound the same way, but awaited UNCONDITIONALLY at boot
+
+`checkVaultPushStatus` (task f48ee77d's read-only push-status visibility check) shares `boundedVaultGit`/`VAULT_GIT_OP_TIMEOUT_MS` with the three sites above, but its call pattern is distinct and worth naming on its own: `index.ts` unconditionally awaits it (via `logVaultPushStatus`) at boot, ~27 lines before `sessions.resumeFleetOnBoot` — the same boot-hang exposure the three sites above exist to prevent, reached through a fourth path added later. The wrapping `try/catch` at that boot call site catches a THROW, never a HANG, so a timeout inside `checkVaultPushStatus` must itself land in the SAME catch every other git error in this function already does, returning `null` ("status unknown") — exactly like today's no-upstream/malformed-count paths — rather than ever surfacing as an unhandled hang at boot.
+
 ## Do not
 
 - Do not leave a new plumbing-tier git call in this module unbounded — route it through `boundedVaultGit` with `VAULT_GIT_OP_TIMEOUT_MS` (or thread a `VaultGitDeps` override) so a wedged child can't re-open the boot-hang this constant exists to prevent.
 - Do not import the sibling `GIT_OP_TIMEOUT_MS`/`GIT_LOCAL_TIMEOUT_MS` constants directly — `git/writer.ts` already imports from this module, so importing back would be circular; keep the independent copy.
 - Do not detect Obsidian-Git management by "subfolder ≠ root" — that backs off for every subfolder of any plain repo, not just an Obsidian-Git-managed one. Use the `.obsidian/plugins/obsidian-git` marker.
+- Do not let `checkVaultPushStatus` (or any future boot-awaited read in this module) degrade a timeout into anything but the same `null`/"status unknown" fail-safe path — an unhandled hang there reopens the exact boot-stall this bound exists to prevent, since `index.ts` awaits it unconditionally before `resumeFleetOnBoot`.

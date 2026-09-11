@@ -673,13 +673,10 @@ export class VaultVersioner {
    * (resolves immediately) if `start()` hasn't been called. Exposed for callers/tests that need to anchor
    * on this OBSERVABLE event rather than a fixed wait.
    *
-   * **Bounded, and a pre-ready failure surfaces NAMED (card 86b41129) — this method owns its own timeout
-   * rather than requiring every caller to bring one.** The shared {@link readyPromise} field itself still
-   * never rejects (`start()`'s "error" listener stays swallow-and-log, matching `sessions/liveness.ts`'s
-   * doctrine — a transient, often-recoverable chokidar error must not poison state nothing may ever
-   * observe), so production is unaffected: nothing outside this method calls `whenReady()` today. But a
-   * caller that DOES call this one is, by definition, asking to be told — so this method rejects as soon
-   * as it can name why, rather than making a real defect indistinguishable from "still scanning":
+   * @decision 86b41129 — never make this rejection depend on the shared `readyPromise` (it never rejects
+   *  — swallow-and-log, per `sessions/liveness.ts`); own a bounded timeout and NAME why a pre-ready
+   *  failure happened, rather than leaving it indistinguishable from "still scanning".
+   *
    *   1. A watcher error already seen before `ready` fired (checked at call time) rejects immediately,
    *      naming that error.
    *   2. A watcher error that arrives WHILE this call is waiting rejects immediately, same message shape —
@@ -967,10 +964,9 @@ export interface VaultPushStatus {
  * (`mayRecutOntoMain` / the ahead-checks around lines 434-437, 911-918) — never a fetch, never a write,
  * never a push.
  *
- * **Bounded (card 509716cc)** — `index.ts` UNCONDITIONALLY awaits this (via `logVaultPushStatus`) at
- * boot, 27 lines before `sessions.resumeFleetOnBoot`, wrapped only in a `try/catch` that catches a THROW
- * — never a HANG. A timeout lands in the SAME catch every other git error here already does, returning
- * `null` ("status unknown"), exactly like today's no-upstream/malformed-count paths.
+ * @decision 509716cc — this call is UNCONDITIONALLY awaited at boot (index.ts, ~27 lines before
+ *  `sessions.resumeFleetOnBoot`) — never let it hang; a timeout must land in the same catch every other
+ *  git error here does, returning `null`, never block boot.
  */
 export async function checkVaultPushStatus(commitPath: string, deps: VaultGitDeps = {}): Promise<VaultPushStatus | null> {
   try {
