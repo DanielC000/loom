@@ -4,11 +4,11 @@ import type { Db } from "../db.js";
 /**
  * Card 0ad1ca68 — SPAWN-policy gate (deliberately NOT a nudge-policy change; idle-watcher.ts's own
  * `nonTerminal`/`openCards` predicate at :266-487 is untouched and stays the source of truth for
- * whether a LIVE manager gets idle-nudged). This is the pre-spawn analogue: before the Scheduler boots
- * a FRESH manager seat, ask whether the project's board is already known to be fully gated on an
- * unanswered owner Request — if so, an identical seat would just re-derive the same "0 actionable"
- * conclusion a predecessor seat already reached, burning a full context window for zero commits (the
- * card's own specimen: session `9d141891`, ~290 turns, zero product change).
+ * whether a LIVE manager gets idle-nudged).
+ *
+ * @decision 0ad1ca68 — without this pre-spawn check, an identical fresh manager seat re-derives the
+ * same "0 actionable" conclusion a predecessor already reached, burning a full context window for
+ * zero product change.
  *
  * 🔴 CRITICAL GUARDRAIL (carried verbatim from the card, doubled by two prior Leads before this):
  * suppression is gated on an ACTUAL pending owner Request existing for this project, NEVER on
