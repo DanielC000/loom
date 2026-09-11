@@ -4362,16 +4362,18 @@ export class SessionService {
 
   /**
    * Durable post-resume continuation-nudge dispatch, shared by every resume-and-nudge path in the daemon.
-   * @decision 597903fc — must not silently drop a boot-time notice if its in-session give-up budget
-   * exhausts; re-mints on give-up, then durably PARKS rather than vanishing with only a console line
-   * (docs/decisions/597903fc-durable-boot-resume-continuation-nudge.md)
-   * @decision 9f7c59f1 — NOT private: also called directly by `CrashRecoveryDeps.enqueueDurableNudge`,
-   * the third resume-and-nudge path (docs/decisions/9f7c59f1-enqueuedurablenudge-not-private-third-resume-path.md)
-   * @decision 06ebbb78 — `resumeFleetOnBoot` routes ALL its continuation nudges through this method too
-   * (docs/decisions/06ebbb78-resumefleetonboot-routes-through-enqueuedurablenudge.md)
-   * @decision 90b9e904 — optional 5th param `opts` (kind/route) generalizes this for 3 more call sites;
-   * defaults to `{}`, reproducing old `kind:"warning"` behavior byte-for-byte for every pre-existing caller
-   * (docs/decisions/90b9e904-enqueuedurablenudge-opts-param-generalizes-three-sites.md)
+   * @decision 597903fc — must not dispatch via a bare `pty.enqueueStdin` with no `onGiveUpExhausted` — a
+   *  give-up exhaustion would then drop the notice with nothing surviving but a console line; this method
+   *  re-mints on give-up, then durably PARKS instead.
+   * @decision 9f7c59f1 — must stay non-`private`: `CrashRecoveryDeps.enqueueDurableNudge` (the third
+   *  resume-and-nudge path) depends on calling it directly from outside `SessionService`; reverting to a
+   *  raw `pty.enqueueStdin` there reopens 597903fc's silent-loss gap.
+   * @decision 06ebbb78 — `resumeFleetOnBoot` must route every continuation nudge through this method too,
+   *  never the old non-durable `enqueueNudge`/`deferredNudge` helpers, or a give-up during a whole-fleet
+   *  restart silently drops it with nothing but a console line.
+   * @decision 90b9e904 — must not hardcode `kind:"warning"` here — the wake/poll/event-trigger call sites
+   *  need `kind:"agent"` (a companion wake needs `route` too); `opts` defaults to `{}`, reproducing the
+   *  old behavior byte-for-byte for every pre-existing caller.
    */
   enqueueDurableNudge(
     id: string, role: SessionRole | null, text: string, taskId: string | null = null,
@@ -4396,20 +4398,12 @@ export class SessionService {
    * `resume()` passes no startupPrompt and honors the resume hardening — readiness wait, summary-gate
    * dismiss, mode convergence).
    *
-   * @decision 9f7c59f1 — one of THREE resume-and-nudge paths this card converged onto
-   * `enqueueDurableNudge` (see docs/decisions/9f7c59f1-enqueuedurablenudge-not-private-third-resume-path.md
-   * for which path this is, and which facets the three do/don't share — NOT a claim these are the only
-   * sessionService/watcher sites that resume a not-live session and enqueue: `orchestration/wake.ts`,
-   * `orchestration/poll.ts`, and `orchestration/event-triggers.ts` do the same shape too, converged by
-   * card 90b9e904, but their nudge is a specific external signal, not this function's generic
-   * continuation nudge, so this function's per-facet ruling does not apply to them). See cfffeda6
-   * (report-resolution.ts) for why "three" is not itself a completeness claim.
-   * Report-state handling, worker nudge text, and ordering are ruled per-facet against the other two
-   * paths in 9f7c59f1's own record — see there before changing any one in isolation.
-   * @decision 06ebbb78 — every continuation nudge here routes through the durable `enqueueDurableNudge`
-   * (see docs/decisions/06ebbb78-resumefleetonboot-routes-through-enqueuedurablenudge.md for the
-   * pty-never-ready-this-early correction and its interaction with `recoverUndeliveredMessagesOnBoot`'s
-   * `mintedBefore` cutoff, which is what actually prevents a duplicate delivery).
+   * @decision 9f7c59f1 — one of three resume-and-nudge paths converged onto `enqueueDurableNudge`; never
+   *  runs in the same boot as `recoverCrashOrphanedWorkers` (index.ts picks exactly one, keyed on whether
+   *  a RestartIntent was captured); its report-state/ordering/nudge-text rulings are per-facet, not shared.
+   * @decision 06ebbb78 — every continuation nudge here must route through `enqueueDurableNudge`, never a
+   *  bare/non-durable dispatch, since a freshly-resumed pty is never `ready` this early; the actual
+   *  duplicate-delivery guard is `recoverUndeliveredMessagesOnBoot`'s `mintedBefore` cutoff, not ordering.
    * Continuation NUDGES are post-resume enqueues (a resumed session gets no
    * startup prompt, so without a nudge a worker/manager would sit idle — the stranded-worker hook can't
    * catch a resume's direct setBusy(false)):
@@ -4417,16 +4411,17 @@ export class SessionService {
    *   - an AFFECTED manager/platform (workers resumed alongside it, queued I/O replayed to it, an unconsumed
    *     answered question, or STRANDED board work) gets the full "re-check your workers" re-orient,
    *     prefixed with a one-line classification of WHAT this restart touched; an UNAFFECTED bystander
-   *     resumes SILENTLY, no enqueue at all — @decision b5664b5b (Problems A + C1), see
-   *     docs/decisions/b5664b5b-bystander-and-idle-reviewer-resume-nudges-silenced.md;
-   *   - @decision 61cc91c6 narrows what "stranded board work" means for the AFFECTED branch above (only
-   *     work NOTHING ELSE will ever re-surface still forces the full nudge) — see
-   *     docs/decisions/61cc91c6-stranded-board-work-narrowed-to-unresurfaceable.md; a platform/Lead is
-   *     classified identically, not carved out — @decision 98b3725c, see
-   *     docs/decisions/98b3725c-platform-lead-gets-manager-idle-watchdog-coverage.md. The deploy
-   *     REQUESTER is NEVER short-circuited — it always gets the full "code is live — continue/verify" nudge;
-   *   - every worker gets the "re-check your worktree's state, continue your task" nudge —
-   *     @decision 547fcaaa, see docs/decisions/547fcaaa-worker-resume-nudge-drops-worktree-integrity-claim.md;
+   *     resumes SILENTLY, no enqueue at all — @decision b5664b5b: even a "lightweight FYI" to an idle
+   *     session is a full turn regardless of message length, so a genuine bystander must get NONE at all;
+   *   - @decision 61cc91c6 — raw board backlog alone must never force the full nudge when the
+   *     manager/platform's idle policy is `watching`/`snoozed` (the idle-watcher already re-surfaces it);
+   *     only backlog NOTHING ELSE will ever re-surface (`suppressed`-via-escalation) still forces it —
+   *     @decision 98b3725c: a platform/Lead is classified by that identical rule, never carved out as
+   *     unconditionally stranded, since it gets the same idle-watchdog tick coverage a manager gets. The
+   *     deploy REQUESTER is NEVER short-circuited — it always gets the full "code is live" nudge;
+   *   - every worker gets the "re-check your worktree's state, continue your task" nudge;
+   *     @decision 547fcaaa — never word it as asserting the daemon verified worktree integrity across the
+   *     restart — it does not check this; the worker verifies for itself;
    *   - a standing reviewer (auditor/workspace-auditor/setup) gets a "you were resumed — continue your work"
    *     nudge ONLY if it was BUSY (mid-run) at capture (b5664b5b Problem B); an already-IDLE reviewer
    *     between scheduled runs resumes SILENTLY (its next due wake/schedule re-engages it via the durable
@@ -4436,19 +4431,19 @@ export class SessionService {
    *     its nudge + pending replay are WITHHELD — we never push a held turn back into the cap (honors
    *     the park; a staggered resume via the watcher at reset). Its DB park state is left intact.
    * @decision 066d317c — a wake's ENQUEUED text names the restart reason only in the affected/full
-   * re-orient branch, never the silent/minimal one, and @decision 11b847e1 further scopes a MANAGER
-   * recipient to the SAME project as the requester (a PLATFORM/Lead recipient is exempt) — see
-   * docs/decisions/066d317c-record-delivered-sha-only-when-reason-shown.md and
-   * docs/decisions/11b847e1-restart-reason-text-scoped-to-same-project-recipient.md. The deploy SHA(s)
-   * named are recorded against the session (recordDeployShasDelivered) under the SAME condition, so a
-   * later "X COMPLETE + DEPLOYED" completion escalation naming that SHA is recognized as a duplicate and
-   * suppressed — @decision 5907b71e, see
-   * docs/decisions/5907b71e-restart-wake-impact-classification-and-sha-dedup.md for the wake-impact
-   * classification (part 1) and the SHA-dedup window this recording feeds (part 2).
+   *  re-orient branch, never the silent/minimal one.
+   * @decision 11b847e1 — that reason text (and any SHA extracted from it) must never reach a MANAGER
+   *  recipient outside the requester's own project (the Platform Lead is exempt) — redact via
+   *  `reasonClauseFor`, and never record a delivered SHA for a recipient given the redacted branch.
+   * @decision 5907b71e — a non-causal bystander with zero `RestartWakeImpact` stake (`isNoOpManagerWake`)
+   *  must resume silently; a delivered deploy SHA is recorded only in-memory (process-local, never
+   *  persisted) to dedup a later completion escalation naming the same SHA.
+   *
    * EVERY continuation nudge carries the shared {@link RESUME_NUDGE_TAIL} (PL Auditor #11): it notes the
-   * engine's file-read tracking was reset by the restart (re-Read before Edit) — @decision 5d8dea5f
-   * removed the old bare-"Continue" disclaimer from that tail; the daemon never enqueues a standalone
-   * bare-continue turn (see docs/decisions/5d8dea5f-resume-nudge-tail-drops-bare-continue-disclaimer.md).
+   * engine's file-read tracking was reset by the restart (re-Read before Edit).
+   * @decision 5d8dea5f — never reintroduce the old bare-"Continue" disclaimer in that tail — the daemon's
+   *  own nudge is the one authoritative resume turn; it never enqueues a standalone bare-continue turn.
+   *
    * Best-effort per session: an unresumable one (dead transcript / gone worktree) is skipped + counted.
    * `resumeOne` is injectable for hermetic tests (default drives this.resume); `now` likewise for tests.
    */
@@ -4507,7 +4502,9 @@ export class SessionService {
     };
 
     // @decision sha:974017b4 — replay a session's pre-restart pending FIFO in order, before its continuation nudge (enqueueStdin is ready-gated, so it queues until boot).
-    // @decision sha:ab65c2ac — the replayed snapshot carries no per-entry warning/agent kind; ambiguous defaults to "agent" (see docs/decisions/ab65c2ac-replayed-pending-entry-defaults-to-agent-kind.md).
+    // @decision sha:ab65c2ac — the replayed snapshot carries no per-entry warning/agent kind; bias an
+    //  ambiguous entry to "agent", never "warning" — a coalesced-away agent message is a worse loss than
+    //  the few extra benign turns a wrongly-"agent"-classified warning costs.
     // @decision 9e27f4d2 — replay side: restore giveUpHeldUntil via enqueueStdin so the hold survives resume; every restored hold is logged, since its eventual delivery is a certain duplicate.
     // DEFENSIVE per-entry: intent is un-versioned on-disk JSON — a malformed entry must never throw here; skip-and-log beats fail-fast (resumeFleetOnBoot has no per-call try/catch, and the intent file is already gone by the time this runs).
     const replayPending = (id: string): void => {
@@ -4542,7 +4539,9 @@ export class SessionService {
     // resumed, I/O replayed, board), not by a stale idle-policy; a genuine bystander no-ops cheaply.
     const liveWorkerCount = (managerId: string): number =>
       entries.filter((e) => e.role === "worker" && e.parentSessionId === managerId).length;
-    // @decision 6d6b1b7b — the worktree-at-risk pre-pass runs once, eagerly, over the flat per-entry resume loop's own order-independent population; see docs/decisions/6d6b1b7b-worktree-risk-prepass-is-eager-and-flat.md.
+    // @decision 6d6b1b7b — classify worktree-at-risk as an eager PRE-PASS, never incrementally inside the
+    //  main per-entry resume loop below — that loop is FLAT across roles in unspecified order, so an
+    //  incremental accumulator's output would depend on iteration order.
     const worktreeCheckedByManager = new Map<string, number>();
     const worktreeAtRiskByManager = new Map<string, number>();
     for (const e of entries) {
@@ -6846,10 +6845,9 @@ export class SessionService {
   }
 
   /**
-   * @decision aa4e24ff — worker_redirect's enqueue-then-interrupt ordering is load-bearing (flush +
-   *  supersede, THEN enqueue, THEN interrupt only if held) so it deterministically lands as the next
-   *  turn; its own discard-count advisory is defect 2's remedy half of this same card
-   *  (docs/decisions/aa4e24ff-redirect-advisory-triggers-on-observable-hold-time-not-message-text.md)
+   * @decision aa4e24ff — worker_redirect's enqueue-then-interrupt ordering is load-bearing: flush +
+   *  supersede, THEN enqueue, THEN interrupt only if held — never reorder, or the redirect can fail to
+   *  deterministically land as the next turn.
    */
   redirectWorker(
     managerSessionId: string, workerSessionId: string, text: string,
@@ -6893,10 +6891,9 @@ export class SessionService {
   }
 
   /**
-   * @decision 9f279c7b — ContextWatcher's emergency-recycle interrupt (Trigger A) reuses
-   *  deliverRedirect but skips the queue flush (a manager's queue holds OTHER parties' inbound
-   *  content), refuses inside an active merge-danger window, and frames under its own bespoke tag
-   *  (docs/decisions/9f279c7b-contextwatcher-emergency-recycle-interrupt-trigger-a.md)
+   * @decision 9f279c7b — ContextWatcher's emergency-recycle interrupt (Trigger A) reuses deliverRedirect
+   *  but must SKIP the queue flush (a manager's queue holds OTHER parties' inbound content) and must
+   *  refuse while the target repo sits inside an active merge-danger window.
    */
   redirectManagerForEmergencyRecycle(sessionId: string, text: string): EmergencyRedirectOutcome {
     const target = this.db.getSession(sessionId);
@@ -6919,9 +6916,8 @@ export class SessionService {
 
   /**
    * @decision aa4e24ff — deliverRedirect is the shared enqueue-then-interrupt core for redirectWorker and
-   *  redirectSessionAsCompanion; callers pre-resolve scope, and a HELD result's return shape must not
-   *  collapse into a plain next-turn-boundary hold
-   *  (docs/decisions/aa4e24ff-redirect-advisory-triggers-on-observable-hold-time-not-message-text.md)
+   *  redirectSessionAsCompanion; it must never re-derive/re-check scope (callers pre-resolve it), and a
+   *  HELD result must not collapse into a plain next-turn-boundary hold — override its `landsAt`.
    */
   private deliverRedirect(
     target: Session, text: string,
@@ -6963,9 +6959,9 @@ export class SessionService {
       ? { ...r0, discarded: flushed.length }
       : { ...r0, landsAt: "after-interrupt", interrupting: true, discarded: flushed.length };
     if (!r.delivered) this.pty.interruptForRedirect(target.id);
-    // @decision 99339bcd — queuedMsgId + turnSeqAtDelivery are stamped on BOTH the held and immediate
-    //  redirect paths (not held-only), so session_message_gave_up stays auditable either way
-    //  (docs/decisions/99339bcd-redirect-queuedmsgid-stamped-on-both-paths-not-held-only.md)
+    // @decision 99339bcd — queuedMsgId + turnSeqAtDelivery must be stamped on BOTH the held and immediate
+    //  redirect paths, never held-only — the immediate path has no session_message_queued record to
+    //  collide with, but still needs both fields or session_message_gave_up/resolveDirectiveOutcome misread it.
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: opts.eventManagerId, workerSessionId: target.id, taskId: target.taskId ?? null, kind: "redirect_worker",
@@ -7044,11 +7040,11 @@ export class SessionService {
 
   /**
    * @decision 610abe29 — worker_set_mode is the ONLY way a worker's permission mode changes, and fails
-   *  closed (bypassPermissions/any string outside acceptEdits|auto|plan must never reach setPermissionMode)
-   *  (docs/decisions/610abe29-worker-set-mode-is-the-only-mode-change-path-fails-closed.md)
-   * @decision 9c03f5a6 — plan is further rejected for a role that cannot self-exit it (ExitPlanMode
-   *  disallowed), since it would then be unable to act OR report up via worker_report
-   *  (docs/decisions/9c03f5a6-auto-mode-entry-warning-suppressed-via-reverse-engineered-flag.md)
+   *  closed: bypassPermissions/any string outside acceptEdits|auto|plan must never reach
+   *  setPermissionMode, or a manager could escalate a worker out of its acceptEdits+allowlist sandbox.
+   * @decision 9c03f5a6 — plan is further rejected outright for a role that cannot self-exit it
+   *  (ExitPlanMode disallowed) — it would then be unable to act OR report up via worker_report, silently
+   *  occupying a concurrency slot until a human notices.
    */
   async setWorkerMode(managerSessionId: string, workerSessionId: string, mode: string): Promise<LandedMode> {
     if (!WORKER_SETTABLE_MODES.has(mode)) {
@@ -7074,8 +7070,8 @@ export class SessionService {
 
   /**
    * @decision 3e76ecad — flushWorkerComposer is a submit-only affordance (press Enter, write no new
-   *  text); resumability/recovered/lastFlushAttribution are additional signals, never replacements for
-   *  ok/reason/confirmed (docs/decisions/3e76ecad-flush-worker-composer-submit-only-affordance.md)
+   *  text); resumability/recovered/lastFlushAttribution are ADDITIONAL discriminators, never a
+   *  replacement for ok/reason/confirmed — a `dead` resumability makes a retry moot regardless of them.
    */
   async flushWorkerComposer(managerSessionId: string, workerSessionId: string): Promise<{
     ok: boolean; reason?: string; confirmed?: boolean; recovered?: boolean; attributable?: boolean; resumability: string;
@@ -7095,16 +7091,14 @@ export class SessionService {
   /**
    * @decision 2ca18433 — a durable down/cross-tree message send: an idle recipient gets it as a turn
    *  now, a busy one holds + persists it so a sender death or daemon restart can no longer silently
-   *  drop it (docs/decisions/2ca18433-restart-pending-snapshot-excludes-durable-messages.md)
+   *  drop it.
    * @decision 61a012ce — ctx.route must be threaded through, or a restart-triggered redrive of a
-   *  companion-routed dispatch silently downgrades to a plain nudge
-   *  (docs/decisions/61a012ce-redrive-persists-route-as-a-fifth-legacy-defaulted-field.md)
-   * @decision 21a281b6 — ctx.mintedAtWallClock is rendered at drain time only, never baked into the
-   *  compared/stored framedText (breaks hasAmbiguousMatch's content-match resend auto-join otherwise)
-   *  (docs/decisions/21a281b6-annotate-mint-stamp-gates-are-load-bearing.md)
-   * @decision 6439c51f — the "system" sentinel to null coalescing-identity map now lives inside
-   *  enqueueStdin itself; every caller here passes ctx.sender RAW
-   *  (docs/decisions/6439c51f-system-sentinel-coalescing-map-moved-into-enqueuestdin.md)
+   *  companion-routed dispatch silently downgrades to a plain nudge.
+   * @decision 21a281b6 — ctx.mintedAtWallClock must render at drain time only, never bake into the
+   *  compared/stored framedText — a non-deterministic timestamp there would break
+   *  hasAmbiguousMatch's content-match resend auto-join.
+   * @decision 6439c51f — the "system" sentinel-to-null coalescing-identity map lives inside
+   *  enqueueStdin itself; every caller here must pass ctx.sender RAW, never pre-mapped.
    *
    * Callers fall into two shapes:
    *  - The original ones (messageWorker, redirectWorker, messageSessionAsPlatform, the recycle carry-
@@ -7147,8 +7141,8 @@ export class SessionService {
    * `annotatePasteRecoveryAge` already established for the same reason. Every other caller (omitting it)
    * is byte-identical to before this field existed.
    */
-  // @decision 6439c51f — see above; both call sites below pass the RAW `sender`/`ctx.sender` straight
-  //  through, `enqueueStdin` maps it (docs/decisions/6439c51f-system-sentinel-coalescing-map-moved-into-enqueuestdin.md)
+  // @decision 6439c51f — both call sites below must pass the RAW `sender`/`ctx.sender` straight through
+  //  unmapped; `enqueueStdin` itself owns the "system" sentinel-to-null coalescing-identity mapping.
 
   private enqueueDurableMessage(
     recipientId: string, framedText: string,
@@ -7235,14 +7229,13 @@ export class SessionService {
       // Held (busy / not-ready) — persist the durable inbox record. delivered:false with no position also
       // means "recipient not live": we still record it, so the boot scan re-drives it once the recipient
       // is resumed (never silently lost), and surfaces it to the sender if it stays stuck.
-      // @decision 129efe74 — a redrive reads back kind/rootMsgId/chainDepth/giveUpHeldUntil from this
-      //  persisted record; a legacy (pre-card) row falls back to the old hardcoded behavior
-      //  (docs/decisions/129efe74-redrive-reads-back-persisted-kind-hold-chain-legacy-defaults.md)
-      // @decision 61a012ce — route joins that persisted list as a fifth field, same reasoning
-      //  (docs/decisions/61a012ce-redrive-persists-route-as-a-fifth-legacy-defaulted-field.md)
-      // @decision d09d58e7 — reportEventId joins the same list, or a reconstructed record can never be
-      //  purge-matched by purgeQueuedByReportEventIds once its report has already been read
-      //  (docs/decisions/d09d58e7-reporteventid-joins-the-persisted-redrive-field-list.md)
+      // @decision 129efe74 — a redrive must read back kind/rootMsgId/chainDepth/giveUpHeldUntil from
+      //  this persisted record, never hardcode them; a legacy (pre-card) row falls back to the old
+      //  hardcoded behavior so an already-undelivered record still redrives unchanged across the upgrade.
+      // @decision 61a012ce — route joins that persisted list as a fifth field — an untouched restart
+      //  redrive of a companion-routed dispatch would otherwise silently downgrade to a plain nudge.
+      // @decision d09d58e7 — reportEventId joins the same list — without it, a reconstructed record can
+      //  never be purge-matched by purgeQueuedByReportEventIds once its report has already been read.
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId: ctx.sender, workerSessionId: recipientId, taskId: ctx.taskId ?? null,
@@ -7271,14 +7264,13 @@ export class SessionService {
 
   /**
    * @decision ccb407eb — handleGiveUpExhausted's give-up terminal-branch policy: never-discard,
-   * re-mint-then-park (giveUpHeldUntil forces the HELD branch, also fixing a durable-record gap),
-   * AUDITABLE rootMsgId chain, and "system"-sender safety — fully recorded, docs/decisions/ccb407eb-*.md
+   *  re-mint-then-park (giveUpHeldUntil forces the HELD branch, also fixing a durable-record gap),
+   *  AUDITABLE rootMsgId chain, and "system"-sender safety — never a silent drop.
    */
   /**
    * @decision 085d9422 — three staleness checks (duplicate-park-for-same-root, superseded-by-newer-
-   * directive, already-confirmed-after-park) suppress a MOOT `[loom:redelivery-parked]` notice before it's
-   * built; never suppresses a genuinely first, unresolved park. Fully recorded, see
-   * docs/decisions/085d9422-suppressmootparknotice-three-staleness-checks.md
+   *  directive, already-confirmed-after-park) must suppress a MOOT `[loom:redelivery-parked]` notice
+   *  before it's built; never suppress a genuinely first, unresolved park.
    */
   private suppressMootParkNotice(recipientId: string, sender: string, rootMsgId: string): string | null {
     const events = this.db.listEventsForWorker(recipientId);
@@ -7397,21 +7389,21 @@ export class SessionService {
       //
       // @decision 417cea0a — the notice's prescribed action/claims must fit what THIS sender can actually
       //  do/verify: no universal cross-project transcript read, no unqualified "safe by construction"
-      //  resend claim (docs/decisions/417cea0a-ongiveupconfirmed-defers-news-vs-noop-to-the-db-holding-implementer.md)
+      //  resend claim.
       //
-      // @decision 085d9422 — DoD-3 shortened this notice by relocating (not deleting) ~730 of its ~1,150
-      //  chars to worker_list/worker_message's own docs (docs/decisions/085d9422-suppressmootparknotice-three-staleness-checks.md)
+      // @decision 085d9422 — the ~730 (of ~1,150) chars trimmed from this notice were RELOCATED, never
+      //  deleted, to worker_list/worker_message's own docs — do not re-inline them here.
       const recipient = this.db.getSession(recipientId);
       const canCheckRecipient = recipient?.role === "worker" && recipient.parentSessionId === sender;
-      // @decision 085d9422 — CR follow-up: the parkedDirective pointer belongs ONLY in the
-      //  canCheckRecipient branch, never the notice's unconditional prefix
-      //  (docs/decisions/085d9422-suppressmootparknotice-three-staleness-checks.md)
+      // @decision 085d9422 — the parkedDirective pointer belongs ONLY in the canCheckRecipient branch,
+      //  never the notice's unconditional prefix — only a sender that can actually read
+      //  worker_list/worker_status gets it.
       // @decision 0f693dea — a `peer_message` sender gets a THIRD branch (peer_message_status), gated on
       //  its own cross_project_message audit event carrying this rootMsgId as msgId, computed lazily so
-      //  the canCheckRecipient fast path pays nothing for it (docs/decisions/0f693dea-peer-message-status-three-code-review-fixes.md)
-      // @decision 0ab96d24 — a wrong claim about the READER'S OWN CAPABILITIES ("no read exists")
-      //  suppresses verification the WORLD's own falseness would invite; reworded conditional, true for
-      //  the platform Lead's session_transcript today and any future role/read (docs/decisions/0ab96d24-wrong-capability-claims-suppress-verification-reword-conditional.md)
+      //  the canCheckRecipient fast path pays nothing for it.
+      // @decision 0ab96d24 — never phrase this notice as a flat universal about the READER'S OWN
+      //  CAPABILITIES ("no read exists") — a wrong claim there suppresses verification a wrong claim
+      //  about the world would instead invite; phrase conditionally ("if you have one, use it").
       const recipientCheckClause = canCheckRecipient
         ? `Check ${recipientId.slice(0, 8)} via worker_list/worker_status (parkedDirective/directive.state) before assuming it's gone.`
         : this.db.listEvents(sender).some((e) => e.kind === "cross_project_message" && e.detail?.msgId === rootMsgId)
