@@ -9846,18 +9846,13 @@ export class PtyHost {
         this.cycleToMode(sessionId, healTarget, onSettled);
         return;
       }
-      // Card 2151f1db (visibility, NOT auto-correct): a role that is NOT excluded from ExitPlanMode —
-      // manager, platform, a plain session — has no backstop above, by design (it may deliberately choose
-      // plan, and it CAN self-exit). But the boot mode-cycle's own footer-read confirmation can fail under
-      // host contention for this role exactly as it can for a healable one (see cycleToMode's doc: a
-      // give-up branch can leave ANY role short of its target) — and unlike a deliberate choice, that
-      // failure is currently silent: the session just discovers it later, indistinguishably from having
-      // chosen the mode itself. `mode !== healTarget` (not just HEALABLE_MODES membership) is the real
-      // mismatch test here, since — unlike a worker/setup/auditor role, whose target is always pinned to
-      // "auto" regardless of project config — a manager/platform target could in principle itself be a
-      // HEALABLE_MODES member (e.g. a project configured to land there deliberately), and that must not
-      // false-positive as a mismatch. One-shot: `live.modeLogged` above already guards this whole function
-      // to fire once per (re)spawn, so this never repeats mid-session.
+      //
+      // @decision 2151f1db — a manager/platform/plain role's landed-mode mismatch gets a visibility-only
+      // notice, not an auto-correcting `cycleToMode` call — it may have deliberately chosen the mode
+      // and can self-exit it, so a failed confirmation is surfaced, not indistinguishable from a choice.
+      //
+      // One-shot: `live.modeLogged` above already guards this whole function to fire once per (re)spawn,
+      // so this never repeats mid-session.
       if (!noCyclingConfigured && healTarget != null && mode !== healTarget && HEALABLE_MODES.has(mode) && l.alive && !disallowedToolsForRole(role).includes("ExitPlanMode")) {
         // eslint-disable-next-line no-console
         console.log(`[resume-mode] ${sessionId} mode-mismatch-notice: role=${role ?? "-"} landed in ${mode}, configured target is ${healTarget} — notifying (no auto-correct for this role)`);
