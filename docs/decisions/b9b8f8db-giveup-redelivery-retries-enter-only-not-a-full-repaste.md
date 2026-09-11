@@ -14,6 +14,23 @@ This assumption was later found to have no way to verify itself when an interven
 
 - Do not revert `giveUpGen`-gated redelivery detection back to a plain backspace+repaste for an already-attempted message — that reintroduces the unbounded compounding growth this card measured and fixed.
 
+## Decision B (unrelated decision, same card id, `pty/host.ts`)
+
+Card `b9b8f8db` also names the evidence that motivated building `flushComposer`/`worker_flush` (card
+`3e76ecad`) in the first place: the owner recovered a session that had sat "apparently dead" for
+~29 minutes by pressing Enter alone at the raw terminal — no new text, just the confirming keystroke.
+Before `worker_flush` existed, a manager's only two documented remedies for a stranded worker were
+`worker_message` (APPENDS, compounding an already-oversized buffer) or `worker_stop` + respawn
+(DISCARDS whatever the worker had accumulated); this evidence is what justified adding a third,
+submit-only option. **Not the same decision as the composer-runaway Enter-only-retry fix above** — this
+is `worker_flush`'s own origin story, cited from the same card id at a different site.
+
+## Source (this section only)
+
+Inline JSDoc in `packages/daemon/src/pty/host.ts` (`flushComposer`'s own method doc), condensed, not
+verbatim, as of main `df6d1c73` (this tranche's starting HEAD). Extracted by card `218e51fe`
+(tranche 39 on `pty/host.ts`).
+
 ## Source
 
 Inline comment in `packages/daemon/src/pty/host.ts` (`submit()`, the composer clear-prefix / give-up-redelivery block), lines 9826-9847, as of commit `dc53c7111807e103baf99544d3890df80e9a1c92` (this tranche's starting HEAD). Extracted by card `dfde8c66` (tranche 9). Regression test: `packages/daemon/test/pty-composer-runaway-bound.mjs`; also exercised by `packages/daemon/test/pty-giveup-clear.mjs`, `pty-giveup-requeue.mjs`, `pty-healifstuck-clear.mjs`, `pty-giveup-clear-single-attempt.mjs`.

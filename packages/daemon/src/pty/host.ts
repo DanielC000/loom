@@ -8469,13 +8469,16 @@ export class PtyHost {
   }
 
   /**
-   * Card 3e76ecad — the manager-facing SUBMIT-ONLY affordance: press Enter on this worker's OWN composer
-   * without writing any new text, the daemon-driven analogue of what a human does at the raw terminal
-   * when a stranded turn just needs re-confirming (the parent card b9b8f8db's evidence: the owner
-   * recovered a session that had sat "apparently dead" for ~29 minutes by pressing Enter — no new text,
-   * just the confirming keystroke). Until this existed, a manager's only two documented options for a
-   * stranded worker were `worker_message` (APPENDS — compounds an already-oversized buffer) or
-   * `worker_stop` + respawn (DISCARDS whatever the worker had accumulated); this is the third option.
+   * The manager-facing SUBMIT-ONLY affordance: press Enter on this worker's OWN composer without
+   * writing any new text — the daemon-driven analogue of a human pressing Enter at the raw
+   * terminal to re-confirm a stranded turn.
+   *
+   * @decision 3e76ecad — the third remedy for a stranded worker, after `worker_message`
+   * (appends, compounding an oversized buffer) and `worker_stop`+respawn (discards accumulated
+   * work) — this affordance submits without touching what's already queued.
+   *
+   * @decision b9b8f8db — built on evidence a human recovered an "apparently dead" session after
+   * ~29 minutes by pressing Enter alone, no new text — motivating a submit-only affordance.
    *
    * GENUINELY NON-WRITING (DoD-2): writes ONLY a zero-length bracket-paste reassert pair
    * (`BRACKET_PASTE_START + BRACKET_PASTE_END` — closes any dangling open paste marker, no body bytes
@@ -8535,16 +8538,14 @@ export class PtyHost {
    * press-Enter remedy, nothing more; a worker whose composer holds genuinely lost/corrupted state is
    * outside what pressing Enter can fix.
    *
-   * Card ac7884e3: stamps `live.flushMarkerGen = gen` right before writing its own reassert+Enter — see
-   * that field's own doc for exactly what the marker can and cannot establish, and `lastFlushAttribution`'s
-   * doc for how a confirming hook later resolves it. This does NOT change anything about the return shape
-   * or timing documented above (`confirmed`/`recovered` keep their exact existing meanings); it is a
-   * SEPARATE, additive piece of bookkeeping that survives past this call's own return, because the defect
-   * this exists to fix is specifically the case where confirmation arrives AFTER this call already
-   * returned `confirmed:false` — see `lastFlushAttribution`'s own doc for the measured production
-   * specimen. `attributable` on the resolved object below is populated ONLY when this call's own bounded
-   * wait happens to observe the resolution for THIS SAME `gen` before returning; the common late case is
-   * read later via `getLastFlushAttribution`/a subsequent `worker_flush` call, never blocked on here.
+   * @decision ac7884e3 — also stamps `live.flushMarkerGen = gen` before writing the reassert+Enter,
+   * a separate attribution record that survives past this call's own return.
+   *
+   * This does NOT change anything about the return shape or timing documented above (`confirmed`/
+   * `recovered` keep their exact existing meanings). `attributable` on the resolved object below is
+   * populated ONLY when this call's own bounded wait happens to observe the resolution for THIS SAME
+   * `gen` before returning; the common late case is read later via `getLastFlushAttribution`/a
+   * subsequent `worker_flush` call, never blocked on here.
    */
   flushComposer(sessionId: string): Promise<{ ok: boolean; reason?: string; confirmed?: boolean; recovered?: boolean; attributable?: boolean }> {
     const live = this.live.get(sessionId);
