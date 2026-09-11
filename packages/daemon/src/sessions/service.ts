@@ -11726,26 +11726,21 @@ export class SessionService {
     // `reusedOpId` set) only when the reuse check proves it doesn't need to.
     let gateRan = false;
     let reusedOpId: string | undefined;
-    // Card 2e52bf99: EVERY reuse-condition that refused, not just the first one hit — declared at this
-    // SAME outer scope as `gateRan`/`reusedOpId` for the identical reason (the `evt("build_gate", ...)`
-    // call that reads it sits below the reuse-decision block). `undefined` whenever reuse actually fired
-    // (nothing to explain); otherwise the FULL set of failing conditions, independently derived — see the
-    // reuse-decision block below for why "first failing condition only" would bias any distribution built
-    // from this field toward whichever condition happens to sit earliest in the check order.
+    // `reuseRefusalReasons` is declared at this outer scope for the same reason as `gateRan`/
+    // `reusedOpId`: the `evt("build_gate", ...)` call that reads it sits below the reuse-decision block.
+    // `undefined` whenever reuse actually fired (nothing to explain); otherwise the FULL set of failing
+    // conditions.
+    // @decision 2e52bf99 — reuseRefusalReasons must capture EVERY failing reuse condition, never only
+    //  the first hit, or a refusal-cause distribution built from it is biased toward whichever check
+    //  happens to run earliest.
     let reuseRefusalReasons: string[] | undefined;
-    // Card 2e52bf99 (manager follow-up): whether the union-merge below (the non-preLanded branch) actually
-    // MOVED the worktree's HEAD — i.e. `mergeMainIntoWorktree`'s own `merged:true`, meaning `git merge
-    // --no-edit mainSha` genuinely ran (fast-forward OR a real merge commit; VERIFIED by reading that
-    // function — its ONLY early-return short-circuit, on a pre-existing merge-base check, returns
-    // `merged:false` and never invokes `git merge` at all when main was already an ancestor, i.e. nothing
-    // to fold in). Declared at this outer scope, defaulting `false`, so the preLanded branch (which never
-    // runs a union-merge at all) and the "nothing to fold in" short-circuit both correctly leave it unset —
-    // in both cases any later stamp change can ONLY be attributable to the worktree/branch itself, never
-    // to this step. Exists so the reuse-refusal reasons below can tell apart two causes that would
-    // otherwise collapse into one bucket: the union-merge's OWN commit moving HEAD (structural — fires
-    // whenever main advanced, independent of anything the worker did) vs. the worktree genuinely changing
-    // on its own (the worker committed or edited something after its self-check — a real, different
-    // signal). Read-only, additive: never influences `reuseResult`.
+    // unionMergeMovedHead: whether the union-merge below actually MOVED HEAD, i.e.
+    // `mergeMainIntoWorktree`'s own `merged:true`. Defaults `false`: the preLanded branch and the
+    // nothing-to-fold-in short-circuit both leave it unset. Read-only, additive: never influences
+    // `reuseResult`.
+    // @decision 2e52bf99 — unionMergeMovedHead lets a later stamp-change be attributed to the union-merge
+    //  folding main in (structural) rather than the worker's own commit/edit (a real, different signal);
+    //  the two causes must never collapse into one bucket.
     let unionMergeMovedHead = false;
     // Card db9b0130: whether this merge's gate was skipped because its ENTIRE changed-path set is proven
     // inert (see `isInertMergeDiff`) — declared at THIS outer scope for the same reason `gateRan` is (the
@@ -12020,12 +12015,9 @@ export class SessionService {
         };
       }
 
-      // REUSE-A-GREEN-SELF-CHECK (card e50600d2): `run_gate` (the worker's own self-check) and this merge
-      // gate run the IDENTICAL `gateCommand`. When this merge's input is PROVABLY the exact same tree the
-      // worker's self-check already validated green, re-running it here is pure duplicate lane time — so
-      // skip it. FAIL-CLOSED BY CONSTRUCTION: every condition below must be independently re-derived from
-      // recorded/fresh state right now, never inferred from elapsed time — any missing/unprovable/false
-      // condition falls straight through to running the gate exactly as before this existed.
+      // @decision e50600d2 — reuse a green run_gate self-check instead of re-running this merge's
+      //  IDENTICAL gate; every condition below is independently re-derived from recorded/fresh state
+      //  right now, never inferred from elapsed time — any gap falls through to a real gate run.
       //   1. The worker's LATEST run_gate self-check (this.lastWorkerGateCheck, recorded by
       //      runWorkerGate on every settle) passed, AND its OWN settle already proved current (headCurrent)
       //      — this alone excludes BOTH a self-check that settled RACY/"UNVERIFIED" (headCurrent:false)
@@ -12040,31 +12032,17 @@ export class SessionService {
       //      earlier in this method, and never skipped just because a union-merge already ran above) —
       //      main's current HEAD is already an ancestor of the branch. This is the hard constraint: a main
       //      that moved past what the branch contains ALWAYS fails this check (`undefined` on a git error
-      //      also fails it, strict `=== 0`), forcing a real re-gate. Proved against a SINGLE captured
-      //      `freshHead` (card 24cc40f9) — the same sha this proof is checked against is the sha threaded
-      //      into `gateBaseMainHead` below, by construction, rather than two independent HEAD reads that
-      //      could each observe a different tip.
+      //      also fails it, strict `=== 0`), forcing a real re-gate.
+      //      @decision 24cc40f9 — freshHead is captured ONCE and threaded through both this proof and
+      //       gateBaseMainHead below, never re-read, so the two can't observe different tips of a moving
+      //       main.
       // Any gap in this proof (no self-check on record for this exact branch, one that failed or settled
       // racy, a dirty worktree, a moved HEAD, or main having advanced) leaves `reuseResult` unset below and
       // the gate runs for real, unchanged from before this existed.
       //
-      // REFUSAL DIAGNOSTICS (card 2e52bf99): conditions 1-4 below are pure reads on `lastCheck` (no I/O,
-      // no side effects) — independently evaluated into named consts regardless of whether earlier ones
-      // already disqualify reuse, at zero extra cost. Conditions 5/7 (worktree dirty / behind-main) are
-      // properties of the CURRENT worktree/git state, independent of whether `lastCheck` even exists — so
-      // `freshStamp`/`freshHead`/`freshBehindMain` are now computed UNCONDITIONALLY (hoisted out of the
-      // `if` that used to gate them), not only when 1-4 already pass. This is deliberate, not an oversight:
-      // without it, the single most-suspected refusal cause (no `lastWorkerGateCheck` entry at all — an
-      // in-memory Map wiped by every daemon restart) would explain itself and stop there, and a fix that
-      // makes the entry durable could still land on a branch whose worktree was ALSO dirty or whose main
-      // had ALSO advanced — a second blocker this instrumentation would otherwise have hidden until the
-      // "fix" shipped and failed to move the reuse rate. Condition 6 (stamp-unchanged) stays conditioned on
-      // `lastCheck` existing — it is only MEANINGFUL relative to a recorded stamp, a genuine not-applicable,
-      // not a measurement gap. HOISTING NEVER CHANGES THE DECISION: every value below is computed EXACTLY
-      // ONCE and read by both the reuse `if` (unchanged operators/order/short-circuit) and the reasons
-      // list; nothing between the old inline call sites and this hoisted one mutates the worktree, the
-      // index, or main (the union-merge / preLanded capture above, and the timeout-breaker check, are both
-      // read/decide-only with respect to worktree content from this point on).
+      // @decision 2e52bf99 — every reuse condition below is computed unconditionally (hoisted), even
+      //  once an earlier one already disqualifies reuse, so a masked second blocker (dirty worktree,
+      //  main advanced) is never hidden behind whichever cause happens to be checked first.
       let reuseResult: GateSequentialResult | undefined;
       const lastCheck = this.lastWorkerGateCheck.get(workerSessionId);
       // `lastCheck !== undefined` (never `!!lastCheck`) deliberately — TS's aliased-condition narrowing
@@ -12143,12 +12121,9 @@ export class SessionService {
           reasons.push("worktree-dirty-unknown", "stamp-unknown");
         } else {
           if (freshStamp.dirty) reasons.push("worktree-dirty");
-          // SPLIT (manager follow-up, card 2e52bf99): a stamp change has two structurally different
-          // causes that must not collapse into one bucket — see `unionMergeMovedHead`'s own doc. When the
-          // union-merge above genuinely moved HEAD (main was folded in — structural, unrelated to
-          // anything the worker did), attribute it there; otherwise the change can only be the
-          // worktree/branch itself (a new commit or a dirty edit landing after the self-check — a real,
-          // different, worker-caused signal).
+          // @decision 2e52bf99 — a stamp change is attributed to the union-merge folding main in
+          //  (structural) when unionMergeMovedHead is true, never collapsed into the same bucket as a
+          //  worker's own new commit or edit landing after the self-check.
           if (hasLastCheck && stampDiffers === true) {
             reasons.push(unionMergeMovedHead ? "stamp-changed-by-union-merge" : "stamp-changed-worktree");
           }
@@ -13144,10 +13119,10 @@ export class SessionService {
         // stamped `skipped:true`. `gateOutcomeFromDetail` checks `skipped` before `passed`, so this alone
         // is what keeps a skip out of `gate_history`'s `"pass"` bucket.
         ...(gateRan ? {} : inertSkip ? { skipped: true, skipReason: "inert-docs-only-diff" } : { reused: true, reusedOpId }),
-        // Card 2e52bf99: independent of the ternary above — `reuseRefusalReasons` is captured at the
-        // reuse-decision block itself (before `inertSkip` is ever considered), so it reflects why REUSE
-        // specifically was refused regardless of what a later inert-diff skip does. Absent (never an empty
-        // array) whenever reuse actually fired — see that block's own doc for the full reasons vocabulary.
+        // Absent (never an empty array) whenever reuse actually fired.
+        // @decision 2e52bf99 — reuseRefusalReasons is stamped independent of the inertSkip/reused
+        //  ternary above, so it reflects why REUSE specifically was refused regardless of a later
+        //  inert-diff skip.
         ...(reuseRefusalReasons && reuseRefusalReasons.length > 0 ? { reuseRefusalReasons } : {}),
         // Card 2154b6ad: a REAL gate still ran (gateRan:true, unlike the inert-diff skip above) but with
         // the runtime test suite swapped out — surfaced here so `gate_history` never reads this as an
