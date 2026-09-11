@@ -9586,17 +9586,9 @@ export class PtyHost {
     // `live.ready` guard above means this whole function body runs AT MOST once per session, so this clear
     // can never be skipped by an early return on any call that reaches this line — there is only one.
     if (live.readyFallbackTimer) { clearTimeout(live.readyFallbackTimer); live.readyFallbackTimer = null; }
-    // Card 25813ecc (fixes a live regression 0050a17e/b4fa85a4 introduced): capture the kickoff from
-    // `live.startupPrompt` — the IMMUTABLE field seeded once at spawn() — BEFORE `drainPending` runs
-    // below. `live.lastPrompt` is NOT safe to read here: `drainPending` calls `submit()` for any queued
-    // message (a resume's queue is normally non-empty — companion/project-memory recall, redriven
-    // undelivered messages, all enqueued before ready), and `submit()` unconditionally overwrites
-    // `live.lastPrompt` with whatever IT is currently submitting. Reading `lastPrompt` AFTER that drain —
-    // as this code used to — captured the DRAINED message instead of the real kickoff on a resume, and
-    // scheduleKickoffGuarantee then redelivered it a second time. `startupPrompt` never receives such a
-    // write (only submit() touches lastPrompt; nothing ever touches startupPrompt past spawn()), so
-    // reading it is correct by construction, not by statement order — no future reordering of the lines
-    // below can reintroduce this bug.
+    // @decision 25813ecc — capture the kickoff from `live.startupPrompt`, never `live.lastPrompt`, before
+    // `drainPending` runs: `drainPending`'s own `submit()` calls unconditionally overwrite `lastPrompt`,
+    // so reading it after the drain silently substitutes the drained message for the real kickoff.
     const kickoff = live.startupPrompt != null && !live.firstTurnStarted ? live.startupPrompt : null;
     this.drainPending(sessionId); // deliver the first queued injection now that the composer is live (synchronous; see its own doc — never races logLandedMode's read, which only starts polling MODE_LOG_POLL_MS from now)
     // Card 0050a17e (Code Review catch #2): logLandedMode's footer read + role-gated plan auto-heal (its
@@ -9610,10 +9602,11 @@ export class PtyHost {
     // completion callback makes that ordering STRUCTURAL rather than incidental — true for 3 of
     // `runCycleToMode`'s 4 terminal branches (`reached`/`press-cap` fire only once `awaitChange` has
     // CONFIRMED the footer moved, so the last Shift+Tab is provably consumed; `pty-gone` is moot, nothing
-    // will be pasted). ⚠️ The `footer-unchanged` branch (card c22f6cb8) is the exception: it gives up after
-    // `RESUME_MODE_CHANGE_MAX_POLLS` polls with the just-written Shift+Tab still UNCONFIRMED, then still
-    // calls `onDone` — so on that branch the ordering is best-effort, not structural: a queued Shift+Tab
-    // can in principle still land mid-paste if the engine is stalled precisely across that give-up.
+    // will be pasted).
+    //
+    // @decision c22f6cb8 — the `footer-unchanged` give-up branch is a best-effort exception to that
+    // structural guarantee: `RESUME_MODE_CHANGE_MAX_POLLS` can exhaust with the just-written Shift+Tab
+    // still unconfirmed, so a queued Shift+Tab can in principle still land mid-paste there.
     this.logLandedMode(sessionId, () => { if (kickoff != null) this.scheduleKickoffGuarantee(sessionId, kickoff); });
   }
 
