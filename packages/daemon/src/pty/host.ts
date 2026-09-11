@@ -8937,25 +8937,9 @@ export class PtyHost {
    * (this file's own long-standing convention — either is definitive even if the other was lost), so both
    * call this the instant they fire.
    *
-   * Card 09e655d5 (fixing a gap in the 441499ee safety net): a hook carries NO generation of its own, so
-   * WHICH generation it confirms has to be derived. The original approach compared a pending entry's
-   * `giveUpGen` against the CURRENT `live.submitGeneration` — correct only while nothing has resubmitted
-   * since the failed attempt gave up, which breaks the instant a SECOND generation has ALSO given up (and
-   * so ALSO advanced `submitGeneration`) before the FIRST generation's late hook arrives: that hook would
-   * misattribute to the CURRENT (second) generation and purge the WRONG requeued entry, leaving the
-   * actually-redundant one to double-deliver.
-   *
-   * THE FIX: `live.giveUpConfirmQueue` (pushed in `requeueGiveUpOrigin`) tracks every generation that gave
-   * up and is still awaiting a possible late confirmation, OLDEST first. A hook always correlates to the
-   * QUEUE FRONT, never the live generation — the front is reliably the oldest still-ambiguous generation
-   * because real turns run serially through the one pty stream, so confirming hooks resolve in the same
-   * order their generations were submitted (a second generation's Enter can only actually reach the engine
-   * after the first's turn — if it was a false negative — has finished running). `UserPromptSubmit` purges
-   * the front's matching entry but does NOT advance the queue: it fires first for a real turn, and leaving
-   * the front unchanged means a still-outstanding `Stop` for that SAME real turn is a safe no-op instead of
-   * misattributing to whatever generation is next in the queue. Only `Stop`/`StopFailure` — the definitive,
-   * one-per-real-turn end signal — advances past the front, purging first (covering the case where
-   * `UserPromptSubmit` for it was itself lost, per this file's "either hook is definitive" convention).
+   * @decision 09e655d5 — a late confirming hook correlates against `live.giveUpConfirmQueue`'s FIFO FRONT
+   * (oldest still-ambiguous generation), never `live.submitGeneration` directly; `UserPromptSubmit` purges
+   * the front without advancing it, only `Stop`/`StopFailure` advances past it.
    *
    * IMPROVED, NOT CLOSED (card 73d5c34a): a reconcile tick used to be able to beat a merely-late hook to
    * the punch and resubmit the requeued entry FIRST (bumping the generation before the confirmation
@@ -9006,38 +8990,19 @@ export class PtyHost {
    * the same reasoning residual (3) already accepted for the restart case, one level up the give-up chain.
    * This residual list enumerates DAEMON-RESTART-shaped bypasses of THIS purge specifically, not every place
    * `giveUpHeldUntil` could apply — (4) above is the one exception, named here because it's this SAME
-   * purge's own blind spot, not a carry-path bypass. CLOSED (card
-   * f25bf3bf): the give-up hold's OTHER carry paths besides a daemon restart — recycle/successor handoff
-   * (`SessionService.carryPendingToSuccessor` and its three callers) and the companion capability re-pin
-   * respawn (`SessionService.upgradeCompanionCapabilities`) — were assessed and decided, each on its own
-   * merits, following on from this card. `carryPendingToSuccessor` DELIVERS deliberately (no hold carried)
-   * — a recycle spawns its successor FRESH with no `--resume`, so there is no shared transcript for a
-   * re-delivered duplicate to confuse, and the purge could never fire there regardless. The companion
-   * re-pin respawn PRESERVES the hold instead — it reconnects the SAME engine session via `--resume`, the
-   * same shape as this restart path. See each site's own doc comment for the full reasoning; don't read
-   * (1)-(3) above as "every daemon-restart-shaped bypass is covered" independent of this paragraph.
+   * purge's own blind spot, not a carry-path bypass.
    *
-   * THE GUARD BELOW (card 73d5c34a, code review follow-up): the FIFO-front correlation above assumes the
-   * NEXT hook to arrive, whatever it is, most likely confirms the OLDEST still-ambiguous generation — true
-   * when every generation since `gen` has ALSO given up (this method's own established cross-generation
-   * case, still handled exactly as before). It stops being true the instant a genuinely FRESH, never-
-   * ambiguous generation is issued (e.g. an unrelated inbound message taking `enqueueStdin`'s idle
-   * immediate-submit path while `gen`'s requeued entry sits held) and that fresh generation confirms
-   * quickly and normally: THIS hook almost certainly proves the FRESH generation's own turn, not `gen`'s —
-   * yet unconditional correlation would still attribute it to `gen` and DELETE `gen`'s still-genuinely-
-   * unconfirmed entry, a SILENT LOSS worse than the duplicate this whole file exists to avoid ("fail
-   * toward a duplicate, never a loss" — a lost message is invisible to both sides; a duplicate is at least
-   * visible and was, in fact, how this very card's specimen was caught). So: only run the DESTRUCTIVE
-   * delete loop when `live.submitGeneration` is EITHER still `gen` itself (nothing new has been issued —
-   * the common, single-ambiguity case) OR is itself present in `giveUpConfirmQueue` (the current
-   * generation is ALSO an ambiguous give-up, i.e. the established cross-generation case) — otherwise a
-   * demonstrably fresh, non-ambiguous generation has taken over, and this hook is left for it: `gen`'s
-   * entry survives, un-purged, to resolve via its own bounded hold (a duplicate at worst) instead of being
-   * deleted on a misattributed guess. The `turnEnded` shift is left UNCONDITIONAL either way — it only
-   * ever discards BOOKKEEPING (which generation is "next to maybe-confirm"), never a `pending` entry, so
-   * there is no data-loss risk in still advancing past `gen` even when this hook wasn't really about it;
-   * leaving it un-advanced instead would leak `gen` in `giveUpConfirmQueue` forever once its entry has
-   * already drained under some later identity.
+   * @decision f25bf3bf — the give-up hold's other carry paths besides a daemon restart — recycle/successor
+   * handoff and the companion capability re-pin respawn — are each assessed and decided on their own
+   * merits, not a gap this residual list leaves open.
+   *
+   * See each site's own doc comment for the full reasoning; don't read (1)-(3) above as "every
+   * daemon-restart-shaped bypass is covered" independent of this paragraph.
+   *
+   * @decision 73d5c34a — the FIFO-front correlation's destructive delete loop runs ONLY when
+   * `live.submitGeneration` is still `gen` itself or is itself present in `giveUpConfirmQueue` (also an
+   * ambiguous give-up) — never against a demonstrably fresh, non-ambiguous generation, which would
+   * misattribute its hook and silently delete a still-genuinely-unconfirmed entry.
    *
    * CARD 4a0af485 — CONTENT-MATCH RESOLUTION (closes residual (4) above, for the STILL-QUEUED population
    * ONLY; read the scope note below before assuming more than that): everything above this paragraph is

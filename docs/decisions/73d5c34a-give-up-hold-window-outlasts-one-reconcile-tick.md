@@ -26,3 +26,15 @@ Card 73d5c34a: a still-`isGiveUpHeld` entry (see that method) is skipped when `d
 ## Source (2)
 
 Inline comment in `packages/daemon/src/pty/host.ts` (`drainPending`'s own top-of-method doc), as of commit `b05e83e4fc69ad67baa53fd70b25e97f9595e0be`. Relocated by card `84a4e0d0` (tranche 29 on `pty/host.ts`); no wording changed, wrapped source lines joined into a flowing paragraph and the `*` comment markers stripped.
+
+## The FIFO-front guard — a genuinely fresh generation must not be misattributed
+
+Card 73d5c34a (code review follow-up): the FIFO-front correlation assumes the next hook most likely confirms the OLDEST still-ambiguous generation — true whenever every generation since `gen` has ALSO given up. It stops being true the instant a genuinely FRESH, never-ambiguous generation is issued (e.g. an unrelated inbound message taking `enqueueStdin`'s idle immediate-submit path while `gen`'s entry sits held) and confirms quickly: THIS hook almost certainly proves the FRESH generation's turn, not `gen`'s — yet unconditional correlation would attribute it to `gen` and DELETE `gen`'s still-genuinely-unconfirmed entry, a SILENT LOSS worse than the duplicate this file exists to avoid ("fail toward a duplicate, never a loss" — a lost message is invisible to both sides; a duplicate is at least visible, and was how this card's specimen was caught). So the destructive delete loop runs ONLY when `live.submitGeneration` is either still `gen` itself (the common, single-ambiguity case) or is itself present in `giveUpConfirmQueue` (the established cross-generation case, handled exactly as before) — otherwise a fresh generation has taken over and this hook is left for it: `gen`'s entry survives, un-purged, to resolve via its own bounded hold (a duplicate at worst) instead of being deleted on a misattributed guess. The `turnEnded` queue-front shift stays UNCONDITIONAL regardless — it only ever discards bookkeeping (which generation is "next to maybe-confirm"), never a `pending` entry, so there is no data-loss risk in still advancing past `gen` even when this hook wasn't really about it; leaving it un-advanced would just leak `gen` in the queue forever once its entry has already drained under a later identity.
+
+## Do not (3)
+
+- Do not run the destructive delete loop unless `live.submitGeneration` is either still `gen` itself or present in `giveUpConfirmQueue` — a demonstrably fresh, non-ambiguous generation must be left for its own hook, or a still-genuinely-unconfirmed entry gets silently deleted.
+
+## Source (3)
+
+Inline JSDoc in `packages/daemon/src/pty/host.ts` (`purgeConfirmedGiveUpRequeue`'s own method doc, "THE GUARD BELOW" paragraph). Extracted by card `1c218980` (tranche 43 on `pty/host.ts`); condensed and reworded, not verbatim.
