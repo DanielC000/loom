@@ -9644,34 +9644,18 @@ export class PtyHost {
    * markReady's own capture never calls this at all in that case — genuinely byte-identical now, since
    * `startupPrompt`, unlike `lastPrompt`, is never written by a resume's own pre-ready drain.
    *
-   * Card a57b07af: for a role that mounts loom-orchestration (manager/worker/assistant — see
-   * `usesOrchestrationMcp`, shared from @loom/shared per card 95f40ee0), the actual delivery inside the
-   * setTimeout below now additionally
-   * awaits `waitForMcpSeen` — the SAME readiness gate the resume-continuation nudge already uses (card
-   * df5e37e7), closing the asymmetry the Code Review that filed this card found: turn 1 calls MCP tools
-   * almost immediately (a worker's first real action is typically `tasks_get`), so it deserves the same
-   * protection against racing the CLI's own async MCP handshake that a resume nudge already gets. Applied
-   * only after measuring (see the wait's own inline comment): 494/494 real production turn-1 kickoff
-   * spawns already had `mcpSeen` true at this point, so the added wait resolves synchronously in the
-   * overwhelming common case and only pays real, bounded (MCP_READY_TIMEOUT_MS) latency during genuine
-   * handshake contention. A role that never mounts loom-orchestration skips the wait entirely — it would
-   * otherwise wait out the full timeout for a signal that can never fire.
+   * @decision a57b07af — turn-1 kickoff delivery gates on `waitForMcpSeen` for any role mounting
+   * loom-orchestration, closing the asymmetry with the resume-continuation nudge's own gate.
    */
   private scheduleKickoffGuarantee(sessionId: string, kickoff: string): void {
     setTimeout(() => {
-      // Card a57b07af: gate delivery on `mcpSeen` for the same roles the resume-continuation nudge already
-      // gates on. Card 95f40ee0: this used to re-derive the manager/worker/assistant list inline (PtyHost
-      // has no access to SessionService) — now both sides import the SAME `usesOrchestrationMcp` predicate
-      // from @loom/shared (the one module both layers already import), so there is no longer a second
-      // hand-typed copy of this role list to drift out of sync. MEASURED (card a57b07af DoD-1, against this
-      // exact log line's own timestamp vs. each session's first observed `/mcp-orch` hit, over the full
-      // retained daemon-output.log history): 494/494 real production turn-1 kickoff spawns for these roles
-      // already had `mcpSeen` true at this precise tick, by 1.19s-2.32s (mean ~1.42s) — zero counterexamples.
-      // So `waitForMcpSeen` resolves synchronously in the overwhelming common case; it only pays real
-      // latency, bounded by MCP_READY_TIMEOUT_MS (same as the resume nudge), during genuine handshake
-      // contention (e.g. a fleet-wide restart) — which is exactly the case this closes the asymmetry for.
-      // A role that never mounts loom-orchestration (platform/setup/run/auditor/workspace-auditor/shell)
-      // would otherwise wait out the full timeout for a signal that can never fire, so those skip the wait.
+      // @decision a57b07af — turn-1 kickoff delivery gates on `waitForMcpSeen` (MEASURED 494/494 real
+      // production spawns already `mcpSeen`-true at this tick) before writing — bounded by
+      // MCP_READY_TIMEOUT_MS and proceeds on timeout, so it narrows the handshake race, not eliminates it.
+      //
+      // @decision 95f40ee0 — this gate and `SessionService` share the ONE `usesOrchestrationMcp` copy of
+      // the role list, so those two specifically can't drift from each other — host.ts still hand-rolls
+      // two more independent copies elsewhere, untouched by this predicate.
       const l0 = this.live.get(sessionId);
       const gateOnMcp = usesOrchestrationMcp(l0?.role ?? null);
       const proceed = (): void => {
@@ -9789,11 +9773,10 @@ export class PtyHost {
    * spawn and resume instead of resume alone getting force-cycled past its own target. `noCyclingConfigured`
    * below excludes a null-or-acceptEdits target rather than fighting that deliberate choice.
    *
-   * A single blind corrective press would have the same drop risk as the failure it's healing (card
-   * 1658fc22): if IT also drops under load, the session stays stranded with no further retry. Routing
-   * through cycleToMode instead reads the footer and retries (bounded) until it reaches the target or the
-   * pty dies, exactly like the main path — so a dropped press just costs one more poll, not a permanent
-   * strand. This is a BACKSTOP, independent of cycleToMode's own convergence logic invoked from the main
+   * @decision 1658fc22 — the auto-heal routes through `cycleToMode`'s bounded footer-verified retry,
+   * never a single blind Shift+Tab press, so a dropped press costs one more poll, not a permanent strand.
+   *
+   * This is a BACKSTOP, independent of cycleToMode's own convergence logic invoked from the main
    * SessionStart path (which stays unchanged for that caller — see cycleToMode's doc comment): it fires
    * off the mode ACTUALLY read from the footer, regardless of why the session ended up there. A
    * manager/platform session is structurally excluded (`disallowedToolsForRole` never puts `ExitPlanMode`
