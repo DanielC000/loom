@@ -9214,14 +9214,9 @@ export class PtyHost {
             // re-enqueues the exact duplicate this purge exists to prevent. Idempotent for an entry whose
             // onDeliver ALREADY fired at its own original hand-off (gen 1's own giveUpGen-tagged requeue,
             // say) — `resolveQueuedMessage`'s `isQueuedMessageDelivered` guard makes a repeat call a no-op.
-            // Card a9e4240f (MINOR-1): guarded to match this file's OTHER two `onDeliver` call sites
-            // (`consumePending`, `drainPending`) — both wrap in try/catch with an explicit "never break the
-            // pull/drain" comment; this one didn't, with no stated reason. LATENT, not a live defect: an
-            // unguarded throw here would abort this splice loop mid-way (after the map entries above are
-            // already deleted), leaving some duplicates purged and some not, and skipping the rest of the
-            // UserPromptSubmit handler — but the only production supplier (sessions/service.ts's
-            // `resolveQueuedMessage`) is already wrapped in its own try/catch, so nothing reaches this path
-            // able to throw today. Fixed as consistency, for the next supplier.
+            // @decision a9e4240f — guard this onDeliver call like this file's other two call sites
+            // (consumePending, drainPending); do not leave it unguarded even though nothing reaches it
+            // able to throw today.
             try { dropped!.onDeliver?.("duplicate-of-confirmed-original"); } catch { /* never break the purge */ }
           }
         }
@@ -9328,33 +9323,13 @@ export class PtyHost {
    * out via submit() (re-arms busy); the held pending queue then drains normally on the next Stop.
    * Returns false if the session isn't live (already stopped/killed → caller does not resume).
    *
-   * Card 7edd420b: a PARKED (rateLimited) session is alive-but-idle, not dying — so an UNRELATED stop can
-   * overlap it: a plain pty.stop() (live.stopping) or a companion upgrade's holdDrain window
-   * (live.drainHeld, see that method's doc) can both be mid-flight the instant this fires (the 60s
-   * rate-limit-watcher tick, or a human clearing the park via REST). Pre-fix this method guarded on
-   * `alive` only, so it would write the replayed turn straight into that dying/held pty — a write that
-   * races the kill, is never recorded in `pending` (so `flushPending` can't recover it), and is simply
-   * lost. `blocked` closes that: when either flag is set, route the replay through `enqueueStdin` instead
-   * of a direct `submit()` — the SAME queuing primitive `drainPending`'s own turn-starting site already
-   * falls back to when it can't submit safely. That HOLDS the prompt in `live.pending` rather than writing
-   * it into the pty, and a caller that's actively draining `pending` before the pty actually exits
-   * (upgradeCompanionCapabilities's holdDrain loop is exactly this) recovers and redelivers it onto the
-   * fresh pty after the respawn — preserving the turn instead of merely declining to lose it noisily. A
-   * plain stop() with no such capture (drainHeld never set) still clears `pending` itself before anything
-   * can recover it (see stop()), so the prompt CAN still be lost on that narrower path — but only ever as
-   * a quietly-dropped queue entry, never by corrupting a dying pty's write.
+   * @decision 7edd420b — route the replay through enqueueStdin, never a direct submit(), when
+   * live.stopping or live.drainHeld is set: an unrelated stop can overlap a parked session, and a
+   * direct write there races the kill and is unrecoverably lost.
    *
-   * Card 81f9c887 (defense-in-depth, mirrors `enqueueStdin`'s own idle-submit gate re-checking rather than
-   * trusting its caller): also guard on `live.busy`. The invariant `rateLimited ⇒ !busy` (rateLimited is
-   * only ever set inside the Stop/StopFailure handler AFTER setBusy(false)) means a genuinely parked
-   * session is never busy — so hitting this on a BUSY session only happens when a caller invokes it against
-   * a session that was never actually parked (e.g. the per-session `POST /rate-limit/clear` REST route has
-   * no server-side busy/parked guard of its own, and `live.lastPrompt` is set by ANY submit(), not just a
-   * rate-limit kill). That's a caller error, not a real resume — replaying `lastPrompt` there would
-   * re-submit it as a SECOND turn on top of the one already in flight (the exact double-turn hazard the
-   * M1/M2 busy-gate ordering exists to prevent). Skip the replay entirely rather than queuing it: unlike
-   * the stopping/drainHeld case, there is no genuinely-held turn here to preserve — queuing would just
-   * deliver the same stale duplicate a moment later instead of on top of the live one.
+   * @decision 81f9c887 — also guard on live.busy before replaying: rateLimited implies !busy, so a
+   * busy hit here means a caller invoked this on a session that was never actually parked; skip the
+   * replay rather than risk a second turn on top of one already in flight.
    */
   resumeAfterRateLimit(sessionId: string): boolean {
     const live = this.live.get(sessionId);

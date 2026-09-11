@@ -48,3 +48,29 @@ Inline comment in `packages/daemon/src/pty/host.ts` (`drainPending`'s route-keye
 `proactiveKey` doc), commit `5cb06da7d` (2026-09-02). Relocated by card `0d9bbbf4` (tranche 31 on
 `pty/host.ts`); no wording changed beyond joining wrapped source lines into a flowing paragraph and
 stripping `//` comment markers.
+
+## MINOR-1 — (unrelated decision, same card id, `pty/host.ts`)
+
+Card a9e4240f (MINOR-1, a distinct finding sharing this card id — not the same-sender-equality family
+above): the `onDeliver` call at the content-match purge site in `purgeConfirmedGiveUpRequeueCore`
+wasn't guarded, unlike this file's other two `onDeliver` call sites (`consumePending`, `drainPending`),
+both of which wrap the call in try/catch with an explicit "never break the pull/drain" comment; this
+one didn't, with no stated reason.
+
+LATENT, not a live defect: an unguarded throw here would abort the splice loop mid-way (after the map
+entries above it are already deleted), leaving some duplicates purged and some not, and skipping the
+rest of the UserPromptSubmit handler — but the only production supplier (`sessions/service.ts`'s
+`resolveQueuedMessage`) is already wrapped in its own try/catch, so nothing reaches this path able to
+throw today. Fixed as consistency, for the next supplier.
+
+## Do not (3)
+
+- Do not assume this guard is load-bearing today — it is a consistency fix for a currently-unreachable
+  throw (the sole production caller already catches), not a fix for an observed failure.
+
+## Source (this section only)
+
+Inline comment in `packages/daemon/src/pty/host.ts` (`purgeConfirmedGiveUpRequeueCore`'s content-match
+purge loop, the `Card a9e4240f (MINOR-1)` paragraph immediately above the guarded `onDeliver` call),
+commit `5cb06da7d` (2026-09-02). Relocated by card `09a1354e` (tranche 46 on `pty/host.ts`); condensed
+and reworded, not verbatim. Not the same decision as the sections above it — see the header.
