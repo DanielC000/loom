@@ -8632,23 +8632,25 @@ export class PtyHost {
    *
    * BOUNDED by `GIVE_UP_REQUEUE_LIMIT`: a message already at its requeue budget is dropped for real here
    * (loudly logged) instead of requeued again — a message that keeps giving up and requeuing forever
-   * would be worse than the original silent drop. `giveUpRequeues` is tracked per MESSAGE OBJECT/id, never
-   * inferred from matching text, so two legitimately identical messages are bounded independently.
+   * would be worse than the original silent drop.
+   *
+   * @decision 441499ee — `giveUpRequeues` is tracked per message OBJECT identity, never inferred from
+   * matching text, so two legitimately identical messages are bounded independently.
    *
    * SAFETY AGAINST A FALSE-NEGATIVE GIVE-UP (card 04de8bbf's neighbourhood — production measurement found
    * GIVE-UP RECOVERY firing while the turn actually HAD started, zero SUPPRESSED in that sample): the
    * discriminator deciding RECOVERY-vs-SUPPRESSED can itself be wrong, so a requeued entry stamps
    * `giveUpGen: gen` — the generation its failed submit ran under — precisely so `purgeConfirmedGiveUpRequeue`
    * can find and drop it the instant a confirming hook proves that generation's turn actually ran, instead
-   * of letting it drain later as a silent duplicate of a message that already landed. Card 09e655d5: `gen`
-   * is ALSO pushed onto `live.giveUpConfirmQueue` (only when something was actually kept/requeued — a
-   * budget-exhausted drop has nothing left to purge later) — that queue, not `live.submitGeneration`, is
-   * what `purgeConfirmedGiveUpRequeue` correlates a late hook against; see its doc for why.
+   * of letting it drain later as a silent duplicate of a message that already landed.
    *
-   * Card 73d5c34a: each kept entry is ALSO stamped `giveUpHeldUntil` (now + `GIVE_UP_HOLD_MS`) — this is
-   * what makes `drainPending` treat it as ineligible until a confirming hook purges it OR the hold expires
-   * (see `isGiveUpHeld`), instead of the entry sitting at the front of `pending` as ordinary drainable
-   * content that a reconcile tick could resubmit before a late hook ever gets to purge it.
+   * @decision 09e655d5 — a kept/requeued generation is also pushed onto `live.giveUpConfirmQueue`;
+   * `purgeConfirmedGiveUpRequeue` correlates a late hook against that queue, never
+   * `live.submitGeneration`.
+   *
+   * @decision 73d5c34a — each requeued entry is also stamped `giveUpHeldUntil`, which is what makes
+   * `drainPending` skip it as ineligible until a confirming hook purges it or the hold expires — not
+   * ordinary drainable content a reconcile tick could resubmit early.
    *
    * Card ccb407eb: a message whose budget IS exhausted (`requeues > GIVE_UP_REQUEUE_LIMIT`) — for a message
    * that has `onGiveUpExhausted` wired — is never silently dropped here — this project's own "fail toward a
