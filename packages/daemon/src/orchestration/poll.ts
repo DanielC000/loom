@@ -258,7 +258,14 @@ export class PollService {
     const block = formatPollItemsBlock(items, conn.host, overflow);
 
     if (job.mode === "wake") {
-      const sessionId = job.sessionId!;
+      // Card 5c409108: `job` is the row `tick()` read BEFORE the fetch above (~line 187) resolved. A
+      // manager recycle landing DURING that await reparents this job's session_id onto the live successor
+      // (`reparentPollJobTargets`, card df9d1c71) — but `job.sessionId` here is still the pre-fetch
+      // snapshot. Re-read the row so a mid-fetch recycle fires at the successor, not the now-retiring
+      // predecessor (which `settleRecycleHandoff`'s ready branch hard-stops, carrying nothing, once it
+      // settles — silently losing the item). A missing row (job deleted mid-fetch, a pre-existing and
+      // out-of-scope edge case) falls back to the stale snapshot, unchanged from before this fix.
+      const sessionId = this.deps.db.getPollJob(job.id)?.sessionId ?? job.sessionId!;
       if (!this.deps.pty.isAlive(sessionId)) await this.deps.resume(sessionId); // throws → caller's backoff path
       // kind:"agent" — a poll-triggered nudge carries a specific external item the target must reason
       // about as its own turn, never mashed with anything else queued behind it.

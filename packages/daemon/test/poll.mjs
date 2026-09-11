@@ -535,7 +535,125 @@ const seedSpawnJob = (e, id, over = {}) => seedWakeJob(e, id, { mode: "spawn", s
   cleanupEnv(e);
 }
 
+// --- Card 5c409108: poll-recycle race. `job` is the row tick() read BEFORE the fetch resolves — a
+// manager recycle landing DURING that await calls `reparentPollJobTargets` (the real recycleManager
+// mechanism, card df9d1c71), moving poll_jobs.session_id from the predecessor onto the live successor
+// mid-flight. fire() must re-read the row so the item lands on the successor, not the frozen pre-fetch
+// snapshot (which would fire at a retiring session that settleRecycleHandoff later hard-stops, carrying
+// nothing — silent item loss). Built by hand (not via makeEnv) because this needs a fetch we can pause
+// and resume mid-tick, and a second (successor) session to reparent onto. ---
+{
+  const dbFile = path.join(os.tmpdir(), `loom-poll-race-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
+  const db = new Db(dbFile);
+  const projId = "pp-race";
+  const agentId = "pa-race";
+  const oldId = "ps-old"; // predecessor manager — this is what the job's row targets BEFORE the recycle
+  const newId = "ps-new"; // successor manager — reparentPollJobTargets moves the job's target here mid-fetch
+  const now = new Date().toISOString();
+  db.insertProject({ id: projId, name: "Race", repoPath: projId, vaultPath: projId, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "wake-target", startupPrompt: "", position: 0 });
+  db.insertSession({
+    id: oldId, projectId: projId, agentId, engineSessionId: "eng-old", title: null, cwd: projId,
+    processState: "live", resumability: "resumable", busy: false,
+    createdAt: now, lastActivity: now, lastError: null, role: "manager",
+  });
+  db.insertSession({
+    id: newId, projectId: projId, agentId, engineSessionId: "eng-new", title: null, cwd: projId,
+    processState: "live", resumability: "resumable", busy: false,
+    createdAt: now, lastActivity: now, lastError: null, role: "manager", recycledFrom: oldId, gen: 1,
+  });
+  const conn = db.createConnection({ name: "gh-race", host: "api.github.com", authScheme: "bearer", secretBlob: "irrelevant-ciphertext" });
+  db.insertPollJob({
+    id: "job-race", connectionId: conn.id, path: "/notifications", method: "GET", intervalMs: MIN_POLL_INTERVAL_MS,
+    nextPollAt: new Date(Date.now() - 60_000).toISOString(), lastPolledAt: now,
+    itemsPath: "items", idPath: "id",
+    cursorJson: JSON.stringify(["n0"]), // already past baseline seeding, so this tick can fire directly
+    mode: "wake", sessionId: oldId, agentId: null,
+    enabled: true, consecutiveFailures: 0, lastError: null, createdAt: now,
+  });
+
+  let releaseFetch;
+  const fetchGate = new Promise((resolve) => { releaseFetch = resolve; });
+  let fetchStarted = false;
+  const request = async () => {
+    fetchStarted = true;
+    await fetchGate; // parks here — the tick's continuation (incl. fire()) cannot run until released below
+    return { ok: true, status: 200, headers: {}, body: JSON.stringify({ items: [{ id: "n0" }, { id: "n1", title: "new thing" }] }) };
+  };
+  const alive = new Set([oldId, newId]);
+  const enqueued = [];
+  const pty = {
+    isAlive: (id) => alive.has(id),
+    enqueueStdin: (id, text, source, onDeliver, route, kind) => { enqueued.push({ sessionId: id, text, kind }); return { delivered: true }; },
+  };
+  const resume = async (id) => { alive.add(id); };
+  const spawn = async () => { throw new Error("job-race is wake-mode; spawn() must never be called"); };
+  const enqueueDurable = (id, text, ctx) => pty.enqueueStdin(id, text, "system", undefined, undefined, ctx.kind);
+  const control = new OrchestrationControl();
+  const poll = new PollService({ db, pty, control, resume, spawn, request, enqueueDurable });
+
+  const tickPromise = poll.tick(new Date());
+  await new Promise((r) => setImmediate(r)); // let tick() reach and enter the awaited fetch
+  check("race setup: the fetch is genuinely in flight before the recycle lands", fetchStarted);
+  // Simulate recycleManager landing mid-fetch: the exact DB call it makes to carry a wake-mode poll
+  // target across a recycle (card df9d1c71) — no need to drive a full SessionService recycle here, since
+  // this row update IS the mechanism PollService.fire() must observe.
+  db.reparentPollJobTargets(oldId, newId);
+  releaseFetch();
+  await tickPromise;
+
+  check("race: the item reaches the SUCCESSOR, not the frozen pre-fetch snapshot",
+    enqueued.length === 1 && enqueued[0].sessionId === newId);
+  check("race: the retiring predecessor gets nothing (no stale duplicate delivery either)",
+    !enqueued.some((x) => x.sessionId === oldId));
+  check("race: the fresh item's content is present (not silently swapped for something else)",
+    enqueued[0]?.text?.includes("new thing") ?? false);
+  cleanupEnv({ db, dbFile });
+}
+
+// --- Non-recycled control: the SAME shape (a wake-mode fire, fetch in flight) with NO recycle landing
+// mid-fetch behaves byte-identically to before this fix — the re-read simply returns the same row. ---
+{
+  const dbFile = path.join(os.tmpdir(), `loom-poll-norace-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
+  const db = new Db(dbFile);
+  const projId = "pp-norace";
+  const agentId = "pa-norace";
+  const sessId = "ps-norace";
+  const now = new Date().toISOString();
+  db.insertProject({ id: projId, name: "NoRace", repoPath: projId, vaultPath: projId, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: agentId, projectId: projId, name: "wake-target", startupPrompt: "", position: 0 });
+  db.insertSession({
+    id: sessId, projectId: projId, agentId, engineSessionId: "eng-1", title: null, cwd: projId,
+    processState: "live", resumability: "resumable", busy: false,
+    createdAt: now, lastActivity: now, lastError: null, role: "manager",
+  });
+  const conn = db.createConnection({ name: "gh-norace", host: "api.github.com", authScheme: "bearer", secretBlob: "irrelevant-ciphertext" });
+  db.insertPollJob({
+    id: "job-norace", connectionId: conn.id, path: "/notifications", method: "GET", intervalMs: MIN_POLL_INTERVAL_MS,
+    nextPollAt: new Date(Date.now() - 60_000).toISOString(), lastPolledAt: now,
+    itemsPath: "items", idPath: "id",
+    cursorJson: JSON.stringify(["n0"]),
+    mode: "wake", sessionId: sessId, agentId: null,
+    enabled: true, consecutiveFailures: 0, lastError: null, createdAt: now,
+  });
+  const enqueued = [];
+  const pty = {
+    isAlive: (id) => new Set([sessId]).has(id),
+    enqueueStdin: (id, text, source, onDeliver, route, kind) => { enqueued.push({ sessionId: id, text, kind }); return { delivered: true }; },
+  };
+  const resume = async (id) => { enqueued.push({ resumedNotEnqueued: id }); };
+  const spawn = async () => { throw new Error("job-norace is wake-mode; spawn() must never be called"); };
+  const enqueueDurable = (id, text, ctx) => pty.enqueueStdin(id, text, "system", undefined, undefined, ctx.kind);
+  const control = new OrchestrationControl();
+  const request = async () => ({ ok: true, status: 200, headers: {}, body: JSON.stringify({ items: [{ id: "n0" }, { id: "n1", title: "unrelated" }] }) });
+  const poll = new PollService({ db, pty, control, resume, spawn, request, enqueueDurable });
+  await poll.tick(new Date());
+  check("non-recycled control: fires at the same (only) session, unchanged by the re-read",
+    enqueued.length === 1 && enqueued[0].sessionId === sessId);
+  cleanupEnv({ db, dbFile });
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PollService seeds a baseline (fires nothing) on a job's first poll, snapshot-diffs to fire ONLY genuinely new items (never re-firing seen ones), frames every fire (wake + spawn) as explicit untrusted DATA naming the source host, backs off (never disables) on a fetch failure, disables a structurally-dead job (connection/session/agent gone), trips a distinct guard instead of re-fire-storming on an unusable idPath, defers the whole tick under a known usage limit, never loses an item to a delivery failure (the cursor only advances once delivery succeeds), and a HELD (busy, non-throwing) wake-mode fire now leaves a durable trace instead of vanishing on a restart before drain (card 61a012ce)."
+  ? "\n✅ ALL PASS — PollService seeds a baseline (fires nothing) on a job's first poll, snapshot-diffs to fire ONLY genuinely new items (never re-firing seen ones), frames every fire (wake + spawn) as explicit untrusted DATA naming the source host, backs off (never disables) on a fetch failure, disables a structurally-dead job (connection/session/agent gone), trips a distinct guard instead of re-fire-storming on an unusable idPath, defers the whole tick under a known usage limit, never loses an item to a delivery failure (the cursor only advances once delivery succeeds), a HELD (busy, non-throwing) wake-mode fire now leaves a durable trace instead of vanishing on a restart before drain (card 61a012ce), and a manager recycle landing mid-fetch delivers the item to the live successor instead of losing it to the retiring predecessor (card 5c409108)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
