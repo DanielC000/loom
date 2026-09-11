@@ -712,9 +712,11 @@ export class IdleWatcher {
    * (`POST /api/questions/:id/answer`) but the asking manager never `question_pull`ed, stuck past
    * ANSWERED_QUESTION_STUCK_MINUTES, re-nudges that MANAGER — never the human, who already answered and
    * would only see noise.
-   * @decision 8701bdbb / @decision f88e91f0 — never route this re-nudge to the exact asking session id;
-   * resolve it by AGENT LINEAGE (`db.getLiveSessionForAgent`, whoever is CURRENTLY live for the asker's
-   * agent) instead, so a recycle successor or a fresh non-recycle respawn is still reached.
+   * @decision 8701bdbb — never route this re-nudge to the exact asking session id: mirrors the
+   * recycle-reparenting precedent, so a recycle successor (already reparented via `reparentQuestions`)
+   * is still reached.
+   * @decision f88e91f0 — resolve it instead by AGENT LINEAGE (`db.getLiveSessionForAgent`, whoever is
+   * CURRENTLY live for the asker's agent), so a fresh non-recycle respawn is also reached.
    *
    * Skips silently when there's no live session for that agent, it isn't a manager, is human-paused, is
    * rate-limited/parked (it'll auto-resume on its own), or has itself flagged non-'watching' via
