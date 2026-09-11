@@ -68,10 +68,12 @@ export function createCompanionGateway(cfg: CompanionConfig, submitTurn: SubmitT
   // Load durable bindings SCOPED TO THIS SESSION (multi-companion runtime, SECURITY-CRITICAL): filtering to
   // cfg.sessionId — rather than the global companion_bindings table — is what guarantees a gateway's OWN
   // routing map can NEVER contain another companion's binding, even when multiple companions are armed
-  // concurrently (each gets its own ChatGateway instance via the controller's per-session map). It also
-  // fixes a correctness bug the global read would otherwise hit under multi-companion: the bootstrap-seed
-  // guard below checks "this session has NO bindings yet", which the GLOBAL binding count would answer
-  // wrongly (companion B would see companion A's bindings and skip seeding its OWN).
+  // concurrently (each gets its own ChatGateway instance via the controller's per-session map).
+  //
+  // @decision sha:55f1b628 — the bootstrap-seed guard below checks "this session has NO bindings yet"; a
+  // GLOBAL binding read can't tell that apart from "a DIFFERENT companion already has some", so it would
+  // wrongly make companion B skip seeding its own binding.
+  //
   // BOOTSTRAP: an empty (session-scoped) store + present env config seeds ONE binding (the single-owner env
   // path). The DM authz rule means the owner works with no allowlist row; a group scope
   // (LOOM_COMPANION_CHAT_SCOPE=group) seeds a group binding to which senders are added over REST. This

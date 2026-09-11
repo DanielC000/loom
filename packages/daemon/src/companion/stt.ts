@@ -15,13 +15,13 @@
  * printing a JSON transcript to stdout. Bounded by its OWN subprocess timeout (STT_SUBPROCESS_TIMEOUT_MS),
  * independent of the pip-install bound, so a stuck/slow decode can never wedge the daemon.
  *
- * MODEL PREFETCH (security-review follow-up): faster-whisper lazily downloads its model weights from the
- * HF Hub on first construction — for STT_MODEL_SIZE="small" (~500MB) that download alone can exceed
- * STT_SUBPROCESS_TIMEOUT_MS, so the OWNER'S FIRST real voice note after a fresh deploy would fail
- * "unavailable" even though pip provisioning succeeded. `prewarmStt` therefore ALSO warms the model itself
- * (transcribe.py's `--warm` mode — instantiate WhisperModel with no audio needed) once pip provisioning
- * finishes, off the event loop, best-effort — so by the time a real voice note arrives the model weights
- * are typically already cached under HF_HOME.
+ * @decision sha:066a953b — package-installed is NOT model-ready: without a prefetch, the owner's first
+ * real voice note after a fresh deploy can fail "unavailable" while the model download still runs past
+ * STT_SUBPROCESS_TIMEOUT_MS.
+ *
+ * `prewarmStt` therefore ALSO warms the model itself (transcribe.py's `--warm` mode — instantiate
+ * WhisperModel with no audio needed) once pip provisioning finishes, off the event loop, best-effort — so
+ * by the time a real voice note arrives the model weights are typically already cached under HF_HOME.
  */
 import path from "node:path";
 import { spawn } from "node:child_process";
