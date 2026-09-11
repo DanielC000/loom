@@ -13380,74 +13380,62 @@ export class SessionService {
     // Squash-merge as ONE clean commit. The subject comes from the task title (mergeBranch falls back to
     // the branch name); the commit carries the deterministic `Loom-Worker-Branch` trailer used downstream.
     const taskTitle = taskId ? this.db.getTask(taskId)?.title ?? undefined : undefined;
-    // `gateBaseMainHead` is set whenever a gate ran for this merge — the REUSE path (card e50600d2, a
-    // skipped redundant re-gate), the union REAL gate-run path (card eda70da6, the sha the union-merge
-    // actually unioned into the worktree BEFORE the gate ran), or the preLanded REAL gate-run path (card
-    // b0ab78d6) — with the canonical main sha the gate's validated tree is provably based on, so
-    // mergeBranch can re-verify (INSIDE its own lock, before touching anything) that main provably hasn't
-    // moved since. `gateBaseBranchHead` rides alongside it, set ONLY by the preLanded producer (see its own
-    // doc above); the union and reuse producers leave it `undefined` here, which `mergeBranch` reads as "no
-    // stability proof supplied" and enforces `requireCanonicalHead` exactly as it always has — this call
-    // site is the ONLY place `gateBaseBranchHead` is read, so that `undefined` is what keeps both other
-    // producers byte-identical to their pre-b0ab78d6 behavior.
+    // @decision eda70da6 — gateBaseMainHead/gateBaseBranchHead are what let mergeBranch re-verify,
+    //  INSIDE its own lock, that main hasn't moved since the gate's validated tree was fixed; the
+    //  union/reuse producers leave gateBaseBranchHead undefined — never read it as meaningful there.
     //
-    // CARD c24dd48a: mark the repo squash-in-flight before the actual squash call — CONFINED to the
-    // `gateRan` path only (Code Review finding, same card: an earlier draft called this unconditionally,
-    // which let the REUSE path (card e50600d2) and a GATELESS project/repo — NEITHER of which ever calls
-    // `this.gateSemaphore.runExclusive(...)`, so NEITHER is ever checked by `mergeRepoFree`/`admit` —
-    // silently DELETE a DIFFERENT, genuinely-admitted op's still-active hold via `endSquash`'s own
-    // unconditional `activeMergeRepos.delete`, letting a THIRD queued op get admitted while the first was
-    // still mid-gate: a real regression of `92e960d1`'s "at most one running merge gate per repo"
-    // invariant, not merely a missed optimization for those two paths — though NOT a data-loss regression,
-    // since `withCanonicalIndexLock`/`requireCanonicalHead` remain untouched and still fail-closed inside
-    // `mergeBranch`'s own lock either way).
+    // This call site is the ONLY place `gateBaseBranchHead` is read, so that `undefined` is what
+    // keeps both the union and reuse producers byte-identical to their pre-`b0ab78d6` behavior.
     //
-    // THE CONFINEMENT, PROVABLE NOT ASSERTED: `gateRan` is assigned THREE TIMES in this whole method (Code
-    // Review correction, card ac7aad04 — a prior version of this comment said TWICE, which its own
-    // reclassification branch below falsified; card db9b0130 before it made the identical correction from
-    // an earlier claim of exactly once — a proven rot site, restate carefully) — `gateRan = !reuseResult`
-    // first; then `if (inertSkip) gateRan = false;` (both inside `if (gate)`); then, ONLY inside that same
-    // inert-diff-skip branch, `ac7aad04`'s own post-guard reclassification can set `gateRan = true` again
-    // — but ONLY in the same code path that also resets `inertSkip = false` right alongside it (see that
-    // branch's own doc for why: falling through to a real gate requires both flips together). The proof
-    // still holds, because the THIRD assignment re-widens `gateRan` in LOCKSTEP with `inertSkip` being
-    // reset, never independently: `gateRan === true` here if and only if BOTH `reuseResult` was falsy AND
-    // `inertSkip` was falsy AT THIS POINT (regardless of which of the three assignments last set
-    // `gateRan`), which is EXACTLY the condition under which `gateResult = reuseResult ?? (inertSkip ?
-    // { passed: true, steps: [] } : await this.gateSemaphore.runExclusive(...))` actually evaluates the
-    // `runExclusive(...)` branch. `gateRan` is therefore still a precise, structural proxy for "this call
-    // reached `runExclusive` at least once" — never true for the REUSE path (skipped by the `??`), never
-    // true for an INERT-DIFF SKIP that stayed inert (the `inertSkip` ternary skips it exactly like reuse
-    // does), and never true for a GATELESS project/repo (never reaches `if (gate)` at all, so none of the
-    // three assignments ever run).
+    // @decision e50600d2 — the REUSE path sets gateBaseMainHead too, for a skipped redundant
+    //  re-gate; do not assume a reused green result is exempt from this same re-derivation.
     //
-    // SAFE BECAUSE (Code Review CORRECTION, card b9e07a4a — an earlier version of this paragraph claimed
-    // `92e960d1`'s admission-exclusivity guard ALONE was what kept `beginSquash`/`endSquash` from ever
-    // touching a sibling's hold; that claim is what the reviewer's reproduced Critical falsified: a
-    // `gateRan:true` op whose gate FAILED, or whose single-file retry raced a real admission window (both
-    // gated on `gateRan`, neither ever `admit()`-ed for THIS specific call), still fires `endSquash`
-    // unconditionally in this `finally` — admission exclusivity says nothing about a call that was never
-    // admitted at all). The ACTUAL guarantee is `GateSemaphore.freeRepoPath`'s identity check (card
-    // b9e07a4a): `beginSquash`/`endSquash` present `thisOpId`, and `activeMergeRepos` only ever mutates
-    // when that matches whoever CURRENTLY holds `repoPath` — a call from an op that never admitted, or
-    // whose own hold already released, is refused as a safe no-op instead of touching whatever a
-    // DIFFERENT, genuinely-admitted op (or a handed-off repo-guard-only waiter) holds there right now.
-    // `gateRan`'s role is narrower than the old claim implied: it's still what confines these calls to
-    // "an op that at least ATTEMPTED a real gate", not proof of a live hold — see `beginSquash`'s own doc
-    // for the full identity mechanism. The reuse and the
-    // gateless paths are DELIBERATELY EXCLUDED from `beginSquash`/`endSquash` and get NO admission-level
-    // protection from THEM — unchanged from before this card — and stay covered by the standing TOCTOU
-    // note on the reuse producer above (this method, `reuseResult`'s own doc: "a SIBLING merge on this
-    // same repo can still land before this merge's own squash actually runs... `mergeBranch`'s own
-    // lock... refuse[s] instead of silently landing an unverified merge") — `requireCanonicalHead` is what
-    // protects them, not this guard, exactly as it always has.
+    // @decision c24dd48a — beginSquash/endSquash are called ONLY on the gateRan path; the reuse
+    //  and gateless paths never call them and get no admission-level protection from this
+    //  mechanism by design — requireCanonicalHead protects them instead, exactly as it always has.
     //
-    // THE INERT-DIFF SKIP (card db9b0130) IS NO LONGER IN THAT GROUP (card b9e07a4a): it is excluded from
-    // `beginSquash`/`endSquash` for the SAME structural reason (it never calls `runExclusive`, so
-    // `mergeRepoFree`/`admit` never see it) — but it now takes its OWN, separately-acquired admission-
-    // level guard via `GateSemaphore.acquireRepoGuardOnly`, at the inert-diff-skip decision point above,
-    // released below via `releaseInertRepoGuard`. See that method's own doc for why this had to be a
-    // distinct primitive rather than routing through `beginSquash`/`endSquash` or `runExclusive` itself.
+    // An earlier draft called this unconditionally: since the reuse path and a gateless project/
+    // repo never call `runExclusive`, neither is ever checked by `mergeRepoFree`/admit, so an
+    // unconfined `endSquash` for them could silently DELETE a DIFFERENT, genuinely-admitted op's
+    // still-active hold, letting a THIRD queued op get admitted while the first was still mid-gate
+    // — a real regression of `92e960d1`'s "at most one running merge gate per repo" invariant, not
+    // merely a missed optimization. NOT a data-loss regression, though: `withCanonicalIndexLock`/
+    // `requireCanonicalHead` remain untouched and still fail-closed inside `mergeBranch`'s own lock
+    // either way.
+    //
+    // @decision b9e07a4a — an unconfined delete here could free a live sibling's hold instead of
+    //  only ever touching its own.
+    //
+    // @decision ac7aad04 — gateRan is assigned in THREE places in this method (a proven rot site
+    //  for a restated count — verify against the actual sites, never trust a prior version of
+    //  this comment). True at the squash call iff reuseResult and inertSkip were both falsy then.
+    //
+    // SAFE BECAUSE: an earlier version of this paragraph claimed `92e960d1`'s admission-exclusivity
+    // guard ALONE was what kept beginSquash/endSquash from ever touching a sibling's hold; the
+    // reviewer's reproduced Critical falsified that — a gateRan:true op whose gate FAILED, or whose
+    // single-file retry raced a real admission window (both gated on gateRan, neither ever
+    // admit()-ed for THIS specific call), still fires endSquash unconditionally in this finally.
+    // Admission exclusivity says nothing about a call that was never admitted at all.
+    //
+    // @decision b9e07a4a — do not free an activeMergeRepos entry without checking the presented
+    //  holderId matches what's stored; the identity check is the actual guarantee here, not
+    //  admission exclusivity alone.
+    //
+    // That refusal-as-safe-no-op protects whatever a DIFFERENT, genuinely-admitted op — or a
+    // handed-off repo-guard-only waiter — holds there right now, not just an ordinary merge op's.
+    //
+    // gateRan's role is narrower than the old claim implied: it still confines these calls to "an
+    // op that at least ATTEMPTED a real gate", never proof of a live hold. The reuse and gateless
+    // paths stay covered by the standing TOCTOU note on the reuse producer above (this method,
+    // `reuseResult`'s own doc) — requireCanonicalHead protects them, not this guard.
+    //
+    // THE INERT-DIFF SKIP (card db9b0130) IS NO LONGER IN THAT GROUP (card b9e07a4a): it is
+    // excluded from beginSquash/endSquash for the SAME structural reason (it never calls
+    // runExclusive, so mergeRepoFree/admit never see it) — but it now takes its OWN, separately-
+    // acquired admission-level guard via GateSemaphore.acquireRepoGuardOnly, at the inert-diff-skip
+    // decision point above, released below via releaseInertRepoGuard. See that method's own doc
+    // for why this had to be a distinct primitive rather than routing through beginSquash/
+    // endSquash or runExclusive itself.
     //
     // The `finally` below (closing the try opened above, at this method's own `if (gate)` line) is what
     // actually frees a queued same-repo sibling once this settles — for the gate-ran case via `endSquash`,
