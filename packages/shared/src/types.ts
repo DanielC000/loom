@@ -649,9 +649,11 @@ export interface PendingMerge {
 /**
  * @decision 7fcb586a — SESSION-ID NAMING POLICY for every MCP surface returning a session id to an
  *  agent (a NEW/RENAMED output field is `loomSessionId`/`engineSessionId`, never a bare `sessionId`;
- *  role-prefixed names and primary keys are exempt; input params keep their names). Hosted here because
- *  it spans both packages. A handful of pre-existing fields are grandfathered (e.g. the test-pinned
- *  `GateHistoryRow.sessionId`) — this rule governs NEW/RENAMED fields only, not every existing one.
+ *  role-prefixed names and primary keys are exempt; input params keep their names).
+ *
+ *  Hosted here because it spans both packages. A handful of pre-existing fields are grandfathered
+ *  (e.g. the test-pinned `GateHistoryRow.sessionId`) — this rule governs NEW/RENAMED fields only, not
+ *  every existing one.
  */
 export interface Session {
   /** The DAEMON's own (Loom-namespaced) session-row primary key — distinct from `engineSessionId` below
@@ -665,6 +667,7 @@ export interface Session {
   engineSessionId: string | null;
   /** @decision 08c81809 — durable counterpart to `PtyHost.hasReachedReady` (in-memory, does not survive
    *  a restart): the ISO instant `markReady` first latched for this session, or null if it never has.
+   *
    *  Deliberately NOT the same fact as `engineSessionId` being set — the readiness fallback timer can
    *  call `markReady` even when SessionStart never landed, and conversely a captured `engineSessionId`
    *  with a session that died before ready leaves this null. See reconcileStrandedRecycleSettles's own
@@ -921,7 +924,9 @@ export type OrchestrationEventKind =
   | "recycle_fleet_recovered" | "recycle_fleet_unresolved" | "recycle_fleet_resolved"
   // @decision 08c81809 — the settle loop that would have decided recovered-vs-unresolved never ran at
   // all (lost to a daemon restart mid-window, before the in-memory `settleRecycleHandoff` poll loop
-  // resolved). Filed by the boot-time `reconcileStrandedRecycleSettles` ONLY when NEITHER the successor
+  // resolved).
+  //
+  // Filed by the boot-time `reconcileStrandedRecycleSettles` ONLY when NEITHER the successor
   // (no engine id — never reached SessionStart) NOR the predecessor (itself unresumable) can serve as an
   // automatic fleet owner. Distinct from `recycle_fleet_unresolved` on purpose: that case still has a
   // live predecessor watching and the loop still running; this one has neither.
@@ -1718,6 +1723,7 @@ export interface GateHistoryRow {
   /** @decision eb9348b0 — never assume this is always null for a merge row: `gateType:"merge"` now ALSO
    *  falls back to the settled verdict payload at zero extra JOIN/column cost (recovers ~70% of recent
    *  merge-rejection rows vs ~10% for older ones). Still null for the cases that payload doesn't cover.
+   *
    *  `opId` (below) is still the reachability key to `gate_status(opId)` for the FULL diagnostic
    *  (`phase`/`stderrTail`/`outputTail`/`exitCode`/`signal`/`timedOut`) whenever this field comes back
    *  null — it was never meant to replace that pivot, only to make the common case (an aggregate scan
@@ -1808,6 +1814,7 @@ export interface GateHistoryRow {
   /** @decision 6ca4b1a0 — NEVER read this off the raw `orchestration_events.detail_json` — join
    *  `pending_gate_ops` by `opId` instead, the one place the true/false/null tri-state survives (raw
    *  detail can't distinguish "genuinely not reduced" from "reduction never computed").
+   *
    *  A caller building a duration series must bucket on this field: never pool a `true` row with a
    *  `false`/`null` row (measured 12.9× duration gap), and never pool `null` with `false` either —
    *  `null` means "not determinable", not "known full run". */
@@ -1817,9 +1824,10 @@ export interface GateHistoryRow {
    *  ONLY alongside `emitCompareReduced === null`, never alongside a genuine `false` (notReducible). */
   emitCompareNotApplicableKind: string | null;
   /** @decision 6ca4b1a0 — present (non-null) ONLY alongside `emitCompareReduced: true`; VACUOUS ON ONE
-   *  OF TWO ARMS — never read alone, always alongside `emitCompareTestFiles` (below). The two arms are
-   *  NOT mutually exclusive (card 0984260f) — a non-zero count alongside a non-empty
-   *  `emitCompareTestFiles` does not make the count vacuous. */
+   *  OF TWO ARMS — never read alone, always alongside `emitCompareTestFiles` (below).
+   *
+   *  The two arms are NOT mutually exclusive (card 0984260f) — a non-zero count alongside a non-empty
+   *   `emitCompareTestFiles` does not make the count vacuous. */
   emitCompareIdenticalCount: number | null;
   /** Card 6ca4b1a0 — the changed `test/*.mjs` file(s) this reduced run ran instead of the full suite.
    *  Present (as an array — possibly EMPTY on the emit-identity arm) whenever `emitCompareReduced: true`;
@@ -2025,19 +2033,24 @@ export interface Task {
   /**
    * @decision 793ac76d — an OPTIONAL companion to `deferred`: "deferred until THIS task merges," which
    * auto-clears `deferred` on the named task's observed `merged` state. `null`/absent (default) means no
-   * auto-clear at all — load-bearing for an owner-gated or external-upstream deferral. A dangling
-   * blocker reference (the named task was deleted) degrades to "stays deferred", never throws.
+   * auto-clear at all — load-bearing for an owner-gated or external-upstream deferral.
+   *
+   * A dangling blocker reference (the named task was deleted) degrades to "stays deferred", never throws.
+   *
    * @decision 022659ac — widens to an array of blockers: `deferred` auto-clears only once ALL have
    * merged (AND); `deferredStuck` (below) is the OR across all of them — ANY one dangling or
-   * closed-with-no-merge trips it, even while the others are still cleanly pending. A single resolved
-   * blocker always collapses back to a bare string, never a 1-element array.
+   * closed-with-no-merge trips it, even while the others are still cleanly pending.
+   *
+   * A single resolved blocker always collapses back to a bare string, never a 1-element array.
    */
   deferredUntilTaskId?: string | string[] | null;
   /**
    * @decision 93669813 — never read `true` as "proven unreachable": `merged === null` can also mean
    * "shipped outside the scan window" or "a transient git read failure" — this is a DELIBERATE
-   * fail-toward-VISIBLE choice. Never auto-clears `deferred` itself — a 0-commit close is legitimate,
-   * and `deferred` stays keyed on `merged` exactly as it always was.
+   * fail-toward-VISIBLE choice.
+   *
+   * Never auto-clears `deferred` itself — a 0-commit close is legitimate, and `deferred` stays keyed on
+   * `merged` exactly as it always was.
    */
   deferredStuck?: boolean;
   /**
@@ -2055,9 +2068,10 @@ export interface Task {
   /**
    * @decision 0d4bc3f0 — written ONLY via `tasks_defer_item`/`tasks_defer_item_ack`, never a raw
    * `tasks_update` patch. Never omit when empty to save bytes — the always-present `[]` is deliberate
-   * for consumer-shape uniformity (a measured, accepted NDJSON spill-budget cost). This is the OUTBOUND
-   * view; the INBOUND view is `TaskWithRequests.incomingDeferredItems`, a different, derived read-time
-   * scan — never assume a card must be told a donor's id in advance to detect a hand-off.
+   * for consumer-shape uniformity (a measured, accepted NDJSON spill-budget cost).
+   *
+   * This is the OUTBOUND view; the INBOUND view is `TaskWithRequests.incomingDeferredItems`, a different,
+   * derived read-time scan — never assume a card must be told a donor's id in advance to detect a hand-off.
    */
   deferredItems?: DeferredItem[];
   /**
@@ -2082,9 +2096,11 @@ export interface Task {
   repoKey?: string | null;
   /**
    * @decision 1eebc46a — a CACHE, never the ground truth: the MCP `tasks_get`/`tasks_list` `merged`
-   * field (`TaskWithMerged`) stays the live-verified answer agents rely on. Never treat these columns
-   * as authoritative for an agent-facing "is this merged" check — they exist purely so the web
-   * board/drawer avoid the per-poll git-scan cost (measured ~40s at ~1200 cards) this cache exists to skip.
+   * field (`TaskWithMerged`) stays the live-verified answer agents rely on.
+   *
+   * Never treat these columns as authoritative for an agent-facing "is this merged" check — they exist
+   * purely so the web board/drawer avoid the per-poll git-scan cost (measured ~40s at ~1200 cards) this
+   * cache exists to skip.
    */
   mergedSha?: string | null;
   mergedRepoKey?: string | null;
@@ -2107,9 +2123,11 @@ export interface Task {
   updatedAt: string;
   /**
    * @decision d0978321 — a CONTENT counter, not a row counter: advances ONLY when `title`/`body` actually
-   * change, never on a field-only move (column/priority/held/deferred/position/repoKey/etc). Never read
-   * an unchanged `version` across two reads as "the card is unchanged" — it only means title/body
-   * haven't changed; the card may have moved column, changed priority, or auto-cleared its deferral.
+   * change, never on a field-only move (column/priority/held/deferred/position/repoKey/etc).
+   *
+   * Never read an unchanged `version` across two reads as "the card is unchanged" — it only means
+   * title/body haven't changed; the card may have moved column, changed priority, or auto-cleared its
+   * deferral.
    */
   version: number;
 }
@@ -2168,9 +2186,11 @@ export interface ProjectMemoryEntry {
   /**
    * @decision aeec1880 — an OPTIONAL trigger predicate that gates a `pinned:true` note's delivery to
    * kickoffs whose text names a matching PATH glob, instead of pinning it globally. `null` (default)
-   * behaves EXACTLY as `pinned` always has. Inert on an unpinned note, and always bypassed by
-   * `"never-drop"` (that floor must never be silently weakened). Stays FTS-reachable even when its
-   * predicate doesn't fire — must never become LESS reachable than an ordinary unpinned note.
+   * behaves EXACTLY as `pinned` always has.
+   *
+   * Inert on an unpinned note, and always bypassed by `"never-drop"` (that floor must never be silently
+   * weakened). Stays FTS-reachable even when its predicate doesn't fire — must never become LESS
+   * reachable than an ordinary unpinned note.
    */
   triggerGlob: string | null;
 }
