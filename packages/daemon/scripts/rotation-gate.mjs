@@ -3,13 +3,8 @@
 // rotation-gate.mjs — durable exit-condition gate for the resume-doc ("Orchestrator Log.md")
 // rotation procedure (card 8e2a4252).
 //
-// WHY THIS EXISTS: the gate this script runs was previously only PROSE — documented in
-// `Operations/Orchestrator Rules.md`'s own §ROTATION-GATE section — and proven live only by having
-// caught two real mistakes when a human/agent happened to remember to apply it by hand. A passive
-// notice, however prominent, is not someone running it (see project memory
-// shipping-a-detector-is-not-someone-reading-it). This script is the same check as a MECHANISM: a
-// rotation either passes it structurally or is refused, with no step where a successor has to choose
-// to re-read the procedure and reimplement it from memory.
+// @decision 8e2a4252 — this gate must stay a structural MECHANISM (pass or refuse),
+// never fall back to prose someone has to remember to re-apply by hand.
 //
 // WHAT IT GATES: the ACTIVE doc a rotation is about to PROMOTE (i.e. the new/trimmed doc that will
 // become the live resume doc after rotation) — not the resume doc's general content. The resume doc
@@ -22,86 +17,20 @@
 // a copy) and MUST be re-checked against the live vault section by whoever next edits this file —
 // this local copy can drift silently, same as any other copied-not-pointed-at value.
 //
-// CUT 2026-09-02 (card `bcd3f690`, step 1 of the owner's "cleanup all bad ceremonies" directive
-// 2026-09-01): three markers retired because the rules they protected were retired in the SAME cut —
-// `MY-PEER-SEND-LEDGER` (the per-send ledger is deleted outright), `ANNOUNCE-CANNOT-CARRY-A-SHA`
-// (retired with the merge-announce obligation it qualified), `MGR122-FLOOR` (a floor on an announced
-// number that no longer gets announced). This local copy dropped to 11 markers — it is the lead's job
-// (not this card's) to land the matching cut in `Orchestrator Rules.md` §ROTATION-GATE and
-// `Orchestrator Log.md`; this script intentionally lands FIRST so the next rotation's gate doesn't
-// refuse the doc the vault edit is about to produce. See the card for the two markers kept despite
-// looking like ceremony — `NO-CLEARANCE-FROM-SILENCE` (protects the repo against inferring
-// authorization from silence, not etiquette) and `QUIET-LANE` (a measurement-honesty rule backing the
-// gate-queue-read-at-fire interlock) — both still required below.
+// @decision bcd3f690 — retire a marker only when the rule it protects is retired in
+// the SAME cut; land this script's cut BEFORE the matching vault edit, never after.
 //
-// RESTORE 2026-09-02, same day (card `a681aed5`): `MGR122-FLOOR` put BACK into MARKERS (11 → 12), after
-// a peer objection to the bare cut above — the peer agreed the announce obligation is genuinely retired,
-// but objected that removing the marker AND the matching `§LIVE COMMITMENTS` numbered item in the same
-// change left NOTHING durable carrying the rule, and had a fresh first-party incident showing exactly
-// this class of loss (a marker-enforcing rotation script is what caught an unrelated rule silently
-// dropped from a DIFFERENT resume doc that same hour). `bcd3f690` otherwise stands unchanged: the floor
-// stays at 12, and `MY-PEER-SEND-LEDGER`/`ANNOUNCE-CANNOT-CARRY-A-SHA` stay retired. The token is cheap
-// to carry now — it's already `§LIVE COMMITMENTS` item 14 in the live doc, and satisfiable via `--rules`
-// from the non-rotating `Orchestrator Rules.md` too. See the MARKERS entry's own note for the one honest
-// limit this doesn't cover: a COUNT floor on the section protects how many items survive, never that any
-// SPECIFIC item (like this one) is among them — only a named marker does that.
+// @decision a681aed5 — MGR122-FLOOR marker stays (peer-objection restore, same cut);
+// the LIVE COMMITMENTS section end anchors on heading DEPTH, never a heading's NAME.
 //
-// RE-ANCHOR 2026-09-02, same card (`a681aed5`): `countLiveCommitments` below used to close the LIVE
-// COMMITMENTS section by searching for a heading literally containing "my-peer-send-ledger" — a second,
-// independent coupling to that same retired name, missed by the `bcd3f690` cut because retiring a MARKER
-// token never touched this separate anchor. Once the vault doc dropped that heading (replacing it with
-// `§PEER-CHANNEL`), the search silently fell back to end-of-file: harmless that day only because nothing
-// else in the doc happened to hold a numbered list below the section, but a real, fail-OPEN exposure —
-// any future numbered list added below `§LIVE COMMITMENTS` would inflate the count instead of ever being
-// caught. The section end is now anchored STRUCTURALLY instead: the next markdown heading line at the
-// same level or shallower than `§LIVE COMMITMENTS`'s own heading (a sibling or ancestor section boundary)
-// — this depends on heading DEPTH, never on any heading's NAME, so it cannot go stale the way a
-// name-anchor already has, twice, in this one script. See `countLiveCommitments`'s own comment for why a
-// same-or-shallower level (not "any heading" or "the immediate next `##`") is the right rule.
+// @decision d78a6d5d — the 2026-08-28 marker-list verification is superseded by the
+// later cuts above (bcd3f690, a681aed5); do not treat it as still current.
 //
-// Prior verification history (now superseded by the cuts above, kept for provenance): re-verified against
-// the live vault section 2026-08-28 (card `d78a6d5d`), the marker list then held 14 entries and matched
-// §ROTATION-GATE verbatim with no drift found.
+// @decision 4cbb2999 — a rules file being READ by --rules is not proof anything in
+// it is GUARDED; keep at least one marker that is rules-file-only to prove it is.
 //
-// ADDED 2026-09-07 (card `4cbb2999`, found by the Platform Lead on its own setup and reported unprompted):
-// `PRAISE-IS-THE-LEAST-AUDITED-INPUT` and `PRE-MERGE-PAIR` — 10 → 12 entries. THE FALSE GREEN THIS FIXES:
-// `resume_doc_check`'s (and this script's own) `--rules`/rulesPath union satisfies a marker from EITHER the
-// active doc OR a listed rules file — so a rules file being READ was never proof anything in it was
-// GUARDED. Measured live: all 10 pre-existing markers resolved via the active doc alone, meaning
-// `Operations/Orchestrator Rules.md` (where the whole non-rotating doctrine now lives) could be gutted
-// entirely and every marker would still report green. These two tokens are deliberately chosen to be
-// RULES-FILE-ONLY (0 hits in the active `Orchestrator Log.md`, ≥6 hits each in the rules file) so they are
-// the first tokens this script (and the project's `orchestration.rotationMarkers` config, landed
-// separately — see the card) actually depends on `--rules`/rulesPath to satisfy — proven by running this
-// script with and without `--rules` against the real vault files (card `4cbb2999`'s own DoD). Two
-// candidates from the same batch — `ANNOUNCE-CANNOT-CARRY-A-SHA` and `MY-PEER-SEND-LEDGER` — were
-// deliberately NOT used here: both name rules this script already retired above (`bcd3f690`), so re-adding
-// them as markers would re-protect dead ceremony rather than live doctrine.
-//
-// ⭐ LIVE_COMMITMENTS_FLOOR IS A FLOOR, NOT AN EXACT COUNT (card 34a6f07e, 2026-08-28). It used to be
-// `REQUIRED_LIVE_COMMITMENTS_COUNT`, checked with EQUALITY (`!==`). That was a bug, not a feature: a
-// fixed arity doesn't merely fail to catch overflow — it CREATES it. The cheapest way to add a 15th
-// legitimate commitment and keep an equality check green is to leave it OUT of the counted section
-// (unprotected prose instead) — measured live on this seat's own rotation: 6 new binding terms were
-// pushed into prose above the list specifically to dodge this check, and a doc that dropped that prose
-// block entirely still passed, because the equality check never looked at it either way. This script's
-// own name and `--help` already promised the right semantics ("refuse to promote a rotation that …
-// SHRINKS the LIVE COMMITMENTS list") — equality was never that. The fix: assert a FLOOR (`>=`) instead.
-// Growing the list can never fail this check again; only shrinking below the floor can.
-//
-// A floor only protects what it counts, and it moves when the underlying doc's own commitments genuinely
-// shrink — not just when they grow. `LIVE_COMMITMENTS_FLOOR` was raised 14 → 20 by card `34a6f07e`
-// (2026-08-28, to protect 6 terms then sitting unprotected in prose — see that card's own history if it
-// still matters to a reader) and is now LOWERED 20 → 12 by card `bcd3f690` (2026-09-02): the owner's
-// ceremony cut removes real numbered LIVE COMMITMENTS items along with the 3 markers above, and 12 is
-// this script's floor on what the lead's post-cut doc will still carry (the lead independently counted
-// at least 12 surviving items before naming this number — see the card). This is DELIBERATE and lands
-// ahead of the matching vault edit, same ordering rationale as always: a `>=` floor is safe to lower
-// ahead of the doc shrinking, because a lower floor can only ever be MORE permissive, never refuse a doc
-// that would have passed the old higher floor. Whoever next changes the vault's real commitment count
-// must update this constant to match IN THE SAME EDIT — never let it silently drift behind the vault
-// content the way the marker list itself has already been shown to drift (see the header note above):
-// this remains the ONE place the number lives, mirroring the vault the same way the marker list does.
+// @decision 34a6f07e — the LIVE COMMITMENTS count check is a FLOOR (>=), never an
+// exact EQUALITY; the floor VALUE has its own separate raise/lower history.
 //
 // USAGE:
 //   node rotation-gate.mjs --active <path-to-post-rotation-active-doc> --archive <path-to-this-rotation's-archive-file>
@@ -174,21 +103,8 @@
 // rotation that happened — this is a minimal, structural sanity check that the archive side of the
 // operation is real, not a review of its content.
 //
-// UNION EXTENDED TO THE LIVE COMMITMENTS FLOOR (card e312b207, owner-approved option (a) — move
-// §LIVE COMMITMENTS into the non-rotating rules file, and move its count guard with it): before this
-// card, `--rules` only unioned the MARKERS check — `countLiveCommitments` measured `--active` alone, so
-// once the vault lead moves the section into `Operations/Orchestrator Rules.md`, every future rotation's
-// gate would refuse a perfectly correct doc. The count is now unioned the SAME way markers already are:
-// tried against --active FIRST (so a still-in-place section behaves byte-identically to before this
-// card), and against --rules only when --active carries no LIVE COMMITMENTS heading at all. This is
-// deliberately a UNION, not a hard switch to --rules, for the same red-window reason the marker union
-// exists: the guard (this repo) and the block (the vault) cannot land atomically, and a hard switch would
-// break every seat in whichever order the two land. FAIL-CLOSED when the heading is in NEITHER file — that
-// is the catastrophic case (the section was lost outright), and it must never degrade into "0 items,
-// nothing to check, green": see `countLiveCommitments` below for exactly how that's avoided. The floor
-// ASSERTION itself is untouched — wherever the section is found, its items are still counted and the same
-// `>= LIVE_COMMITMENTS_FLOOR` check still runs; this card only widens WHERE the section may live, never
-// what "found" means once it's located.
+// @decision e312b207 — the LIVE COMMITMENTS floor is unioned with --rules the same
+// way MARKERS is; fail CLOSED (never a vacuous green) when found in neither file.
 //
 // ⚠️ HONEST LIMIT — READ BEFORE TRUSTING A GREEN: every marker check here is an EXACT-SUBSTRING grep.
 // It can prove a token's literal text is still present; it CANNOT see a rule that survived rotation only
@@ -196,52 +112,8 @@
 // deleted" — a CANDIDATE SET that nothing obviously vanished — never a verdict that no meaning was lost.
 // A human still has to read the actual diff for a rewrite that changed words but kept (or lost) the idea.
 //
-// --audit-vault <path> / LOOM_ROTATION_GATE_VAULT_PATH (card d8062fbb, 2026-09-03): a DRIFT DETECTOR for
-// the MARKERS array/LIVE_COMMITMENTS_FLOOR constant above against the vault §ROTATION-GATE section they
-// were copied from — see the DECISION note below for why this exists instead of the alternative design.
-//
-// ⭐ DECISION (card d8062fbb DoD-0): the card's parent proposed making the vault AUTHORITATIVE at runtime
-// (a `--markers <path>` flag that PARSES the vault section into the marker list, replacing this hardcoded
-// array). REJECTED: this file's own history already shows what a runtime parse of a prose section costs —
-// `countLiveCommitments`'s end-boundary broke TWICE from exactly this shape (a name-anchor silently
-// falling back to end-of-file, cards `d78a6d5d` and `a681aed5`), and that was parsing a STRUCTURED
-// numbered list, an easier target than a heading section listing markers in free prose. Making the
-// PRIMARY gate's pass/fail depend on that parse succeeding would trade a known, documented, occasionally-
-// stale copy for a script that can silently mis-gate every real rotation the moment someone reformats a
-// vault heading — worse, not better, since a rotation is time-pressured and this script's whole job is to
-// be reliable exactly then.
-// ✅ INSTEAD: keep the hardcoded copy (unchanged, still the thing --active/--archive are checked against),
-// and add a SEPARATE, OPT-IN, NON-GATING-BY-DEFAULT self-audit that checks the copy against the vault on
-// demand — detectable mechanically, but never able to turn a vault reformat into a blocked rotation.
-// HOW THE MACHINE-SPECIFIC-VAULT-PATH CONSTRAINT IS HANDLED (DoD-1): this cannot be an unconditional repo
-// test (no worktree can read a real vault path, and the path differs per host) — so instead of a test,
-// it's a flag (`--audit-vault <path>`, explicit, one-off) PLUS an ambient env var
-// (`LOOM_ROTATION_GATE_VAULT_PATH`) that, once set ONCE on a host that actually has the vault mounted
-// (e.g. the owner's/lead's own machine), makes the audit run on EVERY future invocation with zero further
-// action — closing the "manual re-check nobody is obliged to run" gap without a human needing to remember
-// per-edit. A host that never sets it (CI, a fresh worktree) sees byte-identical behavior to before this
-// card — the env var is read but never required.
-// WHAT IT ACTUALLY CHECKS: reusing the SAME structural (heading-depth, never name) anchor already proven
-// for LIVE COMMITMENTS, it locates the vault's §ROTATION-GATE heading section and checks (a) every
-// MARKERS[] token is still present there (respecting per-marker case-sensitivity) and (b) the current
-// LIVE_COMMITMENTS_FLOOR value appears in that section as a standalone number — this is DoD-4's coverage:
-// the floor is part of the SAME copy problem and gets the SAME detector, not silently left out. Both
-// checks are the same "exact-substring, proves-presence" style already used for --active/--rules, with the
-// same honest limit: a REWORDED (not removed) rule can still false-negative (audit says "fine" when the
-// prose changed meaning), and the floor check can false-negative too (a coincidental digit elsewhere in
-// the section reads as "confirmed"). Neither direction is claimed to be more than what it is.
-// WHY IT ONLY GATES `--lint`'s EXIT CODE, NEVER a real rotation's (DoD-3, "do not regress what works"):
-// `--lint` is already documented above as the free, run-anytime, no-consequence mode — exactly the safe
-// place to let a NEW, heuristic check affect the exit code. A live rotation stays governed ONLY by the
-// pre-existing --active/--archive/--was checks, unchanged; the vault audit's result is still PRINTED on a
-// rotation run (never silent), it just can't block one. This is a deliberate, named trade-off, not an
-// oversight: making this new heuristic gate the live path would risk exactly the failure mode DoD-0's
-// decision above just rejected for the alternative design, on the one path that can least afford it.
-// UNREADABLE PATH: given explicitly via `--audit-vault`, an unreadable file is a real error (exit 1, same
-// convention as `--rules`/`--active`). Given only via the ambient env var, an unreadable file is a SILENT
-// (well, visibly-noted, never fatal) SKIP — the env var is best-effort ambient state, not a caller
-// asserting "this path must work," so a stale/unmounted vault path must never turn into a spurious
-// rotation refusal.
+// @decision d8062fbb — the vault-drift audit is opt-in and non-gating (--lint only,
+// never a real rotation); it must never become a runtime parse the primary gate depends on.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 import fs from "node:fs";
 
