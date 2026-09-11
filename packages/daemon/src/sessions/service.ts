@@ -13287,21 +13287,13 @@ export class SessionService {
         // value. Absent (not a stray " ") when `gateStepsResult` is empty/undefined — mirrors `stepsLine`'s
         // own omit-when-empty convention on the green path.
         const stepsLine = gateStepsResult?.length ? ` ${formatGateStepsDiagnostic(gateStepsResult)}` : "";
-        // Card 522cf573 DoD 1/4: this IS the rich detail — headline + detailBits (incl. `failingTest`, the
-        // single highest-value field per the card) + the squash-phase-began state + the canonical-repo
-        // clause + the steps line + the raw output tail. Captured into ONE variable so BOTH the rich
-        // `[loom:merge-rejected]` notify below AND the generic `[loom:merge-failed]` completion echo (fired
-        // instead, whenever this notify is reconciled away by shouldSuppressMergeReject —
-        // confirmWorkerMergeTracked's onSettle callback reads `detailText` off the return) carry the
-        // IDENTICAL detail, by construction. The gate runs strictly before the squash, so squash phase never
-        // reached is always true here.
-        // Card 74716cfb: join key for the `[loom:deferred-trigger]` notice appendix — see
-        // deferredTriggerNotice's own doc. Appended into `detailText` itself (not a separate string tacked
-        // onto the rejectNotify call alone) so it rides BOTH downstream consumers of this one variable —
-        // the rich `[loom:merge-rejected]` notify right below AND the generic `[loom:merge-failed]`
-        // completion echo the comment above already documents reading `detailText` off this return.
-        // Byte-identical (empty string) whenever no task's own `deferredUntilEvent` names one of these
-        // failed files.
+        // @decision 522cf573 — detailText is built once here so the rich `[loom:merge-rejected]` notify
+        //  and the generic `[loom:merge-failed]` fallback echo can never carry different detail; never
+        //  re-derive a second string for either consumer.
+        //
+        // @decision 74716cfb — the deferred-trigger appendix is appended into this same shared detailText
+        //  variable, not tacked onto the notify call separately, so it rides both of that variable's
+        //  downstream consumers; never wire it at only one gate-outcome nudge site.
         const deferredTriggerAppendix = deferredTriggerNotice(this.db, worker.projectId, await readFailedNamesForOp(thisOpId));
         const detailText = `${headline}${detailBits ? ` (${detailBits})` : ""}; squash phase never reached, canonical repo untouched, worktree retained.${stepsLine}${tailBlock}${deferredTriggerAppendix}`;
         const { suppressed, sha } = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
@@ -13350,23 +13342,21 @@ export class SessionService {
           ...(gateCapForRecord !== undefined ? { gateCap: gateCapForRecord } : {}),
           ...(concurrentGatesForRecord !== undefined ? { concurrentGates: concurrentGatesForRecord } : {}),
           ...(concurrentGatesMaxForRecord !== undefined ? { concurrentGatesMax: concurrentGatesMaxForRecord } : {}),
-          // Card 725dc89a: mirrors the plain-GREEN return's own `emitCompareReduced` triple below — a real
-          // gate genuinely spawned to reach this rejection, so `emitCompareReduced` is DECIDABLE here
-          // (true or false, never fabricated undefined) — see `PendingGateOpVerdict.emitCompareReduced`'s
-          // own doc for the tri-state discipline. CORRECTED, card 2db8a3dd: "decidable" held only for a
-          // repo `computeEmitCompareGate`'s predicate actually applies to — `emitCompareNotApplicable`
-          // (set only from that predicate's own `notApplicable` verdict, never re-derived here) guards the
-          // other cause of "never had a chance to be eligible", the one `gateRan` alone doesn't cover: a
-          // real gate spawning and genuinely running full, on a repo whose layout this predicate can never
-          // evaluate. Reporting `false` there would be the identical fabricated "genuinely not reduced"
-          // claim the green-return guard below already exists to prevent, just reached via a different
-          // outcome. FIXED, card 4def0708: this guard existed already, but `emitCompareNotApplicable`
-          // DEFAULTED to the informative `false` (see its declaration above), so a real gate that spawned
-          // and failed via a route that skips the predicate entirely (`!gateBaseMainHead` — an unresolved
-          // git HEAD, reachable via the `preLanded` capture above) still fabricated `emitCompareReduced:
-          // false` here despite this guard's own intent. The declaration's default is now `true`
-          // (uninformative), so this same `emitCompareNotApplicable ? {} : {...}` correctly omits on that
-          // route without any change to the guard expression itself.
+          // @decision 725dc89a — emitCompareReduced is decidable here (true/false, never fabricated
+          //  undefined) because a real gate genuinely spawned to reach this rejection; see
+          //  PendingGateOpVerdict.emitCompareReduced's own tri-state doc.
+          //
+          // CORRECTED, card 2db8a3dd: "decidable" held only for a repo `computeEmitCompareGate`'s
+          // predicate actually applies to — `emitCompareNotApplicable` (set only from that predicate's
+          // own `notApplicable` verdict, never re-derived here) guards the other cause of "never had a
+          // chance to be eligible", the one `gateRan` alone doesn't cover: a real gate spawning and
+          // genuinely running full, on a repo whose layout this predicate can never evaluate. Reporting
+          // `false` there would be the identical fabricated "genuinely not reduced" claim the green-return
+          // guard below already exists to prevent, just reached via a different outcome.
+          //
+          // @decision 4def0708 — this guard's `emitCompareNotApplicable` used to default to the
+          //  informative `false`, fabricating `emitCompareReduced:false` whenever a route skipped the
+          //  predicate entirely; the default is now the uninformative `true`.
           ...(emitCompareNotApplicable
             // Card fd0d34da: the OTHER half of this guard — a real gate genuinely spawned (this whole
             // block is the rejection path) AND the predicate said `notApplicable:true`, so the coarse WHY
