@@ -6,6 +6,8 @@ Card eb9348b0 corrects stale wording claiming `gate_history`'s own `failingTest`
 
 Measured: the fallback recovers ~70% of recent merge-rejection rows' `failingTest` this way, vs ~10% for rows recorded before the opId-stamping (card 78214063) and verdict-widening (card 9f6598dd) cards landed. Still `null` when the fallback has nothing to offer: a `"worker"`/`"deploy"` row whose own event lacks `failingTest` (rare — a worker self-check embeds it inline on failure), a row/op predating opId-stamping or the merge-verdict-payload widening, a `"pass"`/`"cancelled"`/`"skipped"` verdict (`gateDetail` is fail-only), or a genuine rejection whose output carried no recognizable marker (`gateDetail` present but its own `failingTest` absent — see `PendingGateOpVerdict.gateDetail`'s own doc).
 
+**Batch case:** a batch's own `build_gate` event never sets `failingTest` in `detail` (by construction, same as every other gate kind), so before this card `gate_history.failingTest` for a rejected batch was ALWAYS `null`. It now recovers a real value from `deriveBatchGateVerdict`'s own `gateDetail.failingTest` on a "fail" verdict via the same `verdictPayload.gateDetail.failingTest` fallback described above — a genuine, intentional improvement this card's fallback was built for, not an oversight to reconcile away.
+
 ## Do not
 
 - Do not assume `gate_history.failingTest` is always `null` for a merge row — it now falls back to the settled verdict payload; only the cases that payload doesn't cover still need `gate_status(opId)`.

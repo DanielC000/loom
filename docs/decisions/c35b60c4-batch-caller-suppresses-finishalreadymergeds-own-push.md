@@ -4,6 +4,8 @@
 
 `mergeBatchTracked` calls `finishAlreadyMerged` once per LANDED branch, and on that path every one of those branches legitimately resolves ALREADY_MERGED — the batch's own single fast-forward already put every branch's work on main (see `mergeBatchTracked`'s own header doc). None of them is a stale retry, so the STALE-REDELIVERY `alreadyFinalized` guard (card `369d8824`) is `false` for every one of them, and `finishAlreadyMerged`'s own push would otherwise fire K times for one batch — measured live on a real specimen. `suppressNotify` (set ONLY by `mergeBatchTracked`) skips this method's own per-branch push entirely; `mergeBatchTracked` sends ONE aggregate notice for the whole batch instead, once, naming every landed branch, from its own settle callback. This is a NEW, EXPLICIT opt-out, not a widening of the `alreadyFinalized` guard (which stays reserved for the stale-retry case it was built for) — every non-batch caller omits this flag and keeps today's push behavior byte-identical.
 
+**Measured incident:** a K=4 batch queued/delivered FOUR separate `[loom:already-merged]` pushes to the manager before this fix — wasting that many turns, and the wording read like the fallback/rejection path even though the batch had actually succeeded.
+
 ## Do not
 
 - Do not widen the stale-retry `alreadyFinalized` guard to also cover the batch-landed case — it is a deliberately separate opt-out (`suppressNotify`), not an extension of that guard.

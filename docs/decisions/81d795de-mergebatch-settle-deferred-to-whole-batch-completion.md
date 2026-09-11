@@ -50,6 +50,8 @@ WRITE of that already-computed verdict into the tombstone row is held back, deli
 span above has fully settled. The MINT timing is likewise unchanged — see `insertPendingGateOp`'s own
 call-site comment for why it must stay late; only the settle WRITE moved, never the mint.
 
+Code Review finding [5]: `batchGateVerdict` can ALSO be `undefined` on a row that WAS minted — a throw between the mint and every verdict-recording branch leaves it minted with no stored verdict. Pre-fix that throw left the row PERMANENTLY `pending` and invisible to `reconcileOrphanedGateOps` (needs `surfaced_pending=1`, never set for a batch row) — a manager polled forever. `onSettle`'s `outcome` param (the raw settle outcome `attach` hands every hook) makes that terminal row SELF-DESCRIBING instead of a bare `state:"settled"`: it synthesizes a minimal "error" verdict from the real thrown value when none was recorded.
+
 ### Do not (2)
 
 - Do not read `opts.onSettle`'s deferral as moving WHEN the verdict is computed — `deriveBatchGateVerdict` still runs at the same point inside `runGate` it always did; only the tombstone WRITE of that verdict is held back until the whole `run()` settles.

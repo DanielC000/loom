@@ -4,6 +4,8 @@
 
 Card 7ad12202 Code Review BLOCKING [1]: `gateStatus`'s `retryWarning` dispatch used to branch on `payload.retryPassed` ALONE — `formatWeakerPassWarning` on `true`, `formatRetryAlsoFailedWarning` on `false` — which was sound only as long as a `true` `retryPassed` could ONLY ever coexist with a genuinely PASSED gate. Card 7ad12202's own resume mechanism broke that: a rescued single-file retry can pass while a LATER step (one the original `&&` chain never reached) is resumed afterward and genuinely fails — `retryPassed:true` alongside `outcome:"fail"`/`t.record.verdict === "fail"`. Dispatching on `retryPassed` alone rendered `formatWeakerPassWarning`'s "WEAKER PASS" text on a REJECTED record — prose asserting a pass that did not happen, the exact defect class card `9bdc8ea5` exists to remove, reopened by a different mechanism.
 
+The old invariant's own claimed mechanism: a `true` `retryPassed` was assumed to flip the gate's own `passed` before `runBatchedMerge` ever returned that branch.
+
 Fixed by checking the GATE's own real verdict FIRST: `t.record.verdict === "pass"` (never `retryPassed`) decides whether the whole gate actually passed; `retryPassed` is consulted only WITHIN the rejected branch, to choose between `formatRetryAlsoFailedWarning` (the retry itself also failed) and `formatRetryRescuedButGateRejectedWarning` (the retry passed, but the resume then broke) — see that function's own doc for why neither of the other two formatters is honest for this case.
 
 ## Decision B: `gate-runner.ts`'s own resume mechanics — the discriminator and the field-merge rules

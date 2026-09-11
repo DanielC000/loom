@@ -14,8 +14,11 @@ see [[f944d4e4-mergebatchtracked-dedupe-attach-key]]) does NOT reverse this card
 primitive (a same-key call already running is awaited, never re-invoked) is orthogonal to finalize logic
 and, if anything, extends this card's own "no extra gate run" goal from per-call to per-batch-attempt.
 
+CORRECTED (card `be260976`, see [[be260976-batch-verdict-derivation-closes-the-never-existed-gap]]): before that card, `verdictPayload` was always empty for a batch row, so `toGateHistoryRow` stamped `durationMs`/`gateCap`/`concurrentGates`/`concurrentGatesMax` straight off the `build_gate` event's own `detail`. `be260976` mints+settles a real `pending_gate_ops` tombstone for a batch op too, but that tombstone exists for `gate_status(opId)` to resolve a settled batch op at all (the defect it closed — `gate_status` used to return `"never_existed"` for one) — it does NOT change what `gate_history` reads for these four fields; `toGateHistoryRow` still reads them off `detail`, regardless of gate kind, exactly as before `be260976`. Stamping them in the `build_gate` event (mirroring `confirmWorkerMerge`'s own `evt("build_gate", ...)` call) stays necessary regardless: first measured missing on the first live batch run (opId `1cfb5219`, row `ed9bf9a0` — every one of these four read back `null`).
+
 ## Do not
 
+- Do not assume `be260976`'s tombstone row changes what `gate_history` reads for `durationMs`/`gateCap`/`concurrentGates`/`concurrentGatesMax` on a batch row — it exists only so `gate_status(opId)` can resolve a settled batch op; these four fields still read off the `build_gate` event's own `detail`, unchanged by that card.
 - Do not read `emitCompareReduced`/etc. from a non-batched row's raw `detail` — it can never carry an honest `false`, only `true`-or-absent; use `verdictPayload` instead.
 - Do not extend the `detail.batched === true` fallback to a non-batched row — it is safe ONLY because a batch's `build_gate` event is the one producer that stamps a genuine decidable tri-state directly into `detail`.
 - Do not duplicate `emitCompareReduced`/`emitCompareIdenticalCount`/`emitCompareTestFiles` onto `deriveBatchGateVerdict`'s own written payload — that would risk two producers (the `detail` stamp and the verdict payload) disagreeing on a future edit to either.

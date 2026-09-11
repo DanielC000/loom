@@ -6288,24 +6288,19 @@ export class SessionService {
           sessionName: composeWorkerSessionName(project.name, workerAgent.name, taskTitle, worker.id, this.siblingWorkerSessionNames(managerSessionId, project.name, new Set([worker.id]))),
         });
       } catch (e) {
-        // Anything in the try above — the pre-pty steps (card fa1b77c1) or createPty (node-pty's own
-        // spawn, e.g. Windows CreateProcess `error code: 206` from an oversized command line, card
-        // bc91e86c) — can throw SYNCHRONOUSLY, before any Live entry is ever registered. Without this
-        // catch the row stamped 'live' above NEVER gets reconciled: the pty's own onExit chokepoint
-        // (which normally flips a dead session back to 'exited') can only fire for a process that
-        // actually started, so this catch is the ONLY way such a failure is ever observed. Left
-        // uncaught, it's a phantom — engineSessionId stays null, turnSeq stays 0 — that holds
-        // liveSessionIdForTask's per-task mutex forever (that guard keys on process_state alone) and
-        // that pty.stop() can't touch (it no-ops on a session with no Live entry — see PtyHost.stop), so
-        // a stale {stopped:true} from worker_stop would report success without having stopped anything.
-        // Reconciling to 'exited' HERE — the one place that knows the spawn never produced an
-        // engine — releases the mutex immediately and lets a re-spawn (or worker_recycle, which
-        // reuses this same worktree/branch and never checks processState) proceed normally.
-        // Card 8b194419 (Code Review follow-up on 6ca4155f, item 3): folded onto the shared
-        // reconcileFailedSpawn helper every other live-flip site already uses — the two differed only in
-        // the lastError message's prefix ("worker spawn failed…" vs "session spawn failed…"), and a
-        // repo-wide grep found zero consumers of either exact prefix (nothing outside this file's own
-        // source matches either string).
+        // @decision 6ca4155f — anything in this try can throw SYNCHRONOUSLY before any Live entry is
+        //  registered; without this catch the row stamped 'live' phantom-lives forever, holding the
+        //  per-task mutex and defeating pty.stop().
+        //
+        // @decision fa1b77c1 — the try starts at the live-flip, not at pty.spawn: the pre-pty steps
+        //  (project-memory retrieval/digest, codescape status) can throw synchronously too and must be
+        //  covered by the same catch.
+        //
+        // @decision bc91e86c — createPty itself can also throw synchronously (e.g. a Windows
+        //  CreateProcess error code: 206 from an oversized command line), not only the pre-pty steps.
+        //
+        // @decision 8b194419 — folds onto the shared reconcileFailedSpawn helper every other live-flip
+        //  site uses, rather than duplicating the reconcile logic with its own lastError prefix.
         this.reconcileFailedSpawn(worker.id, e);
         throw e;
       }
@@ -14415,25 +14410,13 @@ export class SessionService {
               // on this run's gate child) — never `chosen.length`, the requested K, which can over-report after
               // a conflict drop-out (DoD-4).
               passed: r.passed, batched: true, branchCount: landedCount,
-              // Card 3d2afb53: this batch gate never routes through confirmWorkerMergeTracked/PendingOpRegistry
-              // (see this method's own header doc — no extra finalize logic, no extra gate run). CORRECTED
-              // (card be260976): a `pending_gate_ops` row for this opId DOES now exist — see the
-              // `insertPendingGateOp`/`settlePendingGateOp` pair around this closure's `runExclusive` call —
-              // but `toGateHistoryRow` (db.ts) still reads durationMs/gateCap/concurrentGates/concurrentGatesMax
-              // straight off THIS event's own `detail`, regardless of gate kind, exactly as before be260976;
-              // that tombstone row exists for `gate_status(opId)` to resolve a settled batch op at all (the
-              // defect be260976 closed — `gate_status` used to return `"never_existed"` for a settled batch op),
-              // not to change what `gate_history` reads for these four fields. Stamping them here (mirroring
-              // confirmWorkerMerge's own `evt("build_gate", ...)` call) is still necessary regardless — first
-              // measured missing on the first live batch run (opId 1cfb5219, row ed9bf9a0: every one of these
-              // read back null). ⚠️ A FIFTH field DOES now change on this same op, just not read from `detail`
-              // here: `db.ts`'s `toGateHistoryRow` falls back to `verdictPayload.gateDetail.failingTest` (card
-              // eb9348b0) whenever the raw event carries none — a failed batch's own `build_gate` event never
-              // sets `failingTest` in `detail` (by construction, same as every other gate kind), so before this
-              // card `gate_history.failingTest` for a rejected batch was ALWAYS null; it now recovers a real
-              // value from `deriveBatchGateVerdict`'s own `gateDetail.failingTest` on a "fail" verdict — a
-              // genuine, intentional improvement (this is exactly what card eb9348b0's fallback was built for),
-              // not an oversight to reconcile away.
+              // @decision 3d2afb53 — this batch never routes through confirmWorkerMergeTracked/
+              //  PendingOpRegistry, so these four fields (and the be260976 tombstone's own scope) must be
+              //  stamped here directly, off this event's own `detail`.
+              //
+              // @decision eb9348b0 — a batch's own build_gate event never sets failingTest in detail;
+              //  gate_history.failingTest for a rejected batch now recovers it via this card's own
+              //  verdict-payload fallback.
               durationMs: batchGateAttempt1DurationMs, gateCap: orchestration.maxConcurrentGates,
               concurrentGates: concurrentAtStart, concurrentGatesMax,
               // Card 6cc803b2 — phase instrumentation (`46ebdf20`'s declined DoD-4): the other four of the
@@ -14565,43 +14548,24 @@ export class SessionService {
               // Card 67030bb9: a retry that ALSO failed still recorded that one was attempted — mirrors
               // confirmWorkerMerge's own identical rejection-path observability.
               ...(result.gateDetail?.retriedFile ? { retriedFile: result.gateDetail.retriedFile, retryPassed: result.gateDetail.retryPassed } : {}),
-              // Card 4ad6ccfd: `gate_status(opId)` already renders a `retryWarning` for this exact op — this
-              // sync return, read FIRST by the manager, used to carry the two raw fields above and NO prose
-              // at all. Gated exactly like `gate_status`'s own dispatch (service.ts, the `gateStatus` reader):
-              // `retriedFile` non-null AND `retryPassed` a strict boolean — a `null`/`undefined` retryPassed
-              // is the retry-cancelled-while-queued exception, where no formatter's wording is honest, so it
-              // stays unrendered here too.
+              // @decision 4ad6ccfd — this sync return renders its own retryWarning, gated like
+              //  gate_status's own dispatch; the gatePassed:true branch passes undefined, never
+              //  landed.length, since a later fast-forward/HEAD-read failure means nothing landed.
               //
-              // CORRECTED, card 7ad12202 Code Review BLOCKING [1]: this used to dispatch on `retryPassed`
-              // ALONE, on the claimed invariant that `!result.ok` (this return) meant `retryPassed` "can
-              // only be `false`/`undefined` by construction: a `true` retryPassed flips the gate's own
-              // `passed` before `runBatchedMerge` ever returns that branch." **That claim is now FALSE**:
-              // card 7ad12202's own resume mechanism means the single-file retry can pass
-              // (`retryPassed:true`) while a LATER step (one the original `&&` chain never reached) is
-              // resumed afterward and genuinely fails — `result.gatePassed:false` alongside
-              // `retryPassed:true`, reaching this exact `!result.ok` return. Dispatching on `retryPassed`
-              // alone rendered `formatWeakerPassWarning`'s "⚠ WEAKER PASS" text on a rejected batch — prose
-              // asserting a pass that did not happen, the exact defect card `9bdc8ea5` exists to remove.
-              // Fixed by checking `result.gatePassed` FIRST — the real, ungamed record of whether the gate
-              // itself passed, set once in `batch-merge.ts` and never touched by `retryPassed` — then
-              // `retryPassed` only within the `gatePassed:false` branch, to choose between
-              // `formatRetryAlsoFailedWarning` (the retry itself also failed) and {@link
-              // formatRetryRescuedButGateRejectedWarning} (the retry passed, but the resume then broke).
-              // `result.gatePassed:true` still covers the TWO OTHER `ok:false` returns on an already-PASSED,
-              // possibly retry-assisted gate (a post-gate HEAD-read failure, or a fast-forward
-              // failure/forfeit) — so a passing retry followed by one of those later failures still renders
+              // @decision 7ad12202 — dispatch on result.gatePassed FIRST, never retryPassed alone: a
+              //  rescued single-file retry can still fail a later resumed step, so retryPassed:true can
+              //  coexist with a genuinely rejected gate.
+              //
+              // `result.gatePassed` is the real, ungamed record of whether the gate itself passed, set
+              // once in `batch-merge.ts` and never touched by `retryPassed`. `result.gatePassed:true`
+              // still covers the TWO OTHER `ok:false` returns on an already-PASSED, possibly
+              // retry-assisted gate (a post-gate HEAD-read failure, or a fast-forward failure/forfeit) —
+              // so a passing retry followed by one of those later failures still renders
               // `formatWeakerPassWarning`, exactly as before this correction.
-              // CORRECTED (Code Review fold-in, card 4ad6ccfd): an earlier version of this passed
-              // `result.landed.length` to BOTH non-`gatePassed:true` branches. That count is right for the
-              // genuine-rejection shapes (`gatePassed:false`, whether the retry or the resume is what
-              // finally broke) — where the outer `landed: []` on THIS return and "NONE of them landed" are
-              // both true together. It is WRONG for the `gatePassed:true` branch:
-              // `formatWeakerPassWarning`'s batch clause asserts "ALL N land on the strength of this ONE
-              // retry" — false when the gate (and retry) passed but the fast-forward/HEAD-read afterward did
-              // NOT, which is exactly what `gatePassed:true` + `ok:false` means (the outer `landed: []` here
-              // is the same reality check). Passing `undefined` there omits the batch clause entirely rather
-              // than assert a landing that didn't happen — the solo wording alone ("passed only after
-              // retrying") stays true regardless of what fast-forward did afterward.
+              //
+              // @decision 9bdc8ea5 — within the gatePassed:false branch, retryPassed chooses between
+              //  formatRetryAlsoFailedWarning (the retry itself also failed) and
+              //  formatRetryRescuedButGateRejectedWarning (the retry passed, the resume then broke).
               ...(result.gateDetail?.retriedFile && typeof result.gateDetail?.retryPassed === "boolean" ? {
                 retryWarning: result.gatePassed
                   ? formatWeakerPassWarning(result.gateDetail.retriedFile, result.gateDetail.outputTail, undefined)
@@ -14667,22 +14631,13 @@ export class SessionService {
           if (batchWorktreePath) await removeWorktree(finalRepoPath, batchWorktreePath, { timeoutMs: this.gitOpMs }).catch(() => {});
         }
       },
-      // ASYNC SETTLE NUDGE (card f944d4e4 DoD-2) — fires ONLY for a caller that actually observed
-      // `{settled:false}` (see PendingOpRegistry.attach's `onSettledAfterPending` doc); a caller whose
-      // batch settled inside the sync wait never needs this, it already has the value inline (that sync
-      // caller gets ZERO notices — the fast-path return already IS the answer, mirroring
-      // confirmWorkerMergeTracked's own sync-vs-async split; no per-op push is needed on top of it).
-      // Deliberately MUCH thinner than confirmWorkerMergeTracked's own per-branch echo just below (no
-      // per-step diagnostics, no skill/proximity/retry notes) — but per card c35b60c4 (measured: a K=4
-      // batch queued/delivered FOUR separate `[loom:already-merged]` pushes to the manager, wasting that
-      // many turns, and the wording read like the fallback/rejection path even though the batch had
-      // actually succeeded) every LANDED branch's own `finishAlreadyMerged` push is now SUPPRESSED
-      // (`suppressNotify:true` on that call above) — this is the ONE place a batch's landed branches are
-      // ever announced to the manager, so it names every one of them (task + branch + commit) rather than
-      // just a bare count. Every FALLBACK candidate still gets its own notice via `runFallback`'s
-      // `confirmWorkerMergeTracked` call — those are genuinely per-worker outcomes (a real gate rejection,
-      // a stranded-work refusal, an over-cap deferral), not a batch success duplicated K times, so they are
-      // deliberately left alone.
+      // @decision f944d4e4 — this async settle nudge fires ONLY for a caller that observed
+      //  {settled:false}; a sync-settled caller gets zero notices, and this is the one place a batch's
+      //  landed branches are ever announced (task + branch + commit), never just a bare count.
+      //
+      // @decision c35b60c4 — every landed branch's own finishAlreadyMerged push is suppressed here; a
+      //  K=4 batch used to deliver FOUR separate already-merged pushes worded like a rejection even
+      //  though the batch had succeeded.
       (outcome, opId) => {
         const target = this.resolveSettleNudgeTarget(managerSessionId);
         // Card c35b60c4 DoD-3: never call a batched branch "ALREADY_MERGED" — it landed BECAUSE of this
@@ -14778,34 +14733,27 @@ export class SessionService {
         // (attempt 1 and the single-file retry) and nowhere else — never user/test-output-controlled
         // content, so this is a safe, narrow classifier, not a fragile string-sniff of arbitrary text.
         classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : /^gate cancelled \(/.test(outcome.value.reason ?? "") ? "cancelled" : outcome.value.ok ? "landed" : "rejected"),
-        // DEFERRED TOMBSTONE WRITE (card 81d795de — see this method's own `batchGateVerdict` declaration
-        // above for the full mechanism doc). Fires from inside `PendingOpRegistry.attach`'s own settle
-        // branch — i.e. once `run()` ABOVE (this whole batch: worktree cut, gate, fast-forward, and every
-        // landed branch's `finishAlreadyMerged` finalize) has ACTUALLY resolved or rejected, strictly
-        // AFTER the fast-forward/finalize code that used to run concurrently with an already-"settled"
-        // tombstone. Mirrors confirmWorkerMergeTracked's own `onSettle` (this file, above) — same hook,
-        // same contract: fires for EVERY genuine settle, fast or surfaced-pending, unconditionally on both
-        // the resolve and reject branches (see `PendingOpRegistry.attach`'s own doc). `batchGateVerdict` is
-        // `undefined` on a batch whose gate never even ran (`landed.length === 0` — see runBatchedMerge)
-        // or one that failed before `runGate` was reached at all (e.g. the batch worktree cut itself
-        // threw) — in EITHER case no tombstone row was ever minted for this opId either (mint stays
-        // scoped to `runGate`, unchanged by this card), so this call is a harmless no-op UPDATE against a
-        // non-existent row, exactly as it silently was before this card whenever `runGate` was never
-        // reached. Code Review, card 81d795de finding [5]: `batchGateVerdict` can ALSO be `undefined` on a
-        // row that WAS minted — a genuine throw between the mint and every verdict-recording branch
-        // (`classifyGateFailure`, `identifyRetriableTestFiles`'s own `fs.existsSync`, or the retry's own
-        // `evtBatch("build_gate_single_file_retry", ...)` write, none of which record a verdict
-        // themselves) leaves the row minted with no stored verdict. Pre-fix, that same throw left the row
-        // PERMANENTLY `pending` and invisible to `reconcileOrphanedGateOps` (it requires
-        // `surfaced_pending=1`, which a batch row never sets) — a manager would poll it forever. This is
-        // already strictly better (the row goes terminal the instant `run()` rejects, and the real error
-        // still reaches the manager via `onSettledAfterPending`) — but `outcome` (the raw settle outcome
-        // `PendingOpRegistry.attach` hands every `onSettle` hook) is exactly what makes that terminal row
-        // SELF-DESCRIBING instead of a bare `state:"settled"` with no verdict at all: synthesize a minimal
-        // "error" verdict from the real thrown value whenever no richer one was ever recorded. Confirmed
-        // safe on the `landed.length === 0` / never-reached-`runGate` path too — still a harmless no-op
-        // UPDATE against a never-minted opId, since `outcome.ok` is `true` there and the `?? undefined`
-        // branch is taken.
+        // @decision 81d795de — fires only once the WHOLE batch (fast-forward + every finalize) has
+        //  settled, never the gate's own inner resolve; an undefined batchGateVerdict here still
+        //  synthesizes a minimal "error" verdict from the real thrown value when none was recorded.
+        //
+        // `batchGateVerdict` is `undefined` on a batch whose gate never even ran (`landed.length === 0`
+        // — see runBatchedMerge) or one that failed before `runGate` was reached at all (e.g. the batch
+        // worktree cut itself threw) — in EITHER case no tombstone row was ever minted for this opId
+        // either (mint stays scoped to `runGate`, unchanged by this card), so this call is a harmless
+        // no-op UPDATE against a non-existent row, exactly as it silently was before this card whenever
+        // `runGate` was never reached.
+        //
+        // Code Review, card 81d795de finding [5]: the verdict-recording branches a throw can land
+        // between the mint and are `classifyGateFailure`, `identifyRetriableTestFiles`'s own
+        // `fs.existsSync`, or the retry's own `evtBatch("build_gate_single_file_retry", ...)` write —
+        // none of which record a verdict themselves. This is already strictly better (the row goes
+        // terminal the instant `run()` rejects, and the real error still reaches the manager via
+        // `onSettledAfterPending`) — but `outcome` is exactly what makes that terminal row
+        // SELF-DESCRIBING instead of a bare `state:"settled"` with no verdict at all. Confirmed safe on
+        // the `landed.length === 0` / never-reached-`runGate` path too — still a harmless no-op UPDATE
+        // against a never-minted opId, since `outcome.ok` is `true` there and the `?? undefined` branch
+        // is taken.
         onSettle: (outcome, opId) => {
           this.db.settlePendingGateOp(opId, batchGateVerdict ?? (outcome.ok ? undefined : { kind: "error", payload: { reason: outcome.error instanceof Error ? outcome.error.message : String(outcome.error) } }));
         },

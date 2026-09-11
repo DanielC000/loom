@@ -32,6 +32,8 @@ real, named gap, not a proven-closed one.
 This dedupe/attach primitive is orthogonal to the batch path's own finalize logic — see
 [[3d2afb53-batched-merge-gate-emit-compare-reads-detail-not-verdict-payload]]'s "do not" on this point.
 
+**DoD-2: the async settle nudge.** Fires ONLY for a caller that actually observed `{settled:false}` (see `PendingOpRegistry.attach`'s `onSettledAfterPending` doc) — a caller whose batch settled inside the sync wait already has the value inline and gets ZERO notices from this callback, mirroring `confirmWorkerMergeTracked`'s own sync-vs-async split. Deliberately MUCH thinner than `confirmWorkerMergeTracked`'s own per-branch echo (no per-step diagnostics, no skill/proximity/retry notes): every landed branch's own `finishAlreadyMerged` push is suppressed (see [[c35b60c4-batch-caller-suppresses-finishalreadymergeds-own-push]]), so this callback is the ONE place a batch's landed branches are ever announced to the manager — it names every one of them (task + branch + commit) rather than just a bare count. Every FALLBACK candidate still gets its own notice via `runFallback`'s `confirmWorkerMergeTracked` call instead — those are genuinely per-worker outcomes (a real gate rejection, a stranded-work refusal, an over-cap deferral), not a batch success duplicated K times, so they are deliberately left alone.
+
 ## Do not
 
 - Do not mint a fresh `opId`/cut a second batch worktree on a client-timeout retry with the SAME resolved candidate set — key through `PendingOpRegistry.attach` so the retry re-attaches instead.
