@@ -887,8 +887,7 @@ export function describeGateProximity(steps: GateStepDuration[] | undefined, gat
 
 /**
  * Run a (possibly `&&`-chained) `gateCommand` as SEPARATE sequential child processes instead of one
- * `&&`-chained shell invocation — so memory frees BETWEEN steps (a shared footprint across
- * lint+test+build was OOM-killing a worker's gate, exit 137). Preserves `&&` short-circuit semantics
+ * `&&`-chained shell invocation — so memory frees BETWEEN steps. Preserves `&&` short-circuit semantics
  * exactly: the first non-zero (or spawn-error) step stops the run and fails the gate; a gate with no
  * `&&` behaves exactly as the old single-`spawnSync` call did. Each step gets the SAME per-project
  * `gateTimeoutMs` budget (not a divided share) — a heavy step (e.g. a build) needs its own full window.
@@ -901,6 +900,9 @@ export function describeGateProximity(steps: GateStepDuration[] | undefined, gat
  * `hooks` ({@link GateLivenessHooks}) is forwarded to EVERY step's own `runStep` call, unchanged — trailing
  * again so existing 7-arg callers are unaffected; lets an external registry (GateSemaphore) mirror this
  * run's live idle/extend state without this function needing to know anything about that registry.
+ *
+ * @decision b9515beb — gate steps run as SEPARATE sequential processes, never one `&&`-chained
+ * spawnSync: a shared memory footprint across lint+test+build was OOM-killing a worker's gate.
  */
 export async function runGateSequential(
   gate: string, cwd: string, timeoutMs: number, runStep: GateStepRunner = runGateStep, envOverride?: NodeJS.ProcessEnv,
@@ -1053,12 +1055,12 @@ export function classifyGatePhase(step: string | undefined): "typecheck" | "test
  * this at all. Scans for the same cross-ecosystem failure markers as that live scan (an uncaught-throw
  * `UNCAUGHT` idiom, Loom's own `FAIL  <label>` convention, Jest/AVA/tap-style `FAIL`/`not ok`/✗/✖ markers,
  * thrown `AssertionError`s, and `error TSxxxx` typechecker diagnostics) and returns the FIRST matching line,
- * trimmed. A line recording a PASS ({@link PASS_LINE_RE}) is skipped entirely before any pattern is tried —
- * same flat invariant as {@link createFailingTestTracker}'s own `scanLine` (card 2f0b2e57), so this
- * fallback can't repeat the bug the live scan was fixed for just because it re-derives from a raw string
- * instead of the tracker. Returns `undefined`
- * when nothing recognizable is found — this is a diagnostic aid, not a parser, so a silent miss just means
- * the raw tail is still surfaced on its own.
+ * trimmed. Returns `undefined` when nothing recognizable is found — this is a diagnostic aid, not a parser,
+ * so a silent miss just means the raw tail is still surfaced on its own.
+ *
+ * @decision 2f0b2e57 — check {@link PASS_LINE_RE} before any {@link FAILING_TEST_PATTERNS} tier,
+ * unconditionally, same flat invariant as {@link createFailingTestTracker}'s own `scanLine`; a passing
+ * line's own label text must never win against the PASS check.
  */
 export function extractFailingTest(outputTail: string): string | undefined {
   const lines = outputTail.split(/\r?\n/).filter((l) => !PASS_LINE_RE.test(l));
