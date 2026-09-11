@@ -54,7 +54,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 // set, keeps this file's own env setup ahead of anything that reads it.
 const {
   sleep, GIT_ID, FULL_GATE, seed, mkdirp, mk, BASE_SRC, makeRepoWithBaseSrcFile, REAL_TEST_DAEMON_SCRIPT,
-  CHANGED_TS_SCANNER_BASENAMES, CHANGED_SCRIPT_SCANNER_BASENAMES,
+  writeRealTestDaemonScript, CHANGED_TS_SCANNER_BASENAMES, CHANGED_SCRIPT_SCANNER_BASENAMES,
 } = await import("./_emit-compare-fixtures.mjs");
 
 // Card f862f9c5 — (O) below's own small synthetic `.mjs` fixture, same shape/spirit as BASE_SRC above (a
@@ -476,16 +476,27 @@ try {
 
   // ── (N) card abaaf16e — Code Review MINOR: THE RECLASSIFICATION PATH itself must fold
   //        CHANGED_TS_TEXT_SCANNER_REPO_PATHS in, not just the pre-wait classification (L)/(M) above already
-  //        cover. Same cap-queue-admission shape as (L): N2's pre-wait classification is a comment-only
-  //        .ts edit (eligible, reduced); while genuinely queued behind N1's held-open cap slot, a FURTHER
-  //        commit lands on N2's own branch — but unlike (L), this second edit is ALSO comment-only (still
-  //        transpile-identical), so the admission-time re-derivation (`reunionAtAdmission`'s `if
-  //        (moved) {…}` branch in service.ts) reclassifies to eligible:true again, not a fallback to FULL.
-  //        Pre-fix (before card abaaf16e), `reclassified.changedTsPaths` didn't exist at all, so this
-  //        assertion is RED against that code (TypeError / undefined) and GREEN once the reclassification
-  //        branch actually reads it and re-builds the command with it. ─────────────────────────────────
+  //        cover. Same cap-queue-admission shape as (L), but DELIBERATELY does NOT mirror (L)'s choice of
+  //        touching the SAME scope in both the pre-wait and queue-time commits: this scenario's own earlier
+  //        draft edited `src/example.ts` in BOTH its pre-wait commit and its during-queue commit, so
+  //        `emitCompareTsPaths` was ALREADY non-empty before reclassification ever ran — deleting
+  //        `reclassified.changedTsPaths`'s assignment left the (byte-identical) STALE pre-wait value in
+  //        place and this scenario's own ⭐ assertion stayed green regardless (Code Review `a2bfa262`, review
+  //        of card `f862f9c5`, 2026-09-11 — card `f862f9c5`'s own scenario (O) had the identical defect for
+  //        `changedScriptFiles` and was already fixed the same way, below). THIS scenario instead keeps the
+  //        two commits' SCOPES DISJOINT:
+  //        N2's PRE-WAIT commit is a comment-only edit to a real `test/*.mjs` file (TS-free —
+  //        `emitCompareTsPaths` pre-wait is `[]`), and the commit that lands DURING the cap-queue wait is
+  //        what ADDS the `src/example.ts` comment edit for the FIRST TIME. So
+  //        `reclassified.changedTsPaths` is `["packages/daemon/src/example.ts"]` while the stale pre-wait
+  //        `emitCompareTsPaths` is `[]` — genuinely different values, so deleting the assignment at
+  //        service.ts's reclassification branch demonstrably flips this scenario's own assertion from
+  //        green to red (mutation proof recorded in this card's own decision record; not re-run
+  //        automatically here, since a manual source mutation isn't expressible as a test case in this
+  //        same file). ─────────────────────────────────────────────────────────────────────────────────
   {
     const N1 = mk("n1"), N2 = mk("n2");
+    const BASE_TEST = ["// a hermetic test file, TS-free", "console.log(\"PASS  placeholder\");", "process.exit(0);", ""].join("\n");
     const db = new Db(); dbs.push(db);
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
 
@@ -495,7 +506,14 @@ try {
     execSync(`git init -q && git config user.email ecg@loom && git config user.name ecg`, { cwd: N1.repo });
     commitAll(N1.repo, "init", GIT_ID);
 
+    // N2's base repo carries BOTH a real .ts file (for the queue-time edit) AND a real, self-resolving
+    // test-daemon.mjs (`writeRealTestDaemonScript` — so `loadNotHermeticNames` genuinely SUCCEEDS classifying
+    // the pre-wait test-file edit, rather than falling back to fail-closed; see that helper's own doc) AND a
+    // real test/*.mjs file, untouched at this commit — the pre-wait commit below is what first edits it.
     makeRepoWithBaseSrcFile(N2, BASE_SRC);
+    writeRealTestDaemonScript(N2.repo);
+    fs.writeFileSync(path.join(N2.repo, "packages", "daemon", "test", "reclass-example.mjs"), BASE_TEST);
+    commitAll(N2.repo, "chore: add example test", GIT_ID);
 
     let gate1Calls = 0, gate2Calls = 0;
     let capturedGate2;
@@ -524,10 +542,12 @@ try {
 
     const wt2 = await createWorktree(N2.repo, N2.projId, N2.taskId);
     N2.worktreePath = wt2.worktreePath; N2.branch = wt2.branch; worktrees.push(wt2.worktreePath);
-    // Pre-wait: a COMMENT-ONLY edit — eligible for the reduced gate, classified BEFORE admission.
-    fs.writeFileSync(path.join(N2.worktreePath, "packages", "daemon", "src", "example.ts"),
-      BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed)"));
-    commitAll(N2.worktreePath, "docs: fix comment typo", GIT_ID);
+    // Pre-wait: a COMMENT-ONLY edit to the real test file, TS-FREE — eligible for the reduced gate via
+    // changedTestFiles, classified BEFORE admission, with emitCompareTsPaths left at its empty default
+    // (this commit never touches src/example.ts).
+    fs.writeFileSync(path.join(N2.worktreePath, "packages", "daemon", "test", "reclass-example.mjs"),
+      BASE_TEST.replace("a hermetic test file, TS-free", "a hermetic test file, TS-free (comment tweak)"));
+    commitAll(N2.worktreePath, "docs: fix test comment", GIT_ID);
     seed(db, N2);
 
     const p1 = sessions.confirmWorkerMerge(N1.mgrId, N1.workerId);
@@ -560,13 +580,15 @@ try {
     });
     check("(N) N2's confirm PROVABLY waited on the cap, not a fluke of scheduling", neverSettled);
 
-    // NOW, while N2 is genuinely queued behind the cap, a FURTHER commit lands on N2's OWN branch — but
-    // this one is ALSO comment-only (unlike (L)'s behavioral flip), so the recombined diff stays
-    // transpile-identical and the re-derivation should land on eligible:true again, through the SAME
-    // `if (moved) {...}` reclassification branch (L) exercises for the FULL-gate fallback case.
+    // NOW, while N2 is genuinely queued behind the cap, a FURTHER commit lands on N2's OWN branch that ADDS
+    // a comment-only src/example.ts edit — this is the FIRST time this branch's diff touches a compiled .ts
+    // file at all, so the recombined diff's changedTsPaths is populated ONLY at reclassification time, never
+    // at pre-wait. The recombined diff (both commits) stays transpile-identical, so the re-derivation should
+    // land on eligible:true again, through the SAME `if (moved) {...}` reclassification branch (L) exercises
+    // for the FULL-gate fallback case.
     fs.writeFileSync(path.join(N2.worktreePath, "packages", "daemon", "src", "example.ts"),
-      BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed, take two)"));
-    commitAll(N2.worktreePath, "docs: tidy the comment further during the cap-queue wait", GIT_ID);
+      BASE_SRC.replace("explains what isReady checks", "explains what isReady checks (typo fixed during the cap-queue wait)"));
+    commitAll(N2.worktreePath, "docs: fix comment typo during the cap-queue wait", GIT_ID);
 
     releaseGate1("go");
     const confirm1 = await p1;
@@ -577,7 +599,7 @@ try {
     check("(N) N2's gate command was called exactly once", gate2Calls === 1);
     check("(N) N2's captured command is the REDUCED gate — the re-derivation found the recombined diff STILL transpile-identical, not a stale carry-over of the pre-wait verdict",
       typeof capturedGate2 === "string" && capturedGate2 !== FULL_GATE);
-    check("(N) ⭐ card abaaf16e: the RECLASSIFIED command folds in every dist-text scanner — proves reclassified.changedTsPaths is read and used, not just the pre-wait emitCompareTsPaths",
+    check("(N) ⭐ card abaaf16e: the RECLASSIFIED command folds in every dist-text scanner — proves reclassified.changedTsPaths is read and used, not just the pre-wait emitCompareTsPaths (which stayed empty pre-wait, since the pre-wait commit never touched a compiled .ts file)",
       typeof capturedGate2 === "string" && CHANGED_TS_SCANNER_BASENAMES.every((s) => capturedGate2.includes(`node packages/daemon/test/${s}`)));
     check("(N) N2's warning also names the reclassified dist-text-scanner count",
       typeof confirm2.warning === "string" && new RegExp(`also ran the ${CHANGED_TS_SCANNER_BASENAMES.length} compiled-source/dist text-scanner test\\(s\\)`).test(confirm2.warning));
