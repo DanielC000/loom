@@ -7976,65 +7976,25 @@ export class PtyHost {
   }
 
   /**
-   * Write text as a turn and arm busy (the immediate path and the Stop-drain share this). The text
-   * goes out as a BRACKETED PASTE (start marker, the chunked text, end marker) then Enter a beat
-   * later — so claude treats even multi-line content as one paste unit and the trailing Enter
-   * reliably submits (no more reports stuck un-submitted in the box). The markers are written on
-   * their own so chunking can't split a marker sequence.
+   * Write text as a turn and arm busy (the immediate path and the Stop-drain share this).
    *
-   * M1 INVARIANT (optimistic busy): `setBusy(true)` is the LAST statement and runs SYNCHRONOUSLY —
-   * before submit() yields to the event loop. The actual Enter (`\r`) is written async, a beat later;
-   * the synchronous busy set is what closes the window between "we decided to submit" and "the turn is
-   * really in flight". A concurrent enqueueStdin (its own event-loop task) therefore always sees
-   * busy=true and QUEUES rather than racing the still-pending `\r`. DO NOT move this set behind an
-   * `await`/callback or make submit() async — that would reopen the race. enqueueStdin asserts the set
-   * landed synchronously (the M1 GUARD there).
-   *
-   * The Enter itself is NOT fire-and-forget (card 9549e322): a lone `\r` can land mid-ingest of a
-   * large/coalesced paste, or get dropped outright by Windows ConPTY (the same class of drop already
-   * documented for the boot Esc, card dacb8571) — either way the text strands un-submitted with busy
-   * stuck true. `enterConfirmed` is reset to false here and `sendEnterAndVerify` re-sends the Enter on
-   * a bounded verify/retry schedule until `UserPromptSubmit` (or a Stop, proving a turn ran) confirms
-   * it, or gives up and recovers busy so the session doesn't wedge.
+   * @decision sha:f5cdceac — submit() delivers a turn as a BRACKETED PASTE + delayed Enter, never
+   * raw fire-and-forget lines — reverting reopens "reports stuck un-submitted in the box".
+   */
+  // M1 INVARIANT: setBusy(true) is submit()'s LAST, SYNCHRONOUS statement (before any await) — this
+  // is what makes a concurrent enqueueStdin see busy=true and queue instead of racing the pending
+  // Enter. DO NOT move it behind an await/make submit() async — enqueueStdin's own M1 GUARD asserts it.
+  /**
+   * @decision 9549e322 — the Enter after a submit paste is NOT fire-and-forget: it can be dropped
+   * or land mid-ingest, so it's verified + retried (sendEnterAndVerify) until confirmed or given up.
    */
   /**
-   * Card 1bd1f045: the byte/call-sequence log for the ACTUAL `pty.write()` call — called INLINE at every
-   * real write site (never a layer above them), so it records what genuinely reached node-pty, not what
-   * the daemon merely composed/handed down. That distinction matters: `[submit-write]` (submit()'s own
-   * pre-write log) was overclaimed as proof the write path is clean and retracted twice — everything from
-   * here down was, until this card, completely uninstrumented in both directions (see 3ce3fa39).
-   *
-   * Discriminates the two surviving hypotheses for that card's mid-token splice: if the daemon itself
-   * double-emits (e.g. `writeChunked`'s `done` callback firing more than once, unguarded by
-   * `submitGeneration` — card 9ed20572), TWO `[pty-write]` records on `tag=chunk` share the same content
-   * signature (len, hash) at distinct `seq` WITHIN THE SAME `gen`. If the daemon writes exactly once and
-   * corruption still appears at the receiving end, this log shows a single clean record and the fault is
-   * BELOW the daemon (ConPTY/node-pty/Windows). Either outcome is a real result.
-   *
-   * CORRECTED 2026-07-23 (manager measurement, 583 live records): the discriminator above is unusable
-   * without the `tag=chunk`+`gen` restrictions — fixed control sequences (enter/bracket-start/bracket-end)
-   * are byte-identical by construction and matched repeatedly on healthy traffic, and a by-design re-write
-   * (give-up requeue/retry/re-drain — see `purgeConfirmedGiveUpRequeue`) crosses a `gen` boundary rather
-   * than duplicating within one. Two traps: `seq` resets across a daemon restart (de-duplicate per boot,
-   * never across one), and the give-up clear burst reuses the `chunk` tag and can share a message body's
-   * `len` (only the hash differs) — never filter by length alone.
-   *
-   * `seq` is the load-bearing field: a monotonic per-session counter (Live.writeSeq) that makes a
-   * duplicated or out-of-order emission visible AS a sequence anomaly rather than plausible traffic.
-   *
-   * RECORD SIZE (card review, 2026-07-23): a head+tail excerpt was the first cut but measured at ~100-150
-   * bytes/record — at 17 call sites, some firing per-chunk on every 15KB+ payload, that risked shrinking
-   * daemon-output.log's rotation window (the SAME forensic corpus 3ce3fa39/9ed20572 depend on) faster than
-   * it fills today, which would make a rare recurrence HARDER to catch, not easier. `fnv1a32` replaces the
-   * excerpt with a fixed 8-hex-char content fingerprint — every field the card's DoD names (sessionId, seq,
-   * submitGeneration, len, a cheap hash) stays, nothing load-bearing for duplicate/replay detection is
-   * dropped, and the record shrinks by roughly half regardless of chunk size. `tag` names WHICH call site
-   * wrote (bracket-start/chunk/bracket-end/enter/…) so a reader doesn't have to infer it from content.
-   *
-   * OBSERVATION ONLY: this is a passthrough. It must never alter what's written, its outcome, or its
-   * timing relative to a bare `live.pty.write(data)` call — do not add anything here that could change
-   * write behaviour.
+   * @decision 1bd1f045 — the [pty-write] log must stay INLINE at every real pty.write() call site,
+   * never a layer above, so a duplicate/out-of-order emission is visible as a sequence anomaly and a
+   * daemon double-write can be told apart from ConPTY-level corruption.
    */
+  // OBSERVATION ONLY: this log is a passthrough — never change what's written, its outcome, or its
+  // timing relative to a bare live.pty.write(data) call.
   private ptyWrite(sessionId: string, live: Live, data: string, tag: string): void {
     const seq = ++live.writeSeq;
     // eslint-disable-next-line no-console
