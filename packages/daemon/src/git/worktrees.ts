@@ -2869,9 +2869,12 @@ export const ASSET_READING_TEST_REPO_PATHS = [
  *        source edit (e.g. a bare newline before the `(`) does NOT survive into the emitted output (both
  *        before/after reprint to the identical text), but a COMMENT DOES survive — tsc keeps comment trivia
  *        attached to its nearest node — so `timingSafeEqual /* c *\/(a, b)` emits with the comment intact and
- *        breaks this exact regex. `loopback-secret.mjs` (D) is therefore a KNOWN, PRE-EXISTING fail-open
- *        vector for an inline-comment diff specifically (not a whitespace-only one) — tracked on a separate
- *        follow-up card, NOT fixed by this one; do not cite this entry as proof the check is immune.
+ *        breaks this exact regex. `loopback-secret.mjs` (D) was therefore a KNOWN, PRE-EXISTING fail-open
+ *        vector for an inline-comment diff specifically (not a whitespace-only one) — do not cite this
+ *        entry as proof the check is immune. ✅ FIXED by card `f5ea0cdb`: `loopback-secret.mjs` is now a
+ *        genuine MEMBER of {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} below (next to `gateway-token.mjs`,
+ *        the structurally identical sibling check it was already missing alongside), not an exclusion —
+ *        do not remove it on a future re-assertion of the "single-token is immune" argument.
  *        ⚠️ `test-daemon-codex-real-spawn-preset.mjs`'s own `scripts/test-daemon.mjs` check
  *        (`scriptSource.includes("resolveSelectionForCliMode(HERMETIC, cliMode, CODEX_REAL_SPAWN_BASENAMES)")`)
  *        was PREVIOUSLY documented here as "the same shape one level up" and therefore ALSO immune —
@@ -2926,6 +2929,10 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   "packages/daemon/test/agent-runs-keys.mjs",
   "packages/daemon/test/event-trigger-mcp-absence.mjs",
   "packages/daemon/test/gateway-token.mjs",
+  // Card f5ea0cdb: (D) raw-scans compiled dist/gateway/loopback-secret.js for /timingSafeEqual\(/ — the
+  // SAME presence-only shape as gateway-token.mjs immediately above; was wrongly excluded on the
+  // now-corrected "single-token regex is immune" argument (see shape-(4) above).
+  "packages/daemon/test/loopback-secret.mjs",
   "packages/daemon/test/update-endpoint.mjs",
   "packages/daemon/test/shutdown-snapshot.mjs",
   "packages/daemon/test/periodic-snapshot.mjs",

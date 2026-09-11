@@ -335,6 +335,24 @@ try {
     for (const s of CHANGED_TS_SCANNER_BASENAMES) check(`(T) a changed SCRIPT file (not .ts) -> dist-text scanner ${s} still does NOT run`, !withScriptFileOnly.includes(`node packages/daemon/test/${s}`));
   }
 
+  // ── (W) card f5ea0cdb — RED-PROOF: buildReducedGateCommand must fold `loopback-secret.mjs` into the
+  //        reduced gate command whenever a changed compiled .ts file is passed. Code Review (card `a2bfa262`,
+  //        reviewing `f862f9c5`) MEASURED a pre-existing fail-open: `loopback-secret.mjs` (D) raw-scans
+  //        compiled `dist/gateway/loopback-secret.js` for `/timingSafeEqual\(/`, and real tsc emit KEEPS
+  //        comments — so an inline-comment-only edit to `src/gateway/loopback-secret.ts` is transpile-
+  //        identical (REDUCES the gate per `computeEmitCompareGate`) but breaks that regex in the
+  //        comment-keeping emit. Pre-fix, `CHANGED_TS_TEXT_SCANNER_REPO_PATHS` excluded this file on a
+  //        "single-token regex is immune" argument already MEASURED FALSE by that same review (see that
+  //        list's own shape-(4) doc) — so the reduced gate never ran it, and main would only go red at a
+  //        later, unrelated full gate. HARDCODED path (not derived from `CHANGED_TS_SCANNER_BASENAMES` the
+  //        way scenario (T)'s own loop above is), so this stays a genuine regression pin independent of
+  //        the list itself — RED against the reverted (pre-`f5ea0cdb`) list, GREEN once it's a member. ──
+  {
+    const withLoopbackTs = buildReducedGateCommand({ changedTestFiles: [], changedAssetPaths: [], changedTsPaths: ["packages/daemon/src/gateway/loopback-secret.ts"], changedScriptFiles: [] });
+    check("(W) card f5ea0cdb: a changed .ts file folds loopback-secret.mjs into the reduced gate (RED before card f5ea0cdb, GREEN after)",
+      withLoopbackTs.includes("node packages/daemon/test/loopback-secret.mjs"));
+  }
+
   // ── (V) card f862f9c5 — RED-PROOF: buildReducedGateCommand must fold CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS
   //        in (bare `node <path>`, the STATIC_GUARD_REPO_PATHS shape) whenever a changed
   //        packages/daemon/scripts/**/*.mjs file is passed, on ITS OWN trigger (changedScriptFiles),
