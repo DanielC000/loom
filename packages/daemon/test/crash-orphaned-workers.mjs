@@ -332,6 +332,39 @@ try {
   await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(5) a PARKED manager gets NO summary nudge", pty.getPending(id5b.mgr).length === 0);
   check("(5) its non-parked worker still gets resumed + nudged", pty.getPending(id5b.wkr).some((m) => m.includes("[loom:crash-recovered]")));
+  // Card 55d40cfd negative control: a parked manager whose every worker resumed cleanly must emit ZERO
+  // `parked_manager_workers_unresumed` events — proves the new event is gated on an actual per-worker
+  // resume failure, never fired unconditionally just because the manager was parked.
+  check("(5) a parked manager with NO failed workers emits no parked_manager_workers_unresumed event",
+    db.listEvents(id5b.mgr).filter((ev) => ev.kind === "parked_manager_workers_unresumed").length === 0);
+
+  // Card 55d40cfd (F2): a PARKED manager whose summary nudge is skipped must still durably record any of
+  // its workers that failed to resume — the gap this card closes. One worker resumes fine, the other's
+  // resumeOne fails with a real (allowlisted) reason.
+  const id5c = { mgr: `cow-mgr5c-${sfx}`, wkrOk: `cow-wkr5c-ok-${sfx}`, wkrFail: `cow-wkr5c-fail-${sfx}` };
+  const t5e = mkTask(`cow-t5e-${sfx}`, P.proj);
+  const t5f = mkTask(`cow-t5f-${sfx}`, P.proj);
+  mkSession({ id: id5c.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "exited" });
+  db.setRateLimitedUntil(id5c.mgr, future, "usage limit — parked");
+  mkSession({ id: id5c.wkrOk, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id5c.mgr, taskId: t5e, processState: "exited" });
+  mkSession({ id: id5c.wkrFail, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id5c.mgr, taskId: t5f, processState: "exited" });
+  const derived5c = deriveCrashOrphanedWorkers(db, [db.getSession(id5c.mgr), db.getSession(id5c.wkrOk), db.getSession(id5c.wkrFail)]);
+  const resumeOne5c = (sid) => sid === id5c.wkrFail ? { ok: false, reason: "session has no engine id to resume" } : true;
+  const result5c = sessions.recoverCrashOrphanedWorkers(derived5c, { resumeOne: resumeOne5c });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
+  check("(5c) the parked manager itself still resumed (not in `failed`)", !result5c.failed.includes(id5c.mgr));
+  check("(5c) the ok worker resumed", result5c.resumed.includes(id5c.wkrOk));
+  check("(5c) the failing worker IS in `failed`", result5c.failed.includes(id5c.wkrFail));
+  check("(5c) the parked manager still gets NO summary nudge", pty.getPending(id5c.mgr).length === 0);
+  check("(5c) the failing worker gets no nudge either (never half-resumed)", pty.getPending(id5c.wkrFail).length === 0);
+  const events5c = db.listEvents(id5c.mgr).filter((ev) => ev.kind === "parked_manager_workers_unresumed");
+  check("(5c) a durable parked_manager_workers_unresumed event is filed under the manager, naming its 1 unresumed worker + task + reason",
+    events5c.length === 1 && events5c[0].detail?.workerCount === 1 &&
+    Array.isArray(events5c[0].detail?.workers) && events5c[0].detail.workers.length === 1 &&
+    events5c[0].detail.workers[0].workerSessionId === id5c.wkrFail &&
+    events5c[0].detail.workers[0].taskId === t5f &&
+    events5c[0].detail.workers[0].reason === "session has no engine id to resume");
+  check("(5c) the ok worker is NOT included in the unresumed event's workers list", !events5c[0].detail.workers.some((w) => w.workerSessionId === id5c.wkrOk));
 
   // ============================ (6) MANAGER-ALL-FAILED — still gets a summary nudge =================
   const id6 = { mgr: `cow-mgr6-${sfx}`, wkrA: `cow-wkr6a-${sfx}`, wkrB: `cow-wkr6b-${sfx}` };

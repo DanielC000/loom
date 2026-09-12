@@ -1479,6 +1479,12 @@ export type OrchestrationEventKind =
   // allowlist-sanitized shape as `fleet_resume_failed`'s own): the MANAGER's own resume-failure message —
   // never per-worker, since a manager whose OWN resume fails never individually attempts its workers.
   | "manager_crash_resume_failed"
+  // `recoverCrashOrphanedWorkers`'s PARKED-manager sibling of `manager_crash_resume_failed` above — filed
+  // per parked manager, `detail` describing only its own unresumed workers. See docs/decisions/
+  // 55d40cfd-parked-manager-workers-unresumed.md for the full shape and why no nudge accompanies it.
+  // @decision 55d40cfd — never send a nudge alongside this event: it would push a turn into a parked
+  //  manager's cap, exactly what the park exists to prevent. This is a durable record only.
+  | "parked_manager_workers_unresumed"
   // Canonical main advanced between a batch worktree being cut and its post-gate fast-forward, so the
   // batch's single gate never validated main's real current tree — abandoned, every candidate falls
   // back to its own individual gate. Filed under the confirming MANAGER; `detail` carries
@@ -1546,7 +1552,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   worker_spawn_usage_blocked: true, companion_alert_pushed: true, companion_alert_deferred: true,
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
-  manager_crash_resume_failed: true,
+  manager_crash_resume_failed: true, parked_manager_workers_unresumed: true,
   repeated_tool_call: true, batch_merge_forfeited: true, engine_session_rotated: true,
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, codex_unsupported_capability: true,

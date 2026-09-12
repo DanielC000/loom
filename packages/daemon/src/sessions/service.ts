@@ -5067,9 +5067,21 @@ export class SessionService {
       // this card exists to close. Scope: worktree EXISTENCE only — branch state is explicitly NOT
       // covered (see classifyWorktreeIntegrity's own doc); the notice text below says so.
       let worktreeAtRiskCount = 0;
+      // Card 55d40cfd (F2): captured regardless of `managerParked` (cheap — only populated on an actual
+      // resume failure) but only ever READ in the `managerParked` branch below, where the summary nudge
+      // that would otherwise surface these failures is skipped to honor the park.
+      const failedWorkerDetail: { workerSessionId: string; taskId: string | null; reportedState: CrashOrphanedWorker["reportedState"]; awaitingReview: boolean; reason: string | null }[] = [];
       for (const w of workers) {
         const workerParked = isParked(w.workerSessionId);
-        if (!normalizeResumeOneResult(resumeOne(w.workerSessionId)).ok) { failed.push(w.workerSessionId); failedCount++; continue; }
+        const workerAttempt = normalizeResumeOneResult(resumeOne(w.workerSessionId));
+        if (!workerAttempt.ok) {
+          failed.push(w.workerSessionId); failedCount++;
+          failedWorkerDetail.push({
+            workerSessionId: w.workerSessionId, taskId: this.db.getSession(w.workerSessionId)?.taskId ?? null,
+            reportedState: w.reportedState, awaitingReview: w.awaitingReview, reason: workerAttempt.reason ?? null,
+          });
+          continue;
+        }
         resumed.push(w.workerSessionId);
         recoveredCount++;
         const integrity = classifyWorktreeIntegrity(this.db.getSession(w.workerSessionId)?.worktreePath);
@@ -5131,7 +5143,23 @@ export class SessionService {
           } catch { /* not ready yet — the resume stands */ }
         }
       }
-      if (managerParked) continue; // resumed live; honor the park — no summary nudge
+      if (managerParked) {
+        // Card 55d40cfd (F2): the summary nudge above is skipped to honor the park, so any of this
+        // manager's workers that failed to resume would otherwise be lost outside `failed[]`/a boot
+        // console line (both in-memory only). File the durable record instead — never a nudge (see the
+        // kind's own doc: that would push a turn into the parked manager's cap).
+        if (failedWorkerDetail.length > 0) {
+          try {
+            this.db.appendEvent({
+              id: randomUUID(), ts: now.toISOString(), managerSessionId: managerId, kind: "parked_manager_workers_unresumed",
+              detail: { workerCount: failedWorkerDetail.length, workers: failedWorkerDetail },
+            });
+          } catch (e) {
+            console.warn(`[crash-recovery] appendEvent(parked_manager_workers_unresumed) failed for ${managerId.slice(0, 8)}: ${(e as Error).message}`);
+          }
+        }
+        continue; // resumed live; honor the park — no summary nudge
+      }
       // card c9e51581 (Path B extension of 61cc91c6): a manager/platform with NO stake in this crash —
       // no crash-orphaned worker candidates (recovered or failed) alongside it, no stranded board work,
       // no unconsumed answer — resumes SILENTLY instead of burning the unconditional summary nudge below.
