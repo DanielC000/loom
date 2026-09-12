@@ -8,7 +8,10 @@ import path from "node:path";
  *  `createRequire` load) — the loaders differ; the shape they must produce does not. */
 export interface TypeScriptModuleLike {
   transpileModule(input: string, opts: unknown): { outputText: string };
-  ScriptTarget: Record<string, unknown>;
+  // @decision 18bfe989 — never widen back to `Record<string, unknown>`: an undefined `ScriptTarget` lookup
+  // used to reach `transpileModule` silently (fixed up to ES5, not an error), which could make a real
+  // behavioural change read transpile-identical instead of failing this compile.
+  ScriptTarget: Record<string, number>;
   ModuleKind: Record<string, unknown>;
 }
 
@@ -20,13 +23,16 @@ export interface TypeScriptModuleLike {
  *  `tsconfig.base.json`'s real target, matching what `dist/` actually ships, and `ESNext` for a changed
  *  `.mjs` script — a script is never compiled by this repo's tsconfig chain at all, so `ES2022` would be
  *  UNSOUND there: it can downlevel syntax the original file never runs through; `deploy-staleness.ts` uses
- *  `ES2022` for its own `.ts`-only diff). `module` stays fixed at `NodeNext` for every caller — every
- *  other compiler option is irrelevant here since `transpileModule` never type-checks. */
+ *  `ES2022` for its own `.ts`-only diff). `target: number`, never `unknown` (card 18bfe989) — `unknown`
+ *  only enforced an argument was PRESENT, not that it was a valid target, so an explicit `undefined` (a
+ *  `ScriptTarget` lookup that missed) passed through silently. `module` stays fixed at `NodeNext` for
+ *  every caller — every other compiler option is irrelevant here since `transpileModule` never
+ *  type-checks. */
 export function transpileIgnoringCommentsAndWhitespace(
   text: string,
   fileName: string,
   tsModule: TypeScriptModuleLike,
-  target: unknown,
+  target: number,
 ): { outputText: string } {
   return tsModule.transpileModule(text, {
     compilerOptions: {

@@ -467,6 +467,11 @@ function computeAncestorBehaviouralMatch(repoRoot: string, fromSha: string, toSh
   if (!emitCompareSoundnessOk(repoRoot, DEPLOY_STALENESS_EMIT_COMPARE_SCOPE)) return null;
   const tsModule = loadTypeScriptSync();
   if (tsModule === null) return null;
+  // @decision 18bfe989 — narrow explicitly rather than cast: `noUncheckedIndexedAccess` types this
+  // lookup `number | undefined`, and an undefined target must fail this function closed to `null`, never
+  // reach `transpileModule` (see emit-compare-soundness.ts's own anchor for why that matters).
+  const es2022Target = tsModule.ScriptTarget.ES2022;
+  if (es2022Target === undefined) return null;
 
   for (const line of lines) {
     const tab = line.indexOf("\t");
@@ -489,8 +494,8 @@ function computeAncestorBehaviouralMatch(repoRoot: string, fromSha: string, toSh
     let outBefore: string;
     let outAfter: string;
     try {
-      outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule, tsModule.ScriptTarget.ES2022).outputText;
-      outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule, tsModule.ScriptTarget.ES2022).outputText;
+      outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule, es2022Target).outputText;
+      outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule, es2022Target).outputText;
     } catch {
       // Card 404bfc75, Code Review item 4: the module-wide "NEVER throws" contract (see the module doc)
       // extends to this call — a malformed/unparseable source snapshot must degrade to `null`, never

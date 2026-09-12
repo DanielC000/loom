@@ -2992,6 +2992,10 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   "packages/daemon/test/companion-lead-mode.mjs",
   "packages/daemon/test/decisions-for-tool.mjs",
   "packages/daemon/test/emit-compare-branch-capture-order-guard.mjs",
+  // Card 18bfe989: (A)/(B) raw-scan real emit-compare-soundness.ts SOURCE (never dist/**, which has no
+  // types once compiled) for the ScriptTarget/target type narrowing — a presence-only real-code-token
+  // match, same shape as gateway-token.mjs/loopback-secret.mjs above, immune to no comment shape.
+  "packages/daemon/test/emit-compare-transpile-target-narrowing.mjs",
   "packages/daemon/test/gate-intent-no-firing-coupling.mjs",
   "packages/daemon/test/give-up-exhausted-durable.mjs",
   "packages/daemon/test/inert-skip-branch-capture-order-guard.mjs",
@@ -3405,48 +3409,63 @@ export async function computeEmitCompareGate(
     } catch {
       return notApplicableHere("typescript module not resolvable (expected on a shipped end-user install)", "typescript-unresolvable");
     }
-    for (const p of changedTsFiles) {
-      let before: string;
-      let after: string;
-      try {
-        before = await withTimeout(git.raw(["show", `${baseSha}:${p}`]), timeoutMs, "git show (emit-compare before)");
-      } catch {
-        // Card 4def0708: a failed git read is the same mechanism-failure shape as the diff-read error above.
-        return notApplicableHere(`could not read base content for ${p}`, "git-operation-failed");
+    if (changedTsFiles.length > 0) {
+      // @decision 18bfe989 — narrow explicitly rather than cast: `noUncheckedIndexedAccess` types this
+      // lookup `number | undefined`, and a missing ES2022 must fail this gate closed (notApplicableHere),
+      // never reach `transpileModule` with an undefined target (see emit-compare-soundness.ts's anchor).
+      const es2022Target = tsModule.ScriptTarget.ES2022;
+      if (es2022Target === undefined) {
+        return notApplicableHere("typescript module's ScriptTarget has no ES2022 (unexpected typescript resolution)", "typescript-unresolvable");
       }
-      try {
-        after = await withTimeout(git.raw(["show", `${ref}:${p}`]), timeoutMs, "git show (emit-compare after)");
-      } catch {
-        return notApplicableHere(`could not read branch content for ${p}`, "git-operation-failed");
+      for (const p of changedTsFiles) {
+        let before: string;
+        let after: string;
+        try {
+          before = await withTimeout(git.raw(["show", `${baseSha}:${p}`]), timeoutMs, "git show (emit-compare before)");
+        } catch {
+          // Card 4def0708: a failed git read is the same mechanism-failure shape as the diff-read error above.
+          return notApplicableHere(`could not read base content for ${p}`, "git-operation-failed");
+        }
+        try {
+          after = await withTimeout(git.raw(["show", `${ref}:${p}`]), timeoutMs, "git show (emit-compare after)");
+        } catch {
+          return notApplicableHere(`could not read branch content for ${p}`, "git-operation-failed");
+        }
+        const outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule, es2022Target).outputText;
+        const outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule, es2022Target).outputText;
+        if (outBefore !== outAfter) return notReducible(`${p} is not transpile-identical — a real code change`);
       }
-      const outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule, tsModule.ScriptTarget.ES2022).outputText;
-      const outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule, tsModule.ScriptTarget.ES2022).outputText;
-      if (outBefore !== outAfter) return notReducible(`${p} is not transpile-identical — a real code change`);
     }
-    // Card 82662e98: `.mjs` scripts, at `ESNext` (NOT ES2022, unlike the .ts loop above — see
-    // EMIT_COMPARE_SCRIPTS_PREFIX's own doc). `ESNext` is the only target that structurally cannot
-    // downlevel any syntax the compiler recognizes at all (there is no ceiling below "newest known"), so
-    // this comparison is a faithful comment/whitespace-stripped REPRINT of what Node actually executes —
-    // never a lossy transform that could map two genuinely different scripts onto the same output. Spiked
-    // directly (2026-09-04): at `target: ES2022` (the .ts loop's choice), a `using` declaration explodes
-    // into ~30 lines of disposal-helper machinery that has nothing to do with what an untranspiled `.mjs`
-    // actually runs; at `ESNext` the same input reprints unchanged.
-    for (const p of changedScriptFiles) {
-      let before: string;
-      let after: string;
-      try {
-        before = await withTimeout(git.raw(["show", `${baseSha}:${p}`]), timeoutMs, "git show (emit-compare before)");
-      } catch {
-        return notApplicableHere(`could not read base content for ${p}`, "git-operation-failed");
+    if (changedScriptFiles.length > 0) {
+      // Card 82662e98: `.mjs` scripts, at `ESNext` (NOT ES2022, unlike the .ts loop above — see
+      // EMIT_COMPARE_SCRIPTS_PREFIX's own doc). `ESNext` is the only target that structurally cannot
+      // downlevel any syntax the compiler recognizes at all (there is no ceiling below "newest known"), so
+      // this comparison is a faithful comment/whitespace-stripped REPRINT of what Node actually executes —
+      // never a lossy transform that could map two genuinely different scripts onto the same output. Spiked
+      // directly (2026-09-04): at `target: ES2022` (the .ts loop's choice), a `using` declaration explodes
+      // into ~30 lines of disposal-helper machinery that has nothing to do with what an untranspiled `.mjs`
+      // actually runs; at `ESNext` the same input reprints unchanged.
+      const esNextTarget = tsModule.ScriptTarget.ESNext;
+      if (esNextTarget === undefined) {
+        return notApplicableHere("typescript module's ScriptTarget has no ESNext (unexpected typescript resolution)", "typescript-unresolvable");
       }
-      try {
-        after = await withTimeout(git.raw(["show", `${ref}:${p}`]), timeoutMs, "git show (emit-compare after)");
-      } catch {
-        return notApplicableHere(`could not read branch content for ${p}`, "git-operation-failed");
+      for (const p of changedScriptFiles) {
+        let before: string;
+        let after: string;
+        try {
+          before = await withTimeout(git.raw(["show", `${baseSha}:${p}`]), timeoutMs, "git show (emit-compare before)");
+        } catch {
+          return notApplicableHere(`could not read base content for ${p}`, "git-operation-failed");
+        }
+        try {
+          after = await withTimeout(git.raw(["show", `${ref}:${p}`]), timeoutMs, "git show (emit-compare after)");
+        } catch {
+          return notApplicableHere(`could not read branch content for ${p}`, "git-operation-failed");
+        }
+        const outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule, esNextTarget).outputText;
+        const outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule, esNextTarget).outputText;
+        if (outBefore !== outAfter) return notReducible(`${p} is not transpile-identical — a real code change`);
       }
-      const outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule, tsModule.ScriptTarget.ESNext).outputText;
-      const outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule, tsModule.ScriptTarget.ESNext).outputText;
-      if (outBefore !== outAfter) return notReducible(`${p} is not transpile-identical — a real code change`);
     }
   }
 
