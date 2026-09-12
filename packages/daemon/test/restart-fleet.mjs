@@ -831,6 +831,37 @@ try {
   // unchanged — re-asserted here so this file demonstrates both halves of the allowlist in one run.
   check("(8v) allowlist control: a genuinely static resume() message (8iv's) still passes through unchanged",
     events8iv[0].detail.failed.some((f) => f.sessionId === d4.dead && f.reason === "session has no engine id to resume"));
+
+  // (8vi) Card 06aa82a7: F1 (ee05750e) put the sanitized failure reason on the durable event + the
+  // companion alert line, but left it OUT of the identified Lead's own `[loom:fleet-resume-failure]`
+  // nudge — the Lead is the ONE party cards 9e4205f5/5a9a963b designate as having cross-project reach to
+  // actually investigate, so that omission is a privilege INVERSION. This assertion must FAIL on the
+  // pre-fix tree (detailLines never renders `d.reason`) and PASS after. The plain requester's own
+  // count-only notice must still never leak the reason (5a9a963b's isolation invariant, unchanged).
+  const D6 = { proj: `rf-D6-${sfx}`, agent: `rf-D6-ag-${sfx}` };
+  mkProject(D6.proj, "/tmp/rf-D6"); mkAgent(D6.agent, D6.proj);
+  const d6 = { mgr: `rf-D6-mgr-${sfx}`, dead: `rf-D6-dead-${sfx}` };
+  mkSession({ id: d6.mgr, projId: D6.proj, agentId: D6.agent, role: "manager" });
+  mkSession({ id: d6.dead, projId: B.proj, agentId: B.agent, role: "worker", parentSessionId: id.mgrB, busy: false });
+  const pty8vi = new PtyStub();
+  const sessions8vi = new SessionService(db, pty8vi, new OrchestrationControl());
+  sessions8vi.resumeFleetOnBoot(
+    { reason: "deploy", managerSessionId: d6.mgr, requestedAt: now, resume: [
+      { sessionId: d6.mgr, role: "manager", parentSessionId: null },
+      { sessionId: d6.dead, role: "worker", parentSessionId: id.mgrB, busy: false },
+      { sessionId: d2.lead, role: "platform", parentSessionId: null },
+    ] },
+    { resumeOne: (sid) => sid === d6.dead ? { ok: false, reason: "session not found" } : true, deployStaleness: CLEAN_STALENESS },
+  );
+  await flush();
+  const msg8vi = pty8vi.getPending(d6.mgr);
+  check("(8vi) requester's own count-only notice still never leaks the reason text (5a9a963b's isolation invariant)",
+    msg8vi.length === 1 && !/session not found/i.test(msg8vi[0]));
+  const leadMsgs8vi = pty8vi.getPending(d2.lead);
+  const failureMsg8vi = leadMsgs8vi.find((m) => m.includes("[loom:fleet-resume-failure]") && m.includes(d6.dead));
+  check("(8vi) the Lead's identified nudge names the failed session", !!failureMsg8vi);
+  check("(8vi) the Lead's identified nudge carries the sanitized failure reason (DoD-2 RED assertion)",
+    !!failureMsg8vi && /session not found/i.test(failureMsg8vi));
 } finally {
   db.close();
   for (const repo of repoRoots) {

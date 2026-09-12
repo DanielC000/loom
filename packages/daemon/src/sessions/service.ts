@@ -4839,9 +4839,13 @@ export class SessionService {
           });
           const liveLead = this.db.listAllSessions().find((s) => s.role === "platform" && s.processState === "live");
           if (liveLead) {
+            // Card 06aa82a7: carry the already-sanitized (normalizeResumeOneResult/RESUME_KNOWN_SAFE_REASONS)
+            // failure reason into the Lead's own line — `d.reason` never a re-captured raw error (see the
+            // card's HARD DEPENDENCY on ee05750e's B1 allowlist).
             const detailLines = failedDetail.map((d) =>
               `project ${d.projectId ?? "unknown"} / session ${d.sessionId} / role ${d.role ?? "plain"}` +
-              `${d.taskId ? ` / task ${d.taskId}` : ""} — ${d.wasBusy ? "BUSY at capture (work may have been in flight)" : "idle at capture"}`,
+              `${d.taskId ? ` / task ${d.taskId}` : ""} — ${d.wasBusy ? "BUSY at capture (work may have been in flight)" : "idle at capture"}` +
+              `${d.reason ? ` (${d.reason})` : ""}`,
             );
             const failureNoticeText =
               `${failed.length} session(s) elsewhere in the fleet failed to resume after this restart. You are ` +
