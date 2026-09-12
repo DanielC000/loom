@@ -13,9 +13,12 @@ whole output shape — a self-renewing false alarm, not a one-off.
 Fix: sub-case (b) of `builtContentMatchesHead` — `processBuiltSha` IS an ancestor AND `stale` already
 `true` — runs `computeAncestorBehaviouralMatch`, diffing the two shas over `RESTART_RELEVANT_PATHSPECS`
 then proving every changed `.ts` file transpile-identical (comments/whitespace stripped), the same
-technique `computeEmitCompareGate` (`git/worktrees.ts`) uses for the merge gate, duplicated (not imported)
-since that function is async and private to a larger decision engine, while this module is synchronous
-(`5e30c4bd`). `builtContentMatchesHead:true` overrides `stale` to `false` from EITHER sub-case, since (a)'s
+technique `computeEmitCompareGate` (`git/worktrees.ts`) uses for the merge gate. ⚠️ SUPERSEDED (card
+`bafc68e7`): this originally duplicated (not imported) that technique's predicate/walker/transpile-helper
+locally, on an async-vs-sync justification re-examined and found not decisive — see
+`docs/decisions/bafc68e7-emit-compare-soundness-shared-scope.md` for why and what replaced it (one shared
+`emit-compare-soundness.ts` module, parameterized by scope; this module's own scope — daemon+shared —
+unchanged). `builtContentMatchesHead:true` overrides `stale` to `false` from EITHER sub-case, since (a)'s
 diff scope (`CONTENT_CHECK_PATHSPECS`) is a strict superset of (b)'s (`RESTART_RELEVANT_PATHSPECS`) — an
 empty superset diff already proves an empty subset diff. Anything else leaves `stale` untouched — only
 ever more lenient, never less, and only on a PROVEN-inert diff.
@@ -64,9 +67,10 @@ the diff's own changed files, not the whole src tree.
 - Do not remove or unbound `MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES` — per-file cost is real (measured above).
 - Do not cache `computeAncestorBehaviouralMatch`'s verdict or the soundness check across calls —
   `5e30c4bd`'s DoD #4 is "derive fresh, never persist"; fix perf via a cheaper INPUT, never a cached OUTPUT.
-- Do not let `walkTsFilesForSoundnessCheck` swallow a `readdirSync` failure and return a partial list — a
-  partial scan can miss a real `const enum` and let the check read `true` off incomplete evidence (Code
-  Review B1); it must propagate, exactly like `git/worktrees.ts`'s sibling `walkTsFiles`.
+- Do not let the shared `walkTsFiles` (`emit-compare-soundness.ts`, since `bafc68e7` — was this module's own
+  `walkTsFilesForSoundnessCheck`) swallow a `readdirSync` failure and return a partial list — a partial scan
+  can miss a real `const enum` and let the check read `true` off incomplete evidence (Code Review B1); it
+  must propagate.
 
 ## Source
 

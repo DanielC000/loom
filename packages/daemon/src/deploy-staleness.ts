@@ -7,6 +7,12 @@ import { performance } from "node:perf_hooks";
 import { loomRepoRoot } from "./paths.js";
 import { nonInteractiveEnv } from "./git/writer.js";
 import { DEPLOY_PACKAGES } from "./deploy-packages.js";
+import {
+  emitCompareSoundnessOk,
+  transpileIgnoringCommentsAndWhitespace,
+  type EmitCompareSoundnessScope,
+  type TypeScriptModuleLike,
+} from "./emit-compare-soundness.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -386,15 +392,16 @@ function isAncestor(repoRoot: string, sha: string, of: string): boolean | null {
   }
 }
 
-/** Narrow structural type for the `typescript` package's surface this module actually uses — mirrors
- * git/worktrees.ts's own `TypeScriptModule`, kept as a separate, independently-declared type (not an
- * import) since that module loads `typescript` via an async `import()` and this one is synchronous
- * throughout (see `loadTypeScriptSync` below). */
-interface TypeScriptModuleLike {
-  transpileModule(input: string, opts: unknown): { outputText: string };
-  ScriptTarget: Record<string, unknown>;
-  ModuleKind: Record<string, unknown>;
-}
+/** @decision bafc68e7 — never re-add a local soundness-predicate/walker/transpile-helper copy here; they
+ *  live in the shared `emit-compare-soundness.ts` module now, parameterized by this file's own scope. */
+const DEPLOY_STALENESS_EMIT_COMPARE_SCOPE: EmitCompareSoundnessScope = {
+  tsconfigRelPaths: [
+    "tsconfig.base.json",
+    path.join("packages", "daemon", "tsconfig.json"),
+    path.join("packages", "shared", "tsconfig.json"),
+  ],
+  srcDirRelPaths: [path.join("packages", "daemon", "src"), path.join("packages", "shared", "src")],
+};
 
 /** Synchronous load of the `typescript` package — a `devDependency` (package.json), resolvable only from
  * a real pnpm workspace checkout; `computeAncestorBehaviouralMatch` is only ever reached once this module
@@ -420,80 +427,6 @@ function loadTypeScriptSync(): TypeScriptModuleLike | null {
     return mod as TypeScriptModuleLike;
   } catch {
     return null;
-  }
-}
-
-/** Single-file, syntax-only transpile with `removeComments:true` forced, at `ES2022` (matching
- * `tsconfig.base.json`'s real target) — the SAME technique git/worktrees.ts's `computeEmitCompareGate`
- * uses for its own merge-gate reduction (see that function's doc for why this, not a hand-rolled scanner,
- * is the right tool: a textual "comments-only" check desyncs on template literals). Duplicated here rather
- * than imported: that module's version is private to a much larger, `async`-shaped, merge-gate-specific
- * function; this module is synchronous throughout and needs only the bare transpile step. */
-function transpileIgnoringCommentsAndWhitespace(text: string, fileName: string, tsModule: TypeScriptModuleLike): string {
-  return tsModule.transpileModule(text, {
-    compilerOptions: {
-      target: tsModule.ScriptTarget.ES2022,
-      module: tsModule.ModuleKind.NodeNext,
-      removeComments: true,
-      sourceMap: false,
-      declaration: false,
-    },
-    fileName,
-  }).outputText;
-}
-
-/** No try/catch here, deliberately — mirrors `git/worktrees.ts`'s own `walkTsFiles` exactly: a
- * `readdirSync` failure (a build racing this read, `EPERM`/`EBUSY`/`ENOENT`) MUST propagate to the
- * caller's own try/catch (`ancestorTranspileCompareSound`, below), which fails the WHOLE soundness check
- * closed to `false`. Swallowing it here and returning whatever was accumulated so far would let the
- * soundness check read `true` off a PARTIAL scan — a real `const enum` sitting in the unscanned remainder
- * would then silently pass, exactly the fail-open the soundness check exists to prevent. */
-/** No try/catch here, deliberately — mirrors `git/worktrees.ts`'s own `walkTsFiles` exactly: a
- * `readdirSync` failure (a build racing this read, `EPERM`/`EBUSY`/`ENOENT`) MUST propagate to the
- * caller's own try/catch (`ancestorTranspileCompareSound`, below), which fails the WHOLE soundness check
- * closed to `false`. Swallowing it here and returning whatever was accumulated so far would let the
- * soundness check read `true` off a PARTIAL scan — a real `const enum` sitting in the unscanned remainder
- * would then silently pass, exactly the fail-open the soundness check exists to prevent. */
-function walkTsFilesForSoundnessCheck(dir: string, out: string[] = []): string[] {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) walkTsFilesForSoundnessCheck(full, out);
-    else if (entry.isFile() && entry.name.endsWith(".ts")) out.push(full);
-  }
-  return out;
-}
-
-/** The SAME soundness precondition git/worktrees.ts's `computeEmitCompareGate` re-checks LIVE before
- * trusting a transpile-identity comparison (`emitDecoratorMetadata` re-emits real semantic type metadata
- * that comment-stripping doesn't touch; a `const enum` inlines its members, so two genuinely different
- * declarations can transpile identically at each USE site — see that function's own doc for the full
- * reasoning). Scoped to BOTH restart-relevant packages (`packages/daemon`, `packages/shared` — this
- * module's diff can span either, unlike that sibling check's daemon-only scope). Fails closed to `false`
- * on any read/parse error, same discipline as the sibling. */
-function ancestorTranspileCompareSound(repoRoot: string): boolean {
-  for (const tsconfigRelPath of [
-    "tsconfig.base.json",
-    path.join("packages", "daemon", "tsconfig.json"),
-    path.join("packages", "shared", "tsconfig.json"),
-  ]) {
-    try {
-      const raw = fs.readFileSync(path.join(repoRoot, tsconfigRelPath), "utf8");
-      const opts = (JSON.parse(raw) as { compilerOptions?: Record<string, unknown> }).compilerOptions;
-      if (opts?.emitDecoratorMetadata === true) return false;
-    } catch {
-      return false;
-    }
-  }
-  const CONST_ENUM = /\bconst\s+enum\s+[A-Za-z_$][\w$]*\s*\{/;
-  try {
-    for (const srcDir of [path.join(repoRoot, "packages", "daemon", "src"), path.join(repoRoot, "packages", "shared", "src")]) {
-      for (const file of walkTsFilesForSoundnessCheck(srcDir)) {
-        if (CONST_ENUM.test(fs.readFileSync(file, "utf8"))) return false;
-      }
-    }
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -531,7 +464,7 @@ function computeAncestorBehaviouralMatch(repoRoot: string, fromSha: string, toSh
   if (lines.length === 0) return true;
   if (lines.length > MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES) return null;
 
-  if (!ancestorTranspileCompareSound(repoRoot)) return null;
+  if (!emitCompareSoundnessOk(repoRoot, DEPLOY_STALENESS_EMIT_COMPARE_SCOPE)) return null;
   const tsModule = loadTypeScriptSync();
   if (tsModule === null) return null;
 
@@ -556,8 +489,8 @@ function computeAncestorBehaviouralMatch(repoRoot: string, fromSha: string, toSh
     let outBefore: string;
     let outAfter: string;
     try {
-      outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule);
-      outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule);
+      outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule, tsModule.ScriptTarget.ES2022).outputText;
+      outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule, tsModule.ScriptTarget.ES2022).outputText;
     } catch {
       // Card 404bfc75, Code Review item 4: the module-wide "NEVER throws" contract (see the module doc)
       // extends to this call — a malformed/unparseable source snapshot must degrade to `null`, never

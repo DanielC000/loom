@@ -12,6 +12,12 @@ import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-wi
 import { isDoctrineArtifactPath, isDoctrineSkillsPath } from "../pty/claude-doctrine.js";
 import { isCodexDoctrinePath } from "../pty/codex-doctrine.js";
 import { checkTitleHtmlEntities, CONVENTIONAL_TYPES } from "../tasks/title-guard.js";
+import {
+  emitCompareSoundnessOk,
+  transpileIgnoringCommentsAndWhitespace,
+  type EmitCompareSoundnessScope,
+  type TypeScriptModuleLike,
+} from "../emit-compare-soundness.js";
 
 export interface WorktreeInfo {
   worktreePath: string;
@@ -2566,12 +2572,13 @@ function isEmitCompareInScopePath(p: string): boolean {
  *  every guard under `packages/daemon/test/` runs anyway via the corpus walk — so a guard whose ONLY
  *  invalidator is that kind of edit needs no seat on the reduced path; it is never reachable-but-unrun.
  *  `emit-compare-soundness-guard.mjs` is deliberately excluded on exactly this ground: it is the
- *  regression test FOR `emitCompareSoundnessOk` (below) — the SOUNDNESS PRECONDITION this function's own
- *  doc comment above describes — and that precondition is re-checked LIVE, fail-closed, on every reduced-
- *  path call regardless of this guard. Its own correctness can therefore only be broken by editing
- *  `worktrees.ts`, which is itself a behavioural `.ts` edit. Investigated + confirmed at card a1734000; do
- *  not re-add it here without re-deriving the argument against the criterion above, and do not read its
- *  absence as an oversight.
+ *  regression test FOR `emitCompareSoundnessOk` (`../emit-compare-soundness.ts`, imported below) — the
+ *  SOUNDNESS PRECONDITION this function's own doc comment describes — and that precondition is re-checked
+ *  LIVE, fail-closed, on every reduced-path call regardless of this guard. Its own correctness can
+ *  therefore only be broken by editing `emit-compare-soundness.ts` itself or this file's own call site,
+ *  either of which is itself a behavioural `.ts` edit under `packages/daemon/src`. Investigated + confirmed
+ *  at card a1734000 (re-verified against the `bafc68e7` consolidation); do not re-add it here without
+ *  re-deriving the argument against the criterion above, and do not read its absence as an oversight.
  *
  *  ⛔ NOT A GLOB, DELIBERATELY: `grep -l readdirSync packages/daemon/test/*guard*.mjs` finds every
  *  corpus-wide-scanning guard — a DISCOVERABLE family sitting right next to this HARDCODED list, which
@@ -2932,12 +2939,13 @@ export const ASSET_READING_TEST_REPO_PATHS = [
  *        or how it's bounded — orthogonal to (1)-(4). Added by card `fab07aba`.
  *    (6) a precondition ALREADY RE-VERIFIED LIVE by `computeEmitCompareGate` itself on every reduced-path
  *        call — `emit-compare-soundness-guard.mjs` (A) walks `packages/daemon/src/**` `.ts` files for a
- *        `const enum` declaration, but `emitCompareSoundnessOk` (this same file, called fail-closed inside
- *        `computeEmitCompareGate` whenever `changedTsFiles.length > 0`) runs the IDENTICAL walk+regex
- *        against the worktree's OWN current tree before ever returning `eligible:true`. A comment-only diff
- *        that introduced `const-enum`-shaped text anywhere under `src/**` would already flip THAT live
- *        check to `notReducible`, forcing the full gate — so this test's own correctness can only be broken
- *        by editing `worktrees.ts` itself, which is already excluded on the SAME "that's a behavioural `.ts`
+ *        `const enum` declaration, but `emitCompareSoundnessOk` (`../emit-compare-soundness.ts`, called
+ *        fail-closed inside `computeEmitCompareGate` whenever `changedTsFiles.length > 0`) runs the
+ *        IDENTICAL walk+regex against the worktree's OWN current tree before ever returning `eligible:true`.
+ *        A comment-only diff that introduced `const-enum`-shaped text anywhere under `src/**` would already
+ *        flip THAT live check to `notReducible`, forcing the full gate — so this test's own correctness can
+ *        only be broken by editing `emit-compare-soundness.ts` or `worktrees.ts` itself, already excluded
+ *        on the SAME "that's a behavioural `.ts`
  *        edit" ground {@link STATIC_GUARD_REPO_PATHS}'s own doc gives for this exact file, one list over.
  *        Its (B) positive-control section is separately immune under shape (4) (a presence-only check on a
  *        real declaration name). Added by card `fab07aba`.
@@ -3002,6 +3010,12 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   "packages/daemon/test/setup-templates-rest.mjs",
   "packages/daemon/test/shell-terminal.mjs",
   "packages/daemon/test/skill-edit.mjs",
+  // Card bafc68e7 (Code Review correction, same day — an earlier version of this guard wrongly claimed
+  // exclusion): its `function <name>(` declaration regex is a presence-only real-code-token match — but
+  // MEASURED, `function walkTsFiles(x)` vs `function walkTsFiles/* c */(x)` transpile IDENTICALLY under
+  // `removeComments:true` while the guard's own (now-hardened, but not proven immune) regex is the exact
+  // shape-(4) hazard `loopback-secret.mjs`/`gateway-token.mjs` were added here for.
+  "packages/daemon/test/emit-compare-soundness-single-definition-guard.mjs",
 ];
 
 /** @decision f862f9c5 — never fold this list into {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} or its
@@ -3379,14 +3393,14 @@ export async function computeEmitCompareGate(
     // shared `typescript` import just below. See EMIT_COMPARE_SCRIPTS_PREFIX's own doc for why: a plain
     // `.mjs` script is never compiled by THIS repo's tsconfig chain at all (it's not part of the `dist/`
     // build `emitCompareSoundnessOk` reasons about), so neither mechanism can apply to it.
-    if (!(await emitCompareSoundnessOk(worktreePath))) {
+    if (!emitCompareSoundnessOk(worktreePath, WORKTREES_EMIT_COMPARE_SCOPE)) {
       return notReducible("soundness precondition (emitDecoratorMetadata / const enum) not verified");
     }
   }
   if (changedTsFiles.length > 0 || changedScriptFiles.length > 0) {
-    let tsModule: TypeScriptModule;
+    let tsModule: TypeScriptModuleLike;
     try {
-      const imported = (await import("typescript")) as unknown as { default?: TypeScriptModule } & TypeScriptModule;
+      const imported = (await import("typescript")) as unknown as { default?: TypeScriptModuleLike } & TypeScriptModuleLike;
       tsModule = imported.default ?? imported;
     } catch {
       return notApplicableHere("typescript module not resolvable (expected on a shipped end-user install)", "typescript-unresolvable");
@@ -3492,85 +3506,12 @@ async function loadNotHermeticNames(worktreePath: string): Promise<Set<string> |
   }
 }
 
-/** Narrow structural type for the `typescript` package's default export — only the surface this file
- *  actually uses, so this stays correct without depending on `typescript`'s own (large) public types. */
-interface TypeScriptModule {
-  transpileModule(input: string, opts: unknown): { outputText: string };
-  ScriptTarget: Record<string, unknown>;
-  ModuleKind: Record<string, unknown>;
-}
-
-/** Single-file, syntax-only transpile with `removeComments:true` forced — see {@link computeEmitCompareGate}'s
- *  own doc for why this (not a hand-rolled scanner, not the real `dist/` build) is the right tool.
- *  `target` is caller-supplied (card 82662e98) rather than hardcoded — the `.ts` call site passes
- *  `ES2022` to match `tsconfig.base.json`'s real target, so the emitted SYNTAX shape (e.g. downleveling)
- *  is representative of what `dist/` actually ships; the `.mjs`-script call site passes `ESNext` instead,
- *  because a script is never compiled at all — see {@link EMIT_COMPARE_SCRIPTS_PREFIX}'s own doc for why
- *  `ES2022` would be UNSOUND there (it can downlevel syntax the original file never runs through).
- *  `module` stays fixed at `NodeNext` for both — every other option is irrelevant here since
- *  `transpileModule` never type-checks. */
-function transpileIgnoringCommentsAndWhitespace(text: string, fileName: string, tsModule: TypeScriptModule, target: unknown): { outputText: string } {
-  return tsModule.transpileModule(text, {
-    compilerOptions: {
-      target,
-      module: tsModule.ModuleKind.NodeNext,
-      removeComments: true,
-      sourceMap: false,
-      declaration: false,
-    },
-    fileName,
-  });
-}
-
-/** @decision 2154b6ad — live re-check of the soundness precondition (emitDecoratorMetadata / const enum),
- *  reading BOTH files in the daemon's real tsconfig `extends` chain — never check only the base config, that
- *  would miss a daemon-specific compiler option added to the package's own tsconfig.json.
- *
- *  Fails closed to
- *  `false` on any read/parse error. */
-async function emitCompareSoundnessOk(worktreePath: string): Promise<boolean> {
-  for (const tsconfigRelPath of ["tsconfig.base.json", path.join("packages", "daemon", "tsconfig.json")]) {
-    try {
-      const raw = fs.readFileSync(path.join(worktreePath, tsconfigRelPath), "utf8");
-      const opts = (JSON.parse(raw) as { compilerOptions?: Record<string, unknown> }).compilerOptions;
-      if (opts?.emitDecoratorMetadata === true) return false;
-    } catch {
-      return false;
-    }
-  }
-  const srcDir = path.join(worktreePath, "packages", "daemon", "src");
-  // Requires the actual DECLARATION shape (`const enum <Identifier> {`), not just the two words adjacent —
-  // deliberately tighter than a bare `\bconst\s+enum\b`. Two real false positives on the LOOSER pattern
-  // were found by running this exact check against this exact repo before shipping it: (1) a variable
-  // merely NAMED `const enumerate = ...` (pty/host.ts's own process-enumeration helper — kept as this
-  // check's positive control below, the pattern must NOT match that line), and (2) THIS FILE'S OWN doc
-  // comments ABOVE, which explain the `const enum` mechanism in prose ("`const enum` (its members are
-  // INLINED..." etc.) — a bare word-adjacency regex tripped on its own documentation and would have made
-  // this mechanism permanently fail-closed the moment it shipped, discovered only by actually running the
-  // check rather than eyeballing the pattern. Requiring `<Identifier> {` immediately after excludes both:
-  // prose describing the concept doesn't happen to place an identifier and an open brace right after the
-  // words "const enum" (and if a future comment ever DID include a worked-example declaration in that
-  // exact shape, the worst case is the same safe direction — an unnecessary fail-closed, never a missed
-  // real one).
-  const CONST_ENUM = /\bconst\s+enum\s+[A-Za-z_$][\w$]*\s*\{/;
-  try {
-    for (const file of walkTsFiles(srcDir)) {
-      if (CONST_ENUM.test(fs.readFileSync(file, "utf8"))) return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function walkTsFiles(dir: string, out: string[] = []): string[] {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) walkTsFiles(full, out);
-    else if (entry.isFile() && entry.name.endsWith(".ts")) out.push(full);
-  }
-  return out;
-}
+/** @decision bafc68e7 — never re-add a local soundness-predicate/walker/transpile-helper copy here; they
+ *  live in the shared `emit-compare-soundness.ts` module now, parameterized by this file's own scope. */
+const WORKTREES_EMIT_COMPARE_SCOPE: EmitCompareSoundnessScope = {
+  tsconfigRelPaths: ["tsconfig.base.json", path.join("packages", "daemon", "tsconfig.json")],
+  srcDirRelPaths: [path.join("packages", "daemon", "src")],
+};
 
 /** @decision dd4349ff — a changed test file runs THROUGH THE HARNESS (`test:daemon --only=`), never as
  *  bare `node <path>` — a bare invocation left a hermetic-env-needing file unable to even start (exit 99,

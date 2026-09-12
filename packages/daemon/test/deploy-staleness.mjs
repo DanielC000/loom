@@ -1017,8 +1017,9 @@ try {
   // tsconfig level (not just the base config) — must trip the check and fail closed, on a repo that is
   // otherwise a perfectly valid, comment-only-looking diff. (23i) alone is decoration (no tsconfig chain
   // present is indistinguishable from the feature being entirely absent); this exercises the actual
-  // mechanism `ancestorTranspileCompareSound` checks for, mirroring emit-compare-soundness-guard.mjs's own
-  // (A2)/(D) coverage of the sibling check.
+  // mechanism `emitCompareSoundnessOk` (`emit-compare-soundness.ts`, since card bafc68e7 — was this
+  // module's own `ancestorTranspileCompareSound`) checks for, mirroring emit-compare-soundness-guard.mjs's
+  // own (A2)/(D) coverage of the sibling check.
   const edmRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-edmrepo-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
   fs.mkdirSync(path.join(edmRepo, "packages", "daemon", "src"), { recursive: true });
   fs.mkdirSync(path.join(edmRepo, "packages", "shared", "src"), { recursive: true });
@@ -1052,8 +1053,9 @@ try {
     r23k.builtContentMatchesHead === null && r23k.stale === true);
 
   // ---- (23l) Code Review item 5: a REAL live `const enum` ANYWHERE in the restart-relevant src trees —
-  // even in a file the diff never touches — must also trip the check, mirroring `ancestorTranspileCompareSound`'s
-  // own doc ("this module's diff can span either" package) and the sibling guard's (C) coverage.
+  // even in a file the diff never touches — must also trip the check, mirroring `emitCompareSoundnessOk`'s
+  // own doc (this caller's scope spans both packages, since card bafc68e7) and the sibling guard's (C)/(E)
+  // coverage.
   const ceRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-cerepo-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
   fs.mkdirSync(path.join(ceRepo, "packages", "daemon", "src"), { recursive: true });
   fs.mkdirSync(path.join(ceRepo, "packages", "shared", "src"), { recursive: true });
@@ -1146,12 +1148,12 @@ try {
   // a real, otherwise-sound repo (valid tsconfig chain, genuinely comment-only diff, no const enum
   // anywhere) gets a `packages/daemon/src/nested/` subdirectory whose OWN readdirSync call is forced to
   // throw ENOENT (simulating a build racing this read, exactly the class this module handles ~200 lines
-  // away for the dist scan). Before this card's fix, `walkTsFilesForSoundnessCheck` swallowed that error
-  // and returned whatever it had accumulated so far — a PARTIAL, silently-truncated file list the
-  // soundness check would have then read as "sound" (true) purely because it never got far enough to see
-  // whatever the unscanned remainder might have hidden. The fix removes that swallow so the error
-  // propagates to `ancestorTranspileCompareSound`'s own try/catch, which fails the WHOLE precondition
-  // closed instead.
+  // away for the dist scan). Before this card's fix, `walkTsFilesForSoundnessCheck` (now `walkTsFiles` in
+  // `emit-compare-soundness.ts`, since card bafc68e7) swallowed that error and returned whatever it had
+  // accumulated so far — a PARTIAL, silently-truncated file list the soundness check would have then read
+  // as "sound" (true) purely because it never got far enough to see whatever the unscanned remainder might
+  // have hidden. The fix removes that swallow so the error propagates to `emitCompareSoundnessOk`'s own
+  // try/catch, which fails the WHOLE precondition closed instead.
   const raceRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-racerepo-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
   fs.mkdirSync(path.join(raceRepo, "packages", "daemon", "src", "nested"), { recursive: true });
   fs.mkdirSync(path.join(raceRepo, "packages", "shared", "src"), { recursive: true });
