@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { performance } from "node:perf_hooks";
 import { loomRepoRoot } from "./paths.js";
 import { nonInteractiveEnv } from "./git/writer.js";
@@ -42,6 +43,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * blocked (this is a synchronous `execFileSync`, unlike the async claude-version cache — see the call-site
  * doc at `manager-prompt.ts` for why that's an acceptable tradeoff here) PLUS the (cheap, synchronous `fs`)
  * dist scans.
+ *
+ * @decision 404bfc75 — the ancestor-path behavioural check (`computeAncestorBehaviouralMatch`) is a
+ * SEPARATE, unbounded-in-N conditional cost NOT folded into the "worst case 6×" count above — see its own
+ * record for why and how it's capped.
  * @decision c6e7ebe7 — never raise `GIT_TIMEOUT_MS` without a measured stall (147–275ms IDLE / 220–465ms
  * at 3× oversubscription measured, never approached up to 9×) and never single out a timeout from the
  * `unavailable()` reason taxonomy on its own initiative — see `d3d4d432`'s record for the actual axis.
@@ -127,8 +132,15 @@ export interface DeployStalenessResult {
    * non-restart-relevant commit (docs/assets/tests/scripts) — the same case test (20)'s CRY-WOLF CONTROL
    * in deploy-staleness.mjs asserts is correct, not a defect. */
   commitsBehind: number;
-  /** commitsBehind > 0 — mainline carries daemon-src/shared changes this running process was not built with.
-   * Same scoping caveat as `commitsBehind` applies — see its own doc. */
+  /** `commitsBehind > 0` AND `builtContentMatchesHead` did NOT prove that gap behaviourally inert — see
+   * that field's own doc for the two comparisons it runs. Same scoping caveat as `commitsBehind` applies
+   * — see its own doc.
+   *
+   * Card 404bfc75: `commitsBehind > 0` alongside `stale:false` is a LEGITIMATE, expected reading, not a
+   * contradiction — it means `builtContentMatchesHead:true` already proved every one of those commits
+   * behaviourally inert (the canonical case: a comment-only `@decision`-anchor addition). This can only
+   * ever make `stale` MORE lenient than the raw `commitsBehind > 0` count, never less, and only on a
+   * PROVEN-inert diff — never fabricated. */
   stale: boolean;
   /** ISO mtime of the NEWEST file under `packages/web/dist`, or `null` if that dir is missing/empty (web
    * never built). Card c3ce92ea — the WEB analogue of `distBuiltAt`, kept fully independent so a web-only
@@ -194,18 +206,35 @@ export interface DeployStalenessResult {
    * shipped tree" from "genuinely stale" — the former is exactly what a squash-merged card looks like
    * from the vantage of its own unsquashed worktree form; this field is the CONTENT-based fallback.
    *
-   * Computed ONLY when `processBuiltSha` is resolvable AND is NOT an ancestor of `mainlineHeadSha` (a
-   * `git merge-base --is-ancestor` check) — the one case a plain sha/date comparison is structurally
-   * unable to answer; when `processBuiltSha` IS an ancestor (the ordinary case — ordinary commit history,
-   * an ordinary rebuild), the existing `stale`/`commitsBehind`/`processBuiltShaMatchesHead` signals already
-   * answer the question correctly and this stays `null` (no git call spent confirming what's already
-   * known). `true` means `git diff --name-only` between `processBuiltSha` and `mainlineHeadSha`, scoped to
-   * the shipped paths (`packages/`, `scripts/`, `bin/` — see `CONTENT_CHECK_PATHSPECS`), came back EMPTY:
-   * the built tree is byte-identical to mainline HEAD across everything actually served, so this is NOT
-   * stale despite the sha mismatch. `false` means that diff was non-empty — a genuine content difference,
-   * i.e. actually stale. `null` also when the diff itself couldn't be computed (an unresolvable sha, a
-   * pruned/GC'd commit, a timeout) — never fabricates a verdict without proof, same discipline as every
-   * other field in this module. */
+   * Computed via ONE OF TWO DISTINCT comparisons, chosen by whether `processBuiltSha` is an ancestor of
+   * `mainlineHeadSha` — card `404bfc75` corrected this doc's ORIGINAL claim that the ancestor sub-case
+   * never needed one; see that card's own record for the false alarm this created (a comment-only diff
+   * reporting `stale:true` forever, since the date/path-scoped `commitsBehind` heuristic can't tell "a
+   * comment changed" from "behaviour changed").
+   *
+   * (a) `processBuiltSha` is resolvable and NOT an ancestor of `mainlineHeadSha` (a `git merge-base
+   * --is-ancestor` miss — a divergent/foreign commit, e.g. a worker worktree's own union-forward merge
+   * commit vs. its later squash-merge onto mainline): `true` means `git diff --name-only` between
+   * `processBuiltSha` and `mainlineHeadSha`, scoped to the shipped paths (`packages/`, `scripts/`, `bin/`
+   * — see `CONTENT_CHECK_PATHSPECS`), came back EMPTY — the built tree is byte-identical to mainline HEAD.
+   * `false` means that diff was non-empty — a genuine byte difference, i.e. actually stale.
+   *
+   * (b) `processBuiltSha` IS an ancestor and the date-based `stale` (see that field's own doc) is already
+   * `true`: a byte diff here would trivially be non-empty (that's WHY `commitsBehind` counted a commit) and
+   * proves nothing, so this instead runs `computeAncestorBehaviouralMatch` — a transpile-ignoring-comments-
+   * and-whitespace comparison, restart-relevant-paths-scoped, of every changed `.ts` file between the two
+   * shas (the same technique `computeEmitCompareGate` in `git/worktrees.ts` uses to skip the merge gate's
+   * runtime suite on a provably inert diff). `true` means every changed restart-relevant file is
+   * behaviourally identical — NOT stale despite the byte-level `commitsBehind` count. `false` means a
+   * PROVEN real difference (a genuine transpile difference), OR a changed path this technique can't
+   * examine at all (added/deleted/renamed, or non-`.ts`) — conservatively left un-proven rather than
+   * asserted identical.
+   *
+   * Stays `null` in the ordinary ancestor case the date-based clock ALREADY answers correctly
+   * (`stale:false` — no git call spent confirming what's already known), and whenever either comparison's
+   * own git/typescript reads fail (an unresolvable sha, a pruned/GC'd commit, a timeout, `typescript`
+   * unavailable, the transpile-identity soundness precondition failing to verify) — never fabricates a
+   * verdict without proof, same discipline as every other field in this module. */
   builtContentMatchesHead: boolean | null;
   /** Card f26339d7 — the WEB analogue of `distBuiltSha`: the git commit sha baked into
    * `packages/web/dist/build-info.json` at build time, read fresh every call. `packages/web/dist` is
@@ -355,6 +384,190 @@ function isAncestor(repoRoot: string, sha: string, of: string): boolean | null {
     if (status === 1) return false;
     return null;
   }
+}
+
+/** Narrow structural type for the `typescript` package's surface this module actually uses — mirrors
+ * git/worktrees.ts's own `TypeScriptModule`, kept as a separate, independently-declared type (not an
+ * import) since that module loads `typescript` via an async `import()` and this one is synchronous
+ * throughout (see `loadTypeScriptSync` below). */
+interface TypeScriptModuleLike {
+  transpileModule(input: string, opts: unknown): { outputText: string };
+  ScriptTarget: Record<string, unknown>;
+  ModuleKind: Record<string, unknown>;
+}
+
+/** Synchronous load of the `typescript` package — a `devDependency` (package.json), resolvable only from
+ * a real pnpm workspace checkout; `computeAncestorBehaviouralMatch` is only ever reached once this module
+ * has already confirmed a `.git` exists (a packaged `loomctl` install bails out via `unavailable()` long
+ * before this point), matching `computeEmitCompareGate`'s own precedent for relying on this devDependency
+ * from production code. `require`, not `import()`: this whole module is synchronous by design (see the
+ * module doc's `5e30c4bd` call-site note) — an async load here would force `computeDeployStaleness` itself
+ * to become async. Never throws: an unresolvable module degrades to `null`, never a fabricated verdict. */
+function loadTypeScriptSync(): TypeScriptModuleLike | null {
+  try {
+    const req = createRequire(import.meta.url);
+    const mod = req("typescript") as Partial<TypeScriptModuleLike> | null | undefined;
+    // Validate the exact surface this module dereferences (`transpileModule`, `ScriptTarget.ES2022`,
+    // `ModuleKind.NodeNext`) before trusting the cast above — an unresolvable/mismatched module must
+    // degrade to `null` here, never let a bad shape reach an unguarded property access downstream.
+    if (
+      typeof mod?.transpileModule !== "function" ||
+      typeof mod.ScriptTarget !== "object" || mod.ScriptTarget === null || !("ES2022" in mod.ScriptTarget) ||
+      typeof mod.ModuleKind !== "object" || mod.ModuleKind === null || !("NodeNext" in mod.ModuleKind)
+    ) {
+      return null;
+    }
+    return mod as TypeScriptModuleLike;
+  } catch {
+    return null;
+  }
+}
+
+/** Single-file, syntax-only transpile with `removeComments:true` forced, at `ES2022` (matching
+ * `tsconfig.base.json`'s real target) — the SAME technique git/worktrees.ts's `computeEmitCompareGate`
+ * uses for its own merge-gate reduction (see that function's doc for why this, not a hand-rolled scanner,
+ * is the right tool: a textual "comments-only" check desyncs on template literals). Duplicated here rather
+ * than imported: that module's version is private to a much larger, `async`-shaped, merge-gate-specific
+ * function; this module is synchronous throughout and needs only the bare transpile step. */
+function transpileIgnoringCommentsAndWhitespace(text: string, fileName: string, tsModule: TypeScriptModuleLike): string {
+  return tsModule.transpileModule(text, {
+    compilerOptions: {
+      target: tsModule.ScriptTarget.ES2022,
+      module: tsModule.ModuleKind.NodeNext,
+      removeComments: true,
+      sourceMap: false,
+      declaration: false,
+    },
+    fileName,
+  }).outputText;
+}
+
+/** No try/catch here, deliberately — mirrors `git/worktrees.ts`'s own `walkTsFiles` exactly: a
+ * `readdirSync` failure (a build racing this read, `EPERM`/`EBUSY`/`ENOENT`) MUST propagate to the
+ * caller's own try/catch (`ancestorTranspileCompareSound`, below), which fails the WHOLE soundness check
+ * closed to `false`. Swallowing it here and returning whatever was accumulated so far would let the
+ * soundness check read `true` off a PARTIAL scan — a real `const enum` sitting in the unscanned remainder
+ * would then silently pass, exactly the fail-open the soundness check exists to prevent. */
+/** No try/catch here, deliberately — mirrors `git/worktrees.ts`'s own `walkTsFiles` exactly: a
+ * `readdirSync` failure (a build racing this read, `EPERM`/`EBUSY`/`ENOENT`) MUST propagate to the
+ * caller's own try/catch (`ancestorTranspileCompareSound`, below), which fails the WHOLE soundness check
+ * closed to `false`. Swallowing it here and returning whatever was accumulated so far would let the
+ * soundness check read `true` off a PARTIAL scan — a real `const enum` sitting in the unscanned remainder
+ * would then silently pass, exactly the fail-open the soundness check exists to prevent. */
+function walkTsFilesForSoundnessCheck(dir: string, out: string[] = []): string[] {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) walkTsFilesForSoundnessCheck(full, out);
+    else if (entry.isFile() && entry.name.endsWith(".ts")) out.push(full);
+  }
+  return out;
+}
+
+/** The SAME soundness precondition git/worktrees.ts's `computeEmitCompareGate` re-checks LIVE before
+ * trusting a transpile-identity comparison (`emitDecoratorMetadata` re-emits real semantic type metadata
+ * that comment-stripping doesn't touch; a `const enum` inlines its members, so two genuinely different
+ * declarations can transpile identically at each USE site — see that function's own doc for the full
+ * reasoning). Scoped to BOTH restart-relevant packages (`packages/daemon`, `packages/shared` — this
+ * module's diff can span either, unlike that sibling check's daemon-only scope). Fails closed to `false`
+ * on any read/parse error, same discipline as the sibling. */
+function ancestorTranspileCompareSound(repoRoot: string): boolean {
+  for (const tsconfigRelPath of [
+    "tsconfig.base.json",
+    path.join("packages", "daemon", "tsconfig.json"),
+    path.join("packages", "shared", "tsconfig.json"),
+  ]) {
+    try {
+      const raw = fs.readFileSync(path.join(repoRoot, tsconfigRelPath), "utf8");
+      const opts = (JSON.parse(raw) as { compilerOptions?: Record<string, unknown> }).compilerOptions;
+      if (opts?.emitDecoratorMetadata === true) return false;
+    } catch {
+      return false;
+    }
+  }
+  const CONST_ENUM = /\bconst\s+enum\s+[A-Za-z_$][\w$]*\s*\{/;
+  try {
+    for (const srcDir of [path.join(repoRoot, "packages", "daemon", "src"), path.join(repoRoot, "packages", "shared", "src")]) {
+      for (const file of walkTsFilesForSoundnessCheck(srcDir)) {
+        if (CONST_ENUM.test(fs.readFileSync(file, "utf8"))) return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** @decision 404bfc75 — the ancestor-path behavioural check below is capped at this many changed `.ts`
+ * files; a diff touching more fails closed to `null` (stays `stale:true`) rather than paying an unbounded
+ * synchronous git+transpile cost per file on a rare, but possible, long-unrestarted daemon. */
+// Exported (Code Review item 6) so the cap-boundary test can assert AGAINST the real, live value instead
+// of hardcoding a second copy of "25" that would silently drift the moment this number changes.
+export const MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES = 25;
+
+/** Card 404bfc75 — proves (or refuses to assert) that every restart-relevant byte difference between
+ * `fromSha` and `toSha` is BEHAVIOURALLY inert, closing the gap `builtContentMatchesHead`'s own field doc
+ * names: on the ordinary ANCESTOR path, a comment-only (or otherwise transpile-identical) commit used to
+ * set `stale:true` with zero actual behavioural change, because the only signals computed on that path
+ * were byte/date-based. Only ever called when the date-based `stale` is already `true` (see the call
+ * site) — never spent on the common healthy case.
+ *
+ * `true` only when EVERY changed restart-relevant path is a MODIFIED `.ts` file whose transpiled-and-
+ * comment-stripped output is byte-identical on both sides. Fails closed to `null` on anything else — more
+ * changed files than `MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES`, an added/deleted/renamed/non-`.ts` path (this
+ * technique can't examine it at all), an unresolvable git read, the `typescript` module being unavailable,
+ * or the soundness precondition failing to verify — and to `false` the moment a transpile comparison
+ * proves a REAL difference on an examined file. Never a fabricated `true`. */
+function computeAncestorBehaviouralMatch(repoRoot: string, fromSha: string, toSha: string): boolean | null {
+  let diffOut: string;
+  try {
+    diffOut = execFileSync("git", [
+      "-C", repoRoot, "-c", "core.quotePath=false", "diff", "--name-status", "--no-renames",
+      fromSha, toSha, "--", ...RESTART_RELEVANT_PATHSPECS,
+    ], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, windowsHide: true, env: nonInteractiveEnv() }).trim();
+  } catch {
+    return null;
+  }
+  const lines = diffOut ? diffOut.split("\n").filter(Boolean) : [];
+  if (lines.length === 0) return true;
+  if (lines.length > MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES) return null;
+
+  if (!ancestorTranspileCompareSound(repoRoot)) return null;
+  const tsModule = loadTypeScriptSync();
+  if (tsModule === null) return null;
+
+  for (const line of lines) {
+    const tab = line.indexOf("\t");
+    if (tab < 0) return null;
+    const status = line[0];
+    const p = line.slice(tab + 1);
+    if (status !== "M" || !p.endsWith(".ts")) return null;
+    let before: string;
+    let after: string;
+    try {
+      before = execFileSync("git", ["-C", repoRoot, "show", `${fromSha}:${p}`], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, windowsHide: true, env: nonInteractiveEnv() });
+    } catch {
+      return null;
+    }
+    try {
+      after = execFileSync("git", ["-C", repoRoot, "show", `${toSha}:${p}`], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, windowsHide: true, env: nonInteractiveEnv() });
+    } catch {
+      return null;
+    }
+    let outBefore: string;
+    let outAfter: string;
+    try {
+      outBefore = transpileIgnoringCommentsAndWhitespace(before, p, tsModule);
+      outAfter = transpileIgnoringCommentsAndWhitespace(after, p, tsModule);
+    } catch {
+      // Card 404bfc75, Code Review item 4: the module-wide "NEVER throws" contract (see the module doc)
+      // extends to this call — a malformed/unparseable source snapshot must degrade to `null`, never
+      // propagate to `computeDeployStaleness`'s caller (`composeManagerStartupPrompt` calls it with no
+      // catch of its own, so an uncaught throw here would fail a manager SPAWN, not just this signal).
+      return null;
+    }
+    if (outBefore !== outAfter) return false;
+  }
+  return true;
 }
 
 /**
@@ -575,12 +788,17 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
   // already resolved above (before the `.git` bail) and are reused here via `baked` — not re-read.
   const distBuiltShaDiffersFromProcess = distBuiltSha !== null && processBuiltSha !== null && distBuiltSha !== processBuiltSha;
 
-  // Card 3d7dccb9 — the CONTENT-based fallback: only worth its two extra git calls when a sha comparison
-  // has already told us it CAN'T answer the question, i.e. `processBuiltSha` names a real commit that is
-  // NOT an ancestor of `mainlineHeadSha` (a divergent/foreign commit — the exact shape of a worker
-  // worktree's own union-forward merge commit vs. its later squash-merge onto mainline). When
-  // `processBuiltSha` IS an ancestor (the ordinary case), `stale`/`commitsBehind`/`processBuiltShaMatchesHead`
-  // already answer this correctly and no extra git call is spent confirming it.
+  // Card 3d7dccb9 — the CONTENT-based fallback, sub-case (a): only worth its two extra git calls when a
+  // sha comparison has already told us it CAN'T answer the question, i.e. `processBuiltSha` names a real
+  // commit that is NOT an ancestor of `mainlineHeadSha` (a divergent/foreign commit — the exact shape of a
+  // worker worktree's own union-forward merge commit vs. its later squash-merge onto mainline).
+  //
+  // Card 404bfc75 — sub-case (b): when `processBuiltSha` IS an ancestor (the ordinary case) AND the
+  // date-based `stale` is ALREADY `true`, a byte diff would be non-empty by construction and prove
+  // nothing — this instead proves BEHAVIOURAL equivalence (see `builtContentMatchesHead`'s own field doc
+  // and `computeAncestorBehaviouralMatch`'s doc). When ancestor AND NOT stale (the common healthy case),
+  // the existing `stale`/`commitsBehind`/`processBuiltShaMatchesHead` signals already answer this
+  // correctly and no extra git call is spent confirming it — unchanged from before this card.
   let builtContentMatchesHead: boolean | null = null;
   if (processBuiltSha) {
     const ancestor = isAncestor(repoRoot, processBuiltSha, mainlineHeadSha);
@@ -592,8 +810,23 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
         // An unresolvable sha on either side, or a timeout — unknown, not a fabricated verdict.
         builtContentMatchesHead = null;
       }
+    } else if (ancestor === true && stale) {
+      builtContentMatchesHead = computeAncestorBehaviouralMatch(repoRoot, processBuiltSha, mainlineHeadSha);
     }
   }
+  // Card 404bfc75: `builtContentMatchesHead:true` is the ONE case that can make `stale` MORE lenient than
+  // the date/path-based heuristic computed it above — applies from EITHER sub-case above, (a) or (b).
+  // Sub-case (a)'s `true` is sound here too, not just for the sha-mismatch question it was originally
+  // built to answer: its diff is scoped to `CONTENT_CHECK_PATHSPECS` (`packages/`, `scripts/`, `bin/`),
+  // a strict SUPERSET of `RESTART_RELEVANT_PATHSPECS` (`packages/daemon/src`, `packages/shared/src`) — an
+  // EMPTY diff over the superset proves an empty diff over the narrower restart-relevant paths too, so
+  // "byte-identical shipped tree" already implies "no restart-relevant difference exists to be stale
+  // about", independent of which sub-case proved it. Every other outcome (false, null, or the check never
+  // running at all) leaves `stale` exactly as computed above. Internal computations above this line
+  // (`deploySignatureMismatch` in particular) deliberately keep using the RAW `stale`, not this override —
+  // that signal answers a different question (does the baked sha's own date disagree with the mtime
+  // clock) and must not be perturbed by a content-based proof computed after it.
+  const effectiveStale = stale && builtContentMatchesHead !== true;
 
   return {
     available: true,
@@ -604,7 +837,7 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
     mainlineHeadSha,
     mainlineHeadDate: mainlineHeadDate ?? null,
     commitsBehind,
-    stale,
+    stale: effectiveStale,
     webDistBuiltAt,
     webCommitsBehind,
     webStale: webCommitsBehind > 0,

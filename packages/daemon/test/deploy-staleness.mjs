@@ -99,6 +99,39 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //         calls — builtContentMatchesHead stays null; the already-correct processBuiltShaMatchesHead/stale
 //         answer that case instead.
 //   (23d) an unresolvable processBuiltSha ⇒ null, never a fabricated verdict.
+//   (23j) Code Review N2: sub-case (a)'s builtContentMatchesHead:true ALSO overrides `stale` to `false`
+//         (not just sub-case (b)) — proven by forcing the date-based clock stale:true while processBuiltSha
+//         is workerSha (23a's divergent, content-identical commit).
+//
+// Card 404bfc75 — the OTHER ancestor sub-case: `processBuiltSha` IS an ancestor AND the date-based `stale`
+// is already `true` (the ordinary case a comment-only restart-relevant commit was falling into, forever,
+// before this card — real specimen: main `ce34994b`), proven via computeAncestorBehaviouralMatch's
+// transpile-identity comparison instead of a byte diff:
+//   (23e) THE DoD-1 REPRODUCTION: a comment-only commit spanning BOTH packages/daemon/src and
+//         packages/shared/src (mirrors ce34994b's real shape) ⇒ stale:false despite commitsBehind:1,
+//         builtContentMatchesHead:true.
+//   (23f) DoD-2 POSITIVE CONTROL: a genuinely behavioural commit on the SAME corpus still reports
+//         stale:true, builtContentMatchesHead:false — proves (23e)'s override isn't a check that always
+//         clears.
+//   (23g) DoD-3 FALSE-NEGATIVE CONTROL: ONE commit mixing a comment-only file AND a really-changed file
+//         ⇒ still stale:true — a single inert file can never mask a real one.
+//   (23h) the already-clean ancestor case (stale:false from the date-based clock alone) is UNCHANGED —
+//         builtContentMatchesHead stays null, no extra git/typescript cost spent, same as (23c).
+//   (23i) the transpile-identity soundness precondition failing to verify (no tsconfig chain in the
+//         fixture repo at all) fails CLOSED — stale stays true, builtContentMatchesHead:null, never a
+//         fabricated true without proof. (23i) alone is decoration (indistinguishable from the feature
+//         being entirely absent) — (23k)/(23l) below exercise the REAL soundness hazards.
+//   (23k) REAL HAZARD: emitDecoratorMetadata:true set on the PACKAGE tsconfig (not just the base config)
+//         trips the check on an otherwise genuinely comment-only diff — mirrors
+//         emit-compare-soundness-guard.mjs's own (A2)/(D) coverage of the sibling check.
+//   (23l) REAL HAZARD: a genuine `const enum` declaration anywhere in the restart-relevant src trees —
+//         even in a file the diff never touches — also trips the check, proving it scans the WHOLE tree.
+//   (23m)/(23n) Code Review item 6 — MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES cap-boundary coverage: AT the
+//         cap (all comment-only) still resolves true; ONE FILE BEYOND the cap fails closed to null despite
+//         every file being equally comment-only — the cap wins, never an unbounded per-file cost.
+//   (23o) Code Review B1 REGRESSION: a readdirSync failure mid soundness-walk (a build racing this read,
+//         same monkeypatch technique as (12b)) must fail the WHOLE check closed, never silently complete
+//         on a partial scan that could read "sound" off unscanned evidence.
 //
 // Card 9aa4e2c9 — `processStartedAt` must be a STABLE, joinable stamp: the SAME string on every read of
 // the same (never-restarted) boot, not a value that drifts because the old formula
@@ -138,7 +171,7 @@ const tmpHome = trackDir(path.join(os.tmpdir(), `loom-dpstl-${Date.now()}-${proc
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
-const { computeDeployStaleness: computeDeployStalenessRaw, newestMtimeMs: newestMtimeMsRaw } = await import("../dist/deploy-staleness.js");
+const { computeDeployStaleness: computeDeployStalenessRaw, newestMtimeMs: newestMtimeMsRaw, MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES } = await import("../dist/deploy-staleness.js");
 // Card 8ff7ccde: the `processStartedAt` option lets a test control the "since when has the CURRENTLY
 // RUNNING code been in effect" clock independently of `distBuiltAt`. No section BEFORE (11)
 // intends to exercise that axis — left to the real default (derived from this test process's own
@@ -850,8 +883,345 @@ try {
   check("(23d) an unresolvable processBuiltSha ⇒ builtContentMatchesHead:null (merge-base can't resolve it — degrades, never throws or fabricates)",
     r23d.builtContentMatchesHead === null);
 
+  // ---- (23j) card 404bfc75, code review N2: sub-case (a)'s builtContentMatchesHead:true ALSO overrides
+  // `stale` to false, not just sub-case (b) — CONTENT_CHECK_PATHSPECS is a strict superset of
+  // RESTART_RELEVANT_PATHSPECS, so an empty byte diff over the superset proves no restart-relevant diff
+  // exists either. Rebuild caDistDir's mtime to BEFORE mainlineShaIdentical's own commit date so the
+  // date-based clock alone reads stale:true, then re-run with workerSha (23a's divergent, content-
+  // identical commit) as processBuiltSha.
+  buildCaDistAt("2027-02-02T12:00:00Z"); // after workerSha (Feb 2 00:00) but before mainlineShaIdentical (Feb 3)
+  const r23j = computeDeployStaleness({ distEntry: caDistEntry, repoRoot: caRepo, processBuiltSha: workerSha, processBuiltDirty: false });
+  check("(23j-setup) the date-based clock alone reads stale:true here (mainlineShaIdentical's own commit landed after this dist build)" + reasonSuffix(r23j),
+    r23j.commitsBehind === 1);
+  check("(23j-setup) workerSha is STILL not an ancestor of mainline HEAD — this exercises sub-case (a), not (b)",
+    (() => { try { execSync(`git merge-base --is-ancestor ${workerSha} ${mainlineShaIdentical}`, { cwd: caRepo }); return false; } catch (e) { return e.status === 1; } })());
+  check("(23j) N2 FIX: sub-case (a)'s builtContentMatchesHead:true ALSO overrides stale to false (not just sub-case (b)) — the byte-identical shipped tree proves no restart-relevant difference exists",
+    r23j.builtContentMatchesHead === true && r23j.stale === false);
+
   try { fs.rmSync(caRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(caDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+
+  // ===================== (23e-23i) Card 404bfc75 — builtContentMatchesHead, ANCESTOR-path sub-case (b) =====================
+  // The DoD's own reproduction target: a `packages/daemon/src`/`packages/shared/src` commit whose diff is
+  // COMMENT-ONLY (real specimen: main `ce34994b`) must no longer report `stale:true` — proven against a
+  // fixture repo that mirrors this checkout's own tsconfig chain (the soundness precondition this
+  // technique depends on genuinely reads live from `repoRoot`, so a fixture missing it would silently
+  // fail closed to `null`, not `true` — see (23i) for that failure mode proven directly).
+  const cbRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-cbrepo-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(path.join(cbRepo, "packages", "daemon", "src"), { recursive: true });
+  fs.mkdirSync(path.join(cbRepo, "packages", "shared", "src"), { recursive: true });
+  fs.writeFileSync(path.join(cbRepo, "tsconfig.base.json"), JSON.stringify({ compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext" } }));
+  fs.writeFileSync(path.join(cbRepo, "packages", "daemon", "tsconfig.json"), JSON.stringify({ extends: "../../tsconfig.base.json" }));
+  fs.writeFileSync(path.join(cbRepo, "packages", "shared", "tsconfig.json"), JSON.stringify({ extends: "../../tsconfig.base.json" }));
+  const gitCb = (args, dateIso) => execSync(`git ${args}`, {
+    cwd: cbRepo,
+    env: { ...process.env, ...(dateIso ? { GIT_AUTHOR_DATE: dateIso, GIT_COMMITTER_DATE: dateIso } : {}) },
+  });
+  gitCb("init -q");
+  gitCb('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2027-03-01T00:00:00Z");
+
+  const cbDistDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-cbdist-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(cbDistDir, { recursive: true });
+  const cbDistEntry = path.join(cbDistDir, "index.js");
+  const buildCbDistAt = (iso) => {
+    fs.writeFileSync(cbDistEntry, "// fixture cb dist entry\n");
+    fs.utimesSync(cbDistEntry, new Date(iso), new Date(iso));
+  };
+
+  // ---- (23e) THE DoD-1 REPRODUCTION: comment-only restart-relevant commit ⇒ stale:false, builtContentMatchesHead:true ----
+  fs.writeFileSync(path.join(cbRepo, "packages", "daemon", "src", "thing.ts"), "export function thing() {\n  return 1;\n}\n");
+  fs.writeFileSync(path.join(cbRepo, "packages", "shared", "src", "other.ts"), "export const other = 1;\n");
+  gitCb("add packages/daemon/src/thing.ts packages/shared/src/other.ts");
+  gitCb('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add thing/other"', "2027-03-02T00:00:00Z");
+  const cbBaseSha = execSync("git rev-parse HEAD", { cwd: cbRepo }).toString().trim();
+  buildCbDistAt("2027-03-03T00:00:00Z"); // dist built AFTER cbBaseSha — starts genuinely caught up
+
+  // A comment-only change to BOTH a daemon-src and a shared-src file — mirrors the real ce34994b shape
+  // (spans both restart-relevant packages), landing AFTER the dist build so commitsBehind counts it.
+  fs.writeFileSync(path.join(cbRepo, "packages", "daemon", "src", "thing.ts"), "// @decision deadbeef — explains thing\nexport function thing() {\n  return 1;\n}\n");
+  fs.writeFileSync(path.join(cbRepo, "packages", "shared", "src", "other.ts"), "// a clarifying comment\nexport const other = 1;\n");
+  gitCb("add packages/daemon/src/thing.ts packages/shared/src/other.ts");
+  gitCb('-c user.email=t@loom -c user.name=t commit -q -m "docs(daemon): anchor a comment"', "2027-03-04T00:00:00Z");
+  const cbCommentSha = execSync("git rev-parse HEAD", { cwd: cbRepo }).toString().trim();
+
+  const r25aRaw = computeDeployStalenessRaw({ distEntry: cbDistEntry, repoRoot: cbRepo, processBuiltSha: cbBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+  check("(23e-setup) the date-based clock alone would have called this stale (commitsBehind counts the comment-only commit)" + reasonSuffix(r25aRaw),
+    r25aRaw.commitsBehind === 1);
+  check("(23e-setup) cbBaseSha genuinely IS an ancestor of the comment commit (the ordinary case, not a divergent branch)",
+    (() => { try { execSync(`git merge-base --is-ancestor ${cbBaseSha} ${cbCommentSha}`, { cwd: cbRepo }); return true; } catch { return false; } })());
+  check("(23e) THE FIX (DoD-1): a comment-only daemon-src+shared-src commit ⇒ stale:false despite commitsBehind:1 — the exact ce34994b false alarm this card closes",
+    r25aRaw.stale === false && r25aRaw.commitsBehind === 1);
+  check("(23e) builtContentMatchesHead:true — every changed restart-relevant file proven transpile-identical",
+    r25aRaw.builtContentMatchesHead === true);
+
+  // ---- (23f) DoD-2 POSITIVE CONTROL: a genuinely behavioural restart-relevant commit still reports stale:true ----
+  fs.writeFileSync(path.join(cbRepo, "packages", "daemon", "src", "thing.ts"), "export function thing() {\n  return 2;\n}\n");
+  gitCb("add packages/daemon/src/thing.ts");
+  gitCb('-c user.email=t@loom -c user.name=t commit -q -m "fix(daemon): change thing return value"', "2027-03-05T00:00:00Z");
+  const cbRealChangeSha = execSync("git rev-parse HEAD", { cwd: cbRepo }).toString().trim();
+  const r25bRaw = computeDeployStalenessRaw({ distEntry: cbDistEntry, repoRoot: cbRepo, processBuiltSha: cbCommentSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+  // Card cbDistDir was never rebuilt after (23e) — the date-based clock counts BOTH restart-relevant
+  // commits landed since that build (the comment-only commit from (23e) AND this real change), 2 total.
+  // processBuiltSha here is cbCommentSha (not the dist clock), so the behavioural check below only ever
+  // examines the ONE commit between cbCommentSha and mainline HEAD (cbRealChangeSha) — see (23f) itself.
+  check("(23f-setup) commitsBehind counts BOTH restart-relevant commits since the (23e) dist build (the comment-only one plus this real change)" + reasonSuffix(r25bRaw), r25bRaw.commitsBehind === 2);
+  check("(23f) POSITIVE CONTROL (DoD-2): a REAL code change (return 1 -> return 2) still reports stale:true — this check is not a check that always clears",
+    r25bRaw.stale === true);
+  check("(23f) builtContentMatchesHead:false — the transpile comparison correctly proves a real difference",
+    r25bRaw.builtContentMatchesHead === false);
+
+  // ---- (23g) DoD-3 FALSE-NEGATIVE CONTROL: mixing a comment change AND a real change in ONE commit ⇒ still stale:true ----
+  fs.writeFileSync(path.join(cbRepo, "packages", "daemon", "src", "thing.ts"), "// another comment, no behaviour change\nexport function thing() {\n  return 2;\n}\n");
+  fs.writeFileSync(path.join(cbRepo, "packages", "shared", "src", "other.ts"), "export const other = 2;\n"); // REAL change, no comment
+  gitCb("add packages/daemon/src/thing.ts packages/shared/src/other.ts");
+  gitCb('-c user.email=t@loom -c user.name=t commit -q -m "fix(shared): bump other, add a comment to thing"', "2027-03-06T00:00:00Z");
+  const cbMixedSha = execSync("git rev-parse HEAD", { cwd: cbRepo }).toString().trim();
+  const r25cRaw = computeDeployStalenessRaw({ distEntry: cbDistEntry, repoRoot: cbRepo, processBuiltSha: cbRealChangeSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+  check("(23g) FALSE-NEGATIVE CONTROL (DoD-3): a commit mixing a comment-only file AND a genuinely-changed file ⇒ stale:true — one inert file never masks a real one",
+    r25cRaw.stale === true && r25cRaw.builtContentMatchesHead === false);
+
+  // ---- (23h) the healthy non-stale ancestor case is UNCHANGED — no extra git/typescript cost spent ----
+  buildCbDistAt("2027-03-07T00:00:00Z"); // rebuild AFTER cbMixedSha — genuinely caught up
+  const r25dRaw = computeDeployStalenessRaw({ distEntry: cbDistEntry, repoRoot: cbRepo, processBuiltSha: cbMixedSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+  check("(23h) the ordinary, ALREADY-clean ancestor case is unaffected by this card: stale:false, builtContentMatchesHead stays null (unchanged from (23c)'s own assertion)",
+    r25dRaw.stale === false && r25dRaw.builtContentMatchesHead === null);
+
+  // ---- (23i) the soundness precondition failing to verify (no tsconfig chain here) fails CLOSED to null, never a fabricated true ----
+  const noTsconfigRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-notsconfig-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(path.join(noTsconfigRepo, "packages", "daemon", "src"), { recursive: true });
+  const gitNoTs = (args, dateIso) => execSync(`git ${args}`, {
+    cwd: noTsconfigRepo,
+    env: { ...process.env, ...(dateIso ? { GIT_AUTHOR_DATE: dateIso, GIT_COMMITTER_DATE: dateIso } : {}) },
+  });
+  gitNoTs("init -q");
+  gitNoTs('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2027-03-01T00:00:00Z");
+  fs.writeFileSync(path.join(noTsconfigRepo, "packages", "daemon", "src", "thing.ts"), "export const x = 1;\n");
+  gitNoTs("add packages/daemon/src/thing.ts");
+  gitNoTs('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add thing"', "2027-03-02T00:00:00Z");
+  const noTsBaseSha = execSync("git rev-parse HEAD", { cwd: noTsconfigRepo }).toString().trim();
+  const noTsDistDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-notsdist-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(noTsDistDir, { recursive: true });
+  const noTsDistEntry = path.join(noTsDistDir, "index.js");
+  fs.writeFileSync(noTsDistEntry, "// fixture\n");
+  fs.utimesSync(noTsDistEntry, new Date("2027-03-03T00:00:00Z"), new Date("2027-03-03T00:00:00Z"));
+  fs.writeFileSync(path.join(noTsconfigRepo, "packages", "daemon", "src", "thing.ts"), "// comment only\nexport const x = 1;\n");
+  gitNoTs("add packages/daemon/src/thing.ts");
+  gitNoTs('-c user.email=t@loom -c user.name=t commit -q -m "docs(daemon): comment"', "2027-03-04T00:00:00Z");
+  const r25eRaw = computeDeployStalenessRaw({ distEntry: noTsDistEntry, repoRoot: noTsconfigRepo, processBuiltSha: noTsBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+  check("(23i-setup) this repo has no tsconfig chain at all — the soundness precondition genuinely cannot verify" + reasonSuffix(r25eRaw),
+    !fs.existsSync(path.join(noTsconfigRepo, "tsconfig.base.json")));
+  check("(23i) FAIL-CLOSED: no tsconfig chain to verify soundness against ⇒ stale STAYS true, builtContentMatchesHead:null — never a fabricated true without proof",
+    r25eRaw.stale === true && r25eRaw.builtContentMatchesHead === null);
+
+  // ---- (23k) Code Review item 5: a REAL soundness hazard — emitDecoratorMetadata:true at the PACKAGE
+  // tsconfig level (not just the base config) — must trip the check and fail closed, on a repo that is
+  // otherwise a perfectly valid, comment-only-looking diff. (23i) alone is decoration (no tsconfig chain
+  // present is indistinguishable from the feature being entirely absent); this exercises the actual
+  // mechanism `ancestorTranspileCompareSound` checks for, mirroring emit-compare-soundness-guard.mjs's own
+  // (A2)/(D) coverage of the sibling check.
+  const edmRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-edmrepo-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(path.join(edmRepo, "packages", "daemon", "src"), { recursive: true });
+  fs.mkdirSync(path.join(edmRepo, "packages", "shared", "src"), { recursive: true });
+  fs.writeFileSync(path.join(edmRepo, "tsconfig.base.json"), JSON.stringify({ compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext" } }));
+  // THE HAZARD: set on the PACKAGE file, not the base — proves the check reads BOTH files in the chain,
+  // same distinction emit-compare-soundness-guard.mjs's (A2) draws for the sibling.
+  fs.writeFileSync(path.join(edmRepo, "packages", "daemon", "tsconfig.json"), JSON.stringify({ extends: "../../tsconfig.base.json", compilerOptions: { emitDecoratorMetadata: true } }));
+  fs.writeFileSync(path.join(edmRepo, "packages", "shared", "tsconfig.json"), JSON.stringify({ extends: "../../tsconfig.base.json" }));
+  const gitEdm = (args, dateIso) => execSync(`git ${args}`, {
+    cwd: edmRepo,
+    env: { ...process.env, ...(dateIso ? { GIT_AUTHOR_DATE: dateIso, GIT_COMMITTER_DATE: dateIso } : {}) },
+  });
+  gitEdm("init -q");
+  gitEdm('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2027-04-01T00:00:00Z");
+  fs.writeFileSync(path.join(edmRepo, "packages", "daemon", "src", "thing.ts"), "export function thing() {\n  return 1;\n}\n");
+  gitEdm("add packages/daemon/src/thing.ts");
+  gitEdm('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add thing"', "2027-04-02T00:00:00Z");
+  const edmBaseSha = execSync("git rev-parse HEAD", { cwd: edmRepo }).toString().trim();
+  const edmDistDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-edmdist-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(edmDistDir, { recursive: true });
+  const edmDistEntry = path.join(edmDistDir, "index.js");
+  fs.writeFileSync(edmDistEntry, "// fixture\n");
+  fs.utimesSync(edmDistEntry, new Date("2027-04-03T00:00:00Z"), new Date("2027-04-03T00:00:00Z"));
+  fs.writeFileSync(path.join(edmRepo, "packages", "daemon", "src", "thing.ts"), "// a genuinely comment-only change\nexport function thing() {\n  return 1;\n}\n");
+  gitEdm("add packages/daemon/src/thing.ts");
+  gitEdm('-c user.email=t@loom -c user.name=t commit -q -m "docs(daemon): comment"', "2027-04-04T00:00:00Z");
+  const r23k = computeDeployStalenessRaw({ distEntry: edmDistEntry, repoRoot: edmRepo, processBuiltSha: edmBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+  check("(23k-setup) the diff itself IS genuinely comment-only, and the date-based clock reads stale:true" + reasonSuffix(r23k),
+    r23k.commitsBehind === 1);
+  check("(23k) REAL HAZARD (emitDecoratorMetadata:true on packages/daemon/tsconfig.json): the soundness precondition correctly fails ⇒ builtContentMatchesHead:null, stale STAYS true despite a genuinely comment-only diff — the check does not blindly trust the diff shape",
+    r23k.builtContentMatchesHead === null && r23k.stale === true);
+
+  // ---- (23l) Code Review item 5: a REAL live `const enum` ANYWHERE in the restart-relevant src trees —
+  // even in a file the diff never touches — must also trip the check, mirroring `ancestorTranspileCompareSound`'s
+  // own doc ("this module's diff can span either" package) and the sibling guard's (C) coverage.
+  const ceRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-cerepo-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(path.join(ceRepo, "packages", "daemon", "src"), { recursive: true });
+  fs.mkdirSync(path.join(ceRepo, "packages", "shared", "src"), { recursive: true });
+  fs.writeFileSync(path.join(ceRepo, "tsconfig.base.json"), JSON.stringify({ compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext" } }));
+  fs.writeFileSync(path.join(ceRepo, "packages", "daemon", "tsconfig.json"), JSON.stringify({ extends: "../../tsconfig.base.json" }));
+  fs.writeFileSync(path.join(ceRepo, "packages", "shared", "tsconfig.json"), JSON.stringify({ extends: "../../tsconfig.base.json" }));
+  const gitCe = (args, dateIso) => execSync(`git ${args}`, {
+    cwd: ceRepo,
+    env: { ...process.env, ...(dateIso ? { GIT_AUTHOR_DATE: dateIso, GIT_COMMITTER_DATE: dateIso } : {}) },
+  });
+  gitCe("init -q");
+  gitCe('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2027-05-01T00:00:00Z");
+  fs.writeFileSync(path.join(ceRepo, "packages", "daemon", "src", "thing.ts"), "export function thing() {\n  return 1;\n}\n");
+  // THE HAZARD: a genuine `const enum` declaration in a DIFFERENT, otherwise-untouched file — proves the
+  // soundness check scans the WHOLE src tree, not just the diff's own changed files.
+  fs.writeFileSync(path.join(ceRepo, "packages", "daemon", "src", "enums.ts"), "export const enum Direction { Up, Down }\n");
+  gitCe("add packages/daemon/src/thing.ts packages/daemon/src/enums.ts");
+  gitCe('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add thing and enums"', "2027-05-02T00:00:00Z");
+  const ceBaseSha = execSync("git rev-parse HEAD", { cwd: ceRepo }).toString().trim();
+  const ceDistDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-cedist-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(ceDistDir, { recursive: true });
+  const ceDistEntry = path.join(ceDistDir, "index.js");
+  fs.writeFileSync(ceDistEntry, "// fixture\n");
+  fs.utimesSync(ceDistEntry, new Date("2027-05-03T00:00:00Z"), new Date("2027-05-03T00:00:00Z"));
+  // The diff itself never touches enums.ts — only thing.ts, comment-only.
+  fs.writeFileSync(path.join(ceRepo, "packages", "daemon", "src", "thing.ts"), "// a genuinely comment-only change\nexport function thing() {\n  return 1;\n}\n");
+  gitCe("add packages/daemon/src/thing.ts");
+  gitCe('-c user.email=t@loom -c user.name=t commit -q -m "docs(daemon): comment"', "2027-05-04T00:00:00Z");
+  const r23l = computeDeployStalenessRaw({ distEntry: ceDistEntry, repoRoot: ceRepo, processBuiltSha: ceBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+  check("(23l-setup) the CHANGED file (thing.ts) is genuinely comment-only, and the date-based clock reads stale:true" + reasonSuffix(r23l),
+    r23l.commitsBehind === 1);
+  check("(23l) REAL HAZARD (a live `const enum` in enums.ts, a file the diff never touches): the soundness precondition correctly fails ⇒ builtContentMatchesHead:null, stale STAYS true — the check scans the WHOLE src tree, not just the diff's own files",
+    r23l.builtContentMatchesHead === null && r23l.stale === true);
+
+  // ---- (23m)/(23n) Code Review item 6: MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES cap-boundary coverage ----
+  // Two repos, identical in every way except file COUNT: one with EXACTLY the cap's worth of changed,
+  // comment-only .ts files (AT the boundary — must still evaluate and resolve true), one with ONE MORE
+  // (BEYOND the boundary — must fail closed to null even though every file is, again, comment-only). Tests
+  // AGAINST the real exported MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES value, never a hardcoded second copy.
+  const makeCapFixtureRepo = (tag, fileCount) => {
+    const capRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-cap${tag}repo-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+    fs.mkdirSync(path.join(capRepo, "packages", "daemon", "src"), { recursive: true });
+    fs.mkdirSync(path.join(capRepo, "packages", "shared", "src"), { recursive: true });
+    fs.writeFileSync(path.join(capRepo, "tsconfig.base.json"), JSON.stringify({ compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext" } }));
+    fs.writeFileSync(path.join(capRepo, "packages", "daemon", "tsconfig.json"), JSON.stringify({ extends: "../../tsconfig.base.json" }));
+    fs.writeFileSync(path.join(capRepo, "packages", "shared", "tsconfig.json"), JSON.stringify({ extends: "../../tsconfig.base.json" }));
+    const gitCap = (args, dateIso) => execSync(`git ${args}`, {
+      cwd: capRepo,
+      env: { ...process.env, ...(dateIso ? { GIT_AUTHOR_DATE: dateIso, GIT_COMMITTER_DATE: dateIso } : {}) },
+    });
+    gitCap("init -q");
+    gitCap('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2027-06-01T00:00:00Z");
+    const fileNames = Array.from({ length: fileCount }, (_, i) => `f${i}.ts`);
+    for (const name of fileNames) fs.writeFileSync(path.join(capRepo, "packages", "daemon", "src", name), `export function ${name.replace(".ts", "")}() {\n  return 1;\n}\n`);
+    gitCap(`add ${fileNames.map((n) => `packages/daemon/src/${n}`).join(" ")}`);
+    gitCap(`-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add ${fileCount} files"`, "2027-06-02T00:00:00Z");
+    const capBaseSha = execSync("git rev-parse HEAD", { cwd: capRepo }).toString().trim();
+    const capDistDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-cap${tag}dist-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+    fs.mkdirSync(capDistDir, { recursive: true });
+    const capDistEntry = path.join(capDistDir, "index.js");
+    fs.writeFileSync(capDistEntry, "// fixture\n");
+    fs.utimesSync(capDistEntry, new Date("2027-06-03T00:00:00Z"), new Date("2027-06-03T00:00:00Z"));
+    // Comment-only edit to EVERY file — genuinely transpile-identical, so the only thing that can make
+    // this NOT resolve true is the file-count cap itself.
+    for (const name of fileNames) {
+      const orig = fs.readFileSync(path.join(capRepo, "packages", "daemon", "src", name), "utf8");
+      fs.writeFileSync(path.join(capRepo, "packages", "daemon", "src", name), `// comment\n${orig}`);
+    }
+    gitCap(`add ${fileNames.map((n) => `packages/daemon/src/${n}`).join(" ")}`);
+    gitCap('-c user.email=t@loom -c user.name=t commit -q -m "docs(daemon): comment every file"', "2027-06-04T00:00:00Z");
+    return { capRepo, capDistDir, capDistEntry, capBaseSha };
+  };
+
+  const atCap = makeCapFixtureRepo("at", MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES);
+  const r23m = computeDeployStalenessRaw({ distEntry: atCap.capDistEntry, repoRoot: atCap.capRepo, processBuiltSha: atCap.capBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+  check(`(23m-setup) exactly MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES (${MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES}) files changed, all comment-only, and the date-based clock reads stale:true` + reasonSuffix(r23m),
+    r23m.commitsBehind === 1);
+  check(`(23m) AT THE CAP (${MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES} files): the check still runs and resolves true — the boundary is inclusive, not off-by-one`,
+    r23m.builtContentMatchesHead === true && r23m.stale === false);
+
+  const beyondCap = makeCapFixtureRepo("beyond", MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES + 1);
+  const r23n = computeDeployStalenessRaw({ distEntry: beyondCap.capDistEntry, repoRoot: beyondCap.capRepo, processBuiltSha: beyondCap.capBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+  check(`(23n-setup) MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES + 1 (${MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES + 1}) files changed, all comment-only, and the date-based clock reads stale:true` + reasonSuffix(r23n),
+    r23n.commitsBehind === 1);
+  check(`(23n) BEYOND THE CAP (${MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES + 1} files): fails CLOSED to null despite every file being genuinely comment-only — the cap wins over a check that would otherwise have succeeded, never an unbounded cost`,
+    r23n.builtContentMatchesHead === null && r23n.stale === true);
+
+  // ---- (23o) Code Review B1 REGRESSION: a readdirSync failure mid soundness-walk must FAIL THE WHOLE
+  // CHECK CLOSED, never silently complete on a PARTIAL scan. Same monkeypatch technique as (12b) above:
+  // a real, otherwise-sound repo (valid tsconfig chain, genuinely comment-only diff, no const enum
+  // anywhere) gets a `packages/daemon/src/nested/` subdirectory whose OWN readdirSync call is forced to
+  // throw ENOENT (simulating a build racing this read, exactly the class this module handles ~200 lines
+  // away for the dist scan). Before this card's fix, `walkTsFilesForSoundnessCheck` swallowed that error
+  // and returned whatever it had accumulated so far — a PARTIAL, silently-truncated file list the
+  // soundness check would have then read as "sound" (true) purely because it never got far enough to see
+  // whatever the unscanned remainder might have hidden. The fix removes that swallow so the error
+  // propagates to `ancestorTranspileCompareSound`'s own try/catch, which fails the WHOLE precondition
+  // closed instead.
+  const raceRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-racerepo-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(path.join(raceRepo, "packages", "daemon", "src", "nested"), { recursive: true });
+  fs.mkdirSync(path.join(raceRepo, "packages", "shared", "src"), { recursive: true });
+  fs.writeFileSync(path.join(raceRepo, "tsconfig.base.json"), JSON.stringify({ compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext" } }));
+  fs.writeFileSync(path.join(raceRepo, "packages", "daemon", "tsconfig.json"), JSON.stringify({ extends: "../../tsconfig.base.json" }));
+  fs.writeFileSync(path.join(raceRepo, "packages", "shared", "tsconfig.json"), JSON.stringify({ extends: "../../tsconfig.base.json" }));
+  const gitRace = (args, dateIso) => execSync(`git ${args}`, {
+    cwd: raceRepo,
+    env: { ...process.env, ...(dateIso ? { GIT_AUTHOR_DATE: dateIso, GIT_COMMITTER_DATE: dateIso } : {}) },
+  });
+  gitRace("init -q");
+  gitRace('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2027-07-01T00:00:00Z");
+  fs.writeFileSync(path.join(raceRepo, "packages", "daemon", "src", "thing.ts"), "export function thing() {\n  return 1;\n}\n");
+  fs.writeFileSync(path.join(raceRepo, "packages", "daemon", "src", "nested", "clean.ts"), "export const clean = 1;\n");
+  gitRace("add packages/daemon/src/thing.ts packages/daemon/src/nested/clean.ts");
+  gitRace('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add thing and nested/clean"', "2027-07-02T00:00:00Z");
+  const raceBaseSha = execSync("git rev-parse HEAD", { cwd: raceRepo }).toString().trim();
+  const raceDistDir2 = trackDir(path.join(os.tmpdir(), `loom-dpstl-racedist2-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(raceDistDir2, { recursive: true });
+  const raceDistEntry2 = path.join(raceDistDir2, "index.js");
+  fs.writeFileSync(raceDistEntry2, "// fixture\n");
+  fs.utimesSync(raceDistEntry2, new Date("2027-07-03T00:00:00Z"), new Date("2027-07-03T00:00:00Z"));
+  fs.writeFileSync(path.join(raceRepo, "packages", "daemon", "src", "thing.ts"), "// a genuinely comment-only change\nexport function thing() {\n  return 1;\n}\n");
+  gitRace("add packages/daemon/src/thing.ts");
+  gitRace('-c user.email=t@loom -c user.name=t commit -q -m "docs(daemon): comment"', "2027-07-04T00:00:00Z");
+
+  // SANITY, unpatched: this repo genuinely has no soundness hazard, so the check must resolve true here
+  // — proving the injected failure below is what causes the null, not some unrelated fixture defect.
+  const rRaceSanity = computeDeployStalenessRaw({ distEntry: raceDistEntry2, repoRoot: raceRepo, processBuiltSha: raceBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+  check("(23o-sanity) UNPATCHED: this repo has no real soundness hazard, so the check resolves true" + reasonSuffix(rRaceSanity),
+    rRaceSanity.builtContentMatchesHead === true && rRaceSanity.stale === false);
+
+  const resolvedNestedDir = path.resolve(path.join(raceRepo, "packages", "daemon", "src", "nested"));
+  const originalReaddirSync2 = fs.readdirSync;
+  let racePatchFired2 = false;
+  fs.readdirSync = function patchedReaddirSync2(dir, ...rest) {
+    if (path.resolve(String(dir)) === resolvedNestedDir) {
+      racePatchFired2 = true;
+      const err = new Error(`ENOENT: no such file or directory, scandir '${dir}'`);
+      err.code = "ENOENT";
+      throw err;
+    }
+    return originalReaddirSync2.call(fs, dir, ...rest);
+  };
+  let rRacePatched;
+  try {
+    rRacePatched = computeDeployStalenessRaw({ distEntry: raceDistEntry2, repoRoot: raceRepo, processBuiltSha: raceBaseSha, processBuiltDirty: false, processStartedAt: FAR_FUTURE_PROCESS_START });
+  } finally {
+    fs.readdirSync = originalReaddirSync2; // never leave the global fs module patched
+  }
+  check("(23o self-check) the readdirSync patch actually fired on the nested/ dir (positive control — a never-fired patch proves nothing)", racePatchFired2 === true);
+  check("(23o) THE FIX (Code Review B1): a readdirSync failure mid-walk fails the WHOLE soundness check closed ⇒ builtContentMatchesHead:null, stale STAYS true — never a partial-scan false positive",
+    rRacePatched.builtContentMatchesHead === null && rRacePatched.stale === true);
+
+  try { fs.rmSync(raceRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(raceDistDir2, { recursive: true, force: true }); } catch { /* best-effort */ }
+
+  try { fs.rmSync(atCap.capRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(atCap.capDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(beyondCap.capRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(beyondCap.capDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+
+  try { fs.rmSync(cbRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(cbDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(noTsconfigRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(edmRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(edmDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(ceRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(ceDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(noTsDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
 
   // ===================== (24) Card 9aa4e2c9 — processStartedAt STABILITY across calls =====================
   {

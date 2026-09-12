@@ -4721,11 +4721,21 @@ export class OrchestrationMcpRouter {
           "false`, even `deploySignatureMismatch:true`) can be a FALSE ALARM: a different, non-ancestor " +
           "commit (e.g. a worker worktree's own union-forward merge commit) whose SHIPPED TREE is byte-" +
           "identical to mainline HEAD reads exactly like staleness on sha alone, and was observed doing so " +
-          "live on a genuinely-current daemon. `builtContentMatchesHead` is the fix: computed only in that " +
-          "exact non-ancestor case, `true` means the mismatch is cosmetic (diff came back empty across the " +
-          "shipped paths — trust the deploy), `false` means it's real, `null` means undetermined (git " +
-          "couldn't resolve one side, or the ordinary-ancestor case where this field is never computed at " +
-          "all — read `processBuiltShaMatchesHead`/`stale` instead there). When `processBuiltShaMatchesHead` " +
+          "live on a genuinely-current daemon. `builtContentMatchesHead` is the fix, computed via ONE OF " +
+          "TWO comparisons depending on ancestry: (a) `processBuiltSha` NOT an ancestor of `mainlineHeadSha` " +
+          "— `true` means a BYTE diff (scoped to the shipped paths) came back empty, the mismatch is " +
+          "cosmetic; (b, card 404bfc75) `processBuiltSha` IS an ancestor AND `stale` is already `true` — a " +
+          "byte diff there would trivially be non-empty, so this instead proves BEHAVIOURAL equivalence " +
+          "(a transpile-identity comparison of every changed restart-relevant `.ts` file) — `true` means a " +
+          "comment-only (or otherwise inert) restart-relevant diff, genuinely NOT stale despite " +
+          "`commitsBehind > 0`. EITHER sub-case's `true` overrides `stale` to `false` in the response you " +
+          "already received — you are not meant to re-derive this yourself. `false` means a case (a)/(b) " +
+          "comparison ran and found a REAL difference (still stale). `null` means undetermined: git/" +
+          "typescript couldn't resolve a side, the diff exceeded the behavioural check's own file cap, the " +
+          "transpile-identity soundness precondition failed to verify, OR the ordinary case NEITHER " +
+          "sub-case applies to (ancestor AND `stale` already `false`) — the existing `stale`/" +
+          "`processBuiltShaMatchesHead` signals already answer that case correctly and no extra check ran. " +
+          "When `processBuiltShaMatchesHead` " +
           "is `false`, check `builtContentMatchesHead` before concluding the deploy is actually stale. Card " +
           "f26339d7: every field above this point is DERIVED (a clock, or a live git read) — the last eight " +
           "are the BAKED signal, split into TWO questions on purpose: `distBuiltSha`/`distBuiltDirty` are a " +
@@ -4778,8 +4788,13 @@ export class OrchestrationMcpRouter {
           "toward it. ⛔ Card e8697dd3: do NOT read that as \"an assets-only merge never needs a restart\" " +
           "— see `skillStoreStaleness` below, a SEPARATE signal for exactly the assets subtree where that's " +
           "false. `stale:true` means mainline HEAD carries `commitsBehind` daemon-src/shared commit(s) " +
-          "this running process was not built with — a `daemon_restart` (or a human `pnpm daemon:stable` " +
-          "relaunch) is needed before they take effect, for every project this daemon serves. Card 8ff7ccde: " +
+          "this running process was not built with AND `builtContentMatchesHead` did not prove them " +
+          "behaviourally inert — a `daemon_restart` (or a human `pnpm daemon:stable` " +
+          "relaunch) is needed before they take effect, for every project this daemon serves. Card 404bfc75: " +
+          "a `commitsBehind > 0` reading alongside `stale:false` is a LEGITIMATE, expected combination, not " +
+          "a contradiction — it means `builtContentMatchesHead:true` already proved every one of those " +
+          "commits behaviourally inert (e.g. a comment-only `@decision`-anchor addition); the daemon " +
+          "genuinely does not need a restart despite the non-zero count. Card 8ff7ccde: " +
           "`distBuiltAt` is an ON-DISK ARTIFACT clock (newest dist mtime) and can be NEWER than the code " +
           "this process is actually executing — a rebuild that lands without a restart advances it while " +
           "the process keeps running whatever it loaded at its own start. `stale`/`commitsBehind` are " +
