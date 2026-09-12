@@ -10212,6 +10212,9 @@ export class SessionService {
         // retire.
         this.db.archiveSession(fresh.id);
         const cancelledWakes = this.db.cancelWakesForSession(workerSessionId);
+        // @decision 22a5a2d5 — deliberately asymmetric with the success path below: only wakes are
+        // cancelled here. event_trigger/poll_job/webhook_endpoint targets on `old` are left unreparented
+        // and un-disabled — a rare, compound-precondition gap accepted on COST, never proven impossible.
         // @decision 7b1fda57 — hand `carried`'s NON-durable, `kind:"agent"` entries to the MANAGER as ONE
         // framed, blockquoted notice (never re-enqueued verbatim — role confusion) via the SAME durable
         // `enqueueDurableNudge` mechanism every other `[loom:*]`-to-manager notice already uses.
