@@ -1091,12 +1091,20 @@ function writeFullySync(fd, text) {
 //                       error) rather than a false assertion. Node prints the thrown error's message + top
 //                       stack frames to stderr, which is what actually named the peer's root cause.
 //   "unclassified"    — nonzero exit, no FAIL line, no stderr at all: genuinely nothing to classify from.
+//
+// Card 3a9e5a18: this project's own `check(label, cond)` helper (see this file's header) does NOT throw on
+// a failed assertion — it increments a counter and the test keeps running — so a failing run's stdout can
+// (and routinely does) carry PASSING checks after the first failure. `FAIL_LINE_RE` is the single shared
+// pattern for "this stdout line names a failing assertion"; `computeFailureTail` below reuses it rather
+// than re-deriving its own, weaker "last line of stdout" notion of what to surface.
+const FAIL_LINE_RE = /^FAIL\s\s/;
+
 export function classifyFailureDetail({ status, stdout, stderr }) {
   if (status === "timeout") return { failureType: "timeout", messages: [], truncated: false };
 
   const failLines = (stdout ?? "").split("\n")
-    .filter((l) => /^FAIL\s\s/.test(l))
-    .map((l) => l.replace(/^FAIL\s\s/, "").trim());
+    .filter((l) => FAIL_LINE_RE.test(l))
+    .map((l) => l.replace(FAIL_LINE_RE, "").trim());
   const stderrLines = (stderr ?? "").split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
 
   if (failLines.length) {
@@ -1118,8 +1126,15 @@ export function classifyFailureDetail({ status, stdout, stderr }) {
 // line. Extracted to its own pure function (card 5e3ebc80) so a test can drive it — and the epilogue
 // renderer below that consumes its output — directly against a REAL `spawnWithTimeout` result, without
 // re-deriving this formula a second time and risking the two copies drifting apart.
+//
+// Card 3a9e5a18: prefers the LAST `FAIL  <label>` line over a blind last line of stdout — `check()` doesn't
+// throw on failure, so a run failing an early assertion can still print later PASSING ones. Falls back to
+// the previous blind-last-line behaviour only when stdout carries no FAIL line at all.
 export function computeFailureTail(stdout, stderr) {
-  return stdout.split("\n").filter(Boolean).slice(-1)[0] || stderr.split("\n").filter(Boolean).slice(-1)[0];
+  const stdoutLines = stdout.split("\n").filter(Boolean);
+  const failLines = stdoutLines.filter((l) => FAIL_LINE_RE.test(l));
+  if (failLines.length) return failLines[failLines.length - 1];
+  return stdoutLines.slice(-1)[0] || stderr.split("\n").filter(Boolean).slice(-1)[0];
 }
 
 // Card 5e3ebc80: names WHAT KIND of nonzero termination a failing run had — a numeric exit code, an

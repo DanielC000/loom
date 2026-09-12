@@ -17,7 +17,7 @@
 // only what a REAL multi-failure spawn can prove that a synthetic string cannot.
 import fs from "node:fs";
 import path from "node:path";
-import { spawnWithTimeout, classifyFailureDetail, appendGateTimingRow } from "../scripts/test-daemon.mjs";
+import { spawnWithTimeout, classifyFailureDetail, appendGateTimingRow, computeFailureTail } from "../scripts/test-daemon.mjs";
 import { mkdtempManaged } from "./_tmp-fixture.mjs";
 
 let failures = 0;
@@ -135,6 +135,36 @@ function writeFixture(name, source) {
   appendGateTimingRow(ndjsonPath, { kind: "file", name: "real-mixed-fail-and-throw", ok: false, status: r.status, failureDetail: detail });
   const row = JSON.parse(fs.readFileSync(ndjsonPath, "utf8").trim());
   check("[positive control] the stderrExcerpt survives a real write+read round trip", row.failureDetail.stderrExcerpt.some((m) => m.includes("real secondary throw after the check already failed")));
+}
+
+// ── Scenario E (card 3a9e5a18) — computeFailureTail must name a FAILING assertion, never a passing one.
+//    `check()` (see this file's own header pattern) does not throw on a false assertion — it just keeps
+//    running — so a REAL run that fails an EARLY check and then passes several LATER ones is the
+//    discriminating case: a naive "last line of stdout" tail would report the last PASS, not the FAIL that
+//    actually failed the run. A fixture whose only failure is its LAST assertion cannot tell a fixed
+//    implementation apart from a broken one (both would report that same last line) — this fixture
+//    deliberately fails FIRST and passes AFTERWARD so the two behaviours diverge. ────────────────────────
+{
+  const fixture = writeFixture(
+    "early-fail-then-later-passes",
+    [
+      "let failures = 0;",
+      'const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };',
+      'check("(E1) the real, early assertion that actually fails", 1 === 2);',
+      'check("(E2) a later passing check", 1 === 1);',
+      'check("(E3) another later passing check", "x" === "x");',
+      "process.exit(failures === 0 ? 0 : 1);",
+      "",
+    ].join("\n"),
+  );
+
+  const r = await spawnWithTimeout(process.execPath, [fixture], { timeoutMs: 15_000 });
+  check("[precondition] the fixture actually failed (nonzero exit, not a timeout)", r.ok === false && r.status === 1);
+  check("[precondition] the fixture's LAST stdout line is a PASS, not the FAIL — this is what makes the two behaviours diverge", /^PASS\s\s\(E3\)/m.test(r.stdout.trim().split("\n").slice(-1)[0]));
+
+  const tail = computeFailureTail(r.stdout, r.stderr);
+  check("[THE TEST] the tail names the FAILING assertion, not the last (passing) line of stdout", tail.includes("(E1) the real, early assertion that actually fails"));
+  check("[the control that actually matters] the tail is NOT the last stdout line (a naive implementation returns this instead)", !tail.includes("(E3) another later passing check"));
 }
 
 console.log(`\n${failures === 0 ? "✅" : "❌"} test-daemon-gate-timing-failure-detail: ${failures} check(s) failed.`);
