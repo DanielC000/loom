@@ -1,28 +1,36 @@
 #!/usr/bin/env node
-// extraction-loss-scan.mjs — comment-extraction loss scan scoped to ADDED lines + records (card 69f3bd03).
+// extraction-loss-scan.mjs — comment-extraction loss scan scoped to added + unchanged-context lines and
+// records (cards 69f3bd03, d5f70001).
 //
 // @decision 69f3bd03 — subtracting a removed comment's tokens against the WHOLE branch source masks a
 // real loss: a token recurring anywhere else in a large file reads as "present" even when the clause
-// carrying it was deleted. This script checks only the added lines and the records the added ids resolve to.
+// carrying it was deleted. This script checks only the added lines and the records those ids resolve to.
+//
+// Card d5f70001: "added lines" above also includes UNCHANGED CONTEXT lines, never REMOVED ones — an
+// anchor that survived, textually unchanged, at an edited site still credits its record (fixes a false
+// miss when a paragraph's body changed but its own @decision line didn't); a REMOVED anchor is gone from
+// that site, so pooling it would credit removed tokens to a record whose anchor the tranche just deleted.
 //
 // ⛔ THIS SCRIPT NEVER CONSULTS THE UNCHANGED REMAINDER OF THE SOURCE FILE. That whole-file lookup is
 // exactly the masking mode being fixed — a token present anywhere in the file, not just in what actually
-// carries it forward (the added lines and the records those added lines' @decision ids resolve to), is
-// not evidence the removed content survived.
+// carries it forward (the added + unchanged-context lines and the records those lines' @decision ids
+// resolve to), is not evidence the removed content survived.
 //
 // WHAT IT CHECKS, for one file's diff over --range (default main...HEAD):
 //   1. non-comment removed/added line counts — both must be 0 for a comment-only tranche; each such line
 //      is printed. (Class A/B/C/D taxonomy lives in this repo's CLAUDE.md; this script only checks that
 //      no CODE moved, not which comment class a block belongs to.)
 //   2. every added line over 112 bytes.
-//   3. every @decision (sha:)?<8hex> id in the ADDED lines, and the record file(s) each resolves to under
-//      docs/adr/, docs/decisions/, docs/investigations/<id>-*/ (recursively) IN THE WORKING TREE.
+//   3. every @decision (sha:)?<8hex> id in the ADDED lines and the UNCHANGED-CONTEXT lines (never a
+//      REMOVED line — card d5f70001: an anchor that survived, textually unchanged, at an edited site
+//      still credits its record, but a deleted anchor never does), and the record file(s) each resolves
+//      to under docs/adr/, docs/decisions/, docs/investigations/<id>-*/ (recursively) IN THE WORKING TREE.
 //   4. every REMOVED-line token (four patterns, case-insensitive: \b[a-z]{5,7}\b, \w{4,7}\(\),
 //      [a-z][a-z0-9_]{7,}, \b[0-9a-f]{8}\b) not found in the added lines or in those record files —
 //      printed as an advisory miss with its removed-line context.
 //
 // ⚠️ RECORD FILES ARE POOLED ACROSS THE WHOLE DIFF, not scoped to any one removed clause's own site:
-// step 3 collects every @decision id from ANY added line in the file, and step 4 checks EVERY removed
+// step 3 collects every @decision id from ANY added or unchanged-context line in the file, and step 4 checks EVERY removed
 // line's tokens against the union of all resolved record files. A clean run does NOT prove a removed
 // clause was credited to a record anchored AT the site it was removed from — only that its tokens
 // appear somewhere in that pooled corpus. Per docs/extraction-program.md item 4: a token that survives
@@ -114,19 +122,29 @@ function collectDiffLines(repoRoot, range, posixRel) {
   }
   const removed = [];
   const added = [];
+  const context = [];
   for (const line of diff.split("\n")) {
     if (line.startsWith("+++") || line.startsWith("---")) continue;
     if (line.startsWith("+")) added.push(line.slice(1));
     else if (line.startsWith("-")) removed.push(line.slice(1));
+    // A unified-diff context line always starts with a literal space; every other unmatched line here
+    // (a hunk header, "diff --git", "index …") starts with a non-space and is correctly ignored.
+    else if (line.startsWith(" ")) context.push(line.slice(1));
   }
-  return { removed, added };
+  return { removed, added, context };
 }
 
 const DECISION_ID_RE = /@decision\s+(?:sha:)?([0-9a-fA-F]{8})\b/g;
 
-function collectDecisionIds(addedLines) {
+// Pooled from ADDED lines and UNCHANGED CONTEXT lines only — never REMOVED ones (card d5f70001). A
+// context-line anchor SURVIVED at the edited site (fixing the false-miss case: a paragraph's body
+// changed but its own @decision line didn't, so the anchor never appeared in `added`), while a REMOVED
+// anchor means the anchor is GONE from that site — pooling it would credit removed tokens to a record
+// whose anchor the tranche just deleted, reopening the exact masking card 69f3bd03 built this script to
+// avoid.
+function collectDecisionIds(lines) {
   const ids = new Set();
-  for (const line of addedLines) {
+  for (const line of lines) {
     for (const m of line.matchAll(DECISION_ID_RE)) ids.add(m[1].toLowerCase());
   }
   return ids;
@@ -212,9 +230,9 @@ function main() {
   const repoRoot = args.repoRoot;
   const posixRel = args.file.replaceAll("\\", "/");
 
-  let removed, added;
+  let removed, added, context;
   try {
-    ({ removed, added } = collectDiffLines(repoRoot, args.range, posixRel));
+    ({ removed, added, context } = collectDiffLines(repoRoot, args.range, posixRel));
   } catch (err) {
     console.error(`[extraction-loss-scan] ${err.message}`);
     process.exit(2);
@@ -245,14 +263,14 @@ function main() {
     for (const l of overLongAdded) console.error(`  - (${Buffer.byteLength(l, "utf8")}B) ${l}`);
   }
 
-  const ids = collectDecisionIds(added);
+  const ids = collectDecisionIds([...added, ...context]);
   const recordFiles = collectRecordFiles(repoRoot, ids);
   let corpus = added.join("\n").toLowerCase();
   for (const f of recordFiles) {
     try { corpus += "\n" + fs.readFileSync(f, "utf8").toLowerCase(); } catch { /* unreadable record — corpus just narrower, never wider */ }
   }
 
-  console.log(`\n[extraction-loss-scan] ${ids.size} @decision id(s) in added lines; ${recordFiles.length} record file(s) resolved:`);
+  console.log(`\n[extraction-loss-scan] ${ids.size} @decision id(s) in added/unchanged-context lines; ${recordFiles.length} record file(s) resolved:`);
   for (const f of recordFiles) console.log(`  - ${path.relative(repoRoot, f).replaceAll("\\", "/")}`);
 
   const misses = new Map(); // lowercased token -> first removed-line context

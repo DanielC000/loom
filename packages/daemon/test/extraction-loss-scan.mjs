@@ -3,7 +3,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // loss scan scoped to ADDED lines + records, replacing the whole-branch-source subtraction that masks a
 // real loss when a removed token happens to recur elsewhere, unchanged, in a large file.
 //
-// Four cases, each its own hermetic temp git repo (never this repo's real source):
+// Six cases, each its own hermetic temp git repo (never this repo's real source):
 //   (a) POSITIVE CONTROL — a removed clause whose distinctive token recurs elsewhere in the file, in a
 //       part the tranche never touched, but is absent from the added lines and from any record. This is
 //       EXACTLY the case a whole-file "subtract the branch source" method misses (the token still reads
@@ -14,6 +14,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 //       added @decision id resolves to ⇒ NOT reported.
 //   (c) a non-comment removed (and added) line ⇒ non-zero exit, line printed.
 //   (d) an added line of 113 bytes ⇒ non-zero exit, line printed.
+//   (e) card d5f70001 POSITIVE control — a paragraph's BODY line is removed while its own @decision line
+//       is left textually UNCHANGED (so it's a diff CONTEXT line, never an added one). The removed
+//       token IS present in the record that unchanged @decision line resolves to ⇒ NOT reported (this is
+//       the exact false-miss card d5f70001 fixed: pre-fix, `collectDecisionIds` only ever looked at
+//       added lines, so an unchanged anchor never pooled its record and the removed token misses).
+//   (f) card d5f70001 NEGATIVE control — same shape as (e), but the tranche removes the @decision line
+//       ITSELF along with the body (so the anchor is gone, not unchanged-context) ⇒ STILL reported as a
+//       miss. Proves the fix pools UNCHANGED CONTEXT anchors, never REMOVED ones — the masking mode card
+//       69f3bd03 exists to prevent.
 //
 // Run: node packages/daemon/test/extraction-loss-scan.mjs
 import fs from "node:fs";
@@ -178,11 +187,105 @@ function runScan(dir, file, range) {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// ── (e) card d5f70001 POSITIVE: an unchanged (context-line) @decision anchor still credits its record ──
+{
+  const dir = makeFixtureRepo();
+  const filePath = path.join(dir, "example.mjs");
+  fs.writeFileSync(
+    filePath,
+    "// @decision 1a2b3c4d — retry twice before giving up, per the historical incident.\n" +
+      "// gloopfrazzle explains the retry timing behavior, preserved here for later readers.\n" +
+      "function old() {\n" +
+      "  return 3;\n" +
+      "}\n",
+    "utf8",
+  );
+  git(dir, ["add", "-A"]);
+  git(dir, ["commit", "-q", "-m", "init"]);
+
+  fs.mkdirSync(path.join(dir, "docs", "decisions"), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "docs", "decisions", "1a2b3c4d-retry-twice.md"),
+    "# 1a2b3c4d — retry twice before giving up\n\n" +
+      "gloopfrazzle explains the retry timing behavior: always retry twice before giving up.\n",
+    "utf8",
+  );
+
+  // Tranche removes ONLY the body line — the @decision line one line above is left byte-for-byte
+  // unchanged, so git reports it as diff CONTEXT, never as an added line.
+  fs.writeFileSync(
+    filePath,
+    "// @decision 1a2b3c4d — retry twice before giving up, per the historical incident.\n" +
+      "function old() {\n" +
+      "  return 3;\n" +
+      "}\n",
+    "utf8",
+  );
+  git(dir, ["add", "-A"]);
+  git(dir, ["commit", "-q", "-m", "tranche: drop the gloopfrazzle body line, anchor line untouched"]);
+
+  const r = runScan(dir, "example.mjs", "HEAD~1...HEAD");
+  check(
+    "(e) [card d5f70001] a removed token carried by the record its UNCHANGED (context-line) @decision " +
+      "anchor resolves to is NOT reported as a miss",
+    !/"gloopfrazzle"/.test(r.stdout),
+  );
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ── (f) card d5f70001 NEGATIVE control: a REMOVED @decision anchor must still report a miss ────────────
+{
+  const dir = makeFixtureRepo();
+  const filePath = path.join(dir, "example.mjs");
+  fs.writeFileSync(
+    filePath,
+    "// @decision 5e6f7a8b — retry twice before giving up, per the historical incident.\n" +
+      "// gloopfrazzle explains the retry timing behavior, preserved here for later readers.\n" +
+      "function old() {\n" +
+      "  return 3;\n" +
+      "}\n",
+    "utf8",
+  );
+  git(dir, ["add", "-A"]);
+  git(dir, ["commit", "-q", "-m", "init"]);
+
+  fs.mkdirSync(path.join(dir, "docs", "decisions"), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "docs", "decisions", "5e6f7a8b-retry-twice.md"),
+    "# 5e6f7a8b — retry twice before giving up\n\n" +
+      "gloopfrazzle explains the retry timing behavior: always retry twice before giving up.\n",
+    "utf8",
+  );
+
+  // Tranche removes BOTH lines — the @decision line itself is gone from the site, not unchanged context.
+  fs.writeFileSync(
+    filePath,
+    "function old() {\n" +
+      "  return 3;\n" +
+      "}\n",
+    "utf8",
+  );
+  git(dir, ["add", "-A"]);
+  git(dir, ["commit", "-q", "-m", "tranche: drop the whole gloopfrazzle comment block, anchor included"]);
+
+  const r = runScan(dir, "example.mjs", "HEAD~1...HEAD");
+  check(
+    "(f) [card d5f70001 negative control] a removed token whose @decision anchor was ALSO removed (never " +
+      "pooled from a removed line) is STILL reported as a miss — the fix must not reopen the removed-line masking",
+    /"gloopfrazzle"/.test(r.stdout),
+  );
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(
   failures === 0
     ? "\n✅ ALL PASS — extraction-loss-scan.mjs reports a removed token still present elsewhere unchanged " +
       "in the file (case a — the whole-file-masked case), suppresses one carried by a resolved record " +
-      "(case b), and hard-fails on a non-comment line (case c) or an over-length added line (case d)."
+      "(case b), hard-fails on a non-comment line (case c) or an over-length added line (case d), " +
+      "suppresses one carried by a record its UNCHANGED @decision anchor resolves to (case e), and still " +
+      "reports one whose @decision anchor was itself removed (case f)."
     : `\n❌ ${failures} FAILURE(S).`,
 );
 process.exit(failures === 0 ? 0 : 1);
