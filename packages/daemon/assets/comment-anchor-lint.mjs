@@ -665,8 +665,7 @@ export function findOverlongAnchorParagraphs(lines, blocks, anchors, maxLines = 
  * shape) could only ever see the FIRST occurrence's own position, so a second anchor on that same line
  * inherited the first one's "opens the line" verdict no matter where it actually sat. */
 function isMidSentenceAnchorLine(line, col) {
-  const before = line.slice(0, col).trim().replace(/^\/\*\*?/, "").replace(/^\*/, "").replace(/^\/\//, "").trim();
-  return before.length > 0;
+  return stripCommentMarkers(line.slice(0, col)).length > 0;
 }
 
 /** Every anchor SITE (as returned by `findFileAnchors`) whose own `@decision` occurrence embeds the token
