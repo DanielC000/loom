@@ -909,7 +909,10 @@ export function listRecordIds(repoRoot) {
 /** Every record in `records` (as returned by `listRecordIds`) whose file exceeds `maxBytes` — measured the
  * SAME way `decision-records.mjs`'s own `truncateRecord` measures it (UTF-8 byte length of the raw file
  * text, never a character/UTF-16 count — this repo's house typography is multi-byte, so the two diverge).
- * Card d0d0401b: this is the visible, authoring-time half of the size constraint; read-time truncation
+ *
+ * @decision d0d0401b
+ *
+ * This is the visible, authoring-time half of the size constraint; read-time truncation
  * (decision-records.mjs) stays the last-resort safety net, unchanged. An unreadable record is skipped
  * (never crashes the sweep) — a record that can't be read can't be injected either, so it's not this
  * check's problem to report. */

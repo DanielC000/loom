@@ -1458,7 +1458,11 @@ async function main(): Promise<void> {
   // Self-host restart recovery (consume the intent read above): a manager deliberately restarted the
   // daemon (daemon_restart) to make merged code live. The daemon is ONE process for ALL projects, so the
   // restart tore down the WHOLE cross-project fleet — re-resume ALL of it (every manager, worker, plain
-  // session), not just the requester (P1 17df54c5). resumeFleetOnBoot re-spawns each with its role +
+  // session), not just the requester (P1 17df54c5).
+  //
+  // @decision 17df54c5
+  //
+  // Then resumeFleetOnBoot re-spawns each with its role +
   // linkage, injects nothing into the resume, gives the requester its "code is live" re-prompt and the
   // rest a continuation nudge, and honors a parked session's usage hold. Best-effort + runs once.
   if (restartIntent) {

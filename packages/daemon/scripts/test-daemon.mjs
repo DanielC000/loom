@@ -732,8 +732,11 @@ export function createRssTracker(readRssBytes = () => process.memoryUsage().rss)
   };
 }
 
-// Max gap between successive entries of a timestamp series (ms, same unit as `performance.now()`) —
-// DESCRIPTIVE ONLY (card b6ab2521, retiring `f1043732`'s original stall-detector framing): a genuinely
+// Max gap between successive entries of a timestamp series (ms, same unit as `performance.now()`).
+//
+// @decision b6ab2521
+//
+// DESCRIPTIVE ONLY (retiring `f1043732`'s original stall-detector framing): a genuinely
 // HUNG long-running unit and a HEALTHY long-running unit produce the IDENTICAL reading, because this
 // measures gaps between COMPLETION events and a hang-in-progress emits none — so this number can never
 // discriminate the failure case from the healthy one, and no threshold derived from it is a stall verdict

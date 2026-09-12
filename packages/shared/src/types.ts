@@ -1842,7 +1842,9 @@ export interface GateHistoryRow {
   /** @decision 6ca4b1a0 — present (non-null) ONLY alongside `emitCompareReduced: true`; VACUOUS ON ONE
    *  OF TWO ARMS — never read alone, always alongside `emitCompareTestFiles` (below).
    *
-   *  The two arms are NOT mutually exclusive (card 0984260f) — a non-zero count alongside a non-empty
+   *  @decision 0984260f
+   *
+   *  The two arms are NOT mutually exclusive — a non-zero count alongside a non-empty
    *   `emitCompareTestFiles` does not make the count vacuous. */
   emitCompareIdenticalCount: number | null;
   /** Card 6ca4b1a0 — the changed `test/*.mjs` file(s) this reduced run ran instead of the full suite.

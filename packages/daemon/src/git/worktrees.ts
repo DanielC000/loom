@@ -2868,6 +2868,8 @@ export const ASSET_READING_TEST_REPO_PATHS = [
  *  methodology and the shapes deliberately excluded below (that list is a judgment call, not exhaustive —
  *  see its own closing note).
  *
+ *  @decision fab07aba
+ *
  *  ⛔ NOT a test whose src/dist-text read is one of the shapes below — each is comment-immune by
  *  construction, so a comment-only diff cannot flip it:
  *    (1) a BOUNDED, NAMED-DECLARATION extraction whose captured content is DATA, never comment syntax —
