@@ -205,9 +205,17 @@ export interface MemoryConfig {
  * pathological operator-set value) asks for — bounds hardening so an accidental `memory_write`-in-a-loop
  * misconfiguration, or a fat-fingered platform default, can't bloat every kickoff or grow the DB unbounded.
  * `topK`'s floor is 1 (0 would silently disable related-note retrieval — use `budgetTokens:0` for that).
+ *
+ * `budgetTokens` raised 8000 -> 25000 by owner decision (request `d2b3e43f`, answered 2026-09-12): a
+ * measured 30-round sizing curve against a real project corpus showed 25000 is the knee of the curve —
+ * mean REST delivery rises 1.6% -> 45.7% and the related tier goes from 2.10/8 to a near-saturated 7.23/8,
+ * while a larger budget mostly buys REST delivery alone (the related-tier benefit is nearly exhausted
+ * beyond this point). 25000 is still a REAL ceiling, not unbounded hardening removed — it stays a fixed
+ * multiple of the platform default (4000, below) and still stops a runaway `memory_write`-in-a-loop or a
+ * fat-fingered override from growing without limit; the owner just moved where that limit sits.
  */
 export const MEMORY_CONFIG_MAX = {
-  budgetTokens: 8000,
+  budgetTokens: 25000,
   topK: 50,
   maxNotes: 1000,
 } as const;

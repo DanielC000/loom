@@ -20,6 +20,7 @@ import {
   type MsBounds,
   GOOGLE_ANALYTICS_SCOPE_PRESETS,
   ORCHESTRATION_TIMEOUT_MS_BOUNDS,
+  MEMORY_CONFIG_MAX,
 } from "@loom/shared";
 import { api, type ProjectPatchError } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
@@ -552,11 +553,11 @@ function ConfigEditor({ project }: { project: Project }) {
         <Hint>Shared project-notes tuning for the FTS5 kickoff-injection budget (card 2fd9abf9).</Hint>
         <div className="loom-field-grid loom-field-grid-3" style={{ marginTop: 8 }}>
           <NumField label="Budget (tokens)" value={memoryBudgetTokens} set={setMemoryBudgetTokens}
-            effective={resolved.memory.budgetTokens} def={defaults.memory.budgetTokens} note="0-8000" />
+            effective={resolved.memory.budgetTokens} def={defaults.memory.budgetTokens} note={`0-${MEMORY_CONFIG_MAX.budgetTokens}`} />
           <NumField label="Related notes (top K)" value={memoryTopK} set={setMemoryTopK}
-            effective={resolved.memory.topK} def={defaults.memory.topK} note="1-50" />
+            effective={resolved.memory.topK} def={defaults.memory.topK} note={`1-${MEMORY_CONFIG_MAX.topK}`} />
           <NumField label="Max unpinned notes" value={memoryMaxNotes} set={setMemoryMaxNotes}
-            effective={resolved.memory.maxNotes} def={defaults.memory.maxNotes} note="0-1000 · <= 0 disables the cap" />
+            effective={resolved.memory.maxNotes} def={defaults.memory.maxNotes} note={`0-${MEMORY_CONFIG_MAX.maxNotes} · <= 0 disables the cap`} />
         </div>
       </Panel>
 

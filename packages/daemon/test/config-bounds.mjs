@@ -4,7 +4,7 @@
 // built validators from dist/* only (no daemon, no claude). Mirrors the validator checks in
 // idle-watcher.mjs (case 14). Exercises BOTH paths (REST/human + agent/loom-platform MCP).
 import { validateProjectConfigOverride, validateAgentProjectConfigOverride } from "../dist/mcp/platform.js";
-import { resolveConfig } from "@loom/shared";
+import { resolveConfig, MEMORY_CONFIG_MAX } from "@loom/shared";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -143,7 +143,41 @@ for (const key of ["idleNudgeMinutes", "maxUnansweredNudges", "idleDefaultSnooze
   check(".strict() still rejects an unknown orchestration key", validateProjectConfigOverride(orch({ bogusKey: 1 })).ok === false);
 }
 
+// --- memory.budgetTokens: bounded by MEMORY_CONFIG_MAX.budgetTokens, on BOTH paths, DERIVED FROM THE
+// LIVE CONSTANT rather than a second hardcoded literal (card 5df039d1, ceiling raised 8000 -> 25000 by
+// owner decision `d2b3e43f`, 2026-09-12). The at-ceiling/one-over probes below never hardcode the numeric
+// ceiling themselves — they read MEMORY_CONFIG_MAX.budgetTokens and test exactly at/over THAT value, so
+// they keep discriminating a "validator schema hardcodes its own bound instead of deriving it" regression
+// even if the ceiling is raised again later (if platform.ts's zod .max() ever hardcodes a literal instead
+// of reading the constant, MAX+1 would wrongly be ACCEPTED the moment the constant next changes — these
+// checks would go RED). Only the sanity check pins today's actual owner-decided number, and it alone is
+// the "did the ceiling regress" half of DoD-5 — this is deliberately not the whole test, since a bare
+// equality check would need editing on every future change and proves nothing about a second bound.
+{
+  const mem = (m) => ({ memory: m });
+  const MAX = MEMORY_CONFIG_MAX.budgetTokens;
+
+  check("(sanity) MEMORY_CONFIG_MAX.budgetTokens is the owner-decided ceiling (d2b3e43f, 2026-09-12)", MAX === 25000);
+
+  check(`memory.budgetTokens:${MAX} (at the live ceiling) accepted on the human path`,
+    validateProjectConfigOverride(mem({ budgetTokens: MAX })).ok === true);
+  check(`memory.budgetTokens:${MAX + 1} (one over the live ceiling) rejected on the human path`,
+    validateProjectConfigOverride(mem({ budgetTokens: MAX + 1 })).ok === false);
+  check(`memory.budgetTokens:${MAX} (at the live ceiling) accepted on the agent path`,
+    validateAgentProjectConfigOverride(mem({ budgetTokens: MAX })).ok === true);
+  check(`memory.budgetTokens:${MAX + 1} (one over the live ceiling) rejected on the agent path`,
+    validateAgentProjectConfigOverride(mem({ budgetTokens: MAX + 1 })).ok === false);
+
+  check("memory.budgetTokens:0 (floor) accepted", validateProjectConfigOverride(mem({ budgetTokens: 0 })).ok === true);
+  check("memory.budgetTokens:-1 (below floor) rejected", validateProjectConfigOverride(mem({ budgetTokens: -1 })).ok === false);
+  check("memory.budgetTokens:1.5 (non-integer) rejected", validateProjectConfigOverride(mem({ budgetTokens: 1.5 })).ok === false);
+
+  // resolveConfig's own clamp (shared/config.ts) is exercised separately in test/project-memory.mjs
+  // ("(clamp) an absurd budgetTokens override is clamped to MEMORY_CONFIG_MAX.budgetTokens"), which
+  // already derives from the same live constant — not duplicated here.
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the project-config override schema bounds every orchestration numeric field (recycleAtContextRatio/emergencyRecycleAtContextRatio 0..1; caps int 1..100; minute fields/counter int ≥0; gateCommandTimeoutMs int 1000..1800000; alertWebhookTimeoutMs int 500..60000), rejects out-of-range/negative/non-integer values with a field-named reason on the human REST path, REJECTS the two HUMAN-only timeouts on the agent path (omitted), rejects a daemon-global `platform` key on BOTH project validators (.strict() unknown key), resolveConfig clamps an emergency floor below the ordinary ratio (never below 0-disabled) while passing an already-valid ordering through unchanged, and keeps the existing .strict()/bounds guarantees intact."
+  ? "\n✅ ALL PASS — the project-config override schema bounds every orchestration numeric field (recycleAtContextRatio/emergencyRecycleAtContextRatio 0..1; caps int 1..100; minute fields/counter int ≥0; gateCommandTimeoutMs int 1000..1800000; alertWebhookTimeoutMs int 500..60000), rejects out-of-range/negative/non-integer values with a field-named reason on the human REST path, REJECTS the two HUMAN-only timeouts on the agent path (omitted), rejects a daemon-global `platform` key on BOTH project validators (.strict() unknown key), resolveConfig clamps an emergency floor below the ordinary ratio (never below 0-disabled) while passing an already-valid ordering through unchanged, bounds memory.budgetTokens to the live MEMORY_CONFIG_MAX ceiling on BOTH the human and agent paths without a second hardcoded literal, and keeps the existing .strict()/bounds guarantees intact."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
