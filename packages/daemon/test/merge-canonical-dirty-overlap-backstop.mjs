@@ -153,10 +153,18 @@ async function setup(p) {
 }
 
 try {
+  // stdout liveness sentinel 1/2 (card e81f1ec6): no sentinel at all => died before this line, or stdout
+  // is genuinely lost. Sentinel 1 only => died inside setup() (real createWorktree + commitAll).
+  console.log("[liveness] sentinel 1: entering try, before setup()");
+
   await setup(A);
   await setup(E);
   await setup(S);
   await setup(U);
+
+  // stdout liveness sentinel 2/2: both sentinels with no PASS lines => died between setup and the first
+  // assertion below.
+  console.log("[liveness] sentinel 2: setup() complete, before first check()");
 
   // Dirty the canonical repos — UNSTAGED, never `git add`ed (mirrors "live doctrine existing in no
   // commit" from the real incident).
