@@ -34,6 +34,10 @@
 // characters under the ORIGINAL bare form still resolve as a card id, unverified (the backward-
 // compatibility control); and the sigil'd form REFUSES when the id does not verify as a real commit, even
 // when the identical record file exists (resolveRecord's refuse-rather-than-fall-through gate).
+// Plus card 8449a258 (2026-09-12, owner request a0155873 option (b)): truncation is STRUCTURAL, not
+// positional — a record with a 'Do not'-style heading (at ANY level, not just `##`) always injects its
+// title + every such heading in full, truncating only the rest; a record with none falls back to the
+// original whole-text head+tail behavior, unchanged (a negative control on the TRUNCATED note's wording).
 //
 // RUN with an isolated LOOM_HOME (writeSessionSettings just needs the settings dir; no daemon needed):
 //   pnpm build (repo root) then `node test/decision-records.mjs` from packages/daemon.
@@ -253,6 +257,64 @@ try {
     !!a6 && /# e0000001/.test(a6.hookSpecificOutput.additionalContext) && !a6.hookSpecificOutput.additionalContext.includes("[TRUNCATED"));
   check("DoD-4b: at least one record is explicitly named as omitted for shared budget, not silently dropped",
     !!a6 && /omitted for byte budget/.test(a6.hookSpecificOutput.additionalContext) && /e000000\d-budget\.md/.test(a6.hookSpecificOutput.additionalContext));
+
+  // --- card 8449a258 (owner request a0155873, option (b)): truncation is STRUCTURAL, not positional — a
+  // record with a 'Do not'-style heading always injects its title + EVERY such heading in full; only the
+  // rest is head+tail truncated. Both fixtures below are sized (by real arithmetic, not guesswork) so the
+  // protected heading falls INSIDE the window the OLD whole-text 60/40 head+tail cut would have elided —
+  // proving this is a genuine RED/GREEN case, not one that happened to survive either way. ---
+  {
+    const filler = (n) => "lorem ".repeat(Math.ceil(n / 6)).slice(0, n);
+
+    // c0ff33ee: modeled on the real docs/decisions/088afc94-*.md specimen (card 8449a258's own DoD-3
+    // fixture) — several Narrative/Do-not pairs, with the SECOND 'Do not' section landing in what would
+    // be the old algorithm's elided middle.
+    const do1 = "## Do not\n\n- keep-me-1: must always survive.\n\n";
+    const do2 = "## Do not (2)\n\n- KEEP-ME-MIDDLE: this is the section that must survive in full even "
+      + "though it falls near the middle of the record.\n\n";
+    const structuredBody = "## Narrative\n\n" + filler(2600) + "\n\n" + do1
+      + "## Narrative (2)\n\n" + filler(2600) + "\n\n" + do2
+      + "## Narrative (3)\n\n" + filler(2600) + "\n\n" + "## Source\n\nfile.ts\n";
+    const structuredText = "# c0ff33ee — synthetic do-not protection record\n\n" + structuredBody;
+    check("sanity: c0ff33ee fixture exceeds the per-record cap (else this proves nothing)",
+      Buffer.byteLength(structuredText, "utf8") > 6000);
+    fs.writeFileSync(path.join(REPO, "docs", "decisions", "c0ff33ee-structural-truncation.md"), structuredText);
+    const STRUCT_SRC = path.join(REPO, "struct.ts");
+    fs.writeFileSync(STRUCT_SRC, "// @decision c0ff33ee — structural truncation check\n");
+    const structResult = runHookOnFile(STRUCT_SRC, "s-c0ff33ee", 1, 1);
+    check("card 8449a258: title survives in full", !!structResult && structResult.hookSpecificOutput.additionalContext.includes("# c0ff33ee"));
+    check("card 8449a258: the FIRST 'Do not' section survives in full",
+      !!structResult && structResult.hookSpecificOutput.additionalContext.includes("keep-me-1: must always survive."));
+    check("card 8449a258: the SECOND 'Do not' section (would be elided under the OLD algorithm) survives in full",
+      !!structResult && structResult.hookSpecificOutput.additionalContext.includes("## Do not (2)")
+        && structResult.hookSpecificOutput.additionalContext.includes("KEEP-ME-MIDDLE"));
+    check("card 8449a258: the TRUNCATED note names the PROTECTED mode, not the old head+tail wording",
+      !!structResult && structResult.hookSpecificOutput.additionalContext.includes("kept IN FULL"));
+
+    // c0ffee01: the 'Do not' heading nested at H3 under a `##` parent — measured (card 8449a258): 18 real
+    // records in this repo carry their 'Do not' section ONLY this way, never at `##`.
+    const nested = "### Do not\n\n- NESTED-KEEP-ME: only appears at H3, nested under a H2 parent.\n\n";
+    const nestedBody = "## Decision A\n\n" + filler(3950) + "\n\n" + nested
+      + "## Decision B\n\n" + filler(3200) + "\n\n" + "## Source\n\nfile.ts\n";
+    const nestedText = "# c0ffee01 — nested do-not record\n\n" + nestedBody;
+    check("sanity: c0ffee01 fixture exceeds the per-record cap (else this proves nothing)",
+      Buffer.byteLength(nestedText, "utf8") > 6000);
+    fs.writeFileSync(path.join(REPO, "docs", "decisions", "c0ffee01-nested-do-not.md"), nestedText);
+    const NESTED_SRC = path.join(REPO, "nested.ts");
+    fs.writeFileSync(NESTED_SRC, "// @decision c0ffee01 — nested do-not detection check\n");
+    const nestedResult = runHookOnFile(NESTED_SRC, "s-c0ffee01", 1, 1);
+    check("card 8449a258: a 'Do not' heading nested at H3 (never `##`) is still detected and kept in full",
+      !!nestedResult && nestedResult.hookSpecificOutput.additionalContext.includes("NESTED-KEEP-ME"));
+    check("card 8449a258: the H3-nested case ALSO reports the protected mode", !!nestedResult
+      && nestedResult.hookSpecificOutput.additionalContext.includes("kept IN FULL"));
+
+    // Negative control on the marker itself: deadbeef (DoD-4a fixture, no 'Do not' heading at all) must
+    // still report the ORIGINAL legacy wording, never the new "kept IN FULL" phrase — proves the two modes
+    // are genuinely distinguished, not that "kept IN FULL" always appears.
+    check("card 8449a258 (negative control): a record with NO 'Do not' heading reports the LEGACY wording, not the protected one",
+      !!a5 && a5.hookSpecificOutput.additionalContext.includes("head+tail kept, middle elided")
+        && !a5.hookSpecificOutput.additionalContext.includes("kept IN FULL"));
+  }
 
   // --- sigil namespace (card 969b0e1c): a `sha:`-sigil'd anchor citing a REAL, verified commit resolves
   // exactly like a card anchor, and the injected heading carries the sigil (never confusable with a card

@@ -107,11 +107,16 @@ const FLAT_STORES = ["adr", "decisions"];
 // were silently truncating on every injection under the old 4000 cap; 6000 cleared that whole
 // then-current set, with headroom.
 //
-// Record authors: if a NEW record in docs/adr or docs/decisions exceeds this cap, it will be truncated
-// (head+tail kept, an explicit marker names the cut and the full path to read directly) — this is a real,
-// load-bearing limit, not just an implementation detail; keep records under it, or accept the truncation
-// and expect it may be re-raised. See CLAUDE.md's "Comment taxonomy — the source-vs-record split" for the
-// docs/adr and docs/decisions convention.
+// Record authors: if a NEW record in docs/adr or docs/decisions exceeds this cap, it will be truncated —
+// an explicit marker names the cut and the full path to read directly — this is a real, load-bearing
+// limit, not just an implementation detail; keep records under it, or accept the truncation and expect it
+// may be re-raised. See CLAUDE.md's "Comment taxonomy — the source-vs-record split" for the docs/adr and
+// docs/decisions convention.
+//
+// @decision 8449a258 — a record with a 'Do not'-style heading always injects its title + EVERY such
+// heading in full; only the rest is head+tail truncated. Do not revert to whole-text truncation for a
+// record that has one — that is what silently drops a prohibition into the elided middle.
+//
 // Exported (card d0d0401b): comment-anchor-lint.mjs imports this so its over-cap census reads the SAME
 // constant this injector actually truncates against — one source of truth, so raising the cap here can
 // never leave that lint silently checking a stale number. Safe to import despite the "assets are
@@ -265,31 +270,113 @@ function relPath(repoRoot, p) {
  * codepoint, never a valid place to cut a UTF-8 buffer. */
 function isContinuationByte(b) { return (b & 0xc0) === 0x80; }
 
+/** Matches a Markdown ATX heading of any level (`#` through `######`) at the start of a line — level is
+ * `group[1].length`, heading text is `group[2]` (trailing whitespace trimmed). Deliberately matches
+ * EVERY level, not just `##`: a record's 'Do not' section is not always a top-level `##` — some records
+ * nest it as `###` under a `## Decision N` parent (measured across this repo's real corpus, card
+ * 8449a258: 18 records carry a 'Do not' heading ONLY at `###`, never at `##`). Splitting on every level
+ * finds it either way. */
+const HEADING_RE = /^(#{1,6})[ \t]+(.+?)[ \t]*$/gm;
+
+/** True iff a heading's text is a 'Do not'-style heading — "Do not" optionally followed by more (a
+ * numbering suffix "(2)", a parenthetical, ...), case-insensitive. Measured (card 8449a258): every
+ * instance in this repo today is spelled exactly "Do not" — case-insensitive costs nothing and is simply
+ * the more defensive reading. */
+function isDoNotHeading(heading) { return /^do not\b/i.test(heading); }
+
 /**
- * Truncate `text` to at most `maxBytes` UTF-8 bytes, keeping the HEAD and the TAIL (never just the head:
- * card-review N2 — this repo's own convention puts caveats/bounds LAST in a comment, so a head-only cut
- * keeps the claim and drops its qualifier, reproducing this very card's thesis inside the injector
- * itself), snapping both cut points to a real codepoint boundary so a multi-byte character (this repo's
- * house typography — em dashes, arrows, warning glyphs — is 2-3 bytes each) is never split mid-sequence
- * (card-review B2: the prior `body.slice(0, maxBytes)` sliced UTF-16 CODE UNITS, so e.g. 4000 chars of
- * 3-byte em dashes produced 12000 BYTES — 3x the stated cap, silently blowing the shared per-call budget
- * and causing an otherwise-fitting record to be dropped whole instead of truncated).
+ * Split `text` into `{ preamble, blocks }`: `preamble` is everything before the first heading of any
+ * level (typically just the record's own `# <id> — <title>` line and the blank line after it — some
+ * records instead open with an HTML-comment title line); each block is `{ level, heading, body }`,
+ * where `body` runs from that heading line through (not including) the next heading or end of file.
+ * `preamble` plus every block's `body`, concatenated IN ORDER, reconstructs `text` exactly — a lossless
+ * partition, which is what lets `truncateRecord` below reorder blocks (protected ones first) without
+ * dropping or duplicating a single byte of the source record.
  */
-function truncateRecord(text, maxBytes) {
-  const buf = Buffer.from(text, "utf8");
-  if (buf.length <= maxBytes) return { text, truncated: false };
-  const marker = "\n\n… [elided — see full record] …\n\n";
-  const markerBytes = Buffer.byteLength(marker, "utf8");
-  const remaining = Math.max(0, maxBytes - markerBytes);
-  const headBudget = Math.min(buf.length, Math.ceil(remaining * 0.6));
-  const tailBudget = Math.max(0, remaining - headBudget);
+function splitIntoBlocks(text) {
+  const matches = [...text.matchAll(HEADING_RE)];
+  const preambleEnd = matches.length ? matches[0].index : text.length;
+  const blocks = matches.map((m, i) => {
+    const start = m.index;
+    const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
+    return { level: m[1].length, heading: m[2], body: text.slice(start, end) };
+  });
+  return { preamble: text.slice(0, preambleEnd), blocks };
+}
+
+/**
+ * Slice `buf` to at most `budget` UTF-8 bytes total, keeping ~60% from the head and the rest from the
+ * tail (never just the head: card-review N2 — this repo's own convention puts caveats/bounds LAST in a
+ * comment, so a head-only cut keeps the claim and drops its qualifier, reproducing this very card's
+ * thesis inside the injector itself), snapping both cut points to a real codepoint boundary so a
+ * multi-byte character (this repo's house typography — em dashes, arrows, warning glyphs — is 2-3 bytes
+ * each) is never split mid-sequence (card-review B2: the prior `body.slice(0, maxBytes)` sliced UTF-16
+ * CODE UNITS, so e.g. 4000 chars of 3-byte em dashes produced 12000 BYTES — 3x the stated cap, silently
+ * blowing the shared per-call budget and causing an otherwise-fitting record to be dropped whole instead
+ * of truncated). Returns `{head, tail, elided}` — `elided` is false when `budget` already covers the
+ * whole buffer (nothing was actually cut), so a caller never prints an elision marker naming zero bytes.
+ */
+function headTailSlice(buf, budget) {
+  const b = Math.max(0, budget);
+  if (buf.length <= b) return { head: buf.toString("utf8"), tail: "", elided: false };
+  const headBudget = Math.min(buf.length, Math.ceil(b * 0.6));
+  const tailBudget = Math.max(0, b - headBudget);
   let headEnd = headBudget;
   while (headEnd > 0 && isContinuationByte(buf[headEnd])) headEnd--; // never end mid-codepoint
   let tailStart = Math.max(headEnd, buf.length - tailBudget);
   while (tailStart < buf.length && isContinuationByte(buf[tailStart])) tailStart++; // never start mid-codepoint
   const head = buf.slice(0, headEnd).toString("utf8");
   const tail = tailStart < buf.length ? buf.slice(tailStart).toString("utf8") : "";
-  return { text: `${head}${marker}${tail}`, truncated: true };
+  return { head, tail, elided: true };
+}
+
+/** The FALLBACK for a record with no 'Do not'-style heading at all (measured, card 8449a258: ~8% of
+ * this repo's real corpus) — the ORIGINAL whole-text head+tail truncation, unchanged. */
+function legacyHeadTailTruncate(buf, maxBytes) {
+  const marker = "\n\n… [elided — see full record] …\n\n";
+  const markerBytes = Buffer.byteLength(marker, "utf8");
+  const { head, tail } = headTailSlice(buf, maxBytes - markerBytes);
+  return { text: `${head}${marker}${tail}`, truncated: true, mode: "legacy" };
+}
+
+/**
+ * Truncate `text` to at most `maxBytes` UTF-8 bytes.
+ *
+ * @decision 8449a258 — a record with a 'Do not'-style heading always injects its title + EVERY such
+ * heading in full; only the rest is head+tail truncated. Do not revert to whole-text truncation for a
+ * record that has one — that is what silently drops a prohibition into the elided middle.
+ */
+function truncateRecord(text, maxBytes) {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= maxBytes) return { text, truncated: false };
+
+  const { preamble, blocks } = splitIntoBlocks(text);
+  if (!blocks.some((b) => isDoNotHeading(b.heading))) return legacyHeadTailTruncate(buf, maxBytes);
+
+  const protectedParts = [preamble];
+  const otherParts = [];
+  for (const b of blocks) {
+    if (b.level === 1 || isDoNotHeading(b.heading)) protectedParts.push(b.body);
+    else otherParts.push(b.body);
+  }
+  const protectedText = protectedParts.join("");
+  const otherText = otherParts.join("");
+  const protectedBytes = Buffer.byteLength(protectedText, "utf8");
+
+  const marker = "\n\n… [elided — see full record] …\n\n";
+  const markerBytes = Buffer.byteLength(marker, "utf8");
+  const otherBuf = Buffer.from(otherText, "utf8");
+  const { head, tail, elided } = headTailSlice(otherBuf, maxBytes - protectedBytes - markerBytes);
+
+  if (!elided) {
+    // Reordering (title + Do-not sections moved ahead of the rest) alone made everything fit. Provably
+    // unreachable given `buf.length > maxBytes` above (protectedBytes + otherBuf.length === buf.length,
+    // so the budget passed to headTailSlice is always < otherBuf.length) — kept as a defensive branch
+    // rather than assumed away, mirroring this file's other defensive branches (e.g. main()'s own
+    // `sections.length === 0`).
+    return { text: `${protectedText}${otherText}`, truncated: false };
+  }
+  return { text: `${protectedText}${head}${marker}${tail}`, truncated: true, mode: "protected" };
 }
 
 /**
@@ -389,14 +476,20 @@ async function main() {
   const omitted = [];
   const newlyDelivered = [];
   for (const { key, ns, id, recordPath, text } of candidates) {
-    const { text: body, truncated } = truncateRecord(text, PER_RECORD_MAX_BYTES);
+    const { text: body, truncated, mode } = truncateRecord(text, PER_RECORD_MAX_BYTES);
     const rel = relPath(repoRoot, recordPath);
     // The rendered heading carries the sigil for a sha-keyed record — the same "never confusable by a
     // reader" property the anchor grammar itself enforces (card 969b0e1c) must survive into the injected
     // text, not just the source comment.
     const label = ns === "sha" ? `sha:${id}` : id;
+    // card 8449a258: the two truncation modes get DIFFERENT messages — "protected" mode never cuts a
+    // 'Do not' section, so the old "head+tail kept, middle elided" wording (true only of "legacy" mode)
+    // would misdescribe what actually happened to a reader deciding whether to go read the full record.
+    const truncationNote = mode === "protected"
+      ? `[TRUNCATED at ${PER_RECORD_MAX_BYTES} bytes — title + 'Do not' section(s) kept IN FULL, only the narrative was head+tail truncated — full record: ${rel}]`
+      : `[TRUNCATED at ${PER_RECORD_MAX_BYTES} bytes — head+tail kept, middle elided — full record: ${rel}]`;
     const rendered = `### decision ${label} (${rel})\n\n${body}`
-      + (truncated ? `\n\n[TRUNCATED at ${PER_RECORD_MAX_BYTES} bytes — head+tail kept, middle elided — full record: ${rel}]` : "");
+      + (truncated ? `\n\n${truncationNote}` : "");
     const renderedBytes = Buffer.byteLength(rendered, "utf8");
     // Past budget: drop the WHOLE record rather than truncate it further — a record already at its own
     // per-record cap is truncated-with-signal above; a record that merely lost the race for shared
