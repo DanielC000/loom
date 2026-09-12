@@ -14,9 +14,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 // scopes, run against the REAL repo (must currently PASS — the mechanism is only shipped because neither
 // condition holds today, in either scope) plus synthetic controls proving the check can actually FAIL when
 // the precondition is violated, AND that the scope *parameter* discriminates on a synthetic tree (a check
-// that only ever returns "sound" is not evidence of anything). ⚠️ That last control (§F) proves the
+// that only ever returns "sound" is not evidence of anything). That last control (§F) proves the
 // PARAMETER discriminates, never that either caller's REAL, hand-copied-here scope constant is covered —
-// see (F)'s own header for why, and why that's carded separately rather than fixed here.
+// (G)/(H) below close exactly that gap (card 8abf427f, off Code Review F3/F5 on card bafc68e7): they read
+// the REAL `WORKTREES_EMIT_COMPARE_SCOPE`/`DEPLOY_STALENESS_EMIT_COMPARE_SCOPE` object literals as TEXT out
+// of git/worktrees.ts/deploy-staleness.ts and assert they still match DAEMON_SCOPE/DAEMON_SHARED_SCOPE
+// below, so a production scope narrowing (or an unnoticed widening) now flips (G) red instead of passing
+// silently. Because (G) reads real packages/daemon/src/**/*.ts SOURCE TEXT and pattern-matches it — a
+// genuinely NEW read, not already re-verified live the way (A)/(E)'s const-enum walk is (see
+// git/worktrees.ts's own shape-(6) doc for why THAT walk needs no seat) — this file is a real member of
+// `CHANGED_TS_TEXT_SCANNER_REPO_PATHS` (git/worktrees.ts); see that list's own entry for this file.
 //
 // Code Review (manager #128): `emitDecoratorMetadata` is checked in BOTH files of the daemon's real
 // `extends` chain — `tsconfig.base.json` AND `packages/daemon/tsconfig.json` (which extends the base and
@@ -74,8 +81,8 @@ const DAEMON_SHARED_SCOPE = {
 };
 
 // Structural re-derivation of emit-compare-soundness.ts's own emitCompareSoundnessOk, parameterized the
-// SAME way (never defaulted) — used only by the (F) discriminating scope control below; sections (A)/(A2)/
-// (E) assert each sub-check individually for finer-grained PASS/FAIL reporting.
+// SAME way (never defaulted) — used by the (D)/(F) synthetic-fixture controls below; sections (A)/(A2)/(E)
+// assert each sub-check individually for finer-grained PASS/FAIL reporting.
 function soundnessOk(repoRoot, scope) {
   for (const tsconfigRelPath of scope.tsconfigRelPaths) {
     try {
@@ -96,6 +103,44 @@ function soundnessOk(repoRoot, scope) {
   } catch {
     return false;
   }
+}
+
+// Text-extraction helpers for (G)/(H) (card 8abf427f) — parse an `EmitCompareSoundnessScope`-typed object
+// literal out of real .ts SOURCE TEXT (never imported/executed — same injectable-text posture this whole
+// guard takes per its own header). Tolerant of either a bare string literal or a `path.join(...)` call as
+// an array element, the two shapes the real constants actually use — each computed through the SAME node
+// `path` module both sides of the comparison already go through, so a match is platform-consistent. Fails
+// closed to `null` on no match, never to an empty/partial scope, so a renamed constant or reshaped literal
+// is reported as "not found" (sanity check fails loud) rather than silently comparing against nothing.
+function parsePathJoinArgs(argsText) {
+  const parts = [];
+  const partRe = /"([^"]*)"|'([^']*)'/g;
+  let m;
+  while ((m = partRe.exec(argsText))) parts.push(m[1] ?? m[2]);
+  return path.join(...parts);
+}
+function extractScopeArray(blockText, arrayName) {
+  const arrMatch = new RegExp(`${arrayName}\\s*:\\s*\\[([\\s\\S]*?)\\]`).exec(blockText);
+  if (!arrMatch) return null;
+  const elems = [];
+  const elemRe = /path\.join\(([^)]*)\)|"([^"]*)"|'([^']*)'/g;
+  let m;
+  while ((m = elemRe.exec(arrMatch[1]))) {
+    elems.push(m[1] !== undefined ? parsePathJoinArgs(m[1]) : (m[2] ?? m[3]));
+  }
+  return elems;
+}
+function extractScopeLiteral(sourceText, constName) {
+  const blockMatch = new RegExp(`const\\s+${constName}\\s*:\\s*EmitCompareSoundnessScope\\s*=\\s*\\{([\\s\\S]*?)\\n\\};`).exec(sourceText);
+  if (!blockMatch) return null;
+  const tsconfigRelPaths = extractScopeArray(blockMatch[1], "tsconfigRelPaths");
+  const srcDirRelPaths = extractScopeArray(blockMatch[1], "srcDirRelPaths");
+  if (tsconfigRelPaths === null || srcDirRelPaths === null) return null;
+  return { tsconfigRelPaths, srcDirRelPaths };
+}
+function scopesEqual(a, b) {
+  const arraysEqual = (x, y) => Array.isArray(x) && Array.isArray(y) && x.length === y.length && x.every((v, i) => v === y[i]);
+  return !!a && !!b && arraysEqual(a.tsconfigRelPaths, b.tsconfigRelPaths) && arraysEqual(a.srcDirRelPaths, b.srcDirRelPaths);
 }
 
 // ── (A) REAL REPO — the precondition must hold TODAY, or the mechanism this guard protects has no
@@ -135,21 +180,30 @@ function soundnessOk(repoRoot, scope) {
     fs.writeFileSync(fixture, "const enum Direction { Up, Down }\nexport { Direction };\n");
     const hits = walkTsFiles(tmpDir).filter((f) => CONST_ENUM.test(fs.readFileSync(f, "utf8")));
     check("(C) a genuine `const enum` declaration in a fixture file DOES trip the check", hits.length === 1);
-
-    const fixture2 = path.join(tmpDir, "fixture2.ts");
-    fs.writeFileSync(fixture2, "export const config = { emitDecoratorMetadata: true };\n");
-    // The tsconfig check only ever reads tsconfig.base.json itself, never scans src/ for the string — this
-    // arm exists purely so a reader can't mistake the const-enum walk above for also covering this case.
-    check("(C) (documentation-only) the decorator-metadata check is a tsconfig read, not a src/ scan — not exercised by this fixture", true);
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 }
 
-// ── (D) NEGATIVE CONTROL for the tsconfig check itself ──────────────────────────────────────────────
+// ── (D) NEGATIVE CONTROL for the tsconfig check itself — a synthetic tree whose tsconfig.base.json sets
+//        emitDecoratorMetadata:true MUST make the re-derived soundnessOk() itself return false. (Card
+//        8abf427f, Code Review F3: the prior version of this section only asserted `JSON.parse` and
+//        optional-chaining behavior on an inline object literal — zero connection to any predicate, real
+//        or re-derived; it passed even if the whole emit-compare feature were deleted.) ─────────────────
 {
-  const violating = JSON.parse('{"compilerOptions":{"emitDecoratorMetadata":true}}');
-  check("(D) a tsconfig with emitDecoratorMetadata:true DOES trip the check", violating.compilerOptions?.emitDecoratorMetadata === true);
+  const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "loom-ecsg-decorator-"));
+  try {
+    fs.writeFileSync(path.join(tmpRepo, "tsconfig.base.json"), '{"compilerOptions":{"emitDecoratorMetadata":true}}\n');
+    fs.mkdirSync(path.join(tmpRepo, "packages", "daemon", "src"), { recursive: true });
+    fs.writeFileSync(path.join(tmpRepo, "packages", "daemon", "tsconfig.json"), "{}\n");
+    fs.writeFileSync(path.join(tmpRepo, "packages", "daemon", "src", "clean.ts"), "export const x = 1;\n");
+    check(
+      "(D) a tsconfig.base.json with emitDecoratorMetadata:true DOES trip the re-derived soundnessOk() to false",
+      soundnessOk(tmpRepo, DAEMON_SCOPE) === false,
+    );
+  } finally {
+    fs.rmSync(tmpRepo, { recursive: true, force: true });
+  }
 }
 
 // ── (E) REAL REPO, WIDER SCOPE (card bafc68e7) — deploy-staleness.ts's own daemon+shared coverage must
@@ -170,12 +224,12 @@ function soundnessOk(repoRoot, scope) {
 // ── (F) DISCRIMINATING CONTROL (card bafc68e7) — prove the SCOPE PARAMETER ITSELF discriminates: a
 //        violation planted ONLY under a shared-scope-shaped src dir must be INVISIBLE to the daemon-only
 //        scope object and CAUGHT by the daemon+shared scope object on the exact SAME tree — "what would
-//        this print if the feature were broken?" ⚠️ CORRECTED (Code Review F3): this does NOT prove
-//        anything about the REAL production scope constants (`WORKTREES_EMIT_COMPARE_SCOPE` in
-//        worktrees.ts, `DEPLOY_STALENESS_EMIT_COMPARE_SCOPE` in deploy-staleness.ts) — this file never reads
-//        either one; `DAEMON_SCOPE`/`DAEMON_SHARED_SCOPE` just below are hand-copied literals, per this
-//        file's own header. A caller that silently narrowed its REAL scope constant would NOT be caught by
-//        this control; that hardening (reading the real literals) is carded separately. ─────────────────
+//        this print if the feature were broken?" CORRECTED (Code Review F3): this does NOT prove anything
+//        about the REAL production scope constants (`WORKTREES_EMIT_COMPARE_SCOPE` in worktrees.ts,
+//        `DEPLOY_STALENESS_EMIT_COMPARE_SCOPE` in deploy-staleness.ts) — this file never reads either one;
+//        `DAEMON_SCOPE`/`DAEMON_SHARED_SCOPE` just below are hand-copied literals, per this file's own
+//        header. A caller that silently narrowed its REAL scope constant would NOT be caught by this
+//        control alone — (G)/(H) below close that gap (card 8abf427f) by reading the real literals. ─────
 {
   const tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), "loom-ecsg-scope-"));
   try {
@@ -204,7 +258,51 @@ function soundnessOk(repoRoot, scope) {
   }
 }
 
+// ── (G) REAL PRODUCTION SCOPE CONSTANTS (card 8abf427f, closing the gap (F)'s own header names) — read the
+//        ACTUAL `WORKTREES_EMIT_COMPARE_SCOPE` (git/worktrees.ts) and `DEPLOY_STALENESS_EMIT_COMPARE_SCOPE`
+//        (deploy-staleness.ts) object literals as TEXT and assert they still match this guard's own
+//        hand-copied DAEMON_SCOPE/DAEMON_SHARED_SCOPE above. (A)/(A2)/(E)/(F) above only ever exercise this
+//        file's OWN copies — a real caller silently NARROWING its production scope (e.g. dropping
+//        packages/shared/src from deploy-staleness.ts's coverage) changed nothing any of them could see,
+//        because nothing above ever reads the real constant. This section does. ───────────────────────────
+{
+  const worktreesSrcText = fs.readFileSync(path.join(repoRoot, "packages", "daemon", "src", "git", "worktrees.ts"), "utf8");
+  const deployStalenessSrcText = fs.readFileSync(path.join(repoRoot, "packages", "daemon", "src", "deploy-staleness.ts"), "utf8");
+
+  const realWorktreesScope = extractScopeLiteral(worktreesSrcText, "WORKTREES_EMIT_COMPARE_SCOPE");
+  check("(G) sanity: WORKTREES_EMIT_COMPARE_SCOPE literal was found and parsed out of the real git/worktrees.ts source", realWorktreesScope !== null);
+  check(
+    "(G) the REAL git/worktrees.ts WORKTREES_EMIT_COMPARE_SCOPE matches this guard's own DAEMON_SCOPE copy — a production narrowing/widening here is now caught",
+    scopesEqual(realWorktreesScope, DAEMON_SCOPE),
+  );
+
+  const realDeployStalenessScope = extractScopeLiteral(deployStalenessSrcText, "DEPLOY_STALENESS_EMIT_COMPARE_SCOPE");
+  check("(G) sanity: DEPLOY_STALENESS_EMIT_COMPARE_SCOPE literal was found and parsed out of the real deploy-staleness.ts source", realDeployStalenessScope !== null);
+  check(
+    "(G) the REAL deploy-staleness.ts DEPLOY_STALENESS_EMIT_COMPARE_SCOPE matches this guard's own DAEMON_SHARED_SCOPE copy — a production narrowing/widening here is now caught",
+    scopesEqual(realDeployStalenessScope, DAEMON_SHARED_SCOPE),
+  );
+}
+
+// ── (H) NEGATIVE CONTROL for (G) — prove the extraction+comparison mechanism can actually FAIL: synthetic
+//        source text shaped exactly like the real declaration but with ONE path element removed (the
+//        textual shape a real narrowing takes) MUST be reported as a mismatch, not silently accepted ────
+{
+  const narrowedSourceText = `
+const WORKTREES_EMIT_COMPARE_SCOPE: EmitCompareSoundnessScope = {
+  tsconfigRelPaths: ["tsconfig.base.json"],
+  srcDirRelPaths: [path.join("packages", "daemon", "src")],
+};
+`;
+  const extracted = extractScopeLiteral(narrowedSourceText, "WORKTREES_EMIT_COMPARE_SCOPE");
+  check("(H) sanity: the narrowed fixture text itself still parses (control isn't vacuous)", extracted !== null);
+  check(
+    "(H) DISCRIMINATING: a scope literal missing one tsconfig path (the textual shape a real narrowing takes) is correctly reported as NOT matching the real DAEMON_SCOPE copy",
+    extracted !== null && scopesEqual(extracted, DAEMON_SCOPE) === false,
+  );
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the real repo satisfies the soundness precondition today under BOTH the daemon-only scope (git/worktrees.ts) and the daemon+shared scope (deploy-staleness.ts), pty/host.ts's `const enumerate` identifier does not false-positive, the const-enum/emitDecoratorMetadata fixtures prove the checks can genuinely fail, and a violation planted only under packages/shared/src is invisible to a daemon-only SCOPE OBJECT but caught by a daemon+shared SCOPE OBJECT on the identical tree — proving the scope PARAMETER discriminates (this does NOT prove anything about either caller's real, hand-copied-here scope constant — see (F)'s own header)."
+  ? "\n✅ ALL PASS — the real repo satisfies the soundness precondition today under BOTH the daemon-only scope (git/worktrees.ts) and the daemon+shared scope (deploy-staleness.ts), pty/host.ts's `const enumerate` identifier does not false-positive, the const-enum/emitDecoratorMetadata fixtures prove the checks can genuinely fail, a violation planted only under packages/shared/src is invisible to a daemon-only SCOPE OBJECT but caught by a daemon+shared SCOPE OBJECT on the identical tree (proving the scope PARAMETER discriminates), AND the REAL git/worktrees.ts + deploy-staleness.ts scope constants — read as text, not hand-copied — still match this guard's own copies (proving a production scope narrowing would now be caught, not just a synthetic one)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

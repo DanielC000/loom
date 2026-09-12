@@ -50,8 +50,10 @@ export function transpileIgnoringCommentsAndWhitespace(
  *  `ENOENT`) MUST propagate to the caller's own try/catch (`emitCompareSoundnessOk`, below), which fails
  *  the WHOLE soundness check closed to `false`. Swallowing it here and returning whatever was accumulated
  *  so far would let the soundness check read `true` off a PARTIAL scan — a real `const enum` sitting in
- *  the unscanned remainder would then silently pass, exactly the fail-open this check exists to prevent. */
-export function walkTsFiles(dir: string, out: string[] = []): string[] {
+ *  the unscanned remainder would then silently pass, exactly the fail-open this check exists to prevent.
+ *  @decision 8abf427f — never re-export this: no external consumer (MEASURED), and its no-try/catch
+ *  contract is hazard-specific to `emitCompareSoundnessOk`'s own catch, not a general-purpose walker. */
+function walkTsFiles(dir: string, out: string[] = []): string[] {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) walkTsFiles(full, out);

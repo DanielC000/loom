@@ -91,6 +91,10 @@ function findDeclarations(files, name) {
   const files = walkTsFiles(daemonSrc);
   check("(A) walked a non-trivial number of real source files (sanity: the walk itself works)", files.length > 50);
 
+  // @decision 8abf427f — this deliberately reserves `walkTsFiles` repo-wide under packages/daemon/src, so
+  // an unrelated future module needing its own local `function walkTsFiles(` must rename. Left as-is: a
+  // rename is cheap; a silently-narrowed single-definition guard is not, and there is no other file this
+  // check needs to distinguish from a real re-duplication today.
   for (const name of ["emitCompareSoundnessOk", "walkTsFiles", "transpileIgnoringCommentsAndWhitespace"]) {
     const hits = findDeclarations(files, name);
     check(`(A) exactly ONE \`function ${name}(\` declaration exists under packages/daemon/src`, hits.length === 1);

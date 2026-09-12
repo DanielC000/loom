@@ -2948,7 +2948,10 @@ export const ASSET_READING_TEST_REPO_PATHS = [
  *        on the SAME "that's a behavioural `.ts`
  *        edit" ground {@link STATIC_GUARD_REPO_PATHS}'s own doc gives for this exact file, one list over.
  *        Its (B) positive-control section is separately immune under shape (4) (a presence-only check on a
- *        real declaration name). Added by card `fab07aba`.
+ *        real declaration name). Added by card `fab07aba`. ⚠️ This shape-(6) immunity covers ONLY (A)/(E)'s
+ *        const-enum walk — card `8abf427f` gave this SAME file a genuine, non-immune seat below for an
+ *        unrelated read its (G)/(H) sections added (the real scope CONSTANTS, not the const-enum walk);
+ *        do not read this file's presence in the list below as contradicting the immunity argument here.
  *  This is a judgment call, not a closed taxonomy — see the record's own closing note before assuming a
  *  new candidate's absence from these six proves it belongs on THIS list instead.
  *  card `abaaf16e`'s own report names option (b) — teaching the raw scanners below to strip comments the
@@ -3020,6 +3023,14 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // `removeComments:true` while the guard's own (now-hardened, but not proven immune) regex is the exact
   // shape-(4) hazard `loopback-secret.mjs`/`gateway-token.mjs` were added here for.
   "packages/daemon/test/emit-compare-soundness-single-definition-guard.mjs",
+  // Card 8abf427f (Code Review F3/F5 on bafc68e7): its (G)/(H) sections read the REAL
+  // `WORKTREES_EMIT_COMPARE_SCOPE` (this file) and `DEPLOY_STALENESS_EMIT_COMPARE_SCOPE`
+  // (deploy-staleness.ts) object literals as TEXT and pattern-match them — a genuinely NEW read, not one
+  // already re-verified live the way (A)/(E)'s const-enum walk is (shape (6) above): nothing in production
+  // ever re-derives "does the hand-copied DAEMON_SCOPE/DAEMON_SHARED_SCOPE literal still match the real
+  // constant", so there is no live twin to inherit immunity from — the same reasoning
+  // emit-compare-soundness-single-definition-guard.mjs's own header already gives for its seat here.
+  "packages/daemon/test/emit-compare-soundness-guard.mjs",
 ];
 
 /** @decision f862f9c5 — never fold this list into {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} or its
