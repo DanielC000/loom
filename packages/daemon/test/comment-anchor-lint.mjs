@@ -104,6 +104,7 @@ import {
   findSplitAnchorParagraphs,
   findOversizedRecords,
   findCollidingRecords,
+  findRecordsMissingDoNot,
   listRecordIds,
   computeReport,
   computeFileReport,
@@ -952,6 +953,63 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   }
 }
 
+// --- findRecordsMissingDoNot (card abd049da) ------------------------------------------------------------
+
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-missing-do-not-"));
+  try {
+    fs.mkdirSync(path.join(dir, "docs", "adr"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "docs", "decisions"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "docs", "investigations", "cccccccc-narrative-only"), { recursive: true });
+
+    // aaaaaaaa (docs/decisions): HAS a 'Do not' section — must never be flagged.
+    fs.writeFileSync(path.join(dir, "docs", "decisions", "aaaaaaaa-has-do-not.md"),
+      "# aaaaaaaa\n\n## Narrative\n\nsome narrative.\n\n## Do not\n\n- never do the thing.\n");
+    // bbbbbbbb (docs/adr): NO 'Do not' section anywhere — must be flagged, scoped to docs/adr.
+    fs.writeFileSync(path.join(dir, "docs", "adr", "bbbbbbbb-no-do-not.md"),
+      "# bbbbbbbb\n\n## Narrative\n\nsome narrative, no prohibition anywhere.\n");
+    // dddddddd (docs/decisions): a 'Do not' heading nested at H3 under a H2 parent — must NOT be flagged
+    // (mirrors decision-records.mjs's own any-level detection, card 8449a258).
+    fs.writeFileSync(path.join(dir, "docs", "decisions", "dddddddd-nested-do-not.md"),
+      "# dddddddd\n\n## Decision A\n\nnarrative.\n\n### Do not\n\n- nested prohibition.\n");
+    // cccccccc (docs/investigations): NO 'Do not' section — must NEVER be flagged (card abd049da's own
+    // scoping decision: investigations are narrative reports, explicitly excluded, not merely deferred).
+    fs.writeFileSync(path.join(dir, "docs", "investigations", "cccccccc-narrative-only", "findings.md"),
+      "# cccccccc — findings\n\nan investigation report with no prohibition to state.\n");
+
+    const records = listRecordIds(dir);
+    const missing = findRecordsMissingDoNot(dir, records);
+    const missingIds = missing.map((r) => r.id);
+
+    check("findRecordsMissingDoNot: a record WITH a Do-not section is never flagged",
+      !missingIds.includes("aaaaaaaa"));
+    check("findRecordsMissingDoNot: a docs/adr record with NO Do-not section IS flagged",
+      missingIds.includes("bbbbbbbb"));
+    check("findRecordsMissingDoNot: a Do-not heading nested at H3 under a H2 parent is NOT flagged "
+      + "(any-level detection, matching decision-records.mjs's own hasDoNotSection)",
+      !missingIds.includes("dddddddd"));
+    check("findRecordsMissingDoNot: a docs/investigations record with no Do-not section is NEVER flagged "
+      + "(explicitly excluded scope, not merely deferred — card abd049da)",
+      !missingIds.includes("cccccccc"));
+    check("findRecordsMissingDoNot: exactly the one expected flat-store record is reported",
+      missing.length === 1 && missing[0].id === "bbbbbbbb");
+
+    // computeReport wiring: the same population surfaces on the full report, scoped and labelled.
+    const report = computeReport(dir);
+    check("computeReport: missingDoNotRecords carries the same flat-store-only population",
+      report.missingDoNotRecords.count === 1 && report.missingDoNotRecords.items[0]?.id === "bbbbbbbb");
+    check("computeReport: missingDoNotRecords names its own flat-store-only scope",
+      typeof report.missingDoNotRecords.scope === "string" && report.missingDoNotRecords.scope.includes("docs/adr"));
+    const fileReport = computeFileReport(dir, path.join(dir, "packages", "daemon", "src", "x.ts"), "// nothing\n");
+    check("sanity: computeFileReport actually returned a real report (else the next check is vacuous)", !!fileReport);
+    check("computeFileReport: missingDoNotRecords is NOT a key on the hook-shaped report (CLI-scan only, "
+      + "by design — records live under docs/, outside SOURCE_ROOTS)",
+      !!fileReport && !("missingDoNotRecords" in fileReport));
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
 // --- findCollidingRecords (card a4b83fb7) --------------------------------------------------------------
 
 {
@@ -1552,6 +1610,8 @@ try {
     JSON.stringify(report.collidingRecords) === JSON.stringify(reportBefore.collidingRecords));
   check("DoD-4 before/after: oversizedRecords is UNCHANGED",
     JSON.stringify(report.oversizedRecords) === JSON.stringify(reportBefore.oversizedRecords));
+  check("DoD-4 before/after: missingDoNotRecords is UNCHANGED (same ground as oversizedRecords/collidingRecords)",
+    JSON.stringify(report.missingDoNotRecords) === JSON.stringify(reportBefore.missingDoNotRecords));
   check("DoD-4 before/after: overlongAnchorIds moves from 0 (BEFORE) to exactly 1 (AFTER) — the new signal, and ONLY it, moved",
     reportBefore.overlongAnchorIds.count === 0 && report.overlongAnchorIds.count === 1);
   check("computeReport: the overlong anchor is reported with the correct file, ns, and full matched text",
@@ -1582,6 +1642,8 @@ try {
       JSON.stringify(reportWithSigilSpace.collidingRecords) === JSON.stringify(report.collidingRecords));
     check("DoD-4 (e708670b) before/after: oversizedRecords is UNCHANGED",
       JSON.stringify(reportWithSigilSpace.oversizedRecords) === JSON.stringify(report.oversizedRecords));
+    check("DoD-4 (e708670b) before/after: missingDoNotRecords is UNCHANGED",
+      JSON.stringify(reportWithSigilSpace.missingDoNotRecords) === JSON.stringify(report.missingDoNotRecords));
     check("DoD-4 (e708670b) before/after: sigilSpaceAnchors moves from 0 to exactly 1 — the new signal, and ONLY it, moved",
       report.sigilSpaceAnchors.count === 0 && reportWithSigilSpace.sigilSpaceAnchors.count === 1);
     check("computeReport: the sigil-space anchor is reported with the correct file and full matched text",
@@ -1617,6 +1679,8 @@ try {
       JSON.stringify(reportWithSigilSpaceBefore.collidingRecords) === JSON.stringify(report.collidingRecords));
     check("DoD-4 (e708670b widening) before/after: oversizedRecords is UNCHANGED",
       JSON.stringify(reportWithSigilSpaceBefore.oversizedRecords) === JSON.stringify(report.oversizedRecords));
+    check("DoD-4 (e708670b widening) before/after: missingDoNotRecords is UNCHANGED",
+      JSON.stringify(reportWithSigilSpaceBefore.missingDoNotRecords) === JSON.stringify(report.missingDoNotRecords));
     check("DoD-4 (e708670b widening) before/after: sigilSpaceAnchors moves from 0 to exactly 1 for the before-colon shape too",
       report.sigilSpaceAnchors.count === 0 && reportWithSigilSpaceBefore.sigilSpaceAnchors.count === 1);
     check("computeReport: the before-colon sigil-space anchor is reported with the correct file and full matched text",

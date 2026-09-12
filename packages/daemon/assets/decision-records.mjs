@@ -21,9 +21,13 @@
 // straight through a long comment block and deliver a fragment that carries the OPPOSITE instruction of
 // the whole (measured: 42.1% of block/window intersections truncated — see card 661b7d46's own evidence).
 // Anchors fix this structurally: the anchor itself is short enough to always survive a read window
-// intact, and THIS hook appends the FULL, out-of-band record whenever an anchor's line falls inside the
-// range the `Read` tool actually returned (or immediately ABOVE it, in the same undivided block — see
-// `expandStartToBlock` below) — so the agent always sees the complete record, never a slice of it.
+// intact, and THIS hook appends the record's guard whenever an anchor's line falls inside the range the
+// `Read` tool actually returned (or immediately ABOVE it, in the same undivided block — see
+// `expandStartToBlock` below) — so the agent always sees the prohibition, never a slice of it.
+//
+// @decision abd049da — do not reintroduce whole-record injection: only a record's title + its 'Do not'
+// section(s) (or an explicit no-Do-not note) plus a pointer are injected now — full-record injection was
+// measured ~60-70x costlier than the reads it replaced actually saved, at this repo's corpus scale.
 //
 // Invoked by Claude Code as: node decision-records.mjs <dedupeDir>
 // Reads the PostToolUse payload on stdin: {tool_name, tool_input:{file_path,offset,limit}, session_id,
@@ -113,9 +117,9 @@ const FLAT_STORES = ["adr", "decisions"];
 // may be re-raised. See CLAUDE.md's "Comment taxonomy — the source-vs-record split" for the docs/adr and
 // docs/decisions convention.
 //
-// @decision 8449a258 — a record with a 'Do not'-style heading always injects its title + EVERY such
-// heading in full; only the rest is head+tail truncated. Do not revert to whole-text truncation for a
-// record that has one — that is what silently drops a prohibition into the elided middle.
+// @decision 8449a258 — a record's title + EVERY 'Do not'-style heading always injects in full, and
+// NEVER the narrative around them (card abd049da). Do not go back to injecting a truncated slice of the
+// narrative alongside them — that risks a prohibition landing in an elided middle.
 //
 // Exported (card d0d0401b): comment-anchor-lint.mjs imports this so its over-cap census reads the SAME
 // constant this injector actually truncates against — one source of truth, so raising the cap here can
@@ -290,8 +294,8 @@ function isDoNotHeading(heading) { return /^do not\b/i.test(heading); }
  * records instead open with an HTML-comment title line); each block is `{ level, heading, body }`,
  * where `body` runs from that heading line through (not including) the next heading or end of file.
  * `preamble` plus every block's `body`, concatenated IN ORDER, reconstructs `text` exactly — a lossless
- * partition, which is what lets `truncateRecord` below reorder blocks (protected ones first) without
- * dropping or duplicating a single byte of the source record.
+ * partition, which is what lets `extractDoNotOnly` below pick out the title + Do-not blocks (in their
+ * original relative order) without dropping or duplicating a single byte of the source record.
  */
 function splitIntoBlocks(text) {
   const matches = [...text.matchAll(HEADING_RE)];
@@ -340,43 +344,40 @@ function legacyHeadTailTruncate(buf, maxBytes) {
 }
 
 /**
- * Truncate `text` to at most `maxBytes` UTF-8 bytes.
- *
- * @decision 8449a258 — a record with a 'Do not'-style heading always injects its title + EVERY such
- * heading in full; only the rest is head+tail truncated. Do not revert to whole-text truncation for a
- * record that has one — that is what silently drops a prohibition into the elided middle.
+ * True iff `text` (a record's raw file content) carries at least one 'Do not'-style heading, at any
+ * level. Exported (mirrors `PER_RECORD_MAX_BYTES`'s own export doc, same file-pairing reasoning):
+ * `comment-anchor-lint.mjs`'s authoring-time coverage check imports this so a record is judged by the
+ * EXACT SAME predicate this injector uses to decide between Do-not-section treatment and the no-Do-not
+ * fallback — one source of truth, so the two can never quietly diverge on what counts as "has one".
  */
-function truncateRecord(text, maxBytes) {
-  const buf = Buffer.from(text, "utf8");
-  if (buf.length <= maxBytes) return { text, truncated: false };
+export function hasDoNotSection(text) {
+  const { blocks } = splitIntoBlocks(text);
+  return blocks.some((b) => isDoNotHeading(b.heading));
+}
 
+/**
+ * Extract ONLY what card `abd049da` injects for a record: its own title (every level-1 heading) plus
+ * every 'Do not'-style heading (any level), each IN FULL, in their original relative order — never the
+ * narrative around them.
+ *
+ * @decision 8449a258 — a record's title + EVERY 'Do not'-style heading is always injected in full. Do not
+ * go back to computing a "protected vs. other" split and truncating the "other" half into the injected
+ * output — the narrative must never be injected at all, not merely truncated.
+ *
+ * Card `abd049da` widened this from the original "only the rest is head+tail truncated": there is no rest
+ * left to truncate once the narrative is excluded structurally, so this is a STRONGER guarantee than the
+ * original — a prohibition can no longer even land in an elided middle, because nothing but prohibitions
+ * is in the candidate set to elide in the first place.
+ */
+function extractDoNotOnly(text) {
   const { preamble, blocks } = splitIntoBlocks(text);
-  if (!blocks.some((b) => isDoNotHeading(b.heading))) return legacyHeadTailTruncate(buf, maxBytes);
-
-  const protectedParts = [preamble];
-  const otherParts = [];
+  const parts = [preamble];
+  let hasDoNot = false;
   for (const b of blocks) {
-    if (b.level === 1 || isDoNotHeading(b.heading)) protectedParts.push(b.body);
-    else otherParts.push(b.body);
+    if (b.level === 1) { parts.push(b.body); continue; }
+    if (isDoNotHeading(b.heading)) { parts.push(b.body); hasDoNot = true; }
   }
-  const protectedText = protectedParts.join("");
-  const otherText = otherParts.join("");
-  const protectedBytes = Buffer.byteLength(protectedText, "utf8");
-
-  const marker = "\n\n… [elided — see full record] …\n\n";
-  const markerBytes = Buffer.byteLength(marker, "utf8");
-  const otherBuf = Buffer.from(otherText, "utf8");
-  const { head, tail, elided } = headTailSlice(otherBuf, maxBytes - protectedBytes - markerBytes);
-
-  if (!elided) {
-    // Reordering (title + Do-not sections moved ahead of the rest) alone made everything fit. Provably
-    // unreachable given `buf.length > maxBytes` above (protectedBytes + otherBuf.length === buf.length,
-    // so the budget passed to headTailSlice is always < otherBuf.length) — kept as a defensive branch
-    // rather than assumed away, mirroring this file's other defensive branches (e.g. main()'s own
-    // `sections.length === 0`).
-    return { text: `${protectedText}${otherText}`, truncated: false };
-  }
-  return { text: `${protectedText}${head}${marker}${tail}`, truncated: true, mode: "protected" };
+  return { text: parts.join(""), hasDoNot };
 }
 
 /**
@@ -476,20 +477,34 @@ async function main() {
   const omitted = [];
   const newlyDelivered = [];
   for (const { key, ns, id, recordPath, text } of candidates) {
-    const { text: body, truncated, mode } = truncateRecord(text, PER_RECORD_MAX_BYTES);
     const rel = relPath(repoRoot, recordPath);
+    // Card abd049da: inject ONLY the title + Do-not section(s) (never the narrative around them) — see
+    // this file's header. `extractDoNotOnly` already returns just that protected content, so — unlike the
+    // old whole-record path — there is no narrative left to head+tail truncate away; the per-record cap
+    // below only ever bites the (measured, corpus-wide: well under it) protected content itself.
+    const { text: reduced, hasDoNot } = extractDoNotOnly(text);
+    const reducedBuf = Buffer.from(reduced, "utf8");
+    const overCap = reducedBuf.length > PER_RECORD_MAX_BYTES;
+    const body = overCap ? legacyHeadTailTruncate(reducedBuf, PER_RECORD_MAX_BYTES).text : reduced;
     // The rendered heading carries the sigil for a sha-keyed record — the same "never confusable by a
     // reader" property the anchor grammar itself enforces (card 969b0e1c) must survive into the injected
     // text, not just the source comment.
     const label = ns === "sha" ? `sha:${id}` : id;
-    // card 8449a258: the two truncation modes get DIFFERENT messages — "protected" mode never cuts a
-    // 'Do not' section, so the old "head+tail kept, middle elided" wording (true only of "legacy" mode)
-    // would misdescribe what actually happened to a reader deciding whether to go read the full record.
-    const truncationNote = mode === "protected"
-      ? `[TRUNCATED at ${PER_RECORD_MAX_BYTES} bytes — title + 'Do not' section(s) kept IN FULL, only the narrative was head+tail truncated — full record: ${rel}]`
-      : `[TRUNCATED at ${PER_RECORD_MAX_BYTES} bytes — head+tail kept, middle elided — full record: ${rel}]`;
-    const rendered = `### decision ${label} (${rel})\n\n${body}`
-      + (truncated ? `\n\n${truncationNote}` : "");
+    const noteLines = [];
+    // DoD-2: a record with no Do-not section must still inject something explicit and labelled, never
+    // nothing — never silently drop the record just because it has no prohibition to protect.
+    if (!hasDoNot) noteLines.push(`⚠️ No 'Do not' section in this record.`);
+    // hasDoNot's reduced body is ALREADY title+Do-not-only (measured corpus-wide: always well under cap —
+    // this branch is defensive, not currently reached), so an elided middle here would be cutting a 'Do
+    // not' section itself, not narrative; the marker says so explicitly rather than reusing the
+    // no-Do-not-section wording, which would misleadingly imply nothing protected was ever at risk.
+    if (overCap) {
+      noteLines.push(hasDoNot
+        ? `[TRUNCATED at ${PER_RECORD_MAX_BYTES} bytes — head+tail kept, middle elided — a 'Do not' section may have been cut; read the full record]`
+        : `[TRUNCATED at ${PER_RECORD_MAX_BYTES} bytes — head+tail kept, middle elided]`);
+    }
+    noteLines.push(`Full record: ${rel}`);
+    const rendered = `### decision ${label} (${rel})\n\n${body}\n\n${noteLines.join("\n")}`;
     const renderedBytes = Buffer.byteLength(rendered, "utf8");
     // Past budget: drop the WHOLE record rather than truncate it further — a record already at its own
     // per-record cap is truncated-with-signal above; a record that merely lost the race for shared
@@ -503,8 +518,8 @@ async function main() {
 
   if (sections.length === 0) {
     // Every candidate was too large to fit even alone — now unreachable in ordinary operation since a
-    // single truncated record's rendered size is always well under TOTAL_MAX_BYTES (see truncateRecord),
-    // kept as a defensive branch. Say so explicitly (never silent: DoD-4's whole point is that a
+    // single record's reduced (Do-not-only) rendered size is always well under TOTAL_MAX_BYTES, kept as a
+    // defensive branch. Say so explicitly (never silent: DoD-4's whole point is that a
     // silently-dropped record is exactly the failure mode this card exists to prevent) — AND mark these
     // delivered (card-review N1: an un-marked, permanently-too-large candidate would otherwise re-emit
     // this identical note on every future read of the same region, forever, in this session).
@@ -522,7 +537,8 @@ async function main() {
   const omittedNote = omitted.length
     ? `\n\n(${omitted.length} further record(s) omitted for byte budget — read directly: ${omitted.map((o) => relPath(repoRoot, o.recordPath)).join(", ")})`
     : "";
-  const msg = `Complete decision record(s) governing this range (injected in full — never a positional fragment):\n\n${sections.join("\n\n---\n\n")}${omittedNote}`;
+  const msg = `Decision-record guard(s) governing this range (title + 'Do not' section, or an explicit `
+    + `no-Do-not note, plus a pointer to the full record — never the whole narrative):\n\n${sections.join("\n\n---\n\n")}${omittedNote}`;
 
   await emit({
     hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: msg },

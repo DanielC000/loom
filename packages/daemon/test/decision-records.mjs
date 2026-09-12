@@ -3,7 +3,9 @@
 // payloads on stdin against a fixture "repo" (a temp dir with its own `.git` marker + docs/adr,
 // docs/decisions, docs/investigations), and asserts:
 //   DoD-1: a read whose range (or enclosing block) intersects a `// @decision <id>` anchor returns that
-//          record's COMPLETE text, resolved live from the fixture repo at call time.
+//          record's title + 'Do not' section(s) (or, for a record with none, its title/body plus an
+//          explicit no-Do-not fallback note — card abd049da), resolved live from the fixture repo at call
+//          time, NEVER the narrative around them.
 //   DoD-2: a read with no anchored id in range is byte-identical to no hook at all (empty stdout).
 //   DoD-3: per-session dedupe — a repeat read of the same anchored region injects nothing the second
 //          time in the SAME session, but still injects in a DIFFERENT session.
@@ -34,10 +36,14 @@
 // characters under the ORIGINAL bare form still resolve as a card id, unverified (the backward-
 // compatibility control); and the sigil'd form REFUSES when the id does not verify as a real commit, even
 // when the identical record file exists (resolveRecord's refuse-rather-than-fall-through gate).
-// Plus card 8449a258 (2026-09-12, owner request a0155873 option (b)): truncation is STRUCTURAL, not
-// positional — a record with a 'Do not'-style heading (at ANY level, not just `##`) always injects its
-// title + every such heading in full, truncating only the rest; a record with none falls back to the
-// original whole-text head+tail behavior, unchanged (a negative control on the TRUNCATED note's wording).
+// Plus card 8449a258 (2026-09-12, owner request a0155873 option (b)): protected-content extraction (title +
+// every 'Do not'-style heading, at ANY level, not just `##`) is the SAME "what survives" logic this test
+// exercises below, now used to decide what's injected in the first place, not merely what a truncation
+// keeps.
+// Plus card abd049da (2026-09-12, owner request e17fd9bf): only a record's title + 'Do not' section(s) are
+// injected — NEVER the narrative around them, whether or not the record needed truncating. A record with
+// no Do-not section injects an explicit, labelled fallback note instead of the old whole-record narrative.
+// The per-record byte cap now bounds this much smaller reduced body (ordinarily never triggered).
 //
 // RUN with an isolated LOOM_HOME (writeSessionSettings just needs the settings dir; no daemon needed):
 //   pnpm build (repo root) then `node test/decision-records.mjs` from packages/daemon.
@@ -48,6 +54,12 @@ import { spawnSync, execFileSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
 import { DECISION_RECORDS_SCRIPT, SETTINGS_DIR, ensureDirs } from "../dist/paths.js";
 import { writeSessionSettings, DECISION_RECORD_STORE_KINDS } from "../dist/pty/claude-settings.js";
+import { listRecordIds, findRecordsMissingDoNot } from "../assets/comment-anchor-lint.mjs";
+
+// The REAL repo root (three levels up from this test file) — used only to source ONE real, currently
+// no-Do-not record's content for the DoD-2 "proven over a real case" test below (card abd049da), never to
+// resolve anchors against it (every hook invocation in this file still targets the isolated fixture REPO).
+const REAL_REPO_ROOT = path.join(import.meta.dirname, "..", "..", "..");
 
 if (!process.env.LOOM_HOME) { console.error("LOOM_HOME must be set."); process.exit(2); }
 
@@ -165,10 +177,17 @@ try {
   // --- DoD-1: a range that does NOT include the anchor line itself, but shares its blank-line-delimited
   // block, still gets the complete record (the "enclosing block" scope control, card 661b7d46). ---
   const a1 = runHook("s1", lineOf.aaaaaaaa + 2, 3); // a few lines AFTER the anchor, still in block A
-  check("DoD-1: read inside block A (not the anchor line itself) injects the complete aaaaaaaa record",
+  check("DoD-1: read inside block A (not the anchor line itself) injects the aaaaaaaa record's content",
     !!a1 && /An immutable decision record, resolved from docs\/adr\./.test(a1.hookSpecificOutput.additionalContext));
-  check("DoD-1: the injected record is the FULL file text, not a fragment",
+  check("DoD-1: the injected content carries the record's title",
     !!a1 && a1.hookSpecificOutput.additionalContext.includes("# ADR aaaaaaaa"));
+  // Card abd049da: aaaaaaaa's fixture has no 'Do not' section at all — the explicit, labelled fallback
+  // note must fire (DoD-2 of that card: never silence, never the old whole-record narrative dressed up as
+  // if it were the guard).
+  check("card abd049da DoD-2: a record with NO 'Do not' section injects the explicit no-Do-not fallback note",
+    !!a1 && a1.hookSpecificOutput.additionalContext.includes("No 'Do not' section in this record"));
+  check("card abd049da: the injected content also carries a pointer to the full record path",
+    !!a1 && /Full record: docs\/adr\/aaaaaaaa-adr-store\.md/.test(a1.hookSpecificOutput.additionalContext));
 
   // --- card da723d41 regression: a record is emitted EXACTLY ONCE, via `hookSpecificOutput.
   // additionalContext` only — never a duplicate `systemMessage` copy of the same body (the defect this
@@ -188,6 +207,8 @@ try {
   const a2 = runHook("s2", bAndCRange[0], bAndCRange[1]); // spans both bbbbbbbb (block B) and cccccccc (block C)
   check("DoD-1: nested docs/investigations/<id>-*/findings.md convention resolves",
     !!a2 && /An investigation report, resolved from the nested docs\/investigations convention\./.test(a2.hookSpecificOutput.additionalContext));
+  check("card abd049da: an investigations record with no 'Do not' section ALSO gets the explicit fallback note",
+    !!a2 && a2.hookSpecificOutput.additionalContext.includes("No 'Do not' section in this record"));
   check("DoD-5: an anchored id with no record anywhere is silently skipped (never a broken partial), "
     + "in the SAME call that correctly resolved a sibling id — proves the miss is a real absence, not a broken check",
     !!a2 && !a2.hookSpecificOutput.additionalContext.includes("cccccccc"));
@@ -258,17 +279,18 @@ try {
   check("DoD-4b: at least one record is explicitly named as omitted for shared budget, not silently dropped",
     !!a6 && /omitted for byte budget/.test(a6.hookSpecificOutput.additionalContext) && /e000000\d-budget\.md/.test(a6.hookSpecificOutput.additionalContext));
 
-  // --- card 8449a258 (owner request a0155873, option (b)): truncation is STRUCTURAL, not positional — a
-  // record with a 'Do not'-style heading always injects its title + EVERY such heading in full; only the
-  // rest is head+tail truncated. Both fixtures below are sized (by real arithmetic, not guesswork) so the
-  // protected heading falls INSIDE the window the OLD whole-text 60/40 head+tail cut would have elided —
-  // proving this is a genuine RED/GREEN case, not one that happened to survive either way. ---
+  // --- card abd049da: only a record's title + 'Do not' section(s) are injected — the NARRATIVE around
+  // them is excluded ENTIRELY now, never merely truncated-with-signal (the old card 8449a258 behavior this
+  // supersedes for the injection path — 8449a258's own protected-content definition, title + every 'Do
+  // not' heading, is exactly what `extractDoNotOnly` reuses). Both fixtures below carry enough narrative
+  // to exceed the per-record cap under the OLD whole-record truncation, but their DO-NOT-ONLY reduced
+  // content is small — proving the narrative is dropped structurally, not merely elided. ---
   {
     const filler = (n) => "lorem ".repeat(Math.ceil(n / 6)).slice(0, n);
 
     // c0ff33ee: modeled on the real docs/decisions/088afc94-*.md specimen (card 8449a258's own DoD-3
     // fixture) — several Narrative/Do-not pairs, with the SECOND 'Do not' section landing in what would
-    // be the old algorithm's elided middle.
+    // be the OLD truncation algorithm's elided middle.
     const do1 = "## Do not\n\n- keep-me-1: must always survive.\n\n";
     const do2 = "## Do not (2)\n\n- KEEP-ME-MIDDLE: this is the section that must survive in full even "
       + "though it falls near the middle of the record.\n\n";
@@ -276,20 +298,25 @@ try {
       + "## Narrative (2)\n\n" + filler(2600) + "\n\n" + do2
       + "## Narrative (3)\n\n" + filler(2600) + "\n\n" + "## Source\n\nfile.ts\n";
     const structuredText = "# c0ff33ee — synthetic do-not protection record\n\n" + structuredBody;
-    check("sanity: c0ff33ee fixture exceeds the per-record cap (else this proves nothing)",
+    check("sanity: c0ff33ee fixture exceeds the per-record cap (else this proves nothing about narrative exclusion)",
       Buffer.byteLength(structuredText, "utf8") > 6000);
     fs.writeFileSync(path.join(REPO, "docs", "decisions", "c0ff33ee-structural-truncation.md"), structuredText);
     const STRUCT_SRC = path.join(REPO, "struct.ts");
     fs.writeFileSync(STRUCT_SRC, "// @decision c0ff33ee — structural truncation check\n");
     const structResult = runHookOnFile(STRUCT_SRC, "s-c0ff33ee", 1, 1);
-    check("card 8449a258: title survives in full", !!structResult && structResult.hookSpecificOutput.additionalContext.includes("# c0ff33ee"));
-    check("card 8449a258: the FIRST 'Do not' section survives in full",
+    check("card abd049da: title survives in full", !!structResult && structResult.hookSpecificOutput.additionalContext.includes("# c0ff33ee"));
+    check("card abd049da: the FIRST 'Do not' section survives in full",
       !!structResult && structResult.hookSpecificOutput.additionalContext.includes("keep-me-1: must always survive."));
-    check("card 8449a258: the SECOND 'Do not' section (would be elided under the OLD algorithm) survives in full",
+    check("card abd049da: the SECOND 'Do not' section (mid-record) survives in full",
       !!structResult && structResult.hookSpecificOutput.additionalContext.includes("## Do not (2)")
         && structResult.hookSpecificOutput.additionalContext.includes("KEEP-ME-MIDDLE"));
-    check("card 8449a258: the TRUNCATED note names the PROTECTED mode, not the old head+tail wording",
-      !!structResult && structResult.hookSpecificOutput.additionalContext.includes("kept IN FULL"));
+    check("card abd049da: the NARRATIVE is excluded entirely — not a single filler word survives",
+      !!structResult && !structResult.hookSpecificOutput.additionalContext.includes("lorem"));
+    check("card abd049da: no [TRUNCATED] marker fires — the reduced (Do-not-only) body is well under the per-record cap",
+      !!structResult && !structResult.hookSpecificOutput.additionalContext.includes("[TRUNCATED"));
+    check("card abd049da: the injected content is a small fraction of the ~8KB source record (proving real "
+      + "byte reduction, not just narrative reordering)",
+      !!structResult && structResult.hookSpecificOutput.additionalContext.length < 1200);
 
     // c0ffee01: the 'Do not' heading nested at H3 under a `##` parent — measured (card 8449a258): 18 real
     // records in this repo carry their 'Do not' section ONLY this way, never at `##`.
@@ -297,23 +324,23 @@ try {
     const nestedBody = "## Decision A\n\n" + filler(3950) + "\n\n" + nested
       + "## Decision B\n\n" + filler(3200) + "\n\n" + "## Source\n\nfile.ts\n";
     const nestedText = "# c0ffee01 — nested do-not record\n\n" + nestedBody;
-    check("sanity: c0ffee01 fixture exceeds the per-record cap (else this proves nothing)",
+    check("sanity: c0ffee01 fixture exceeds the per-record cap (else this proves nothing about narrative exclusion)",
       Buffer.byteLength(nestedText, "utf8") > 6000);
     fs.writeFileSync(path.join(REPO, "docs", "decisions", "c0ffee01-nested-do-not.md"), nestedText);
     const NESTED_SRC = path.join(REPO, "nested.ts");
     fs.writeFileSync(NESTED_SRC, "// @decision c0ffee01 — nested do-not detection check\n");
     const nestedResult = runHookOnFile(NESTED_SRC, "s-c0ffee01", 1, 1);
-    check("card 8449a258: a 'Do not' heading nested at H3 (never `##`) is still detected and kept in full",
+    check("card abd049da: a 'Do not' heading nested at H3 (never `##`) is still detected and kept in full",
       !!nestedResult && nestedResult.hookSpecificOutput.additionalContext.includes("NESTED-KEEP-ME"));
-    check("card 8449a258: the H3-nested case ALSO reports the protected mode", !!nestedResult
-      && nestedResult.hookSpecificOutput.additionalContext.includes("kept IN FULL"));
+    check("card abd049da: the H3-nested case ALSO excludes its surrounding narrative entirely",
+      !!nestedResult && !nestedResult.hookSpecificOutput.additionalContext.includes("lorem"));
 
-    // Negative control on the marker itself: deadbeef (DoD-4a fixture, no 'Do not' heading at all) must
-    // still report the ORIGINAL legacy wording, never the new "kept IN FULL" phrase — proves the two modes
-    // are genuinely distinguished, not that "kept IN FULL" always appears.
-    check("card 8449a258 (negative control): a record with NO 'Do not' heading reports the LEGACY wording, not the protected one",
-      !!a5 && a5.hookSpecificOutput.additionalContext.includes("head+tail kept, middle elided")
-        && !a5.hookSpecificOutput.additionalContext.includes("kept IN FULL"));
+    // Negative control: deadbeef (DoD-4a fixture, no 'Do not' heading at all — its single-heading fixture
+    // IS its own "protected" content, so it's oversized on its own) still reports the LEGACY head+tail
+    // wording, distinguishing "oversized with no Do-not section" from the two Do-not cases above.
+    check("negative control: a record with NO 'Do not' heading at all (deadbeef) reports the legacy "
+      + "head+tail-elided wording when it's individually oversized, not the Do-not-only shape above",
+      !!a5 && a5.hookSpecificOutput.additionalContext.includes("head+tail kept, middle elided"));
   }
 
   // --- sigil namespace (card 969b0e1c): a `sha:`-sigil'd anchor citing a REAL, verified commit resolves
@@ -521,6 +548,36 @@ try {
   check("DECISION_RECORD_STORE_KINDS (claude-settings.ts, compiled) matches decision-records.mjs's own "
     + "anyStoreExists store-kind literals exactly (set equality — catches EITHER divergence direction)",
     setsEqual(assetKinds, settingsKinds));
+
+  // --- card abd049da DoD-2, "proven by a test over at least one of the 35 real cases": dynamically pick
+  // ONE real docs/adr|docs/decisions record from the ACTUAL repo that currently has no 'Do not' section
+  // (never a hardcoded id — a record could gain a Do-not section later, per this card's own "Do not" list,
+  // and a hardcoded id would then silently stop testing what it claims to), copy its REAL content into the
+  // fixture repo, anchor it, and confirm the fallback fires on genuine record text, not just a synthetic
+  // fixture. Skips gracefully (rather than failing) if the real corpus currently has zero such records —
+  // that would mean the coverage gap this card exists to close has already been fully closed. ---
+  {
+    const realRecords = listRecordIds(REAL_REPO_ROOT);
+    const realMissing = findRecordsMissingDoNot(REAL_REPO_ROOT, realRecords);
+    if (realMissing.length === 0) {
+      check("card abd049da DoD-2 (real-case proof): SKIPPED — the real corpus currently has zero flat-store "
+        + "records missing a 'Do not' section (the coverage gap is fully closed; nothing to prove against)", true);
+    } else {
+      const real = realMissing[0];
+      const realText = fs.readFileSync(real.path, "utf8");
+      const realStore = path.basename(path.dirname(real.path)); // "adr" or "decisions"
+      const realFixturePath = path.join(REPO, "docs", realStore, path.basename(real.path));
+      fs.writeFileSync(realFixturePath, realText);
+      const REAL_CASE_SRC = path.join(REPO, "real-case.ts");
+      fs.writeFileSync(REAL_CASE_SRC, `// @decision ${real.id} — real no-Do-not case, card abd049da DoD-2\n`);
+      const realResult = runHookOnFile(REAL_CASE_SRC, "s-real-no-do-not", 1, 1);
+      check(`card abd049da DoD-2 (real-case proof): real record ${real.id} (currently no Do-not section) `
+        + "injects the explicit fallback note, not silence and not the old whole-record narrative",
+        !!realResult && realResult.hookSpecificOutput.additionalContext.includes("No 'Do not' section in this record"));
+      check(`card abd049da DoD-2 (real-case proof): the real record's own title survives`,
+        !!realResult && realResult.hookSpecificOutput.additionalContext.includes(`${real.id}`));
+    }
+  }
 } finally {
   for (const d of [REPO, DEDUPE_DIR, FOREIGN_REPO, NO_STORE_REPO]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ } }
   for (const id of ["decrec-wiring-store", "decrec-wiring-nostore", "decrec-wiring-omitted"]) {
@@ -529,11 +586,12 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — decision-records.mjs injects complete, out-of-band decision records (resolved live "
-    + "from docs/adr, docs/decisions, and the nested docs/investigations convention) whenever an anchor's "
-    + "line falls within a Read's actual range or its enclosing blank-line block; stays byte-identical to "
-    + "no hook at all when nothing is anchored in range; dedupes per session; and enforces its byte cap "
-    + "via explicit truncation (single oversized record) or explicit whole-record omission (shared-budget "
-    + "contention) — never a silent partial."
+  ? "\n✅ ALL PASS — decision-records.mjs injects a record's title + 'Do not' section(s) plus a pointer "
+    + "(or an explicit no-Do-not fallback note, never silence, never the old whole-record narrative), "
+    + "resolved live from docs/adr, docs/decisions, and the nested docs/investigations convention, "
+    + "whenever an anchor's line falls within a Read's actual range or its enclosing blank-line block; "
+    + "stays byte-identical to no hook at all when nothing is anchored in range; dedupes per session; and "
+    + "enforces its byte cap via explicit truncation (a single oversized reduced body) or explicit "
+    + "whole-record omission (shared-budget contention) — never a silent partial."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

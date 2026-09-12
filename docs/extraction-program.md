@@ -219,9 +219,10 @@ before you reach for it:**
    nothing to do with them.
 
 **Extending an already-over-cap record — adding bytes at either its head or its tail — is not
-case 1, however over cap it already was.** `truncateRecord` (`packages/daemon/assets/decision-records.mjs`)
-keeps a fixed-size head window and a fixed-size tail window and elides the middle — read it there
-for the split, don't restate it here. Growing the record moves both windows: prepending pushes old
+case 1, however over cap it already was.** `legacyHeadTailTruncate`/`headTailSlice`
+(`packages/daemon/assets/decision-records.mjs`) keep a fixed-size head window and a fixed-size tail
+window and elide the middle — read them there for the split, don't restate it here. Growing the
+record moves both windows: prepending pushes old
 head bytes into the elided middle, and appending pushes old tail bytes into it just as surely — so
 previously-delivered content goes dark exactly as in case 2. Bytes landing strictly in the elided
 middle are never delivered, so they don't help either.
@@ -235,12 +236,13 @@ is not licence to accept an overage it didn't have before you touched it.
 **The one-line check, before you write:** *was the record ≤ `PER_RECORD_MAX_BYTES` on main before
 your edit? If yes, your edit must leave it ≤ the cap — reflow or split, not accept.*
 
-### Measured specimen (case 2), re-derived from `truncateRecord`
+### Measured specimen (case 2), re-derived from `legacyHeadTailTruncate`
 
 One tranche extended a record from 5,704 → 7,857 bytes and accepted the overage, reasoning that a
-visible elision marker means nothing is lost. **Re-derived here directly from `truncateRecord` in
-`packages/daemon/assets/decision-records.mjs` (read there at extraction time — these offsets track
-its current logic and the current `PER_RECORD_MAX_BYTES`, not a restated constant):**
+visible elision marker means nothing is lost. **Re-derived here directly from
+`legacyHeadTailTruncate`/`headTailSlice` in `packages/daemon/assets/decision-records.mjs` (read there
+at extraction time — these offsets track their current logic and the current
+`PER_RECORD_MAX_BYTES`, not a restated constant):**
 
 - The marker `"\n\n… [elided — see full record] …\n\n"` is 34 characters, 3 of them (both `…` and
   the one `—`) 3 bytes each in UTF-8, the rest 1 byte ⇒ `markerBytes = 31 + 3×3 = 40`.

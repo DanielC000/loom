@@ -24,7 +24,7 @@
 // `posttooluse-hook-honors-additionalcontext-not-systemmessage` and decision-records.mjs's own header for
 // the full method.
 //
-// Fourteen checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
+// Fifteen checks, matching CLAUDE.md's comment-taxonomy section (card 90b19799):
 //   1. unanchoredLongBlocks — a contiguous comment block >= `minLines` (default DEFAULT_MIN_LINES) with
 //      no `@decision <id>` anywhere in it. The "narrative is regrowing in source" signal.
 //   2. orphanAnchors — an `@decision <id>` whose id resolves to no record in ANY of the three stores this
@@ -205,6 +205,16 @@
 //      picks up the pervasive bare-citation-only style; re-measure fresh rather than trusting a number
 //      restated here). REPORT-ONLY. Runs in BOTH the CLI scan and the
 //      per-file hook, same scoping convention as `overlongAnchorParagraphs`/`embeddedAnchors` above.
+//  15. missingDoNotRecords (card abd049da) — a record file in `docs/adr` or `docs/decisions` (never
+//      `docs/investigations` — see `findRecordsMissingDoNot`'s own doc for why those are excluded) with no
+//      'Do not'-style heading at any level (`hasDoNotSection`, imported from decision-records.mjs — the
+//      SAME predicate that script uses at read time to decide between Do-not-section injection and the
+//      no-Do-not fallback). Authoring-time coverage check for the read-time fallback: the runtime path
+//      never goes silent either way, but a record missing a 'Do not' section gets a smaller, less useful
+//      injection (title + an explicit "no Do not section" note, rather than a real prohibition) — this
+//      check makes that gap visible at authoring time instead of only discoverable by reading the injected
+//      output. CLI-scan only, same ground as `oversizedRecords`/`collidingRecords` above: records live
+//      under `docs/`, outside `SOURCE_ROOTS`, so the per-file hook structurally never observes one.
 //
 // A <= GUARD_MAX_LINES-line block that DOES carry an anchor is the convention's TARGET STATE (Class A: a
 // short guard/prohibition, permanently inline) and is counted separately as `guardClassBlocks` — it is
@@ -214,7 +224,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { PER_RECORD_MAX_BYTES } from "./decision-records.mjs";
+import { PER_RECORD_MAX_BYTES, hasDoNotSection } from "./decision-records.mjs";
 
 // Comment-syntax-agnostic, byte-identical to decision-records.mjs's own ANCHOR_RE — kept as a separate
 // literal here (not imported) because assets ship as standalone files invoked by bare `node <path>`,
@@ -906,8 +916,9 @@ export function listRecordIds(repoRoot) {
 }
 
 /** Every record in `records` (as returned by `listRecordIds`) whose file exceeds `maxBytes` — measured the
- * SAME way `decision-records.mjs`'s own `truncateRecord` measures it (UTF-8 byte length of the raw file
- * text, never a character/UTF-16 count — this repo's house typography is multi-byte, so the two diverge).
+ * SAME way `decision-records.mjs`'s own truncation functions measure it (UTF-8 byte length of the raw
+ * file text, never a character/UTF-16 count — this repo's house typography is multi-byte, so the two
+ * diverge).
  *
  * @decision d0d0401b
  *
@@ -924,6 +935,38 @@ export function findOversizedRecords(records, maxBytes) {
     if (bytes > maxBytes) oversized.push({ id: r.id, path: r.path, bytes });
   }
   return oversized;
+}
+
+/** True iff `recordPath` lives in one of the flat stores (`docs/adr`, `docs/decisions`) — never
+ * `docs/investigations` — mirroring `FLAT_STORES`. */
+function isFlatStorePath(repoRoot, recordPath) {
+  const rel = relPath(repoRoot, recordPath).toLowerCase();
+  return FLAT_STORES.some((s) => rel.startsWith(`docs/${s}/`));
+}
+
+/**
+ * Every record in `records`, SCOPED TO `docs/adr` + `docs/decisions` ONLY, that has no 'Do not'-style
+ * heading at any level (`hasDoNotSection`, imported from decision-records.mjs — the SAME predicate that
+ * script uses to decide between Do-not-section injection and the no-Do-not fallback, one source of truth).
+ *
+ * Card `abd049da`: `docs/investigations/**\/findings.md` records are deliberately EXCLUDED from this
+ * check — they are narrative investigation reports, not prohibition-carrying decision records, and
+ * legitimately have no 'Do not' section to state. Extending this check to them would force a fabricated
+ * prohibition into records that structurally have none. `decision-records.mjs`'s runtime fallback still
+ * covers them (an explicit "no Do-not section" note, never silence) — this authoring-time check just
+ * doesn't ask investigations to close that gap.
+ *
+ * An unreadable record is skipped (mirrors `findOversizedRecords`'s own posture).
+ */
+export function findRecordsMissingDoNot(repoRoot, records) {
+  const missing = [];
+  for (const r of records) {
+    if (!isFlatStorePath(repoRoot, r.path)) continue;
+    let text;
+    try { text = fs.readFileSync(r.path, "utf8"); } catch { continue; }
+    if (!hasDoNotSection(text)) missing.push({ id: r.id, path: r.path });
+  }
+  return missing;
 }
 
 /**
@@ -1084,6 +1127,7 @@ export function computeReport(repoRoot, opts = {}) {
   const anchorIdSet = new Set(allAnchors.map((a) => a.id));
   const oversizedRecords = findOversizedRecords(records, PER_RECORD_MAX_BYTES);
   const collidingRecords = findCollidingRecords(repoRoot);
+  const missingDoNotRecords = findRecordsMissingDoNot(repoRoot, records);
 
   const unanchoredLong = allBlocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
   const guardClass = allBlocks.filter((b) => b.length <= GUARD_MAX_LINES && b.anchorIds.length > 0);
@@ -1148,6 +1192,14 @@ export function computeReport(repoRoot, opts = {}) {
     collidingRecords: {
       count: collidingRecords.length,
       items: collidingRecords,
+    },
+    missingDoNotRecords: {
+      count: missingDoNotRecords.length,
+      // Card abd049da: scoped to docs/adr + docs/decisions only — docs/investigations findings.md
+      // records are narrative reports, explicitly accepted as having no 'Do not' section (see
+      // findRecordsMissingDoNot's own doc).
+      scope: "docs/adr + docs/decisions only",
+      items: missingDoNotRecords.map((r) => ({ id: r.id, path: relPath(repoRoot, r.path) })),
     },
     bareCommitAnchors: {
       count: bareCommitAnchors.length,

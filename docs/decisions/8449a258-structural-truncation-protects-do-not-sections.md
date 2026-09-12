@@ -20,4 +20,6 @@ Owner request `a0155873` offered four options; the owner chose (b): make truncat
 
 ## Source
 
-`packages/daemon/assets/decision-records.mjs`: `splitIntoBlocks`, `isDoNotHeading`, `headTailSlice`, `legacyHeadTailTruncate`, `truncateRecord`. Card `8449a258`, request `a0155873`. Population and re-measurement figures above are pinned to sha `ce34994b152eba754c306ba2593425ff11c2704a`.
+`packages/daemon/assets/decision-records.mjs`: `splitIntoBlocks`, `isDoNotHeading`, `headTailSlice`, `legacyHeadTailTruncate`. Card `8449a258`, request `a0155873`. Population and re-measurement figures above are pinned to sha `ce34994b152eba754c306ba2593425ff11c2704a`.
+
+**Note (card `abd049da`):** the protected-content rule this decision established (title + every 'Do not' heading survives in full) is now enforced by `extractDoNotOnly`, not `truncateRecord` — `truncateRecord` (which used to compute a "protected vs. other" split and truncate only the "other" half) was deleted once the injector stopped injecting the narrative at all, leaving no "other" half to truncate. This decision is NOT superseded: `abd049da` enforces it more strongly than before (the narrative can no longer even land in an elided middle, since it is never injected in the first place).
