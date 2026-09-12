@@ -32,13 +32,22 @@ Once the owner's one-time setup is done (see *Automated release (CI)* below), cu
      green on Windows** — for this class of failure it is structurally not a general correctness
      guarantee (card `4e762baf`; the specimens are `d88b8523` and `f33830d1`, the latter a 12-day /
      ~271-commit red-`main` episode nobody read for days). The manager can't run the Linux gate locally,
-     so the latest `main` run of the Linux gate (`.github/workflows/ci.yml`) is the authoritative "is
-     `main` releasable" signal instead.
+     so `ci.yml` is the only thing that can ever answer "is this exact commit releasable" for that class
+     of failure — but only for a commit it has actually run against.
+   - **`main` is pushed to `origin` at release time, not continuously (owner decision, request
+     `381b60c0`).** Between releases, local `main` accumulates commits `origin/main` has never seen, and
+     the latest `ci.yml` run on `origin/main` is expected to lag behind — sometimes by a lot. That gap is
+     deliberate and accepted, **not** evidence those commits are broken, and **not** something this doc
+     should imply is covered: `ci.yml`'s latest run is authoritative only for the commits it actually ran
+     against, never for anything still unpushed.
    - **This is now enforced, not just advised:** step 3's `npm version` runs a `preversion` hook
-     (`scripts/check-main-ci.mjs`) that queries the latest completed `ci.yml` run on `main` via the
-     GitHub API and **refuses to bump the version** if it isn't green — so a red or unreadable CI status
-     blocks the release at the exact command that starts one, instead of relying on someone remembering
-     to check first. To check by hand anyway (or if the automated check can't reach GitHub):
+     (`scripts/check-main-ci.mjs`) that checks `ci.yml` **by exact commit, not just recency** — it
+     refuses outright if `HEAD` has any commit not yet on `origin/main` (telling you to push and wait for
+     `ci.yml` to complete, then retry), and otherwise looks up the run for that specific sha via the
+     GitHub API and **refuses to bump the version** if it isn't green. So a red, unreadable, or
+     never-run CI status blocks the release at the exact command that starts one — and, under the
+     push-at-release-time cadence above, so does an un-pushed `main`, which is exactly the case this
+     check exists to catch. To check by hand anyway (or if the automated check can't reach GitHub):
      `gh run list --workflow=ci.yml --branch main --limit 1`. `LOOM_SKIP_CI_CHECK=1` bypasses the hook
      for a genuine emergency — it prints a loud warning when used; don't reach for it as a habit.
    - **Bundled-skill currency check.** If anything in this release added, renamed, or removed an MCP tool,
