@@ -1883,7 +1883,8 @@ export class PlatformMcpRouter {
           "(lint-mode: markers + floor only, no rotation implied). ⚠️ `configured:false` means this seat " +
           "has NOT set up any protection yet — an unconfigured seat's `ok:true` is VACUOUS (nothing was " +
           "actually checked), never mistake it for 'checked and passed.' You (as the human-equivalent " +
-          "elevated role) can freely add, remove, or re-point ANY of rotationMarkers/" +
+          "elevated role) can freely add, remove, or re-point ANY of rotationMarkers (an array of " +
+          "`{token: string, caseSensitive?: boolean, note?: string}` objects, NOT bare strings)/" +
           "rotationLiveCommitmentsHeading/rotationLiveCommitmentsFloor via project_configure on the " +
           "Platform project — unlike a manager's project_update, which can only GROW its own project's " +
           "set (see project_configure's own note on the asymmetry). ⚠️ HONEST LIMIT: every check here is an " +

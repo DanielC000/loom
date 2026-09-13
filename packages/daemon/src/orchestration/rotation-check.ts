@@ -724,6 +724,25 @@ export interface RunResumeDocCheckResult extends RotationCheckResult {
    *  resume doc yet) — distinct from a doc that WAS read and found missing markers, so a caller never
    *  confuses "doesn't exist yet" with "lost its protection." */
   docFound: boolean;
+  /** Card 32b893e9: present (and loud) only when `docFound` is false. The RED `ok:false` already tells a
+   *  caller something is wrong, but the CAUSE — "the resolved path does not exist" — used to be
+   *  recoverable only from `docFound` itself or the nested `liveCommitments.diagnostic`. This is the same
+   *  top-level idiom `unconfiguredWarning`/`ambiguityWarning` already use, so a reader scanning only
+   *  top-level fields still sees WHY, not just that `ok` is false. Never drives `ok` — `ok` was already
+   *  false on this path. */
+  docNotFoundWarning?: string;
+}
+
+/** Builds `docNotFoundWarning` from the resolved path that failed to read — the ONE place this message is
+ *  composed (card 32b893e9), so the wording can't drift from the field's own doc above. Names
+ *  `orchestration.resumeDocFilename` as the lever to check, mirroring the same fix in `resume_doc_check`'s
+ *  own MCP tool description (mcp/orchestration.ts). */
+export function buildDocNotFoundWarning(resumeDocPath: string): string {
+  return (
+    `[resume-doc-check] ACTIVE DOC NOT FOUND at ${resumeDocPath} — ok:false here means the resolved path ` +
+    "does not exist (wrong orchestration.resumeDocFilename, or the doc hasn't been written yet), not that " +
+    "markers or live-commitments went missing from a real doc."
+  );
 }
 
 /**
@@ -793,6 +812,9 @@ export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocC
       honestLimitNote: HONEST_LIMIT_NOTE,
     };
     if (!configured) result.unconfiguredWarning = UNCONFIGURED_WARNING;
+    // Card 32b893e9: the doc-missing branch already returns ok:false with every marker in missingMarkers —
+    // this adds the CAUSE at the top level (see buildDocNotFoundWarning's own doc), never the redness.
+    result.docNotFoundWarning = buildDocNotFoundWarning(opts.resumeDocPath);
     // Code review N1: same top-level warning as checkRotation's found-doc path — a supplied-but-unreadable
     // rules source is worth surfacing even when the active doc itself is missing.
     const rulesUnreadableWarning = deriveRulesUnreadableWarning(result.rulesCheck, result.rulesChecks);

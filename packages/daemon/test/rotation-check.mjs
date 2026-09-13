@@ -25,7 +25,7 @@ import path from "node:path";
 import {
   checkMarkers, countNumberedSection, countNumberedSectionUnion, checkRotation, runResumeDocCheck, containUnderVault,
   checkMarkersUnion, countNumberedSectionUnionMulti,
-  HONEST_LIMIT_NOTE, UNCONFIGURED_WARNING,
+  HONEST_LIMIT_NOTE, UNCONFIGURED_WARNING, buildDocNotFoundWarning,
 } from "../dist/orchestration/rotation-check.js";
 
 let failures = 0;
@@ -298,9 +298,19 @@ function tmpFile(name, content) {
   check("runResumeDocCheck: missing doc ⇒ docFound:false, never throws", r.docFound === false && r.ok === false);
   check("runResumeDocCheck: missing doc distinguishes 'not found' from 'markers lost' in the diagnostic", r.liveCommitments.diagnostic.includes("not found") || r.missingMarkers.includes("x"));
 
+  // Card 32b893e9: a doc-missing result already went RED (ok:false, asserted above) — what was missing was
+  // a top-level statement of the CAUSE. Assert BOTH: today's ok:false behaviour (so a future change can't
+  // silently regress this branch into a green) AND the new top-level docNotFoundWarning naming the path.
+  check("runResumeDocCheck: missing doc ⇒ docNotFoundWarning is present and loud", typeof r.docNotFoundWarning === "string" && r.docNotFoundWarning.includes("NOT FOUND"));
+  check("runResumeDocCheck: missing doc ⇒ docNotFoundWarning names the exact path that failed to resolve", r.docNotFoundWarning.includes(missingDocPath));
+  check("runResumeDocCheck: missing doc ⇒ docNotFoundWarning is exactly the exported builder's output", r.docNotFoundWarning === buildDocNotFoundWarning(missingDocPath));
+
   const docPath = tmpFile("doc.md", "## LIVE COMMITMENTS\n1. a\n2. b\n3. c\ncapQueued present\n");
   const r2 = runResumeDocCheck({ resumeDocPath: docPath, markers: [{ token: "capQueued", caseSensitive: true }], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 3 });
   check("runResumeDocCheck: real file, all checks pass ⇒ ok:true, docFound:true", r2.docFound === true && r2.ok === true);
+  // Negative control (mirrors the unconfigured-seat pattern above): a FOUND doc must never carry this
+  // warning — proves the field isn't always present, only on the branch it's meant for.
+  check("runResumeDocCheck: found doc ⇒ no docNotFoundWarning field", r2.docNotFoundWarning === undefined);
   fs.rmSync(docPath, { force: true });
 
   // archivePath + preEditBytes wired end-to-end through the impure wrapper.

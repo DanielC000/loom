@@ -4543,13 +4543,18 @@ export class OrchestrationMcpRouter {
           "configured protected-marker set (orchestration.rotationMarkers) and, if configured, its " +
           "LIVE-COMMITMENTS-style numbered-section floor (orchestration.rotationLiveCommitmentsHeading/" +
           "rotationLiveCommitmentsFloor). Resolves and reads your ACTIVE resume doc ITSELF — there is NO " +
-          "path argument for it, so you can never check the wrong file (the optional `archivePath` below " +
-          "IS a path argument, for a DIFFERENT file — see its own note). Call with no arguments any time (lint-mode: " +
-          "markers + floor only, no rotation implied). ⚠️ `configured:false` means this seat has NOT set " +
-          "up any protection yet — an unconfigured seat's `ok:true` is VACUOUS (nothing was actually " +
-          "checked), never mistake it for 'checked and passed.' Add markers with project_update's " +
-          "orchestration.rotationMarkers (additive-only from this session — you can add a marker but not " +
-          "remove one; ask a human/Lead to remove one). ⚠️ HONEST LIMIT: every check here is an " +
+          "path argument for it, so you can never MIS-AIM this call at the wrong file (the optional " +
+          "`archivePath` below IS a path argument, for a DIFFERENT file — see its own note); that guarantee " +
+          "is about the ARGUMENT, not that the resolved doc is definitionally right for this seat — if " +
+          "your resume doc lives under a non-default filename, redirect the resolution ITSELF via " +
+          "project_update's config.orchestration.resumeDocFilename (a project-level config key, not a " +
+          "per-call argument) and every future call here follows it automatically. Call with no arguments " +
+          "any time (lint-mode: markers + floor only, no rotation implied). ⚠️ `configured:false` means " +
+          "this seat has NOT set up any protection yet — an unconfigured seat's `ok:true` is VACUOUS " +
+          "(nothing was actually checked), never mistake it for 'checked and passed.' Add markers with " +
+          "project_update's orchestration.rotationMarkers — an array of `{token: string, caseSensitive?: " +
+          "boolean, note?: string}` objects, NOT bare strings (additive-only from this session — you can " +
+          "add a marker but not remove one; ask a human/Lead to remove one). ⚠️ HONEST LIMIT: every check here is an " +
           "exact-substring grep — it proves literal text survived, not that no meaning was lost to " +
           "rewording. A green is a candidate set ('nothing was blatantly deleted'), never a verdict that " +
           "no meaning was lost — still read the real diff for a rewrite that changed words but kept (or " +
