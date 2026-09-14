@@ -842,9 +842,19 @@ const TEST_TIMEOUT_MS = 120_000;
 // @decision 63bdd2cc — merge-confirm-completion-nudge no longer needs an override: its sync-wait
 // budget is now injectable (0faaaa55's DI seam) so real gate waits only need to outlive a shrunk
 // budget; measured 3/3 standalone: 33.5-33.8s, ~3.5x under the 120s blanket ceiling.
+//
 // card bfbe616b — kickoff-real-spawn/merge-spawn-tracked (ISOLATED_REAL_SPAWN_BASENAMES,
 // untreated at 17d03ac1^) measured safe with NO override: max pass 50,172ms/40,702ms vs the 120s
 // ceiling = 2.39x/2.95x margin, 0 fails across 14 full-suite runs each — do not add one for uniformity.
+//
+// card ba46a06f — batch-merge-gate-retry/batch-merge-gate-history (outside ISOLATED_REAL_SPAWN_BASENAMES,
+// no class-based warrant available) measured safe with NO override: max pass 79,545ms/65,741ms vs the
+// 120s ceiling = 1.51x/1.83x margin, 0 fails across 15 full-suite runs each (2026-09-12 -> 2026-09-14).
+// Neither shares emit-compare-gate/gate-status's link to the one known SIGTERM failure (that failure's
+// own per-file row has since aged out of daemon-per-file-timing.ndjson via retention compaction, so even
+// a same-window correlation can no longer be checked) and both stub the actual gate call (fakeGate)
+// rather than exercise real merge-gate machinery — margin alone, absent either, is not sufficient
+// warrant per cc595ca7's per-file-curated design; do not add an override for either on margin alone.
 const TEST_TIMEOUT_OVERRIDES = {
   "merge-repo-mutex": 300_000, // 15 trials x 2 concurrent real merges + a full content-integrity sweep
   "merge-stranded-backstop": 300_000, // 2x createWorktree + reviewWorkerMerge/confirmWorkerMerge, all real git
