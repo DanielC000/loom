@@ -4231,7 +4231,10 @@ export async function getTaskMergedInfo(
   return { sha: resolved.sha.slice(0, 7), date: hit.date, verification: resolved.verification };
 }
 
-/** TEST-ONLY: clear the merged-commit map cache (settled + in-flight) between hermetic test cases reusing the same temp repos. */
+/** TEST-ONLY: clear the merged-commit map cache (settled + in-flight) between hermetic test cases reusing the same temp repos.
+ * ⚠️ GLOBAL clear — unlike the per-repo `withCanonicalIndexLock` (repo-lock.ts), which keys on `repoPath`, this
+ * wipes EVERY repo's entries at once. Concurrent scenarios in different temp repos sharing this reset can
+ * clobber each other's cache/in-flight state mid-scan — unaudited whether that yields a wrong value or a redundant recompute. */
 export function __resetMergedCommitMapCacheForTest(): void {
   mergedMapCache.clear();
   mergedMapInFlight.clear();
