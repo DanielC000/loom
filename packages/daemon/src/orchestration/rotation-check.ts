@@ -160,12 +160,17 @@ function findMarkerHits(text: string, marker: RotationMarker, allMarkers: readon
  * computed (never re-deriving precedence) — for each FOUND marker, resolves its winning source's text
  * ("active" -> activeText, any other label -> the matching entry in `ruleSources`, built the same way
  * for both the single- and multi-rules-file paths) and scans just that text for hit locations.
+ *
+ * @decision e013b1ca — `excludedRangeByLabel` filters hits by the SAME range `stripSection` already
+ * computed for the union scan, never re-derived here. Scanning still runs on RAW text, so a filtered
+ * hit's `line` stays a true line number in the unstripped file, never a stripped-text index.
  */
 function buildMarkerHits(
   activeText: string,
   markerSources: Record<string, string>,
   markers: readonly RotationMarker[],
   ruleSources: readonly RuleFileSource[],
+  excludedRangeByLabel: ReadonlyMap<string, { start: number; end: number }>,
 ): Record<string, MarkerHitDetail> {
   const textByLabel = new Map<string, string>([["active", activeText]]);
   for (const s of ruleSources) textByLabel.set(s.label, s.text);
@@ -175,7 +180,9 @@ function buildMarkerHits(
     if (label === undefined) continue; // not satisfied — no hits to report (missingMarkers covers this)
     const text = textByLabel.get(label);
     if (text === undefined) continue; // defensive; every label in markerSources came from one of these texts
-    const hits = findMarkerHits(text, marker, markers);
+    const allHits = findMarkerHits(text, marker, markers);
+    const excludedRange = excludedRangeByLabel.get(label);
+    const hits = excludedRange ? allHits.filter((h) => h.line < excludedRange.start || h.line > excludedRange.end) : allHits;
     result[marker.token] = { source: label, hits, ...(hits.length > 1 ? { multipleHits: true as const } : {}) };
   }
   return result;
@@ -228,14 +235,23 @@ function findSectionBoundary(lines: readonly string[], fromIndex: number, maxLev
  * about where `§ROTATION-GATE` begins and ends. Returns `text` unchanged when `headingToken`'s heading
  * line is not present in it at all.
  */
-function stripSection(text: string, headingToken: string): string {
+interface SectionStripResult {
+  text: string;
+  /** @decision e013b1ca — the exact 1-based [start,end] inclusive line range removed from `text`;
+   * absent when `headingToken` wasn't found (nothing was stripped). Lets a caller filter markerHits by
+   * the SAME range this call already used to strip, never a second, independently-derived one. */
+  excludedRange?: { start: number; end: number };
+}
+
+function stripSection(text: string, headingToken: string): SectionStripResult {
   const lines = text.split(/\r\n|\r|\n/);
   const startLine = findHeadingLine(lines, headingToken, 0);
-  if (startLine === -1) return text;
+  if (startLine === -1) return { text };
   const startLevel = headingLevel(lines[startLine]!)!;
   const endLine = findSectionBoundary(lines, startLine + 1, startLevel);
-  const remaining = endLine === -1 ? lines.slice(0, startLine) : [...lines.slice(0, startLine), ...lines.slice(endLine)];
-  return remaining.join("\n");
+  const stopIndex = endLine === -1 ? lines.length : endLine;
+  const remaining = [...lines.slice(0, startLine), ...lines.slice(stopIndex)];
+  return { text: remaining.join("\n"), excludedRange: { start: startLine + 1, end: stopIndex } };
 }
 
 const ROTATION_GATE_SECTION_HEADING = "rotation-gate";
@@ -688,10 +704,18 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
 
   // card 6dd3a17c — MARKER UNION SCAN ONLY (see stripSection's own doc): countNumberedSectionUnion/Multi
   // below still read the raw, unstripped `rulesText`/`sources`.
+  // @decision e013b1ca — `excludedRangeByLabel` collects each stripped source's `excludedRange` (a
+  // byproduct of the SAME stripSection call the scan below uses) for buildMarkerHits, below, to filter by.
   let missing: RotationMarker[];
   let markerSources: Record<string, string>;
+  const excludedRangeByLabel = new Map<string, { start: number; end: number }>();
   if (!hasMultiFiles) {
-    const rulesTextForMarkers = rulesText !== null ? stripSection(rulesText, ROTATION_GATE_SECTION_HEADING) : null;
+    let rulesTextForMarkers: string | null = null;
+    if (rulesText !== null) {
+      const stripped = stripSection(rulesText, ROTATION_GATE_SECTION_HEADING);
+      rulesTextForMarkers = stripped.text;
+      if (stripped.excludedRange) excludedRangeByLabel.set("rules", stripped.excludedRange);
+    }
     const r = checkMarkers(input.activeText, input.markers, rulesTextForMarkers);
     missing = r.missing;
     markerSources = {};
@@ -702,7 +726,9 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
     // supplied) AND every `rulesFiles` entry, labeled by its own `resolvedPath` (DoD-3), DEDUPED by
     // resolvedPath (code review N3) so the same on-disk file never counts as two different places.
     const sources = buildRuleSources(input.rules, rulesFiles);
-    const sourcesForMarkers = sources.map((s) => ({ label: s.label, text: stripSection(s.text, ROTATION_GATE_SECTION_HEADING) }));
+    const strippedSources = sources.map((s) => ({ label: s.label, ...stripSection(s.text, ROTATION_GATE_SECTION_HEADING) }));
+    for (const s of strippedSources) if (s.excludedRange) excludedRangeByLabel.set(s.label, s.excludedRange);
+    const sourcesForMarkers = strippedSources.map((s) => ({ label: s.label, text: s.text }));
     const r = checkMarkersUnion(input.activeText, input.markers, sourcesForMarkers);
     missing = r.missing;
     markerSources = {};
@@ -713,7 +739,7 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
   // SAME winning text per marker (via markerSources, already finalized above) — never re-deriving the
   // precedence/dedup logic in checkMarkers/checkMarkersUnion/buildRuleSources.
   const hitSources = buildRuleSources(input.rules, rulesFiles);
-  const markerHits = buildMarkerHits(input.activeText, markerSources, input.markers, hitSources);
+  const markerHits = buildMarkerHits(input.activeText, markerSources, input.markers, hitSources, excludedRangeByLabel);
   const markersNeedingReview = Object.keys(markerHits).filter(
     (token) => markerHits[token]!.multipleHits === true || markerHits[token]!.hits.some((h) => h.sharedLineMarkers.length > 0),
   );

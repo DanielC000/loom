@@ -1150,7 +1150,86 @@ function tmpFile(name, content) {
   check("6dd3a17c: LIVE COMMITMENTS floor check is untouched — still finds a genuine section INSIDE §ROTATION-GATE", rFloor.liveCommitments.count === 12 && rFloor.liveCommitments.ok === true);
 }
 
+// ── REGRESSION 4 — card e013b1ca: markerHits must agree with what the marker union scan excluded, and a
+// surviving hit's `line` must stay the REAL line number in the UNSTRIPPED file, never shifted by the
+// exclusion. Same real-vault shape as REGRESSION 3 (§ROTATION-GATE enumeration+prose sits ABOVE a
+// genuine, later home) on both the single-`rules` and N-file `rulesFiles` paths — this is the shape
+// that catches the naive "just scan the already-stripped text" fix: under that shape, the excluded-
+// section occurrence is gone from what gets scanned too, so `hits.length` would ALSO read 1 — only the
+// reported `line` would be wrong, shifted up by however many lines the exclusion removed. Asserting
+// `line` against the real unstripped position (not just `hits.length`) is what actually distinguishes
+// this fix from that naive one; see docs/decisions/e013b1ca-*.md's own "Do not" for this exact trap. ──
+{
+  const TARGET = { token: "TARGETMARKER", caseSensitive: false };
+  const OTHER = { token: "OTHERMARKER", caseSensitive: false };
+
+  const genuineLine = "TARGETMARKER is documented here as the genuine content, well below §ROTATION-GATE.";
+  const otherLine = "OTHERMARKER never appears inside §ROTATION-GATE at all — a negative control for the filter.";
+  const lines = [
+    "# Fixture — e013b1ca line-number regression",
+    "",
+    "## §ROTATION-GATE — the rotation is where rules die",
+    "```",
+    "TARGETMARKER",
+    "```",
+    "Discussion: TARGETMARKER matters because the rule it protects matters.",
+    "",
+    "## §SOME OTHER SECTION",
+    genuineLine,
+    otherLine,
+    "",
+  ];
+  const rulesText = lines.join("\n");
+  // Ground truth for both assertions below, derived from the SAME array the text is built from —
+  // never hand-counted, so it can't drift from the fixture if a line above is ever added/removed.
+  const realGenuineLine = lines.indexOf(genuineLine) + 1;
+  const realOtherLine = lines.indexOf(otherLine) + 1;
+
+  // Single-`rules` path (checkMarkers / buildMarkerHits' single-source branch).
+  const rSingle = checkRotation({
+    activeText: "no markers here",
+    rules: { resolvedPath: "rules.md", text: rulesText },
+    markers: [TARGET, OTHER],
+    commitmentsHeading: "", commitmentsFloor: 0,
+  });
+  check("e013b1ca single-rules: TARGETMARKER resolves via rules (real home outside §ROTATION-GATE)", rSingle.markerSources["TARGETMARKER"] === "rules");
+  check("e013b1ca single-rules: only the genuine hit survives — the §ROTATION-GATE occurrence is filtered out", rSingle.markerHits["TARGETMARKER"].hits.length === 1);
+  check("e013b1ca single-rules: the surviving hit's line is the REAL line in the unstripped file, not shifted", rSingle.markerHits["TARGETMARKER"].hits[0].line === realGenuineLine);
+  check("e013b1ca single-rules NEGATIVE CONTROL: OTHERMARKER has no occurrence inside §ROTATION-GATE — its one hit is untouched by the filter", rSingle.markerHits["OTHERMARKER"].hits.length === 1 && rSingle.markerHits["OTHERMARKER"].hits[0].line === realOtherLine);
+  check("e013b1ca single-rules: TARGETMARKER no longer needs review — down to its one genuine hit", !rSingle.markersNeedingReview.includes("TARGETMARKER"));
+
+  // N-file `rulesFiles` path (card f6985338's union branch, checkMarkersUnion) — same fixture, same
+  // assertions, proving DoD-2's "both the single-rules and N-file rulesFiles paths" requirement.
+  const rMulti = checkRotation({
+    activeText: "no markers here",
+    rulesFiles: [{ resolvedPath: "/vault/Rules.md", text: rulesText }],
+    markers: [TARGET, OTHER],
+    commitmentsHeading: "", commitmentsFloor: 0,
+  });
+  check("e013b1ca rulesFiles (N-file) path: TARGETMARKER resolves via its own resolvedPath label", rMulti.markerSources["TARGETMARKER"] === "/vault/Rules.md");
+  check("e013b1ca rulesFiles (N-file) path: only the genuine hit survives", rMulti.markerHits["TARGETMARKER"].hits.length === 1);
+  check("e013b1ca rulesFiles (N-file) path: the surviving hit's line matches the real unstripped position", rMulti.markerHits["TARGETMARKER"].hits[0].line === realGenuineLine);
+  check("e013b1ca rulesFiles (N-file) path: TARGETMARKER no longer needs review either", !rMulti.markersNeedingReview.includes("TARGETMARKER"));
+
+  // A marker with TWO genuine hits BOTH outside the excluded section must still show multipleHits/be
+  // flagged for review — the filter must only drop the excluded slice, never over-filter real content.
+  const twoGenuineHits = [
+    "## §ROTATION-GATE", "```", "TARGETMARKER", "```", "",
+    "## §SOME OTHER SECTION",
+    "TARGETMARKER first genuine mention.",
+    "TARGETMARKER second genuine mention.",
+    "",
+  ].join("\n");
+  const rTwoGenuine = checkRotation({
+    activeText: "no markers here",
+    rules: { resolvedPath: "rules.md", text: twoGenuineHits },
+    markers: [TARGET], commitmentsHeading: "", commitmentsFloor: 0,
+  });
+  check("e013b1ca: two GENUINE hits outside §ROTATION-GATE both survive the filter (not over-filtered)", rTwoGenuine.markerHits["TARGETMARKER"].hits.length === 2 && rTwoGenuine.markerHits["TARGETMARKER"].multipleHits === true);
+  check("e013b1ca: markersNeedingReview correctly still flags a marker with genuinely multiple real hits", rTwoGenuine.markersNeedingReview.includes("TARGETMARKER"));
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — rotation-check's marker/floor/archive/byte checks behave correctly, the two named historical bugs (a681aed5's name-anchor fail-open, 34a6f07e's equality-vs-floor) are proven absent from this port, a mutation test confirms a dropped marker is caught and named, configured:false is distinct from ok:true, the impure fs wrapper never throws on a missing doc, the new multi-rules-file union (card f6985338) is byte-identical for a legacy single-rulesPath caller while correctly unioning/attributing/failing-visibly across N files, and (card 6dd3a17c) a rules file's own §ROTATION-GATE section no longer satisfies the marker union scan just by enumerating/discussing every token, on both the single-rules and N-file paths, while leaving the LIVE COMMITMENTS floor check untouched — claude-free."
+  ? "\n✅ ALL PASS — rotation-check's marker/floor/archive/byte checks behave correctly, the two named historical bugs (a681aed5's name-anchor fail-open, 34a6f07e's equality-vs-floor) are proven absent from this port, a mutation test confirms a dropped marker is caught and named, configured:false is distinct from ok:true, the impure fs wrapper never throws on a missing doc, the new multi-rules-file union (card f6985338) is byte-identical for a legacy single-rulesPath caller while correctly unioning/attributing/failing-visibly across N files, (card 6dd3a17c) a rules file's own §ROTATION-GATE section no longer satisfies the marker union scan just by enumerating/discussing every token on both the single-rules and N-file paths while leaving the LIVE COMMITMENTS floor check untouched, and (card e013b1ca) markerHits/markersNeedingReview now agree with what that same exclusion counted — filtering out excluded-section hits while every surviving hit's line number stays true to the real, unstripped file — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
