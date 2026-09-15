@@ -218,6 +218,28 @@ function findSectionBoundary(lines: readonly string[], fromIndex: number, maxLev
   return -1;
 }
 
+/**
+ * @decision 6dd3a17c — strips a rules text's own §ROTATION-GATE section out of the copy fed to the
+ * MARKER UNION SCAN ONLY (never activeText, never countNumberedSectionUnion/Multi) — that section's
+ * marker enumeration was otherwise satisfying every marker by merely existing.
+ *
+ * Reuses `findHeadingLine`/`findSectionBoundary` above (the SAME structural boundary every other section
+ * locator in this file/`rotation-gate.mjs` uses) so this exclusion can never disagree with anything else
+ * about where `§ROTATION-GATE` begins and ends. Returns `text` unchanged when `headingToken`'s heading
+ * line is not present in it at all.
+ */
+function stripSection(text: string, headingToken: string): string {
+  const lines = text.split(/\r\n|\r|\n/);
+  const startLine = findHeadingLine(lines, headingToken, 0);
+  if (startLine === -1) return text;
+  const startLevel = headingLevel(lines[startLine]!)!;
+  const endLine = findSectionBoundary(lines, startLine + 1, startLevel);
+  const remaining = endLine === -1 ? lines.slice(0, startLine) : [...lines.slice(0, startLine), ...lines.slice(endLine)];
+  return remaining.join("\n");
+}
+
+const ROTATION_GATE_SECTION_HEADING = "rotation-gate";
+
 export interface NumberedSectionCount {
   /** null only when `headingToken`'s heading line could not be found at all IN THIS TEXT. */
   count: number | null;
@@ -664,10 +686,13 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
   const rulesFiles = input.rulesFiles ?? [];
   const hasMultiFiles = rulesFiles.length > 0;
 
+  // card 6dd3a17c — MARKER UNION SCAN ONLY (see stripSection's own doc): countNumberedSectionUnion/Multi
+  // below still read the raw, unstripped `rulesText`/`sources`.
   let missing: RotationMarker[];
   let markerSources: Record<string, string>;
   if (!hasMultiFiles) {
-    const r = checkMarkers(input.activeText, input.markers, rulesText);
+    const rulesTextForMarkers = rulesText !== null ? stripSection(rulesText, ROTATION_GATE_SECTION_HEADING) : null;
+    const r = checkMarkers(input.activeText, input.markers, rulesTextForMarkers);
     missing = r.missing;
     markerSources = {};
     for (const [token, src] of r.satisfiedBy) markerSources[token] = src;
@@ -677,7 +702,8 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
     // supplied) AND every `rulesFiles` entry, labeled by its own `resolvedPath` (DoD-3), DEDUPED by
     // resolvedPath (code review N3) so the same on-disk file never counts as two different places.
     const sources = buildRuleSources(input.rules, rulesFiles);
-    const r = checkMarkersUnion(input.activeText, input.markers, sources);
+    const sourcesForMarkers = sources.map((s) => ({ label: s.label, text: stripSection(s.text, ROTATION_GATE_SECTION_HEADING) }));
+    const r = checkMarkersUnion(input.activeText, input.markers, sourcesForMarkers);
     missing = r.missing;
     markerSources = {};
     for (const [token, src] of r.satisfiedBy) markerSources[token] = src;

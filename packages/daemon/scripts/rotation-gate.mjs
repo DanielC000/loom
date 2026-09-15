@@ -380,6 +380,19 @@ function findSectionBoundary(lines, fromIndex, maxLevel) {
   return -1;
 }
 
+// @decision 6dd3a17c — strips a rules file's own §ROTATION-GATE section out of the text fed to the
+// MARKER UNION SCAN ONLY (never --active, never countLiveCommitments, never --audit-vault) — that
+// section's marker enumeration was otherwise satisfying every marker by merely existing.
+function stripSection(text, headingToken) {
+  const lines = text.split(/\r\n|\r|\n/);
+  const startLine = findHeadingLine(lines, headingToken, 0);
+  if (startLine === -1) return text;
+  const startLevel = headingLevel(lines[startLine]);
+  const endLine = findSectionBoundary(lines, startLine + 1, startLevel);
+  const remaining = endLine === -1 ? lines.slice(0, startLine) : [...lines.slice(0, startLine), ...lines.slice(endLine)];
+  return remaining.join("\n");
+}
+
 // Returns { count, diagnostic }. `count` is the number of /^\d+\. /gm matches strictly between the LIVE
 // COMMITMENTS heading LINE and the next section-boundary heading LINE after it (same level or shallower —
 // see findSectionBoundary; or end of file if there is none) — null if the LIVE COMMITMENTS heading itself
@@ -611,7 +624,10 @@ function main() {
     }
   }
 
-  const { missing, satisfiedBy } = checkMarkers(activeText, rulesSources);
+  // card 6dd3a17c — marker union scan only (see stripSection's own doc): countLiveCommitments below still
+  // reads the raw, unstripped rulesSources.
+  const rulesSourcesForMarkers = rulesSources.map((s) => ({ label: s.label, text: stripSection(s.text, "rotation-gate") }));
+  const { missing, satisfiedBy } = checkMarkers(activeText, rulesSourcesForMarkers);
   const live = countLiveCommitments(activeText, rulesSources);
 
   // AMBIGUITY notice (code review, card e312b207, product ruling (i)+(ii) — NOT (iii), a hard failure is

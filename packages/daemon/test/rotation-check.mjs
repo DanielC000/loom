@@ -1083,7 +1083,74 @@ function tmpFile(name, content) {
   check("cd0c85f1 surrogate safety NEGATIVE CONTROL: hasLoneSurrogate genuinely detects a split pair", hasLoneSurrogate(emoji[0]) === true && hasLoneSurrogate("plain ascii, no surrogates") === false);
 }
 
+// ── REGRESSION 3 — card 6dd3a17c: a rules file's own §ROTATION-GATE section must not satisfy the marker
+// union scan just by enumerating/discussing every token. Mirrors rotation-gate-marker-homing.mjs's Case
+// A/B/C for the script, here against checkRotation directly on BOTH the single-`rules` path and the
+// N-file `rulesFiles` path (card f6985338) — this fix touches both branches inside checkRotation. ─────────
+{
+  const ALL_12 = [
+    "Orchestrator Rules", "THE FOUR-LEG VERIFY", "LIVE COMMITMENTS", "OWNER-GATED", "ROTATE AT 40 KB",
+    "THE SAFE-WRITE", "MULTI-HARNESS EPIC", "NO-CLEARANCE-FROM-SILENCE", "QUIET-LANE", "MGR122-FLOOR",
+    "PRAISE-IS-THE-LEAST-AUDITED-INPUT", "PRE-MERGE-PAIR",
+  ].map((token) => ({ token, caseSensitive: false }));
+
+  // Same shape as the real vault: a §ROTATION-GATE heading whose section fences the enumeration AND
+  // discusses several tokens in prose outside the fence (the shape that made a fence-only exclusion
+  // insufficient — see docs/decisions/6dd3a17c-*.md). `otherSectionMarker`, when given, is a real home in
+  // a SEPARATE, later section.
+  function rulesFixture(otherSectionMarker) {
+    const lines = [
+      "# Fixture rules doc — deliberately carries none of the 12 marker tokens outside the guarded section", "",
+      "## §ROTATION-GATE — the rotation is where rules die",
+      "```",
+      ALL_12.map((m) => m.token).join(" · "),
+      "```",
+      ...ALL_12.map((m) => `Discussion: ${m.token} matters because the rule it protects matters.`),
+      "",
+    ];
+    if (otherSectionMarker) {
+      lines.push("## §SOME OTHER SECTION", `${otherSectionMarker} is documented here as real content.`, "");
+    }
+    return lines.join("\n");
+  }
+
+  // Single-`rules`-path (checkMarkers branch): enumeration-only rules text satisfies NOTHING.
+  const rEnumOnly = checkRotation({ activeText: "no markers here", rules: { resolvedPath: "rules.md", text: rulesFixture() }, markers: ALL_12, commitmentsHeading: "", commitmentsFloor: 0 });
+  check("6dd3a17c single-rules: §ROTATION-GATE enumeration+prose alone satisfies none of the 12", rEnumOnly.missingMarkers.length === 12);
+
+  // Single-`rules`-path: a marker with a real home in a DIFFERENT section still resolves (section-scoped,
+  // not a blanket exclusion of the whole rules file — required by @decision 4cbb2999).
+  const rWithHome = checkRotation({ activeText: "no markers here", rules: { resolvedPath: "rules.md", text: rulesFixture("QUIET-LANE") }, markers: ALL_12, commitmentsHeading: "", commitmentsFloor: 0 });
+  check("6dd3a17c single-rules: QUIET-LANE homed in a different section resolves via rules", !rWithHome.missingMarkers.includes("QUIET-LANE") && rWithHome.markerSources["QUIET-LANE"] === "rules");
+  check("6dd3a17c single-rules: the other 11 (enumeration-only) are still missing", rWithHome.missingMarkers.length === 11);
+
+  // N-file `rulesFiles` path (checkMarkersUnion branch, card f6985338) — same proof, routed through
+  // `rulesFiles` instead of the legacy singular `rules` field.
+  const rMulti = checkRotation({
+    activeText: "no markers here",
+    rulesFiles: [{ resolvedPath: "/vault/Orchestrator Rules.md", text: rulesFixture("PRE-MERGE-PAIR") }],
+    markers: ALL_12, commitmentsHeading: "", commitmentsFloor: 0,
+  });
+  check("6dd3a17c rulesFiles (N-file) path: PRE-MERGE-PAIR homed elsewhere resolves via its own resolvedPath label", rMulti.markerSources["PRE-MERGE-PAIR"] === "/vault/Orchestrator Rules.md");
+  check("6dd3a17c rulesFiles (N-file) path: the other 11 (enumeration-only) are still missing", rMulti.missingMarkers.length === 11);
+
+  // The LIVE COMMITMENTS floor check is explicitly UNTOUCHED by this fix (card 6dd3a17c DoD: marker union
+  // scan only) — a §ROTATION-GATE section with a genuine "## LIVE COMMITMENTS"-matching heading inside it
+  // must still be found by countNumberedSectionUnion, proving the exclusion was not (even accidentally)
+  // widened to the commitments count.
+  const sectionWithCommitments = [
+    "## §ROTATION-GATE", "```", "LIVE COMMITMENTS", "```",
+    "## LIVE COMMITMENTS", ...Array.from({ length: 12 }, (_, i) => `${i + 1}. item`), "",
+  ].join("\n");
+  const rFloor = checkRotation({
+    activeText: "no heading here",
+    rules: { resolvedPath: "rules.md", text: sectionWithCommitments },
+    markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 12,
+  });
+  check("6dd3a17c: LIVE COMMITMENTS floor check is untouched — still finds a genuine section INSIDE §ROTATION-GATE", rFloor.liveCommitments.count === 12 && rFloor.liveCommitments.ok === true);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — rotation-check's marker/floor/archive/byte checks behave correctly, the two named historical bugs (a681aed5's name-anchor fail-open, 34a6f07e's equality-vs-floor) are proven absent from this port, a mutation test confirms a dropped marker is caught and named, configured:false is distinct from ok:true, the impure fs wrapper never throws on a missing doc, and the new multi-rules-file union (card f6985338) is byte-identical for a legacy single-rulesPath caller while correctly unioning/attributing/failing-visibly across N files — claude-free."
+  ? "\n✅ ALL PASS — rotation-check's marker/floor/archive/byte checks behave correctly, the two named historical bugs (a681aed5's name-anchor fail-open, 34a6f07e's equality-vs-floor) are proven absent from this port, a mutation test confirms a dropped marker is caught and named, configured:false is distinct from ok:true, the impure fs wrapper never throws on a missing doc, the new multi-rules-file union (card f6985338) is byte-identical for a legacy single-rulesPath caller while correctly unioning/attributing/failing-visibly across N files, and (card 6dd3a17c) a rules file's own §ROTATION-GATE section no longer satisfies the marker union scan just by enumerating/discussing every token, on both the single-rules and N-file paths, while leaving the LIVE COMMITMENTS floor check untouched — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
