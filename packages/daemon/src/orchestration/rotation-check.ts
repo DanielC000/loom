@@ -9,11 +9,21 @@ import type { RotationMarker } from "@loom/shared";
  * `orchestration.rotationMarkers` / `rotationLiveCommitmentsHeading` / `rotationLiveCommitmentsFloor`
  * config (see config.ts).
  *
- * DELIBERATELY NOT SHARED CODE with `packages/daemon/scripts/rotation-gate.mjs` — that script is FROZEN
- * for this card: migrate off it, never edit it. This module is a fresh TypeScript port of its algorithm;
- * because it is a port of logic already debugged in production, it does not automatically inherit any bug
- * the script already fixed — see the two regression tests in `test/rotation-check.mjs` for the historical
- * bugs this port must be proven not to have reintroduced:
+ * DELIBERATELY NOT SHARED CODE with `packages/daemon/scripts/rotation-gate.mjs` — kept as an independent
+ * second implementation, on purpose: the Loom Orchestrator's own doctrine runs BOTH checkers at every
+ * rotation because their independence has already caught real divergences (Operations/Orchestrator
+ * Rules.md §ROTATION-GATE). `rotation-gate.mjs` is NOT frozen and carries no retirement plan — it is the
+ * Loom Orchestrator's live, actively-maintained rotation gate, still ahead of this module in capability
+ * (e.g. `--audit-vault` has no port here).
+ *
+ * @decision 335456b0 — do not treat an edit to `rotation-gate.mjs` as a freeze violation; none exists.
+ * An earlier version of this comment claimed the script was "FROZEN ... never edit it" and 8 merged
+ * edits to it in the two weeks after that claim was written prove it was never true.
+ *
+ * This module is a fresh TypeScript port of the script's algorithm; because it is a port of logic already
+ * debugged in production, it does not automatically inherit any bug the script already fixed — see the
+ * two regression tests in `test/rotation-check.mjs` for the historical bugs this port must be proven not
+ * to have reintroduced:
  *
  * @decision a681aed5 (the section-boundary
  * NAME-ANCHOR fail-open; `findSectionBoundary` below anchors STRUCTURALLY by heading DEPTH instead) and

@@ -3,8 +3,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // that succeeds the three hand-rolled per-seat protections (a committed script for the Loom
 // Orchestrator, a per-rotation byte-slice ritual for Codescape, nothing for the Platform Lead).
 //
-// This is a FRESH TypeScript port of `packages/daemon/scripts/rotation-gate.mjs`'s algorithm (that
-// script is FROZEN for this card — never touched, never imported from here). A port of logic already
+// This is a FRESH TypeScript port of `packages/daemon/scripts/rotation-gate.mjs`'s algorithm, kept
+// deliberately independent — never imported from here. The script itself is NOT frozen (card 335456b0
+// corrected an earlier claim that it was). A port of logic already
 // debugged in production does not automatically inherit any bug the original already fixed, so two of
 // the blocks below are REGRESSION tests proving this port does not have either of the two historical
 // bugs the live script's own header documents having fixed:

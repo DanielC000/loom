@@ -1899,7 +1899,7 @@ export class PlatformMcpRouter {
           "rotation-scoped (a rotation is a replacement, not a cut; omit this for an ordinary rotation). " +
           "Pass `rulesPath` (card 3c30258f) to also union-check markers against a NON-ROTATING rules " +
           "file (e.g. an Orchestrator Rules.md) — a marker is satisfied if present in the ACTIVE doc OR " +
-          "the rules file, mirroring the frozen rotation-gate.mjs script's own --rules semantics; this " +
+          "the rules file, mirroring the rotation-gate.mjs script's own --rules semantics; this " +
           "is a union, NEVER a replacement — a marker present in NEITHER still fails. `rulesPath` NOW " +
           "ALSO unions the LIVE-COMMITMENTS-style floor itself (card e312b207): the numbered section is " +
           "counted wherever its heading is actually found — the active doc first (so nothing changes " +
