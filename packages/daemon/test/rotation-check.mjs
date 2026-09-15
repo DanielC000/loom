@@ -629,11 +629,20 @@ function tmpFile(name, content) {
     commitmentsHeading: "", commitmentsFloor: 0,
     rules: { resolvedPath: "/x/rules.md", text: "...ALPHA...BETA..." },
   });
+  // Card cd0c85f1: the golden literal below was updated (not merely extended) when markerHits/
+  // markersNeedingReview shipped — this IS the intended contract change the card asks for, not a
+  // regression. Both markers here (a single-line "...ALPHA...BETA..." rules text) genuinely SHARE their
+  // one hit line, so markerHits also exercises `sharedLineMarkers` and `markersNeedingReview` for free.
   const golden = {
     configured: true,
     ok: true,
     missingMarkers: [],
     markerSources: { ALPHA: "rules", BETA: "rules" },
+    markerHits: {
+      ALPHA: { source: "rules", hits: [{ line: 1, excerpt: "...ALPHA...BETA...", sharedLineMarkers: ["BETA"] }] },
+      BETA: { source: "rules", hits: [{ line: 1, excerpt: "...ALPHA...BETA...", sharedLineMarkers: ["ALPHA"] }] },
+    },
+    markersNeedingReview: ["ALPHA", "BETA"],
     rulesCheck: { checked: true, ok: true, resolvedPath: "/x/rules.md" },
     liveCommitments: {
       enabled: false, count: null, floor: 0, ok: true,
@@ -956,6 +965,122 @@ function tmpFile(name, content) {
     ],
   });
   check("N3 NEGATIVE CONTROL: two DIFFERENT resolvedPaths (even with identical content) still correctly trip ambiguity — the dedupe fix didn't overreach", rGenuineAmbiguity.liveCommitments.ambiguous === true && rGenuineAmbiguity.liveCommitments.otherSources.length === 1 && rGenuineAmbiguity.ambiguityWarning !== undefined);
+}
+
+// ── CARD cd0c85f1 — markerHits/markersNeedingReview against the amendment's own 4-state table ───────────
+// The amendment MEASURED that a bare count is not a discriminator: a count of 1 occurs in BOTH a healthy
+// state (content only) and a fully vacuous one (meta-mention only, content deleted); a count of 2 occurs
+// in BOTH an exposed state (content + meta) and a legitimately-double-cited-content state ("PRINT AND
+// READ THE ROWS"). Reproduce all four here and prove the NEW fields — excerpt text, sharedLineMarkers,
+// multipleHits — carry the signal the count never did, while being explicit about where they still can't
+// (a single-marker meta line sharing no other configured marker — the design's own admitted blind spot).
+{
+  const soloMarker = { token: "SOLOMARKER", caseSensitive: false };
+  const pairedMarker = { token: "PAIREDMARKER", caseSensitive: false };
+  const otherMarker = { token: "OTHERMARKER", caseSensitive: false };
+
+  // State 1 — content only (healthy, count=1).
+  const healthyDoc = "## Some section\nSOLOMARKER: the actual rule text lives right here, in the doc body.\n";
+  const rHealthy = checkRotation({ activeText: healthyDoc, markers: [soloMarker], commitmentsHeading: "", commitmentsFloor: 0 });
+  check("cd0c85f1 state 1 (healthy, count=1): one hit, no multipleHits", rHealthy.markerHits.SOLOMARKER.hits.length === 1 && rHealthy.markerHits.SOLOMARKER.multipleHits === undefined);
+  check("cd0c85f1 state 1: hit carries a MEASURED empty sharedLineMarkers ([], not absent)", Array.isArray(rHealthy.markerHits.SOLOMARKER.hits[0].sharedLineMarkers) && rHealthy.markerHits.SOLOMARKER.hits[0].sharedLineMarkers.length === 0);
+  check("cd0c85f1 state 1: markersNeedingReview is empty — nothing to flag on genuinely healthy content", rHealthy.markersNeedingReview.length === 0);
+
+  // State 2 — meta-only (fully vacuous; the negative-control state). Deliberately configured with ONLY
+  // this one marker, so sharedLineMarkers is structurally empty here too — modeling the amendment's own
+  // admitted blind spot (a single-marker meta line): only the EXCERPT can distinguish this from state 1.
+  const vacuousDoc = "## Some section\nThe SOLOMARKER token is kept here so this marker resolves.\n";
+  const rVacuous = checkRotation({ activeText: vacuousDoc, markers: [soloMarker], commitmentsHeading: "", commitmentsFloor: 0 });
+  check("cd0c85f1 state 2 (vacuous, count=1): SAME hit count as state 1 — the count alone cannot discriminate, exactly as the amendment measured", rHealthy.markerHits.SOLOMARKER.hits.length === rVacuous.markerHits.SOLOMARKER.hits.length);
+  check("cd0c85f1 state 2: sharedLineMarkers is ALSO empty here (the admitted blind spot — this flag agrees with state 1 too)", rVacuous.markerHits.SOLOMARKER.hits[0].sharedLineMarkers.length === 0);
+  check("cd0c85f1 states 1 vs 2: the EXCERPT is what actually differs — the discriminating signal the count/flag never carried", rHealthy.markerHits.SOLOMARKER.hits[0].excerpt !== rVacuous.markerHits.SOLOMARKER.hits[0].excerpt);
+  check("cd0c85f1 state 2: the excerpt reads as the meta sentence, not real content", rVacuous.markerHits.SOLOMARKER.hits[0].excerpt.includes("kept here so this marker resolves"));
+
+  // State 3 — content + meta (exposed, count=2). PAIREDMARKER has real content on one line and a SEPARATE
+  // meta-list line that also names OTHERMARKER — the shape that DOES trip sharedLineMarkers (mirrors the
+  // card's own MGR122-FLOOR/Orchestrator-Rules-967-970 specimens).
+  const exposedDoc = [
+    "## Some section",
+    "PAIREDMARKER: the actual rule text lives right here.",
+    "Reference list: PAIREDMARKER and OTHERMARKER are both protected above.",
+  ].join("\n");
+  const rExposed = checkRotation({ activeText: exposedDoc, markers: [pairedMarker, otherMarker], commitmentsHeading: "", commitmentsFloor: 0 });
+  check("cd0c85f1 state 3 (exposed, count=2): two hits, multipleHits:true", rExposed.markerHits.PAIREDMARKER.hits.length === 2 && rExposed.markerHits.PAIREDMARKER.multipleHits === true);
+  check("cd0c85f1 state 3: the meta-list line's hit carries sharedLineMarkers naming OTHERMARKER", rExposed.markerHits.PAIREDMARKER.hits.some((h) => h.sharedLineMarkers.includes("OTHERMARKER")));
+  check("cd0c85f1 state 3: the real-content line's hit carries NO sharedLineMarkers (only the list line does)", rExposed.markerHits.PAIREDMARKER.hits.some((h) => h.sharedLineMarkers.length === 0));
+  check("cd0c85f1 state 3: markersNeedingReview flags PAIREDMARKER", rExposed.markersNeedingReview.includes("PAIREDMARKER"));
+
+  // State 4 — content + content cross-reference (count=2, NOT exposed; mirrors "PRINT AND READ THE ROWS" —
+  // a marker legitimately cited twice in genuine content). Same count AND same multipleHits:true as state
+  // 3 — proving multipleHits alone never claims vacuousness — but neither line shares another configured
+  // marker, so sharedLineMarkers stays empty on both hits.
+  const doubleContentDoc = [
+    "## Some section",
+    "SOLOMARKER: first genuine statement of the rule.",
+    "As stated above, SOLOMARKER also governs this related case.",
+  ].join("\n");
+  const rDoubleContent = checkRotation({ activeText: doubleContentDoc, markers: [soloMarker], commitmentsHeading: "", commitmentsFloor: 0 });
+  check("cd0c85f1 state 4 (not exposed, count=2): two hits, multipleHits:true — SAME shape as state 3's count", rDoubleContent.markerHits.SOLOMARKER.hits.length === 2 && rDoubleContent.markerHits.SOLOMARKER.multipleHits === true);
+  check("cd0c85f1 state 4: neither hit carries sharedLineMarkers — multipleHits alone never implies vacuousness", rDoubleContent.markerHits.SOLOMARKER.hits.every((h) => h.sharedLineMarkers.length === 0));
+  check("cd0c85f1 states 3 vs 4: hits.length AND multipleHits are IDENTICAL between the exposed and the healthy-double-cite state — only the excerpts/sharedLineMarkers actually tell them apart", rExposed.markerHits.PAIREDMARKER.hits.length === rDoubleContent.markerHits.SOLOMARKER.hits.length && rExposed.markerHits.PAIREDMARKER.multipleHits === rDoubleContent.markerHits.SOLOMARKER.multipleHits);
+
+  check("cd0c85f1: multipleHits is genuinely ABSENT (not false) on a single-hit marker", rHealthy.markerHits.SOLOMARKER.multipleHits === undefined);
+}
+
+// ── CARD cd0c85f1 — excerpt windowing is MATCH-CENTERED, never head-anchored ─────────────────────────────
+// Measured against this project's own resume doc: median line length 219 chars, and a real marker match
+// at character 222 — past ANY fixed 200-char head window. Reproduce that shape directly: a marker deep in
+// a long line must still appear in its own excerpt.
+{
+  const marker = { token: "TARGETMARKER", caseSensitive: false };
+  const filler = "x".repeat(300);
+  const longLine = `${filler} TARGETMARKER ${filler}`;
+  const r = checkRotation({ activeText: longLine, markers: [marker], commitmentsHeading: "", commitmentsFloor: 0 });
+  const excerpt = r.markerHits.TARGETMARKER.hits[0].excerpt;
+  check("cd0c85f1 excerpt: the match is actually IN the excerpt on a long line (a head-anchored 200-char window would have missed it here)", excerpt.toUpperCase().includes("TARGETMARKER"));
+  check("cd0c85f1 excerpt: elided on BOTH ends (leading and trailing …) since the line is far longer than the window", excerpt.startsWith("…") && excerpt.endsWith("…"));
+  check("cd0c85f1 excerpt: genuinely windowed, not the whole line", excerpt.length < longLine.length);
+
+  // Negative control — a short line needs NO ellipsis at all; the window covers the whole thing.
+  const shortLine = "TARGETMARKER short line";
+  const rShort = checkRotation({ activeText: shortLine, markers: [marker], commitmentsHeading: "", commitmentsFloor: 0 });
+  check("cd0c85f1 excerpt NEGATIVE CONTROL: a short line is NOT elided at all — proves the ellipsis logic discriminates length, not applied unconditionally", rShort.markerHits.TARGETMARKER.hits[0].excerpt === shortLine);
+}
+
+// ── CARD cd0c85f1 — excerpt windowing never splits a UTF-16 surrogate pair (emoji) ────────────────────────
+// This project's own doc set is emoji-dense. Construct the exact boundary case: the marker's trailing
+// window edge (matchEnd + EXCERPT_RADIUS) lands precisely between an emoji's high and low surrogate — a
+// naive char-index slice would cut it in half, producing an unpaired surrogate (mojibake).
+{
+  function hasLoneSurrogate(s) {
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      if (c >= 0xd800 && c <= 0xdbff) {
+        const next = s.charCodeAt(i + 1);
+        if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+        i++;
+      } else if (c >= 0xdc00 && c <= 0xdfff) {
+        return true;
+      }
+    }
+    return false;
+  }
+  const marker = { token: "EMOJIMARKER", caseSensitive: false };
+  const emoji = "🔴"; // a genuine surrogate pair (U+1F534)
+  const EXCERPT_RADIUS = 120;
+  // The naive (unsafe) end boundary is matchIndex + matchLength + EXCERPT_RADIUS. We want the emoji's
+  // HIGH surrogate to land exactly at (end - 1) — the last char a naive slice would include, splitting
+  // the pair. Solving emoji-start (matchIndex + matchLength + paddingLen) = end - 1 cancels matchLength,
+  // leaving paddingLen = EXCERPT_RADIUS - 1 regardless of the marker token's own length.
+  const paddingLen = EXCERPT_RADIUS - 1;
+  const line = `${marker.token}${"y".repeat(paddingLen)}${emoji}z`;
+  const r = checkRotation({ activeText: line, markers: [marker], commitmentsHeading: "", commitmentsFloor: 0 });
+  const excerpt = r.markerHits.EMOJIMARKER.hits[0].excerpt;
+  check("cd0c85f1 surrogate safety: the boundary-straddling emoji survives whole, never split into a lone surrogate", !hasLoneSurrogate(excerpt) && Array.from(excerpt).includes(emoji));
+
+  // Negative control — the helper itself must actually be able to detect a split: prove it on a
+  // hand-built lone-surrogate string (never produced by checkRotation, just exercising the detector).
+  check("cd0c85f1 surrogate safety NEGATIVE CONTROL: hasLoneSurrogate genuinely detects a split pair", hasLoneSurrogate(emoji[0]) === true && hasLoneSurrogate("plain ascii, no surrogates") === false);
 }
 
 console.log(failures === 0

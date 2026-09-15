@@ -31,7 +31,11 @@ import type { RotationMarker } from "@loom/shared";
 
 export const HONEST_LIMIT_NOTE =
   "[resume-doc-check] limit: every check above is an exact-substring grep — it proves literal text " +
-  "survived, not that no meaning was lost to rewording. Treat a green as a candidate set, not a verdict.";
+  "survived, not that no meaning was lost to rewording. Treat a green as a candidate set, not a verdict. " +
+  "A marker being FOUND is not evidence its hit is real content either: a token that survives ONLY on a " +
+  "line that merely NAMES the marker (a marker list, a doctrine note, a warning comment) reads identical " +
+  "to real content via markerSources/ok alone — read markerHits[token].hits[].excerpt (and " +
+  "markersNeedingReview) to tell them apart; this module still cannot classify that automatically.";
 
 /** A marker not yet configured for this seat at all (both `rotationMarkers` empty and
  *  `rotationLiveCommitmentsHeading` unset) — distinct from `ok:true`, so an unconfigured seat is never
@@ -73,6 +77,108 @@ export function checkMarkers(activeText: string, markers: readonly RotationMarke
     }
   }
   return { missing, satisfiedBy };
+}
+
+/**
+ * @decision cd0c85f1 — a marker "found" is no evidence its hit is real content; see markerHits/
+ * markersNeedingReview below and the linked record for the incident (a meta-mention that keeps a
+ * marker permanently satisfiable after the content it was protecting was deleted).
+ */
+const EXCERPT_RADIUS = 120;
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+/**
+ * Windows an excerpt AROUND the match (never from the line's head) — this project's own resume doc has
+ * lines up to 783 chars with matches well past any fixed 200-char head window, which would silently
+ * return an excerpt that doesn't even contain the marker it exists to display. Bounded to
+ * `EXCERPT_RADIUS` chars either side of the match, adjusted so the cut never lands inside a UTF-16
+ * surrogate pair (this doc is emoji-dense; a naive char-index cut can split one into mojibake).
+ */
+function windowExcerpt(line: string, matchIndex: number, matchLength: number): string {
+  let start = Math.max(0, matchIndex - EXCERPT_RADIUS);
+  let end = Math.min(line.length, matchIndex + matchLength + EXCERPT_RADIUS);
+  if (start > 0 && isLowSurrogate(line.charCodeAt(start))) start -= 1;
+  if (end > 0 && end < line.length && isHighSurrogate(line.charCodeAt(end - 1))) end += 1;
+  const slice = line.slice(start, end).trim();
+  return (start > 0 ? "…" : "") + slice + (end < line.length ? "…" : "");
+}
+
+export interface MarkerHit {
+  /** 1-indexed, same convention as countNumberedSection's own diagnostics. */
+  line: number;
+  /** Match-centered, not head-anchored — see windowExcerpt's own doc for why. May be elided at either
+   *  end (a leading/trailing "…") when the line is longer than the window. */
+  excerpt: string;
+  /** Other CONFIGURED markers whose token ALSO appears on this exact line — a purely structural signal
+   *  (a marker-list/doctrine line tends to name several markers on one line at once), never a
+   *  classification of which occurrence is "real." A MEASURED zero: always an array, `[]` when nothing
+   *  else shares the line, never absent (mirrors this surface family's own "0 is measured, not omitted"
+   *  convention — e.g. composerDirtyLen/recentTimeoutStreak). */
+  sharedLineMarkers: string[];
+}
+
+export interface MarkerHitDetail {
+  /** Identical to markerSources[token] for this same marker — repeated here so a reader consuming
+   *  markerHits alone doesn't also need to cross-reference markerSources. */
+  source: string;
+  /** EVERY occurrence of this marker's token within the winning source's text, never just the first. */
+  hits: MarkerHit[];
+  /** Present (not merely false) when `hits.length > 1` — a flag to INSPECT, never a verdict either way:
+   *  a marker can legitimately appear more than once as genuine content (e.g. a heading plus real uses)
+   *  just as easily as it can appear once as content and once as a meta-mention. */
+  multipleHits?: true;
+}
+
+/**
+ * Finds every line in `text` containing `marker`'s token, independent of and never re-deriving the
+ * precedence/dedup logic in checkMarkers/checkMarkersUnion above — this only ever runs against the ONE
+ * text a marker was already determined to be satisfied by (see buildMarkerHits below).
+ */
+function findMarkerHits(text: string, marker: RotationMarker, allMarkers: readonly RotationMarker[]): MarkerHit[] {
+  const lines = text.split(/\r\n|\r|\n/);
+  const hits: MarkerHit[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const haystack = marker.caseSensitive ? line : line.toLowerCase();
+    const needle = marker.caseSensitive ? marker.token : marker.token.toLowerCase();
+    const idx = haystack.indexOf(needle);
+    if (idx === -1) continue;
+    const sharedLineMarkers = allMarkers.filter((m) => m.token !== marker.token && textIncludes(line, m)).map((m) => m.token);
+    hits.push({ line: i + 1, excerpt: windowExcerpt(line, idx, needle.length), sharedLineMarkers });
+  }
+  return hits;
+}
+
+/**
+ * Builds `markerHits` from the SAME `markerSources` labels checkMarkers/checkMarkersUnion already
+ * computed (never re-deriving precedence) — for each FOUND marker, resolves its winning source's text
+ * ("active" -> activeText, any other label -> the matching entry in `ruleSources`, built the same way
+ * for both the single- and multi-rules-file paths) and scans just that text for hit locations.
+ */
+function buildMarkerHits(
+  activeText: string,
+  markerSources: Record<string, string>,
+  markers: readonly RotationMarker[],
+  ruleSources: readonly RuleFileSource[],
+): Record<string, MarkerHitDetail> {
+  const textByLabel = new Map<string, string>([["active", activeText]]);
+  for (const s of ruleSources) textByLabel.set(s.label, s.text);
+  const result: Record<string, MarkerHitDetail> = {};
+  for (const marker of markers) {
+    const label = markerSources[marker.token];
+    if (label === undefined) continue; // not satisfied — no hits to report (missingMarkers covers this)
+    const text = textByLabel.get(label);
+    if (text === undefined) continue; // defensive; every label in markerSources came from one of these texts
+    const hits = findMarkerHits(text, marker, markers);
+    result[marker.token] = { source: label, hits, ...(hits.length > 1 ? { multipleHits: true as const } : {}) };
+  }
+  return result;
 }
 
 /** Returns the heading depth (1-6) of a markdown heading line, or null if `line` isn't one. */
@@ -389,6 +495,17 @@ export interface RotationCheckResult {
    *  the "which file satisfied it" DoD-3 asks for. Widened from a 2-value union to `string` for this
    *  reason; every existing "active"/"rules" comparison still holds unchanged. */
   markerSources: Record<string, string>;
+  /** Card cd0c85f1: per-marker hit LOCATIONS within the winning source named by `markerSources` —
+   *  never just the label. Only FOUND markers appear (mirrors `markerSources` itself). A marker being
+   *  present here is NOT evidence its content survived — see `markersNeedingReview` below and
+   *  `HONEST_LIMIT_NOTE`; the hit excerpts are what a reader must actually look at. */
+  markerHits: Record<string, MarkerHitDetail>;
+  /** Card cd0c85f1: every marker token whose `markerHits` entry carries `multipleHits` or a non-empty
+   *  `sharedLineMarkers` on any hit — an ADDRESSED "inspect these," surfaced at the TOP level so a
+   *  caller reading only top-level fields still learns something needs a look, rather than the same
+   *  data sitting as a passive notice nested inside `markerHits`. Never a verdict, never folds into
+   *  `ok` — always an array, `[]` when nothing warrants review (a measured empty set, not an omission). */
+  markersNeedingReview: string[];
   /** Symmetric twin of `archiveCheck` for the `rulesPath` union input (card 870edbcf). `checked:false`
    *  means no rulesPath was supplied at all (silent, as before this card). `checked:true, ok:false` means
    *  one WAS supplied but could not be read — `resolvedPath` names exactly what was tried and `reason`
@@ -566,6 +683,15 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
     for (const [token, src] of r.satisfiedBy) markerSources[token] = src;
   }
 
+  // Card cd0c85f1: markerHits/markersNeedingReview are a wholly separate, purely additive pass over the
+  // SAME winning text per marker (via markerSources, already finalized above) — never re-deriving the
+  // precedence/dedup logic in checkMarkers/checkMarkersUnion/buildRuleSources.
+  const hitSources = buildRuleSources(input.rules, rulesFiles);
+  const markerHits = buildMarkerHits(input.activeText, markerSources, input.markers, hitSources);
+  const markersNeedingReview = Object.keys(markerHits).filter(
+    (token) => markerHits[token]!.multipleHits === true || markerHits[token]!.hits.some((h) => h.sharedLineMarkers.length > 0),
+  );
+
   const rulesCheck = deriveRulesCheck(input.rules);
   const rulesChecks = deriveRulesChecks(input.rulesFiles);
 
@@ -635,6 +761,8 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
     ok,
     missingMarkers: missing.map((m) => m.token),
     markerSources,
+    markerHits,
+    markersNeedingReview,
     rulesCheck,
     ...(rulesChecks ? { rulesChecks } : {}),
     liveCommitments,
@@ -797,6 +925,8 @@ export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocC
       ok: false,
       missingMarkers: opts.markers.map((m) => m.token),
       markerSources: {},
+      markerHits: {},
+      markersNeedingReview: [],
       rulesCheck: deriveRulesCheck(rules),
       ...(rulesChecks ? { rulesChecks } : {}),
       liveCommitments: {

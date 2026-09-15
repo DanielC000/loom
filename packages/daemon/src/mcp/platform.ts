@@ -1935,7 +1935,17 @@ export class PlatformMcpRouter {
           "vault-contained exactly like `rulesPath` (refused if any resolves outside this project's " +
           "vaultPath) and independently reported in the response's `rulesChecks` array (mirrors " +
           "`rulesCheck` per-file) — a file that does not exist or cannot be read is a REAL entry there " +
-          "with `ok:false`, never silently dropped from the union.",
+          "with `ok:false`, never silently dropped from the union. " +
+          "Card cd0c85f1: a marker being FOUND is NOT evidence its content survived — a marker satisfied " +
+          "by a line that merely NAMES it (a marker list, a doctrine note warning 'keep this so the " +
+          "marker resolves') reads identical to one satisfied by real content in `markerSources`/`ok` " +
+          "alone. The response also carries `markerHits` (per FOUND marker: every line in its winning " +
+          "source containing the token, each with a match-centered excerpt — NEVER head-anchored, since " +
+          "a real doc can have matches past any fixed head window — and `sharedLineMarkers`, naming any " +
+          "OTHER configured marker also on that exact line) and a top-level `markersNeedingReview` (marker " +
+          "tokens whose hits carry `multipleHits` or a non-empty `sharedLineMarkers` — 'inspect these', " +
+          "never a verdict, never folded into `ok`). Read the excerpts yourself to tell a meta-mention " +
+          "from real content; this module still cannot classify that automatically.",
         inputSchema: strictShape({
           archivePath: z.string().optional(),
           rulesPath: z.string().optional(),
