@@ -91,8 +91,15 @@ function recordExitCloseMargin(scenario, r, configuredTimeoutMs) {
 // --- REAL spawn, mechanism (A): a fixture that exits 0 almost instantly, whose GRANDCHILD inherits its
 // stdio and outlives it — reproduces "printed ALL PASS, close still didn't fire" hermetically.
 {
-  const grandchildDelayMs = 900; // must clear timeoutMs comfortably so the race isn't tight
-  const timeoutMs = 250; // must clear the parent's own near-instant exit comfortably
+  // Card 8e2546a8: 717 real-gate-contention samples of this exact scenario (d1e10795's own promptness-
+  // margin instrument) measured 4 rows where the parent's actual exit slipped past the OLD 250ms budget
+  // (worst observed: exited at ~320ms, a -70ms inversion) — under load, node's own startup + running this
+  // fixture's few lines occasionally exceeds 250ms. timeoutMs=1000 leaves ~3x that worst-observed overrun
+  // as headroom before the margin could invert again; grandchildDelayMs=2000 keeps a comfortable gap above
+  // timeoutMs so the harness still reliably times out (not an early natural close) with room to spare on
+  // the exit->close gap check below.
+  const grandchildDelayMs = 2000; // must clear timeoutMs comfortably so the race isn't tight
+  const timeoutMs = 1000; // must clear the parent's own near-instant exit comfortably, even under real contention
   const r = await spawnWithTimeout(process.execPath, [LATE_CLOSE_PARENT, String(grandchildDelayMs)], { timeoutMs });
   recordExitCloseMargin("mechanismA", r, timeoutMs);
   check(
