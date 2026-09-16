@@ -1,6 +1,6 @@
 import path from "node:path";
 import fs from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import type { SessionRole } from "@loom/shared";
@@ -198,6 +198,253 @@ export function protectedIdsFromIntent(intent: RestartIntent): Set<string> {
 /** True only when running under the restart supervisor — i.e. `daemon_restart` can safely relaunch. */
 export function isSupervised(): boolean {
   return process.env.LOOM_SUPERVISED === "1";
+}
+
+/**
+ * Card 83718377: `isSupervised()` above only proves this process was SPAWNED under the supervisor — the
+ * env var is inherited once at spawn and never rechecked, so it stays `true` forever even if the
+ * supervisor process has since died. Before card 3fba0cd2 that gap was harmless: a dead supervisor took
+ * the whole process tree (incl. this daemon) down with it via an unguarded EPIPE crash, so the orphaned
+ * state — supervisor dead, daemon alive — was unreachable. 3fba0cd2 makes the daemon survive that crash,
+ * which means it can now genuinely outlive its supervisor. `isSupervisorProcessAlive` closes that gap by
+ * re-deriving, from the live OS process table, whether a real `daemon-supervisor.mjs` process still sits
+ * above this one — see its own doc below for the mechanism and why it's an ancestry WALK, not a single
+ * captured-pid check.
+ */
+
+/** One row of the bulk OS process snapshot {@link isSupervisorProcessAlive} walks. */
+export interface SupervisorProcRow {
+  ppid: number;
+  commandLine: string;
+  /** Best-effort process start time, epoch ms. null when the OS/enumerator couldn't report it. */
+  createdAtMs: number | null;
+}
+
+/** Bound the OS enumeration (PowerShell `Get-CimInstance`/`ps`) so a hung/slow call can't wedge a restart
+ * request indefinitely — a timeout REFUSES the restart (see {@link isSupervisorProcessAlive}), it never
+ * silently treats "couldn't check in time" as "must be fine". */
+const SUPERVISOR_ENUM_TIMEOUT_MS = 8_000;
+
+/**
+ * How many ancestor hops {@link walkSupervisorAncestry} climbs before giving up. MEASURED against this
+ * project's own real, live supervisor+daemon pair (Windows): the daemon's `process.ppid` is the
+ * `cmd.exe /c "node ... dist/index.js"` shell wrapper `runDaemon` spawns it through (Windows `shell:true`
+ * has no exec-replace, so that wrapper stays alive as a real intermediate process) — 1 hop — and ITS
+ * ppid is the real `node scripts/daemon-supervisor.mjs` process — 2 hops total. On POSIX, `sh -c` often
+ * exec-replaces itself for a single simple command, which would put the supervisor at hop 0 or 1 instead
+ * — untested from this host (win32-only), but bounding at 4 gives slack for either shape without
+ * "climbing to the root" and risking an unrelated coincidental match far up the tree.
+ */
+export const SUPERVISOR_MAX_ANCESTOR_HOPS = 4;
+
+/**
+ * Tolerance for the parent/child creation-time monotonicity check {@link walkSupervisorAncestry} runs at
+ * every hop (card 83718377 amendment 1). A genuine parent must have started at or before its child;
+ * POSIX creation times are derived from `ps`'s 1-second-resolution `etime`, so a few seconds of slack
+ * absorbs that rounding plus ordinary scheduling jitter without opening the door to a real pid-reuse
+ * case (which we still care about at second-plus granularity, not millisecond).
+ */
+export const SUPERVISOR_CREATION_SLOP_MS = 5_000;
+
+/**
+ * Card 83718377 amendment 2 — "match an invocation, not a mention": requires the command line's own
+ * EXECUTABLE be `node`/`node.exe` (optionally path-qualified, optionally quoted) AND its FINAL token
+ * name a path ending in `daemon-supervisor.mjs`. This deliberately does NOT match a `cmd.exe /c "node
+ * scripts/daemon-supervisor.mjs"` wrapper (the executable there is cmd.exe, not node — see MEASURED
+ * cases in the committed test) nor a node process that merely mentions the string as a stray mid-line
+ * argument (e.g. a flag value, or a shim naming the real script further down the line) — only a process
+ * whose own argv actually terminates in that script path counts as the supervisor.
+ */
+export const SUPERVISOR_INVOCATION_RE =
+  /^\s*"?(?:[^"<>|]*[\\/])?node(?:\.exe)?"?\s+(?:[^\s]+\s+)*"?[^\s"]*daemon-supervisor\.mjs"?\s*$/i;
+
+/** Windows bulk process enumerator: one line per LIVE process, `pid|ppid|createdAtEpochMs|commandLine`
+ * (createdAtEpochMs empty when `CreationDate` is unavailable for that process). Mirrors the bulk
+ * pid/ppid enumeration style `pty/host.ts`'s `reapOrphanedDescendants` already uses, extended to also
+ * carry CommandLine + CreationDate (needed for the identity + monotonicity checks here). */
+function enumerateWindowsProcesses(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "powershell.exe",
+      [
+        "-NoProfile", "-NonInteractive", "-Command",
+        "Get-CimInstance Win32_Process | ForEach-Object { $ct=''; if ($_.CreationDate) { $ct=[long]([datetimeoffset]$_.CreationDate).ToUnixTimeMilliseconds() }; \"$($_.ProcessId)|$($_.ParentProcessId)|$ct|$($_.CommandLine)\" }",
+      ],
+      { timeout: SUPERVISOR_ENUM_TIMEOUT_MS, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+      (err, stdout) => { if (err) reject(err); else resolve(stdout); },
+    );
+  });
+}
+
+/** POSIX bulk process enumerator: `pid ppid etime command` per line (no header, `=` suffix suppresses
+ * it) — same technique `git/worktrees.ts`-adjacent code and `scripts/daemon-supervisor-stop.mjs`'s
+ * `commandLineOf` already use for a single pid, here enumerating every live process in one call.
+ * Card 83718377 Code Review fix: uses `etime` (POSIX-standard, `[[dd-]hh:]mm:ss`), NOT `etimes` — that's
+ * a GNU procps-ng extension absent on macOS/BSD `ps` and on a minimal/busybox `ps`, which would make
+ * EVERY POSIX self-host restart permanently checkFailed. `etime` is parsed by {@link parseEtimeToSeconds}. */
+function enumeratePosixProcesses(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "ps",
+      ["-eo", "pid=,ppid=,etime=,command="],
+      { timeout: SUPERVISOR_ENUM_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
+      (err, stdout) => { if (err) reject(err); else resolve(stdout); },
+    );
+  });
+}
+
+/**
+ * Parse a POSIX `ps -o etime` value — `[[dd-]hh:]mm:ss` — into whole seconds. Exported + given its own
+ * seam so the POSIX parse path (otherwise only ever exercised on a POSIX CI runner) can be unit-tested
+ * directly from any host. Returns null on anything that doesn't match the documented shape (never
+ * throws) — a caller treats that the same as an unknown creation time.
+ */
+export function parseEtimeToSeconds(etime: string): number | null {
+  const m = etime.trim().match(/^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/);
+  if (!m) return null;
+  const days = m[1] ? Number(m[1]) : 0;
+  const hours = m[2] ? Number(m[2]) : 0;
+  const minutes = Number(m[3]);
+  const seconds = Number(m[4]);
+  return days * 86_400 + hours * 3_600 + minutes * 60 + seconds;
+}
+
+function parseWindowsProcessRows(out: string): Map<number, SupervisorProcRow> {
+  const rows = new Map<number, SupervisorProcRow>();
+  for (const raw of out.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = line.match(/^(\d+)\|(\d+)\|(\d*)\|([\s\S]*)$/);
+    if (!m) continue;
+    rows.set(Number(m[1]), { ppid: Number(m[2]), createdAtMs: m[3] ? Number(m[3]) : null, commandLine: m[4] ?? "" });
+  }
+  return rows;
+}
+
+function parsePosixProcessRows(out: string, nowMs: number): Map<number, SupervisorProcRow> {
+  const rows = new Map<number, SupervisorProcRow>();
+  for (const raw of out.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    // etime's own shape ([[dd-]hh:]mm:ss) contains `:`/`-`, so its field can't be matched with `\d+` —
+    // `[^\s]+` bounds it to one whitespace-free token, same as pid/ppid's own fields.
+    const m = line.match(/^(\d+)\s+(\d+)\s+(\S+)\s+([\s\S]*)$/);
+    if (!m) continue;
+    const elapsedSeconds = parseEtimeToSeconds(m[3] ?? "");
+    rows.set(Number(m[1]), { ppid: Number(m[2]), createdAtMs: elapsedSeconds == null ? null : nowMs - elapsedSeconds * 1000, commandLine: m[4] ?? "" });
+  }
+  return rows;
+}
+
+/** Real (non-test) process snapshot: enumerate + parse for whichever platform this process runs on. */
+async function defaultSupervisorProcessRows(): Promise<Map<number, SupervisorProcRow>> {
+  const nowMs = Date.now();
+  const out = process.platform === "win32" ? await enumerateWindowsProcesses() : await enumeratePosixProcesses();
+  return process.platform === "win32" ? parseWindowsProcessRows(out) : parsePosixProcessRows(out, nowMs);
+}
+
+/**
+ * Walk the OS ancestry from `startPpid` upward (bounded, cycle-guarded) for a live `node ...
+ * daemon-supervisor.mjs` invocation. PURE + exported for a hermetic test (no spawning). Every hop must
+ * also pass a parent-not-younger-than-child creation-time check (an unknown creation time counts as a
+ * failure) before its command line is even tested — without it the walk could continue THROUGH a pid the
+ * OS reused for an unrelated process into that process's own real ancestry and match a coincidental
+ * daemon-supervisor.mjs further up. A dead/missing hop refuses too.
+ */
+export function walkSupervisorAncestry(
+  startPpid: number,
+  startCreatedAtMs: number | null,
+  rows: Map<number, SupervisorProcRow>,
+): SupervisorLivenessResult {
+  const seen = new Set<number>();
+  let pid = startPpid;
+  let childCreatedAtMs = startCreatedAtMs;
+  for (let hop = 0; hop < SUPERVISOR_MAX_ANCESTOR_HOPS; hop++) {
+    if (!Number.isInteger(pid) || pid <= 0 || seen.has(pid)) {
+      return { alive: false, reason: `reached the top of the process ancestry (or a cycle) after ${hop} hop(s) without finding a live daemon-supervisor.mjs process — refusing to restart` };
+    }
+    seen.add(pid);
+    const row = rows.get(pid);
+    if (!row) {
+      return { alive: false, reason: `pid ${pid} in the supervisor ancestry chain is no longer running — the supervisor (or an intermediate process) has died; refusing to restart` };
+    }
+    if (row.createdAtMs == null) {
+      return { alive: false, reason: `could not determine pid ${pid}'s start time, so pid reuse can't be ruled out for this hop; refusing to restart` };
+    }
+    if (childCreatedAtMs != null && row.createdAtMs > childCreatedAtMs + SUPERVISOR_CREATION_SLOP_MS) {
+      return { alive: false, reason: `pid ${pid} started AFTER the process it's claimed to be the parent of — the ancestry chain is broken (the pid was likely reused by an unrelated process); refusing to restart` };
+    }
+    if (SUPERVISOR_INVOCATION_RE.test(row.commandLine)) {
+      return { alive: true };
+    }
+    childCreatedAtMs = row.createdAtMs;
+    pid = row.ppid;
+  }
+  return { alive: false, reason: `no live daemon-supervisor.mjs process found within ${SUPERVISOR_MAX_ANCESTOR_HOPS} ancestor hop(s) — refusing to restart rather than climb further up the process tree` };
+}
+
+/** Injectable seam for {@link isSupervisorProcessAlive} — a hermetic test swaps in a synthetic `rows`
+ * snapshot (and/or a fake `self`) instead of spawning a real OS enumerator. */
+export interface SupervisorLivenessDeps {
+  rows?: () => Promise<Map<number, SupervisorProcRow>>;
+  self?: { ppid: number; createdAtMs: number | null };
+}
+
+export interface SupervisorLivenessResult {
+  alive: boolean;
+  /** Present whenever alive is false. */
+  reason?: string;
+  /** True ONLY when the check itself could not be completed (enumeration timed out, exited non-zero, or
+   * returned nothing parseable) — distinct from a CONFIRMED dead/mismatched supervisor. A manager should
+   * read this as "retry", not "the supervisor is gone". */
+  checkFailed?: boolean;
+}
+
+/**
+ * Card 83718377: is a genuine, live `daemon-supervisor.mjs` process still an ancestor of this one? Used
+ * by `requestDaemonRestart` (sessions/service.ts) as a SECOND gate alongside `isSupervised()` — that
+ * function only proves this process was spawned under supervision once; this re-derives, right now, from
+ * the live OS process table, whether that supervisor is still there. Fails CLOSED: any inability to
+ * complete the check (enumerator timeout/non-zero-exit/unparseable output) is `{alive:false,
+ * checkFailed:true}`, never treated as "assume fine" — exiting into an orphaned daemon that nothing
+ * relaunches is far worse than a refused restart a manager can simply retry.
+ */
+export async function isSupervisorProcessAlive(deps: SupervisorLivenessDeps = {}): Promise<SupervisorLivenessResult> {
+  let rows: Map<number, SupervisorProcRow>;
+  try {
+    rows = deps.rows ? await deps.rows() : await defaultSupervisorProcessRows();
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException & { killed?: boolean };
+    const reason = err.killed
+      ? `could not verify supervisor liveness (process enumeration timed out after ${SUPERVISOR_ENUM_TIMEOUT_MS}ms) — refusing to restart; retry`
+      : `could not verify supervisor liveness (process enumeration failed: ${err.message ?? String(e)}) — refusing to restart; retry once the check itself can succeed`;
+    return { alive: false, checkFailed: true, reason };
+  }
+  if (rows.size === 0) {
+    return { alive: false, checkFailed: true, reason: "could not verify supervisor liveness (process enumeration returned no parseable rows) — refusing to restart; retry once the check itself can succeed" };
+  }
+  const ppid = deps.self?.ppid ?? process.ppid;
+  // Card 83718377 Code Review fix: derive OUR OWN creation time from the SAME enumeration/clock as every
+  // ancestor row below, rather than Node's Date.now()-process.uptime() arithmetic — that reads a DIFFERENT
+  // clock source than the OS enumerator's own CreationDate/etime, and the two can disagree (a backward
+  // wall-clock step after boot from an NTP/RTC correction, or a DST-fold-back-ambiguous local-time
+  // conversion), spuriously tripping the parent-younger-than-child check in walkSupervisorAncestry and
+  // producing a FALSE refusal that would recur for this daemon's whole remaining lifetime (self's
+  // Node-derived time relative to boot doesn't change on its own). Sourcing both sides from one snapshot
+  // makes them consistent by construction.
+  let createdAtMs: number | null;
+  if (deps.self) {
+    createdAtMs = deps.self.createdAtMs; // explicit test override — trusted as-is, including a deliberate null
+  } else {
+    const selfRow = rows.get(process.pid);
+    if (!selfRow) {
+      // A real host always finds itself in its own enumeration — this is a failed CHECK, not evidence
+      // the supervisor is dead.
+      return { alive: false, checkFailed: true, reason: "could not verify supervisor liveness (this process's own pid was not found in the process enumeration) — refusing to restart; retry once the check itself can succeed" };
+    }
+    createdAtMs = selfRow.createdAtMs;
+  }
+  return walkSupervisorAncestry(ppid, createdAtMs, rows);
 }
 
 /**

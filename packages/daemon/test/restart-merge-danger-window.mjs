@@ -50,6 +50,7 @@ const ids = { projId: `mdw-proj-${sfx}`, agentId: `mdw-agent-${sfx}`, mgrId: `md
 const now = new Date().toISOString();
 const REPO_PATH = path.join(os.tmpdir(), `loom-mdw-fake-repo-${sfx}`); // never touched on disk -- this test never calls a real merge
 const buildDeps = { runStep: async () => ({ code: 0, out: "" }) }; // instant green build, shared by every case below
+const isSupervisorAlive = async () => ({ alive: true }); // card 83718377: bypass the real OS ancestry check in this hermetic test
 
 try {
   db.insertProject({ id: ids.projId, name: "MDW", repoPath: REPO_PATH, vaultPath: REPO_PATH, config: {}, createdAt: now, archivedAt: null });
@@ -67,7 +68,7 @@ try {
   check("(1-pre) no merge-danger window active", listActiveMergeDangerWindows().length === 0);
   const exit1 = makeExit();
   const t0 = Date.now();
-  const r1 = await sessions.requestDaemonRestart(ids.mgrId, "deploy, nothing in flight", { buildDeps, exit: exit1.fn, mergeDangerGraceMs: 5000 });
+  const r1 = await sessions.requestDaemonRestart(ids.mgrId, "deploy, nothing in flight", { buildDeps, exit: exit1.fn, mergeDangerGraceMs: 5000, isSupervisorAlive });
   const elapsed1 = Date.now() - t0;
   check("(1) restarting:true", r1.restarting === true);
   check("(1) mergeDangerWait reports 0 windows active", r1.mergeDangerWait?.windowsActive === 0);
@@ -83,7 +84,7 @@ try {
 
   const exit2 = makeExit();
   let resolved = false;
-  const p2 = sessions.requestDaemonRestart(ids.mgrId, "deploy while a squash is in flight", { buildDeps, exit: exit2.fn, mergeDangerGraceMs: 5000 })
+  const p2 = sessions.requestDaemonRestart(ids.mgrId, "deploy while a squash is in flight", { buildDeps, exit: exit2.fn, mergeDangerGraceMs: 5000, isSupervisorAlive })
     .then((r) => { resolved = true; return r; });
 
   // (2)+(3a): prove requestDaemonRestart does NOT resolve / call exit while the window is still open --
@@ -131,7 +132,7 @@ try {
   enterMergeDangerWindow(REPO_PATH, "loom/never-clears", "op-2");
   const exit4 = makeExit();
   const t4 = Date.now();
-  const r4 = await sessions.requestDaemonRestart(ids.mgrId, "deploy against a window that never clears", { buildDeps, exit: exit4.fn, mergeDangerGraceMs: 500 });
+  const r4 = await sessions.requestDaemonRestart(ids.mgrId, "deploy against a window that never clears", { buildDeps, exit: exit4.fn, mergeDangerGraceMs: 500, isSupervisorAlive });
   const elapsed4 = Date.now() - t4;
   check("(4) restarting:true even though the window never cleared (fail-open, never a hard refusal)", r4.restarting === true);
   check("(4) resolved within the shrunk grace ceiling, not blocked indefinitely (400-2000ms)", elapsed4 >= 400 && elapsed4 < 2000);

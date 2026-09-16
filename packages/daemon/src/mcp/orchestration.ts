@@ -4508,7 +4508,12 @@ export class OrchestrationMcpRouter {
           "and retry). On a green build the daemon restarts: EVERY live session across ALL projects is dropped " +
           "— not just your own pty and your live workers', but the whole fleet — then the whole fleet (you and " +
           "your live workers included) is AUTOMATICALLY resumed with a note once it's back. Returns " +
-          "{restarting:true} on success, or {restarting:false, error} if unsupervised / build failed. If the " +
+          "{restarting:true} on success, or {restarting:false, error} if unsupervised, a live restart " +
+          "supervisor process can no longer be confirmed (card 83718377 — it re-checks the live OS process " +
+          "table on every call, not just whether this process was ONCE spawned under one; refuses rather " +
+          "than exit into an orphan nothing would relaunch — retry if the error says the CHECK itself " +
+          "failed, ask a human to restart the supervisor if it says the supervisor is actually gone), or " +
+          "build failed. If the " +
           "deploy going live also touches scripts/daemon-supervisor.mjs (the OUTER process that spawned this " +
           "daemon and is NOT re-execed by this restart), the success result additionally carries " +
           "{supervisorChanged:true, supervisorWarning} — those lines are silently inert until a human does a " +

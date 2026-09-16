@@ -594,6 +594,7 @@ class ControllableMcpPty {
     result = await sessions.requestDaemonRestart("reqPlatWrite", "verify write-path", {
       buildDeps: { runStep: fakeRunStep },
       exit: captureExit,
+      isSupervisorAlive: async () => ({ alive: true }), // card 83718377: bypass the real OS ancestry check in this hermetic test
     });
   } finally {
     delete process.env.LOOM_SUPERVISED;

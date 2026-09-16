@@ -110,6 +110,86 @@ try {
   try { await sessions.requestDaemonRestart(ids.workerId, "nope"); } catch { threw = true; }
   check("(3) a worker calling requestDaemonRestart throws (manager-only)", threw);
 
+  // --- (3b) card 83718377: supervised BUT the live supervisor process can no longer be confirmed —
+  // requestDaemonRestart must refuse in the SAME {restarting:false, error} shape as the unsupervised
+  // case above, WITHOUT ever reaching buildDaemon (a doomed restart shouldn't pay for a rebuild) or exit
+  // (the daemon must stay fully up). buildDeps.runStep records a call so a false PASS (build ran anyway)
+  // is caught rather than silently missed.
+  let buildStepCalled = false;
+  const buildDepsNeverCalled = { runStep: async () => { buildStepCalled = true; return { code: 0, out: "" }; } };
+  let exitCalled = false;
+  process.env.LOOM_SUPERVISED = "1";
+  let livenessRefusal;
+  try {
+    livenessRefusal = await sessions.requestDaemonRestart(ids.mgrId, "should be refused — supervisor unconfirmed", {
+      buildDeps: buildDepsNeverCalled,
+      exit: () => { exitCalled = true; },
+      isSupervisorAlive: async () => ({ alive: false, reason: "TEST: supervisor pid no longer running" }),
+    });
+  } finally {
+    delete process.env.LOOM_SUPERVISED;
+  }
+  check("(3b) unconfirmed-supervisor requestDaemonRestart returns restarting:false", livenessRefusal.restarting === false);
+  check("(3b) unconfirmed-supervisor refusal carries an explanatory error naming the reason", typeof livenessRefusal.error === "string" && livenessRefusal.error.includes("TEST: supervisor pid no longer running"));
+  check("(3b) unconfirmed-supervisor refusal never reached buildDaemon", buildStepCalled === false);
+  check("(3b) unconfirmed-supervisor refusal never called exit (daemon stays up)", exitCalled === false);
+  check("(3b) unconfirmed-supervisor refusal wrote NO intent (daemon left untouched)", restart.readRestartIntent() === null);
+
+  // --- (3c) same shape, but the CHECK ITSELF failed (enumeration timeout/error) rather than confirming
+  // the supervisor is dead — the refusal must still leave the daemon up, and should read as "retry", not
+  // "the supervisor is gone" (checkFailed:true is surfaced distinctly in requestDaemonRestart's wording).
+  process.env.LOOM_SUPERVISED = "1";
+  let checkFailedRefusal;
+  try {
+    checkFailedRefusal = await sessions.requestDaemonRestart(ids.mgrId, "should be refused — liveness check itself failed", {
+      buildDeps: buildDepsNeverCalled,
+      exit: () => { exitCalled = true; },
+      isSupervisorAlive: async () => ({ alive: false, checkFailed: true, reason: "TEST: enumeration timed out" }),
+    });
+  } finally {
+    delete process.env.LOOM_SUPERVISED;
+  }
+  check("(3c) check-failed requestDaemonRestart also returns restarting:false", checkFailedRefusal.restarting === false);
+  check("(3c) check-failed refusal wording is distinguishable from a confirmed-dead supervisor (says it's a failed CHECK)", /failed CHECK/i.test(checkFailedRefusal.error) && /retry/i.test(checkFailedRefusal.error));
+  check("(3c) the confirmed-dead refusal (3b) does NOT carry that same distinguishing wording", !/failed CHECK/i.test(livenessRefusal.error));
+  check("(3c) check-failed refusal never reached buildDaemon either", buildStepCalled === false);
+  check("(3c) check-failed refusal never called exit either", exitCalled === false);
+
+  // --- (3d) card 83718377 Code Review finding #3: buildDaemon() and the merge-danger wait can each take
+  // minutes AFTER the first liveness check — a supervisor that dies during either window must still be
+  // caught by a SECOND check right before exit, not sail through on a stale "yes" from minutes earlier.
+  // isSupervisorAlive here is STATEFUL: alive on its first call (so the pre-build gate passes and a real
+  // build/intent-write actually happens), dead on every call after (simulating the supervisor dying
+  // during buildDaemon/the merge-danger wait) — proving the recheck actually fires post-build, refuses,
+  // clears the now-stale intent it just wrote, and never calls exit.
+  let buildStepCalledInPassThenFail = false;
+  const buildDepsForPassThenFail = { runStep: async () => { buildStepCalledInPassThenFail = true; return { code: 0, out: "" }; } };
+  let exitCalledInPassThenFail = false;
+  let livenessCallCount = 0;
+  process.env.LOOM_SUPERVISED = "1";
+  let passThenFailResult;
+  try {
+    passThenFailResult = await sessions.requestDaemonRestart(ids.mgrId, "should build, then refuse right before exit", {
+      buildDeps: buildDepsForPassThenFail,
+      exit: () => { exitCalledInPassThenFail = true; },
+      mergeDangerGraceMs: 200,
+      isSupervisorAlive: async () => {
+        livenessCallCount++;
+        return livenessCallCount === 1
+          ? { alive: true }
+          : { alive: false, reason: "TEST: supervisor died during buildDaemon/the merge-danger wait" };
+      },
+    });
+  } finally {
+    delete process.env.LOOM_SUPERVISED;
+  }
+  check("(3d) the pre-build check passed and a real build actually ran (not skipped)", buildStepCalledInPassThenFail === true);
+  check("(3d) liveness was checked AT LEAST twice (pre-build AND pre-exit)", livenessCallCount >= 2);
+  check("(3d) the pass-then-fail sequence still returns restarting:false", passThenFailResult.restarting === false);
+  check("(3d) the pass-then-fail refusal names the second-check reason", typeof passThenFailResult.error === "string" && passThenFailResult.error.includes("TEST: supervisor died during buildDaemon/the merge-danger wait"));
+  check("(3d) exit was NEVER called, even though the build succeeded", exitCalledInPassThenFail === false);
+  check("(3d) the intent written after the (passing) pre-build check was CLEARED by the failed recheck", restart.readRestartIntent() === null);
+
   // --- (4) boot replay seam: replaying the intent's pending snapshot onto a resumed pty preserves FIFO order ---
   // A minimal stand-in for the PTY host's FIFO seam: a freshly resumed pty is not-ready, so every
   // enqueueStdin QUEUES (the ready-gated path in host.ts) and getPending returns a copy — exactly what

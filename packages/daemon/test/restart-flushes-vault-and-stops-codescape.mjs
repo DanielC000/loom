@@ -68,6 +68,7 @@ const ids = { projId: `rfv-proj-${sfx}`, agentId: `rfv-agent-${sfx}`, mgrId: `rf
 const now = new Date().toISOString();
 const FAKE_PROJECT_REPO = path.join(mkdtempManaged("loom-rfv-fake-repo-"), "repo"); // never touched on disk — this test never calls a real merge
 const buildDeps = { runStep: async () => ({ code: 0, out: "" }) }; // instant green build, shared by every case below
+const isSupervisorAlive = async () => ({ alive: true }); // card 83718377: bypass the real OS ancestry check in this hermetic test
 
 try {
   db.insertProject({ id: ids.projId, name: "RFV", repoPath: FAKE_PROJECT_REPO, vaultPath: FAKE_PROJECT_REPO, config: {}, createdAt: now, archivedAt: null });
@@ -89,7 +90,7 @@ try {
   check("(1-pre) edit is staged as a real pending change (debounce window, nothing committed yet)", beforeRed === 1);
 
   const exitRed = makeExit();
-  const rRed = await sessions.requestDaemonRestart(ids.mgrId, "restart with no cleanup registered (RED)", { buildDeps, exit: exitRed.fn, mergeDangerGraceMs: 500 });
+  const rRed = await sessions.requestDaemonRestart(ids.mgrId, "restart with no cleanup registered (RED)", { buildDeps, exit: exitRed.fn, mergeDangerGraceMs: 500, isSupervisorAlive });
   check("(1) restarting:true", rRed.restarting === true);
   const exitFiredRed = await pollUntil(() => exitRed.calls.length > 0, { timeoutMs: 2000, intervalMs: 20 });
   check("(1) exit fired within the 300ms flush delay", exitFiredRed);
@@ -114,7 +115,7 @@ try {
 
   const exitGreen = makeExit();
   const tGreenStart = performance.now();
-  const rGreen = await sessions.requestDaemonRestart(ids.mgrId, "restart with cleanup registered (GREEN)", { buildDeps, exit: exitGreen.fn, mergeDangerGraceMs: 500 });
+  const rGreen = await sessions.requestDaemonRestart(ids.mgrId, "restart with cleanup registered (GREEN)", { buildDeps, exit: exitGreen.fn, mergeDangerGraceMs: 500, isSupervisorAlive });
   check("(2) restarting:true", rGreen.restarting === true);
   const exitFiredGreen = await pollUntil(() => exitGreen.calls.length > 0, { timeoutMs: 2000, intervalMs: 20 });
   check("(2) exit fired within the flush delay", exitFiredGreen);

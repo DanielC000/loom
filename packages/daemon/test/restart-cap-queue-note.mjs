@@ -112,6 +112,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
       result = await sessions.requestDaemonRestart(mgrA, "verify capQueued snapshot", {
         buildDeps: { runStep: fakeRunStep },
         exit: (code) => exitCalls.push(code),
+        isSupervisorAlive: async () => ({ alive: true }), // card 83718377: bypass the real OS ancestry check in this hermetic test
       });
     } finally {
       delete process.env.LOOM_SUPERVISED;
@@ -163,6 +164,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
     try {
       await sessions.requestDaemonRestart(mgrC, "verify no capQueued key when nothing queued", {
         buildDeps: { runStep: fakeRunStep }, exit: () => {},
+        isSupervisorAlive: async () => ({ alive: true }), // card 83718377: bypass the real OS ancestry check in this hermetic test
       });
     } finally {
       delete process.env.LOOM_SUPERVISED;
@@ -206,7 +208,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
     const fakeRunStep = async () => ({ code: 0, out: "" });
     process.env.LOOM_SUPERVISED = "1";
     try {
-      await sessions.requestDaemonRestart(mgrD, "verify entry-count cap", { buildDeps: { runStep: fakeRunStep }, exit: () => {} });
+      await sessions.requestDaemonRestart(mgrD, "verify entry-count cap", { buildDeps: { runStep: fakeRunStep }, exit: () => {}, isSupervisorAlive: async () => ({ alive: true }) }); // card 83718377: bypass the real OS ancestry check in this hermetic test
     } finally {
       delete process.env.LOOM_SUPERVISED;
     }

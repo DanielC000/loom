@@ -47,7 +47,7 @@ import type { CodescapeSupervisor } from "../codescape/supervisor.js";
 import { resolveCodescapeLastIngested } from "../codescape/manifest.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
-import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, supervisorScriptChangedSince, supervisorCheckResponseFields, type RestartIntent, type RestartResumeEntry, type BuildDeps } from "../orchestration/restart.js";
+import { RESTART_EXIT_CODE, isSupervised, isSupervisorProcessAlive, writeRestartIntent, clearRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, supervisorScriptChangedSince, supervisorCheckResponseFields, type RestartIntent, type RestartResumeEntry, type BuildDeps, type SupervisorLivenessResult } from "../orchestration/restart.js";
 import { currentDeployStaleness } from "../served-status.js";
 import type { DeployStalenessResult } from "../deploy-staleness.js";
 import { computeWakeImpact } from "../orchestration/wake-impact.js";
@@ -3240,7 +3240,7 @@ export class SessionService {
   // git flush itself takes
   async requestDaemonRestart(
     callerSessionId: string, reason: string,
-    deps: { buildDeps?: BuildDeps; exit?: (code: number) => void; mergeDangerGraceMs?: number } = {},
+    deps: { buildDeps?: BuildDeps; exit?: (code: number) => void; mergeDangerGraceMs?: number; isSupervisorAlive?: () => Promise<SupervisorLivenessResult> } = {},
   ): Promise<{ restarting: boolean; error?: string; supervisorChanged?: boolean; supervisorCheckFailed?: boolean; supervisorWarning?: string; mergeDangerWait?: { waitedMs: number; windowsActive: number } }> {
     const caller = this.db.getSession(callerSessionId);
     if (!caller || (caller.role !== "manager" && caller.role !== "platform")) {
@@ -3248,6 +3248,37 @@ export class SessionService {
     }
     if (!isSupervised()) {
       return { restarting: false, error: "daemon is not running under the restart supervisor (pnpm daemon:stable) — cannot self-restart. Flag that the human must restart for your merged code to go live." };
+    }
+    // Card 83718377: isSupervised() above only proves this PROCESS was spawned under the supervisor —
+    // it stays true forever even after the supervisor itself has died (env vars don't un-set
+    // themselves). Re-derive RIGHT NOW, from the live OS process table, whether a real
+    // daemon-supervisor.mjs process is still an ancestor of this one — see isSupervisorProcessAlive's
+    // own doc for the mechanism. Checked BEFORE buildDaemon() so a doomed restart never pays for a
+    // rebuild, and refuses in the exact same {restarting:false, error} shape as the check above —
+    // leaving the daemon fully up rather than exiting into an orphan nothing will relaunch.
+    //
+    // Card 83718377 Code Review fix: this is ONE of TWO checks, not the only one — buildDaemon() (a
+    // frozen install plus a forced turbo build) and the merge-danger-window wait further down can each
+    // take MINUTES, and a supervisor that dies during either window would still sail through on a stale
+    // "yes" from here. checkSupervisorAlive is re-invoked a second time, right before the actual exit is
+    // scheduled — see that call site's own comment for why a failure there also clears the
+    // just-written restart intent.
+    const checkSupervisorAlive = deps.isSupervisorAlive ?? isSupervisorProcessAlive;
+    const supervisorRefusal = (liveness: SupervisorLivenessResult, context: string) => {
+      const retryHint = liveness.checkFailed ? " (this is a failed CHECK, not a confirmed-dead supervisor — retry)" : "";
+      // Card 83718377 Code Review fix: the "check the supervisor and restart it manually" clause asserts
+      // the supervisor IS dead — true for a confirmed-dead/mismatched result, but actively misleading for
+      // a checkFailed one (the check itself broke; the supervisor may be perfectly fine). Only a
+      // confirmed refusal gets it.
+      const humanClause = liveness.checkFailed ? "" : " A human should check the supervisor (pnpm daemon:stable) and restart it manually if it has died.";
+      return {
+        restarting: false as const,
+        error: `${context}${retryHint} — refusing to restart (this would otherwise exit into an orphaned daemon that nothing relaunches, taking every project on this host down silently). ${liveness.reason ?? ""}${humanClause}`.trim(),
+      };
+    };
+    const liveness = await checkSupervisorAlive();
+    if (!liveness.alive) {
+      return supervisorRefusal(liveness, "could not confirm the restart supervisor is still alive");
     }
     const build = await buildDaemon(deps.buildDeps);
     if (build.code !== 0) {
@@ -3364,6 +3395,21 @@ export class SessionService {
       try {
         console.log(`[restart] daemon_restart waited ${mergeDangerWait.waitedMs}ms for ${windowsActive} in-flight merge danger window(s) before exiting.`);
       } catch { /* never block the restart */ }
+    }
+    // Card 83718377 Code Review fix: the SECOND of the two supervisor-liveness checks (see the first
+    // call site's own comment) — buildDaemon() and the merge-danger wait just above can together take
+    // minutes, so re-derive liveness right here, as close to the actual exit as this function gets,
+    // rather than trusting a "yes" that may now be stale. A failure here means we've ALREADY written
+    // the restart intent above (harmless while the daemon keeps running — index.ts only ever reads it at
+    // boot) — clear it explicitly so it can never be mistaken for a live, still-pending restart by a
+    // later, unrelated crash/reboot.
+    const recheck = await checkSupervisorAlive();
+    if (!recheck.alive) {
+      clearRestartIntent();
+      return supervisorRefusal(
+        recheck,
+        "the restart supervisor could no longer be confirmed alive immediately before exiting (the restart-intent written moments ago has been cleared; nothing was scheduled to exit)",
+      );
     }
     // Exit AFTER this MCP response flushes; the pty (incl. this caller) dies with the process, the
     // supervisor relaunches the freshly-built daemon, and boot re-resumes us from the intent. NOTE: this
