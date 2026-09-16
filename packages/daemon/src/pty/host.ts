@@ -3501,15 +3501,24 @@ export function reapOrphanedDescendants(rootPid: number): void {
     }
     const seen = new Set<number>();
     const stack = [rootPid];
+    let found = 0;
+    let killed = 0;
+    let alreadyGone = 0;
     while (stack.length) {
       const p = stack.pop()!;
       if (seen.has(p)) continue; // bounds the walk to each pid at most once — breaks any parent-map cycle
       seen.add(p);
       for (const child of byParent.get(p) ?? []) {
-        try { process.kill(child, "SIGKILL"); } catch { /* already gone */ }
+        found++;
+        try { process.kill(child, "SIGKILL"); killed++; } catch { alreadyGone++; /* already gone */ }
         stack.push(child);
       }
     }
+    // Card 7d58a1aa: the only place this backstop's outcome is ever observable — previously this
+    // function logged nothing on any path, so a sweep that found/killed nothing was byte-identical
+    // from outside to a clean successful sweep.
+    // eslint-disable-next-line no-console
+    console.log(`[pty-reap] root=${rootPid}: found=${found} killed=${killed} alreadyGone=${alreadyGone}`);
   };
   const cmd = process.platform === "win32"
     ? spawnProcess("powershell.exe", [
@@ -3519,7 +3528,13 @@ export function reapOrphanedDescendants(rootPid: number): void {
     : spawnProcess("ps", ["-eo", "pid,ppid"], { stdio: ["ignore", "pipe", "ignore"] });
   let out = "";
   cmd.stdout?.on("data", (d) => { out += d; });
-  cmd.on("error", () => { /* helper unavailable — best-effort, never throws */ });
+  // Card 7d58a1aa: mirrors the same fix reapProcessesRootedInWorktree already got (decision
+  // sha:16b7c38c) — an enumeration-helper spawn failure used to be silent, indistinguishable from
+  // "nothing needed killing". Still best-effort, still never throws past this handler.
+  cmd.on("error", (err) => {
+    // eslint-disable-next-line no-console
+    console.error(`[pty-reap] root=${rootPid}: enumeration helper failed to spawn — found/killed NOTHING (best-effort, never throws): ${err.message}`);
+  });
   cmd.on("close", () => sweep(out));
 }
 
@@ -4300,8 +4315,10 @@ export class PtyHost {
       // Card 2d8d2e42: same per-session-cleanup-point discipline — a dead session's repeat-streak bucket
       // would otherwise linger for the rest of the daemon's process lifetime. Fires on EVERY exit path.
       this.repeatedCalls.forget(opts.sessionId);
+      // Card 7d58a1aa: pid= added so this line joins by pid against the async `[pty-reap]` outcome
+      // log above, without threading sessionId through reapOrphanedDescendants's own signature.
       // eslint-disable-next-line no-console
-      console.log(`[pty] exit ${opts.sessionId} code=${exitCode} intended=${live.stopping}`);
+      console.log(`[pty] exit ${opts.sessionId} code=${exitCode} intended=${live.stopping} pid=${live.pid}`);
       try { live.logStream.end(); } catch { /* ignore */ }
       this.broadcastControl(live, { type: "exit", code: exitCode });
       // `intended` = a deliberate Loom stop() was issued (live.stopping). An UNEXPECTED death never went
