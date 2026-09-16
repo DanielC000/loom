@@ -2468,9 +2468,11 @@ function applyMs(orch: Partial<OrchestrationConfig>, key: keyof OrchestrationCon
 //
 // Card 48365fda. An MsField is labelled and entered in a human unit (s/m/h) but stores canonical ms, so
 // the server's own rejection quoted the raw MILLISECOND bound into a field measured in seconds: typing
-// `2000` into "Gate command timeout (s)" sent 2_000_000 and came back "expected number to be <=1800000".
-// The rejection was CORRECT — the true ceiling is 1800s — but there was no way to derive that from the
-// message. Two different project owners read it as a broken validator on the same night.
+// `2000` into "Gate command timeout (s)" sent 2_000_000 and came back "expected number to be <=1800000"
+// (the gate ceiling AT THE TIME — since raised to 3_600_000 by card fc8aa167; this incident's own numbers
+// are historical and no longer track the live bound, read live from ORCHESTRATION_TIMEOUT_MS_BOUNDS).
+// The rejection was CORRECT — the true ceiling was 1800s at the time — but there was no way to derive that
+// from the message. Two different project owners read it as a broken validator on the same night.
 //
 // Fix: divide the shared bound by the field's own unit and both (a) show the range up front and (b) catch
 // an out-of-range entry client-side, so the raw-ms server error is never the thing the user reads.

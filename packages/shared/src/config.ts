@@ -235,7 +235,7 @@ export const MEMORY_CONFIG_MAX = {
  * one is an owner decision, not a UI concern.
  */
 export const ORCHESTRATION_TIMEOUT_MS_BOUNDS = {
-  gateCommandTimeoutMs: { min: 1000, max: 1_800_000 },
+  gateCommandTimeoutMs: { min: 1000, max: 3_600_000 },
   deployCommandTimeoutMs: { min: 1000, max: 1_800_000 },
   alertWebhookTimeoutMs: { min: 500, max: 60_000 },
 } as const;
