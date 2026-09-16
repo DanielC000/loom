@@ -20,6 +20,21 @@ import http from "node:http";
 import { createRotatingLog } from "./lib/rotating-log.mjs";
 import { createLineTimestamper } from "./lib/line-timestamp.mjs";
 import { loadDotEnvFile, fillEnvDefaults } from "./lib/env-file.mjs";
+import { installEpipeTolerantStdio } from "./lib/epipe-tolerant-stdio.mjs";
+
+// Card 175a7eb2: a supervisor whose hosting console has died is alive but doomed — it passes a
+// liveness check (the process exists) and then can crash on its own next console.log/error (e.g. the
+// "[supervisor] daemon requested restart…" line printed at the exact moment it should relaunch the
+// daemon). Install BEFORE anything else writes to stdout/stderr — including inside the --detach block
+// below — so every console.*/process.std{out,err}.write call site in THIS process is covered from
+// process start. Two child writers are OUT OF THIS GUARD'S REACH, deliberately: the turbo build
+// children spawned by sh() below run with stdio:"inherit", writing straight to the inherited fd and
+// never touching this process's stream objects at all; the daemon child spawned by runDaemon() writes
+// to ITS OWN stdout/stderr (guarded independently inside the daemon process by crashlog.ts's own
+// installEpipeTolerantStdio, card 3fba0cd2/63dfcdcd) — only the SUPERVISOR's own re-write of that piped
+// data, at the console-mirror tee further down, is this guard's concern, and that re-write IS covered
+// since it goes through the same process.stdout/process.stderr objects wrapped here.
+installEpipeTolerantStdio();
 
 const RESTART_EXIT_CODE = 75; // must match packages/daemon/src/orchestration/restart.ts
 const thisFile = fileURLToPath(import.meta.url);

@@ -3002,6 +3002,14 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // rotateCrashlog() body comparison) is comment-stripped internally and immune on its own, but the
   // file's overall verdict is not, so the whole file belongs here.
   "packages/daemon/test/crashlog-supervisor-rotation-parity.mjs",
+  // Card 175a7eb2: extractFunctionBody() raw-scans real crashlog.ts SOURCE for
+  // "function installEpipeTolerantStdio(...) {" and its body text (comment-stripped internally, but the
+  // function-start regex and the presence of the function itself are not) — same drift-guard shape as
+  // crashlog-supervisor-rotation-parity.mjs immediately above, comparing against a local duplicate in
+  // scripts/lib/epipe-tolerant-stdio.mjs. A comment-only edit ABOVE the real declaration (this file's own
+  // crashlog-supervisor-rotation-parity.mjs precedent showed exactly this shape flips an unanchored
+  // `.match()`) is the reduced-gate hole this registration exists to close.
+  "packages/daemon/test/epipe-tolerant-stdio-supervisor-parity.mjs",
   "packages/daemon/test/project-memory.mjs",
   "packages/daemon/test/session-archive.mjs",
   // card fab07aba — real packages/daemon/src/**/*.ts readers, same trigger as the dist/** readers above.
