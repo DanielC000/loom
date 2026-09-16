@@ -2994,6 +2994,14 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // keeps comments, so a comment-only edit to index.ts containing "installCrashHandlers();" above the real
   // installEpipeTolerantStdio() call would flip this. Same shape as its sibling immediately above.
   "packages/daemon/test/epipe-tolerant-stdio.mjs",
+  // Card 9c8ce2b2: extractMaxGenerations() raw-scans real packages/daemon/src/crashlog.ts SOURCE for
+  // /CRASHLOG_MAX_GENERATIONS\s*=\s*(\d+)/ — an unanchored, whole-file `.match()` (not `^`/`m`-anchored to
+  // a bare `const` line the way anchor-re-parity.mjs's immune shape is). MEASURED: inserting a plausible
+  // comment-only historical note ("// historically this was CRASHLOG_MAX_GENERATIONS = 3…") immediately
+  // above the real declaration flips the extracted value from 5 to 3. The file's OTHER check (the
+  // rotateCrashlog() body comparison) is comment-stripped internally and immune on its own, but the
+  // file's overall verdict is not, so the whole file belongs here.
+  "packages/daemon/test/crashlog-supervisor-rotation-parity.mjs",
   "packages/daemon/test/project-memory.mjs",
   "packages/daemon/test/session-archive.mjs",
   // card fab07aba — real packages/daemon/src/**/*.ts readers, same trigger as the dist/** readers above.

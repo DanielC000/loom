@@ -29,8 +29,9 @@ const daemonDir = path.join(repoRoot, "packages", "daemon");
 
 // Mirrors packages/daemon/src/crashlog.ts CRASHLOG_PATH (LOOM_HOME/crash.log). The daemon's fatal-exit
 // handler writes the crashlog here; a freshly launched daemon would overwrite it on its next crash. So
-// before each launch, rotate any existing crash.log to crash.log.prev — keeping the last two — so a
-// restart (or a human re-run after a crash) never clobbers the previous crash signature. Best-effort.
+// before each launch, rotate any existing crash.log through numbered generations (crash.log.1 ..
+// crash.log.N, see CRASHLOG_MAX_GENERATIONS below) so a restart (or a human re-run after a crash) never
+// clobbers the last several prior crash signatures. Best-effort.
 const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
 
 // File-based feature-flag toggles (card b22f9ef2): a `daemon_restart` (in-process, exit 75) reuses
@@ -164,6 +165,16 @@ if (isDetachedChild) {
 }
 
 const CRASHLOG = path.join(LOOM_HOME, "crash.log");
+// How many ROTATED crash-log generations to retain (card 9c8ce2b2) — MUST match the duplicate constant
+// of the same name in packages/daemon/src/crashlog.ts (see that file's own doc for why the duplication
+// is deliberate: this supervisor script runs before the daemon package is even built/imported).
+const CRASHLOG_MAX_GENERATIONS = 5;
+
+/** Path to the Nth rotated crash-log generation (1-indexed; 1 = most recent prior crash, N = oldest). */
+function crashlogGenerationPath(generation) {
+  return `${CRASHLOG}.${generation}`;
+}
+
 /**
  * Returns whether a crash.log actually existed and was rotated (Code Review finding #2). This return
  * value matters beyond the rotation itself: the daemon child's own boot-time check
@@ -172,13 +183,23 @@ const CRASHLOG = path.join(LOOM_HOME, "crash.log");
  * launch (below), so by the time the child could check, a real prior crash's record is already gone
  * regardless of whether this boot is a crash-recovery boot at all. The caller threads this into
  * LOOM_PRIOR_CRASHLOG so the child can still tell the difference — see hadCrashLogAtBoot's own doc.
+ *
+ * Rotates through numbered generations (crash.log.1 .. crash.log.N), shifting oldest-first so no rename
+ * ever needs to overwrite a slot it hasn't already vacated — same algorithm as crashlog.ts's own
+ * rotateCrashlog, kept in sync by hand since the two files can't share code (see the constant's own doc).
  */
 function rotateCrashlog() {
   try {
     if (!fs.existsSync(CRASHLOG)) return false;
-    const prev = `${CRASHLOG}.prev`;
-    fs.rmSync(prev, { force: true }); // Windows renameSync fails if the destination exists — clear it first
-    fs.renameSync(CRASHLOG, prev);
+    for (let gen = CRASHLOG_MAX_GENERATIONS; gen >= 2; gen--) {
+      const src = crashlogGenerationPath(gen - 1);
+      if (!fs.existsSync(src)) continue;
+      const dst = crashlogGenerationPath(gen);
+      fs.rmSync(dst, { force: true }); // Windows renameSync fails if the destination exists
+      fs.renameSync(src, dst);
+    }
+    fs.rmSync(crashlogGenerationPath(1), { force: true });
+    fs.renameSync(CRASHLOG, crashlogGenerationPath(1));
     return true;
   } catch (err) {
     console.error(`[supervisor] crashlog rotate failed (continuing): ${err.message}`);

@@ -298,57 +298,94 @@ if (scenario) {
       check("exit-restart: NO crashlog written (restart sentinel is not a crash)", readCrashlog(home) === null);
     }
 
-    // ── G: boot-time crash.log rotation (the SHIPPED, supervisor-less daemon path) ────────────────────
-    // installCrashHandlers must rotate a PRE-EXISTING crash.log → crash.log.prev at boot, BEFORE any new
-    // crash record can be written, so a crash→auto-restart preserves the prior signature.
+    // ── G: boot-time crash.log rotation (numbered generations, card 9c8ce2b2) ─────────────────────────
+    // installCrashHandlers must rotate a PRE-EXISTING crash.log through numbered generations
+    // (crash.log.1 newest .. crash.log.N oldest) at boot, BEFORE any new crash record can be written, so
+    // a crash→auto-restart preserves the last N prior signatures, not just one (the old crash.log.prev
+    // swap could only ever hold one — the exact gap this card fixes, see the card body for the incident).
     // NOTE: crashlog.js caches CRASHLOG_PATH from LOOM_HOME at its FIRST import (section A's home), so a
     // re-import does NOT repoint it — operate against the module's exported paths and clear them first.
     {
-      const { rotateCrashlog, CRASHLOG_PATH, CRASHLOG_PREV_PATH } = await import("../dist/crashlog.js");
-      fs.rmSync(CRASHLOG_PATH, { force: true });
-      fs.rmSync(CRASHLOG_PREV_PATH, { force: true });
-      const readPrev = () => (fs.existsSync(CRASHLOG_PREV_PATH) ? fs.readFileSync(CRASHLOG_PREV_PATH, "utf8") : null);
+      const { rotateCrashlog, CRASHLOG_PATH, CRASHLOG_MAX_GENERATIONS, crashlogGenerationPath } =
+        await import("../dist/crashlog.js");
+      const clearAll = () => {
+        fs.rmSync(CRASHLOG_PATH, { force: true });
+        for (let g = 1; g <= CRASHLOG_MAX_GENERATIONS + 2; g++) {
+          fs.rmSync(crashlogGenerationPath(g), { force: true, recursive: true });
+        }
+      };
+      const readGen = (g) => (fs.existsSync(crashlogGenerationPath(g)) ? fs.readFileSync(crashlogGenerationPath(g), "utf8") : null);
+      clearAll();
 
-      // No crash.log present → idempotent no-op, never throws, leaves no .prev.
+      check("rotate: CRASHLOG_MAX_GENERATIONS is 5 (card 9c8ce2b2's accepted N)", CRASHLOG_MAX_GENERATIONS === 5);
+
+      // Cold start: no crash.log, no generations at all → idempotent no-op, never throws, creates nothing.
       let threw = false;
       try { rotateCrashlog(); } catch { threw = true; }
-      check("rotate: no crash.log → no-op, does not throw", !threw);
-      check("rotate: no crash.log → no .prev created", !fs.existsSync(CRASHLOG_PATH) && !fs.existsSync(CRASHLOG_PREV_PATH));
+      check("rotate: cold start (no crash.log, no generations) → no-op, does not throw", !threw);
+      let createdOnColdStart = false;
+      for (let g = 1; g <= CRASHLOG_MAX_GENERATIONS; g++) if (fs.existsSync(crashlogGenerationPath(g))) createdOnColdStart = true;
+      check("rotate: cold start creates no generation files", !createdOnColdStart);
 
-      // A pre-existing crash.log is moved to crash.log.prev (content preserved verbatim).
+      // Rotate N+2 crashes through — must retain exactly the last N, in newest-first order, oldest 2 dropped.
       fs.mkdirSync(path.dirname(CRASHLOG_PATH), { recursive: true });
-      fs.writeFileSync(CRASHLOG_PATH, "FIRST-CRASH");
-      rotateCrashlog();
-      check("rotate: crash.log moved to crash.log.prev", !fs.existsSync(CRASHLOG_PATH) && readPrev() === "FIRST-CRASH");
+      const totalCrashes = CRASHLOG_MAX_GENERATIONS + 2;
+      for (let i = 1; i <= totalCrashes; i++) {
+        fs.writeFileSync(CRASHLOG_PATH, `CRASH-${i}`);
+        rotateCrashlog();
+      }
+      check("rotate: crash.log itself is gone after rotation (promoted to generation 1)", !fs.existsSync(CRASHLOG_PATH));
+      let generationsOk = true;
+      for (let g = 1; g <= CRASHLOG_MAX_GENERATIONS; g++) {
+        if (readGen(g) !== `CRASH-${totalCrashes - g + 1}`) generationsOk = false;
+      }
+      check(`rotate: retains exactly the last ${CRASHLOG_MAX_GENERATIONS} generations, newest-first (crash.log.1=newest)`, generationsOk);
+      check("rotate: the two oldest crashes beyond N are dropped — no stray generation N+1 file", !fs.existsSync(crashlogGenerationPath(CRASHLOG_MAX_GENERATIONS + 1)));
 
-      // A second crash.log rotates over the older .prev (keeps the last two, drops the oldest).
-      fs.writeFileSync(CRASHLOG_PATH, "SECOND-CRASH");
+      // Idempotent: re-running with no crash.log present is a harmless no-op — the supervisor-interaction
+      // guarantee (supervisor pre-rotated; daemon boot finds no crash.log left to rotate).
+      const beforeGen1 = readGen(1);
       rotateCrashlog();
-      check("rotate: newer crash.log overwrites older .prev", !fs.existsSync(CRASHLOG_PATH) && readPrev() === "SECOND-CRASH");
+      check("rotate: re-run with no crash.log preserves existing generations (no double-rotation)", readGen(1) === beforeGen1);
 
-      // Idempotent: rotating again with no crash.log is a harmless no-op and does NOT touch the .prev —
-      // this is the supervisor-interaction guarantee (supervisor pre-rotated; daemon boot finds no crash.log).
-      rotateCrashlog();
-      check("rotate: re-run with no crash.log preserves .prev (no double-rotation)", readPrev() === "SECOND-CRASH");
+      // A REAL rotation failure must never throw — engineer one that is NOT just `force:true`-tolerated
+      // ENOENT: make generation-1's slot an actual directory, so the rmSync clearing it before the final
+      // rename throws ERR_FS_EISDIR (verified: force:true does NOT suppress this, only ENOENT).
+      clearAll();
+      fs.writeFileSync(CRASHLOG_PATH, "WILL-FAIL");
+      fs.mkdirSync(crashlogGenerationPath(1));
+      let failThrew = false;
+      try { rotateCrashlog(); } catch { failThrew = true; }
+      check("rotate: a genuine rotation failure (EISDIR clearing generation 1) does not throw", !failThrew);
+      clearAll();
     }
 
-    // ── H: a crash→restart cycle preserves the prior crash as .prev (end-to-end, real handlers) ───────
-    // Crash a child (writes crash.log via the real handler), then crash a SECOND child sharing the SAME
-    // LOOM_HOME: its installCrashHandlers must rotate the first crash to .prev before writing the second.
+    // ── H: a crash→restart cycle preserves prior crashes across numbered generations (real handlers) ──
+    // Crash three children sharing the SAME LOOM_HOME: each installCrashHandlers boot-time rotation must
+    // shift the prior generations down before writing the newest crash.log — proving the end-to-end path
+    // (not just the unit-level rotateCrashlog above) actually retains more than one prior crash.
     {
       const home = freshHome("cycle");
       const run = (sc) => spawnSync(process.execPath, [__filename], {
         env: { ...process.env, CRASH_SCENARIO: sc, LOOM_HOME: home }, encoding: "utf8", timeout: 30_000,
       });
-      run("uncaught"); // first crash → crash.log
+      const readGenAt = (home, g) => {
+        const p = path.join(home, `crash.log.${g}`);
+        return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : null;
+      };
+      run("uncaught"); // crash #1 → crash.log
       const first = readCrashlog(home);
       check("cycle: first crash wrote crash.log", first?.json?.error?.message === "child uncaught boom");
-      run("uncaught"); // second crash → boot rotation moves first to .prev, then writes a fresh crash.log
-      const prevPath = path.join(home, "crash.log.prev");
-      const prev = fs.existsSync(prevPath) ? JSON.parse(fs.readFileSync(prevPath, "utf8")) : null;
-      const current = readCrashlog(home);
-      check("cycle: prior crash preserved as crash.log.prev", prev?.error?.message === "child uncaught boom");
-      check("cycle: current crash.log still present after rotation", current?.json?.kind === "uncaughtException");
+      run("rejection"); // crash #2 → boot rotation moves #1 to generation 1, writes a fresh crash.log
+      const afterSecond = readGenAt(home, 1);
+      check("cycle: after 2nd crash, generation 1 holds the FIRST crash", afterSecond?.error?.message === "child uncaught boom");
+      check("cycle: current crash.log holds the SECOND crash", readCrashlog(home)?.json?.kind === "unhandledRejection");
+      run("uncaught"); // crash #3 → both priors shift down one generation
+      const gen1 = readGenAt(home, 1);
+      const gen2 = readGenAt(home, 2);
+      check("cycle: after 3rd crash, generation 1 holds the SECOND crash (most recent prior)", gen1?.kind === "unhandledRejection");
+      check("cycle: after 3rd crash, generation 2 still holds the FIRST crash (not lost — the whole point of this card)", gen2?.error?.message === "child uncaught boom");
+      check("cycle: current crash.log holds the THIRD crash", readCrashlog(home)?.json?.error?.message === "child uncaught boom");
     }
 
     // ── I: hadCrashLogAtBoot() — the env-transport handoff (Code Review finding #2 on card 2f146782) ────

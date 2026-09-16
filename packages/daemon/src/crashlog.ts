@@ -15,8 +15,20 @@ import { LOOM_HOME } from "./paths.js";
  */
 export const CRASHLOG_PATH = path.join(LOOM_HOME, "crash.log");
 
-/** The rotated previous-crash slot. Kept alongside {@link CRASHLOG_PATH}; holds the last-but-one crash. */
-export const CRASHLOG_PREV_PATH = `${CRASHLOG_PATH}.prev`;
+/**
+ * How many ROTATED crash-log generations to retain (card 9c8ce2b2): crash.log.1 is the most recent
+ * prior crash, crash.log.5 the oldest still kept. Replaces the old single crash.log.prev swap, which
+ * could only ever hold ONE prior crash — a recovery boot rotating a second crash in destroyed the
+ * first before anyone could tell whether the two shared a mechanism. Must be kept in sync with the
+ * DUPLICATE constant of the same name in scripts/daemon-supervisor.mjs (see rotateCrashlog's own doc
+ * below for why that duplication is deliberate, not an oversight).
+ */
+export const CRASHLOG_MAX_GENERATIONS = 5;
+
+/** Path to the Nth rotated crash-log generation (1-indexed; 1 = most recent prior crash, N = oldest). */
+export function crashlogGenerationPath(generation: number): string {
+  return `${CRASHLOG_PATH}.${generation}`;
+}
 
 /**
  * @decision 2f146782 — false with no shutdownMarker means killed from outside, never a JS "crash".
@@ -130,17 +142,27 @@ export function writeCrashlog(input: CrashlogInput): void {
 }
 
 /**
- * Rotate {@link CRASHLOG_PATH} to {@link CRASHLOG_PREV_PATH} at boot, BEFORE {@link installCrashHandlers}
- * wires its own handlers below (so `writeCrashlog` can never race the rotation). Idempotent (no
- * crash.log ⇒ no-op), best-effort, NEVER throws.
+ * Rotate {@link CRASHLOG_PATH} through numbered generations (crash.log.1 .. crash.log.{@link
+ * CRASHLOG_MAX_GENERATIONS}) at boot, BEFORE {@link installCrashHandlers} wires its own handlers below
+ * (so `writeCrashlog` can never race the rotation). Shifts oldest-first (N down to 2) so no rename ever
+ * needs to overwrite a slot it hasn't already vacated, then promotes the live log to generation 1 —
+ * correct whether 0, some, or all N generations already exist. Idempotent (no crash.log ⇒ no-op),
+ * best-effort, NEVER throws.
  * @decision sha:e26fa369 — why this exists and why rotating only-if-present is safe under both callers.
  */
 export function rotateCrashlog(): void {
   try {
     if (!fs.existsSync(CRASHLOG_PATH)) return;
-    // Windows renameSync fails if the destination exists — clear any older .prev first.
-    fs.rmSync(CRASHLOG_PREV_PATH, { force: true });
-    fs.renameSync(CRASHLOG_PATH, CRASHLOG_PREV_PATH);
+    for (let gen = CRASHLOG_MAX_GENERATIONS; gen >= 2; gen--) {
+      const src = crashlogGenerationPath(gen - 1);
+      if (!fs.existsSync(src)) continue;
+      const dst = crashlogGenerationPath(gen);
+      // Windows renameSync fails if the destination exists — clear the slot being overwritten first.
+      fs.rmSync(dst, { force: true });
+      fs.renameSync(src, dst);
+    }
+    fs.rmSync(crashlogGenerationPath(1), { force: true });
+    fs.renameSync(CRASHLOG_PATH, crashlogGenerationPath(1));
   } catch {
     /* best-effort: a failed rotation must never gate boot — fall through, the worst case is a clobber */
   }
@@ -211,8 +233,9 @@ export function installCrashHandlers(): void {
   if (installed) return;
   installed = true;
 
-  // Rotate any crash.log from a PRIOR run to .prev BEFORE wiring the handlers below — so on the shipped
-  // (supervisor-less) path a crash→auto-restart preserves the previous signature instead of clobbering it.
+  // Rotate any crash.log from a PRIOR run into the numbered generations BEFORE wiring the handlers below
+  // — so on the shipped (supervisor-less) path a crash→auto-restart preserves prior signatures instead
+  // of clobbering them.
   rotateCrashlog();
 
   process.on("uncaughtException", (err) => {
