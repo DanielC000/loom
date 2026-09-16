@@ -17820,8 +17820,8 @@ export class SessionService {
     const timeoutMs = this.gitOpMs ?? 15_000; // mirrors git/worktrees.ts's own GIT_OP_TIMEOUT_MS default
     let dirty: boolean;
     try {
-      const porcelain = await this.boundedGit(worktreePath, timeoutMs).raw(["status", "--porcelain"]);
-      dirty = worktreeStatusHasWork(porcelain);
+      const porcelainZ = await this.boundedGit(worktreePath, timeoutMs).raw(["-c", "core.quotePath=false", "status", "--porcelain", "-z"]);
+      dirty = worktreeStatusHasWork(porcelainZ);
     } catch {
       dirty = true; // fail safe — an error means "don't know", not "clean"
     }

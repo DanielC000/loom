@@ -659,8 +659,10 @@ function summarizeDirtyFiles(files: string[]): ReusedDirtyWorktreeInfo | undefin
 async function detectReusedDirtyWorktree(worktreePath: string, deps: BoundedGitDeps = {}): Promise<ReusedDirtyWorktreeInfo | undefined> {
   try {
     const { git, timeoutMs } = boundedGit(worktreePath, deps);
-    const porcelain = await withTimeout(git.raw(["status", "--porcelain"]), timeoutMs, "git status --porcelain");
-    return summarizeDirtyFiles(uncommittedWorkFiles(porcelain));
+    const porcelainZ = await withTimeout(
+      git.raw(["-c", "core.quotePath=false", "status", "--porcelain", "-z"]), timeoutMs, "git status --porcelain -z",
+    );
+    return summarizeDirtyFiles(uncommittedWorkFiles(porcelainZ));
   } catch {
     return undefined; // FAIL SAFE — a status-check hiccup must never block or alter the spawn
   }
@@ -671,37 +673,38 @@ async function detectReusedDirtyWorktree(worktreePath: string, deps: BoundedGitD
  * TRACKED entries only (status not `??`). An untracked file is untouched by `reset --hard` and survives
  * it, so it must never be reported as "discarded" — that distinction is the whole point of this filter
  * existing separately from {@link uncommittedWorkFiles} itself. Implemented as a POST-filter on that
- * function's own already-daemon-noise-filtered output (re-parsing the porcelain only for each line's
- * status char) rather than a parallel parsing loop, so the two can never drift on what counts as daemon
- * noise vs. real work — only the tracked/untracked split is new here.
+ * function's own already-daemon-noise-filtered output (re-parsing the SAME `-z` records via
+ * {@link parsePorcelainStatusZ} — card 8cc047d3, replacing a hand-rolled v1-text dequote that would
+ * otherwise disagree with {@link uncommittedWorkFiles}'s now-lossless paths) rather than a parallel
+ * parsing loop, so the two can never drift on what counts as daemon noise vs. real work — only the
+ * tracked/untracked split is new here. A rename/copy's OLD half is tracked too (it existed in HEAD).
  */
-function discardedByResetFiles(porcelain: string): string[] {
+function discardedByResetFiles(porcelainZ: string): string[] {
   const tracked = new Set<string>();
-  for (const line of porcelain.split(/\r?\n/)) {
-    if (line.trim() === "") continue;
-    // porcelain v1 line: 2 status chars, a space, then the path. `??` = untracked — reset --hard leaves it.
-    if (line.slice(0, 2) === "??") continue;
-    let p = line.slice(3);
-    if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1); // git quotes paths with special chars
-    tracked.add(p);
+  for (const e of parsePorcelainStatusZ(porcelainZ)) {
+    if (e.untracked) continue; // `??` — reset --hard leaves it untouched
+    if (e.oldPath) tracked.add(e.oldPath);
+    tracked.add(e.path);
   }
-  return uncommittedWorkFiles(porcelain).filter((p) => tracked.has(p));
+  return uncommittedWorkFiles(porcelainZ).filter((p) => tracked.has(p));
 }
 
 /**
  * Board card 13cc2300 — the pre-recut twin of {@link detectReusedDirtyWorktree}: same read (`git status
- * --porcelain`), same bound ({@link summarizeDirtyFiles}), same FAIL-SAFE posture (a capture hiccup reads
- * as "nothing to report", never blocking or altering the caller's reset) — but filtered through {@link
- * discardedByResetFiles} instead of {@link uncommittedWorkFiles}, so it names only what a `reset --hard`
- * actually destroys (tracked work), never an untracked leftover that will survive the reset untouched.
- * Called by {@link recutStaleReusedBranch} IMMEDIATELY BEFORE that reset — the only moment this is still
- * true to read.
+ * --porcelain -z`), same bound ({@link summarizeDirtyFiles}), same FAIL-SAFE posture (a capture hiccup
+ * reads as "nothing to report", never blocking or altering the caller's reset) — but filtered through
+ * {@link discardedByResetFiles} instead of {@link uncommittedWorkFiles}, so it names only what a `reset
+ * --hard` actually destroys (tracked work), never an untracked leftover that will survive the reset
+ * untouched. Called by {@link recutStaleReusedBranch} IMMEDIATELY BEFORE that reset — the only moment
+ * this is still true to read.
  */
 async function captureDiscardedOnRecut(worktreePath: string, deps: BoundedGitDeps = {}): Promise<DiscardedOnRecutInfo | undefined> {
   try {
     const { git, timeoutMs } = boundedGit(worktreePath, deps);
-    const porcelain = await withTimeout(git.raw(["status", "--porcelain"]), timeoutMs, "git status --porcelain");
-    return summarizeDirtyFiles(discardedByResetFiles(porcelain));
+    const porcelainZ = await withTimeout(
+      git.raw(["-c", "core.quotePath=false", "status", "--porcelain", "-z"]), timeoutMs, "git status --porcelain -z",
+    );
+    return summarizeDirtyFiles(discardedByResetFiles(porcelainZ));
   } catch {
     return undefined; // FAIL SAFE — a capture hiccup must never block or alter the reset
   }
@@ -1311,68 +1314,94 @@ export async function countCommitsBehind(repoPath: string, branch: string, base 
   }
 }
 
-/** Does `git status --porcelain` represent REAL worker work, or only daemon-injected `.claude/` noise
+/** Does `git status --porcelain -z` represent REAL worker work, or only daemon-injected `.claude/` noise
  *  (skill injection, Claude's own `settings.local.json` writes)? ⛔ Two noise classes are dropped — any
  *  untracked `.claude/` path, and the injected `.claude/skills/` subtree at ANY status — everything else
  *  (incl. a tracked non-skills `.claude/` file) counts as work; without this a merged worktree reads dirty
- *  and blocks its own cleanup. Exported so the guard is unit-testable in isolation. */
-export function worktreeStatusHasWork(porcelain: string): boolean {
-  return uncommittedWorkFiles(porcelain).length > 0;
+ *  and blocks its own cleanup. Exported so the guard is unit-testable in isolation. Takes `-z` output
+ *  (card 8cc047d3) — a v1 (non-`-z`) porcelain string parses as one bogus record and is WRONG. */
+export function worktreeStatusHasWork(porcelainZ: string): boolean {
+  return uncommittedWorkFiles(porcelainZ).length > 0;
 }
 
 /**
- * The filtered, noise-excluded `git status --porcelain` LINES (not just paths) — the shared foundation
- * both {@link uncommittedWorkFiles} and {@link computeWorktreeGateStamp}'s `dirtyHash` build on, so every
- * consumer of "what counts as real work" agrees. Two daemon-noise classes are dropped: an UNTRACKED (`??`)
- * path under `.claude/` (skill injection + Claude's own `.claude/settings.local.json` permission writes),
- * AND the daemon-injected `.claude/skills/` subtree at ANY status (a re-copy over a tracked colliding skill
- * name surfaces as a tracked modification, not `??`). Everything else — tracked modifications elsewhere
- * (incl. a tracked non-skills file under `.claude/`), staged/unstaged changes, untracked paths OUTSIDE
- * `.claude/` — is the worker's product and kept. Card 887e10b8 Item 1: codex's injected AGENTS.md is the
- * SAME kind of doctrine noise, untracked-only (a repo's own real, already-TRACKED AGENTS.md would show a
- * different status and is never touched by injectCodexDoctrine in the first place).
+ * One parsed record from `git status --porcelain -z ...` (card 8cc047d3 — generalized from the
+ * codex-auto-commit-only {@link parseAutoCommitStatusZ}). `-z` NUL-delimits records and prints every path
+ * VERBATIM — no C-quoting/octal-escaping of non-ASCII bytes, and no `" -> "` substring to mis-split — so
+ * `café.txt`, a path containing a literal `" -> "`, and a renamed/copied path are all parsed losslessly.
+ * A combined rename/copy record occupies TWO consecutive `-z` fields (`XY new\0old\0`): `path` is the NEW
+ * half, `oldPath` the OLD half. Each CALLER decides whether it needs `oldPath` — see
+ * {@link parseAutoCommitStatusZ}'s own doc for why the auto-commit path drops it (the old half is never
+ * itself stageable), versus {@link filteredWorkEntries}'s callers, which want the complete path set.
  */
-function filteredWorkLines(porcelain: string): string[] {
-  const lines: string[] = [];
-  for (const line of porcelain.split(/\r?\n/)) {
-    if (line.trim() === "") continue;
-    // porcelain v1 line: 2 status chars, a space, then the path. `??` = untracked.
-    const status = line.slice(0, 2);
-    let p = line.slice(3);
-    if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1); // git quotes paths with special chars
-    if (status === "??" && isDoctrineArtifactPath(p)) continue;
-    if (isDoctrineSkillsPath(p)) continue;
-    if (status === "??" && isCodexDoctrinePath(p)) continue;
-    lines.push(line);
+interface PorcelainZEntry {
+  status: string;
+  path: string;
+  oldPath?: string;
+  untracked: boolean;
+}
+
+/** Shared `-z` record parser — see {@link PorcelainZEntry}'s own doc. */
+function parsePorcelainStatusZ(porcelainZ: string): PorcelainZEntry[] {
+  const fields = porcelainZ.split("\0");
+  if (fields.length > 0 && fields[fields.length - 1] === "") fields.pop(); // trailing NUL leaves an empty tail field
+  const out: PorcelainZEntry[] = [];
+  let i = 0;
+  while (i < fields.length) {
+    const rec = fields[i++];
+    if (!rec || rec.length < 3) continue; // defensive: malformed/short record
+    const status = rec.slice(0, 2);
+    const p = rec.slice(3);
+    let oldPath: string | undefined;
+    if (status[0] === "R" || status[0] === "C" || status[1] === "R" || status[1] === "C") {
+      oldPath = fields[i++]; // consume the OLD path field (rename/copy source)
+    }
+    out.push({ status, path: p, oldPath, untracked: status === "??" });
   }
-  return lines;
+  return out;
 }
 
 /**
- * De-quote a porcelain v1 line's path (status + space prefix stripped, `"`-wrapped special-char paths
- * unwrapped). A RENAME/COPY line's path field is `old -> new` (git quotes each half independently, e.g.
- * `"old file.txt" -> "new file.txt"`) — this returns the NEW path (the one that matters going forward: a
- * later content edit to the renamed file is diffed/reported against `new`, not the stale `old`, and
- * naming `old -> new` as one "file" in an uncommittedWorkFiles refusal was never a real committable path
- * anyway).
+ * The filtered, noise-excluded `git status --porcelain -z` RECORDS (not just paths) — the shared
+ * foundation both {@link uncommittedWorkFiles} and {@link computeWorktreeGateStamp}'s `dirtyHash` build
+ * on, so every consumer of "what counts as real work" agrees. Two daemon-noise classes are dropped: an
+ * UNTRACKED (`??`) path under `.claude/` (skill injection + Claude's own `.claude/settings.local.json`
+ * permission writes), AND the daemon-injected `.claude/skills/` subtree at ANY status (a re-copy over a
+ * tracked colliding skill name surfaces as a tracked modification, not `??`). Everything else — tracked
+ * modifications elsewhere (incl. a tracked non-skills file under `.claude/`), staged/unstaged changes,
+ * untracked paths OUTSIDE `.claude/` — is the worker's product and kept. Card 887e10b8 Item 1: codex's
+ * injected AGENTS.md is the SAME kind of doctrine noise, untracked-only (a repo's own real, already-
+ * TRACKED AGENTS.md would show a different status and is never touched by injectCodexDoctrine in the
+ * first place).
  */
-function porcelainLinePath(line: string): string {
-  let p = line.slice(3);
-  const arrow = p.indexOf(" -> ");
-  if (arrow !== -1) p = p.slice(arrow + 4); // rename/copy: take the NEW path
-  if (p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1);
-  return p;
+function filteredWorkEntries(porcelainZ: string): PorcelainZEntry[] {
+  const out: PorcelainZEntry[] = [];
+  for (const e of parsePorcelainStatusZ(porcelainZ)) {
+    if (e.untracked && isDoctrineArtifactPath(e.path)) continue;
+    if (isDoctrineSkillsPath(e.path)) continue;
+    if (e.untracked && isCodexDoctrinePath(e.path)) continue;
+    out.push(e);
+  }
+  return out;
 }
 
 /**
- * The REAL-work paths in a `git status --porcelain` output — the list form of {@link worktreeStatusHasWork}
- * (which is now just `length > 0`), built on the same {@link filteredWorkLines} filter so the two (and
- * {@link computeWorktreeGateStamp}'s `dirtyHash`) can't drift apart. Exported so the worker_report(done)
- * pre-check can NAME the uncommitted files in its refusal. Paths are de-quoted (git quotes paths with
- * special chars).
+ * The REAL-work paths in a `git status --porcelain -z` output — the list form of
+ * {@link worktreeStatusHasWork} (which is now just `length > 0`), built on the same
+ * {@link filteredWorkEntries} filter so the two (and {@link computeWorktreeGateStamp}'s `dirtyHash`)
+ * can't drift apart. Exported so the worker_report(done) pre-check can NAME the uncommitted files in its
+ * refusal. A rename/copy record contributes BOTH halves (card 8cc047d3: unlike
+ * {@link parseAutoCommitStatusZ}'s staging-only semantic, a precheck/gate-stamp consumer wants the
+ * COMPLETE dirty path set, not just what's stageable) — paths are the exact bytes git reported, never
+ * quoted or escaped.
  */
-export function uncommittedWorkFiles(porcelain: string): string[] {
-  return filteredWorkLines(porcelain).map(porcelainLinePath);
+export function uncommittedWorkFiles(porcelainZ: string): string[] {
+  const paths: string[] = [];
+  for (const e of filteredWorkEntries(porcelainZ)) {
+    if (e.oldPath) paths.push(e.oldPath);
+    paths.push(e.path);
+  }
+  return paths;
 }
 
 export interface DoneReportPrecheck {
@@ -1407,8 +1436,10 @@ export async function precheckWorkerDone(
   //     ignoring daemon-injected untracked `.claude/` noise (see uncommittedWorkFiles).
   try {
     const wt = makeGit(worktreePath, timeoutMs);
-    const porcelain = await withTimeout(wt.raw(["status", "--porcelain"]), timeoutMs, "git status --porcelain");
-    const files = uncommittedWorkFiles(porcelain);
+    const porcelainZ = await withTimeout(
+      wt.raw(["-c", "core.quotePath=false", "status", "--porcelain", "-z"]), timeoutMs, "git status --porcelain -z",
+    );
+    const files = uncommittedWorkFiles(porcelainZ);
     if (files.length > 0) return { uncommitted: true, files, zeroAhead: false };
   } catch {
     return { uncommitted: false, files: [], zeroAhead: false }; // FAIL SAFE: never block a legitimate done
@@ -1517,31 +1548,19 @@ function autoCommitAnomalyReason(worktreePath: string, relPath: string): string 
 }
 
 /**
- * Parse `git status --porcelain -z --untracked-files=all` into one entry per stageable path (Code
- * Review "S1"): `-z` NUL-delimits records and prints every path VERBATIM, so `café.txt`, a space, or a
- * literal `" -> "` in a name all parse correctly. Separate from `uncommittedWorkFiles`/`filteredWorkLines`
- * on purpose (widening those is a different card). A combined rename/copy record (`XY new\0old\0`) means
- * the OLD half is ALREADY staged — it exists nowhere `git add` could act on, so re-adding it fails
- * outright ("pathspec did not match any files", verified directly) — the field is consumed to stay
- * positioned for the next record, but never emitted. An UNSTAGED rename (a plain filesystem move, since
- * a codex worker can't run `git mv`) never reaches this branch at all: it arrives as two independent
- * `D`/`??` records, each already its own entry via the ordinary path below.
+ * `git status --porcelain -z --untracked-files=all` into one entry per STAGEABLE path (Code Review "S1"),
+ * built on the shared {@link parsePorcelainStatusZ} (card 8cc047d3 — this used to have its own parsing
+ * loop; that generalized into the shared one, this is now a thin projection over it). A combined
+ * rename/copy record's OLD half is ALREADY staged — it exists nowhere `git add` could act on, so
+ * re-adding it fails outright ("pathspec did not match any files", verified directly) — {@link
+ * parsePorcelainStatusZ} still consumes that field to stay positioned for the next record, but this
+ * wrapper drops it rather than emitting it. Separate from {@link uncommittedWorkFiles} on purpose:
+ * that caller wants the OLD half too (the complete dirty path set), this one must not stage it. An
+ * UNSTAGED rename (a plain filesystem move, since a codex worker can't run `git mv`) never reaches the
+ * rename branch at all: it arrives as two independent `D`/`??` records, each already its own entry.
  */
 function parseAutoCommitStatusZ(porcelainZ: string): { path: string; untracked: boolean }[] {
-  const fields = porcelainZ.split("\0");
-  if (fields.length > 0 && fields[fields.length - 1] === "") fields.pop(); // trailing NUL leaves an empty tail field
-  const out: { path: string; untracked: boolean }[] = [];
-  let i = 0;
-  while (i < fields.length) {
-    const rec = fields[i++];
-    if (!rec || rec.length < 3) continue; // defensive: malformed/short record
-    const status = rec.slice(0, 2);
-    out.push({ path: rec.slice(3), untracked: status === "??" });
-    if (status[0] === "R" || status[0] === "C" || status[1] === "R" || status[1] === "C") {
-      i++; // consume the OLD path field — never staged (see this function's own doc), never emitted
-    }
-  }
-  return out;
+  return parsePorcelainStatusZ(porcelainZ).map((e) => ({ path: e.path, untracked: e.untracked }));
 }
 
 /** First non-empty line of `text`, trimmed; `""` for empty/whitespace-only input. */
@@ -1802,8 +1821,10 @@ export async function worktreeHasWork(
   //     ignoring daemon-injected untracked `.claude/` noise (see worktreeStatusHasWork).
   try {
     const wt = makeGit(worktreePath, timeoutMs);
-    const porcelain = await withTimeout(wt.raw(["status", "--porcelain"]), timeoutMs, "git status --porcelain");
-    if (worktreeStatusHasWork(porcelain)) return true;
+    const porcelainZ = await withTimeout(
+      wt.raw(["-c", "core.quotePath=false", "status", "--porcelain", "-z"]), timeoutMs, "git status --porcelain -z",
+    );
+    if (worktreeStatusHasWork(porcelainZ)) return true;
   } catch {
     return true; // bounded failure → fail SAFE (assume work, keep the dir)
   }
@@ -2149,16 +2170,19 @@ export interface WorktreeGateStamp {
   /** Whether the worktree carried any REAL uncommitted work (via {@link uncommittedWorkFiles}'s
    *  daemon-noise filter) at the moment this stamp was taken. */
   dirty: boolean;
-  /** sha256 over the {@link filteredWorkLines}-filtered `git status --porcelain` lines + a `git diff HEAD`
-   *  scoped to those SAME survivor paths, when `dirty` — content-level for TRACKED changes (staged or
-   *  unstaged). `null` when clean or unreadable. Card dc281db8: BOTH inputs are filtered through the same
-   *  daemon-noise exclusion `dirty` itself uses (`uncommittedWorkFiles`) — an EARLIER version hashed the
-   *  raw, unfiltered porcelain + full `diff HEAD`, so pure `.claude/` noise on an already-dirty tree could
-   *  flip this hash even though `dirty` correctly stayed governed by the filtered view; that mismatch is
-   *  what this comment now documents as fixed. KNOWN GAP: editing the CONTENT of an already-untracked new
-   *  file IN PLACE (no `git add`, no commit) changes neither input, so that exact edit is invisible to this
-   *  hash — accepted here because the reported incidents (card 50c1e0d0) were edits to an EXISTING tracked
-   *  file, not a brand-new untracked one.
+  /** sha256 over the {@link filteredWorkEntries}-filtered `git status --porcelain -z` records + a `git
+   *  diff HEAD` scoped to those SAME survivor paths, when `dirty` — content-level for TRACKED changes
+   *  (staged or unstaged). `null` when clean or unreadable. Card dc281db8: BOTH inputs are filtered
+   *  through the same daemon-noise exclusion `dirty` itself uses (`uncommittedWorkFiles`) — an EARLIER
+   *  version hashed the raw, unfiltered porcelain + full `diff HEAD`, so pure `.claude/` noise on an
+   *  already-dirty tree could flip this hash even though `dirty` correctly stayed governed by the
+   *  filtered view; that mismatch is what this comment now documents as fixed. Card 8cc047d3: the diff's
+   *  pathspec is now built from LOSSLESS `-z`-parsed paths (verbatim bytes) rather than quoted/C-escaped
+   *  v1 text, which used to make the diff half of this hash silently blind to a real content edit on a
+   *  non-ASCII-named tracked file (the escaped pathspec matched nothing). KNOWN GAP: editing the CONTENT
+   *  of an already-untracked new file IN PLACE (no `git add`, no commit) changes neither input, so that
+   *  exact edit is invisible to this hash — accepted here because the reported incidents (card 50c1e0d0)
+   *  were edits to an EXISTING tracked file, not a brand-new untracked one.
    */
   dirtyHash: string | null;
 }
@@ -2177,18 +2201,26 @@ export async function computeWorktreeGateStamp(worktreePath: string, deps: Bound
   try {
     const { git, timeoutMs } = boundedGit(worktreePath, deps);
     const head = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "gate-stamp rev-parse HEAD")).trim();
-    const porcelain = await withTimeout(git.raw(["status", "--porcelain"]), timeoutMs, "gate-stamp status --porcelain");
-    const workLines = filteredWorkLines(porcelain);
-    if (workLines.length === 0) return { head, dirty: false, dirtyHash: null };
-    // Card dc281db8: hash the FILTERED lines/paths — the same daemon-noise exclusion `dirty` uses — not the
-    // raw porcelain, and scope the diff to those same survivor paths, so noise-only churn (e.g. a re-copied
-    // `.claude/skills/` file) that `uncommittedWorkFiles` correctly ignores can never flip this hash either.
-    const files = workLines.map(porcelainLinePath);
+    const porcelainZ = await withTimeout(
+      git.raw(["-c", "core.quotePath=false", "status", "--porcelain", "-z"]), timeoutMs, "gate-stamp status --porcelain -z",
+    );
+    const workEntries = filteredWorkEntries(porcelainZ);
+    if (workEntries.length === 0) return { head, dirty: false, dirtyHash: null };
+    // Card dc281db8: hash the FILTERED entries/paths — the same daemon-noise exclusion `dirty` uses — not
+    // the raw porcelain, and scope the diff to those same survivor paths, so noise-only churn (e.g. a
+    // re-copied `.claude/skills/` file) that `uncommittedWorkFiles` correctly ignores can never flip this
+    // hash either. Card 8cc047d3: paths come from the LOSSLESS `-z` parse (verbatim bytes, no C-escaping)
+    // rather than the old quoted/escaped v1 text — a `git diff HEAD -- <path>` pathspec built from an
+    // escaped path silently matches nothing, which used to make a real content edit to a non-ASCII-named
+    // tracked file invisible to this hash. A rename/copy's OLD half is included too (it complicates the
+    // path set `dirty` is scoped to, even though it typically diffs to nothing on its own).
+    const files = [...new Set(workEntries.flatMap((e) => (e.oldPath ? [e.oldPath, e.path] : [e.path])))];
     // Best-effort: a `diff HEAD` failure still yields a (slightly weaker, porcelain-only) comparable hash
     // rather than aborting the whole stamp — the outer try/catch is reserved for a genuinely unreadable
     // worktree (rev-parse/status themselves failing).
     const diff = await withTimeout(git.raw(["diff", "HEAD", "--", ...files]), timeoutMs, "gate-stamp diff HEAD").catch(() => "");
-    const dirtyHash = createHash("sha256").update(workLines.join("\n")).update(diff).digest("hex");
+    const canonical = workEntries.map((e) => `${e.status} ${e.oldPath ?? ""}\0${e.path}`).join("\n");
+    const dirtyHash = createHash("sha256").update(canonical).update(diff).digest("hex");
     return { head, dirty: true, dirtyHash };
   } catch {
     return { head: null, dirty: false, dirtyHash: null };
