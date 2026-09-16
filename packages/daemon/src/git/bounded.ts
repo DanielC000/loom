@@ -150,16 +150,25 @@ export function scrubGitEnv(env: Record<string, string | undefined>): Record<str
  * `abortPlugin` so a later `controller.abort()` issues a real kill of the spawned child — see the
  * `8e75ee20` record for the one caller that needs it. OMIT it (the default) for a plain instance with no
  * abort wiring, matching every existing caller byte-for-byte.
+ *
+ * Card 00a6cdd6 (Code Review S4): `extraUnsafe`, when supplied, is merged into the SAME `unsafe` object
+ * — but ONLY for the ONE call that passes it. This is deliberately NOT another unconditional addition
+ * next to `allowUnsafeConfigPaths` above: a caller-scoped opt-in keeps every OTHER existing/future
+ * caller's `unsafe` allowlist exactly what it is on main, rather than silently widening it for all of
+ * them. The codex auto-commit path (`git/worktrees.ts`'s `attemptCodexAutoCommit`) is the one caller
+ * that passes `{ allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }` here, via its OWN dedicated
+ * `gitFactory` — see that function's own doc for why it needs both.
  */
 export function boundedSimpleGit(
   repoPath: string,
   blockTimeoutMs: number,
   env?: Record<string, string | undefined>,
   abortSignal?: AbortSignal,
+  extraUnsafe?: SimpleGitOptions["unsafe"],
 ): SimpleGit {
   const scrubbedEnv = env ? scrubGitEnv(env) : undefined;
   const hasEnv = !!scrubbedEnv && Object.keys(scrubbedEnv).length > 0;
-  const unsafe: SimpleGitOptions["unsafe"] = { allowUnsafeConfigPaths: true };
+  const unsafe: SimpleGitOptions["unsafe"] = { allowUnsafeConfigPaths: true, ...extraUnsafe };
   const git = simpleGit(repoPath, {
     timeout: { block: blockTimeoutMs },
     ...(abortSignal ? { abort: abortSignal } : {}),

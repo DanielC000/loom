@@ -18,7 +18,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
@@ -9259,6 +9259,10 @@ export class SessionService {
     // confirmWorkerMerge). FAILS SAFE: precheckWorkerDone degrades to ALLOW on any git error, so a flaky
     // check can never wedge a legitimate done. Only the AFFIRMATIVE uncommitted signal refuses.
     let warning: string | undefined;
+    // Card 00a6cdd6: set only when Loom actually auto-committed for an eligible codex-harness worker —
+    // declared at this OUTER scope (not inside the project/worktree block below) so the `worker_report`
+    // event append further down can read it regardless of which branch of that block ran.
+    let codexAutoCommit: { sha: string; fileCount: number; subject: string } | undefined;
     // AUTO-RETIRE a declared no-commit worker (card 14434d6b), GENERALIZED to a per-report declared-intent
     // signal (card ccf0bbfe): a read-only / no-commit worker (e.g. the Code Reviewer rig, profile
     // noCommit=true → pinned on the row) has NO merge step, so unlike a normal worker — whose concurrency
@@ -9374,18 +9378,93 @@ export class SessionService {
         // `HEAD` for every other worker (byte-identical to before this fix for the non-review case).
         const reviewSpawn = typeof worker.reviewBaseSha === "string" && worker.reviewBaseSha.length > 0;
         const doneBase = worker.reviewBaseSha ?? "HEAD";
+
+        // CODEX AUTO-COMMIT (board card 00a6cdd6, owner-approved via request 54aba8b2): the LAST gate
+        // before the uncommitted-files precheck below, never earlier — every OTHER done-report refusal
+        // (the auto-recovery re-confirmation dedupe above, the pending-manager-direction precheck above)
+        // has already run by this point, so a report refused for any of those reasons commits NOTHING.
+        // Code Review "B1": also gated on `!report.noChanges` — a worker DECLARING no changes must never
+        // be auto-committed for, even when real dirty files are sitting in the worktree (a mistake or a
+        // lie): committing on its behalf would make the noChanges declaration retroactively FALSE by our
+        // own action, and the tree staying dirty is exactly what lets the ordinary uncommitted-files
+        // refusal below catch it correctly instead. Eligibility is otherwise harness-based (a
+        // claude-harness worker's flow below is byte-identical to before this card).
+        let autoCommitNote: string | undefined;
+        if (worker.harness === "codex" && !worker.noCommit && !report.noChanges) {
+          const task = taskId ? this.db.getTask(taskId) : undefined;
+          const ac = await attemptCodexAutoCommit(
+            worktreePath, worker.branch, { taskTitle: task?.title, summary: report.summary }, { timeoutMs: this.gitOpMs },
+          );
+          if (ac.headMismatch) {
+            // Distinct short-circuit refusal: precheckWorkerDone (below) never checks ref identity at
+            // all, so a wrong-branch worktree would otherwise sail through silently. Defense-in-depth
+            // against a Loom-side bug/concurrent worktree op — a codex worker can't move its own HEAD
+            // (the same `.git`-write DENY ACE this whole card exists to route around).
+            const error =
+              `worker_report(done) REFUSED — this worktree's checked-out branch ('${ac.headMismatch.head}') is not your assigned branch ('${worker.branch}'). ` +
+              `Loom auto-commits for a codex-harness worker only onto its own assigned branch, and refuses otherwise. This worktree is in an unexpected state — ` +
+              `escalate to your manager rather than trying to fix it yourself. Your task stays in_progress.`;
+            this.db.appendEvent({
+              id: randomUUID(), ts: new Date().toISOString(),
+              managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "worker_report_rejected",
+              detail: { reason: "codex-head-mismatch", head: ac.headMismatch.head, branch: worker.branch },
+            });
+            return { reported: false, refused: true, error, deliveryStatus: "dropped" };
+          }
+          if (ac.commitStateUnknown) {
+            // Code Review "B1 residual": FAIL CLOSED — never fall through to precheckWorkerDone here.
+            // A worktree Loom itself can't read HEAD from could have EITHER a landed, unaudited commit
+            // or none at all; precheckWorkerDone might well find it clean either way and wrongly accept
+            // the done. Refuse outright and say plainly that the state is unknown, not just "uncommitted".
+            const error =
+              `worker_report(done) REFUSED — Loom's automatic commit for this codex worker is in an UNKNOWN state (${ac.error ?? "HEAD unreadable"}) ` +
+              `and may or may not have actually landed on your branch. This needs a human to inspect the worktree directly before anything is reported done — ` +
+              `escalate to your manager rather than trying to fix it yourself. Your task stays in_progress.`;
+            this.db.appendEvent({
+              id: randomUUID(), ts: new Date().toISOString(),
+              managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "worker_report_rejected",
+              detail: { reason: "codex-commit-state-unknown", ...(ac.error ? { error: ac.error } : {}) },
+            });
+            return { reported: false, refused: true, error, deliveryStatus: "dropped" };
+          }
+          if (ac.committed) {
+            codexAutoCommit = { sha: ac.sha!, fileCount: ac.fileCount!, subject: ac.subject! };
+            // Code Review "B1": audit the commit AT THE EARLIEST POSSIBLE POINT, unconditionally — before
+            // anything below (precheckWorkerDone, the nochanges-with-commits check, updateTask, the final
+            // appendEvent) gets a chance to refuse or throw. This is what makes "no daemon-authored commit
+            // may exist without an event naming it" hold even under a later race (a background process
+            // dirtying the tree again before precheckWorkerDone's OWN status read) or an unrelated throw —
+            // this event is already durably written by the time either could happen.
+            this.db.appendEvent({
+              id: randomUUID(), ts: new Date().toISOString(),
+              managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "codex_auto_commit",
+              detail: { ...codexAutoCommit },
+            });
+          } else if (ac.skippedReason) {
+            autoCommitNote = ac.skippedReason;
+          } else if (ac.error) {
+            autoCommitNote = `Loom's automatic commit for this codex worker failed (${ac.error}) — falling back to the ordinary uncommitted-files check below.`;
+          }
+        }
+
         const precheck = await precheckWorkerDone(precheckRepoPath, worktreePath, worker.branch, doneBase, { timeoutMs: this.gitOpMs });
         if (precheck.uncommitted) {
           // REFUSE: do NOT move the task — the worker stays in_progress to commit + re-report. Name the
-          // uncommitted files so the worker knows exactly what to commit.
+          // uncommitted files so the worker knows exactly what to commit. Code Review "B1": this CAN fire
+          // even after a successful `codexAutoCommit` above (e.g. a background process the worker
+          // started earlier dirties the tree again in the window between our commit and THIS status
+          // read) — `codexAutoCommit` rides this rejected event too so the commit stays discoverable
+          // from wherever a manager actually looks, on top of the unconditional audit event already
+          // written above.
           const error =
             `worker_report(done) REFUSED — your worktree has UNCOMMITTED changes (${precheck.files.length} path(s): ${precheck.files.join(", ")}). ` +
             `The merge gate only sees COMMITTED work on your assigned branch '${worker.branch}', so reporting done now would lose this work. ` +
-            `Commit to your assigned branch first (do NOT 'git checkout -b' — commit straight to '${worker.branch}'), then re-report done. Your task stays in_progress.`;
+            `Commit to your assigned branch first (do NOT 'git checkout -b' — commit straight to '${worker.branch}'), then re-report done. Your task stays in_progress.` +
+            (autoCommitNote ? ` (${autoCommitNote})` : "");
           this.db.appendEvent({
             id: randomUUID(), ts: new Date().toISOString(),
             managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "worker_report_rejected",
-            detail: { reason: "uncommitted", files: precheck.files },
+            detail: { reason: "uncommitted", files: precheck.files, ...(codexAutoCommit ? { codexAutoCommit } : {}) },
           });
           // `dropped`: nothing was routed and the task was NOT moved (it stays in_progress to re-report) —
           // there is no durable report to surface, so this is a genuine non-delivery, not a queue.
@@ -9410,10 +9489,14 @@ export class SessionService {
           const baseDesc = reviewSpawn
             ? `the reviewed branch's tip ('${doneBase}') — your branch's real base as a REVIEW spawn, not mainline`
             : "base";
+          // Code Review "B1": phrased harness-neutral ("already on your branch", never "YOU already
+          // made") — a codex worker can reach this branch too (via a PRIOR report's own auto-commit; not
+          // THIS report's, since the noChanges gate above already skips auto-commit whenever
+          // `report.noChanges` is set), and Loom, not the worker, authored those commits.
           const error = reviewSpawn
             ? `worker_report(done) REFUSED — you reported noChanges:true, but your assigned branch '${worker.branch}' ` +
               `has ${precheck.aheadCount} commit(s) ahead of ${baseDesc}. Your working tree is already clean, so ` +
-              `there is nothing left in it to find or stage — these are commit(s) YOU already made during this ` +
+              `there is nothing left in it to find or stage — these are commit(s) already on the branch from earlier in this ` +
               `review, on top of the reviewed tip, not commits inherited from the reviewed branch. Either drop ` +
               `noChanges and report what you actually changed, or explain the discrepancy. Your task stays ` +
               `in_progress. (This branch must never be merged.)`
@@ -9424,7 +9507,7 @@ export class SessionService {
           this.db.appendEvent({
             id: randomUUID(), ts: new Date().toISOString(),
             managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "worker_report_rejected",
-            detail: { reason: "nochanges-with-commits", aheadCount: precheck.aheadCount },
+            detail: { reason: "nochanges-with-commits", aheadCount: precheck.aheadCount, ...(codexAutoCommit ? { codexAutoCommit } : {}) },
           });
           // `dropped`: nothing was routed and the task was NOT moved (stays in_progress to re-report).
           return { reported: false, refused: true, error, deliveryStatus: "dropped" };
@@ -9511,6 +9594,12 @@ export class SessionService {
         ...(isConfirmedSubagent(report.subagentAttribution?.state)
           ? { subagentAttribution: { agentId: report.subagentAttribution?.agentId, agentType: report.subagentAttribution?.agentType } }
           : {}),
+        // Card 00a6cdd6: recorded ONLY when Loom actually auto-committed for this codex-harness worker —
+        // a convenience co-location on the SAME event a manager already reads, alongside the primary,
+        // unconditional audit trail: the dedicated `codex_auto_commit` OrchestrationEventKind appended
+        // immediately when the commit lands (see the codex-auto-commit block above), which exists
+        // independently of whether this worker_report event ever gets written at all.
+        ...(codexAutoCommit ? { codexAutoCommit } : {}),
       },
     });
 
@@ -9523,6 +9612,9 @@ export class SessionService {
       if (report.prUrl) framed += ` | PR: ${report.prUrl}`;
       if (report.needs) framed += ` | needs: ${report.needs}`;
       if (warning) framed += ` | warning: ${warning}`;
+      // Card 00a6cdd6, "M2": surfaced in the SAME nudge so a manager sees Loom authored the commit
+      // without a separate worker_report_get call — same rationale as the ctxPct/subagent lines below.
+      if (codexAutoCommit) framed += ` | codex auto-commit ${codexAutoCommit.sha} (${codexAutoCommit.fileCount} files)`;
       // Card 808ee811: surfaced in the SAME nudge the manager reads at the clean-seam moment it decides
       // continue-vs-recycle — never a bare 0 for an unmeasured (e.g. codex-harness) worker, which would
       // misread as a fresh seat and invert that decision.

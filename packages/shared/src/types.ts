@@ -897,6 +897,15 @@ export type DeliveryStatus = "delivered-live" | "queued" | "boarded" | "dropped"
 /** Append-only orchestration audit record (the manager↔worker timeline). */
 export type OrchestrationEventKind =
   | "spawn_worker" | "message_worker" | "worker_report" | "stop_worker"
+  // Card 00a6cdd6 (Code Review "B1"): audits a daemon-authored commit for a codex-harness worker's own
+  // `done` report, filed IMMEDIATELY and UNCONDITIONALLY the instant the commit lands — before
+  // precheckWorkerDone, the nochanges-with-commits check, or the eventual `worker_report`/
+  // `worker_report_rejected` event get a chance to refuse or throw. `detail` carries {sha, fileCount,
+  // subject}. Filed under workerSessionId/taskId like worker_report_rejected. Deliberately NOT added to
+  // EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/REPORT_RESOLVED_EVENT_KINDS — an
+  // audit-only marker, not a lifecycle signal any of those four track; the worker's own turn already
+  // registers as activity via its surrounding events regardless of whether this one is counted.
+  | "codex_auto_commit"
   // Manager→worker REDIRECT (orchestration `worker_redirect`): the "land it NOW" escalation — END the
   // worker's CURRENT turn (a single Esc cancel) + flush/SUPERSEDE its queued direction + deliver ONE
   // authoritative instruction as the next turn. Parent-scoped exactly like message_worker/stop_worker.
@@ -1556,6 +1565,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   repeated_tool_call: true, batch_merge_forfeited: true, engine_session_rotated: true,
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, codex_unsupported_capability: true,
+  codex_auto_commit: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

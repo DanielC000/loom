@@ -1,11 +1,12 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import type { SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
-import { nonInteractiveEnv } from "./writer.js";
+import { nonInteractiveEnv, stripClaudeSessionTrailer, gitError } from "./writer.js";
 import { withTimeout, withTimeoutKillingChild, boundedSimpleGit } from "./bounded.js";
 import { withCanonicalIndexLock } from "./repo-lock.js";
 import { enterMergeDangerWindow, exitMergeDangerWindow } from "./merge-danger-window.js";
@@ -1428,6 +1429,354 @@ export async function precheckWorkerDone(
   }
 
   return { uncommitted: false, files: [], zeroAhead: false };
+}
+
+// ── Codex worker auto-commit (board card 00a6cdd6) ──────────────────────────────────────────────────
+//
+// Owner-approved boundary (card 00a6cdd6, request 54aba8b2): daemon-side, worktree-scoped, branch-
+// scoped, NO push, triggered ONLY by a codex-harness worker's own `done` report. This is the ONLY caller
+// this code exists for — SessionService.workerReport calls it, immediately before precheckWorkerDone
+// and AFTER every earlier done-report refusal (pending-direction, the auto-recovery dedupe) AND after
+// its own `report.noChanges` check (a worker DECLARING no changes must never be auto-committed for,
+// even if real dirty files are present — see the Code Review fix on card 00a6cdd6, "B1") — so a report
+// that's refused, or that declares noChanges, commits NOTHING.
+
+/** Basenames that change the BEHAVIOR of a later git operation (filter/diff driver dispatch, submodule
+ *  remote URLs, LFS endpoint config) rather than just data. Matched by basename at ANY depth — a nested
+ *  `sub/.gitattributes` governs its own subtree exactly like a root one. Refused from the codex auto-
+ *  commit's automatic staging unconditionally, so a change to any of them always gets a human's eyes
+ *  before it's committed via this path — regardless of whether codex's own sandbox can currently define
+ *  a NEW filter command (it can't: that lives in `.git/config`, which its DENY ACE already blocks). */
+const AUTOCOMMIT_REFUSED_BASENAMES = new Set([".gitattributes", ".gitmodules", ".lfsconfig"]);
+
+/** Reserved metadata directory names (codex's own `PROTECTED_METADATA_PATH_NAMES`) — a path under any of
+ *  these shouldn't appear in `git status --porcelain` output at all; checked anyway since it's free. */
+const AUTOCOMMIT_PROTECTED_DIR_NAMES = new Set([".git", ".agents", ".codex"]);
+
+/**
+ * Why a candidate path must NOT be auto-staged, or `undefined` if it's fine. Three checks, in order:
+ * (1) a basename that redefines git behavior ({@link AUTOCOMMIT_REFUSED_BASENAMES}); (2) a path segment
+ * naming a protected metadata dir; (3) a SYMLINK whose target resolves outside the worktree (git itself
+ * only ever stores the link TEXT as the blob — never follows it — so this is about not letting an
+ * out-of-tree path reference land in a commit at all, not about data exfiltration, which this can't do
+ * either way) — checked even when the link is DANGLING (Code Review fix, "S3"): `fs.realpathSync`
+ * throws ENOENT for a dangling target exactly like it would for a genuinely absent PATH, so the two
+ * must be told apart at the `lstatSync` layer, never conflated by catching both the same way. A
+ * candidate path that no longer exists AT ALL (a deletion — `lstatSync` itself throws ENOENT) is NOT
+ * anomalous; any OTHER stat failure (permission, etc.) fails CLOSED (flagged), matching this feature's
+ * narrow, err-on-the-side-of-a-human-looks posture.
+ */
+function autoCommitAnomalyReason(worktreePath: string, relPath: string): string | undefined {
+  const base = path.basename(relPath);
+  if (AUTOCOMMIT_REFUSED_BASENAMES.has(base)) {
+    return `${relPath} changes git behavior (filter/submodule/LFS config) and needs human review`;
+  }
+  const segments = relPath.split(/[\\/]/);
+  if (segments.some((s) => AUTOCOMMIT_PROTECTED_DIR_NAMES.has(s))) {
+    return `${relPath} sits under a protected metadata directory`;
+  }
+  const abs = path.resolve(worktreePath, relPath);
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(abs); // the candidate path ITSELF doesn't exist → ENOENT here → genuine deletion
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+    return `${relPath} could not be verified (${gitError(e)})`;
+  }
+  if (st.isDirectory()) {
+    // Code Review "should-fix 1": a NESTED repo (a directory carrying its own `.git`) is exactly the
+    // one directory shape `git status` refuses to expand even under `--untracked-files=all` — it stays
+    // collapsed to the bare directory name, which is how this candidate can even BE a directory here at
+    // all (an ordinary untracked directory is always expanded into its own files by `-uall`, so it
+    // never reaches this scan as a directory candidate). Staging it would record a GITLINK — a tree
+    // entry pointing at the nested repo's OWN commit sha, not its content — never real, reviewable data.
+    if (fs.existsSync(path.join(abs, ".git"))) {
+      return `${relPath} is a directory containing its own .git — staging it would create a gitlink, not real content`;
+    }
+    return undefined;
+  }
+  if (!st.isSymbolicLink()) return undefined;
+
+  const worktreeReal = fs.realpathSync(worktreePath);
+  let real: string;
+  try {
+    real = fs.realpathSync(abs);
+  } catch {
+    // DANGLING symlink: the link itself exists (lstat above proved it), but its target does not, so
+    // realpathSync throws — that throw must NOT be read as "nothing to check" (the bug this fixes): the
+    // link's own TEXT can still name an out-of-tree path. Resolve it syntactically instead, against the
+    // symlink's own directory (matching how a relative symlink target is actually interpreted).
+    const linkTarget = fs.readlinkSync(abs);
+    real = path.isAbsolute(linkTarget) ? path.resolve(linkTarget) : path.resolve(path.dirname(abs), linkTarget);
+  }
+  const rel = path.relative(worktreeReal, real);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    return `${relPath} is a symlink resolving outside the worktree (${real})`;
+  }
+  return undefined;
+}
+
+/**
+ * Parse `git status --porcelain -z --untracked-files=all` into one entry per stageable path (Code
+ * Review "S1"): `-z` NUL-delimits records and prints every path VERBATIM, so `café.txt`, a space, or a
+ * literal `" -> "` in a name all parse correctly. Separate from `uncommittedWorkFiles`/`filteredWorkLines`
+ * on purpose (widening those is a different card). A combined rename/copy record (`XY new\0old\0`) means
+ * the OLD half is ALREADY staged — it exists nowhere `git add` could act on, so re-adding it fails
+ * outright ("pathspec did not match any files", verified directly) — the field is consumed to stay
+ * positioned for the next record, but never emitted. An UNSTAGED rename (a plain filesystem move, since
+ * a codex worker can't run `git mv`) never reaches this branch at all: it arrives as two independent
+ * `D`/`??` records, each already its own entry via the ordinary path below.
+ */
+function parseAutoCommitStatusZ(porcelainZ: string): { path: string; untracked: boolean }[] {
+  const fields = porcelainZ.split("\0");
+  if (fields.length > 0 && fields[fields.length - 1] === "") fields.pop(); // trailing NUL leaves an empty tail field
+  const out: { path: string; untracked: boolean }[] = [];
+  let i = 0;
+  while (i < fields.length) {
+    const rec = fields[i++];
+    if (!rec || rec.length < 3) continue; // defensive: malformed/short record
+    const status = rec.slice(0, 2);
+    out.push({ path: rec.slice(3), untracked: status === "??" });
+    if (status[0] === "R" || status[0] === "C" || status[1] === "R" || status[1] === "C") {
+      i++; // consume the OLD path field — never staged (see this function's own doc), never emitted
+    }
+  }
+  return out;
+}
+
+/** First non-empty line of `text`, trimmed; `""` for empty/whitespace-only input. */
+function firstLine(text: string): string {
+  return (text ?? "").split(/\r?\n/, 1)[0]?.trim() ?? "";
+}
+
+/** Everything after the first line of `text`, trimmed; `undefined` if there is no second line. */
+function restAfterFirstLine(text: string): string | undefined {
+  const idx = (text ?? "").indexOf("\n");
+  if (idx === -1) return undefined;
+  const rest = text.slice(idx + 1).trim();
+  return rest || undefined;
+}
+
+/**
+ * {@link toConventionalSubject} bounded to `maxLen` (default 72, the conventional git-subject-line
+ * convention) — preserves the coerced `type(scope)?: ` prefix and truncates only the description, so a
+ * long card title or a long worker summary line still reads as a valid conventional subject rather than
+ * being blindly sliced mid-prefix.
+ */
+export function boundConventionalSubject(raw: string, maxLen = 72): string {
+  const subject = toConventionalSubject(raw);
+  if (subject.length <= maxLen) return subject;
+  const m = /^([a-z]+(?:\([^)]+\))?!?: )([\s\S]*)$/.exec(subject);
+  if (!m) return `${subject.slice(0, Math.max(0, maxLen - 1))}…`;
+  const prefix = m[1] ?? "";
+  const desc = m[2] ?? "";
+  const room = maxLen - prefix.length - 1;
+  if (room <= 0) return `${(prefix + desc).slice(0, Math.max(0, maxLen - 1))}…`;
+  return `${prefix}${desc.slice(0, room).trimEnd()}…`;
+}
+
+/** Discriminated outcome of {@link attemptCodexAutoCommit} — see that function's own doc. */
+export interface CodexAutoCommitResult {
+  /** Whether the feature actually evaluated the worktree (false only on a fail-safe infra skip, e.g. a
+   *  HEAD-read error/timeout — mirrors precheckWorkerDone's own fail-safe-on-flakiness posture). */
+  attempted: boolean;
+  committed: boolean;
+  sha?: string;
+  fileCount?: number;
+  subject?: string;
+  /** Set when attempted but deliberately NOT committed for a reason other than a HEAD mismatch (an
+   *  anomalous path, or a git error during add/commit). The caller falls through to the pre-existing
+   *  precheckWorkerDone-based "uncommitted" refusal, which will re-see the same dirty tree — this text
+   *  is appended to THAT refusal so the report stays actionable. */
+  skippedReason?: string;
+  /** Set ONLY on an AFFIRMATIVE HEAD/branch mismatch (a successful read that disagrees) — the caller
+   *  short-circuits with its OWN distinct refusal instead of falling through, since precheckWorkerDone
+   *  doesn't check ref identity at all and would otherwise let a wrong-branch worktree through silently. */
+  headMismatch?: { head: string };
+  /** Code Review "B1 residual": set when a failure struck AFTER `add` started and this function could
+   *  NOT determine whether the commit actually landed (HEAD itself became unreadable). Distinct from
+   *  ordinary `committed:false` — the caller must FAIL CLOSED (refuse the done outright) rather than
+   *  fall through to precheckWorkerDone, which could find a since-cleaned worktree and wrongly accept
+   *  a done with no audit trail for a commit that may or may not exist. */
+  commitStateUnknown?: boolean;
+  error?: string;
+}
+
+/**
+ * `core.hooksPath` override target (Code Review "B2"): a NON-DIRECTORY, so nothing can ever plant a
+ * hook into it. A prior design used a fresh `mkdtemp`'d directory under `os.tmpdir()`, reasoning the
+ * daemon's own single JS turn left no window to react — but that only covers the DAEMON's event loop,
+ * not a genuinely-concurrent OS process the worker started earlier: `os.tmpdir()` sits inside codex
+ * `workspace-write`'s default writable set on macOS/Linux (confirmed via `pty/codex-host.ts` — Loom
+ * passes no `--add-dir`/`exclude_slash_tmp`/`exclude_tmpdir_env_var`), and codex runs as the daemon's own
+ * uid, so a background process could poll for the new dir and plant a hook before our `commit` reads it.
+ * `os.devNull` closes this structurally: `<devNull>/<hookname>` can never exist, so git's `find_hook()`
+ * always reports "no such hook" — verified against real git via a shell-free spawned child (this
+ * host's own `/dev/null` could otherwise be a bash-layer artifact, not proof git itself resolves it);
+ * see `test/codex-worker-auto-commit.mjs`'s header for which platform(s) that proof actually ran on.
+ */
+const AUTOCOMMIT_HOOKS_PATH = os.devNull;
+
+/**
+ * Owner-approved (card 00a6cdd6): commit a codex-harness worker's own uncommitted worktree changes onto
+ * its OWN assigned branch, as a side effect of handling its `done` report — never called for a
+ * claude-harness worker, no new agent-callable tool, never pushes. See {@link autoCommitAnomalyReason},
+ * {@link parseAutoCommitStatusZ}, and {@link AUTOCOMMIT_HOOKS_PATH}'s own doc for the load-bearing
+ * sub-decisions; this function is the A→D sequence over all three.
+ */
+export async function attemptCodexAutoCommit(
+  worktreePath: string,
+  branch: string,
+  subjectSource: { taskTitle?: string; summary: string },
+  deps: BoundedGitDeps = {},
+): Promise<CodexAutoCommitResult> {
+  const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
+  // Code Review "S4": the extra `unsafe` allowances this feature needs (`allowUnsafeHooksPath`/
+  // `allowUnsafeFsMonitor`, for the `-c` args below) are passed ONLY through THIS dedicated default
+  // factory, via boundedSimpleGit's own opt-in `extraUnsafe` param — never added to that shared
+  // chokepoint's unconditional allowlist, so no OTHER caller's `unsafe` set is widened by this feature.
+  const makeGit = deps.gitFactory
+    ?? ((p, ms) => boundedSimpleGit(p, ms, nonInteractiveEnv(), undefined, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }));
+  let git: Pick<SimpleGit, "raw">;
+  try {
+    git = makeGit(worktreePath, timeoutMs);
+  } catch {
+    return { attempted: false, committed: false }; // FAIL SAFE: construct failure → skip, existing flow handles it
+  }
+  const cfg = ["-c", `core.hooksPath=${AUTOCOMMIT_HOOKS_PATH}`, "-c", "core.fsmonitor=false", "-c", "core.quotePath=false"];
+
+  // (A) HEAD check.
+  let head: string;
+  try {
+    head = (await withTimeout(
+      git.raw([...cfg, "rev-parse", "--abbrev-ref", "HEAD"]), timeoutMs, "codex-auto-commit rev-parse --abbrev-ref HEAD",
+    )).trim();
+  } catch {
+    return { attempted: false, committed: false }; // FAIL SAFE: unreadable HEAD → skip, never refuse on infra flakiness
+  }
+  if (head !== branch) return { attempted: true, committed: false, headMismatch: { head } };
+
+  // (B) status, filtered. `-z --untracked-files=all`: the `-z` half (Code Review "S1") NUL-delimits and
+  // never quotes/escapes a path — see parseAutoCommitStatusZ's own doc; `--untracked-files=all` is
+  // load-bearing on its own — without it, an entirely-untracked directory collapses to ONE porcelain
+  // line naming the directory itself, hiding a nested `sub/.gitattributes` from the anomaly scan below
+  // (its basename check would only ever see the string "sub") and staging the whole directory instead
+  // of the exact files in it.
+  let porcelainZ: string;
+  try {
+    porcelainZ = await withTimeout(
+      git.raw([...cfg, "status", "--porcelain", "-z", "--untracked-files=all"]), timeoutMs, "codex-auto-commit status --porcelain -z",
+    );
+  } catch {
+    return { attempted: false, committed: false }; // FAIL SAFE
+  }
+  const candidates = [...new Set(
+    parseAutoCommitStatusZ(porcelainZ)
+      .filter((e) => !(e.untracked && isDoctrineArtifactPath(e.path)))
+      .filter((e) => !isDoctrineSkillsPath(e.path))
+      .filter((e) => !(e.untracked && isCodexDoctrinePath(e.path)))
+      .map((e) => e.path),
+  )];
+  if (candidates.length === 0) return { attempted: true, committed: false };
+
+  // (C) anomaly scan — any hit aborts the WHOLE attempt, never a partial stage.
+  const anomalies = candidates
+    .map((rel) => autoCommitAnomalyReason(worktreePath, rel))
+    .filter((r): r is string => !!r);
+  if (anomalies.length > 0) {
+    return {
+      attempted: true, committed: false,
+      skippedReason: `Loom's automatic commit for this codex worker was skipped — ${anomalies.length} path(s) need human review: ${anomalies.join("; ")}`,
+    };
+  }
+
+  // (D) subject/body.
+  const subject = boundConventionalSubject(subjectSource.taskTitle?.trim() || firstLine(subjectSource.summary) || "worker changes");
+  const rawBody = subjectSource.taskTitle?.trim() ? subjectSource.summary : restAfterFirstLine(subjectSource.summary);
+  const body = rawBody?.trim() ? stripClaudeSessionTrailer(rawBody).message.trim() : undefined;
+
+  // Code Review "B1 residual": the pre-commit HEAD, read BEFORE `add` runs, is the reference point every
+  // later recovery check below compares against — the only way to tell "the commit call reported
+  // failure but the ref moved anyway" apart from "it genuinely never landed".
+  let preCommitSha: string;
+  try {
+    preCommitSha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "codex-auto-commit rev-parse HEAD (pre-commit)")).trim();
+  } catch {
+    return { attempted: false, committed: false }; // FAIL SAFE — same posture as every earlier read
+  }
+
+  try {
+    // Code Review "S2": `--literal-pathspecs` is a GLOBAL flag (before the subcommand, alongside the
+    // `-c` args) — `--` alone does NOT stop pathspec magic/globbing, so a candidate literally named `*`
+    // or `:(glob)**` would otherwise expand against the filesystem and stage paths this scan never saw
+    // (verified directly: `git add -- '*'` matches every file in the dir without this flag).
+    await withTimeout(
+      git.raw(["--literal-pathspecs", ...cfg, "add", "--", ...candidates]), timeoutMs, "codex-auto-commit add",
+    );
+  } catch (e) {
+    // `add` never moves HEAD, so a failure here genuinely stages nothing — the ordinary fall-through to
+    // precheckWorkerDone's uncommitted-files refusal is correct as-is, no recovery check needed.
+    return { attempted: true, committed: false, error: gitError(e) };
+  }
+
+  // Code Review "B1 residual": `commit` is the ONE call here that MUTATES the ref, so it is the one
+  // that must never be abandoned mid-flight by a bare `withTimeout` race — that helper settles
+  // INDEPENDENT of the underlying child (see its own doc), so a "failure" it reports can still be
+  // followed by the real git child finishing the commit moments later, unobserved. `withTimeoutKillingChild`
+  // only settles once the child is CONFIRMED dead, closing that window structurally — mirroring
+  // `createWorktree`'s own `boundedLockedRaw` pattern (grepped, not hand-rolled): the test seam
+  // (`deps.gitFactory`) stays a plain `withTimeout`, since an injected fake doesn't need real killing.
+  const messageArgs = body ? ["-m", subject, "-m", body] : ["-m", subject];
+  const commitArgs = [...cfg, "commit", "--no-verify", ...messageArgs];
+  const commitLabel = "codex-auto-commit commit";
+  let commitThrew: unknown;
+  try {
+    if (deps.gitFactory) {
+      await withTimeout(deps.gitFactory(worktreePath, timeoutMs).raw(commitArgs), timeoutMs, commitLabel);
+    } else {
+      const controller = new AbortController();
+      await withTimeoutKillingChild(
+        boundedSimpleGit(worktreePath, timeoutMs, nonInteractiveEnv(), controller.signal, { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true }).raw(commitArgs),
+        timeoutMs, commitLabel, controller,
+      );
+    }
+  } catch (e) {
+    commitThrew = e;
+  }
+
+  // Whichever path above ran, verify what ACTUALLY happened via HEAD rather than trusting `commit`'s own
+  // success/failure signal alone (Code Review "B1 residual"): a post-commit read failing after a
+  // genuinely successful commit must never be reported as `committed:false` — that would let the
+  // caller's fall-through precheck see a clean tree and accept the done with no audit trail at all. ONE
+  // retry: a bare `rev-parse HEAD` is cheap and a single transient failure (unlike `commit` itself,
+  // already protected above) shouldn't be enough to declare the state permanently unknown.
+  let headAfter: string | undefined;
+  for (let attempt = 0; attempt < 2 && headAfter === undefined; attempt++) {
+    try {
+      headAfter = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "codex-auto-commit rev-parse HEAD (post-commit)")).trim();
+    } catch { /* retried once below; if both attempts fail, handled via commitStateUnknown */ }
+  }
+
+  if (headAfter !== undefined && headAfter !== preCommitSha) {
+    // HEAD moved — a commit landed, whether or not `commit` itself reported success. Recover it.
+    return { attempted: true, committed: true, sha: headAfter, fileCount: candidates.length, subject };
+  }
+  if (!commitThrew) {
+    // `commit` reported success (git only does that after actually moving the ref), yet HEAD reads as
+    // unchanged or unreadable — a contradiction that must NEVER be reported as a plain "not committed":
+    // fail CLOSED rather than let a real commit go unaudited and undiscovered.
+    return {
+      attempted: true, committed: false, commitStateUnknown: true,
+      error: headAfter === undefined ? "commit reported success but HEAD is now unreadable" : "commit reported success but HEAD did not move",
+    };
+  }
+  if (headAfter === undefined) {
+    // `commit` failed/timed out AND HEAD is unreadable — genuinely unknown whether it landed anyway.
+    return { attempted: true, committed: false, commitStateUnknown: true, error: gitError(commitThrew) };
+  }
+  // `commit` failed/timed out, HEAD is readable, and it did NOT move — genuinely failed, tree still
+  // dirty, the ordinary fall-through to precheckWorkerDone's uncommitted-files refusal is correct.
+  return { attempted: true, committed: false, error: gitError(commitThrew) };
 }
 
 /** @decision 9cb0287a — SAFE-TO-DISCARD guard for boot-reconcile Pass B (the 2026-06-05 P0 data-loss fix);
