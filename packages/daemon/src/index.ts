@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolveConfig, resolveCodescapeIntegrationPath } from "@loom/shared";
 import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR, LOOPBACK_SECRET_PATH, isUsagePollerSuppressed } from "./paths.js";
-import { installCrashHandlers, hadCrashLogAtBoot as computeHadCrashLogAtBoot } from "./crashlog.js";
+import { installCrashHandlers, installEpipeTolerantStdio, hadCrashLogAtBoot as computeHadCrashLogAtBoot } from "./crashlog.js";
 import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-marker.js";
 import { Db } from "./db.js";
 import { canOpenRemoteListener, isTrustTierHookActive, tlsRequirementSatisfied, isAllInterfacesBindHost } from "./gateway/trust-tier.js";
@@ -91,6 +91,11 @@ async function main(): Promise<void> {
   // run any handler" (an OS-level kill / sleep / reboot / a crashed hosting terminal) — the missing
   // shutdown marker in EITHER case is already correct behavior; only the wording changes.
   const hadCrashLogAtBoot = computeHadCrashLogAtBoot();
+  // Card 3fba0cd2: before EVERYTHING else, including installCrashHandlers() below — a write to a
+  // destroyed stdout/stderr pipe throws EPIPE synchronously and would otherwise reach uncaughtException
+  // and kill the daemon (it has, twice). See installEpipeTolerantStdio's own doc for what this does and
+  // does not cover.
+  installEpipeTolerantStdio();
   // Top-level fatal-exit crash handler FIRST — so an uncaught exception / unhandled rejection / stray
   // non-zero exit at any point past here leaves a diagnosable crashlog under .loom (a real crash once
   // left no log signature at all). Idempotent + fail-safe; never throws.

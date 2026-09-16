@@ -2989,6 +2989,11 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   "packages/daemon/test/periodic-snapshot.mjs",
   "packages/daemon/test/git-log-locale-pin.mjs",
   "packages/daemon/test/graceful-shutdown-epipe-resilience.mjs",
+  // Card 3fba0cd2: (wiring section) reads real dist/index.js SOURCE and does a raw, unstripped
+  // indexOf("installCrashHandlers();") / indexOf("installEpipeTolerantStdio(") to assert call order — tsc
+  // keeps comments, so a comment-only edit to index.ts containing "installCrashHandlers();" above the real
+  // installEpipeTolerantStdio() call would flip this. Same shape as its sibling immediately above.
+  "packages/daemon/test/epipe-tolerant-stdio.mjs",
   "packages/daemon/test/project-memory.mjs",
   "packages/daemon/test/session-archive.mjs",
   // card fab07aba — real packages/daemon/src/**/*.ts readers, same trigger as the dist/** readers above.

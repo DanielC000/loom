@@ -158,6 +158,39 @@ function isNodePtyConsoleListRace(reason: unknown): boolean {
 }
 
 /**
+ * Wrap `process.stdout`/`stderr` against a destroyed pipe (e.g. the hosting console going away), which
+ * otherwise reaches `uncaughtException` and kills the daemon — it has, twice. Two independent guards,
+ * BOTH required: a try/catch around `write()` itself (covers a stream whose write genuinely throws
+ * synchronously) PLUS an `.on("error")` listener (covers the case a real `net.Socket`-backed stdout
+ * actually takes: `write()` returns normally and the failure surfaces later as an async `"error"` event,
+ * which Node rethrows as `uncaughtException` when nothing is listening). Wrapping `write()` itself (not
+ * `console.*`, which calls it internally) covers every `console.*` call site plus any direct `.write()`
+ * from our own code or a dependency, in one place. MUST be called before {@link installCrashHandlers} so
+ * that handler's own `console.error` diagnostic is covered too.
+ *
+ * @decision 3fba0cd2 — do not widen either guard's swallow past `code === "EPIPE"`; do not call this
+ * after `installCrashHandlers()`; do not drop the `.on("error")` listener as merely theoretical — it is
+ * the one verified to actually fire for a `net.Socket`-backed stdout, not the write-wrapper.
+ */
+export function installEpipeTolerantStdio(): void {
+  for (const stream of [process.stdout, process.stderr] as const) {
+    const original = stream.write.bind(stream) as (...args: unknown[]) => boolean;
+    (stream as unknown as { write: (...args: unknown[]) => boolean }).write = (...args: unknown[]): boolean => {
+      try {
+        return original(...args);
+      } catch (err) {
+        // Reader gone; drop the line rather than let a synchronous EPIPE reach uncaughtException.
+        if ((err as NodeJS.ErrnoException)?.code === "EPIPE") return false;
+        throw err;
+      }
+    };
+    stream.on("error", (err: NodeJS.ErrnoException) => {
+      if (err?.code !== "EPIPE") throw err;
+    });
+  }
+}
+
+/**
  * Install the top-level fatal-exit handlers. Wired ONCE at the daemon entrypoint:
  * - `uncaughtException` / `unhandledRejection` — write the crashlog, then `process.exit(1)`. With a
  *   handler attached Node no longer self-terminates, so we MUST exit to preserve the default fatal code.
