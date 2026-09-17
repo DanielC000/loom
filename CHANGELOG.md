@@ -4,6 +4,9 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+### Removed
+- **`/graphify` bundled skill removed.** The opt-in graphify code-graph orientation skill is gone from Loom's built-in surface — Codescape already covers this repo's own orientation, and Loom never validated or updated the doctrine against the underlying third-party tool after it was first added. graphify itself is unaffected; a user who installs it separately can still use it, just without Loom's own shipped doctrine for it.
+
 ## [0.29.0] — 2026-09-06
 
 **A batched-merge and fleet-visibility release, with a follow-on trust-boundary pass.** The merge gate can now land a whole batch of ready branches in one run instead of one gate per branch, the web app moves from polling to a live fleet status feed, and Project Memory and manager reliability both pick up real observability. Three more loopback endpoints — left open by 0.28.0's first pass — now require the same access credential as every other write route.
