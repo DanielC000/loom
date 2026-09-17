@@ -377,6 +377,14 @@ export const NOT_HERMETIC = new Set([
   "web-build-no-orphans", // mutates the REAL packages/web/src/main.tsx + rebuilds the shared packages/web/dist
   // 2-3x (~5-20s each) to exercise turbo's actual cache — would race codescape-privacy-guard.mjs (which
   // reads that same dist) if run concurrently. Run manually per its own header comment.
+  "disallow-harness-scheduling-tools-real-spawn", // card 7a624213: spawns TWO real, authenticated `claude`
+  // processes and spends a real model turn on EACH — on the owner's Windows host `claude auth status`
+  // passes, so left hermetic-discovered this would run on EVERY merge gate: an unapproved recurring spend
+  // on the owner's account, plus a new flake surface (auth expiry, rate limits, network) inside a suite
+  // that already runs concurrent lanes. UNLIKE the codex-real-spawn family (CODEX_REAL_SPAWN_BASENAMES,
+  // scheduled as its own separate, locked gate step) this file has no such scheduling — it is proof-once,
+  // manual-only. Its own header carries the exact run command + the evidence from the run that proved this
+  // card's fix. Run manually per its own header comment.
 ]);
 
 // Directories that are established non-test containers under test/ — never descended into by the

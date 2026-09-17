@@ -124,15 +124,20 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      see the same "still queued/running" fact for free from `gate_queue`, and a no-change report costs a
      turn on both sides for nothing new. Only report again once something has actually changed — you're
      ready to act, you decided to cancel it, or your disposition genuinely shifted. **If you also want a
-     belt-and-suspenders fallback wake for this park, prefer `wake_me` over any other scheduling
-     primitive you have available** — Loom can see a `wake_me` and auto-cancels it the instant the
-     awaited nudge actually lands, so a healthy park never leaves a stale wake to fire later; a wake
-     scheduled through some other mechanism is invisible to Loom and fires regardless, handing you a
-     pointless round-trip re-discovering work you already finished. Still cancel your own fallback wake
-     yourself the moment the nudge lands — don't rely solely on the auto-cancel. And the auto-cancel
-     sweeps by TIME, not by intent: an unrelated `wake_me` you schedule for something else while still
-     parked on this same gate may get reaped too — if you still need it once the nudge lands,
-     re-schedule it then.
+     belt-and-suspenders fallback wake for this park, use `wake_me`** — the ONLY self-scheduling primitive
+     available to you. **Your underlying engine's own self-scheduling / remote-trigger tools (e.g.
+     `ScheduleWakeup`, or a recurring-job / remote-routine-trigger tool by whatever name your harness
+     uses) are NOT available in this session, are deliberately blocked at spawn, and must never be reached
+     for even if one somehow still appears in your tool list:** any tick or job one of those arms is
+     invisible to Loom and can fire an entirely different operating mandate into your session at an idle
+     boundary, colliding with a manager's own queued direction. `wake_me` is the one Loom can see, and it
+     auto-cancels it the instant the awaited nudge actually lands, so a healthy park never leaves a stale
+     wake to fire later; anything scheduled through some other mechanism is invisible to Loom and fires
+     regardless, handing you a pointless round-trip re-discovering work you already finished. Still cancel
+     your own fallback wake yourself the moment the nudge lands — don't rely solely on the auto-cancel.
+     And the auto-cancel sweeps by TIME, not by intent: an unrelated `wake_me` you schedule for something
+     else while still parked on this same gate may get reaped too — if you still need it once the nudge
+     lands, re-schedule it then.
    - **Once you've committed and kicked off `run_gate` (above), your worktree is an INPUT to that running
      gate, not a workspace that happens to be nearby — treat everything in it as OWNED by the gate until
      it settles.** That means the obvious case, **build output** (no wiping it, no manual rebuild, no

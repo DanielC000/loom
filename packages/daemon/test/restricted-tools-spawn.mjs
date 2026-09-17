@@ -12,7 +12,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Proves:
 //   (P) RESTRICTED_NATIVE_TOOLS content + frozen; disallowedToolsForSpawn OFF == disallowedToolsForRole
-//       (byte-identical), ON == the de-duped union (role human-prompt tools + the restricted set).
+//       (byte-identical), ON == the de-duped union (the role's FULL base disallow — human-prompt tools
+//       plus, for an in-scope role, the separate harness-self-scheduling disallow, card 7a624213 — then
+//       the restricted set).
 //   (A) buildSpawnArgs with the restricted list emits --disallowedTools INCLUDING the restricted set AND
 //       still the role's human-prompt tools, before --strict-mcp-config (the H2 ordering invariant), with
 //       the prompt still last behind `--`; flag OFF ⇒ argv BYTE-IDENTICAL to today.
@@ -43,7 +45,7 @@ process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFIL
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 const { Db } = await import("../dist/db.js");
-const { PtyHost, buildSpawnArgs, disallowedToolsForRole, disallowedToolsForSpawn, RESTRICTED_NATIVE_TOOLS, HUMAN_PROMPT_TOOLS } = await import("../dist/pty/host.js");
+const { PtyHost, buildSpawnArgs, disallowedToolsForRole, disallowedToolsForSpawn, RESTRICTED_NATIVE_TOOLS, HUMAN_PROMPT_TOOLS, HARNESS_SCHEDULING_TOOLS } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -74,11 +76,13 @@ for (const role of ["worker", "assistant", "manager", null, undefined]) {
   check(`(P) absent restrictedTools arg role '${String(role)}': also byte-identical`,
     eq(disallowedToolsForSpawn(role), disallowedToolsForRole(role)));
 }
-// ON, worker: the union is the role's human-prompt tools FOLLOWED BY the restricted native set, de-duped.
+// ON, worker: the union is the role's FULL base disallow (human-prompt tools + the separate
+// harness-self-scheduling disallow, card 7a624213 — see disallow-harness-scheduling-tools.mjs)
+// FOLLOWED BY the restricted native set, de-duped.
 {
   const merged = disallowedToolsForSpawn("worker", true);
-  check("(P) ON worker: union = human-prompt tools + restricted native set (role tools first)",
-    eq(merged, [...HUMAN_PROMPT_TOOLS, ...RESTRICTED]));
+  check("(P) ON worker: union = human-prompt + harness-scheduling tools + restricted native set (role tools first)",
+    eq(merged, [...HUMAN_PROMPT_TOOLS, ...HARNESS_SCHEDULING_TOOLS, ...RESTRICTED]));
   check("(P) ON worker: every restricted native tool present", RESTRICTED.every((t) => merged.includes(t)));
   check("(P) ON worker: the human-prompt disallow is STILL present (union, not replacement)",
     HUMAN_PROMPT_TOOLS.every((t) => merged.includes(t)));
@@ -92,7 +96,18 @@ check("(P) ON null role: only the restricted native set (orthogonal to role)",
 check("(P) ON manager: union = manager's task-tracking base tools + restricted native set (role tools first)",
   eq(disallowedToolsForSpawn("manager", true), [...disallowedToolsForRole("manager"), ...RESTRICTED]));
 // The returned array is a fresh copy (no shared-state mutation of the frozen constant / role list).
-{ const a = disallowedToolsForSpawn("worker", true); a.push("X"); check("(P) returns a fresh array (no shared-state mutation)", disallowedToolsForSpawn("worker", true).length === HUMAN_PROMPT_TOOLS.length + RESTRICTED.length); }
+{
+  const a = disallowedToolsForSpawn("worker", true);
+  a.push("X");
+  a[0] = "CLOBBERED";
+  // Derive the expected length from disallowedToolsForRole("worker") itself (its own base, whatever it
+  // currently is) rather than re-deriving a hand-summed formula that drifts every time a new disallow
+  // dimension is added to the role (card 7a624213 already drifted this once) — the POINT of this check is
+  // that mutating a returned array never leaks into a later call, not a specific number.
+  check("(P) returns a fresh array (no shared-state mutation)",
+    disallowedToolsForSpawn("worker", true).length === disallowedToolsForRole("worker").length + RESTRICTED.length &&
+    disallowedToolsForSpawn("worker", true)[0] === disallowedToolsForRole("worker")[0]);
+}
 
 // ===================== (A) buildSpawnArgs emits + orders the merged --disallowedTools =====================
 {
@@ -211,8 +226,8 @@ try {
   check("(e2e) companion: role resolved to 'assistant'", oC?.role === "assistant");
   check("(e2e) companion: returned session.restrictedTools === true", sC.restrictedTools === true);
   check("(e2e) companion: DB persists restricted_tools=1 (pins it for respawns)", db.getSession(sC.id).restrictedTools === true);
-  check("(e2e) companion: the spawn's disallow list = human-prompt + restricted union (dangerous native tools removed)",
-    eq(disallowedToolsForSpawn(oC.role, oC.restrictedTools), [...HUMAN_PROMPT_TOOLS, ...RESTRICTED]));
+  check("(e2e) companion: the spawn's disallow list = human-prompt + harness-scheduling + restricted union (dangerous native tools removed)",
+    eq(disallowedToolsForSpawn(oC.role, oC.restrictedTools), [...HUMAN_PROMPT_TOOLS, ...HARNESS_SCHEDULING_TOOLS, ...RESTRICTED]));
 
   // startNew on a plain agent → false, byte-identical (no restriction beyond role).
   const sPlain = svc.startNew("agentPlain");
@@ -244,8 +259,8 @@ try {
   const oWRW = optsFor(wRW.id);
   check("(e2e) spawnWorker(restricted rig): spawn opts.restrictedTools === true", oWRW?.restrictedTools === true);
   check("(e2e) spawnWorker(restricted rig): DB row persists restricted_tools=1", db.getSession(wRW.id).restrictedTools === true);
-  check("(e2e) spawnWorker(restricted rig): the worker disallow list unions human-prompt + restricted set",
-    eq(disallowedToolsForSpawn(oWRW.role, oWRW.restrictedTools), [...HUMAN_PROMPT_TOOLS, ...RESTRICTED]));
+  check("(e2e) spawnWorker(restricted rig): the worker disallow list unions human-prompt + harness-scheduling + restricted set",
+    eq(disallowedToolsForSpawn(oWRW.role, oWRW.restrictedTools), [...HUMAN_PROMPT_TOOLS, ...HARNESS_SCHEDULING_TOOLS, ...RESTRICTED]));
 
   // RECYCLE the restricted worker → the successor carries the restriction from the old row.
   host.capture.length = 0;

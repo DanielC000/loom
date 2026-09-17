@@ -5,9 +5,11 @@
 // `<system-reminder>` — pure noise for a role whose real task surface is the `mcp__loom-tasks__tasks_*`
 // board (a disjoint tool namespace, untouched by this disallow). Every out-of-scope role's argv on THIS
 // dimension stays BYTE-IDENTICAL. See disallow-prompt-tools.mjs for the separate human-prompt disallow
-// (auditor carries BOTH; manager/platform carry ONLY this one).
+// (auditor carries BOTH; manager/platform carry ONLY this one) and disallow-harness-scheduling-tools.mjs
+// for the third, separate harness-self-scheduling disallow (manager/auditor carry that one too, platform
+// does not — this file's own exact-equality checks below account for that union rather than re-deriving it).
 // Run: node test/disallow-task-tools.mjs
-import { buildSpawnArgs, disallowedToolsForRole, TASK_TRACKING_TOOLS, HUMAN_PROMPT_TOOLS } from "../dist/pty/host.js";
+import { buildSpawnArgs, disallowedToolsForRole, TASK_TRACKING_TOOLS, HUMAN_PROMPT_TOOLS, HARNESS_SCHEDULING_TOOLS } from "../dist/pty/host.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -27,16 +29,18 @@ for (const role of ["manager", "platform", "auditor"]) {
   check(`role '${role}': every task-tracking tool disallowed`,
     TASK_TRACKING_TOOLS.every((t) => disallowedToolsForRole(role).includes(t)));
 }
-// `auditor` carries BOTH concerns — the human-prompt disallow (it's Loom-driven, never blocks on a human)
-// AND the task-tracking disallow (it's board-driven) — unioned into one list.
-check("role 'auditor': carries BOTH human-prompt AND task-tracking disallow",
+// `auditor` carries ALL THREE concerns — human-prompt (Loom-driven, never blocks on a human), task-tracking
+// (board-driven), AND harness-scheduling (Loom-driven — see HARNESS_SCHEDULING_TOOLS) — unioned in that order.
+check("role 'auditor': carries human-prompt AND task-tracking AND harness-scheduling disallow",
   JSON.stringify(disallowedToolsForRole("auditor")) ===
-    JSON.stringify([...HUMAN_PROMPT_TOOLS, ...TASK_TRACKING_TOOLS]));
-// manager/platform carry ONLY the task-tracking disallow (never human-prompt — see disallow-prompt-tools.mjs).
-for (const role of ["manager", "platform"]) {
-  check(`role '${role}': task-tracking disallow ONLY (no human-prompt tools)`,
-    JSON.stringify(disallowedToolsForRole(role)) === JSON.stringify([...TASK_TRACKING_TOOLS]));
-}
+    JSON.stringify([...HUMAN_PROMPT_TOOLS, ...TASK_TRACKING_TOOLS, ...HARNESS_SCHEDULING_TOOLS]));
+// platform carries ONLY the task-tracking disallow (never human-prompt, never harness-scheduling — it's
+// the human-driven Platform Lead). manager carries task-tracking AND harness-scheduling, but never
+// human-prompt (a manager legitimately surfaces decisions to the human — see disallow-prompt-tools.mjs).
+check("role 'platform': task-tracking disallow ONLY (no human-prompt, no harness-scheduling)",
+  JSON.stringify(disallowedToolsForRole("platform")) === JSON.stringify([...TASK_TRACKING_TOOLS]));
+check("role 'manager': task-tracking AND harness-scheduling disallow (no human-prompt)",
+  JSON.stringify(disallowedToolsForRole("manager")) === JSON.stringify([...TASK_TRACKING_TOOLS, ...HARNESS_SCHEDULING_TOOLS]));
 
 // OUT of scope: every role whose real task surface isn't the board the same way — worker/setup/
 // workspace-auditor/run/assistant (Loom-driven, human-prompt-disallowed, but NOT task-tracking-disallowed)
@@ -54,10 +58,12 @@ for (const role of ["worker", "setup", "workspace-auditor", "run", "assistant", 
   const strict = args.indexOf("--strict-mcp-config");
   const cfg = args.indexOf("--mcp-config");
   check("manager: `--disallowedTools` is present", d !== -1);
-  check("manager: the six tool names follow the flag, in order",
+  check("manager: the six task-tracking tool names lead, in order",
     ["TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate"]
       .every((name, i) => args[d + 1 + i] === name));
-  check("manager: `--disallowedTools` precedes `--strict-mcp-config` (its variadic is terminated by that flag)", d < strict && d + 7 === strict);
+  check("manager: the five harness-scheduling tool names follow, in order",
+    HARNESS_SCHEDULING_TOOLS.every((name, i) => args[d + 1 + TASK_TRACKING_TOOLS.length + i] === name));
+  check("manager: `--disallowedTools` precedes `--strict-mcp-config` (its variadic is terminated by that flag)", d < strict && d + 1 + tools.length === strict);
   check("manager: `--mcp-config` value is the last real flag (no `--`/prompt trailing it — the prompt never rides argv)", cfg !== -1 && args.length - 1 === cfg + 1);
   check("manager: no `--` separator (the prompt never rides argv)", !args.includes("--"));
 }
@@ -80,6 +86,6 @@ for (const role of ["worker", "setup", "workspace-auditor", "run", "assistant", 
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — manager/platform/auditor spawn with the native Task* tools disallowed (auditor also keeps its human-prompt disallow); worker/setup/workspace-auditor/run/assistant/plain stay byte-identical on this dimension."
+  ? "\n✅ ALL PASS — manager/platform/auditor spawn with the native Task* tools disallowed (auditor also keeps its human-prompt disallow, manager and auditor also carry the harness-scheduling disallow, platform does not); worker/setup/workspace-auditor/run/assistant/plain stay byte-identical on this dimension."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

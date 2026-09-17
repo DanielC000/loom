@@ -3099,9 +3099,57 @@ export const HUMAN_PROMPT_TOOLS: readonly string[] = ["AskUserQuestion", "ExitPl
  */
 export const TASK_TRACKING_TOOLS: readonly string[] = ["TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate"];
 
+/**
+ * The harness's OWN self-scheduling / remote-trigger tools — a DIFFERENT hazard class than
+ * {@link HUMAN_PROMPT_TOOLS}/{@link TASK_TRACKING_TOOLS}: none of these block a turn waiting on a human,
+ * they let a Loom-driven session arm autonomous behavior (a future tick, a recurring cron job, a
+ * claude.ai routine) that Loom itself cannot see or cancel — colliding with Loom's own queued delivery at
+ * an idle boundary (board card 7a624213, from a real incident: a taskless QA worker's `ScheduleWakeup`
+ * tick fired the harness's full autonomous-`/loop` mandate — "commit and push", "fix CI" — into a session
+ * whose actual instructions come from its manager, at the exact moment a manager `worker_message` was
+ * queued to drain). Loom's own sanctioned wake primitive is `wake_me` (an MCP tool, unaffected by this
+ * native-tool disallow — Loom can see it and auto-cancels it once the awaited event lands); a Loom-driven
+ * session should never need any of these instead.
+ *  - `ScheduleWakeup` — arms a future harness-delivered prompt tick, the direct cause above.
+ *  - `CronCreate`/`CronDelete` — the harness's own session-scoped recurring-job scheduler.
+ *  - `CronList` — read-only standalone, but it only ever lists jobs `CronCreate` made IN THIS SESSION;
+ *    once `CronCreate` is denied it lists nothing but dead weight advertising a scheduler surface Loom
+ *    cannot see into, so it closes with the rest of the trio rather than leaving one member reachable.
+ *  - `RemoteTrigger` — the most powerful of the five: can create/run a claude.ai routine that keeps firing
+ *    independently of this session, entirely outside Loom, even after this session ends.
+ * NOT included: `Monitor` (watches an already-running process/stream, not a scheduler), `PushNotification`/
+ * `FetchInboxMessage` (messaging, a disjoint concern), `TaskOutput`/`TaskStop` (the harness's native
+ * task-tracking tools — see {@link TASK_TRACKING_TOOLS}, a disjoint concern with its own disallow scope).
+ *
+ * Role scope (board card 7a624213) is a THIRD, independent switch in {@link disallowedToolsForRole}
+ * below, not folded into the human-prompt switch: worker/setup/auditor/workspace-auditor/assistant/
+ * manager get it (every Loom-driven role whose stdin is never a live human, PLUS manager — a manager's
+ * own idle loop runs entirely on `idle_report`/`wake_me`, never a harness tick, and a stray
+ * `ScheduleWakeup` tick is just as invisible to Loom and just as able to collide with queued worker
+ * reports at a manager's idle boundary). Deliberately NOT `run` (an ephemeral, owner-triggered Agent Run
+ * — unlike every other role here it never idles waiting on anything, so there is no idle boundary for a
+ * tick to collide with, and `run` is carved out of THIS switch even though it IS in the human-prompt
+ * one), NOT `platform` (the human-driven Platform Lead — an owner-interactive session, not Loom-driven),
+ * NOT `operator` (human-spawned-only; untouched by either existing switch below, a deliberate
+ * consistency call, not an oversight), and NOT plain/role-less (an owner-interactive terminal, where
+ * `/loop` is a legitimate owner feature).
+ *
+ * Codex parity (card 7a624213): NOTHING to deny here, and no lever to deny it with even if there were.
+ * `ScheduleWakeup`/`CronCreate`/`CronDelete`/`CronList`/`RemoteTrigger` are Claude-Code-harness-native
+ * tool names — codex's own CLI tool surface (shell/apply_patch-style) exposes no equivalent under any
+ * name, so there is no codex-side tool to deny in the first place. Separately, and independently,
+ * `createCodexPty` (this file) has NO `--disallowedTools`/`--allowedTools`-equivalent lever at all — see
+ * that method's own doc comment ("codex has NO analogous per-tool lever at all — verified:
+ * opts.permission/disallowedTools never appear anywhere in this method or spawnCodexProcess"), the SAME
+ * structural gap card `0770d916` already named for a different capability (codescape). So this disallow
+ * list is deliberately absent from `createCodexPty`'s argv construction: not a silent gap, a structural
+ * fact recorded here so a future reader doesn't go looking for a codex-side flag that cannot exist.
+ */
+export const HARNESS_SCHEDULING_TOOLS: readonly string[] = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger"];
+
 /** @decision 8dd1dd1c — human-prompt disallow: Loom-driven roles only (worker/setup/auditor/
  *  workspace-auditor/run/assistant), NEVER manager/platform — they legitimately surface decisions to the
- *  human. Task-tracking disallow (card 33f9f181) is separate/disjoint. */
+ *  human. Task-tracking (card 33f9f181) and harness-self-scheduling ({@link HARNESS_SCHEDULING_TOOLS}) disallow are separate/disjoint, each with its own role scope. */
 export function disallowedToolsForRole(role?: SessionRole | null): string[] {
   const out: string[] = [];
   switch (role) {
@@ -3124,6 +3172,18 @@ export function disallowedToolsForRole(role?: SessionRole | null): string[] {
       break;
     default:
       break; // worker / setup / workspace-auditor / run / assistant / plain — no task-tracking disallow
+  }
+  switch (role) {
+    case "worker":
+    case "setup":
+    case "auditor":
+    case "workspace-auditor":
+    case "assistant":
+    case "manager":
+      out.push(...HARNESS_SCHEDULING_TOOLS);
+      break;
+    default:
+      break; // platform / run / operator / plain — human-driven, owner-interactive, or untouched by design (see HARNESS_SCHEDULING_TOOLS's own doc)
   }
   return out;
 }

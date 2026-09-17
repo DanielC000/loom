@@ -293,6 +293,15 @@ Need a human decision, approval, secret, or input? File a `question_ask` Request
 above), not an idle report. (If you go silent and unresponsive, the watchdog itself escalates you to the
 human after `maxUnansweredNudges` — that safety net is separate and automatic.)
 
+**Your underlying engine's own self-scheduling / remote-trigger tools (e.g. `ScheduleWakeup`, or a
+recurring-job / remote-routine-trigger tool by whatever name your harness uses) are NOT available in this
+session and must never be reached for, even if one somehow still appears in your tool list.** Any tick or
+job one of those arms is invisible to the daemon and can fire an entirely different operating mandate into
+your session at exactly the idle boundary this section is about — colliding with a worker report or a
+queued direction. `idle_report('waiting', minutes=…)` (above) is your primary mechanism for a bounded
+park; `wake_me` (available on every session, same as a worker's) covers a one-shot wake tied to a specific
+future time instead. The daemon can see and auto-manage both.
+
 **Re-read before you park.** Before ANY `idle_report('done')`/`idle_report('waiting')` — or any park,
 `recycle_me`, stop, or irreversible fleet-wide action (a `daemon_restart`/deploy, a force-push, a
 deletion) — do a FRESH `tasks_list` and drain your inbox (`inbox_pull`); never conclude the

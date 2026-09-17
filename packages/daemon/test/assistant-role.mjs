@@ -8,8 +8,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       role + resumeId, injects no prompt) — plus the fleet CAPTURE/round-trip carries the role;
 //   (c) its server-owned base BRIEF (companion identity + untrusted-input posture + chat_reply doctrine) is
 //       injected AHEAD of the agent's own prompt;
-//   (d) its spawn argv carries `--disallowedTools AskUserQuestion ExitPlanMode EnterPlanMode`, while a
-//       non-assistant role's argv stays BYTE-IDENTICAL;
+//   (d) its spawn argv carries `--disallowedTools AskUserQuestion ExitPlanMode EnterPlanMode` PLUS the
+//       separate harness-self-scheduling disallow (card 7a624213 — see disallow-harness-scheduling-tools.mjs
+//       for that dimension's own dedicated coverage), while a non-assistant/out-of-scope role's argv stays
+//       BYTE-IDENTICAL;
 //   (e) resolveRole ADMITS `assistant` with a MINIMAL orchestration surface — my_context + the companion-
 //       gated chat_reply present, the manager coordination surface (worker_spawn/…) + worker_report ABSENT.
 // Run: 1) build (turbo builds shared first), 2) node test/assistant-role.mjs
@@ -27,7 +29,7 @@ fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
 const { Db } = await import("../dist/db.js");
-const { PtyHost, buildSpawnArgs, buildMcpServers, disallowedToolsForRole, HUMAN_PROMPT_TOOLS } = await import("../dist/pty/host.js");
+const { PtyHost, buildSpawnArgs, buildMcpServers, disallowedToolsForRole, HUMAN_PROMPT_TOOLS, HARNESS_SCHEDULING_TOOLS } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -149,14 +151,21 @@ try {
   // =================== (d) argv: assistant gets the human-prompt disallow; a plain role stays byte-identical ===================
   // (manager separately carries the task-tracking disallow now — see disallow-task-tools.mjs — so a
   // plain/role-less session is this test's out-of-scope byte-identical example instead.)
-  check("(d) disallowedToolsForRole('assistant') === the full human-prompt tool list", JSON.stringify(disallowedToolsForRole("assistant")) === JSON.stringify([...HUMAN_PROMPT_TOOLS]));
+  // assistant is ALSO in scope for the separate harness-self-scheduling disallow (card 7a624213 —
+  // HARNESS_SCHEDULING_TOOLS, see pty/host.ts's own doc), unioned in AFTER the human-prompt tools — so
+  // its full list is human-prompt + harness-scheduling, not human-prompt alone. See
+  // disallow-harness-scheduling-tools.mjs for that dimension's own dedicated coverage.
+  check("(d) disallowedToolsForRole('assistant') === human-prompt + harness-scheduling tool list", JSON.stringify(disallowedToolsForRole("assistant")) === JSON.stringify([...HUMAN_PROMPT_TOOLS, ...HARNESS_SCHEDULING_TOOLS]));
   check("(d) disallowedToolsForRole(null) === [] (out of scope, unchanged)", disallowedToolsForRole(null).length === 0);
   const mcpServers = buildMcpServers({ sessionId: "s1", port: 4317, role: "assistant" });
-  const asstArgs = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "hi", disallowedTools: disallowedToolsForRole("assistant") });
+  const asstTools = disallowedToolsForRole("assistant");
+  const asstArgs = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "hi", disallowedTools: asstTools });
   const d = asstArgs.indexOf("--disallowedTools");
-  check("(d) assistant argv carries `--disallowedTools` with the three tools in order",
+  check("(d) assistant argv carries `--disallowedTools` with the human-prompt tools leading, in order",
     d !== -1 && asstArgs[d + 1] === "AskUserQuestion" && asstArgs[d + 2] === "ExitPlanMode" && asstArgs[d + 3] === "EnterPlanMode");
-  check("(d) assistant argv: `--disallowedTools` precedes `--strict-mcp-config` (its variadic is terminated by it)", d < asstArgs.indexOf("--strict-mcp-config") && d + 4 === asstArgs.indexOf("--strict-mcp-config"));
+  check("(d) assistant argv: the harness-scheduling tools follow, in order",
+    HARNESS_SCHEDULING_TOOLS.every((name, i) => asstArgs[d + 1 + HUMAN_PROMPT_TOOLS.length + i] === name));
+  check("(d) assistant argv: `--disallowedTools` precedes `--strict-mcp-config` (its variadic is terminated by it — ordering check, not a fixed offset)", d < asstArgs.indexOf("--strict-mcp-config") && d + 1 + asstTools.length === asstArgs.indexOf("--strict-mcp-config"));
   // Byte-identical proof for the out-of-scope path: a plain session's argv (disallow []) == the no-arg argv.
   const base = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" } }, startupPrompt: "hi" });
   const plain = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" } }, startupPrompt: "hi", disallowedTools: disallowedToolsForRole(null) });

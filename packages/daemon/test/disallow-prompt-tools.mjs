@@ -3,8 +3,11 @@
 // the human-prompt tools forbidden via `--disallowedTools`, while every out-of-scope role's argv stays
 // BYTE-IDENTICAL. A worker that called AskUserQuestion blocked itself waiting on input that can never
 // come from the human; this makes the prompt tools structurally un-callable for those roles.
+// worker/setup/workspace-auditor/assistant ALSO carry the separate harness-self-scheduling disallow
+// (card 7a624213, HARNESS_SCHEDULING_TOOLS — see disallow-harness-scheduling-tools.mjs) — this file's own
+// exact-equality checks account for that UNION rather than re-deriving it; `run` does NOT (see that file).
 // Run: node test/disallow-prompt-tools.mjs
-import { buildSpawnArgs, disallowedToolsForRole, HUMAN_PROMPT_TOOLS } from "../dist/pty/host.js";
+import { buildSpawnArgs, disallowedToolsForRole, HUMAN_PROMPT_TOOLS, HARNESS_SCHEDULING_TOOLS } from "../dist/pty/host.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -27,9 +30,15 @@ for (const role of ["worker", "setup", "auditor", "workspace-auditor", "run", "a
   check(`role '${role}': all human-prompt tools disallowed`,
     HUMAN_PROMPT_TOOLS.every((t) => disallowedToolsForRole(role).includes(t)));
 }
-for (const role of ["worker", "setup", "workspace-auditor", "run", "assistant"]) {
-  check(`role '${role}': human-prompt disallow list is EXACTLY HUMAN_PROMPT_TOOLS (nothing else)`,
-    JSON.stringify(disallowedToolsForRole(role)) === JSON.stringify([...HUMAN_PROMPT_TOOLS]));
+// `run` carries ONLY the human-prompt disallow (it does NOT get the harness-self-scheduling disallow —
+// see HARNESS_SCHEDULING_TOOLS's own doc for why); worker/setup/workspace-auditor/assistant carry BOTH,
+// unioned in that order (human-prompt first, then harness-scheduling — disallow-harness-scheduling-tools.mjs
+// asserts the harness-scheduling dimension itself; this file only needs to account for the union here).
+check("role 'run': human-prompt disallow list is EXACTLY HUMAN_PROMPT_TOOLS (nothing else)",
+  JSON.stringify(disallowedToolsForRole("run")) === JSON.stringify([...HUMAN_PROMPT_TOOLS]));
+for (const role of ["worker", "setup", "workspace-auditor", "assistant"]) {
+  check(`role '${role}': human-prompt disallow list is EXACTLY HUMAN_PROMPT_TOOLS + HARNESS_SCHEDULING_TOOLS`,
+    JSON.stringify(disallowedToolsForRole(role)) === JSON.stringify([...HUMAN_PROMPT_TOOLS, ...HARNESS_SCHEDULING_TOOLS]));
 }
 // OUT of scope for the HUMAN-PROMPT disallow specifically: manager/orchestrator + the human-driven
 // platform lead never get AskUserQuestion/ExitPlanMode/EnterPlanMode disallowed (a manager legitimately
@@ -49,7 +58,7 @@ for (const role of [null, undefined]) {
   const a = disallowedToolsForRole("worker");
   a.push("Mutated");
   check("disallowedToolsForRole returns a fresh array (no shared-state mutation)",
-    disallowedToolsForRole("worker").length === HUMAN_PROMPT_TOOLS.length);
+    disallowedToolsForRole("worker").length === HUMAN_PROMPT_TOOLS.length + HARNESS_SCHEDULING_TOOLS.length);
 }
 
 // --- buildSpawnArgs: the flag is emitted + ordered correctly -----------------------------------
@@ -60,9 +69,12 @@ for (const role of [null, undefined]) {
   const strict = args.indexOf("--strict-mcp-config");
   const cfg = args.indexOf("--mcp-config");
   check("worker: `--disallowedTools` is present", d !== -1);
-  check("worker: the three tool names follow the flag, in order",
+  check("worker: the human-prompt tool names lead, in order",
     args[d + 1] === "AskUserQuestion" && args[d + 2] === "ExitPlanMode" && args[d + 3] === "EnterPlanMode");
-  check("worker: `--disallowedTools` precedes `--strict-mcp-config` (its variadic is terminated by that flag)", d < strict && d + 4 === strict);
+  check("worker: the harness-scheduling tool names follow, in order",
+    args[d + 4] === "ScheduleWakeup" && args[d + 5] === "CronCreate" && args[d + 6] === "CronDelete" &&
+    args[d + 7] === "CronList" && args[d + 8] === "RemoteTrigger");
+  check("worker: `--disallowedTools` precedes `--strict-mcp-config` (its variadic is terminated by that flag)", d < strict && d + 1 + tools.length === strict);
   check("worker: `--disallowedTools` follows `--permission-mode` (a real flag, mid-argv)", d > args.indexOf("--permission-mode"));
   check("worker: `--mcp-config` value is the last real flag (no `--`/prompt trailing it — the prompt never rides argv)", cfg !== -1 && args.length - 1 === cfg + 1);
   check("worker: no `--` separator (the prompt never rides argv)", !args.includes("--"));
@@ -90,9 +102,11 @@ for (const role of [null, undefined]) {
   check("plain/out-of-scope: NO `--disallowedTools` in argv", !withEmpty.includes("--disallowedTools"));
   check("empty disallow list: argv byte-identical to the no-arg argv", JSON.stringify(withEmpty) === JSON.stringify(base));
   check("undefined disallow: argv byte-identical to the no-arg argv", JSON.stringify(withUndef) === JSON.stringify(base));
-  // And the worker argv differs from the plain argv ONLY by the inserted flag+names (4 extra tokens).
-  const worker = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", disallowedTools: disallowedToolsForRole("worker") });
-  check("worker argv = plain argv + exactly 4 inserted tokens (flag + 3 names)", worker.length === base.length + 4);
+  // And the worker argv differs from the plain argv ONLY by the inserted flag+names (9 extra tokens:
+  // the flag + 3 human-prompt names + 5 harness-scheduling names — see HARNESS_SCHEDULING_TOOLS).
+  const workerTools = disallowedToolsForRole("worker");
+  const worker = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", disallowedTools: workerTools });
+  check("worker argv = plain argv + exactly 9 inserted tokens (flag + 8 names)", worker.length === base.length + 1 + workerTools.length);
 }
 
 // Resume path (no prompt): the disallow still threads, --resume still leads, no `--` separator emitted.
@@ -104,6 +118,6 @@ for (const role of [null, undefined]) {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker/setup/auditor/workspace-auditor/run/assistant spawn with AskUserQuestion + Exit/EnterPlanMode disallowed; manager/platform get none of those (plain stays fully byte-identical). See disallow-task-tools.mjs for the separate task-tracking disallow."
+  ? "\n✅ ALL PASS — worker/setup/auditor/workspace-auditor/run/assistant spawn with AskUserQuestion + Exit/EnterPlanMode disallowed (worker/setup/workspace-auditor/assistant ALSO carry the harness-scheduling disallow, run does not); manager/platform get none of the human-prompt ones (plain stays fully byte-identical). See disallow-task-tools.mjs for the task-tracking disallow and disallow-harness-scheduling-tools.mjs for the harness-scheduling disallow."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
