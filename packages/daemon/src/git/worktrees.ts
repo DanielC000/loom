@@ -2871,9 +2871,9 @@ export async function repoTreeReferencesInertPrefix(
  *  never a gate-eligibility signal; an assets/skills/** diff still gates exactly as before this existed. */
 const SKILL_ASSET_PREFIX = "packages/daemon/assets/skills/";
 
-/** @decision 13965c93 — per-skill info for what a diff touched under skill assets, split into THREE
- *  distinct facts (store vs. a live session vs. an agent actually opening it) — never collapse them back
- *  into one warning line, that was the exact miscommunication this split fixed. Fails closed to `[]`. */
+/** @decision 13965c93 — per-skill info for what a diff touched under skill assets, split into distinct
+ *  facts — never collapse them back into one warning line, that was the exact miscommunication this split
+ *  fixed. Fails closed to `[]`; only ever describes what the DIFF touched, never store/session state. */
 export interface ChangedSkillInfo {
   name: string;
   /** `true` iff this diff touched `<name>/SKILL.md` itself (the ambiently-read file). */
@@ -2882,20 +2882,69 @@ export interface ChangedSkillInfo {
    *  touched, so nothing about this diff is ambient; an agent only sees it if it happens to open that
    *  specific reference file. */
   referencesOnly: boolean;
+  /**
+   * `true` iff `<name>/SKILL.md` was DELETED by this diff (a `D` row from `git diff --name-status`) — the
+   * entrypoint asset is gone from the tree at `ref`. Distinct from `skillMdChanged`/`referencesOnly`: a
+   * caller should check this FIRST, since neither "live at the next restart" (pristine) nor "needs an
+   * explicit adopt" (customized) holds for a deletion — `seedGlobalSkills()` is seed-if-absent and never
+   * removes an orphaned store dir unless its name is on the hardcoded `RETIRED_BUNDLED_SKILL_NAMES`
+   * allowlist (`skills/store.ts`), which a fully-deleted skill is deliberately never added to.
+   */
+  deleted: boolean;
+}
+
+/**
+ * Same flag discipline as {@link NAME_ONLY_DIFF_FLAGS} (`--no-renames` so a moved/renamed file always
+ * appears as a plain `A`+`D` pair rather than an unattributable `R`/`C` row; `core.quotePath=false` so a
+ * non-ASCII path isn't octal-escaped past the {@link SKILL_ASSET_PREFIX} prefix check) — kept as its own
+ * array rather than reusing `NAME_ONLY_DIFF_FLAGS` because `--name-only` and `--name-status` are mutually
+ * exclusive diff output modes.
+ */
+const NAME_STATUS_DIFF_FLAGS = ["-c", "core.quotePath=false", "diff", "--name-status", "--no-renames"] as const;
+
+/**
+ * `--name-status` counterpart to {@link changedPathsBetween} — same flags, same `base..ref` range shape,
+ * but returns the change-type LETTER (`A`/`M`/`D`/`T`/`U`/`X`/`B`) per path instead of just the path.
+ * Local to {@link changedSkillNames}'s `deleted` detection (its only caller) rather than a third shared
+ * helper. Best-effort like {@link diffNameStatus}: a row that doesn't parse as `<letter>\t<path>` is
+ * skipped, never guessed — `--no-renames` above means an `R`/`C` row should never occur here in the first
+ * place, so this is defensive, not the primary path.
+ */
+async function changedPathStatusesBetween(
+  git: Pick<SimpleGit, "raw">, base: string, ref: string, timeoutMs?: number,
+): Promise<Map<string, string>> {
+  const args = [...NAME_STATUS_DIFF_FLAGS, `${base}..${ref}`];
+  const raw = timeoutMs === undefined
+    ? await git.raw(args)
+    : await withTimeout(git.raw(args), timeoutMs, "git diff --name-status (changed skill statuses)");
+  const map = new Map<string, string>();
+  for (const rawLine of raw.split("\n")) {
+    const line = rawLine.replace(/\r$/, "");
+    if (!line) continue;
+    const tab = line.indexOf("\t");
+    if (tab < 1) continue; // no tab, or an empty status column — can't parse
+    const letter = line[0];
+    if (!letter) continue;
+    const rest = line.slice(tab + 1);
+    if (rest.includes("\t")) continue; // a second tab means more than one path on this row — skip
+    if (!rest) continue;
+    map.set(rest, letter);
+  }
+  return map;
 }
 
 export async function changedSkillNames(
   repoPath: string, base: string, ref: string, deps: BoundedGitDeps = {},
 ): Promise<ChangedSkillInfo[]> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
-  let paths: string[];
+  let statuses: Map<string, string>;
   try {
-    paths = await changedPathsBetween(git, base, ref, timeoutMs);
+    statuses = await changedPathStatusesBetween(git, base, ref, timeoutMs);
   } catch {
     return [];
   }
   const bySkill = new Map<string, string[]>();
-  for (const p of paths) {
+  for (const p of statuses.keys()) {
     if (!p.startsWith(SKILL_ASSET_PREFIX)) continue;
     const rest = p.slice(SKILL_ASSET_PREFIX.length);
     const slash = rest.indexOf("/");
@@ -2911,6 +2960,7 @@ export async function changedSkillNames(
       name,
       skillMdChanged: subPaths.includes("SKILL.md"),
       referencesOnly: subPaths.length > 0 && subPaths.every((s) => s.startsWith("references/")),
+      deleted: statuses.get(`${SKILL_ASSET_PREFIX}${name}/SKILL.md`) === "D",
     };
   });
 }

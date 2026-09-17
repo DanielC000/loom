@@ -41,6 +41,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       skill must NOT get the on-demand-read clause (SKILL.md's own ambient read makes the diff not
 //       references-only), proving the flag actually discriminates rather than firing on any references/
 //       touch at all.
+//   (H) DELETION (card 7b677081) — a diff that DELETES `<name>/SKILL.md` must say the store copy is NOT
+//       removed by a restart and that removal needs a human action, and must NOT say "live at the next
+//       restart" (pristine) or "needs an explicit adopt" (customized) — proven against a store that
+//       already holds a PRISTINE copy of the deleted skill, so a regression that lets this fall through to
+//       the pristine arm would flip this test red.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/merge-skill-liveness-warning.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -258,6 +263,36 @@ try {
     check("(G) skillWarning names mixed-skill", typeof confirm.skillWarning === "string" && confirm.skillWarning.includes("mixed-skill"));
     check("(G) SKILL.md touched ⇒ NOT references-only, no on-demand note", !/read on demand/.test(confirm.skillWarning));
   }
+
+  // ── (H) DELETION (card 7b677081) — SKILL.md itself was REMOVED by this diff. Neither the pristine nor
+  //       the customized arm applies: a restart never removes an orphaned store dir (seed-if-absent), and
+  //       there is nothing to adopt. The asset already existed on main BEFORE this merge (so its removal
+  //       shows as a real `D` row), and the live store already carries a PRISTINE copy — proving the
+  //       deleted arm takes PRIORITY over the pristine arm rather than falling through to it ──────────────
+  {
+    const H = mk("h");
+    makeRepo(H);
+    writeSkillAssetFile(H.repo, "doomed-skill", "# doomed v1\n");
+    commitAll(H.repo, "feat: add doomed-skill", GIT_ID);
+    mkdirp(path.join(process.env.LOOM_HOME, "skills", "doomed-skill"));
+    fs.writeFileSync(path.join(process.env.LOOM_HOME, "skills", "doomed-skill", "SKILL.md"), "# doomed v1\n");
+
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => ({ passed: true }) });
+    const { worktreePath, branch } = await createWorktree(H.repo, H.projId, H.taskId);
+    H.worktreePath = worktreePath; H.branch = branch; worktrees.push(worktreePath);
+    fs.rmSync(path.join(worktreePath, "packages", "daemon", "assets", "skills", "doomed-skill"), { recursive: true, force: true });
+    commitAll(worktreePath, "chore(assets): unship doomed-skill", GIT_ID);
+    seed(db, H, "pnpm gate");
+
+    const confirm = await sessions.confirmWorkerMerge(H.mgrId, H.workerId);
+    check("(H) merged:true", confirm.merged === true);
+    check("(H) skillWarning names doomed-skill", typeof confirm.skillWarning === "string" && confirm.skillWarning.includes("doomed-skill"));
+    check("(H) reads DELETED, names the human-action routes (Skills UI / retire allowlist)", /doomed-skill \(DELETED from bundled assets — the skill store copy is NOT removed by a restart; removing it needs a human action, via the Skills UI or the retire allowlist\)/.test(confirm.skillWarning));
+    check("(H) NEGATIVE — never says 'live in the skill store at the next daemon restart' despite a pristine store copy existing", !/live in the skill store at the next daemon restart/.test(confirm.skillWarning));
+    check("(H) NEGATIVE — never says 'needs an explicit adopt'", !/needs an explicit adopt/.test(confirm.skillWarning));
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) cleanupPathSync(wt);
@@ -266,6 +301,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a merge landing packages/daemon/assets/skills/<name>/** carries a skillWarning naming the skill(s), the correct store-liveness next step read from the live store's customized flag (pristine ⇒ next restart, customized ⇒ explicit adopt, never suppressed), that a session only reflects it on its own next resume, and — for a references/**-only diff — a distinct on-demand-read clause; a merge that never touches that prefix carries no skillWarning at all."
+  ? "\n✅ ALL PASS — a merge landing packages/daemon/assets/skills/<name>/** carries a skillWarning naming the skill(s), the correct store-liveness next step read from the live store's customized flag (pristine ⇒ next restart, customized ⇒ explicit adopt, never suppressed), that a session only reflects it on its own next resume, a references/**-only diff gets a distinct on-demand-read clause, a DELETED SKILL.md gets a TRUE deletion clause instead of falling through to either arm, and a merge that never touches that prefix carries no skillWarning at all."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

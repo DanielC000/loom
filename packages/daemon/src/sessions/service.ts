@@ -587,17 +587,19 @@ type ConfirmMergeResult = {
   gateCap?: number;
   concurrentGates?: number;
   concurrentGatesMax?: number;
-  /** Card 64a30c79 (reworded by card 13965c93): set ONLY when this merge's squash commit touched
-   *  `packages/daemon/assets/skills/<name>/**` (see {@link changedSkillNames}) — i.e. only ever on Loom's
-   *  own self-hosted repo, never any other project. Names the skill(s) and, per skill, states THREE
-   *  separate facts rather than collapsing them into one (card 13965c93's whole point — see
-   *  {@link ChangedSkillInfo}'s own doc for the mechanism each fact rests on): (1) whether the STORE
-   *  advances at the next restart (pristine) or needs an explicit adopt that a restart will never do for
-   *  it (customized, read from the live store's own `customized` flag, never guessed); (2) that a session
-   *  already live across that restart only picks up the change on its own NEXT RESUME, not the instant
-   *  the store updates; (3) when the diff only touched `references/**` (never `SKILL.md`), that the file
-   *  is read on demand, so being live in a session's own copy still doesn't mean any agent opens it.
-   *  `undefined` for every merge that doesn't touch that prefix — byte-identical to before this field
+  /** Card 64a30c79 (reworded by card 13965c93; deletion case added by card 7b677081): set ONLY when this
+   *  merge's squash commit touched `packages/daemon/assets/skills/<name>/**` (see {@link
+   *  changedSkillNames}) — i.e. only ever on Loom's own self-hosted repo, never any other project. Names
+   *  the skill(s) and, per skill, states separate facts rather than collapsing them into one (card
+   *  13965c93's whole point — see {@link ChangedSkillInfo}'s own doc for the mechanism each fact rests
+   *  on): (1) whether the STORE advances at the next restart (pristine) or needs an explicit adopt that a
+   *  restart will never do for it (customized, read from the live store's own `customized` flag, never
+   *  guessed) — UNLESS `<name>/SKILL.md` was DELETED by this diff, in which case neither of those holds
+   *  (a restart never removes an orphaned store dir) and the text says so plainly instead; (2) that a
+   *  session already live across that restart only picks up the change on its own NEXT RESUME, not the
+   *  instant the store updates; (3) when the diff only touched `references/**` (never `SKILL.md`), that
+   *  the file is read on demand, so being live in a session's own copy still doesn't mean any agent opens
+   *  it. `undefined` for every merge that doesn't touch that prefix — byte-identical to before this field
    *  existed. Distinct from the generic `warning` field above so it can't be silently absorbed into (or
    *  crowded out by) an unrelated warning; echoed separately into the `[loom:merge-done]` nudge too (see
    *  confirmWorkerMergeTracked's `msg` construction) so both DoD-1 surfaces carry it. */
@@ -14380,6 +14382,12 @@ export class SessionService {
         // on demand — see the store/reach facts above still hold, but neither one implies an agent opens
         // the file).
         const describeSkill = (d: ChangedSkillInfo): string => {
+          // Card 7b677081: a DELETION is neither of the two arms below — a restart never removes an
+          // orphaned store dir (seed-if-absent) unless its name is on the hardcoded retire allowlist,
+          // which a fully-deleted skill deliberately never joins (would auto-delete a user's own copy).
+          if (d.deleted) {
+            return `${d.name} (DELETED from bundled assets — the skill store copy is NOT removed by a restart; removing it needs a human action, via the Skills UI or the retire allowlist)`;
+          }
           const entry = store.find((s) => s.name === d.name);
           const storeClause = entry?.customized
             ? "customized — needs an explicit adopt (a restart will NOT do it); even after adopting, a session gets it only on its next resume"
