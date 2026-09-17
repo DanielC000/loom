@@ -12,7 +12,12 @@ import {
   type SkillAssetsGitStatus,
   type SkillAssetsSyncState,
 } from "./skills/assets-git-status.js";
-import { measureScratchRootBytes, SCRATCH_ROOT_WARN_BYTES } from "./sessions/scratch-gc.js";
+import {
+  measureScratchRootBytes,
+  SCRATCH_ROOT_WARN_BYTES,
+  getBootScratchGcSweepOutcome,
+  type ScratchGcSweepOutcome,
+} from "./sessions/scratch-gc.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -92,6 +97,15 @@ export interface ServedStatus {
   /** `scratchRootBytes > SCRATCH_ROOT_WARN_BYTES` — precomputed so a reader doesn't need to import the
    *  constant to know whether the number above is a problem. */
   scratchRootOverCeiling: boolean;
+  /**
+   * Card 1a686bad — the boot sweep's own outcome (see `scratch-gc.ts`'s `ScratchGcSweepOutcome` doc for
+   * the full rationale): beside `scratchRootOverCeiling` so a reader can tell "the ceiling fired and the
+   * GC is working, nothing currently qualifies" apart from "the ceiling fired and the GC is broken" —
+   * previously indistinguishable, since the sweep's result was discarded. `"in-progress"` is a real,
+   * honest state (the sweep is fire-and-forget and may still be running when this is read), never
+   * fabricated as a completed zero.
+   */
+  scratchGcSweep: ScratchGcSweepOutcome;
 }
 
 /**
@@ -132,5 +146,6 @@ export function buildServedStatus(db: Db): ServedStatus {
     skillAssetsSyncState: deriveSkillAssetsSyncState(storeStaleness, assetsGitStatus),
     scratchRootBytes,
     scratchRootOverCeiling: scratchRootBytes > SCRATCH_ROOT_WARN_BYTES,
+    scratchGcSweep: getBootScratchGcSweepOutcome(),
   };
 }

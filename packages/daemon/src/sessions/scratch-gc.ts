@@ -186,6 +186,78 @@ export async function sweepUnresumableScratchDirs(db: Db, deps: ScratchGcDeps = 
   return result;
 }
 
+/**
+ * Card 1a686bad — the boot sweep's own OUTCOME, made readable by `served_status` (see `served-status.ts`).
+ * `reconcileRunsOnBoot` fires {@link sweepUnresumableScratchDirs} fire-and-forget (`void ….catch(...)`) and
+ * discards the returned {@link ScratchGcResult} — so today a sweep that scanned 1,395 dirs and reaped 0 is
+ * byte-identical, on every observable surface, to a sweep that threw on its first statement and was
+ * swallowed by that `.catch`, or to one that never ran at all. This module-level record (mirrors
+ * `served-status.ts`'s own `processBuiltSha`, captured once and read fresh by every `served_status` call —
+ * see that module's doc for why "once" is deliberate there; here it's "once per boot, mutated in place as
+ * the ONE outstanding sweep progresses" instead, since a NEW value legitimately arrives over time) is what
+ * closes that gap: a state machine with four cases, so "not finished yet" and "reaped 0" and "threw" are
+ * three DIFFERENT, distinguishable values rather than one indistinguishable silence.
+ *
+ * ⛔ Do NOT read `state:"not-started"` as itself informative in production — `runBootScratchGcSweep` is
+ * called synchronously, unconditionally, from `reconcileRunsOnBoot` before `app.listen()`, so by the time
+ * anything could call `served_status` the state has already advanced to at least `"in-progress"`. The
+ * `"not-started"` case exists for a fresh module import (a test that never calls the boot wrapper) and for
+ * `__resetScratchGcSweepOutcomeForTest`, never for a real boot.
+ */
+export type ScratchGcSweepOutcome =
+  | { state: "not-started" }
+  | { state: "in-progress"; startedAt: string }
+  | { state: "completed"; startedAt: string; completedAt: string; scanned: number; reaped: number; wedged: number }
+  | { state: "failed"; startedAt: string; failedAt: string; error: string };
+
+let bootScratchGcSweepOutcome: ScratchGcSweepOutcome = { state: "not-started" };
+
+/** Fresh read for `served_status`/`buildServedStatus` — same "read whatever the module currently holds"
+ *  discipline as every other field on that surface (see `served-status.ts`'s own doc on why its sibling
+ *  fields are fresh, uncached reads). */
+export function getBootScratchGcSweepOutcome(): ScratchGcSweepOutcome {
+  return bootScratchGcSweepOutcome;
+}
+
+/** TEST SEAM — mirrors `served-status.ts`'s `__setProcessBuiltInfoForTest`. Production code never calls
+ *  this; it lets a test reset the module-level record between cases without a real process restart. */
+export function __resetScratchGcSweepOutcomeForTest(): void {
+  bootScratchGcSweepOutcome = { state: "not-started" };
+}
+
+/**
+ * Boot-only wrapper around {@link sweepUnresumableScratchDirs} — call this from `reconcileRunsOnBoot`
+ * instead of the bare fire-and-forget call. Stays synchronous and non-throwing on its own turn (records
+ * `"in-progress"` and returns immediately) so it can never become something `app.listen()` waits on
+ * (`boot-listen-not-blocked.mjs` pins that); the async sweep itself is unchanged — this only adds recording
+ * around it. A rejected sweep records `"failed"` with the error message rather than leaving the record
+ * stuck at `"in-progress"` forever, and still logs via the same `console.warn` the bare call used to.
+ */
+export function runBootScratchGcSweep(db: Db, deps: ScratchGcDeps = {}): void {
+  const startedAt = new Date().toISOString();
+  bootScratchGcSweepOutcome = { state: "in-progress", startedAt };
+  void sweepUnresumableScratchDirs(db, deps)
+    .then((result) => {
+      bootScratchGcSweepOutcome = {
+        state: "completed",
+        startedAt,
+        completedAt: new Date().toISOString(),
+        scanned: result.scanned,
+        reaped: result.reaped.length,
+        wedged: result.wedged.length,
+      };
+    })
+    .catch((e) => {
+      bootScratchGcSweepOutcome = {
+        state: "failed",
+        startedAt,
+        failedAt: new Date().toISOString(),
+        error: (e as Error).message,
+      };
+      console.warn(`[boot] scratch dir sweep failed: ${(e as Error).message}`);
+    });
+}
+
 /** Total on-disk bytes currently under `SCRATCH_ROOT_DIR` — the WHOLE root (every entry, not just
  *  v4-uuid-shaped reap candidates), since this feeds a footprint WARNING, not the reap scope. A full
  *  recursive walk, deliberately synchronous: called on-demand from `served_status`/`GET /api/deploy-
