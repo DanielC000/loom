@@ -9210,7 +9210,10 @@ export class SessionService {
        *  "this report was filed by a sub-agent" AT THE POINT of deciding whether to act on it — the
        *  action path, not a separate log line nobody reads (per pinned memory
        *  `shipping-a-detector-is-not-someone-reading-it`). Any other state (confirmed-main/unknown/
-       *  ambiguous) is deliberately NOT surfaced here — only a positive confirmation is actionable info. */
+       *  ambiguous) is deliberately NOT surfaced here — only a positive confirmation is actionable info.
+       *
+       *  @decision d15c9f36 — a MISSING `ATTRIBUTION:` label below is never evidence of a main-turn call:
+       *  it reads identically for confirmed-main, unknown, and ambiguous. See `WATCHED_TOOLS`'s own doc. */
       subagentAttribution?: { state: ToolAttributionState; agentId?: string; agentType?: string };
     },
   ): Promise<{ reported: boolean; deliveryStatus: DeliveryStatus; refused?: boolean; error?: string; uncommittedFiles?: string[]; warning?: string; autoRetired?: boolean }> {

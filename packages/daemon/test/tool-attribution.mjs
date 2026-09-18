@@ -2,7 +2,7 @@
 // Covers the confirmed cases AND, deliberately, the correlation-FAILURE paths (unknown/ambiguous/TTL
 // expiry/max-depth) — the whole point of this card was refusing to fold those into a false-definite
 // answer. Run (after a build): node test/tool-attribution.mjs
-import { ToolAttributionTracker, ATTRIBUTION_TTL_MS, WATCHED_TOOL_NAMES, SubagentDriftTracker, isConfirmedSubagent, extractWatchedToolCalls } from "../dist/pty/tool-attribution.js";
+import { ToolAttributionTracker, ATTRIBUTION_TTL_MS, WATCHED_TOOL_NAMES, WATCHED_TOOLS, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, SubagentDriftTracker, isConfirmedSubagent, extractWatchedToolCalls } from "../dist/pty/tool-attribution.js";
 import { PRE_TOOL_USE_ATTRIBUTION_MATCHER } from "../dist/pty/claude-settings.js";
 
 let failures = 0;
@@ -131,11 +131,47 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   check("forget() of a session with nothing recorded is a no-op — a later call still reads correctly", r.state === "unknown");
 }
 
-// --- WATCHED_TOOL_NAMES: the two DoD-2 tools, and only those (scope, not a behavior test of the set itself) --
+// --- WATCHED_TOOL_NAMES: card d15c9f36's widened write/action set, and ONLY that set --------------------
+// Negative control is load-bearing here, not decorative: a widening test that only asserts the members
+// present would pass identically whether the set were scoped to writes or widened to literally everything
+// — `tasks_get` (a real, worker-reachable READ tool) proves the scope boundary actually excludes something.
 {
-  check("WATCHED_TOOL_NAMES includes worker_report", WATCHED_TOOL_NAMES.has("worker_report"));
-  check("WATCHED_TOOL_NAMES includes memory_write", WATCHED_TOOL_NAMES.has("memory_write"));
-  check("WATCHED_TOOL_NAMES does not include an arbitrary unrelated tool", !WATCHED_TOOL_NAMES.has("tasks_get"));
+  const expectedWatched = ["worker_report", "run_gate", "gate_cancel", "memory_write", "memory_forget",
+    "tasks_create", "tasks_update", "tasks_defer_item", "tasks_defer_item_ack", "wake_me", "wake_cancel"];
+  for (const name of expectedWatched) {
+    check(`WATCHED_TOOL_NAMES includes ${name}`, WATCHED_TOOL_NAMES.has(name));
+  }
+  check("WATCHED_TOOL_NAMES has exactly the expected write/action tools, nothing extra", WATCHED_TOOL_NAMES.size === expectedWatched.length);
+  // The negative control: a representative READ tool on each watched router, deliberately excluded.
+  check("WATCHED_TOOL_NAMES does not include tasks_get (a read tool on loom-tasks)", !WATCHED_TOOL_NAMES.has("tasks_get"));
+  check("WATCHED_TOOL_NAMES does not include gate_status (a read tool on loom-orchestration)", !WATCHED_TOOL_NAMES.has("gate_status"));
+}
+
+// --- WATCHED_TOOLS: each entry names its ACTUAL registered server — the class the old server-blind matcher
+// agreement check (below) could not catch: a tool wired under the WRONG server is silently inert (its
+// PreToolUse hook never matches the client's real qualified name), and stripping server prefixes before
+// comparing (as the old check did) can't tell a correct pairing from a swapped one. -----------------------
+{
+  const byTool = new Map(WATCHED_TOOLS.map((w) => [w.tool, w.server]));
+  check("worker_report is registered on loom-orchestration, not loom-tasks", byTool.get("worker_report") === LOOM_ORCHESTRATION_SERVER_ID);
+  check("run_gate is registered on loom-orchestration, not loom-tasks", byTool.get("run_gate") === LOOM_ORCHESTRATION_SERVER_ID);
+  check("gate_cancel is registered on loom-orchestration, not loom-tasks", byTool.get("gate_cancel") === LOOM_ORCHESTRATION_SERVER_ID);
+  check("memory_write is registered on loom-tasks, not loom-orchestration", byTool.get("memory_write") === LOOM_TASKS_SERVER_ID);
+  check("memory_forget is registered on loom-tasks, not loom-orchestration", byTool.get("memory_forget") === LOOM_TASKS_SERVER_ID);
+  check("tasks_update is registered on loom-tasks, not loom-orchestration", byTool.get("tasks_update") === LOOM_TASKS_SERVER_ID);
+  check("wake_me is registered on loom-tasks, not loom-orchestration", byTool.get("wake_me") === LOOM_TASKS_SERVER_ID);
+  check("every WATCHED_TOOLS entry names one of the two known server ids (no typo'd server string)",
+    WATCHED_TOOLS.every((w) => w.server === LOOM_TASKS_SERVER_ID || w.server === LOOM_ORCHESTRATION_SERVER_ID));
+}
+
+// --- a newly-widened write tool (tasks_update, not one of the original two) resolves through the SAME
+// confirm/consume pipeline as worker_report — the widening actually wired the tracker, not just the list --
+{
+  const t = new ToolAttributionTracker();
+  t.record("s-widen", "tasks_update", { agentId: "sub-widen" }, 1_000);
+  const r = t.consume("s-widen", "tasks_update", 1_010);
+  check("a widened tool (tasks_update) resolves confirmed-subagent through the real tracker, not just the name list",
+    r.state === "confirmed-subagent" && r.agentId === "sub-widen");
 }
 
 // --- matcher/WATCHED_TOOL_NAMES agree (round-2 review) ---------------------------------------------
@@ -369,6 +405,6 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — confirmed-subagent/confirmed-main both resolve and consume correctly; unknown, ambiguous, TTL-expiry, cross-tool-name, and burst-depth are all classified honestly rather than folded into a false-definite answer; ambiguous entries are left in place (not drained) and self-resolve only once genuinely stale; (card 7b8a3b25) forget(sessionId) drops a session's own queued entries, leaves a different session's entries untouched, is prefix-safe against one session id being a literal prefix of another's, and is a harmless no-op on a session with nothing recorded; the PreToolUse matcher / WATCHED_TOOL_NAMES agree exactly, mechanically, not just by comment; extractWatchedToolCalls is method-gated; isConfirmedSubagent collapses to one predicate; SubagentDriftTracker's redesigned drift tell DISCRIMINATES healthy from blind operation on the identical lifecycle shape, while staying correctly silent (not a false alarm) on the predecessor's own failure signature; (card aed28554) evict() bounds a Start-without-Stop leak to the session's own lifetime, is a harmless no-op on an unknown session, and is strictly per-session; and (card 3cc3b726) bare-name keying is PROVEN to let loom-tasks' and loom-orchestration's same-named memory_write tools steal each other's queue entries, while qualifying the key by the full mcp__<server>__<tool> name is PROVEN to keep them isolated in both directions."
+  ? "\n✅ ALL PASS — confirmed-subagent/confirmed-main both resolve and consume correctly; unknown, ambiguous, TTL-expiry, cross-tool-name, and burst-depth are all classified honestly rather than folded into a false-definite answer; ambiguous entries are left in place (not drained) and self-resolve only once genuinely stale; (card 7b8a3b25) forget(sessionId) drops a session's own queued entries, leaves a different session's entries untouched, is prefix-safe against one session id being a literal prefix of another's, and is a harmless no-op on a session with nothing recorded; (card d15c9f36) WATCHED_TOOL_NAMES is widened to the full write/action set with a real read-tool negative control proving the scope boundary, WATCHED_TOOLS pairs each tool with its verified real server (catching a mispairing class the bare matcher/name-set agreement check below cannot), and a newly-widened tool resolves through the real tracker, not just the name list; the PreToolUse matcher / WATCHED_TOOL_NAMES agree exactly, mechanically, not just by comment; extractWatchedToolCalls is method-gated; isConfirmedSubagent collapses to one predicate; SubagentDriftTracker's redesigned drift tell DISCRIMINATES healthy from blind operation on the identical lifecycle shape, while staying correctly silent (not a false alarm) on the predecessor's own failure signature; (card aed28554) evict() bounds a Start-without-Stop leak to the session's own lifetime, is a harmless no-op on an unknown session, and is strictly per-session; and (card 3cc3b726) bare-name keying is PROVEN to let loom-tasks' and loom-orchestration's same-named memory_write tools steal each other's queue entries, while qualifying the key by the full mcp__<server>__<tool> name is PROVEN to keep them isolated in both directions."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

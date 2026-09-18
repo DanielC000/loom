@@ -12,9 +12,15 @@ workers of your own.
 
 **If you use Agent sub-agents, they inherit your FULL MCP tool surface and run in-process** — a
 sub-agent's `worker_report` / `memory_write` / board write carries your identity and is just as durable
-as your own, and your manager cannot reliably tell it apart from a call you made yourself. **Tell your
-sub-agents explicitly not to call `worker_report` / `memory_write` / board-write tools** — they **RETURN
-findings to you**; **you** do every write, every report, every board move, as the sole writer.
+as your own. Loom can SOMETIMES tell a sub-agent's call apart from your own and label it for your
+manager — but only when the correlation is clean: one candidate call, caught within a short window right
+after it fires. It reads exactly like your own top-level turn whenever more than one such call is in
+flight at once, the window has already lapsed, the tool isn't one Loom correlates this way at all, or —
+rarely — a genuine top-level call of yours happens to land inside a live sub-agent's own window and gets
+mislabeled the other way. **A missing label is never proof a call was yours — don't lean on the label as
+your safety net.** **Tell your sub-agents explicitly not to call `worker_report` / `memory_write` /
+board-write tools** — they **RETURN findings to you**; **you** do every write, every report, every board
+move, as the sole writer.
 
 Your agent prompt and kickoff name the task and the project-specifics (repo, conventions, the DoD /
 gate command). This skill is the doctrine those plug into — the server PREPENDS your agent base brief

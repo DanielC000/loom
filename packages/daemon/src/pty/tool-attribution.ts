@@ -46,19 +46,6 @@ export interface ToolAttributionEntry {
 }
 
 /**
- * The only tools this correlation currently tracks — kept narrow per card cd0c7fee (the two DoD-2 cares
- * about). Widen here, and `claude-settings.ts`'s `PRE_TOOL_USE_ATTRIBUTION_MATCHER`, TOGETHER, if scope
- * ever grows; a tool name outside this set is simply never recorded, so `consume` for it always reads
- * "unknown". ⚠️ A drift between the two is SILENT and fails toward the reassuring side: a tool present
- * here but missing from the matcher never gets a PreToolUse hook fired for it, so `consume` reads
- * "unknown" for it forever — nothing breaks, nothing logs, nobody looks; the detector just quietly stops
- * detecting for that one tool. `test/tool-attribution.mjs`'s "matcher/WATCHED_TOOL_NAMES agree" block
- * makes this mechanical rather than a comment a future editor has to remember to honor — run it after
- * editing either side.
- */
-export const WATCHED_TOOL_NAMES: ReadonlySet<string> = new Set(["worker_report", "memory_write"]);
-
-/**
  * Card 3cc3b726: the two MCP server ids that can register a watched tool — the only ids that matter for
  * the attribution queue's qualified key (`mcp__<server>__<tool>`, see `keyFor`'s own doc below). Exported
  * so `pty/host.ts`'s `buildMcpServers` (which mints these as the client's own MCP server names) and
@@ -69,6 +56,32 @@ export const WATCHED_TOOL_NAMES: ReadonlySet<string> = new Set(["worker_report",
  */
 export const LOOM_TASKS_SERVER_ID = "loom-tasks";
 export const LOOM_ORCHESTRATION_SERVER_ID = "loom-orchestration";
+
+/**
+ * @decision d15c9f36 — scoped to WRITE/ACTION tools only (a read can't mislead anyone); widen by adding
+ * to this array, never by hand-editing `WATCHED_TOOL_NAMES` or the matcher separately. See record for the
+ * scope boundary and the server-mispairing test gap this design closes.
+ */
+export const WATCHED_TOOLS: ReadonlyArray<{ readonly tool: string; readonly server: string }> = [
+  { tool: "worker_report", server: LOOM_ORCHESTRATION_SERVER_ID },
+  { tool: "run_gate", server: LOOM_ORCHESTRATION_SERVER_ID },
+  { tool: "gate_cancel", server: LOOM_ORCHESTRATION_SERVER_ID },
+  { tool: "memory_write", server: LOOM_TASKS_SERVER_ID },
+  { tool: "memory_forget", server: LOOM_TASKS_SERVER_ID },
+  { tool: "tasks_create", server: LOOM_TASKS_SERVER_ID },
+  { tool: "tasks_update", server: LOOM_TASKS_SERVER_ID },
+  { tool: "tasks_defer_item", server: LOOM_TASKS_SERVER_ID },
+  { tool: "tasks_defer_item_ack", server: LOOM_TASKS_SERVER_ID },
+  { tool: "wake_me", server: LOOM_TASKS_SERVER_ID },
+  { tool: "wake_cancel", server: LOOM_TASKS_SERVER_ID },
+];
+
+/**
+ * Derived from {@link WATCHED_TOOLS} — bare tool names only (server-agnostic; see `extractWatchedToolCalls`'s
+ * own doc for why bare-name matching here is harmless even though the queue KEY elsewhere is server-
+ * qualified). Widen by adding to `WATCHED_TOOLS` above, never by editing this Set directly.
+ */
+export const WATCHED_TOOL_NAMES: ReadonlySet<string> = new Set(WATCHED_TOOLS.map((w) => w.tool));
 
 /** How long a PreToolUse entry stays eligible for correlation. Generous for local-loopback + hook-process
  *  spawn overhead; tight enough that it can never span into an unrelated LATER call in the same turn. */

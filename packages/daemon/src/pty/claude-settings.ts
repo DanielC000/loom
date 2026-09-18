@@ -2,11 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import type { PermissionPolicy } from "@loom/shared";
 import { SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, DECISION_RECORDS_SCRIPT, DECISION_RECORDS_DEDUPE_DIR, COMMENT_ANCHOR_LINT_SCRIPT, PORT } from "../paths.js";
+import { WATCHED_TOOLS } from "./tool-attribution.js";
 
-/** @decision cd0c7fee — narrow-scoped to `worker_report`/`memory_write` (`WATCHED_TOOL_NAMES`); a
- *  drift between the two fails SILENTLY (the un-matched tool's hook just never fires) —
- *  `test/tool-attribution.mjs` asserts they stay in sync, run it after editing either side. */
-export const PRE_TOOL_USE_ATTRIBUTION_MATCHER = "mcp__loom-orchestration__worker_report|mcp__loom-tasks__memory_write";
+/** @decision d15c9f36 — derived from `tool-attribution.ts`'s `WATCHED_TOOLS`, the single source for both
+ *  this matcher and `WATCHED_TOOL_NAMES` — widen `WATCHED_TOOLS`, not this string. See record. */
+export const PRE_TOOL_USE_ATTRIBUTION_MATCHER = WATCHED_TOOLS.map(({ tool, server }) => `mcp__${server}__${tool}`).join("|");
 
 /** @decision sha:29b22e7e — overrides both resume-gate env thresholds so the CLI's "resume from
  *  summary" gate never renders (default choice force-compacted 3 managers at once, 2026-07-10).
@@ -77,9 +77,13 @@ export function assertValidHooksShape(hooksObj: unknown, context: string): void 
  * `computeBootMode`, host.ts, for which one) + allowlist avoids the "Bypass Permissions mode"
  * acceptance gate that --dangerously-skip-permissions triggers. (All behaviors validated in the spike.)
  *
- * PreToolUse (card cd0c7fee) is ALWAYS wired too, matcher-scoped to `worker_report`/`memory_write`
- * only (see `PRE_TOOL_USE_ATTRIBUTION_MATCHER`) — feeds PtyHost's sub-agent-call correlation queue.
- * Advisory/observational only, same as the vault-lint PostToolUse below — it never blocks or denies.
+ * PreToolUse (card cd0c7fee, widened by card d15c9f36) is ALWAYS wired too, matcher-scoped to the
+ * write/action tools named in `tool-attribution.ts`'s `WATCHED_TOOLS` (see `PRE_TOOL_USE_ATTRIBUTION_MATCHER`)
+ * — feeds PtyHost's sub-agent-call correlation queue. A tool call outside that set (including every read
+ * tool) never fires this hook, so an absent `ATTRIBUTION:` label downstream is never proof of a main-turn
+ * call — it is equally consistent with an unwatched tool, an expired/ambiguous correlation window, or a
+ * genuine main-turn call (see `WATCHED_TOOLS`'s own doc and card aed28554 for the measured false-positive
+ * race). Advisory/observational only, same as the vault-lint PostToolUse below — it never blocks or denies.
  *
  * SubagentStart/SubagentStop (card 8d158088, cross-check redesigned by card e6ef5062) are ALSO ALWAYS
  * wired, with NO matcher (their matcher field filters by `agent_type`; the drift cross-check wants every
