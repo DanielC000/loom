@@ -711,11 +711,22 @@ try {
     // (r2) the prune/branch-list/worktree-add sequence — createWorktree's own SECOND git call, on the
     //      FRESH (-b) branch-cut path. rev-parse is delegated to real git (fast); only "worktree" (prune,
     //      then add) hangs.
+    //
+    // Card 507448ab: this assertion expects a REJECT, and a real, unhung rev-parse ahead of the
+    // deliberately-hung "worktree" call can ALSO reject (it shares createWorktree's single gitDeps.timeoutMs
+    // bound across every git call in the invocation, hung or not — see delegatingHangFactoryFastHang's own
+    // doc above). That wrong-source reject satisfies `res.ok === false` just as well as the intended one, so
+    // the check would PASS for a reason that has nothing to do with the property under test, and no run
+    // would ever contradict it. Fixed the same way (r5) was: delegatingHangFactoryFastHang keeps every real
+    // call on the full production GIT_OP_TIMEOUT_MS bound (never spuriously raced) while only the
+    // deliberately-hung command rejects fast, on its OWN `simulatedHangTimeout`-marked error — so the
+    // discriminator check below can tell "the intended hang fired" apart from "some other call rejected".
     {
       const tR2 = "bounded-worktree-add-seq";
       const res = await timeAndSettle(createWorktree(repo, "projWT", tR2, {}, undefined, undefined,
-        { gitFactory: delegatingHangFactory(["worktree"]), timeoutMs: tinyMs }));
+        { gitFactory: delegatingHangFactoryFastHang(["worktree"], tinyMs) }));
       check("(r2) worktree prune/add: createWorktree REJECTS despite a never-resolving git op (not an infinite hang)", res.ok === false);
+      check("(r2) the reject came FROM the simulated hang, not an unrelated real-call timeout", res.err?.simulatedHangTimeout === true);
       check(`(r2) bounded — settled in ${Math.round(res.elapsed)}ms (cap ${tinyMs}ms)`, boundedEnough(res.elapsed));
     }
 
@@ -724,13 +735,18 @@ try {
     //      BEFORE mayRecutOntoMain ever sees a value, so this must never reach the destructive reset —
     //      it can only propagate the timeout up (createWorktree REJECTS), landing on the SAFE
     //      "could not determine" side of the guard, never a synthesized "provably empty" result.
+    //
+    // Card 507448ab: TWO real, unhung calls precede the intended "rev-list" hang here — createWorktree's
+    // own mainSha rev-parse AND recutStaleReusedBranch's own rev-parse HEAD — either capable of a
+    // wrong-source reject under the old shared-tinyMs bound. Same fix + discriminator as (r2).
     {
       const tR3 = "bounded-recut-ahead-check";
       const seed = await createWorktree(repo, "projWT", tR3); // real fresh worktree → reuse path next call
       check("(r3) setup: worktree exists on disk before the reuse call", fs.existsSync(seed.worktreePath));
       const res = await timeAndSettle(createWorktree(repo, "projWT", tR3, {}, undefined, undefined,
-        { gitFactory: delegatingHangFactory(["rev-list"]), timeoutMs: tinyMs }));
+        { gitFactory: delegatingHangFactoryFastHang(["rev-list"], tinyMs) }));
       check("(r3) recut ahead-check: createWorktree REJECTS despite a never-resolving git op (not an infinite hang)", res.ok === false);
+      check("(r3) the reject came FROM the simulated hang, not an unrelated real-call timeout", res.err?.simulatedHangTimeout === true);
       check(`(r3) bounded — settled in ${Math.round(res.elapsed)}ms (cap ${tinyMs}ms)`, boundedEnough(res.elapsed));
       check("(r3) the worktree's branch tip is UNCHANGED — the timeout never reached the destructive reset",
         git(seed.worktreePath, "rev-parse HEAD") === seed.mainSha);
@@ -743,12 +759,17 @@ try {
     //      git (so mayRecutOntoMain genuinely evaluates true); only "reset" hangs. A hang here must still
     //      surface as a bounded, visible failure (createWorktree REJECTS) — never an infinite wedge on
     //      the daemon's hottest path.
+    //
+    // Card 507448ab: THREE real, unhung calls precede the intended "reset" hang — createWorktree's own
+    // mainSha rev-parse, plus recutStaleReusedBranch's own rev-parse HEAD and rev-list --count ahead-check
+    // — same exposure and same fix as (r2)/(r3).
     {
       const tR4 = "bounded-recut-reset-hard";
       const seed = await createWorktree(repo, "projWT", tR4); // 0 commits added → provably 0 ahead of main
       const res = await timeAndSettle(createWorktree(repo, "projWT", tR4, {}, undefined, undefined,
-        { gitFactory: delegatingHangFactory(["reset"]), timeoutMs: tinyMs }));
+        { gitFactory: delegatingHangFactoryFastHang(["reset"], tinyMs) }));
       check("(r4) recut reset --hard: createWorktree REJECTS despite a never-resolving git op (not an infinite hang)", res.ok === false);
+      check("(r4) the reject came FROM the simulated hang, not an unrelated real-call timeout", res.err?.simulatedHangTimeout === true);
       check(`(r4) bounded — settled in ${Math.round(res.elapsed)}ms (cap ${tinyMs}ms)`, boundedEnough(res.elapsed));
       await removeWorktree(repo, seed.worktreePath);
       await deleteBranch(repo, seed.branch);
@@ -780,14 +801,39 @@ try {
     //      computes behindBy > 0 and the code path is really exercised); "merge-base"/"diff" hang.
     //      detectStaleBase FAILS SAFE (its own try/catch) — createWorktree must RESOLVE within the bound,
     //      with staleBase simply absent (purely advisory, must never block or alter a spawn).
+    //
+    // Card 507448ab: 070fbe8c's own doc comment above (delegatingHangFactoryFastHang) already names (r6)
+    // as sharing (r5)'s fail-safe shape, but the sub-test itself was never actually switched over — it
+    // still shared createWorktree's single gitDeps.timeoutMs bound across every real call preceding the
+    // "merge-base"/"diff" hang (createWorktree's own mainSha rev-parse; recutStaleReusedBranch's rev-parse
+    // + rev-list ahead-check; detectReusedDirtyWorktree's status read; countCommitsBehind's own rev-list).
+    // Unlike (r2)-(r4) this assertion expects a RESOLVE, so a wrong-source reject from one of those flips
+    // it RED (a spurious failure, not a vacuous pass) — a DIFFERENT symptom from the card's headline "can
+    // pass on a reject from the wrong git call", not the same one. But there IS a real vacuous-pass shape
+    // here too: `countCommitsBehind` fails safe on its OWN rev-list timeout (returns undefined), which
+    // short-circuits detectStaleBase via `if (!behindBy) return undefined` — resolving `res.ok === true`
+    // with `staleBase === undefined` WITHOUT the "merge-base"/"diff" hang ever being reached at all. Fixed
+    // with the same delegatingHangFactoryFastHang swap as (r5), PLUS a `hangSiteReached` flag proving the
+    // hung command was actually invoked — `staleBase === undefined` alone cannot tell "never stale" apart
+    // from "genuinely hung and fail-safed".
     {
       const tR6 = "bounded-detect-stale-base";
       const seed = await createWorktree(repo, "projWT", tR6);
       commitInto(seed.worktreePath, "r6.txt", "r6\n", "r6 commit"); // >0 ahead ⇒ a recovery branch (recut is a no-op)
       commitInto(repo, "main-advance-r6.txt", "main moved forward\n", "main advance r6"); // base falls behind main
+      let hangSiteReached = false;
+      const hangOnR6 = ["merge-base", "diff"];
+      const gitFactoryR6 = (repoPathArg, blockMs) => {
+        const inner = delegatingHangFactoryFastHang(hangOnR6, tinyMs)(repoPathArg, blockMs);
+        return { raw: (args) => {
+          if (hangOnR6.includes(args[0])) hangSiteReached = true;
+          return inner.raw(args);
+        } };
+      };
       const res = await timeAndSettle(createWorktree(repo, "projWT", tR6, {}, undefined, undefined,
-        { gitFactory: delegatingHangFactory(["merge-base", "diff"]), timeoutMs: tinyMs }));
+        { gitFactory: gitFactoryR6 }));
       check("(r6) detectStaleBase merge-base/diff: createWorktree RESOLVES despite a never-resolving git op (fails safe, not a hang)", res.ok === true);
+      check("(r6) the merge-base/diff hang site was actually reached (not short-circuited by an earlier fail-safe)", hangSiteReached === true);
       check(`(r6) bounded — settled in ${Math.round(res.elapsed)}ms (cap ${tinyMs}ms)`, boundedEnough(res.elapsed));
       check("(r6) staleBase is absent (fail-safe degrade — purely advisory, never blocks/alters the spawn)",
         res.value?.staleBase === undefined);
