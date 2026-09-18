@@ -936,6 +936,23 @@ export interface ProjectConfigHistoryEntry {
   createdAt: string;
 }
 
+/** Mask `config.sessionEnv` VALUES with same-length bullet filler (card b2f9ce3a) — never bucketed, since
+ * a bucketed length would hide a truncated paste. Shared by the config write path and both read paths
+ * that redact sessionEnv — reuse this, never a second masker. Idempotent: masking an already-masked
+ * bullet string re-produces the same string, so one function covers both a legacy verbatim row and a row
+ * already masked at write time. */
+export function maskSessionEnvRecord(
+  sessionEnv: Record<string, unknown> | null | undefined,
+): Record<string, string> | undefined {
+  if (!sessionEnv || Object.keys(sessionEnv).length === 0) return undefined;
+  return Object.fromEntries(
+    // `String(value ?? "")` keeps this TOTAL despite `sessionEnv: strictRecord(z.string())` validating
+    // every write path — a legacy/bad row's `null`/`undefined` must never throw here, or a bare
+    // `.length` would 500 every route sharing this masker. Do not simplify to `value.length`.
+    Object.entries(sessionEnv).map(([name, value]) => [name, "•".repeat(String(value ?? "").length)]),
+  );
+}
+
 /**
  * Daemon-global platform override — the SEPARATE 2nd arg to `resolveConfig`, NOT part of a per-project
  * override. Deep-partial of PlatformConfig: each sub-group optional, each field within it optional, so

@@ -5,8 +5,8 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
-import { resolveConfig, resolveCodescapeConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, ProjectConfigHistoryEntry, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
+import { resolveConfig, resolveCodescapeConfig, columnKeyForRole, describeCron, maskSessionEnvRecord, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
@@ -289,14 +289,12 @@ export function parseWsJsonObject(raw: Buffer | string): Record<string, unknown>
 }
 
 /**
- * Card a5ecb6fd: mask `config.sessionEnv` VALUES (same-length filler, never bucketed — a bucketed length
- * would hide a truncated paste) before a project row leaves the daemon over `GET /api/projects`. Every
- * other config key, and `Db.listProjects()` itself, stay untouched. `String(value ?? "")` makes the
- * mapper TOTAL over whatever a row happens to hold — every current write path (`sessionEnv:
- * strictRecord(z.string())`) rejects a non-string value, so a non-string here should be unreachable, but
- * before this function existed a bad row still served fine; a `.length` thrown on `null`/`undefined`
- * would newly 500 the one endpoint every page shares. Pure + exported so a hermetic test can assert the
- * masking directly without booting a real server (mirrors `sanitizeCompanionName`/`GATEWAY_LOG_SERIALIZERS`
+ * Card a5ecb6fd: mask `config.sessionEnv` VALUES before a project row leaves the daemon over
+ * `GET /api/projects`. Every other config key, and `Db.listProjects()` itself, stay untouched. The
+ * masking itself is `maskSessionEnvRecord` (`@loom/shared`) — the ONE primitive shared with the
+ * `/config/history` route below and with `Db.recordProjectConfigChange`'s write-time redaction (card
+ * b2f9ce3a); do not reintroduce a second masker here. Pure + exported so a hermetic test can assert this
+ * wrapper directly without booting a real server (mirrors `sanitizeCompanionName`/`GATEWAY_LOG_SERIALIZERS`
  * above).
  *
  * @decision 0c5d6851 — also applied to the 4 project-returning WRITE routes (create/PATCH/restore/
@@ -304,12 +302,28 @@ export function parseWsJsonObject(raw: Buffer | string): Record<string, unknown>
  * anything beyond length without re-verifying it can't round-trip the masked value onto a later write.
  */
 export function redactSessionEnvForRead(project: Project): Project {
-  const sessionEnv = project.config.sessionEnv;
-  if (!sessionEnv || Object.keys(sessionEnv).length === 0) return project;
-  const masked = Object.fromEntries(
-    Object.entries(sessionEnv).map(([name, value]) => [name, "•".repeat(String(value ?? "").length)]),
-  );
+  const masked = maskSessionEnvRecord(project.config.sessionEnv);
+  if (!masked) return project;
   return { ...project, config: { ...project.config, sessionEnv: masked } };
+}
+
+/**
+ * Card b2f9ce3a: mask `sessionEnv` inside a project-config-history entry's `prior`/`next` blobs before it
+ * leaves the daemon over `GET /api/projects/:id/config/history`. Read-side defense for rows written
+ * BEFORE `Db.recordProjectConfigChange` started masking at write time — those legacy rows still hold the
+ * secret verbatim on disk. Reuses `maskSessionEnvRecord`, the same primitive the write path now calls;
+ * masking an already-masked (post-fix) value is idempotent, so this is a safe no-op there, not a
+ * double-redaction.
+ */
+export function redactSessionEnvHistoryEntry(entry: ProjectConfigHistoryEntry): ProjectConfigHistoryEntry {
+  const priorMasked = maskSessionEnvRecord(entry.prior.sessionEnv as Record<string, unknown> | undefined);
+  const nextMasked = maskSessionEnvRecord(entry.next.sessionEnv as Record<string, unknown> | undefined);
+  if (!priorMasked && !nextMasked) return entry;
+  return {
+    ...entry,
+    prior: priorMasked ? { ...entry.prior, sessionEnv: priorMasked } : entry.prior,
+    next: nextMasked ? { ...entry.next, sessionEnv: nextMasked } : entry.next,
+  };
 }
 
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
@@ -4261,13 +4275,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // Read-only bounded change history for ONE project's config override (card a0cafef2, sibling of
   // GET /api/platform/config/history). Tier-0 (loopback-only, human-only), deliberately NOT promoted to
   // Tier-1 like the sibling project reads (board/tasks/agents/memory) above: unlike those, a project's
-  // config can carry gateCommand (host-RCE) and alertWebhook (data-exfil) — this history exposes PRIOR
-  // values of those same fields, so it inherits the config-PATCH route's own trust posture, not the
-  // read-only project-data routes' looser one.
+  // config can carry gateCommand (host-RCE), alertWebhook (data-exfil), and sessionEnv (arbitrary
+  // delivered secrets, card e668518f) — this history exposes PRIOR values of those same fields, so it
+  // inherits the config-PATCH route's own trust posture, not the read-only project-data routes' looser
+  // one. `sessionEnv` values are additionally MASKED (card b2f9ce3a, redactSessionEnvHistoryEntry) —
+  // unlike gateCommand/alertWebhook, rotating a leaked sessionEnv secret through the supported Settings
+  // flow is exactly the action that would otherwise archive the old value here forever.
   app.get("/api/projects/:id/config/history", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
-    return { entries: deps.db.listProjectConfigHistory(id) };
+    return { entries: deps.db.listProjectConfigHistory(id).map(redactSessionEnvHistoryEntry) };
   });
 
   // Atomic safe board-column layout change (task B) — the editor's mutation (card C), NOT the blind

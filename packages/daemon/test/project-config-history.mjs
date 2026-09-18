@@ -28,6 +28,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       same shape platform's sibling route does, newest-first.
 //   (5) History is also recorded correctly on setProjectConfigSafe's RE-KEY path (a kanbanColumns
 //       key-set change), not just the blind path.
+//   (6) Card b2f9ce3a: `sessionEnv` VALUES are masked at BOTH boundaries — WRITE time
+//       (Db.recordProjectConfigChange never persists the verbatim value, proven directly against the DB
+//       row) and READ time (GET .../config/history masks a pre-fix LEGACY row that still holds the secret
+//       verbatim on disk, with a control proving an unrelated key holding the same literal string is left
+//       untouched — so the masking is scoped to sessionEnv, not a blanket string scrub).
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -123,14 +128,20 @@ try {
   db.recordProjectConfigChange("pB", { docLint: true }, { docLint: false }, "human");
   check("(2) pB has exactly 2 entries before pA is driven past the cap", db.listProjectConfigHistory("pB").length === 2);
 
-  // Drive pA's history well past its cap with distinct changes.
+  // Drive pA's history well past its cap with distinct changes. `pty.cols` rides along UNMASKED (only
+  // sessionEnv is redacted) so we can still identify the genuinely-latest row by value once sessionEnv
+  // itself is masked below.
   for (let i = 0; i < 210; i++) {
-    db.recordProjectConfigChange("pA", { sessionEnv: { N: String(i) } }, { sessionEnv: { N: String(i + 1) } }, "human");
+    db.recordProjectConfigChange("pA", { sessionEnv: { N: String(i) }, pty: { cols: i } }, { sessionEnv: { N: String(i + 1) }, pty: { cols: i + 1 } }, "human");
   }
   const cappedA = new Database(dbFile, { readonly: true }).prepare("SELECT COUNT(*) AS c FROM project_config_history WHERE project_id = ?").get("pA").c;
   check("(2) ★ pA's ring buffer caps at exactly the limit (bounded, not unlimited growth)", cappedA === 200);
   const newestA = db.listProjectConfigHistory("pA", 1);
-  check("(2) the most recent write for pA survives the prune", newestA[0].next.sessionEnv.N === "210");
+  check("(2) the most recent write for pA survives the prune (unmasked sibling key proves identity)", newestA[0].next.pty.cols === 210);
+  // Card b2f9ce3a NEGATIVE CONTROL: a raw sessionEnv VALUE ("210") must NEVER survive into the stored row —
+  // masked to same-length bullet filler at WRITE time (recordProjectConfigChange), not just at read.
+  check("(2) ★ sessionEnv is masked, not verbatim, in the STORED row", newestA[0].next.sessionEnv.N === "•".repeat("210".length));
+  check("(2) the masked value is never the raw secret itself", newestA[0].next.sessionEnv.N !== "210");
   // pB's own (untouched) history is BYTE-IDENTICAL — pA's churn never evicted pB's rows.
   check("(2) ★ pB's history is UNTOUCHED by pA's ring eviction (per-project scoping, not a shared ring)",
     db.listProjectConfigHistory("pB").length === 2);
@@ -237,6 +248,44 @@ try {
   check("(5) ★ the re-key path ALSO recorded a history entry", hRekey.length === 1);
   check("(5) the entry's actor is threaded through the re-key path too", hRekey[0].actor === "platform:plat-sess-1");
   check("(5) the entry names kanbanColumns as the changed key", JSON.stringify(hRekey[0].changedKeys) === JSON.stringify(["kanbanColumns"]));
+
+  // ===================== (6) card b2f9ce3a: sessionEnv is masked end-to-end over REST, at BOTH boundaries =====================
+  // (6a) a REST-driven write with a real sessionEnv secret must never surface the raw value over GET history.
+  db.insertProject({ id: "pSecret", name: "Secret", repoPath: TMP, vaultPath: TMP, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  const secretPatch = await app.inject({ method: "PATCH", url: "/api/projects/pSecret/config", payload: { config: { sessionEnv: { API_KEY: "sk-super-secret-value" } } } });
+  check("(6a) REST PATCH with a sessionEnv secret → 200", secretPatch.statusCode === 200);
+  const secretHist = (await app.inject({ method: "GET", url: "/api/projects/pSecret/config/history" })).json().entries;
+  check("(6a) ★★ the RAW secret NEVER appears in the history response", JSON.stringify(secretHist).includes("sk-super-secret-value") === false);
+  check("(6a) the value is masked to same-length bullet filler", secretHist[0].next.sessionEnv.API_KEY === "•".repeat("sk-super-secret-value".length));
+  // The SAME invariant holds directly in the DB row, proving the redaction is at WRITE time, not just at
+  // the REST boundary (a caller reading project_config_history directly — e.g. a future internal tool —
+  // gets the same protection for free). Queried via the ALREADY-OPEN `db` handle (see the (6b) comment
+  // below on why a fresh `Database(dbFile)` handle here isn't closed and left a lingering lock on Windows).
+  const secretRow = db.db.prepare("SELECT next_json FROM project_config_history WHERE project_id = ?").get("pSecret");
+  check("(6a) ★★ the RAW secret never reaches the DB row either", secretRow.next_json.includes("sk-super-secret-value") === false);
+
+  // (6b) READ-SIDE defense for a LEGACY row written BEFORE this fix — i.e. one that still holds the secret
+  // verbatim on disk (inserted directly, bypassing recordProjectConfigChange, to simulate pre-fix data).
+  // NEGATIVE CONTROL: prove the route is actually capable of leaking a raw value by first inserting a row
+  // that mimics one of docLint's own key (never masked) holding the SAME literal string, then confirming
+  // ONLY the sessionEnv-keyed occurrence is redacted while the docLint one still passes through untouched
+  // — so a passing check here isn't just "nothing untrusted is echoed at all".
+  const legacySecret = "sk-pre-fix-legacy-value";
+  // Insert via the ALREADY-OPEN `db` handle (not a fresh `Database(dbFile)`) — a second writable handle to
+  // the same file left unclosed is what left a lingering lock behind on Windows during this test's own
+  // development; reusing the existing connection avoids that leak entirely.
+  db.db.prepare(
+    "INSERT INTO project_config_history (id, project_id, changed_keys, prior_json, next_json, actor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run(
+    randomUUID(), "pSecret", JSON.stringify(["sessionEnv", "docLint"]),
+    JSON.stringify({}), JSON.stringify({ sessionEnv: { OLD_KEY: legacySecret }, docLint: legacySecret }),
+    "human", new Date(Date.now() + 1000).toISOString(),
+  );
+  const legacyHist = (await app.inject({ method: "GET", url: "/api/projects/pSecret/config/history" })).json().entries;
+  const legacyEntry = legacyHist.find((e) => e.changedKeys.includes("docLint"));
+  check("(6b) ★★ a pre-fix legacy row's sessionEnv value is masked at READ time too", legacyEntry.next.sessionEnv.OLD_KEY === "•".repeat(legacySecret.length));
+  check("(6b) the masked value is never the raw legacy secret", legacyEntry.next.sessionEnv.OLD_KEY !== legacySecret);
+  check("(6b) ★ CONTROL: an unrelated key (docLint) holding the SAME literal string is left untouched — proves the check isn't vacuous", legacyEntry.next.docLint === legacySecret);
 } finally {
   try { if (app) await app.close(); } catch { /* ignore */ }
   db.close();
@@ -245,6 +294,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — project_config_history (card a0cafef2): the DB-level ring buffer records changed-keys/prior/next/actor/timestamp per write, a no-op records nothing, and eviction is scoped PER PROJECT (a busy project's churn never evicts a quiet sibling's history, unlike platform_config's single shared ring); setProjectConfigSafe threads a TRUTHFUL, per-surface-distinguishable actor across all four real writers — the human REST PATCH (\"human\"), the Platform Lead's project_configure (\"platform:<sessionId>\"), the Setup Assistant's project_configure AND project_update (\"setup:<sessionId>\"), and the manager's project_update (\"manager:<sessionId>\") — never hardcoding \"human\" for an agent write; a rejected/no-op write on any surface records nothing; GET /api/projects/:id/config/history (human-only REST) reflects the recorded entries newest-first, 404s on an unknown project, and empty-array's a fresh one; and history is recorded correctly on BOTH of setProjectConfigSafe's paths — the blind path and the column re-key path."
+  ? "\n✅ ALL PASS — project_config_history (card a0cafef2): the DB-level ring buffer records changed-keys/prior/next/actor/timestamp per write, a no-op records nothing, and eviction is scoped PER PROJECT (a busy project's churn never evicts a quiet sibling's history, unlike platform_config's single shared ring); setProjectConfigSafe threads a TRUTHFUL, per-surface-distinguishable actor across all four real writers — the human REST PATCH (\"human\"), the Platform Lead's project_configure (\"platform:<sessionId>\"), the Setup Assistant's project_configure AND project_update (\"setup:<sessionId>\"), and the manager's project_update (\"manager:<sessionId>\") — never hardcoding \"human\" for an agent write; a rejected/no-op write on any surface records nothing; GET /api/projects/:id/config/history (human-only REST) reflects the recorded entries newest-first, 404s on an unknown project, and empty-array's a fresh one; history is recorded correctly on BOTH of setProjectConfigSafe's paths — the blind path and the column re-key path; and (card b2f9ce3a) `sessionEnv` values are masked at BOTH the WRITE boundary (never persisted verbatim in the DB row, so a rotated-out secret is never archived) and the READ boundary (a pre-fix legacy row still holding a verbatim secret is masked over REST too), with a control proving an unrelated key holding the identical literal string is left untouched."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

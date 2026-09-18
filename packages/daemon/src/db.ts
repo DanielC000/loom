@@ -83,7 +83,7 @@ import type {
   RepoRegistryEntry, PlatformConfigHistoryEntry, ProjectConfigHistoryEntry,
 } from "@loom/shared";
 import type { CapabilityDefRow } from "./capabilities/registry.js";
-import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio } from "@loom/shared";
+import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
 // Type-only — companion/types.ts has zero runtime imports, so this can never form a runtime cycle with
@@ -2921,6 +2921,8 @@ export class Db {
    * `actor` must be THREADED FROM THE CALLER, never hardcoded — project config (unlike platform_config) has
    * THREE agent-facing writers alongside the one human REST PATCH; hardcoding "human" here would falsely
    * attribute an agent's write. See `ProjectConfigHistoryEntry`'s doc for the actor-string convention.
+   * Card b2f9ce3a: `sessionEnv` is MASKED (`maskSessionEnvRecord`) before reaching this row — rotating a
+   * secret must never archive the old value in cleartext.
    */
   recordProjectConfigChange(projectId: string, before: ProjectConfigOverride, after: ProjectConfigOverride, actor: string): void {
     const b = (before ?? {}) as Record<string, unknown>;
@@ -2931,6 +2933,13 @@ export class Db {
     for (const key of new Set([...Object.keys(b), ...Object.keys(a)])) {
       if (JSON.stringify(b[key]) === JSON.stringify(a[key])) continue;
       changedKeys.push(key);
+      if (key === "sessionEnv") {
+        const bMasked = maskSessionEnvRecord(b[key] as Record<string, unknown> | undefined);
+        const aMasked = maskSessionEnvRecord(a[key] as Record<string, unknown> | undefined);
+        if (bMasked !== undefined) prior[key] = bMasked;
+        if (aMasked !== undefined) next[key] = aMasked;
+        continue;
+      }
       if (b[key] !== undefined) prior[key] = b[key];
       if (a[key] !== undefined) next[key] = a[key];
     }
