@@ -593,8 +593,9 @@ try {
     check("(e2e verdict pass) outputTail round-trips through the tombstone — the DoD item 2 fix: a passing gate used to retain NOTHING here", status.outputTail === "42 passed, 0 failed");
     check("(e2e verdict pass) cancelled/reason/gateDetail are all absent (never a fabricated value for fields that don't apply to a pass)", status.cancelled === undefined && status.reason === undefined && status.gateDetail === undefined);
     // Card 3407caad: a real gate DID spawn here, so gateProximity must be PRESENT — nearBudget:false is
-    // the honest "ran, checked, comfortably under budget" answer (4200ms against the default 120000ms
-    // budget), never an omission — distinct from the gateless/reused negative controls further below.
+    // the honest "ran, checked, comfortably under budget" answer (4200ms against the default 600000ms
+    // budget, card bc74fcaf), never an omission — distinct from the gateless/reused negative controls
+    // further below.
     check("(e2e verdict pass — 3407caad) sync result carries gateProximity, comfortably under budget", result.value.gateProximity?.nearBudget === false && result.value.gateProximity?.step === "pnpm test");
     check("(e2e verdict pass — 3407caad) gate_status ALSO round-trips proximity for a settled PASS", status.proximity?.nearBudget === false);
   }
@@ -667,7 +668,7 @@ try {
     check("(e2e verdict fail) steps/outputTail are ALSO present on the fail path (parity with pass)", Array.isArray(status.steps) && status.steps.length === 1 && status.outputTail === "FAIL  some_test.mjs");
     check("(e2e verdict fail) cancelled is absent — a real failure must never read as a cancel", status.cancelled === undefined);
     // Card 3407caad: gateProximity is present on the FAIL path too (parity with pass) — 900ms against the
-    // default 120000ms budget is nowhere near it.
+    // default 600000ms budget (card bc74fcaf) is nowhere near it.
     check("(e2e verdict fail — 3407caad) sync result carries gateProximity on the fail path too", result.value.gateProximity?.nearBudget === false && result.value.gateProximity?.step === "pnpm test");
     check("(e2e verdict fail — 3407caad) gate_status ALSO round-trips proximity for a settled FAIL", status.proximity?.nearBudget === false);
   }
@@ -725,9 +726,10 @@ try {
       check("(e2e merge verdict pass) settled INLINE this run, merged:true", r.ok === true && value.merged === true);
       check("(e2e merge verdict pass) the sync result ALREADY carries gateExtended:true (the wiring this card adds)", value.gateExtended === true);
       // Card 3407caad: `extended:true` here comes from the INJECTED onExtend() hook call, not from the
-      // step's own duration (4200ms is nowhere near the default 120000ms budget) — proving gateProximity
-      // is a GENUINELY SEPARATE signal from gateExtended, not a renamed alias of it: the same run reports
-      // "already breached" (extended) AND "comfortably under budget by duration" (proximity) together.
+      // step's own duration (4200ms is nowhere near the default 600000ms budget, card bc74fcaf) — proving
+      // gateProximity is a GENUINELY SEPARATE signal from gateExtended, not a renamed alias of it: the
+      // same run reports "already breached" (extended) AND "comfortably under budget by duration"
+      // (proximity) together.
       check("(e2e merge verdict pass — 3407caad) gateProximity is a DISTINCT signal from gateExtended: nearBudget:false even though extended:true", value.gateProximity?.nearBudget === false && value.gateProximity?.step === "pnpm gate");
     }
 
@@ -1093,7 +1095,7 @@ try {
     // had SOME durable trace via the pty notify text) — this just proves parity now that PASS has one too.
     check("(e2e merge verdict fail — a1a8c5c4) outputTail is ALSO present as a top-level field (parity with pass)", status.outputTail === "FAIL  some_test.mjs");
     // Card 3407caad: gateProximity is present on the merge FAIL path too (parity with pass) — 900ms
-    // against the default 120000ms budget is nowhere near it.
+    // against the default 600000ms budget (card bc74fcaf) is nowhere near it.
     if (!viaAsync) {
       check("(e2e merge verdict fail — 3407caad) sync result carries gateProximity on the fail path too", value.gateProximity?.nearBudget === false && value.gateProximity?.step === "pnpm gate");
     }

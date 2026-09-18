@@ -117,11 +117,15 @@ function makeRepo(repo) {
     registerForCleanup(repo1); // this scenario's own cleanup only rmSync's `worktrees` + LOOM_HOME, never these repo dirs
     registerForCleanup(repo2);
     // Card fd9edb87: the two projects carry DELIBERATELY DIFFERENT `gateCommandTimeoutMs` overrides, and
-    // neither is the schema default (120000). That is what makes the `snapshotGates` checks below able to
-    // fail: a per-ROW resolution is the only implementation that can report two different numbers here —
-    // one shared read (of the platform config, or of either project) would report one number for both.
+    // neither is the schema default (600000, raised from 120000 by card bc74fcaf). That is what makes the
+    // `snapshotGates` checks below able to fail: a per-ROW resolution is the only implementation that can
+    // report two different numbers here — one shared read (of the platform config, or of either project)
+    // would report one number for both. Card bc74fcaf: P2's override was 600_000 before that card raised
+    // the platform default to the SAME number, which would have silently defeated the "neither fell back
+    // to the default" check below for P2's row alone (a real fallback bug would then look identical to a
+    // correct resolve) — changed to 900_000 to stay distinct from both the old and the new default.
     db.insertProject({ id: P1, name: "Own Project", repoPath: repo1, vaultPath: repo1, config: { orchestration: { gateCommand: "pnpm gate", gateCommandTimeoutMs: 1_800_000 } }, createdAt: now, archivedAt: null });
-    db.insertProject({ id: P2, name: "Foreign Project", repoPath: repo2, vaultPath: repo2, config: { orchestration: { gateCommand: "pnpm gate", gateCommandTimeoutMs: 600_000 } }, createdAt: now, archivedAt: null });
+    db.insertProject({ id: P2, name: "Foreign Project", repoPath: repo2, vaultPath: repo2, config: { orchestration: { gateCommand: "pnpm gate", gateCommandTimeoutMs: 900_000 } }, createdAt: now, archivedAt: null });
     db.insertAgent({ id: "a1", projectId: P1, name: "dev-1", startupPrompt: "", position: 0 });
     db.insertAgent({ id: "a2", projectId: P2, name: "dev-2", startupPrompt: "", position: 0 });
     const t1 = `${P1}-task`, t2 = `${P2}-task`;
@@ -192,7 +196,7 @@ function makeRepo(repo) {
     const g2 = godEye.gates.find((g) => g.projectId === P2);
     check("(unit, fd9edb87) snapshotGates sees both live runs", godEye.gates.length === 2 && g1 != null && g2 != null);
     check("(unit, fd9edb87) the P1 entry carries P1's OWN resolved gateCommandTimeoutMs override", g1.gateTimeoutMs === 1_800_000);
-    check("(unit, fd9edb87) the P2 entry carries P2's OWN resolved gateCommandTimeoutMs override", g2.gateTimeoutMs === 600_000);
+    check("(unit, fd9edb87) the P2 entry carries P2's OWN resolved gateCommandTimeoutMs override", g2.gateTimeoutMs === 900_000);
     // THE DISCRIMINATING CHECK: two rows in ONE snapshot report DIFFERENT bounds. A single shared config
     // read — the exact "swap one hardcoded number for one config-read number" defect this card exists to
     // prevent — would satisfy every check above that only asserts a number is present, but not this one.
@@ -200,8 +204,8 @@ function makeRepo(repo) {
       g1.gateTimeoutMs !== g2.gateTimeoutMs);
     // …and neither is the schema default, so "resolved the platform default and ignored the override"
     // cannot pass as a correct answer either.
-    check("(unit, fd9edb87) neither row fell back to the schema default (120000)",
-      g1.gateTimeoutMs !== 120000 && g2.gateTimeoutMs !== 120000);
+    check("(unit, fd9edb87) neither row fell back to the schema default (600000)",
+      g1.gateTimeoutMs !== 600000 && g2.gateTimeoutMs !== 600000);
     // A QUEUED row carries it too: the queued lane's own elapsed clock is a wait, not gate execution, but
     // the bound must not be withheld from the row just because it has not been admitted yet.
     check("(unit, fd9edb87) the bound is present on the QUEUED row, not only the running one",

@@ -111,7 +111,7 @@ for (const key of ["idleNudgeMinutes", "maxUnansweredNudges", "idleDefaultSnooze
   check("gateCommandTimeoutMs:1500.5 (non-integer) rejected", validateProjectConfigOverride(orch({ gateCommandTimeoutMs: 1500.5 })).ok === false);
   check("gateCommandTimeoutMs:1000 (floor) accepted", validateProjectConfigOverride(orch({ gateCommandTimeoutMs: 1000 })).ok === true);
   check(`gateCommandTimeoutMs:${GATE_MAX} (ceiling) accepted`, validateProjectConfigOverride(orch({ gateCommandTimeoutMs: GATE_MAX })).ok === true);
-  check("gateCommandTimeoutMs:120000 (default) accepted", validateProjectConfigOverride(orch({ gateCommandTimeoutMs: 120000 })).ok === true);
+  check("gateCommandTimeoutMs:120000 (mid-range) accepted", validateProjectConfigOverride(orch({ gateCommandTimeoutMs: 120000 })).ok === true);
 
   check("alertWebhookTimeoutMs:499 (<floor) rejected", validateProjectConfigOverride(orch({ alertWebhookTimeoutMs: 499 })).ok === false);
   check("alertWebhookTimeoutMs:60001 (>ceiling) rejected", validateProjectConfigOverride(orch({ alertWebhookTimeoutMs: 60001 })).ok === false);

@@ -66,8 +66,8 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 {
   // service.ts confirmWorkerMerge now passes resolveConfig(project.config).orchestration.gateCommandTimeoutMs
   // to spawnSync({ timeout }). Prove the value it reads: default + per-project override.
-  check("gate timeout default = 120000 (the old hardcoded spawnSync timeout)",
-    resolveConfig(undefined).orchestration.gateCommandTimeoutMs === 120_000);
+  check("gate timeout default = 600000 (card bc74fcaf, raised from the old hardcoded-spawnSync-era 120000)",
+    resolveConfig(undefined).orchestration.gateCommandTimeoutMs === 600_000);
   check("per-project gateCommandTimeoutMs override wins (resolve-live)",
     resolveConfig({ orchestration: { gateCommandTimeoutMs: 7777 } }).orchestration.gateCommandTimeoutMs === 7777);
 }

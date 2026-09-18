@@ -11,10 +11,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        - the unmeasured-context branch (ctxInputTokens null) ALSO carries gateCommand
 //   (T) Card 89257222: gateCommand ALSO carries the resolved `timeoutMs`, via the SAME
 //       resolveConfig(...).orchestration.gateCommandTimeoutMs path the gate itself enforces:
-//        - a project OVERRIDING the timeout reports the OVERRIDE, not the 120000 platform default
-//          (the case that matters: a broken implementation silently reporting the default would look
-//          authoritative and be wrong for every project that overrides)
-//        - a project with NO override still reports the (120000) default
+//        - a project OVERRIDING the timeout reports the OVERRIDE, not the 600000 platform default
+//          (card bc74fcaf, raised from 120000 — the case that matters: a broken implementation silently
+//          reporting the default would look authoritative and be wrong for every project that overrides)
+//        - a project with NO override still reports the (600000) default
 //        - timeoutMs is present even when NO gateCommand is configured (the timeout still governs
 //          whatever gate the project later sets)
 //        - no elevated-only field (anything platform.ts-only) leaks onto this ordinary surface
@@ -150,8 +150,9 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
   const now = new Date().toISOString();
 
   const GATE = "pnpm build && pnpm --filter @loom/daemon test:daemon";
-  const OVERRIDE_MS = 1_500_000; // Loom's own real override — deliberately far from the 120000 default.
-  const DEFAULT_MS = 120_000;
+  // Card bc74fcaf raised the platform default 120000 -> 600000; kept deliberately far from it either way.
+  const OVERRIDE_MS = 1_500_000; // Loom's own real override — deliberately far from the 600000 default.
+  const DEFAULT_MS = 600_000;
 
   // Project pO: gated + an EXPLICIT timeout override (the case that matters — must NOT silently
   // report the platform default instead).
@@ -160,7 +161,7 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
     config: { orchestration: { gateCommand: GATE, gateCommandTimeoutMs: OVERRIDE_MS } },
     createdAt: now, archivedAt: null,
   });
-  // Project pD: gated, NO timeout override → resolves to the 120000 platform default.
+  // Project pD: gated, NO timeout override → resolves to the 600000 platform default.
   db.insertProject({
     id: "pD", name: "DefaultTimeout", repoPath: "/d", vaultPath: "/d",
     config: { orchestration: { gateCommand: GATE } }, createdAt: now, archivedAt: null,
@@ -187,9 +188,9 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
   const router = new OrchestrationMcpRouter(db, {});
   const ctx = (id) => router.myContext(id);
 
-  check("(T) project with a timeout OVERRIDE → reports the override, not the 120000 default",
+  check("(T) project with a timeout OVERRIDE → reports the override, not the 600000 default",
     ctx("mgrO").gateCommand?.timeoutMs === OVERRIDE_MS);
-  check("(T) project with NO timeout override → reports the (120000) platform default",
+  check("(T) project with NO timeout override → reports the (600000) platform default",
     ctx("mgrD").gateCommand?.timeoutMs === DEFAULT_MS);
   check("(T) ungated project → timeoutMs still reported (governs whatever gate is set later)",
     ctx("mgrU").gateCommand?.configured === false && ctx("mgrU").gateCommand?.timeoutMs === 900_000);
@@ -404,6 +405,6 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — my_context folds in the RESOLVED project gateCommand (resolveConfig) READ-ONLY: {configured:true,command,timeoutMs} when set, an explicit 'none configured' sentinel (still carrying timeoutMs) when absent, for any role and across measured/unmeasured + live-PATCH; timeoutMs tracks a per-project OVERRIDE (not the 120000 default) and no elevated-only field leaks in; NO set/propose gate surface was added."
+  ? "\n✅ ALL PASS — my_context folds in the RESOLVED project gateCommand (resolveConfig) READ-ONLY: {configured:true,command,timeoutMs} when set, an explicit 'none configured' sentinel (still carrying timeoutMs) when absent, for any role and across measured/unmeasured + live-PATCH; timeoutMs tracks a per-project OVERRIDE (not the 600000 default, card bc74fcaf) and no elevated-only field leaks in; NO set/propose gate surface was added."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

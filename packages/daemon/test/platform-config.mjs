@@ -62,7 +62,9 @@ clearWatcherEnvs();
   check("(1) timeout defaults", p.timeouts.gitOpMs === 15000 && p.timeouts.gitLocalMs === 15000 &&
     p.timeouts.gitPushMs === 45000 && p.timeouts.provisionMs === 180000 && p.timeouts.busyStaleMs === 300000);
   // The two NEW per-project orchestration timeouts default through.
-  check("(1) gateCommandTimeoutMs default 120000", c.orchestration.gateCommandTimeoutMs === 120000);
+  // Card bc74fcaf: raised 120000 -> 600000 (the old default sat below a real quiet/warm suite's own
+  // measured runtime on more than one project).
+  check("(1) gateCommandTimeoutMs default 600000", c.orchestration.gateCommandTimeoutMs === 600000);
   check("(1) alertWebhookTimeoutMs default 5000", c.orchestration.alertWebhookTimeoutMs === 5000);
   // Single-arg callers behave identically with an override too (no 2nd arg → platform defaults).
   check("(1) single-arg w/ project override still yields platform defaults",
