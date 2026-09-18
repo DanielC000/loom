@@ -14,6 +14,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (7) an 'answered' question still under the stuck threshold → no enqueue (not yet).
 //   (8) after a question is pulled/consumed, a DIFFERENT stuck question for the SAME manager still
 //       nudges independently (the storm guard tracks per-question, not per-manager).
+//   (9) card c07b9ab4: the re-nudge carries the SAME [loom:deferred-trigger] appendix
+//       (requestAnsweredTriggerNotice) the initial answer-time nudge does, for a card bound to THIS
+//       stuck question via deferredUntilEvent — plus a negative control: a card bound to a DIFFERENT
+//       request id is never named.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -213,7 +217,36 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// ============ (9) the [loom:deferred-trigger] appendix rides the re-nudge, selectively ============
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-9");
+  const boundQid = seedQuestion(e, "mgr-9", { answeredMinutesAgo: 30, title: "bound decision" });
+  const otherQid = seedQuestion(e, "mgr-9", { answeredMinutesAgo: 30, title: "unbound-sibling decision" });
+
+  const now = NOW.toISOString();
+  const boundTaskId = `task-bound-${Math.random().toString(36).slice(2, 8)}`;
+  e.db.insertTask({ id: boundTaskId, projectId: e.projId, title: "deferred on the stuck request", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now, deferred: true, deferredReason: `waiting on request ${boundQid}` });
+  e.db.updateTask(boundTaskId, { deferredUntilEvent: { kind: "request-answered", key: boundQid } });
+
+  // negative control: bound to the OTHER stuck question's id, never the one under test below.
+  const otherTaskId = `task-other-${Math.random().toString(36).slice(2, 8)}`;
+  e.db.insertTask({ id: otherTaskId, projectId: e.projId, title: "deferred on a DIFFERENT request", body: "", columnKey: "in_progress", position: 2, createdAt: now, updatedAt: now, deferred: true, deferredReason: `waiting on request ${otherQid}` });
+  e.db.updateTask(otherTaskId, { deferredUntilEvent: { kind: "request-answered", key: otherQid } });
+
+  e.watcher.tick(NOW);
+  const hits = e.enqueued.filter((x) => x.id === "mgr-9");
+  check("(9) precondition: both stuck questions nudged (one enqueue each)", hits.length === 2);
+  const boundHit = hits.find((h) => h.text.includes("bound decision"));
+  const otherHit = hits.find((h) => h.text.includes("unbound-sibling decision"));
+  check("(9) the re-nudge for the BOUND question carries the [loom:deferred-trigger] appendix", (boundHit?.text ?? "").includes("[loom:deferred-trigger]"));
+  check("(9) the appendix names the bound card id", (boundHit?.text ?? "").includes(boundTaskId));
+  check("(9) NEGATIVE CONTROL: the bound question's re-nudge does NOT name the other card (different request)", !(boundHit?.text ?? "").includes(otherTaskId));
+  check("(9) NEGATIVE CONTROL: the OTHER question's own re-nudge carries its OWN appendix, not the bound one's", (otherHit?.text ?? "").includes(otherTaskId) && !(otherHit?.text ?? "").includes(boundTaskId));
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the answered-stuck-question watchdog re-nudges the asking MANAGER (never the human) exactly once per answered→still-answered window for a stuck 'answered' question, staying silent for a rate-limited/parked, human-paused, or self-flagged-non-'watching' manager, for 'pending'/'consumed' questions, and before the stuck threshold elapses; the per-question storm guard doesn't block an unrelated fresh stuck question."
+  ? "\n✅ ALL PASS — the answered-stuck-question watchdog re-nudges the asking MANAGER (never the human) exactly once per answered→still-answered window for a stuck 'answered' question, staying silent for a rate-limited/parked, human-paused, or self-flagged-non-'watching' manager, for 'pending'/'consumed' questions, and before the stuck threshold elapses; the per-question storm guard doesn't block an unrelated fresh stuck question; and the re-nudge carries the SAME [loom:deferred-trigger] appendix the initial answer-time nudge does, selectively, for a card bound to that exact stuck question."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

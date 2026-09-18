@@ -5,6 +5,7 @@ import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
 import type { QueueSource, TurnRoute, QueuedMessageKind } from "../pty/host.js";
 import { computeBoardDelta, formatBoardDeltaDigest } from "./board-read.js";
+import { requestAnsweredTriggerNotice } from "./deferred-trigger-notice.js";
 
 /** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). */
 export interface IdlePty {
@@ -724,6 +725,11 @@ export class IdleWatcher {
    * EXACTLY ONCE per answered→still-answered window via the in-memory `nudgedAnsweredQuestions` Set (no
    * schema change): pruned the moment a question leaves 'answered', so a future re-answer isn't silenced
    * by a stale entry.
+   *
+   * ⚠️ Its audience for the appended `requestAnsweredTriggerNotice` pointer (card c07b9ab4) is narrower
+   * than the answer route's own nudge: only a LIVE session with `role === "manager"` is ever reached
+   * here (see the skip conditions above) — fine for the pointer's purpose, since a manager is who acts
+   * on a deferred card, but worth stating rather than leaving implicit.
    */
   private tickAnsweredStuckQuestions(nowMs: number): void {
     const { db, pty, control } = this.deps;
@@ -748,7 +754,14 @@ export class IdleWatcher {
       const state = db.getIdleNudgeState(m.id);
       if (state && state.policy !== "watching") continue; // manager itself flagged waiting/suppressed
 
-      const msg = `[loom:answered-stuck] Your decision "${q.title}" was answered a while ago but you haven't pulled it — call question_pull to fetch it.`;
+      // Card c07b9ab4: append the SAME request-answered deferred-trigger appendix the initial
+      // answer-time nudge carries (see requestAnsweredTriggerNotice's own doc) — this re-nudge fires
+      // EXACTLY when that first appendix was missed (the watchdog's own firing condition is "no
+      // question_pull yet"), so it is the one delivery that most needs the pointer. `q.projectId` comes
+      // straight off the full Question row (db.ts's toQuestion), same as the answer route's
+      // `updated.projectId` — no narrower projection here to work around.
+      const msg = `[loom:answered-stuck] Your decision "${q.title}" was answered a while ago but you haven't pulled it — call question_pull to fetch it.` +
+        requestAnsweredTriggerNotice(db, q.projectId, q.id);
       // Tag with q.id (mirrors the answer-route push-nudge, card bbc46336) so a LATER question_pull that
       // consumes this question purges this exact nudge if it's still queued when it goes stale — otherwise
       // a manager behind on turns sees a "pull it" nudge for a question it already pulled.
