@@ -30,7 +30,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (5) a project with NO sessionEnv at all round-trips with no sessionEnv key on the response at all
 //       (the masker's own early-return, not a crash) — proven against an ACTUALLY-SUCCEEDED call.
 //   (6) ⭐ THE REGRESSION GUARD — feeding a masked response's `config` straight back into project_configure
-//       (both routers, merge AND replace:true) is REJECTED, and the REAL secret survives untouched.
+//       (both routers, merge AND replace:true) is REJECTED, and the REAL secret survives untouched. Pins
+//       the exact rejection TEXT (naming the echo mechanism + both keys on platform; a distinct
+//       "unrecognized key" schema rejection on setup, isolated to a sessionEnv-only payload) — not just
+//       "an error happened" — so a partial regression (e.g. one key's mask exempted) can't hide behind a
+//       fixture whose rejection was actually caused by an unrelated invalid sibling key (Code Reviewer
+//       finding, card bb267ade follow-up: the original setup pair's fixture also carried an
+//       agent-invalid `orchestration.gateCommandTimeoutMs`, so it passed even with sessionEnv deleted).
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic like project-mcp-sessionenv-redaction.mjs: a REAL
 // Db + the REAL Platform + Setup routers driven over an in-process MCP InMemoryTransport.
@@ -177,20 +183,42 @@ try {
   // project_configure (the write surface both routers share) and confirm it is REJECTED, not silently
   // stored, and the REAL secret survives. This is the assertion that makes masking these six read sites
   // safe — without card a253cec8's write-side guard, this section would instead show the mask silently
-  // overwriting the real secret. ============
+  // overwriting the real secret.
+  //
+  // Code Reviewer finding (card bb267ade follow-up): asserting only `typeof error === "string"` cannot
+  // tell "rejected because it's a masked echo" apart from "rejected for any other reason at all" — it
+  // would miss a PARTIAL regression (e.g. a guard tweak exempting short values would keep GSC green while
+  // SHORT silently slipped through). Pin the exact rejection TEXT, naming the echo mechanism and BOTH
+  // keys, so each assertion can only pass for the reason it claims. ============
+  const echoRejectionText = (keys) =>
+    `sessionEnv write rejected: ${keys.join(", ")} look like a masked read-response echoed back (all filler characters, same length as the stored value) rather than a real value — re-read the ACTUAL secret before writing it, or leave the key out of the payload to keep it unchanged`;
+
   const roundTripMerge = await platform("project_configure", { projectId: "pReadMask", config: pGet.config });
   check("(round-trip, platform project_configure, merge) ★ REJECTED, not silently written", typeof roundTripMerge.error === "string" && !roundTripMerge.ok);
+  check("(round-trip, platform project_configure, merge) ★ rejection names the echo guard AND both keys", roundTripMerge.error === echoRejectionText(["GSC_SERVICE_ACCOUNT_JSON", "SHORT"]));
   check("(round-trip, platform project_configure, merge) ★ the REAL secret SURVIVES in storage", db.getProject("pReadMask").config.sessionEnv.GSC_SERVICE_ACCOUNT_JSON === REAL_SECRET);
 
   const roundTripReplace = await platform("project_configure", { projectId: "pReadMask", config: pGet.config, replace: true });
   check("(round-trip, platform project_configure, replace:true) ★ REJECTED, not silently written", typeof roundTripReplace.error === "string" && !roundTripReplace.ok);
+  check("(round-trip, platform project_configure, replace:true) ★ rejection names the echo guard AND both keys", roundTripReplace.error === echoRejectionText(["GSC_SERVICE_ACCOUNT_JSON", "SHORT"]));
   check("(round-trip, platform project_configure, replace:true) ★ the REAL secret SURVIVES in storage", db.getProject("pReadMask").config.sessionEnv.GSC_SERVICE_ACCOUNT_JSON === REAL_SECRET);
 
-  // setup's project_configure validator rejects `sessionEnv` as an unknown/human-only key outright (a
-  // SEPARATE, structural reason a masked echo can never be written back here) — confirm that holds too,
-  // so this surface's own round-trip is provably safe by whichever mechanism actually fires.
-  const roundTripSetup = await setup("project_configure", { projectId: "pReadMask", config: sGet.config });
+  // setup's project_configure validator rejects `sessionEnv` as an unknown/human-only key outright — a
+  // SEPARATE, structural reason (never reaches a253cec8's echo guard at all) a masked echo can never be
+  // written back here.
+  //
+  // Code Reviewer finding: the ORIGINAL fixture fed `sGet.config` whole, which also carries
+  // `orchestration.gateCommandTimeoutMs` — itself agent-invalid on this surface. Proved by execution: the
+  // SAME rejection fires with `sessionEnv` deleted from the payload entirely (on gateCommandTimeoutMs
+  // alone), so that pair passed with the sessionEnv leg absent and proved nothing about sessionEnv on the
+  // setup surface. Fixed: isolate the payload to ONLY `sessionEnv` (this surface's own agent validator
+  // rejects nothing else in it), so the assertion can only pass for the reason claimed, and pin the exact
+  // rejection text (a schema "Unrecognized key" error, not the echo guard's text above — a DIFFERENT
+  // mechanism than the platform pairs, which is the point: it's structurally unreachable here, not merely
+  // untriggered).
+  const roundTripSetup = await setup("project_configure", { projectId: "pReadMask", config: { sessionEnv: sGet.config.sessionEnv } });
   check("(round-trip, setup project_configure) ★ REJECTED, not silently written", typeof roundTripSetup.error === "string" && !roundTripSetup.ok);
+  check("(round-trip, setup project_configure) ★ rejected as an unrecognized key (sessionEnv is not the echo guard's job on THIS surface — it never reaches it)", roundTripSetup.error === 'invalid config: (root): Unrecognized key: "sessionEnv"');
   check("(round-trip, setup project_configure) ★ the REAL secret SURVIVES in storage", db.getProject("pReadMask").config.sessionEnv.GSC_SERVICE_ACCOUNT_JSON === REAL_SECRET);
 } finally {
   db.close();
