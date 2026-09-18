@@ -381,6 +381,59 @@ try {
     check("6e: getLastMismatchReplay stays null for a suppressed benign mismatch", host.getLastMismatchReplay(sid) === null);
   }
 
+  // ===== 6f. Card 7c1487c8 — the +58, divergesAtChar=0 population: Claude Code's OWN composer wraps a
+  // bracketed-paste prompt in `<pasted_content id="ID">...</pasted_content id="ID">` before submitting
+  // it. Reproduces the real specimen verbatim in SHAPE (session 80ea0c0d, reportedLen=538/intendedLen=480,
+  // id="f5c5") — content fully present, only the CLI's own paste framing added. What must change: the
+  // SESSION-FACING notice must NOT fire. =====
+  {
+    const sid = newSession("PastedContentWrap"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "[loom:context] some real, correctly-submitted notice content that was never lost";
+    const reported = `\n\n<pasted_content id="f5c5">\n${intended}\n</pasted_content id="f5c5">\n`; // exact wrapper shape, id verbatim from the real specimen
+    host.enqueueStdin(sid, intended);
+    const writesBeforeMismatch = fake.writes.length;
+    const warnings = captureMismatchWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6f: the raw byte-wise scan still diverges — the diagnostic log still fires (corpus preserved)", warnings.length === 1);
+    check("6f: divergesAtChar=0 (the wrapper's own leading newlines never match `intended`'s first char) — the measured shape this card was filed over",
+      /divergesAtChar=0\b/.test(warnings[0] ?? ""));
+    check("6f: lenDelta equals the wrapper's own fixed prefix+suffix length (58), independent of payload size", /lenDelta=58\b/.test(warnings[0] ?? ""));
+    // TIMING-GUARD-SAFE: sync-probe-no-macrotask — see scenario 8's own comment for why exactly one tick is
+    // provably sufficient; the negative check below runs synchronously immediately after, no further await.
+    await new Promise((r) => setTimeout(r, 0));
+    check("6f: NEGATIVE CONTROL — despite the raw byte divergence, the session-facing notice does NOT enqueue (recognized pasted-content wrap, content fully present)", !hasPendingMismatchNotice(sid));
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    const afterTurn = fake.writes.slice(writesBeforeMismatch).join("");
+    check("6f: and nothing resembling the notice ever reached the pty", !afterTurn.includes("[loom:prompt-mismatch]"));
+    check("6f: getLastMismatchReplay stays null for a suppressed benign mismatch", host.getLastMismatchReplay(sid) === null);
+  }
+
+  // ===== 6g. Card 7c1487c8 — THE SAFETY CASE: a genuine loss wrapped in the SAME `<pasted_content
+  // id="...">...</pasted_content id="...">` framing must still fire in full. Reported is wrapped, but the
+  // wrapped INNER text does not equal `intended` (some of it never arrived) — the wrapper-stripped
+  // reconciliation must fail closed, exactly like scenario 16 proves for the chunk-seam form feed. =====
+  {
+    const sid = newSession("PastedContentWrapLoss"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "[loom:context] the full notice text Loom actually intended for this turn, all of it";
+    const truncatedInner = intended.slice(0, intended.length - 20); // the wrapped inner text is missing a real tail
+    const reported = `\n\n<pasted_content id="f5c5">\n${truncatedInner}\n</pasted_content id="f5c5">\n`;
+    host.enqueueStdin(sid, intended);
+    const writesBeforeMismatch = fake.writes.length;
+    const enqueued6g = captureMismatchWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6g: the diagnostic log fires (a real divergence, wrapper aside)", enqueued6g.length === 1);
+    const noticeLanded6g = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("6g: THE SAFETY CASE — a genuine loss wrapped in the SAME pasted-content framing still enqueues the session-facing notice (wrapper reconciliation fails closed)", noticeLanded6g);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    const noticeWrite6g = fake.writes.slice(writesBeforeMismatch).join("");
+    check("6g: the notice actually reached the pty", noticeWrite6g.includes("[loom:prompt-mismatch]"));
+  }
+
   // ===== 7. Card 201d0d95 Q1 — POSITIVE: a mismatch must now SURFACE to the affected session itself, not
   // just to daemon-output.log. Reproduces the real incident's shape (session 363002b9, 2026-08-04): an
   // EARLIER generation's own already-confirmed text reappears, byte-for-byte, as what the engine reports

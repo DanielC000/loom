@@ -357,6 +357,17 @@ function isEngineTaskNotificationReport(reported: string): boolean {
   return trimmed.startsWith("<task-notification>") && trimmed.endsWith("</task-notification>");
 }
 
+/** Card 7c1487c8 — Claude Code's OWN composer wraps a bracketed-paste prompt in
+ *  `<pasted_content id="ID">...</pasted_content id="ID">` before submitting it (harness-side paste
+ *  framing; the literal appears nowhere else in this repo). Verified against a real engine transcript
+ *  (session 80ea0c0d, reportedLen=538/intendedLen=480): the wrapper's own prefix+suffix is a fixed 58
+ *  chars regardless of payload size and stripping it leaves `intended` byte-for-byte — the id is
+ *  captured/backreferenced, never assumed to be any particular length or charset. */
+function isRecognizedPastedContentWrap(reported: string, intended: string): boolean {
+  const m = /^\n\n<pasted_content id="([0-9a-zA-Z]+)">\n([\s\S]*)\n<\/pasted_content id="\1">\n$/.exec(reported);
+  return m !== null && m[2] === intended;
+}
+
 /** @decision 4af5aefa — annotates queue age only (never suppresses/gates/reorders); disclosed count is
  *  worded "submit generations", never "turns" (a give-up can consume a generation with none run); checks
  *  the STRIPPED text for PASTE_RECOVERY_TAG, not raw — else the most-redrained notices silently no-op. */
@@ -6273,6 +6284,11 @@ export class PtyHost {
               // compare), never by signature alone. `i > 0` excludes divergence at the very start.
               const isChunkSeamFormFeed = i > 0 && i % PTY_WRITE_CHUNK_UNITS === 0 && reported[i] === "\u000c" &&
                 reported.slice(0, i) + reported.slice(i + 1) === intended;
+              // Card 7c1487c8 — see isRecognizedPastedContentWrap's own doc: content fully present, only
+              // the CLI's own paste-composer framing added. Suppresses only by full reconciliation
+              // (id-backreferenced wrapper stripped, remainder byte-for-byte equal to `intended`), never
+              // by signature/length alone — a genuine loss wrapped the same way still fails this check.
+              const isPastedContentWrap = isRecognizedPastedContentWrap(reported, intended);
               // @decision 00b5066e — offset-aware reconciliation: INSERTION uses `endsWith` (not `includes`,
               // which false-matched card 68459420's unrelated population), left unbounded; OMISSION is
               // bounded to OFFSET_OMISSION_MAX_TAIL_CHARS. Neither suppresses the notice, only its wording.
@@ -6299,7 +6315,7 @@ export class PtyHost {
                 // does not hold once a session has entered a persistent, sustained lag.
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-notice-self-exempt] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} — this generation's own intended text IS one of Loom's own prompt-mismatch-family notices ([loom:prompt-mismatch] or [loom:prompt-mismatch-unresolved]); skipping mismatch detection/re-notification/timer-arming for it entirely so a notice can never mint a follow-up notice about its own confirmation (card 87d2dc95, the self-sustaining "notice delivered -> submit -> mismatches -> another notice" feedback loop observed on session 67568eba).`);
-              } else if (!isBenignWhitespaceRerender && !isStalePlaceholderPrefix && !isChunkSeamFormFeed) {
+              } else if (!isBenignWhitespaceRerender && !isStalePlaceholderPrefix && !isChunkSeamFormFeed && !isPastedContentWrap) {
                 // @decision 68459420 — DoD-3: a FOURTH, uncharacterized mismatch population (reported
                 // LONGER than intended, matching no recent write). Characterize/tag only — never fold
                 // into the replay shape or invent a suppression for it; not yet understood.
