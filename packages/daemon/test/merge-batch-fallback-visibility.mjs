@@ -140,11 +140,15 @@ try {
   // Wait for all 3 fallback candidates to have minted a live gate_queue row (running or queued — cap
   // defaults to 1, so at most one is ever "running" at a time, matching the incident's own "one running
   // plus two queued" shape).
+  //
+  // @decision afc5cdcc — NO elapsed cap, deliberately: a fixed 10s budget here ARRIVED LATE (10376ms) on
+  // gate 48b2f8a8 under host contention — a wider guess is the same defect with a longer fuse. This still
+  // polls REAL state; a stalled event now HANGS (loud) with the file's own TEST_TIMEOUT_MS as backstop.
   await sharedWaitUntil(() => {
     const snap = svc.gateQueueForManager(P);
     const merges = [...snap.running, ...snap.queued].filter((e) => e.gateType === "merge");
     return merges.length >= 3;
-  }, { timeoutMs: 10_000, intervalMs: 50, label: "all 3 fallback candidates registered in gate_queue" });
+  }, { timeoutMs: Infinity, intervalMs: 50, label: "all 3 fallback candidates registered in gate_queue" });
 
   const snap = svc.gateQueueForManager(P);
   const fallbackRows = [...snap.running, ...snap.queued].filter((e) => e.gateType === "merge");
