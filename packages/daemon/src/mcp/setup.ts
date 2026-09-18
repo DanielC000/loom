@@ -239,7 +239,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the AGENT project-config schema (NOT the elevated platform validator); resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian (autoStart only — obsidian.path is human-only, see below), python (accepted, but currently has no agent-settable fields — python.interpreterPath is human-only, see below), memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). The human-only orchestration.gateCommand (host-RCE) and alertWebhook (data-exfil), obsidian.path and python.interpreterPath (host-launch), and sessionEnv (the internal transport those same host-launch fields ride in as env vars — allowing it would re-open the same capability) — and any unknown key — are REJECTED and the stored config is left unchanged.",
+        description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the AGENT project-config schema (NOT the elevated platform validator); resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian (autoStart only — obsidian.path is human-only, see below), python (accepted, but currently has no agent-settable fields — python.interpreterPath is human-only, see below), memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). The human-only orchestration.gateCommand (host-RCE) and alertWebhook (data-exfil), obsidian.path and python.interpreterPath (host-launch), and sessionEnv (the internal transport those same host-launch fields ride in as env vars — allowing it would re-open the same capability) — and any unknown key — are REJECTED and the stored config is left unchanged. The returned config MASKS sessionEnv values (same-length filler, never the real secret) — a pre-existing human-set value never round-trips here as plaintext, even on a patch that never touched it.",
         inputSchema: strictShape({
           projectId: z.string(),
           config: z.object({}).passthrough(),
@@ -281,7 +281,22 @@ export class SetupMcpRouter {
         // operator, ships to ALL users) — hardcoding "human" would be a false attribution.
         const wrote = setProjectConfigSafe(db, resolvedProjectId, merged, callerSessionId ? `setup:${callerSessionId}` : "setup");
         if (!wrote.ok) return ok({ error: wrote.error });
-        return ok({ ok: true, projectId: resolvedProjectId, config: db.getProject(resolvedProjectId)?.config ?? merged });
+        // @decision 5d6e0ace — sessionEnv NEVER appears here as a value-shaped string (masked or real): a
+        // masked value is itself an ACCEPTED write payload (idempotent + unrecoverable). sessionEnvKeys
+        // (lengths only) is a key this schema's .strict() rejects, so resubmitting `config` verbatim fails.
+        //
+        // This surface's OWN agent validator already rejects sessionEnv outright, so the round-trip the
+        // decision above guards against is unreachable HERE — kept identical to platform.ts for a
+        // consistent response shape across both project_configure tools.
+        const finalConfig = db.getProject(resolvedProjectId)?.config ?? merged;
+        const { sessionEnv, ...configSansSessionEnv } = finalConfig;
+        const sessionEnvKeys = sessionEnv
+          ? Object.fromEntries(Object.entries(sessionEnv).map(([name, value]) => [name, String(value ?? "").length]))
+          : undefined;
+        return ok({
+          ok: true, projectId: resolvedProjectId,
+          config: sessionEnvKeys === undefined ? configSansSessionEnv : { ...configSansSessionEnv, sessionEnvKeys },
+        });
       },
     );
 

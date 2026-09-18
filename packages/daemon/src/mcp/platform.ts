@@ -1189,7 +1189,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian, python, memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–3600000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). UNSET/REPLACE: pass unset:[\"orchestration.gateCommand\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset. A payload that both WRITES and UNSETS the same dot-path is REJECTED (not silently resolved either way) — drop one of the two.",
+        description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian, python, memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–3600000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). UNSET/REPLACE: pass unset:[\"orchestration.gateCommand\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset. A payload that both WRITES and UNSETS the same dot-path is REJECTED (not silently resolved either way) — drop one of the two. The returned config NEVER carries sessionEnv values, masked or real — instead it carries sessionEnvKeys (names + VALUE LENGTHS only, e.g. {\"FOO\":38}), so you can confirm a length without ever seeing anything value-shaped. sessionEnvKeys is NOT a settable key — feeding this response's config straight back as a later patch/replace is REJECTED (invalid config), never a silent write.",
         inputSchema: strictShape({
           projectId: z.string(),
           config: z.object({}).passthrough().optional(),
@@ -1237,7 +1237,18 @@ export class PlatformMcpRouter {
         // "human" would be a false attribution, so the caller's own session id is threaded through.
         const wrote = setProjectConfigSafe(db, resolvedProjectId, merged, callerSessionId ? `platform:${callerSessionId}` : "platform");
         if (!wrote.ok) return ok({ error: wrote.error });
-        return ok({ ok: true, projectId: resolvedProjectId, config: db.getProject(resolvedProjectId)?.config ?? merged });
+        // @decision 5d6e0ace — sessionEnv NEVER appears here as a value-shaped string (masked or real): a
+        // masked value is itself an ACCEPTED write payload (idempotent + unrecoverable). sessionEnvKeys
+        // (lengths only) is a key this schema's .strict() rejects, so resubmitting `config` verbatim fails.
+        const finalConfig = db.getProject(resolvedProjectId)?.config ?? merged;
+        const { sessionEnv, ...configSansSessionEnv } = finalConfig;
+        const sessionEnvKeys = sessionEnv
+          ? Object.fromEntries(Object.entries(sessionEnv).map(([name, value]) => [name, String(value ?? "").length]))
+          : undefined;
+        return ok({
+          ok: true, projectId: resolvedProjectId,
+          config: sessionEnvKeys === undefined ? configSansSessionEnv : { ...configSansSessionEnv, sessionEnvKeys },
+        });
       },
     );
 
