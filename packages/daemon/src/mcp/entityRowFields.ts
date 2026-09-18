@@ -1,4 +1,4 @@
-import type { Agent, Profile, Project } from "@loom/shared";
+import { maskSessionEnvRecord, type Agent, type Profile, type Project } from "@loom/shared";
 
 /**
  * Shared MCP-layer row projections for the platform + setup routers' Project/Agent/Profile
@@ -57,8 +57,14 @@ const PROJECT_FIELDS: Record<keyof Project, 1> = {
 };
 const PROJECT_KEYS = Object.keys(PROJECT_FIELDS) as (keyof Project)[];
 
+// @decision bb267ade — config.sessionEnv is masked here (maskSessionEnvRecord) for ALL SIX MCP project
+// reads that flow through this chokepoint. Never revert to a raw pass-through of config.sessionEnv.
 export function projectFields(row: Project | undefined): Project | undefined {
-  return row === undefined ? row : pickFields(row, PROJECT_KEYS);
+  if (row === undefined) return row;
+  const picked = pickFields(row, PROJECT_KEYS);
+  const { sessionEnv, ...configRest } = picked.config;
+  const masked = maskSessionEnvRecord(sessionEnv);
+  return { ...picked, config: masked === undefined ? configRest : { ...configRest, sessionEnv: masked } };
 }
 
 const AGENT_FIELDS: Record<keyof Agent, 1> = {

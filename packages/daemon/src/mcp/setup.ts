@@ -303,7 +303,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "project_update",
       {
-        description: "Structural edit of a project by id — name and/or vaultPath, and/or its config override (omitted fields left as-is). repoPath, referenceRepos, repos (the writable multi-repo registry), and denyGlobs are not editable here (human-only, via the REST/UI). config (when given) is validated against the AGENT project-config schema, so orchestration.gateCommand and alertWebhook — and unknown keys — are REJECTED. 404 if the project is unknown. Returns the updated project.",
+        description: "Structural edit of a project by id — name and/or vaultPath, and/or its config override (omitted fields left as-is). repoPath, referenceRepos, repos (the writable multi-repo registry), and denyGlobs are not editable here (human-only, via the REST/UI). config (when given) is validated against the AGENT project-config schema, so orchestration.gateCommand and alertWebhook — and unknown keys — are REJECTED. 404 if the project is unknown. Returns the updated project. The returned config's sessionEnv values are MASKED (same-length bullet filler, never the real secret) — feeding a masked value back as a later write is rejected, not silently stored.",
         inputSchema: strictShape({
           projectId: z.string(),
           name: z.string().optional(),
@@ -593,7 +593,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "list_all_projects",
       {
-        description: "List every live project across the platform, INCLUDING reserved/system homes. Excludes archived projects. Returns project rows.",
+        description: "List every live project across the platform, INCLUDING reserved/system homes. Excludes archived projects. Returns project rows. Every row's config.sessionEnv values are MASKED (same-length bullet filler, never the real secret) — feeding a masked value back as a later write is rejected, not silently stored.",
         inputSchema: strictShape({}),
       },
       async () => ok(db.listAllProjects().map(projectFields)),
@@ -723,7 +723,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "project_get",
       {
-        description: "Read ONE project by id — the FULL record incl. its config override (so you can see what's set before a project_configure PATCH). Accepts the full id OR an unambiguous 8-char id-prefix. Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
+        description: "Read ONE project by id — the FULL record incl. its config override (so you can see what's set before a project_configure PATCH). Accepts the full id OR an unambiguous 8-char id-prefix. Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids). The returned config's sessionEnv values are MASKED (same-length bullet filler, never the real secret) — feeding a masked value back as a later write is rejected, not silently stored.",
         inputSchema: strictShape({ projectId: z.string() }),
       },
       async ({ projectId }) => {
