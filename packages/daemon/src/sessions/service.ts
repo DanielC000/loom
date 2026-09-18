@@ -11716,8 +11716,10 @@ export class SessionService {
   }
 
   /**
-   * Platform-lead cross-project spawn (loom-platform `session_spawn`). Spawns a session into ANY
-   * project by explicit projectId + agentId. HARD INVARIANT — role ∈ {manager, plain} ONLY:
+   * Platform-lead cross-project spawn (loom-platform `session_spawn`, the loom-setup mirror, and the
+   * companion `session-spawn` lever — all three route here, so this ONE fix covers all three surfaces).
+   * Spawns a session into ANY project by explicit projectId + agentId. HARD INVARIANT — role ∈
+   * {manager, plain} ONLY:
    *   - NEVER 'platform' — a platform session is HUMAN-REST-only (startPlatformLead). Letting this
    *     surface mint one would let anything reaching the platform MCP self-elevate to human-equivalent.
    *   - NEVER 'worker' — a worker requires a manager parent + a task + a worktree; spawning one stays
@@ -11725,15 +11727,19 @@ export class SessionService {
    * The role is narrowed to `"manager" | "plain"` at the TYPE level (the in-service backstop of the
    * invariant the platform router also enforces at runtime). manager → startManager (orchestration
    * surface); plain → startNew(forcePlain) (vanilla, role null — even on a profile agent).
+   *
+   * @decision e6a756ea — `projectId`/`agentId` accept a full id OR an unambiguous id-prefix via the
+   *  SAME `getByIdPrefix` resolver every sibling `*_get` tool uses. Do not hand-roll a second
+   *  prefix-resolution scheme here, and do not drop the belongs-to-project check below as "redundant".
    */
   spawnSessionAsPlatform(projectId: string, agentId: string, role: "manager" | "plain"): Session {
-    const project = this.db.getProject(projectId);
-    if (!project) throw new Error("project not found");
-    const agent = this.db.getAgent(agentId);
-    if (!agent) throw new Error("agent not found");
-    if (agent.projectId !== projectId) throw new Error("agent does not belong to the given project");
-    if (role === "manager") return this.startManager(agentId);
-    return this.startNew(agentId, { forcePlain: true });
+    const project = getByIdPrefix(projectId, (id) => this.db.getProject(id), () => this.db.listAllProjects(), "project");
+    if ("error" in project) throw new Error(project.error);
+    const agent = getByIdPrefix(agentId, (id) => this.db.getAgent(id), () => this.db.listAgents(project.id), "agent");
+    if ("error" in agent) throw new Error(agent.error);
+    if (agent.projectId !== project.id) throw new Error("agent does not belong to the given project");
+    if (role === "manager") return this.startManager(agent.id);
+    return this.startNew(agent.id, { forcePlain: true });
   }
 
   /**

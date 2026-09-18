@@ -1630,7 +1630,7 @@ export class PlatformMcpRouter {
       "session_spawn",
       {
         description:
-          "Spawn a session into ANY project by explicit projectId + agentId. role MUST be \"manager\" or \"plain\" ONLY: \"manager\" gets the orchestration surface; \"plain\" is a vanilla role-null session (even on a profile agent). NEVER spawns a \"platform\" session (human-REST-only — no self-elevation) and NEVER a \"worker\" (a worker needs a manager parent + a task; that stays a manager's orchestration job). Any other role value is rejected.",
+          "Spawn a session into ANY project by explicit projectId + agentId. projectId and agentId each accept the full id OR an unambiguous 8-char id-prefix (the short id Loom displays), exactly like project_get/agent_get — an ambiguous prefix errors naming the candidate ids; agentId is resolved among the RESOLVED project's own agents. role MUST be \"manager\" or \"plain\" ONLY: \"manager\" gets the orchestration surface; \"plain\" is a vanilla role-null session (even on a profile agent). NEVER spawns a \"platform\" session (human-REST-only — no self-elevation) and NEVER a \"worker\" (a worker needs a manager parent + a task; that stays a manager's orchestration job). Any other role value is rejected.",
         inputSchema: strictShape({ projectId: z.string(), agentId: z.string(), role: z.string() }),
       },
       async ({ projectId, agentId, role }) => {
@@ -1641,7 +1641,8 @@ export class PlatformMcpRouter {
         const roleError = spawnableRoleError(role);
         if (roleError) return ok({ error: roleError });
         try {
-          // Narrowed by spawnableRoleError above (only "manager"/"plain" reach here).
+          // Narrowed by spawnableRoleError above (only "manager"/"plain" reach here). projectId/agentId
+          // prefix resolution (card e6a756ea) lives in spawnSessionAsPlatform itself.
           return ok(sessions.spawnSessionAsPlatform(projectId, agentId, role as "manager" | "plain"));
         } catch (e) {
           return ok({ error: (e as Error).message });

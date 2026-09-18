@@ -81,6 +81,17 @@ db.insertProject({ id: "pArch", name: "ToArchive", repoPath: repo, vaultPath: re
 db.insertAgent({ id: "agentLead", projectId: "pHome", name: "Lead", startupPrompt: "LEAD", position: 0, profileId: null });
 db.insertAgent({ id: "agentWork", projectId: "pOrd", name: "Work", startupPrompt: "WORK", position: 0, profileId: null });
 db.insertAgent({ id: "agentMgr", projectId: "pOrd", name: "Mgr", startupPrompt: "MGR", position: 1, profileId: null });
+// card e6a756ea fixtures: UUID-shaped (>=8-char) ids so an 8-char PREFIX is a real, distinct affordance —
+// "pOrd"/"agentMgr" above are themselves too short to prefix-resolve (MIN_ID_PREFIX_LEN=8).
+db.insertProject({ id: "c348c3b5-1111-4a1a-8000-000000000001", name: "Prefixable", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+db.insertAgent({ id: "7d61ef9c-2222-4a1a-8000-000000000001", projectId: "c348c3b5-1111-4a1a-8000-000000000001", name: "PrefixAgent", startupPrompt: "PFX", position: 0, profileId: null });
+// A colliding pair of PROJECT ids sharing the same 8-char prefix, for the ambiguous-prefix case.
+db.insertProject({ id: "dddddddd-aaaa-4a1a-8000-000000000001", name: "Dupe A", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+db.insertProject({ id: "dddddddd-bbbb-4a1a-8000-000000000002", name: "Dupe B", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+// A colliding pair of AGENT ids sharing the same 8-char prefix — inside "Prefixable" (NOT "pOrd": the
+// list_all_agents(projectId:"pOrd") check below asserts an EXACT count, so extra pOrd agents would break it).
+db.insertAgent({ id: "eeeeeeee-aaaa-4a1a-8000-000000000001", projectId: "c348c3b5-1111-4a1a-8000-000000000001", name: "Dupe Agent A", startupPrompt: "A", position: 1, profileId: null });
+db.insertAgent({ id: "eeeeeeee-bbbb-4a1a-8000-000000000002", projectId: "c348c3b5-1111-4a1a-8000-000000000001", name: "Dupe Agent B", startupPrompt: "B", position: 2, profileId: null });
 // A human-authored profile (the only kind that exists pre-P2) — profile_assign target.
 db.insertProfile({ id: "profQA", name: "QA Tester", role: "worker", description: "qa rig", allowDelta: [], skills: null, model: null, icon: "🧪", browserTesting: true });
 // One session per role (bound to pOrd/agentWork) — the role-gate fixtures.
@@ -319,6 +330,34 @@ try {
   check("session_spawn: unknown project rejected", (await call("session_spawn", { projectId: "ghost", agentId: "agentMgr", role: "manager" })).error === "project not found");
   check("session_spawn: unknown agent rejected", (await call("session_spawn", { projectId: "pOrd", agentId: "ghost", role: "manager" })).error === "agent not found");
   check("session_spawn: agent-not-in-the-given-project rejected", /does not belong/.test((await call("session_spawn", { projectId: "pArch", agentId: "agentMgr", role: "manager" })).error));
+
+  // ============== card e6a756ea: projectId/agentId accept a full id OR an 8-char id-prefix ==============
+  // THE core regression: an 8-char prefix of a REAL project/agent must NOT return "project not found" —
+  // that false-not-found (a real project misreported as missing) is exactly what card e6a756ea filed.
+  // Reverting the id-prefix.ts fix in spawnSessionAsPlatform makes this assertion go RED (spawnPfx.error
+  // would read "project not found" instead of spawning), so this pins the FIX, not a tautology.
+  const spawnPfx = await call("session_spawn", { projectId: "c348c3b5", agentId: "7d61ef9c", role: "plain" });
+  check("(e6a756ea) session_spawn: an unambiguous 8-char PROJECT+AGENT prefix SPAWNS (never \"project not found\")",
+    !spawnPfx.error && !!spawnPfx.id);
+  check("(e6a756ea) the prefix-resolved spawn lands in the FULL-id project",
+    db.getSession(spawnPfx.id)?.projectId === "c348c3b5-1111-4a1a-8000-000000000001");
+  // An AMBIGUOUS project prefix stays an explicit error naming BOTH candidates — exactly like project_get
+  // (getByIdPrefix's own `ambiguous` shape), never a silent pick and never "not found".
+  const spawnAmbigProj = await call("session_spawn", { projectId: "dddddddd", agentId: "agentMgr", role: "plain" });
+  check("(e6a756ea) an ambiguous PROJECT id-prefix errors (not \"not found\", not a silent pick)",
+    typeof spawnAmbigProj.error === "string" && /ambiguous/.test(spawnAmbigProj.error) && !spawnAmbigProj.id);
+  check("(e6a756ea) the ambiguous-project error NAMES both candidate ids",
+    spawnAmbigProj.error.includes("dddddddd-aaaa-4a1a-8000-000000000001") && spawnAmbigProj.error.includes("dddddddd-bbbb-4a1a-8000-000000000002"));
+  // Same for an AMBIGUOUS agent prefix, scoped within a resolved project.
+  const spawnAmbigAgent = await call("session_spawn", { projectId: "c348c3b5", agentId: "eeeeeeee", role: "plain" });
+  check("(e6a756ea) an ambiguous AGENT id-prefix (within the resolved project) errors, naming both candidates",
+    typeof spawnAmbigAgent.error === "string" && /ambiguous/.test(spawnAmbigAgent.error)
+      && spawnAmbigAgent.error.includes("eeeeeeee-aaaa-4a1a-8000-000000000001") && spawnAmbigAgent.error.includes("eeeeeeee-bbbb-4a1a-8000-000000000002")
+      && !spawnAmbigAgent.id);
+  // A too-short (< 8 char) ref never prefix-resolves — stays the honest "not found" (it never claimed to
+  // be a full id nor a valid prefix), same as every getByIdPrefix-backed *_get tool.
+  check("(e6a756ea) a too-short projectId ref (< 8 chars) is genuinely \"project not found\", not a false ambiguous",
+    (await call("session_spawn", { projectId: "c348c", agentId: "agentMgr", role: "plain" })).error === "project not found");
 
   // ===================== (a) session_stop — cross-project, not parent-scoped =====================
   const stopRes = await call("session_stop", { sessionId: spawnMgr.id, mode: "hard" });
