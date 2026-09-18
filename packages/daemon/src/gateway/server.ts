@@ -291,14 +291,17 @@ export function parseWsJsonObject(raw: Buffer | string): Record<string, unknown>
 /**
  * Card a5ecb6fd: mask `config.sessionEnv` VALUES (same-length filler, never bucketed — a bucketed length
  * would hide a truncated paste) before a project row leaves the daemon over `GET /api/projects`. Every
- * other config key, and `Db.listProjects()` itself, stay untouched — do not widen this to other project
- * routes without re-checking their own consumers first (see the card body for why). `String(value ?? "")`
- * makes the mapper TOTAL over whatever a row happens to hold — every current write path (`sessionEnv:
+ * other config key, and `Db.listProjects()` itself, stay untouched. `String(value ?? "")` makes the
+ * mapper TOTAL over whatever a row happens to hold — every current write path (`sessionEnv:
  * strictRecord(z.string())`) rejects a non-string value, so a non-string here should be unreachable, but
  * before this function existed a bad row still served fine; a `.length` thrown on `null`/`undefined`
  * would newly 500 the one endpoint every page shares. Pure + exported so a hermetic test can assert the
  * masking directly without booting a real server (mirrors `sanitizeCompanionName`/`GATEWAY_LOG_SERIALIZERS`
  * above).
+ *
+ * @decision 0c5d6851 — also applied to the 4 project-returning WRITE routes (create/PATCH/restore/
+ * config-PATCH). Do not add a consumer of any of their responses that reads `config.sessionEnv` for
+ * anything beyond length without re-verifying it can't round-trip the masked value onto a later write.
  */
 export function redactSessionEnvForRead(project: Project): Project {
   const sessionEnv = project.config.sessionEnv;
@@ -3983,7 +3986,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       repos,
     };
     deps.db.insertProject(project);
-    return reply.code(201).send(project);
+    return reply.code(201).send(redactSessionEnvForRead(project));
   });
 
   // Soft-archived projects (read-only) — the web "Archived" section that surfaces restore / permanent-
@@ -4150,7 +4153,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     // staleStartupPrompts is ADDITIVE on this response — always present (possibly []), never a field on
     // the stored Project itself; a rename/repoPath-change lint result, not project state.
-    return { ...deps.db.getProject(id)!, staleStartupPrompts };
+    return { ...redactSessionEnvForRead(deps.db.getProject(id)!), staleStartupPrompts };
   });
 
   // Soft-remove (archive) a project — hides it from the project list; rows/sessions are retained.
@@ -4171,7 +4174,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
     deps.db.restoreProject(id);
-    return deps.db.getProject(id);
+    return redactSessionEnvForRead(deps.db.getProject(id)!);
   });
 
   // PERMANENTLY delete a project (DISTINCT from the bare DELETE archive above) — irreversible CASCADE of
@@ -4252,7 +4255,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (resolveCodescapeConfig(v.value).enabled && !resolveCodescapeConfig(existing.config).enabled) {
       console.log(`[codescape] project ${id} codescape.enabled set — a daemon restart is required to ingest this project (v1)`);
     }
-    return deps.db.getProject(id);
+    return redactSessionEnvForRead(deps.db.getProject(id)!);
   });
 
   // Read-only bounded change history for ONE project's config override (card a0cafef2, sibling of
