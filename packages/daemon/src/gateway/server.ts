@@ -5292,6 +5292,69 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return reply.send(updated);
   });
 
+  // --- Delivered credentials (card af08f7e8) — HUMAN-ONLY loopback REST, NO MCP path of ANY router (same
+  // trust posture as the connections store above and the credential answer route itself): an agent in an
+  // ordinary project session must never list or revoke a delivered credential. Tier-0 by construction (not
+  // added to gateway/trust-tier.ts's TIER_1_ROUTES) — unlike the answer/dismiss routes above, this surface
+  // stays loopback-only even under a future remote bind. The list read NEVER returns secret_blob, its byte
+  // length, or anything else derived from the plaintext/ciphertext — see DeliveredCredentialSummary's own
+  // doc and toDeliveredCredentialSummary's.
+  // ⚠️ HONEST LIMIT (card 6dfdc660's review): revocation is DE-PROVISIONING, not CONTAINMENT — it stops
+  // FUTURE delivery only, and cannot recall a value an agent's process env already held. Any caller-facing
+  // surface built on this route (a future UI, a CLI) must say so plainly, never imply an immediate,
+  // retroactive cut-off — see revokeDeliveredCredential's own doc for the full reasoning. ---
+  app.get("/api/projects/:id/delivered-credentials", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
+    return reply.send(deps.db.listDeliveredCredentials(id));
+  });
+  // Code Review finding, card af08f7e8 (the "agent-readable free text" nitpick): `reason` lands verbatim in
+  // `detail.reason` on the `credential_revoked` orchestration event below, and that event kind is NOT
+  // excluded from a manager-role agent's own event-reading tools (`events_search` et al) — no SECRET value
+  // is exposed either way, but a human typing e.g. "rotating, the old key sk-… showed up in a log" would
+  // otherwise hand that free text straight to an agent. Capped, not stripped: the three ids alone don't
+  // answer WHY a credential was revoked, and why is exactly what a real incident review needs later.
+  const CREDENTIAL_REVOKE_REASON_MAX_CHARS = 500;
+  app.post("/api/credentials/:id/revoke", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { reason?: unknown };
+    const reasonRaw = typeof body.reason === "string" ? body.reason.trim() : "";
+    if (reasonRaw.length > CREDENTIAL_REVOKE_REASON_MAX_CHARS) {
+      return reply.code(400).send({ error: `reason must be at most ${CREDENTIAL_REVOKE_REASON_MAX_CHARS} characters` });
+    }
+    const reason = reasonRaw || null;
+    // Card af08f7e8, REVISED by Code Review (the rotation blocker): revokeDeliveredCredential now revokes
+    // EVERY live sibling sharing `id`'s own (project, credentialEnvVar) — the env var is the revocation
+    // unit, so this can return several rows, not just the one the human clicked. See that method's own doc.
+    let revoked;
+    try { revoked = deps.db.revokeDeliveredCredential(id, { revokedBy: "human", revokedReason: reason }); }
+    catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
+    if (!revoked) return reply.code(404).send({ error: "delivered credential not found" });
+    // Code Review finding: unconditional audit trail, one event PER revoked row — this exists specifically
+    // BECAUSE revocation is decoupled from the asking session's own row, so its filing must never depend on
+    // that session/question still being resolvable (the false equivalence this comment used to draw to
+    // `codex_auto_commit` is WRONG: that event always carries a real workerSessionId+taskId, so its own
+    // `?? ""` fallback is harmless — the real in-file precedent for a `managerSessionId: ""` best-effort
+    // audit write is `usage_latch_cleared` above). `detail.projectId` is included explicitly — without it,
+    // an event filed under `managerSessionId: ""` (the exact Archive-tab-delete case this card exists for)
+    // is unreachable from the project-scoped event reader (db.ts's project-derivation joins on session/task
+    // id, both null here) and from `/api/orchestration/events` (requires a managerId) alike. Best-effort:
+    // a logging fault must never turn an already-durably-persisted revoke into a 500. Sessions already
+    // running keep the old value in their env until their next resume/restart — this route has no way to
+    // reach into a live process's env, and does not try to.
+    for (const row of revoked) {
+      try {
+        const sourceQuestion = row.sourceQuestionId ? deps.db.getQuestion(row.sourceQuestionId) : undefined;
+        deps.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: sourceQuestion?.sessionId ?? "",
+          kind: "credential_revoked",
+          detail: { deliveredCredentialId: row.id, projectId: row.projectId, credentialEnvVar: row.credentialEnvVar, sourceQuestionId: row.sourceQuestionId, reason },
+        });
+      } catch { /* best-effort audit trail — never break the revoke itself */ }
+    }
+    return reply.send(revoked);
+  });
+
   // --- Per-project session Archive (HUMAN/REST only — like stop/fork/merge, NEVER an MCP tool).
   // Archiving is AUTOMATIC now (card b37750a4): a session auto-archives when its pty exits and
   // auto-restores when it resumes — there is NO manual archive endpoint. Restore brings an archived

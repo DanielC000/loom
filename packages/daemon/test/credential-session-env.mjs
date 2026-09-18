@@ -106,9 +106,12 @@ function askAndAnswer(proj, { id, envVar, secret, provisionTo, answeredAt }) {
 
   // A corrupt row — hand-corrupt the stored ciphertext directly (the only way to produce this state; the
   // real answer boundary always writes a well-formed envelope). This proves fail-closed: it must not
-  // throw and must not block GOOD_VAR/ROTATED_VAR from resolving.
+  // throw and must not block GOOD_VAR/ROTATED_VAR from resolving. Card af08f7e8: delivery now reads from
+  // the DECOUPLED delivered_credentials table (see db.ts's own doc), not questions directly, so the
+  // corruption must target THAT row — corrupting questions.secret_blob alone would no longer reach the
+  // resolver at all, since it never reads that column post-answer.
   askAndAnswer(proj, { id: "cse-b3-corrupt", envVar: "CORRUPT_VAR", secret: "irrelevant", answeredAt: "2026-01-15T00:00:00.000Z" });
-  db.db.prepare("UPDATE questions SET secret_blob = 'not-a-real-envelope' WHERE id = 'cse-b3-corrupt'").run();
+  db.db.prepare("UPDATE delivered_credentials SET secret_blob = 'not-a-real-envelope' WHERE source_question_id = 'cse-b3-corrupt'").run();
 
   let resolved;
   let threw = false;

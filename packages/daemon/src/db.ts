@@ -70,7 +70,7 @@ function assertNotProdDbInTest(file: string): void {
 import type {
   Project, Agent, AgentListItem, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind, ScheduleHistoryPage, ScheduleHistoryEntry, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, ProvisionTarget, FulfillmentTarget, PendingBinding, PresetPrompt, PresetPromptSuggestion,
+  OrchestrationEvent, OrchestrationEventKind, ScheduleHistoryPage, ScheduleHistoryEntry, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, ProvisionTarget, FulfillmentTarget, PendingBinding, PresetPrompt, PresetPromptSuggestion, DeliveredCredentialSummary,
   CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionConversationSummary, CompanionRoute,
   CompanionCapabilityGrant,
   ApiKey, ApiKeyStatus, ApiKeyCaps, GatewayToken, GatewayTokenStatus, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
@@ -1238,6 +1238,33 @@ CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id, state)
 -- answered_at <= ?) and pullAnsweredQuestionsForAgent's per-agent join (card f88e91f0) — both filter on
 -- state before/without a known session_id, which idx_questions_session (session_id-leading) can't serve.
 CREATE INDEX IF NOT EXISTS idx_questions_state_answered ON questions(state, answered_at);
+-- Card af08f7e8: the DELIVERY record for a sessionEnv-delivered credential (card 82b22817), deliberately
+-- decoupled from the asking session's own questions row above — that row's session_id is a NOT NULL FK,
+-- and deleteSession/deleteAgent/deleteProject cascade-delete every questions row for a session regardless
+-- of state, so an answered credential's secret_blob + full history would otherwise be permanently destroyed
+-- by an ordinary Archive-tab session delete, with zero warning. This table has NO FK to sessions/agents/
+-- questions: source_question_id is a soft, historical pointer (mirrors questions.task_id), so a delivery
+-- record survives long after the asking session (and its questions row) is gone. Never hard-deleted on
+-- revoke — same "retain, never destroy" posture as questions.cancelled_at (see cancelQuestion's own doc):
+-- revoked_at/revoked_by/revoked_reason mark a row terminal without erasing it. Only deleteProject
+-- cascades this table (project_id is a NOT NULL FK) — deleting/archiving a SESSION or AGENT never touches
+-- it, which is the whole point of the decoupling.
+CREATE TABLE IF NOT EXISTS delivered_credentials (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  credential_env_var TEXT NOT NULL,
+  secret_blob TEXT NOT NULL,               -- envelope ciphertext (v1:iv:tag:ct) — same shape as
+                                            -- questions.secret_blob; NEVER mapped into any agent-reachable
+                                            -- or human-REST-listed shape (see toDeliveredCredentialSummary)
+  source_question_id TEXT,                 -- soft link to questions(id) — no FK, may outlive it
+  delivered_at TEXT NOT NULL,              -- = the answering question's answered_at
+  revoked_at TEXT,
+  revoked_by TEXT,                         -- 'human' — this row is only ever revoked human-side
+  revoked_reason TEXT
+);
+-- Serves the live-delivery read (resolveCredentialSessionEnv's project_id + revoked_at IS NULL scan) and
+-- the human-only list surface.
+CREATE INDEX IF NOT EXISTS idx_delivered_credentials_project ON delivered_credentials(project_id, revoked_at);
 CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project_id, position);
 CREATE INDEX IF NOT EXISTS idx_api_keys_project ON api_keys(project_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, created_at);
@@ -2291,6 +2318,7 @@ export class Db {
     this.migrateCompanionConversations();
     this.migrateOrchestrationEvents();
     this.migrateQuestions();
+    this.migrateDeliveredCredentials();
     this.migrateConnections();
     this.migrateProjectMemory();
   }
@@ -2666,6 +2694,44 @@ export class Db {
   }
 
   /**
+   * One-time backfill for `delivered_credentials` (card af08f7e8): every row that satisfied the OLD
+   * (pre-af08f7e8) `listCredentialSessionEnvSources` predicate — read directly off `questions` — is copied
+   * into its own dedicated delivery record, so a credential already live in production keeps delivering
+   * after this upgrade instead of silently going dark. That's a real regression this card's own triage
+   * flagged, not a cosmetic gap: without this backfill, an upgrade would instantly stop injecting every
+   * credential a project had already answered, with no error and no visible cause.
+   *
+   * Runs AFTER migrateQuestions() (needs provision_target/cancelled_at to exist on a legacy DB) and AFTER
+   * exec(SCHEMA) (needs `delivered_credentials` to exist). Idempotent via a `source_question_id` presence
+   * check rather than an app_meta one-shot marker — safe to run on every boot, and never duplicates a row
+   * already backfilled OR one delivered normally through answerCredentialQuestion since this card shipped.
+   * Boot-tested against a copy of a real pre-migration DB — see test/delivered-credentials-migration.mjs.
+   */
+  private migrateDeliveredCredentials(): void {
+    const already = new Set(
+      (this.db.prepare("SELECT source_question_id FROM delivered_credentials WHERE source_question_id IS NOT NULL").all() as Row[])
+        .map((r) => r.source_question_id as string),
+    );
+    const candidates = (this.db.prepare(
+      `SELECT id, project_id, credential_env_var, secret_blob, answered_at FROM questions
+       WHERE type = 'credential' AND state IN ('answered', 'consumed')
+         AND credential_env_var IS NOT NULL AND credential_env_var != ''
+         AND secret_blob IS NOT NULL AND provision_target IS NULL AND cancelled_at IS NULL`,
+    ).all() as Row[]).filter((r) => !already.has(r.id as string));
+    if (candidates.length === 0) return;
+    const insert = this.db.prepare(
+      `INSERT INTO delivered_credentials (id, project_id, credential_env_var, secret_blob, source_question_id, delivered_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    const run = this.db.transaction((rows: Row[]) => {
+      for (const r of rows) {
+        insert.run(randomUUID(), r.project_id, r.credential_env_var, r.secret_blob, r.id, (r.answered_at as string | null) ?? new Date().toISOString());
+      }
+    });
+    run(candidates);
+  }
+
+  /**
    * Idempotent additive migration for `connections` — the OAuth2 phase (agent-tooling epic P5a): ADD
    * COLUMN any of CONNECTION_ADDED_COLUMNS missing from an existing DB (fresh installs already have them
    * via CREATE TABLE). Every added column is nullable/defaulted, so a pre-P5a row (api-key/bearer only,
@@ -2926,6 +2992,10 @@ export class Db {
       // pending_gate_ops is now a PERMANENT tombstone table (card e3e40167) — cascade explicitly, or a
       // deleted project's rows become an unbounded orphan class (see the schema doc).
       this.db.prepare("DELETE FROM pending_gate_ops WHERE project_id = ?").run(id);
+      // Card af08f7e8: delivered_credentials.project_id is a NOT NULL FK (enforced) with no session/agent
+      // tie — deleteSession/deleteAgent never touch it (that's the point), but deleteProject genuinely
+      // removes the project itself, so this must be cascaded explicitly or the transaction aborts.
+      this.db.prepare("DELETE FROM delivered_credentials WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM sessions WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM agents WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
@@ -7019,6 +7089,12 @@ export class Db {
    * note are deliberately left untouched (stay NULL) — the credential's only answer payloads are secret_blob
    * and (when provisioning) provision_connection_id/provision_binding_state, none of which `toQuestion` ever
    * maps `secret_blob` itself into the agent-reachable `Question` object.
+   *
+   * Card af08f7e8: for the sessionEnv path (no `patch.provision` — a provisioned row's secret lives in the
+   * Connection instead, see listCredentialSessionEnvSources's own doc), this ALSO inserts the dedicated
+   * `delivered_credentials` row that is now the SOLE source `listCredentialSessionEnvSources` reads —
+   * atomically, in the same transaction as the `questions` UPDATE, so the two can never observably diverge.
+   * See that table's own SCHEMA doc for why delivery lives there and not here.
    */
   answerCredentialQuestion(
     id: string,
@@ -7026,39 +7102,156 @@ export class Db {
   ): Question | undefined {
     const existing = this.getQuestion(id);
     if (!existing || existing.state !== "pending" || existing.type !== "credential") return undefined;
-    this.db.prepare(
-      "UPDATE questions SET state = 'answered', secret_blob = ?, answered_at = ?, provision_connection_id = ?, provision_binding_state = ? WHERE id = ?",
-    ).run(
-      patch.secretBlob,
-      patch.answeredAt,
-      patch.provision?.connectionId ?? null,
-      patch.provision ? patch.provision.bindingState : null,
-      id,
-    );
+    this.db.transaction(() => {
+      this.db.prepare(
+        "UPDATE questions SET state = 'answered', secret_blob = ?, answered_at = ?, provision_connection_id = ?, provision_binding_state = ? WHERE id = ?",
+      ).run(
+        patch.secretBlob,
+        patch.answeredAt,
+        patch.provision?.connectionId ?? null,
+        patch.provision ? patch.provision.bindingState : null,
+        id,
+      );
+      if (!patch.provision && patch.secretBlob && existing.credentialEnvVar) {
+        this.db.prepare(
+          `INSERT INTO delivered_credentials (id, project_id, credential_env_var, secret_blob, source_question_id, delivered_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        ).run(randomUUID(), existing.projectId, existing.credentialEnvVar, patch.secretBlob, id, patch.answeredAt);
+      }
+    })();
     return this.getQuestion(id);
   }
   /**
-   * Card 82b22817 — the read side of credential→sessionEnv delivery: every ANSWERED-or-CONSUMED
-   * `type:"credential"` row for this project that named a `credentialEnvVar` and was NOT auto-provisioned
-   * into a Connection (`provision_target IS NULL` — a provisioned row's secret lives in `connections`
-   * instead, gated by its own deliberate profile-binding grant; see `listPendingBindings`). `secret_blob`
-   * comes back as raw ciphertext — the caller (`keys/credentialSessionEnv.ts`) decrypts it; this method
-   * never touches plaintext. Ordered oldest-answered-first so a caller building a last-write-wins map
-   * naturally prefers the MOST RECENT answer when the same env var was declared twice (a rotated key).
+   * Card af08f7e8 — the read side of credential→sessionEnv delivery: every NOT-YET-REVOKED
+   * `delivered_credentials` row for this project. `secret_blob` comes back as raw ciphertext — the caller
+   * (`keys/credentialSessionEnv.ts`) decrypts it; this method never touches plaintext. Ordered
+   * oldest-delivered-first so a caller building a last-write-wins map naturally prefers the MOST RECENT
+   * delivery when the same env var was declared twice (a rotated key) — `deliveredAt` is the former
+   * `answeredAt` this method returned when it read directly off `questions`, renamed (Code Review finding,
+   * post-af08f7e8) because the id in this row is now a `delivered_credentials` row, not a `questions` row —
+   * a name still calling it `answeredAt` would mislead a reader chasing it back to the wrong table. See
+   * `effectiveShadowFor`'s own doc for the CURRENTLY-DELIVERING-vs-shadowed distinction the read/list
+   * surface below computes; THIS method never needed it — it already returns only the winner per env var
+   * by construction (last-write-wins in the caller's own merge loop).
    */
   listCredentialSessionEnvSources(
     projectId: string,
-  ): Array<{ id: string; credentialEnvVar: string; secretBlob: string; answeredAt: string }> {
+  ): Array<{ id: string; credentialEnvVar: string; secretBlob: string; deliveredAt: string }> {
     const rows = this.db.prepare(
-      `SELECT id, credential_env_var, secret_blob, answered_at FROM questions
-       WHERE project_id = ? AND type = 'credential' AND state IN ('answered', 'consumed')
-         AND credential_env_var IS NOT NULL AND credential_env_var != ''
-         AND secret_blob IS NOT NULL AND provision_target IS NULL AND cancelled_at IS NULL
-       ORDER BY answered_at ASC`,
-    ).all(projectId) as Array<{ id: string; credential_env_var: string; secret_blob: string; answered_at: string }>;
+      `SELECT id, credential_env_var, secret_blob, delivered_at FROM delivered_credentials
+       WHERE project_id = ? AND revoked_at IS NULL
+       ORDER BY delivered_at ASC, id ASC`,
+    ).all(projectId) as Array<{ id: string; credential_env_var: string; secret_blob: string; delivered_at: string }>;
     return rows.map((r) => ({
-      id: r.id, credentialEnvVar: r.credential_env_var, secretBlob: r.secret_blob, answeredAt: r.answered_at,
+      id: r.id, credentialEnvVar: r.credential_env_var, secretBlob: r.secret_blob, deliveredAt: r.delivered_at,
     }));
+  }
+  /**
+   * Code Review finding (post-af08f7e8, the rotation blocker): among every LIVE (`revoked_at IS NULL`)
+   * `delivered_credentials` row sharing this row's `(project_id, credential_env_var)`, is THIS row the one
+   * `listCredentialSessionEnvSources` would actually hand to the next spawn (`effective`), or is it live but
+   * silently SUPERSEDED by a newer live sibling (`shadowedBy`, that sibling's id)? Uses the EXACT SAME
+   * `ORDER BY delivered_at ASC, id ASC` `listCredentialSessionEnvSources` itself uses (manager review
+   * finding, second pass: the id tiebreak makes an identical-timestamp tie deterministic — `id` is the
+   * PRIMARY KEY, so it can never itself tie — closing the one case where this method and the real delivery
+   * path could otherwise disagree), so this can never disagree with what actually gets delivered. A revoked
+   * row is NEVER effective and NEVER reports a shadow — it's already excluded from delivery on its own,
+   * regardless of any sibling. This is what makes the human-only list surface below tell the truth about
+   * ROTATION: two rows can share an env var with both `revokedAt: null`, and before this, nothing
+   * distinguished "the one actually being delivered" from "an already-superseded row a human could revoke
+   * and believe they'd stopped delivery."
+   */
+  private effectiveShadowFor(r: { id: string; project_id: string; credential_env_var: string; revoked_at: string | null }): { effective: boolean; shadowedBy: string | null } {
+    if (r.revoked_at !== null) return { effective: false, shadowedBy: null };
+    const live = this.db.prepare(
+      "SELECT id FROM delivered_credentials WHERE project_id = ? AND credential_env_var = ? AND revoked_at IS NULL ORDER BY delivered_at ASC, id ASC",
+    ).all(r.project_id, r.credential_env_var) as { id: string }[];
+    const winnerId = live[live.length - 1]?.id;
+    if (winnerId === r.id) return { effective: true, shadowedBy: null };
+    return { effective: false, shadowedBy: winnerId ?? null };
+  }
+  /**
+   * Card af08f7e8 — the human-only read/list surface for delivered credentials: EVERY delivered_credentials
+   * row (live AND revoked) for a project, newest-delivered-first, so the UI can show what's currently being
+   * injected and what was revoked (and when/why) in one list. Deliberately NEVER returns secret_blob, its
+   * byte length, or anything else derived from the plaintext or ciphertext — unlike Question's
+   * credentialByteLength (card 82b22817), which was a deliberate, narrower exception on a DIFFERENT surface;
+   * this is a fresh read/list endpoint and the manager's review condition on this card was explicit: no
+   * value that could reconstruct or approximate the secret. `getDeliveredCredential` below is the by-id
+   * counterpart the revoke route uses to 404 cleanly. Computes `effective`/`shadowedBy` (see
+   * `effectiveShadowFor`'s own doc) in ONE pass over the project's own rows rather than N+1 per-row queries
+   * — via `winnerOfLiveDeliveredCredentials`, the SAME comparator `effectiveShadowFor`'s SQL expresses, so
+   * the two can never drift into disagreeing about which row wins (manager review finding, second pass: an
+   * earlier version used `localeCompare` here against a plain `ORDER BY` in SQL — two DIFFERENT orderings
+   * on the one surface whose entire job is saying which row is effective).
+   */
+  listDeliveredCredentials(projectId: string): DeliveredCredentialSummary[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM delivered_credentials WHERE project_id = ? ORDER BY delivered_at DESC, id DESC",
+    ).all(projectId) as Row[];
+    const liveByVar = new Map<string, Row[]>();
+    for (const r of rows) {
+      if (r.revoked_at !== null) continue;
+      const key = r.credential_env_var as string;
+      if (!liveByVar.has(key)) liveByVar.set(key, []);
+      liveByVar.get(key)!.push(r);
+    }
+    for (const list of liveByVar.values()) list.sort(winnerOfLiveDeliveredCredentials);
+    return rows.map((r) => {
+      if (r.revoked_at !== null) return toDeliveredCredentialSummary(r, { effective: false, shadowedBy: null });
+      // r itself is live and was pushed into its own env-var group above, so `live` always has >=1 entry
+      // (r, at minimum) — the non-null assertion is structural, not a guess.
+      const live = liveByVar.get(r.credential_env_var as string)!;
+      const winner = live[live.length - 1]!;
+      const isEffective = winner.id === r.id;
+      return toDeliveredCredentialSummary(r, { effective: isEffective, shadowedBy: isEffective ? null : (winner.id as string) });
+    });
+  }
+  getDeliveredCredential(id: string): DeliveredCredentialSummary | undefined {
+    const r = this.db.prepare("SELECT * FROM delivered_credentials WHERE id = ?").get(id) as Row | undefined;
+    return r ? toDeliveredCredentialSummary(r, this.effectiveShadowFor(r as unknown as { id: string; project_id: string; credential_env_var: string; revoked_at: string | null })) : undefined;
+  }
+  /**
+   * Card af08f7e8, REVISED by Code Review (the rotation blocker): revoke every LIVE row sharing `id`'s own
+   * `(project_id, credential_env_var)` — NOT just `id` itself. Rows sharing an env var are mutually
+   * exclusive at delivery time BY CONSTRUCTION (`listCredentialSessionEnvSources`'s last-write-wins merge
+   * can only ever hand ONE of them to a spawn) — so revoking only the row a human happened to click while a
+   * newer, still-live sibling existed would silently leave that sibling delivering, or worse, leave an
+   * OLDER superseded sibling as the new effective row once the newest one both was revoked. THE ENV VAR IS
+   * THE REVOCATION UNIT, not the row: "revoke DB_PASSWORD" must mean "stop DB_PASSWORD," full stop.
+   * Same "retain, never destroy" posture as `cancelQuestion` above for every row touched — none are
+   * deleted, all keep their own `secret_blob`/history, just excluded from delivery. Refuses (throws) only
+   * when the SPECIFICALLY TARGETED row (`id`) is itself already revoked — a human re-clicking revoke on a
+   * row they already revoked is a genuine double-fire to reject; a sibling that was ALREADY revoked by an
+   * earlier call is silently left alone (its own `revoked_at` stays whatever it already was, never
+   * overwritten) — the UPDATE's `AND revoked_at IS NULL` guard makes that the SQL's own behavior, not an
+   * extra check. Runs inside one transaction — better-sqlite3 is single-threaded/synchronous, so there is
+   * no window for a concurrent call to observe or act on a partially-revoked env-var group.
+   *
+   * ⚠️ HONEST LIMIT (sharpened by a sibling lane's review, card 6dfdc660): this is DE-PROVISIONING, not
+   * CONTAINMENT. It stops FUTURE delivery only — it cannot recall a value already read. `sessionEnv`
+   * delivery hands the raw plaintext into an agent-readable process env for that session's whole life
+   * (unlike `authenticated_request`'s server-side-only credential use, a deliberately different product);
+   * any session that ran while this credential was live could already have persisted, logged, or
+   * transmitted it, and this method has no way to reach into that env. Revoking stops Loom handing the
+   * secret out again — it is never the remedy for a genuinely leaked key; upstream rotation is. Every
+   * caller-facing surface must say exactly this, never imply revocation "retracts" or "contains" anything.
+   */
+  revokeDeliveredCredential(id: string, patch: { revokedBy: "human"; revokedReason: string | null }): DeliveredCredentialSummary[] | undefined {
+    const existing = this.getDeliveredCredential(id);
+    if (!existing) return undefined;
+    if (existing.revokedAt !== null) throw new Error("credential is already revoked");
+    const revokedAt = new Date().toISOString();
+    return this.db.transaction(() => {
+      const liveSiblingIds = (this.db.prepare(
+        "SELECT id FROM delivered_credentials WHERE project_id = ? AND credential_env_var = ? AND revoked_at IS NULL",
+      ).all(existing.projectId, existing.credentialEnvVar) as { id: string }[]).map((r) => r.id);
+      const stmt = this.db.prepare(
+        "UPDATE delivered_credentials SET revoked_at = ?, revoked_by = ?, revoked_reason = ? WHERE id = ? AND revoked_at IS NULL",
+      );
+      for (const sid of liveSiblingIds) stmt.run(revokedAt, patch.revokedBy, patch.revokedReason, sid);
+      return liveSiblingIds.map((sid) => this.getDeliveredCredential(sid)!);
+    })();
   }
   /**
    * Cancel a still-'pending' request — the terminal, retained-in-history counterpart to answerQuestion/
@@ -8577,6 +8770,39 @@ function toWebhookEndpointRow(r0: unknown): WebhookEndpointRow {
     targetSessionId: (r.target_session_id as string) ?? null, agentId: (r.agent_id as string) ?? null,
     enabled: (r.enabled as number) === 1, createdAt: r.created_at as string,
     lastFiredAt: (r.last_fired_at as string) ?? null,
+  };
+}
+/**
+ * Manager review finding, second pass (post-af08f7e8, the rotation blocker): the ONE win-ordering rule for
+ * delivered_credentials rows sharing an env var — oldest `delivered_at` first, tie-broken by `id` (the
+ * PRIMARY KEY, so it can never itself tie) — shared by `listDeliveredCredentials`'s JS sort AND cited by
+ * `effectiveShadowFor`'s SQL query doc, so both compute the SAME winner as the real delivery path
+ * (`listCredentialSessionEnvSources`'s `ORDER BY delivered_at ASC, id ASC`). Plain string comparison
+ * (never `localeCompare`, which is locale-sensitive and can disagree with SQLite's own BINARY collation on
+ * these ASCII ISO-8601 timestamps/UUIDs) — an earlier version used `localeCompare` here against a bare
+ * `ORDER BY delivered_at ASC` in SQL, two DIFFERENT orderings on the one surface whose entire job is
+ * telling a human which row is currently effective.
+ */
+function winnerOfLiveDeliveredCredentials(a: Row, b: Row): number {
+  const ad = a.delivered_at as string, bd = b.delivered_at as string;
+  if (ad !== bd) return ad < bd ? -1 : 1;
+  const ai = a.id as string, bi = b.id as string;
+  return ai < bi ? -1 : ai > bi ? 1 : 0;
+}
+// Card af08f7e8: intentionally does NOT map `secret_blob` — this is the human-only read/list shape for
+// delivered_credentials, and unlike toQuestion's one deliberate credentialByteLength carve-out (below),
+// this surface carries NOTHING derived from the ciphertext or plaintext at all (per this card's own review
+// condition — no value that could reconstruct or approximate the secret).
+function toDeliveredCredentialSummary(r0: unknown, effShadow: { effective: boolean; shadowedBy: string | null }): DeliveredCredentialSummary {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, projectId: r.project_id as string, credentialEnvVar: r.credential_env_var as string,
+    sourceQuestionId: (r.source_question_id as string | null) ?? null,
+    deliveredAt: r.delivered_at as string,
+    revokedAt: (r.revoked_at as string | null) ?? null,
+    revokedBy: (r.revoked_by as "human" | null) ?? null,
+    revokedReason: (r.revoked_reason as string | null) ?? null,
+    effective: effShadow.effective, shadowedBy: effShadow.shadowedBy,
   };
 }
 // NOTE: intentionally does NOT map `secret_blob` — the envelope-encrypted credential ciphertext must

@@ -1524,7 +1524,17 @@ export type OrchestrationEventKind =
   // @decision badba5a8 — never collapse `injected`/`reason`/`stamped` back into one boolean, and never
   //  merge the "asset unreadable" and "asset read but empty" reasons — different operational faults.
   //  Never log the block's own prose via this event — it exists so nobody ever has to.
-  | "discovery_block_injection";
+  | "discovery_block_injection"
+  // Card af08f7e8: audits a human revoking a delivered credential (`POST /api/credentials/:id/revoke`) —
+  // AUDIT-ONLY, same posture as `engine_session_rotated`/`discovery_block_injection` (deliberately excluded
+  // from EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/REPORT_RESOLVED_EVENT_KINDS — no
+  // live orchestration decision follows from one revoke). `detail` carries { deliveredCredentialId,
+  // credentialEnvVar, sourceQuestionId, reason }. Filed under the source question's own (still-routed)
+  // `sessionId` when that question row still resolves, else `""` (mirrors `codex_auto_commit`'s
+  // `managerSessionId ?? ""` fallback for a filing identity that may not exist) — this event exists
+  // specifically BECAUSE revocation is decoupled from that session's own row, so its absence must never
+  // block the audit write.
+  | "credential_revoked";
 
 /**
  * Every `OrchestrationEventKind` value, as a runtime array — closes the gap where `events_search`
@@ -1566,6 +1576,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, codex_unsupported_capability: true,
   codex_auto_commit: true,
+  credential_revoked: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 
@@ -3132,6 +3143,59 @@ export interface Question {
    *  unset — there is no backfill for a legacy row, and `null` here must be read as "unknown," never
    *  guessed at from `createdAt`/session lifetimes. */
   filedBySessionId: string | null;
+}
+
+/**
+ * Card af08f7e8 — a `delivered_credentials` row, the DELIVERY record for a sessionEnv-delivered credential
+ * (card 82b22817), deliberately decoupled from the `questions` row that asked for it: `questions.session_id`
+ * is a NOT NULL FK cascade-deleted by deleteSession/deleteAgent/deleteProject regardless of state, so
+ * reading delivery straight off `questions` made a credential's lifetime — and its only revocation path —
+ * an accident of the asking session's own row (an ordinary Archive-tab session delete would silently and
+ * permanently destroy the secret and its entire history, with no warning). This is the human-only
+ * read/list shape: it NEVER carries the ciphertext, its byte length, or anything else derived from the
+ * plaintext or ciphertext (unlike Question.credentialByteLength — a deliberate, narrower exception on a
+ * different surface; this is a fresh endpoint with no such carve-out).
+ */
+export interface DeliveredCredentialSummary {
+  id: string;
+  projectId: string;
+  credentialEnvVar: string;
+  /** Soft link to the `questions` row that originally asked for this — no FK, may point at a row that no
+   *  longer exists (that row can be deleted independently, e.g. via an Archive-tab session delete, without
+   *  affecting this row at all — that's the whole point of the decoupling). Null for a delivered_credentials
+   *  row backfilled from a pre-af08f7e8 upgrade whose source question id, for whatever reason, could not be
+   *  resolved (never expected in practice — the backfill always has the source row in hand — but the type
+   *  stays honest rather than asserting a non-null guarantee the migration doesn't actually make). */
+  sourceQuestionId: string | null;
+  /** When this credential started being delivered — the answering question's own `answeredAt`. */
+  deliveredAt: string;
+  /** Null while still being delivered. Set once, permanently, by `POST /api/credentials/:id/revoke` —
+   *  never cleared (there is no "un-revoke"; a human who wants the credential back answers a fresh ask).
+   *  HONEST LIMIT (card 6dfdc660's review): a non-null value means DE-PROVISIONED, never CONTAINED — it
+   *  stops future delivery only and cannot recall a value a session's process env already held while this
+   *  credential was live. A UI reading this field must say so, never imply a retroactive cut-off. */
+  revokedAt: string | null;
+  /** 'human' — this row is only ever revoked human-side, never by an agent (no MCP tool exposes this). Null
+   *  until revoked. */
+  revokedBy: "human" | null;
+  /** Optional freeform reason the revoking human gave, null if none. Null until revoked. */
+  revokedReason: string | null;
+  /** Code Review finding (the rotation blocker): a credential can be ROTATED — the same `credentialEnvVar`
+   *  answered a second time — leaving TWO rows both `revokedAt: null` for the same `(projectId,
+   *  credentialEnvVar)`. Only the newest actually reaches a spawn (`listCredentialSessionEnvSources`'s
+   *  last-write-wins merge); the older is live-but-inert. `effective:true` means THIS row is the one
+   *  currently being delivered. A revoked row is always `effective:false`. See `shadowedBy` for the other
+   *  live-but-inert case. ⚠️ Revoking ANY row now revokes every live sibling sharing its env var (see
+   *  `revokeDeliveredCredential`'s own doc) specifically so a human can never revoke a shadowed row and
+   *  believe they stopped delivery while the effective sibling keeps running. */
+  effective: boolean;
+  /** Non-null only when `revokedAt` is null AND `effective` is false: this row is LIVE (not revoked) but a
+   *  NEWER live row for the same `(projectId, credentialEnvVar)` is the one actually being delivered — this
+   *  field names that newer row's id. Null for an effective row and for a revoked row (a revoked row is
+   *  already excluded from delivery on its own; nothing "shadows" it). A UI must never present a
+   *  `shadowedBy`-set row as if revoking it alone would stop delivery of its env var — it would not; the
+   *  effective sibling would keep delivering, and revocation is bulk-by-env-var precisely to prevent that. */
+  shadowedBy: string | null;
 }
 
 /**

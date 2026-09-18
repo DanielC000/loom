@@ -3,12 +3,14 @@ import { decryptSecret } from "./envelope.js";
 /**
  * Narrow structural seam onto `Db` (mirrors `connections/store.ts`'s `ConnectionsDbStore`) so this
  * resolver is unit-testable without a real database. The real `Db` class satisfies this via
- * `listCredentialSessionEnvSources`.
+ * `listCredentialSessionEnvSources`. `id` here is a `delivered_credentials` row id (card af08f7e8) — NOT a
+ * `questions` row id, since that card decoupled the two; a caller chasing this id back to a table must look
+ * in `delivered_credentials`, not `questions`.
  */
 export interface CredentialSessionEnvDbStore {
   listCredentialSessionEnvSources(
     projectId: string,
-  ): Array<{ id: string; credentialEnvVar: string; secretBlob: string; answeredAt: string }>;
+  ): Array<{ id: string; credentialEnvVar: string; secretBlob: string; deliveredAt: string }>;
 }
 
 /**
@@ -47,18 +49,21 @@ export function isValidCredentialEnvVarName(name: string): boolean {
 }
 
 /**
- * Card 82b22817 — deliver every answered, un-provisioned `type:"credential"` secret this project has
+ * Card 82b22817 — deliver every un-provisioned, NOT-YET-REVOKED `type:"credential"` secret this project has
  * stored under a declared `credentialEnvVar` into a flat `{ENV_VAR: plaintext}` map, merged into a spawn's
  * env at `pty/host.ts`'s two `buildSpawnEnv` call sites. Excludes a row whose `provisionTarget` was set —
  * that secret lives in a Connection instead, gated by its own deliberate, owner-only profile-binding grant
  * (Direction B, card 12dc7fc9) — this path must never bypass that gate. Delivery scope is every role,
  * every session of the project (owner directive 2026-09-18), matching how `sessionEnv` already behaves.
+ * Card af08f7e8 decoupled the SOURCE of these rows from `questions` into `delivered_credentials` and added
+ * revocation — this function's own behavior/contract is unchanged by that, since `listCredentialSessionEnvSources`
+ * already absorbed the difference (see that method's own doc).
  *
  * Fail-closed at EVERY layer (mirrors `resolveScopedConnectionSecret`): the DB read itself, a reserved/
  * malformed env-var name, and a corrupt/undecryptable blob are each caught and skip only their own row (or,
  * for the DB read, the whole project) — logged, never thrown — so nothing here can ever block a spawn.
- * Rows come oldest-answered-first, so a rotated key (same env-var name asked twice) naturally has its most
- * recent answer win here.
+ * Rows come oldest-delivered-first, so a rotated key (same env-var name asked twice) naturally has its most
+ * recent delivery win here.
  */
 export function resolveCredentialSessionEnv(db: CredentialSessionEnvDbStore, projectId: string): Record<string, string> {
   const env: Record<string, string> = {};
@@ -73,7 +78,7 @@ export function resolveCredentialSessionEnv(db: CredentialSessionEnvDbStore, pro
   for (const row of rows) {
     if (!isValidCredentialEnvVarName(row.credentialEnvVar)) {
       // eslint-disable-next-line no-console
-      console.error(`[credential-session-env] refusing to deliver reserved/invalid env-var name "${row.credentialEnvVar}" (question ${row.id}, project ${projectId}) — dropped, not delivered.`);
+      console.error(`[credential-session-env] refusing to deliver reserved/invalid env-var name "${row.credentialEnvVar}" (delivered credential ${row.id}, project ${projectId}) — dropped, not delivered.`);
       continue;
     }
     try {
@@ -82,7 +87,7 @@ export function resolveCredentialSessionEnv(db: CredentialSessionEnvDbStore, pro
       // eslint-disable-next-line no-console
       console.error(
         `[credential-session-env] failed to decrypt stored credential for "${row.credentialEnvVar}" ` +
-          `(question ${row.id}, project ${projectId}): ${(err as Error).message} — dropped, not delivered.`,
+          `(delivered credential ${row.id}, project ${projectId}): ${(err as Error).message} — dropped, not delivered.`,
       );
     }
   }

@@ -21,6 +21,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       is genuinely project-scoped, not a global leak dressed up as a presence check.
 //   (C) a `opts.sessionEnv` entry with the SAME name still wins over the stored credential (human/Lead
 //       override always beats an auto-delivered one).
+//   (D) card af08f7e8 — REVOKING a delivered credential (db.revokeDeliveredCredential) makes it ABSENT
+//       from a REAL spawn's env on the very next spawn. Presence-only (`?.length`), never a config read,
+//       never echoing the value — proves the revoke boundary actually reaches the real delivery path this
+//       whole file exercises, not just the DB row.
+//   (E) Code Review BLOCKER (post-af08f7e8) — THE ROTATION CASE, END TO END: the SAME env var answered
+//       TWICE (a designed, validated flow) leaves two live rows; revoking via EITHER one's id (deliberately
+//       the OLDER/shadowed row, the dangerous click) must make the env var ABSENT from a REAL spawn — not
+//       merely flip one row's `revokedAt`, which is exactly what the pre-fix bug also did while still
+//       re-injecting the superseded value.
 //
 // WINDOWS-ONLY (mirrors pty-codex-spawn-env.mjs): the `.cmd`-wrapper mechanism is Windows-specific. SKIPS
 // (exit 0) on non-win32 rather than silently passing 0 checks.
@@ -163,9 +172,86 @@ async function realSpawnEnv(opts) {
   check("(C) a deliberate opts.sessionEnv entry wins over the auto-delivered credential on a name collision", spawnedEnv.MY_TEST_REAL_CREDENTIAL === "deliberate-human-override");
 }
 
+// ===== (D) card af08f7e8 — revoking a delivered credential removes it from the next real spawn's env =====
+{
+  const delivered = db.listDeliveredCredentials(projA.projectId);
+  const row = delivered.find((d) => d.credentialEnvVar === "MY_TEST_REAL_CREDENTIAL" && d.revokedAt === null);
+  if (!row) throw new Error("expected an undelivered-revoked row for MY_TEST_REAL_CREDENTIAL before revoking it");
+  db.revokeDeliveredCredential(row.id, { revokedBy: "human", revokedReason: "test" });
+
+  const spawnCwd = fs.mkdtempSync(path.join(tmpHome, "cwd-d-"));
+  const envOutputFile = path.join(tmpHome, "spawned-env-d.json");
+  const spawnedEnv = await realSpawnEnv({
+    sessionId: "cse-spawn-session-d",
+    cwd: spawnCwd,
+    permission: {},
+    geometry: { cols: 120, rows: 40 },
+    sessionEnv: { FIXTURE_ENV_OUTPUT_FILE: envOutputFile },
+    role: "worker",
+    harness: "codex",
+    projectId: projA.projectId,
+  });
+  // Presence check ONLY (never a config/DB read, never the value) — proves the revoke boundary actually
+  // reaches the real spawned child's env, not just the delivered_credentials row.
+  const absent = !("MY_TEST_REAL_CREDENTIAL" in spawnedEnv) || !(spawnedEnv.MY_TEST_REAL_CREDENTIAL?.length > 0);
+  check("(D) a REVOKED credential is ABSENT from a real spawned child's env", absent);
+}
+
+// ===== (E) Code Review BLOCKER — THE ROTATION CASE, END TO END. Answering the SAME env var twice (a real,
+// designed flow — questionTool.ts's buildQuestionAsk validates only the NAME, never rejects a duplicate)
+// leaves TWO live rows sharing one credentialEnvVar. Before the fix, revoking just the row a human happened
+// to click left its sibling live — in the worst real case, re-injecting a SUPERSEDED (possibly leaked) key
+// on the very next spawn, with nothing warning that it had happened. This is the assertion that would have
+// caught that: not "one row flipped to revoked" (the old bug's own row DID flip — that's what made it look
+// fixed) but "the env var is ABSENT from a REAL spawned child" after revoking. =====
+{
+  const ROTATED_VAR = "ROTATED_REAL_CREDENTIAL";
+  const OLD_VALUE = "sk-real-spawn-rotated-OLD-should-never-reinject";
+  const NEW_VALUE = "sk-real-spawn-rotated-NEW";
+
+  const answerCredential = (id, value) => {
+    const built = buildQuestionAsk(
+      { type: "credential", title: "t", body: "b", envVar: ROTATED_VAR },
+      { sessionId: projA.mgrId, projectId: projA.projectId, db, role: "manager" },
+    );
+    if ("error" in built) throw new Error(`unexpected buildQuestionAsk error: ${built.error}`);
+    db.insertQuestion({ ...built.question, id });
+    db.answerCredentialQuestion(id, { secretBlob: encryptSecret(value), answeredAt: new Date().toISOString() });
+  };
+  answerCredential("cse-spawn-rotate-old", OLD_VALUE);
+  answerCredential("cse-spawn-rotate-new", NEW_VALUE);
+
+  const rotatedRows = db.listDeliveredCredentials(projA.projectId).filter((d) => d.credentialEnvVar === ROTATED_VAR);
+  check("(E) setup: rotation leaves TWO live rows sharing the same env var", rotatedRows.length === 2 && rotatedRows.every((r) => r.revokedAt === null));
+  // The DANGEROUS click: revoke via the OLDER (already-superseded/"shadowed") row's id — the shape a human
+  // clicking an arbitrary row in a list, not necessarily the newest, would actually produce.
+  const olderRow = rotatedRows.find((r) => r.sourceQuestionId === "cse-spawn-rotate-old");
+  db.revokeDeliveredCredential(olderRow.id, { revokedBy: "human", revokedReason: "rotation test" });
+
+  const afterRevoke = db.listDeliveredCredentials(projA.projectId).filter((d) => d.credentialEnvVar === ROTATED_VAR);
+  check("(E) revoking via the OLDER row also revoked its NEWER sibling (env var is the revocation unit)", afterRevoke.every((r) => r.revokedAt !== null));
+
+  const spawnCwd = fs.mkdtempSync(path.join(tmpHome, "cwd-e-"));
+  const envOutputFile = path.join(tmpHome, "spawned-env-e.json");
+  const spawnedEnv = await realSpawnEnv({
+    sessionId: "cse-spawn-session-e",
+    cwd: spawnCwd,
+    permission: {},
+    geometry: { cols: 120, rows: 40 },
+    sessionEnv: { FIXTURE_ENV_OUTPUT_FILE: envOutputFile },
+    role: "worker",
+    harness: "codex",
+    projectId: projA.projectId,
+  });
+  // THE assertion the blocker was missing: not that a row flipped, but that the env var is genuinely absent
+  // from a REAL spawned child — the OLD (superseded, possibly leaked) value must never reach a live process.
+  const rotatedAbsent = !(ROTATED_VAR in spawnedEnv) || !(spawnedEnv[ROTATED_VAR]?.length > 0);
+  check("(E) after rotation + revoke-via-either-row, the env var is ABSENT from a real spawned child (the old value never re-injects)", rotatedAbsent);
+}
+
 try { db.close(); } catch { /* ignore */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — an answered credential with a declared credentialEnvVar reaches a REAL spawned OS child process's env, decrypted to the exact stored plaintext, using the SAME production PtyHost/Db wiring index.ts uses; it never leaks across projects (negative control); and a deliberate sessionEnv override still wins on a name collision."
+  ? "\n✅ ALL PASS — an answered credential with a declared credentialEnvVar reaches a REAL spawned OS child process's env, decrypted to the exact stored plaintext, using the SAME production PtyHost/Db wiring index.ts uses; it never leaks across projects (negative control); a deliberate sessionEnv override still wins on a name collision; revoking it removes it from the next real spawn's env; and a ROTATED credential (the same env var answered twice) is genuinely absent from a real spawn after revoking via EITHER row — the old, superseded value never re-injects."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
