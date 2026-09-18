@@ -78,12 +78,20 @@ const now = new Date().toISOString();
 
 function seed(db, p, opts) {
   // `mgrProcessState` defaults to "exited" (the shape every OTHER scenario in this file, and most of this
-  // suite's other merge-confirm tests, use — there is no live pty either way, and a single settling call
-  // never consults it). Scenario (G) below is the one exception: it re-attaches to a genuinely STILL
-  // RUNNING op across several polls, and `confirmWorkerMergeTracked`'s dead-owner recovery (card 27ea069e)
-  // would otherwise treat an "exited" manager as dead and evict + re-mint a FRESH confirmWorkerMerge on
-  // EVERY poll — a pile-up of concurrent real git-merge attempts on the same branch that never lets any
-  // single one settle within its own attach budget. Pass `mgrProcessState: "live"` there.
+  // suite's other merge-confirm tests, use — there is no live pty either way, and a call that settles
+  // WELL WITHIN its own SYNC_ATTACH_BUDGET_MS never consults it, since the op is already evicted-on-settle
+  // by the time anything else could look). Card cc62777f: that "well within budget" assumption is a REAL
+  // wall-clock race, not a guarantee — any scenario making a SECOND confirmWorkerMergeTracked call while
+  // the first's real op could still plausibly be running (a slow-settling first call under host
+  // contention, OR — (G)'s own deliberate case — a first call FORCED pending via a tiny budget) must pass
+  // `mgrProcessState: "live"`, or `confirmWorkerMergeTracked`'s dead-owner recovery (card 27ea069e) treats
+  // the "exited" manager as dead and evicts + re-mints a FRESH op instead of the second call correctly
+  // attaching to/waiting on the still-running first one — a pile-up of concurrent real git-merge attempts
+  // on the same branch that never lets any single one settle within its own attach budget, and (for (F)'s
+  // own cache-reuse assertion) a second call that no longer observes the SAME opId as the first. Confirmed
+  // via a standalone repro forcing this exact race deterministically (tiny syncAttachBudgetMs + a held
+  // gate): "exited" reproduces the pile-up byte-for-byte; "live" does not. (F) and (G) both need it; every
+  // single-call scenario (A-E) does not.
   db.insertProject({ id: p.projId, name: "MCIW", repoPath: p.repo, vaultPath: p.repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
   db.insertAgent({ id: p.agentId, projectId: p.projId, name: "t", startupPrompt: "", position: 0 });
   db.insertTask({ id: p.taskId, projectId: p.projId, title: "MCIW-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
@@ -276,7 +284,7 @@ try {
     F.worktreePath = worktreePath; F.branch = branch; worktrees.push(worktreePath);
     fs.writeFileSync(path.join(worktreePath, "feat-f.txt"), "work\n");
     commitAll(worktreePath, "feat-f", GIT_ID);
-    seed(db, F);
+    seed(db, F, { mgrProcessState: "live" }); // see seed()'s own doc — the r2 cache-reuse call can land while r1's real op is still running under host contention
     signals.fusion[F.workerId] = { gen: 1, spanGens: [0, 1], reportedLen: 30, intendedLen: 10, detectedAt: 1_000_000 };
 
     const r1 = await sessions.confirmWorkerMergeTracked(F.mgrId, F.workerId);
