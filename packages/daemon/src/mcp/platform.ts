@@ -285,11 +285,28 @@ const memoryOverride = z.object({
   topK: z.number().int().min(1).max(MEMORY_CONFIG_MAX.topK).optional(),
   maxNotes: z.number().int().min(0).max(MEMORY_CONFIG_MAX.maxNotes).optional(),
 }).strict();
+// @decision c9a2f1e0 — do not revert to plain `z.record` (silently DROPS a raw `__proto__` key instead
+// of erroring), and do not "fix" this by building the record with `Object.create(null)` instead — a
+// safely-built `__proto__` entry still can never work: every real consumer merges via `Object.assign`.
+function rejectDunderProtoKey(raw: unknown, ctx: z.RefinementCtx): unknown {
+  if (raw && typeof raw === "object" && !Array.isArray(raw) && Object.hasOwn(raw, "__proto__")) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "'__proto__' is not a valid key here" });
+    return z.NEVER;
+  }
+  return raw;
+}
+/** A `z.record(z.string(), valueSchema)` that REJECTS a raw `__proto__` key instead of silently
+ *  dropping it (see @decision c9a2f1e0 immediately above). Use for any record-shaped config/credential
+ *  field an untrusted caller can populate by dot/bracket key name. */
+function strictRecord<T extends z.ZodTypeAny>(valueSchema: T) {
+  return z.preprocess(rejectDunderProtoKey, z.record(z.string(), valueSchema));
+}
+
 const projectConfigOverrideSchema = z.object({
   kanbanColumns: kanbanColumnsSchema.optional(),
   permission: permissionOverride.optional(),
   pty: ptyOverride.optional(),
-  sessionEnv: z.record(z.string(), z.string()).optional(),
+  sessionEnv: strictRecord(z.string()).optional(),
   orchestration: orchestrationOverride.optional(),
   docLint: z.boolean().optional(),
   codescape: codescapeOverride.optional(),

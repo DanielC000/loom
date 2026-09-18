@@ -47,6 +47,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       path ("."/"..") is never a collision (mirrors unsetConfigPath's own documented no-op).
 //   (14) end-to-end: a zero-segment unset ("unset: [\".\"]") alongside a real write is no longer wrongly
 //       REFUSED through the REST handler — the same regression case (13) proves at the primitive level.
+//   (15) card e4e854cc: a raw `sessionEnv.__proto__` key is REFUSED at validation (400, stored config
+//       UNCHANGED) instead of zod's `z.record` silently dropping it and returning 200 — driven through
+//       the real REST handler (validateProjectConfigOverride is its first step), PLUS a positive control
+//       sweeping the same 10 prototype-family names as (13) through the same PATCH path: each is a
+//       genuine own key of the request body and lands correctly, proving the __proto__ refusal is
+//       specific to that one name, not a side effect of the sweep rejecting the whole family.
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic: a REAL Db + the REAL Fastify gateway
 // (app.inject), every other dep STUBBED — mirrors mgmt-project-agent.mjs's minimal harness (this route
@@ -65,7 +71,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
-const { findConfigPatchUnsetCollisions } = await import("../dist/mcp/platform.js");
+const { findConfigPatchUnsetCollisions, validateProjectConfigOverride } = await import("../dist/mcp/platform.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -331,12 +337,69 @@ try {
   const cfgJ = db.getProject("pJ").config;
   check("(14) ★ the write landed", cfgJ.sessionEnv?.API_KEY === "x");
   check("(14) ★ the untouched sibling gateCommand SURVIVES", cfgJ.orchestration?.gateCommand === "pnpm build");
+
+  // ===================== (15) card e4e854cc: sessionEnv.__proto__ is REFUSED at validation, not silently
+  // dropped. `validateProjectConfigOverride` is called DIRECTLY (imported from dist, like (13)'s
+  // findConfigPatchUnsetCollisions) rather than through `app.inject` — driving it through a REAL HTTP
+  // request would test a DIFFERENT, already-existing guard instead of this one: Fastify's own JSON body
+  // parser defaults to `onProtoPoisoning: "error"` (secure-json-parse) and throws on ANY request body
+  // containing a literal `"__proto__":` key, on every route on this app, before `req.body` is even
+  // populated — confirmed directly against this project's real Fastify instance (a PATCH carrying
+  // `{"sessionEnv":{"__proto__":"evil"}}` 400s with `FST_ERR_CTP_INVALID_JSON_BODY`, never reaching this
+  // handler at all). That is a genuine, separate, pre-existing defense at the TRANSPORT layer — this
+  // card's fix is at the VALIDATOR layer, for any caller (present or future) of `validateProjectConfigOverride`
+  // that isn't sitting behind that same Fastify body-parser default. =====
+  {
+    // Built via JSON.parse, not a JS object literal: `{ __proto__: "evil" }` as a LITERAL is spec-
+    // special-cased to SET the object's prototype rather than create an own property (and a string
+    // target is a silent no-op), which would produce an empty sessionEnv and defeat this test before it
+    // starts. JSON.parse instead uses CreateDataProperty, so `__proto__` becomes a genuine own key —
+    // exactly how the reviewer's own reproduction (card e4e854cc) built it.
+    const protoSessionEnv = JSON.parse('{"__proto__":"evil"}');
+    const vProto = validateProjectConfigOverride({ sessionEnv: protoSessionEnv });
+    check("(15) ★ sessionEnv.__proto__ is REFUSED at validation (ok:false), not silently dropped", vProto.ok === false);
+    check("(15) ★ the error names the offending field", typeof vProto.error === "string" && vProto.error.includes("sessionEnv") && vProto.error.includes("__proto__"));
+    check("(15) the request's own prototype chain is untouched by the refused payload", Object.getPrototypeOf({}) === Object.prototype);
+
+    // Positive control (card e4e854cc DoD-3): the SAME 10 prototype-family names swept in (13) all
+    // survive as ordinary own keys through the real validator — proving the __proto__ refusal is
+    // specific to that one name, not an accidental side effect of rejecting the whole prototype family.
+    for (const protoKey of ["constructor", "prototype", "hasOwnProperty", "toString", "valueOf", "isPrototypeOf", "propertyIsEnumerable", "__defineGetter__", "_proto_", "PATH"]) {
+      const vPositive = validateProjectConfigOverride({ sessionEnv: { [protoKey]: "fine" } });
+      check(`(15) positive control: sessionEnv["${protoKey}"] validates ok:true (not swept up by the __proto__ refusal)`, vPositive.ok === true);
+      check(`(15) ★ sessionEnv["${protoKey}"] survives as a genuine own key with the parsed value`,
+        vPositive.ok === true && Object.hasOwn(vPositive.value.sessionEnv, protoKey) && vPositive.value.sessionEnv[protoKey] === "fine");
+    }
+
+    // A __proto__ refusal alongside an untouched sibling key: the whole PATCH object still fails (one
+    // bad key refuses the batch, matching how a bad top-level key in (6) refuses its whole payload too),
+    // and the sibling key is never independently inspected — refusal is all-or-nothing at this boundary.
+    // Built via JSON.parse (same reason as protoSessionEnv above): a literal `{__proto__: ...}` key in
+    // this source file would set the object's prototype instead of creating an own property.
+    const mixedSessionEnv = JSON.parse('{"KEEP":"1","__proto__":"evil"}');
+    const vMixed = validateProjectConfigOverride({ sessionEnv: mixedSessionEnv });
+    check("(15) ★ a __proto__ key alongside a legitimate sibling still refuses the WHOLE sessionEnv map", vMixed.ok === false);
+  }
+
+  // Separately (and NOT a proof of this card's fix — see the comment above): confirm the real REST route
+  // ALSO currently refuses an HTTP body carrying a literal __proto__ key, end-to-end, via app.inject —
+  // documenting Fastify's own transport-layer guard so a future reader doesn't mistake it for this card's
+  // validator-layer fix, or remove this schema change believing HTTP already covers it unconditionally
+  // (Fastify's own guard is a daemon-wide default that could be reconfigured; the validator fix cannot).
+  db.insertProject({
+    id: "pK", name: "K", repoPath: TMP, vaultPath: TMP,
+    config: { orchestration: { gateCommand: "pnpm build" } },
+    createdAt: now, archivedAt: null, reserved: false,
+  });
+  const rProtoHttp = await patch("pK", { config: { sessionEnv: JSON.parse('{"__proto__":"evil"}') } });
+  check("(15) HTTP-layer note: a real PATCH body carrying __proto__ is ALSO refused today (400) — by Fastify's own onProtoPoisoning default, a separate guard from this card's fix", rProtoHttp.statusCode === 400);
+  check("(15) the untouched project is unaffected by the refused HTTP request", db.getProject("pK").config.orchestration?.gateCommand === "pnpm build");
 } finally {
   try { if (app) await app.close(); } catch { /* ignore */ }
   db.close();
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PATCH /api/projects/:id/config deep-merges by default (a single-key PATCH preserves every sibling key, nested objects merge field-by-field), `unset` expresses deletion the merge itself cannot, `replace:true` still opts into the old whole-object-replace behavior byte-identical, this human REST path carries NO additiveOnlyRotationGuard (can shrink/lower/re-point rotation fields — the documented Settings.tsx escape hatch), a rejected PATCH leaves the stored config unchanged, `unset` genuinely REMOVES memory/alertWebhook/rotationMarkers+heading (not stored-empty) with an untouched sibling surviving each, and unsetting EVERY leaf of a group one dot-path at a time (the real Settings.tsx shape) PRUNES the now-empty parent too — in either order, while a PARTIAL clear leaves the group's untouched sibling leaf intact; PLUS (card b5faa194) a write and an `unset` of the SAME dot-path in one payload is now REFUSED (400, named, stored config unchanged) rather than the unset silently winning, a non-colliding rename in the same map is unaffected, the sessionEnv editor's own two-pass payload lands its rotated value, and a sessionEnv unset genuinely deletes its key while an unmodeled `pty` override survives; PLUS (card e07daa96 / reviewer session 4275d929) a prototype-family name the patch never wrote is never a false-positive collision while a genuinely own key sharing that name still is, and a zero-segment unset path is never a collision — at both the primitive and the end-to-end REST layer."
+  ? "\n✅ ALL PASS — PATCH /api/projects/:id/config deep-merges by default (a single-key PATCH preserves every sibling key, nested objects merge field-by-field), `unset` expresses deletion the merge itself cannot, `replace:true` still opts into the old whole-object-replace behavior byte-identical, this human REST path carries NO additiveOnlyRotationGuard (can shrink/lower/re-point rotation fields — the documented Settings.tsx escape hatch), a rejected PATCH leaves the stored config unchanged, `unset` genuinely REMOVES memory/alertWebhook/rotationMarkers+heading (not stored-empty) with an untouched sibling surviving each, and unsetting EVERY leaf of a group one dot-path at a time (the real Settings.tsx shape) PRUNES the now-empty parent too — in either order, while a PARTIAL clear leaves the group's untouched sibling leaf intact; PLUS (card b5faa194) a write and an `unset` of the SAME dot-path in one payload is now REFUSED (400, named, stored config unchanged) rather than the unset silently winning, a non-colliding rename in the same map is unaffected, the sessionEnv editor's own two-pass payload lands its rotated value, and a sessionEnv unset genuinely deletes its key while an unmodeled `pty` override survives; PLUS (card e07daa96 / reviewer session 4275d929) a prototype-family name the patch never wrote is never a false-positive collision while a genuinely own key sharing that name still is, and a zero-segment unset path is never a collision — at both the primitive and the end-to-end REST layer; PLUS (card e4e854cc) a raw sessionEnv.__proto__ key is REFUSED at validation (400, stored config unchanged) instead of zod's z.record silently dropping it, with a positive control proving the same 10 prototype-family names from (13) still land as ordinary own keys through the real PATCH path."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
