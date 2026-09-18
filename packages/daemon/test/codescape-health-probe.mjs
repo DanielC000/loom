@@ -115,6 +115,35 @@ async function waitForCompletedCondition(cond, tickCounter, { pollMs = 25, stall
   return true;
 }
 
+// Card bab0e772: settles a `>= N` wait to a STABLE read before a later `=== N` assertion — a bare ">= N"
+// poll (as `waitForCompletedCondition` above is normally used) returns the instant it's satisfied, which
+// can race a would-be flood of MORE spawns landing just after, silently turning a should-always-fail
+// pollution into a coin-flip depending on exact poll timing (this is what let three specimens of a real
+// interference bug pass undetected for weeks — see the card). Rather than a fixed wall-clock sleep after
+// the wait (which this file's OWN guard rightly rejects as unfalsifiable in one trial — see
+// fixed-wait-witness-guard.mjs), this polls until `getCount()` has stopped changing for `settleTicks`
+// consecutive COMPLETED probe ticks — a real, observable unit of progress, same discipline as
+// `waitForCompletedCondition` itself, never a guessed duration.
+async function waitForStableCount(getCount, tickCounter, { settleTicks = 2, pollMs = 25, stallTimeoutMs = 8000 } = {}) {
+  let lastCount = getCount();
+  let lastTicks = tickCounter();
+  let stableSinceTicks = lastTicks;
+  let lastTickProgressAt = Date.now(); // last time `ticks` itself advanced — genuine-stall detector, same as waitForCompletedCondition
+  while (true) {
+    await sleep(pollMs);
+    const count = getCount();
+    const ticks = tickCounter();
+    if (ticks !== lastTicks) { lastTicks = ticks; lastTickProgressAt = Date.now(); }
+    if (count !== lastCount) {
+      lastCount = count;
+      stableSinceTicks = ticks; // the count just moved — restart the settle window from here
+    } else if (ticks - stableSinceTicks >= settleTicks) {
+      return lastCount; // count held steady across settleTicks completed probe ticks
+    }
+    if (Date.now() - lastTickProgressAt > stallTimeoutMs) return lastCount; // probe itself stalled — report whatever was last observed
+  }
+}
+
 // Card 92b0f44e: waits for the SPECIFIC completed probe tick whose OWN version-probe loop reached
 // `minAttempts` — never "any completed tick" (see `getCompletedProbeTickCount()`'s own counter, which
 // increments for EVERY probeHealth() call that runs to completion, including one whose `/graph/health`
@@ -431,12 +460,20 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
     homeDir,
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
-    // Same margin rule as scenarios (1)/(2): intervalMs/timeoutMs must stay safely above real child-
-    // process startup latency (~70-85ms observed, more under host load), or a restart here can be killed
-    // by an unrelated wedge probe failure before it ever gets a fair chance to answer a drift check.
+    // intervalMs/timeoutMs/threshold stay at the file's usual values (checkBuildDrift rides the same
+    // tick, so retiming any of them would change more than just health timing) — but wedge-KILL
+    // detection itself is disarmed below. This scenario tests ONLY the build-drift restart path
+    // (scenarios (1)-(4) already own the wedge path); a genuine specimen (gate `a053812a`, 2026-09-18)
+    // showed the drift-restarted child getting killed by an UNRELATED wedge failure under host load
+    // before this scenario's own assertions ran, injecting extra spawns into the exact ledger below.
+    //
+    // @decision bab0e772 — do not revert to widening intervalMs/timeoutMs/failureThreshold instead of
+    // healthProbeWedgeKillEnabled; a huge number is indistinguishable on the page from quieting a flake
+    // by loosening a timeout, which this card forbids.
     healthProbeIntervalMs: 300,
     healthProbeTimeoutMs: 180,
     healthProbeFailureThreshold: 3,
+    healthProbeWedgeKillEnabled: false,
     versionProbeTimeoutMs: 2000,
     // Card 9e6f984d: a drift restart now requires the installed build to sit UNCHANGED for
     // driftStabilityMs before it fires — a short test-only window (not the real ~10-15min default) so
@@ -453,7 +490,14 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
   await sup.start(["/fake/repo/drift"]);
   const portAfterStart = sup.getPort(); // the reserved port is fixed for the instance's lifetime — safe to read anytime
 
+  // Poll until the ledger first reaches 2, THEN settle to a STABLE read (progress-keyed, never a fixed
+  // wall-clock sleep — see waitForStableCount's own doc) before asserting `=== 2`. A bare ">= 2" poll
+  // returns the instant it's satisfied and can race a would-be flood of extra spawns landing just after
+  // (card bab0e772's own specimen), silently turning a should-always-fail pollution into a coin-flip.
+  // This makes any genuine extra spawn — from any future source, not just the now-disarmed wedge-kill —
+  // fail deterministically.
   await waitForCompletedCondition(() => readServeCalls(callsFile).length >= 2, () => sup.getCompletedProbeTickCount());
+  await waitForStableCount(() => readServeCalls(callsFile).length, () => sup.getCompletedProbeTickCount());
   let calls = readServeCalls(callsFile);
   check("(5) a genuine, STABLE build drift (running != installed, unchanged for the stability window) triggers a restart via the EXISTING death path (initial spawn + one restart on record)",
     calls.length === 2);
@@ -477,12 +521,75 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
   // again only once IT has been stable for the full window.
   process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-newer";
   await waitForCompletedCondition(() => readServeCalls(callsFile).length >= 3, () => sup.getCompletedProbeTickCount());
+  await waitForStableCount(() => readServeCalls(callsFile).length, () => sup.getCompletedProbeTickCount()); // settle — same reasoning as the (5) ledger==2 check above
   calls = readServeCalls(callsFile);
   check("(5) a NEW drift (installed build changes again) fires its own restart, once stable (a 3rd spawn on record)",
     calls.length === 3 && calls[2].pid !== calls[1].pid);
 
   warnings.restore();
   sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+}
+
+// ===================== (5b) card bab0e772's own regression guard: a FORCED wedge-kill against the
+// drift-restarted child must NOT inflate the ledger when healthProbeWedgeKillEnabled:false is set —
+// the exact fix scenario (5) relies on =====================
+{
+  const homeDir = path.join(tmpHome, "drift-wedge-guard-home");
+  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
+  const wedgeFile = path.join(tmpHome, "drift-wedge-guard-flag");
+  if (fs.existsSync(wedgeFile)) fs.rmSync(wedgeFile);
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "build-old";
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-new";
+  // The env var must be set BEFORE start() so every spawned/respawned child inherits it at spawn time
+  // (child_process.spawn snapshots the parent's env at spawn, not live) — but the fixture checks the
+  // FILE's existence live, per-request (its own header comment), so setting the var now while the file
+  // itself doesn't exist yet leaves the initial spawn AND the drift-restarted spawn healthy; only
+  // creating the file later, once the drift-restarted child is confirmed up, arms the wedge against
+  // whichever child is live at that moment — this is what lets the forced condition land on the SAME
+  // child card bab0e772's real specimen hit, not the pre-drift one.
+  process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE = wedgeFile;
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    // Same file-usual 300/180/3 as scenario (5) above — deliberately NOT padded, so this genuinely
+    // exercises the SEAM rather than a widened margin. healthProbeWedgeKillEnabled:false is the exact
+    // fix scenario (5) relies on; this scenario is its regression guard. If that gate is ever removed or
+    // broken, the forced wedge below reproduces card bab0e772's real specimen (gate `a053812a`: 2
+    // spurious wedge-kills, ledger inflated to 4) instead of staying at 2, and this check() fails.
+    //
+    // @decision bab0e772 — do not "fix" a future red here by widening these three or by removing the
+    // forced wedge; that would rebuild the exact blind spot this scenario exists to catch.
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3,
+    healthProbeWedgeKillEnabled: false,
+    versionProbeTimeoutMs: 2000,
+    driftStabilityMs: 500,
+  });
+  await sup.start(["/fake/repo/drift-wedge-guard"]);
+
+  // Wait for the intended drift restart (spawn #2) to land, settle to a stable read (progress-keyed, not
+  // a fixed sleep — same waitForStableCount idiom as scenario (5) above), THEN arm the wedge against
+  // whichever child is now live.
+  await waitForCompletedCondition(() => readServeCalls(callsFile).length >= 2, () => sup.getCompletedProbeTickCount());
+  await waitForStableCount(() => readServeCalls(callsFile).length, () => sup.getCompletedProbeTickCount());
+  check("(5b) setup: the drift restart landed before the forced wedge is armed (exactly 2 spawns so far)",
+    readServeCalls(callsFile).length === 2);
+  fs.writeFileSync(wedgeFile, "1"); // NOW wedge the live (drift-restarted) child's /graph/health
+
+  // settleTicks:5 gives 3 consecutive probe ticks (the failure threshold) plus a real settle margin —
+  // comfortably enough for a forced wedge to manifest a kill if the gate were broken, while staying
+  // progress-keyed rather than a guessed wall-clock duration.
+  await waitForStableCount(() => readServeCalls(callsFile).length, () => sup.getCompletedProbeTickCount(), { settleTicks: 5 });
+  check("(5b) a forced wedge against the drift-restarted child, with healthProbeWedgeKillEnabled:false, does NOT inflate the ledger (still exactly 2 spawns on record)",
+    readServeCalls(callsFile).length === 2);
+
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
   delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
   delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
 }

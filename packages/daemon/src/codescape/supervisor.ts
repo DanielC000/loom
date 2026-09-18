@@ -167,6 +167,20 @@ export interface CodescapeSupervisorOpts {
   healthProbeTimeoutMs?: number;
   /** Test seam: override {@link DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD}. */
   healthProbeFailureThreshold?: number;
+  /**
+   * Test-only seam, default `true`. Production NEVER sets this. Set `false` only in a scenario whose OWN
+   * subject is orthogonal to WEDGE detection (e.g. a build-drift restart test) — the probe tick itself
+   * keeps running (checkBuildDrift only ever runs off a SUCCESSFUL probe response, so disarming the
+   * whole timer would break drift detection too, not just wedge-kills); this flag gates ONLY the
+   * consecutive-failure counting and the resulting kill in {@link probeHealth}'s no-answer branch, so an
+   * unrelated wedge-detection kill can't inject a spurious extra spawn into an exact-spawn-count
+   * assertion.
+   *
+   * @decision bab0e772 — do not achieve the same effect by widening healthProbeIntervalMs /
+   * healthProbeFailureThreshold to a huge number instead of this flag; that reads as a timeout fix, not
+   * an intentional opt-out, and the next reader can't tell the two apart.
+   */
+  healthProbeWedgeKillEnabled?: boolean;
   /** Test seam: shrink/lengthen {@link DEFAULT_VERSION_PROBE_TIMEOUT_MS}. */
   versionProbeTimeoutMs?: number;
   /** Test seam: override {@link DEFAULT_VERSION_PROBE_MAX_ATTEMPTS}. */
@@ -494,6 +508,7 @@ export class CodescapeSupervisor {
   private readonly healthProbeIntervalMs: number;
   private readonly healthProbeTimeoutMs: number;
   private readonly healthProbeFailureThreshold: number;
+  private readonly healthProbeWedgeKillEnabled: boolean;
   private readonly versionProbeTimeoutMs: number;
   private readonly versionProbeMaxAttempts: number;
   private readonly versionProbeRetryDelayMs: number;
@@ -699,6 +714,7 @@ export class CodescapeSupervisor {
     this.healthProbeIntervalMs = opts?.healthProbeIntervalMs ?? DEFAULT_HEALTH_PROBE_INTERVAL_MS;
     this.healthProbeTimeoutMs = opts?.healthProbeTimeoutMs ?? DEFAULT_HEALTH_PROBE_TIMEOUT_MS;
     this.healthProbeFailureThreshold = opts?.healthProbeFailureThreshold ?? DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD;
+    this.healthProbeWedgeKillEnabled = opts?.healthProbeWedgeKillEnabled ?? true;
     this.versionProbeTimeoutMs = opts?.versionProbeTimeoutMs ?? DEFAULT_VERSION_PROBE_TIMEOUT_MS;
     this.versionProbeMaxAttempts = opts?.versionProbeMaxAttempts ?? DEFAULT_VERSION_PROBE_MAX_ATTEMPTS;
     this.versionProbeRetryDelayMs = opts?.versionProbeRetryDelayMs ?? DEFAULT_VERSION_PROBE_RETRY_DELAY_MS;
@@ -1279,6 +1295,10 @@ export class CodescapeSupervisor {
         }
         return;
       }
+      // test seam (bab0e772) — the finally block below still runs on this early return and increments
+      // completedProbeTicks, so waitForStableCount still advances; only the failure counting and kill
+      // below it are disarmed.
+      if (!this.healthProbeWedgeKillEnabled) return;
       this.consecutiveHealthFailures++;
       if (this.consecutiveHealthFailures < this.healthProbeFailureThreshold) return;
       console.warn(`[codescape] serve health probe failed ${this.consecutiveHealthFailures}x consecutively (alive but unresponsive) — killing for restart`);
