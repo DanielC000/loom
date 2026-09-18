@@ -3,10 +3,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // onRequest hook in gateway/server.ts. Ships INERT: the hook only exists when a non-loopback bind is
 // configured (remoteAccess.enabled && bindHost non-loopback), which is never true by default.
 // HERMETIC + CLAUDE-FREE + NETWORK-FREE (Db + buildServer via app.inject, like csrf-rebind.mjs). Proves:
-//   1. routeTier default-deny is TOTAL against the REAL registered route surface: every one of the
-//      method+pattern combos the gateway actually registers (captured via app.printRoutes) classifies
-//      Tier-0 EXCEPT the exact, explicit Tier-1 allowlist — so a route added later is Tier-0 unless someone
-//      deliberately allowlists it.
+//   1. routeTier default-deny is TOTAL against the REAL registered route surface: every method+pattern
+//      combo the gateway actually registers is derived LIVE from the real Fastify router (never a hand-
+//      maintained snapshot). Card 3c708c30 found the OLD hand-copied `ALL_ROUTES` array had drifted —
+//      three real routes (/api/setup/project-init, /api/setup/templates, /api/setup/templates/apply)
+//      weren't in it at all, and this file's own header claimed `app.printRoutes` backed it when that
+//      call never actually ran (the capture was hand-typed once and never re-verified). This LIVE
+//      derivation walks the real Fastify router's route table directly (see `liveRoutesOf` below) rather
+//      than parsing `printRoutes`'s pretty-printed tree text — that text merges shared path PREFIXES at
+//      arbitrary character boundaries (e.g. "test" + "ing" => "testing" with no separator), not just path
+//      segments, making it fragile to reconstruct exact {method, pattern} pairs from; walking the
+//      router's own `.routes` array gives those pairs directly and exactly. Anything not the exact,
+//      explicit Tier-1/Tier-2 allowlist is Tier-0 — so a route added later is Tier-0 unless someone
+//      deliberately allowlists it, AND is automatically covered by this check without anyone touching a
+//      hand-maintained route list.
 //   2. remoteAccess DISABLED (default): the hook is never even registered — a "remote-looking" request
 //      (simulated remoteAddress) to a writer route behaves exactly as today (200, byte-identical).
 //   3. remoteAccess ENABLED + a non-loopback bindHost:
@@ -27,6 +37,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import Fastify from "fastify";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
@@ -48,177 +60,6 @@ const { routeTier, selectWsSubprotocol, resolveWsSubprotocolToken, WS_GENERIC_SU
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
-
-// --- (1) routeTier vs. the REAL registered route surface -------------------------------------------
-// Captured once via a throwaway buildServer + app.printRoutes({commonPrefix:false}) and hand-verified
-// against the task's Tier-1 spec (a matching pure-function list also lives in trust-tier.ts). HEAD/
-// OPTIONS/TRACE are Fastify auto-added siblings of GET, not distinct handlers, so they're excluded here —
-// same reasoning the hook itself doesn't need to special-case them (a HEAD probe of a Tier-1 GET is
-// itself intended to be Tier-1; a HEAD/OPTIONS of a Tier-0 route is intended to stay Tier-0).
-const ALL_ROUTES = [
-  ["GET", "*"],
-  ["DELETE", "/api/agents/:id"], ["POST", "/api/agents/:id"],
-  ["GET", "/api/agents/:id/sessions"], ["POST", "/api/agents/:id/sessions"],
-  ["GET", "/api/archived-sessions"], ["GET", "/api/archived-sessions/:id"],
-  ["GET", "/api/audit/diff"], ["GET", "/api/audit/session/:id"], ["GET", "/api/audit/wave/:managerId"],
-  ["GET", "/api/capabilities"], ["POST", "/api/capabilities"], ["DELETE", "/api/capabilities/:id"],
-  ["DELETE", "/api/companion/:sessionId/grants"], ["GET", "/api/companion/:sessionId/grants"],
-  ["POST", "/api/companion/:sessionId/grants"], ["PUT", "/api/companion/:sessionId/grants"],
-  ["POST", "/api/companion/:sessionId/upgrade"],
-  ["GET", "/api/companion/allowed-senders"], ["POST", "/api/companion/allowed-senders"],
-  ["DELETE", "/api/companion/allowed-senders/:id"],
-  ["GET", "/api/companion/bindings"], ["POST", "/api/companion/bindings"],
-  ["DELETE", "/api/companion/bindings/:sessionId"],
-  ["GET", "/api/companion/config"], ["POST", "/api/companion/config"],
-  ["DELETE", "/api/companion/config/:sessionId"], ["GET", "/api/companion/config/:sessionId"],
-  ["PUT", "/api/companion/config/:sessionId"],
-  ["GET", "/api/companion/conversations/:sessionId"], ["GET", "/api/companion/conversations/:sessionId/:seq"],
-  ["DELETE", "/api/companion/home"], ["GET", "/api/companion/home"], ["PUT", "/api/companion/home"],
-  ["GET", "/api/companion/:sessionId/lead-mode"], ["PUT", "/api/companion/:sessionId/lead-mode"],
-  ["GET", "/api/companion/memory/:sessionId"],
-  ["DELETE", "/api/companion/memory/:sessionId/:name"], ["GET", "/api/companion/memory/:sessionId/:name"],
-  ["GET", "/api/companion/messages/:sessionId"],
-  ["POST", "/api/companion/pairing"],
-  ["GET", "/api/companion/prompt/:sessionId"], ["PUT", "/api/companion/prompt/:sessionId"],
-  ["POST", "/api/companion/provision"],
-  ["GET", "/api/companion/reminders/:sessionId"], ["DELETE", "/api/companion/reminders/:sessionId/:reminderId"],
-  ["GET", "/api/companion/restricted-tools/:sessionId"], ["PUT", "/api/companion/restricted-tools/:sessionId"],
-  ["GET", "/api/companion/skills/:sessionId"],
-  ["DELETE", "/api/companion/skills/:sessionId/:name"], ["GET", "/api/companion/skills/:sessionId/:name"],
-  ["GET", "/api/companion/voice-prefs/:sessionId"],
-  ["GET", "/api/connections"], ["POST", "/api/connections"], ["DELETE", "/api/connections/:id"],
-  ["POST", "/api/connections/:id/oauth/consent"], ["POST", "/api/connections/oauth"],
-  ["DELETE", "/api/gateway-tokens/:tokenId"], ["GET", "/api/gateway-tokens"], ["POST", "/api/gateway-tokens"],
-  ["POST", "/api/gateway-tokens/:tokenId"], ["POST", "/api/gateway-tokens/:tokenId/rotate"],
-  ["GET", "/api/gates/active"], ["GET", "/api/gates/history"],
-  ["DELETE", "/api/keys/:keyId"], ["POST", "/api/keys/:keyId"],
-  ["POST", "/api/keys/:keyId/kill"], ["POST", "/api/keys/:keyId/rotate"],
-  ["GET", "/api/orchestration/events"], ["POST", "/api/orchestration/kill"],
-  ["POST", "/api/orchestration/pause"], ["POST", "/api/orchestration/resume"], ["GET", "/api/orchestration/status"],
-  ["GET", "/api/platform/config"], ["PATCH", "/api/platform/config"], ["GET", "/api/platform/config/history"], ["GET", "/api/platform/home"],
-  ["GET", "/api/poll-jobs"], ["POST", "/api/poll-jobs"], ["DELETE", "/api/poll-jobs/:id"], ["POST", "/api/poll-jobs/:id"],
-  ["GET", "/api/preset-prompt-suggestions"], ["POST", "/api/preset-prompt-suggestions"],
-  ["POST", "/api/preset-prompt-suggestions/:id/adopt"], ["POST", "/api/preset-prompt-suggestions/:id/dismiss"],
-  ["GET", "/api/preset-prompts"], ["POST", "/api/preset-prompts"],
-  ["DELETE", "/api/preset-prompts/:id"], ["PUT", "/api/preset-prompts/:id"],
-  ["GET", "/api/profiles"], ["POST", "/api/profiles"], ["DELETE", "/api/profiles/:id"], ["GET", "/api/profiles/:id"],
-  ["PUT", "/api/profiles/:id"], ["POST", "/api/profiles/:id/adopt"], ["GET", "/api/profiles/:id/merge-preview"],
-  ["POST", "/api/profiles/:id/reset"], ["GET", "/api/profiles/:id/update-diff"],
-  ["GET", "/api/projects"], ["POST", "/api/projects"], ["DELETE", "/api/projects/:id"], ["PATCH", "/api/projects/:id"],
-  ["GET", "/api/projects/:id/agents"], ["POST", "/api/projects/:id/agents"], ["GET", "/api/projects/:id/archive"],
-  ["GET", "/api/projects/:id/board"], ["PUT", "/api/projects/:id/columns"], ["PATCH", "/api/projects/:id/config"],
-  ["GET", "/api/projects/:id/config/history"],
-  ["POST", "/api/projects/:id/git/branch"], ["GET", "/api/projects/:id/git/branches"],
-  ["POST", "/api/projects/:id/git/checkout"], ["POST", "/api/projects/:id/git/commit"],
-  ["GET", "/api/projects/:id/git/log"], ["POST", "/api/projects/:id/git/push"],
-  ["GET", "/api/projects/:id/git/reference-repos/:index/log"],
-  ["GET", "/api/projects/:id/git/repos/:index/log"],
-  ["GET", "/api/projects/:id/keys"], ["POST", "/api/projects/:id/keys"],
-  ["DELETE", "/api/projects/:id/permanent"], ["POST", "/api/projects/:id/restore"],
-  ["GET", "/api/projects/:id/run-events"], ["GET", "/api/projects/:id/runs"], ["GET", "/api/projects/:id/runs/:runId"],
-  ["POST", "/api/projects/:id/runs/:runId/cancel"], ["GET", "/api/projects/:id/runs/:runId/transcript"],
-  ["GET", "/api/projects/:id/tasks"], ["POST", "/api/projects/:id/tasks"],
-  ["GET", "/api/projects/:id/vault"], ["DELETE", "/api/projects/:id/vault/file"],
-  ["GET", "/api/projects/:id/vault/file"], ["POST", "/api/projects/:id/vault/file"], ["PUT", "/api/projects/:id/vault/file"],
-  ["GET", "/api/projects/:id/vault/raw"], ["GET", "/api/projects/archived"],
-  ["GET", "/api/python/provisioning"], ["POST", "/api/python/provisioning/retry"],
-  ["GET", "/api/questions"], ["GET", "/api/questions/:id"], ["POST", "/api/questions/:id/acknowledge"],
-  ["POST", "/api/questions/:id/answer"], ["POST", "/api/questions/:id/dismiss"],
-  ["POST", "/api/runs"], ["GET", "/api/runs/:id"], ["POST", "/api/runs/:id/cancel"],
-  ["GET", "/api/schedules"], ["GET", "/api/schedules/history"], ["POST", "/api/schedules"], ["DELETE", "/api/schedules/:id"],
-  ["POST", "/api/schedules/:id"], ["POST", "/api/schedules/preview"],
-  ["GET", "/api/sessions"], ["DELETE", "/api/sessions/:id/archive"], ["GET", "/api/sessions/:id/diff"],
-  ["POST", "/api/sessions/:id/end"], ["POST", "/api/sessions/:id/fork"], ["POST", "/api/sessions/:id/input"],
-  ["POST", "/api/sessions/:id/merge"], ["GET", "/api/sessions/:id/queue"], ["PATCH", "/api/sessions/:id/queue"],
-  ["DELETE", "/api/sessions/:id/queue/:entryId"], ["PATCH", "/api/sessions/:id/queue/:entryId"],
-  ["POST", "/api/sessions/:id/rate-limit/clear"], ["POST", "/api/sessions/:id/restore"],
-  ["POST", "/api/sessions/:id/resume"], ["POST", "/api/sessions/:id/stop"], ["GET", "/api/sessions/:id/transcript"],
-  ["GET", "/api/sessions/:id/wakes"], ["DELETE", "/api/sessions/:id/wakes/:wakeId"],
-  ["GET", "/api/setup/home"],
-  ["GET", "/api/skills"], ["POST", "/api/skills"], ["DELETE", "/api/skills/:name"], ["GET", "/api/skills/:name"],
-  ["PUT", "/api/skills/:name"], ["POST", "/api/skills/:name/adopt"], ["GET", "/api/skills/:name/merge-preview"],
-  ["POST", "/api/skills/:name/publish"], ["POST", "/api/skills/:name/reset"], ["GET", "/api/skills/:name/update-diff"],
-  ["DELETE", "/api/tasks/:id"], ["GET", "/api/tasks/:id"], ["POST", "/api/tasks/:id"],
-  ["GET", "/api/terminals"], ["POST", "/api/terminals"], ["DELETE", "/api/terminals/:id"], ["GET", "/api/terminals/default-shell"],
-  ["GET", "/api/update-status"], ["POST", "/api/usage/clear-hold"],
-  ["GET", "/api/usage/history"], ["GET", "/api/usage/limits"], ["GET", "/api/usage/sessions/history"],
-  ["GET", "/api/version"],
-  ["GET", "/api/webhook-endpoints"], ["POST", "/api/webhook-endpoints"],
-  ["DELETE", "/api/webhook-endpoints/:id"], ["POST", "/api/webhook-endpoints/:id/enabled"],
-  ["POST", "/hooks/:endpointPath"],
-  ["POST", "/internal/hook"], ["POST", "/internal/shutdown"],
-  ["GET", "/internal/test/projects/:id/raw-config"],
-  ["POST", "/internal/test/seed"], ["POST", "/internal/update"],
-  ["DELETE", "/mcp-audit/:sessionId"], ["GET", "/mcp-audit/:sessionId"], ["PATCH", "/mcp-audit/:sessionId"],
-  ["POST", "/mcp-audit/:sessionId"], ["PUT", "/mcp-audit/:sessionId"],
-  ["DELETE", "/mcp-orch/:sessionId"], ["GET", "/mcp-orch/:sessionId"], ["PATCH", "/mcp-orch/:sessionId"],
-  ["POST", "/mcp-orch/:sessionId"], ["PUT", "/mcp-orch/:sessionId"],
-  ["DELETE", "/mcp-platform/:sessionId"], ["GET", "/mcp-platform/:sessionId"], ["PATCH", "/mcp-platform/:sessionId"],
-  ["POST", "/mcp-platform/:sessionId"], ["PUT", "/mcp-platform/:sessionId"],
-  ["DELETE", "/mcp-run/:sessionId"], ["GET", "/mcp-run/:sessionId"], ["PATCH", "/mcp-run/:sessionId"],
-  ["POST", "/mcp-run/:sessionId"], ["PUT", "/mcp-run/:sessionId"],
-  ["DELETE", "/mcp-setup/:sessionId"], ["GET", "/mcp-setup/:sessionId"], ["PATCH", "/mcp-setup/:sessionId"],
-  ["POST", "/mcp-setup/:sessionId"], ["PUT", "/mcp-setup/:sessionId"],
-  ["DELETE", "/mcp-user-audit/:sessionId"], ["GET", "/mcp-user-audit/:sessionId"], ["PATCH", "/mcp-user-audit/:sessionId"],
-  ["POST", "/mcp-user-audit/:sessionId"], ["PUT", "/mcp-user-audit/:sessionId"],
-  ["DELETE", "/mcp/:sessionId"], ["GET", "/mcp/:sessionId"], ["PATCH", "/mcp/:sessionId"],
-  ["POST", "/mcp/:sessionId"], ["PUT", "/mcp/:sessionId"],
-  ["GET", "/oauth/callback"],
-  ["GET", "/ws/companion/:sessionId"], ["GET", "/ws/fleet"], ["GET", "/ws/term/:sessionId"],
-];
-
-const EXPECTED_TIER_1 = new Set([
-  "GET /api/projects", "GET /api/sessions", "GET /api/sessions/:id/transcript", "GET /api/sessions/:id/diff",
-  "GET /api/projects/:id/board", "GET /api/projects/:id/tasks", "GET /api/projects/:id/agents",
-  "GET /api/agents/:id/sessions", "GET /api/sessions/:id/queue", "GET /api/sessions/:id/wakes",
-  "GET /api/audit/session/:id", "GET /api/audit/wave/:managerId", "GET /api/audit/diff",
-  "GET /api/gates/active", "GET /api/gates/history",
-  "GET /api/usage/limits", "GET /api/usage/history", "GET /api/usage/sessions/history",
-  "GET /api/projects/:id/vault", "GET /api/projects/:id/vault/file", "GET /api/projects/:id/vault/raw",
-  "GET /api/questions", "GET /api/questions/:id",
-  "POST /api/questions/:id/answer", "POST /api/questions/:id/dismiss", "POST /api/sessions/:id/input", "POST /api/sessions/:id/end",
-  "POST /api/sessions/:id/stop", "POST /api/sessions/:id/resume", "POST /api/sessions/:id/rate-limit/clear",
-  "GET /ws/term/:sessionId", "GET /ws/companion/:sessionId", "GET /ws/fleet",
-  // Access-story Phase C (card 6bc02f50) follow-up on 77ade04c: reads a remote read-only UI needs.
-  "GET /api/version", "GET /api/update-status", "GET /api/orchestration/status", "GET /api/orchestration/events",
-  "GET /api/schedules/history",
-  "GET /api/projects/:id/git/log", "GET /api/projects/:id/git/branches",
-  "GET /api/projects/:id/git/reference-repos/:index/log",
-  "GET /api/projects/:id/git/repos/:index/log",
-  "GET /api/profiles", "GET /api/profiles/:id", "GET /api/skills", "GET /api/skills/:name",
-  "GET /api/archived-sessions", "GET /api/archived-sessions/:id", "GET /api/projects/:id/archive", "GET /api/projects/archived",
-  "GET /api/companion/:sessionId/grants", "GET /api/companion/allowed-senders", "GET /api/companion/bindings",
-  "GET /api/companion/config", "GET /api/companion/config/:sessionId",
-  "GET /api/companion/conversations/:sessionId", "GET /api/companion/conversations/:sessionId/:seq",
-  "GET /api/companion/home", "GET /api/companion/:sessionId/lead-mode",
-  "GET /api/companion/memory/:sessionId", "GET /api/companion/memory/:sessionId/:name",
-  "GET /api/companion/messages/:sessionId", "GET /api/companion/prompt/:sessionId",
-  "GET /api/companion/reminders/:sessionId", "GET /api/companion/restricted-tools/:sessionId",
-  "GET /api/companion/skills/:sessionId", "GET /api/companion/skills/:sessionId/:name",
-  "GET /api/companion/voice-prefs/:sessionId",
-]);
-
-// Tier 2 (agent-tooling epic P5b, card 8fbedcac): the ONE fixed webhook-ingress pattern — PUBLIC,
-// signature-gated, deliberately NOT Tier 1 (it never accepts the gateway token).
-const EXPECTED_TIER_2 = new Set([
-  "POST /hooks/:endpointPath",
-]);
-
-check(`(1) TOTAL real registered routes classify correctly (${ALL_ROUTES.length} checked, ${EXPECTED_TIER_1.size} expected Tier-1, ${EXPECTED_TIER_2.size} expected Tier-2)`,
-  ALL_ROUTES.every(([method, pattern]) => {
-    const key = `${method} ${pattern}`;
-    const expected = EXPECTED_TIER_1.has(key) ? 1 : EXPECTED_TIER_2.has(key) ? 2 : 0;
-    const actual = routeTier(method, pattern);
-    if (actual !== expected) { console.log(`  MISMATCH ${key}: expected tier ${expected}, got ${actual}`); return false; }
-    return true;
-  }));
-check("(1b) every EXPECTED_TIER_1 entry is actually a real registered route (no stale/typo'd allowlist entry)",
-  [...EXPECTED_TIER_1].every((key) => ALL_ROUTES.some(([m, p]) => `${m} ${p}` === key)));
-check("(1c) every EXPECTED_TIER_2 entry is actually a real registered route (no stale/typo'd allowlist entry)",
-  [...EXPECTED_TIER_2].every((key) => ALL_ROUTES.some(([m, p]) => `${m} ${p}` === key)));
-check("(1d) the webhook-endpoints ADMIN surface (a writer, not the ingress route) stays Tier-0 (loopback-only)",
-  routeTier("GET", "/api/webhook-endpoints") === 0 && routeTier("POST", "/api/webhook-endpoints") === 0
-  && routeTier("DELETE", "/api/webhook-endpoints/:id") === 0 && routeTier("POST", "/api/webhook-endpoints/:id/enabled") === 0);
 
 // --- (4) selectWsSubprotocol (the wired-in `handleProtocols`) + resolveWsSubprotocolToken — pure unit ----
 // checks against the actual functions gateway/server.ts wires in, so the assertion holds regardless of
@@ -244,7 +85,44 @@ check("(4) resolveWsSubprotocolToken: generic offered alone (no bearer) → no-t
 check("(4) resolveWsSubprotocolToken: no header at all → no-token",
   resolveWsSubprotocolToken(undefined).outcome === "no-token");
 
-// --- (2) remoteAccess DISABLED (default): the hook never registers; a "remote" request to a writer still runs ---
+// --- LIVE route-surface derivation (card 3c708c30) ---------------------------------------------------
+// find-my-way isn't a direct daemon dependency (only fastify is), so it's resolved the SAME way fastify
+// resolves it internally — anchored at fastify's own package location via `createRequire` — guaranteeing
+// this patches the identical prototype object fastify's own router construction uses, not some other
+// copy that a plain `import("find-my-way")` from this file's own location might miss entirely (or worse,
+// silently resolve to a different installed copy).
+const FindMyWay = createRequire(import.meta.resolve("fastify"))("find-my-way");
+let capturedRouter = null;
+const originalRouterOn = FindMyWay.prototype.on;
+FindMyWay.prototype.on = function capturingOn(...args) {
+  capturedRouter = this; // find-my-way's own Router instance — its `.routes` array is the ground truth
+  return originalRouterOn.apply(this, args);
+};
+
+/**
+ * Registered {method, pattern} pairs the given find-my-way Router instance actually holds, deduped and
+ * HEAD/OPTIONS/TRACE-filtered (Fastify auto-added siblings of GET, not distinct handlers — same reasoning
+ * the onRequest hook itself doesn't special-case them: a HEAD probe of a Tier-1 GET is itself intended to
+ * be Tier-1; a HEAD/OPTIONS of a Tier-0 route is intended to stay Tier-0). Uses `route.path` — NOT
+ * `route.pattern`, which find-my-way mutates into its OWN internal tree-matching shorthand that strips
+ * param names as it walks the string (e.g. "/hooks/:endpointPath" ends up as "/hooks/:") — `route.path` is
+ * the literal, unmutated string passed to `.on()`, i.e. the real registered Fastify pattern.
+ */
+function liveRoutesOf(router) {
+  const seen = new Set();
+  const routes = [];
+  for (const r of router.routes) {
+    if (r.method === "HEAD" || r.method === "OPTIONS" || r.method === "TRACE") continue;
+    const key = `${r.method} ${r.path}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    routes.push([r.method, r.path]);
+  }
+  routes.sort(([am, ap], [bm, bp]) => (am === bm ? ap.localeCompare(bp) : am.localeCompare(bm)));
+  return routes;
+}
+
+// --- (1) routeTier vs. the REAL, LIVE-derived registered route surface -------------------------------
 let killCallsOff = 0;
 const dbOff = new Db(path.join(TMP, "loom-off.db"));
 const appOff = await buildServer({
@@ -253,6 +131,116 @@ const appOff = await buildServer({
   requestShutdown: () => {},
 });
 try {
+  if (!capturedRouter) {
+    throw new Error("find-my-way's Router.prototype.on was never observed while building the server — the " +
+      "live derivation's own interception is broken, which would otherwise make every check below pass " +
+      "VACUOUSLY over an empty route list");
+  }
+  const LIVE_ROUTES = liveRoutesOf(capturedRouter);
+
+  // (1-sanity) fail loudly if the derivation mechanism's own scope assumption stops holding, rather than
+  // silently under-covering the way the old hand-copied ALL_ROUTES did. A floor (not an exact count) —
+  // the real count drifts as routes are added — plus a known-stable landmark route.
+  check(`(1-sanity) the live derivation observed a non-trivial route population (found ${LIVE_ROUTES.length}, floor 200)`,
+    LIVE_ROUTES.length >= 200);
+  check("(1-sanity) the live derivation includes a known-stable landmark route (GET /api/projects) — absence would mean the interception itself silently broke",
+    LIVE_ROUTES.some(([m, p]) => m === "GET" && p === "/api/projects"));
+
+  // (1e) LIVENESS demo: a brand-new route, never hardcoded anywhere in this file or in trust-tier.ts,
+  // registered on a throwaway fixture app AFTER the LIVE_ROUTES snapshot above was taken, must appear in
+  // the SAME derivation mechanism run again — proving this reads the router live, not a frozen snapshot
+  // (the exact defect this card fixes one level up, at the ALL_ROUTES-was-a-stale-hand-capture level).
+  {
+    const fixtureApp = Fastify({ logger: false });
+    fixtureApp.get("/api/fixture/trust-tier-liveness-demo", async () => ({}));
+    const fixtureRoutes = liveRoutesOf(capturedRouter);
+    check("(1e) a brand-new, never-hardcoded route appears in the SAME live derivation mechanism automatically",
+      fixtureRoutes.some(([m, p]) => m === "GET" && p === "/api/fixture/trust-tier-liveness-demo"));
+    await fixtureApp.close();
+  }
+
+  const EXPECTED_TIER_1 = new Set([
+    "GET /api/projects", "GET /api/sessions", "GET /api/sessions/:id/transcript", "GET /api/sessions/:id/diff",
+    "GET /api/projects/:id/board", "GET /api/projects/:id/tasks", "GET /api/projects/:id/agents",
+    "GET /api/agents/:id/sessions", "GET /api/sessions/:id/queue", "GET /api/sessions/:id/wakes",
+    "GET /api/audit/session/:id", "GET /api/audit/wave/:managerId", "GET /api/audit/diff",
+    "GET /api/gates/active", "GET /api/gates/history",
+    "GET /api/usage/limits", "GET /api/usage/history", "GET /api/usage/sessions/history",
+    "GET /api/projects/:id/vault", "GET /api/projects/:id/vault/file", "GET /api/projects/:id/vault/raw",
+    "GET /api/questions", "GET /api/questions/:id",
+    "POST /api/questions/:id/answer", "POST /api/questions/:id/dismiss", "POST /api/sessions/:id/input", "POST /api/sessions/:id/end",
+    "POST /api/sessions/:id/stop", "POST /api/sessions/:id/resume", "POST /api/sessions/:id/rate-limit/clear",
+    "GET /ws/term/:sessionId", "GET /ws/companion/:sessionId", "GET /ws/fleet",
+    // Access-story Phase C (card 6bc02f50) follow-up on 77ade04c: reads a remote read-only UI needs.
+    "GET /api/version", "GET /api/update-status", "GET /api/orchestration/status", "GET /api/orchestration/events",
+    "GET /api/schedules/history",
+    "GET /api/projects/:id/git/log", "GET /api/projects/:id/git/branches",
+    "GET /api/projects/:id/git/reference-repos/:index/log",
+    "GET /api/projects/:id/git/repos/:index/log",
+    "GET /api/profiles", "GET /api/profiles/:id", "GET /api/skills", "GET /api/skills/:name",
+    "GET /api/archived-sessions", "GET /api/archived-sessions/:id", "GET /api/projects/:id/archive", "GET /api/projects/archived",
+    "GET /api/companion/:sessionId/grants", "GET /api/companion/allowed-senders", "GET /api/companion/bindings",
+    "GET /api/companion/config", "GET /api/companion/config/:sessionId",
+    "GET /api/companion/conversations/:sessionId", "GET /api/companion/conversations/:sessionId/:seq",
+    "GET /api/companion/home", "GET /api/companion/:sessionId/lead-mode",
+    "GET /api/companion/memory/:sessionId", "GET /api/companion/memory/:sessionId/:name",
+    "GET /api/companion/messages/:sessionId", "GET /api/companion/prompt/:sessionId",
+    "GET /api/companion/reminders/:sessionId", "GET /api/companion/restricted-tools/:sessionId",
+    "GET /api/companion/skills/:sessionId", "GET /api/companion/skills/:sessionId/:name",
+    "GET /api/companion/voice-prefs/:sessionId",
+    // Card 3c708c30 sync fix: these three are ALREADY Tier-1 in trust-tier.ts's real TIER_1_ROUTES (the
+    // per-project memory read, and the companion reply-health telemetry from card 8bda9fc6) but were
+    // missing from this test's OWN spec — the old hand-typed ALL_ROUTES never included these routes at
+    // all, so check (1) never actually compared them against anything. Once the route surface is derived
+    // LIVE (above), leaving these out would make (1) fail for real (expected 0, actual 1) — this is what
+    // proves the completeness check now has teeth it didn't have before.
+    "GET /api/projects/:id/memory", "GET /api/companion/status", "GET /api/companion/status/:sessionId",
+  ]);
+
+  // Tier 2 (agent-tooling epic P5b, card 8fbedcac): the ONE fixed webhook-ingress pattern — PUBLIC,
+  // signature-gated, deliberately NOT Tier 1 (it never accepts the gateway token).
+  const EXPECTED_TIER_2 = new Set([
+    "POST /hooks/:endpointPath",
+  ]);
+
+  /** Pure comparison, decoupled from any real server — see the (1-control) positive control below. */
+  function findTierMismatches(routes, tierFn, tier1Set, tier2Set) {
+    const mismatches = [];
+    for (const [method, pattern] of routes) {
+      const key = `${method} ${pattern}`;
+      const expected = tier1Set.has(key) ? 1 : tier2Set.has(key) ? 2 : 0;
+      const actual = tierFn(method, pattern);
+      if (actual !== expected) mismatches.push({ key, expected, actual });
+    }
+    return mismatches;
+  }
+
+  // POSITIVE CONTROL: proves findTierMismatches can actually go RED, on a route it has never seen and
+  // that neither allowlist mentions — a `tierFn` that (buggily) tier-1's it must be caught; the SAME
+  // route, correctly fail-closed, must be clean. This is the shape of mismatch (1) below would need to
+  // catch for real: a route with no explicit expectation getting classified as non-zero anyway.
+  {
+    const neverSeenRoute = [["GET", "/api/fixture/never-real-trust-tier-mismatch"]];
+    const buggyTierFn = () => 1;
+    const caught = findTierMismatches(neverSeenRoute, buggyTierFn, new Set(), new Set());
+    check("(1-control) the mismatch detector CATCHES an unlisted route incorrectly classified non-zero",
+      caught.length === 1 && caught[0].expected === 0 && caught[0].actual === 1);
+    const clean = findTierMismatches(neverSeenRoute, () => 0, new Set(), new Set());
+    check("(1-control) the SAME route, correctly fail-closed, is clean", clean.length === 0);
+  }
+
+  const mismatches = findTierMismatches(LIVE_ROUTES, routeTier, EXPECTED_TIER_1, EXPECTED_TIER_2);
+  check(`(1) TOTAL live registered routes classify correctly (${LIVE_ROUTES.length} checked, ${EXPECTED_TIER_1.size} expected Tier-1, ${EXPECTED_TIER_2.size} expected Tier-2, offenders: ${mismatches.length === 0 ? "none" : mismatches.map((m) => `${m.key} [expected ${m.expected}, got ${m.actual}]`).join(" | ")})`,
+    mismatches.length === 0);
+  check("(1b) every EXPECTED_TIER_1 entry is actually a real LIVE registered route (no stale/typo'd allowlist entry)",
+    [...EXPECTED_TIER_1].every((key) => LIVE_ROUTES.some(([m, p]) => `${m} ${p}` === key)));
+  check("(1c) every EXPECTED_TIER_2 entry is actually a real LIVE registered route (no stale/typo'd allowlist entry)",
+    [...EXPECTED_TIER_2].every((key) => LIVE_ROUTES.some(([m, p]) => `${m} ${p}` === key)));
+  check("(1d) the webhook-endpoints ADMIN surface (a writer, not the ingress route) stays Tier-0 (loopback-only)",
+    routeTier("GET", "/api/webhook-endpoints") === 0 && routeTier("POST", "/api/webhook-endpoints") === 0
+    && routeTier("DELETE", "/api/webhook-endpoints/:id") === 0 && routeTier("POST", "/api/webhook-endpoints/:id/enabled") === 0);
+
+  // --- (2) remoteAccess DISABLED (default): the hook never registers; a "remote" request to a writer still runs ---
   const r = await appOff.inject({ method: "POST", url: "/api/orchestration/kill", remoteAddress: "203.0.113.5" });
   check("(2) remoteAccess disabled: a 'remote' POST /api/orchestration/kill still runs (200, byte-identical)", r.statusCode === 200 && killCallsOff === 1);
 
@@ -416,6 +404,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — routeTier default-denies every non-listed real route, the hook stays dormant (byte-identical) when remoteAccess is disabled, a loopback request is unchanged when enabled, and a remote request 403s Tier-0 / 401s-then-200s Tier-1 by token."
+  ? "\n✅ ALL PASS — routeTier default-denies every non-listed LIVE-derived route, the hook stays dormant (byte-identical) when remoteAccess is disabled, a loopback request is unchanged when enabled, and a remote request 403s Tier-0 / 401s-then-200s Tier-1 by token."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
