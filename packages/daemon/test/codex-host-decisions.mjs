@@ -14,11 +14,11 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 const {
-  isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, CodexTrustDialogLock,
+  isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, CodexTrustDialogLock,
   codexAsciiFold, codexCharNeedsAsciiFold, codexNfkcFold,
 } = await import("../dist/pty/codex-host.js");
 const {
-  TRUST_DIALOG_MARKER, BUSY_STATUS_MARKER, CODEX_READY_PLACEHOLDER, CODEX_MODEL_LOADED_RE, stripAnsiCsi, normalizeCodexScreenText, hashConfigBefore, diffConfigAfterSpawn,
+  TRUST_DIALOG_MARKER, BUSY_STATUS_MARKER, CODEX_BUSY_MARKER_MAX_CHARS, CODEX_READY_PLACEHOLDER, CODEX_MODEL_LOADED_RE, stripAnsiCsi, normalizeCodexScreenText, hashConfigBefore, diffConfigAfterSpawn,
 } = await import("../dist/pty/codex-doctrine.js");
 const fs = await import("node:fs");
 const path = await import("node:path");
@@ -129,6 +129,118 @@ check("DoD-3 no-regression: isCodexBusy still detects the ordinary literal-space
 // CODEX_UPDATE_CHECK_OVERRIDE_ARGS's own doc comment and an unrelated gateway/server.ts hit) — it is
 // suppressed entirely via the per-invocation `-c check_for_update_on_startup=false` config override,
 // never detected-and-answered from screen text, so this exposure class doesn't apply.
+
+// --- scanCodexBusy (card 46ff24ef) — bounded tail carryover closing the busy-marker chunk-straddle gap ---
+// Mirrors worker 5d3ac261's two deterministic, synthetic proofs on the card: (1) a split marker defeats
+// bare isCodexBusy(chunk) but IS caught via the carried-forward tail, with a concatenation control proving
+// the loss is purely a chunking artifact, not a malformed marker; (2) freshness is PRESERVED — busy goes
+// false again within a small, bounded number of subsequent idle chunks, never lingering the way an
+// unbounded accumulation (the rejected fix) was measured to (~8192 bytes / 128 sampled idle chunks).
+
+const REAL_BUSY_MARKER = "Working (12s • esc to interrupt)";
+check(
+  "scanCodexBusy sanity: the real marker in one whole chunk (empty prevTail) reads busy (positive control)",
+  scanCodexBusy("", REAL_BUSY_MARKER).busy === true,
+);
+check(
+  "scanCodexBusy: idle-only screen from a cold start never reports busy (negative control)",
+  scanCodexBusy("", "> Ask Codex to do anything").busy === false,
+);
+check(
+  "scanCodexBusy: title-bar spinner glyph still fires through the carryover wrapper (positive control, unsplit — the far-shorter sibling marker CODEX_BUSY_MARKER_MAX_CHARS is also sized to cover)",
+  scanCodexBusy("", "\x1b]0;⣠ codex\x07").busy === true,
+);
+
+// PROOF 1 mirror — split at two INDEPENDENT interior points, each defeats a single-chunk read but is
+// recovered via the carried-forward tail; the concatenation control proves the loss is a pure chunking
+// artifact of isCodexBusy(chunk) alone, not a malformed marker.
+for (const splitAt of ["esc to interrupt)", "interrupt"]) {
+  const idx = REAL_BUSY_MARKER.indexOf(splitAt);
+  const part1 = REAL_BUSY_MARKER.slice(0, idx);
+  const part2 = REAL_BUSY_MARKER.slice(idx);
+  check(
+    `RED PROOF (pre-fix shape, still true of bare isCodexBusy on either half alone — split before "${splitAt}"): each half alone reads false`,
+    isCodexBusy(part1) === false && isCodexBusy(part2) === false,
+  );
+  check(
+    `concatenation control (split before "${splitAt}"): the two halves joined — what a carryover would scan — fires true, proving the halves aren't individually malformed`,
+    isCodexBusy(part1 + part2) === true,
+  );
+  const step1 = scanCodexBusy("", part1);
+  check(`scanCodexBusy: the first half alone (split before "${splitAt}") does not yet report busy`, step1.busy === false);
+  const step2 = scanCodexBusy(step1.tail, part2);
+  check(
+    `FIX (DoD-1a, split before "${splitAt}"): the bounded tail carried forward from the first chunk lets scanCodexBusy detect the marker once the second chunk arrives, where bare isCodexBusy(chunk) alone could not`,
+    step2.busy === true,
+  );
+  check(
+    `REGRESSION GUARD (split before "${splitAt}"): once the split marker is confirmed, its tail resets to "" — nothing left over to poison a later unrelated chunk`,
+    step2.tail === "",
+  );
+}
+
+// REGRESSION GUARD — caught RED by this card's own verification against the real stateful onData handler
+// (codex-queue-state-machine.mjs's boot-episode scenario), not merely reasoned about: a chunk that is
+// ITSELF a self-contained, complete busy marker (nothing split about it) must NOT poison a later,
+// UNRELATED chunk. The first implementation carried the whole matched marker forward as tail
+// unconditionally, so the NEXT chunk — however unrelated, and however much later it arrived — still
+// spuriously matched, purely because the old marker's own text was still sitting in the carried tail. A
+// one-chunk-wide reincarnation of the "stale match latches busy forever" regression, bounded by CHUNK
+// ARRIVAL rather than by bytes and therefore not bounded by TIME at all.
+{
+  const step1 = scanCodexBusy("", REAL_BUSY_MARKER); // a self-contained match, no split involved
+  check("REGRESSION GUARD setup: a whole marker in one chunk reads busy", step1.busy === true);
+  check("REGRESSION GUARD setup: its tail resets to \"\" immediately (self-contained match, nothing left to stitch)", step1.tail === "");
+  const UNRELATED_CHUNK = "OpenAI Codex (v1.2.3)\n      │ model:     \x1b[3mloading\x1b[23m   /model to change\r";
+  check(
+    "REGRESSION GUARD: a wholly unrelated later chunk (no marker in it at all) does NOT read busy just because the PREVIOUS chunk's fully-matched marker text was carried forward",
+    scanCodexBusy(step1.tail, UNRELATED_CHUNK).busy === false,
+  );
+}
+
+// PROOF 2 mirror — DoD-1(b), the property that matters most: freshness is PRESERVED. After the marker
+// stops, busy must go false again within a small, BOUNDED number of subsequent idle chunks — never
+// lingering the way pointing this at an unbounded accumulation (the rejected fix) was measured to.
+{
+  let tail = "";
+  const primed = scanCodexBusy(tail, REAL_BUSY_MARKER);
+  check("DoD-1(b) setup: the marker fires busy when it first arrives", primed.busy === true);
+  tail = primed.tail;
+
+  // Deliberately LARGER than the whole carryover window, so a single idle chunk is guaranteed to fully
+  // evict any trailing marker fragment from the next scan — the bound this test holds the fix to.
+  const IDLE_CHUNK = "x".repeat(CODEX_BUSY_MARKER_MAX_CHARS * 2);
+  let staleBusyChunks = 0;
+  let wentIdle = false;
+  for (let i = 0; i < 5 && !wentIdle; i++) {
+    const step = scanCodexBusy(tail, IDLE_CHUNK);
+    tail = step.tail;
+    if (step.busy) staleBusyChunks++; else wentIdle = true;
+  }
+  check(
+    "DoD-1(b) FRESHNESS PRESERVED: busy goes false again IMMEDIATELY once the marker stops (the self-contained-match reset means zero lingering, not merely a bounded few chunks — not the unbounded-accumulation regression, which stayed busy for ~8192 bytes of idle output before its cap evicted the stale match)",
+    wentIdle === true && staleBusyChunks === 0,
+  );
+  check(
+    "DoD-1(b), continued: once idle, FURTHER idle chunks stay idle (the carryover window has fully rolled past the old match, not merely paused on it)",
+    scanCodexBusy(tail, IDLE_CHUNK).busy === false,
+  );
+}
+
+// Carryover window itself stays bounded, always — never grows into an accumulation buffer regardless of
+// chunk size.
+check(
+  "scanCodexBusy: a chunk shorter than the carryover bound is carried forward in full (nothing lost, nothing padded)",
+  scanCodexBusy("", "hi").tail === "hi",
+);
+check(
+  "scanCodexBusy: a chunk far larger than the carryover bound still yields a tail capped at CODEX_BUSY_MARKER_MAX_CHARS-1 chars — proves this is a bounded window, not an accumulation buffer",
+  scanCodexBusy("", "y".repeat(5000)).tail.length === CODEX_BUSY_MARKER_MAX_CHARS - 1,
+);
+check(
+  "CODEX_BUSY_MARKER_MAX_CHARS sanity: derived, finite, and comfortably smaller than CODEX_SCREEN_SCAN_CAP (8192) — a freshness read, not an accumulation buffer",
+  Number.isFinite(CODEX_BUSY_MARKER_MAX_CHARS) && CODEX_BUSY_MARKER_MAX_CHARS > 0 && CODEX_BUSY_MARKER_MAX_CHARS < 200,
+);
 
 // --- mcpServersToCodexArgs ---------------------------------------------------------------------------
 

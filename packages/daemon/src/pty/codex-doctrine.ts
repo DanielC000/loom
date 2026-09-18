@@ -65,6 +65,23 @@ export const BUSY_STATUS_MARKER = /Working \(\d+s.*esc to interrupt\)/;
 export const BUSY_TITLE_SPINNER_RE = /\x1b\]0;[⠀-⣿]/;
 
 /**
+ * The bounded tail-carryover window `codex-host.ts#scanCodexBusy` keeps between chunks: the two LITERAL
+ * segments of {@link BUSY_STATUS_MARKER} plus a bounded ALLOWANCE for each of its two genuinely unbounded
+ * segments (`\d+` and `.*`, which admit arbitrary length) — those two allowances are judgement calls about
+ * real rendering, not facts derived from the pattern itself, and no specimen has ever captured codex's
+ * real busy-status-line text to check them against (decision `c0933e57`'s own open exposure). If one ever
+ * is, check its length against this bound. See docs/decisions/46ff24ef-bounded-tail-carryover-for-
+ * codex-busy.md for the full breakdown and the two proofs that ruled out the obvious alternative.
+ * @decision 46ff24ef — do not widen this into an unbounded accumulation (e.g. `live.screenScan`) to
+ * "fully" fix chunk straddling — that reintroduces the closed "stale match latches busy forever"
+ * regression.
+ */
+const CODEX_BUSY_ELAPSED_DIGITS_MAX = 6; // 999999s ~ 11.5 days — far beyond any real turn, still finite
+const CODEX_BUSY_MIDDLE_MAX_CHARS = 16; // generous multiple of the observed " • " separator (~5 chars)
+export const CODEX_BUSY_MARKER_MAX_CHARS =
+  "Working (".length + CODEX_BUSY_ELAPSED_DIGITS_MAX + "s".length + CODEX_BUSY_MIDDLE_MAX_CHARS + "esc to interrupt)".length;
+
+/**
  * The static input-box placeholder. The probe's findings.md documents this text sitting in TWO DISTINCT
  * traps — a reader (and, once, this codebase) can correctly defend against one and still walk straight
  * into the other:

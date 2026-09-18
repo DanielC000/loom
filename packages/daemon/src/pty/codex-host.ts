@@ -1,4 +1,4 @@
-import { TRUST_DIALOG_MARKER, TRUST_DIALOG_ANSWER, BUSY_STATUS_MARKER, BUSY_TITLE_SPINNER_RE, CODEX_READY_PLACEHOLDER, CODEX_MODEL_LOADED_RE, stripAnsiCsi, normalizeCodexScreenText } from "./codex-doctrine.js";
+import { TRUST_DIALOG_MARKER, TRUST_DIALOG_ANSWER, BUSY_STATUS_MARKER, BUSY_TITLE_SPINNER_RE, CODEX_BUSY_MARKER_MAX_CHARS, CODEX_READY_PLACEHOLDER, CODEX_MODEL_LOADED_RE, stripAnsiCsi, normalizeCodexScreenText } from "./codex-doctrine.js";
 
 /**
  * Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4: the PURE, testable decision logic for the codex
@@ -40,6 +40,33 @@ export function trustDialogAnswer(): string {
  *  busy state), but a strict no-op on every currently-passing case, so there is no regression risk. */
 export function isCodexBusy(screen: string): boolean {
   return BUSY_STATUS_MARKER.test(normalizeCodexScreenText(screen)) || BUSY_TITLE_SPINNER_RE.test(screen);
+}
+
+/**
+ * Chunk-straddle-safe wrapper around {@link isCodexBusy} — a bounded tail carryover, never unbounded
+ * accumulation. `isCodexBusy` alone scans a single raw chunk with no memory of the previous one — correct
+ * for busy/idle's freshness semantics, but wrong for a marker whose bytes can land split across two
+ * chunks (the same failure class already confirmed in production for the trust-dialog marker, card
+ * `353f6dc4`, before ITS accumulation fix landed). Keeping up to `CODEX_BUSY_MARKER_MAX_CHARS - 1` chars
+ * of whatever was most recently scanned guarantees any marker occurrence, however it was chunked, is
+ * fully present in at least one `tail + chunk` scan — and a candidate tail that is ITSELF already a
+ * complete match is reset to `""` rather than carried forward. See docs/decisions/46ff24ef-bounded-tail-
+ * carryover-for-codex-busy.md for why (a real defect this card's own verification caught).
+ * @decision 46ff24ef — never carry a self-contained match forward as tail; it has no genuinely incomplete
+ * marker left to stitch a future chunk onto, and doing so anyway re-triggers busy against whatever
+ * unrelated content the next chunk brings.
+ *
+ * Pure and stateless (the caller threads `prevTail` through — `pty/host.ts`'s onData handler is the only
+ * real caller, via `CodexLive.codexBusyTail`), so this is directly unit-testable with synthetic strings,
+ * no pty/daemon required.
+ */
+export function scanCodexBusy(prevTail: string, chunk: string): { busy: boolean; tail: string } {
+  const scan = prevTail + chunk;
+  const busy = isCodexBusy(scan);
+  const tailLen = CODEX_BUSY_MARKER_MAX_CHARS - 1;
+  let tail = scan.length > tailLen ? scan.slice(-tailLen) : scan;
+  if (isCodexBusy(tail)) tail = ""; // see this function's own doc for why a self-contained match resets
+  return { busy, tail };
 }
 
 /**

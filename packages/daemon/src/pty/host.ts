@@ -26,7 +26,7 @@ import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
-import { isTrustDialogPrompt, trustDialogAnswer, isCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS } from "./codex-host.js";
+import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS } from "./codex-host.js";
 import { findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } from "./codex-transcript.js";
 
 const RING_CAP_BYTES = 256 * 1024;
@@ -2701,8 +2701,9 @@ export interface CodexLive {
    *  on {@link isCodexReadyMarkerPresent}, never on this flag. */
   trustDialogPending: boolean;
   /** Codex-only, Code Review C2/M3 fix: wall-clock time a REAL busy marker was LAST actually observed in
-   *  the pty's own output (0 = never) — written ONLY by the onData handler's `isCodexBusy(d)` branch, never
-   *  optimistically (card fedef6a0 fixed a prior optimistic stamp at submit time — see `submitCodex`'s own
+   *  the pty's own output (0 = never) — written ONLY by the onData handler's `scanCodexBusy(...)`-gated
+   *  branch (card 46ff24ef), never optimistically (card fedef6a0 fixed a prior optimistic stamp at submit
+   *  time — see `submitCodex`'s own
    *  doc for why that was the root of the unconfirmed-drain bug). Read by `armCodexBusyStaleTimer`'s fired
    *  callback (compared against `enterWrittenAt` below) to tell a genuinely-completed turn apart from one
    *  whose Enter was never confirmed at all — see that method's own doc for the full state machine.
@@ -2747,6 +2748,12 @@ export interface CodexLive {
    *  used for busy/idle detection, which is a FRESHNESS read keyed off `lastBusyMarkerAt`/`busyStaleTimer`
    *  instead (see `CODEX_BUSY_STALE_MS`'s own doc for why). */
   screenScan: string;
+  /** Codex-only, card 46ff24ef: the bounded tail `codex-host.ts#scanCodexBusy` carries forward between
+   *  onData chunks so a busy marker split across a chunk boundary is still detected — NEVER an
+   *  accumulation buffer like `screenScan` above (see `CODEX_BUSY_MARKER_MAX_CHARS`'s own doc / decision
+   *  46ff24ef for why unbounded accumulation reintroduces the closed "stale match latches busy forever"
+   *  regression). Bounded to `CODEX_BUSY_MARKER_MAX_CHARS - 1` chars at all times. */
+  codexBusyTail: string;
   /** Codex-only, card 2ec60d9c DoD-1: has an engine-session-identity discovery attempt already fired for
    *  THIS pty instance? Latched on the FIRST attempt (success or not) so a later chunk can't retrigger an
    *  unbounded rescan — see `captureCodexEngineSessionId`'s own doc for the ONE bounded retry this still
@@ -4710,6 +4717,7 @@ export class PtyHost {
       trustDialogAnswered: false, trustDialogPending: false,
       lastBusyMarkerAt: 0, enterWrittenAt: 0, enterPending: false, submitConfirmAttempts: 0, busyStaleGen: 0, busyStaleTimer: null, kickoffDelivered: false,
       screenScan: "",
+      codexBusyTail: "",
       engineSessionIdCaptureAttempted: false,
       engineSessionIdCaptureEndReason: null,
       bootReady: false, bootReadyTimer: null,
@@ -4826,13 +4834,18 @@ export class PtyHost {
       }
 
       // Code Review C2/M3 fix: busy is a FRESHNESS read, never a per-chunk recompute — see
-      // `CODEX_BUSY_STALE_MS`'s own doc for the full reasoning. Seeing the marker in THIS chunk (evaluated
-      // against the latest chunk alone; the marker is a short, single-line status text, not a multi-chunk
-      // artifact like the trust dialog, so no accumulation is needed to find it intact) (re)arms the
-      // staleness timer — it is the ONLY thing that ever turns busy false, never a chunk's mere absence of
-      // the marker, which closes the C2 race (a chunk landing in `submitCodex`'s own text->\r write gap
-      // can no longer flip busy back to false) at its root.
-      if (isCodexBusy(d)) {
+      // `CODEX_BUSY_STALE_MS`'s own doc for the full reasoning. Seeing the marker in the bounded
+      // `codexBusyTail + d` scan (re)arms the staleness timer — it is the ONLY thing that ever turns busy
+      // false, never a chunk's mere absence of the marker, which closes the C2 race (a chunk landing in
+      // `submitCodex`'s own text->\r write gap can no longer flip busy back to false) at its root.
+      // Card 46ff24ef: `isCodexBusy(d)` alone (evaluated against the latest chunk in isolation) CAN miss a
+      // marker split across a chunk boundary — see `scanCodexBusy`'s own doc / decision 46ff24ef for the
+      // proof and why the fix is a small bounded tail carryover rather than the full `screenScan`
+      // accumulation every sibling check uses (that reintroduces the exact stale-match regression this
+      // freshness read exists to prevent).
+      const busyScan = scanCodexBusy(live.codexBusyTail, d);
+      live.codexBusyTail = busyScan.tail;
+      if (busyScan.busy) {
         live.lastBusyMarkerAt = Date.now();
         if (!live.busy) this.setCodexBusy(opts.sessionId, live, true, "codex-marker");
         this.armCodexBusyStaleTimer(opts.sessionId, live);
@@ -4872,9 +4885,9 @@ export class PtyHost {
         // ⚠️ CORRECTED (card 448f1b4a, real-spawn verification): `live.busy` is NOT guaranteed false here.
         // The EARLIER, now-corrected version of this comment claimed submitting immediately was safe
         // because "nothing could have submitted before this latch" — true, but irrelevant: `live.busy` is
-        // set by the `isCodexBusy(d)` branch ABOVE, EARLIER in this SAME onData handler (this file, a few
-        // lines up), and that branch fires from codex's OWN output — not only from Loom submitting
-        // something. A single chunk can satisfy `isCodexBusy(d)` (e.g. codex's own MCP-server-startup work
+        // set by the `scanCodexBusy(...)` branch ABOVE, EARLIER in this SAME onData handler (this file, a
+        // few lines up), and that branch fires from codex's OWN output — not only from Loom submitting
+        // something. A single chunk can satisfy it (e.g. codex's own MCP-server-startup work
         // rendering a busy status line) AND the boot-ready composite in the identical tick, setting
         // `live.busy = true` moments before `live.bootReady = true` right here. Confirmed against a REAL
         // codex process, not just reasoned about: `test/codex-submit-confirmation-real-spawn.mjs` observed
