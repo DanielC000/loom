@@ -288,6 +288,27 @@ export function parseWsJsonObject(raw: Buffer | string): Record<string, unknown>
   return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
 }
 
+/**
+ * Card a5ecb6fd: mask `config.sessionEnv` VALUES (same-length filler, never bucketed — a bucketed length
+ * would hide a truncated paste) before a project row leaves the daemon over `GET /api/projects`. Every
+ * other config key, and `Db.listProjects()` itself, stay untouched — do not widen this to other project
+ * routes without re-checking their own consumers first (see the card body for why). `String(value ?? "")`
+ * makes the mapper TOTAL over whatever a row happens to hold — every current write path (`sessionEnv:
+ * strictRecord(z.string())`) rejects a non-string value, so a non-string here should be unreachable, but
+ * before this function existed a bad row still served fine; a `.length` thrown on `null`/`undefined`
+ * would newly 500 the one endpoint every page shares. Pure + exported so a hermetic test can assert the
+ * masking directly without booting a real server (mirrors `sanitizeCompanionName`/`GATEWAY_LOG_SERIALIZERS`
+ * above).
+ */
+export function redactSessionEnvForRead(project: Project): Project {
+  const sessionEnv = project.config.sessionEnv;
+  if (!sessionEnv || Object.keys(sessionEnv).length === 0) return project;
+  const masked = Object.fromEntries(
+    Object.entries(sessionEnv).map(([name, value]) => [name, "•".repeat(String(value ?? "").length)]),
+  );
+  return { ...project, config: { ...project.config, sessionEnv: masked } };
+}
+
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // trustProxy is DELIBERATELY left at its default (false) — LOAD-BEARING for every `req.ip` loopback
   // gate in this file (the /internal/* checks below, and the trust-tier onRequest hook's own peer check).
@@ -3159,10 +3180,22 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
       return reply.send({ ok: true, marked: sweepDeadSessions(deps.db) });
     });
+
+    // Card a5ecb6fd: `GET /api/projects` now masks `config.sessionEnv` values, so an e2e spec asserting
+    // what actually PERSISTED (not what the listing route renders) needs its own oracle. Direct DB read,
+    // never redacted — same trust posture as `/internal/test/seed`/`sweep-dead-sessions` above: gated on
+    // BOTH `inTestMode()` AND loopback, structurally absent from a real end-user daemon.
+    app.get("/internal/test/projects/:id/raw-config", async (req, reply) => {
+      if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
+      const id = (req.params as { id: string }).id;
+      const project = deps.db.getProject(id);
+      if (!project) return reply.code(404).send({ error: "project not found" });
+      return reply.send({ config: project.config });
+    });
   }
 
   // --- REST: read ---
-  app.get("/api/projects", async () => deps.db.listProjects());
+  app.get("/api/projects", async () => deps.db.listProjects().map(redactSessionEnvForRead));
 
   // --- Platform home discovery (Platform Manager P6): the reserved "Loom Platform" project + its
   // agents (the Platform Lead + Auditor), surfaced to the dedicated Platform UI section. The reserved

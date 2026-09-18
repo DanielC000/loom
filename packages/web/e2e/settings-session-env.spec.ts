@@ -42,14 +42,30 @@ async function seedConfig(baseURL: string, projectId: string, config: Record<str
   if (!res.ok) throw new Error(`seedConfig failed (${res.status}): ${await res.text()}`);
 }
 
+// The REAL, unredacted stored config — a test-only daemon route (gated inTestMode()+loopback, card
+// a5ecb6fd), because `GET /api/projects` now masks `sessionEnv` VALUES (same-length filler) and can no
+// longer serve as this suite's oracle for what actually persisted. Every existing read in this file goes
+// through here; only the new redaction test below reads the LISTING route directly.
 async function readConfig(baseURL: string, projectId: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${baseURL}/internal/test/projects/${projectId}/raw-config`);
+  if (!res.ok) throw new Error(`readConfig failed (${res.status}): ${await res.text()}`);
+  const body = (await res.json()) as { config: Record<string, unknown> };
+  return body.config;
+}
+
+const readSessionEnv = async (baseURL: string, projectId: string) =>
+  ((await readConfig(baseURL, projectId)).sessionEnv as Record<string, string> | undefined) ?? null;
+
+/** What `GET /api/projects` (the redacted LISTING route) actually serves — used only to assert the
+ * masking itself; every other read in this file uses the unredacted `readConfig` oracle above. */
+async function readListedConfig(baseURL: string, projectId: string): Promise<Record<string, unknown>> {
   const res = await fetch(`${baseURL}/api/projects`);
   const projects = (await res.json()) as Array<{ id: string; config?: Record<string, unknown> }>;
   return projects.find((p) => p.id === projectId)?.config ?? {};
 }
 
-const readSessionEnv = async (baseURL: string, projectId: string) =>
-  ((await readConfig(baseURL, projectId)).sessionEnv as Record<string, string> | undefined) ?? null;
+const readListedSessionEnv = async (baseURL: string, projectId: string) =>
+  ((await readListedConfig(baseURL, projectId)).sessionEnv as Record<string, string> | undefined) ?? null;
 
 const projectSaveButton = (page: import("@playwright/test").Page) =>
   page.getByRole("button", { name: "Save", exact: true }).first();
@@ -66,8 +82,15 @@ test("renders sessionEnv key names + exact lengths, NEVER a stored value, and ed
   await expect(page.getByTestId("senv-indicator-ALPHA")).toHaveText(`set · ${ALPHA_VALUE.length} chars`);
   await expect(page.getByTestId("senv-indicator-BETA")).toHaveText(`set · ${BETA_VALUE.length} chars`);
 
-  // 🔴 DoD-2, the absolute one: neither stored value appears ANYWHERE in the served document, the value
-  // inputs are empty rather than pre-filled, and they are masked so a typed value can't be screenshotted.
+  // Since card a5ecb6fd, `GET /api/projects` itself never serves ALPHA_VALUE/BETA_VALUE — they're masked
+  // to same-length filler before they leave the daemon — so the two `not.toContain` checks below can no
+  // longer FAIL on this path regardless of whether the client's own write-only rendering is still correct:
+  // the real bytes never reach the browser to be rendered in the first place. Kept anyway as a cheap,
+  // still-true sanity check and a regression pin for a hypothetical future de-redaction of that route (at
+  // which point this WOULD start discriminating again) — but it is no longer "the absolute one" proof of
+  // DoD-2. The `toHaveValue("")` assertions right below are what actually prove the client discards
+  // whatever it's given rather than pre-filling; the destruction-direction test further down (also card
+  // a5ecb6fd) is what proves a masked value can never round-trip back out and overwrite a real secret.
   const html = await page.content();
   expect(html).not.toContain(ALPHA_VALUE);
   expect(html).not.toContain(BETA_VALUE);
@@ -457,4 +480,46 @@ test("a legacy stored name (blank / whitespace-padded) does NOT brick the whole 
     .poll(async () => ((await readConfig(loomDaemon.baseURL, project.id)).orchestration as { gateCommand?: string } | undefined)?.gateCommand)
     .toBe("pnpm build");
   expect(await readSessionEnv(loomDaemon.baseURL, project.id)).toEqual({ "": "empty-named", " PADDED ": "padded-named", OK: "fine" });
+});
+
+// Card a5ecb6fd: `GET /api/projects` (the project LISTING route) now masks sessionEnv VALUES rather than
+// serving them in cleartext — a project's config sits in the web client's react-query cache, and
+// sessionEnv is a live secret-delivery channel (card e668518f). This is the DESTRUCTION-direction guard
+// for that change: masking must never become an accidental WRITE. The panel mounts from the masked
+// listing response and reads only `Object.keys` + each value's `.length` (never the value itself — see
+// `seedSessionEnvRows`'s own doc) and `buildOverride()` unconditionally deletes `sessionEnv` from its
+// clone before rebuilding it from the editor's own typed rows (card 546034fa/32b23f0f). If either of
+// those ever regressed and let the masked filler ride along into a save, this is the test that would
+// catch it: a save that never touches a sessionEnv row must never overwrite the REAL stored secrets with
+// mask characters — that is strictly worse than the exposure this card fixes (an incident of exactly this
+// shape, a Critical that silently destroyed a live secret, is card af08f7e8).
+test("GET /api/projects masks sessionEnv values, and a save that never touches them leaves the REAL secrets on disk untouched (destruction-direction guard, card a5ecb6fd)", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`settings-senv-redact-${Date.now()}`);
+  await seedConfig(loomDaemon.baseURL, project.id, { sessionEnv: { ALPHA: ALPHA_VALUE, BETA: BETA_VALUE } });
+
+  // The listing route itself: never the real bytes, never a bucketed/rounded length (that would hide a
+  // truncated paste — the one failure the exact-length indicator exists to catch).
+  const listed = await readListedSessionEnv(loomDaemon.baseURL, project.id);
+  expect(listed?.ALPHA).not.toBe(ALPHA_VALUE);
+  expect(listed?.BETA).not.toBe(BETA_VALUE);
+  expect(listed?.ALPHA?.length).toBe(ALPHA_VALUE.length);
+  expect(listed?.BETA?.length).toBe(BETA_VALUE.length);
+
+  await pinActiveProject(page, project.id);
+  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await expect(page.getByTestId("senv-indicator-ALPHA")).toBeVisible();
+
+  // Save an UNRELATED field — the sessionEnv rows are never touched, so if the masked GET response ever
+  // leaked into what buildOverride() sends, this is the save that would stamp it over the real secrets.
+  await page.locator(`label:has(> span:text-is("Gate command"))`).locator("input").fill("pnpm build");
+  const save = projectSaveButton(page);
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect
+    .poll(async () => ((await readConfig(loomDaemon.baseURL, project.id)).orchestration as { gateCommand?: string } | undefined)?.gateCommand)
+    .toBe("pnpm build");
+
+  // The REAL, unredacted, on-disk secrets — read via the raw-config oracle, independent of the redacted
+  // listing route — must be byte-for-byte the originals, not the mask and not blank.
+  expect(await readSessionEnv(loomDaemon.baseURL, project.id)).toEqual({ ALPHA: ALPHA_VALUE, BETA: BETA_VALUE });
 });

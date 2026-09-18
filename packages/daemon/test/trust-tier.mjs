@@ -147,6 +147,7 @@ const ALL_ROUTES = [
   ["DELETE", "/api/webhook-endpoints/:id"], ["POST", "/api/webhook-endpoints/:id/enabled"],
   ["POST", "/hooks/:endpointPath"],
   ["POST", "/internal/hook"], ["POST", "/internal/shutdown"],
+  ["GET", "/internal/test/projects/:id/raw-config"],
   ["POST", "/internal/test/seed"], ["POST", "/internal/update"],
   ["DELETE", "/mcp-audit/:sessionId"], ["GET", "/mcp-audit/:sessionId"], ["PATCH", "/mcp-audit/:sessionId"],
   ["POST", "/mcp-audit/:sessionId"], ["PUT", "/mcp-audit/:sessionId"],
@@ -254,6 +255,19 @@ const appOff = await buildServer({
 try {
   const r = await appOff.inject({ method: "POST", url: "/api/orchestration/kill", remoteAddress: "203.0.113.5" });
   check("(2) remoteAccess disabled: a 'remote' POST /api/orchestration/kill still runs (200, byte-identical)", r.statusCode === 200 && killCallsOff === 1);
+
+  // (2a2) card a5ecb6fd: GET /api/projects masks config.sessionEnv values. That fix's own regression
+  // coverage is a Playwright e2e spec, which runs in a SEPARATE CI job, never inside this project's own
+  // merge gate — so this hermetic assertion (which DOES run in the gate) is what actually stops a future
+  // refactor of the route from re-exposing the secrets and still landing on main green.
+  dbOff.insertProject({
+    id: "pSenv", name: "Senv", repoPath: TMP, vaultPath: TMP,
+    config: { sessionEnv: { ALPHA: "alpha-secret-value" } }, createdAt: new Date().toISOString(), archivedAt: null,
+  });
+  const listed = await appOff.inject({ method: "GET", url: "/api/projects" });
+  const senv = listed.json().find((p) => p.id === "pSenv").config.sessionEnv;
+  check("(2a2) GET /api/projects masks sessionEnv values: never the real value, exact length preserved",
+    senv.ALPHA !== "alpha-secret-value" && senv.ALPHA.length === "alpha-secret-value".length);
 
   // (2b) REGRESSION GUARD (card 42abca6a): the loopback cockpit WS — today's web client connects with NO
   // Sec-WebSocket-Protocol header at all (see packages/web/src/components/Terminal.tsx) — must still
