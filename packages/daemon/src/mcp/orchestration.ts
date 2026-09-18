@@ -4977,6 +4977,8 @@ export class OrchestrationMcpRouter {
     // browserTesting/documentConversion/restrictedTools are the SAME resolveProfile output profile_get/
     // profile_list already surface (mcp/platform.ts) — reused here so a manager can match a worker prompt
     // to real provisioning without a spawn-and-inspect round-trip (Auditor finding 64430a50).
+    // harness (card 97ddbe6d) is projected the same way — pre-spawn vendor-CLI discovery, distinct from
+    // the SESSION-tier harness worker_status/worker_list already return for a worker that already exists.
     server.registerTool(
       "agent_list",
       {
@@ -4988,7 +4990,10 @@ export class OrchestrationMcpRouter {
           "{id, name, role (resolved from its bound profile — null for a plain agent), profileId, position, " +
           "browserTesting, documentConversion, restrictedTools (resolved from the assigned/default " +
           "profile — same resolution profile_get/profile_list use; false when profile-less or the profile " +
-          "leaves a flag unset)}, ordered by position.",
+          "leaves a flag unset), harness ('claude' | 'codex' | null — the EFFECTIVE vendor CLI this agent " +
+          "would spawn as, resolved the same way as the flags above; null means unset — either the agent is " +
+          "profile-less or its bound profile never set harness — and unset spawns the engine default " +
+          "('claude'), so null is NOT the same as an explicit 'claude')}, ordered by position.",
         inputSchema: strictShape({}),
       },
       async () => {
@@ -5005,6 +5010,7 @@ export class OrchestrationMcpRouter {
             browserTesting: resolved.browserTesting,
             documentConversion: resolved.documentConversion,
             restrictedTools: resolved.restrictedTools,
+            harness: resolved.harness,
           };
         }));
       },
@@ -5024,8 +5030,11 @@ export class OrchestrationMcpRouter {
         description:
           "Read ONE agent in YOUR project — the FULL record INCLUDING its startupPrompt (agent_list's " +
           "summary deliberately drops it — some prompts are large), " +
-          "PLUS its resolved browserTesting/documentConversion/restrictedTools capability flags (from its " +
-          "assigned/default profile — same resolution profile_get/profile_list use; false when profile-less " +
+          "PLUS its resolved browserTesting/documentConversion/restrictedTools capability flags AND harness " +
+          "('claude' | 'codex' | null — the EFFECTIVE vendor CLI this agent would spawn as; null means " +
+          "unset, either profile-less or its profile never set harness, and unset spawns the engine default " +
+          "'claude', so null is NOT the same as an explicit 'claude') (all resolved from its " +
+          "assigned/default profile — same resolution profile_get/profile_list use; false/null when profile-less " +
           "or the profile leaves a flag unset). Use this before a safe read-modify-write via agent_update " +
           "(its appendToStartupPrompt mode lets you add to what you read here without retyping the whole " +
           "prompt, and its replaceInStartupPrompt mode lets you edit one clause mid-document the same way), " +
@@ -5047,6 +5056,7 @@ export class OrchestrationMcpRouter {
             browserTesting: resolved.browserTesting,
             documentConversion: resolved.documentConversion,
             restrictedTools: resolved.restrictedTools,
+            harness: resolved.harness,
           };
         };
         const exact = agents.find((a) => a.id === agentId);

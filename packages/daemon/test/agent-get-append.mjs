@@ -17,6 +17,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (6) agent_get AND agent_list surface the RESOLVED browserTesting/documentConversion/restrictedTools
 //       flags (Auditor finding 64430a50): an agent bound to a browser profile shows true/true/false;
 //       a profile-less agent backstops to false/false/false — matching resolveProfile exactly.
+//   (6b) agent_get AND agent_list also surface the RESOLVED harness (card 97ddbe6d, pre-spawn vendor-CLI
+//        discovery): a profile explicitly bound to harness:"codex" resolves "codex"; a profile-less
+//        agent, ANOTHER profile-less agent, and an agent bound to a profile that never sets harness all
+//        resolve null — never collapsed to the literal "claude" (the exact mistake 3edf6ef7 bounced once
+//        already on the profile-tier read this card's projection reuses).
 //   (7) agent_update / agent_assign_profile (the agent WRITE handlers) resolve an id-PREFIX exactly like
 //       agent_get does — the read/write asymmetry that used to yield a silent "agent not found" on write;
 //       ambiguous still errors naming both candidates; full id unchanged; a foreign-project agent's exact
@@ -82,6 +87,18 @@ db.insertProfile({
 });
 const ID_BROWSER = "b0000001-0000-4000-8000-000000000007";
 db.insertAgent({ id: ID_BROWSER, projectId: "pMine", name: "Browsy", startupPrompt: "BROWSER PROMPT", position: 4, profileId: "profBrowser" });
+
+// harness fixtures (card 97ddbe6d): a profile explicitly bound to "codex", vs. profBrowser above (a
+// bound profile that never sets harness) and ID_SOLO/ID_DUP_A above (no profile at all) — THREE distinct
+// unset shapes that must all resolve to `null`, plus one explicitly-set shape that must resolve to
+// "codex" (never collapsed to the literal "claude").
+db.insertProfile({
+  id: "profCodex", name: "Codex Rig", role: null, description: "codex rig", allowDelta: [],
+  skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, restrictedTools: false,
+  harness: "codex",
+});
+const ID_CODEX = "c0de0001-0000-4000-8000-000000000009";
+db.insertAgent({ id: ID_CODEX, projectId: "pMine", name: "Codexy", startupPrompt: "CODEX PROMPT", position: 6, profileId: "profCodex" });
 
 // Fixture for section (8) — replaceInStartupPrompt. "LINE" occurs 3 times (ambiguous target); the clause
 // occurs exactly once (the genuine single-occurrence target).
@@ -162,6 +179,33 @@ try {
   check("(6) agent_list on a profile-less agent backstops all flags to false",
     lPlain?.browserTesting === false && lPlain?.documentConversion === false && lPlain?.restrictedTools === false);
 
+  // ===================== (6b) harness on agent_get + agent_list (card 97ddbe6d) =========================
+  // The property under test is "a reader can tell whether harness is SET" — only the UNSET branch
+  // exercises it; a test against a harness="codex" agent alone would pass on code that collapses unset
+  // to the literal "claude". Cover all THREE unset shapes (no profile at all; a bound profile that never
+  // sets harness) plus the one explicitly-set shape, on BOTH agent_get and agent_list.
+  const gCodex = await call("agent_get", { agentId: ID_CODEX });
+  check("(6b-green) agent_get on a profile explicitly bound to harness:\"codex\" resolves \"codex\"",
+    gCodex.harness === "codex");
+  const gUnsetNoProfile = await call("agent_get", { agentId: ID_DUP_A });
+  check("(6b-red) agent_get on a PROFILE-LESS agent resolves harness:null (not \"claude\")",
+    gUnsetNoProfile.harness === null);
+  const gUnsetProfileSolo = await call("agent_get", { agentId: ID_SOLO });
+  check("(6b-red) agent_get on ANOTHER profile-less agent also resolves harness:null",
+    gUnsetProfileSolo.harness === null);
+  const gUnsetBoundProfile = await call("agent_get", { agentId: ID_BROWSER });
+  check("(6b-red) agent_get on an agent bound to a profile that never sets harness resolves harness:null (not \"claude\")",
+    gUnsetBoundProfile.harness === null);
+
+  const lCodex = list.find((a) => a.id === ID_CODEX);
+  const lUnsetBoundProfile = list.find((a) => a.id === ID_BROWSER);
+  check("(6b-green) agent_list on a profile explicitly bound to harness:\"codex\" resolves \"codex\"",
+    lCodex?.harness === "codex");
+  check("(6b-red) agent_list on a profile-less agent resolves harness:null (not \"claude\")",
+    lPlain?.harness === null);
+  check("(6b-red) agent_list on an agent bound to a profile that never sets harness resolves harness:null (not \"claude\")",
+    lUnsetBoundProfile?.harness === null);
+
   // ===================== (7) agent_update / agent_assign_profile resolve an id-PREFIX like agent_get =====
   // The bug: agent_get resolves an unambiguous 8-char id-prefix, but the manager-surface agent WRITE
   // handlers (agent_update, agent_assign_profile) did EXACT-match only — a prefix that read fine 404'd on
@@ -235,6 +279,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — agent_get returns the full record for an exact id / unambiguous prefix, errors on ambiguous/unknown/cross-project; agent_update's appendToStartupPrompt concatenates (bare when empty), plain startupPrompt still fully replaces, passing both is rejected with no write, agent_get/agent_list surface the resolved browserTesting/documentConversion/restrictedTools flags, agent_update/agent_assign_profile now resolve the same id-prefix agent_get does, and agent_update's replaceInStartupPrompt rejects an absent/ambiguous/empty `old` (or a mode combined with startupPrompt/appendToStartupPrompt) with no write while a genuine single-occurrence match applies byte-exactly."
+  ? "\n✅ ALL PASS — agent_get returns the full record for an exact id / unambiguous prefix, errors on ambiguous/unknown/cross-project; agent_update's appendToStartupPrompt concatenates (bare when empty), plain startupPrompt still fully replaces, passing both is rejected with no write, agent_get/agent_list surface the resolved browserTesting/documentConversion/restrictedTools flags AND harness (unset resolves null on every unset shape, never the literal \"claude\"; an explicit codex binding resolves \"codex\"), agent_update/agent_assign_profile now resolve the same id-prefix agent_get does, and agent_update's replaceInStartupPrompt rejects an absent/ambiguous/empty `old` (or a mode combined with startupPrompt/appendToStartupPrompt) with no write while a genuine single-occurrence match applies byte-exactly."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
