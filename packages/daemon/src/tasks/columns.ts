@@ -347,9 +347,17 @@ export function setProjectConfigSafe(
   if (!project) return { ok: false, error: "project not found" };
   const before = project.config;
   if (next.sessionEnv) {
-    const priorSessionEnv = before.sessionEnv as Record<string, string> | undefined;
+    const priorSessionEnv = (before.sessionEnv ?? {}) as Record<string, unknown>;
+    // `String(... ?? "")` on BOTH sides (mirrors `maskSessionEnvRecord`'s own defensive read): a legacy
+    // row predating the write-time `sessionEnv: strictRecord(z.string())` validator could hold a
+    // non-string/null value, and this guard must never throw on one — `Object.hasOwn` (not a plain
+    // property read) distinguishes "key genuinely absent" (nothing to be an echo OF) from "key present
+    // with a nullish/malformed legacy value" (still a real prior to compare against).
     const echoedKeys = Object.entries(next.sessionEnv)
-      .filter(([key, value]) => isMaskedSessionEnvEcho(String(value ?? ""), priorSessionEnv?.[key]))
+      .filter(([key, value]) => isMaskedSessionEnvEcho(
+        String(value ?? ""),
+        Object.hasOwn(priorSessionEnv, key) ? String(priorSessionEnv[key] ?? "") : undefined,
+      ))
       .map(([key]) => key);
     if (echoedKeys.length > 0) {
       return {
