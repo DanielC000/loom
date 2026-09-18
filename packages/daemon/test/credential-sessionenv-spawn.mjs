@@ -30,6 +30,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the OLDER/shadowed row, the dangerous click) must make the env var ABSENT from a REAL spawn — not
 //       merely flip one row's `revokedAt`, which is exactly what the pre-fix bug also did while still
 //       re-injecting the superseded value.
+//   (F) card 32b23f0f DoD-7 — a project-config `sessionEnv` entry written the way the human Settings
+//       panel writes one reaches a REAL spawned child's env, and REMOVING it (the panel's `unset`
+//       dot-path) makes it ABSENT from the next spawn. This exercises the chain the Settings panel
+//       actually writes on — projects.config_json -> resolveConfig().sessionEnv -> opts.sessionEnv ->
+//       spawn env — which (A)-(C) never touch, because they hand-feed `opts.sessionEnv` directly and so
+//       skip config storage and resolution entirely. A config READ could not stand in for this:
+//       sessionEnv merges into the process env AT SPAWN, so only a NEWLY spawned child can confirm a
+//       write made after an earlier session started.
 //
 // WINDOWS-ONLY (mirrors pty-codex-spawn-env.mjs): the `.cmd`-wrapper mechanism is Windows-specific. SKIPS
 // (exit 0) on non-win32 rather than silently passing 0 checks.
@@ -65,6 +73,12 @@ const { buildQuestionAsk } = await import("../dist/mcp/questionTool.js");
 const { encryptSecret } = await import("../dist/keys/envelope.js");
 const { resolveCredentialSessionEnv } = await import("../dist/keys/credentialSessionEnv.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+// (F)'s imports: the EXACT trio the human REST config PATCH handler composes (gateway/server.ts's
+// `/api/projects/:id/config`), so that case writes config through the same validator + merge + store the
+// Settings panel's Save actually goes through — not a raw db.setProjectConfig shortcut past all three.
+const { validateProjectConfigOverride, mergeConfigOverride, unsetConfigPath } = await import("../dist/mcp/platform.js");
+const { setProjectConfigSafe } = await import("../dist/tasks/columns.js");
+const { resolveConfig } = await import("@loom/shared");
 
 const dbFile = path.join(tmpHome, "spawn-cse.db");
 const db = new Db(dbFile);
@@ -249,9 +263,87 @@ async function realSpawnEnv(opts) {
   check("(E) after rotation + revoke-via-either-row, the env var is ABSENT from a real spawned child (the old value never re-injects)", rotatedAbsent);
 }
 
+// ===== (F) card 32b23f0f DoD-7 — a project-config sessionEnv entry reaches a REAL spawn, and an
+// explicit unset removes it from the NEXT one.
+{
+  const SENV_NAME = "MY_TEST_PANEL_ENV";
+  const SENV_VALUE = "panel-written-env-value-abcdef";
+
+  // Write it EXACTLY as the human REST config PATCH does: validate -> deep-merge onto the stored
+  // override -> apply `unset` dot-paths -> setProjectConfigSafe. The Settings panel sends only DELTAS
+  // plus `unset`, so a bare `{sessionEnv:{...}}` config is precisely the body it produces for an add.
+  const patchConfig = (projectId, config, unsetPaths = []) => {
+    const v = validateProjectConfigOverride(config);
+    if (!v.ok) throw new Error(`(F) config rejected by the real validator: ${v.error}`);
+    let merged = mergeConfigOverride(db.getProject(projectId).config, v.value);
+    for (const path of unsetPaths) merged = unsetConfigPath(merged, path);
+    const wrote = setProjectConfigSafe(db, projectId, merged, "human");
+    if (!wrote.ok) throw new Error(`(F) config write refused: ${wrote.error}`);
+  };
+  patchConfig(projA.projectId, { sessionEnv: { [SENV_NAME]: SENV_VALUE } });
+
+  // The spawn's sessionEnv is derived the way sessions/service.ts derives it — resolveConfig over the
+  // project's STORED override — never hand-assembled here, or this would test nothing about the chain.
+  const resolvedSessionEnv = () => resolveConfig(db.getProject(projA.projectId).config).sessionEnv;
+
+  {
+    const spawnCwd = fs.mkdtempSync(path.join(tmpHome, "cwd-f1-"));
+    const envOutputFile = path.join(tmpHome, "spawned-env-f1.json");
+    const spawnedEnv = await realSpawnEnv({
+      sessionId: "cse-spawn-session-f1",
+      cwd: spawnCwd,
+      permission: {},
+      geometry: { cols: 120, rows: 40 },
+      sessionEnv: { ...resolvedSessionEnv(), FIXTURE_ENV_OUTPUT_FILE: envOutputFile },
+      role: "worker",
+      harness: "codex",
+      projectId: projA.projectId,
+    });
+    // PRESENCE check only (card 32b23f0f DoD-7 is explicit: never echo the value) — the length is
+    // compared as a boolean so neither the value nor its bytes can reach this test's own stdout.
+    check(
+      "(F) a project-config sessionEnv entry is PRESENT in a REAL newly-spawned child's env",
+      spawnedEnv[SENV_NAME]?.length === SENV_VALUE.length,
+    );
+  }
+
+  // Now REMOVE it the way the panel's staged removal does — an `unset` dot-path, never an omission.
+  // NOTE: that the unset genuinely deletes the stored key, and that an unmodeled `pty` override
+  // survives such a write, are asserted in `project-config-patch-merge.mjs` case (12) instead (it
+  // seeds its own pty override) — both are platform-independent config logic, and this file exits
+  // early on non-win32, so asserting them HERE meant they never ran on ubuntu CI. Only the REAL-SPAWN
+  // half below belongs behind that gate.
+  patchConfig(projA.projectId, {}, [`sessionEnv.${SENV_NAME}`]);
+
+  {
+    const spawnCwd = fs.mkdtempSync(path.join(tmpHome, "cwd-f2-"));
+    const envOutputFile = path.join(tmpHome, "spawned-env-f2.json");
+    const spawnedEnv = await realSpawnEnv({
+      sessionId: "cse-spawn-session-f2",
+      cwd: spawnCwd,
+      permission: {},
+      geometry: { cols: 120, rows: 40 },
+      sessionEnv: { ...resolvedSessionEnv(), FIXTURE_ENV_OUTPUT_FILE: envOutputFile },
+      role: "worker",
+      harness: "codex",
+      projectId: projA.projectId,
+    });
+    check(
+      "(F) after the removal the var is ABSENT from the NEXT real spawn's env",
+      !(SENV_NAME in spawnedEnv),
+    );
+    // Positive control for the assertion immediately above: this spawn DID happen and DID carry env, so
+    // the absence is a real removal rather than an empty/failed dump that would read identically.
+    check(
+      "(F) [positive control] that same spawn still carried its own fixture env var",
+      spawnedEnv.FIXTURE_ENV_OUTPUT_FILE === envOutputFile,
+    );
+  }
+}
+
 try { db.close(); } catch { /* ignore */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — an answered credential with a declared credentialEnvVar reaches a REAL spawned OS child process's env, decrypted to the exact stored plaintext, using the SAME production PtyHost/Db wiring index.ts uses; it never leaks across projects (negative control); a deliberate sessionEnv override still wins on a name collision; revoking it removes it from the next real spawn's env; and a ROTATED credential (the same env var answered twice) is genuinely absent from a real spawn after revoking via EITHER row — the old, superseded value never re-injects."
+  ? "\n✅ ALL PASS — an answered credential with a declared credentialEnvVar reaches a REAL spawned OS child process's env, decrypted to the exact stored plaintext, using the SAME production PtyHost/Db wiring index.ts uses; it never leaks across projects (negative control); a deliberate sessionEnv override still wins on a name collision; revoking it removes it from the next real spawn's env; and a ROTATED credential (the same env var answered twice) is genuinely absent from a real spawn after revoking via EITHER row — the old, superseded value never re-injects; and a project-config sessionEnv entry written the way the human Settings panel writes one reaches a REAL spawn, with an explicit unset making it absent from the next one."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

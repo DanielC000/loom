@@ -25,6 +25,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       Settings.tsx shape — `applyNumField` pushes one path per field, never a single group-level
 //       path) — in either leaf order, and a PARTIAL clear does NOT prune (the untouched sibling leaf
 //       survives).
+//   (11) the handler's merge-THEN-unset ORDER: an `unset` of a key BEATS a write of that same key in
+//       ONE payload (the write is silently discarded, HTTP 200). Pinned, not fixed — it is the
+//       documented project_configure grammar, and it is WHY Settings.tsx's sessionEnv editor must
+//       collect every written name before emitting any unset (card 32b23f0f: remove-then-re-add of the
+//       same name destroyed both the old secret and its just-typed replacement).
+//   (12) an `unset` dot-path genuinely deletes a sessionEnv key, and an unmodeled `pty` override
+//       survives a sessionEnv-only write — relocated from credential-sessionenv-spawn.mjs, which is
+//       Windows-gated for its real-spawn fixture, so these two platform-independent assertions never
+//       ran on ubuntu CI there.
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic: a REAL Db + the REAL Fastify gateway
 // (app.inject), every other dep STUBBED — mirrors mgmt-project-agent.mjs's minimal harness (this route
@@ -191,12 +200,59 @@ try {
   const cfgH = db.getProject("pH").config;
   check("(10) ★ a PARTIAL group clear does NOT prune — the untouched sibling leaf survives", cfgH.memory?.maxNotes === 200);
   check("(10) the two cleared leaves are gone", cfgH.memory.budgetTokens === undefined && cfgH.memory.topK === undefined);
+
+  // ===================== (11) merge-THEN-unset: a COLLIDING unset beats a write of the same key ======
+  // The handler applies `merge` then `unset`, unconditionally and in that order. So a payload carrying
+  // BOTH an `unset` of a key AND a write of that SAME key ends with the key GONE — the write is
+  // silently discarded. This is the documented `project_configure` grammar ("REMOVE a key AFTER the
+  // merge"), NOT a defect — and NOT one to "fix" in this file or in Settings.tsx. Reordering it is card
+  // b5faa194, deliberately deferred behind 32b23f0f because it targets THIS file too. If that card lands,
+  // the starred assertion below INVERTS (the write would win) and must be REWRITTEN, not deleted —
+  // deleting it drops the grammar pin AND the sibling-survival check alongside it. The second half (the
+  // `unset: []` two-pass payload) is order-independent and survives either way.
+  // This case PINS the current order, because it is the
+  // reason Settings.tsx's sessionEnv editor must collect every written name BEFORE emitting any unset.
+  // Card 32b23f0f: a human removing a secret and re-adding the SAME name in one save (the natural way
+  // to rotate a value you cannot see) destroyed BOTH the old secret and the replacement they had just
+  // typed, with an HTTP 200 and no error anywhere.
+  db.insertProject({
+    id: "pI", name: "I", repoPath: TMP, vaultPath: TMP,
+    config: { sessionEnv: { API_KEY: "old-secret", OTHER: "keep-me" }, pty: { cols: 132, rows: 48 } },
+    createdAt: now, archivedAt: null, reserved: false,
+  });
+  const rCollide = await patch("pI", { config: { sessionEnv: { API_KEY: "fresh-secret" } }, unset: ["sessionEnv.API_KEY"] });
+  check("(11) colliding write+unset PATCH → 200 (it does NOT error)", rCollide.statusCode === 200);
+  const cfgI = db.getProject("pI").config;
+  check("(11) ★ the unset WINS over a write of the same key in one payload — the new value is discarded",
+    cfgI.sessionEnv?.API_KEY === undefined);
+  check("(11) an unrelated sibling key in the same map is untouched", cfgI.sessionEnv?.OTHER === "keep-me");
+
+  // The shape a FIXED client actually sends for that same human intent: the write is kept and no unset
+  // is emitted for a name this payload writes back. Proves the two-pass payload is well-formed here —
+  // the daemon-side complement of the browser e2e that drives the panel itself.
+  const rTwoPass = await patch("pI", { config: { sessionEnv: { API_KEY: "fresh-secret" } }, unset: [] });
+  check("(11) two-pass payload (no colliding unset) → 200", rTwoPass.statusCode === 200);
+  const cfgI2 = db.getProject("pI").config;
+  check("(11) ★ omitting the colliding unset lands the rotated value", cfgI2.sessionEnv?.API_KEY === "fresh-secret");
+
+  // ===================== (12) sessionEnv unset + unmodeled-key survival (relocated) ==================
+  // Card 32b23f0f DoD-7 originally asserted these two inside credential-sessionenv-spawn.mjs, which
+  // exits early on non-win32 (its .cmd-wrapper fixture is Windows-only) — so on ubuntu CI they never
+  // ran. Neither has any platform dependency: both are pure config-write logic. They live here, where
+  // the suite runs everywhere; the real-spawn half correctly stays behind that Windows gate.
+  const rUnsetSenv = await patch("pI", { unset: ["sessionEnv.API_KEY", "sessionEnv.OTHER"] });
+  check("(12) sessionEnv unset PATCH → 200", rUnsetSenv.statusCode === 200);
+  const cfgI3 = db.getProject("pI").config;
+  check("(12) ★ an `unset` dot-path genuinely deletes a sessionEnv key (and prunes the emptied parent)",
+    cfgI3.sessionEnv === undefined);
+  check("(12) ★ the unmodeled `pty` override survived every sessionEnv write + unset above",
+    cfgI3.pty?.cols === 132 && cfgI3.pty?.rows === 48);
 } finally {
   try { if (app) await app.close(); } catch { /* ignore */ }
   db.close();
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PATCH /api/projects/:id/config deep-merges by default (a single-key PATCH preserves every sibling key, nested objects merge field-by-field), `unset` expresses deletion the merge itself cannot, `replace:true` still opts into the old whole-object-replace behavior byte-identical, this human REST path carries NO additiveOnlyRotationGuard (can shrink/lower/re-point rotation fields — the documented Settings.tsx escape hatch), a rejected PATCH leaves the stored config unchanged, `unset` genuinely REMOVES memory/alertWebhook/rotationMarkers+heading (not stored-empty) with an untouched sibling surviving each, and unsetting EVERY leaf of a group one dot-path at a time (the real Settings.tsx shape) PRUNES the now-empty parent too — in either order, while a PARTIAL clear leaves the group's untouched sibling leaf intact."
+  ? "\n✅ ALL PASS — PATCH /api/projects/:id/config deep-merges by default (a single-key PATCH preserves every sibling key, nested objects merge field-by-field), `unset` expresses deletion the merge itself cannot, `replace:true` still opts into the old whole-object-replace behavior byte-identical, this human REST path carries NO additiveOnlyRotationGuard (can shrink/lower/re-point rotation fields — the documented Settings.tsx escape hatch), a rejected PATCH leaves the stored config unchanged, `unset` genuinely REMOVES memory/alertWebhook/rotationMarkers+heading (not stored-empty) with an untouched sibling surviving each, and unsetting EVERY leaf of a group one dot-path at a time (the real Settings.tsx shape) PRUNES the now-empty parent too — in either order, while a PARTIAL clear leaves the group's untouched sibling leaf intact; PLUS the merge-THEN-unset order is pinned (a colliding unset beats a write of the same key in one payload, which is why the sessionEnv editor collects written names before emitting any unset), and a sessionEnv unset genuinely deletes its key while an unmodeled `pty` override survives."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

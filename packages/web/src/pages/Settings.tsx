@@ -265,14 +265,21 @@ function ConfigEditor({ project }: { project: Project }) {
   );
   const [rotationHeading, setRotationHeading] = useState(ov.orchestration?.rotationLiveCommitmentsHeading ?? "");
   const [rotationFloor, setRotationFloor] = useState(numStr(ov.orchestration?.rotationLiveCommitmentsFloor));
+  // sessionEnv — the WRITE-ONLY secret map (card 32b23f0f). Seeded from the stored KEY NAMES and value
+  // LENGTHS only; every row's `value` starts "" because this panel never renders a stored value. See
+  // SessionEnvRow / seedSessionEnvRows, and buildOverride's own sessionEnv block for the delta protocol.
+  const [sessionEnvRows, setSessionEnvRows] = useState<SessionEnvRow[]>(() => seedSessionEnvRows(ov.sessionEnv));
 
   // Build the OVERRIDE from the current form, PLUS the `unset` dot-paths a cleared field needs (card
   // 546034fa: the PATCH now MERGES onto the stored override by default, so omitting a key from `override`
   // means "leave it alone", not "clear it" — the OLD whole-object-replace behavior this UI relied on to
   // express a delete). We still start from a clone of the stored override and apply only the fields this
-  // UI models — preserving keys it does NOT model (pty, sessionEnv, permission.mode/deny/
-  // startupModeCycles) instead of silently wiping them; those keys need no `unset` entry since the merge
-  // already leaves them untouched. A modeled field set to blank/inherit is DELETED locally AND its
+  // UI models — preserving keys it does NOT model (pty, permission.mode/deny/startupModeCycles)
+  // instead of silently wiping them; those keys need no `unset` entry since the merge already leaves
+  // them untouched. `sessionEnv` is the ONE exception on both counts: it IS modeled (see its own block
+  // at the end of this function), it is deliberately DELETED from the clone rather than preserved, and
+  // it is the only key whose deletions travel as explicit `unset` dot-paths. A modeled field set to
+  // blank/inherit is DELETED locally AND its
   // dot-path recorded on `unset`, so it actually falls back to the platform default server-side too.
   // Numbers parse with Number() so a non-numeric entry sends NaN→null and the strict-zod PATCH 400s
   // with a readable "Expected number" — the demonstrable error path.
@@ -370,8 +377,120 @@ function ConfigEditor({ project }: { project: Project }) {
     applyNumField(mem, "maxNotes", memoryMaxNotes, unset, "memory");
     if (Object.keys(mem).length) o.memory = mem; else delete o.memory;
 
+    // sessionEnv — the WRITE-ONLY secret map (card 32b23f0f). ⛔ Deliberately NOT modeled like every
+    // field above: the cloned map is STRIPPED and only DELTAS (changed/new keys) + `unset` dot-paths
+    // (removals) are sent. Do not "simplify" this back into the clone — three things depend on it:
+    //   1. An UNTOUCHED entry is never in the payload AT ALL, so the server's deep-merge preserves it
+    //      BYTE-FOR-BYTE (mergeConfigOverride → deepMergeRecord recurses on any plain object, and
+    //      sessionEnv IS a plain Record<string,string>). No client bug can truncate, reorder or wipe a
+    //      value the client never sent — that is DoD-3 structurally, not by care.
+    //   2. It stops every UNRELATED save (a gateCommand tweak) from re-POSTing the stored secrets back
+    //      over the wire, which `structuredClone(ov)` above otherwise does on EVERY Save — a real
+    //      exposure reduction across request logs and the browser's own Network panel.
+    //   3. Blankness therefore means "leave as stored", NEVER "delete". Deletion is reachable only via
+    //      an explicit staged per-row removal emitting `sessionEnv.<NAME>` on `unset`, so a
+    //      render-then-save round-trip is a no-op BY CONSTRUCTION (DoD-4), not by care.
+    delete o.sessionEnv;
+    // 🔴 TWO PASSES, and the order is the whole point — do not collapse them into one loop.
+    //
+    // @decision 32b23f0f — never emit an `unset` for a name this same payload also WRITES: the server
+    // applies the PATCH as merge-THEN-unset unconditionally, so the unset wins and the just-typed
+    // replacement value is destroyed along with the old one.
+    //
+    // A single loop cannot get this right, because the write that saves a key may come from a LATER row
+    // than the removal/rename that would unset it (remove `API_KEY`, then add a fresh row re-using that
+    // name — the natural way to rotate a secret in a panel that never shows you the old value). So:
+    // collect every written name FIRST, then emit unsets only for what nothing writes back.
+    // A Map (not a plain object) because a name is human-typed: `__proto__` as an object key silently
+    // fails to become an own property, and `constructor`/`toString` answer `in` via the prototype — both
+    // pass the env-name check, and both would turn into exactly the kind of silent no-op this panel
+    // exists to refuse.
+    const written = new Map<string, string>();
+    for (const r of sessionEnvRows) {
+      if (r.removed) continue;
+      const name = r.name.trim();
+      // A blank name or a blank value writes NOTHING — blank means KEEP, never delete.
+      if (name === "" || r.value === "") continue;
+      written.set(name, r.value);
+    }
+    for (const r of sessionEnvRows) {
+      // A brand-new row is dropped from the list outright by the editor (nothing persisted ⇒ nothing to
+      // unset), so only a row with a storedName can ever need one.
+      if (r.storedName === null) continue;
+      const needsUnset = r.removed || isSessionEnvRenamed(r);
+      // `envNameIsManageable` is re-checked AT THE EMITTER, not just in sessionEnvErrors: the error list
+      // only gates the Save BUTTON, so it is one UI affordance away from being the sole thing standing
+      // between an unaddressable name and a destructive no-op unset. A second save path added later
+      // would silently reopen that; this makes the invariant structural instead.
+      if (needsUnset && !written.has(r.storedName) && envNameIsManageable(r.storedName)) {
+        unset.push(`sessionEnv.${r.storedName}`);
+      }
+    }
+    if (written.size) o.sessionEnv = Object.fromEntries(written);
+
     return { override: o, unset };
   }
+
+  // Blocks Save for every shape that would SILENTLY lose, shadow or orphan a secret rather than letting
+  // it reach the wire. Fail-closed is the right default on this surface: a refused save costs a re-type,
+  // a silently wrong one costs the secret — and the human cannot see the stored value to notice.
+  const sessionEnvErrors: string[] = (() => {
+    const errs: string[] = [];
+    const live = sessionEnvRows.filter((r) => !r.removed);
+    for (const r of live) {
+      const name = r.name.trim();
+      // 🔴 An UNTOUCHED row is never accused of anything, and a brand-new blank row is just an unused
+      // "Add" click. This skip is what stops a legacy stored name the panel would refuse to CREATE —
+      // "", " API_KEY ", a dotted one — from permanently disabling the ENTIRE project Settings Save on
+      // mount (`blockingErrors` gates the one Save button for every panel on the page) with no control
+      // the user could touch to clear it. The unset-requiring operations on such a row are still
+      // refused, by the second loop below, but only once the user actually stages one.
+      if (isSessionEnvUntouched(r) || (r.storedName === null && name === "" && r.value === "")) continue;
+      if (name === "") {
+        // A STORED row whose name was CLEARED is inert on the wire (nothing written, nothing unset), so
+        // the save would "succeed" and the field would snap back on re-seed — name the real action.
+        // An entry stored under a blank/whitespace name is a third case: it can be neither written (a
+        // blank name writes nothing) nor unset (`sessionEnv.` would target the whole map), so say so
+        // rather than pointing at a Remove that is itself refused.
+        errs.push(r.storedName === null
+          ? "an env var with a value needs a name"
+          : r.storedName.trim() === ""
+            ? "an entry stored under a blank name cannot be managed from this panel"
+            : `${r.storedName}: a name cannot be blanked — use Remove to delete this entry`);
+        continue;
+      }
+      // Validate the name only where this save actually CREATES or RENAMES it. An unchanged stored name
+      // is grandfathered: it is already persisted (nothing validated these before this panel existed),
+      // and refusing it here would strand a legacy key with no way to even rotate its value — while the
+      // second loop below still refuses the operations on it that genuinely cannot work.
+      const refusal = r.storedName === null || isSessionEnvRenamed(r) ? envNameRefusal(name) : null;
+      if (refusal) { errs.push(`${name} ${refusal}`); continue; }
+      if (r.value !== "") continue;
+      if (r.storedName === null) errs.push(`${name} needs a value`);
+      else if (isSessionEnvRenamed(r)) {
+        errs.push(`renaming ${r.storedName} to ${name} needs its value re-entered — this panel never reads stored values`);
+      }
+    }
+    // A STORED name that is not a plain env-var name cannot be targeted by an `unset` dot-path at all —
+    // `unsetConfigPath` splits on ".", so `sessionEnv.MY.VAR` looks for an object at `sessionEnv.MY`,
+    // finds a string, and no-ops. Removing or renaming such a key would report SUCCESS while leaving the
+    // old secret in place and still delivered to every spawn (an orphan, invisible from this panel).
+    // Editing its VALUE in place is fine — that is a merge write needing no unset — so only the
+    // unset-requiring operations are refused. Nothing validated these names before this panel existed.
+    for (const r of sessionEnvRows) {
+      if (r.storedName === null || envNameIsManageable(r.storedName)) continue;
+      if (r.removed || isSessionEnvRenamed(r)) {
+        errs.push(`${r.storedName} cannot be removed or renamed here — its name is not addressable by the config API, so only its value can be changed`);
+      }
+    }
+    // Duplicates among LIVE rows only, deliberately: a staged-removed row's name being re-used by
+    // another row is the legitimate rotate flow (remove, then re-add fresh), which the two-pass in
+    // buildOverride now lands correctly — it is not a collision to block.
+    const names = live.map((r) => r.name.trim()).filter(Boolean);
+    const dupes = [...new Set(names.filter((n, i) => names.indexOf(n) !== i))];
+    if (dupes.length) errs.push(`duplicate env var name(s): ${dupes.join(", ")}`);
+    return [...new Set(errs)];
+  })();
 
   // Snapshot the NORMALIZED baseline override (buildOverride() on mount round-trips the stored config
   // into this UI's canonical key order, so `dirty` is false until a field actually changes — not merely
@@ -379,9 +498,32 @@ function ConfigEditor({ project }: { project: Project }) {
   // at the just-saved value so the form drops "unsaved changes" without waiting for a remount. Keyed by
   // project id → a project switch remounts + re-snapshots.
   const { override: built, unset } = buildOverride();
-  const builtJson = JSON.stringify(built);
+  // `built` stays the PAYLOAD, but the dirty/baseline comparison is taken over a sessionEnv-FREE
+  // projection of it (JSON.stringify drops an `undefined` value, so the key is simply absent).
+  //
+  // @decision 32b23f0f — never let sessionEnv into this JSON: its own dirtiness is owned entirely by
+  // `sessionEnvDirty` below, and including it BOTH sticks `dirty` true forever after a write AND retains
+  // the typed plaintext secret in `baseline`'s ref for the component's lifetime.
+  //
+  // The stuck flag, concretely: a save stores a baseline containing `sessionEnv: {<delta>}`, then the
+  // rows re-seed from the server and blank every value, so the NEXT build writes nothing and omits the
+  // key — leaving the two JSONs differing by exactly that key, with nothing left to save and no remount
+  // (this editor is keyed by project id) to clear it.
+  const builtJson = JSON.stringify({ ...built, sessionEnv: undefined });
   const baseline = useRef(builtJson);
-  const dirty = builtJson !== baseline.current;
+  // 🔴 A staged sessionEnv REMOVAL changes NOTHING in `built` — it emits an `unset` dot-path instead —
+  // so the JSON comparison below cannot see it. Without this the Save button stays DISABLED and the
+  // panel's primary new action is unperformable. ⛔ `unset.length` cannot stand in for this:
+  // "orchestration.schedulerEnabled" is pushed unconditionally on every build, so `unset` is never
+  // empty and the guard would be vacuous. Re-baselined in onSuccess alongside `baseline.current`.
+  const sessionEnvDirty = sessionEnvRows.some((r) =>
+    r.removed
+      ? r.storedName !== null
+      : r.storedName === null
+        ? r.name.trim() !== "" || r.value !== ""
+        : r.value !== "" || isSessionEnvRenamed(r),
+  );
+  const dirty = builtJson !== baseline.current || sessionEnvDirty;
 
   // What this save would take AWAY from the rotation guard, diffed STORED -> BUILT. Surfaced because these
   // three edits are the ones no agent can make: an agent's patch can only grow the marker set and raise
@@ -416,6 +558,10 @@ function ConfigEditor({ project }: { project: Project }) {
     .map(([label, value, b]) => { const e = msRangeError(value, "s", b); return e ? `${label} ${e}` : null; })
     .filter((e): e is string => e !== null);
 
+  // Everything that BLOCKS Save, in one list — it both disables the button and takes the error slot, so
+  // a blocked Save can never be silent about which entry is blocking it.
+  const blockingErrors = [...timeoutRangeErrors, ...sessionEnvErrors];
+
   const save = useMutation({
     mutationFn: () => api.updateProjectConfig(project.id, built, unset),
     // Surface this mutation's failures INLINE (see the Save row below); tell the global mutation-error
@@ -424,6 +570,10 @@ function ConfigEditor({ project }: { project: Project }) {
     onSuccess: (updated) => {
       // The just-saved override is now the clean baseline — clearing the dirty flag immediately.
       baseline.current = builtJson;
+      // Re-seed the sessionEnv rows from the SERVER's just-persisted map: clears every pending value and
+      // staged removal (dropping sessionEnvDirty) and re-reads each indicator length from the stored
+      // truth rather than from what this form believes it sent.
+      setSessionEnvRows(seedSessionEnvRows(updated.config.sessionEnv));
       // Patch the cached projects list so the header + this editor re-read the persisted override
       // immediately (a re-read shows it). Remount via the key happens on the next project switch.
       qc.setQueryData<Project[]>(["projects"], (prev) =>
@@ -567,6 +717,37 @@ function ConfigEditor({ project }: { project: Project }) {
       </Panel>
 
       <Panel>
+        <SectionLabel>Session Environment</SectionLabel>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <Hint>
+            Extra environment variables merged into every session this project spawns. Takes effect on the
+            NEXT spawn — a session already running never sees a change made here.
+          </Hint>
+          {/* DoD-2's consequence, stated at the control: a reader who does not know values are never
+              read will assume a blank field clears the entry, which is the one mistake that destroys a
+              secret. The blank-keeps / Remove-deletes split is the whole design, so it is said first. */}
+          <Hint>
+            Stored values are <span style={{ color: color.text }}>never displayed and never sent back</span> —
+            only their names and lengths are read. Leave a value blank to
+            <span style={{ color: color.text }}> keep </span>what is stored; use
+            <span style={{ color: color.text }}> Remove </span>to delete an entry.
+          </Hint>
+        </div>
+        {/* DoD-6 — the unencrypted-storage warning, at the point of ENTRY rather than in a panel footer,
+            because it has to be read before a private key gets pasted, not after. */}
+        <div role="note" style={{ marginTop: 10, padding: "8px 10px", border: `1px solid ${color.amber}`, borderRadius: 6, background: color.panel2 }}>
+          <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, lineHeight: 1.6 }}>
+            ⚠ A value typed here is stored <strong>unencrypted</strong> in this project's config row, and is
+            readable by any surface that can read the project's config. This is the right tool for a
+            non-secret variable, and only an honest stopgap for a real secret — prefer the encrypted
+            credential channel, which delivers a secret into session env without it ever being stored in
+            plaintext here.
+          </span>
+        </div>
+        <SessionEnvEditor rows={sessionEnvRows} set={setSessionEnvRows} />
+      </Panel>
+
+      <Panel>
         <SectionLabel>Memory</SectionLabel>
         <Hint>Shared project-notes tuning for the FTS5 kickoff-injection budget (card 2fd9abf9).</Hint>
         <div className="loom-field-grid loom-field-grid-3" style={{ marginTop: 8 }}>
@@ -580,7 +761,7 @@ function ConfigEditor({ project }: { project: Project }) {
       </Panel>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <Button variant="primary" disabled={!dirty || save.isPending || timeoutRangeErrors.length > 0} onClick={() => save.mutate()}>
+        <Button variant="primary" disabled={!dirty || save.isPending || blockingErrors.length > 0} onClick={() => save.mutate()}>
           {save.isPending ? "Saving…" : "Save"}
         </Button>
         {dirty
@@ -589,9 +770,9 @@ function ConfigEditor({ project }: { project: Project }) {
         <span style={{ flex: 1 }} />
         {/* An out-of-range timeout takes the error slot: it's what's blocking Save, and it states the
             limit in the field's own unit — unlike a stale server error still quoting raw ms. */}
-        {timeoutRangeErrors.length > 0 ? (
+        {blockingErrors.length > 0 ? (
           <span role="alert" style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
-            {timeoutRangeErrors.join(" · ")}
+            {blockingErrors.join(" · ")}
           </span>
         ) : save.isError && (
           <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
@@ -2369,6 +2550,164 @@ function RotationMarkersEditor({ markers, set, effectiveCount }:
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 2 }}>
         <Button onClick={add}>＋ Add marker</Button>
         <Hint>{effHint(`${effectiveCount} marker(s)`)}</Hint>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One row of the sessionEnv editor — a WRITE-ONLY view of a project's session env map (card 32b23f0f).
+ *
+ * `value` ALWAYS starts "" for a stored entry: DoD-2 forbids ever rendering a stored value, because this
+ * map holds live secrets (a service-account private key today). ⇒ BLANK IS THE NORMAL STATE OF EVERY
+ * UNTOUCHED ROW, which is exactly why this editor must NOT reuse the blank-means-delete convention the
+ * modeled scalar fields use — that would wipe the whole map on a render-then-save round-trip. Deleting is
+ * `removed`, a separate explicit intent. See buildOverride's own sessionEnv block for the wire protocol.
+ */
+/** A POSIX-shaped environment variable name — the shape half of `envNameRefusal` below. */
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Why this panel cannot manage `name`, or null if it can. ONE predicate for BOTH ways a name fails,
+ * because both land identically — as a secret silently lost with an HTTP 200 and a success in the UI.
+ *
+ * @decision 32b23f0f — refuse a name this panel can neither ADDRESS nor STORE, never just one of the two.
+ *
+ * `unsetConfigPath` splits on ".", so a dotted key can never be deleted — a rename of one orphans the old
+ * secret, still delivered to every spawn. And `z.record` builds its output by plain assignment, so
+ * `__proto__` never becomes an own property and the server drops it: a rename onto that name unsets the
+ * old key and stores nothing at all. Nothing else in the stack validates these names.
+ */
+function envNameRefusal(name: string): string | null {
+  if (!ENV_NAME_RE.test(name)) return "must be letters, digits and _, not starting with a digit";
+  // Verified against the real validator: of 11 prototype-family names, this is the ONLY one dropped —
+  // `constructor`, `prototype`, `hasOwnProperty`, `toString`, `valueOf`, `isPrototypeOf`,
+  // `propertyIsEnumerable`, `__defineGetter__` and `_proto_` all persist correctly as own keys, so this
+  // is deliberately a single name and not a prototype-name blocklist.
+  if (name === "__proto__") return "is silently dropped by the config store, so it can never be saved";
+  return null;
+}
+const envNameIsManageable = (name: string): boolean => envNameRefusal(name) === null;
+
+/**
+ * Is this row RENAMING its stored key?
+ *
+ * @decision 32b23f0f — compare `r.name === r.storedName` BEFORE trimming: an untouched row is NEVER a
+ * rename, whatever trimming does to its name.
+ *
+ * Comparing a trimmed name against an untrimmed stored one made a row seeded from `" API_KEY "` read as
+ * renamed on mount, which emitted an unset of the real key with nothing written — a pure deletion of a
+ * live secret.
+ */
+function isSessionEnvRenamed(r: SessionEnvRow): boolean {
+  if (r.storedName === null) return false; // a brand-new row renames nothing
+  if (r.name === r.storedName) return false;
+  return r.name.trim() !== r.storedName;
+}
+
+/** Nothing staged on this row: byte-identical name (pre-trim) and no value typed. */
+function isSessionEnvUntouched(r: SessionEnvRow): boolean {
+  return r.storedName !== null && r.name === r.storedName && r.value === "";
+}
+
+interface SessionEnvRow {
+  /** The key as PERSISTED — the identity used for `unset` dot-paths. null for a brand-new row. */
+  storedName: string | null;
+  /** Character length of the persisted value; the ONLY thing derived from it. null for a new row. */
+  storedLength: number | null;
+  name: string;
+  /** What the human typed. "" ⇒ leave the stored value alone — never "delete it". */
+  value: string;
+  /** Staged removal, reversible until Save. Only ever set on a row that has a storedName. */
+  removed: boolean;
+}
+
+/**
+ * Seed rows from the stored map's KEY NAMES and value LENGTHS only — never the values themselves.
+ *
+ * @decision 32b23f0f — the indicator is an EXACT length: ⛔ never add a hash/digest of a stored value
+ * (a prefix is an offline verification oracle) and ⛔ never bucket the length (that hides a truncated
+ * paste, the one failure it exists to catch).
+ */
+function seedSessionEnvRows(stored: Record<string, string> | undefined): SessionEnvRow[] {
+  return Object.entries(stored ?? {}).map(([name, value]) => ({
+    storedName: name, storedLength: value.length, name, value: "", removed: false,
+  }));
+}
+
+/**
+ * The sessionEnv row list. Row idiom mirrors RotationMarkersEditor above (Input row + a ghost remove, one
+ * "add" button) so the list editors read as one control. State is lifted: this only edits the array;
+ * Save/dirty/blocking-error logic lives with the rest of the form in ConfigEditor.
+ *
+ * Removal is STAGED rather than immediate — the row stays visible, struck through and labelled, with an
+ * Undo — so it is deliberate and distinguishable from leaving a row alone (DoD-4) at the UI layer, the
+ * same way the `unset` dot-path makes it distinguishable at the wire layer.
+ */
+function SessionEnvEditor({ rows, set }: { rows: SessionEnvRow[]; set: (r: SessionEnvRow[]) => void }) {
+  const edit = (i: number, patch: Partial<SessionEnvRow>) =>
+    set(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  // A STORED row stages its removal. A brand-new row has nothing persisted to unset, so its ✕ drops the
+  // row outright — staging one would show a "will be removed" promise about a key that never existed.
+  const removeOrStage = (i: number) => {
+    const r = rows[i] as SessionEnvRow;
+    if (r.storedName === null) set(rows.filter((_, j) => j !== i));
+    else edit(i, { removed: true });
+  };
+  const add = () => set([...rows, { storedName: null, storedLength: null, name: "", value: "", removed: false }]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
+      {rows.length === 0 ? (
+        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "2px 0" }}>
+          No session environment variables — sessions spawn with the inherited environment only.
+        </span>
+      ) : (
+        rows.map((r, i) => {
+          const id = r.storedName ?? `new-${i}`;
+          if (r.removed) {
+            return (
+              <div key={id} data-testid={`senv-row-${id}`} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "4px 0" }}>
+                <span style={{ fontFamily: font.mono, fontSize: 13, color: color.textMuted, textDecoration: "line-through" }}>
+                  {r.storedName}
+                </span>
+                <span data-testid={`senv-staged-${id}`} style={{ fontFamily: font.mono, fontSize: 11, color: color.red }}>
+                  will be removed on Save
+                </span>
+                <Button variant="ghost" data-testid={`senv-undo-${id}`} aria-label={`Undo removing ${r.storedName}`}
+                  onClick={() => edit(i, { removed: false })} style={{ padding: "4px 9px" }}>Undo</Button>
+              </div>
+            );
+          }
+          return (
+            <div key={id} data-testid={`senv-row-${id}`} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+              <Input placeholder="NAME" value={r.name} spellCheck={false}
+                onChange={(e) => edit(i, { name: e.target.value })}
+                data-testid={`senv-name-${id}`} aria-label={`Env var ${id} name`}
+                style={{ flex: "2 1 200px", minWidth: 0 }} />
+              {/* type="password" — the value the human is typing RIGHT NOW is necessarily in the input,
+                  so mask it: DoD-2's "must not land in a screenshot" applies to the entry field too. */}
+              <Input type="password" autoComplete="off" spellCheck={false} value={r.value}
+                placeholder={r.storedName !== null ? "blank = keep stored value" : "value"}
+                onChange={(e) => edit(i, { value: e.target.value })}
+                data-testid={`senv-value-${id}`} aria-label={`Env var ${id} value`}
+                style={{ flex: "3 1 220px", minWidth: 0 }} />
+              {/* Fixed width + right-aligned: the indicator's text length varies per row ("2377 chars"
+                  vs "40 chars" vs "new"), and letting it size to content drags each row's inputs to a
+                  different x — a visibly ragged column down the list. */}
+              <span data-testid={`senv-indicator-${id}`} style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, whiteSpace: "nowrap", minWidth: 104, textAlign: "right" }}>
+                {r.storedName !== null ? `set · ${r.storedLength} chars` : "new"}
+              </span>
+              <Button variant="ghost" data-testid={`senv-remove-${id}`}
+                title={r.storedName !== null ? "Remove this variable on Save" : "Discard this row"}
+                aria-label={r.storedName !== null ? `Remove ${r.storedName}` : `Discard new entry ${i + 1}`}
+                onClick={() => removeOrStage(i)} style={{ padding: "4px 9px" }}>✕</Button>
+            </div>
+          );
+        })
+      )}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 2 }}>
+        <Button onClick={add} data-testid="senv-add">＋ Add variable</Button>
       </div>
     </div>
   );
