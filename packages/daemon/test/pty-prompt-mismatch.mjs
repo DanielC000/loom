@@ -110,6 +110,18 @@ function captureUnmatchedLongerWarnings(fn) {
   return lines;
 }
 
+// Card 1a315058 DoD-1: captures the arm-classification instrument's own [prompt-mismatch-arm] line — a
+// SEPARATE, narrower filter from captureMismatchWarnings above (its "[prompt-mismatch]" substring would
+// also match this tag; this one is exact-scoped so a test can assert the classified arm + delivered flag
+// without conflating it with the plain diagnostic).
+function captureArmWarnings(fn) {
+  const lines = [];
+  const orig = console.log;
+  console.log = (msg) => { if (typeof msg === "string" && msg.includes("[prompt-mismatch-arm]")) lines.push(msg); };
+  try { fn(); } finally { console.log = orig; }
+  return lines;
+}
+
 const SIDS = [];
 
 try {
@@ -391,7 +403,13 @@ try {
     // shape from the real incident (reportedHash equals a PRIOR generation's writtenHash, not this one's).
     host.enqueueStdin(sid, genBText); // gen=2, live.lastPrompt = genBText
     const writesBeforeMismatch = fake.writes.length;
-    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: genAText }); // byteIdentical=false
+    const armWarnings7 = captureArmWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: genAText }); // byteIdentical=false
+    });
+    // Card 1a315058 DoD-1: a recognized-but-unconfirmed replay classifies as its OWN distinct arm, never
+    // folded into "fallback-unrecognized" — the two partition disjointly on replayedEntry definedness.
+    check("7: the arm-classification instrument names this arm=fallback-replay-awaiting-resolution (card 1a315058 DoD-1)",
+      armWarnings7.length === 1 && /arm=fallback-replay-awaiting-resolution/.test(armWarnings7[0]) && /delivered=true/.test(armWarnings7[0]));
     // Manager review, card 201d0d95 (fixed-wait-negative-guard caught the ORIGINAL fixed-duration wait
     // here): a BARRIER, not a delay — poll for the REAL positive event the deferred setTimeout(0) produces
     // (the notice actually landing in host.getPendingEntries), rather than waiting a guessed duration and
@@ -680,8 +698,11 @@ try {
       !/check the message sent just before this one/.test(noticeWrite) && !/IMMEDIATELY PRECEDING submission/.test(noticeWrite));
     check("7f: instead it says plainly there is no earlier write to check",
       /no earlier write recorded for this session/.test(noticeWrite));
-    check("7f: it still keeps the cautious 'possible LOSS' framing — this is a genuinely unmatched mismatch, not a fusion",
-      /possible LOSS/.test(noticeWrite));
+    // Card 1a315058: the genuinely-unmatched population no longer asserts "possible LOSS" — it gets its
+    // own honest third-state wording instead ("unrecognized, not established"), never claiming a
+    // confirmed benign explanation or an established loss either.
+    check("7f: it now keeps the honest UNRECOGNIZED third-state framing (card 1a315058), never a confirmed benign explanation or an established loss",
+      /UNRECOGNIZED, NOT AN ESTABLISHED LOSS/.test(noticeWrite) && !/NOT A LOSS —/.test(noticeWrite) && !/nothing was lost/.test(noticeWrite));
   }
 
   // ===== 7h. Card 41950a38 — a real specimen (Platform Lead session, gen=1, a daemon_restart resume
@@ -708,8 +729,10 @@ try {
       /CLI-generated <task-notification> block/.test(noticeWrite));
     check("7h: it does NOT fall back to the generic gen=1 \"no earlier write recorded\" wording (this is a strictly more specific fact)",
       !/no earlier write recorded for this session/.test(noticeWrite));
-    check("7h: it still keeps the cautious 'possible LOSS' framing — recognizing the SHAPE never confirms the content arrived",
-      /possible LOSS/.test(noticeWrite));
+    // Card 1a315058: same population as 7f — recognizing the task-notification SHAPE never confirms the
+    // content arrived, so this stays the honest third-state wording, not "possible LOSS".
+    check("7h: it now keeps the honest UNRECOGNIZED third-state framing (card 1a315058) — recognizing the SHAPE never confirms the content arrived",
+      /UNRECOGNIZED, NOT AN ESTABLISHED LOSS/.test(noticeWrite) && !/NOT A LOSS —/.test(noticeWrite) && !/nothing was lost/.test(noticeWrite));
   }
 
   // ===== 7b. Card 201d0d95 Q1 — the FALLBACK wording when no exact match is found in recentWrittenTurns
@@ -744,16 +767,16 @@ try {
     check("7b: the fallback still points at the IMMEDIATELY PRECEDING submission as the measured pattern",
       /IMMEDIATELY PRECEDING/.test(noticeWrite) && /could not be matched directly/.test(noticeWrite));
     check("7b: the fallback never asserts a cause either", !/\bbecause\b/i.test(noticeWrite));
-    // Card 68459420 DoD-2/DoD-3: an UNMATCHED mismatch is NOT an established replay — the notice must keep
-    // the more cautious "possible LOSS" framing (never "ESTABLISHED"), since this specific content could
-    // not be matched to any of this session's own recent writes.
-    check("7b: an unmatched mismatch keeps the cautious 'possible LOSS' framing, never asserts ESTABLISHED",
-      /may not have reached you/.test(noticeWrite) && !/ESTABLISHED/.test(noticeWrite));
-    // Card f5f6515a DoD-4, manager review 5eef504d — REQUIRED: a genuinely-unmatched mismatch (no confirmed
-    // fusion, no single-entry replay) must stay BYTE-IDENTICAL to before the fusion-notice-text change: the
-    // literal phrase "possible LOSS" still present, unchanged.
-    check("7b: BYTE-IDENTICAL REQUIREMENT — the literal phrase \"possible LOSS\" is still present for a genuinely-unmatched mismatch",
-      /possible LOSS/.test(noticeWrite));
+    // Card 68459420 DoD-2/DoD-3: an UNMATCHED mismatch is NOT an established replay, and (card 1a315058)
+    // is no longer worded as a loss either — it gets its own honest third-state wording, since this
+    // specific content could not be matched to any of this session's own recent writes AND Loom cannot
+    // confirm it was lost.
+    check("7b: an unmatched mismatch keeps the honest UNRECOGNIZED third-state framing, never asserts ESTABLISHED (card 1a315058)",
+      /UNRECOGNIZED, NOT AN ESTABLISHED LOSS/.test(noticeWrite) && !/NOT A LOSS —/.test(noticeWrite) && !/nothing was lost/.test(noticeWrite));
+    // Card 1a315058 SUPERSEDES card f5f6515a DoD-4's byte-identical requirement here — this is exactly the
+    // population that card was written to change; the OLD "possible LOSS" phrase is INTENTIONALLY gone.
+    check("7b: REQUIRED (card 1a315058) — the literal phrase \"possible LOSS\" is GONE for a genuinely-unmatched mismatch",
+      !/possible LOSS/.test(noticeWrite));
     // Card 68459420 DoD-1: the sender-directed signal is SPECIFIC to a recognized replay — an unmatched
     // mismatch must NOT set it (there is no confirmed prior generation to name as replayed).
     check("7b: getLastMismatchReplay stays null for an UNMATCHED mismatch (nothing to attribute the replay to)",
@@ -982,8 +1005,10 @@ try {
     check("13: the ordinary session-facing notice still fires (characterization is additive, not a suppression)", enqueued13);
     host.deliverHook(sid, { hook_event_name: "Stop" });
     const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
-    check("13: the notice keeps the cautious 'possible LOSS' framing — this is NOT a recognized replay",
-      /may not have reached you/.test(noticeWrite) && !/ESTABLISHED/.test(noticeWrite));
+    // Card 1a315058: this population is NOT a recognized replay AND unrecognized — gets the honest
+    // third-state wording, never "possible LOSS" and never an ESTABLISHED claim either.
+    check("13: the notice keeps the honest UNRECOGNIZED third-state framing (card 1a315058) — this is NOT a recognized replay",
+      /UNRECOGNIZED, NOT AN ESTABLISHED LOSS/.test(noticeWrite) && !/NOT A LOSS —/.test(noticeWrite) && !/nothing was lost/.test(noticeWrite));
     check("13: no rule/suppression was invented for this shape — getLastMismatchReplay stays null",
       host.getLastMismatchReplay(sid) === null);
   }
@@ -1021,7 +1046,11 @@ try {
     host.live.get(sid).enterConfirmed = false;
     const suppressedLines = [];
     const origLog = console.log;
-    console.log = (msg) => { if (typeof msg === "string" && msg.includes("[prompt-mismatch-notice-suppressed]")) suppressedLines.push(msg); };
+    const armLines14 = [];
+    console.log = (msg) => {
+      if (typeof msg === "string" && msg.includes("[prompt-mismatch-notice-suppressed]")) suppressedLines.push(msg);
+      if (typeof msg === "string" && msg.includes("[prompt-mismatch-arm]")) armLines14.push(msg);
+    };
     try {
       host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded + intended }); // identical gen=1, identical hashes
     } finally {
@@ -1029,6 +1058,10 @@ try {
     }
     check("14: the exact-repeat occurrence logs a suppression line naming the matched signature",
       suppressedLines.length === 1 && /gen=1\b/.test(suppressedLines[0] ?? "") && /writtenHash=\w+/.test(suppressedLines[0] ?? "") && /reportedHash=\w+/.test(suppressedLines[0] ?? ""));
+    // Card 1a315058 DoD-1: a SUPPRESSED exact-repeat is still a real detection and must still be counted —
+    // the arm-classification instrument logs it with delivered=false, not skipped entirely.
+    check("14: the arm-classification instrument still fires for the suppressed repeat, with delivered=false (card 1a315058 DoD-1)",
+      armLines14.length === 1 && /delivered=false/.test(armLines14[0]) && /gen=1\b/.test(armLines14[0]));
     // Card c0323f8a (manager review): the suppression must also be DURABLY, manager-visibly recorded — a
     // console line alone is invisible to the manager who needs to know an alarm was swallowed. Set
     // synchronously inside deliverHook itself, so this is checkable immediately with no wait.
@@ -1434,8 +1467,11 @@ try {
     check("24: the notice fires", enqueued24);
     host.deliverHook(sid, { hook_event_name: "Stop" });
     const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
-    check("24: HARD BOUND — a 10-char omitted tail (past OFFSET_OMISSION_MAX_TAIL_CHARS=2) keeps the cautious 'possible LOSS' wording, is NOT softened to 'NOT a loss'",
-      /possible LOSS/.test(noticeWrite) && !/NOT a loss/.test(noticeWrite));
+    // Card 1a315058: still HARD BOUND — a tail past the offset-omission bound must NOT be softened to a
+    // confirmed "NOT a loss" claim. It now reads as the honest UNRECOGNIZED third state rather than
+    // "possible LOSS", but the bound itself (never silently upgraded to benign) is unchanged.
+    check("24: HARD BOUND — a 10-char omitted tail (past OFFSET_OMISSION_MAX_TAIL_CHARS=2) keeps the honest UNRECOGNIZED framing (card 1a315058), is NOT softened to 'NOT a loss'",
+      /UNRECOGNIZED, NOT AN ESTABLISHED LOSS/.test(noticeWrite) && !/NOT a loss/.test(noticeWrite));
   }
 
   // ===== 25. Card 00b5066e HARD BOUND (2 of 2) — THE REAL GEN=4 LOSS SHAPE this card's own hard-bounds
@@ -1456,10 +1492,57 @@ try {
     host.deliverHook(sid, { hook_event_name: "Stop" });
     await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
     const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
-    check("25: HARD BOUND — a genuine, large-tail, unrelated-content loss keeps crying 'possible LOSS', is NOT softened",
-      /possible LOSS/.test(noticeWrite) && !/NOT a loss/.test(noticeWrite));
+    // Card 1a315058: still HARD BOUND — a genuine, large-tail, unrelated-content divergence must NEVER be
+    // softened to a confirmed "NOT a loss" claim; it now reads as the honest UNRECOGNIZED third state
+    // rather than "possible LOSS", which is the correct, more honest framing for the SAME never-benign bound.
+    check("25: HARD BOUND — a genuine, large-tail, unrelated-content divergence keeps the honest UNRECOGNIZED framing (card 1a315058), is NOT softened to 'NOT a loss'",
+      /UNRECOGNIZED, NOT AN ESTABLISHED LOSS/.test(noticeWrite) && !/NOT a loss/.test(noticeWrite));
     check("25: DoD-7 — the notice STILL carries the position fields for a genuine loss too (divergesAtChar=7, a LARGE tailIntendedLen), letting a recipient tell this apart from scenarios 22/23 from the notice text alone",
       /divergesAtChar=7\b/.test(noticeWrite) && /tailIntendedLen=42075\b/.test(noticeWrite) && /tailReportedLen=437\b/.test(noticeWrite));
+  }
+
+  // ===== 26. Card 1a315058 — the `unmatchedRecognized` (partial-substring) shape: the exact population of
+  // the card's own live specimen (a manager session, gen=6, written=3180/reported=74528 — an earlier
+  // generation's own recorded write recognized as a SUBSTRING inside a much larger, otherwise-unrelated
+  // report). No prior test in this file exercised this branch (grepped: zero hits for `unmatchedRecognized`/
+  // `d005f55b`/"partial recognition"). `reported` here embeds gen=1's own full text between unrelated
+  // leading/trailing noise — not an exact replay (findLast finds no EXACT match), not an offset shape
+  // (neither a prefix nor a suffix relationship to THIS turn's own intended text), not an accumulation (no
+  // window of recent writes sums to reported's length) — so it can only resolve via `findRecognizedSubstring`,
+  // proving the new third-state wording also carries the PARTIAL-recognition detail (via `replayNote`,
+  // reused unchanged) rather than reading as a wholly blank "nothing recognized" case. =====
+  {
+    const sid = newSession("PartialSubstringRecognized"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const earlierGenText = "[loom:idle] AAAA — an earlier, unrelated, cleanly-delivered turn establishing a real prior entry";
+    const genText = "[loom:worker-report] worker PPPP — generation 2's own real report, the one this scenario tracks";
+    const reported = `leading noise the composer must have picked up from somewhere else entirely — ${earlierGenText} — and trailing noise too, equally unrelated to anything Loom wrote for this turn`;
+    host.enqueueStdin(sid, earlierGenText); // gen=1 — establishes the real prior entry `reported` will embed
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: earlierGenText });
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+
+    host.enqueueStdin(sid, genText); // gen=2
+    const writesBeforeMismatch = fake.writes.length;
+    const armWarnings26 = captureArmWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported }); // byteIdentical=false, embeds gen=1 as a substring
+    });
+    check("26: the arm-classification instrument fires exactly once, arm=fallback-unrecognized, delivered=true (card 1a315058 DoD-1)",
+      armWarnings26.length === 1 && /arm=fallback-unrecognized/.test(armWarnings26[0]) && /delivered=true/.test(armWarnings26[0]) && /gen=2\b/.test(armWarnings26[0]));
+    const enqueued26 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("26: the deferred notice actually enqueues (a real observed event, not assumed)", enqueued26);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
+    check("26: the notice fires and keeps the honest UNRECOGNIZED third-state framing", noticeWrite.includes("[loom:prompt-mismatch]") &&
+      /UNRECOGNIZED, NOT AN ESTABLISHED LOSS/.test(noticeWrite) && !/NOT A LOSS —/.test(noticeWrite) && !/nothing was lost/.test(noticeWrite));
+    check("26: it STILL carries the partial-recognition detail — generation 1's own recorded write recognized as a substring",
+      /DOES contain generation 1's own recorded write as a substring/.test(noticeWrite) && /partial recognition only, not a confirmed replay or accumulation/.test(noticeWrite));
+    check("26: it does NOT close with the generic artifact-audit ask the recognized-replay/confirmed branches use — nothing was recognized to have duplicated",
+      !/What YOU can check yourself: your own artifacts/.test(noticeWrite) && /No action is required of you for this on its own/.test(noticeWrite));
+    check("26: getLastMismatchReplay stays null — no EXACT ring match, only a partial substring",
+      host.getLastMismatchReplay(sid) === null);
+    check("26: getLastMismatchFusion also stays null — no confirmed accumulation span",
+      host.getLastMismatchFusion(sid) === null);
   }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }

@@ -3056,8 +3056,10 @@ export interface PtyHostEvents {
   /** @decision 38d68b8d — onPromptMismatchUnmatched: the PUSH half getLastMismatchUnmatched's pull surface
    *  (card 59757189) can't cover — a recipient can never self-diagnose.
    *  @decision 68459420 — that pull surface is deliberately never cleared once set, a discovery aid for a
-   *  manager who hasn't looked yet, not a live/transient flag. */
-  onPromptMismatchUnmatched?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; intendedText: string; detectedAt: number }): void;
+   *  manager who hasn't looked yet, not a live/transient flag.
+   *  @decision 1a315058 — `arm` carries the session-facing notice's own classification across this event
+   *  boundary, so the sender-facing message can stop contradicting it (see that card's own record). */
+  onPromptMismatchUnmatched?(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; intendedText: string; detectedAt: number; arm: string }): void;
   /** @decision 176bdb0c — onExit: intended stays the load-bearing crash-recovery discriminator; signal/
    *  codexStopDiag (+ ece98bd8's engineSessionIdCaptureEndReason) are diagnostic-only additions that never
    *  change what counts as a successful/intended stop. signal is ALWAYS undefined on Windows/conpty. */
@@ -6412,6 +6414,8 @@ export class PtyHost {
                   // unlike the fully-unmatched fallback below.
                   : (isOffsetOmission && !unmatchedRecognized)
                     ? `This is NOT a loss in the usual sense — the engine's report is an exact, contiguous PREFIX of this turn's own full intended text: every byte up to that point matches exactly, and only the final ${intended.length - reported.length} char(s) are missing from the echo (most likely a trailing character, such as a newline, that the engine did not echo back). This is far too small an omission to be the kind of large-tail loss this notice otherwise exists to catch.`
+                    // @decision 1a315058 — UNREACHABLE BY CONSTRUCTION: `isTrulyUnrecognizedDivergence`
+                    // (above) already covers this population; kept only as `lossClause`'s exhaustive else.
                     : `This means the text Loom intended for this turn may not have reached you at all — a possible LOSS, though (unlike a confirmed replay) this content could not be matched to any of this session's own recent writes, so it is not established the way a recognized replay is.`;
                 // @decision f5f6515a — a confirmed fusion gets its OWN complete notice text (never
                 // patched onto `lossClause`/`replayNote`'s loss/replay dichotomy; "possible LOSS"
@@ -6427,6 +6431,12 @@ export class PtyHost {
                 if (isUnmatchableMismatch) {
                   live.lastMismatchUnmatched = { gen: live.submitGeneration, intendedLen: intended.length, intendedText: intended, detectedAt: Date.now() };
                 }
+                // @decision 1a315058 — the genuinely-unrecognized third state; disjoint from
+                // isRecognizedReplayAwaitingResolution by construction (partitions on replayedEntry
+                // definedness) — structurally can never arm that population's resolve-timer.
+                const isTrulyUnrecognizedDivergence = isUnmatchableMismatch
+                  && !(isOffsetInsertion && !unmatchedRecognized)
+                  && !(isOffsetOmission && !unmatchedRecognized);
                 // @decision 3ff61275 — every mismatch-notice branch shares ONE lead-in identifying
                 // THIS turn by wall-clock time + message id, not just a bare gen number — a reader
                 // holding a later, unrelated generation cannot otherwise tell how stale the alarm is.
@@ -6490,6 +6500,13 @@ export class PtyHost {
                     ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}, ${positionInfo}). NOT A LOSS — the engine's report is EXACTLY generation ${confirmedWrapperAwareFusion.recognizedGen}'s own recorded write (${confirmedWrapperAwareFusion.matchedLen} chars) plus THIS turn's own intended text with a possible-duplicate redelivery tag stripped, byte-for-byte. Every byte of both generations' content did arrive; this is an attribution/ordering artifact, not corruption. ` +
                       `What YOU can check yourself: if generation ${confirmedWrapperAwareFusion.recognizedGen}'s own turn already ran, you may be about to act on a piece of it a second time — check your own artifacts for that.`
+                  // @decision 1a315058 — its OWN complete notice text: unrecognized is a THIRD state,
+                  // neither confirmed benign nor established loss, so it asserts neither — and skips the
+                  // artifact-audit ask below it, having nothing recognized to have duplicated.
+                    : isTrulyUnrecognizedDivergence
+                    ? `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
+                      `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}, ${positionInfo}). UNRECOGNIZED, NOT AN ESTABLISHED LOSS — Loom could not classify this divergence as any of its known-benign shapes (a stale wrapper, an ANSI-strip artifact, a recognized replay, or a composer fusion), and it also could not confirm the content was lost; this is a THIRD state, distinct from both. ${replayNote} ` +
+                      `No action is required of you for this on its own — Loom records it for its own tracking. If you independently notice content missing around this point, mention it in your next report up.`
                     : `[loom:prompt-mismatch] Loom wrote ${intended.length} chars for this turn (gen=${live.submitGeneration}, ${writeIdentity}), but the engine's own report of what it submitted is ${reported.length} chars and does not match byte-for-byte ` +
                       `(writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash}, ${positionInfo}). ${lossClause} ${replayNote} ` +
                       `What YOU can check yourself: your own artifacts (an action you just took, a decision you just made) for whether you've now acted on the same content twice — that duplicate check is yours to make. The loss half above is not: only the sender can tell whether their content actually arrived.`;
@@ -6624,6 +6641,20 @@ export class PtyHost {
                   && live.lastMismatchNoticeSignature.gen === noticeSignature.gen
                   && live.lastMismatchNoticeSignature.writtenHash === noticeSignature.writtenHash
                   && live.lastMismatchNoticeSignature.reportedHash === noticeSignature.reportedHash;
+                // @decision 1a315058 — DoD-1: the arm-classification instrument, mirroring `mismatchText`'s
+                // own real branch precedence exactly. Logged UNCONDITIONALLY (before the suppress/deliver
+                // branch below) so a suppressed exact-repeat is still counted, not just a delivered notice.
+                const mismatchArm = confirmedFusion ? "confirmed-fusion"
+                  : confirmedDivergedPrior ? "confirmed-diverged-prior"
+                  : confirmedWrapperDeficit ? "confirmed-wrapper-deficit"
+                  : confirmedAnsiStripDeficit ? "confirmed-ansi-strip"
+                  : confirmedWrapperAwareFusion ? "confirmed-wrapper-aware-fusion"
+                  : isTrulyUnrecognizedDivergence ? "fallback-unrecognized"
+                  : isRecognizedReplayAwaitingResolution ? "fallback-replay-awaiting-resolution"
+                  : isOffsetInsertion ? "fallback-benign-offset-insertion"
+                  : "fallback-benign-offset-omission";
+                // eslint-disable-next-line no-console
+                console.log(`[prompt-mismatch-arm] ${sessionId} gen=${noticeSignature.gen} arm=${mismatchArm} delivered=${!isExactRepeatNotice} writtenHash=${noticeSignature.writtenHash} reportedHash=${noticeSignature.reportedHash} reportedLen=${reported.length} intendedLen=${intended.length}`);
                 if (isExactRepeatNotice) {
                   // eslint-disable-next-line no-console
                   console.log(`[prompt-mismatch-notice-suppressed] ${sessionId} gen=${noticeSignature.gen} writtenHash=${noticeSignature.writtenHash} reportedHash=${noticeSignature.reportedHash} — exact repeat of the last notice already sent for this event; not re-sending a byte-identical turn.`);
@@ -6641,7 +6672,12 @@ export class PtyHost {
                   // not just the recipient above: only the sender can tell whether their content
                   // actually arrived.
                   if (isUnmatchableMismatch) {
-                    this.events.onPromptMismatchUnmatched?.(sessionId, { gen: live.submitGeneration, writtenHash: sigWritten.hash, reportedHash: sigReported.hash, intendedLen: intended.length, intendedText: intended, detectedAt: live.lastMismatchUnmatched?.detectedAt ?? Date.now() });
+                    // eslint-disable-next-line no-console
+                    console.log(`[prompt-mismatch-unmatched-pushed] ${sessionId} gen=${live.submitGeneration} arm=${mismatchArm} writtenHash=${sigWritten.hash} reportedHash=${sigReported.hash} — pushing to parent/manager (onPromptMismatchUnmatched), if any.`);
+                    // @decision 1a315058 — `arm` carries the SAME classification the session-facing notice
+                    // used, across this event boundary — so the manager-facing senderMsg can stop asserting
+                    // "possible LOSS" for an arm the session was just told is NOT a loss.
+                    this.events.onPromptMismatchUnmatched?.(sessionId, { gen: live.submitGeneration, writtenHash: sigWritten.hash, reportedHash: sigReported.hash, intendedLen: intended.length, intendedText: intended, detectedAt: live.lastMismatchUnmatched?.detectedAt ?? Date.now(), arm: mismatchArm });
                   }
                 }
               }

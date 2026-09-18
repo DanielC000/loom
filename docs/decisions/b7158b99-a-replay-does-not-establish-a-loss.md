@@ -14,6 +14,8 @@ The honest framing at THIS point in time is "cannot yet be established either wa
 
 The genuinely-unmatched (no known prior entry) branch is UNCHANGED by this reasoning — it already used the cautious "possible LOSS" framing pre-existing this card, correctly: an unmatched mismatch has no known prior entry to ever be fused back from, so there is no pending-recovery half to name for it.
 
+**Superseded in part by card `1a315058`:** the genuinely-unmatched branch's "possible LOSS" wording was later found to be the ONE population still defaulting to a loss alarm on a shape it merely doesn't recognize, with nothing actionable to check — `1a315058` gives it its own honest "unrecognized, not established" wording instead, still never claiming an established benign explanation. See that card's own record for the full reasoning; this record's claim above about the pending-recovery half not existing still holds.
+
 ## Do not
 
 - Do not word a replay-detection notice or field doc as an established loss — a later generation can still fuse the content back in whole, which is unknowable at detection time.

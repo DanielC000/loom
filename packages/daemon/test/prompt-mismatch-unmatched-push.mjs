@@ -128,6 +128,38 @@ try {
     sessions.handlePromptMismatchUnmatched(mgr, baseInfo); // mgr itself has no parentSessionId
     check("11: a session with no parent gets no push at all — a silent no-op, mirroring handlePromptMismatchUnresolved/handlePasteTripwireGiveUp's own shape", ptyStub.enqueued.length === 0);
   }
+
+  // ===== PART 5 — Card 1a315058 SCOPE EXTENSION: `info.arm` branches this message so it stops contradicting
+  // ===== the SAME event's session-facing notice. Before this card, EVERY arm reaching this method (including
+  // ===== the two already-benign offset shapes) was told "a possible LOSS" here while the session itself was
+  // ===== told "NOT A LOSS" about the identical detection — one event, two contradictory verdicts. =====
+  {
+    const wkrBenign = `pmu-wkr-${sfx}-benign-insertion`;
+    mkSession({ id: wkrBenign, role: "worker", parentSessionId: mgr });
+    ptyStub.enqueued.length = 0;
+    sessions.handlePromptMismatchUnmatched(wkrBenign, { ...baseInfo, arm: "fallback-benign-offset-insertion" });
+    const benignInsertionMsg = ptyStub.enqueued.find((e) => e.sessionId === mgr)?.text ?? "";
+    check("12: arm=fallback-benign-offset-insertion — the sender message now says NOT A LOSS, matching the session-facing notice (card 1a315058)",
+      /NOT A LOSS/.test(benignInsertionMsg) && !/a possible LOSS/.test(benignInsertionMsg));
+
+    const wkrBenignOmission = `pmu-wkr-${sfx}-benign-omission`;
+    mkSession({ id: wkrBenignOmission, role: "worker", parentSessionId: mgr });
+    ptyStub.enqueued.length = 0;
+    sessions.handlePromptMismatchUnmatched(wkrBenignOmission, { ...baseInfo, arm: "fallback-benign-offset-omission" });
+    const benignOmissionMsg = ptyStub.enqueued.find((e) => e.sessionId === mgr)?.text ?? "";
+    check("13: arm=fallback-benign-offset-omission — the sender message ALSO says NOT A LOSS (card 1a315058)",
+      /NOT A LOSS/.test(benignOmissionMsg) && !/a possible LOSS/.test(benignOmissionMsg));
+
+    // NEGATIVE CONTROL — the genuinely-unrecognized arm keeps the "possible LOSS" wording, proving the
+    // branch is arm-SPECIFIC, not a blanket softening of every message this method sends.
+    const wkrUnrecognized = `pmu-wkr-${sfx}-unrecognized`;
+    mkSession({ id: wkrUnrecognized, role: "worker", parentSessionId: mgr });
+    ptyStub.enqueued.length = 0;
+    sessions.handlePromptMismatchUnmatched(wkrUnrecognized, { ...baseInfo, arm: "fallback-unrecognized" });
+    const unrecognizedMsg = ptyStub.enqueued.find((e) => e.sessionId === mgr)?.text ?? "";
+    check("14: NEGATIVE CONTROL — arm=fallback-unrecognized keeps 'a possible LOSS' (card 1a315058 only softens the two benign offset arms)",
+      /a possible LOSS/.test(unrecognizedMsg) && !/NOT A LOSS/.test(unrecognizedMsg));
+  }
 } finally {
   delete process.env.LOOM_LOG_MESSAGE_CONTENT;
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }

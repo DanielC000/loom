@@ -7852,14 +7852,20 @@ export class SessionService {
    * content only under `LOOM_LOG_MESSAGE_CONTENT`, default OFF.
    * @decision 25f31381 — re-examined whether the existing pull surface (`getLastMismatchUnmatched`) made
    * this push notice redundant; ruled NO — a pull surface only reaches a party who already suspects loss.
+   * @decision 1a315058 — `info.arm` branches this message: the two already-benign offset arms get a
+   * "NOT A LOSS" senderMsg matching the SAME event's session-facing notice — before this, both arms told
+   * the recipient "NOT A LOSS" and told the sender "a possible LOSS" about the identical detection.
    */
-  handlePromptMismatchUnmatched(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; intendedText: string; detectedAt: number }): void {
+  handlePromptMismatchUnmatched(sessionId: string, info: { gen: number; writtenHash: string; reportedHash: string; intendedLen: number; intendedText: string; detectedAt: number; arm: string }): void {
     const s = this.db.getSession(sessionId);
     if (!s?.parentSessionId) return; // no sender/parent to push to — the pull surface still stands
     const contentClause = isLogMessageContentEnabled()
       ? ` Intended text: ${JSON.stringify(info.intendedText)}.`
       : ` Content is not included by default (set LOOM_LOG_MESSAGE_CONTENT=1 to include it) — the length and hash above already let you confirm a match against what you actually sent.`;
-    const senderMsg = `${PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG} your session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} had a ${PROMPT_MISMATCH_NOTICE_TAG} at gen=${info.gen} that could not be matched to anything recognized (not a replay, not a confirmed fusion) — a possible LOSS of ${info.intendedLen} char(s) Loom intended to write there (writtenHash=${info.writtenHash} reportedHash=${info.reportedHash}). Only you — the sender — can tell whether that content actually arrived and was acted on; the recipient only ever sees what arrived, never what was intended.${contentClause} If it does not appear to have been acted on, consider resending it — but check first, since a resend on top of content that actually did arrive creates a duplicate.`;
+    const isBenignOffsetArm = info.arm === "fallback-benign-offset-insertion" || info.arm === "fallback-benign-offset-omission";
+    const senderMsg = isBenignOffsetArm
+      ? `${PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG} your session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} had a ${PROMPT_MISMATCH_NOTICE_TAG} at gen=${info.gen} (writtenHash=${info.writtenHash} reportedHash=${info.reportedHash}) — NOT A LOSS: Loom's own reconciliation matched this to a benign offset (a stale prefix/tag or a tiny trailing omission), the same verdict the session itself was given. No action is needed; recorded here only for visibility.`
+      : `${PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG} your session ${sessionId}${s.taskId ? ` (task ${s.taskId})` : ""} had a ${PROMPT_MISMATCH_NOTICE_TAG} at gen=${info.gen} that could not be matched to anything recognized (not a replay, not a confirmed fusion) — a possible LOSS of ${info.intendedLen} char(s) Loom intended to write there (writtenHash=${info.writtenHash} reportedHash=${info.reportedHash}). Only you — the sender — can tell whether that content actually arrived and was acted on; the recipient only ever sees what arrived, never what was intended.${contentClause} If it does not appear to have been acted on, consider resending it — but check first, since a resend on top of content that actually did arrive creates a duplicate.`;
     this.enqueueSystemNudge(s.parentSessionId, senderMsg, { kind: "warning", taskId: s.taskId ?? null });
   }
 
