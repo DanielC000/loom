@@ -2344,6 +2344,7 @@ export class Db {
     this.migrateDeliveredCredentials();
     this.migrateConnections();
     this.migrateProjectMemory();
+    this.migratePurgeLegacySessionEnvHistory();
   }
 
   /**
@@ -2908,6 +2909,57 @@ export class Db {
   /** Replace a project's config override (Pillar C project_configure / PATCH config). */
   setProjectConfig(id: string, config: ProjectConfigOverride): void {
     this.db.prepare("UPDATE projects SET config_json = ? WHERE id = ?").run(JSON.stringify(config), id);
+  }
+  /**
+   * Card 11eb8f79: mask any pre-`b2f9ce3a`/`aef6b82d` CLEARTEXT `sessionEnv` value still sitting in
+   * `project_config_history`'s `prior_json`/`next_json` — rows written before `recordProjectConfigChange`
+   * masked at write time. Reuses `maskSessionEnvRecord` (`@loom/shared`), the SAME primitive the write path
+   * now applies, so a legacy row converges onto exactly the post-fix shape rather than a third state.
+   * Idempotent (masking an already-masked value reproduces it unchanged — see that function's own doc), so
+   * this scan is safe to re-run on every boot: a row with no `sessionEnv` key, one whose `sessionEnv` is
+   * already masked, or one whose `sessionEnv` is an EMPTY object (`{}` — e.g. a user deleting their last
+   * sessionEnv key), produces no UPDATE. The `{}` case is deliberate: `maskSessionEnvRecord({})` returns
+   * `undefined` (its own empty-map early return), and blindly assigning that back would DROP the
+   * `sessionEnv` key from the JSON entirely — leaving a row whose `changed_keys` still names `sessionEnv`
+   * but whose blob no longer has it, an internally inconsistent audit row. Skipping when the masked result
+   * is `undefined` keeps `{}` exactly as `{}`. Only the `sessionEnv` field inside `prior`/`next` is
+   * rewritten — any neighbouring changed key in the same row survives untouched. Never drops a row.
+   */
+  private migratePurgeLegacySessionEnvHistory(): void {
+    const rows = this.db.prepare(
+      "SELECT id, prior_json, next_json FROM project_config_history WHERE changed_keys LIKE '%sessionEnv%'",
+    ).all() as Row[];
+    if (rows.length === 0) return;
+    const update = this.db.prepare("UPDATE project_config_history SET prior_json = ?, next_json = ? WHERE id = ?");
+    const run = this.db.transaction((candidates: Row[]) => {
+      for (const r of candidates) {
+        let prior: Record<string, unknown>;
+        let next: Record<string, unknown>;
+        try {
+          prior = JSON.parse(r.prior_json as string) as Record<string, unknown>;
+          next = JSON.parse(r.next_json as string) as Record<string, unknown>;
+        } catch {
+          continue; // malformed row — leave untouched rather than risk destroying data we can't parse
+        }
+        let changed = false;
+        if (prior.sessionEnv && typeof prior.sessionEnv === "object") {
+          const masked = maskSessionEnvRecord(prior.sessionEnv as Record<string, unknown>);
+          if (masked !== undefined && JSON.stringify(masked) !== JSON.stringify(prior.sessionEnv)) {
+            prior = { ...prior, sessionEnv: masked };
+            changed = true;
+          }
+        }
+        if (next.sessionEnv && typeof next.sessionEnv === "object") {
+          const masked = maskSessionEnvRecord(next.sessionEnv as Record<string, unknown>);
+          if (masked !== undefined && JSON.stringify(masked) !== JSON.stringify(next.sessionEnv)) {
+            next = { ...next, sessionEnv: masked };
+            changed = true;
+          }
+        }
+        if (changed) update.run(JSON.stringify(prior), JSON.stringify(next), r.id);
+      }
+    });
+    run(rows);
   }
   /**
    * Record ONE project-config write into its bounded, PER-PROJECT change history (card a0cafef2, sibling
