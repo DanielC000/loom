@@ -1482,6 +1482,29 @@ export const MAX_EVENTS_SEARCH_PAGE = 200;
  *  `build_gate_retry_attempt` carries no outcome, so it is deliberately excluded. */
 const GATE_HISTORY_KINDS = ["worker_gate", "build_gate", "build_gate_retry", "deploy"] as const;
 
+// @decision 9f7f2b50 — do not delete these kinds in deleteAgent's cascade, and do not add a kind here
+// without also stamping detail.projectId for it in appendEvent — an excluded row that keeps a session-only
+// projectId derivation goes unfindable the instant its session is gone (deleteProject still purges all of it).
+const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<OrchestrationEventKind>([
+  // Security / trust-boundary
+  "credential_revoked", "manager_manage", "deploy", "worker_gate", "discovery_block_injection",
+  "engine_session_rotated", "codex_auto_commit",
+  // Cross-board / cross-project escalation trail
+  "platform_escalate", "escalation_triaged", "audit_finding", "workspace_audit_suggestion",
+  "cross_project_message", "assistant_relay_message", "session_message",
+  // Gate / merge history
+  "build_gate", "build_gate_retry_attempt", "build_gate_retry", "build_gate_single_file_retry",
+  "merge_request", "merge_done", "merge_rejected", "merge_cancelled", "batch_merge_forfeited", "kill_switch",
+  // Incident / forensic record
+  "session_died", "session_recovery_abandoned", "worker_report_undelivered", "worker_exited_without_report",
+  "manager_exited_with_live_workers", "fleet_resume_failed", "manager_crash_resume_failed",
+  "parked_manager_workers_unresumed", "rate_limit_bailed", "usage_latch_cleared", "session_message_gave_up",
+  "paste_length_loss", "paste_tripwire_give_up", "prompt_mismatch_unresolved", "repeated_tool_call",
+  "codex_submit_unconfirmed", "codex_boot_stuck", "codex_unsupported_capability", "companion_zero_reply_detected",
+  // Owner-interaction records (ruled durable — lead gen 345, low volume, provenance IS the value)
+  "question_asked", "request_escalated", "task_held_cleared",
+]);
+
 /**
  * One worktree dir whose killable removal was force-KILLED on timeout (genuinely wedged, not a clean
  * reject) — see removeWorktree/killableRemoveDir in git/worktrees.ts. This is NOT a permanent quarantine:
@@ -4009,17 +4032,26 @@ export class Db {
    * ONLY; the caller drops the deleted sessions' on-disk transcript snapshots (mirrors deleteSession),
    * so returns the deleted session ids. Does NOT guard live sessions — the REST layer blocks that FIRST
    * ("stop the fleet first").
+   *
+   * @decision 9f7f2b50
+   *
+   * The orchestration_events cascade excludes DURABLE_AUDIT_EVENT_KINDS — those rows survive with a
+   * now-dangling session id instead of being deleted.
    */
   deleteAgent(id: string): { sessionIds: string[] } {
     const sessionIds = (this.db.prepare("SELECT id FROM sessions WHERE agent_id = ?").all(id) as Row[]).map((r) => r.id as string);
     const runIds = (this.db.prepare("SELECT id FROM runs WHERE agent_id = ?").all(id) as Row[]).map((r) => r.id as string);
+    const durableKinds = [...DURABLE_AUDIT_EVENT_KINDS];
+    const durablePlaceholders = durableKinds.map(() => "?").join(",");
     this.db.transaction(() => {
       for (const sid of sessionIds) {
         this.db.prepare("DELETE FROM wakes WHERE session_id = ?").run(sid);
         this.db.prepare("DELETE FROM companion_reminders WHERE session_id = ?").run(sid);
         this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ?").run(sid);
         this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(sid);
-        this.db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ? OR worker_session_id = ?").run(sid, sid);
+        this.db.prepare(
+          `DELETE FROM orchestration_events WHERE (manager_session_id = ? OR worker_session_id = ?) AND kind NOT IN (${durablePlaceholders})`,
+        ).run(sid, sid, ...durableKinds);
         // pending_gate_ops is now a PERMANENT tombstone table (card e3e40167), keyed by owner_session_id
         // with no direct agent_id — cascade per session, mirroring deleteProject's own project_id cascade.
         this.db.prepare("DELETE FROM pending_gate_ops WHERE owner_session_id = ?").run(sid);
@@ -5423,16 +5455,40 @@ export class Db {
       try { this.sessionChangeListener(id); } catch { /* listener faults never break a session write */ }
     }
   }
+  /**
+   * @decision 9f7f2b50 (see DURABLE_AUDIT_EVENT_KINDS) — the session/task lookups this does at write time
+   * for a durable-audit kind are best-effort; a lookup miss must fall through to no stamp, never throw,
+   * or a bad kickoff would take down every appendEvent call for that kind.
+   */
+  private deriveProjectIdForDurableEvent(evt: OrchestrationEvent): string | undefined {
+    const sid = evt.workerSessionId || evt.managerSessionId;
+    if (sid) {
+      const row = this.db.prepare("SELECT project_id FROM sessions WHERE id = ?").get(sid) as Row | undefined;
+      if (row?.project_id) return row.project_id as string;
+    }
+    if (evt.taskId) {
+      const row = this.db.prepare("SELECT project_id FROM tasks WHERE id = ?").get(evt.taskId) as Row | undefined;
+      if (row?.project_id) return row.project_id as string;
+    }
+    return undefined;
+  }
   /** Append an orchestration audit record (detail serialized to JSON). */
   appendEvent(evt: OrchestrationEvent): void {
     const seq = this.nextEventSeq();
+    let detail = evt.detail;
+    if (DURABLE_AUDIT_EVENT_KINDS.has(evt.kind) && (detail == null || !("projectId" in detail))) {
+      try {
+        const projectId = this.deriveProjectIdForDurableEvent(evt);
+        if (projectId) detail = { ...(detail ?? {}), projectId };
+      } catch { /* best-effort stamp — never break the audit write itself over a lookup fault */ }
+    }
     this.db.prepare(
       `INSERT INTO orchestration_events (id,ts,manager_session_id,worker_session_id,task_id,kind,detail_json,seq)
        VALUES (@id,@ts,@managerSessionId,@workerSessionId,@taskId,@kind,@detailJson,@seq)`,
     ).run({
       id: evt.id, ts: evt.ts, managerSessionId: evt.managerSessionId,
       workerSessionId: evt.workerSessionId ?? null, taskId: evt.taskId ?? null,
-      kind: evt.kind, detailJson: evt.detail === undefined ? null : JSON.stringify(evt.detail), seq,
+      kind: evt.kind, detailJson: detail === undefined ? null : JSON.stringify(detail), seq,
     });
     // Notify the (optional) listener AFTER the row is committed. Best-effort: a listener fault must
     // never propagate into the orchestration event path, so swallow it.
@@ -5800,18 +5856,24 @@ export class Db {
    *
    *  `batchForfeited` is a correlated subquery, deliberately.
    *
-   *  @decision b480dda9 */
+   *  @decision b480dda9
+   *
+   *  Every GATE_HISTORY_KINDS member is also a DURABLE_AUDIT_EVENT_KINDS member — excluded from
+   *  deleteAgent's cascade and stamped with `detail.projectId` at write time — so the project match falls
+   *  back through the task join and that stamp once the filing session's row is gone.
+   *
+   *  @decision 9f7f2b50 */
   listGateEvents(opts: { projectId?: string | null; limit: number; offset: number }): GateHistoryPage {
     const limit = Math.max(1, Math.min(opts.limit, MAX_GATE_HISTORY_PAGE));
     const offset = Math.max(0, opts.offset);
     const kindPlaceholders = GATE_HISTORY_KINDS.map(() => "?").join(",");
-    const projFilter = opts.projectId ? " AND s.project_id = ?" : "";
+    const projFilter = opts.projectId ? " AND COALESCE(s.project_id, t.project_id, json_extract(oe.detail_json, '$.projectId')) = ?" : "";
     const from =
       `FROM orchestration_events oe
        LEFT JOIN sessions s ON s.id = COALESCE(oe.worker_session_id, oe.manager_session_id)
-       LEFT JOIN projects p ON p.id = s.project_id
-       LEFT JOIN agents a ON a.id = s.agent_id
        LEFT JOIN tasks t ON t.id = oe.task_id
+       LEFT JOIN projects p ON p.id = COALESCE(s.project_id, t.project_id, json_extract(oe.detail_json, '$.projectId'))
+       LEFT JOIN agents a ON a.id = s.agent_id
        -- Card 6ca4b1a0: op_id is this table's PRIMARY KEY, so this LEFT JOIN can never fan out a row —
        -- safe to share with the COUNT query below unchanged. See GateEventJoinRow.verdictPayloadJson's doc.
        LEFT JOIN pending_gate_ops pgo ON pgo.op_id = json_extract(oe.detail_json, '$.opId')
@@ -5821,7 +5883,8 @@ export class Db {
     const rows = this.db.prepare(
       `SELECT oe.id AS id, oe.ts AS ts, oe.kind AS kind, oe.detail_json AS detailJson, oe.task_id AS taskId,
               COALESCE(oe.worker_session_id, oe.manager_session_id) AS sessionId,
-              s.project_id AS projectId, p.name AS projectName, a.name AS agentName,
+              COALESCE(s.project_id, t.project_id, json_extract(oe.detail_json, '$.projectId')) AS projectId,
+              p.name AS projectName, a.name AS agentName,
               s.branch AS branch, t.title AS taskTitle, pgo.verdict_payload_json AS verdictPayloadJson,
               (SELECT 1 FROM orchestration_events bmf
                 WHERE bmf.kind = 'batch_merge_forfeited'
@@ -5853,7 +5916,7 @@ export class Db {
       params.push(...opts.kind);
     }
     if (opts.projectId) {
-      conditions.push("COALESCE(s.project_id, t.project_id) = ?");
+      conditions.push("COALESCE(s.project_id, t.project_id, json_extract(oe.detail_json, '$.projectId')) = ?");
       params.push(opts.projectId);
     }
     if (opts.sessionId) {
@@ -5872,18 +5935,26 @@ export class Db {
     //
     // Two independent, additive fallbacks below; does NOT recover `session_message_delivered`, whose
     // event carries no taskId in this shape.
+    //
+    // @decision 9f7f2b50
+    //
+    // A THIRD fallback, `detail.projectId`, recovers a DURABLE_AUDIT_EVENT_KINDS event whose session row
+    // is gone (deleteAgent excludes these kinds from its cascade; deleteSession never deletes any event) —
+    // appendEvent stamps that field at write time for exactly this set. Forward-only: a row written before
+    // that stamp existed still resolves projectId as NULL once its session is gone.
     const from =
       `FROM orchestration_events oe
        LEFT JOIN sessions s ON s.id = COALESCE(NULLIF(oe.worker_session_id, ''), NULLIF(oe.manager_session_id, ''))
        LEFT JOIN tasks t ON t.id = oe.task_id
-       LEFT JOIN projects p ON p.id = COALESCE(s.project_id, t.project_id)
+       LEFT JOIN projects p ON p.id = COALESCE(s.project_id, t.project_id, json_extract(oe.detail_json, '$.projectId'))
        LEFT JOIN agents a ON a.id = s.agent_id
        ${where}`;
     const total = (this.db.prepare(`SELECT COUNT(*) AS c ${from}`).get(...params) as { c: number }).c;
     const rows = this.db.prepare(
       `SELECT oe.id AS id, oe.ts AS ts, oe.kind AS kind, oe.detail_json AS detailJson, oe.task_id AS taskId,
               COALESCE(oe.worker_session_id, oe.manager_session_id) AS sessionId,
-              COALESCE(s.project_id, t.project_id) AS projectId, p.name AS projectName, a.name AS agentName,
+              COALESCE(s.project_id, t.project_id, json_extract(oe.detail_json, '$.projectId')) AS projectId,
+              p.name AS projectName, a.name AS agentName,
               s.branch AS branch, t.title AS taskTitle
        ${from}
        ORDER BY oe.seq DESC
