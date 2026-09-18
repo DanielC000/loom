@@ -377,6 +377,9 @@ test("a pre-existing DOTTED key can have its value changed but NOT be renamed or
   await page.getByTestId("senv-name-MY.VAR").fill("MY_VAR");
   await page.getByTestId("senv-value-MY.VAR").fill("rotated");
   await expect(page.getByRole("alert")).toContainText("not addressable by the config API");
+  // Card 4ad33446: the refusal is not a dead end — it names the `replace:true` REST escape hatch this
+  // panel can't compose itself (see the escape-hatch test below for a working demonstration of it).
+  await expect(page.getByRole("alert")).toContainText("replace: true");
   await expect(save).toBeDisabled();
 
   // Staging its removal is refused for the same reason — the unset cannot target it.
@@ -393,6 +396,33 @@ test("a pre-existing DOTTED key can have its value changed but NOT be renamed or
   await expect(save).toBeEnabled();
   await save.click();
   await expect.poll(() => readSessionEnv(loomDaemon.baseURL, project.id)).toEqual({ "MY.VAR": "rotated-in-place" });
+});
+
+// Card 4ad33446: the refusal above names a `replace:true` REST escape hatch this panel can't compose
+// itself. This proves that hatch actually works — a dotted key can be removed entirely (no orphan: it
+// is GONE, not left behind under either its old or a new name) without touching a neighbouring key —
+// using the exact mechanism the refusal copy describes.
+test("the documented replace:true escape hatch removes a dotted key without orphaning or touching a neighbour (card 4ad33446)", async ({ loomDaemon }) => {
+  const project = await loomDaemon.createProject(`settings-senv-escape-${Date.now()}`);
+  await seedConfig(loomDaemon.baseURL, project.id, {
+    sessionEnv: { "MY.VAR": "dotted-secret", NEIGHBOR: "keep-me" },
+  });
+
+  // Re-submit the FULL stored config with the dotted key omitted — exactly what the refusal copy
+  // instructs ("the full config minus this key"). `replace:true` bypasses `unset` entirely, so this is
+  // the one shape that can address a name `unsetConfigPath` cannot.
+  const full = await readConfig(loomDaemon.baseURL, project.id);
+  const sessionEnv = { ...(full.sessionEnv as Record<string, string>) };
+  delete sessionEnv["MY.VAR"];
+  const res = await fetch(`${loomDaemon.baseURL}/api/projects/${project.id}/config`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ config: { ...full, sessionEnv }, replace: true }),
+  });
+  expect(res.ok).toBe(true);
+
+  // Gone entirely — not renamed, not left under the old name — and the neighbour is untouched.
+  await expect.poll(() => readSessionEnv(loomDaemon.baseURL, project.id)).toEqual({ NEIGHBOR: "keep-me" });
 });
 
 // ⭐ PINS THE Map-VS-PLAIN-OBJECT CHOICE in buildOverride's written-name collection. `constructor` is a

@@ -477,10 +477,14 @@ function ConfigEditor({ project }: { project: Project }) {
     // old secret in place and still delivered to every spawn (an orphan, invisible from this panel).
     // Editing its VALUE in place is fine — that is a merge write needing no unset — so only the
     // unset-requiring operations are refused. Nothing validated these names before this panel existed.
+    //
+    // @decision 4ad33446 — this is a dead end for THIS PANEL only, not absolutely: name the
+    // `replace:true` REST escape hatch in the refusal text below rather than just stopping the
+    // user cold.
     for (const r of sessionEnvRows) {
       if (r.storedName === null || envNameIsManageable(r.storedName)) continue;
       if (r.removed || isSessionEnvRenamed(r)) {
-        errs.push(`${r.storedName} cannot be removed or renamed here — its name is not addressable by the config API, so only its value can be changed`);
+        errs.push(`${r.storedName} cannot be removed or renamed here — its name is not addressable by the config API, so only its value can be changed. To delete it entirely, PATCH /api/projects/:id/config with {replace: true} and the full config minus this key — this panel can't compose that itself, since it never reads the other stored config fields.`);
       }
     }
     // Duplicates among LIVE rows only, deliberately: a staged-removed row's name being re-used by
