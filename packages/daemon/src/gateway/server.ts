@@ -49,7 +49,7 @@ import { listConnections, createConnection, deleteConnection, getConnectionMetad
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef, getCapabilityProvisionStatus, resolveCapabilityServer } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
-import { validateProjectConfigOverride, validatePlatformConfigOverride, validatePlatformConfigPatch, validateColumnLayout } from "../mcp/platform.js";
+import { validateProjectConfigOverride, validatePlatformConfigOverride, validatePlatformConfigPatch, validateColumnLayout, mergeConfigOverride, unsetConfigPath } from "../mcp/platform.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
@@ -4163,20 +4163,39 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
 
   // Set a project's config override (the machine-writable config, schema-validated). Mirrors the
-  // platform MCP's project_configure so UI/REST and the agent share one validator + store.
+  // platform MCP's project_configure — same DEEP-MERGE-by-default / unset / replace grammar (card
+  // 546034fa), so UI/REST and the agent share one validator + store AND one merge semantics.
   app.patch("/api/projects/:id/config", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const existing = deps.db.getProject(id);
     if (!existing) return reply.code(404).send({ error: "project not found" });
-    const v = validateProjectConfigOverride((req.body as { config?: unknown })?.config ?? req.body);
+    // Accepts a bare `{...}` body (the whole thing IS the config, legacy shape) or a wrapped
+    // `{config?, unset?, replace?}` — detected by the presence of ANY of those three top-level keys, so
+    // an unset-only or replace-only PATCH (config omitted) still resolves as wrapped, and a bare body's
+    // own keys are never misread as sibling params.
+    const body = (req.body ?? {}) as { config?: unknown; unset?: unknown; replace?: unknown };
+    const rawObj = typeof req.body === "object" && req.body !== null ? (req.body as object) : null;
+    const wrapped = rawObj !== null && ("config" in rawObj || "unset" in rawObj || "replace" in rawObj);
+    const v = validateProjectConfigOverride(wrapped ? body.config : req.body);
     if (!v.ok) return reply.code(400).send({ error: `invalid config: ${v.error}` });
+    const replace = wrapped && body.replace === true;
+    const unset = wrapped && Array.isArray(body.unset) ? body.unset.filter((p): p is string => typeof p === "string" && p.length > 0) : [];
+    // PATCH/MERGE (card 546034fa): deep-merge onto the existing override by default — matching every
+    // MCP config-write surface — instead of replacing it wholesale, so a single-key PATCH (e.g. a
+    // sessionEnv credential delivery) can never silently drop gateCommand/kanbanColumns/etc. `replace:
+    // true` opts into the old whole-object-replace behavior verbatim.
+    // @decision 1069c8e1 — no additiveOnlyRotationGuard here: this human REST PATCH is the documented
+    // escape hatch for shrinking rotationMarkers / lowering rotationLiveCommitmentsFloor (Settings.tsx);
+    // the agent-only guard would silently disable that release valve.
+    let merged = replace ? v.value : mergeConfigOverride(existing.config, v.value);
+    for (const p of unset) merged = unsetConfigPath(merged, p);
     // Route through the SAFE writer (not a blind setProjectConfig): a kanbanColumns change that drops/renames
     // a column re-keys the affected cards to the landing lane instead of ORPHANING them on a non-existent
     // column. A non-column patch stays byte-identical to the blind path. (tasks/columns.ts.)
     // "human" is honest here (card a0cafef2), not a placeholder: this REST PATCH is a human-only surface —
     // no agent MCP tool calls it (they route through the platform/setup/manager project_configure/
     // project_update tools below, each threading its OWN actor).
-    const wrote = setProjectConfigSafe(deps.db, id, v.value, "human");
+    const wrote = setProjectConfigSafe(deps.db, id, merged, "human");
     if (!wrote.ok) return reply.code(400).send({ error: wrote.error });
     // Codescape v1 has no runtime registration (see codescape/supervisor.ts's CWD CONTRACT doc): serve
     // only ever sees the projects boot-ingested it. Flipping codescape.enabled ON here won't ingest this

@@ -117,8 +117,9 @@ try {
   db.insertProject({ id: "pB", name: "B", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: false });
   const cardB = randomUUID();
   db.insertTask({ id: cardB, projectId: "pB", title: "on todo", body: "", columnKey: "todo", position: 1, priority: "p2", createdAt: now, updatedAt: now });
-  // The REST PATCH replaces the whole override (no merge). A blind PATCH has no prevKey, so renaming "todo"
-  // → "doing" reads as drop-todo + add-doing: the card on "todo" lands in the landing lane (no orphan).
+  // The REST PATCH deep-merges (card 546034fa) — but kanbanColumns is an ARRAY, so it still REPLACES
+  // wholesale (arrays never merge element-wise) and carries no prevKey: renaming "todo" → "doing" reads
+  // as drop-todo + add-doing, so the card on "todo" lands in the landing lane (no orphan).
   const newBoardB = resolveConfig({}).kanbanColumns.map((c) => (c.key === "todo" ? { ...c, key: "doing", label: "Doing" } : c));
   const r2 = await app.inject({ method: "PATCH", url: "/api/projects/pB/config", payload: { config: { kanbanColumns: newBoardB } } });
   check("(2) REST PATCH (column rename) → 200", r2.statusCode === 200);

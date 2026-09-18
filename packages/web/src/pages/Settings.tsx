@@ -32,9 +32,10 @@ import { color, font } from "../theme";
 // Project-scoped settings — edit the per-project config OVERRIDE (deep-partial of ResolvedConfig).
 // Scoped to the header's active project; switching it re-scopes (the editor is keyed by project id).
 // Every field edits the OVERRIDE while showing the EFFECTIVE resolved value as a hint; a blank/inherit
-// field is omitted from the override and falls back to the platform default. Save REPLACES the whole
-// override via PATCH /api/projects/:id/config (the human/REST path — gateCommand is editable here by
-// design; only the agent MCP path rejects it). A strict-zod 400 surfaces verbatim.
+// field is omitted from the override AND its dot-path is sent as `unset` (card 546034fa: Save MERGES
+// onto the stored override by default via PATCH /api/projects/:id/config — the human/REST path —
+// gateCommand is editable here by design; only the agent MCP path rejects it), so it actually falls back
+// to the platform default rather than surviving the merge. A strict-zod 400 surfaces verbatim.
 export default function Settings() {
   const { projectId, projects } = useActiveProject();
   const project = projects.find((p) => p.id === projectId) ?? null;
@@ -265,14 +266,19 @@ function ConfigEditor({ project }: { project: Project }) {
   const [rotationHeading, setRotationHeading] = useState(ov.orchestration?.rotationLiveCommitmentsHeading ?? "");
   const [rotationFloor, setRotationFloor] = useState(numStr(ov.orchestration?.rotationLiveCommitmentsFloor));
 
-  // Build the OVERRIDE from the current form. CRITICAL: the PATCH REPLACES the whole override, so we
-  // start from a clone of the stored one and apply only the fields this UI models — preserving keys it
-  // does NOT model (pty, sessionEnv, permission.mode/deny/startupModeCycles) instead of silently wiping
-  // them. A modeled field set to blank/inherit is DELETED so it falls back to the platform default.
+  // Build the OVERRIDE from the current form, PLUS the `unset` dot-paths a cleared field needs (card
+  // 546034fa: the PATCH now MERGES onto the stored override by default, so omitting a key from `override`
+  // means "leave it alone", not "clear it" — the OLD whole-object-replace behavior this UI relied on to
+  // express a delete). We still start from a clone of the stored override and apply only the fields this
+  // UI models — preserving keys it does NOT model (pty, sessionEnv, permission.mode/deny/
+  // startupModeCycles) instead of silently wiping them; those keys need no `unset` entry since the merge
+  // already leaves them untouched. A modeled field set to blank/inherit is DELETED locally AND its
+  // dot-path recorded on `unset`, so it actually falls back to the platform default server-side too.
   // Numbers parse with Number() so a non-numeric entry sends NaN→null and the strict-zod PATCH 400s
   // with a readable "Expected number" — the demonstrable error path.
-  function buildOverride(): ProjectConfigOverride {
+  function buildOverride(): { override: ProjectConfigOverride; unset: string[] } {
     const o: ProjectConfigOverride = structuredClone(ov);
+    const unset: string[] = [];
 
     // kanbanColumns is intentionally left as-cloned — owned by the dedicated atomic columns endpoint, not
     // this PATCH (see the state note above). Touching it here would race the column editor.
@@ -283,44 +289,50 @@ function ConfigEditor({ project }: { project: Project }) {
     } else if (o.permission) {
       const { allow: _drop, ...rest } = o.permission;
       if (Object.keys(rest).length) o.permission = rest; else delete o.permission;
+      unset.push("permission.allow");
     }
 
     const orch: Partial<OrchestrationConfig> = { ...o.orchestration };
     // schedulerEnabled moved to the daemon-global config (GlobalConfigForm below) — it's no longer
-    // modeled per-project. Drop it unconditionally so a project whose STORED override still carries a
-    // stale value (accepted before the move) doesn't get silently re-sent on the next save and 400 the
-    // strict per-project validator, which now rejects the key outright.
+    // modeled per-project. Drop it unconditionally (+ unset it) so a project whose STORED override still
+    // carries a stale value (accepted before the move) doesn't get silently re-sent on the next save
+    // (rejected outright by the strict per-project validator) AND actually gets cleaned out of storage
+    // instead of surviving a merge that never touches it.
     delete orch.schedulerEnabled;
-    if (gateCommand.trim()) orch.gateCommand = gateCommand.trim(); else delete orch.gateCommand;
-    applyMs(orch, "gateCommandTimeoutMs", gateTimeout, "s");
-    if (deployCommand.trim()) orch.deployCommand = deployCommand.trim(); else delete orch.deployCommand;
-    applyMs(orch, "deployCommandTimeoutMs", deployTimeout, "s");
-    applyMs(orch, "alertWebhookTimeoutMs", webhookTimeout, "s");
+    unset.push("orchestration.schedulerEnabled");
+    if (gateCommand.trim()) orch.gateCommand = gateCommand.trim();
+    else { delete orch.gateCommand; unset.push("orchestration.gateCommand"); }
+    applyMs(orch, "gateCommandTimeoutMs", gateTimeout, "s", unset);
+    if (deployCommand.trim()) orch.deployCommand = deployCommand.trim();
+    else { delete orch.deployCommand; unset.push("orchestration.deployCommand"); }
+    applyMs(orch, "deployCommandTimeoutMs", deployTimeout, "s", unset);
+    applyMs(orch, "alertWebhookTimeoutMs", webhookTimeout, "s", unset);
     // alertWebhook: sent when either half is non-blank, so a partial entry (URL with no events, or vice
     // versa) still round-trips to the server's readable "both required" 400 rather than being silently
-    // dropped. Both blank ⇒ not configured, delete the key.
+    // dropped. Both blank ⇒ not configured, delete (+ unset) the key.
     const webhookUrlTrim = alertWebhookUrl.trim();
     const webhookEvents = parseLines(alertWebhookEventsText);
     if (webhookUrlTrim || webhookEvents.length) {
       orch.alertWebhook = { url: webhookUrlTrim, events: webhookEvents as OrchestrationEventKind[] };
     } else {
       delete orch.alertWebhook;
+      unset.push("orchestration.alertWebhook");
     }
-    applyNum(orch, "maxConcurrentWorkers", maxWorkers);
-    applyNum(orch, "maxConcurrentManagers", maxManagers);
-    applyNum(orch, "recycleAtContextRatio", recycle);
-    applyNum(orch, "emergencyRecycleAtContextRatio", emergencyRecycle);
-    applyNum(orch, "idleNudgeMinutes", idleNudge);
-    applyNum(orch, "stuckWorkerMinutes", stuckWorker);
-    applyNum(orch, "managerBlindTurnMinutes", blindTurn);
-    applyNum(orch, "maxUnansweredNudges", maxUnanswered);
-    applyNum(orch, "idleDefaultSnoozeMinutes", idleSnooze);
+    applyNum(orch, "maxConcurrentWorkers", maxWorkers, unset);
+    applyNum(orch, "maxConcurrentManagers", maxManagers, unset);
+    applyNum(orch, "recycleAtContextRatio", recycle, unset);
+    applyNum(orch, "emergencyRecycleAtContextRatio", emergencyRecycle, unset);
+    applyNum(orch, "idleNudgeMinutes", idleNudge, unset);
+    applyNum(orch, "stuckWorkerMinutes", stuckWorker, unset);
+    applyNum(orch, "managerBlindTurnMinutes", blindTurn, unset);
+    applyNum(orch, "maxUnansweredNudges", maxUnanswered, unset);
+    applyNum(orch, "idleDefaultSnoozeMinutes", idleSnooze, unset);
     // rotationMarkers: trimmed; a row blank in BOTH token and note is dropped (an accidental empty add).
     // A row carrying a note but no token is KEPT so it round-trips to the server's readable "token: String
     // must contain at least 1 character" 400 instead of vanishing — same reasoning as the partial
     // alertWebhook entry above. `caseSensitive` is emitted only when true (false is the schema default);
     // the mount-time baseline normalizes identically, so that never reads as a spurious dirty edit.
-    // An EMPTY list DELETES the key — the clear half of the escape hatch.
+    // An EMPTY list DELETES (+ unsets) the key — the clear half of the escape hatch.
     const markers: RotationMarker[] = rotationMarkers
       .map((m) => {
         const out: RotationMarker = { token: m.token.trim() };
@@ -330,29 +342,35 @@ function ConfigEditor({ project }: { project: Project }) {
         return out;
       })
       .filter((m) => m.token !== "" || m.note !== undefined);
-    if (markers.length) orch.rotationMarkers = markers; else delete orch.rotationMarkers;
+    if (markers.length) orch.rotationMarkers = markers;
+    else { delete orch.rotationMarkers; unset.push("orchestration.rotationMarkers"); }
     if (rotationHeading.trim()) orch.rotationLiveCommitmentsHeading = rotationHeading.trim();
-    else delete orch.rotationLiveCommitmentsHeading;
-    applyNum(orch, "rotationLiveCommitmentsFloor", rotationFloor);
+    else { delete orch.rotationLiveCommitmentsHeading; unset.push("orchestration.rotationLiveCommitmentsHeading"); }
+    applyNum(orch, "rotationLiveCommitmentsFloor", rotationFloor, unset);
     if (Object.keys(orch).length) o.orchestration = orch; else delete o.orchestration;
 
-    if (docLint !== "inherit") o.docLint = docLint === "true"; else delete o.docLint;
+    if (docLint !== "inherit") o.docLint = docLint === "true";
+    else { delete o.docLint; unset.push("docLint"); }
 
     // python.interpreterPath: set when non-blank, else drop the key (and the now-empty python block) so a
     // blank field inherits PATH discovery rather than persisting an empty override.
     const py = pythonInterpreter.trim();
     if (py) o.python = { ...o.python, interpreterPath: py };
-    else if (o.python) { const { interpreterPath: _drop, ...rest } = o.python; if (Object.keys(rest).length) o.python = rest; else delete o.python; }
+    else if (o.python) {
+      const { interpreterPath: _drop, ...rest } = o.python;
+      if (Object.keys(rest).length) o.python = rest; else delete o.python;
+      unset.push("python.interpreterPath");
+    }
 
-    // memory: shared-notes tuning (budgetTokens/topK/maxNotes) — each field blank → delete (inherit the
-    // platform default, itself clamped to MEMORY_CONFIG_MAX by resolveConfig).
+    // memory: shared-notes tuning (budgetTokens/topK/maxNotes) — each field blank → delete + unset
+    // (inherit the platform default, itself clamped to MEMORY_CONFIG_MAX by resolveConfig).
     const mem: Partial<MemoryConfig> = { ...o.memory };
-    applyNumField(mem, "budgetTokens", memoryBudgetTokens);
-    applyNumField(mem, "topK", memoryTopK);
-    applyNumField(mem, "maxNotes", memoryMaxNotes);
+    applyNumField(mem, "budgetTokens", memoryBudgetTokens, unset, "memory");
+    applyNumField(mem, "topK", memoryTopK, unset, "memory");
+    applyNumField(mem, "maxNotes", memoryMaxNotes, unset, "memory");
     if (Object.keys(mem).length) o.memory = mem; else delete o.memory;
 
-    return o;
+    return { override: o, unset };
   }
 
   // Snapshot the NORMALIZED baseline override (buildOverride() on mount round-trips the stored config
@@ -360,7 +378,7 @@ function ConfigEditor({ project }: { project: Project }) {
   // because the stored key order differs). The baseline is a MUTABLE ref: a successful save re-points it
   // at the just-saved value so the form drops "unsaved changes" without waiting for a remount. Keyed by
   // project id → a project switch remounts + re-snapshots.
-  const built = buildOverride();
+  const { override: built, unset } = buildOverride();
   const builtJson = JSON.stringify(built);
   const baseline = useRef(builtJson);
   const dirty = builtJson !== baseline.current;
@@ -399,7 +417,7 @@ function ConfigEditor({ project }: { project: Project }) {
     .filter((e): e is string => e !== null);
 
   const save = useMutation({
-    mutationFn: () => api.updateProjectConfig(project.id, built),
+    mutationFn: () => api.updateProjectConfig(project.id, built, unset),
     // Surface this mutation's failures INLINE (see the Save row below); tell the global mutation-error
     // handler to skip its blocking window.alert for this one.
     meta: { inlineError: true },
@@ -2433,17 +2451,20 @@ function triStr(v: boolean | undefined): TriState {
 function numStr(v: number | undefined): string {
   return v === undefined ? "" : String(v);
 }
-// Set/clear a numeric orchestration key from a form string. Blank → delete (not overridden, inherits the
-// default). A non-numeric entry is passed through as NaN (→ null over JSON) so the strict-zod PATCH
-// rejects it with a readable error — the demonstrable invalid-value path.
-function applyNum(orch: Partial<OrchestrationConfig>, key: keyof OrchestrationConfig, s: string): void {
-  if (s.trim() === "") delete (orch as Record<string, unknown>)[key];
+// Set/clear a numeric orchestration key from a form string. Blank → delete locally AND record its
+// dot-path on `unset` (card 546034fa: the PATCH now MERGES, so a merely-omitted key is left alone, not
+// cleared — `unset` is what actually deletes it server-side). A non-numeric entry is passed through as
+// NaN (→ null over JSON) so the strict-zod PATCH rejects it with a readable error — the demonstrable
+// invalid-value path.
+function applyNum(orch: Partial<OrchestrationConfig>, key: keyof OrchestrationConfig, s: string, unset: string[]): void {
+  if (s.trim() === "") { delete (orch as Record<string, unknown>)[key]; unset.push(`orchestration.${String(key)}`); }
   else (orch as Record<string, unknown>)[key] = Number(s);
 }
 // Generic sibling of applyNum for a non-OrchestrationConfig numeric group (e.g. MemoryConfig) — same
-// blank→delete / non-numeric→NaN passthrough semantics, just not narrowed to one specific config shape.
-function applyNumField<T extends Record<string, unknown>>(obj: T, key: keyof T, s: string): void {
-  if (s.trim() === "") delete obj[key];
+// blank→delete+unset / non-numeric→NaN passthrough semantics, just not narrowed to one specific config
+// shape. `prefix` is the group's own dot-path root (e.g. "memory").
+function applyNumField<T extends Record<string, unknown>>(obj: T, key: keyof T, s: string, unset: string[], prefix: string): void {
+  if (s.trim() === "") { delete obj[key]; unset.push(`${prefix}.${String(key)}`); }
   else (obj as Record<string, unknown>)[key as string] = Number(s);
 }
 
@@ -2456,11 +2477,12 @@ const UNIT_MS: Record<Unit, number> = { s: 1000, m: 60000, h: 3600000 };
 function msStr(v: number | undefined, unit: Unit): string {
   return v === undefined ? "" : String(v / UNIT_MS[unit]);
 }
-// Set/clear a canonical-ms orchestration key from a form string in `unit`. Blank → delete (inherit the
-// default). A non-numeric entry passes through as NaN (→ null over JSON) so the strict-zod PATCH rejects
-// it with a readable error — the demonstrable invalid-value path (mirrors applyNum).
-function applyMs(orch: Partial<OrchestrationConfig>, key: keyof OrchestrationConfig, s: string, unit: Unit): void {
-  if (s.trim() === "") delete (orch as Record<string, unknown>)[key];
+// Set/clear a canonical-ms orchestration key from a form string in `unit`. Blank → delete + record its
+// dot-path on `unset` (inherit the default — see applyNum's own note on why `unset` is now required). A
+// non-numeric entry passes through as NaN (→ null over JSON) so the strict-zod PATCH rejects it with a
+// readable error — the demonstrable invalid-value path (mirrors applyNum).
+function applyMs(orch: Partial<OrchestrationConfig>, key: keyof OrchestrationConfig, s: string, unit: Unit, unset: string[]): void {
+  if (s.trim() === "") { delete (orch as Record<string, unknown>)[key]; unset.push(`orchestration.${String(key)}`); }
   else (orch as Record<string, unknown>)[key] = Number(s) * UNIT_MS[unit];
 }
 

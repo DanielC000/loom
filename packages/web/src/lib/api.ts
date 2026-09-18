@@ -414,8 +414,11 @@ export const api = {
       if (!p) throw new Error("project not found");
       return p.config;
     }),
-  updateProjectConfig: (id: string, config: ProjectConfigOverride) =>
-    patch<Project>(`/api/projects/${id}/config`, { config }),
+  // The route deep-merges `config` onto the stored override by default (card 546034fa) — `unset`
+  // (dot-paths, e.g. "orchestration.gateCommand") is how a caller expresses a DELETE the merge itself
+  // cannot: an omitted key now means "leave it alone", not "clear it". See Settings.tsx's buildOverride.
+  updateProjectConfig: (id: string, config: ProjectConfigOverride, unset?: string[]) =>
+    patch<Project>(`/api/projects/${id}/config`, unset?.length ? { config, unset } : { config }),
   // --- Daemon-global platform tuning (HUMAN-only; NOT project-scoped — one shared daemon). GET returns
   // the stored override + the RESOLVED effective platform group (for the "effective:" hints); update
   // PATCHes the replacement override under `{ config }`. The validator is strict zod with §bounds — an

@@ -534,6 +534,9 @@ export function mergeConfigOverride(
  * object) is a harmless no-op, never a throw. Top-level ("obsidian") or nested ("orchestration.gateCommand").
  * Validation is unnecessary: removing any (independent, all-optional) config key can never make the result
  * invalid — the inverse of the merge note's "two valid configs merge to a valid config".
+ *
+ * @decision 546034fa — PRUNES a now-empty parent object after the leaf delete; do not revert to a bare
+ * leaf-only delete — that reopens a dangling `group: {}` husk a raw presence check reads as "configured".
  */
 export function unsetConfigPath(
   config: ProjectConfigOverride, dotPath: string,
@@ -541,13 +544,22 @@ export function unsetConfigPath(
   const parts = dotPath.split(".").filter(Boolean);
   if (!parts.length) return config;
   const out = structuredClone(config ?? {}) as Record<string, unknown>;
-  let cur: Record<string, unknown> = out;
+  // `chain` always has >= 1 entry by construction (seeded with `out`, only ever pushed to), so every
+  // index below is in-bounds — the `as Record<string, unknown>` casts state that invariant rather than
+  // re-deriving it via an unnecessary runtime check.
+  const chain: Record<string, unknown>[] = [out];
   for (let i = 0; i < parts.length - 1; i++) {
+    const cur = chain[chain.length - 1] as Record<string, unknown>;
     const next = cur[parts[i] as string];
     if (!isPlainObject(next)) return out as ProjectConfigOverride; // path doesn't exist — no-op
-    cur = next;
+    chain.push(next as Record<string, unknown>);
   }
-  delete cur[parts[parts.length - 1] as string];
+  delete (chain[chain.length - 1] as Record<string, unknown>)[parts[parts.length - 1] as string];
+  for (let i = chain.length - 1; i > 0; i--) {
+    const obj = chain[i] as Record<string, unknown>;
+    if (Object.keys(obj).length === 0) delete (chain[i - 1] as Record<string, unknown>)[parts[i - 1] as string];
+    else break;
+  }
   return out as ProjectConfigOverride;
 }
 
