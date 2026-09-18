@@ -34,3 +34,25 @@ export function deferredTriggerNotice(db: Db, projectId: string, failedNames: st
     )
     .join("");
 }
+
+/**
+ * Card f75a2202: the `kind:"request-answered"` sibling of {@link deferredTriggerNotice} above, keyed on
+ * a Request (Question) id instead of a failed test-file name — see `Task.deferredUntilEvent`'s own doc
+ * for the full "never auto-clears, this is a POINTER" contract. Returns `""` when nothing matches a task
+ * whose `deferredUntilEvent.kind === "request-answered"` names this exact `questionId`. Wired at every
+ * site that pushes a "your question was answered" nudge to the asker (`gateway/server.ts`'s answer
+ * route; `companion/capabilities.ts`'s two `decision_resolve` commit paths) — never `question_resolve`
+ * (`mcp/questionTool.ts`), which pushes no nudge of its own to append to.
+ */
+export function requestAnsweredTriggerNotice(db: Db, projectId: string, questionId: string): string {
+  const matches = db.listTasks(projectId).filter(
+    (t) => t.deferredUntilEvent?.kind === "request-answered" && t.deferredUntilEvent.key === questionId,
+  );
+  if (matches.length === 0) return "";
+  return matches
+    .map((t) =>
+      `\n[loom:deferred-trigger] request ${questionId} was just answered; card ${t.id} is deferred ON THIS EXACT REQUEST. ` +
+      "Read its deferredReason IN FULL before releasing anything — this is a POINTER, never proof the card should be released.",
+    )
+    .join("");
+}

@@ -28,6 +28,7 @@ import type { OwnerAttestation, AuthoredContentGrantScope } from "./attestation.
 import { CompanionTrustWindow } from "./trust-window.js";
 import type { GitWriter } from "../git/writer.js";
 import { resolveVaultGitTarget } from "../vault/versioner.js";
+import { requestAnsweredTriggerNotice } from "../orchestration/deferred-trigger-notice.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -792,7 +793,10 @@ const DECISIONS_RELAY: CompanionCapability = {
           const updated = db.answerQuestion(questionId, { chosenOption, note: normalizedNote, answeredAt: new Date().toISOString() });
           if (!updated) return ok({ error: "question was answered or changed concurrently — nothing to resolve" });
           try {
-            const nudge = `Your question "${updated.title}" was answered — pull it (question_pull) when you reach that decision point.`;
+            // Card f75a2202: append the request-answered deferred-trigger appendix (see that function's
+            // own doc) — must be wired at every "was answered" push site, not just the REST route.
+            const nudge = `Your question "${updated.title}" was answered — pull it (question_pull) when you reach that decision point.` +
+              requestAnsweredTriggerNotice(db, updated.projectId, updated.id);
             ctx.pty.enqueueStdin(updated.sessionId, nudge, "human", undefined, undefined, "agent", updated.id);
           } catch { /* best-effort — the answer already persisted; question_pull is the durable fallback */ }
           return ok({ status: "resolved", questionId, chosenOption, note: normalizedNote });
@@ -812,7 +816,8 @@ const DECISIONS_RELAY: CompanionCapability = {
           // subsequent Tier-A calls on this (session, route, sender) skip the round-trip; Tier X never arms.
           onStepUpCommitted(ctx.trustWindow, tier, friction, frictionScope);
           try {
-            const nudge = `Your question "${updated.title}" was answered — pull it (question_pull) when you reach that decision point.`;
+            const nudge = `Your question "${updated.title}" was answered — pull it (question_pull) when you reach that decision point.` +
+              requestAnsweredTriggerNotice(db, updated.projectId, updated.id);
             ctx.pty.enqueueStdin(updated.sessionId, nudge, "human", undefined, undefined, "agent", updated.id);
           } catch { /* best-effort — the answer already persisted; question_pull is the durable fallback */ }
           return ok({ status: "resolved", questionId, chosenOption, note: normalizedNote });

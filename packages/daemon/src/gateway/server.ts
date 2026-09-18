@@ -53,6 +53,7 @@ import { validateProjectConfigOverride, validatePlatformConfigOverride, validate
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
+import { requestAnsweredTriggerNotice } from "../orchestration/deferred-trigger-notice.js";
 import { clearClaudeRateLimit, readClaudeUsageState } from "../orchestration/usage-awareness.js";
 import { GitReader, checkCommitIdentity, isGitRepo } from "../git/reader.js";
 import { GitWriter, gitError } from "../git/writer.js";
@@ -5302,7 +5303,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // (defensive — the FK on questions.session_id makes a missing asker row unreachable in practice).
       const asker = deps.db.getSession(updated.sessionId);
       const target = (asker && deps.db.getLiveSessionForAgent(asker.agentId)?.id) ?? updated.sessionId;
-      const nudge = `Your question "${updated.title}" was answered — pull it (question_pull) when you reach that decision point.`;
+      // Card f75a2202: append the request-answered deferred-trigger appendix (see that function's own
+      // doc) — a card bound to THIS request via deferredUntilEvent gets a pointer the moment it's
+      // answered, mirroring deferredTriggerNotice's gate-fail-naming sibling.
+      const nudge = `Your question "${updated.title}" was answered — pull it (question_pull) when you reach that decision point.` +
+        requestAnsweredTriggerNotice(deps.db, updated.projectId, updated.id);
       // Tagged with the question id (questionId) so a LATER question_pull that consumes this question in
       // the same batch as others can purge this exact nudge if it's still queued when it goes stale
       // (card bbc46336 follow-up — see SessionService.purgeAnsweredQuestionNudges).

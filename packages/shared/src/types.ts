@@ -1981,9 +1981,9 @@ export interface DeferredItem {
  * - `"gate-fail-naming"`: a gate/merge run whose `run-summary.failedNames` (the dense, structurally-
  *   correct list of failed test files — NOT `gateDetail.failingTest`, which only carries a name on a
  *   minority of failed rows) includes `key` (a test file name/path).
- * - `"request-answered"`: reserved for the owner-Request axis (card 929a2839's sibling extension) — not
- *   wired by anything yet; validated the same way so a card can name it without a second field shape
- *   later.
+ * - `"request-answered"`: `key` (a Question/Request id) transitions to `state:"answered"` — wired by
+ *   `orchestration/deferred-trigger-notice.ts`'s `requestAnsweredTriggerNotice` (card f75a2202), appended
+ *   to the "your question was answered" nudge at every site that pushes one to the asker.
  */
 export type DeferredUntilEventKind = "gate-fail-naming" | "request-answered";
 
