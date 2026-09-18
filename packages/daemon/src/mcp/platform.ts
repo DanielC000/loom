@@ -302,11 +302,30 @@ function strictRecord<T extends z.ZodTypeAny>(valueSchema: T) {
   return z.preprocess(rejectDunderProtoKey, z.record(z.string(), valueSchema));
 }
 
+/**
+ * @decision 12400719 — a dotted `sessionEnv` key can never be addressed by the config unset dot-path
+ * grammar, so reject it at write time. Keep this separate from `rejectDunderProtoKey`/`strictRecord`
+ * above, which stay general-purpose for a future field where a dot may be legitimate.
+ */
+function rejectDottedKey(raw: unknown, ctx: z.RefinementCtx): unknown {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const dotted = Object.keys(raw).find((k) => k.includes("."));
+    if (dotted !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `sessionEnv key "${dotted}" contains "." — a dotted name can never be removed via the config unset dot-path syntax; rename it without a "." (e.g. use "_")`,
+      });
+      return z.NEVER;
+    }
+  }
+  return raw;
+}
+
 const projectConfigOverrideSchema = z.object({
   kanbanColumns: kanbanColumnsSchema.optional(),
   permission: permissionOverride.optional(),
   pty: ptyOverride.optional(),
-  sessionEnv: strictRecord(z.string()).optional(),
+  sessionEnv: z.preprocess(rejectDottedKey, strictRecord(z.string())).optional(),
   orchestration: orchestrationOverride.optional(),
   docLint: z.boolean().optional(),
   codescape: codescapeOverride.optional(),
