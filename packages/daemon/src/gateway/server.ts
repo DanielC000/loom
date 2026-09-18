@@ -3343,12 +3343,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       repos,
     };
     deps.db.insertProject(project);
+    // Card ce9a3a91: redact sessionEnv on BOTH exits below like the other project-returning WRITE routes
+    // (0c5d6851) — nothing in the setup wizard reads config.sessionEnv back out of this response.
     // Same bind-time commit-identity advisory as project_init: never blocks the create (already persisted).
     if (isGit) {
       const identity = await checkCommitIdentity(boot.dir);
-      if (identity.warning) return reply.code(201).send({ ...project, identityWarning: identity.warning });
+      if (identity.warning) return reply.code(201).send({ ...redactSessionEnvForRead(project), identityWarning: identity.warning });
     }
-    return reply.code(201).send(project);
+    return reply.code(201).send(redactSessionEnvForRead(project));
   });
 
   app.post("/api/setup/templates/apply", async (req, reply) => {
