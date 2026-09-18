@@ -936,6 +936,10 @@ export interface ProjectConfigHistoryEntry {
   createdAt: string;
 }
 
+/** The bullet filler character `maskSessionEnvRecord` masks with. Exported so a write-side detector can
+ * recognize the mask SHAPE without a second hardcoded literal drifting from this one (card a253cec8). */
+export const SESSION_ENV_MASK_CHAR = "•";
+
 /** Mask `config.sessionEnv` VALUES with same-length bullet filler (card b2f9ce3a) — never bucketed, since
  * a bucketed length would hide a truncated paste. Shared by the config write path and both read paths
  * that redact sessionEnv — reuse this, never a second masker. Idempotent: masking an already-masked
@@ -949,8 +953,31 @@ export function maskSessionEnvRecord(
     // `String(value ?? "")` keeps this TOTAL despite `sessionEnv: strictRecord(z.string())` validating
     // every write path — a legacy/bad row's `null`/`undefined` must never throw here, or a bare
     // `.length` would 500 every route sharing this masker. Do not simplify to `value.length`.
-    Object.entries(sessionEnv).map(([name, value]) => [name, "•".repeat(String(value ?? "").length)]),
+    Object.entries(sessionEnv).map(([name, value]) => [name, SESSION_ENV_MASK_CHAR.repeat(String(value ?? "").length)]),
   );
+}
+
+/**
+ * True when `value` is indistinguishable from `maskSessionEnvRecord`'s own filler for THIS key's current
+ * stored value — i.e. every character is the mask char AND the length exactly matches `priorValue`'s
+ * length (card a253cec8, guarding the WRITE chokepoint against a masked read response fed back in).
+ * Detects the mask SHAPE, not a hardcoded bullet count — the filler is deliberately same-length as the
+ * real secret, so length alone proves nothing; only "all-filler AND same length as what's already
+ * stored" narrows to the mask without also catching a genuine same-length rotation to a new secret that
+ * merely happens to differ in content (a real rotation is never literally all mask-char bytes, short of
+ * an astronomically unlikely coincidence).
+ *
+ * Deliberately narrow (the card's own steer): `priorValue === undefined` (no prior value to have been
+ * masked against, e.g. a brand-new key) and a length mismatch both pass through as legitimate — a user
+ * genuinely setting a value that happens to contain the filler character keeps working unless it lands
+ * on this exact ambiguous shape.
+ */
+export function isMaskedSessionEnvEcho(value: string, priorValue: string | undefined): boolean {
+  if (value.length === 0 || priorValue === undefined || priorValue.length !== value.length) return false;
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] !== SESSION_ENV_MASK_CHAR) return false;
+  }
+  return true;
 }
 
 /**

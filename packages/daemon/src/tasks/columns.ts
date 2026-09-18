@@ -1,4 +1,4 @@
-import { resolveConfig, columnKeyForRole, type KanbanColumn, type ColumnRole, type ProjectConfigOverride } from "@loom/shared";
+import { resolveConfig, columnKeyForRole, isMaskedSessionEnvEcho, type KanbanColumn, type ColumnRole, type ProjectConfigOverride } from "@loom/shared";
 import type { Db } from "../db.js";
 
 // Board-column lifecycle (task B): the ONE-TIME role backfill migration + the pure desired-vs-current
@@ -335,6 +335,10 @@ export function currentColumns(db: Db, projectId: string): KanbanColumn[] {
  * The "after" value recorded is the project's ACTUAL persisted config post-write (re-read fresh, not
  * reconstructed from `next`), so it's correct on both the blind path and the re-key path (which persists
  * via two separate writes — the non-column keys, then applyBoardColumnLayout's own kanbanColumns write).
+ *
+ * @decision a253cec8 — a masked sessionEnv RESPONSE is a valid write INPUT; feed it back and the filler
+ * silently overwrites the real secret. This chokepoint rejects that echo below MCP so every writer (and
+ * every future masked read surface) is covered in one place — never duplicate the check per caller.
  */
 export function setProjectConfigSafe(
   db: Db, projectId: string, next: ProjectConfigOverride, actor: string,
@@ -342,6 +346,18 @@ export function setProjectConfigSafe(
   const project = db.getProject(projectId);
   if (!project) return { ok: false, error: "project not found" };
   const before = project.config;
+  if (next.sessionEnv) {
+    const priorSessionEnv = before.sessionEnv as Record<string, string> | undefined;
+    const echoedKeys = Object.entries(next.sessionEnv)
+      .filter(([key, value]) => isMaskedSessionEnvEcho(String(value ?? ""), priorSessionEnv?.[key]))
+      .map(([key]) => key);
+    if (echoedKeys.length > 0) {
+      return {
+        ok: false,
+        error: `sessionEnv write rejected: ${echoedKeys.join(", ")} look like a masked read-response echoed back (all filler characters, same length as the stored value) rather than a real value — re-read the ACTUAL secret before writing it, or leave the key out of the payload to keep it unchanged`,
+      };
+    }
+  }
   const recordAndOk = (): { ok: true } => {
     db.recordProjectConfigChange(projectId, before, db.getProject(projectId)?.config ?? next, actor);
     return { ok: true };
