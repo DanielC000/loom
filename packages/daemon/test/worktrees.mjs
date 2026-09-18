@@ -663,6 +663,32 @@ try {
       const real = realSimpleGit(repoPathArg);
       return { raw: (args) => (hangOn.includes(args[0]) ? new Promise(() => {}) : real.raw(args)) };
     };
+    /** Card 06deedb7: same delegation shape as {@link delegatingHangFactory}, but the hung command
+     *  REJECTS on its OWN short `hangMs` timer instead of never settling — decoupling "how long we wait
+     *  to observe the fail-safe kick in" from the single `gitDeps.timeoutMs` bound createWorktree applies
+     *  to EVERY git call it makes in the same invocation, hung or not. A fail-safe sub-test (a hung
+     *  command whose own try/catch must swallow the timeout, per (r5)/(r6)) has REAL, unhung git calls
+     *  BEFORE the hung one — createWorktree's own `mainSha` rev-parse, and (in the reuse path)
+     *  `recutStaleReusedBranch`'s ahead-check — that must ALSO complete for the fail-safe path to even be
+     *  reached. Sharing `delegatingHangFactory`'s tiny `tinyMs` bound across those real calls too raced a
+     *  REAL git subprocess against an artificially tight ceiling unrelated to the property under test:
+     *  measured, those real calls alone routinely exceed 250ms (347-1155ms, clean AND loaded hosts), well
+     *  past a 250ms bound applied to them — and being unguarded (by design, for (r1)-(r4)), a timeout on
+     *  ANY of them rejects the whole call, which a fail-safe sub-test misreads as "the fail-safe didn't
+     *  fire" when the fail-safe was never even reached. Used with `gitDeps.timeoutMs` left at its real
+     *  production default (`GIT_OP_TIMEOUT_MS`, 15s) so those real calls are never spuriously raced;
+     *  only the specifically-hung command's own rejection stays fast. */
+    const delegatingHangFactoryFastHang = (hangOn, hangMs) => (repoPathArg, _blockMs) => {
+      const real = realSimpleGit(repoPathArg);
+      return {
+        raw: (args) => (hangOn.includes(args[0])
+          ? new Promise((_resolve, reject) => setTimeout(
+              () => reject(Object.assign(new Error(`simulated hang timeout: git ${args.join(" ")}`), { simulatedHangTimeout: true })),
+              hangMs,
+            ))
+          : real.raw(args)),
+      };
+    };
     const timeAndSettle = async (p) => {
       const t0 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
       let ok = true, err;
@@ -734,8 +760,12 @@ try {
     {
       const tR5 = "bounded-detect-dirty-status";
       const seed = await createWorktree(repo, "projWT", tR5);
+      // Card 06deedb7: gitDeps.timeoutMs deliberately OMITTED (defaults to the real GIT_OP_TIMEOUT_MS,
+      // 15s) — see delegatingHangFactoryFastHang's own doc for why: the real, unhung calls that precede
+      // detectReusedDirtyWorktree (mainSha rev-parse, recutStaleReusedBranch's ahead-check) must never
+      // race a tight bound meant only for the deliberately-hung "status" command.
       const res = await timeAndSettle(createWorktree(repo, "projWT", tR5, {}, undefined, undefined,
-        { gitFactory: delegatingHangFactory(["status"]), timeoutMs: tinyMs }));
+        { gitFactory: delegatingHangFactoryFastHang(["status"], tinyMs) }));
       check("(r5) detectReusedDirtyWorktree status: createWorktree RESOLVES despite a never-resolving git op (fails safe, not a hang)", res.ok === true);
       check(`(r5) bounded — settled in ${Math.round(res.elapsed)}ms (cap ${tinyMs}ms)`, boundedEnough(res.elapsed));
       check("(r5) reusedDirtyWorktree is absent (fail-safe degrade — a missed flag, never a spawn failure)",

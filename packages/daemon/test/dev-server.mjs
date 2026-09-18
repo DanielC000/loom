@@ -326,10 +326,23 @@ try {
   // step around (argv[2]), AND the port named in its pre-banner decoy "proxying" line (argv[4]) — one
   // number, playing the two roles the real `pnpm web` log conflates (the daemon's port is both a real,
   // live thing on the host AND the value a naive extraction would wrongly record).
+  // Card 06deedb7: this section's own `LOOM_DEV_SERVER_PORT_TIMEOUT_MS` used to be shortened to "5000"
+  // purely for test speed, unlike sections (g)/(h)/(j)/(l)/(m) which share that same shortcut for a
+  // fixture that binds near-instantly. `waitForBinding` (the helper's own internal wait this env var
+  // bounds) already polls a REAL signal — the child's own startup banner landing in its captured log —
+  // at a fixed interval; it was never a blind/synthetic sleep. But a REAL child process here (spawned via
+  // an extra supervisor hop, plus a forced EADDRINUSE retry against the decoy) genuinely can take longer
+  // than 5s to spawn, bind, and get its banner flushed to disk under host contention — measured: a merge
+  // gate specimen (`b35627c6`) saw this section's whole `(f)` block cascade-fail from `recordedPort`
+  // staying null because detection never completed inside that window, not from any defect in the
+  // port-freed wait downstream. Dropping the override lets this section use the SAME ceiling
+  // (`waitForBinding`'s own 15000ms default) real `pnpm web`/`vite` users get — a deadlock-breaker ceiling,
+  // not a target for tuning back down — and the outer `spawnSync` timeout is widened past it so the outer
+  // kill can never race the inner wait's own deadline.
   const startResult = spawnSync(
     process.execPath,
     [HELPER, "start", portWorkDir, "--", process.execPath, portFixtureScript, String(decoyPort), portSentinelFile, String(decoyPort)],
-    { encoding: "utf8", timeout: 15_000, env: { ...process.env, LOOM_DEV_SERVER_PORT_TIMEOUT_MS: "5000" } },
+    { encoding: "utf8", timeout: 20_000, env: process.env },
   );
   check("(f) start (contended port) exits 0", startResult.status === 0);
   const portStartMatch = /\(pid (\d+)\)/.exec(startResult.stdout || "");
