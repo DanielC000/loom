@@ -85,11 +85,20 @@ process.on("exit", () => {
 const isAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 // Retrofitted onto the shared _wait.mjs waitUntil (card a19e4c02): same timeoutMs/stepMs budget, still
 // returns true/false — a thrown predicate is a real bug and should propagate, not fold into false.
+// Discriminates on the structured `err.exhaustedOnThrow` marker (card d5ca8d57), not the message text —
+// the shared waitUntil's own "waitUntil: timed out" message now legitimately fires even when the
+// underlying cause was a persistent throw (it retries a throwing predicate internally rather than
+// letting the first throw propagate), so a message-text regex can no longer tell the two apart.
+// `!== false` (not a bare truthy check): rethrow unless the error is a CONFIRMED genuine timeout —
+// faithful to the old regex's own defensiveness, which also rethrew any error that wasn't recognisably
+// a waitUntil timeout (a foreign error escaping the wrapper). A bare `if (err?.exhaustedOnThrow)` would
+// silently narrow that: undefined (a foreign error, or no `exhaustedOnThrow` at all) would fold to
+// `false` instead of rethrowing.
 const waitUntil = async (predicate, timeoutMs = 5000, stepMs = 50) => {
   try {
     return !!(await sharedWaitUntil(predicate, { timeoutMs, intervalMs: stepMs, label: "dev-server: predicate" }));
   } catch (err) {
-    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    if (err?.exhaustedOnThrow !== false) throw err;
     return false;
   }
 };

@@ -66,6 +66,31 @@ function describe(value) {
  * and the LAST observed (falsy) value — a bare "timed out" is barely better than the blind sleep this
  * replaces.
  *
+ * A predicate that THROWS (card d5ca8d57 — e.g. `execSync("git rev-parse HEAD")` racing a concurrent
+ * writer) is treated as "not yet observed", exactly like a falsy return, and retried inside the SAME
+ * budget — never a widened one. Only the LAST thrown error is kept (not accumulated) and it is named in
+ * the eventual timeout message, so a predicate that throws for a REAL reason still surfaces that reason
+ * instead of a bare "timed out" — this is not "swallow errors to quiet a flake": if the condition never
+ * becomes true, `waitUntil` still fails at the same budget, it just fails with the LAST error attached
+ * rather than the FIRST one propagating uncaught and killing the whole test file.
+ *
+ * The thrown timeout Error also carries a STRUCTURED `exhaustedOnThrow` boolean (card d5ca8d57, closing
+ * a gap found the same day it landed): `true` when the LAST poll before failing was a throw, `false`
+ * when it was an ordinary falsy return. Some callers (card a19e4c02 — `dev-server.mjs`,
+ * `serve-static.mjs`) deliberately re-throw a predicate's real bug rather than folding it into `false`,
+ * and used to discriminate that by regexing the Error's MESSAGE for `/waitUntil: timed out/` — fragile
+ * by construction, since this function's own timeout message now legitimately starts with that same
+ * text even when the underlying cause was a persistent throw, not a never-true condition.
+ *
+ * THE CANONICAL CALLER FORM is `if (err?.exhaustedOnThrow !== false) throw err;` — verbatim, not a bare
+ * `if (err?.exhaustedOnThrow)`. `!== false` rethrows unless the error is a CONFIRMED genuine timeout,
+ * matching the old regex's own defensiveness (it also rethrew any error that didn't recognisably say
+ * "waitUntil: timed out" — a foreign error escaping the wrapper). A bare truthy check silently narrows
+ * that: `undefined` (a foreign error, or any Error without `exhaustedOnThrow` at all) would fold to
+ * `false` instead of rethrowing. Never resurrect the message-regex as a fallback alongside this check —
+ * that would reintroduce the exact machine-parsed-message contract this marker exists to replace; the
+ * message stays human-readable only, `exhaustedOnThrow` is the sole discrimination contract.
+ *
  * On expiry (card 3fcd06d6): a bare "timed out" cannot tell an ABSENT event (never fires) apart from a
  * LATE one (fires after we stopped watching) — two states, one signature, needing opposite fixes. So
  * before failing, keep polling into a bounded GRACE window purely to characterise which one this was.
@@ -77,8 +102,20 @@ function describe(value) {
 export async function waitUntil(predicate, { timeoutMs = 5000, intervalMs = 10, label = "condition" } = {}) {
   const t0 = performance.now();
   let last;
+  let lastError;
+  const poll = async () => {
+    try {
+      const value = await predicate();
+      lastError = undefined;
+      return value;
+    } catch (err) {
+      lastError = err;
+      return undefined;
+    }
+  };
+  const errSuffix = () => (lastError ? `; last error: ${lastError?.message ?? String(lastError)}` : "");
   for (;;) {
-    last = await predicate();
+    last = await poll();
     if (last) return last;
     if (performance.now() - t0 > timeoutMs) break;
     await sleep(intervalMs);
@@ -90,20 +127,26 @@ export async function waitUntil(predicate, { timeoutMs = 5000, intervalMs = 10, 
   const graceDeadline = t0 + timeoutMs + graceMs;
   while (performance.now() < graceDeadline) {
     await sleep(intervalMs);
-    last = await predicate();
+    last = await poll();
     if (last) {
       const elapsed = Math.round(performance.now() - t0);
       const overshoot = (elapsed / timeoutMs).toFixed(1);
       const outcome = `[waitUntil-outcome] ARRIVED LATE at ${elapsed}ms (budget ${timeoutMs}ms, overshoot ${overshoot}x) for ${label}`;
       console.error(outcome);
-      throw new Error(`waitUntil: timed out after ${timeoutMs}ms waiting for ${label} — ${outcome}`);
+      const lateErr = new Error(`waitUntil: timed out after ${timeoutMs}ms waiting for ${label} — ${outcome}`);
+      lateErr.exhaustedOnThrow = false; // arrived (truthy) late — never a persistent-throw exhaustion
+      throw lateErr;
     }
   }
   const elapsed = Math.round(performance.now() - t0);
   const overshoot = (elapsed / timeoutMs).toFixed(1);
   const outcome = `[waitUntil-outcome] ABSENT through ${elapsed}ms (${overshoot}x budget) for ${label}`;
   console.error(outcome);
-  throw new Error(`waitUntil: timed out after ${timeoutMs}ms waiting for ${label} — ${outcome} (last observed: ${describe(last)})`);
+  const absentErr = new Error(`waitUntil: timed out after ${timeoutMs}ms waiting for ${label} — ${outcome} (last observed: ${describe(last)}${errSuffix()})`);
+  // The LAST poll before this throw is the discriminator (mirrors the message's own "last observed"
+  // convention) — set whenever that final poll threw rather than returning an ordinary falsy value.
+  absentErr.exhaustedOnThrow = lastError !== undefined;
+  throw absentErr;
 }
 
 /**
