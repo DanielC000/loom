@@ -109,3 +109,20 @@ export function decryptSecret(blob: string, keyPath: string = SECRET_KEY_PATH): 
   decipher.setAuthTag(tag); // decipher.final() throws if this tag does not authenticate the ciphertext
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
 }
+
+/**
+ * The plaintext's byte length, recovered WITHOUT the key and WITHOUT decrypting (card 82b22817) — AES-GCM
+ * is a stream cipher, so the ciphertext segment is exactly as long as the plaintext it came from; this
+ * just base64-decodes that ONE segment and reads its length. Safe to expose to a reader that must never
+ * see the secret itself (an agent's credential ack): it discloses a size, never a byte of content. Throws
+ * the SAME "unrecognized secret envelope" error as `decryptSecret` for a malformed blob, so a caller can
+ * treat the two functions as interchangeable on the failure path.
+ */
+export function secretEnvelopeByteLength(blob: string): number {
+  const parts = typeof blob === "string" ? blob.split(":") : [];
+  const [ver, ivB64, tagB64, ctB64] = parts;
+  if (parts.length !== 4 || ver !== VERSION || ivB64 === undefined || tagB64 === undefined || ctB64 === undefined) {
+    throw new Error(`unrecognized secret envelope (expected "${VERSION}:iv:tag:ciphertext")`);
+  }
+  return Buffer.from(ctB64, "base64").length;
+}

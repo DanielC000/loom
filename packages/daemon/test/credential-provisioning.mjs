@@ -113,6 +113,47 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// ===== (A2) envVar name validation — code-review fix 1 (card 82b22817): an agent chooses the env-var
+// NAME (never the secret VALUE), and an unvalidated name could overwrite PATH/GIT_*/LOOM_*/etc. at spawn
+// time. Reject at ask time so Loom's own credential UI never presents a bad name to the human as
+// legitimate. (The resolve-time backstop for a row written before this check existed is covered in
+// credential-session-env.mjs.) =====
+{
+  const e = mkDb("envvar-validate");
+  const rejected = [
+    ["PATH", "exact reserved name (inherited env)"],
+    ["NODE_OPTIONS", "exact reserved name (inherited env)"],
+    ["HOME", "exact reserved name (inherited env)"],
+    ["PAGER", "exact reserved name — buildSpawnEnv's own default"],
+    ["GIT_TERMINAL_PROMPT", "GIT_ prefix — buildSpawnEnv's own default"],
+    ["LOOM_WORKTREE", "LOOM_ prefix — buildSpawnEnv's own default"],
+    ["PYTHONIOENCODING", "PYTHON prefix — buildSpawnEnv's own default"],
+    ["CLAUDECODE", "exact reserved name — the CLAUDECODE scrub this would reintroduce"],
+    ["NODE_PATH", "exact reserved name — module-resolution hijack"],
+    ["LD_PRELOAD", "LD_ prefix — the classic native code-injection vector (Linux)"],
+    ["DYLD_INSERT_LIBRARIES", "DYLD_ prefix — the classic native code-injection vector (macOS)"],
+    ["1BAD", "must start with a letter or underscore"],
+    ["HAS-DASH", "a dash is not a valid env-var character"],
+    ["HAS=EQUALS", "= is never valid in an env-var name"],
+    ["   ", "blank/whitespace-only"],
+  ];
+  for (const [envVar, reason] of rejected) {
+    const built = buildQuestionAsk(
+      { type: "credential", title: "t", body: "b", envVar },
+      { sessionId: e.mgrId, projectId: e.projId, db: e.db, role: "manager" },
+    );
+    check(`(A2) envVar "${envVar}" is REJECTED at ask time (${reason})`, "error" in built);
+  }
+  const good = buildQuestionAsk(
+    { type: "credential", title: "t", body: "b", envVar: "  MY_GOOD_TOKEN  " },
+    { sessionId: e.mgrId, projectId: e.projId, db: e.db, role: "manager" },
+  );
+  check("(A2) a well-formed, non-reserved envVar is ACCEPTED", "question" in good);
+  check("(A2) it is stored TRIMMED", "question" in good && good.question.credentialEnvVar === "MY_GOOD_TOKEN");
+
+  cleanup(e);
+}
+
 // ===== REST harness shared by (B)-(H) =====
 function mkApp(e) {
   const enqueued = [];
@@ -126,9 +167,9 @@ function mkApp(e) {
     }),
   };
 }
-function askCredential(e, { id, title, provisionTo }) {
+function askCredential(e, { id, title, provisionTo, envVar }) {
   const built = buildQuestionAsk(
-    { type: "credential", title, body: "test ask", provisionTo },
+    { type: "credential", title, body: "test ask", provisionTo, envVar },
     { sessionId: e.mgrId, projectId: e.projId, db: e.db, role: "manager" },
   );
   if ("error" in built) throw new Error(`unexpected buildQuestionAsk error: ${built.error}`);
@@ -296,7 +337,19 @@ function askCredential(e, { id, title, provisionTo }) {
   await app.inject({ method: "POST", url: `/api/questions/${qPlain.id}/answer`, payload: { secret: "sk_plain" } });
   const ackPlain = questionPullItem(e.db.pullAnsweredQuestionsForAgent(e.agentId, new Date().toISOString()).find((p) => p.id === qPlain.id), e.db).ack;
   check("(G) a plain credential ack does NOT mention provisioning into a Connection", !ackPlain.includes("provisioned into Connection"));
-  check("(G) a plain credential ack keeps the classic 'NOT auto-injected' wording", ackPlain.includes("NOT auto-injected"));
+  check("(G) a plain credential ack (no envVar) keeps the 'NOT auto-injected' wording", ackPlain.includes("NOT auto-injected"));
+
+  // Card 82b22817: a declared credentialEnvVar with NO provisionTarget is the NEW real delivery path —
+  // the ack must say delivery is real, name its two honest failure modes, and surface the stored byte
+  // length (never the value) so an implausibly short paste is visible from the ack alone.
+  const qEnv = askCredential(e, { id: "cred-ack-envvar", title: "Need the token", envVar: "MY_API_TOKEN" });
+  await app.inject({ method: "POST", url: `/api/questions/${qEnv.id}/answer`, payload: { secret: "sk_env_1234" } });
+  const ackEnv = questionPullItem(e.db.pullAnsweredQuestionsForAgent(e.agentId, new Date().toISOString()).find((p) => p.id === qEnv.id), e.db).ack;
+  check("(G) a declared-envVar ack says it IS delivered automatically", ackEnv.includes("delivered automatically as MY_API_TOKEN"));
+  check("(G) a declared-envVar ack never claims a human must wire it in", !ackEnv.includes("a human must wire it into"));
+  check("(G) a declared-envVar ack names the not-yet-resumed caveat", ackEnv.includes("NEXT resume or restart"));
+  check("(G) a declared-envVar ack names the undecryptable-blob failure mode", ackEnv.includes("silently DROPPED"));
+  check("(G) a declared-envVar ack surfaces the stored byte length, not the value", ackEnv.includes("11 byte(s)") && !ackEnv.includes("sk_env_1234"));
 
   cleanup(e);
 }

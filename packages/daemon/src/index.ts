@@ -46,6 +46,7 @@ import { PollService } from "./orchestration/poll.js";
 import { EventTriggerService } from "./orchestration/event-triggers.js";
 import { performAuthenticatedRequest } from "./connections/request.js";
 import { resolveScopedConnectionSecret } from "./connections/store.js";
+import { resolveCredentialSessionEnv } from "./keys/credentialSessionEnv.js";
 import { ContextWatcher } from "./orchestration/context-watcher.js";
 import { IdleWatcher } from "./orchestration/idle-watcher.js";
 import { BusyWorkerWatcher } from "./orchestration/busy-worker-watcher.js";
@@ -585,6 +586,10 @@ async function main(): Promise<void> {
     // reserved Platform/Setup homes are denied too, same inclusive posture as `mcp/tasks.ts`'s own
     // other-projects lookup.
     getOtherProjects: (projectId: string) => db.listAllProjects().filter((p) => p.id !== projectId).map((p) => ({ id: p.id, repoPath: p.repoPath })),
+    // Card 82b22817: read-and-decrypt access to this project's answered `type:"credential"` secrets,
+    // for merging into a spawn's env — read LIVE per-spawn (like every callback above), never boot-bound,
+    // so a freshly-answered credential reaches the very next spawn/resume with no daemon restart.
+    resolveCredentialSessionEnv: (projectId: string) => resolveCredentialSessionEnv(db, projectId),
   });
 
   const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design

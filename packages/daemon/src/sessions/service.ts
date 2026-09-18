@@ -5732,6 +5732,7 @@ export class SessionService {
         sessionEnv: config.sessionEnv,
         vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
         docLint: config.docLint, // card d92ec82b: explicit signal for the comment-anchor-lint hook, independent of vaultPath
+        projectId: project.id, // card 82b22817: was the one createPty call site missing this — needed for credential-sessionEnv resolution, same as every other role
         startupPrompt,
         role: "run", // buildMcpServers mounts ONLY loom-run; createPty allowlists mcp__loom-run
         browserTesting: false,

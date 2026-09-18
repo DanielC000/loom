@@ -5,6 +5,11 @@ import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { DB_PATH, DAEMON_TEST_DIR } from "./paths.js";
 import type { EmitCompareNotApplicableKind } from "./git/worktrees.js";
+// `secretEnvelopeByteLength` (card 82b22817) is the ONE deliberate exception to this file never touching
+// crypto: it derives a SIZE from the ciphertext's own structure, never decrypts, never sees plaintext —
+// see toQuestion's own comment at `credentialByteLength` for why this stays consistent with "this layer
+// never decrypts, logs, or otherwise touches the plaintext" (answerCredentialQuestion's doc, above).
+import { secretEnvelopeByteLength } from "./keys/envelope.js";
 
 /**
  * The REAL production database — `~/.loom/loom.db`, independent of any LOOM_HOME override. A worker
@@ -7033,6 +7038,29 @@ export class Db {
     return this.getQuestion(id);
   }
   /**
+   * Card 82b22817 — the read side of credential→sessionEnv delivery: every ANSWERED-or-CONSUMED
+   * `type:"credential"` row for this project that named a `credentialEnvVar` and was NOT auto-provisioned
+   * into a Connection (`provision_target IS NULL` — a provisioned row's secret lives in `connections`
+   * instead, gated by its own deliberate profile-binding grant; see `listPendingBindings`). `secret_blob`
+   * comes back as raw ciphertext — the caller (`keys/credentialSessionEnv.ts`) decrypts it; this method
+   * never touches plaintext. Ordered oldest-answered-first so a caller building a last-write-wins map
+   * naturally prefers the MOST RECENT answer when the same env var was declared twice (a rotated key).
+   */
+  listCredentialSessionEnvSources(
+    projectId: string,
+  ): Array<{ id: string; credentialEnvVar: string; secretBlob: string; answeredAt: string }> {
+    const rows = this.db.prepare(
+      `SELECT id, credential_env_var, secret_blob, answered_at FROM questions
+       WHERE project_id = ? AND type = 'credential' AND state IN ('answered', 'consumed')
+         AND credential_env_var IS NOT NULL AND credential_env_var != ''
+         AND secret_blob IS NOT NULL AND provision_target IS NULL AND cancelled_at IS NULL
+       ORDER BY answered_at ASC`,
+    ).all(projectId) as Array<{ id: string; credential_env_var: string; secret_blob: string; answered_at: string }>;
+    return rows.map((r) => ({
+      id: r.id, credentialEnvVar: r.credential_env_var, secretBlob: r.secret_blob, answeredAt: r.answered_at,
+    }));
+  }
+  /**
    * Cancel a still-'pending' request — the terminal, retained-in-history counterpart to answerQuestion/
    * answerCredentialQuestion.
    *
@@ -8554,6 +8582,8 @@ function toWebhookEndpointRow(r0: unknown): WebhookEndpointRow {
 // NOTE: intentionally does NOT map `secret_blob` — the envelope-encrypted credential ciphertext must
 // never flow into the agent-reachable `Question` object (question_pull's payload, the web JSON API, the
 // companion decisions-relay). It stays a db.ts-internal column, touched only by answerCredentialQuestion.
+// The ONE derived exception is `credentialByteLength` below — a SIZE, computed from the ciphertext's own
+// structure without ever decrypting it, never the blob or the plaintext itself (card 82b22817).
 function toQuestion(r0: unknown): Question {
   const r = r0 as Row;
   const optionsJson = r.options_json as string | null | undefined;
@@ -8570,6 +8600,16 @@ function toQuestion(r0: unknown): Question {
     decidedScope: (r.decided_scope as PermissionScope | null) ?? null,
     decidedExpiresAt: (r.decided_expires_at as string | null) ?? null,
     credentialEnvVar: (r.credential_env_var as string | null) ?? null,
+    // Card 82b22817: a SIZE AS STORED only, derived from the ciphertext's own length — never the
+    // plaintext, and NEVER a decryptability/delivery check (code-review correction: `secretEnvelopeByteLength`
+    // validates the envelope's 4-part STRUCTURE, not its auth tag, so a tampered-but-structurally-intact
+    // blob still reports a real number here even though `resolveCredentialSessionEnv` will fail to decrypt
+    // it and silently drop it at every spawn — see this field's own doc on `Question` for the honest limit).
+    // Null for a provisioned row (secret_blob is deliberately NULL there, see answerCredentialQuestion
+    // above) and null for a STRUCTURALLY malformed blob (a corrupt row should surface as "unknown").
+    credentialByteLength: r.type === "credential" && r.secret_blob
+      ? (() => { try { return secretEnvelopeByteLength(r.secret_blob as string); } catch { return null; } })()
+      : null,
     provisionTarget: r.provision_target ? (JSON.parse(r.provision_target as string) as ProvisionTarget) : null,
     fulfillmentTarget: r.fulfillment_target ? (JSON.parse(r.fulfillment_target as string) as FulfillmentTarget) : null,
     provisionConnectionId: (r.provision_connection_id as string | null) ?? null,

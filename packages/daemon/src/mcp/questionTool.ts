@@ -5,6 +5,7 @@ import { resolveIdPrefix } from "../id-prefix.js";
 import type { Db } from "../db.js";
 import { resolveAlias } from "./arg-alias.js";
 import { PROFILE_FIELD_NAMES } from "../profiles/validate.js";
+import { isValidCredentialEnvVarName } from "../keys/credentialSessionEnv.js";
 
 /** Roles allowed to set `provisionTo` on a `type:"credential"` ask (card 193de09e Q1) — manager and
  *  platform (the Lead) only. Enforced in `buildQuestionAsk` below so both `question_ask` registrations
@@ -109,6 +110,18 @@ export function buildQuestionAsk(
   if (input.provisionTo && !PROVISIONING_ROLES.includes(ctx.role)) {
     return { error: `provisionTo (auto-provisioning) is restricted to ${PROVISIONING_ROLES.join("/")} roles` };
   }
+  // Code-review finding (card 82b22817, post-gate): reject a bad env-var NAME here, at ask time — before
+  // Loom's own credential UI ever presents it to a human as a legitimate destination for their secret.
+  // `isValidCredentialEnvVarName` is the SAME check `resolveCredentialSessionEnv` re-applies as a backstop
+  // (a row written before this check existed still gets caught there); see that function's own doc.
+  if (type === "credential" && input.envVar !== undefined && !isValidCredentialEnvVarName(input.envVar.trim())) {
+    return {
+      error: `envVar "${input.envVar}" is not a valid credential env-var name — it must match ` +
+        "^[A-Za-z_][A-Za-z0-9_]*$ and must not be PATH/NODE_OPTIONS/NODE_PATH/HOME/USERPROFILE/PAGER/" +
+        "CLAUDECODE or start with GIT_/LOOM_/PYTHON/CLAUDE_/LD_/DYLD_ (load-bearing, host-launch, or " +
+        "native/JS code-injection names)",
+    };
+  }
   if (type === "credential" && input.provisionTo) {
     if (!input.provisionTo.connection?.name?.trim() || !input.provisionTo.connection?.host?.trim()) {
       return { error: "provisionTo.connection requires non-empty `name` and `host`" };
@@ -155,7 +168,12 @@ export function buildQuestionAsk(
       // ANSWER-time payload only — always null at ask time, written later by answerQuestion.
       decidedScope: null,
       decidedExpiresAt: null,
-      credentialEnvVar: type === "credential" ? (input.envVar ?? null) : null,
+      // Stored TRIMMED — the SAME string the validation above just checked, so a caller can never sneak
+      // leading/trailing whitespace past the check by relying on it being stored raw.
+      credentialEnvVar: type === "credential" && input.envVar !== undefined ? input.envVar.trim() : null,
+      // Answer-time-only derived field (card 82b22817) — always null at ask time; computed by `toQuestion`
+      // from `secret_blob` once answered.
+      credentialByteLength: null,
       provisionTarget: type === "credential" ? (input.provisionTo ?? null) : null,
       fulfillmentTarget: type === "permission" ? (input.fulfillmentTarget ?? null) : null,
       provisionConnectionId: null,
@@ -180,16 +198,15 @@ export function buildQuestionAsk(
 /**
  * The `type:"credential"` ack text — factored out of `questionPullItem` (card 988bb585) so
  * `taskRequestGetItem`'s full-detail read can share the EXACT same never-echo phrasing without
- * duplicating it and risking drift. Never touches `secret_blob` — it only ever reads `credentialEnvVar`/
- * `provisionTarget`/`provisionConnectionId`/`provisionBindingState`, all ask-time-hint or non-secret
- * answer-time metadata (never the answer itself).
+ * duplicating it and risking drift. Never touches `secret_blob` — only `credentialEnvVar`/
+ * `credentialByteLength`/`provisionTarget`/`provisionConnectionId`/`provisionBindingState` (ask-time-
+ * hint, derived-size, or non-secret answer-time metadata — never the answer itself).
  *
- * Branches on whether auto-provisioning was requested (card 193de09e): with no `provisionTarget`, the
- * wording is UNCHANGED from before this card — a human still has to wire it in by hand, auto-wiring is a
- * separate, unbuilt path (card 3f8bd560's honest-ack lesson). With a `provisionTarget`, the answer boundary
- * has already created/updated a Connection by the time this reads `answered` — the ack names it, and is
- * explicit that a requested profile binding is only ever PENDING human confirmation here, never applied:
- * it must never read as "wired up and ready to use."
+ * Branches on `provisionTarget` (card 193de09e): a requested profile binding is only ever PENDING human
+ * confirmation, never applied — must never read as "wired up and ready to use." With no `provisionTarget`
+ * but a `credentialEnvVar` (card 82b22817), delivery is now real (`keys/credentialSessionEnv.ts`, merged
+ * at spawn) — so the ack says so, but names its two failure modes (not-yet-resumed; undecryptable-blob
+ * dropped) rather than promising more than this mechanism guarantees (card 3f8bd560's honest-ack lesson).
  */
 function credentialAck(q: Question): string {
   if (q.provisionTarget) {
@@ -204,12 +221,27 @@ function credentialAck(q: Question): string {
       `"${q.provisionTarget.connection.name}" (id ${q.provisionConnectionId}).` + bindingNote
     );
   }
-  return q.credentialEnvVar
-    ? `Provided and stored securely — not returned via this tool. It is NOT auto-injected into any ` +
-      `session env; a human must wire it into a Connection or this project's config (as ${q.credentialEnvVar}) ` +
-      "before an agent session can use it."
-    : "Provided and stored securely — not returned via this tool. It is NOT auto-injected into any " +
+  if (!q.credentialEnvVar) {
+    return "Provided and stored securely — not returned via this tool. It is NOT auto-injected into any " +
       "session env; ask your operator how (or whether) it's made available to you.";
+  }
+  // Length only — never the value, never a hash of it (manager directive 2026-09-18). Surfaced
+  // unconditionally when known so an implausibly short paste (e.g. a truncated service-account JSON) is
+  // visible to whoever reads this ack, not just to someone who happens to go looking. Code-review
+  // correction: this is a SIZE AS STORED, not a decryptability check — a tampered blob can still report a
+  // real number here and still get silently dropped at delivery, so the ack must not let a number read as
+  // confirmation that the value is usable.
+  const sizeNote = q.credentialByteLength !== null
+    ? ` The stored value is ${q.credentialByteLength} byte(s) as stored (size only, not a check that it ` +
+      `will actually decrypt) — if that looks too short for what you meant to paste, ask the human to re-answer this request.`
+    : "";
+  return (
+    `Provided and stored securely — not returned via this tool. It is delivered automatically as ` +
+    `${q.credentialEnvVar} into every new or resumed session of this project — no human re-typing needed.` +
+    ` A session already running right now will only see it on its NEXT resume or restart, not immediately.` +
+    ` If the stored value can't be decrypted at spawn time it is silently DROPPED rather than delivered —` +
+    ` ask your operator to re-answer this request if the env var never shows up.${sizeNote}`
+  );
 }
 
 /**

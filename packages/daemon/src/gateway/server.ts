@@ -3076,6 +3076,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           options: q.options ?? null, recommendation: q.recommendation ?? null, taskId: q.taskId ?? null,
           permissionAction: q.permissionAction ?? null, permissionScopeHint: q.permissionScopeHint ?? null,
           permissionExpiresAt: q.permissionExpiresAt ?? null, credentialEnvVar: q.credentialEnvVar ?? null,
+          // Answer-time-only derived field (card 82b22817) — insertQuestion never writes it; a spec
+          // needing one non-null seeds pending, then answers via the real REST route (same as every other
+          // answer-time field's own comment above).
+          credentialByteLength: null,
           // provisionConnectionId/provisionBindingState and decidedScope/decidedExpiresAt are ALL
           // answer-time-only (see the seed body type's own comment above) — always the pre-answer defaults
           // here; insertQuestion itself never writes any of them regardless of what's passed. A spec that

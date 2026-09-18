@@ -3049,6 +3049,19 @@ export interface Question {
    *  under once granted (a display hint, not itself wired to injection — see Question's own doc). Null for
    *  every other type. */
   credentialEnvVar: string | null;
+  /** `type:"credential"` ANSWER-time, DERIVED-ONLY (card 82b22817) — the stored secret's byte length AS
+   *  STORED, recovered from the ciphertext's own length without ever decrypting (see `keys/envelope.ts`'s
+   *  `secretEnvelopeByteLength`). Never the secret itself, never a hash of it — a size only, so an agent's
+   *  credential ack can flag an implausibly short stored value (e.g. a service-account JSON pasted as a
+   *  truncated fragment) without the never-echo model being weakened.
+   *  ⚠️ NOT a decryptability/delivery check (code-review correction): the underlying function validates
+   *  only the envelope's 4-part structure, not its auth tag, so a tampered-but-structurally-intact blob
+   *  still reports a real number here even though `resolveCredentialSessionEnv` will fail to decrypt it
+   *  and silently drop it at every spawn — a reader must not treat a non-null value as proof the secret
+   *  will actually arrive.
+   *  Null until answered, and null for a provisioned row (`provisionTarget` set) whose secret lives in a
+   *  Connection instead — see `provisionTarget`'s own doc — or for any non-"credential" type. */
+  credentialByteLength: number | null;
   /** `type:"credential"` ask-time payload (card 193de09e, credential auto-provisioning v1) — the agent
    *  STATING INTENT to auto-provision the answered secret into a named Connection, never a grant: the
    *  human answer boundary is what actually creates/updates the Connection (see `provisionConnectionId`

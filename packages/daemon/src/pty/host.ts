@@ -4105,6 +4105,16 @@ export class PtyHost {
    * behaves byte-identically: a worker spawn gets no project-scoped deny rules at all.
    */
   private readonly getOtherProjects: (projectId: string) => Array<{ id: string; repoPath: string }>;
+  /**
+   * Card 82b22817: read access to every answered, un-provisioned `type:"credential"` secret this
+   * project's Requests channel has stored under a declared `credentialEnvVar`, wired in by index.ts at
+   * boot (it holds `db`; PtyHost deliberately does not — mirrors `resolveConnectionSecret`/
+   * `getOtherProjects` above). Called PER-SPAWN (never boot-bound) at both `buildSpawnEnv` call sites
+   * below, so a freshly-answered credential reaches the very next spawn OR resume of this project — no
+   * daemon restart needed. Defaults to a harmless no-op (`{}`) so a PtyHost built without this opt —
+   * every existing hermetic test — behaves byte-identically.
+   */
+  private readonly resolveCredentialSessionEnv: (projectId: string) => Record<string, string>;
   constructor(
     private events: PtyHostEvents,
     opts?: {
@@ -4114,6 +4124,7 @@ export class PtyHost {
       getIntegrationPaths?: () => { codescape?: string };
       getCodescapeSupervisorState?: () => { port: number | null; resolveProjectId: (repoPath: string) => string | null };
       getOtherProjects?: (projectId: string) => Array<{ id: string; repoPath: string }>;
+      resolveCredentialSessionEnv?: (projectId: string) => Record<string, string>;
     },
   ) {
     this.busyStaleMs = opts?.busyStaleMs ?? BUSY_STALE_MS;
@@ -4123,6 +4134,7 @@ export class PtyHost {
     this.getIntegrationPaths = opts?.getIntegrationPaths ?? (() => ({}));
     this.getCodescapeSupervisorState = opts?.getCodescapeSupervisorState ?? (() => ({ port: null, resolveProjectId: () => null }));
     this.getOtherProjects = opts?.getOtherProjects ?? (() => []);
+    this.resolveCredentialSessionEnv = opts?.resolveCredentialSessionEnv ?? (() => ({}));
   }
 
   spawn(opts: SpawnOpts): void {
@@ -4526,7 +4538,11 @@ export class PtyHost {
     // read in full, everything it does is correct for a codex spawn too: the CLAUDECODE/CLAUDE_CODE_* scrub
     // is a harmless no-op (codex never sets those), and the git-safety/LOOM_WORKTREE/Python-encoding vars +
     // the sessionEnv merge are exactly as load-bearing for an unattended codex pty as for a claude one.
-    const env = buildSpawnEnv(process.env, opts.sessionEnv, opts.cwd);
+    // Card 82b22817: any stored credential this project has under a declared env-var name is spread FIRST,
+    // so a deliberate `opts.sessionEnv` entry (human/Lead-set) always wins on a name collision — buildSpawnEnv
+    // itself stays pure/DB-free; the merge happens here, at the call site, same as createPty's below.
+    const credentialEnv = opts.projectId ? this.resolveCredentialSessionEnv(opts.projectId) : {};
+    const env = buildSpawnEnv(process.env, { ...credentialEnv, ...opts.sessionEnv }, opts.cwd);
     // Card 9346ed5b: mirror createPty's obsidian-preflight block (see that method's own comment for the
     // full contract). buildSpawnEnv (since 8d828fa4, above) merges opts.sessionEnv, so LOOM_OBSIDIAN_AUTOSTART
     // now reaches a codex spawn's env where it previously never arrived at all — but createCodexPty never set
@@ -5778,7 +5794,10 @@ export class PtyHost {
     // Inherited env (CLAUDE_*/CLAUDECODE scrubbed) + sessionEnv merge + the three git-safety vars that
     // keep an unattended worker pty from wedging on a pager / credential prompt, plus LOOM_WORKTREE (the
     // cwd anchor an agent's own Bash calls can reference). See buildSpawnEnv.
-    const env = buildSpawnEnv(process.env, opts.sessionEnv, opts.cwd);
+    // Card 82b22817: see createCodexPty's identical comment above buildSpawnEnv there — the credential
+    // merge spreads FIRST so a deliberate opts.sessionEnv entry always wins on a name collision.
+    const credentialEnv = opts.projectId ? this.resolveCredentialSessionEnv(opts.projectId) : {};
+    const env = buildSpawnEnv(process.env, { ...credentialEnv, ...opts.sessionEnv }, opts.cwd);
     // Obsidian auto-start: when the resolved config turned it on (LOOM_OBSIDIAN_AUTOSTART rode in via
     // sessionEnv → obsidianSessionEnv), hand the vault preflight helper its ABSOLUTE path so a vault skill
     // can `node "$LOOM_OBSIDIAN_PREFLIGHT"`. The asset path is daemon-side (not knowable in browser-pure
