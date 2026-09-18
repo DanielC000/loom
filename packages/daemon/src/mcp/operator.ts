@@ -8,6 +8,7 @@ import type { SessionService } from "../sessions/service.js";
 import { GitWriter } from "../git/writer.js";
 import { writeVaultFile } from "../vault/writer.js";
 import { strictShape } from "./arg-alias.js";
+import { projectFields } from "./entityRowFields.js";
 
 // Same envelope as the task / orchestration / platform / setup MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -180,12 +181,12 @@ export class OperatorMcpRouter {
     server.registerTool(
       "my_project",
       {
-        description: "Read YOUR OWN project — the FULL record (name, repoPath, vaultPath, config override). No argument: always resolves to the project this operator session was spawned into. Read-only.",
+        description: "Read YOUR OWN project — the FULL record (name, repoPath, vaultPath, config override). No argument: always resolves to the project this operator session was spawned into. Read-only. The returned config's sessionEnv values are MASKED (same-length bullet filler, never the real secret) — feeding a masked value back as a later write is rejected, not silently stored.",
         inputSchema: strictShape({}),
       },
       async () => {
         const p = ownProject();
-        return p ? ok(p) : ok({ error: "no project for this session" });
+        return p ? ok(projectFields(p)) : ok({ error: "no project for this session" });
       },
     );
 
