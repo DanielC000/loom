@@ -49,7 +49,7 @@ import { listConnections, createConnection, deleteConnection, getConnectionMetad
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef, getCapabilityProvisionStatus, resolveCapabilityServer } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
-import { validateProjectConfigOverride, validatePlatformConfigOverride, validatePlatformConfigPatch, validateColumnLayout, mergeConfigOverride, unsetConfigPath } from "../mcp/platform.js";
+import { validateProjectConfigOverride, validatePlatformConfigOverride, validatePlatformConfigPatch, validateColumnLayout, mergeConfigOverride, unsetConfigPath, findConfigPatchUnsetCollisions } from "../mcp/platform.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
@@ -4180,6 +4180,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!v.ok) return reply.code(400).send({ error: `invalid config: ${v.error}` });
     const replace = wrapped && body.replace === true;
     const unset = wrapped && Array.isArray(body.unset) ? body.unset.filter((p): p is string => typeof p === "string" && p.length > 0) : [];
+    // @decision b5faa194 — a colliding write+unset of the same path is REFUSED, not resolved either way
+    // (silent data loss under merge-then-unset); check BEFORE the merge/unset run at all.
+    const collisions = findConfigPatchUnsetCollisions(v.value, unset);
+    if (collisions.length > 0) {
+      return reply.code(400).send({ error: `config PATCH writes and unsets the same path(s): ${collisions.join(", ")} — the merge-then-unset order would silently discard the write; drop the colliding unset entr${collisions.length === 1 ? "y" : "ies"} or remove the write` });
+    }
     // PATCH/MERGE (card 546034fa): deep-merge onto the existing override by default — matching every
     // MCP config-write surface — instead of replacing it wholesale, so a single-key PATCH (e.g. a
     // sessionEnv credential delivery) can never silently drop gateCommand/kanbanColumns/etc. `replace:

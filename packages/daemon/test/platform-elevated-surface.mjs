@@ -10,6 +10,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (a) a platform session can set the human-only orchestration.gateCommand/alertWebhook (FULL validator)
 //       and an out-of-bounds value is REJECTED (stored config unchanged); the AGENT validator still
 //       rejects gateCommand/alertWebhook (the manager/worker path is unchanged);
+//   (a2) card b5faa194 — THIS MCP call site (project_configure) is exercised for the write+unset
+//       collision refusal too, not just the sibling REST handler: a mutation test (delete the call site)
+//       left the whole suite green before this case existed, so the primitive alone (proven in
+//       project-config-patch-merge.mjs) was not sufficient coverage for this surface;
 //   (b) git_checkout/git_create_branch/git_commit against a real temp repo work, and git_push succeeds
 //       bounded + non-interactive against a LOCAL bare remote (reusing GitWriter verbatim);
 //   (c) vault_write writes under the project vault AND a path-escape is rejected ('traversal');
@@ -170,6 +174,22 @@ try {
     validateAgentProjectConfigOverride({ orchestration: { alertWebhook: { url: "https://e.com", events: [] } } }).ok === false);
   check("(a) validateProjectConfigOverride (full/human) ACCEPTS gateCommand", validateProjectConfigOverride({ orchestration: { gateCommand: "x" } }).ok === true);
 
+  // ===================== (a2) card b5faa194 — this MCP call site is the OTHER handler
+  // findConfigPatchUnsetCollisions guards (the reviewer proved the ORIGINAL commit's coverage gap here
+  // by mutation: deleting the platform.ts call site left the whole suite green). One colliding call +
+  // one non-colliding rename, driven through the REAL registered tool over the REAL MCP transport — not
+  // the primitive directly (project-config-patch-merge.mjs already covers the primitive in isolation). ==
+  db.setProjectConfig("pOrd", { sessionEnv: { API_KEY: "old-secret", OTHER: "keep-me" } });
+  const beforeConfigure = JSON.stringify(db.getProject("pOrd").config);
+  const collideCfg = await call("project_configure", { projectId: "pOrd", config: { sessionEnv: { API_KEY: "fresh-secret" } }, unset: ["sessionEnv.API_KEY"] });
+  check("(a2) ★ project_configure REFUSES a colliding write+unset of the same path", collideCfg.ok !== true && typeof collideCfg.error === "string" && collideCfg.error.includes("sessionEnv.API_KEY"));
+  check("(a2) ★ the refused configure left the stored config UNCHANGED", JSON.stringify(db.getProject("pOrd").config) === beforeConfigure);
+  const renameCfg = await call("project_configure", { projectId: "pOrd", config: { sessionEnv: { RENAMED: "fresh-secret" } }, unset: ["sessionEnv.API_KEY"] });
+  check("(a2) a non-colliding rename (different key written vs. unset) is NOT refused → ok:true", renameCfg.ok === true && !renameCfg.error);
+  const renamedCfg = db.getProject("pOrd").config;
+  check("(a2) ★ the write landed and the unset of the OLD name landed too", renamedCfg.sessionEnv?.RENAMED === "fresh-secret" && renamedCfg.sessionEnv?.API_KEY === undefined);
+  check("(a2) an unrelated sibling key in the same map is untouched", renamedCfg.sessionEnv?.OTHER === "keep-me");
+
   // ===================== (b) GIT WRITES — reuse GitWriter verbatim, real temp repo + local bare remote =====================
   const mkBranch = await call("git_create_branch", { projectId: "pOrd", name: "feat" });
   check("(b) git_create_branch creates + switches to a new branch", mkBranch.ok === true && mkBranch.branch === "feat");
@@ -281,6 +301,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the platform P3 ELEVATED surface works for a platform session (gateCommand/alertWebhook via the FULL validator, bounded; git checkout/create-branch/commit/push reusing GitWriter against a real repo + local bare remote; vault_write reusing writeVaultFile with the path-traversal guard), the agent/manager validator is unchanged (still rejects gateCommand/alertWebhook), and the role gate holds (manager/worker → no elevated surface) — claude-free, network-free."
+  ? "\n✅ ALL PASS — the platform P3 ELEVATED surface works for a platform session (gateCommand/alertWebhook via the FULL validator, bounded; a colliding write+unset of the same config path is REFUSED through THIS project_configure call site, not just the sibling REST handler; git checkout/create-branch/commit/push reusing GitWriter against a real repo + local bare remote; vault_write reusing writeVaultFile with the path-traversal guard), the agent/manager validator is unchanged (still rejects gateCommand/alertWebhook), and the role gate holds (manager/worker → no elevated surface) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

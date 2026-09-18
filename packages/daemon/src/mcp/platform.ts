@@ -550,7 +550,12 @@ export function unsetConfigPath(
   const chain: Record<string, unknown>[] = [out];
   for (let i = 0; i < parts.length - 1; i++) {
     const cur = chain[chain.length - 1] as Record<string, unknown>;
-    const next = cur[parts[i] as string];
+    const key = parts[i] as string;
+    // @decision e07daa96 — Object.hasOwn BEFORE the read: a plain `cur[key]` read for key "__proto__"
+    // resolves via the accessor to the REAL Object.prototype (not an own property), and descending onto
+    // it turns the delete below into a permanent, process-wide `delete Object.prototype.<name>`.
+    if (!Object.hasOwn(cur, key)) return out as ProjectConfigOverride; // path doesn't exist — no-op
+    const next = cur[key];
     if (!isPlainObject(next)) return out as ProjectConfigOverride; // path doesn't exist — no-op
     chain.push(next as Record<string, unknown>);
   }
@@ -561,6 +566,25 @@ export function unsetConfigPath(
     else break;
   }
   return out as ProjectConfigOverride;
+}
+
+// @decision b5faa194 — do not resolve a write+unset collision on the same dot-path silently (write-wins
+// or unset-wins); both handlers below REFUSE the whole payload instead, naming the colliding path(s).
+export function findConfigPatchUnsetCollisions(
+  patch: ProjectConfigOverride, unsetPaths: string[],
+): string[] {
+  return unsetPaths.filter((dotPath) => {
+    const parts = dotPath.split(".").filter(Boolean);
+    if (!parts.length) return false; // mirrors unsetConfigPath's own zero-segment no-op ("." / "..")
+    let node: unknown = patch;
+    for (const part of parts) {
+      // Object.hasOwn (not a plain bracket read) — same own-property guard as unsetConfigPath's descent
+      // just above (card e07daa96): a prototype-chain name must never resolve to a defined value here.
+      if (!isPlainObject(node) || !Object.hasOwn(node, part)) return false;
+      node = (node as Record<string, unknown>)[part];
+    }
+    return node !== undefined;
+  });
 }
 
 /**
@@ -1129,7 +1153,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian, python, memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–3600000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). UNSET/REPLACE: pass unset:[\"orchestration.gateCommand\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset.",
+        description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, codescape (codescape.enabled — the per-project Codescape opt-in toggle), obsidian, python, memory (memory.budgetTokens / topK / maxNotes — project-scoped shared-memory tuning, each clamped to MEMORY_CONFIG_MAX). As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–3600000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). UNSET/REPLACE: pass unset:[\"orchestration.gateCommand\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset. A payload that both WRITES and UNSETS the same dot-path is REJECTED (not silently resolved either way) — drop one of the two.",
         inputSchema: strictShape({
           projectId: z.string(),
           config: z.object({}).passthrough().optional(),
@@ -1156,6 +1180,12 @@ export class PlatformMcpRouter {
         // List the valid top-level keys on rejection so a fat-fingered key (e.g. "columns" instead of
         // kanbanColumns) converges instead of giving up — mirrors the setup router's project_configure.
         if (!v.ok) return ok({ error: `invalid config: ${v.error}`, validTopLevelKeys: CONFIG_TOP_LEVEL_KEYS });
+        // @decision b5faa194 — a colliding write+unset of the same path is REFUSED, not resolved either
+        // way (silent data loss under merge-then-unset); check BEFORE the merge/unset run at all.
+        const collisions = findConfigPatchUnsetCollisions(v.value, unset ?? []);
+        if (collisions.length > 0) {
+          return ok({ error: `config PATCH writes and unsets the same path(s): ${collisions.join(", ")} — the merge-then-unset order would silently discard the write; drop the colliding unset entr${collisions.length === 1 ? "y" : "ies"} or remove the write` });
+        }
         // BASE: deep-merge onto the existing override (card 28c21fe1) so setting one key never clobbers
         // another — UNLESS replace:true, where `config` becomes the whole override (clear keys by omission,
         // the agent-reachable analogue of the human REST whole-object PATCH). The partial is validated ABOVE;

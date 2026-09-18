@@ -25,15 +25,28 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       Settings.tsx shape — `applyNumField` pushes one path per field, never a single group-level
 //       path) — in either leaf order, and a PARTIAL clear does NOT prune (the untouched sibling leaf
 //       survives).
-//   (11) the handler's merge-THEN-unset ORDER: an `unset` of a key BEATS a write of that same key in
-//       ONE payload (the write is silently discarded, HTTP 200). Pinned, not fixed — it is the
-//       documented project_configure grammar, and it is WHY Settings.tsx's sessionEnv editor must
-//       collect every written name before emitting any unset (card 32b23f0f: remove-then-re-add of the
-//       same name destroyed both the old secret and its just-typed replacement).
+//   (11) card b5faa194: the handler still merge-THEN-unsets, but a write and an `unset` of the SAME
+//       dot-path in ONE payload is now REFUSED (400, naming the path, stored config UNCHANGED) instead
+//       of silently discarding the write — and a NON-colliding rename (a different key written vs.
+//       unset) is unaffected, so the refusal is specific to the actual collision. Settings.tsx's
+//       sessionEnv editor (card 32b23f0f) already avoids the collision client-side, which is why the
+//       two-pass payload it actually sends (no unset for a name it writes back) is proven well-formed.
 //   (12) an `unset` dot-path genuinely deletes a sessionEnv key, and an unmodeled `pty` override
 //       survives a sessionEnv-only write — relocated from credential-sessionenv-spawn.mjs, which is
 //       Windows-gated for its real-spawn fixture, so these two platform-independent assertions never
 //       ran on ubuntu CI there.
+//   (13) `findConfigPatchUnsetCollisions` (mcp/platform.ts) — the shared primitive BOTH the REST handler
+//       above and mcp/platform.ts's project_configure call before merging — imported straight from dist
+//       and exercised directly: exact-path collisions, ancestor-vs-descendant collisions, a primitive
+//       write making a deeper unset path unreachable (matching unsetConfigPath's own no-op), a mixed
+//       payload returning only the genuinely colliding path — PLUS (reviewer session 4275d929, reviewing
+//       commit 3425b1a3) a prototype-family name (constructor/toString/valueOf/hasOwnProperty/__proto__)
+//       the patch never actually WROTE is never a false-positive collision (own-property semantics via
+//       Object.hasOwn, matching unsetConfigPath's own descent, card e07daa96), while a genuinely OWN key
+//       sharing one of those names is still a real collision when written — and a zero-segment unset
+//       path ("."/"..") is never a collision (mirrors unsetConfigPath's own documented no-op).
+//   (14) end-to-end: a zero-segment unset ("unset: [\".\"]") alongside a real write is no longer wrongly
+//       REFUSED through the REST handler — the same regression case (13) proves at the primitive level.
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic: a REAL Db + the REAL Fastify gateway
 // (app.inject), every other dep STUBBED — mirrors mgmt-project-agent.mjs's minimal harness (this route
@@ -52,6 +65,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
+const { findConfigPatchUnsetCollisions } = await import("../dist/mcp/platform.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -201,35 +215,47 @@ try {
   check("(10) ★ a PARTIAL group clear does NOT prune — the untouched sibling leaf survives", cfgH.memory?.maxNotes === 200);
   check("(10) the two cleared leaves are gone", cfgH.memory.budgetTokens === undefined && cfgH.memory.topK === undefined);
 
-  // ===================== (11) merge-THEN-unset: a COLLIDING unset beats a write of the same key ======
-  // The handler applies `merge` then `unset`, unconditionally and in that order. So a payload carrying
-  // BOTH an `unset` of a key AND a write of that SAME key ends with the key GONE — the write is
-  // silently discarded. This is the documented `project_configure` grammar ("REMOVE a key AFTER the
-  // merge"), NOT a defect — and NOT one to "fix" in this file or in Settings.tsx. Reordering it is card
-  // b5faa194, deliberately deferred behind 32b23f0f because it targets THIS file too. If that card lands,
-  // the starred assertion below INVERTS (the write would win) and must be REWRITTEN, not deleted —
-  // deleting it drops the grammar pin AND the sibling-survival check alongside it. The second half (the
-  // `unset: []` two-pass payload) is order-independent and survives either way.
-  // This case PINS the current order, because it is the
-  // reason Settings.tsx's sessionEnv editor must collect every written name BEFORE emitting any unset.
-  // Card 32b23f0f: a human removing a secret and re-adding the SAME name in one save (the natural way
-  // to rotate a value you cannot see) destroyed BOTH the old secret and the replacement they had just
-  // typed, with an HTTP 200 and no error anywhere.
+  // ===================== (11) merge-THEN-unset: a COLLIDING unset is REFUSED, not resolved either way ===
+  // Card b5faa194: the handler still applies `merge` then `unset`, unconditionally and in that order —
+  // but a payload carrying BOTH a write of a key AND an `unset` of that SAME key used to silently
+  // discard the write (the unset ran after and pruned it, HTTP 200, no error). DoD-0 found no live
+  // caller depending on that old "unset wins" precedence — Settings.tsx's sessionEnv editor (card
+  // 32b23f0f) already avoids the collision client-side rather than rely on it — so the handler now
+  // REFUSES the whole PATCH instead, naming the colliding path, and the stored config is left UNCHANGED.
+  // This is the same collision card 32b23f0f's fix was written around: a human removing a secret and
+  // re-adding the SAME name in one save (the natural way to rotate a value you cannot see).
   db.insertProject({
     id: "pI", name: "I", repoPath: TMP, vaultPath: TMP,
     config: { sessionEnv: { API_KEY: "old-secret", OTHER: "keep-me" }, pty: { cols: 132, rows: 48 } },
     createdAt: now, archivedAt: null, reserved: false,
   });
+  const beforeCollide = JSON.stringify(db.getProject("pI").config);
   const rCollide = await patch("pI", { config: { sessionEnv: { API_KEY: "fresh-secret" } }, unset: ["sessionEnv.API_KEY"] });
-  check("(11) colliding write+unset PATCH → 200 (it does NOT error)", rCollide.statusCode === 200);
-  const cfgI = db.getProject("pI").config;
-  check("(11) ★ the unset WINS over a write of the same key in one payload — the new value is discarded",
-    cfgI.sessionEnv?.API_KEY === undefined);
-  check("(11) an unrelated sibling key in the same map is untouched", cfgI.sessionEnv?.OTHER === "keep-me");
+  check("(11) ★ colliding write+unset PATCH → 400 (refused, not silently resolved)", rCollide.statusCode === 400);
+  check("(11) ★ the error names the colliding path", typeof rCollide.json().error === "string" && rCollide.json().error.includes("sessionEnv.API_KEY"));
+  check("(11) ★ a refused PATCH leaves the stored config UNCHANGED — neither the old nor the new value wins",
+    JSON.stringify(db.getProject("pI").config) === beforeCollide);
 
-  // The shape a FIXED client actually sends for that same human intent: the write is kept and no unset
-  // is emitted for a name this payload writes back. Proves the two-pass payload is well-formed here —
-  // the daemon-side complement of the browser e2e that drives the panel itself.
+  // A non-colliding RENAME (a different key written vs. unset — the reviewer's own measured positive
+  // control) is unaffected — proves the collision check is specific to the actual colliding path, not a
+  // blanket refusal whenever `unset` and `config` are both present. A separate project (pI2) keeps this
+  // check's own key name independent of `pI`'s below, so `pI` stays byte-identical to the pre-b5faa194
+  // fixture shape for the two-pass + (12) assertions that follow.
+  db.insertProject({
+    id: "pI2", name: "I2", repoPath: TMP, vaultPath: TMP,
+    config: { sessionEnv: { API_KEY: "old-secret", OTHER: "keep-me" } },
+    createdAt: now, archivedAt: null, reserved: false,
+  });
+  const rRename = await patch("pI2", { config: { sessionEnv: { RENAMED: "fresh-secret" } }, unset: ["sessionEnv.API_KEY"] });
+  check("(11) a non-colliding rename (different key written vs. unset) → 200", rRename.statusCode === 200);
+  const cfgIRename = db.getProject("pI2").config;
+  check("(11) ★ the write landed", cfgIRename.sessionEnv?.RENAMED === "fresh-secret");
+  check("(11) ★ the unset of the OLD name landed too — both effects apply, since they don't collide", cfgIRename.sessionEnv?.API_KEY === undefined);
+  check("(11) an unrelated sibling key in the same map is untouched", cfgIRename.sessionEnv?.OTHER === "keep-me");
+
+  // The shape a FIXED client actually sends for a same-name rotation (card 32b23f0f): the write is kept
+  // and no unset is emitted for a name this payload writes back. Proves the two-pass payload is
+  // well-formed here — the daemon-side complement of the browser e2e that drives the panel itself.
   const rTwoPass = await patch("pI", { config: { sessionEnv: { API_KEY: "fresh-secret" } }, unset: [] });
   check("(11) two-pass payload (no colliding unset) → 200", rTwoPass.statusCode === 200);
   const cfgI2 = db.getProject("pI").config;
@@ -247,12 +273,70 @@ try {
     cfgI3.sessionEnv === undefined);
   check("(12) ★ the unmodeled `pty` override survived every sessionEnv write + unset above",
     cfgI3.pty?.cols === 132 && cfgI3.pty?.rows === 48);
+
+  // ===================== (13) findConfigPatchUnsetCollisions — the SAME shared primitive mcp/platform.ts's
+  // project_configure calls before its own merge+unset (card b5faa194's DoD-1 "both surfaces" scope).
+  // Imported straight from dist and called directly — no reimplementation of the collision logic here —
+  // so this is a genuine proof of the function the OTHER surface actually runs, not a lookalike. The REST
+  // route above already proves the end-to-end refusal through the real handler (11); this proves the
+  // primitive behind BOTH handlers on cases the REST harness above doesn't otherwise exercise. ===
+  check("(13) exact-path collision: unset targets exactly what the patch writes",
+    JSON.stringify(findConfigPatchUnsetCollisions({ sessionEnv: { API_KEY: "x" } }, ["sessionEnv.API_KEY"])) === JSON.stringify(["sessionEnv.API_KEY"]));
+  check("(13) ★ ancestor collision: unsetting the WHOLE map while the patch writes ONE nested key still collides — the unset would prune the just-written key too",
+    JSON.stringify(findConfigPatchUnsetCollisions({ sessionEnv: { API_KEY: "x" } }, ["sessionEnv"])) === JSON.stringify(["sessionEnv"]));
+  check("(13) no collision: the patch never touches the unset path at all",
+    findConfigPatchUnsetCollisions({ sessionEnv: { OTHER: "y" } }, ["sessionEnv.API_KEY"]).length === 0);
+  check("(13) no collision: a primitive write makes a DEEPER unset path unreachable — same as unsetConfigPath's own no-op",
+    findConfigPatchUnsetCollisions({ orchestration: { gateCommand: "cmd" } }, ["orchestration.gateCommand.nested"]).length === 0);
+  check("(13) mixed payload: only the genuinely colliding path is returned, the non-colliding one is not",
+    JSON.stringify(findConfigPatchUnsetCollisions({ sessionEnv: { API_KEY: "x" } }, ["sessionEnv.OTHER", "sessionEnv.API_KEY"])) === JSON.stringify(["sessionEnv.API_KEY"]));
+  check("(13) empty unset list → no collisions", findConfigPatchUnsetCollisions({ sessionEnv: { API_KEY: "x" } }, []).length === 0);
+
+  // ===== (13) BLOCKING Major (reviewer session 4275d929, reviewing 3425b1a3): own-property semantics —
+  // a prototype-chain name the patch never actually WROTE must never register as a collision. Without
+  // Object.hasOwn, a plain bracket read resolves __proto__/constructor/toString/etc. through the
+  // prototype chain to a defined (inherited) value, so a payload REMOVING a stored key that happens to
+  // share one of those names gets refused as a "collision" the patch never wrote — false diagnostics on
+  // top of a regression: pre-b5faa194, that removal worked. =====
+  for (const protoKey of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__"]) {
+    check(`(13) ★★ prototype-family key "${protoKey}" the patch never wrote is NOT a false-positive collision`,
+      findConfigPatchUnsetCollisions({ sessionEnv: { OTHER: "y" } }, [`sessionEnv.${protoKey}`]).length === 0);
+  }
+  check("(13) ★★ a bare top-level prototype-family name against an EMPTY patch is NOT a false-positive collision",
+    findConfigPatchUnsetCollisions({}, ["constructor"]).length === 0);
+  // A genuinely OWN key sharing a prototype-family name (e.g. an actual sessionEnv var named
+  // "constructor") is still a REAL collision when the patch writes it — the hasOwn guard narrows to
+  // inherited names, it doesn't blanket-exempt the literal string.
+  check("(13) ★ an OWN key that happens to share a prototype-family name IS still a real collision when written",
+    JSON.stringify(findConfigPatchUnsetCollisions({ sessionEnv: { constructor: "x" } }, ["sessionEnv.constructor"])) === JSON.stringify(["sessionEnv.constructor"]));
+
+  // ===== (13) Minor: a zero-segment unset path ("." / "..") is unsetConfigPath's own documented no-op
+  // (`if (!parts.length) return config`) — it can never collide with anything the patch writes. =====
+  check('(13) zero-segment unset path "." is never a collision (mirrors unsetConfigPath\'s own no-op)',
+    findConfigPatchUnsetCollisions({ sessionEnv: { API_KEY: "x" } }, ["."]).length === 0);
+  check('(13) zero-segment unset path ".." is never a collision either',
+    findConfigPatchUnsetCollisions({ sessionEnv: { API_KEY: "x" } }, [".."]).length === 0);
+
+  // ===================== (14) end-to-end: a zero-segment unset alongside a real write is no longer
+  // wrongly refused. Pre-fix, `parts=[]` skipped the whole descent loop and fell straight to `return
+  // node !== undefined` with `node` still the PATCH itself — always truthy for any non-empty write, so
+  // ANY payload combining a real write with `unset: ["."]` was refused as a false "collision". =====
+  db.insertProject({
+    id: "pJ", name: "J", repoPath: TMP, vaultPath: TMP,
+    config: { orchestration: { gateCommand: "pnpm build" } },
+    createdAt: now, archivedAt: null, reserved: false,
+  });
+  const rZeroSeg = await patch("pJ", { config: { sessionEnv: { API_KEY: "x" } }, unset: ["."] });
+  check("(14) a write alongside a zero-segment unset (\".\") is NOT refused → 200", rZeroSeg.statusCode === 200);
+  const cfgJ = db.getProject("pJ").config;
+  check("(14) ★ the write landed", cfgJ.sessionEnv?.API_KEY === "x");
+  check("(14) ★ the untouched sibling gateCommand SURVIVES", cfgJ.orchestration?.gateCommand === "pnpm build");
 } finally {
   try { if (app) await app.close(); } catch { /* ignore */ }
   db.close();
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PATCH /api/projects/:id/config deep-merges by default (a single-key PATCH preserves every sibling key, nested objects merge field-by-field), `unset` expresses deletion the merge itself cannot, `replace:true` still opts into the old whole-object-replace behavior byte-identical, this human REST path carries NO additiveOnlyRotationGuard (can shrink/lower/re-point rotation fields — the documented Settings.tsx escape hatch), a rejected PATCH leaves the stored config unchanged, `unset` genuinely REMOVES memory/alertWebhook/rotationMarkers+heading (not stored-empty) with an untouched sibling surviving each, and unsetting EVERY leaf of a group one dot-path at a time (the real Settings.tsx shape) PRUNES the now-empty parent too — in either order, while a PARTIAL clear leaves the group's untouched sibling leaf intact; PLUS the merge-THEN-unset order is pinned (a colliding unset beats a write of the same key in one payload, which is why the sessionEnv editor collects written names before emitting any unset), and a sessionEnv unset genuinely deletes its key while an unmodeled `pty` override survives."
+  ? "\n✅ ALL PASS — PATCH /api/projects/:id/config deep-merges by default (a single-key PATCH preserves every sibling key, nested objects merge field-by-field), `unset` expresses deletion the merge itself cannot, `replace:true` still opts into the old whole-object-replace behavior byte-identical, this human REST path carries NO additiveOnlyRotationGuard (can shrink/lower/re-point rotation fields — the documented Settings.tsx escape hatch), a rejected PATCH leaves the stored config unchanged, `unset` genuinely REMOVES memory/alertWebhook/rotationMarkers+heading (not stored-empty) with an untouched sibling surviving each, and unsetting EVERY leaf of a group one dot-path at a time (the real Settings.tsx shape) PRUNES the now-empty parent too — in either order, while a PARTIAL clear leaves the group's untouched sibling leaf intact; PLUS (card b5faa194) a write and an `unset` of the SAME dot-path in one payload is now REFUSED (400, named, stored config unchanged) rather than the unset silently winning, a non-colliding rename in the same map is unaffected, the sessionEnv editor's own two-pass payload lands its rotated value, and a sessionEnv unset genuinely deletes its key while an unmodeled `pty` override survives; PLUS (card e07daa96 / reviewer session 4275d929) a prototype-family name the patch never wrote is never a false-positive collision while a genuinely own key sharing that name still is, and a zero-segment unset path is never a collision — at both the primitive and the end-to-end REST layer."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);
