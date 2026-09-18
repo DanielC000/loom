@@ -143,7 +143,8 @@ async function waitForStopOrGiveUp(SID, sinceStopped, sinceBusyLen, timeoutMs) {
     }, { timeoutMs, intervalMs: 100, label: "_probe-repaint-wedge: stop-or-give-up" });
     return { outcome, elapsedMs: Date.now() - t0 };
   } catch (err) {
-    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    // _wait.mjs's own doc comment is canonical: discriminate via exhaustedOnThrow, never the message text (card 69547e0e).
+    if (err?.exhaustedOnThrow !== false) throw err;
     return { outcome: "timeout", elapsedMs: Date.now() - t0 };
   }
 }

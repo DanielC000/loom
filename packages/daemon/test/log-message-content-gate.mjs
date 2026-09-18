@@ -185,7 +185,8 @@ try {
       try {
         return await sharedWaitUntil(pred, { timeoutMs, intervalMs, label: "log-message-content-gate" });
       } catch (err) {
-        if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+        // _wait.mjs's own doc comment is canonical: discriminate via exhaustedOnThrow, never the message text (card 69547e0e).
+        if (err?.exhaustedOnThrow !== false) throw err;
         return false;
       }
     };

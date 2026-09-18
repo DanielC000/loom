@@ -70,7 +70,8 @@ async function waitUntil(predicate, timeoutMs, intervalMs = 200) {
   try {
     return await sharedWaitUntil(predicate, { timeoutMs, intervalMs, label: "pending-gate-ops: predicate" });
   } catch (err) {
-    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    // _wait.mjs's own doc comment is canonical: discriminate via exhaustedOnThrow, never the message text (card 69547e0e).
+    if (err?.exhaustedOnThrow !== false) throw err;
     return predicate();
   }
 }

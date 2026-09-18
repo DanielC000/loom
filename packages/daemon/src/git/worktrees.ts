@@ -3168,6 +3168,15 @@ export const STATIC_GUARD_REPO_PATHS = [
   // disk. Verified directly against the real motivating shape (a real, uncommitted file physically added
   // to the test/ directory, not just a synthetic fixture), not merely reasoned about.
   "packages/daemon/test/codex-real-spawn-lock-membership-guard.mjs",
+  // Card 69547e0e: a corpus-wide source-text scan forbidding the fragile message-text regex idiom
+  // (`/waitUntil: timed out/.test(err?.message ?? "")`) that this card's own migration replaced across
+  // all 75 real call sites with the structured `err?.exhaustedOnThrow !== false` check (see `_wait.mjs`'s
+  // own doc comment — the source of truth for the canonical form, added by card d5ca8d57). Belongs here
+  // on the same ground as its corpus-wide-scan siblings above: a NEW wrapper copied from an older
+  // reference/example regenerating the retired idiom is a source-TEXT property the reduced/emit-compare
+  // path cannot reason about (it changes zero compiled/runtime behavior on its own), so it could otherwise
+  // take the reduced path and never trip a single check.
+  "packages/daemon/test/waituntil-message-regex-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run

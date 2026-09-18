@@ -124,7 +124,8 @@ async function waitUntilRepoGuardQueued(sessions, projId, repoPath, timeoutMs) {
       return snap.repoGuardOnly.some((e) => e.phase === "queued" && e.repoPath === repoPath);
     }, { timeoutMs, intervalMs: 10, label: "merge-gate-inert-diff: repo guard queued" });
   } catch (err) {
-    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    // _wait.mjs's own doc comment is canonical: discriminate via exhaustedOnThrow, never the message text (card 69547e0e).
+    if (err?.exhaustedOnThrow !== false) throw err;
     return false;
   }
 }

@@ -56,7 +56,8 @@ async function waitFor(fn, timeoutMs = 5000) {
   try {
     return await sharedWaitUntil(fn, { timeoutMs, intervalMs: 50, label: "vault-versioner-wiring: fn" });
   } catch (err) {
-    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    // _wait.mjs's own doc comment is canonical: discriminate via exhaustedOnThrow, never the message text (card 69547e0e).
+    if (err?.exhaustedOnThrow !== false) throw err;
     return false;
   }
 }

@@ -36,7 +36,8 @@ const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
     await sharedWaitUntil(pred, { timeoutMs, intervalMs, label: "worker-set-mode: condition" });
     return true;
   } catch (err) {
-    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err; // a throwing predicate is a real error, not a timeout
+    // _wait.mjs's own doc comment is canonical: discriminate via exhaustedOnThrow, never the message text (card 69547e0e).
+    if (err?.exhaustedOnThrow !== false) throw err; // a throwing predicate is a real error, not a timeout
     return false;
   }
 };

@@ -163,7 +163,8 @@ async function waitForSession(sessionId, pred, timeoutMs, intervalMs = 250) {
       return last && pred(last) ? last : false;
     }, { timeoutMs, intervalMs, label: "usage-limit-detect: session state" });
   } catch (err) {
-    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    // _wait.mjs's own doc comment is canonical: discriminate via exhaustedOnThrow, never the message text (card 69547e0e).
+    if (err?.exhaustedOnThrow !== false) throw err;
     return last;
   }
 }

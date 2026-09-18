@@ -82,7 +82,8 @@ async function waitForFile(filePath, timeoutMs) {
   try {
     return await sharedWaitUntil(() => fs.existsSync(filePath), { timeoutMs, intervalMs: 100, label: "vault-commit-hang-bound: waitForFile" });
   } catch (err) {
-    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    // _wait.mjs's own doc comment is canonical: discriminate via exhaustedOnThrow, never the message text (card 69547e0e).
+    if (err?.exhaustedOnThrow !== false) throw err;
     return fs.existsSync(filePath);
   }
 }

@@ -27,7 +27,8 @@ async function waitUntil(fn, timeoutMs = 4000, stepMs = 25) {
   try {
     return await sharedWaitUntil(fn, { timeoutMs, intervalMs: stepMs, label: "claude-version-prewarm" });
   } catch (err) {
-    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    // _wait.mjs's own doc comment is canonical: discriminate via exhaustedOnThrow, never the message text (card 69547e0e).
+    if (err?.exhaustedOnThrow !== false) throw err;
     return false;
   }
 }

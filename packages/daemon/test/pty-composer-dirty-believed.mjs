@@ -66,7 +66,8 @@ async function waitForBusyFalse(busyLog, sessionId, t0) {
   try {
     await sharedWaitUntil(() => busyLog[sessionId]?.at(-1) === false, { timeoutMs: remainingMs, intervalMs: GIVE_UP_POLL_MS, label: "pty-composer-dirty-believed: busy fell back to false" });
   } catch (err) {
-    if (!/waitUntil: timed out/.test(err?.message ?? "")) throw err;
+    // _wait.mjs's own doc comment is canonical: discriminate via exhaustedOnThrow, never the message text (card 69547e0e).
+    if (err?.exhaustedOnThrow !== false) throw err;
   }
 }
 
