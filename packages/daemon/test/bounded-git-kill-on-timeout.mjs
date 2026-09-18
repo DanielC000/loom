@@ -151,6 +151,73 @@ fs.mkdirSync(repo, { recursive: true });
 execSync(`git init -q "${repo}"`);
 execSync(`git -C "${repo}" ${GIT_ID} commit -q --allow-empty -m init`);
 
+// Card 58d2462c — this fixture repo has TWICE presented with zero commits mid-run (a `git log` hitting
+// "fatal: your current branch 'master' does not have any commits yet", exit 128) despite its own
+// `[setup] baseline: exactly 1 commit` check passing earlier in the SAME run. Both prior specimens were
+// lost: the uncaught throw propagates through this file's top-level `try/finally` below, whose
+// `fs.rmSync(repo, ...)` deletes the failing repo before anyone can inspect it. RULE ZERO for this card is
+// "instrument first, reproduce second" — so `commitSubjectsOnRepo` (the ONE call site that can observe
+// this) snapshots `.git/refs/heads/master`, `.git/HEAD`, `.git/packed-refs` (existence/mtime/content) and
+// any lingering `loom-killtest`-tagged child processes to a file OUTSIDE the repo (survives the cleanup),
+// BEFORE re-throwing — never swallowing the failure, only capturing it on the way past. Best-effort:
+// a failure inside the snapshot itself must never mask or replace the real error.
+const SNAPSHOT_DIR = process.env.LOOM_SCRATCH_DIR?.trim() || os.tmpdir();
+
+function readGitStateFile(p) {
+  try {
+    const stat = fs.statSync(p);
+    return { exists: true, mtimeMs: stat.mtimeMs, size: stat.size, content: fs.readFileSync(p, "utf8") };
+  } catch (e) {
+    return { exists: false, error: e?.message ?? String(e) };
+  }
+}
+
+function findLingeringKilltestProcesses() {
+  if (process.platform !== "win32") return "<process enumeration only implemented for win32>";
+  try {
+    // CommandLine filter on "loom-killtest" — the hook's inline `node -e` script writes to a marker path
+    // under THIS repo dir, so its own command line names it; this also catches an orphaned `sh.exe` still
+    // holding the pre-commit hook open (Windows: killing the top-level git.exe does not kill an
+    // already-spawned hook descendant — see this file's own header comment). Name-scoped to
+    // git.exe/sh.exe/node.exe deliberately — a broad CommandLine-only filter self-matches the enumeration
+    // command's OWN command line (it necessarily contains the literal string "loom-killtest"), which
+    // showed up as false-positive noise (the powershell.exe/cmd.exe running THIS query) during verification.
+    return execSync(
+      `powershell -NoProfile -NonInteractive -Command ` +
+      `"Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*loom-killtest*' -and ` +
+      `$_.Name -in @('git.exe','sh.exe','node.exe') } | ` +
+      `Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress"`,
+      { encoding: "utf8", timeout: 5000 },
+    ).trim() || "<none found>";
+  } catch (e) {
+    return `<enumeration failed: ${e?.message ?? String(e)}>`;
+  }
+}
+
+function snapshotFixtureState(reason) {
+  try {
+    const ts = Date.now();
+    const snapshot = {
+      card: "58d2462c",
+      reason,
+      timestamp: new Date(ts).toISOString(),
+      pid: process.pid,
+      repo,
+      "refs/heads/master": readGitStateFile(path.join(repo, ".git", "refs", "heads", "master")),
+      HEAD: readGitStateFile(path.join(repo, ".git", "HEAD")),
+      "packed-refs": readGitStateFile(path.join(repo, ".git", "packed-refs")),
+      lingeringKilltestProcesses: findLingeringKilltestProcesses(),
+    };
+    const snapshotPath = path.join(SNAPSHOT_DIR, `bounded-git-kill-snapshot-${ts}-${process.pid}.json`);
+    fs.writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2));
+    // Also to stdout (survives even if the file write itself fails, and is what a gate log archives).
+    console.error(`\n🔴🔴 CARD 58d2462c SNAPSHOT (${snapshotPath}):\n${JSON.stringify(snapshot, null, 2)}\n`);
+  } catch (snapshotError) {
+    console.error(`snapshotFixtureState itself failed (best-effort, not the real failure): ` +
+      `${snapshotError?.message ?? snapshotError}`);
+  }
+}
+
 function installSlowTalkingPreCommitHook(repoPath, markerPath) {
   // A single `node` child does ALL the ticking (not a shell loop spawning `sleep`/`echo` as SEPARATE
   // processes per tick) — deliberately, after measuring the difference under load: a 50-iteration shell
@@ -178,8 +245,16 @@ function hookStartMarkerPath(repoPath, message) {
 }
 
 function commitSubjectsOnRepo(repoPath) {
-  return execSync(`git -C "${repoPath}" log --format=%s`, { encoding: "utf8" })
-    .split("\n").map((l) => l.trim()).filter(Boolean);
+  try {
+    return execSync(`git -C "${repoPath}" log --format=%s`, { encoding: "utf8" })
+      .split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch (e) {
+    // Card 58d2462c — this is the ONE call site that has, twice now, observed the fixture repo present
+    // with zero commits mid-run. Snapshot BEFORE re-throwing: the top-level try/finally's fs.rmSync would
+    // otherwise delete the evidence before anyone can look at it.
+    snapshotFixtureState(`commitSubjectsOnRepo(${repoPath}) threw: ${e?.message ?? String(e)}`);
+    throw e;
+  }
 }
 
 /** Attempt one `git commit` against the shared `repo`, fresh slow-talking hook each time. `kill:true`
