@@ -3208,8 +3208,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // second reserved home (the ungated "Platform" setup home) now coexists, so "the one reserved project"
     // is ambiguous and could return the setup home instead of Loom Platform (the live regression this
     // fixes). The setup home has its own discovery route below (GET /api/setup/home).
-    const project = deps.db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
-    if (!project) return reply.code(404).send({ error: "no reserved Loom Platform project" });
+    const found = deps.db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
+    if (!found) return reply.code(404).send({ error: "no reserved Loom Platform project" });
+    // Card 6bfc3bfb: redact sessionEnv on this reserved project like GET /api/projects — Platform.tsx
+    // never reads config.sessionEnv back out of this response (it only reads project.reserved/name/id).
+    const project = redactSessionEnvForRead(found);
     const agents = deps.db.listAgents(project.id);
     // LIVE-SESSION INFO: surface each platform agent's currently-LIVE sessions as a per-agent LIST, so the
     // UI can show how many Leads/Auditors are live and offer Resume/Attach. Multiple live Leads may coexist
@@ -3238,8 +3241,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // already-live one instead of minting a duplicate). 404 only if no setup home exists (impossible after
   // boot-seed). ---
   app.get("/api/setup/home", async (_req, reply) => {
-    const project = deps.db.getReservedProjectByName(SETUP_PROJECT_NAME);
-    if (!project) return reply.code(404).send({ error: "no reserved setup home" });
+    const foundSetup = deps.db.getReservedProjectByName(SETUP_PROJECT_NAME);
+    if (!foundSetup) return reply.code(404).send({ error: "no reserved setup home" });
+    // Card 6bfc3bfb: redact sessionEnv on this reserved project like GET /api/platform/home above —
+    // nothing in the setup UI reads config.sessionEnv back out of this response.
+    const project = redactSessionEnvForRead(foundSetup);
     const agents = deps.db.listAgents(project.id);
     const liveSessions = agents.flatMap((a) =>
       deps.db.liveSessions(a.id).map((s) => ({
@@ -3982,7 +3988,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
 
   // Soft-archived projects (read-only) — the web "Archived" section that surfaces restore / permanent-
   // delete. Static path, declared before /api/projects/:id so it never collides with the param routes.
-  app.get("/api/projects/archived", async () => deps.db.listArchivedProjects());
+  // Card 6bfc3bfb: same redaction as GET /api/projects — a pure READ, and EXPECTED_TIER_1 (trust-tier.mjs),
+  // so unlike its sibling routes this one is reachable by a token-authenticated remote client, not just
+  // loopback. ArchivedProjects (packages/web/src/pages/Projects.tsx) never reads config.sessionEnv back
+  // out of this response — it only feeds restore/permanent-delete, neither of which touches sessionEnv.
+  app.get("/api/projects/archived", async () => deps.db.listArchivedProjects().map(redactSessionEnvForRead));
 
   // --- HUMAN-only project management (rename / archive / restore / PERMANENT delete). These are
   // DESTRUCTIVE, trust-boundary surfaces exposed ONLY here on the loopback REST — exactly like session
