@@ -393,10 +393,12 @@ before you edit; I'll sanity-check first" is only advisory if phrased loosely: a
 treat it as optional narration — write the plan as chat prose and edit in the very next step, and the
 checkpoint you wanted never happens. You **cannot** fall back to `plan` mode to force it (rejected for a
 worker, as above). Enforce the gate with an EXPLICIT kickoff instruction instead: require the worker to `worker_report` its root
-cause + plan as a `progress` (or `blocked`) checkpoint and then STOP and wait for your approval before
-making any edit. That report-and-stop is a real checkpoint (the `/worker` doctrine backs it — a plan
-narrated as prose followed by edits does not satisfy it); a loosely-worded "let me know your plan" does
-not.
+cause + plan as a `blocked` checkpoint — not `progress` for THIS purpose: a `progress` checkpoint relies
+solely on a push nudge, which can be missed, while `blocked` also sets the durable `awaitingReview` flag
+`worker_list` shows you. (`progress` stays the right status for an ordinary "FYI, still working" report —
+this is only about the plan-approval gate.) Then STOP and wait for your approval before making any edit.
+That report-and-stop is a real checkpoint (the `/worker` doctrine backs it — a plan narrated as prose
+followed by edits does not satisfy it); a loosely-worded "let me know your plan" does not.
 
 **Verify a steering message actually landed — but read the result precisely.** After
 `worker_message`/`worker_redirect`, check the result it returns and distinguish two "not delivered"
