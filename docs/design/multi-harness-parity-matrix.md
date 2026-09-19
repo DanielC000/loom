@@ -295,6 +295,7 @@ gracefully; a mutator must be guarded per condition 1 above if reachable from a 
 | `markMcpSeen` | AGNOSTIC, useful for codex | `[read]` | Touches `live.alive`/`live.mcpSeen`/`live.mcpSeenWaiters` — generic fields; this is literally the mechanism the MCP-reachability smoke test's daemon-side log rode. |
 | `waitForMcpSeen` | AGNOSTIC, useful for codex | `[read]` | Same as above. |
 | `getPending` | AGNOSTIC | `[read]` | Reads `live.pending` (generic array). |
+| `getPendingQueueDepth` | AGNOSTIC | `[read]` | Card `d8eaa381`: reads `live.pending.length` via `findAnyLive` — same field as `getPending`, so the same classification. |
 | `getActiveTurnOrigin` | AGNOSTIC | `[read]` | Reads `live.activeTurnRoute`, set at submit()/enqueueStdin — generic Companion-routing metadata. |
 | `getActiveTurnIsProactive` | AGNOSTIC | `[read]` | Reads `live.activeTurnProactive` — same family as above. |
 | `getActiveTurnOwnerText` | AGNOSTIC | `[read]` | Reads `live.activeTurnOwnerText` — same family. |
@@ -332,6 +333,7 @@ gracefully; a mutator must be guarded per condition 1 above if reachable from a 
 | `getLastOutputAt` | RECLASSIFIED to CLAUDE-ONLY — fixed by card `a1916267` | `[read]` | ⚠️ **CORRECTION**: this row was WRONG in a load-bearing way. It WAS true that `live.lastOutputAt` is "set on every pty data chunk regardless of harness" — but that's exactly the bug: codex's TUI repaints continuously (spinner/cursor chrome) with NO turn running, so the field kept advancing on a dead-ended codex session, indistinguishable from genuine liveness to a manager reading `worker_list`'s `lastEngineOutputAt` (measured: ~30 minutes past the worker's last real turn). `CodexLive` no longer carries a `lastOutputAt` field at all — it also had NO internal consumer (codex's own busy/idle ladder keys off `lastBusyMarkerAt`/screen-scan markers, never this). `getLastOutputAt` now reads `this.live.get(id)` only, the SAME convention `getComposerDirtyLen` below already uses — a codex row now honestly projects `lastEngineOutputAt: null`. |
 | `getComposerDirtyLen` | CLAUDE-ONLY | `[read]` | Accessor for a Claude-only field; safe no-op (`undefined`) on a codex `Live` that never sets it. |
 | `getComposerDirtyLenBelieved` | CLAUDE-ONLY | `[read]` | Same family. |
+| `getCurrentTurnBusyForMs` | CLAUDE-ONLY | `[read]` | Card `d8eaa381`: reads `live.busySince` — `CodexLive` has no `busySince`/stuck-busy-heal concept at all (see the `reconcile` row above), so this reads `this.live` only, never `findAnyLive`; a codex row's `undefined` collapses to `null` at the read site, same convention as `getLastOutputAt` (card `a1916267`). |
 | `getPendingConfirmMs` | CLAUDE-ONLY | `[grep]` | Adjacent to `humanSubmitHeldUntil` handling. |
 | `getLastMismatchReplay` | CLAUDE-ONLY | `[read]` | Accessor for a Claude-only optional field; safe no-op. |
 | `getLastFlushAttribution` | CLAUDE-ONLY | `[read]` | Same family. |

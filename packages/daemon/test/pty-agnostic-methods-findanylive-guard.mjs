@@ -49,6 +49,9 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // this list, same as those two.
 const AGNOSTIC_METHODS = [
   "markMcpSeen", "waitForMcpSeen",
+  // Card d8eaa381: getPendingQueueDepth — same "pending" field getPending already reads, AGNOSTIC for the
+  // same reason (the queue mechanism itself is harness-independent).
+  "getPendingQueueDepth",
   "getPending", "getActiveTurnOrigin", "getActiveTurnIsProactive", "getActiveTurnOwnerText",
   "getRecentOwnerTurns", "getActiveTurnSenderId",
   "getPersistablePendingSnapshot", "getPendingEntries", "pendingAgentCount", "consumePending",

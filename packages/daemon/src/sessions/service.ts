@@ -9364,12 +9364,30 @@ export class SessionService {
           const isRepeat = priorMsgIds !== null
             && priorMsgIds.length === currentMsgIds.length
             && priorMsgIds.every((id, i) => id === currentMsgIds[i]);
+          // Card d8eaa381: the count above is manager-authored direction ONLY (this.db.listUnresolvedQueuedMessagesForWorker
+          // filtered to `sender === managerSessionId`) — the REAL FIFO can hold more (another sender's
+          // direction, a Loom-authored nudge) ahead of or alongside it, and only ONE entry drains per
+          // completed turn. Naming the live depth here tells the worker (and, via worker_report_rejected's
+          // own detail, its manager) that a non-empty queue can legitimately take SEVERAL more of its own
+          // turns to fully clear — it is not evidence of a stuck delivery path (see this card's own
+          // diagnosis: a queue can look frozen from outside while draining correctly, one turn at a time).
+          // Defensive `typeof` guard, same convention as `hasAmbiguousMatch`'s own call site in this
+          // file (Requirement A, card 4a0af485) and `lastFlushAttribution`'s in mcp/orchestration.ts:
+          // `this.pty` is statically the concrete `PtyHost` in production (this method always exists
+          // there), but this codebase's test suite is riddled with hermetic `PtyStub` fakes that
+          // duck-type only the subset of the contract their own scenario needs — an unguarded call threw
+          // "not a function" against exactly that class of stub (batch-gate finding). Missing the method
+          // degrades to no note at all, never a regression, no hard dependency a stub must opt into.
+          const liveQueueDepth = typeof this.pty.getPendingQueueDepth === "function" ? (this.pty.getPendingQueueDepth(workerSessionId) ?? null) : null;
+          const queueNote = liveQueueDepth !== null && liveQueueDepth > pending.length
+            ? ` Your live send queue actually holds ${liveQueueDepth} entries right now (${liveQueueDepth - pending.length} more from other senders or Loom's own nudges, ahead of or alongside these) — only ONE entry drains per turn you complete, so fully clearing it may take more than one more turn.`
+            : "";
           const error = isRepeat
             ? `worker_report(done) REFUSED (again) — the SAME ${pending.length} instruction(s) from your manager are still unconsumed (unchanged since your last refusal):\n${pendingList}\n` +
-              `Nothing NEW has arrived, so this doesn't look like a fresh supersede — RECONCILE against it (act on it, or if your work already satisfies it, say so) THEN re-report done. Your task stays in_progress.`
+              `Nothing NEW has arrived, so this doesn't look like a fresh supersede — RECONCILE against it (act on it, or if your work already satisfies it, say so) THEN re-report done. Your task stays in_progress.${queueNote}`
             : `worker_report(done) REFUSED — you have ${pending.length} UNRESOLVED instruction(s) queued from your manager that you have NOT consumed yet:\n${pendingList}\n` +
               `These may SUPERSEDE the work you're about to report (the incident this guards: a worker committed a superseded design before reading the manager's redirect). ` +
-              `End this turn so the queued manager direction drains into your next turn, act on it, THEN re-report done. Your task stays in_progress.`;
+              `End this turn so the queued manager direction drains into your next turn, act on it, THEN re-report done. Your task stays in_progress.${queueNote}`;
           // Card 36e43a98: persist the REFUSED report's own content on this same event, not just the
           // refusal metadata — pre-fix, a `done` refused here vanished entirely (never recorded as a
           // `worker_report` event, since that append happens later, past this early return), so a worker

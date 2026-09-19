@@ -74,7 +74,11 @@ const EXPECTED_KEYS = [
   // whole percent (number | null — null EXACTLY when ctxInputTokens is null, never a measured 0).
   "ctxPct",
   "neverCompletedTurn", "lastEngineOutputAt", "composerDirtyLen", "composerDirtyLenBelieved",
-  "unconfirmedDeliveryMs", "lastMismatchReplay", "lastMismatchFusion", "lastMismatch",
+  "unconfirmedDeliveryMs",
+  // Card d8eaa381: pendingQueueDepth (FIFO send-queue depth) + currentTurnBusyForMs (ms since the
+  // current turn went busy) — see pty/host.ts's getPendingQueueDepth/getCurrentTurnBusyForMs.
+  "pendingQueueDepth", "currentTurnBusyForMs",
+  "lastMismatchReplay", "lastMismatchFusion", "lastMismatch",
   "lastMismatchNoticeSuppressed", "lastPasteTripwireGiveUp", "lastFlushAttribution", "pendingMerge", "worktreePathAliases",
   "reportedState", "awaitingReview", "staleReport", "directive", "staleDirective", "parkedDirective",
   "archivedWithoutReport", "unresolvedCascade",

@@ -7396,6 +7396,42 @@ export class PtyHost {
     return (this.findAnyLive(sessionId)?.pending ?? []).map((m) => m.text);
   }
 
+  /**
+   * Card d8eaa381: how many messages currently sit in this session's FIFO send queue
+   * (`Live.pending`/`CodexLive.pending`.length) — every entry regardless of sender (manager direction,
+   * a worker's own re-queued text, a Loom-authored "warning"-kind nudge), not just manager-authored
+   * direction. AGNOSTIC (the queue itself is harness-independent — see `getPending`'s own doc and this
+   * project's `docs/design/multi-harness-parity-matrix.md`), so this routes through `findAnyLive` and
+   * works for both claude and codex sessions.
+   *
+   * `undefined` when the session isn't live in EITHER harness's registry — never conflate that with a
+   * measured `0` (a genuinely empty, live queue), the same discipline `getComposerDirtyLen` established.
+   * A read site collapses `undefined` to `null` (see mcp/orchestration.ts's `pendingQueueDepth`).
+   */
+  getPendingQueueDepth(sessionId: string): number | undefined {
+    return this.findAnyLive(sessionId)?.pending.length;
+  }
+
+  /**
+   * Card d8eaa381: milliseconds elapsed since the CURRENT turn's busy rose (`Live.busySince`), or `null`
+   * if no turn is currently in flight (idle — nothing to measure), or `undefined` if the session isn't
+   * live. Exists so a manager can tell "this worker's current turn has been running a long time, and
+   * that alone is not evidence of a wedge" (see this card's own diagnosis) from "this queued message
+   * will land the moment the current turn completes" without guessing from wall-clock alone.
+   *
+   * CLAUDE-ONLY: `CodexLive` carries no `busySince`/stuck-busy-heal concept at all (a named Phase-1
+   * simplification — see `docs/design/multi-harness-parity-matrix.md`'s `reconcile` row), so this reads
+   * `this.live` directly, never `findAnyLive` — a codex session's `undefined` here collapses to the same
+   * `null` a read site already gives a not-live session, an honest "not applicable to this harness"
+   * absence, mirroring `getLastOutputAt`'s own codex convention (card a1916267).
+   */
+  getCurrentTurnBusyForMs(sessionId: string): number | null | undefined {
+    const live = this.live.get(sessionId);
+    if (!live) return undefined;
+    if (!live.busy || live.busySince === null) return null;
+    return Date.now() - live.busySince;
+  }
+
 
   /**
    * Loom Companion (multi-channel reply routing): the ORIGINATING route of the session's IN-FLIGHT turn, or

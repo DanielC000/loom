@@ -40,7 +40,12 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const now = new Date().toISOString();
 
 const db = new Db();
-const ptyStub = { enqueueStdin() { return { delivered: true }; } };
+// Card d8eaa381: workerReport's pending-direction refusal now unconditionally reads
+// pty.getPendingQueueDepth(workerId) — a stub lacking it would throw the instant that refusal fires,
+// which is exactly the path under test here. Pinned to 3 (2 more than the single manager-authored
+// instruction seeded below) so the queue-depth note's own text is exercised, not just its absence.
+const LIVE_QUEUE_DEPTH = 3;
+const ptyStub = { enqueueStdin() { return { delivered: true }; }, getPendingQueueDepth() { return LIVE_QUEUE_DEPTH; } };
 const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -88,6 +93,16 @@ try {
     !r.error.includes(`[${FROM_MANAGER_TAG}]`));
   check("(3) preview still shows the instruction's real body text",
     r.error.includes(realBody));
+
+  // Card d8eaa381: the refusal now also names the LIVE queue depth (from pty.getPendingQueueDepth) when
+  // it exceeds the manager-authored-only count this refusal is otherwise scoped to — proving a manager
+  // reading this text learns "more turns may be needed", not just "one instruction is stuck". Manager
+  // review caught the extra entries asserted as "from other senders" alone, which does not cover a
+  // Loom-authored "warning"-kind nudge (not a sender a manager could go hunting for) — the wording now
+  // says "from other senders or Loom's own nudges", matched here verbatim so a future regression to the
+  // narrower, misleading phrasing fails this assertion.
+  check("(3b) refusal names the live queue depth and how many more entries sit ahead — WITHOUT asserting they're all from a sender",
+    r.error.includes(`${LIVE_QUEUE_DEPTH} entries`) && r.error.includes(`${LIVE_QUEUE_DEPTH - 1} more from other senders or Loom's own nudges`));
 
   // (4) ⭐ the durable record itself — the thing that actually drains as the real delivery at the next
   // turn boundary — must be untouched. This is the assertion that would fail if a change accidentally
