@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, ProjectConfigHistoryEntry, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
-import { resolveConfig, resolveCodescapeConfig, columnKeyForRole, describeCron, maskSessionEnvRecord, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
+import { resolveConfig, resolveCodescapeConfig, columnKeyForRole, describeCron, redactSessionEnvInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
@@ -292,10 +292,10 @@ export function parseWsJsonObject(raw: Buffer | string): Record<string, unknown>
 /**
  * Card a5ecb6fd: mask `config.sessionEnv` VALUES before a project row leaves the daemon over
  * `GET /api/projects`. Every other config key, and `Db.listProjects()` itself, stay untouched. The
- * masking itself is `maskSessionEnvRecord` (`@loom/shared`) — the ONE primitive shared with the
- * `/config/history` route below and with `Db.recordProjectConfigChange`'s write-time redaction (card
- * b2f9ce3a); do not reintroduce a second masker here. Pure + exported so a hermetic test can assert this
- * wrapper directly without booting a real server (mirrors `sanitizeCompanionName`/`GATEWAY_LOG_SERIALIZERS`
+ * masking itself is `redactSessionEnvInConfig` (`@loom/shared`) — the ONE primitive shared with the
+ * `/config/history` route below and with `mcp/entityRowFields.ts`'s `projectFields` (card e5c82138); do
+ * not reintroduce a second masker here. Pure + exported so a hermetic test can assert this wrapper
+ * directly without booting a real server (mirrors `sanitizeCompanionName`/`GATEWAY_LOG_SERIALIZERS`
  * above).
  *
  * @decision 0c5d6851 — also applied to the 4 project-returning WRITE routes (create/PATCH/restore/
@@ -303,28 +303,19 @@ export function parseWsJsonObject(raw: Buffer | string): Record<string, unknown>
  * anything beyond length without re-verifying it can't round-trip the masked value onto a later write.
  */
 export function redactSessionEnvForRead(project: Project): Project {
-  const masked = maskSessionEnvRecord(project.config.sessionEnv);
-  if (!masked) return project;
-  return { ...project, config: { ...project.config, sessionEnv: masked } };
+  return { ...project, config: redactSessionEnvInConfig(project.config) };
 }
 
 /**
  * Card b2f9ce3a: mask `sessionEnv` inside a project-config-history entry's `prior`/`next` blobs before it
  * leaves the daemon over `GET /api/projects/:id/config/history`. Read-side defense for rows written
  * BEFORE `Db.recordProjectConfigChange` started masking at write time — those legacy rows still hold the
- * secret verbatim on disk. Reuses `maskSessionEnvRecord`, the same primitive the write path now calls;
- * masking an already-masked (post-fix) value is idempotent, so this is a safe no-op there, not a
- * double-redaction.
+ * secret verbatim on disk. Reuses `redactSessionEnvInConfig` (card e5c82138) on each leg — the same
+ * primitive the read path above now calls; masking an already-masked (post-fix) value is idempotent, so
+ * this is a safe no-op there, not a double-redaction.
  */
 export function redactSessionEnvHistoryEntry(entry: ProjectConfigHistoryEntry): ProjectConfigHistoryEntry {
-  const priorMasked = maskSessionEnvRecord(entry.prior.sessionEnv as Record<string, unknown> | undefined);
-  const nextMasked = maskSessionEnvRecord(entry.next.sessionEnv as Record<string, unknown> | undefined);
-  if (!priorMasked && !nextMasked) return entry;
-  return {
-    ...entry,
-    prior: priorMasked ? { ...entry.prior, sessionEnv: priorMasked } : entry.prior,
-    next: nextMasked ? { ...entry.next, sessionEnv: nextMasked } : entry.next,
-  };
+  return { ...entry, prior: redactSessionEnvInConfig(entry.prior), next: redactSessionEnvInConfig(entry.next) };
 }
 
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {

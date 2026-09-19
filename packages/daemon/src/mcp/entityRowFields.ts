@@ -1,4 +1,4 @@
-import { maskSessionEnvRecord, type Agent, type Profile, type Project } from "@loom/shared";
+import { redactSessionEnvInConfig, type Agent, type Profile, type Project } from "@loom/shared";
 
 /**
  * Shared MCP-layer row projections for the platform + setup routers' Project/Agent/Profile
@@ -57,14 +57,15 @@ const PROJECT_FIELDS: Record<keyof Project, 1> = {
 };
 const PROJECT_KEYS = Object.keys(PROJECT_FIELDS) as (keyof Project)[];
 
-// @decision bb267ade — config.sessionEnv is masked here (maskSessionEnvRecord) for ALL SIX MCP project
-// reads that flow through this chokepoint. Never revert to a raw pass-through of config.sessionEnv.
+// @decision bb267ade — config.sessionEnv is masked here (via redactSessionEnvInConfig) for ALL SIX MCP
+// project reads that flow through this chokepoint. Never revert to a raw pass-through of config.sessionEnv.
+// @decision e5c82138 — re-expressed over the shared `redactSessionEnvInConfig` (@loom/shared): a
+// pre-existing `sessionEnv: {}` now round-trips as `{}` (was: silently dropped) — see that primitive's
+// own doc for the empty-record policy this adopts.
 export function projectFields(row: Project | undefined): Project | undefined {
   if (row === undefined) return row;
   const picked = pickFields(row, PROJECT_KEYS);
-  const { sessionEnv, ...configRest } = picked.config;
-  const masked = maskSessionEnvRecord(sessionEnv);
-  return { ...picked, config: masked === undefined ? configRest : { ...configRest, sessionEnv: masked } };
+  return { ...picked, config: redactSessionEnvInConfig(picked.config) };
 }
 
 const AGENT_FIELDS: Record<keyof Agent, 1> = {

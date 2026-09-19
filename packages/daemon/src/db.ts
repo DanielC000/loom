@@ -2975,6 +2975,8 @@ export class Db {
    * attribute an agent's write. See `ProjectConfigHistoryEntry`'s doc for the actor-string convention.
    * Card b2f9ce3a: `sessionEnv` is MASKED (`maskSessionEnvRecord`) before reaching this row — rotating a
    * secret must never archive the old value in cleartext.
+   * @decision e5c82138 — evaluated for unification with `redactSessionEnvInConfig` (@loom/shared) and
+   * DELIBERATELY EXCLUDED: this builds a fresh diff-accumulator, not a projection. Left as-is.
    */
   recordProjectConfigChange(projectId: string, before: ProjectConfigOverride, after: ProjectConfigOverride, actor: string): void {
     const b = (before ?? {}) as Record<string, unknown>;

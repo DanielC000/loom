@@ -960,6 +960,22 @@ export function maskSessionEnvRecord(
 }
 
 /**
+ * Mask `sessionEnv` inside a config-shaped object using `maskSessionEnvRecord`, leaving every other key
+ * untouched. Shared by the three sites that PROJECT an existing config-shaped object onto a response —
+ * `redactSessionEnvForRead`/`redactSessionEnvHistoryEntry` (`gateway/server.ts`) and `projectFields`
+ * (`mcp/entityRowFields.ts`); `Db.recordProjectConfigChange` builds a fresh diff-accumulator instead of
+ * projecting one, so it doesn't fit here (evaluated + deliberately excluded, card e5c82138 — see the
+ * inline note at that call site).
+ * @decision e5c82138 — empty-record policy: when `maskSessionEnvRecord` returns `undefined`
+ * (`sessionEnv` absent, `null`, or `{}`), the original value is preserved VERBATIM, never dropped, so a
+ * pre-existing `sessionEnv: {}` round-trips as `{}`. Do not revert to dropping the key on this edge.
+ */
+export function redactSessionEnvInConfig<T extends { sessionEnv?: unknown }>(config: T): T {
+  const masked = maskSessionEnvRecord(config.sessionEnv as Record<string, unknown> | null | undefined);
+  return masked === undefined ? config : { ...config, sessionEnv: masked };
+}
+
+/**
  * True when `value` is indistinguishable from `maskSessionEnvRecord`'s own filler for THIS key's current
  * stored value — i.e. every character is the mask char AND the length exactly matches `priorValue`'s
  * length (card a253cec8, guarding the WRITE chokepoint against a masked read response fed back in).

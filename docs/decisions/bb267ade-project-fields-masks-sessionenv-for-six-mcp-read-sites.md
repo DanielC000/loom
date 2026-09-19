@@ -36,45 +36,38 @@ all-filler `sessionEnv` value as an echoed mask (card `a253cec8`). This card's m
 write-side rejection are two halves of one invariant — masking alone, without `a253cec8`, would have
 turned every one of these six read sites into a loaded gun.
 
-## Evaluated, not built: a shared `redactSessionEnvInConfig(config)` unit
+## Evaluated, then built (card `e5c82138`): the shared `redactSessionEnvInConfig(config)` unit
 
 The card's NEW BLOCKER appendix asked to evaluate a shared `redactSessionEnvInConfig(config)` in
 `@loom/shared` (Code Reviewer suggestion), reusable across every sessionEnv-masking call site, "if the
 shapes unify." Code Reviewer follow-up review found four independent implementations with three
 different empty-record behaviours: `gateway/server.ts:305` (`redactSessionEnvForRead`) and `:319`
-(`redactSessionEnvHistoryEntry`) **preserve** the original value when `maskSessionEnvRecord` returns
-`undefined` (so a pre-existing `sessionEnv: {}` round-trips as `{}`, not absent); `db.ts:2988` (inside
-`recordProjectConfigChange`) and `entityRowFields.ts`'s `projectFields` (this file) **drop** the key
-entirely on the same empty-record case.
+(`redactSessionEnvHistoryEntry`) **preserved** the original value when `maskSessionEnvRecord` returned
+`undefined` (so a pre-existing `sessionEnv: {}` round-tripped as `{}`, not absent); `db.ts:2988` (inside
+`recordProjectConfigChange`) and `entityRowFields.ts`'s `projectFields` (this file) **dropped** the key
+entirely on the same empty-record case. The verdict at the time — shapes unify for 3 of the 4 sites, not
+all 4 — was carded as a follow-up rather than fixed here.
 
-**Verdict: the shapes unify for 3 of the 4 sites, not all 4 — worth a small follow-up card, not a fix
-folded into this one.**
-- `redactSessionEnvForRead` and `projectFields` both project a whole `Project`/`ProjectConfigOverride`
-  object and return the same shape with `sessionEnv` masked — a single `redactSessionEnvInConfig(config):
-  ProjectConfigOverride` would serve both directly, and adopting `redactSessionEnvForRead`'s
-  longer-lived "preserve original, including a literal `{}`" policy as the canonical one would also fix
-  the actual inconsistency `projectFields` introduces here (dropping the key for `{}` instead of
-  preserving it).
-- `redactSessionEnvHistoryEntry` operates on a two-legged `{prior, next}` object, but each leg is itself
-  a single config-shaped blob — it unifies too, by calling the same single-leg primitive twice.
-- `recordProjectConfigChange`'s inline branch does **not** unify: it builds a brand-new diff-accumulator
-  object (`prior`/`next` start empty and are populated only for keys that actually changed), not a
-  projection of an existing config — there is no pre-existing `{}` to preserve or drop in that shape.
-  Forcing it through the same primitive would mean reshaping the accumulator-building loop itself, a
-  materially different and riskier change with no clear benefit (this path is write-time-only and already
-  correct for its own purpose).
+**Card `e5c82138` built that follow-up.** `redactSessionEnvInConfig` now lives in `@loom/shared`
+(`packages/shared/src/config.ts`, beside `maskSessionEnvRecord`), and `redactSessionEnvForRead`,
+`redactSessionEnvHistoryEntry` (per leg), and `projectFields` (this file) are all re-expressed over it.
+`recordProjectConfigChange` was evaluated again and stays excluded, unchanged — see its own inline
+`@decision e5c82138` note in `db.ts`: it builds a fresh diff-accumulator, not a projection of an existing
+config, so the primitive doesn't fit without reshaping that loop.
 
-No consumer today distinguishes `sessionEnv: {}` from an absent key, so the inconsistency `projectFields`
-introduces is Minor and left as-is per this card's instruction not to build the shared unit here. A
-follow-up card should add `redactSessionEnvInConfig` to `@loom/shared` and reuse it from the 3 sites that
-genuinely unify, leaving `recordProjectConfigChange` untouched.
+**The empty-record policy adopted is "preserve"**, not "drop" — `redactSessionEnvForRead`'s original
+behaviour. This is a deliberate fix to the inconsistency `projectFields` introduced above, not merely a
+centralisation: `projectFields` now preserves a literal `sessionEnv: {}` instead of dropping the key. Full
+rationale: `docs/decisions/e5c82138-unify-three-sessionenv-config-projection-maskers.md`.
 
 ## Do not
 
 - Do not revert `projectFields` to a raw pass-through of `config.sessionEnv` — that reopens all six
   sites at once, since they share this one chokepoint.
 - Do not import `redactSessionEnvForRead` from `mcp/` — it is `gateway/server.ts`-local; import
-  `maskSessionEnvRecord` from `@loom/shared` directly.
-- Do not write a second sessionEnv masker — `maskSessionEnvRecord` is the one shared primitive.
+  `redactSessionEnvInConfig` from `@loom/shared` directly (the shared primitive `projectFields` and
+  `redactSessionEnvForRead` both project over — see card `e5c82138`).
+- Do not write a second sessionEnv-in-config projection helper — `redactSessionEnvInConfig` is the one
+  shared primitive for this shape (`maskSessionEnvRecord` remains the lower-level value masker it wraps).
 - Do not assume masking alone makes a masked response safe to feed back as a write — that safety comes
   from `setProjectConfigSafe`'s separate echo-rejection (card `a253cec8`), not from anything in this file.
