@@ -6962,6 +6962,31 @@ export class SessionService {
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "message_worker",
       detail: r.delivered ? { msgId: r.msgId, turnSeqAtDelivery: worker.turnSeq ?? 0 } : { msgId: r.msgId },
     });
+    // ADVISORY (card d9c203e4): a codex session wedged before it ever finished booting (`getCodexBootStuck`
+    // non-null — card bba13405's own durable latch) can sit live/resumable/busy:false, indistinguishable
+    // from a healthy idle worker, while a held enqueue's plain `queued:true`/`deliveryState:"queued"`
+    // reads exactly like an ordinary hold that WILL land at the recipient's next turn boundary. It won't —
+    // there is no turn running to end. Checked BEFORE the busyForMs advisory below, on the SAME `!r.
+    // delivered` guard: a boot-stuck codex session can never take the immediate-delivery branch (it never
+    // reaches `bootReady`), so this and the busyForMs branch are mutually exclusive in practice, but the
+    // ordering also means this never interferes with DoD-3's healthy-busy byte-identical contract. `typeof`
+    // -guarded (precedent: `hasAmbiguousMatch` above) — a hermetic PtyStub test double may not implement
+    // this getter at all, and must degrade to today's plain result, not throw.
+    if (!r.delivered) {
+      const bootStuck = typeof this.pty.getCodexBootStuck === "function" ? this.pty.getCodexBootStuck(workerSessionId) : null;
+      if (bootStuck) {
+        return {
+          ...r,
+          advisory:
+            `this worker's codex session appears wedged before it ever finished booting (never reached ` +
+            `model-loaded — unmet: ${bootStuck.unmet.join(", ")}); this message is durably queued ` +
+            `(queued:true) but will NOT land at a "next turn boundary" the way an ordinary held message ` +
+            `does, because no turn is running to end it. It will only deliver if this session recovers on ` +
+            `its own or you worker_stop/worker_recycle it — check worker_status's codexBootStuck field.`,
+        };
+      }
+    }
+
     // ADVISORY (card aa4e24ff, defect 2): only on a HELD, busy-caused hold whose busyForMs has crossed
     // WORKER_MESSAGE_HELD_ADVISORY_MS — see that constant's doc for why `busyForMs` (never text) is the
     // trigger. An idle worker's immediate delivery never reaches here with a `busyForMs` at all (the
