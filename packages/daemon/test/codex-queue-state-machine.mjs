@@ -311,11 +311,21 @@ check("M4 FIX: writeStdin's raw bytes reached the fake codex pty", fakePty.write
   check("R4 FIX: the boot-stuck report does NOT blame trust-dialog-resolved when no dialog ever appeared", stuckEvent.info.trustDialogResolved === true);
   check("R4: nothing was EVER written to the never-booting session's pty (no premature submit)", stuckPty.writes.length === 0);
   check("R4: bootReady never latched for the never-booting session", host.liveCodex.get(STUCK_SESSION_ID).bootReady === false);
+  // Card bba13405: the durable, publicly-readable counterpart to the async onCodexBootStuck event above —
+  // proves `getCodexBootStuck` genuinely latches the SAME info the fail-loud report already carried, so a
+  // caller that reads it minutes later (worker_status/worker_list, never subscribed to the async event)
+  // can still discriminate this session from a healthy idle one.
+  const stuck = host.getCodexBootStuck(STUCK_SESSION_ID);
+  check("R4 FIX (bba13405): getCodexBootStuck reads non-null once the ceiling has fired", stuck !== null);
+  check("R4 FIX (bba13405): getCodexBootStuck's timeoutMs matches the fired ceiling", stuck?.timeoutMs === 800);
+  check("R4 FIX (bba13405): getCodexBootStuck's unmet names the same two conditions the event reported", Array.isArray(stuck?.unmet) && stuck.unmet.includes("ready marker") && stuck.unmet.includes("model-loaded") && !stuck.unmet.includes("trust-dialog-resolved"));
+  check("R4 FIX (bba13405): a healthy, already-booted session (the shared SESSION_ID, well past boot) reads getCodexBootStuck:null", host.getCodexBootStuck(SESSION_ID) === null);
   // A LATE recovery (codex was merely slow, not genuinely stuck) must still resolve normally — the fail-
   // loud report is one-shot, not a permanent lockout (see CodexLive.bootReadyTimer's own doc).
   stuckPty.push("OpenAI Codex (v1.2.3)\n│ model:     gpt-6-astra medium                          │\n›  Ask Codex to do anything\n");
   check("R4: a LATE boot-readiness still latches normally after a boot-stuck report already fired", host.liveCodex.get(STUCK_SESSION_ID).bootReady === true);
   check("R4: the previously-queued message drains once the late boot-readiness latches", stuckPty.writes.some((w) => w.includes("queued against a session that never boots")));
+  check("R4 FIX (bba13405): getCodexBootStuck clears back to null once the late boot-readiness genuinely latches — a recovered session reads healthy again, not permanently flagged", host.getCodexBootStuck(STUCK_SESSION_ID) === null);
 }
 
 // --- FOLD WIRING (card 0e83c855 round 4, Code Review round 1 Major [1]): the only proof anywhere that

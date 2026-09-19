@@ -2793,6 +2793,16 @@ export interface CodexLive {
    *  MANAGER-visible report rather than every queued caller silently waiting forever — see
    *  `onCodexBootStuck`'s own doc for the two-recipient contract this feeds. */
   bootReadyTimer: NodeJS.Timeout | null;
+  /** Codex-only, card bba13405: durable (survives past the one-shot `bootReadyTimer`'s own firing)
+   *  companion to `onCodexBootStuck` — the SAME info that fail-loud console.error/event carries, latched
+   *  onto the live row itself so a caller that never saw that async notice (e.g. `worker_status`/
+   *  `worker_list`, read well after the fact) can still tell a wedged-at-boot session apart from a
+   *  healthy idle one. `null` until the ceiling actually fires; set at the SAME instant `bootReadyTimer`'s
+   *  callback fires (never re-derived separately, so it can't drift from what the notice itself reported).
+   *  Cleared the instant a LATE `bootReady` latch resolves it (mirrors `bootReadyTimer` itself being
+   *  cleared there) — a session that goes on to boot successfully reads healthy again, not permanently
+   *  flagged; @decision 448f1b4a's own "late boot-readiness still resolves normally" applies here too. */
+  bootStuckInfo: { at: number; timeoutMs: number; unmet: string[] } | null;
   /** Codex-only, card 176bdb0c: wall-clock time (`Date.now()`) `stopCodex`'s SECOND `\x03` was actually
    *  WRITTEN for the CURRENT stop attempt — `null` until then, and reset to `null` at the top of every
    *  fresh `stopCodex(..., "graceful")` call. The write is itself conditional (`stopCodex`'s own
@@ -4731,7 +4741,7 @@ export class PtyHost {
       codexBusyTail: "",
       engineSessionIdCaptureAttempted: false,
       engineSessionIdCaptureEndReason: null,
-      bootReady: false, bootReadyTimer: null,
+      bootReady: false, bootReadyTimer: null, bootStuckInfo: null,
       secondSigintWrittenAt: null,
       firstTurnStarted: false, // flips true on the FIRST confirmed CASE-2 completion — see the field's own doc
       submitOutstanding: false, // set true by submitCodex, cleared by CASE 2 — see the field's own doc
@@ -4764,6 +4774,10 @@ export class PtyHost {
         ? unmet.join(", ")
         : "none individually — all three held at some point but were never observed simultaneously in one onData tick";
       // eslint-disable-next-line no-console
+      // Card bba13405: latch the SAME info onto the live row (see `CodexLive.bootStuckInfo`'s own doc) —
+      // set at this exact instant so a `worker_status`/`worker_list` read minutes later, long after this
+      // async console.error/event fired, can still discriminate this session from a healthy idle one.
+      live.bootStuckInfo = { at: Date.now(), timeoutMs: CODEX_BOOT_READY_TIMEOUT_MS, unmet };
       console.error(`[codex-boot-stuck] ${opts.sessionId} boot readiness never reached after ${CODEX_BOOT_READY_TIMEOUT_MS}ms — unmet: ${unmetLabel} — ${live.pending.length} message(s) queued and frozen. Manager intervention needed.`);
       try {
         this.events.onCodexBootStuck?.(opts.sessionId, { timeoutMs: CODEX_BOOT_READY_TIMEOUT_MS, pendingCount: live.pending.length, readyMarker, modelLoaded, trustDialogResolved });
@@ -4883,6 +4897,11 @@ export class PtyHost {
         isCodexReadyMarkerPresent(live.screenScan) && isCodexModelLoaded(live.screenScan)
       ) {
         live.bootReady = true;
+        // Card bba13405: a LATE latch resolves whatever `bootStuckInfo` a prior fail-loud ceiling already
+        // recorded — this session genuinely booted, so it must read healthy again, not permanently flagged
+        // (same "late boot-readiness still resolves normally" posture as `bootReadyTimer` itself, cleared
+        // two lines below).
+        live.bootStuckInfo = null;
         // @decision 08c81809 — mirrors claude's `markReady` `onReady` fire (round 3 finding 5), so a codex
         // successor's `reachedReadyAt` also latches; guarded by the same `!live.bootReady` check above.
         // Wrapped (round 4 item 4): a throw here must never skip the kickoff delivery immediately below.
@@ -10460,6 +10479,17 @@ export class PtyHost {
    */
   isCodexBootReady(sessionId: string): boolean {
     return this.liveCodex.get(sessionId)?.bootReady ?? false;
+  }
+
+  /**
+   * Card bba13405: read the durable `CodexLive.bootStuckInfo` latch (see that field's own doc) — a
+   * wedged-at-boot codex session's `worker_status`/`worker_list` discriminator. Returns `null` for a
+   * healthy/still-booting/never-stuck codex session, a claude session, a dead session, or an unknown
+   * `sessionId` alike (mirrors `isCodexBootReady`'s own "false/null unless clearly true" convention) —
+   * deliberately codex-SPECIFIC, same category as `isCodexBootReady` itself.
+   */
+  getCodexBootStuck(sessionId: string): { at: number; timeoutMs: number; unmet: string[] } | null {
+    return this.liveCodex.get(sessionId)?.bootStuckInfo ?? null;
   }
 
   /**

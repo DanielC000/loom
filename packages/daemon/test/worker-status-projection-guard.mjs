@@ -78,6 +78,9 @@ const EXPECTED_KEYS = [
   // Card d8eaa381: pendingQueueDepth (FIFO send-queue depth) + currentTurnBusyForMs (ms since the
   // current turn went busy) — see pty/host.ts's getPendingQueueDepth/getCurrentTurnBusyForMs.
   "pendingQueueDepth", "currentTurnBusyForMs",
+  // Card bba13405: codexBootStuck — the wedged-at-boot codex discriminator, see pty/host.ts's
+  // getCodexBootStuck.
+  "codexBootStuck",
   "lastMismatchReplay", "lastMismatchFusion", "lastMismatch",
   "lastMismatchNoticeSuppressed", "lastPasteTripwireGiveUp", "lastFlushAttribution", "pendingMerge", "worktreePathAliases",
   "reportedState", "awaitingReview", "staleReport", "directive", "staleDirective", "parkedDirective",
