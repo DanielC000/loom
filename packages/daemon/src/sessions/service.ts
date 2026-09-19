@@ -7345,6 +7345,9 @@ export class SessionService {
     // The one-time warn below exists so a REAL production gap (should this typing guarantee ever actually
     // break — a future refactor widening `this.pty`'s type to an interface, say) is loud rather than a
     // silent, permanent feature degradation nobody notices.
+    // CONVENTION: guard every new `this.pty.<method>` call added to this file the same way — `typeof
+    // this.pty.<method> === "function"` — for the same reason (hermetic PtyStub fakes below getPendingQueueDepth
+    // do it too; card 0bf4c23c).
     if (typeof this.pty.hasAmbiguousMatch !== "function" && !warnedMissingHasAmbiguousMatch) {
       warnedMissingHasAmbiguousMatch = true;
       // eslint-disable-next-line no-console

@@ -2747,6 +2747,8 @@ export class OrchestrationMcpRouter {
     // (several hermetic tests wire one, implementing only the getters their own scenario needs). A
     // real PtyHost always has this method; a hand-rolled test double may not, so `typeof` is checked
     // before calling rather than assuming its presence the way the sibling `pty?.getXxx(...)` reads do.
+    // CONVENTION: guard every new `pty.<method>` call added to this file the same way — `typeof
+    // pty?.<method> === "function"` — for the same reason (see the two below; card 0bf4c23c).
     const lastFlushAttribution = (workerId: string): { gen: number; attributable: boolean; reason: string; resolvedAt: number } | null =>
       typeof pty?.getLastFlushAttribution === "function" ? (pty.getLastFlushAttribution(workerId) ?? null) : null;
 
