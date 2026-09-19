@@ -359,11 +359,17 @@ ignore it.** If the worker has been mid-turn long enough that the queued message
 the result can carry a short note pointing you at `worker_redirect` as the faster path. Treat that note
 as a prompt to re-decide, not as something the message result owes you every time — most holds resolve
 fine on their own, and the advisory only shows up when the wait is genuinely long. **The reverse pairing
-matters just as much: a `worker_redirect` that discards queued direction tells you exactly how many
-messages it just discarded — re-send them after**, once the worker has reconciled onto the new
-direction, instead of treating a redirect as a reason to silently drop what you'd already queued. Don't
-choose between "redirect and lose what was queued" and "message and risk landing late" — redirect, then
-re-send: it costs a couple of extra tool calls and keeps both the urgency and the content.
+matters just as much, but check before you act on it: a `worker_redirect` that discards queued direction
+tells you exactly how many messages it just discarded — before re-sending any of them, check whether
+your redirect's own new instruction already covers that content.** If it does, the discarded content is
+already subsumed and re-sending it too is not an extra safety net — it's a second, redundant instruction
+landing on a worker already acting on the combined text: you pay the duplicate's cost and get none of
+the loss-prevention it was meant to buy. Re-send only the discarded content the redirect's own text does NOT already
+carry, and only once the worker has reconciled onto the new direction — don't let "redirect, then
+re-send" become an unconditional reflex. Don't choose between "redirect and lose what was queued" and
+"message and risk landing late" — fold what's still missing into the redirect up front, or re-send just
+that remainder afterward: it costs a couple of extra tool calls and keeps both the urgency and the
+content, without duplicating what the redirect already said.
 
 **Before you redirect/hold a worker to stop it, VERIFY WHAT IT'S ACTUALLY BUILDING — the working tree
 is authoritative, the event log is not.** A busy flag, a tool-call log, or your own read of what the
