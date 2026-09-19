@@ -1650,15 +1650,39 @@ export class PlatformMcpRouter {
       },
     );
 
+    // Shared cross-project session-by-id resolver for session_stop/session_reap/session_message — SAME
+    // resolver as session_transcript (below), but resolved HERE at the router and names ambiguous
+    // candidates.
+    //
+    // @decision f2f0fafa — never move this into SessionService (the companion's session-steer lever
+    // reuses stopSession/reapSessionStrays/deliverSessionMessage after its own exact-only resolution),
+    // and never widen shared AMBIGUOUS_ID_ERROR to name candidates (used by two unrelated read surfaces).
+    const resolveSessionByIdOrPrefix = (sessionId: string) => {
+      const exact = db.getSession(sessionId);
+      if (exact) return { session: exact } as const;
+      if (sessionId.length < MIN_ID_PREFIX_LEN) return { error: AMBIGUOUS_ID_ERROR } as const;
+      const matches = db.findSessionsByIdPrefix(sessionId);
+      if (matches.length > 1) {
+        return {
+          error: `ambiguous session id-prefix '${sessionId}' — it matches ${matches.map((m) => m.id).join(", ")}; pass more characters or the full id`,
+        } as const;
+      }
+      const found = matches[0];
+      if (!found) return { error: "session not found" } as const;
+      return { session: found } as const;
+    };
+
     server.registerTool(
       "session_stop",
       {
-        description: "Stop ANY session by id (cross-project) — the DAEMON's own Loom-namespaced session id, never the engine's own (see `Session`'s session-id naming policy doc in `@loom/shared`, card 7fcb586a). mode \"graceful\" (default — clean Ctrl-C ×2, resumable) or \"hard\" (pty.kill escalation); both orphan-free. Mirrors POST /api/sessions/:id/stop. 404 if the session is unknown.",
+        description: `Stop ANY session by id (cross-project) — the DAEMON's own Loom-namespaced session id, never the engine's own (see \`Session\`'s session-id naming policy doc in \`@loom/shared\`, card 7fcb586a). Accepts a full session id OR an unambiguous ${MIN_ID_PREFIX_LEN}-char id-prefix (the short id Loom displays), same resolution as session_transcript — an ambiguous prefix errors naming the candidate ids. mode "graceful" (default — clean Ctrl-C ×2, resumable) or "hard" (pty.kill escalation); both orphan-free. Mirrors POST /api/sessions/:id/stop. {error} if the session id is unknown or the prefix is ambiguous/too-short.`,
         inputSchema: strictShape({ sessionId: z.string(), mode: z.enum(["graceful", "hard"]).optional() }),
       },
       async ({ sessionId, mode }) => {
+        const resolved = resolveSessionByIdOrPrefix(sessionId);
+        if ("error" in resolved) return ok({ error: resolved.error });
         try {
-          return ok(sessions.stopSession(sessionId, mode ?? "graceful"));
+          return ok(sessions.stopSession(resolved.session.id, mode ?? "graceful"));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
@@ -1679,13 +1703,16 @@ export class PlatformMcpRouter {
           "(matched by executable path/cwd/command line — never a bare image-name or port match — " +
           "never sweep by name/port across the whole host), and it EXCLUDES the session's own live pid — " +
           "a routine reap can never end the session you scoped it to; use `session_stop` for that. " +
+          `Accepts a full session id OR an unambiguous ${MIN_ID_PREFIX_LEN}-char id-prefix (the short id Loom displays), same resolution as session_transcript — an ambiguous prefix errors naming the candidate ids. ` +
           "Returns `{killedPids:[]}` on a healthy worktree (nothing to reap) — an empty list is success, " +
-          "not a failure. 404 if the session is unknown.",
+          "not a failure. {error} if the session id is unknown or the prefix is ambiguous/too-short.",
         inputSchema: strictShape({ sessionId: z.string() }),
       },
       async ({ sessionId }) => {
+        const resolved = resolveSessionByIdOrPrefix(sessionId);
+        if ("error" in resolved) return ok({ error: resolved.error });
         try {
-          return ok(await sessions.reapSessionStrays(sessionId));
+          return ok(await sessions.reapSessionStrays(resolved.session.id));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
@@ -2811,16 +2838,20 @@ export class PlatformMcpRouter {
           "Framed [loom:from-platform] so a live receiver knows the source (the tag is applied for you — do NOT " +
           "prepend it yourself in `text`). DELIVER-ONCE: a retried/duplicated call for the SAME (sessionId, text) " +
           "within a short window returns the ORIGINAL delivery result with duplicate:true and injects NOTHING new " +
-          "— safe to retry on an uncertain outcome. DELIVERY ONLY — this never spawns anything. 404 only if the " +
-          "session id is unknown.",
+          "— safe to retry on an uncertain outcome. DELIVERY ONLY — this never spawns anything. Accepts a full " +
+          `session id OR an unambiguous ${MIN_ID_PREFIX_LEN}-char id-prefix (the short id Loom displays), same ` +
+          "resolution as session_transcript — an ambiguous prefix errors naming the candidate ids. {error} if " +
+          "the session id is unknown or the prefix is ambiguous/too-short.",
         inputSchema: strictShape({ sessionId: z.string(), text: z.string() }),
       },
       async ({ sessionId, text }) => {
+        const resolved = resolveSessionByIdOrPrefix(sessionId);
+        if ("error" in resolved) return ok({ error: resolved.error });
         try {
           // Thread the LEAD's own session id (the URL-path caller) as the durable sender, so a queued
           // dispatch that a daemon restart interrupts can be surfaced back to THIS Lead on resume to
           // re-send (card 2ca18433). `callerSessionId` is always set on the live request path.
-          return ok(sessions.messageSessionAsPlatform(sessionId, text, callerSessionId));
+          return ok(sessions.messageSessionAsPlatform(resolved.session.id, text, callerSessionId));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

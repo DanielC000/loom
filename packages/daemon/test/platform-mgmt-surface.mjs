@@ -364,7 +364,11 @@ try {
   check("session_stop: stops a session by id (routes to pty.stop hard)", stopRes.stopped === true && host.stopped.some((s) => s.id === spawnMgr.id && s.mode === "hard"));
   const stopGraceful = await call("session_stop", { sessionId: spawnPlain.id });
   check("session_stop: defaults to graceful when mode omitted", stopGraceful.stopped === true && host.stopped.some((s) => s.id === spawnPlain.id && s.mode === "graceful"));
-  check("session_stop: 404 on an unknown session", (await call("session_stop", { sessionId: "ghost" })).error === "session not found");
+  // Card f2f0fafa: session_stop now accepts an 8-char id-prefix (mirrors session_transcript), so a
+  // well-formed-but-unknown id (>=8 chars) is the right fixture for "not found" — a SHORT ref like the
+  // old "ghost" fixture now correctly hits the DISTINCT too-short/ambiguous error instead (see
+  // platform-session-id-prefix.mjs for that coverage).
+  check("session_stop: 404 on an unknown session", (await call("session_stop", { sessionId: "ffffffff-doesnotexist" })).error === "session not found");
 
   // ===================== (a) PROJECT update + (d) archive (reserved refused) =====================
   const newVaultPath = path.join(os.tmpdir(), "ord2");

@@ -159,8 +159,11 @@ try {
     prefixedEnq.text === "[loom:from-platform]\nsecond hop of a relayed directive" &&
     (prefixedEnq.text.match(/\[loom:from-platform\]/g) || []).length === 1);
 
-  // 404 ONLY for a truly unknown id.
-  check("(a) session_message 404s an unknown session", (await pCall("session_message", { sessionId: "ghost", text: "x" })).error === "session not found");
+  // 404 ONLY for a truly unknown id. Card f2f0fafa: session_message now accepts an 8-char id-prefix
+  // (mirrors session_transcript), so a well-formed-but-unknown id (>=8 chars, matching NO session) is the
+  // right fixture for "not found" — a SHORT ref like the old "ghost" fixture now correctly hits the
+  // DISTINCT too-short/ambiguous error instead (see platform-session-id-prefix.mjs for that coverage).
+  check("(a) session_message 404s an unknown session", (await pCall("session_message", { sessionId: "ffffffff-doesnotexist", text: "x" })).error === "session not found");
   // A NOT-LIVE target no longer throws — it BOARDS a durable card on the target's project board (pOrd) and
   // returns deliveryStatus "boarded" + the taskId, so the Lead's message is never silently dropped.
   const ordTasksBefore = db.listTasks("pOrd").length;

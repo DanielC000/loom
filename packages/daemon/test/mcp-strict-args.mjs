@@ -108,6 +108,14 @@ async function connect(server, label) {
     processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
     lastError: null, role: "platform",
   });
+  // Card f2f0fafa: session_message now resolves its sessionId arg against the REAL db (id-prefix
+  // support) BEFORE ever reaching the stub `sessions.messageSessionAsPlatform` below — so the target
+  // must actually exist, unlike before that card when the router forwarded the raw arg unconditionally.
+  db.insertSession({
+    id: "S-target", projectId: "pP", agentId: "agentP", engineSessionId: null, title: null, cwd: "/p",
+    processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: null,
+  });
 
   // Minimal stub: session_message's handler calls exactly ONE SessionService method — mirrors
   // arg-name-aliases.mjs's stub pattern for the OrchestrationMcpRouter surface.
