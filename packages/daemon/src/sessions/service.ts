@@ -1741,6 +1741,21 @@ const defaultRunWebhookPost: RunWebhookPoster = async (url, body, timeoutMs) => 
 };
 
 /**
+ * Card 6325bc74 — a typed sentinel for `confirmWorkerMerge`'s ownership refusal, so
+ * `confirmWorkerMergeTracked`'s `classifyOutcome` can discriminate it by `instanceof` rather than
+ * string-matching `error.message` against the literal "not your worker" (the SAME text is also thrown at
+ * eight other unrelated guard sites in this file — a prose match can't tell them apart, and would silently
+ * decouple from the message the moment someone rewords it). Message text is unchanged so the observable
+ * `ConfirmMergeResult.error` shape is byte-identical to before this existed.
+ */
+class NotYourWorkerError extends Error {
+  constructor() {
+    super("not your worker");
+    this.name = "NotYourWorkerError";
+  }
+}
+
+/**
  * Card b798e706: thrown from INSIDE the merge gate's `gateSemaphore.runExclusive` callback when the
  * ADMISSION-TIME re-union — re-checking whether canonical main moved during this op's semaphore queue
  * wait and, only if it did, re-unioning against the fresh tip (see `confirmWorkerMerge`'s own doc at the
@@ -12340,7 +12355,7 @@ export class SessionService {
     // "can't determine it" and cancels nothing (its fail-safe), which would be correct for an untracked call
     // (no PendingOpRegistry entry to speak of) — but per the note above, no current caller is untracked.
     const worker = this.db.getSession(workerSessionId);
-    if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
+    if (!worker || worker.parentSessionId !== managerSessionId) throw new NotYourWorkerError();
     if (!worker.branch) throw new Error("worker has no branch");
     const project = this.db.getProject(worker.projectId);
     if (!project) throw new Error("project not found");
@@ -15911,7 +15926,10 @@ export class SessionService {
         // @decision 99a1cf6f — `gateBaseInvalidated` classifies distinctly from an ordinary "rejected",
         // checked before the plain merged-else-rejected fallback — a real test failure is safe to replay,
         // a stale-base one is not.
-        classifyOutcome: (outcome) => (!outcome.ok ? "unknown" : outcome.value.cancelled ? "cancelled" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.merged ? "merged" : "rejected"),
+        //
+        // Card 6325bc74 — a `NotYourWorkerError` throw classifies as "not-your-worker", not "unknown": it
+        // is a fact about the CALLING MANAGER, a dimension `NEVER_CACHED_OUTCOMES` excludes from caching.
+        classifyOutcome: (outcome) => (!outcome.ok ? (outcome.error instanceof NotYourWorkerError ? "not-your-worker" : "unknown") : outcome.value.cancelled ? "cancelled" : outcome.value.gateBaseInvalidated ? "stale-base" : outcome.value.merged ? "merged" : "rejected"),
         // @decision 33172f01 — bypasses BOTH caches on an explicit `forceRemoveWorktree`, extended by
         // 1555e361 to cover the until-superseded dedupe too: that escalation must never be served from a
         // cache built by an earlier, unforced call.

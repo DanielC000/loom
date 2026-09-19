@@ -19,8 +19,11 @@ export type PendingOpOutcome = string;
  *  cancellation forever.
  *  @decision 99a1cf6f — a stale-base rejection is a real, resolved verdict about canonical MAIN, not the
  *  branch: never serve it from either cache to a later re-confirm — a branch-keyed identity string can't
- *  capture that main has moved on. */
-const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base"]);
+ *  capture that main has moved on.
+ *  Card 6325bc74 — an ownership refusal ("not your worker") is a fact about the CALLING MANAGER, a
+ *  dimension this cache doesn't key on at all: never cache or replay it, or a refusal correct for one
+ *  manager gets served forever to a different (or since-corrected) one. */
+const NEVER_CACHED_OUTCOMES: ReadonlySet<PendingOpOutcome> = new Set(["cancelled", "stale-base", "not-your-worker"]);
 
 /**
  * The externally-visible projection of a pending op — safe to serialize over MCP. Never carries the
@@ -665,8 +668,8 @@ export class PendingOpRegistry {
             this.entries.delete(key);
             if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: false, error: err }, opts.verdictIdentity);
             // UNTIL-SUPERSEDED WRITE — mirrors the `ok:true` branch above, same doc, same
-            // `NEVER_CACHED_OUTCOMES` veto (a thrown error has no analogous cancelled/stale-base shape
-            // today, so this is unaffected in practice).
+            // `NEVER_CACHED_OUTCOMES` veto — a thrown error CAN classify into a veto'd shape (card
+            // 6325bc74: an ownership-refusal throw classifies as "not-your-worker" and is excluded here).
             if (opts?.retainVerdictUntilSuperseded && !NEVER_CACHED_OUTCOMES.has(fresh.outcome ?? "")) this.untilSupersededVerdicts.set(key, { rawOutcome: { ok: false, error: err }, identity: opts.verdictIdentity });
             opts?.onSettle?.({ ok: false, error: err }, fresh.opId);
             if (fresh.surfacedPending) onSettledAfterPending?.({ ok: false, error: err }, fresh.opId);
