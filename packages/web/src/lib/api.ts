@@ -53,6 +53,50 @@ export interface TranscriptTurn { role: "user" | "assistant" | "tool_result" | "
 export interface QueuedMessage { id: string; text: string; source: "human" | "system"; kind: "warning" | "agent"; }
 export interface BranchDiff { filesChanged: number; insertions: number; deletions: number; patch: string; uncommitted?: boolean; merged?: boolean; }
 
+// MIRRORS the daemon's own NodeModulesReclaimCandidate / NodeModulesReclaimRunResult
+// (packages/daemon/src/sessions/service.ts) — a hand-copy across the package boundary, not an import,
+// the same convention TranscriptTurn above follows, so these must be updated by hand whenever those
+// change. Card 1008e305 owns the routes; card 08ac5925 owns this consumer.
+//
+// ⚠️ There is deliberately NO size field on a CANDIDATE: the daemon measures a tree only at the moment
+// it removes it (reclaimNodeModulesDir), so a pre-deletion number could only ever be an estimate, and
+// an estimate is exactly what card 08ac5925 DoD-3 forbids. Size is knowable only from the run result.
+export interface NodeModulesReclaimCandidate {
+  worktreePath: string;
+  nodeModulesPath: string;
+  sessionId: string;
+  taskId: string | null;
+  projectId: string;
+  projectName: string;
+  lastActivityAt: string;
+  ageHours: number;
+}
+export interface NodeModulesReclaimListing { count: number; entries: NodeModulesReclaimCandidate[]; }
+
+/** How ONE worktree's reclaim ended. `bytesReclaimed` is non-null ONLY for `"removed"` — and the nulls
+ *  on the other four do NOT all mean the same thing, so a consumer must branch on THIS field, never on
+ *  `bytesReclaimed === null`. `"wedged"` above all is an UNKNOWN, not a zero: the removal was
+ *  force-killed part-way (one attempt, never retried — decision record bd9fc808, anchored in the daemon's
+ *  own reclaimNodeModulesDir), so a real fraction of that tree may already be gone. */
+export type NodeModulesReclaimOutcome = "removed" | "missing" | "wedged" | "left-on-disk" | "no-longer-eligible";
+export interface NodeModulesReclaimRunResult {
+  candidatesConsidered: number;
+  removed: number;
+  /** Sum of MEASURED bytes freed across the `removed` entries — never an estimate. A LOWER BOUND when
+   *  `sizeTruncatedCount > 0` (that many trees hit the daemon's size-scan entry cap mid-measure). */
+  bytesReclaimed: number;
+  sizeTruncatedCount: number;
+  noLongerEligible: number;
+  missing: number;
+  wedged: number;
+  leftOnDisk: number;
+  results: Array<{
+    worktreePath: string; projectId: string; projectName: string; taskId: string | null;
+    outcome: NodeModulesReclaimOutcome;
+    bytesReclaimed: number | null;
+  }>;
+}
+
 // Skill update adoption (end-user customization — card 295a50f9). `update-diff` is the raw base→shipped
 // pair (the UI computes the "what shipped changed" line diff); `merge-preview` is the 3-way auto-merge:
 // `clean` one-clicks, otherwise `merged` carries git-style conflict markers (<<<<<<< mine / ||||||| base
@@ -666,6 +710,21 @@ export const api = {
   // scopes it server-side (undefined = ALL). PAGINATED `{items,total,limit}` (mirrors archivedSessions):
   // a "load more" consumer accumulates by offset and reads the effective `limit` back to detect a cap. ---
   gatesActive: () => get<GatesActive>("/api/gates/active"),
+  // --- node_modules reclaim (card 1008e305's two human-only loopback routes; consumed by the Settings
+  // panel card 08ac5925 built). READ is safe to poll and reclaims nothing; POST PERMANENTLY DELETES the
+  // named worktrees' `node_modules` directories on this host and is irreversible.
+  // ⛔ `worktreePaths` is matched SERVER-SIDE by EXACT STRING EQUALITY against a freshly recomputed
+  // candidate set, so the only safe way to build it is to copy `worktreePath` out of THIS GET's own
+  // response byte-for-byte — never reconstruct, re-join, normalise, or re-case one (these are Windows
+  // paths; a variant silently lands in `noLongerEligible` and the caller sees a no-op with no error).
+  // Pass the SAME `minAgeHours` the listing was read at: the POST re-derives eligibility at whatever
+  // threshold it is given, so a mismatch makes every requested path ineligible. ---
+  nodeModulesReclaimable: (minAgeHours?: number) =>
+    get<NodeModulesReclaimListing>(
+      `/api/worktrees/node-modules-reclaimable${minAgeHours === undefined ? "" : `?minAgeHours=${encodeURIComponent(String(minAgeHours))}`}`,
+    ),
+  reclaimNodeModules: (body: { minAgeHours?: number; worktreePaths?: string[] }) =>
+    postErr<NodeModulesReclaimRunResult>("/api/worktrees/reclaim-node-modules", body),
   gatesHistory: (opts?: { projectId?: string; limit?: number; offset?: number }) =>
     get<GateHistoryPage>(
       `/api/gates/history?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.projectId ? `&projectId=${encodeURIComponent(opts.projectId)}` : ""}`,

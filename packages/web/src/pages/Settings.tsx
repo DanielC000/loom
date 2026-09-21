@@ -22,12 +22,17 @@ import {
   ORCHESTRATION_TIMEOUT_MS_BOUNDS,
   MEMORY_CONFIG_MAX,
 } from "@loom/shared";
-import { api, type ProjectPatchError } from "../lib/api";
+import {
+  api,
+  type ProjectPatchError,
+  type NodeModulesReclaimOutcome,
+  type NodeModulesReclaimRunResult,
+} from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAllAgents } from "../lib/useAllAgents";
-import { Panel, Button, Input, Select, SectionLabel, Badge, Chip, StaleStartupPromptWarning } from "../components/ui";
+import { Panel, Button, Input, Select, SectionLabel, Badge, Chip, StatusPill, StaleStartupPromptWarning } from "../components/ui";
 import { ColumnManager } from "../components/ColumnManager";
-import { color, font } from "../theme";
+import { color, font, tone, type Tone } from "../theme";
 
 // Project-scoped settings — edit the per-project config OVERRIDE (deep-partial of ResolvedConfig).
 // Scoped to the header's active project; switching it re-scopes (the editor is keyed by project id).
@@ -103,6 +108,16 @@ export default function Settings() {
       <div>
         <SectionLabel>Project Links</SectionLabel>
         <ProjectLinksPanel />
+      </div>
+
+      {/* node_modules reclaim (card 08ac5925) — daemon-global disk housekeeping over card 1008e305's two
+          human-only loopback routes. Deliberately LAST: it is the only panel on this page whose primary
+          control permanently DELETES data on this host, and Settings is a page the owner scrolls through
+          for configuration — an irreversible action sitting above the routine editors invites a misclick.
+          Discoverability comes from the panel's own live candidate count, not from its position. */}
+      <div>
+        <SectionLabel>Disk Reclaim</SectionLabel>
+        <NodeModulesReclaimPanel />
       </div>
     </div>
   );
@@ -1945,6 +1960,301 @@ function ProjectLinksPanel() {
           ))}
         </div>
       </Panel>
+    </div>
+  );
+}
+
+// ── node_modules reclaim (card 08ac5925) ──────────────────────────────────────────────────────────
+// The owner-facing surface for card 1008e305's two human-only loopback routes: list the worktrees whose
+// node_modules can be reclaimed, then delete them behind an explicit confirm.
+//
+// @decision 08ac5925 — send the GET's own `worktreePath` strings back VERBATIM, and keep this view
+// daemon-global rather than scoping it to the active project: a re-joined/normalised/re-cased Windows
+// path silently lands in `noLongerEligible`, and a scoped view hides other projects' reclaimable space.
+const RECLAIM_DEFAULT_MIN_AGE_HOURS = 24; // mirrors the daemon's DEFAULT_NODE_MODULES_RECLAIM_MIN_AGE_HOURS
+
+// Per-outcome presentation. The load-bearing rule (DoD-3): `bytesReclaimed` is non-null ONLY for
+// "removed", but the four nulls do NOT mean the same thing and NONE of them means zero — so this branches
+// on the OUTCOME, never on `bytesReclaimed === null`. "wedged" is the one that matters: the removal was
+// force-stopped part-way and is never retried, so a real fraction of that tree may already be gone.
+// Rendering it as "0 bytes freed" would tell the owner nothing happened when something did.
+const RECLAIM_OUTCOME: Record<NodeModulesReclaimOutcome, { tone: Tone; label: string; freed: string; note: string }> = {
+  removed: { tone: "phosphor", label: "Removed", freed: "", note: "" },
+  wedged: {
+    tone: "red", label: "Interrupted", freed: "Freed: unknown",
+    note: "the removal was force-stopped part-way and is never retried, so part of this tree may already be deleted. Scan again to see what is left.",
+  },
+  "left-on-disk": {
+    tone: "amber", label: "Not removed", freed: "Freed: nothing",
+    note: "the removal failed cleanly — most likely a file handle was still held. Nothing was deleted.",
+  },
+  missing: {
+    tone: "muted", label: "Already gone", freed: "Freed: nothing",
+    note: "node_modules was no longer there when the reclaim ran. Nothing was deleted.",
+  },
+  "no-longer-eligible": {
+    tone: "amber", label: "Skipped", freed: "Freed: nothing",
+    note: "this worktree stopped being eligible between the scan and the reclaim, so it was never touched.",
+  },
+};
+// An outcome this build doesn't recognise (the daemon grew one) must fail SAFE — never as a success and
+// never as a quantity. "Unknown" is the honest reading, and it keeps the same rule as "wedged": we cannot
+// say nothing happened to that tree.
+const RECLAIM_OUTCOME_UNKNOWN = {
+  tone: "amber" as Tone, label: "Unknown outcome", freed: "Freed: unknown",
+  note: "this version of the UI does not recognise the outcome the daemon reported for this worktree.",
+};
+const reclaimOutcome = (o: NodeModulesReclaimOutcome) => RECLAIM_OUTCOME[o] ?? RECLAIM_OUTCOME_UNKNOWN;
+
+function humanBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = bytes / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+function idleLabel(ageHours: number): string {
+  if (ageHours < 48) return `idle ${ageHours}h`;
+  return `idle ${Math.floor(ageHours / 24)}d`;
+}
+
+// The headline for a settled run. Never prints a bytes figure that would read as "nothing happened" when
+// an interrupted removal means the real answer is unknown — the two are separate clauses on purpose.
+function reclaimHeadline(r: NodeModulesReclaimRunResult): string {
+  const freed = r.removed > 0
+    ? `freed ${r.sizeTruncatedCount > 0 ? "at least " : ""}${humanBytes(r.bytesReclaimed)}`
+    : "freed nothing";
+  const cleared = r.removed > 0
+    ? `Cleared ${r.removed} of ${r.candidatesConsidered} · ${freed}`
+    : "Nothing was cleared";
+  return r.wedged > 0
+    ? `${cleared} · ${r.wedged} interrupted, amount freed unknown`
+    : cleared;
+}
+
+function NodeModulesReclaimPanel() {
+  const [minAgeText, setMinAgeText] = useState(String(RECLAIM_DEFAULT_MIN_AGE_HOURS));
+  // Selection holds the GET's OWN path strings, untouched. See this section's header comment.
+  const [selected, setSelected] = useState<string[]>([]);
+  const [confirming, setConfirming] = useState(false);
+  const [result, setResult] = useState<NodeModulesReclaimRunResult | null>(null);
+
+  const parsedAge = Number(minAgeText);
+  const minAgeHours = minAgeText.trim() !== "" && Number.isFinite(parsedAge) && parsedAge >= 0
+    ? parsedAge : RECLAIM_DEFAULT_MIN_AGE_HOURS;
+
+  const listing = useQuery({
+    queryKey: ["nodeModulesReclaimable", minAgeHours],
+    queryFn: () => api.nodeModulesReclaimable(minAgeHours),
+  });
+  const entries = listing.data?.entries ?? [];
+
+  // Rebuilt from the CURRENT listing every render, so a path that aged out (or went live) between the
+  // scan and the click can never reach the POST body at all — and every string in it demonstrably came
+  // from this response.
+  const chosen = entries.filter((e) => selected.includes(e.worktreePath));
+
+  const reclaim = useMutation({
+    // Same `minAgeHours` the listing above was read at: the POST re-derives eligibility at whatever
+    // threshold it is handed, so sending a different one would make every requested path ineligible.
+    mutationFn: () => api.reclaimNodeModules({ minAgeHours, worktreePaths: chosen.map((e) => e.worktreePath) }),
+    onSuccess: (r) => {
+      setResult(r);
+      setConfirming(false);
+      setSelected([]);
+      void listing.refetch();
+    },
+  });
+
+  // Any change to what is on screen disarms the confirm — a primed destructive action must never survive
+  // the list underneath it changing.
+  const resetArming = () => { setConfirming(false); reclaim.reset(); };
+  const toggle = (p: string) => {
+    resetArming();
+    setSelected((s) => (s.includes(p) ? s.filter((x) => x !== p) : [...s, p]));
+  };
+
+  const busy = reclaim.isPending;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <Panel>
+        <p style={{ color: color.textMuted, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+          Loom keeps a worker's worktree on disk after its session ends, and each one can hold a full
+          <code style={{ color: color.cyan }}> node_modules</code> install. This clears
+          <strong style={{ color: color.text }}> only the node_modules directory</strong> from worktrees
+          whose sessions are all finished and unresumable — never the worktree itself, its branch, or any
+          git state. A worktree that is reused later reinstalls on its own.
+        </p>
+        <p style={{ color: color.textMuted, fontSize: 12, margin: "8px 0 0", fontFamily: font.mono, lineHeight: 1.5 }}>
+          This covers every project on this daemon, not just the one selected in the header. Sizes are
+          measured as each tree is removed, so nothing here estimates what you will get back before it runs
+          — the figure you see afterwards is a real measurement.
+        </p>
+      </Panel>
+
+      <Panel>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+          <SectionLabel style={{ margin: 0 }}>Reclaimable worktrees ({entries.length})</SectionLabel>
+          <span style={{ flex: 1 }} />
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
+            idle at least
+            <Input type="number" min={0} value={minAgeText} aria-label="Minimum idle hours" style={{ width: 66 }}
+              onChange={(e) => { setMinAgeText(e.target.value); setSelected([]); resetArming(); }} />
+            hours
+          </label>
+          <Button variant="ghost" disabled={listing.isFetching || busy}
+            onClick={() => { resetArming(); void listing.refetch(); }}>
+            {listing.isFetching ? "Scanning…" : "Scan again"}
+          </Button>
+        </div>
+
+        {listing.isLoading && <Hint>scanning for reclaimable worktrees…</Hint>}
+        {listing.isError && (
+          <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>
+            {(listing.error as Error)?.message ?? "failed to load /api/worktrees/node-modules-reclaimable"}
+          </span>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {entries.length === 0 && !listing.isLoading && !listing.isError && (
+            <span style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>
+              Nothing to reclaim — no finished worktree has been idle this long with node_modules still on disk.
+            </span>
+          )}
+          {entries.map((e) => {
+            const on = selected.includes(e.worktreePath);
+            return (
+              <label key={e.worktreePath}
+                style={{
+                  display: "flex", alignItems: "flex-start", gap: 10, padding: "8px 10px", cursor: "pointer",
+                  background: color.panel2, borderRadius: 6,
+                  border: `1px solid ${on ? color.red : color.border}`,
+                }}>
+                <input type="checkbox" checked={on} disabled={busy} onChange={() => toggle(e.worktreePath)}
+                  aria-label={`Select ${e.worktreePath}`} style={{ marginTop: 3, accentColor: color.red }} />
+                <span style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0, flex: 1 }}>
+                  {/* The FULL path, wrapped rather than truncated: it is the exact string the reclaim acts
+                      on, and the owner's only way to recognise which worktree this is. */}
+                  <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text, wordBreak: "break-all", lineHeight: 1.45 }}>
+                    {e.worktreePath}
+                  </span>
+                  <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <Badge tone="cyan">{e.projectName}</Badge>
+                    <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim }}>{idleLabel(e.ageHours)}</span>
+                    <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+                      last active {new Date(e.lastActivityAt).toLocaleString()}
+                    </span>
+                  </span>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+
+        {entries.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+            <Button variant="ghost" disabled={busy}
+              onClick={() => { resetArming(); setSelected(selected.length === entries.length ? [] : entries.map((e) => e.worktreePath)); }}>
+              {selected.length === entries.length ? "Clear selection" : `Select all ${entries.length}`}
+            </Button>
+            <span style={{ flex: 1 }} />
+            {!confirming && (
+              <Button variant="danger" disabled={chosen.length === 0 || busy || listing.isFetching}
+                onClick={() => setConfirming(true)}>
+                Delete node_modules from {chosen.length} {chosen.length === 1 ? "worktree" : "worktrees"}
+              </Button>
+            )}
+          </div>
+        )}
+
+        {/* The confirm step (DoD-2). It names the exact worktrees, states plainly that this is permanent
+            and local, and is the ONLY place the POST can be fired from. A bare button is never enough for
+            an irreversible delete on the owner's own machine. */}
+        {confirming && chosen.length > 0 && (
+          <div role="status" style={{ marginTop: 10, padding: 10, border: `1px solid ${color.red}`, borderRadius: 6, background: color.panel2, display: "flex", flexDirection: "column", gap: 8 }}>
+            <span style={{ fontFamily: font.mono, fontSize: 13, color: color.red, lineHeight: 1.5 }}>
+              Permanently delete node_modules from {chosen.length} {chosen.length === 1 ? "worktree" : "worktrees"} on this machine. This cannot be undone.
+            </span>
+            <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 170, overflowY: "auto" }}>
+              {chosen.map((e) => (
+                <span key={e.worktreePath} style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, wordBreak: "break-all", lineHeight: 1.45 }}>
+                  {e.worktreePath}<span style={{ color: color.textMuted }}>\node_modules</span>
+                </span>
+              ))}
+            </div>
+            <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.5 }}>
+              Branches, commits and the worktrees themselves are left untouched. Loom re-checks eligibility
+              as it runs, so anything that went live since the scan is skipped rather than deleted.
+            </span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <Button variant="danger" disabled={busy} onClick={() => reclaim.mutate()}>
+                {busy ? "Deleting…" : `Delete ${chosen.length} node_modules ${chosen.length === 1 ? "directory" : "directories"}`}
+              </Button>
+              <Button variant="ghost" disabled={busy} onClick={() => setConfirming(false)}>
+                {chosen.length === 1 ? "Keep it" : "Keep them"}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {reclaim.isError && (
+          <span style={{ display: "block", marginTop: 8, color: color.red, fontSize: 12, fontFamily: font.mono }}>
+            {(reclaim.error as Error)?.message ?? "reclaim failed"}
+          </span>
+        )}
+
+        {result && <ReclaimResultReadout result={result} onDismiss={() => setResult(null)} />}
+      </Panel>
+    </div>
+  );
+}
+
+// The settled-run readout. Every number here is measured by the daemon during the run — the only
+// estimate-free source there is — and an entry whose freed amount is genuinely UNKNOWN says so in those
+// words rather than borrowing zero's typography (DoD-3).
+function ReclaimResultReadout({ result, onDismiss }: { result: NodeModulesReclaimRunResult; onDismiss: () => void }) {
+  const clean = result.wedged === 0 && result.leftOnDisk === 0 && result.noLongerEligible === 0;
+  return (
+    <div data-testid="reclaim-result" style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${color.border}`, display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <StatusPill tone={clean ? "phosphor" : "amber"} label="last reclaim" />
+        <span style={{ fontFamily: font.mono, fontSize: 13, color: clean ? color.text : color.amber, lineHeight: 1.5 }}>
+          {reclaimHeadline(result)}
+        </span>
+        <span style={{ flex: 1 }} />
+        <Button variant="ghost" onClick={onDismiss}>Dismiss</Button>
+      </div>
+      {result.sizeTruncatedCount > 0 && (
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.5 }}>
+          {result.sizeTruncatedCount} {result.sizeTruncatedCount === 1 ? "tree was" : "trees were"} too large to
+          measure completely, so the total above is a lower bound — the real figure is higher.
+        </span>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+        {result.results.map((r) => {
+          const o = reclaimOutcome(r.outcome);
+          // A real measured number ONLY on "removed"; every other outcome reads its own words for what
+          // happened to it. `bytesReclaimed === null` is never rendered as a quantity.
+          const freed = r.outcome === "removed" && r.bytesReclaimed !== null
+            ? `Freed ${humanBytes(r.bytesReclaimed)}`
+            : o.freed;
+          return (
+            <div key={`${r.outcome}:${r.worktreePath}`} data-testid="reclaim-row" data-outcome={r.outcome}
+              style={{ display: "flex", flexDirection: "column", gap: 3, padding: "7px 9px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <Badge tone={o.tone}>{o.label}</Badge>
+                <span style={{ fontFamily: font.mono, fontSize: 12, color: o.tone === "phosphor" ? color.text : tone[o.tone] }}>{freed}</span>
+                {r.projectName && <Badge tone="muted">{r.projectName}</Badge>}
+              </div>
+              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, wordBreak: "break-all", lineHeight: 1.45 }}>{r.worktreePath}</span>
+              {o.note && <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.5 }}>{o.note}</span>}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
