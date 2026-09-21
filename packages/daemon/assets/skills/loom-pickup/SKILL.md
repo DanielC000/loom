@@ -19,14 +19,16 @@ project id anywhere; it's derived server-side.
 3. **Conventions** — read `CLAUDE.md` at the repo root if present.
 4. **Your role's anchor** (whichever applies):
    - *Lead / orchestrator:* read your **living resume doc** — it's the "you are here + what's next"
-     source of truth. Your session's **"Where things live"** context block gives your project's
-     absolute **vault root**; your resume doc is `<vaultRoot>/Projects/<Project>/Orchestrator Log.md`
-     (substitute your project's name). **Read it by that ABSOLUTE path — never Glob, Bash `find`, or
-     Bash `ls` for it** (a broad search from your home directory hits the search timeout). Cross-check
-     it against the board. **Before acting on a handoff's "still to build / un-built" claim, verify it
+     source of truth. Your session's **"Where things live"** context block already carries its resolved
+     absolute path on the **`Resume doc:`** line, directly under **`Project vault dir:`**. **Read it from
+     that exact `Resume doc:` line, verbatim — never construct or derive the path yourself** (there is no
+     fixed `Projects/<Project>` segment under the vault dir, and the filename itself is a per-project
+     override, so any hand-built path is likely wrong), **and never Glob, Bash `find`, or Bash `ls` for
+     it either** (a broad search from your home directory hits the search timeout). Cross-check it
+     against the board. **Before acting on a handoff's "still to build / un-built" claim, verify it
      against `git log`/`git merge-base` first** — work a resume doc calls unbuilt may already be merged on
      the mainline, and dispatching (or filing an owner go/no-go for) it re-derives work that already
-     exists. If that injected root turns out wrong (the read 404s), don't fall back to a
+     exists. If the injected `Project vault dir:` turns out wrong (the read 404s), don't fall back to a
      broad search — resolve the real vault root from Obsidian's own global config file (`obsidian.json`,
      under the OS's per-user app-data directory, e.g. `%APPDATA%\obsidian\obsidian.json` on Windows),
      which lists every known vault path; then retry against the resolved root.

@@ -834,11 +834,12 @@ what you checked. Found none? Treat it as live.
    rotation procedure, archive naming, and the incident behind the budget are in
    `references/resume-doc-rotation.md` (under this skill's own directory) — read it the first time a
    rotation comes due.
-   **Where it lives:** your session's **"Where things live"** context block gives your project's
-   absolute **vault root**; your resume doc is `<vaultRoot>/Projects/<Project>/Orchestrator Log.md`
-   (substitute your project's name). **Read and write it by that ABSOLUTE path — never Glob, Bash
-   `find`, or Bash `ls` for it** (a broad search from your home directory hits the search timeout). The
-   vault root is the injected value; the doc path is derived from it.
+   **Where it lives:** your session's **"Where things live"** context block already carries the
+   resolved absolute path on its **`Resume doc:`** line, directly under **`Project vault dir:`**. **Read
+   and write it from that exact `Resume doc:` line, verbatim — never construct or derive the path
+   yourself** (there is no fixed `Projects/<Project>` segment under the vault dir, and the filename
+   itself is a per-project override, so any hand-built path is likely wrong). **Never Glob, Bash `find`,
+   or Bash `ls` for it either** (a broad search from your home directory hits the search timeout).
    A handoff (your resume doc, or a worker recycle handoff) is a **hint, not the source of truth**: when
    its claimed state conflicts with the **live board + code**, the live board and code win. **Before you act
    on OR RESTATE any load-bearing claim — from a handoff, a memory, or a doc — verify it against the artifact

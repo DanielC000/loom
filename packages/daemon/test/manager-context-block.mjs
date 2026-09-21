@@ -25,7 +25,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        row from before the write-boundary absolute-path guard existed — gets a [loom:vault-path-invalid]
 //        note instead of a fabricated (confidently-wrong) absolute path; the vault-dir/resume-doc lines
 //        are omitted entirely rather than trusted;
-//   (4) the loom-pickup + orchestrate skill ASSETS instruct reading the resume doc by ABSOLUTE path.
+//   (4) the loom-pickup + orchestrate skill ASSETS point at the injected "Resume doc:" line and
+//       instruct reading it verbatim — never deriving/constructing the path themselves (card 9f24d13b).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/manager-context-block.mjs
 import fs from "node:fs";
@@ -426,15 +427,34 @@ try {
   check("(2) worker spawn opts.startupPrompt carries its agent brief THEN the kickoff", oW?.startupPrompt?.includes("AGENT_WORKER_PROMPT") && oW?.startupPrompt?.includes("WORKER_KICKOFF") && oW.startupPrompt.indexOf("AGENT_WORKER_PROMPT") < oW.startupPrompt.indexOf("WORKER_KICKOFF"));
   check("(2) worker spawn opts.startupPrompt does NOT carry the manager 'Where things live' block", !oW?.startupPrompt?.includes("Where things live"));
 
-  // ===================== (4) skill ASSETS instruct read-by-absolute-path =====================
+  // ===================== (4) skill ASSETS point at the injected Resume-doc line, never construct it =====================
+  // Card 9f24d13b (closes audit finding C1): the assets used to teach DERIVING
+  // <vaultRoot>/Projects/<Project>/Orchestrator Log.md — a path resolveResumeDocPath never produces
+  // (no Projects/<Project> segment, and the filename is a per-project resumeDocFilename override) —
+  // against manager-prompt.ts's own injected "do not reconstruct it" instruction (see (3) above). The
+  // assets now point at the already-resolved "Resume doc:" line and instruct reading it verbatim.
   const pickup = fs.readFileSync(path.join(__dirname, "..", "assets", "skills", "loom-pickup", "SKILL.md"), "utf8");
   const orchestrate = fs.readFileSync(path.join(__dirname, "..", "assets", "skills", "orchestrate", "SKILL.md"), "utf8");
   check("(4) loom-pickup asset references the 'Where things live' context block", /Where things live/.test(pickup));
-  check("(4) loom-pickup asset derives the resume doc path (Orchestrator Log.md)", /Orchestrator Log\.md/.test(pickup));
-  check("(4) loom-pickup asset instructs ABSOLUTE-path read, never Glob", /ABSOLUTE path/.test(pickup) && /never Glob/i.test(pickup));
   check("(4) orchestrate asset references the 'Where things live' context block", /Where things live/.test(orchestrate));
-  check("(4) orchestrate asset derives the resume doc path (Orchestrator Log.md)", /Orchestrator Log\.md/.test(orchestrate));
-  check("(4) orchestrate asset instructs ABSOLUTE-path read, never Glob", /ABSOLUTE path/.test(orchestrate) && /never Glob/i.test(orchestrate));
+
+  // Scoped to each file's actual resume-doc-path region, NOT the whole SKILL.md — a bare whole-file
+  // regex can't distinguish "this region teaches an absolute-path read" from "the words appear
+  // somewhere else in a large, multi-topic file" (e.g. orchestrate's unrelated screenshot-path
+  // guidance at ~:1009 also says "ABSOLUTE path", which let a prior version of this assertion pass
+  // for the wrong reason even after the resume-doc region itself had changed).
+  const pickupResumeDocRegion = pickup.slice(pickup.indexOf("Lead / orchestrator:"), pickup.indexOf("*Worker:* your scope"));
+  const orchestrateResumeDocRegion = orchestrate.slice(orchestrate.indexOf("Where it lives:"), orchestrate.indexOf("A handoff (your resume doc,"));
+  check("(4) loom-pickup resume-doc region boundary markers still present (non-empty slice)", pickupResumeDocRegion.length > 100);
+  check("(4) orchestrate resume-doc region boundary markers still present (non-empty slice)", orchestrateResumeDocRegion.length > 100);
+
+  check("(4) loom-pickup asset points at the injected 'Resume doc:' line and reads it verbatim", /Resume doc:/.test(pickupResumeDocRegion) && /verbatim/i.test(pickupResumeDocRegion));
+  check("(4) loom-pickup asset does NOT teach constructing/deriving the path (no hardcoded Orchestrator Log.md to build, in that region)", /never construct/i.test(pickupResumeDocRegion) && !/Orchestrator Log\.md/.test(pickupResumeDocRegion));
+  check("(4) loom-pickup asset still instructs never to Glob for the resume doc", /never Glob/i.test(pickupResumeDocRegion));
+
+  check("(4) orchestrate asset points at the injected 'Resume doc:' line and reads it verbatim", /Resume doc:/.test(orchestrateResumeDocRegion) && /verbatim/i.test(orchestrateResumeDocRegion));
+  check("(4) orchestrate asset does NOT teach constructing/deriving the path (no hardcoded Orchestrator Log.md to build, in that region)", /never construct/i.test(orchestrateResumeDocRegion) && !/Orchestrator Log\.md/.test(orchestrateResumeDocRegion));
+  check("(4) orchestrate asset still instructs never to Glob for the resume doc", /never Glob/i.test(orchestrateResumeDocRegion));
 } finally {
   try { if (workerWorktree) { const { removeWorktree } = await import("../dist/git/worktrees.js"); await removeWorktree(repo, workerWorktree); } } catch { /* best-effort */ }
   db.close(); // free the WAL handle before removing the temp dir (Windows)
@@ -444,6 +464,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — managers get the 'Where things live' block (both absolute roots), workers stay byte-identical, the loom-pickup/orchestrate assets instruct absolute-path reads, and a project's orchestration.resumeDocFilename override (card c1f2f095) is the single source of truth for the injected resume-doc path, defense-in-depth-contained to the vault root — claude-free."
+  ? "\n✅ ALL PASS — managers get the 'Where things live' block (both absolute roots), workers stay byte-identical, the loom-pickup/orchestrate assets point at the injected Resume-doc line instead of deriving it, and a project's orchestration.resumeDocFilename override (card c1f2f095) is the single source of truth for the injected resume-doc path, defense-in-depth-contained to the vault root — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
