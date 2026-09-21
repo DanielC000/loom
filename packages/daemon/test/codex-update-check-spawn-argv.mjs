@@ -69,14 +69,16 @@ async function spawnAndCaptureArgv(sessionId, optsOverlay) {
   }
 }
 
-/** True iff `-c check_for_update_on_startup=false` appears as an ADJACENT pair anywhere in argv (never
- *  merely that both tokens are present somewhere unrelated). */
-function hasUpdateCheckOverride(argv) {
+/** True iff `-c <value>` appears as an ADJACENT pair anywhere in argv (never merely that both tokens are
+ *  present somewhere unrelated). Generalized (card 702f2197) from the update-check-only check this file
+ *  started with — same adjacency discipline, reused below to pin the codex MCP auto-approve overrides. */
+function hasAdjacentCArg(argv, value) {
   for (let i = 0; i < argv.length - 1; i++) {
-    if (argv[i] === "-c" && argv[i + 1] === "check_for_update_on_startup=false") return true;
+    if (argv[i] === "-c" && argv[i + 1] === value) return true;
   }
   return false;
 }
+const hasUpdateCheckOverride = (argv) => hasAdjacentCArg(argv, "check_for_update_on_startup=false");
 
 // --- fresh spawn (no resumeId, no fork) — the ordinary worker/manager/platform spawn AND recycle path
 // (project memory codex-recycle-is-always-fresh-never-resume: recycle never sets resumeId either). --------
@@ -104,7 +106,17 @@ check("fork spawn argv does NOT lead with resume (fork forces a fresh spawn, per
 check("[negative control] hasUpdateCheckOverride returns false against argv genuinely missing the override", !hasUpdateCheckOverride(["-a", "never", "-s", "workspace-write"]));
 check("[negative control] hasUpdateCheckOverride returns false against the two tokens present but NOT adjacent", !hasUpdateCheckOverride(["-c", "some_other_key=true", "check_for_update_on_startup=false"]));
 
+// --- card 702f2197: the codex MCP auto-approve overrides — the exact lever that bypasses `-a never`'s
+// blanket deny for a worker_report call (see docs/decisions/702f2197-codex-mcp-server-approve-mode-
+// bypasses-a-never-blanket-deny.md). Pins that createCodexPty's real production call site actually PASSES
+// CODEX_AUTO_APPROVE_MCP_SERVER_IDS to mcpServersToCodexArgs — a self-concealing regression class (every
+// OTHER test here stays green if that argument is silently dropped) that only a real-spawn argv capture
+// like this file can catch. Reused fresh spawn above (role:"worker" mounts both loom-tasks/loom-orchestration).
+check("fresh spawn argv carries the loom-orchestration MCP auto-approve override as an ADJACENT -c pair (where worker_report lives)", hasAdjacentCArg(freshArgv, "mcp_servers.loom-orchestration.default_tools_approval_mode=approve"));
+check("fresh spawn argv carries the loom-tasks MCP auto-approve override too", hasAdjacentCArg(freshArgv, "mcp_servers.loom-tasks.default_tools_approval_mode=approve"));
+check("[negative control] hasAdjacentCArg returns false against the auto-approve value present but NOT adjacent to -c", !hasAdjacentCArg(["-c", "some_other_key=true", "mcp_servers.loom-orchestration.default_tools_approval_mode=approve"], "mcp_servers.loom-orchestration.default_tools_approval_mode=approve"));
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — createCodexPty's real spawn argv carries \"-c check_for_update_on_startup=false\" on a fresh spawn, a resume spawn, and a fork spawn alike (the three shapes buildCodexResumeArgs distinguishes), proven against a real OS child process substituted for codex via LOOM_CODEX_BIN, so this regresses loudly even when no codex update happens to be pending on the host running this test."
+  ? "\n✅ ALL PASS — createCodexPty's real spawn argv carries \"-c check_for_update_on_startup=false\" on a fresh spawn, a resume spawn, and a fork spawn alike (the three shapes buildCodexResumeArgs distinguishes), proven against a real OS child process substituted for codex via LOOM_CODEX_BIN, so this regresses loudly even when no codex update happens to be pending on the host running this test. Card 702f2197: the SAME real-spawn argv capture also pins that createCodexPty's production call site actually wires CODEX_AUTO_APPROVE_MCP_SERVER_IDS into mcpServersToCodexArgs — both loom-tasks and loom-orchestration carry the default_tools_approval_mode=approve override as an adjacent -c pair, so a future refactor that silently drops that argument (leaving every OTHER test green) regresses loudly here instead."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1);

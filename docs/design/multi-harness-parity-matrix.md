@@ -248,6 +248,17 @@ through session-boot MCP startup, then exited cleanly via the confirmed double-C
 connect + handshake + tool-enumeration evidence, not a config-acceptance inference. **No proxy component
 is needed** — codex can point straight at Loom's existing HTTP MCP endpoints.
 
+⚠️ **Scope of the above, stated precisely (card `702f2197`):** what was measured here is connect +
+handshake + `tools/list` — never a tool CALL. `-a never` denies at CALL time, not at connect/handshake
+time, so a worker's own `worker_report` call was separately found DENIED ("requires approval and approval
+policy is never") even though MCP wiring itself, as measured here, was fully healthy. Card `702f2197` (see
+`docs/decisions/702f2197-codex-mcp-server-approve-mode-bypasses-a-never-blanket-deny.md`) grants Loom's own
+first-party server ids (`loom-tasks`, `loom-orchestration`) a `default_tools_approval_mode=approve`
+override so a tool call on them is never classified as approval-requiring in the first place — but the
+full end-to-end round-trip (an actual MCP tool call succeeding under that override) remains UNVERIFIED as
+of this writing; only config-acceptance was confirmed, not a live call. Don't read "MCP is settled for
+codex" from this section alone without also reading that record.
+
 ## Original (superseded) reasoning, kept for the record
 
 The original architecture proposal assumed Codex's `-c mcp_servers.<id>.*` override was stdio-only and

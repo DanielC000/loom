@@ -8,6 +8,8 @@ The same deny-not-approve shape holds for `-s workspace-write`'s filesystem sand
 
 **Evidence tier:** ESTABLISHED — `-a never`'s documented semantics, and the pilot's corroborated denial. NOT ESTABLISHED — an exhaustive enumeration of which MCP tools codex classifies as approval-requiring.
 
+**Forward reference (card `702f2197`):** the `worker_report` denial cited above is now fixed — see `docs/decisions/702f2197-codex-mcp-server-approve-mode-bypasses-a-never-blanket-deny.md` for the source-verified mechanism (a per-server `default_tools_approval_mode` override) and the narrow, non-widening lever it applies to Loom's own first-party MCP servers.
+
 ## Finding: a codex worker on Windows can never `git commit` in its own worktree
 
 `git add`/`git commit` fail with `"Unable to create '<gitdir>/index.lock': Permission denied"` because a worktree's real gitdir (`<repo>/.git/worktrees/<name>`, and the shared `<repo>/.git` objects/refs it points at) sits outside every writable sandbox root a codex spawn grants.
