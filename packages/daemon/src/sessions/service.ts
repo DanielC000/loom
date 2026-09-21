@@ -18,7 +18,7 @@ import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attr
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
@@ -375,6 +375,47 @@ export interface RetainedWorktreeEntry {
   /** `git rev-list --count HEAD..<branch>`, read live. `null` only when that probe itself failed/timed
    *  out (best-effort, observability-only — never blocks or excludes the entry). */
   commitsAhead: number | null;
+}
+
+/** Default minimum idle time (card 1008e305, DoD-1) before a retained-but-dead worktree's `node_modules`
+ *  becomes reclaim-eligible — see {@link SessionService.listNodeModulesReclaimCandidates}'s own doc for
+ *  the justification. A human-supplied `minAgeHours` at the REST call site always overrides this. */
+export const DEFAULT_NODE_MODULES_RECLAIM_MIN_AGE_HOURS = 24;
+
+/** One entry in {@link SessionService.listNodeModulesReclaimCandidates}'s result (card 1008e305). */
+export interface NodeModulesReclaimCandidate {
+  worktreePath: string;
+  nodeModulesPath: string;
+  sessionId: string;
+  taskId: string | null;
+  projectId: string;
+  projectName: string;
+  /** The owning session's last DB write — same proxy-for-exit-time caveat as {@link
+   *  RetainedWorktreeEntry.lastActivityAt}. */
+  lastActivityAt: string;
+  ageHours: number;
+}
+
+/** {@link SessionService.reclaimNodeModules}'s result (card 1008e305). Every count is a MEASURED outcome
+ *  of this specific run, never an estimate. */
+export interface NodeModulesReclaimRunResult {
+  candidatesConsidered: number;
+  removed: number;
+  /** Sum of MEASURED bytes actually freed across every `removed` entry this run — never an estimate. */
+  bytesReclaimed: number;
+  /** How many `removed` entries had a truncated size measurement — `bytesReclaimed` is then a lower bound. */
+  sizeTruncatedCount: number;
+  /** An explicitly-requested `worktreePaths` entry the fresh eligibility recompute no longer includes
+   *  (see {@link SessionService.reclaimNodeModules}'s own doc for why the specific reason isn't named). */
+  noLongerEligible: number;
+  missing: number;
+  wedged: number;
+  leftOnDisk: number;
+  results: Array<{
+    worktreePath: string; projectId: string; projectName: string; taskId: string | null;
+    outcome: "removed" | "missing" | "wedged" | "left-on-disk" | "no-longer-eligible";
+    bytesReclaimed: number | null;
+  }>;
 }
 
 /**
@@ -17898,6 +17939,125 @@ export class SessionService {
       });
     }
     return { count: entries.length, entries };
+  }
+
+  /**
+   * Card 1008e305: worktrees eligible for a `node_modules` reclaim — on disk, EVERY session that ever
+   * held the path has `resumability === "dead"`, still carries `node_modules`, idle >= `minAgeHours`
+   * (default {@link DEFAULT_NODE_MODULES_RECLAIM_MIN_AGE_HOURS} — a just-rejected worker is likely
+   * re-dispatched almost immediately, and reclaiming that fast just pays the install cost twice for no
+   * real benefit).
+   *
+   * The eligibility predicate is deliberately narrower than "not literally live right now" (review finding
+   * [1]): an EXITED-but-RESUMABLE session — worker_stop'd, merge-rejected-and-parked, crash-orphaned — is
+   * exactly the shape designed to be resumed later, and `resume()` spawns straight into `session.cwd` with
+   * NO reinstall trigger of its own (only `createWorktree`'s reuse path got one). Requiring
+   * `resumability === "dead"` for every session sharing the path excludes that case by construction,
+   * without needing a second reinstall path on the load-bearing `resume()` hot path. This is NOT
+   * `reconcileOrchestrationOnBoot`'s Pass B `isLive` predicate (`processState`-based) restated — it is a
+   * narrower, resumability-based one chosen specifically because Pass B's own restart-intent protection
+   * (`protectedSessionIds`) has no equivalent here; a residual, accepted gap: a session whose `resumability`
+   * is stale-`"dead"` (not yet self-healed by crash recovery — see `deriveCrashOrphanedWorkers`'s own doc)
+   * during the narrow boot window before that heal runs could transiently look eligible. `minAgeHours`
+   * mitigates it in practice; a caller can still override it lower.
+   *
+   * Deliberately NOT keyed off `retainedWorktreeRecords` (a BOOT-TIME-ONLY Pass B snapshot — a worker
+   * that exits mid-uptime never lands in it until the next restart); this re-derives eligibility fresh
+   * from the current session rows on every call. READ-ONLY — reclaims nothing; see {@link
+   * reclaimNodeModules} for the mutating counterpart.
+   */
+  async listNodeModulesReclaimCandidates(minAgeHours = DEFAULT_NODE_MODULES_RECLAIM_MIN_AGE_HOURS): Promise<{ count: number; entries: NodeModulesReclaimCandidate[] }> {
+    const all = this.db.listAllSessionsIncludingArchived();
+    // Same two-pass shape as reconcileOrchestrationOnBoot's Pass B: a worktree path can be shared by more
+    // than one session row (a worker_recycle chain aliases one worktreePath across rows), so eligibility
+    // must be decided ONCE per PATH from the union of every session that ever held it, never from a
+    // single row in isolation — and the representative row kept per path is the one with the most recent
+    // `lastActivity`, so age is never over-estimated from a stale predecessor row.
+    const protectedPaths = new Set<string>();
+    const byPath = new Map<string, Session>();
+    for (const s of all) {
+      if (!s.worktreePath) continue;
+      if (s.resumability !== "dead") protectedPaths.add(s.worktreePath);
+      const existing = byPath.get(s.worktreePath);
+      if (!existing || new Date(s.lastActivity).getTime() > new Date(existing.lastActivity).getTime()) {
+        byPath.set(s.worktreePath, s);
+      }
+    }
+    const now = Date.now();
+    const entries: NodeModulesReclaimCandidate[] = [];
+    for (const [worktreePath, s] of byPath) {
+      if (protectedPaths.has(worktreePath)) continue;
+      if (!fs.existsSync(worktreePath)) continue;
+      const nodeModulesPath = path.join(worktreePath, "node_modules");
+      if (!fs.existsSync(nodeModulesPath)) continue;
+      const ageHours = (now - new Date(s.lastActivity).getTime()) / 3_600_000;
+      if (ageHours < minAgeHours) continue;
+      const project = this.db.getProject(s.projectId);
+      entries.push({
+        worktreePath, nodeModulesPath, sessionId: s.id, taskId: s.taskId ?? null,
+        projectId: s.projectId, projectName: project?.name ?? "(unknown project)",
+        lastActivityAt: s.lastActivity, ageHours: Math.floor(ageHours),
+      });
+    }
+    return { count: entries.length, entries };
+  }
+
+  /**
+   * Card 1008e305 DoD: the mutating counterpart to {@link listNodeModulesReclaimCandidates} —
+   * HUMAN/REST-only (see gateway/server.ts's route), never an MCP tool, same trust posture as every other
+   * destructive git/vault writer in this codebase. `worktreePaths`, when given, NARROWS to that explicit
+   * set (e.g. the exact paths a human just reviewed from the GET listing); a path outside the FRESHLY
+   * recomputed candidate set below is silently ignored, never acted on.
+   *
+   * Eligibility is RE-DERIVED here, fresh, via {@link listNodeModulesReclaimCandidates} — never trusting
+   * an implicit "this was eligible when I looked it up" from the caller. This closes the TOCTOU window
+   * between a human reading the GET listing and this call actually running (a worker could have been
+   * re-dispatched onto that exact worktree in between).
+   *
+   * @decision bd9fc808 — each worktree gets exactly ONE removal attempt via {@link reclaimNodeModulesDir}
+   * (itself routed through the killable-removal primitive); a wedged entry is reported, never retried in
+   * a loop here or anywhere in this method.
+   */
+  async reclaimNodeModules(opts: { minAgeHours?: number; worktreePaths?: string[] } = {}): Promise<NodeModulesReclaimRunResult> {
+    const { entries } = await this.listNodeModulesReclaimCandidates(opts.minAgeHours);
+    const scoped = opts.worktreePaths ? entries.filter((e) => opts.worktreePaths!.includes(e.worktreePath)) : entries;
+    const result: NodeModulesReclaimRunResult = {
+      candidatesConsidered: scoped.length, removed: 0, bytesReclaimed: 0, sizeTruncatedCount: 0,
+      noLongerEligible: 0, missing: 0, wedged: 0, leftOnDisk: 0, results: [],
+    };
+    for (const c of scoped) {
+      // No timeout override passed — reclaimNodeModulesDir's own default (NODE_MODULES_RECLAIM_TIMEOUT_MS)
+      // is a dedicated bulk-filesystem-delete budget, deliberately never borrowed from this.gitOpMs (a
+      // git-ref-op budget — review finding [2]).
+      const outcome = await reclaimNodeModulesDir(c.worktreePath, undefined, { removeDir: this.removeDirOverride });
+      switch (outcome.outcome) {
+        case "removed":
+          result.removed++;
+          result.bytesReclaimed += outcome.bytesReclaimed ?? 0;
+          if (outcome.sizeTruncated) result.sizeTruncatedCount++;
+          break;
+        case "missing": result.missing++; break;
+        case "wedged": result.wedged++; break;
+        case "left-on-disk": result.leftOnDisk++; break;
+      }
+      result.results.push({
+        worktreePath: c.worktreePath, projectId: c.projectId, projectName: c.projectName, taskId: c.taskId,
+        outcome: outcome.outcome, bytesReclaimed: outcome.bytesReclaimed,
+      });
+    }
+    // Any explicitly-requested path that the fresh recompute above no longer considers eligible (gone
+    // live, worktree/node_modules removed since, aged back under the threshold on a lower minAgeHours
+    // retry, etc.) — reported for visibility, never acted on. The specific reason isn't distinguished
+    // here (any of several honest causes) — see this method's own doc for why that's deliberate.
+    if (opts.worktreePaths) {
+      const scopedPaths = new Set(scoped.map((e) => e.worktreePath));
+      for (const p of opts.worktreePaths) {
+        if (scopedPaths.has(p)) continue;
+        result.noLongerEligible++;
+        result.results.push({ worktreePath: p, projectId: "", projectName: "", taskId: null, outcome: "no-longer-eligible", bytesReclaimed: null });
+      }
+    }
+    return result;
   }
 
   /** A simpleGit instance for `repoPath` bound by a kill-the-hung-child block timeout (card 9df3ea71 —

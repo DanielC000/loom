@@ -956,6 +956,32 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return filterRetainedWorktreesByProject(await deps.sessions.getRetainedWorktrees(), projectId);
   });
 
+  // --- node_modules reclaim (card 1008e305, clause A of the owner's ruling on request 6d60a0d8 — sibling
+  // of the retained-worktree backlog above). HUMAN/REST-ONLY (loopback), NOT an MCP tool — same trust
+  // posture as the vault/git writers and every other destructive-action surface (CLAUDE.md's "Vault + git
+  // writes" section): no destructive step here runs unattended without a human explicitly invoking it.
+  // Scope is a HARD FENCE — `node_modules` directories only, never the worktree itself, its git state, or
+  // any other content.
+  // GET lists current candidates (every session that ever held the worktree has resumability:"dead" — see
+  // SessionService.listNodeModulesReclaimCandidates's own doc for why that's narrower than "not literally
+  // live" — still carries node_modules, idle >= minAgeHours) — read-only, reclaims nothing, safe to poll.
+  app.get("/api/worktrees/node-modules-reclaimable", async (req) => {
+    const { minAgeHours } = req.query as { minAgeHours?: string };
+    const parsed = minAgeHours !== undefined ? Number(minAgeHours) : undefined;
+    return deps.sessions.listNodeModulesReclaimCandidates(parsed !== undefined && Number.isFinite(parsed) ? parsed : undefined);
+  });
+  // POST actually reclaims. `worktreePaths` (optional) narrows to an explicit set (e.g. hand-picked from
+  // the GET listing above) — matched by EXACT STRING EQUALITY against the freshly recomputed candidate
+  // set's own `worktreePath`, so the reliable way to use it is a GET immediately followed by a POST with
+  // the paths copied verbatim from that response, not hand-typed or normalized. Omitted reclaims every
+  // currently-eligible candidate at `minAgeHours`. Eligibility is RE-DERIVED fresh at call time regardless
+  // of what was requested — see SessionService.reclaimNodeModules's own doc for why a caller-supplied list
+  // is never trusted blind.
+  app.post("/api/worktrees/reclaim-node-modules", async (req) => {
+    const body = (req.body ?? {}) as { minAgeHours?: number; worktreePaths?: string[] };
+    return deps.sessions.reclaimNodeModules(body);
+  });
+
   // A manager's orchestration_events timeline (chronological). READ-ONLY — emits no event.
   app.get("/api/orchestration/events", async (req) => {
     const { managerId } = req.query as { managerId?: string };

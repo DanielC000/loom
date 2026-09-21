@@ -860,7 +860,13 @@ export async function createWorktree(
     // can bring in a package.json/lockfile change (same reasoning the reattach path's own
     // provisionWorktreeDeps ordering comment gives) — reinstall in exactly that case, best-effort + bounded
     // like every other provisionWorktreeDeps call, so a failure here never blocks the worktree return.
-    if (forwarded) await provisionWorktreeDeps(worktreePath, deps);
+    // Card 1008e305: ALSO reinstall when node_modules is not INTACT (absent, or a partial/corrupted
+    // residue left by a wedged reclaim attempt — see hasIntactNodeModules's own doc) — the node_modules
+    // reclaimer (reclaimNodeModulesDir) can remove it from a retained-but-currently-dead worktree between
+    // spawns, which invalidates the "already provisioned" assumption above for exactly this reuse path.
+    // Without this, a worktree reused after a reclaim would silently ship with no (or partial) deps and
+    // nothing to trigger installing them.
+    if (forwarded || !hasIntactNodeModules(worktreePath)) await provisionWorktreeDeps(worktreePath, deps);
     return {
       worktreePath, branch, mainSha,
       ...(discardedOnRecut ? { discardedOnRecut } : {}),
@@ -1209,6 +1215,141 @@ export async function removeWorktree(
     // via finalizeMerge / Pass B). A stale admin record is harmless — createWorktree prunes on reuse.
   }
   return { removed, wedged };
+}
+
+/** Cap on filesystem entries visited by {@link measureDirSize} — mirrors {@link
+ *  NESTED_REPO_SCAN_MAX_ENTRIES}'s bounded-walk shape so a pathological `node_modules` tree can't run the
+ *  size measurement unbounded. Hitting this is signalled via `truncated`; a truncated sum is a LOWER
+ *  BOUND on the real size, never a "confirmed accurate" total — card 1008e305's own sibling investigation
+ *  (`83cd04dc`) reported its own whole-tree `du` undercounting for the identical reason (concurrent-
+ *  removal races), so a truncated partial sum here is reported the same honest way. */
+const DIR_SIZE_SCAN_MAX_ENTRIES = 200_000;
+
+/** Bounded, best-effort recursive byte-size sum for `dir` (regular files only — directory entries and
+ *  symlinks are not themselves counted) — walks via `fs.promises` so it never blocks the event loop for
+ *  long. A path that vanishes mid-walk (e.g. a concurrent process racing this scan) contributes 0 for
+ *  that entry rather than throwing — this is an advisory MEASUREMENT only, never a gate on removal. */
+export async function measureDirSize(dir: string): Promise<{ bytes: number; truncated: boolean }> {
+  let bytes = 0;
+  let visited = 0;
+  let truncated = false;
+  async function walk(d: string): Promise<void> {
+    if (visited >= DIR_SIZE_SCAN_MAX_ENTRIES) { truncated = true; return; }
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(d, { withFileTypes: true });
+    } catch {
+      return; // vanished/unreadable mid-walk — contributes 0, not a scan failure
+    }
+    for (const entry of entries) {
+      if (visited >= DIR_SIZE_SCAN_MAX_ENTRIES) { truncated = true; return; }
+      visited++;
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+      } else if (entry.isFile()) {
+        try {
+          bytes += (await fs.promises.stat(full)).size;
+        } catch {
+          // vanished mid-walk — contributes 0, not a scan failure
+        }
+      }
+    }
+  }
+  await walk(dir);
+  return { bytes, truncated };
+}
+
+/**
+ * Ceiling for a `node_modules` removal (card 1008e305 review finding [2]) — deliberately its OWN budget,
+ * never borrowed from {@link GIT_OP_TIMEOUT_MS} (15s, sized for a git ref op, not a bulk filesystem
+ * delete). Measured on a real 15,923-entry/277.5MB node_modules: a comparable delete took ~5.1s, so 120s
+ * leaves generous headroom while staying far short of {@link PROVISION_TIMEOUT_MS} (a full reinstall is
+ * slower than deleting). A killed attempt still degrades exactly like any other {@link killableRemoveDir}
+ * caller — see {@link reclaimNodeModulesDir}'s own decision record bd9fc808 — this only shrinks how often
+ * that path is reached in practice.
+ */
+const NODE_MODULES_RECLAIM_TIMEOUT_MS = 120_000;
+
+/** Per-package-manager marker file written INSIDE `node_modules` only once an install has genuinely
+ *  finished (mirrors {@link detectPackageManager}'s own lockfile-based manager detection). Used by {@link
+ *  hasIntactNodeModules} as a best-effort INTEGRITY signal — see that function's own doc for why plain
+ *  existence isn't enough. */
+const NODE_MODULES_INTEGRITY_MARKER: Record<PackageManager, string> = {
+  pnpm: ".modules.yaml",
+  npm: ".package-lock.json",
+  yarn: ".yarn-integrity",
+};
+
+/**
+ * True when `worktreePath`'s `node_modules` looks like a genuinely COMPLETE install, not merely present
+ * (card 1008e305 review finding [2]). A wedged/partial {@link killableRemoveDir} attempt (bounded, never
+ * retried — see {@link reclaimNodeModulesDir}) can leave `node_modules` on disk with a real fraction of
+ * its packages already deleted; `fs.existsSync(node_modules)` alone can't tell that apart from a healthy
+ * install, and reusing a partially-deleted `node_modules` is worse than reusing none — some packages
+ * resolve, others don't, which is exactly the concurrent/partial install state `CLAUDE.md` documents as
+ * load-bearing to avoid. Checks for the detected package manager's own completion marker instead; falls
+ * back to plain existence when no recognized lockfile is present (nothing to validate against, matching
+ * {@link provisionWorktreeDeps}'s own no-op in that case).
+ */
+function hasIntactNodeModules(worktreePath: string): boolean {
+  const nodeModulesPath = path.join(worktreePath, "node_modules");
+  if (!fs.existsSync(nodeModulesPath)) return false;
+  const manager = detectPackageManager(worktreePath);
+  if (!manager) return true;
+  return fs.existsSync(path.join(nodeModulesPath, NODE_MODULES_INTEGRITY_MARKER[manager]));
+}
+
+/** {@link reclaimNodeModulesDir}'s result. */
+export interface NodeModulesReclaimOutcome {
+  worktreePath: string;
+  nodeModulesPath: string;
+  /** "missing": nothing to reclaim (already absent — a harmless no-op, not an error). "removed": actually
+   *  deleted — `bytesReclaimed` is a real MEASURED total (a lower bound when `sizeTruncated`). "wedged":
+   *  the removal was force-killed (genuinely stuck, see {@link killableRemoveDir}'s decision record
+   *  bd9fc808) and is NEVER retried by this function; nothing was reclaimed. "left-on-disk": a clean
+   *  (non-hang) removal failure (e.g. a transient handle lock); also nothing reclaimed. */
+  outcome: "missing" | "removed" | "wedged" | "left-on-disk";
+  /** Measured (never estimated) bytes actually freed. `null` unless `outcome === "removed"`. */
+  bytesReclaimed: number | null;
+  /** True when the size measurement hit {@link DIR_SIZE_SCAN_MAX_ENTRIES} — `bytesReclaimed` is then a
+   *  LOWER BOUND, not a complete total. Always false when `bytesReclaimed` is null. */
+  sizeTruncated: boolean;
+}
+
+/**
+ * Reclaim ONE worktree's `node_modules` directory (card 1008e305). Deliberately narrow: this function
+ * knows nothing about liveness, retention, or age — a caller (SessionService) decides WHETHER a worktree
+ * is eligible; this only ever removes exactly `<worktreePath>/node_modules`, nothing else, and never
+ * touches git state at all (node_modules is gitignored — there is no git call anywhere in this function,
+ * so a worktree's HEAD/branch/tracked-file state is structurally unaffected by calling it). Routes
+ * through {@link killableRemoveDir} directly, the same primitive {@link removeWorktree} already uses.
+ * @decision bd9fc808 — a single removal attempt, never a retry loop on a killed (wedged) result.
+ */
+export async function reclaimNodeModulesDir(
+  worktreePath: string,
+  timeoutMs: number = NODE_MODULES_RECLAIM_TIMEOUT_MS,
+  deps: {
+    removeDir?: (target: string, timeoutMs: number) => Promise<RemoveDirResult>;
+    measureSize?: (dir: string) => Promise<{ bytes: number; truncated: boolean }>;
+  } = {},
+): Promise<NodeModulesReclaimOutcome> {
+  const nodeModulesPath = path.join(worktreePath, "node_modules");
+  if (!fs.existsSync(nodeModulesPath)) {
+    return { worktreePath, nodeModulesPath, outcome: "missing", bytesReclaimed: null, sizeTruncated: false };
+  }
+  const measureSize = deps.measureSize ?? measureDirSize;
+  const { bytes, truncated } = await measureSize(nodeModulesPath);
+  const removeDir = deps.removeDir ?? ((p, ms) => killableRemoveDir(p, ms));
+  const result = await removeDir(nodeModulesPath, timeoutMs);
+  if (result.removed) {
+    return { worktreePath, nodeModulesPath, outcome: "removed", bytesReclaimed: bytes, sizeTruncated: truncated };
+  }
+  return {
+    worktreePath, nodeModulesPath,
+    outcome: result.killed ? "wedged" : "left-on-disk",
+    bytesReclaimed: null, sizeTruncated: false,
+  };
 }
 
 /** @decision 9cb0287a — test-only: ZERO production call sites since boot-reconcile Pass A switched to
