@@ -113,10 +113,17 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
 - Don't ask "what should I do next?" and don't hand the human a menu for routine sequencing. Decide
   the order and execute it. The moment a task clears the gate, pick up the next — spawn → review →
   merge → repeat. Parallelize independent tasks; sequence dependent ones. **Parallelism is bounded** —
-  `maxConcurrentWorkers` caps live workers, so a `worker_spawn` past the cap throws "concurrency cap
-  reached (N)"; a per-`taskId` one-live-worker mutex also refuses a second worker on the same card.
-  `worker_spawn`'s `taskId` is **optional** — omit it for a taskless spike or a read-only reviewer
-  without hijacking a board card.
+  `maxConcurrentWorkers` caps live workers; a per-`taskId` one-live-worker mutex also refuses a second
+  worker on the same card. Size your next dispatch off `worker_spawn`'s own successful-response
+  `capacity:{cap,live,inFlight,free}` (also on every `worker_list` row) — `free` is how many more you can
+  spawn right now, a live read taken at that call, so re-read it rather than hand-transcribing it forward.
+  Past the cap, `worker_spawn` throws "concurrency cap reached (N)" and records the intent as
+  `capQueued` — it auto-fires FIFO on its own the next time a slot frees, but ⚠️ that queue is
+  in-memory-only and does **not** survive any daemon restart (crash, dev-watch reload, or deliberate) —
+  re-`worker_spawn` by hand after a restart if a dispatch you made before it still matters.
+  `worker_spawn`'s `taskId` is **optional** — omit it for a taskless spike, or a read-only reviewer via
+  `reviewOfWorkerSessionId`/`reviewOfTaskId` (mutually exclusive; cuts the review worker's own branch from
+  the reviewed branch's current tip) — either way without hijacking a board card.
 - **Sequence or defer your OWN work with `deferred`, never `held`** — `tasks_update` a card
   `deferred:true` to mark it as intentionally sequenced behind other work; it stays off the idle
   watchdog's nag count but never blocks dispatch. `held` is the owner's SOLE brake and refuses
