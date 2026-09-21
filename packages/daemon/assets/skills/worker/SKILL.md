@@ -58,7 +58,11 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    points you at a note in the project's knowledge base (a vault-relative path, e.g. `Projects/…/Design/
    *.md`) may not be reachable by your Glob/Read tools at all — that store can live outside your isolated
    worktree. Don't burn repeated Globs hunting for it; `worker_report blocked` and ask your manager for
-   the excerpt or an absolute, worktree-reachable path.
+   the excerpt or an absolute, worktree-reachable path. **A short `@decision <id>` (or `@decision
+   sha:<8hex>`) comment marks a load-bearing decision record.** A `Read` whose range covers that line
+   already surfaces its guard (title + prohibitions + a pointer to the full record) automatically — if the
+   project exposes a lookup tool for these, use it only to resolve what the guard didn't answer, never as
+   the primary way to read one.
 2. **Stay in scope.** Do exactly the assigned task and its definition of done — one logical change.
    Don't sprawl scope mid-task. If you discover something bigger (a real bug, a wrong assumption, a
    missing piece), surface it **up** via `worker_report` and let your manager decide — don't quietly

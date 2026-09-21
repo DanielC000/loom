@@ -454,8 +454,10 @@ export function registerDecisionTools(server: McpServer, resolveRepoRoot: () => 
         "The index over this project's `@decision <id>` (card) and `@decision sha:<id>` (verified commit, " +
         "card 969b0e1c) source anchors and their out-of-band decision records (docs/adr/, docs/decisions/, " +
         "docs/investigations/<id>-*/findings.md) — an ESCAPE HATCH for questions the on-Read injection hook " +
-        "can't answer positionally, not the primary way to read a record (a plain Read of an anchored file " +
-        "already surfaces the full record inline). `query` is optional and its shape picks the mode: " +
+        "can't answer positionally, not the primary way to read a record (a plain Read whose range covers " +
+        "an anchor line already surfaces that record's title + its 'Do not' section(s) — or an explicit " +
+        "no-Do-not note for the minority of records without one — plus a pointer to the full record; " +
+        "never the whole narrative). `query` is optional and its shape picks the mode: " +
         "an 8-hex-char id (e.g. \"a32533a1\") -> REVERSE lookup on a board-card anchor; \"sha:<8hex>\" " +
         "(e.g. \"sha:c70a5e0e\") -> the SAME reverse lookup on a verified-commit anchor instead (an " +
         "unverifiable sha reports record:null, exactly like a bare id with no card record — it is never " +
@@ -480,8 +482,9 @@ export function registerDecisionTools(server: McpServer, resolveRepoRoot: () => 
         "directions are only as complete as that list is empty. The index is rebuilt fresh on every " +
         "call by walking this project's own repo (`repoPath`) — never a persisted or cached snapshot, so " +
         "it can never go stale. Record bodies are NOT inlined here (only {path,title}) — Read the returned " +
-        "record path directly for the full text; the on-Read hook is the place that delivers complete " +
-        "record text automatically.",
+        "record path directly for the full text; the on-Read hook is the place that delivers that same " +
+        "title + Do-not-section guard automatically (still not the full narrative — read the record path " +
+        "directly for that).",
       inputSchema: strictShape({ query: z.string().optional() }),
     },
     async ({ query }) => {

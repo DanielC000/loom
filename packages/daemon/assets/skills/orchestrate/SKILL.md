@@ -520,6 +520,10 @@ what you checked. Found none? Treat it as live.
      grep for live consumers before you board a removal. Then **cite that provenance in the card** (the
      blame/commit + the grep result) so the worker — and you at the merge gate — can trust the card isn't
      about to delete something load-bearing. An unproven removal card is how a live field gets deleted.
+   - **A short `@decision <id>` (or `@decision sha:<8hex>`) comment marks a load-bearing decision
+     record.** A `Read` whose range covers that line already surfaces its guard (title + prohibitions +
+     a pointer to the full record) automatically — if the project exposes a lookup tool for these, use it
+     only to resolve what the guard didn't answer, never as the primary way to read one.
 2. **Decompose into delegable tasks**, each with an explicit **definition of done**. A task without a
    DoD/acceptance check can't be delegated — state what *proves* it works (your agent prompt names the
    project's gate command). One task = one focused, independently-mergeable change.
