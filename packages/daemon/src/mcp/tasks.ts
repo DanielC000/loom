@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Task, TaskPriority, Question, QuestionType, QuestionState, BoardTask, DeferredItem, DeferredItemStatus } from "@loom/shared";
+import type { Task, TaskPriority, Question, QuestionType, QuestionState, BoardTask, DeferredItem, DeferredItemStatus, DeferredUntilEvent } from "@loom/shared";
 import { DEFAULT_TASK_PRIORITY, resolveConfig, columnKeyForRole } from "@loom/shared";
 import type { Db } from "../db.js";
 import { resolveIdPrefix } from "../id-prefix.js";
@@ -146,23 +146,37 @@ export interface ResolvedDeferredState {
  * blocker sets it, even while the others are still cleanly, reachably pending. With exactly one id this
  * degenerates to precisely the single-blocker logic that existed before this card — same lookups, same
  * order, same returns — so a single-blocker deferral's behavior is unchanged.
+ *
+ * @decision ca0957d7 — `stuck` also folds in {@link resolveDeferredEventStuck}'s read of
+ * `task.deferredUntilEvent` while `deferred` is true — see the full record for why, and for why a
+ * blocker-less deferral no longer short-circuits straight to `stuck:false`.
  */
 export async function resolveDeferredEffective(
-  db: Db, projectId: string, task: Pick<Task, "id" | "deferred" | "deferredUntilTaskId" | "deferredStuck">, includeMerged: boolean,
+  db: Db, projectId: string,
+  task: Pick<Task, "id" | "deferred" | "deferredUntilTaskId" | "deferredStuck" | "deferredUntilEvent">,
+  includeMerged: boolean,
 ): Promise<ResolvedDeferredState> {
   const raw = task.deferred === true;
   const rawStuck = task.deferredStuck === true;
   const ids = Array.isArray(task.deferredUntilTaskId)
     ? task.deferredUntilTaskId
     : task.deferredUntilTaskId ? [task.deferredUntilTaskId] : [];
-  // Genuine determinations, independent of merged state — deferred:false or a blocker-less deferral
-  // (a manual, owner/upstream-gated sequencing marker) are NEVER stuck. Self-heals a stale `deferredStuck`
-  // left over from a since-cleared or re-pointed deferral.
+  const eventStuck = raw ? resolveDeferredEventStuck(db, projectId, task.deferredUntilEvent) : false;
+  // Genuine determinations, independent of merged state — deferred:false is NEVER stuck (`eventStuck` is
+  // forced false above whenever `!raw`, so it can never leak through here). A blocker-less deferral (no
+  // deferredUntilTaskId) is no longer unconditionally "never stuck" (card ca0957d7) — it can still carry a
+  // deferredUntilEvent whose request has gone unfireable. Self-heals a stale `deferredStuck` left over
+  // from a since-cleared or re-pointed deferral either way.
   if (!raw || ids.length === 0) {
-    return { deferred: raw, autoCleared: false, stuck: false, stuckChanged: rawStuck !== false };
+    return { deferred: raw, autoCleared: false, stuck: eventStuck, stuckChanged: eventStuck !== rawStuck };
   }
-  // UNMEASURED, not a determination — see this function's own doc. Preserve, never write.
-  if (!includeMerged) return { deferred: true, autoCleared: false, stuck: rawStuck, stuckChanged: false };
+  // UNMEASURED (blocker merged state), not a determination — see this function's own doc. Preserve the
+  // raw persisted blocker-stuck bit, never write over it; `eventStuck` is measured either way (cheap,
+  // independent of includeMerged) and ORed on top.
+  if (!includeMerged) {
+    const stuck = rawStuck || eventStuck;
+    return { deferred: true, autoCleared: false, stuck, stuckChanged: stuck !== rawStuck };
+  }
   const cols = resolveConfig(db.getProject(projectId)?.config).kanbanColumns;
   const terminalKey = columnKeyForRole(cols, "terminal");
   let allMerged = true;
@@ -179,8 +193,34 @@ export async function resolveDeferredEffective(
     allMerged = false;
     if (blocker.columnKey === terminalKey) anyStuck = true; // closed with no proven merge → stuck
   }
+  // All named TASK blockers merged: `deferred` auto-clears regardless of `eventStuck` — `deferredUntilEvent`
+  // never gates `deferred` (see its own doc), and `stuck` is only ever meaningful while `deferred` is true.
   if (allMerged) return { deferred: false, autoCleared: true, stuck: false, stuckChanged: rawStuck !== false };
-  return { deferred: true, autoCleared: false, stuck: anyStuck, stuckChanged: anyStuck !== rawStuck };
+  const stuck = anyStuck || eventStuck;
+  return { deferred: true, autoCleared: false, stuck, stuckChanged: stuck !== rawStuck };
+}
+
+/**
+ * Card ca0957d7 — resolve whether a `deferredUntilEvent` of kind `"request-answered"` can still ever fire,
+ * against the LIVE requests store. Mirrors the `deferredUntilTaskId` blocker's dangling-reference check
+ * (not found / cross-project → stuck) plus one case a task blocker doesn't have: `state:"cancelled"` — a
+ * Request superseded (`question_ask({supersedes})`) or explicitly cancelled can never transition to
+ * `"answered"` again, so the annotated trigger is permanently unfireable.
+ *
+ * `"pending"` is NOT stuck (still genuinely live). `"answered"`/`"consumed"` are deliberately NOT stuck
+ * either (card ca0957d7 DoD-1) — both mean the event already fired; the card is simply awaiting a reader's
+ * judgement call on its own `deferredReason`, per {@link DeferredUntilEvent}'s "never auto-clears, this is
+ * a pointer" contract. Conflating "already fired" with "can never fire" would turn a working, quiet queue
+ * into a wall of false alarms.
+ *
+ * `kind:"gate-fail-naming"` always returns `false` — see {@link DeferredUntilEventKind}'s own doc for why
+ * that kind has no analogous dangling case to detect.
+ */
+function resolveDeferredEventStuck(db: Db, projectId: string, event: DeferredUntilEvent | null | undefined): boolean {
+  if (!event || event.kind !== "request-answered") return false;
+  const q = db.getQuestion(event.key);
+  if (!q || q.projectId !== projectId) return true; // dangling / cross-project — can never resolve
+  return q.state === "cancelled"; // cancelled/superseded → unfireable; pending/answered/consumed are fine
 }
 
 /**

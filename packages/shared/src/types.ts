@@ -1986,6 +1986,9 @@ export interface DeferredItem {
  * - `"request-answered"`: `key` (a Question/Request id) transitions to `state:"answered"` — wired by
  *   `orchestration/deferred-trigger-notice.ts`'s `requestAnsweredTriggerNotice` (card f75a2202), appended
  *   to the "your question was answered" nudge at every site that pushes one to the asker.
+ *
+ * @decision ca0957d7 — only `"request-answered"` gets a read-time dangling-key detector (see
+ * `Task.deferredStuck`'s own doc). `"gate-fail-naming"` deliberately has none — see the full record for why.
  */
 export type DeferredUntilEventKind = "gate-fail-naming" | "request-answered";
 
@@ -2003,6 +2006,9 @@ export type DeferredUntilEventKind = "gate-fail-naming" | "request-answered";
  * untouched by anything that reads it. Every card in this class documents that release is a JUDGEMENT
  * CALL made by a reader after reading the card's own `deferredReason` in full — a nudge naming a matching
  * event is a POINTER to go read that reason, never proof the card should be released.
+ *
+ * @decision ca0957d7 — a `"request-answered"` key resolving to `cancelled`/not-found sets `Task.deferredStuck`
+ * (visibility only, still never auto-clears `deferred`) — see the full record for why.
  *
  * Validated at set time (`updateProjectTask`, mcp/tasks.ts): `kind` must be one of
  * {@link DeferredUntilEventKind}'s known values and `key` a non-empty string, or the whole patch is
@@ -2092,6 +2098,10 @@ export interface Task {
    *
    * Never auto-clears `deferred` itself — a 0-commit close is legitimate, and `deferred` stays keyed on
    * `merged` exactly as it always was.
+   *
+   * @decision ca0957d7 — ALSO covers a `deferredUntilEvent.kind === "request-answered"` whose Request has
+   * since been cancelled/superseded (or no longer resolves): that trigger can never fire again either. An
+   * `"answered"`/`"consumed"` request is NOT stuck — it already fired; release is still the reader's call.
    */
   deferredStuck?: boolean;
   /**
