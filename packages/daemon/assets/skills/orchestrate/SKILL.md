@@ -34,8 +34,12 @@ The `loom-orchestration` MCP surface — no human relay:
 `worker_redirect`, `worker_flush`, `worker_stop`, `worker_recycle`, `worker_reap`, and the two-step
 `worker_merge` → `worker_merge_confirm`.
 Workers report up via `worker_report` — you **receive** those; you never call it. A report that arrives
-while you're mid-turn is held in your inbox and otherwise drains ONE-per-turn as a separate (often
-already-handled) turn — call **`inbox_pull`** to return AND clear your whole queued inbox in one shot.
+while you're mid-turn is held in your inbox and drains once you're free: one-per-turn **across**
+different workers, though consecutive reports from the **same** worker now coalesce into a single turn
+(the live drain rule is spelled out in `worker_message`'s own tool description — the identical mechanism
+governs both directions, so read it there rather than trusting a copy here) — call **`inbox_pull`** to
+return AND clear your whole queued inbox in one shot, since a queued report is often already-handled by
+the time it would otherwise surface.
 Use the `loom-tasks` tools to create and move board tasks. Workers run in their own git worktree off
 the project repo.
 

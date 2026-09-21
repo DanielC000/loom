@@ -115,10 +115,12 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    into re-attaching to a known-stale in-flight op instead of the default refusal), use the tool rather
    than running your project's gate
    yourself in a shell — the DAEMON spawns it, so every worker gate + merge gate on the daemon shares ONE
-   concurrency budget and parallel workers can't collectively swamp the host. It also pins two-lane test
-   concurrency for you, so **don't set a test-concurrency env var yourself**. **Its tool description is
-   the contract for the exact return, pending, and retry shape — read it there.** Two things that
-   description can't tell you, because they're doctrine:
+   concurrency budget and parallel workers can't collectively swamp the host. It also pins its own
+   `LOOM_GATE_TEST_CONCURRENCY` value for you (`run_gate`'s own tool description states the
+   currently-resolved figure — don't trust a number copied here instead), so **don't set a
+   test-concurrency env var yourself**. **Its tool description is the contract for the exact return,
+   pending, and retry shape — read it there.** Two things that description can't tell you, because
+   they're doctrine:
    - **None of the foreground/backgrounding rules below apply to `run_gate`** — the daemon, not your
      shell, runs it, so it never blocks your turn. A `pending` result, or the call queueing behind another
      in-flight gate on a busy fleet, is EXPECTED — not a hang. Parking on its completion nudge IS safe:
