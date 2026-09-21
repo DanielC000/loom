@@ -14422,6 +14422,17 @@ export class SessionService {
       return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null });
     }
 
+    // STALE IDLE-NUDGE PURGE (card 6119778b — same evaluation-vs-delivery gap task 69a128b0 fixed for
+    // recycleWorker, applied here): classifyIdleWorker's PENDING-MERGE GUARD reads `pendingMerge.state`
+    // as "running" for this op's ENTIRE lifetime, including a REUSED verdict's real (but gate-less)
+    // squash/cleanup work — so the periodic idle-worker tick can classify+enqueue a `[loom:worker-idle]`
+    // "its merge gate ... runs ... you'll get a [loom:merge-done]/[loom:merge-failed] nudge when it does"
+    // notice WHILE this call is still mid-flight (the manager busy running THIS same tool call). That
+    // promise is false the instant this call returns SYNCHRONOUSLY below (EXACTLY-ONE-SIGNAL, decision
+    // 187f5b76 — no separate settle nudge is ever coming). Purge it now, BEFORE the hard-stop, so a
+    // nudge that was accurate when classified but stale by delivery time never drains into the manager
+    // describing a merge that has already settled.
+    try { this.pty.purgeQueuedWorkerIdleNudges(managerSessionId, workerSessionId); } catch { /* manager not live */ }
     // Green: the branch is on the canonical repo. The worker (which reported 'done' but is still
     // alive) holds the worktree as its pty cwd — on Windows `git worktree remove` fails while the
     // dir is a live process's cwd. So hard-stop the worker and wait for the pty to die BEFORE
@@ -14622,6 +14633,11 @@ export class SessionService {
         } catch { /* manager not live; wakes deliberately left untouched */ }
       }
     }
+    // STALE IDLE-NUDGE PURGE (card 6119778b) — same reasoning as confirmWorkerMerge's Green path: this
+    // op's `pendingMerge.state` reads "running" for its whole lifetime, including the ALREADY_MERGED
+    // idempotent-cleanup work here; purge before the hard-stop so a nudge classified mid-flight never
+    // drains stale, describing a merge this call is about to settle synchronously.
+    try { this.pty.purgeQueuedWorkerIdleNudges(args.managerSessionId, args.workerSessionId); } catch { /* manager not live */ }
     this.pty.stop(args.workerSessionId, "hard");
     for (let i = 0; i < 50 && this.pty.isAlive(args.workerSessionId); i++) {
       await new Promise((r) => setTimeout(r, 100));
