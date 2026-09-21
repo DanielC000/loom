@@ -34,7 +34,7 @@ const tmpHome = path.join(os.tmpdir(), `loom-prompt-mismatch-${Date.now()}-${pro
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
-const { PtyHost } = await import("../dist/pty/host.js");
+const { PtyHost, classifyDroppedChar } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const fakesById = new Map(); // sessionId -> fake pty ({ writes, ... }) — card 201d0d95's new scenarios need
@@ -119,6 +119,16 @@ function captureArmWarnings(fn) {
   const lines = [];
   const orig = console.log;
   console.log = (msg) => { if (typeof msg === "string" && msg.includes("[prompt-mismatch-arm]")) lines.push(msg); };
+  try { fn(); } finally { console.log = orig; }
+  return lines;
+}
+
+// Card b1cc4f01: captures the pasted-content-wrap single-character-deficit diagnostic's own
+// [prompt-mismatch-pasted-content-wrap-near-miss] line — exact-scoped, same shape as captureArmWarnings.
+function captureNearMissWarnings(fn) {
+  const lines = [];
+  const orig = console.log;
+  console.log = (msg) => { if (typeof msg === "string" && msg.includes("[prompt-mismatch-pasted-content-wrap-near-miss]")) lines.push(msg); };
   try { fn(); } finally { console.log = orig; }
   return lines;
 }
@@ -432,6 +442,73 @@ try {
     await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
     const noticeWrite6g = fake.writes.slice(writesBeforeMismatch).join("");
     check("6g: the notice actually reached the pty", noticeWrite6g.includes("[loom:prompt-mismatch]"));
+  }
+
+  // ===== 6h. Card b1cc4f01 — the REAL residual shape: the wrap FRAMING matches EXACTLY (same
+  // id-backreferenced regex as 6f), but the wrapped body is missing exactly ONE character relative to
+  // `intended`. Measured directly off 6/6 real production specimens (all six residual arms after card
+  // 7c1487c8 shipped showed exactly this shape, always Δ+57 — one byte short of the clean +58 in 6f).
+  // POSITIVE CONTROL for `detectPastedContentWrapSingleCharDeficit`, and THE SAFETY CASE again: naming
+  // the shape must never suppress the notice — a one-character divergence is still a real divergence. =====
+  {
+    const sid = newSession("PastedContentWrapOneCharDeficit"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "[loom:from-manager]\nPlease re-check card 1234abcd before you report back to me on this generation, thanks.";
+    const dropIndex = 30;
+    const droppedChar = intended[dropIndex];
+    const innerWithOneCharMissing = intended.slice(0, dropIndex) + intended.slice(dropIndex + 1);
+    const reported = `\n\n<pasted_content id="f5c5">\n${innerWithOneCharMissing}\n</pasted_content id="f5c5">\n`;
+    host.enqueueStdin(sid, intended);
+    const writesBeforeMismatch = fake.writes.length;
+    const nearMiss6h = captureNearMissWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6h: POSITIVE CONTROL — a wrap missing exactly one character fires the near-miss diagnostic exactly once", nearMiss6h.length === 1);
+    check("6h: it names the dropped index", (nearMiss6h[0] ?? "").includes(`droppedIndex=${dropIndex}`));
+    // Card 16c93a50/request 0eb43216 (owner ruling): must NEVER quote the raw character — asserts the
+    // disclosure-safe class label (real logic, imported, not duplicated) plus the redactedExcerpt shape,
+    // and explicitly asserts the raw character does NOT appear anywhere in the line.
+    check("6h: it names the dropped character's CLASS, not the character itself", (nearMiss6h[0] ?? "").includes(`droppedCharClass=${classifyDroppedChar(droppedChar)}`));
+    check("6h: the dropped character is logged ONLY through the redactedExcerpt chokepoint (length+hash), never inline", /droppedChar=<redacted len=1 hash=[0-9a-f]+>/.test(nearMiss6h[0] ?? ""));
+    check("6h: the raw dropped character never appears in the log line at all", !(nearMiss6h[0] ?? "").includes(JSON.stringify(droppedChar)));
+    const noticeLanded6h = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("6h: THE SAFETY CASE — naming this shape never suppresses the session-facing notice (still a real, if one-character, divergence)", noticeLanded6h);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    const noticeWrite6h = fake.writes.slice(writesBeforeMismatch).join("");
+    check("6h: the notice actually reached the pty", noticeWrite6h.includes("[loom:prompt-mismatch]"));
+  }
+
+  // ===== 6i. Card b1cc4f01 — NEGATIVE CONTROL: a wrap-shaped mismatch missing TWO characters (not one)
+  // must NOT be misclassified as the single-character-deficit shape. =====
+  {
+    const sid = newSession("PastedContentWrapTwoCharDeficit"); SIDS.push(sid);
+    const intended = "[loom:from-manager]\nPlease re-check card 1234abcd before you report back to me on this generation, thanks.";
+    const innerMissingTwo = intended.slice(0, 30) + intended.slice(32); // two chars dropped, not one
+    const reported = `\n\n<pasted_content id="f5c5">\n${innerMissingTwo}\n</pasted_content id="f5c5">\n`;
+    host.enqueueStdin(sid, intended);
+    const nearMiss6i = captureNearMissWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6i: NEGATIVE CONTROL — a two-character deletion does NOT fire the single-character near-miss diagnostic", nearMiss6i.length === 0);
+  }
+
+  // ===== 6j. Card b1cc4f01 — NEGATIVE CONTROL: a wrap-shaped mismatch with a same-length, one-character
+  // SUBSTITUTION (not a deletion) must NOT be misclassified as the single-character-deficit shape either
+  // — this exercises the deficit detector's own length-equality gate, the only part of its predicate
+  // capable of returning false on an otherwise well-formed, same-length divergence. =====
+  {
+    const sid = newSession("PastedContentWrapSubstitution"); SIDS.push(sid);
+    const intended = "[loom:from-manager]\nPlease re-check card 1234abcd before you report back to me on this generation, thanks.";
+    const origChar = intended[30];
+    const replChar = origChar === "Q" ? "Z" : "Q";
+    const substituted = intended.slice(0, 30) + replChar + intended.slice(31);
+    const reported = `\n\n<pasted_content id="f5c5">\n${substituted}\n</pasted_content id="f5c5">\n`;
+    host.enqueueStdin(sid, intended);
+    const nearMiss6j = captureNearMissWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6j: NEGATIVE CONTROL — a same-length one-character substitution does NOT fire the deletion-shaped near-miss diagnostic", nearMiss6j.length === 0);
   }
 
   // ===== 7. Card 201d0d95 Q1 — POSITIVE: a mismatch must now SURFACE to the affected session itself, not

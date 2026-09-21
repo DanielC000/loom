@@ -362,6 +362,11 @@ function isEngineTaskNotificationReport(reported: string): boolean {
   return trimmed.startsWith("<task-notification>") && trimmed.endsWith("</task-notification>");
 }
 
+/** Card 7c1487c8 — the id-backreferenced pasted-content wrap shape, shared by `isRecognizedPastedContentWrap`
+ *  and its sibling near-miss diagnostic `detectPastedContentWrapSingleCharDeficit` (card b1cc4f01) so the
+ *  two can never drift on what "the wrap" structurally means. */
+const PASTED_CONTENT_WRAP_RE = /^\n\n<pasted_content id="([0-9a-zA-Z]+)">\n([\s\S]*)\n<\/pasted_content id="\1">\n$/;
+
 /** Card 7c1487c8 — Claude Code's OWN composer wraps a bracketed-paste prompt in
  *  `<pasted_content id="ID">...</pasted_content id="ID">` before submitting it (harness-side paste
  *  framing; the literal appears nowhere else in this repo). Verified against a real engine transcript
@@ -369,8 +374,50 @@ function isEngineTaskNotificationReport(reported: string): boolean {
  *  chars regardless of payload size and stripping it leaves `intended` byte-for-byte — the id is
  *  captured/backreferenced, never assumed to be any particular length or charset. */
 function isRecognizedPastedContentWrap(reported: string, intended: string): boolean {
-  const m = /^\n\n<pasted_content id="([0-9a-zA-Z]+)">\n([\s\S]*)\n<\/pasted_content id="\1">\n$/.exec(reported);
+  const m = PASTED_CONTENT_WRAP_RE.exec(reported);
   return m !== null && m[2] === intended;
+}
+
+/** Card b1cc4f01 — sibling diagnostic to `isRecognizedPastedContentWrap`: the wrap FRAMING matches the
+ *  SAME id-backreferenced shape byte-for-byte, but the wrapped body is missing exactly ONE character
+ *  relative to `intended`. Measured, not guessed: 6/6 of this card's own residual specimens showed this
+ *  exact shape, AND Loom's own write was independently verified byte-exact against `intended` for one of
+ *  them via the `[pty-write]` chunk log (the chunk lengths summed to `intended.length` precisely) — so the
+ *  single-character drop happens strictly AFTER Loom's write, inside the engine's own paste round-trip,
+ *  never in Loom's writer. Diagnostic only, like `detectAnsiEscapeStripDeficit`/`wrapperDeficit` — this
+ *  does NOT suppress the "possible LOSS" notice and must never be used to relax
+ *  `isRecognizedPastedContentWrap`'s own `m[2] === intended` check: a one-character content divergence is
+ *  still, genuinely, the exact shape that safety property exists to catch — this only NAMES the shape so
+ *  it reads as a characterized near-miss instead of an unaccounted-for fallback. */
+function detectPastedContentWrapSingleCharDeficit(reported: string, intended: string): { droppedIndex: number, droppedChar: string } | null {
+  const m = PASTED_CONTENT_WRAP_RE.exec(reported);
+  if (m === null) return null;
+  const inner = m[2]!;
+  if (inner.length !== intended.length - 1) return null;
+  let i = 0;
+  while (i < inner.length && inner[i] === intended[i]) i++;
+  if (intended.slice(i + 1) !== inner.slice(i)) return null;
+  return { droppedIndex: i, droppedChar: intended[i]! };
+}
+
+/** Card b1cc4f01 (owner ruling, card 16c93a50 / request 0eb43216): a coarse, disclosure-safe
+ *  classification of a single dropped character — logged UNCONDITIONALLY, alongside (never instead of)
+ *  `redactedExcerpt(droppedChar)` through the same chokepoint every content-bearing diagnostic in this
+ *  file routes through. Never the character itself: `redactedExcerpt`'s own length+hash shape is
+ *  near-meaningless confidentiality on a ONE-character domain (an fnv1a32 hash of a single code unit is
+ *  brute-forcible in ~128 guesses), so this exists to carry the actual diagnostic value that check can't —
+ *  in particular, `"surrogate-half"` distinguishes a UTF-16 surrogate-boundary drop (this project's own
+ *  writeChunked astral-splitting hazard — see project memory `writechunked-splits-astral-chars-at-1024-
+ *  boundary`) from an ordinary whitespace/control/printable drop, without ever disclosing which one.
+ *  PURE + exported for the hermetic test (mirrors `nextComposerLen`'s own export rationale). */
+export function classifyDroppedChar(ch: string): string {
+  const code = ch.charCodeAt(0);
+  if (code >= 0xd800 && code <= 0xdfff) return "surrogate-half";
+  if (ch === " " || ch === "\t") return "whitespace";
+  if (ch === "\n" || ch === "\r") return "newline";
+  if (code < 0x20 || code === 0x7f) return "control";
+  if (code > 0x7e) return "non-ascii";
+  return "ascii-printable";
 }
 
 /** @decision 4af5aefa — annotates queue age only (never suppresses/gates/reorders); disclosed count is
@@ -6315,6 +6362,20 @@ export class PtyHost {
               // (id-backreferenced wrapper stripped, remainder byte-for-byte equal to `intended`), never
               // by signature/length alone — a genuine loss wrapped the same way still fails this check.
               const isPastedContentWrap = isRecognizedPastedContentWrap(reported, intended);
+              // Card b1cc4f01 — sibling diagnostic, gated on the wrap NOT already being recognized: the
+              // wrap FRAMING matches byte-for-byte but the body is missing exactly one character. Logged
+              // unconditionally, diagnostic only — never suppresses anything, never weakens the safety
+              // check just above (see `detectPastedContentWrapSingleCharDeficit`'s own doc).
+              const pastedContentWrapSingleCharDeficit = isPastedContentWrap ? null : detectPastedContentWrapSingleCharDeficit(reported, intended);
+              if (pastedContentWrapSingleCharDeficit) {
+                // Card 16c93a50/request 0eb43216 (owner ruling): never inline JSON.stringify(<content>) —
+                // droppedChar is one character of real session/agent text. droppedCharClass carries the
+                // actual diagnostic value (see classifyDroppedChar's own doc); redactedExcerpt(droppedChar)
+                // is logged alongside it, through the SAME chokepoint every other content-bearing
+                // diagnostic in this file uses, for an audit trail only — never the raw character.
+                // eslint-disable-next-line no-console
+                console.log(`[prompt-mismatch-pasted-content-wrap-near-miss] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} droppedIndex=${pastedContentWrapSingleCharDeficit.droppedIndex} droppedCharClass=${classifyDroppedChar(pastedContentWrapSingleCharDeficit.droppedChar)} droppedChar=${redactedExcerpt(pastedContentWrapSingleCharDeficit.droppedChar)} — the engine's own pasted-content wrap framing matches EXACTLY (id-backreferenced, byte-for-byte), but the wrapped body is missing exactly ONE character relative to what Loom wrote. Card b1cc4f01 (measured, 6/6 specimens): Loom's own write is independently verified byte-exact via the pty-write chunk log — this is the engine's own paste round-trip dropping one character, not a Loom write defect. Still a real divergence (the wrapper-reconciliation check above correctly declines it) — this only names the shape, it does not suppress the notice.`);
+              }
               // @decision 00b5066e — offset-aware reconciliation: INSERTION uses `endsWith` (not `includes`,
               // which false-matched card 68459420's unrelated population), left unbounded; OMISSION is
               // bounded to OFFSET_OMISSION_MAX_TAIL_CHARS. Neither suppresses the notice, only its wording.

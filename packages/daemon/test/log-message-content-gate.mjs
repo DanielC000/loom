@@ -15,7 +15,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   pty/host.ts: [prompt-mismatch] reportedAround/intendedAround, [prompt-mismatch-unmatched-remainder]
 //     leadingRemainder/trailingRemainder, [pty] sanitized-nudge, [pty] missing-tag, [submit-write] head,
 //     [stdin-write] head, [resume-mode] footer= (added after manager review — collapseFooter only strips
-//     ANSI/whitespace, it does not isolate a footer region, so this tail is "whatever rendered last").
+//     ANSI/whitespace, it does not isolate a footer region, so this tail is "whatever rendered last"),
+//     [prompt-mismatch-pasted-content-wrap-near-miss] droppedChar= (card b1cc4f01/16c93a50 — logged
+//     alongside an unconditional, disclosure-safe character CLASS, never the raw character alone).
 //   sessions/service.ts: [give-up] … PARKED head.
 // Run: 1) build daemon (pnpm build from packages/daemon), 2) node test/log-message-content-gate.mjs
 import fs from "node:fs";
@@ -82,20 +84,21 @@ try {
   // ===== (4) COVERAGE CENSUS: every call site this card's own enumeration found actually routes through ===
   // ===== redactedExcerpt — a regression guard against a future content-bearing log line skipping the gate =
   {
-    // Card 36afbbdd: comment-stripped before matching — these are EXACT-count censuses (=== 7, === 1), so
-    // even ONE stray comment mention of "redactedExcerpt(" (highly plausible near any of the 7 real call
+    // Card 36afbbdd: comment-stripped before matching — these are EXACT-count censuses (=== 8, === 1), so
+    // even ONE stray comment mention of "redactedExcerpt(" (highly plausible near any of the 8 real call
     // sites this test's own comment below enumerates) would break the equality and flip a comment-only
     // diff to a false failure. See (4-control) below for the proof.
     const hostSrc = stripComments(fs.readFileSync(new URL("../src/pty/host.ts", import.meta.url), "utf8"));
     const serviceSrc = stripComments(fs.readFileSync(new URL("../src/sessions/service.ts", import.meta.url), "utf8"));
     const hostCalls = (hostSrc.match(/redactedExcerpt\(/g) ?? []).length - 1; // -1 for the function's own declaration line
     const serviceCalls = (serviceSrc.match(/redactedExcerpt\(/g) ?? []).length;
-    // 7 call sites: the shared `around` helper (feeds BOTH reportedAround= and intendedAround=), the shared
+    // 8 call sites: the shared `around` helper (feeds BOTH reportedAround= and intendedAround=), the shared
     // `excerpt` helper (feeds BOTH leadingRemainder= and trailingRemainder=), sanitized-nudge, missing-tag,
     // submit-write head=, stdin-write head=, resume-mode footer= (added after manager review found
-    // collapseFooter does not actually isolate a footer region — see done-report) — see done-report for the
-    // enumerating grep + per-site anchors.
-    check("(4) pty/host.ts: exactly 7 redactedExcerpt call sites", hostCalls === 7);
+    // collapseFooter does not actually isolate a footer region — see done-report), and (card b1cc4f01)
+    // the pasted-content-wrap near-miss droppedChar= — see done-report for the enumerating grep + per-site
+    // anchors.
+    check("(4) pty/host.ts: exactly 8 redactedExcerpt call sites", hostCalls === 8);
     check("(4) sessions/service.ts: exactly 1 redactedExcerpt call site ([give-up] PARKED head)", serviceCalls === 1);
     // Negative control on the census itself: a nonexistent function name must find ZERO call sites, proving
     // this isn't a pattern that matches everything.
