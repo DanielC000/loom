@@ -43,6 +43,18 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import { commitAll } from "./_git-commit.mjs";
+import { requireHermeticEnv } from "./_guard.mjs";
+import { useOwnLoomHome } from "./_tmp-fixture.mjs";
+
+// Card aac489a2: this file calls the REAL production createWorktree() (imported below), which resolves
+// WORKTREES_DIR as a SIBLING of LOOM_HOME (paths.ts) — a bare `node batch-merge-robustness.mjs` run with
+// no LOOM_HOME set would otherwise leak real worktrees into the owner's real ~/.loom-worktrees.
+// useOwnLoomHome reuses the harness's own per-test temp home when run via scripts/test-daemon.mjs (which
+// already sets one), or mkdtemp's + registers its own when run bare directly — either way LOOM_HOME is a
+// temp dir BEFORE the dist import below, and requireHermeticEnv() makes that fail closed rather than
+// silently leak again.
+useOwnLoomHome("loom-bmr-parent-");
+requireHermeticEnv();
 
 const { createWorktree, getTaskMergedInfo, __resetMergedCommitMapCacheForTest } = await import("../dist/git/worktrees.js");
 const { assembleBatchBranches, fastForwardCanonicalMain, runBatchedMerge } = await import("../dist/git/batch-merge.js");
@@ -664,7 +676,9 @@ try {
     check("(noop) fast-forward to the same sha succeeds without touching anything", ff.ok === true);
   }
 } finally {
-  // best-effort cleanup of the daemon-managed worktrees dir this test created under; harmless if absent.
+  // No per-test worktree cleanup needed: LOOM_HOME is now a temp dir (useOwnLoomHome, above), so
+  // _guard.mjs's own exit hook removes its WORKTREES_DIR sibling (where createWorktree() put everything
+  // this file created) automatically — see card aac489a2.
 }
 
 console.log(failures === 0
