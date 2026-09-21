@@ -57,6 +57,29 @@ export interface ToolAttributionEntry {
 export const LOOM_TASKS_SERVER_ID = "loom-tasks";
 export const LOOM_ORCHESTRATION_SERVER_ID = "loom-orchestration";
 
+/** The rest of Loom's own first-party MCP server ids — each minted by `pty/host.ts`'s `buildMcpServers`
+ *  for exactly one role's spawn. Exported here (rather than left as inline literals in `buildMcpServers`)
+ *  so {@link LOOM_FIRST_PARTY_SERVER_IDS} below can be derived, not hand-typed. */
+export const LOOM_PLATFORM_SERVER_ID = "loom-platform";
+export const LOOM_AUDIT_SERVER_ID = "loom-audit";
+export const LOOM_USER_AUDIT_SERVER_ID = "loom-user-audit";
+export const LOOM_SETUP_SERVER_ID = "loom-setup";
+export const LOOM_OPERATOR_SERVER_ID = "loom-operator";
+export const LOOM_RUN_SERVER_ID = "loom-run";
+
+/** Card a6598c1e: every MCP server id `buildMcpServers` can mint, for `capabilities/registry.ts`'s
+ *  `RESERVED_CAPABILITY_SLUGS` to reserve — widen HERE, never in that reserved-slugs array directly. */
+export const LOOM_FIRST_PARTY_SERVER_IDS: readonly string[] = [
+  LOOM_TASKS_SERVER_ID,
+  LOOM_ORCHESTRATION_SERVER_ID,
+  LOOM_PLATFORM_SERVER_ID,
+  LOOM_AUDIT_SERVER_ID,
+  LOOM_USER_AUDIT_SERVER_ID,
+  LOOM_SETUP_SERVER_ID,
+  LOOM_OPERATOR_SERVER_ID,
+  LOOM_RUN_SERVER_ID,
+];
+
 /**
  * @decision d15c9f36 — scoped to WRITE/ACTION tools only (a read can't mislead anyone); widen by adding
  * to this array, never by hand-editing `WATCHED_TOOL_NAMES` or the matcher separately. See record for the

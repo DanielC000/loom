@@ -57,6 +57,8 @@ const {
   resolveCapabilityServer, __setCapabilityProvisionerForTest, getCapabilityProvisionStatus,
 } = await import("../dist/capabilities/registry.js");
 const { validateProfile, agentProfileKeyError } = await import("../dist/profiles/validate.js");
+const { LOOM_FIRST_PARTY_SERVER_IDS } = await import("../dist/pty/tool-attribution.js");
+const { RESERVED_CAPABILITY_SLUGS } = await import("../dist/capabilities/registry.js");
 fs.mkdirSync(SETTINGS_DIR, { recursive: true });
 
 // ===================== validateProfile / AGENT_FORBIDDEN_PROFILE_KEYS: capabilities is HUMAN-only =====================
@@ -193,6 +195,84 @@ const reservedInProfile2 = validateProfile({ name: "P", capabilities: [{ slug: "
 check("(hardening) a profile's capabilities array naming 'document-conversion' is rejected too", reservedInProfile2.ok === false);
 const nonReservedInProfile = validateProfile({ name: "P", capabilities: [{ slug: "my-custom-thing" }] });
 check("(hardening) a profile's capabilities array naming a NON-reserved slug still validates ok", nonReservedInProfile.ok === true);
+
+// ===================== card a6598c1e: loom-* first-party MCP server ids reserved as capability slugs =====================
+// Sourced from pty/tool-attribution.ts's own constants (never hand-typed) — see that file's own doc.
+check("(a6598c1e) LOOM_FIRST_PARTY_SERVER_IDS derives exactly the 8 ids the reviewer counted",
+  JSON.stringify([...LOOM_FIRST_PARTY_SERVER_IDS].sort()) === JSON.stringify(
+    ["loom-tasks", "loom-orchestration", "loom-platform", "loom-audit", "loom-user-audit", "loom-setup", "loom-operator", "loom-run"].sort()));
+check("(a6598c1e) RESERVED_CAPABILITY_SLUGS carries every first-party id ON TOP of the 2 pre-existing legacy slugs",
+  LOOM_FIRST_PARTY_SERVER_IDS.every((id) => RESERVED_CAPABILITY_SLUGS.includes(id))
+  && RESERVED_CAPABILITY_SLUGS.includes("browser-testing") && RESERVED_CAPABILITY_SLUGS.includes("document-conversion"));
+
+// Polarity 1: EVERY first-party id is rejected at validateCapabilityDefInput (owner-catalog create).
+for (const id of LOOM_FIRST_PARTY_SERVER_IDS) {
+  const r = validateCapabilityDefInput({ slug: id, name: "x", description: "", transport: "stdio", kind: "bundled", provision: { command: process.execPath }, toolAllowlist: [] });
+  check(`(a6598c1e) validateCapabilityDefInput REJECTS the reserved slug '${id}'`, r.ok === false);
+}
+// Same polarity at the OTHER validation entry point: a profile's capabilities grant array.
+for (const id of LOOM_FIRST_PARTY_SERVER_IDS) {
+  const r = validateProfile({ name: "P", capabilities: [{ slug: id }] });
+  check(`(a6598c1e) a profile capabilities grant naming '${id}' is REJECTED too`, r.ok === false);
+}
+// Polarity 2: an ORDINARY (non-reserved) slug is still accepted at both entry points — the reservation
+// must not have over-widened into rejecting everything.
+const ordinarySlugOk = validateCapabilityDefInput({ slug: "loom-tasks-helper", name: "x", description: "", transport: "stdio", kind: "bundled", provision: { command: process.execPath }, toolAllowlist: [] });
+check("(a6598c1e) an ordinary slug that merely STARTS WITH 'loom-' (not an exact first-party id) still validates ok", ordinarySlugOk.ok === true);
+const ordinaryProfileOk = validateProfile({ name: "P", capabilities: [{ slug: "my-other-thing" }] });
+check("(a6598c1e) an ordinary profile capability slug still validates ok (no over-widening)", ordinaryProfileOk.ok === true);
+
+// The collision case directly: even if a catalog row somehow ends up slugged as a first-party id
+// (bypassing validateCapabilityDefInput entirely — the same shape a pre-existing DB row, or a future
+// seed-only provision kind, could take), buildMcpServers must never let it displace the real mount.
+// Each id is minted only under ITS OWN role (see buildMcpServers' wantsX gates), so the squat attempt is
+// run under the role that actually pre-mounts that id — the exact scenario the reviewer described.
+const OWNING_ROLE_FOR_ID = {
+  "loom-tasks": "worker", // mounted for every non-"run" role; worker exercises the generalized loop too
+  "loom-orchestration": "worker",
+  "loom-platform": "platform",
+  "loom-audit": "auditor",
+  "loom-user-audit": "workspace-auditor",
+  "loom-setup": "setup",
+  "loom-operator": "operator",
+  // "loom-run" is the ONE role whose buildMcpServers call returns BEFORE the capability loop even runs
+  // (the R2 early return) — so under its own role there is no capability loop to exploit at all. It's
+  // still checked below (as "worker") to prove the guard also fires generically, independent of role.
+};
+for (const id of LOOM_FIRST_PARTY_SERVER_IDS) {
+  const owningRole = OWNING_ROLE_FOR_ID[id] ?? "worker";
+  const squattingDef = { ...fakeBundled, id: `squat-${id}`, slug: id };
+  const result = buildMcpServers({
+    sessionId: "s-a6598c1e", port: 4317, role: owningRole,
+    capabilities: [{ slug: id }], capabilityCatalog: [squattingDef],
+  });
+  const mounted = result[id];
+  if (owningRole !== "worker" || id === "loom-tasks" || id === "loom-orchestration") {
+    // This id has a REAL pre-existing mount under its owning role — assert it SURVIVED the squat attempt.
+    const isRealLoomMount = typeof mounted === "object" && mounted !== null && mounted.type === "http" && typeof mounted.url === "string";
+    check(`(a6598c1e) buildMcpServers (role:${owningRole}): a catalog row squatting '${id}' never displaces the real first-party HTTP mount`, isRealLoomMount);
+  } else {
+    // "loom-run" under role:"worker" has no real pre-existing mount to defend — assert the squat is
+    // simply refused (log-and-skip), never silently mounted under a non-owning role either.
+    check(`(a6598c1e) buildMcpServers (role:${owningRole}): a catalog row squatting '${id}' is refused, not silently mounted`, mounted === undefined);
+  }
+  check(`(a6598c1e) buildMcpServers (role:${owningRole}): the squatting def's own stdio command never reaches the '${id}' slot`, !(mounted && "command" in mounted));
+}
+
+// False-positive check on the buildMcpServers-level guard's OWN predicate (not just validateCapabilityDefInput's):
+// it is `RESERVED_CAPABILITY_SLUGS.includes(def.slug)` — exact-string membership, never a prefix/substring
+// test — so an ORDINARY capability whose slug merely STARTS WITH "loom-" (or contains a reserved id as a
+// substring) must still mount normally. A false positive here would silently drop a real user's working
+// capability mount at spawn time, with no error — worse than the footgun this card closes, since it hits
+// someone who did nothing wrong.
+const legitLoomPrefixedDef = { ...fakeBundled, id: "cap-loom-prefixed", slug: "loom-tasks-helper" };
+const withLegitLoomPrefixed = buildMcpServers({
+  sessionId: "s-a6598c1e-legit", port: 4317, role: "worker",
+  capabilities: [{ slug: "loom-tasks-helper" }], capabilityCatalog: [legitLoomPrefixedDef],
+});
+check("(a6598c1e) buildMcpServers: an ORDINARY capability slug that merely starts with 'loom-' still mounts normally (the guard is an exact match, never a prefix check)",
+  withLegitLoomPrefixed["loom-tasks-helper"]?.command === process.execPath
+  && withLegitLoomPrefixed["loom-tasks"]?.type === "http" && withLegitLoomPrefixed["loom-orchestration"]?.type === "http");
 
 // ===================== (d) byte-identical BRIDGE regression =====================
 const oldShape = buildMcpServers({ sessionId: "s6", port: 4317, role: "worker", browserTesting: true });

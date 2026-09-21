@@ -13,7 +13,7 @@ import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
 import { writeSessionSettings, writeSessionMcpConfig, toCliPermissionMode, type CliPermissionMode } from "./claude-settings.js";
 import { ensureTrusted } from "./claude-config.js";
-import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, type ToolAttributionResult } from "./tool-attribution.js";
+import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, LOOM_PLATFORM_SERVER_ID, LOOM_AUDIT_SERVER_ID, LOOM_USER_AUDIT_SERVER_ID, LOOM_SETUP_SERVER_ID, LOOM_OPERATOR_SERVER_ID, LOOM_RUN_SERVER_ID, type ToolAttributionResult } from "./tool-attribution.js";
 import { RepeatedCallTracker, REPEATED_CALL_THRESHOLD } from "./repeated-call-tracker.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
@@ -24,7 +24,7 @@ import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteR
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, isPtyUseConptyDllEnabled, isLogMessageContentEnabled } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
-import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
+import { resolveCapabilityServer, RESERVED_CAPABILITY_SLUGS, type CapabilityDefRow } from "../capabilities/registry.js";
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
 import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS } from "./codex-host.js";
 import { findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } from "./codex-transcript.js";
@@ -1605,7 +1605,7 @@ export function buildMcpServers(o: {
   // the one path that does not mount loom-tasks (every other role layers ON TOP of it). The early return
   // keeps every non-run spawn byte-identical to today (a run is the only role that reaches this branch).
   if (o.role === "run") {
-    return { "loom-run": { type: "http", url: `http://127.0.0.1:${o.port}/mcp-run/${o.sessionId}` } };
+    return { [LOOM_RUN_SERVER_ID]: { type: "http", url: `http://127.0.0.1:${o.port}/mcp-run/${o.sessionId}` } };
   }
   // manager/worker AND the Companion (assistant) mount loom-orchestration — but a role-gated surface:
   // the assistant gets only my_context + the companion-gated chat_reply (buildServer's assistant branch),
@@ -1626,21 +1626,21 @@ export function buildMcpServers(o: {
     mcpServers[LOOM_ORCHESTRATION_SERVER_ID] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-orch/${o.sessionId}` };
   }
   if (wantsPlatform) {
-    mcpServers["loom-platform"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-platform/${o.sessionId}` };
+    mcpServers[LOOM_PLATFORM_SERVER_ID] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-platform/${o.sessionId}` };
   }
   if (wantsAudit) {
-    mcpServers["loom-audit"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-audit/${o.sessionId}` };
+    mcpServers[LOOM_AUDIT_SERVER_ID] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-audit/${o.sessionId}` };
   }
   // End-User Platform tier B3: a "workspace-auditor" session gets ONLY the curated loom-user-audit surface
   // (on top of loom-tasks) — NEVER loom-platform/orchestration/audit/setup. A tool not registered there
   // can't be reached (its whole tool world is 2 reads + 2 inert daemon-local suggest-writes).
   if (wantsUserAudit) {
-    mcpServers["loom-user-audit"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-user-audit/${o.sessionId}` };
+    mcpServers[LOOM_USER_AUDIT_SERVER_ID] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-user-audit/${o.sessionId}` };
   }
   // Setup Assistant (E1-3): a "setup" session gets ONLY the curated loom-setup surface (on top of
   // loom-tasks) — NEVER loom-platform/orchestration/audit. A tool not registered there can't be reached.
   if (wantsSetup) {
-    mcpServers["loom-setup"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-setup/${o.sessionId}` };
+    mcpServers[LOOM_SETUP_SERVER_ID] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-setup/${o.sessionId}` };
   }
   // Bucket 2b Elevated Operator: an "operator" session gets ONLY the curated loom-operator surface (on
   // top of loom-tasks) — NEVER loom-platform/orchestration/audit/setup. A tool not registered there can't
@@ -1648,7 +1648,7 @@ export function buildMcpServers(o: {
   // request, so this mount alone is not the enforcement point — a flag flip to OFF 404s the surface even
   // though the mount entry (an inert URL) still exists in this session's already-spawned argv.
   if (wantsOperator) {
-    mcpServers["loom-operator"] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-operator/${o.sessionId}` };
+    mcpServers[LOOM_OPERATOR_SERVER_ID] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-operator/${o.sessionId}` };
   }
   // Agent-tooling P4: ONE generalized loop over every resolved registry-capability grant (the bridged
   // legacy booleans + the new capabilities array). byte-identical-when-none: an empty resolved list is a
@@ -1704,6 +1704,16 @@ export function buildMcpServers(o: {
     if (!def) {
       // eslint-disable-next-line no-console
       console.warn(`[pty] ${o.sessionId} capability '${grant.slug}' is enabled but not found in the catalog — spawning without it.`);
+      continue;
+    }
+    // Card a6598c1e: defense-in-depth against a catalog row squatting a Loom first-party/legacy slug —
+    // validateCapabilityDefInput already refuses to CREATE one, but this is the point where the actual
+    // overwrite (mcpServers[def.slug] = server, below) would happen, so it is checked here too rather
+    // than trusting every upstream path (e.g. a pre-existing row, or a future seed-only kind) to have
+    // gone through that validator.
+    if ((RESERVED_CAPABILITY_SLUGS as readonly string[]).includes(def.slug)) {
+      // eslint-disable-next-line no-console
+      console.warn(`[pty] ${o.sessionId} capability '${grant.slug}' names a Loom-reserved slug — refusing to mount it (would overwrite a first-party MCP server).`);
       continue;
     }
     const connectionSecret = def.requiresConnection && grant.connectionId ? o.resolveConnectionSecret?.(grant.connectionId, o.projectId) : undefined;

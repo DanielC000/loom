@@ -40,6 +40,7 @@ import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } fr
 import { loomGithubMcpBin, ensureGithubMcpBinaryAsync } from "./github-binary.js";
 import type { EnsureGithubBinaryOpts, EnsureGithubBinaryResult, GithubBinaryProvisionOutcome } from "./github-binary.js";
 import { resolveExecutable } from "../pty/resolve-bin.js";
+import { LOOM_FIRST_PARTY_SERVER_IDS } from "../pty/tool-attribution.js";
 
 /** One owner-added catalog row as stored/read at the DB layer (mirrors ConnectionRow's shape). */
 export interface CapabilityDefRow {
@@ -84,8 +85,14 @@ const DESCRIPTION_MAX = 2000;
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 /** The legacy-bridged slugs (@loom/shared's `LEGACY_CAPABILITY_SLUGS`) — reserved so an owner-added
  *  row can never collide with or shadow a builtin. Duplicated as string literals (not imported) to keep
- *  this module's validation independent of the shared bridge helper's own location. */
-export const RESERVED_CAPABILITY_SLUGS = ["browser-testing", "document-conversion"] as const;
+ *  this module's validation independent of the shared bridge helper's own location.
+ *
+ *  Card a6598c1e: ALSO reserves every Loom first-party MCP server id (`LOOM_FIRST_PARTY_SERVER_IDS`,
+ *  derived — never hand-typed — from `pty/tool-attribution.ts`'s own constants). Without this, an
+ *  owner-created capability slugged e.g. `loom-tasks` would overwrite Loom's own mount in
+ *  `buildMcpServers` (last-write-wins on `mcpServers[def.slug] = server`) and the replacement would
+ *  inherit `loom-tasks`'s universal `BASELINE_SESSION_ALLOW` auto-approval. */
+export const RESERVED_CAPABILITY_SLUGS = ["browser-testing", "document-conversion", ...LOOM_FIRST_PARTY_SERVER_IDS] as const;
 
 function isNonBlankStr(v: unknown, max: number): v is string {
   return typeof v === "string" && v.trim().length > 0 && v.length <= max;
