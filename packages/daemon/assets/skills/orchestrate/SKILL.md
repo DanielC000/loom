@@ -916,9 +916,9 @@ what you checked. Found none? Treat it as live.
    drive it to the running app and confirm the change actually renders and behaves before you call the
    task done; you are standing-authorized to do this, so never park UI work as "eyeball pending, needs a
    human." Playwright is the agent default; claude-in-chrome is Lead-only / special-case (the real
-   authenticated browser) — heavy cockpit/Overview pages freeze its CDP renderer (mounting a live-session
-   terminal is the trigger), so if you must use it, eyeball only LIGHT, non-terminal pages (`/settings`,
-   `/skills`, `/platform`). Division of labor keys on the provisioned capability, not the role name: any
+   authenticated browser) — a heavy page that mounts a live-session terminal can freeze its CDP renderer,
+   so if you must use it, eyeball only a LIGHT, non-terminal page (see the project's `CLAUDE.md` for which
+   routes qualify on this project). Division of labor keys on the provisioned capability, not the role name: any
    worker that HAS the Playwright/`browserTesting` surface provisioned + allowlisted **self-verifies**
    UI/visual work with Playwright before reporting done — whatever its role name (e.g. the QA / Web
    Designer rigs are provisioned this way, but so could a Dev/SEO/Docs rig be); only a worker WITHOUT that
