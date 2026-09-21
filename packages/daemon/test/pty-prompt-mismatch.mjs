@@ -469,7 +469,11 @@ try {
     // disclosure-safe class label (real logic, imported, not duplicated) plus the redactedExcerpt shape,
     // and explicitly asserts the raw character does NOT appear anywhere in the line.
     check("6h: it names the dropped character's CLASS, not the character itself", (nearMiss6h[0] ?? "").includes(`droppedCharClass=${classifyDroppedChar(droppedChar)}`));
-    check("6h: the dropped character is logged ONLY through the redactedExcerpt chokepoint (length+hash), never inline", /droppedChar=<redacted len=1 hash=[0-9a-f]+>/.test(nearMiss6h[0] ?? ""));
+    // Card 8b13a61e: droppedChar is ALWAYS exactly one character (intended[dropIndex]) — below
+    // REDACTED_EXCERPT_MIN_HASH_LEN, so redactedExcerpt now withholds the hash entirely (a 1-char hash is
+    // the most brute-forcible case in the whole card, ~100 candidates). Length-only, never inline.
+    check("6h: the dropped character is logged ONLY through the redactedExcerpt chokepoint (length only — a 1-char excerpt is below the minimum hash length), never inline", /droppedChar=<redacted len=1>/.test(nearMiss6h[0] ?? ""));
+    check("6h: the dropped character's redacted form carries no hash to enumerate against", !(nearMiss6h[0] ?? "").includes("droppedChar=<redacted len=1 hash="));
     check("6h: the raw dropped character never appears in the log line at all", !(nearMiss6h[0] ?? "").includes(JSON.stringify(droppedChar)));
     const noticeLanded6h = await waitUntil(() => hasPendingMismatchNotice(sid));
     check("6h: THE SAFETY CASE — naming this shape never suppresses the session-facing notice (still a real, if one-character, divergence)", noticeLanded6h);

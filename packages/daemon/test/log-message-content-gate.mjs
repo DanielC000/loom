@@ -254,6 +254,74 @@ try {
     check("(6b) ON: the real daemon log line DOES contain the secret rendered just before the footer", capOn.lines.some((l) => l.includes(SECRET_ON)));
     delete process.env.LOOM_LOG_MESSAGE_CONTENT;
   }
+
+  // ===== (7) UNIT: short-excerpt minimum-length policy (card 8b13a61e) — below the chokepoint's own =====
+  // ===== REDACTED_EXCERPT_MIN_HASH_LEN, no hash is emitted (length only): a 32-bit unsalted hash over ====
+  // ===== so tiny a candidate space is brute-forcible, so the byte-identity-matching guarantee only ========
+  // ===== actually holds at/above the minimum. See docs/decisions/8b13a61e-redacted-excerpt-minimum- ========
+  // ===== hash-length.md for the full reasoning + rejected alternatives. ====================================
+  {
+    delete process.env.LOOM_LOG_MESSAGE_CONTENT;
+    // Mirrors host.ts's own REDACTED_EXCERPT_MIN_HASH_LEN — update this if that constant ever moves.
+    const MIN_HASH_LEN = 8;
+
+    // (7a) SHAPE: below the minimum, no hash field at all — only `len` survives.
+    const shortSecret = "ok"; // 2 chars, deliberately far below the boundary
+    const outShort = redactedExcerpt(shortSecret);
+    check("(7a) OFF, short excerpt: shape is <redacted len=N> with NO hash field", /^<redacted len=\d+>$/.test(outShort));
+    check("(7a) OFF, short excerpt: length is still the real length", outShort === `<redacted len=${shortSecret.length}>`);
+    check("(7a) OFF, short excerpt: raw content does not reach the returned string", !outShort.includes(shortSecret));
+
+    // (7b) BOUNDARY: exactly at the minimum still gets a hash; one char below does not.
+    const atMin = "a".repeat(MIN_HASH_LEN);
+    const belowMin = "a".repeat(MIN_HASH_LEN - 1);
+    check(`(7b) OFF, excerpt of exactly ${MIN_HASH_LEN} chars: DOES carry a hash`, /^<redacted len=\d+ hash=[0-9a-f]{8}>$/.test(redactedExcerpt(atMin)));
+    check(`(7b) OFF, excerpt of ${MIN_HASH_LEN - 1} chars (one below): does NOT carry a hash`, /^<redacted len=\d+>$/.test(redactedExcerpt(belowMin)));
+
+    // (7c) RECOVERABILITY — the whole point: a short excerpt's redacted form must not let the input be
+    // recovered by enumeration. Proved structurally: every candidate of the SAME short length, over a
+    // realistic alphabet, must redact to the IDENTICAL output (only `len` survives) — so no enumeration
+    // can ever narrow the candidate set below "every string of this length" (the full space, i.e. no
+    // better than guessing with zero information from the log line).
+    const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const shortLen = 3; // comfortably below MIN_HASH_LEN
+    const sampleCandidates = [];
+    for (let i = 0; i < 500; i++) {
+      let s = "";
+      for (let j = 0; j < shortLen; j++) s += alphabet[Math.floor(Math.random() * alphabet.length)];
+      sampleCandidates.push(s);
+    }
+    const outputsForCandidates = new Set(sampleCandidates.map((c) => redactedExcerpt(c)));
+    check("(7c) RECOVERABILITY: 500 random distinct short candidates all redact to the SAME single output (no content signal survives to enumerate against)", outputsForCandidates.size === 1);
+    check("(7c) RECOVERABILITY: that single output carries no hash to enumerate against", /^<redacted len=\d+>$/.test([...outputsForCandidates][0]));
+
+    // (7c-control) NEGATIVE CONTROL on this very check — proves (7c) is falsifiable, not vacuous: the
+    // PRE-FIX shape (len+hash, unconditional at every length) is re-derived directly here (never imported
+    // from production — this is the OLD behavior, reconstructed only to prove the new check can fail) and
+    // shown to FAIL the same "collapses to one output" assertion (7c) now expects to pass — the old shape
+    // DOES discriminate the 500 short candidates into distinct outputs, which is exactly the brute-force
+    // exposure this card fixes.
+    const fnv1a32Ref = (s) => {
+      let h = 0x811c9dc5;
+      for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+      return (h >>> 0).toString(16).padStart(8, "0");
+    };
+    const oldShapeOutputs = new Set(sampleCandidates.map((c) => `<redacted len=${c.length} hash=${fnv1a32Ref(c)}>`));
+    check("(7c-control) NEGATIVE CONTROL: the PRE-FIX shape (len+hash, unconditional) DOES discriminate 500 short candidates into distinct outputs — proving (7c) genuinely exercises the fix, not a vacuous pass", oldShapeOutputs.size > 1);
+
+    // (7d) LONG EXCERPT UNCHANGED: well above the minimum, the existing hash+len shape and cross-
+    // occurrence discrimination are preserved exactly as before this card.
+    const longA = "the owner's actual message text, still well above the minimum length";
+    const longB = "a completely different payload, same length".padEnd(longA.length, "!");
+    check("(7d) OFF, long excerpt: shape unchanged (len+hash)", /^<redacted len=\d+ hash=[0-9a-f]{8}>$/.test(redactedExcerpt(longA)));
+    check("(7d) OFF, long excerpt: still discriminates different content of the same length", redactedExcerpt(longA) !== redactedExcerpt(longB));
+
+    // (7e) FLAG ON UNCHANGED: a short excerpt is still fully revealed when the operator opts in — the
+    // minimum-length policy applies only to the flag-OFF (redaction) path.
+    process.env.LOOM_LOG_MESSAGE_CONTENT = "1";
+    check("(7e) ON, short excerpt: unaffected — byte-identical to JSON.stringify", redactedExcerpt(shortSecret) === JSON.stringify(shortSecret));
+    delete process.env.LOOM_LOG_MESSAGE_CONTENT;
+  }
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }

@@ -83,8 +83,10 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
   and `<LOOM_HOME>/logs/daemon-output.log`, the bounded/rotating/timestamped copy of the daemon's own
   output (as before). **`LOOM_LOG_MESSAGE_CONTENT` (default OFF, card `16c93a50`):** this log is shared
   across every tenant on the host, so message CONTENT (a raw excerpt of session/agent text) is redacted to
-  a length+hash signature at the handful of diagnostics that would otherwise quote it — length/hash
-  diagnostics themselves (`submit-write`/`prompt-echo`/`prompt-mismatch`) are unaffected either way. Set
+  a length+hash signature (length only below a minimum excerpt length — see `REDACTED_EXCERPT_MIN_HASH_LEN`,
+  `pty/host.ts`; a 32-bit hash of too short an excerpt is itself brute-forcible) at the handful of
+  diagnostics that would otherwise quote it — length/hash diagnostics themselves (`submit-write`/
+  `prompt-echo`/`prompt-mismatch`) are unaffected either way. Set
   `LOOM_LOG_MESSAGE_CONTENT=1` in the daemon's own env (e.g. `<LOOM_HOME>/.env`) to opt this host back into
   raw content for local debugging — never flip it in code; see `paths.ts`'s `isLogMessageContentEnabled`.
   Tracks its PID (+ port) at `<LOOM_HOME>/daemon-supervisor.pid`, best-effort-removed

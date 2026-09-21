@@ -171,19 +171,29 @@ function textSignature(text: string): { len: number; hash: string } {
   return { len: text.length, hash: fnv1a32(text) };
 }
 
+/** @decision 8b13a61e — below this length `redactedExcerpt` emits length only, no hash (a 32-bit unsalted
+ *  hash over so tiny a candidate space is brute-forcible). Length is a PROXY for entropy, not entropy
+ *  itself — reaching this minimum does NOT certify a structured/low-entropy excerpt as safe (see record). */
+const REDACTED_EXCERPT_MIN_HASH_LEN = 8;
+
 /**
  * Card 16c93a50 (owner ruling, request `0eb43216`): the single chokepoint every content-bearing diagnostic
  * in this file (and `sessions/service.ts`'s `[give-up] … PARKED` line) routes its excerpt through, instead
  * of quoting `JSON.stringify(<excerpt>)` directly. Every call site passes the ALREADY-SLICED/windowed
  * candidate excerpt (never the full session text) — with {@link isLogMessageContentEnabled} OFF (the
- * shipped default), this returns that excerpt's own length + the SAME cheap `fnv1a32` hash `ptyWrite`'s
- * own log line already uses, never its bytes, so a reader can still confirm two occurrences are byte-
- * identical without the daemon ever writing the content itself to the rotated, multi-tenant
- * `daemon-output.log`. With the flag on, this returns exactly what the call site used to inline
- * unconditionally (`JSON.stringify(excerpt)`) — byte-identical to pre-16c93a50 behavior.
+ * shipped default), this returns that excerpt's own length plus, ONLY when the excerpt is at least
+ * {@link REDACTED_EXCERPT_MIN_HASH_LEN} characters long, the SAME cheap `fnv1a32` hash `ptyWrite`'s own
+ * log line already uses — never the raw bytes. **The byte-identity-matching guarantee ("a reader can
+ * still confirm two occurrences are byte-identical without the daemon ever writing the content itself to
+ * the rotated, multi-tenant `daemon-output.log`") holds ONLY for excerpts at or above that minimum**
+ * (card `8b13a61e`): below it, a 32-bit unsalted hash over so tiny an input domain is brute-forcible, so a
+ * short excerpt instead gets length-only — sacrificing cross-occurrence matching it never meaningfully had
+ * at that length anyway. With the flag on, this returns exactly what the call site used to inline
+ * unconditionally (`JSON.stringify(excerpt)`) — byte-identical to pre-16c93a50 behavior, at any length.
  */
 export function redactedExcerpt(excerpt: string): string {
   if (isLogMessageContentEnabled()) return JSON.stringify(excerpt);
+  if (excerpt.length < REDACTED_EXCERPT_MIN_HASH_LEN) return `<redacted len=${excerpt.length}>`;
   return `<redacted len=${excerpt.length} hash=${fnv1a32(excerpt)}>`;
 }
 
