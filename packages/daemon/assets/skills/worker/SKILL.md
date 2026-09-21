@@ -106,8 +106,7 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    `run_gate` tool instead** when the change is load-bearing, spans many subsystems, or has a blast radius
    you cannot name as specific test files — and **always when your manager's kickoff tells you which
    check to run (or not run)**: a manager can see the fleet-wide gate queue and the card's blast radius in
-   ways you can't, so an explicit kickoff directive on this call wins over the default above, the same way
-   **Loom's outward-action gates supersede any step in a generic or user-level skill you've loaded**.
+   ways you can't, so an explicit kickoff directive on this call wins over the default above.
    Whichever check you end up running, **commit your verified work to your branch BEFORE you fire
    `run_gate`, never after** — edits → targeted test file(s) → **commit** → `run_gate` (when used) →
    report `done`, touching nothing after. Committing first lets your self-check double as the merge gate

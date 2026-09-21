@@ -14,7 +14,9 @@ prose. The daemon auto-commits the vault — never run manual vault git.
    their rationale, and add items for what remains. Move the task to its correct column by ROLE
    (review / terminal / parked). Only move to a **terminal** column if it's actually true — scoped work
    outstanding means it isn't done.
-2. **Code state** — ensure the build/gate passes; commit only if asked. Report any uncommitted changes
+2. **Code state** — pushing and merging is the **human-driven/lead path only**. **A worker never pushes
+   and never merges** — finish via `/worker` (`worker_report`) instead; see "By role" below. For the
+   human/lead path: ensure the build/gate passes; commit only if asked. Report any uncommitted changes
    plainly. When you *do* commit, stage an **explicit list of the paths this session touched**
    (`git add <path> …`) — **never `git add -A` or `git add .`** in a shared workspace: other unrelated
    in-flight work may be present and a blanket stage would sweep it into your commit. Its subject
