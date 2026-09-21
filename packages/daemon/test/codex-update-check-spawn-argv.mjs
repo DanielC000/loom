@@ -116,6 +116,26 @@ check("fresh spawn argv carries the loom-orchestration MCP auto-approve override
 check("fresh spawn argv carries the loom-tasks MCP auto-approve override too", hasAdjacentCArg(freshArgv, "mcp_servers.loom-tasks.default_tools_approval_mode=approve"));
 check("[negative control] hasAdjacentCArg returns false against the auto-approve value present but NOT adjacent to -c", !hasAdjacentCArg(["-c", "some_other_key=true", "mcp_servers.loom-orchestration.default_tools_approval_mode=approve"], "mcp_servers.loom-orchestration.default_tools_approval_mode=approve"));
 
+// --- card 90dc3c8c: the SAME real-spawn argv capture, for each of the three roles the auto-approve grant
+// was widened to (loom-setup/loom-operator/loom-platform) — the ONLY thing standing between this mechanism
+// and a silent, self-concealing regression is pinning the wiring HERE, against a real spawned argv, not
+// just against the pure mcpServersToCodexArgs unit coverage in codex-host-decisions.mjs. --------------------
+for (const [role, serverId] of [["setup", "loom-setup"], ["operator", "loom-operator"], ["platform", "loom-platform"]]) {
+  const argv = await spawnAndCaptureArgv(`codex-argv-${role}`, { role });
+  console.log(`[info] ${role} spawn argv: ${JSON.stringify(argv)}`);
+  check(`${role} spawn argv carries the ${serverId} MCP auto-approve override (card 90dc3c8c)`, hasAdjacentCArg(argv, `mcp_servers.${serverId}.default_tools_approval_mode=approve`));
+}
+// --- NEGATIVE CONTROL: the three roles card 90dc3c8c deliberately did NOT grant (each unreachable today
+// via the normal profile+spawn path for its own independent reason — see docs/decisions/90dc3c8c-*.md).
+// createCodexPty itself works fine for these roles when invoked directly (as this test does), so this
+// proves the auto-approve set itself was not accidentally widened to include them, distinct from the
+// separate, unrelated reachability gaps that keep a REAL profile-driven spawn from ever reaching here. ----
+for (const [role, serverId] of [["auditor", "loom-audit"], ["workspace-auditor", "loom-user-audit"], ["run", "loom-run"]]) {
+  const argv = await spawnAndCaptureArgv(`codex-argv-${role}`, { role });
+  console.log(`[info] ${role} spawn argv: ${JSON.stringify(argv)}`);
+  check(`${role} spawn argv mounts ${serverId} but carries NO auto-approve override (deliberately ungranted — card 90dc3c8c)`, !hasAdjacentCArg(argv, `mcp_servers.${serverId}.default_tools_approval_mode=approve`) && argv.some((a) => a.startsWith(`mcp_servers.${serverId}.url=`)));
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — createCodexPty's real spawn argv carries \"-c check_for_update_on_startup=false\" on a fresh spawn, a resume spawn, and a fork spawn alike (the three shapes buildCodexResumeArgs distinguishes), proven against a real OS child process substituted for codex via LOOM_CODEX_BIN, so this regresses loudly even when no codex update happens to be pending on the host running this test. Card 702f2197: the SAME real-spawn argv capture also pins that createCodexPty's production call site actually wires CODEX_AUTO_APPROVE_MCP_SERVER_IDS into mcpServersToCodexArgs — both loom-tasks and loom-orchestration carry the default_tools_approval_mode=approve override as an adjacent -c pair, so a future refactor that silently drops that argument (leaving every OTHER test green) regresses loudly here instead."
   : `\n❌ ${failures} FAILURE(S).`);

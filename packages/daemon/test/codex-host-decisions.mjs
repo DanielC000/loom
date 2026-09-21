@@ -362,9 +362,28 @@ check(
 // Card 702f2197: the REAL production call site (createCodexPty) passes CODEX_AUTO_APPROVE_MCP_SERVER_IDS
 // as autoApproveServerIds — proving the actual wired behavior a codex WORKER spawn gets, not a
 // hand-constructed set that could drift from the real one.
+//
+// Card 90dc3c8c: widened from loom-tasks/loom-orchestration (worker only) to also cover loom-setup/
+// loom-operator/loom-platform — the three of the six remaining first-party ids whose role is REACHABLE
+// today (profile-pinnable harness + a real seeded profile). Deliberately EXCLUDES loom-audit/
+// loom-user-audit/loom-run — each unreachable today for its own independent reason (see
+// docs/decisions/90dc3c8c-*.md), never a proportionality call. This exact-membership pin (`.size === 5`)
+// is the guard that must be updated, in the SAME commit, whenever this set changes — loosening it to make
+// a diff pass defeats its entire point.
 check(
-  "CODEX_AUTO_APPROVE_MCP_SERVER_IDS: exactly loom-tasks + loom-orchestration — Loom's own first-party server ids a worker mounts, never a capability-catalog/playwright/markitdown/codescape server",
-  CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-tasks") && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-orchestration") && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.size === 2,
+  "CODEX_AUTO_APPROVE_MCP_SERVER_IDS: exactly loom-tasks + loom-orchestration + loom-setup + loom-operator + loom-platform — Loom's own first-party, REACHABLE-today role surfaces, never a capability-catalog/playwright/markitdown/codescape server",
+  CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-tasks")
+    && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-orchestration")
+    && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-setup")
+    && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-operator")
+    && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-platform")
+    && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.size === 5,
+);
+check(
+  "CODEX_AUTO_APPROVE_MCP_SERVER_IDS deliberately excludes the three UNREACHABLE-today first-party ids (card 90dc3c8c) — loom-audit, loom-user-audit, loom-run",
+  !CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-audit")
+    && !CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-user-audit")
+    && !CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-run"),
 );
 const workerArgsAutoApproved = mcpServersToCodexArgs(workerServers, { autoApproveServerIds: CODEX_AUTO_APPROVE_MCP_SERVER_IDS });
 check(
@@ -384,6 +403,41 @@ check(
       && !args.includes("mcp_servers.some-owner-capability.default_tools_approval_mode=approve");
   })(),
 );
+
+// Card 90dc3c8c: REAL integration proof for each of the three newly-reachable roles, mirroring the worker
+// proof above — a REAL buildMcpServers(role) result carries the auto-approve override on its OWN
+// role-gated server, and NOT on the servers a DIFFERENT role would mount.
+for (const [role, serverId, mountPath] of [
+  ["setup", "loom-setup", "/mcp-setup/"],
+  ["operator", "loom-operator", "/mcp-operator/"],
+  ["platform", "loom-platform", "/mcp-platform/"],
+]) {
+  const servers = buildMcpServers({ sessionId: `sess-${role}`, port: 4317, role });
+  check(
+    `mcpServersToCodexArgs against a REAL buildMcpServers(role:'${role}') result: mounts ${serverId}`,
+    mcpServersToCodexArgs(servers).some((a) => a.startsWith(`mcp_servers.${serverId}.url=`) && a.includes(mountPath)),
+  );
+  const approved = mcpServersToCodexArgs(servers, { autoApproveServerIds: CODEX_AUTO_APPROVE_MCP_SERVER_IDS });
+  check(
+    `card 90dc3c8c fix: role:'${role}' carries the ${serverId} auto-approve override`,
+    approved.includes(`mcp_servers.${serverId}.default_tools_approval_mode=approve`),
+  );
+}
+// NEGATIVE CONTROL for the three roles deliberately left ungranted — proves the widening above did not
+// silently sweep in the still-unreachable ids too.
+for (const [role, serverId] of [
+  ["auditor", "loom-audit"],
+  ["workspace-auditor", "loom-user-audit"],
+  ["run", "loom-run"],
+]) {
+  const servers = buildMcpServers({ sessionId: `sess-${role}`, port: 4317, role });
+  const approved = mcpServersToCodexArgs(servers, { autoApproveServerIds: CODEX_AUTO_APPROVE_MCP_SERVER_IDS });
+  check(
+    `NEGATIVE CONTROL: role:'${role}' mounts ${serverId} but gets NO auto-approve override (unreachable today — card 90dc3c8c)`,
+    mcpServersToCodexArgs(servers).some((a) => a.startsWith(`mcp_servers.${serverId}.url=`))
+      && !approved.includes(`mcp_servers.${serverId}.default_tools_approval_mode=approve`),
+  );
+}
 
 // --- buildCodexResumeArgs (card c6ce2804 DoD-1) — the constructed-argv coverage that replaces the
 // real-spawn regression test relocated to docs/investigations/c6ce2804-codex-resume-rollout-timing/

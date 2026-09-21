@@ -31,8 +31,18 @@ import { findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } f
 
 /** @decision 702f2197 — the ONLY server ids passed as `mcpServersToCodexArgs`'s `autoApproveServerIds` at
  *  `createCodexPty`'s call site: Loom's own first-party, daemon-local, role-gated surfaces. Never widen
- *  this to a capability-catalog/playwright/markitdown/codescape server, which can be third-party. */
-export const CODEX_AUTO_APPROVE_MCP_SERVER_IDS: ReadonlySet<string> = new Set([LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID]);
+ *  this to a capability-catalog/playwright/markitdown/codescape server, which can be third-party.
+ *
+ * @decision 90dc3c8c — widened to also cover loom-setup/loom-operator/loom-platform, the three of the
+ * six remaining first-party ids reachable today; do NOT add loom-audit/loom-user-audit/loom-run without
+ * first re-deriving their reachability — each is unreachable today for a separate, unrelated reason. */
+export const CODEX_AUTO_APPROVE_MCP_SERVER_IDS: ReadonlySet<string> = new Set([
+  LOOM_TASKS_SERVER_ID,
+  LOOM_ORCHESTRATION_SERVER_ID,
+  LOOM_SETUP_SERVER_ID,
+  LOOM_OPERATOR_SERVER_ID,
+  LOOM_PLATFORM_SERVER_ID,
+]);
 
 const RING_CAP_BYTES = 256 * 1024;
 /** Multi-harness epic (df1f94b0) Phase 1: bounded rolling scan buffer for codex's own trust-dialog/busy-
