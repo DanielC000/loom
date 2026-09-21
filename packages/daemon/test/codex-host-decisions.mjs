@@ -269,6 +269,54 @@ check(
   JSON.stringify(mcpServersToCodexArgs({ broken: { type: "http" } })) === "[]",
 );
 
+// --- mcpServersToCodexArgs `autoApproveServerIds` (card 702f2197) — bypasses codex's `-a never` blanket
+// MCP tool-call deny for ONE named server only. See docs/decisions/702f2197-codex-mcp-server-approve-
+// mode-bypasses-a-never-blanket-deny.md for the full upstream-source-verified mechanism. -----------------
+
+check(
+  "mcpServersToCodexArgs: byte-identical to the pre-702f2197 shape when autoApproveServerIds is OMITTED (additive-when-off — negative control on the new option itself)",
+  JSON.stringify(mcpServersToCodexArgs({ "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/abc" } }))
+    === JSON.stringify(["-c", "mcp_servers.loom-tasks.url=http://127.0.0.1:4317/mcp/abc"]),
+);
+check(
+  "mcpServersToCodexArgs: autoApproveServerIds naming a server that IS mounted ⇒ the url pair is followed immediately by a default_tools_approval_mode=approve override for that SAME id",
+  JSON.stringify(mcpServersToCodexArgs(
+    { "loom-orchestration": { type: "http", url: "http://127.0.0.1:4317/mcp-orch/abc" } },
+    { autoApproveServerIds: new Set(["loom-orchestration"]) },
+  )) === JSON.stringify([
+    "-c", "mcp_servers.loom-orchestration.url=http://127.0.0.1:4317/mcp-orch/abc",
+    "-c", "mcp_servers.loom-orchestration.default_tools_approval_mode=approve",
+  ]),
+);
+check(
+  "mcpServersToCodexArgs: autoApproveServerIds is PER-SERVER — a server NOT named in the set gets no override even though another server in the SAME map does (proves this doesn't leak to every mounted server)",
+  JSON.stringify(mcpServersToCodexArgs(
+    {
+      "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/abc" },
+      "loom-orchestration": { type: "http", url: "http://127.0.0.1:4317/mcp-orch/abc" },
+    },
+    { autoApproveServerIds: new Set(["loom-orchestration"]) },
+  )) === JSON.stringify([
+    "-c", "mcp_servers.loom-tasks.url=http://127.0.0.1:4317/mcp/abc",
+    "-c", "mcp_servers.loom-orchestration.url=http://127.0.0.1:4317/mcp-orch/abc",
+    "-c", "mcp_servers.loom-orchestration.default_tools_approval_mode=approve",
+  ]),
+);
+check(
+  "mcpServersToCodexArgs: a server named in autoApproveServerIds but NOT actually mountable (non-http, dropped) gets NO override — the auto-approve override can never fire for an entry that was never translated to a url pair at all",
+  JSON.stringify(mcpServersToCodexArgs(
+    { "playwright": { type: "stdio", command: "npx" } },
+    { autoApproveServerIds: new Set(["playwright"]) },
+  )) === "[]",
+);
+check(
+  "mcpServersToCodexArgs: autoApproveServerIds naming an id absent from the map entirely is a silent no-op (never throws, never emits anything for a server that was never in `mcpServers`)",
+  JSON.stringify(mcpServersToCodexArgs(
+    { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/abc" } },
+    { autoApproveServerIds: new Set(["some-id-not-in-the-map"]) },
+  )) === JSON.stringify(["-c", "mcp_servers.loom-tasks.url=http://127.0.0.1:4317/mcp/abc"]),
+);
+
 // --- unsupportedCodexMcpServers (card b987f086) — companion to mcpServersToCodexArgs above: WHICH
 // entries get dropped, so a real caller can report it instead of leaving the console.warn as the only
 // signal. Run against the EXACT SAME inputs as the mcpServersToCodexArgs block above, so a reader can see
@@ -299,7 +347,7 @@ check(
 
 // Real integration with the SAME buildMcpServers this project's claude spawn path already uses — proves
 // this translation stays byte-consistent with claude's own routing table rather than a hand-copied one.
-const { buildMcpServers } = await import("../dist/pty/host.js");
+const { buildMcpServers, CODEX_AUTO_APPROVE_MCP_SERVER_IDS } = await import("../dist/pty/host.js");
 const workerServers = buildMcpServers({ sessionId: "sess-1", port: 4317, role: "worker" });
 const workerArgs = mcpServersToCodexArgs(workerServers);
 check(
@@ -309,6 +357,32 @@ check(
 check(
   "mcpServersToCodexArgs against a REAL buildMcpServers(role:'worker') result: mounts loom-orchestration too (worker gets both, exactly as claude's --mcp-config does)",
   workerArgs.includes("mcp_servers.loom-orchestration.url=http://127.0.0.1:4317/mcp-orch/sess-1"),
+);
+
+// Card 702f2197: the REAL production call site (createCodexPty) passes CODEX_AUTO_APPROVE_MCP_SERVER_IDS
+// as autoApproveServerIds — proving the actual wired behavior a codex WORKER spawn gets, not a
+// hand-constructed set that could drift from the real one.
+check(
+  "CODEX_AUTO_APPROVE_MCP_SERVER_IDS: exactly loom-tasks + loom-orchestration — Loom's own first-party server ids a worker mounts, never a capability-catalog/playwright/markitdown/codescape server",
+  CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-tasks") && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-orchestration") && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.size === 2,
+);
+const workerArgsAutoApproved = mcpServersToCodexArgs(workerServers, { autoApproveServerIds: CODEX_AUTO_APPROVE_MCP_SERVER_IDS });
+check(
+  "DEFECT REPRO, FIXED: against a REAL worker mount set with the REAL production auto-approve set, loom-orchestration (where worker_report lives) carries the default_tools_approval_mode=approve override — the exact lever that bypasses the 'requires approval and approval policy is never' denial card 702f2197 reports",
+  workerArgsAutoApproved.includes("mcp_servers.loom-orchestration.default_tools_approval_mode=approve"),
+);
+check(
+  "same fix: loom-tasks (memory_write/tasks_*/wake_me) gets the SAME override",
+  workerArgsAutoApproved.includes("mcp_servers.loom-tasks.default_tools_approval_mode=approve"),
+);
+check(
+  "NEGATIVE CONTROL: an owner-granted third-party capability server mounted alongside the two Loom ones gets NO override — proves the fix does not widen beyond Loom's own first-party surface",
+  (() => {
+    const mixed = { ...workerServers, "some-owner-capability": { type: "http", url: "http://127.0.0.1:4317/some-external-mcp" } };
+    const args = mcpServersToCodexArgs(mixed, { autoApproveServerIds: CODEX_AUTO_APPROVE_MCP_SERVER_IDS });
+    return args.includes("mcp_servers.some-owner-capability.url=http://127.0.0.1:4317/some-external-mcp")
+      && !args.includes("mcp_servers.some-owner-capability.default_tools_approval_mode=approve");
+  })(),
 );
 
 // --- buildCodexResumeArgs (card c6ce2804 DoD-1) — the constructed-argv coverage that replaces the

@@ -104,9 +104,14 @@ export function isCodexModelLoaded(screen: string): boolean {
  * @decision 7fa73e2c — an unsupported entry must be REPORTED, never silently skipped: a silent skip here
  * is indistinguishable from a working mount (e.g. browserTesting silently spawning with no Playwright
  * MCP). Report via the companion {@link unsupportedCodexMcpServers}.
+ *
+ * @decision 702f2197 — `opts.autoApproveServerIds` emits `-c mcp_servers.<id>.default_tools_approval_mode=approve`,
+ * bypassing the `-a never` blanket MCP tool-call deny for that server ONLY (never `-a`/`-s` themselves).
+ * Pass ONLY first-party Loom server ids — never a capability-catalog server, which can be third-party.
  */
-export function mcpServersToCodexArgs(mcpServers: Record<string, unknown>): string[] {
+export function mcpServersToCodexArgs(mcpServers: Record<string, unknown>, opts?: { autoApproveServerIds?: ReadonlySet<string> }): string[] {
   const args: string[] = [];
+  const autoApprove = opts?.autoApproveServerIds;
   for (const [id, entry] of Object.entries(mcpServers)) {
     if (!entry || typeof entry !== "object") continue;
     const { type, url } = entry as { type?: unknown; url?: unknown };
@@ -116,6 +121,9 @@ export function mcpServersToCodexArgs(mcpServers: Record<string, unknown>): stri
       continue;
     }
     args.push("-c", `mcp_servers.${id}.url=${url}`);
+    if (autoApprove?.has(id)) {
+      args.push("-c", `mcp_servers.${id}.default_tools_approval_mode=approve`);
+    }
   }
   return args;
 }

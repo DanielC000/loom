@@ -29,6 +29,11 @@ import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDi
 import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS } from "./codex-host.js";
 import { findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } from "./codex-transcript.js";
 
+/** @decision 702f2197 — the ONLY server ids passed as `mcpServersToCodexArgs`'s `autoApproveServerIds` at
+ *  `createCodexPty`'s call site: Loom's own first-party, daemon-local, role-gated surfaces. Never widen
+ *  this to a capability-catalog/playwright/markitdown/codescape server, which can be third-party. */
+export const CODEX_AUTO_APPROVE_MCP_SERVER_IDS: ReadonlySet<string> = new Set([LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID]);
+
 const RING_CAP_BYTES = 256 * 1024;
 /** Multi-harness epic (df1f94b0) Phase 1: bounded rolling scan buffer for codex's own trust-dialog/busy-
  *  marker detection (`CodexLive.screenScan`) — large enough to hold the trust-dialog menu text plus
@@ -4620,7 +4625,9 @@ export class PtyHost {
       capabilities: opts.capabilities, capabilityCatalog, resolveConnectionSecret: this.resolveConnectionSecret,
       projectId: opts.projectId,
     });
-    const mcpArgs = mcpServersToCodexArgs(mcpServers);
+    // @decision 702f2197 — ONLY Loom's own first-party server ids go in autoApproveServerIds; never a
+    // capability-catalog/playwright/markitdown/codescape server, which can be third-party.
+    const mcpArgs = mcpServersToCodexArgs(mcpServers, { autoApproveServerIds: CODEX_AUTO_APPROVE_MCP_SERVER_IDS });
     for (const dropped of unsupportedCodexMcpServers(mcpServers)) {
       unsupportedItems.push({ id: dropped.id, reason: `resolved to a "${dropped.type}" MCP server, which codex cannot mount — codex only mounts {type:"http"} servers` });
     }
