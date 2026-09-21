@@ -109,13 +109,14 @@ const parsePageParam = (v: string | undefined, fallback: number): number => {
   return v && Number.isFinite(n) && n >= 0 ? n : fallback;
 };
 
-/** Maps the run-history UI's outcome-filter value (`fired`/`deferred`/`failed`) to the matching
+/** Maps the run-history UI's outcome-filter value (`fired`/`deferred`/`failed`/`missed`) to the matching
  *  orchestration-event kind for the `?outcome=` param on GET /api/schedules/history. Any other value
  *  (including "all" or a typo) resolves to `undefined` → no kind filter (all outcomes). */
-const SCHEDULE_OUTCOME_KIND: Record<string, "schedule_fired" | "schedule_fire_deferred" | "schedule_fire_failed" | undefined> = {
+const SCHEDULE_OUTCOME_KIND: Record<string, "schedule_fired" | "schedule_fire_deferred" | "schedule_fire_failed" | "schedule_fire_missed" | undefined> = {
   fired: "schedule_fired",
   deferred: "schedule_fire_deferred",
   failed: "schedule_fire_failed",
+  missed: "schedule_fire_missed",
 };
 /** Whitelist guard for the human REST task surfaces — rejects any value outside the p0–p3 enum. */
 const isTaskPriority = (v: unknown): v is Task["priority"] => v === "p0" || v === "p1" || v === "p2" || v === "p3";
@@ -1024,8 +1025,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // create/update (the Scheduler advances it after each fire). ---
   app.get("/api/schedules", async () => deps.db.listSchedules());
   // Run history: a bounded, newest-first page of previous schedule FIRES (the durable `schedule_fired` /
-  // `schedule_fire_deferred` / `schedule_fire_failed` orchestration events), god-eye across every schedule
-  // like the list above. Backs the Schedules page's collapsed-by-default, lazy-loaded run-history section.
+  // `schedule_fire_deferred` / `schedule_fire_failed` / `schedule_fire_missed` orchestration events),
+  // god-eye across every schedule like the list above. Backs the Schedules page's collapsed-by-default, lazy-loaded run-history section.
   // PAGINATED (?limit=&offset=, default DEFAULT_ARCHIVE_PAGE_LIMIT, clamp MAX_SCHEDULE_HISTORY_PAGE in
   // db.ts) with an optional `?scheduleId=` filter — the client accumulates TRUE offset pages for its
   // "Load more" (never a grown limit, which would silently truncate at the clamp). Enrichment (schedule

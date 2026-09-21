@@ -871,7 +871,7 @@ export const api = {
   // all schedules; optional `scheduleId` scopes to one. PAGINATED — the caller accumulates TRUE offset
   // pages for "Load more" (`{items, total, limit}`, same contract as the archive lists). Lazy: the
   // Schedules page only calls this once its collapsed history section is expanded.
-  scheduleHistory: (opts?: { scheduleId?: string; outcome?: "fired" | "deferred" | "failed"; limit?: number; offset?: number }) =>
+  scheduleHistory: (opts?: { scheduleId?: string; outcome?: "fired" | "deferred" | "failed" | "missed"; limit?: number; offset?: number }) =>
     get<ScheduleHistoryPage>(`/api/schedules/history?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.scheduleId ? `&scheduleId=${encodeURIComponent(opts.scheduleId)}` : ""}${opts?.outcome ? `&outcome=${opts.outcome}` : ""}`),
 
   // --- Event Triggers (Loom Event Triggers subsystem, card f5d07121): when an INTERNAL orchestration

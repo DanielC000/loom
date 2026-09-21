@@ -1459,9 +1459,10 @@ function likeSubstring(q: string): string {
 const MAX_SCHEDULE_HISTORY_PAGE = 500;
 
 /** The schedule-fire orchestration-event kinds backing the run-history view (a paused/usage-limited tick
- *  records NO event, so there is deliberately no `skipped` outcome). Kept as a frozen tuple so the SQL
+ *  records NO event, so there is deliberately no in-tick `skipped` outcome — `schedule_fire_missed` is a
+ *  boot-time reconcile finding, a different thing; card f9802e9f). Kept as a frozen tuple so the SQL
  *  `IN (...)` clause and any consumer stay in lockstep. */
-const SCHEDULE_FIRE_KINDS = ["schedule_fired", "schedule_fire_deferred", "schedule_fire_failed"] as const;
+const SCHEDULE_FIRE_KINDS = ["schedule_fired", "schedule_fire_deferred", "schedule_fire_failed", "schedule_fire_missed"] as const;
 
 /** Clamp for a bounded gate-history page (listGateEvents, card a1c86452) — same posture as
  *  MAX_ARCHIVED_PAGE: a caller's `limit` is clamped into [1, MAX_GATE_HISTORY_PAGE] so a huge value can't
@@ -6729,9 +6730,11 @@ export class Db {
       kind: patch.kind,
       prompt: normalizeSchedulePrompt(patch.prompt),
       // Explicit null (not undefined) clears the deferral columns — the caller (Scheduler.start()'s
-      // reconcile path) passes null when it advances a stale next_fire_at, so the badge doesn't linger
-      // past an episode that ended without a real fire. Omitted (undefined) leaves them untouched, so
-      // every other updateSchedule caller (REST enable/disable/rename) stays byte-identical.
+      // reconcile path) passes null when it advances a DISABLED schedule's stale next_fire_at, so the
+      // badge doesn't linger past an episode that ended without a real fire. That same reconcile passes
+      // a fresh string (not null) for an ENABLED schedule instead — it REPLACES the columns with the
+      // miss it just found (card f9802e9f), rather than clearing them. Omitted (undefined) leaves them
+      // untouched, so every other updateSchedule caller (REST enable/disable/rename) stays byte-identical.
       last_deferred_at: patch.lastDeferredAt,
       last_deferred_reason: patch.lastDeferredReason,
     };
@@ -8251,10 +8254,11 @@ function toScheduleHistoryEntry(r0: unknown): ScheduleHistoryEntry {
     scheduleName: (r.schedule_name as string | null) ?? null,
     cron: (r.schedule_cron as string | null) ?? (detail.cron as string | undefined) ?? "",
     agentLabel: projectName && agentName ? `${projectName} / ${agentName}` : null,
-    // Only a `schedule_fired` event carries a spawned session (the deferred/failed events store "").
+    // Only a `schedule_fired` event carries a spawned session (the deferred/failed/missed events store "").
     sessionId: r.kind === "schedule_fired" && mgr ? mgr : null,
     reason: (detail.reason as string | undefined) ?? null,
     error: (detail.error as string | undefined) ?? null,
+    dueAt: (detail.dueAt as string | undefined) ?? null,
   };
 }
 /** The JOINed row shape {@link Db.listGateEvents} selects — the raw event columns plus the enrichment

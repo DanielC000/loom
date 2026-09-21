@@ -8,10 +8,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       AND a second durable event — when the deferral REASON changes between ticks (not just on the
 //       first transition into deferred). Distinct from scheduler.mjs's "Transition-only" test, which
 //       proves the OPPOSITE half (a SAME-reason repeat tick writes nothing).
-//   (2) RECONCILE-CLEAR: Scheduler.start()'s missed-fire reconcile path (advancing a stale next_fire_at
-//       forward on boot) is NOT a real fire — it never goes through markFired — so without an explicit
-//       clear a schedule that was mid-deferral when the daemon went down would keep showing the amber
-//       "deferred" badge indefinitely after restart. start() must clear last_deferred_at/reason too.
+//   (2) RECONCILE-REPLACE (card f9802e9f): Scheduler.start()'s missed-fire reconcile path (advancing a
+//       stale next_fire_at forward on boot) is NOT a real fire — it never goes through markFired — so an
+//       ENABLED schedule that was mid-deferral when the daemon went down gets its stale deferral REPLACED
+//       with the fresh miss (a schedule_fire_missed event + a "missed —" lastDeferredReason), not merely
+//       cleared: the occurrence really was skipped, and that must stay visible, not silently reset to
+//       null. A DISABLED schedule's stale deferral is still CLEARED (it was never going to fire anyway).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/scheduler-deferral-reemit.mjs
 import fs from "node:fs";
@@ -91,25 +93,50 @@ const seedLiveScheduledManager = (e, id) => e.db.insertSession({
   cleanupEnv(e);
 }
 
-// (2) RECONCILE-CLEAR: a schedule that was mid-deferral when the daemon went down (its stale next_fire_at
-// is also in the past) must have its deferral columns CLEARED when Scheduler.start()'s reconcile advances
-// next_fire_at forward — that advance is not a real fire (never goes through markFired), so without an
-// explicit clear the amber badge would linger past the episode's actual end.
+// (2) RECONCILE-REPLACE (card f9802e9f): an ENABLED schedule that was mid-deferral when the daemon went
+// down (its stale next_fire_at is also in the past) has its deferral columns REPLACED — not cleared — by
+// Scheduler.start()'s reconcile: the occurrence was genuinely missed (the daemon was down across its due
+// slot), so the badge must keep saying so, with a durable schedule_fire_missed event alongside it — not
+// silently reset to null (that would be exactly the silent-skip defect the card fixes).
 {
   const e = makeEnv();
   const staleNextFireAt = new Date(Date.now() - 3_600_000).toISOString();
-  seedSchedule(e, "sch-reconcile-clear", { nextFireAt: staleNextFireAt });
-  e.db.markDeferred("sch-reconcile-clear", new Date(Date.now() - 1_800_000).toISOString(), "manager cap (3) reached");
-  const before = e.db.getSchedule("sch-reconcile-clear");
+  seedSchedule(e, "sch-reconcile-replace", { nextFireAt: staleNextFireAt });
+  e.db.markDeferred("sch-reconcile-replace", new Date(Date.now() - 1_800_000).toISOString(), "manager cap (3) reached");
+  const before = e.db.getSchedule("sch-reconcile-replace");
   check("(2) setup: the schedule starts mid-deferral (both columns populated)", !!before.lastDeferredAt && before.lastDeferredReason === "manager cap (3) reached");
 
   const now = new Date();
   e.scheduler.start(now); // reconciles the stale next_fire_at forward
   e.scheduler.stop();
-  const after = e.db.getSchedule("sch-reconcile-clear");
+  const after = e.db.getSchedule("sch-reconcile-replace");
   check("(2) next_fire_at recomputed forward (unchanged base behavior)", new Date(after.nextFireAt).getTime() > now.getTime());
   check("(2) reconcile-advance did NOT fire (no catch-up spawn)", e.calls.length === 0);
-  check("(2) lastDeferredAt/lastDeferredReason are CLEARED back to null by the reconcile advance", after.lastDeferredAt === null && after.lastDeferredReason === null);
+  check("(2) lastDeferredAt is RE-STAMPED (a fresh miss, not the stale cap-reached instant)", after.lastDeferredAt !== before.lastDeferredAt);
+  check("(2) lastDeferredReason is REPLACED with the miss (not the stale cap reason, not null)",
+    after.lastDeferredReason !== "manager cap (3) reached" && (after.lastDeferredReason ?? "").includes("daemon down"));
+  const raw = new Database(e.dbFile);
+  const missed = raw.prepare("SELECT * FROM orchestration_events WHERE kind = 'schedule_fire_missed'").all();
+  raw.close();
+  check("(2) a schedule_fire_missed event is filed for the original due time", missed.length === 1 && JSON.parse(missed[0].detail_json).dueAt === staleNextFireAt);
+  cleanupEnv(e);
+}
+
+// (2c) RECONCILE-CLEAR (unchanged for a DISABLED schedule): it was never going to fire regardless of
+// daemon uptime, so a stale deferral from before it was disabled is CLEARED, not replaced with a miss.
+{
+  const e = makeEnv();
+  seedSchedule(e, "sch-reconcile-clear-disabled", { enabled: false, nextFireAt: new Date(Date.now() - 3_600_000).toISOString() });
+  e.db.markDeferred("sch-reconcile-clear-disabled", new Date(Date.now() - 1_800_000).toISOString(), "manager cap (3) reached");
+  e.scheduler.start(new Date());
+  e.scheduler.stop();
+  const after = e.db.getSchedule("sch-reconcile-clear-disabled");
+  check("(2c) a disabled schedule's stale deferral is CLEARED back to null (never replaced with a miss)",
+    after.lastDeferredAt === null && after.lastDeferredReason === null);
+  const raw = new Database(e.dbFile);
+  const missedCount = raw.prepare("SELECT COUNT(*) AS c FROM orchestration_events WHERE kind = 'schedule_fire_missed'").get().c;
+  raw.close();
+  check("(2c) no schedule_fire_missed event for a disabled schedule", missedCount === 0);
   cleanupEnv(e);
 }
 
@@ -129,6 +156,6 @@ const seedLiveScheduledManager = (e, id) => e.db.insertSession({
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a deferral reason CHANGE between ticks re-stamps lastDeferredAt and files a second schedule_fire_deferred event; Scheduler.start()'s missed-fire reconcile clears a stale deferral (it's not a real fire), leaving a still-due schedule's genuine in-flight deferral untouched."
+  ? "\n✅ ALL PASS — a deferral reason CHANGE between ticks re-stamps lastDeferredAt and files a second schedule_fire_deferred event; Scheduler.start()'s missed-fire reconcile REPLACES an enabled schedule's stale deferral with the fresh miss (schedule_fire_missed event + reason), CLEARS a disabled one's, and leaves a still-due schedule's genuine in-flight deferral untouched."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

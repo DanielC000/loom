@@ -237,20 +237,39 @@ export class Scheduler {
 
   /**
    * Start ticking. First reconciles MISSED fires: any schedule whose next_fire_at is in the past
-   * (the daemon was down across its slot) recomputes forward to the next future boundary — so a
-   * restart never floods with catch-up fires (run-once-forward, not run-N-times).
+   * (the daemon was down across its slot) recomputes forward to the next future boundary — never
+   * catches up (no stampede of missed spawns). An ENABLED schedule's miss is now RECORDED, not
+   * silent: last_deferred_at/last_deferred_reason are stamped (the same columns/badge a budget/
+   * owner-gate defer already uses) and a durable `schedule_fire_missed` event is filed, carrying the
+   * schedule id, the ORIGINAL due time, and why. A DISABLED schedule's past next_fire_at is not a
+   * miss (it was never going to fire) — its stale deferral fields are CLEARED, not replaced, so the
+   * badge doesn't keep lying about a live episode that ended (CR a3715e68 on 53edd8d5).
    *
-   * This reconcile advance is NOT a fire — it never goes through markFired, so without an explicit
-   * clear here a schedule that was mid-deferral when the daemon went down would keep showing the
-   * amber "deferred" badge indefinitely after restart, even though its episode ended (the schedule
-   * moved on to a fresh future slot, not a resolved fire). Clear last_deferred_at/last_deferred_reason
-   * alongside the advance so the badge doesn't lie about current state (CR a3715e68 on 53edd8d5).
+   * @decision f9802e9f — do not implement misfire catch-up/replay here: after a long outage it would
+   * stampede every missed occurrence's manager spawn at once. Skip and record instead.
    */
   start(now: Date = new Date()): void {
     for (const s of this.deps.db.listSchedules()) {
       if (new Date(s.nextFireAt).getTime() <= now.getTime()) {
+        const dueAt = s.nextFireAt;
         try {
-          this.deps.db.updateSchedule(s.id, { nextFireAt: nextFireAt(s.cron, now), lastDeferredAt: null, lastDeferredReason: null });
+          if (s.enabled) {
+            const reason = "daemon down";
+            this.deps.db.updateSchedule(s.id, {
+              nextFireAt: nextFireAt(s.cron, now),
+              lastDeferredAt: now.toISOString(),
+              lastDeferredReason: `missed — ${reason} (was due ${dueAt})`,
+            });
+            try {
+              this.deps.db.appendEvent({
+                id: randomUUID(), ts: now.toISOString(),
+                managerSessionId: "", kind: "schedule_fire_missed",
+                detail: { scheduleId: s.id, cron: s.cron, kind: s.kind, dueAt, reason },
+              });
+            } catch { /* never let the durable-record write itself crash the tick */ }
+          } else {
+            this.deps.db.updateSchedule(s.id, { nextFireAt: nextFireAt(s.cron, now), lastDeferredAt: null, lastDeferredReason: null });
+          }
         } catch (e) {
           // eslint-disable-next-line no-console
           console.error(`[scheduler] could not recompute schedule ${s.id} (${s.cron}):`, (e as Error).message);

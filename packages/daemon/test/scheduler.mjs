@@ -228,6 +228,58 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
   cleanupEnv(e);
 }
 
+// Card f9802e9f — a missed occurrence (daemon down across the due slot) is RECORDED, not silent, for an
+// ENABLED schedule: lastDeferredAt/lastDeferredReason populate (reusing the SAME Schedules-UI badge a
+// budget/owner-gate defer already renders) and a durable `schedule_fire_missed` event is filed carrying
+// the schedule id, the ORIGINAL due time, and why.
+{
+  const e = makeEnv();
+  const dueAt = new Date(Date.now() - 3_600_000).toISOString();
+  seedSchedule(e, "sch-missed", { nextFireAt: dueAt });
+  const now = new Date();
+  e.scheduler.start(now);
+  e.scheduler.stop();
+  const after = e.db.getSchedule("sch-missed");
+  check("Missed (enabled): next_fire_at still recomputed forward (unchanged behavior)", new Date(after.nextFireAt).getTime() > now.getTime());
+  check("Missed (enabled): start() did NOT fire (skip, never catch up)", e.calls.length === 0);
+  check("Missed (enabled): lastDeferredAt is stamped (no longer silent)", !!after.lastDeferredAt);
+  check("Missed (enabled): lastDeferredReason names the miss + the original due time",
+    (after.lastDeferredReason ?? "").includes("daemon down") && after.lastDeferredReason.includes(dueAt));
+  const raw = new Database(e.dbFile);
+  const evs = raw.prepare("SELECT * FROM orchestration_events WHERE kind = 'schedule_fire_missed'").all();
+  raw.close();
+  check("Missed (enabled): a schedule_fire_missed event is filed (session-less, detail carries scheduleId+dueAt+reason)",
+    evs.length === 1 && evs[0].manager_session_id === "" &&
+    JSON.parse(evs[0].detail_json).scheduleId === "sch-missed" &&
+    JSON.parse(evs[0].detail_json).dueAt === dueAt &&
+    JSON.parse(evs[0].detail_json).reason === "daemon down");
+  cleanupEnv(e);
+}
+
+// Card f9802e9f — a DISABLED schedule's past next_fire_at is NOT a miss (it was never going to fire
+// regardless of daemon uptime): no event is filed, and any stale deferral fields are CLEARED (not
+// replaced) — preserving the existing CR a3715e68 fix (an operator who paused a starved schedule must not
+// keep seeing an amber badge implying a live episode that already ended).
+{
+  const e = makeEnv();
+  seedSchedule(e, "sch-missed-disabled", { enabled: false, nextFireAt: new Date(Date.now() - 3_600_000).toISOString() });
+  // Simulate a stale deferral left over from a defer episode that predates the outage (insertSchedule
+  // doesn't carry these columns — set them the same way a real Scheduler.tick() defer would).
+  e.db.updateSchedule("sch-missed-disabled", { lastDeferredAt: new Date(Date.now() - 7_200_000).toISOString(), lastDeferredReason: "manager cap (3) reached" });
+  const now = new Date();
+  e.scheduler.start(now);
+  e.scheduler.stop();
+  const after = e.db.getSchedule("sch-missed-disabled");
+  check("Missed (disabled): next_fire_at still recomputed forward", new Date(after.nextFireAt).getTime() > now.getTime());
+  check("Missed (disabled): stale lastDeferredAt/lastDeferredReason CLEARED, not replaced",
+    after.lastDeferredAt === null && after.lastDeferredReason === null);
+  const raw = new Database(e.dbFile);
+  const evCount = raw.prepare("SELECT COUNT(*) AS c FROM orchestration_events WHERE kind = 'schedule_fire_missed'").get().c;
+  raw.close();
+  check("Missed (disabled): NO schedule_fire_missed event (it was never due regardless of uptime)", evCount === 0);
+  cleanupEnv(e);
+}
+
 // === §19a hardening (3 findings) ===
 
 // Finding 1 — deleted agent: a due schedule whose agent no longer exists is DISABLED (so it stops

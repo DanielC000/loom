@@ -1378,7 +1378,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_schedules",
       {
-        description: "List cron schedules across the platform (each {id, agentId, cron, enabled, nextFireAt, lastFiredAt, kind, prompt}). Optional projectId narrows to schedules whose agent lives in that project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. With no filter, returns every schedule. Read-only. Use to discover a scheduleId before schedule_update/schedule_delete.",
+        description: "List cron schedules across the platform (each {id, agentId, cron, enabled, nextFireAt, nextFireAtLocal, lastFiredAt, lastDeferredAt, lastDeferredReason, kind, prompt}). `cron`/`nextFireAt` are evaluated/expressed in the DAEMON's LOCAL timezone, NOT UTC — `nextFireAtLocal` is the reliable human-readable cross-check, never assume nextFireAt's ISO instant reads as UTC-intuitive wall-clock time. `lastDeferredReason` is non-null when a fire was held back by a budget/owner gate OR missed entirely while the daemon was down (see the durable `schedule_fire_deferred`/`schedule_fire_missed` orchestration events for the full history). Optional projectId narrows to schedules whose agent lives in that project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. With no filter, returns every schedule. Read-only. Use to discover a scheduleId before schedule_update/schedule_delete.",
         inputSchema: strictShape({ projectId: z.string().optional() }),
       },
       async ({ projectId }) => {
@@ -2748,7 +2748,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "schedule_create",
       {
-        description: "Create a cron schedule that boots a session in an agent (explicit cross-project agentId) on each tick (5-field cron). kind selects WHAT it spawns: \"manager\" (default — a manager session that runs the orchestration loop), \"auditor\" (the read-and-file-only Platform Auditor, spawned with a locked auditor role), or \"workspace-auditor\" (the suggest-only end-user Workspace Auditor, spawned with a locked workspace-auditor role). enabled defaults to true. An unknown agent or an invalid cron is rejected. next_fire_at is computed here. Optional `prompt` is a custom task description, APPENDED to the agent's own startupPrompt (agent prompt first, then this as a clearly-delimited block) when the schedule fires — omit for today's behavior (agent prompt only). Optional `name` is a human-facing label shown in the Schedules UI; omit it and a friendly default is derived from the cron.",
+        description: "Create a cron schedule that boots a session in an agent (explicit cross-project agentId) on each tick (5-field cron). kind selects WHAT it spawns: \"manager\" (default — a manager session that runs the orchestration loop), \"auditor\" (the read-and-file-only Platform Auditor, spawned with a locked auditor role), or \"workspace-auditor\" (the suggest-only end-user Workspace Auditor, spawned with a locked workspace-auditor role). enabled defaults to true. An unknown agent or an invalid cron is rejected. next_fire_at is computed here. The cron fields are evaluated in the DAEMON's LOCAL timezone, NOT UTC — the response's `nextFireAtLocal` is the reliable human-readable cross-check. Optional `prompt` is a custom task description, APPENDED to the agent's own startupPrompt (agent prompt first, then this as a clearly-delimited block) when the schedule fires — omit for today's behavior (agent prompt only). Optional `name` is a human-facing label shown in the Schedules UI; omit it and a friendly default is derived from the cron.",
         inputSchema: strictShape({ agentId: z.string(), cron: z.string(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional(), prompt: z.string().optional(), name: z.string().optional() }),
       },
       async ({ agentId, cron, enabled, kind, prompt, name }) => {
@@ -2770,7 +2770,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "schedule_update",
       {
-        description: "Update a schedule's name, cron, enabled flag, kind (\"manager\"|\"auditor\"|\"workspace-auditor\"), and/or custom prompt by id. A changed cron recomputes next_fire_at (rejected if invalid); enabled toggles the Scheduler for this row; kind changes what a fire spawns; prompt is appended to the agent's own startupPrompt on fire (pass an empty string to clear it). Omitted fields are left as-is; a blank `name` is ignored (a schedule always keeps a name). 404 if the schedule is unknown.",
+        description: "Update a schedule's name, cron, enabled flag, kind (\"manager\"|\"auditor\"|\"workspace-auditor\"), and/or custom prompt by id. A changed cron recomputes next_fire_at (rejected if invalid), evaluated in the DAEMON's LOCAL timezone, NOT UTC — the response's `nextFireAtLocal` is the reliable human-readable cross-check; enabled toggles the Scheduler for this row; kind changes what a fire spawns; prompt is appended to the agent's own startupPrompt on fire (pass an empty string to clear it). Omitted fields are left as-is; a blank `name` is ignored (a schedule always keeps a name). 404 if the schedule is unknown.",
         inputSchema: strictShape({ scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional(), prompt: z.string().optional(), name: z.string().optional() }),
       },
       async ({ scheduleId, cron, enabled, kind, prompt, name }) => {
@@ -2792,7 +2792,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "schedule_get",
       {
-        description: "Read ONE schedule by id — the FULL record ({id, agentId, cron, enabled, nextFireAt, lastFiredAt, kind, prompt}). Read-only. Error if the id is unknown.",
+        description: "Read ONE schedule by id — the FULL record ({id, agentId, cron, enabled, nextFireAt, nextFireAtLocal, lastFiredAt, lastDeferredAt, lastDeferredReason, kind, prompt}). `cron`/`nextFireAt` are evaluated/expressed in the DAEMON's LOCAL timezone, NOT UTC — `nextFireAtLocal` is the reliable human-readable cross-check. Read-only. Error if the id is unknown.",
         inputSchema: strictShape({ scheduleId: z.string() }),
       },
       async ({ scheduleId }) => {

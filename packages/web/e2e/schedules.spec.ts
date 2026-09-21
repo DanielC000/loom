@@ -349,4 +349,35 @@ test.describe("schedules run history (card f624267a)", () => {
     // The failure's reason text renders in the Result cell.
     await expect(page.getByText(/target agent was deleted/i)).toBeVisible();
   });
+
+  // Card f9802e9f: a boot-time reconcile "missed" occurrence (the daemon was down across the due slot)
+  // gets its own outcome — distinct from "deferred" (which implies an imminent retry) — showing the
+  // reason AND the original due time it was skipped at.
+  test("a missed occurrence shows its own outcome + due time in the run log", async ({ page, loomDaemon }) => {
+    const stamp = Date.now();
+    const project = await loomDaemon.createProject(`sched-missed-${stamp}`);
+    const agent = await seedAgent(loomDaemon.baseURL, project.id, `Agent ${stamp}`);
+    await pinActiveProject(page, project.id);
+
+    const schedName = `Missed sweep ${stamp}`;
+    const sched = await seedSchedule(loomDaemon.baseURL, agent.id, schedName);
+    const dueAt = new Date(Date.now() - 3_600_000).toISOString();
+    await loomDaemon.seedOrchestrationEvent({
+      managerSessionId: "", kind: "schedule_fire_missed",
+      detail: { scheduleId: sched.id, cron: sched.cron, kind: "manager", dueAt, reason: "daemon down" },
+    });
+
+    await page.goto(`${loomDaemon.baseURL}/automation`);
+    await page.getByRole("button", { name: /run history/i }).click();
+    await page.getByLabel("Filter runs by schedule").selectOption({ label: schedName });
+
+    // The "All" tab already shows it under its own "missed" label (not lumped into "deferred").
+    await expect(page.getByText("missed", { exact: true })).toBeVisible();
+    await expect(page.getByText(/daemon down/i)).toBeVisible();
+
+    // The "Missed" outcome tab isolates it (server-side filter).
+    await page.getByRole("tab", { name: "Missed" }).click();
+    await expect(page.getByText("missed", { exact: true })).toBeVisible();
+    await expect(page.getByText("fired", { exact: true })).toHaveCount(0);
+  });
 });

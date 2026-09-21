@@ -148,10 +148,16 @@ export default function Schedules() {
                         row's own lastDeferredAt/lastDeferredReason (cleared on the next successful fire),
                         so this self-clears without any extra polling. Also gated on s.enabled: a schedule
                         disabled WHILE deferred stopped being "due" at all, so the badge would otherwise
-                        keep lying about a live episode after the operator paused it (CR a3715e68). */}
+                        keep lying about a live episode after the operator paused it (CR a3715e68). The
+                        SAME columns also carry a boot-reconcile MISS (card f9802e9f — the daemon was down
+                        across the due slot, not merely budget-gated) — the reason text's "missed —" prefix
+                        (Scheduler.start()'s own wording) discriminates the two so the badge doesn't call a
+                        lost occurrence "deferred" (which implies it will still fire imminently). */}
                     {s.enabled && s.lastDeferredAt && (
-                      <div style={{ marginTop: 4, whiteSpace: "normal" }} title={`Deferred since ${fmt(s.lastDeferredAt)}`}>
-                        <Badge tone="amber">deferred: {s.lastDeferredReason ?? "budget reached"}</Badge>
+                      <div style={{ marginTop: 4, whiteSpace: "normal" }} title={`${s.lastDeferredReason?.startsWith("missed —") ? "Missed" : "Deferred"} since ${fmt(s.lastDeferredAt)}`}>
+                        <Badge tone={s.lastDeferredReason?.startsWith("missed —") ? "muted" : "amber"}>
+                          {s.lastDeferredReason?.startsWith("missed —") ? s.lastDeferredReason : `deferred: ${s.lastDeferredReason ?? "budget reached"}`}
+                        </Badge>
                       </div>
                     )}
                   </td>
@@ -201,20 +207,24 @@ export default function Schedules() {
 
 // ── Run history ────────────────────────────────────────────────────────────────────────────────────
 
-const OUTCOME_TABS: { key: "all" | "fired" | "deferred" | "failed"; label: string }[] = [
+const OUTCOME_TABS: { key: "all" | "fired" | "deferred" | "failed" | "missed"; label: string }[] = [
   { key: "all", label: "All" },
   { key: "fired", label: "Fired" },
   { key: "deferred", label: "Deferred" },
   { key: "failed", label: "Failed" },
+  { key: "missed", label: "Missed" },
 ];
 
 // Visual identity per outcome — reuses the signal palette (phosphor = ran, amber = deferred by a budget
-// gate, red = failed to spawn). There is no "skipped" outcome: a paused/usage-limited tick records no
-// event at all, so only these three can occur.
+// gate, red = failed to spawn, textMuted = missed entirely at boot reconcile). There is no in-tick
+// "skipped" outcome: a paused/usage-limited tick records no event at all. `schedule_fire_missed` is a
+// DIFFERENT thing — a boot-time reconcile finding a schedule's next_fire_at already in the past (the
+// daemon was down across it) — so it gets its own outcome rather than folding into "deferred".
 const OUTCOME_STYLE: Record<ScheduleHistoryEntry["kind"], { label: string; color: string; dot: string }> = {
   schedule_fired: { label: "fired", color: color.phosphor, dot: color.phosphor },
   schedule_fire_deferred: { label: "deferred", color: color.amber, dot: color.amber },
   schedule_fire_failed: { label: "failed", color: color.red, dot: color.red },
+  schedule_fire_missed: { label: "missed", color: color.textMuted, dot: color.textMuted },
 };
 
 const HISTORY_PAGE_SIZE = 50;
@@ -227,7 +237,7 @@ const HISTORY_PAGE_SIZE = 50;
 // SERVER-SIDE so a filtered "Load more" never dead-ends short of the real total.
 function ScheduleRunHistory({ schedules }: { schedules: Schedule[] }) {
   const [open, setOpen] = useState(false);
-  const [outcome, setOutcome] = useState<"all" | "fired" | "deferred" | "failed">("all");
+  const [outcome, setOutcome] = useState<"all" | "fired" | "deferred" | "failed" | "missed">("all");
   const [scheduleId, setScheduleId] = useState<string>(""); // "" = all schedules
 
   const history = useInfiniteQuery({
@@ -347,13 +357,21 @@ function ScheduleRunHistory({ schedules }: { schedules: Schedule[] }) {
 }
 
 // The Result cell: a fired run links to the session it spawned; a deferred run shows its budget reason
-// (amber); a failed run shows the spawn error (red).
+// (amber); a failed run shows the spawn error (red); a missed run shows the reason + the ORIGINAL due
+// time it was skipped at (textMuted) — the daemon was down across that slot, so it never fired.
 function ResultCell({ entry }: { entry: ScheduleHistoryEntry }) {
   if (entry.kind === "schedule_fire_deferred") {
     return <span style={{ color: color.amber }}>{entry.reason ?? "deferred"}</span>;
   }
   if (entry.kind === "schedule_fire_failed") {
     return <span style={{ color: color.red }}>{entry.error ?? "spawn failed"}</span>;
+  }
+  if (entry.kind === "schedule_fire_missed") {
+    return (
+      <span style={{ color: color.textMuted }}>
+        {entry.reason ?? "missed"}{entry.dueAt ? ` — was due ${fmt(entry.dueAt)}` : ""}
+      </span>
+    );
   }
   if (entry.sessionId) {
     return (

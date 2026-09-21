@@ -5276,7 +5276,9 @@ export class OrchestrationMcpRouter {
           "to the agent's own startupPrompt (agent prompt first, then this as a clearly-delimited block) when " +
           "the schedule fires — omit for today's behavior (agent prompt only). Optional `name` is a " +
           "human-facing label shown in the Schedules UI; omit it and a friendly default is derived from " +
-          "the cron (e.g. \"Every day at 9:00 AM\").",
+          "the cron (e.g. \"Every day at 9:00 AM\"). The cron fields are evaluated in the DAEMON's LOCAL " +
+          "timezone, NOT UTC — the response's `nextFireAtLocal` is the reliable human-readable cross-check; " +
+          "never assume the bare `nextFireAt`/`cron` are UTC.",
         inputSchema: strictShape({ agentId: z.string(), cron: z.string(), enabled: z.boolean().optional(), prompt: z.string().optional(), name: z.string().optional() }),
       },
       async ({ agentId, cron, enabled, prompt, name }) => {
@@ -5296,7 +5298,8 @@ export class OrchestrationMcpRouter {
           "fire (rejected if invalid); enabled toggles the Scheduler on/off for this row; prompt is appended to " +
           "the agent's own startupPrompt on fire (pass an empty string to clear it). The schedule's agent must " +
           "be in YOUR project (a schedule outside it is REJECTED). Omitted fields are left as-is; a blank " +
-          "`name` is ignored (a schedule always keeps a name).",
+          "`name` is ignored (a schedule always keeps a name). The cron fields are evaluated in the DAEMON's " +
+          "LOCAL timezone, NOT UTC — the response's `nextFireAtLocal` is the reliable human-readable check.",
         inputSchema: strictShape({ scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional(), prompt: z.string().optional(), name: z.string().optional() }),
       },
       async ({ scheduleId, cron, enabled, prompt, name }) => {

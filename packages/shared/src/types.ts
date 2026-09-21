@@ -994,6 +994,18 @@ export type OrchestrationEventKind =
   // clear on the schedule's next successful fire (Db.markFired). The slot is NOT claimed (unlike a
   // failed spawn) — a deferred schedule stays due and is retried next tick like the pause/usage-limit gates.
   | "schedule_fire_deferred"
+  // A schedule's `next_fire_at` was found in the PAST at boot-time reconcile (`Scheduler.start()`) — the
+  // daemon was down across its due slot, so the occurrence was SKIPPED, never caught up (board card
+  // f9802e9f — Scheduler.start()'s own doc comment carries the decision guard for why). Filed
+  // under the SCHEDULE id like `schedule_fire_failed`/`schedule_fire_deferred` (managerSessionId = "", no
+  // session was spawned); `detail` carries {scheduleId, cron, kind, dueAt, reason} — `dueAt` is the
+  // ORIGINAL due time (captured before the reconcile advances `next_fire_at` forward), `reason` is
+  // "daemon down" (the only cause a boot-time reconcile can distinguish). The schedule row's own
+  // `lastDeferredAt`/`lastDeferredReason` are stamped with the SAME miss (reusing the columns/badge a
+  // budget/owner-gate defer already uses) and clear on the schedule's next successful fire (Db.markFired),
+  // same as `schedule_fire_deferred`. Never emitted for a DISABLED schedule — it was never due regardless
+  // of daemon uptime, so nothing was missed.
+  | "schedule_fire_missed"
   // worker_report(done) PRE-CHECK refusal (board cards 907b9f50, dcb25bd9, 50162e6b): a worker reported
   // done but was refused at the source — `detail.reason` discriminates: "uncommitted" (UNCOMMITTED work
   // in its worktree, + the named files) or "pending-direction" (UNRESOLVED manager direction still
@@ -1554,6 +1566,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   merge_done: true, merge_rejected: true, merge_cancelled: true, build_gate: true,
   kill_switch: true, schedule_fired: true, build_gate_retry_attempt: true, build_gate_retry: true,
   build_gate_single_file_retry: true, schedule_fire_failed: true, schedule_fire_deferred: true,
+  schedule_fire_missed: true,
   worker_report_rejected: true, wake_scheduled: true, wake_fired: true, wake_dropped: true,
   idle_report: true, idle_escalated: true, context_escalated: true, context_blind_turn: true, context_emergency_interrupt: true, worker_stuck: true,
   worktree_vanished: true,
@@ -1633,23 +1646,26 @@ export interface ArchivedSessionsPage {
 }
 
 /** One schedule-fire history entry — a durable `orchestration_events` row of kind `schedule_fired` /
- *  `schedule_fire_deferred` / `schedule_fire_failed`, enriched server-side (a single LEFT JOIN over
- *  schedules → agents → projects, NOT a per-row lookup) with the schedule's name and its target agent's
- *  "Project / Agent" label. The enrichment fields are `null` when the schedule (or its agent) was deleted
- *  after the fire — the durable event outlives the schedule row, so history stays truthful about what ran.
- *  There is deliberately no `skipped` outcome and no duration: a paused/usage-limited tick records nothing,
- *  and a fire persists only its start (no end is tracked). */
+ *  `schedule_fire_deferred` / `schedule_fire_failed` / `schedule_fire_missed`, enriched server-side (a
+ *  single LEFT JOIN over schedules → agents → projects, NOT a per-row lookup) with the schedule's name
+ *  and its target agent's "Project / Agent" label. The enrichment fields are `null` when the schedule (or
+ *  its agent) was deleted after the fire — the durable event outlives the schedule row, so history stays
+ *  truthful about what ran. There is deliberately no in-tick `skipped` outcome and no duration: a
+ *  paused/usage-limited TICK still records nothing, and a fire persists only its start (no end is
+ *  tracked) — `schedule_fire_missed` is a DIFFERENT thing, a boot-time reconcile finding a schedule's
+ *  `next_fire_at` already in the past (card f9802e9f), not a tick-time skip. */
 export interface ScheduleHistoryEntry {
   id: string; // orchestration_events.id
   ts: string; // fired-at, ISO
-  kind: "schedule_fired" | "schedule_fire_deferred" | "schedule_fire_failed";
+  kind: "schedule_fired" | "schedule_fire_deferred" | "schedule_fire_failed" | "schedule_fire_missed";
   scheduleId: string;
   scheduleName: string | null; // null if the schedule row was deleted after this fire
   cron: string;
   agentLabel: string | null; // "Project / Agent"; null if the schedule/agent was deleted
   sessionId: string | null; // the spawned manager/auditor session (fired only) — links to /sessions/:id
-  reason: string | null; // deferral reason (deferred only), e.g. "manager cap (3) reached"
+  reason: string | null; // deferral/miss reason (deferred/missed only), e.g. "manager cap (3) reached" / "daemon down"
   error: string | null; // spawn error message (failed only)
+  dueAt: string | null; // the ORIGINAL due time that was skipped (missed only) — null otherwise
 }
 
 /** A bounded page of schedule-fire history + the TOTAL (for a "N of total / Load more" UI), newest fire
