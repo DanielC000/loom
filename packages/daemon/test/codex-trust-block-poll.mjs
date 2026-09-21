@@ -56,6 +56,9 @@ process.env.LOOM_HOME = TMP;
 const { PtyHost } = await import("../dist/pty/host.js");
 const { TRUST_DIALOG_MARKER } = await import("../dist/pty/codex-doctrine.js");
 const { codexTrustDialogLock } = await import("../dist/pty/codex-host.js");
+const { ensureDirs } = await import("../dist/paths.js");
+ensureDirs(); // LOGS_DIR must exist before spawn — the pty's own logStream open would otherwise ENOENT
+// (card 65c1ecc7; mirrors codex-transcript-real-spawn.mjs / codex-doctrine-real-spawn.mjs / kickoff-real-spawn.mjs)
 
 // Capture [codex-trust] console.warn lines without silencing anything else — restored at the end.
 const warnLines = [];
@@ -119,9 +122,22 @@ const containsBlock = (cwd) => fs.readFileSync(CONFIG_PATH, "utf8").includes(add
   // OLD code's fixed-1500ms-then-one-shot-diff check point (with CODEX_SUBMIT_ENTER_DELAY_MS shrunk to
   // 20ms above, the old code's one and only look happens at ~1520ms), and comfortably INSIDE the new
   // poll's 3000ms deadline (leaving room for at least one more 100ms poll tick before expiry).
+  //
+  // Card 65c1ecc7: instrument THIS timer's own actual fire-time against its scheduled time. Two 2026-09
+  // reds on this file (Windows gate `48b2f8a8`, Linux CI `35589820758`) both showed the awaited write
+  // ABSENT through the full ~12.5s observation window — a signature consistent with EITHER "this callback
+  // fired, just very late" (host/scheduling contention) or "it never fired at all" (a different mechanism
+  // entirely), and a bare red can't tell which. This line is unconditional on both the pass and fail path
+  // — it prints iff the callback actually runs, so its absence in a future red's captured output is itself
+  // the "never fired" signal, and its drift (actual minus scheduled) is the "fired late" signal.
+  const LATE_WRITE_SCHEDULED_DELAY_MS = 2200;
+  const lateWriteScheduledAt = performance.now();
   setTimeout(() => {
+    const actualDelayMs = Math.round(performance.now() - lateWriteScheduledAt);
+    const driftMs = actualDelayMs - LATE_WRITE_SCHEDULED_DELAY_MS;
+    console.log(`[scenario-A late-write timer] fired at +${actualDelayMs}ms (scheduled +${LATE_WRITE_SCHEDULED_DELAY_MS}ms, drift ${driftMs >= 0 ? "+" : ""}${driftMs}ms)`);
     fs.appendFileSync(CONFIG_PATH, `\n${addedBlock(CWD_A)}`);
-  }, 2200);
+  }, LATE_WRITE_SCHEDULED_DELAY_MS);
 
   await waitUntil(() => containsBlock(CWD_A) === true, { timeoutMs: 2500, label: "scenario A: the simulated late write actually landed on disk (setup check, not the fix under test)" });
   let scenarioAStripped = false;
