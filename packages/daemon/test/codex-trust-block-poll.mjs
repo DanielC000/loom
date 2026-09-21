@@ -130,16 +130,26 @@ const containsBlock = (cwd) => fs.readFileSync(CONFIG_PATH, "utf8").includes(add
   // entirely), and a bare red can't tell which. This line is unconditional on both the pass and fail path
   // — it prints iff the callback actually runs, so its absence in a future red's captured output is itself
   // the "never fired" signal, and its drift (actual minus scheduled) is the "fired late" signal.
+  // @decision 51bc64f2 — the setup check below reads back SYNCHRONOUSLY in-callback, never via a
+  // separate `waitUntil` poll: a polled read can lose an observable race against the production poll
+  // under test, which can detect-and-strip the block within single-digit ms of the append landing.
   const LATE_WRITE_SCHEDULED_DELAY_MS = 2200;
   const lateWriteScheduledAt = performance.now();
+  let lateWriteLandedOnDisk = null; // null until the timer fires; then the SYNCHRONOUSLY-observed value
   setTimeout(() => {
     const actualDelayMs = Math.round(performance.now() - lateWriteScheduledAt);
     const driftMs = actualDelayMs - LATE_WRITE_SCHEDULED_DELAY_MS;
     console.log(`[scenario-A late-write timer] fired at +${actualDelayMs}ms (scheduled +${LATE_WRITE_SCHEDULED_DELAY_MS}ms, drift ${driftMs >= 0 ? "+" : ""}${driftMs}ms)`);
     fs.appendFileSync(CONFIG_PATH, `\n${addedBlock(CWD_A)}`);
+    // Read back IN THIS SAME callback tick, before yielding — Node is single-threaded, so nothing else
+    // (including the production poll under test, on its own independently-scheduled timer) can run
+    // between the write above and this read. This is what makes the observation race-free: a separate
+    // `waitUntil` poll racing the production poll's own strip is exactly the mechanism diagnosed above.
+    lateWriteLandedOnDisk = containsBlock(CWD_A);
   }, LATE_WRITE_SCHEDULED_DELAY_MS);
 
-  await waitUntil(() => containsBlock(CWD_A) === true, { timeoutMs: 2500, label: "scenario A: the simulated late write actually landed on disk (setup check, not the fix under test)" });
+  await waitUntil(() => lateWriteLandedOnDisk !== null, { timeoutMs: 2500, label: "scenario A: the simulated late-write timer callback has run (setup check, not the fix under test)" });
+  check("scenario A: the simulated late write actually landed on disk (observed synchronously in the same callback tick as the append — race-free against the poll under test's own strip)", lateWriteLandedOnDisk === true);
   let scenarioAStripped = false;
   try {
     await waitUntil(() => containsBlock(CWD_A) === false, { timeoutMs: 2500, label: "scenario A: the trust block gets stripped after the late persist" });
