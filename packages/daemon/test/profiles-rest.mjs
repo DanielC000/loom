@@ -121,6 +121,22 @@ try {
   check("POST rejects an unknown key → 400", (await json("POST", "/api/profiles", { name: "X", bogus: 1 })).status === 400);
   check("POST rejects a missing name → 400", (await json("POST", "/api/profiles", { role: "worker" })).status === 400);
 
+  // --- card 71bcb207: a PUT to the bundled "Workspace Auditor" profile (role workspace-auditor, CORE —
+  // seeds without LOOM_DEV) must validate an unrelated-field patch instead of 400ing on its own
+  // pre-existing role, over the REAL REST path (not just the validator unit). This IS the empirical
+  // reachability check the card's own DoD calls for — reproduces the reported defect before proving it
+  // fixed, rather than trusting the schema read alone.
+  const workspaceAuditor = seeded.find((p) => p.role === "workspace-auditor");
+  check("seed: bundled 'Workspace Auditor' (role workspace-auditor) present", !!workspaceAuditor);
+  const auditorPatch = await json("PUT", `/api/profiles/${workspaceAuditor.id}`, { description: "unrelated field edit" });
+  check("PUT an unrelated field onto the bundled Workspace Auditor profile → 200 (not a 400 on its own role)",
+    auditorPatch.status === 200 && auditorPatch.body.description === "unrelated field edit");
+  check("...and role is carried forward UNCHANGED, not defaulted away", auditorPatch.body.role === "workspace-auditor");
+  // Still never MINTABLE or ASSIGNABLE via this surface: a fresh CREATE with this role is rejected, and a
+  // PATCH that tries to move an existing profile's role INTO it is rejected too (least-privilege intact).
+  check("POST /api/profiles with role:workspace-auditor (mint attempt) → 400", (await json("POST", "/api/profiles", { name: "Mint Attempt", role: "workspace-auditor" })).status === 400);
+  check("PUT reassigning an existing profile's role INTO workspace-auditor → 400", (await json("PUT", `/api/profiles/${id}`, { role: "workspace-auditor" })).status === 400);
+
   // RESET-to-bundled: edit a bundled profile, then reset restores the shipped fields.
   await json("PUT", `/api/profiles/${bundledDev.id}`, { description: "EDITED", role: "manager" });
   const resetRes = await json("POST", `/api/profiles/${bundledDev.id}/reset`);

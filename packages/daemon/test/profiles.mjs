@@ -335,6 +335,45 @@ check("(validator) harness:claude + a non-empty capabilities array ⇒ still acc
   return r.ok && r.value.capabilities.length === 1;
 })());
 
+// --- (guard) card 71bcb207: "auditor"/"workspace-auditor" are role-carry-forward-only — accepted by
+// validateProfile ONLY when the resolved value equals opts.previousRole (an unchanged edit to an
+// already-existing profile of that role); a CREATE or a reassignment into/out of either value is
+// rejected, so a profile write can never MINT or ASSIGN one, only describe an already-locked one. ------
+check("(validator) CREATE (no opts) with role:auditor ⇒ rejected (never mintable)",
+  validateProfile({ name: "X", role: "auditor" }).ok === false);
+check("(validator) CREATE (no opts) with role:workspace-auditor ⇒ rejected (never mintable)",
+  validateProfile({ name: "X", role: "workspace-auditor" }).ok === false);
+check("(validator) UPDATE-shaped, unrelated field edit on an already-auditor profile ⇒ carries role forward, ACCEPTED (the bug this card fixes)", (() => {
+  const existingAuditorRow = { name: "Platform-audit", role: "auditor", description: "", allowDelta: [], skills: null, model: null, icon: null };
+  const patch = { description: "edited, role untouched" };
+  const r = validateProfile({ ...existingAuditorRow, ...patch }, { previousRole: existingAuditorRow.role, patch });
+  return r.ok && r.value.role === "auditor" && r.value.description === "edited, role untouched";
+})());
+check("(validator) UPDATE-shaped, unrelated field edit on an already-workspace-auditor profile ⇒ carries role forward, ACCEPTED", (() => {
+  const existingRow = { name: "Workspace Auditor", role: "workspace-auditor", description: "", allowDelta: [], skills: null, model: null, icon: null };
+  const patch = { icon: "🔧" };
+  const r = validateProfile({ ...existingRow, ...patch }, { previousRole: existingRow.role, patch });
+  return r.ok && r.value.role === "workspace-auditor" && r.value.icon === "🔧";
+})());
+check("(validator) UPDATE-shaped patch that REASSIGNS role from worker into auditor ⇒ rejected (never assignable)", (() => {
+  const existingWorkerRow = { name: "Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null };
+  const patch = { role: "auditor" };
+  const r = validateProfile({ ...existingWorkerRow, ...patch }, { previousRole: existingWorkerRow.role, patch });
+  return r.ok === false;
+})());
+check("(validator) UPDATE-shaped patch that reassigns role OFF auditor onto worker ⇒ rejected (role field can't move it either direction)", (() => {
+  const existingAuditorRow = { name: "Platform-audit", role: "auditor", description: "", allowDelta: [], skills: null, model: null, icon: null };
+  const patch = { role: "worker" };
+  const r = validateProfile({ ...existingAuditorRow, ...patch }, { previousRole: existingAuditorRow.role, patch });
+  return r.ok === false;
+})());
+check("(validator) non-restricted role unaffected by the carry-forward gate (worker edit still passes)", (() => {
+  const existingWorkerRow = { name: "Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null };
+  const patch = { description: "unrelated edit" };
+  const r = validateProfile({ ...existingWorkerRow, ...patch }, { previousRole: existingWorkerRow.role, patch });
+  return r.ok && r.value.role === "worker";
+})());
+
 // --- (guard) P4↔P5a: capabilityGrantBindingError rejects an oauth2 connection bound to a
 // requiresConnection capability grant (the "binds fine, spawns silently credential-less" bug this task
 // closes) — real capability_defs + connections rows through the real stores, not fakes. ---------------

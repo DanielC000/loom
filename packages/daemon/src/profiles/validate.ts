@@ -12,10 +12,7 @@ import { RESERVED_CAPABILITY_SLUGS } from "../capabilities/registry.js";
 const profileSchema = z
   .object({
     name: z.string().min(1),
-    // NB: "auditor" AND "workspace-auditor" are deliberately NOT mintable here — both are caller-set via
-    // their start* paths (startAuditor / the future startWorkspaceAuditor — the security boundary), so a
-    // profile must never confer either. They're absent from this enum, so validateProfile REJECTS them by
-    // construction. "setup" IS a valid profile role (the Setup Assistant rig). (End-User Platform tier B1.)
+    // "setup" IS a valid profile role (the Setup Assistant rig). (End-User Platform tier B1.)
     // "assistant" (the long-lived Loom Companion) is a valid, low-privilege profile role — profile-spawnable
     // like manager/worker (its whole surface is my_context + the companion-gated chat_reply). The ungated
     // Setup operator still can't mint one (setupRoleError's allowlist omits it) — human REST / dev only.
@@ -23,7 +20,11 @@ const profileSchema = z
     // SESSION role it ends up carrying is ALWAYS locked by the explicit caller role at startOperator
     // (resolveAgentSpawn), never by this profile field alone, and the ungated Setup operator still can't
     // mint/assign one (setupRoleError's allowlist omits it, exactly like "platform").
-    role: z.enum(["manager", "worker", "platform", "setup", "assistant", "operator"]).nullable().optional(),
+    //
+    // @decision 71bcb207 — "auditor"/"workspace-auditor" are in this enum so an edit to an already-
+    // existing bundled profile of either role doesn't 400 on its own pre-existing value, but
+    // `roleCarryForwardOnlyError` below still rejects any write that MINTS or REASSIGNS either role.
+    role: z.enum(["manager", "worker", "platform", "setup", "assistant", "operator", "auditor", "workspace-auditor"]).nullable().optional(),
     description: z.string().optional(),
     allowDelta: z.array(z.string()).optional(),
     skills: z.array(z.string()).nullable().optional(),
@@ -189,6 +190,29 @@ export function capabilityGrantBindingError(
  * when the caller passes no `opts.patch` (the CREATE shape, where raw already IS the full unmerged
  * submission).
  */
+/**
+ * Roles a profile write can never NEWLY confer — caller-set only via their dedicated start* path
+ * (startAuditor / the future startWorkspaceAuditor, the real security boundary). Both are accepted by the
+ * `role` enum above so an edit to an already-existing bundled profile of either role can still validate,
+ * but this gate rejects the RESOLVED role whenever it names one of these two values AND differs from
+ * `opts.previousRole`: a CREATE (no previousRole to match) or an UPDATE patch that changes role into or
+ * out of either value. An UPDATE that leaves the role unchanged (the common case — an unrelated field
+ * edit on an already-auditor/workspace-auditor profile) passes untouched.
+ */
+const ROLE_CARRY_FORWARD_ONLY = ["auditor", "workspace-auditor"] as const;
+
+function roleCarryForwardOnlyError(
+  resolvedRole: string | null | undefined,
+  previousRole: string | null | undefined,
+): string | null {
+  const touchesRestricted =
+    (resolvedRole != null && (ROLE_CARRY_FORWARD_ONLY as readonly string[]).includes(resolvedRole)) ||
+    (previousRole != null && (ROLE_CARRY_FORWARD_ONLY as readonly string[]).includes(previousRole));
+  if (!touchesRestricted) return null;
+  if (resolvedRole === previousRole) return null; // unchanged carry-forward, not a new assignment
+  return `role "${resolvedRole ?? "null"}" may not be set here — "auditor"/"workspace-auditor" are caller-set only via their dedicated start* path, never conferred by a profile write. An existing profile already carrying one of these roles may still be edited (other fields), just not have its role reassigned into or out of it through this validator.`;
+}
+
 function assistantRestrictedToolsOmittedError(
   resolvedRole: string | null | undefined,
   previousRole: string | null | undefined,
@@ -254,6 +278,8 @@ export function validateProfile(
     return { ok: false, error: msg };
   }
   const d = r.data;
+  const roleCarryForwardError = roleCarryForwardOnlyError(d.role, opts?.previousRole);
+  if (roleCarryForwardError) return { ok: false, error: roleCarryForwardError };
   const restrictedToolsError = assistantRestrictedToolsOmittedError(d.role, opts?.previousRole, opts?.patch ?? raw);
   if (restrictedToolsError) return { ok: false, error: restrictedToolsError };
   const codexRestrictedToolsError = codexRestrictedToolsUnsupportedError(d.harness, d.restrictedTools);
