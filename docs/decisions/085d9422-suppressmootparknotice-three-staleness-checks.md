@@ -67,7 +67,7 @@ comment markers stripped.
 
 ## Related
 
-- `docs/decisions/ccb407eb-carry-givenupexhausted-through-upgrade-requeue.md` — the give-up
+- `docs/decisions/ccb407eb-give-up-exhausted-terminal-branch-policy.md` — the give-up
   terminal-branch policy (`handleGiveUpExhausted`) this method's PARK site calls into.
 
 ## Notice-text relocation (DoD-3), same card, second site
