@@ -4949,7 +4949,10 @@ export class SessionService {
             id: randomUUID(), ts: now.toISOString(), managerSessionId: reqId, kind: "fleet_resume_failed",
             detail: { count: failed.length, failed: failedDetail },
           });
-          const liveLead = this.db.listAllSessions().find((s) => s.role === "platform" && s.processState === "live");
+          // Card 8457d0ed (DoD-3 sweep, mirrors e79e2956): exclude a session with a live successor — a
+          // recycling predecessor stays "live" until its successor settles, so a bare scan here could
+          // notify the about-to-retire predecessor of this fleet-resume failure instead of its successor.
+          const liveLead = this.db.listAllSessions().find((s) => s.role === "platform" && s.processState === "live" && !this.db.hasSuccessor(s.id));
           if (liveLead) {
             // Card 06aa82a7: carry the already-sanitized (normalizeResumeOneResult/RESUME_KNOWN_SAFE_REASONS)
             // failure reason into the Lead's own line — `d.reason` never a re-captured raw error (see the
@@ -8970,10 +8973,11 @@ export class SessionService {
     // session could hand the manager fabricated text as if it were owner-authored.
     const framed = `[loom:from-assistant · ${senderName} · sessionId:${assistantSessionId}]\n${text}`;
 
-    // @decision 2db23c4d — resolve the target manager FRESH on every call; caching it would target a
-    // recycled predecessor instead of the project's current live manager.
+    // @decision 2db23c4d — resolve the target manager FRESH on every call (no caching), excluding a
+    // session with a live successor (card 8457d0ed, mirrors e79e2956's hasSuccessor guard) — a recycling
+    // predecessor stays "live" until its successor settles, so a bare scan could target it instead.
     const targetManager = this.db.listAllSessions().find(
-      (s) => s.projectId === projectId && s.role === "manager" && s.processState === "live",
+      (s) => s.projectId === projectId && s.role === "manager" && s.processState === "live" && !this.db.hasSuccessor(s.id),
     );
 
     const now = new Date().toISOString();
