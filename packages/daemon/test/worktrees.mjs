@@ -656,12 +656,24 @@ try {
   {
     const { simpleGit: realSimpleGit } = await import("simple-git");
     const tinyMs = 250;
+    /** Card 805f04cd: the real subcommand a `git.raw(args)` call names, skipping any leading `-c
+     *  <key>=<value>` pairs (e.g. `["-c", "core.quotePath=false", "status", ...]`) — some call sites
+     *  (the porcelain-status reads) prepend one of these for lossless non-ASCII path handling, which
+     *  shifts the subcommand off `args[0]`. A hang-matcher keyed on bare `args[0]` silently stops
+     *  matching the moment a site picks up such a prefix, degrading a deliberate-hang sub-test into one
+     *  that races real, unhung git subprocess timing instead — see (r5)'s own note below for the
+     *  incident this caused. */
+    const gitSubcommand = (args) => {
+      let i = 0;
+      while (args[i] === "-c") i += 2;
+      return args[i];
+    };
     /** A gitFactory that delegates every command NOT in `hangOn` to REAL simple-git against whatever path
      *  createWorktree's own boundedGit call was made with (repoPath or worktreePath, depending on site),
-     *  and hangs (never settles) any command whose `args[0]` IS in `hangOn`. */
+     *  and hangs (never settles) any command whose subcommand ({@link gitSubcommand}) IS in `hangOn`. */
     const delegatingHangFactory = (hangOn) => (repoPathArg, _blockMs) => {
       const real = realSimpleGit(repoPathArg);
-      return { raw: (args) => (hangOn.includes(args[0]) ? new Promise(() => {}) : real.raw(args)) };
+      return { raw: (args) => (hangOn.includes(gitSubcommand(args)) ? new Promise(() => {}) : real.raw(args)) };
     };
     /** Card 06deedb7: same delegation shape as {@link delegatingHangFactory}, but the hung command
      *  REJECTS on its OWN short `hangMs` timer instead of never settling — decoupling "how long we wait
@@ -681,7 +693,7 @@ try {
     const delegatingHangFactoryFastHang = (hangOn, hangMs) => (repoPathArg, _blockMs) => {
       const real = realSimpleGit(repoPathArg);
       return {
-        raw: (args) => (hangOn.includes(args[0])
+        raw: (args) => (hangOn.includes(gitSubcommand(args))
           ? new Promise((_resolve, reject) => setTimeout(
               () => reject(Object.assign(new Error(`simulated hang timeout: git ${args.join(" ")}`), { simulatedHangTimeout: true })),
               hangMs,
@@ -785,9 +797,29 @@ try {
       // 15s) — see delegatingHangFactoryFastHang's own doc for why: the real, unhung calls that precede
       // detectReusedDirtyWorktree (mainSha rev-parse, recutStaleReusedBranch's ahead-check) must never
       // race a tight bound meant only for the deliberately-hung "status" command.
+      //
+      // Card 805f04cd: detectReusedDirtyWorktree's own status read picked up a `-c core.quotePath=false`
+      // prefix (commit f5d0d824e2, for lossless non-ASCII paths) without this sub-test being updated —
+      // `hangOn.includes(args[0])` then matched `"-c"`, never `"status"`, so the intended hang silently
+      // stopped firing at all: every call here ran as REAL, unhung git, and (r5)'s own timing check
+      // started passing or failing on incidental real-subprocess latency instead of the fail-safe
+      // property it claims to test (fast CI host: ~120ms, under the 200ms floor ⇒ red; this slower dev
+      // host: ~400ms ⇒ green — same broken injection, different verdict by host speed alone). Fixed via
+      // {@link gitSubcommand} (skips the `-c <kv>` prefix); `hangSiteReached` below is the same
+      // discriminator (r6) already carries, so a FUTURE arg-shape drift fails loudly here too instead of
+      // silently degrading into this exact false timing signal again.
+      let hangSiteReachedR5 = false;
+      const gitFactoryR5 = (repoPathArg, blockMs) => {
+        const inner = delegatingHangFactoryFastHang(["status"], tinyMs)(repoPathArg, blockMs);
+        return { raw: (args) => {
+          if (gitSubcommand(args) === "status") hangSiteReachedR5 = true;
+          return inner.raw(args);
+        } };
+      };
       const res = await timeAndSettle(createWorktree(repo, "projWT", tR5, {}, undefined, undefined,
-        { gitFactory: delegatingHangFactoryFastHang(["status"], tinyMs) }));
+        { gitFactory: gitFactoryR5 }));
       check("(r5) detectReusedDirtyWorktree status: createWorktree RESOLVES despite a never-resolving git op (fails safe, not a hang)", res.ok === true);
+      check("(r5) the status hang site was actually reached (not silently missed by an arg-shape mismatch)", hangSiteReachedR5 === true);
       check(`(r5) bounded — settled in ${Math.round(res.elapsed)}ms (cap ${tinyMs}ms)`, boundedEnough(res.elapsed));
       check("(r5) reusedDirtyWorktree is absent (fail-safe degrade — a missed flag, never a spawn failure)",
         res.value?.reusedDirtyWorktree === undefined);
