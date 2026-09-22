@@ -165,8 +165,11 @@ MCP — spawns with one), use it:
    binds another port or fails, so eyeballing the default would render the wrong, *stale* server.
    For a **static on-disk HTML file** with no dev server (a CV, a rendered report), don't navigate
    `file://` — Playwright's `browser_navigate` blocks it outright — and don't hand-roll a web server
-   per render cycle. Serve its directory over loopback with the bundled helper and open the printed
-   URL instead: `node .claude/skills/web-design/scripts/serve-static.mjs <dir>`.
+   per render cycle. Serve its directory over loopback with the bundled helper: `node
+   .claude/skills/web-design/scripts/serve-static.mjs start <dir>` prints the URL + the exact tracked
+   pid and returns immediately (the server keeps running); eyeball via Playwright at the printed URL,
+   then `node .claude/skills/web-design/scripts/serve-static.mjs stop <dir>` tears down EXACTLY that
+   tracked pid when you're done — never a `netstat`/`taskkill` port hunt.
 2. **Screenshot it and actually look** — squint test, hierarchy, spacing rhythm, contrast, the eight
    states, dark mode, a narrow (mobile) viewport. For a **throwaway** verification shot, take it with
    **no filename/path** — the screenshot tool auto-names it into your session's out-of-tree
