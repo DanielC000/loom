@@ -47,6 +47,7 @@ import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, F
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
 import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection } from "../connections/store.js";
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
+import { validateSonarQubeCredential } from "../connections/sonarqube.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef, getCapabilityProvisionStatus, resolveCapabilityServer } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride, validatePlatformConfigPatch, validateColumnLayout, mergeConfigOverride, unsetConfigPath, findConfigPatchUnsetCollisions } from "../mcp/platform.js";
@@ -2281,6 +2282,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   app.delete("/api/connections/:id", async (req) => {
     deleteConnection(deps.db, (req.params as { id: string }).id);
+    return { ok: true };
+  });
+
+  // Card 1e8e9b1e (SonarQube connection preset, DoD-1): a live pre-save probe, never persisting anything —
+  // the SonarQube preset's "Create connection" flow calls this FIRST and only proceeds to the ordinary
+  // POST /api/connections above once it returns ok. Human-only loopback, same trust posture as every other
+  // route in this section.
+  app.post("/api/connections/sonarqube/validate", async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    if (typeof b.host !== "string" || !b.host.trim()) return reply.code(400).send({ error: "host must be a non-empty string" });
+    if (typeof b.token !== "string" || !b.token.trim()) return reply.code(400).send({ error: "token must be a non-empty string" });
+    const result = await validateSonarQubeCredential({}, b.host.trim(), b.token.trim());
+    if (!result.ok) return reply.code(400).send({ error: result.error });
     return { ok: true };
   });
 

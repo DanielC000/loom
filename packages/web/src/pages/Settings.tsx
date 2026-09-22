@@ -1427,9 +1427,11 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
 // consent page in a new tab; the daemon's own fixed loopback callback completes the token exchange
 // out-of-band, so this panel just reflects the resulting status (connected / token expiry / needs-reauth)
 // once the browser tab returns focus here (react-query's default refetch-on-window-focus picks it up).
-// The New-connection form leads with a turnkey "Google Analytics" preset (provider google, endpoints
-// pre-filled by the daemon template, per-product read scopes as checkboxes) over that same oauth2 surface;
-// "Custom" is the full free-text form. Daemon-global, like the tuning panel above (one shared store).
+// The New-connection form leads with turnkey presets: "Google Analytics" (provider google, endpoints
+// pre-filled by the daemon template, per-product read scopes as checkboxes, over the oauth2 surface) and
+// "SonarQube" (card 1e8e9b1e — a bearer connection, host+token validated live against the target host
+// BEFORE saving via POST /api/connections/sonarqube/validate); "Custom" is the full free-text form for
+// api-key/bearer/oauth2. Daemon-global, like the tuning panel above (one shared store).
 
 const AUTH_SCHEMES: ConnectionAuthScheme[] = ["api-key", "bearer", "oauth2"];
 const OAUTH_PROVIDERS: { value: OAuthProviderSlug; label: string }[] = [
@@ -1643,10 +1645,17 @@ function PendingBindingsPanel() {
 // preset is UX-only: it POSTs the SAME /api/connections/oauth surface, just with the fields pre-shaped.
 // v1 uses USER-supplied client id/secret (the user registers their own Google Cloud OAuth app) — a
 // shared Loom-owned OAuth app is a separate owner-liability decision, not built here.
-type ConnectorMode = "google-analytics" | "custom";
+type ConnectorMode = "google-analytics" | "sonarqube" | "custom";
 // GA products span several googleapis.com hosts (analyticsdata / searchconsole / adsense); host is
 // metadata-only + unenforced today, so the preset pins the headline GA4 Data API host and hides the field.
 const GA_PRESET_HOST = "analyticsdata.googleapis.com";
+
+// Card 1e8e9b1e: a bare-hostname normalizer for the SonarQube preset — SonarQube's own docs commonly give
+// a full URL ("https://sonarcloud.io/"), but every connection host in this system is a BARE hostname (see
+// connections/request.ts's buildRequestUrl) — strip a pasted scheme/trailing slash rather than reject it.
+function normalizeSonarQubeHost(raw: string): string {
+  return raw.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+}
 
 function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onCancel }: {
   pending: boolean; error: string | null;
@@ -1674,9 +1683,22 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
     Object.fromEntries(GOOGLE_ANALYTICS_SCOPE_PRESETS.map((p) => [p.key, p.key === "analytics"])),
   );
   const [localErr, setLocalErr] = useState<string | null>(null);
+  // Card 1e8e9b1e (DoD-1): a live pre-save probe — the SonarQube branch of submit() calls this FIRST and
+  // only proceeds to onSubmit (the real createConnection POST) once it resolves ok. Never persists anything.
+  const validateSonar = useMutation({ mutationFn: (b: { host: string; token: string }) => api.validateSonarQubeConnection(b) });
 
   const submit = () => {
     setLocalErr(null);
+    if (mode === "sonarqube") {
+      if (!name.trim()) { setLocalErr("A name is required."); return; }
+      if (!host.trim()) { setLocalErr("A host is required."); return; }
+      if (!secret.trim()) { setLocalErr("A user token is required."); return; }
+      const normalizedHost = normalizeSonarQubeHost(host);
+      validateSonar.mutate({ host: normalizedHost, token: secret.trim() }, {
+        onSuccess: () => onSubmit({ name: name.trim(), host: normalizedHost, authScheme: "bearer", secret: secret.trim(), projectId: scopeProjectId || null }),
+      });
+      return;
+    }
     if (mode === "google-analytics") {
       if (!name.trim()) {
         setLocalErr("A name is required.");
@@ -1728,7 +1750,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
   };
 
   const modeBtn = (m: ConnectorMode, label: string) => (
-    <Button variant={mode === m ? "primary" : "ghost"} onClick={() => { setMode(m); setLocalErr(null); }}>{label}</Button>
+    <Button variant={mode === m ? "primary" : "ghost"} onClick={() => { setMode(m); setLocalErr(null); validateSonar.reset(); }}>{label}</Button>
   );
 
   return (
@@ -1737,6 +1759,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
         <span style={fieldLabel}>Connector</span>
         <div style={{ display: "flex", gap: 6 }} role="group" aria-label="Connector type">
           {modeBtn("google-analytics", "Google Analytics")}
+          {modeBtn("sonarqube", "SonarQube")}
           {modeBtn("custom", "Custom")}
         </div>
       </div>
@@ -1750,7 +1773,30 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
         <Hint>Global is reachable daemon-wide, exactly like today. Scoping to a project bounds the credential to that project's own sessions only.</Hint>
       </label>
 
-      {mode === "google-analytics" ? (
+      {mode === "sonarqube" ? (
+        <>
+          <Hint>
+            Let an agent read code-quality signal — quality gate status, issues, coverage — from a SonarQube
+            project via the authenticated_request tool. Works with both self-hosted SonarQube Server and
+            SonarCloud. Generate a User Token (My Account → Security) with just Browse access on the
+            project(s) you want visible — no admin scope is needed for read-only use.
+          </Hint>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Name</span>
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. SonarQube" />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Host</span>
+            <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="sonarcloud.io — or your self-hosted host, e.g. sonarqube.mycompany.com" spellCheck={false} />
+            <Hint>A bare hostname (a pasted https:// URL is stripped automatically). Use "sonarcloud.io" for SonarCloud.</Hint>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>User token</span>
+            <Input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} spellCheck={false} autoComplete="off" />
+            <Hint>checked against the host before saving · encrypted at rest immediately · never shown again</Hint>
+          </label>
+        </>
+      ) : mode === "google-analytics" ? (
         <>
           <Hint>Read GA4, Search Console &amp; AdSense numbers through one connection. Register your own Google Cloud OAuth app, then paste its client ID/secret below — Loom fills the rest and walks you through one consent.</Hint>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -1848,10 +1894,16 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
         </>
       )}
 
-      {(localErr || error) && <div style={{ fontSize: 12, color: color.red, fontFamily: font.mono }}>{localErr ?? error}</div>}
+      {(localErr || error || validateSonar.error) && (
+        <div style={{ fontSize: 12, color: color.red, fontFamily: font.mono }}>
+          {localErr ?? error ?? (validateSonar.error as Error)?.message}
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 8 }}>
-        <Button variant="primary" onClick={submit} disabled={pending}>{pending ? "Saving…" : "Create connection"}</Button>
+        <Button variant="primary" onClick={submit} disabled={pending || validateSonar.isPending}>
+          {validateSonar.isPending ? "Checking SonarQube…" : pending ? "Saving…" : "Create connection"}
+        </Button>
         <Button variant="ghost" onClick={onCancel} disabled={pending}>Cancel</Button>
       </div>
     </div>

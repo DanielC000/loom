@@ -1148,6 +1148,10 @@ export const api = {
   createConnection: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId?: string | null }) =>
     postErr<ConnectionMetadata>("/api/connections", b),
   deleteConnection: (id: string) => delErr<{ ok: boolean }>(`/api/connections/${encodeURIComponent(id)}`),
+  // Card 1e8e9b1e: a live pre-save probe for the SonarQube preset — never persists anything. The preset's
+  // "Create connection" submit calls this FIRST and only proceeds to createConnection() once it resolves.
+  validateSonarQubeConnection: (b: { host: string; token: string }) =>
+    postErr<{ ok: true }>("/api/connections/sonarqube/validate", b),
   // agent-tooling P5a: register a new oauth2 connection (provider app registration — no token exchange
   // yet, `connected:false` until a consent round-trip completes) + initiate consent for an EXISTING one
   // (returns the provider's auth URL for the caller to open in a new tab; the daemon's own fixed loopback
