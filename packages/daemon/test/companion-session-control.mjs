@@ -397,6 +397,94 @@ try {
     db.close();
   }
 
+  // ============ session_steer: recyclePlatformLead-style window — row EXITED, pty still ALIVE
+  // (card c3a9cc1c) ============
+  // recyclePlatformLead (service.ts) flips the predecessor's DB row to "exited" SYNCHRONOUSLY, BEFORE its
+  // successor row even exists — the real pty is not stopped until settleRecycleHandoff resolves, seconds
+  // later, so the row reads "exited" while the process is genuinely still alive and interruptible.
+  // c965fe76's own row-state gate (`target.processState === "live"`) never fires in this window, so
+  // session_steer fell through and flushed+interrupted a session about to be hard-killed — this REDS on
+  // that old behavior (the queued entry must SURVIVE, not merely "an error was returned").
+  {
+    const proj = `proj-steer-exited-alive-${randomUUID()}`;
+    const companionSess = `companion-steer-exited-alive-${randomUUID()}`;
+    const predecessor = `target-steer-exited-alive-old-${randomUUID()}`;
+    const successor = `target-steer-exited-alive-new-${randomUUID()}`;
+    const { db, pty, sessions, orch } = setup(companionSess, proj);
+    seedSession(db, predecessor, proj, "platform");
+    pty.setLive(predecessor); pty.setBusy(predecessor); // pty genuinely still alive+busy
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "session-steer", projectId: proj, mode: "act" });
+
+    // Pre-load a queued (durable) message while the predecessor is still ordinarily live+busy — mirrors
+    // the c965fe76 live-superseded test's own setup.
+    const pre = sessions.messageSessionAsCompanion(predecessor, "OLD — keep going on the current plan", companionSess);
+    check("(exited-alive setup) old direction is HELD (busy predecessor) + persisted", pre.deliveryStatus === "queued");
+    check("(exited-alive setup) an undelivered durable message exists before the steer", db.listUndeliveredQueuedMessages().some((e) => e.detail.text.includes("OLD")));
+
+    // Mirror recyclePlatformLead's own atomic handoff ordering: retire the predecessor's row FIRST, then
+    // insert the successor — the real pty stays alive throughout.
+    db.setProcessState(predecessor, "exited");
+    seedSession(db, successor, proj, "platform", { recycledFrom: predecessor });
+
+    pty.setOwnerText("the owner said: pivot to the hotfix instead");
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const steerRes = await call(client, "session_steer", { target: predecessor, message: "pivot to the hotfix instead" });
+
+    check("session_steer (exited row, alive pty): dropped:true, not delivered", steerRes.dropped === true);
+    check("session_steer (exited row, alive pty): replacedBy names the real successor", steerRes.replacedBy === successor);
+    check("session_steer (exited row, alive pty): the predecessor's queue SURVIVES — not flushed", db.listUndeliveredQueuedMessages().some((e) => e.detail.text.includes("OLD")));
+    check("session_steer (exited row, alive pty): still on the live pty queue too, not silently flushed there either", pty.getPending(predecessor).some((t) => t.includes("OLD")));
+    check("session_steer (exited row, alive pty): the still-alive predecessor was NOT interrupted", !pty.interrupts.includes(predecessor));
+    check("session_steer (exited row, alive pty): the new instruction was NOT delivered to the dying predecessor", !pty.delivered.some((d) => d.id === predecessor && d.text.includes("pivot to the hotfix")));
+    check("session_steer (exited row, alive pty): audits under session_steer_dropped, with replacedBy",
+      db.listEventsForWorker(predecessor).some((e) => e.kind === "session_steer_dropped" && e.detail?.replacedBy === successor));
+
+    await client.close();
+    db.close();
+  }
+
+  // ============ session_steer: fully NOT-live predecessor (pty dead) with a live successor — the
+  // GENERAL case (card c3a9cc1c) ============
+  // Unlike the window above (still mid-handoff), this predecessor's process is genuinely gone — no
+  // recyclePlatformLead-specific ordering quirk, just an ordinary already-fully-exited session that still
+  // has a live successor down its recycle lineage. Before this card, session_steer's fall-through enqueued
+  // the new instruction as a durable record onto the DEAD predecessor's own id — never delivered to
+  // anyone, silently lost, and the predecessor's own pre-existing queue was flushed for nothing.
+  {
+    const proj = `proj-steer-notlive-successor-${randomUUID()}`;
+    const companionSess = `companion-steer-notlive-successor-${randomUUID()}`;
+    const predecessor = `target-steer-notlive-old-${randomUUID()}`;
+    const successor = `target-steer-notlive-new-${randomUUID()}`;
+    const { db, pty, sessions, orch } = setup(companionSess, proj);
+    seedSession(db, predecessor, proj, "worker");
+    pty.setLive(predecessor); pty.setBusy(predecessor); // still ordinarily live+busy while queuing
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "session-steer", projectId: proj, mode: "act" });
+
+    const pre = sessions.messageSessionAsCompanion(predecessor, "OLD — keep going on the current plan", companionSess);
+    check("(notlive setup) old direction is HELD (busy predecessor) + persisted", pre.deliveryStatus === "queued");
+
+    // NOW the predecessor fully settles: its real process dies (unlike the window above, where the pty
+    // stays alive) and a live successor now owns the work.
+    pty.setLive(predecessor, false); pty.setBusy(predecessor, false);
+    db.setProcessState(predecessor, "exited");
+    seedSession(db, successor, proj, "worker", { recycledFrom: predecessor });
+
+    pty.setOwnerText("the owner said: pivot to the hotfix instead");
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const steerRes = await call(client, "session_steer", { target: predecessor, message: "pivot to the hotfix instead" });
+
+    check("session_steer (not-live, has successor): dropped:true, not delivered", steerRes.dropped === true);
+    check("session_steer (not-live, has successor): replacedBy names the real successor", steerRes.replacedBy === successor);
+    check("session_steer (not-live, has successor): the predecessor's pre-existing queue SURVIVES", db.listUndeliveredQueuedMessages().some((e) => e.detail.text.includes("OLD")));
+    check("session_steer (not-live, has successor): the new instruction was NOT enqueued onto the dead predecessor", !db.listUndeliveredQueuedMessages().some((e) => e.detail.text.includes("pivot to the hotfix")));
+    check("session_steer (not-live, has successor): the predecessor was not interrupted", !pty.interrupts.includes(predecessor));
+    check("session_steer (not-live, has successor): audits under session_steer_dropped, with replacedBy",
+      db.listEventsForWorker(predecessor).some((e) => e.kind === "session_steer_dropped" && e.detail?.replacedBy === successor));
+
+    await client.close();
+    db.close();
+  }
+
   // ============ scope: read-only-granted project rejects, for ALL FOUR tools ============
   {
     const projRead = `proj-scope-ro-${randomUUID()}`;

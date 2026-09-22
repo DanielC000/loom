@@ -24,6 +24,7 @@ import { AMBIGUOUS_ID_ERROR } from "../mcp/transcript-read.js";
 import { spawnableRoleError } from "../mcp/spawnable-role.js";
 import { createProjectTask, getProjectTask, listProjectTasks, relocateProjectTask, updateProjectTask, type PendingRequestWarning, type TaskSummary, type TaskUpdateAck } from "../mcp/tasks.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, pageTranscript, lastNTurns, applyAggregateWalkCap } from "../sessions/transcript.js";
+import { liveLineageSuccessor } from "../sessions/lineage.js";
 import { listVaultTree, readVaultFile, resolveVaultFilePath, statVaultFile } from "../vault/browser.js";
 import type { OwnerAttestation, AuthoredContentGrantScope } from "./attestation.js";
 import { CompanionTrustWindow } from "./trust-window.js";
@@ -2033,17 +2034,21 @@ const SESSION_STEER: CompanionCapability = {
     //
     // @decision c965fe76 — `onSuperseded` is REQUIRED, never optional — a 5th tool must name its policy
     // to compile, so it can't silently inherit an unsafe default.
-    /** What to do when the resolved target is `processState:"live"` but already has a recycle successor
-     *  (the async `settleRecycleHandoff` window — ordinarily seconds, unbounded if the successor never
-     *  settles). "disclose": return `{disclosed, replacedBy}` instead of `{session}` — the caller must not
-     *  act, only report the successor id. "handled-downstream": always return `{session}` unchanged — this
-     *  is honest about NOT being the enforcement point for that tool; the call site's own comment names
-     *  WHY it doesn't need to be (verify, don't assume — see `session_resume`'s call site: an earlier draft
-     *  of this doc claimed a "deeper check downstream" for it that turned out to be unreachable in this
-     *  exact window, card c965fe76 Code Review round 2). "benign": always return `{session}` unchanged —
-     *  acting on a superseded target is an accepted trade-off for this tool, not "downstream-handled" and
-     *  not "nothing to catch" — the call site's own comment states the trade-off. */
-    type SupersededPolicy = "disclose" | "handled-downstream" | "benign";
+    /** What to do when the resolved target already has a recycle successor. "disclose": return
+     *  `{disclosed, replacedBy}` instead of `{session}` — the caller must not act, only report the
+     *  successor id — checked ONLY while `target.processState === "live"` (the async
+     *  `settleRecycleHandoff` window, ordinarily seconds, unbounded if the successor never settles).
+     *  "disclose-any-live-successor" is the SAME decline, but its gate is "does a live successor exist
+     *  anywhere in the target's recycle lineage", never the target's own row state — `session_steer` is
+     *  the only user; see that branch's own decision anchor below for why. "handled-downstream": always
+     *  return `{session}` unchanged — this is honest about NOT being the enforcement point for that tool;
+     *  the call site's own comment names WHY it doesn't need to be (verify, don't assume — see
+     *  `session_resume`'s call site: an earlier draft of this doc claimed a "deeper check downstream" for
+     *  it that turned out to be unreachable in this exact window, card c965fe76 Code Review round 2).
+     *  "benign": always return `{session}` unchanged — acting on a superseded target is an accepted
+     *  trade-off for this tool, not "downstream-handled" and not "nothing to catch" — the call site's own
+     *  comment states the trade-off. */
+    type SupersededPolicy = "disclose" | "disclose-any-live-successor" | "handled-downstream" | "benign";
     function resolveControlTarget(
       sessionId: string, onSuperseded: SupersededPolicy,
     ): { session: Session } | { error: string } | { disclosed: true; session: Session; replacedBy: string } {
@@ -2071,6 +2076,13 @@ const SESSION_STEER: CompanionCapability = {
       }
       if (onSuperseded === "disclose" && target.processState === "live") {
         const successor = db.getSuccessor(target.id);
+        if (successor) return { disclosed: true, session: target, replacedBy: successor.id };
+      }
+      // @decision c3a9cc1c — never key this branch on target.processState==="live": recyclePlatformLead
+      // flips the predecessor's row to "exited" synchronously, before its successor row even exists, while
+      // the real pty is still alive — a row-state gate misses that window entirely.
+      if (onSuperseded === "disclose-any-live-successor") {
+        const successor = target.processState === "live" ? db.getSuccessor(target.id) : liveLineageSuccessor(db, target.id);
         if (successor) return { disclosed: true, session: target, replacedBy: successor.id };
       }
       return { session: target };
@@ -2145,16 +2157,16 @@ const SESSION_STEER: CompanionCapability = {
           "instruction as the new authoritative direction (framed [loom:from-owner-via-companion:redirect]), " +
           "and interrupts the target's in-flight turn if it was busy (an idle target simply receives it as " +
           "its next turn — nothing to interrupt). If the target has already been replaced by a recycle " +
-          "successor (still briefly live during handoff), nothing is flushed or interrupted — the call " +
-          "returns {dropped:true, replacedBy} instead; re-target the successor. \"replacedBy\" in the " +
-          "result is a uniform way to detect this outcome, since it appears on exactly the " +
-          "superseded-decline case and never on a delivered success. Requires an act-mode " +
-          "grant on the target session's project and an owner-authored turn — a proactive/heartbeat turn " +
-          "is always rejected.",
+          "successor — whether still briefly live during handoff, or already fully exited — nothing is " +
+          "flushed or interrupted — the call returns {dropped:true, replacedBy} instead; re-target the " +
+          "successor. \"replacedBy\" in the result is a uniform way to detect this outcome, since it " +
+          "appears on exactly the superseded-decline case and never on a delivered success. Requires an " +
+          "act-mode grant on the target session's project and an owner-authored turn — a proactive/heartbeat " +
+          "turn is always rejected.",
         inputSchema: { target: z.string(), message: z.string() },
       },
       async ({ target, message }) => {
-        const resolved = resolveControlTarget(target, "disclose");
+        const resolved = resolveControlTarget(target, "disclose-any-live-successor");
         if ("error" in resolved) return ok({ error: resolved.error });
         if ("disclosed" in resolved) {
           recordSupersededEvent(target, resolved.session, resolved.replacedBy, "session_steer_dropped");
