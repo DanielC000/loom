@@ -28,7 +28,16 @@ export { checkTitleHtmlEntities, checkTitleConventionalType } from "../tasks/tit
  */
 export type TaskWithMerged = Omit<Task, "mergedVerification"> & {
   merged: MergedCommitInfo | null;
-  /** See this type's own doc above — the persisted, at-merge-time-frozen sibling of `merged.verification`. */
+  /**
+   * See this type's own doc above — the persisted, at-merge-time-frozen sibling of `merged.verification`.
+   * A solo squash-confirm always stamps `"content"`. A batch landing (`merge_batch`, card d6d40edd)
+   * stamps `"pathset"` (its own `Loom-Worker-PathSet` digest landed) or `"trailer-only"` (that stamp
+   * failed) for a freshly-landed branch — but `null` for one whose content was already present elsewhere
+   * in the batch's own ancestry (a `noop` landing reuses an already-landed sha with no fresh stamp of its
+   * own). `null` here otherwise means either pre-`d6d40edd` batch history, or a solo ALREADY_MERGED/
+   * boot-reconcile landing — both wait on the web board drawer's lazy backfill (human-triggered, not
+   * agent-facing) to fill in from a live `merged.verification` read; never read `null` as an anomaly.
+   */
   mergedVerificationAtMerge: "content" | "pathset" | "trailer-only" | null;
 };
 

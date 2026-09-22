@@ -2401,7 +2401,12 @@ export class PlatformMcpRouter {
           "re-derived since. The two can legitimately DISAGREE once the branch is later deleted (live " +
           "content-verification then degrades to pathset/trailer-only, while the frozen at-merge value " +
           "doesn't move) — never treat a disagreement between them as a bug, and never assume one is simply " +
-          "more current than the other without checking which you actually need. Read-only. Error if unknown " +
+          "more current than the other without checking which you actually need. `mergedVerificationAtMerge:" +
+          "null` on a MERGED card (card d6d40edd) means one of: a solo ALREADY_MERGED/boot-reconcile landing, " +
+          "a `noop` batch landing (content already present elsewhere in the batch), or pre-fix history — " +
+          "NEVER an anomaly to chase; it backfills lazily only via the web board drawer (human-triggered, " +
+          "not agent-facing). A freshly-landed batch branch DOES stamp \"pathset\"/\"trailer-only\" eagerly, " +
+          "same as a solo squash-confirm stamps \"content\". Read-only. Error if unknown " +
           "or an ambiguous prefix (the error names the candidate ids).\n" +
           "BATCH READ (card 1105c2c8): pass `taskIds` (up to 200) instead of `taskId` to read MANY cards' " +
           "full bodies in one call — the fix for an audit wave's per-card project_task_get round-trips. " +
@@ -2670,6 +2675,11 @@ export class PlatformMcpRouter {
           "that card's merge landed and never re-derived since; the two can legitimately disagree once the " +
           "branch is later deleted (live content-verification then degrades to pathset/trailer-only, while " +
           "the frozen at-merge value doesn't move) — never treat a disagreement between them as a bug. " +
+          "`mergedVerificationAtMerge:null` on a MERGED card (card d6d40edd) means one of: a solo " +
+          "ALREADY_MERGED/boot-reconcile landing, a `noop` batch landing (content already present elsewhere " +
+          "in the batch), or pre-fix history — NEVER an anomaly to chase; it backfills lazily only via the " +
+          "web board drawer (human-triggered, not agent-facing). A freshly-landed batch branch DOES stamp " +
+          "\"pathset\"/\"trailer-only\" eagerly, same as a solo squash-confirm stamps \"content\". " +
           "Reads are capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by " +
           "default. PAGINATION: with NO offset/limit passed and the whole matching set fits in one page, " +
           "returns the bare tasks array (today's shape, unchanged) — otherwise, or whenever you pass " +

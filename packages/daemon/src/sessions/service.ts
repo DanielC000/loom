@@ -14687,6 +14687,9 @@ export class SessionService {
     forceRemoveWorktree?: boolean; opStartedAt?: string;
     /** Ship-state to persist (card 1eebc46a) — forwarded verbatim into {@link finalizeMerge}; see its own doc. */
     mergedSha?: string | null; repoKey?: string | null;
+    /** Forwarded verbatim into {@link finalizeMerge} — see that method's own doc for who can state this
+     *  for free (card d6d40edd: `mergeBatchTracked` now can, from `pathSetStamped`) and who omits it. */
+    mergedVerification?: "content" | "pathset" | "trailer-only" | null;
     /** See the `@decision c35b60c4` anchor in this method's doc above. */
     suppressNotify?: boolean;
   }): Promise<ConfirmMergeResult> {
@@ -15480,11 +15483,20 @@ export class SessionService {
             // construction (the batch's own single fast-forward already put it on main) — none of them is
             // a stale retry, so finishAlreadyMerged's own push would fire once per branch. This method
             // sends ONE aggregate notice for the whole batch instead (see the settle callback below).
+            //
+            // mergedVerification (card d6d40edd): a freshly-landed branch (noop:false) reports its own
+            // `Loom-Worker-PathSet` stamp outcome for free (landBranchCommitsIndividually already computed
+            // it in this SAME call) — "pathset" when the stamp landed, else the commit has neither trailer
+            // and degrades to "trailer-only" (see BatchLandedBranch.pathSetStamped's own doc). A `noop`
+            // landing reuses an already-landed sha with no fresh stamp attempt of its own — leave it null
+            // (unknown) rather than guessing at a tier nothing here actually verified.
+            const mergedVerification: "pathset" | "trailer-only" | null =
+              lb.noop ? null : lb.pathSetStamped === false ? "trailer-only" : "pathset";
             await this.finishAlreadyMerged({
               managerSessionId, workerSessionId: lb.workerSessionId, taskId: lb.taskId,
               worktreePath: worker.worktreePath ?? worker.cwd, branch: lb.branch, repoPath: finalRepoPath,
               projectId: finalProjectId, opId: randomUUID(), mergedSha: lb.sha, repoKey: c?.repoKey ?? null,
-              suppressNotify: true,
+              mergedVerification, suppressNotify: true,
             });
             // strippedTrailerCount (card b7f965d2): non-zero means this branch's own commit(s) carried a
             // Claude-Session trailer that got stripped before landing — surface it to the calling manager
@@ -17214,14 +17226,17 @@ export class SessionService {
     mergedSha?: string | null; repoKey?: string | null;
     /**
      * Which verification mode produced `mergedSha` (card 52e978ad) — see `Task.mergedVerification`'s own
-     * doc. ONLY the fresh-squash "Green" caller can state this for free: `merge.sha` there is the commit
-     * `mergeBranchLocked` just created from the live branch content in the SAME call, which is exactly
-     * the "content" guarantee, no separate check needed. The ALREADY_MERGED / boot-reconcile callers
-     * derive `mergedSha` from `findLandedSquashCommit`, which does NOT report its own verification mode —
-     * they omit this, leaving the column null until the drawer's lazy backfill (`GET /api/tasks/:id`)
-     * fills it in from a real `getTaskMergedInfo` read.
+     * doc. The fresh-squash "Green" caller states `"content"` for free: `merge.sha` there is the commit
+     * `mergeBranchLocked` just created from the live branch content in the SAME call, no separate check
+     * needed. A batch landing (card d6d40edd — `mergeBatchTracked`'s `finishAlreadyMerged` call) states
+     * `"pathset"`/`"trailer-only"` for free too: `landBranchCommitsIndividually` already computed its own
+     * `Loom-Worker-PathSet` digest (or found it couldn't) in the SAME landing call, so its caller derives
+     * the tier from that `pathSetStamped` flag rather than re-verifying anything. The remaining
+     * ALREADY_MERGED / boot-reconcile callers derive `mergedSha` from `findLandedSquashCommit`, which does
+     * NOT report its own verification mode — they omit this, leaving the column null until the drawer's
+     * lazy backfill (`GET /api/tasks/:id`) fills it in from a real `getTaskMergedInfo` read.
      */
-    mergedVerification?: "content" | null;
+    mergedVerification?: "content" | "pathset" | "trailer-only" | null;
   }): Promise<{
     nestedRepoBlock?: { paths: string[]; truncated: boolean };
     /** Task 035fb673: the non-"removed"/non-"nested-repo-blocked" gcWorktreeDir outcome, when one
