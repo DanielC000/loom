@@ -6754,6 +6754,12 @@ export class SessionService {
    */
   reconcileOrphanedGateOps(beforeInstant: string): number {
     let cleared = 0;
+    // Card 791def40: ONE staleness read shared across the WHOLE sweep, not one per row — this loop can
+    // touch many ops in a single boot pass, and `currentDeployStaleness()` is a synchronous, uncached,
+    // git-call-laden read (see deploy-staleness.ts's own module doc); a fresh call per row would multiply
+    // that cost by the row count for no benefit (every row settles in the SAME boot, so the answer can't
+    // change between them).
+    const deployStaleness = currentDeployStaleness();
     for (const row of this.db.listSurfacedPendingGateOps(beforeInstant)) {
       // STRUCTURALLY UNREACHABLE for "deploy" (card bed91595): `deployOwnProject`'s tombstone is minted
       // and settled back-to-back in one synchronous span (see that insert's own comment) — it never calls
@@ -6778,7 +6784,10 @@ export class SessionService {
 
       if (recovered) {
         this.db.settlePendingGateOp(row.opId, recovered);
-        const msg = formatRecoveredGateOpNudge(isMerge, row.opId, recovered) + attribution;
+        // Card 791def40: this recovered-verdict echo reuses the SAME `[loom:${tag}]` vocabulary the live
+        // settle paths use (see formatRecoveredGateOpNudge's own doc) and is just as much a verdict ABOUT
+        // CODE as those — it gets the same build stamp, sharing the one read taken above the loop.
+        const msg = formatRecoveredGateOpNudge(isMerge, row.opId, recovered) + attribution + this.buildStampSuffix(deployStaleness);
         try {
           // Card ccb407eb: a one-shot TERMINAL signal (this row is cleared right below regardless of
           // outcome — never re-sent), so it's durable like every other settle nudge.
@@ -6799,7 +6808,7 @@ export class SessionService {
       // Card 7d492f8b: no longer asserts "daemon restart killed this run" — this daemon never actually
       // verified that mechanism (see recoverGateOpVerdict's own doc for what WAS checked: its own durable
       // audit trail, found empty). States the honest limit instead.
-      const msg = `${tag} op ${row.opId} — no gate/merge verdict was ever reached for this op (its outcome could not be recovered after a daemon restart — no durable settle record was found for it). This is NOT a failure — ${verb} to get a real result.` + attribution;
+      const msg = `${tag} op ${row.opId} — no gate/merge verdict was ever reached for this op (its outcome could not be recovered after a daemon restart — no durable settle record was found for it). This is NOT a failure — ${verb} to get a real result.` + attribution + this.buildStampSuffix(deployStaleness);
       try {
         const r = this.enqueueDurableMessage(target, msg, { sender: "system", taskId: row.taskId, kind: "warning" });
         // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — if the target isn't
@@ -14688,7 +14697,9 @@ export class SessionService {
         // this method's doc), suppressing confirmWorkerMergeTracked's generic echo — so it must itself reach
         // the current lineage owner, not the (possibly recycled) manager captured when the confirm started.
         const target = this.resolveSettleNudgeTarget(args.managerSessionId);
-        const msg = `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main; finishing the worktree cleanup + task without a new commit.` + this.settleNudgeAttribution(target, args.managerSessionId);
+        // Card 791def40: fresh read — this success announcement may be read long after the event,
+        // possibly across a restart, and carries no other staleness-derived claim.
+        const msg = `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main; finishing the worktree cleanup + task without a new commit.` + this.settleNudgeAttribution(target, args.managerSessionId) + this.buildStampSuffix(currentDeployStaleness());
         try {
           // Card ccb407eb: a ONE-SHOT TERMINAL success announcement (never re-sent) — durable like every
           // other settle nudge.
@@ -15553,7 +15564,10 @@ export class SessionService {
             (outcome.value.reducedGateWarning ? ` ${outcome.value.reducedGateWarning}` : "")
           : `[loom:merge-batch-failed] merge_batch [op ${opId}] landed nothing via the batch path (${outcome.value.reason ?? "see fallback"}) — ${outcome.value.fallback.length} candidate(s) routed to an individual worker_merge_confirm instead (each already notified separately).`;
         try {
-          this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId), { sender: "system", taskId: null, kind: "warning" });
+          // Card 791def40: fresh read, mirroring the solo-merge settle nudge (confirmWorkerMergeTracked's
+          // onSettledAfterPending) — this settle carries no other staleness-derived claim, and it may be
+          // read long after the event, possibly across a restart.
+          this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + this.buildStampSuffix(currentDeployStaleness()), { sender: "system", taskId: null, kind: "warning" });
         } catch { /* manager not live — best-effort, mirrors every other completion nudge */ }
       },
       {
@@ -16611,11 +16625,14 @@ export class SessionService {
           const tag = outcome.value.cancelKind === "superseded-by-merge" ? "gate-superseded" : "gate-cancelled";
           const target = this.resolveSettleNudgeTarget(workerSessionId);
           try {
+            // Card 791def40: fresh read, matching the pass/fail branch of this same callback below — this
+            // cancel/superseded outcome carries no other staleness-derived claim.
             this.enqueueDurableMessage(
               target,
               `[loom:${tag}] op ${opId} — your gate self-check was cancelled (${outcome.value.reason ?? "cancelled"}). ` +
                 "This is NOT a failure — no verdict was reached, there is nothing to fix." +
-                this.settleNudgeAttribution(target, workerSessionId),
+                this.settleNudgeAttribution(target, workerSessionId) +
+                this.buildStampSuffix(currentDeployStaleness()),
               { sender: "system", taskId: worker.taskId ?? null },
             );
           } catch { /* worker not live — best-effort, mirrors every other completion nudge */ }
@@ -17370,7 +17387,10 @@ export class SessionService {
   private escalateWedgedMergeReconcile(s: Session, project: Project, entry: MergeReconcileWedgeEntry): void {
     const target = this.resolveSettleNudgeTarget(s.parentSessionId ?? s.id);
     const ageDays = Math.max(0, Math.round((Date.now() - new Date(entry.firstWedgedAt).getTime()) / 86_400_000));
-    const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${s.branch ?? "?"}, task ${(s.taskId ?? "?").slice(0, 8)}) on project "${project.name}" has a merge reconciliation that can never complete automatically: repoKey "${entry.repoKey}" does not name a registered repo on this project, and retrying will never change that. Wedged since ${entry.firstWedgedAt} (~${ageDays} day(s), ${entry.attempts} boot retries) — NOTE: "wedged since" is when this daemon started TRACKING the wedge, not necessarily when it first began; a record can predate this tracking and be older than it reports. This is NOT a transient failure — a human should either register that repoKey on the project, or confirm the branch is gone and close the task by hand.`;
+    const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${s.branch ?? "?"}, task ${(s.taskId ?? "?").slice(0, 8)}) on project "${project.name}" has a merge reconciliation that can never complete automatically: repoKey "${entry.repoKey}" does not name a registered repo on this project, and retrying will never change that. Wedged since ${entry.firstWedgedAt} (~${ageDays} day(s), ${entry.attempts} boot retries) — NOTE: "wedged since" is when this daemon started TRACKING the wedge, not necessarily when it first began; a record can predate this tracking and be older than it reports. This is NOT a transient failure — a human should either register that repoKey on the project, or confirm the branch is gone and close the task by hand.`
+      // Card 791def40: fresh read — this escalation fires rarely (past a give-up attempts/age threshold),
+      // never in a per-row sweep like reconcileOrphanedGateOps, so a shared read buys nothing here.
+      + this.buildStampSuffix(currentDeployStaleness());
     try {
       this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" });
     } catch {
