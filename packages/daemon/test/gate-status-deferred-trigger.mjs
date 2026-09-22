@@ -130,7 +130,7 @@ try {
   check("(2) it names the real failed file (from the REAL run-summary.failedNames, not a stub)",
     afterAnnotation.deferredTriggerNotice?.includes("this red names widget.spec.js"));
   check("(2) it names the matching card's real id", afterAnnotation.deferredTriggerNotice?.includes(deferredTaskId));
-  check("(2) it carries the required pointer+deadline wording", afterAnnotation.deferredTriggerNotice?.includes("not itself a specimen") && afterAnnotation.deferredTriggerNotice?.includes("~20 min"));
+  check("(2) it carries the required pointer+retention wording", afterAnnotation.deferredTriggerNotice?.includes("not itself a specimen") && afterAnnotation.deferredTriggerNotice?.includes("never by elapsed time"));
   check("(3, READ-TIME) a second, independent read of the SAME opId agrees — genuinely re-derived, not a one-shot side effect of the first call",
     (await callGateStatusAs(serverA, failOpId)).deferredTriggerNotice === afterAnnotation.deferredTriggerNotice);
 

@@ -17,8 +17,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (3) readFailedNamesForOp: an opId with no matching row, or a file that doesn't exist, returns
 //       undefined — never a fabricated [].
 //   (4) deferredTriggerNotice: a task whose deferredUntilEvent.key is in failedNames produces the notice
-//       line, naming the file and the card id, with the required "not itself a specimen" + "~20 min"
-//       clauses (card 1538bbc9's own binding constraint on what the pointer must carry).
+//       line, naming the file and the card id, with the required "not itself a specimen" + retention-
+//       policy clauses (card 1538bbc9's own binding constraint on what the pointer must carry; the
+//       retention wording corrected by card 9148c15c — count+bytes, never time-based).
 //   (5) deferredTriggerNotice: BYTE-IDENTICAL (empty string) when no task has deferredUntilEvent set —
 //       the DoD's own "byte-identical for a card with no deferredUntilEvent" requirement, tested directly
 //       against the join function itself.
@@ -111,7 +112,7 @@ function ndjsonRow(obj) {
   check("(4) the notice names the matching card id", notice4.includes(matchTaskId));
   check("(4) the notice carries the loom tag", notice4.includes("[loom:deferred-trigger]"));
   check("(4) the notice carries the 'not itself a specimen' qualifier verbatim (card 1538bbc9's binding constraint)", notice4.includes("a red naming a listed file is not itself a specimen"));
-  check("(4) the notice carries the ~20-minute capture deadline", notice4.includes("~20 min"));
+  check("(4) the notice carries the count+bytes retention wording, never a time-based claim", notice4.includes("never by elapsed time") && !notice4.includes("min."));
   check("(4) the notice does NOT mention the non-matching or wrong-kind tasks", !notice4.includes(nonMatchTaskId) && !notice4.includes(wrongKindTaskId));
 
   // (5) BYTE-IDENTICAL (empty string) when no task's own deferredUntilEvent matches at all — proved here
@@ -142,6 +143,6 @@ function ndjsonRow(obj) {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — readFailedNamesForOp reads run-summary.failedNames keyed by opId (honoring the largest-testCount tie-break on a retried op, undefined never fabricated []), and deferredTriggerNotice turns a failedNames list into a per-matching-card [loom:deferred-trigger] line carrying the required pointer+deadline wording, staying byte-identical (\"\") when nothing matches or no failedNames were given at all."
+  ? "\n✅ ALL PASS — readFailedNamesForOp reads run-summary.failedNames keyed by opId (honoring the largest-testCount tie-break on a retried op, undefined never fabricated []), and deferredTriggerNotice turns a failedNames list into a per-matching-card [loom:deferred-trigger] line carrying the required pointer+retention wording, staying byte-identical (\"\") when nothing matches or no failedNames were given at all."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

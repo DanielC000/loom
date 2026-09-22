@@ -29,8 +29,10 @@ export function deferredTriggerNotice(db: Db, projectId: string, failedNames: st
   return matches
     .map((t) =>
       `\n[loom:deferred-trigger] this red names ${t.deferredUntilEvent!.key}; card ${t.id} is deferred ON THIS EXACT EVENT. ` +
-      "Read its deferredReason IN FULL before attributing (a red naming a listed file is not itself a specimen), " +
-      "and capture the tail NOW — gate-output/ is pruned in ~20 min.",
+      "Read its deferredReason IN FULL before attributing (a red naming a listed file is not itself a specimen). " +
+      "gate-output/ retention is bounded by total bytes and file count, never by elapsed time " +
+      "(see GATE_SPILL_MAX_TOTAL_BYTES / GATE_SPILL_RETAIN_COUNT in gate-spill.ts) — capture the tail when convenient, " +
+      "but an older log is usually still present.",
     )
     .join("");
 }

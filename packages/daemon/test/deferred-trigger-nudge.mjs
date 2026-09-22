@@ -138,7 +138,7 @@ try {
     check("(A) signal text carries [loom:deferred-trigger]", text.includes("[loom:deferred-trigger]"));
     check("(A) it names the real failed file (from the REAL run-summary.failedNames, not a stub)", text.includes("this red names widget.spec.js"));
     check("(A) it names the matching card's real id", text.includes(deferredTaskId));
-    check("(A) it carries the required pointer+deadline wording", text.includes("not itself a specimen") && text.includes("~20 min"));
+    check("(A) it carries the required pointer+retention wording", text.includes("not itself a specimen") && text.includes("never by elapsed time"));
   }
 
   // ── (B) SAME shape, NO deferredUntilEvent-carrying task anywhere on the project ─────────────────────────
