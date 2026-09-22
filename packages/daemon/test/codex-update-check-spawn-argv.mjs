@@ -116,24 +116,21 @@ check("fresh spawn argv carries the loom-orchestration MCP auto-approve override
 check("fresh spawn argv carries the loom-tasks MCP auto-approve override too", hasAdjacentCArg(freshArgv, "mcp_servers.loom-tasks.default_tools_approval_mode=approve"));
 check("[negative control] hasAdjacentCArg returns false against the auto-approve value present but NOT adjacent to -c", !hasAdjacentCArg(["-c", "some_other_key=true", "mcp_servers.loom-orchestration.default_tools_approval_mode=approve"], "mcp_servers.loom-orchestration.default_tools_approval_mode=approve"));
 
-// --- card 90dc3c8c: the SAME real-spawn argv capture, for each of the three roles the auto-approve grant
-// was widened to (loom-setup/loom-operator/loom-platform) — the ONLY thing standing between this mechanism
-// and a silent, self-concealing regression is pinning the wiring HERE, against a real spawned argv, not
-// just against the pure mcpServersToCodexArgs unit coverage in codex-host-decisions.mjs. --------------------
-for (const [role, serverId] of [["setup", "loom-setup"], ["operator", "loom-operator"], ["platform", "loom-platform"]]) {
+// --- cards 90dc3c8c + cea3cec6: the SAME real-spawn argv capture, for each of the six roles the
+// auto-approve grant covers beyond worker/manager's loom-tasks/loom-orchestration (loom-setup/
+// loom-operator/loom-platform granted by 90dc3c8c; loom-audit/loom-user-audit/loom-run granted by
+// cea3cec6 once both of 90dc3c8c's reachability blockers — 71bcb207, 56e6c046 — were independently fixed;
+// see docs/decisions/90dc3c8c-*.md's cea3cec6 section for the per-role reachability + proportionality
+// re-derivation that required) — the ONLY thing standing between this mechanism and a silent,
+// self-concealing regression is pinning the wiring HERE, against a real spawned argv, not just against
+// the pure mcpServersToCodexArgs unit coverage in codex-host-decisions.mjs. --------------------------------
+for (const [role, serverId] of [
+  ["setup", "loom-setup"], ["operator", "loom-operator"], ["platform", "loom-platform"],
+  ["auditor", "loom-audit"], ["workspace-auditor", "loom-user-audit"], ["run", "loom-run"],
+]) {
   const argv = await spawnAndCaptureArgv(`codex-argv-${role}`, { role });
   console.log(`[info] ${role} spawn argv: ${JSON.stringify(argv)}`);
-  check(`${role} spawn argv carries the ${serverId} MCP auto-approve override (card 90dc3c8c)`, hasAdjacentCArg(argv, `mcp_servers.${serverId}.default_tools_approval_mode=approve`));
-}
-// --- NEGATIVE CONTROL: the three roles card 90dc3c8c deliberately did NOT grant (each unreachable today
-// via the normal profile+spawn path for its own independent reason — see docs/decisions/90dc3c8c-*.md).
-// createCodexPty itself works fine for these roles when invoked directly (as this test does), so this
-// proves the auto-approve set itself was not accidentally widened to include them, distinct from the
-// separate, unrelated reachability gaps that keep a REAL profile-driven spawn from ever reaching here. ----
-for (const [role, serverId] of [["auditor", "loom-audit"], ["workspace-auditor", "loom-user-audit"], ["run", "loom-run"]]) {
-  const argv = await spawnAndCaptureArgv(`codex-argv-${role}`, { role });
-  console.log(`[info] ${role} spawn argv: ${JSON.stringify(argv)}`);
-  check(`${role} spawn argv mounts ${serverId} but carries NO auto-approve override (deliberately ungranted — card 90dc3c8c)`, !hasAdjacentCArg(argv, `mcp_servers.${serverId}.default_tools_approval_mode=approve`) && argv.some((a) => a.startsWith(`mcp_servers.${serverId}.url=`)));
+  check(`${role} spawn argv carries the ${serverId} MCP auto-approve override`, hasAdjacentCArg(argv, `mcp_servers.${serverId}.default_tools_approval_mode=approve`));
 }
 
 console.log(failures === 0

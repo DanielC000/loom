@@ -33,15 +33,18 @@ import { findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } f
  *  `createCodexPty`'s call site: Loom's own first-party, daemon-local, role-gated surfaces. Never widen
  *  this to a capability-catalog/playwright/markitdown/codescape server, which can be third-party.
  *
- * @decision 90dc3c8c — widened to also cover loom-setup/loom-operator/loom-platform, the three of the
- * six remaining first-party ids reachable today; do NOT add loom-audit/loom-user-audit/loom-run without
- * first re-deriving their reachability — each is unreachable today for a separate, unrelated reason. */
+ * @decision 90dc3c8c — now every first-party server id (loom-run/loom-audit/loom-user-audit added by
+ * cea3cec6). Do NOT widen this past LOOM_FIRST_PARTY_SERVER_IDS without a per-role reachability +
+ * proportionality re-derivation. */
 export const CODEX_AUTO_APPROVE_MCP_SERVER_IDS: ReadonlySet<string> = new Set([
   LOOM_TASKS_SERVER_ID,
   LOOM_ORCHESTRATION_SERVER_ID,
   LOOM_SETUP_SERVER_ID,
   LOOM_OPERATOR_SERVER_ID,
   LOOM_PLATFORM_SERVER_ID,
+  LOOM_AUDIT_SERVER_ID,
+  LOOM_USER_AUDIT_SERVER_ID,
+  LOOM_RUN_SERVER_ID,
 ]);
 
 const RING_CAP_BYTES = 256 * 1024;
