@@ -19,12 +19,14 @@ import { pickFields } from "./entityRowFields.js";
  * path, lineage ids, errors, rate-limit bookkeeping). Mirrors tasks_list's TaskSummary: a full list
  * of dozens of enriched session rows was a 300K+ blob, so a default list read here stays bounded.
  * Callers that need a whole record opt in with full:true (or read one transcript via transcript_read).
+ * `turnSeq:0` ALONE is not evidence of a wedge — see worker_list's `neverCompletedTurn` doc
+ * (orchestration.ts) for why a genuinely long first turn reads identically.
  */
 export type SessionSummary = Pick<
   SessionListItem,
   | "id" | "projectId" | "projectName" | "agentId" | "agentName" | "role" | "processState"
   | "busy" | "archivedAt" | "createdAt" | "lastActivity" | "model"
-  | "ctxInputTokens" | "ctxTurns"
+  | "ctxInputTokens" | "ctxTurns" | "turnSeq"
 >;
 
 /** Project ONE enriched session row down to its summary. Optional fields normalise to null. */
@@ -43,6 +45,10 @@ export const toSessionSummary = (s: SessionListItem): SessionSummary => ({
   model: s.model ?? null,
   ctxInputTokens: s.ctxInputTokens ?? null,
   ctxTurns: s.ctxTurns ?? null,
+  // `turnSeq` has no `null` member (unlike ctxInputTokens/ctxTurns above) — db.ts's own row mapper
+  // always populates it with a real number (defaulting to 0), so `?? 0` here mirrors that same
+  // convention, not a null-vs-measured-zero ambiguity (see orchestration.ts's `w.turnSeq ?? 0`).
+  turnSeq: s.turnSeq ?? 0,
 });
 
 /**
