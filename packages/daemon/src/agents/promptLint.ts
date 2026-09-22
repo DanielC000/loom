@@ -73,7 +73,7 @@ export const ORCH_MANAGER_TOOLS: readonly string[] = [
   "gate_queue", "gate_status", "idle_report", "inbox_pull", "merge_batch", "my_context",
   "platform_escalate", "profile_delete", "project_archive", "project_update", "question_amend", "question_ask",
   "question_cancel", "question_pull", "question_resolve", "recycle_me", "requests_list",
-  "resume_doc_check", "schedule_create", "schedule_update", "served_status", "worker_flush", "worker_list", "worker_merge",
+  "resume_doc_check", "schedule_create", "schedule_get", "schedule_list", "schedule_update", "served_status", "worker_flush", "worker_list", "worker_merge",
   "worker_merge_confirm", "worker_message", "worker_reap", "worker_recycle", "worker_redirect",
   "worker_relink", "worker_report_get", "worker_set_mode", "worker_spawn", "worker_status", "worker_stop",
   "worker_transcript",

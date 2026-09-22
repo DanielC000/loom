@@ -76,9 +76,14 @@ db.insertProject({ id: "pArchived", name: "ArchivedFar", repoPath: tmpHome, vaul
 db.insertAgent({ id: "aArchivedProf", projectId: "pArchived", name: "ArchivedAgent", startupPrompt: "", position: 0, profileId: "profArchived" });
 db.insertProfile({ id: "profArchived", name: "ArchivedRef", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null });
 db.insertProfile({ id: "profShared", name: "Shared", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null });
-// A pre-existing schedule in EACH project (target the manager will try to cross-edit).
+// A pre-existing schedule in EACH project (target the manager will try to cross-edit). zzOtherPrefix's
+// id is deliberately LONGER than the 8-char prefix floor, and its own first-8-chars prefix ("zzOtherP")
+// deliberately shares NO characters with "schOther"/"schMine" — so a genuine PREFIX-of-a-foreign-id
+// case is testable (its prefix must never coincide with another schedule's FULL id, or the exact-id
+// fast path would silently short-circuit the very prefix path this fixture exists to exercise).
 db.insertSchedule({ id: "schMine", agentId: "aMine", cron: "0 * * * *", enabled: true, nextFireAt: now, lastFiredAt: null, createdAt: now, kind: "manager" });
 db.insertSchedule({ id: "schOther", agentId: "aOther", cron: "0 * * * *", enabled: true, nextFireAt: now, lastFiredAt: null, createdAt: now, kind: "manager" });
+db.insertSchedule({ id: "zzOtherPrefix12345", agentId: "aOther", cron: "0 * * * *", enabled: true, nextFireAt: now, lastFiredAt: null, createdAt: now, kind: "manager" });
 
 // The manager session lives in pMine. (Role MUST be "manager" — requireManager gates first.)
 db.insertSession({
@@ -131,10 +136,21 @@ try {
   check("schedule_create for the manager's OWN agent SUCCEEDS", !!db.getSchedule(created.id) && db.getSchedule(created.id).agentId === "aMine");
 
   // ════════ schedule_update — cross-project schedule REJECTED, no write; own-project OK ════════
-  rejects("schedule_update on a schedule whose agent is in ANOTHER project → rejected",
+  rejects("schedule_update on a schedule whose agent is in ANOTHER project (exact FULL id) → rejected",
     () => svc.updateScheduleAsManager("M", "schOther", { enabled: false }), /outside your project/);
   check("schedule_update made NO write to the foreign schedule", db.getSchedule("schOther").enabled === true);
-  rejects("schedule_update on a MISSING schedule → rejected", () => svc.updateScheduleAsManager("M", "ghost", { enabled: false }), /schedule not found/);
+  // card 52b812c6 (Code Review): a foreign schedule's id-PREFIX must be REJECTED too, and never leak
+  // via the "outside your project" wording — the write resolver's own-project prefix candidate set
+  // excludes the foreign schedule entirely, so a prefix (unlike the exact id above) reads a plain
+  // "schedule not found", not an existence-revealing rejection.
+  rejects("schedule_update on a FOREIGN schedule's id-PREFIX → rejected (never resolves cross-project)",
+    () => svc.updateScheduleAsManager("M", "zzOtherPrefix12345".slice(0, 8), { enabled: false }), /schedule not found/);
+  check("schedule_update made NO write via the foreign prefix either", db.getSchedule("zzOtherPrefix12345").enabled === true);
+  // card 52b812c6 DoD-3: a ref shorter than the 8-char prefix floor is NOT the same as a genuinely
+  // unresolvable one — it gets its own distinct "too short" error.
+  rejects("schedule_update with a ref SHORTER than the 8-char prefix floor → its own 'too short' error",
+    () => svc.updateScheduleAsManager("M", "short1", { enabled: false }), /too short/);
+  rejects("schedule_update on a MISSING (well-formed-length) schedule → rejected", () => svc.updateScheduleAsManager("M", "ghostghost", { enabled: false }), /schedule not found/);
   const schUpd = svc.updateScheduleAsManager("M", "schMine", { enabled: false });
   check("schedule_update on the manager's OWN schedule SUCCEEDS", schUpd.enabled === false && db.getSchedule("schMine").enabled === false);
 

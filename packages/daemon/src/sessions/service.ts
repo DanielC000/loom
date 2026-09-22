@@ -11758,6 +11758,65 @@ export class SessionService {
   }
 
   /**
+   * card 52b812c6: the caller's OWN project's schedules (schedule → agent → project) — the single
+   * computation shared by every project-scoped schedule read/resolve, so the filter is never duplicated
+   * (and never drifts) across call sites.
+   */
+  private ownSchedulesForManager(managerSessionId: string): Schedule[] {
+    const ownProjectId = this.db.getSession(managerSessionId)?.projectId;
+    if (!ownProjectId) throw new Error("no project for this session");
+    return this.db.listSchedules().filter((s) => this.db.getAgent(s.agentId)?.projectId === ownProjectId);
+  }
+
+  /**
+   * card 52b812c6: resolve a scheduleId ref for a manager-surface schedule WRITE — full id first (a
+   * cross-project id falls through to requireOwnProject's clearer "outside your project" rejection),
+   * else an 8-char id-PREFIX scoped to the caller's own schedules (mirrors resolveManagerAgentRef).
+   * WRITE-ONLY: safe here (a cross-project id yields only that same content-free rejection), but a
+   * cross-project EXISTENCE ORACLE if reused by a READ — `schedule_get` uses
+   * {@link resolveOwnScheduleRef} instead, which never leaves the caller's own project at all.
+   */
+  private resolveManagerScheduleRef(managerSessionId: string, ref: string): Schedule {
+    const exact = this.db.getSchedule(ref);
+    if (exact) return exact;
+    return this.resolveSchedulePrefix(this.ownSchedulesForManager(managerSessionId), ref);
+  }
+
+  /**
+   * card 52b812c6: resolve a scheduleId ref for a manager-surface schedule READ — full id or an
+   * unambiguous 8-char id-PREFIX, scoped to the caller's OWN project from the start (never touches
+   * `db.getSchedule`'s unscoped exact lookup). Mirrors agent_get's own resolution
+   * (mcp/orchestration.ts, `agents.find(a => a.id === agentId)` over `db.listAgents(projectId)`) rather
+   * than {@link resolveManagerScheduleRef} (the WRITE-only resolver — see its own doc for why the two
+   * must NOT be unified): a foreign schedule's id, full or prefix, simply reads "schedule not found",
+   * with no signal distinguishing it from a genuinely nonexistent one.
+   */
+  private resolveOwnScheduleRef(managerSessionId: string, ref: string): Schedule {
+    const schedules = this.ownSchedulesForManager(managerSessionId);
+    const exact = schedules.find((s) => s.id === ref);
+    if (exact) return exact;
+    return this.resolveSchedulePrefix(schedules, ref);
+  }
+
+  /**
+   * card 52b812c6 DoD-3: the shared prefix-resolution tail for both schedule resolvers above — a `ref`
+   * shorter than the 8-char prefix floor gets its OWN error rather than falling into the generic
+   * "schedule not found", which would otherwise read identically to a genuinely deleted schedule for a
+   * ref that was never even a valid candidate.
+   */
+  private resolveSchedulePrefix(candidates: Schedule[], ref: string): Schedule {
+    if (ref.length < MIN_ID_PREFIX_LEN) {
+      throw new Error(`scheduleId '${ref}' is too short to resolve — pass the full id or an unambiguous ${MIN_ID_PREFIX_LEN}-char prefix`);
+    }
+    const r = resolveIdPrefix(candidates, ref);
+    if (r.kind === "found") return r.record;
+    if (r.kind === "ambiguous") {
+      throw new Error(`ambiguous schedule id-prefix '${ref}' — it matches ${r.ids.join(", ")}; pass more characters or the full id`);
+    }
+    throw new Error("schedule not found");
+  }
+
+  /**
    * Assign an EXISTING human-authored profile to an agent (or clear it with `profileId: null`).
    * Option B: profile CREATE/edit stays human-only, so any assignable profileId was minted by a
    * human who intended it assignable — assignment can't escalate beyond what a human already blessed.
@@ -11957,8 +12016,9 @@ export class SessionService {
     managerSessionId: string, scheduleId: string, patch: { cron?: string; enabled?: boolean; prompt?: string | null; name?: string },
   ): Schedule {
     this.requireManager(managerSessionId, "schedule_update");
-    const schedule = this.db.getSchedule(scheduleId);
-    if (!schedule) throw new Error("schedule not found");
+    // card 52b812c6: full id OR an unambiguous 8-char id-prefix (was exact-id-only — see
+    // resolveManagerScheduleRef's own doc for the incident this fixes).
+    const schedule = this.resolveManagerScheduleRef(managerSessionId, scheduleId);
     // Resolve the schedule → its agent → that agent's project; reject a schedule outside the caller's
     // project (a missing agent can never match own, so it's rejected too).
     this.requireOwnProject(managerSessionId, this.db.getAgent(schedule.agentId)?.projectId, "schedule_update");
@@ -11971,9 +12031,31 @@ export class SessionService {
       try { dbPatch.nextFireAt = nextFireAt(patch.cron, new Date()); } catch { throw new Error("invalid cron expression"); }
       dbPatch.cron = patch.cron;
     }
-    this.db.updateSchedule(scheduleId, dbPatch);
-    this.auditManage(managerSessionId, "schedule_update", { scheduleId, cron: patch.cron, enabled: patch.enabled });
-    return this.db.getSchedule(scheduleId)!;
+    // Use the RESOLVED full id (`scheduleId` may have been a prefix) for every downstream write/read/audit.
+    this.db.updateSchedule(schedule.id, dbPatch);
+    this.auditManage(managerSessionId, "schedule_update", { scheduleId: schedule.id, cron: patch.cron, enabled: patch.enabled });
+    return this.db.getSchedule(schedule.id)!;
+  }
+
+  /**
+   * List cron schedules scoped to the caller's OWN project (via each schedule's agent). card 52b812c6:
+   * a manager previously had `schedule_create`/`schedule_update` — both WRITES — and no read at all; the
+   * cross-project Platform `list_all_schedules` surface is untouched and stays the Lead-only whole-fleet
+   * view.
+   */
+  listSchedulesAsManager(managerSessionId: string): Schedule[] {
+    this.requireManager(managerSessionId, "schedule_list");
+    return this.ownSchedulesForManager(managerSessionId);
+  }
+
+  /**
+   * Read ONE schedule by id — full id or an unambiguous 8-char id-prefix, via
+   * {@link resolveOwnScheduleRef} (never {@link resolveManagerScheduleRef} — that resolver is WRITE-only;
+   * see its own doc for why a READ must not reuse it). card 52b812c6.
+   */
+  getScheduleAsManager(managerSessionId: string, scheduleId: string): Schedule {
+    this.requireManager(managerSessionId, "schedule_get");
+    return this.resolveOwnScheduleRef(managerSessionId, scheduleId);
   }
 
   /**

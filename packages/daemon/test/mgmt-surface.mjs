@@ -156,7 +156,81 @@ check("schedule_create: a missing agent is rejected", (await call(M, "schedule_c
 const su = await call(M, "schedule_update", { scheduleId: sched.id, enabled: false, cron: "30 8 * * *" });
 check("schedule_update: applies enabled=false + new cron", su.enabled === false && su.cron === "30 8 * * *" && !su.error);
 check("schedule_update: an invalid cron is rejected", (await call(M, "schedule_update", { scheduleId: sched.id, cron: "bogus" })).error === "invalid cron expression");
-check("schedule_update: a missing schedule is rejected", (await call(M, "schedule_update", { scheduleId: "nope", enabled: true })).error === "schedule not found");
+check("schedule_update: a missing (well-formed-length) schedule is rejected", (await call(M, "schedule_update", { scheduleId: "nopenopenope", enabled: true })).error === "schedule not found");
+// card 52b812c6 DoD-3: a ref shorter than the 8-char prefix floor gets its OWN "too short" error,
+// distinct from a genuinely-unresolvable one ("nope" above is 4 chars — this used to collapse into the
+// same bare "schedule not found" the missing-schedule case gets, silently conflating "malformed" with
+// "deleted").
+check("schedule_update: a ref shorter than the 8-char prefix floor gets its own 'too short' error",
+  /too short/.test((await call(M, "schedule_update", { scheduleId: "nope", enabled: true })).error ?? ""));
+
+// 5a) card 52b812c6 — schedule_update was exact-id-only (db.getSchedule), so a well-formed 8-char
+// id-prefix naming a LIVE, ENABLED schedule returned the same "schedule not found" as a genuinely
+// deleted one. Now resolves like every sibling *_get/*_update tool.
+const suPrefix = await call(M, "schedule_update", { scheduleId: sched.id.slice(0, 8), enabled: true });
+check("schedule_update: an 8-char id-prefix resolves the same schedule (not 'schedule not found')",
+  suPrefix.id === sched.id && suPrefix.enabled === true && !suPrefix.error);
+
+// 5b) schedule_get / schedule_list — card 52b812c6's read half: a manager previously had
+// schedule_create/schedule_update (both WRITES) and no read at all.
+check("manager surface also includes schedule_get + schedule_list (the read half)",
+  ["schedule_get", "schedule_list"].every((t) => mTools.includes(t)));
+const sg = await call(M, "schedule_get", { scheduleId: sched.id });
+check("schedule_get: returns the full record by full id, incl. nextFireAtLocal",
+  sg.id === sched.id && sg.cron === "30 8 * * *" && typeof sg.nextFireAtLocal === "string" && !sg.error);
+const sgPrefix = await call(M, "schedule_get", { scheduleId: sched.id.slice(0, 8) });
+check("schedule_get: resolves the same record by an 8-char id-prefix", sgPrefix.id === sched.id && !sgPrefix.error);
+check("schedule_get: a missing (well-formed-length) schedule is rejected", (await call(M, "schedule_get", { scheduleId: "deadbeef" })).error === "schedule not found");
+// card 52b812c6 DoD-3: a ref shorter than the 8-char prefix floor gets its OWN error, distinct from a
+// genuinely-unresolvable one.
+check("schedule_get: a ref shorter than the 8-char prefix floor gets its own 'too short' error",
+  /too short/.test((await call(M, "schedule_get", { scheduleId: "short1" })).error ?? ""));
+const sl = await call(M, "schedule_list", {});
+check("schedule_list: an array including the created/updated schedule", Array.isArray(sl) && sl.some((s) => s.id === sched.id));
+check("schedule_list: each row carries nextFireAtLocal (the local-time cross-check)", sl.every((s) => typeof s.nextFireAtLocal === "string"));
+
+// 5c) own-project scoping (never leaks a foreign project's schedule, by full id OR by prefix). Insert
+// one directly for projArch's own agent — there's no manager session there to call schedule_create.
+const dbFgn = new Database(path.join(LOOM, "loom.db"));
+dbFgn.prepare("INSERT INTO agents (id,project_id,name,startup_prompt,position,profile_id) VALUES (?,?,?,?,0,NULL)")
+  .run("tA", "projArch", "lead-a", "do the other thing");
+const foreignId = "ffffffff-0000-4000-8000-000000000001";
+dbFgn.prepare(`INSERT INTO schedules (id,name,agent_id,cron,enabled,next_fire_at,last_fired_at,created_at,kind,prompt)
+  VALUES (?,?,?,?,1,?,NULL,?,'manager',NULL)`).run(foreignId, "foreign", "tA", "0 9 * * *", now, now);
+dbFgn.close();
+// schedule_get is a READ — it must NOT be a cross-project existence oracle. A foreign schedule's FULL
+// id reads the SAME plain "schedule not found" as a genuinely nonexistent one (never "outside your
+// project", which would reveal that a schedule with that exact id exists somewhere).
+const foreignFull = await call(M, "schedule_get", { scheduleId: foreignId });
+check("schedule_get: a foreign schedule's FULL id reads a plain 'schedule not found' (no cross-project existence oracle)",
+  foreignFull.error === "schedule not found");
+// schedule_update is a WRITE — the sibling agent_assign_profile/agent_update convention (a real
+// cross-project id falls through to the clearer, content-free "outside your project" rejection) is
+// intentionally UNCHANGED here.
+const foreignUpdate = await call(M, "schedule_update", { scheduleId: foreignId, enabled: true });
+check("schedule_update: a foreign schedule's FULL id still gets the clearer own-project boundary error (WRITE convention, unchanged)",
+  typeof foreignUpdate.error === "string" && /outside your project/.test(foreignUpdate.error));
+const foreignPrefix = await call(M, "schedule_get", { scheduleId: foreignId.slice(0, 8) });
+check("schedule_get: a foreign schedule's id-PREFIX never resolves (own-project-scoped candidate set)",
+  foreignPrefix.error === "schedule not found");
+const listAfterForeign = await call(M, "schedule_list", {});
+check("schedule_list: never includes a foreign project's schedule", !listAfterForeign.some((s) => s.id === foreignId));
+
+// 5d) an AMBIGUOUS id-prefix (two of M's OWN schedules sharing the same first 8 hex chars) names both
+// candidate ids rather than silently picking one.
+const dbDup = new Database(path.join(LOOM, "loom.db"));
+const dupPrefix = "abcdabcd";
+const dupId1 = `${dupPrefix}-1111-4000-8000-000000000001`;
+const dupId2 = `${dupPrefix}-2222-4000-8000-000000000002`;
+for (const id of [dupId1, dupId2]) {
+  dbDup.prepare(`INSERT INTO schedules (id,name,agent_id,cron,enabled,next_fire_at,last_fired_at,created_at,kind,prompt)
+    VALUES (?,?,?,?,1,?,NULL,?,'manager',NULL)`).run(id, `dup-${id}`, "tM", "0 9 * * *", now, now);
+}
+dbDup.close();
+const ambiguous = await call(M, "schedule_get", { scheduleId: dupPrefix });
+check("schedule_get: an ambiguous id-prefix names both candidate ids (never silently picks one)",
+  typeof ambiguous.error === "string" && ambiguous.error.includes("ambiguous") &&
+  ambiguous.error.includes(dupId1) && ambiguous.error.includes(dupId2));
 
 // 6) project_archive — own-project-scope trust boundary (commit 6008062, business-rule coverage lives
 //    in mgr-own-project-scope.mjs, which calls the service directly). This proves the SAME boundary
@@ -207,7 +281,7 @@ check("agent_create: a non-existent profileId is rejected (no minting)", acBad.e
 await PL.close();
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the manager self-service management surface works end-to-end (assign profile / update agent / update+archive project / create+update schedule), the trust-boundary guardrails hold (gateCommand rejected on the agent path; profiles can only be ASSIGNED, never minted), and workers/plain sessions never see it."
+  ? "\n✅ ALL PASS — the manager self-service management surface works end-to-end (assign profile / update agent / update+archive project / create+update schedule / list+get schedules), the trust-boundary guardrails hold (gateCommand rejected on the agent path; profiles can only be ASSIGNED, never minted; schedule_get never leaks a foreign schedule's existence, unlike schedule_update's own-project rejection), and workers/plain sessions never see any of it."
   : `\n❌ ${failures} FAILURE(S).`);
 } finally {
   try { daemon.kill(); } catch { /* ignore */ }

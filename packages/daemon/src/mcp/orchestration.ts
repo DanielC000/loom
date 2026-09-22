@@ -5405,12 +5405,70 @@ export class OrchestrationMcpRouter {
           "the agent's own startupPrompt on fire (pass an empty string to clear it). The schedule's agent must " +
           "be in YOUR project (a schedule outside it is REJECTED). Omitted fields are left as-is; a blank " +
           "`name` is ignored (a schedule always keeps a name). The cron fields are evaluated in the DAEMON's " +
-          "LOCAL timezone, NOT UTC — the response's `nextFireAtLocal` is the reliable human-readable check.",
+          "LOCAL timezone, NOT UTC — the response's `nextFireAtLocal` is the reliable human-readable check. " +
+          "scheduleId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as schedule_get/" +
+          "schedule_list, worker_spawn's agentId, tasks_get's taskId) — a well-formed prefix naming a real " +
+          "schedule in YOUR project now resolves instead of returning 'schedule not found' as if it had been " +
+          "deleted. A ref shorter than 8 characters gets its OWN error naming it too short, distinct from a " +
+          "genuinely-unresolvable id.",
         inputSchema: strictShape({ scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional(), prompt: z.string().optional(), name: z.string().optional() }),
       },
       async ({ scheduleId, cron, enabled, prompt, name }) => {
         try {
           return ok(withScheduleTimeEcho(sessions.updateScheduleAsManager(managerSessionId, scheduleId, { cron, enabled, prompt, name })));
+        } catch (e) {
+          return ok({ error: (e as Error).message, ...nowEcho() });
+        }
+      },
+    );
+
+    // card 52b812c6: schedule_list/schedule_get — the read-affordance half of a manager's schedule
+    // surface. A manager previously had schedule_create/schedule_update (both WRITES) and no read at
+    // all — "I can create schedules I can't enumerate." The cross-project Platform variant
+    // (list_all_schedules/schedule_get on mcp/platform.ts) is UNCHANGED — this is the project-scoped
+    // mirror, same isolation as agent_get/agent_list.
+    server.registerTool(
+      "schedule_list",
+      {
+        description:
+          "List cron schedules in YOUR project (each {id, name, agentId, cron, enabled, nextFireAt, " +
+          "nextFireAtLocal, lastFiredAt, lastFiredAtLocal, lastDeferredAt, lastDeferredReason, kind, prompt}). " +
+          "`cron`/`nextFireAt` are evaluated/expressed in the DAEMON's LOCAL timezone, NOT UTC — " +
+          "`nextFireAtLocal` is the reliable human-readable cross-check, never assume `nextFireAt`'s ISO " +
+          "instant reads as UTC-intuitive wall-clock time. `lastDeferredReason` is non-null when a fire was " +
+          "held back by a budget/owner gate OR missed entirely while the daemon was down — see events_search " +
+          "(kind: schedule_fire_deferred/schedule_fire_missed) for the full history. Your project is " +
+          "derived SERVER-SIDE (no projectId param) — this is the read half of schedule_create/schedule_update, " +
+          "closing the gap where a manager could create a schedule it had no way to enumerate. Read-only.",
+        inputSchema: strictShape({}),
+      },
+      async () => {
+        try {
+          return ok(sessions.listSchedulesAsManager(managerSessionId).map((s) => withScheduleTimeEcho(s)));
+        } catch (e) {
+          return ok({ error: (e as Error).message, ...nowEcho() });
+        }
+      },
+    );
+
+    server.registerTool(
+      "schedule_get",
+      {
+        description:
+          "Read ONE schedule in YOUR project by id — the FULL record ({id, name, agentId, cron, enabled, " +
+          "nextFireAt, nextFireAtLocal, lastFiredAt, lastFiredAtLocal, lastDeferredAt, lastDeferredReason, " +
+          "kind, prompt}). `cron`/`nextFireAt` are evaluated/expressed in the DAEMON's LOCAL timezone, NOT " +
+          "UTC — `nextFireAtLocal` is the reliable human-readable cross-check. scheduleId accepts the full id " +
+          "OR an unambiguous 8-char id-prefix (same resolution as schedule_update/worker_spawn's agentId) — " +
+          "an ambiguous prefix errors naming the candidate ids, never resolving to an arbitrary match; a ref " +
+          "shorter than 8 characters gets its own 'too short' error instead. A schedule outside YOUR project " +
+          "resolves as a plain not-found (never distinguishable from a genuinely nonexistent id), same " +
+          "scoping as agent_get/worker_list. Read-only.",
+        inputSchema: strictShape({ scheduleId: z.string() }),
+      },
+      async ({ scheduleId }) => {
+        try {
+          return ok(withScheduleTimeEcho(sessions.getScheduleAsManager(managerSessionId, scheduleId)));
         } catch (e) {
           return ok({ error: (e as Error).message, ...nowEcho() });
         }
