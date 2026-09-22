@@ -2781,6 +2781,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // spawn would use), and omitted bytes just replay the pinned geometry over a blank screen.
           ptyGeometry?: { cols: number; rows: number };
           ptyBytes?: string;
+          // (card 8dfaf750) The pinned vendor CLI, so a spec can construct a CODEX session row. There is
+          // no other way to build one in a hermetic e2e: `harness` is pinned onto the row at spawn from
+          // the resolved Profile, and spawning is exactly what the no-spawn guard forbids. Omitted ⇒
+          // NULL ⇒ claude, byte-identical to every existing seed call. Typed off Session rather than
+          // respelling the union: harness-adapter-claude-literal-guard forbids a bare vendor literal here,
+          // and referencing the shared type is what keeps this from drifting when the union grows.
+          harness?: Session["harness"];
         }[];
         // A pending scheduled wake for a session — the ONLY way an e2e spec can make the SessionWakes
         // sub-panel render (it draws nothing when empty). DB-backed (insertWake), so it round-trips
@@ -3067,6 +3074,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           branch: s.branch ?? null,
           model: s.model ?? null,
           ctxInputTokens: s.ctxInputTokens ?? null,
+          harness: s.harness,
         };
         deps.db.insertSession(row);
         liveSessionIds.push(id);

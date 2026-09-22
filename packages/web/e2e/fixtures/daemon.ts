@@ -319,6 +319,11 @@ export interface LoomDaemon {
    */
   seedLiveSession: (opts?: {
     project?: SeededProject;
+    /** Override the minted session id. The default `e2e-live-<uuid>` makes EVERY seeded session render
+     *  the same 8-char short id in the UI (`id.slice(0, 8)` → "e2e-live"), which two existing specs already
+     *  had to route around — pass a distinct prefix when a spec needs to tell two seeded rows apart ON
+     *  SCREEN. Omitted ⇒ the default mint, byte-identical to every existing call. */
+    id?: string;
     agentId?: string;
     agentName?: string;
     role?: SeededLiveRole;
@@ -337,6 +342,10 @@ export interface LoomDaemon {
      *  distinct from omitting this field entirely (renders as the archive's "never measured" dash) — the
      *  seed endpoint distinguishes the two via `??`, never `||`, so pass `0` explicitly to seed that case. */
     ctxInputTokens?: number;
+    /** The pinned vendor CLI (card 8dfaf750). The ONLY way a hermetic spec can build a CODEX session:
+     *  `harness` is pinned onto the row from the resolved Profile at spawn, and spawning is exactly what
+     *  the no-spawn guard forbids. Omitted ⇒ NULL ⇒ "claude", byte-identical to every existing call. */
+    harness?: "claude" | "codex";
   }) => Promise<SeededLiveSession>;
   /**
    * Enqueue a message straight onto a LIVE session's pty FIFO with a chosen source+kind via POST
@@ -690,14 +699,14 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
         taskTitle = t.title;
       }
 
-      const sessionId = `e2e-live-${randomUUID()}`;
+      const sessionId = opts.id ?? `e2e-live-${randomUUID()}`;
       const wakeNote = opts.wake ? (opts.wake.note ?? "seeded wake — e2e") : undefined;
       await apiPost(baseURL, "/internal/test/seed", {
         liveSessions: [{
           id: sessionId, projectId: project.id, agentId, role, busy: opts.busy ?? false,
           parentSessionId: opts.parentSessionId, taskId, branch: opts.branch, title: opts.title,
           ptyGeometry: opts.ptyGeometry, ptyBytes: opts.ptyBytes,
-          model: opts.model, ctxInputTokens: opts.ctxInputTokens,
+          model: opts.model, ctxInputTokens: opts.ctxInputTokens, harness: opts.harness,
         }],
         wakes: opts.wake ? [{ sessionId, note: wakeNote }] : [],
       });

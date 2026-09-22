@@ -5,7 +5,9 @@ import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
 import { isRateLimited, usePendingDecisionsBySession, type AttentionItem, type PendingDecision } from "../lib/attention";
 import { fleetRollup, workerBuckets, capArchived } from "../lib/fleet";
+import { harnessOf } from "../lib/harnessFields";
 import { DecisionStateChip } from "./decisions";
+import { HarnessTag } from "./HarnessPicker";
 import { useOpenRequest } from "./requests";
 import { Panel, StatusPill, Chip, Meter, Button, Dot } from "./ui";
 import { color, font, radius, tone, type Tone } from "../theme";
@@ -250,6 +252,14 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
       <span style={{ fontFamily: font.mono, fontSize: 12, color: star ? color.phosphor : color.text, fontWeight: star ? 700 : 400 }}>
         {star ? "★ " : ""}{star ? "mgr " : "w:"}{s.id.slice(0, 8)}
       </span>
+      {/* Which vendor CLI this session actually runs — grouped with the id because it's an identity
+          fact about the row, not a status. Reuses the Profiles tag verbatim, so it renders ONLY for
+          codex: claude is the default and the overwhelming majority, and badging every row would
+          spend the fleet's scarcest resource (row width, and the reader's attention) on the case that
+          carries no information. `null` (never pinned) and an explicit `"claude"` both read as claude
+          here — the daemon keeps them distinct because it's a provenance question, but they spawn the
+          same binary, so there is nothing for a fleet reader to act on between them. */}
+      <HarnessTag harness={harnessOf(s.harness)} title="Runs the codex CLI, not claude" />
       <StatusPill tone={st.tone} label={st.label} glow={st.glow} />
       {/* Decision affordance (surface 5): a manager holding a pending decision flags it inline + jumps
           straight to the answer page — derived from the SAME pending-decision signal as the inbox + bell. */}

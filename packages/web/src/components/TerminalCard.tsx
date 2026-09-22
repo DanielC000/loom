@@ -3,7 +3,9 @@ import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem, Wake } from "@loom/shared";
 import { api, type QueuedMessage } from "../lib/api";
 import { useIsCompanionSession } from "../lib/companionGuard";
+import { harnessOf } from "../lib/harnessFields";
 import { isCompanionSession } from "../lib/sessions";
+import { HarnessTag } from "./HarnessPicker";
 import { TerminalPane } from "./Terminal";
 import { TranscriptPane } from "./TranscriptPane";
 import { Composer } from "./Composer";
@@ -48,7 +50,7 @@ export type TerminalTab = "terminal" | "transcript" | "timeline" | "diff";
 // assignable, so those call sites are byte-identical. `id` is the only field a title-override + renderBody
 // consumer actually surfaces; the rest are optional and consumed only by the default title/task paths.
 export type TerminalCardSession = Pick<SessionListItem, "id"> &
-  Partial<Pick<SessionListItem, "projectId" | "taskId" | "busy" | "role" | "agentName" | "projectName">>;
+  Partial<Pick<SessionListItem, "projectId" | "taskId" | "busy" | "role" | "agentName" | "projectName" | "harness">>;
 
 // Optional role-scoped tab bar. When provided, the body gains a Terminal + Transcript tab bar (both
 // owned by the base — the shared TerminalPane / TranscriptPane), plus a Timeline and/or Diff tab ONLY
@@ -112,6 +114,12 @@ export function TileTitle({ s, showProject }: { s: TerminalCardSession; showProj
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
       <StatusPill tone={s.busy ? "amber" : "phosphor"} glow={s.busy} label={s.busy ? "busy" : "idle"} />
+      {/* Same codex-only rule as FleetRow. It sits with the status pill rather than after the identity
+          text so a narrow tile can never strand the tag alone on a wrapped second line, and so the two
+          badges read as one cluster. A title-override consumer (a raw shell, a companion watch window)
+          never reaches this path, and `harness` is optional on TerminalCardSession, so those call sites
+          stay byte-identical. */}
+      <HarnessTag harness={harnessOf(s.harness)} title="Runs the codex CLI, not claude" />
       <span>{showProject ? `${s.projectName} · ` : ""}{s.agentName}{s.role ? ` · ${s.role}` : ""} · {s.id.slice(0, 8)}</span>
     </span>
   );
