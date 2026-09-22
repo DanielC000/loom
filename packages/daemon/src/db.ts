@@ -1471,6 +1471,18 @@ const SCHEDULE_FIRE_KINDS = ["schedule_fired", "schedule_fire_deferred", "schedu
  *  redeclaring it, mirroring MAX_EVENTS_SEARCH_PAGE's own export for `events_search`. */
 export const MAX_GATE_HISTORY_PAGE = 200;
 
+/** DEFAULT page size for `gate_history` when `limit` is omitted (card 67c54f48). Sized BELOW the
+ *  tool-result cap BY MEASUREMENT, same posture as DEFAULT_AGENT_SUMMARY_CAP: an unprojected
+ *  GateHistoryRow measured ~904 chars (2026-09-22) — matching the original 54,350/60≈905-chars/row
+ *  evidence that motivated 23fde5f8; the row shape has NOT grown, the batch/emit-compare fields added
+ *  since are almost always `null`. The old default of 100 was never fixed by 40f4cae9's `fields:[...]`
+ *  projection — `pickFields` returns rows unchanged when `fields` is omitted, so an un-opted-in call
+ *  still returned ~90,400 chars. 25 × ~904 ≈ 22.6K chars, under half the shared ~48K "safely inline"
+ *  budget every sibling DEFAULT_*_CAP targets (SPILL_INLINE_BUDGET_CHARS, spill.ts). Bounds the DEFAULT
+ *  only — an explicit `limit` still opts a caller past it, up to MAX_GATE_HISTORY_PAGE. A caller wanting
+ *  more rows per page should narrow with `fields:[...]` first — see the tool description. */
+export const DEFAULT_GATE_HISTORY_PAGE = 25;
+
 /** Clamp for a bounded, kind-filterable events-forensics page (listOrchestrationEventsBounded, card
  *  80b7a33b) — same posture as MAX_GATE_HISTORY_PAGE: a caller's `limit` is clamped into [1,
  *  MAX_EVENTS_SEARCH_PAGE] so a huge value can't return an unbounded slice of the event log. Exported so

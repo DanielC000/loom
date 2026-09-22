@@ -784,6 +784,31 @@ export function spillableTaskGet<T extends { title: string; body: string }>(
 }
 
 /**
+ * Server-side body excerpt for `tasks_get` (card 67c54f48, item 3) — replaces the workaround
+ * `spillableTaskGet`'s own spill `note` above literally names ("grep it for a substring; slice by
+ * character range via Bash"). Applied to the FULL, un-spilled body BEFORE `spillableTaskGet` runs, so a
+ * small excerpt request never even reaches the spill boundary. Exactly one of `bodyGrep`/`bodySlice` may
+ * be passed — the tool handler rejects both being set before this ever runs.
+ * `bodyGrep`: case-insensitive PLAIN SUBSTRING match (never a regex/caller-compiled pattern) — `body`
+ * becomes the matching lines only, newline-joined, original order; `bodyGrepMatches` is the match count
+ * (0 reads as "no match", never "empty body"). `bodySlice`: a `[start, end)` range via `String.slice`
+ * (out-of-range silently clamped, never an error). Either way `bodyExcerpt:true` + `bodyCharsFull` (the
+ * ORIGINAL length) are stamped so the caller knows what they excerpted FROM.
+ */
+export function applyBodyExcerpt<T extends { body: string }>(
+  task: T, opts: { bodyGrep?: string; bodySlice?: [number, number] },
+): T & { bodyExcerpt: true; bodyCharsFull: number; bodyGrepMatches?: number } {
+  const bodyCharsFull = task.body.length;
+  if (opts.bodyGrep !== undefined) {
+    const needle = opts.bodyGrep.toLowerCase();
+    const matches = task.body.split("\n").filter((line) => line.toLowerCase().includes(needle));
+    return { ...task, body: matches.join("\n"), bodyExcerpt: true, bodyCharsFull, bodyGrepMatches: matches.length };
+  }
+  const [start, end] = opts.bodySlice!;
+  return { ...task, body: task.body.slice(start, end), bodyExcerpt: true, bodyCharsFull };
+}
+
+/**
  * {@link spillableTaskGet}'s sibling for a WRITE result, applied to whatever {@link updateProjectTask}
  * returned. Shared by both writers of THAT function's return shape — `tasks_update` (mcp/server.ts) and
  * `project_task_update` (mcp/platform.ts) — so the two callers don't grow independently-drifting spill

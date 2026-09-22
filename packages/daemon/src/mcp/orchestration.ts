@@ -16,7 +16,7 @@ import { pickFields } from "./tasks.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
 import type { Db } from "../db.js";
-import { MAX_GATE_HISTORY_PAGE, MAX_EVENTS_SEARCH_PAGE } from "../db.js";
+import { MAX_GATE_HISTORY_PAGE, DEFAULT_GATE_HISTORY_PAGE, MAX_EVENTS_SEARCH_PAGE } from "../db.js";
 import { eventsSearchQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
 import type { PtyHost } from "../pty/host.js";
 import { possibleDuplicateRootLabel } from "../pty/host.js";
@@ -4458,8 +4458,17 @@ export class OrchestrationMcpRouter {
           "reason about when a particular field became reliable should check that field's own history, not " +
           "assume the others share it. Never null for a REJECTED row once the field in question is being " +
           "stamped at all — a rejection carries the same fields a pass does. `limit`/`offset` paginate " +
-          "(default 100, clamped to " +
-          MAX_GATE_HISTORY_PAGE + "); `nextOffset` is `offset+items.length` when more rows remain, else " +
+          "(default " + DEFAULT_GATE_HISTORY_PAGE + ", clamped to " + MAX_GATE_HISTORY_PAGE + "). The " +
+          "default is sized to fit an UNPROJECTED page inline (card 67c54f48) — an un-projected row is " +
+          "~900 chars, so " + DEFAULT_GATE_HISTORY_PAGE + " rows stays comfortably under the tool-result " +
+          "cap with headroom; the OLD default of 100 did not (it overflowed outright — that failure is " +
+          "the original evidence this default was sized against). Passing an explicit `limit` still opts " +
+          "you past this default, up to " + MAX_GATE_HISTORY_PAGE + " — but if you want MORE rows per " +
+          "page than the default fits, reach for `fields:[...]` (below) FIRST: it shrinks each ROW, while " +
+          "raising `limit` just multiplies the existing ~900-char shape. `fields` is opt-in and rows come " +
+          "back full-shape when it's omitted, so this default is the only thing standing between an " +
+          "un-opted-in caller and that full per-row size. " +
+          "`nextOffset` is `offset+items.length` when more rows remain, else " +
           "`null` — page deterministically via offset:nextOffset until it is null, same contract as " +
           "`events_search`. " +
           "PROJECT-SCOPED SERVER-SIDE, NOT BY ARGUMENT: there is no `projectId` parameter — the project is " +
@@ -4483,7 +4492,7 @@ export class OrchestrationMcpRouter {
         const projectId = db.getSession(managerSessionId)?.projectId;
         if (!projectId) return ok({ error: "no project for this session" });
         const off = offset ?? 0;
-        const page = db.listGateEvents({ projectId, limit: limit ?? 100, offset: off });
+        const page = db.listGateEvents({ projectId, limit: limit ?? DEFAULT_GATE_HISTORY_PAGE, offset: off });
         // Card 40f4cae9: nextOffset is derived from page.items.length/page.total BEFORE projection — fields
         // narrows what's IN each row, never how many rows there are (same ordering rule as tasks_list).
         const nextOffset = off + page.items.length < page.total ? off + page.items.length : null;
