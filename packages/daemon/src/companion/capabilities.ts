@@ -339,7 +339,7 @@ export interface GrantOutbound {
  *  `senderSessionId` is threaded through by the caller (never agent-suppliable) so an undelivered dispatch
  *  can be traced back to the originating companion session. */
 export interface GrantSessions {
-  messageSession(sessionId: string, text: string, senderSessionId: string): { deliveryStatus: string; position?: number; taskId?: string; routedTo?: string };
+  messageSession(sessionId: string, text: string, senderSessionId: string): { deliveryStatus: string; position?: number; taskId?: string; routedTo?: string; replacedBy?: string };
   redirectSession(sessionId: string, text: string, senderSessionId: string): { delivered: boolean; position?: number };
   stopSession(sessionId: string, mode: "graceful" | "hard"): { stopped: true; sessionId: string };
   resumeSession(sessionId: string): { id: string };
@@ -2064,8 +2064,13 @@ const SESSION_STEER: CompanionCapability = {
           "[loom:from-owner-via-companion] so the receiver knows the source. Returns a deliveryStatus: " +
           "delivered-live (submitted as a turn now), queued (the target is busy — held FIFO, delivered on " +
           "its next turn boundary), or boarded (the target isn't live and has no live successor — filed as " +
-          "a durable board card instead of lost). Requires an act-mode grant on the target session's " +
-          "project and an owner-authored turn — a proactive/heartbeat turn is always rejected.",
+          "a durable board card instead of lost). If the target is still `live` but has ALREADY been " +
+          "replaced by a recycle successor (its predecessor stays live until its successor settles — " +
+          "ordinarily seconds, but longer if the successor is slow to settle), nothing is delivered — " +
+          "deliveryStatus is dropped and replacedBy names the successor (which may itself be dead; " +
+          "re-addressing it then falls through to the boarded path above). Re-address `replacedBy` if the " +
+          "message should still go out. Requires an act-mode grant on the target session's project and an " +
+          "owner-authored turn — a proactive/heartbeat turn is always rejected.",
         inputSchema: { target: z.string(), message: z.string() },
       },
       async ({ target, message }) => {

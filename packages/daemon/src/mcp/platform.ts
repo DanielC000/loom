@@ -2886,8 +2886,14 @@ export class PlatformMcpRouter {
           "delivered-live as strong evidence, not proof, for anything safety-critical or time-sensitive. " +
           "A NOT-LIVE target whose recycle lineage has a LIVE successor is " +
           "routed there instead (deliveryStatus reflects the successor's delivery, and routedTo names it); a " +
-          "NOT-LIVE target with no live successor anywhere in its lineage is BOARDED as a durable card on that " +
-          "target's project board (boarded) — never silently dropped — and the returned taskId names it. " +
+          "NOT-LIVE target with no live successor anywhere in its lineage is instead BOARDED as a durable card " +
+          "on that target's project board (boarded, never silently lost) — and the returned taskId names it. " +
+          "Separately: a target that is STILL `live` but has ALREADY been recycled (its predecessor stays live " +
+          "until its successor settles — ordinarily seconds, but unboundedly longer if the successor never " +
+          "reaches ready or dies) gets neither of the above: it is disclosed, not delivered and not silently " +
+          "redirected — deliveryStatus is dropped and replacedBy names the successor (which may itself be dead; " +
+          "re-address it and a dead successor falls through to the NOT-LIVE/boarding path above). Re-send " +
+          "addressed to `replacedBy` if the message should still go out. " +
           "Framed [loom:from-platform] so a live receiver knows the source (the tag is applied for you — do NOT " +
           "prepend it yourself in `text`). DELIVER-ONCE: a retried/duplicated call for the SAME (sessionId, text) " +
           "within a short window returns the ORIGINAL delivery result with duplicate:true and injects NOTHING new " +

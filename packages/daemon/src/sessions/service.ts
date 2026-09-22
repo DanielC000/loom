@@ -2044,7 +2044,7 @@ export class SessionService {
    * process's short retry window, and a missed dedup (e.g. across a daemon restart) is harmless — one
    * extra turn, not a lost one. Pruned by {@link PLATFORM_MESSAGE_DEDUP_TTL_MS}.
    */
-  private readonly platformMessageDedupe = new Map<string, { result: { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string }; atMs: number }>();
+  private readonly platformMessageDedupe = new Map<string, { result: { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string; replacedBy?: string }; atMs: number }>();
   private static readonly PLATFORM_MESSAGE_DEDUP_TTL_MS = 5 * 60_000;
   // @decision ea648f89 — resume-half memory-recall dedup gate; hash the framed block and compare against
   // the digest persisted on the session row — never an in-memory cache, since self-hosting restarts on
@@ -8229,11 +8229,15 @@ export class SessionService {
    *    instead of THROWING (which silently drops the message), we BOARD a durable note onto the target's
    *    OWN project board — the same durable-board fallback platformEscalate uses for an offline Lead —
    *    and return `boarded`. The message is never lost.
+   *
+   * @decision fb5e39c3 — an addressed id can ALSO be a still-`live` recycle predecessor: the caller named
+   *  this session explicitly, so unlike the NOT-LIVE branch above (which SCANS and may safely route
+   *  forward) there is nothing to select between here. We disclose (`replacedBy`), never silently redirect.
    */
   private deliverSessionMessage(
     sessionId: string, text: string, senderSessionId: string | undefined,
     framing: { tag: string; senderFallback: string; boardHeading: string; boardFromLine: (s?: string) => string; boardTitlePrefix: string },
-  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string } {
+  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string; replacedBy?: string } {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
     const framed = `[${framing.tag}]\n${text}`;
@@ -8253,7 +8257,21 @@ export class SessionService {
       });
       return { deliveryStatus: this.deliveryStatusFor(r), position: r.position };
     };
-    if (session.processState === "live") return deliverLive(session);
+    if (session.processState === "live") {
+      // @decision fb5e39c3 — do not deliver into an addressed session whose `processState` still reads
+      // "live" but already has a recycle successor, and do not silently redirect to that successor either;
+      // disclose it via `replacedBy` and let the caller re-address it.
+      const successor = this.db.getSuccessor(sessionId);
+      if (successor) {
+        this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(),
+          managerSessionId: senderSessionId ?? "", workerSessionId: sessionId, taskId: session.taskId ?? null, kind: "session_message",
+          detail: { replacedBy: successor.id },
+        });
+        return { deliveryStatus: "dropped", replacedBy: successor.id };
+      }
+      return deliverLive(session);
+    }
 
     // NOT LIVE: before boarding, resolve to the live end of the target's recycle lineage — the target may
     // simply have been recycled, with a successor already doing the work under a new session id.
@@ -8312,10 +8330,14 @@ export class SessionService {
    * @decision c17291c3 — normalize away any leading `[loom:from-platform]` tag before re-framing, and
    *  dedupe a resend of the SAME (recipient, text) within a short TTL to the ORIGINAL delivery result
    *  (`duplicate:true`, no new enqueue) — closes both a retried-call double-turn and a doubled frame tag.
+   *
+   * @decision fb5e39c3 — never CACHE a "dropped" (non-delivering) result: this dedupe exists to prevent
+   *  double-DELIVERY, so replaying a cached non-delivery for the TTL's full 5 minutes would defeat a
+   *  retry that, by then, may legitimately take the NOT-LIVE/successor-routing branch instead.
    */
   messageSessionAsPlatform(
     sessionId: string, text: string, senderSessionId?: string,
-  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string; duplicate?: boolean } {
+  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string; replacedBy?: string; duplicate?: boolean } {
     const normalizedText = SessionService.stripLeadingPlatformTag(text);
     const dedupeKey = createHash("sha256").update(sessionId).update("\0").update(normalizedText).digest("hex");
     const now = Date.now();
@@ -8323,7 +8345,7 @@ export class SessionService {
     const prior = this.platformMessageDedupe.get(dedupeKey);
     if (prior) return { ...prior.result, duplicate: true };
     const result = this.deliverSessionMessage(sessionId, normalizedText, senderSessionId, SessionService.PLATFORM_MESSAGE_FRAMING);
-    this.platformMessageDedupe.set(dedupeKey, { result, atMs: now });
+    if (result.deliveryStatus !== "dropped") this.platformMessageDedupe.set(dedupeKey, { result, atMs: now });
     return result;
   }
 
@@ -8358,7 +8380,7 @@ export class SessionService {
    */
   messageSessionAsCompanion(
     sessionId: string, text: string, senderSessionId?: string,
-  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string } {
+  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string; replacedBy?: string } {
     return this.deliverSessionMessage(sessionId, text, senderSessionId, SessionService.COMPANION_MESSAGE_FRAMING);
   }
 
