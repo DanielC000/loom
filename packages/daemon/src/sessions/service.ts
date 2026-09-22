@@ -5716,12 +5716,13 @@ export class SessionService {
     if (!project) throw new Error("project not found");
     const config = resolveConfig(project.config);
     // Resolve the agent's profile capabilities through the SAME helper every other fresh spawn uses, so a
-    // run honors the agent's profile-pinned model + skills — the asymmetry this method had: it hand-rolled
-    // its SpawnOpts and DROPPED both (a model-pinned agent ran on the engine default; a skills-pinned agent
-    // got ALL store skills). We thread ONLY model + skills; the run's deliberate differences stay: role is
-    // hardcoded "run" below (not the profile role), permission is the VERBATIM boot recipe (config.permission,
+    // run honors the agent's profile-pinned model + skills + harness — the asymmetry this method had: it
+    // hand-rolled its SpawnOpts and DROPPED all three (a model-pinned agent ran on the engine default; a
+    // skills-pinned agent got ALL store skills; a harness-pinned agent silently booted as claude regardless
+    // — card 56e6c046). We thread ONLY model + skills + harness; the run's deliberate differences stay: role
+    // is hardcoded "run" below (not the profile role), permission is the VERBATIM boot recipe (config.permission,
     // no allowDelta), browserTesting/documentConversion stay false, and buildMcpServers mounts ONLY loom-run.
-    const { model, skills } = this.resolveAgentSpawn(agent, config, "run");
+    const { model, skills, harness } = this.resolveAgentSpawn(agent, config, "run");
 
     const now = new Date().toISOString();
     const sessionId = randomUUID();
@@ -5770,6 +5771,7 @@ export class SessionService {
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
       connections: [], // a run never mounts loom-tasks (buildMcpServers: ONLY loom-run), so this is moot
       vaultWrite: false, // a run never mounts loom-tasks (buildMcpServers: ONLY loom-run), so this is moot
+      harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude") — card 56e6c046: was resolved but never threaded onto the run session row/spawn
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
@@ -5798,6 +5800,7 @@ export class SessionService {
         model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
         skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
         sessionName: composeRoleSessionName("run", project.name), // card f9b47cd1: `loom-<project>-run`
+        harness, // multi-harness epic df1f94b0 P1: profile-pinned vendor CLI (undefined ⇒ "claude") — card 56e6c046
       });
     } catch (e) {
       this.reconcileFailedSpawn(session.id, e);
