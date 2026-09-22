@@ -791,3 +791,22 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
     webBuiltDirty,
   };
 }
+
+/**
+ * Card fde10c75 — a compact, one-token build stamp for a daemon-emitted advisory (a nudge, a notice, an
+ * enrichment appended to a tool's response) that a reader can consult AT THE POINT OF READING, without a
+ * separate `served_status` call, to tell whether the text they're reading was produced by current or
+ * stale code — a durable, read-later advisory (e.g. `gate_status` on an op settled well before this read,
+ * possibly across a restart) is exactly the case a live push nudge doesn't cover.
+ *
+ * Derived from `runningCodeBuiltAt`/`commitsBehind`/`stale` — NEVER the raw `distBuiltAt` clock (card
+ * 8ff7ccde: that would understate staleness, the exact failure this stamp exists to prevent). `null` when
+ * the signal itself is unavailable (never a fabricated "current" — same discipline as every other field in
+ * this module).
+ */
+export function advisoryBuildStamp(staleness: DeployStalenessResult): string | null {
+  if (!staleness.available || !staleness.runningCodeBuiltAt) return null;
+  return staleness.stale
+    ? `stale, ${staleness.commitsBehind} commit(s) behind (running code built ${staleness.runningCodeBuiltAt})`
+    : `current (running code built ${staleness.runningCodeBuiltAt})`;
+}

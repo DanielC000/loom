@@ -49,7 +49,7 @@ import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeE
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
 import { RESTART_EXIT_CODE, isSupervised, isSupervisorProcessAlive, writeRestartIntent, clearRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, announcesDeploy, supervisorScriptChangedSince, supervisorCheckResponseFields, type RestartIntent, type RestartResumeEntry, type BuildDeps, type SupervisorLivenessResult } from "../orchestration/restart.js";
 import { currentDeployStaleness } from "../served-status.js";
-import type { DeployStalenessResult } from "../deploy-staleness.js";
+import { advisoryBuildStamp, type DeployStalenessResult } from "../deploy-staleness.js";
 import { computeWakeImpact } from "../orchestration/wake-impact.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
@@ -5014,7 +5014,9 @@ export class SessionService {
             `${reqWorkersResumed}/${reqWorkers.length} of your live ` +
             `workers were resumed (${fleetParenthetical}).${reqWorktreeNote ? ` ${reqWorktreeNote}.` : ""} You can now ` +
             `end-to-end verify the live behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote + reqCapNote;
-        this.enqueueDurableNudge(reqId, reqRole, reqText);
+        // Card fde10c75: the SAME `deployStaleness` this method already computed for `liveClaim` above —
+        // not a fresh read, so the two can never disagree with each other on the same nudge.
+        this.enqueueDurableNudge(reqId, reqRole, reqText + this.buildStampSuffix(deployStaleness));
       }
     } else {
       failed.push(reqId);
@@ -6681,6 +6683,20 @@ export class SessionService {
    */
   private settleNudgeAttribution(target: string, originSessionId: string): string {
     return target === originSessionId ? "" : ` (started by your predecessor session ${originSessionId.slice(0, 8)} before you were recycled)`;
+  }
+
+  /**
+   * Card fde10c75 — a settle-nudge suffix carrying `advisoryBuildStamp`'s one-token build-currency
+   * stamp, mirroring `settleNudgeAttribution`'s "helper returns a suffix, callers append it at delivery"
+   * shape: never baked into the `msg`/`detailText` these nudges already build (which feed other
+   * invariants — durable events, `gate_status`'s recomputed echo, etc.), only appended at the final
+   * `enqueueDurable*` call, exactly where the attribution suffix already is. Empty (never a fabricated
+   * "current") when the signal itself is unavailable. Reuses `advisoryBuildStamp` — never a second,
+   * independently-derived stamp formula.
+   */
+  private buildStampSuffix(staleness: DeployStalenessResult): string {
+    const stamp = advisoryBuildStamp(staleness);
+    return stamp ? ` [build: ${stamp}]` : "";
   }
 
   /**
@@ -12528,7 +12544,11 @@ export class SessionService {
         try {
           // Card ccb407eb: a merge-rejection is a ONE-SHOT TERMINAL outcome (never re-sent), so it's
           // durable — the specimen this card fixed was exactly this class of push going missing.
-          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId), { sender: "system", taskId, kind: "agent" });
+          // Card fde10c75: the build-stamp suffix, same "recompute fresh at delivery" posture as
+          // gate_status's own read-time enrichment — this rejection nudge may be read long after the
+          // event, possibly across a restart, so it needs the CURRENT build's stamp, not one captured
+          // earlier in this method.
+          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + this.buildStampSuffix(currentDeployStaleness()), { sender: "system", taskId, kind: "agent" });
           // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — see
           // autoCancelSettleWakes's doc for why a failed/undelivered push must leave every pending wake
           // untouched. `opStartedAt` is the CLOSED-OVER confirmWorkerMerge param (captured by
@@ -15997,7 +16017,8 @@ export class SessionService {
           // enqueueStdin with no onDeliver and no DB record at all (zero durability at any layer), so a
           // give-up here was a total, unrecoverable loss even across a daemon restart. A ONE-SHOT TERMINAL
           // signal (never re-sent) — now durable like every other settle nudge.
-          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId), { sender: "system", taskId, kind: "warning" });
+          // Card fde10c75: same build-stamp suffix as the merge-rejected nudge above.
+          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + this.buildStampSuffix(currentDeployStaleness()), { sender: "system", taskId, kind: "warning" });
           // @decision 9d521792 — only reaps fallback wakes after a successful delivery; `opStartedAt` is
           // the CLOSED-OVER value captured before `attach()`, never a settle-time `peek()` re-derive.
           if (r.delivered) this.autoCancelSettleWakes(target, opStartedAt, opId);
@@ -16684,7 +16705,8 @@ export class SessionService {
         try {
           // Card ccb407eb: a ONE-SHOT TERMINAL gate outcome (never re-sent) — durable like every other
           // settle nudge.
-          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, workerSessionId), { sender: "system", taskId: worker.taskId ?? null, kind: "warning" });
+          // Card fde10c75: same build-stamp suffix as the merge nudges above.
+          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, workerSessionId) + this.buildStampSuffix(currentDeployStaleness()), { sender: "system", taskId: worker.taskId ?? null, kind: "warning" });
           // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — see
           // autoCancelSettleWakes's doc for why a failed/undelivered push must leave every pending wake
           // untouched. `opStartedAt` is the CLOSED-OVER value captured (alongside `attachedToInFlight`)

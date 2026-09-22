@@ -223,6 +223,9 @@ try {
     check("(1) carries the landed squash subject (card 7a1a76e9 DoD-1 — the queued path was previously silent on this)",
       nudges[0] && nudges[0].text.includes('subject="chore: t1"'));
     check("(1) the merge actually landed on main (the underlying behavior is unchanged)", fs.existsSync(path.join(repo, "feat1.txt")));
+    // Card fde10c75: this test runs from a real Loom source checkout, so the deploy-staleness signal is
+    // genuinely available — the nudge carries a build-currency stamp.
+    check("(1, fde10c75) the [loom:merge-done] nudge carries a build-currency stamp", nudges[0] && /\[build: (current|stale,)/.test(nudges[0].text));
     worktrees.push([repo, undefined]); // already merged/removed — no worktree left to clean up, kept for symmetry
   }
 
@@ -259,6 +262,7 @@ try {
       rejectedNudges[0] && rejectedNudges[0].text.includes("task t2") && rejectedNudges[0].text.includes(pendingOpId2));
     check("(2) NO generic [loom:merge-failed] echo for the SAME event (card 9eea3901 double-notify fix)", failedNudges.length === 0);
     check("(2) fail-closed: worktree retained (gate failed, nothing merged)", fs.existsSync(worktreePath));
+    check("(2, fde10c75) the rich [loom:merge-rejected] nudge ALSO carries a build-currency stamp", rejectedNudges[0] && /\[build: (current|stale,)/.test(rejectedNudges[0].text));
     worktrees.push([repo, worktreePath]);
   }
 

@@ -188,6 +188,10 @@ try {
     check("(1) pushed with kind:\"warning\" (a Loom operational nudge — same-route coalescing is correct)", nudges[0] && nudges[0].kind === "warning");
     check("(1) delivered to the WORKER's OWN session (not any manager)", nudges[0] && nudges[0].sessionId === workerId);
     check("(1) carries the SAME opId the pending response returned (correlation stamp)", nudges[0] && nudges[0].text.includes(pendingOpId1));
+    // Card fde10c75: this test runs from a real Loom source checkout (this repo's own worktree), so the
+    // deploy-staleness signal is genuinely available — the nudge carries a build stamp, not a fabricated
+    // "current" and not a silently-omitted field.
+    check("(1, fde10c75) the completion nudge carries a build-currency stamp", nudges[0] && /\[build: (current|stale,)/.test(nudges[0].text));
     worktrees.push([repo, worktreePath]);
   }
 
@@ -209,6 +213,7 @@ try {
     check("(2) pushed with kind:\"warning\"", nudges[0] && nudges[0].kind === "warning");
     check("(2) delivered to the WORKER's OWN session (not any manager)", nudges[0] && nudges[0].sessionId === workerId);
     check("(2) carries the SAME opId the pending response returned", nudges[0] && nudges[0].text.includes(pendingOpId2));
+    check("(2, fde10c75) the FAILURE nudge ALSO carries a build-currency stamp", nudges[0] && /\[build: (current|stale,)/.test(nudges[0].text));
     worktrees.push([repo, worktreePath]);
   }
 

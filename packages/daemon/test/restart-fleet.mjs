@@ -203,6 +203,13 @@ try {
   // Requester managerA: ONE message — its "code is now LIVE" re-prompt.
   const mgrAq = pty.getPending(id.mgrA);
   check("(2) requester gets exactly its 'code is live' re-prompt", mgrAq.length === 1 && mgrAq[0].includes("now LIVE") && mgrAq[0].includes("[loom:daemon-restarted]"));
+  // Card fde10c75: CLEAN_STALENESS is available:false (a deliberate test fixture, per that file's own
+  // header) — the requester's resume nudge must never fabricate a "[build: " stamp on an unavailable
+  // signal. The POSITIVE (available:true) case is proven against a real repo checkout by
+  // worker-run-gate-completion-nudge.mjs/merge-confirm-completion-nudge.mjs, which exercise the SAME
+  // `buildStampSuffix` helper end-to-end; this fixture can't produce that branch (advisoryBuildStamp's
+  // own unit tests, gate-status-emitted-build.mjs, already RED-prove the formula itself).
+  check("(2, fde10c75) the requester's nudge carries NO fabricated build stamp when the signal is unavailable", !mgrAq[0].includes("[build: "));
   // Card b2dcf930: `deadW` above is unresumable, so `failed.length === 1` by the time this requester
   // nudge is built. The fleet clause must name that failure instead of unconditionally claiming the
   // whole fleet was resumed (RED-proofed by reverting this fix and re-running — see worker_report).

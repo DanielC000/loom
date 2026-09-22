@@ -34,7 +34,8 @@ import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
 import { reminderNextFireAt, reminderNextFireAtBySession } from "../companion/reminders.js";
 import type { CompanionReminder, CompanionRoute } from "../companion/types.js";
 import { resolveIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
-import { buildServedStatus } from "../served-status.js";
+import { buildServedStatus, currentDeployStaleness } from "../served-status.js";
+import { advisoryBuildStamp } from "../deploy-staleness.js";
 import { lineageRootId } from "../sessions/lineage.js";
 import { resolveResumeDocPath } from "../sessions/resume-doc-notes.js";
 import { runResumeDocCheck, containUnderVault } from "../orchestration/rotation-check.js";
@@ -692,7 +693,14 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
       "call from the durable gate-timing NDJSON plus the board's CURRENT deferral state — so calling " +
       "this after a missed or lost completion nudge (including one the daemon never got to enqueue " +
       "because it crashed between this op settling and that push) still recovers the SAME advisory, not " +
-      "a stale or absent one. Redacted (never even computed) for a foreign project's op, see above.";
+      "a stale or absent one. Redacted (never even computed) for a foreign project's op, see above. " +
+      "ALSO carries `emittedBuild?` (card fde10c75) on any settled row — a one-token stamp (`\"current\"` " +
+      "or `\"stale, N commit(s) behind\"`, plus the running code's own build timestamp) telling you " +
+      "whether THIS READ — not the op itself, which may have settled long before, possibly across a " +
+      "restart — was served by current or stale daemon code, without a separate `served_status` call. " +
+      "Derived from `runningCodeBuiltAt`, never the raw on-disk `distBuiltAt` clock (card 8ff7ccde: that " +
+      "would understate staleness). Absent (never a fabricated \"current\") when the signal itself is " +
+      "unavailable — e.g. a packaged install with no `.git`.";
   server.registerTool(
     "gate_status",
     {
@@ -733,6 +741,16 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
           } catch {
             // Advisory only — an observability read must never turn a real gate_status answer into an
             // error. Fall through and return the plain result below.
+          }
+          // Card fde10c75: this settled result may be read long after the op itself settled — possibly
+          // across a daemon restart — so stamp it with the build serving THIS read, the same
+          // "recompute at read time" posture as `deferredTriggerNotice` below. Best-effort, same posture
+          // as `timingBand` immediately above.
+          try {
+            const emittedBuild = advisoryBuildStamp(currentDeployStaleness());
+            if (emittedBuild) enriched = { ...enriched, emittedBuild };
+          } catch {
+            // Advisory only, same posture as timingBand above.
           }
           // Card 5f3a394e: recompute the `[loom:deferred-trigger]` advisory HERE, at READ time, rather
           // than relying solely on the one-shot push composed when the op settled
