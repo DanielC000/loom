@@ -45,7 +45,7 @@ import { resolvePlatformLeadResumeDocPath } from "../sessions/platform-lead-prom
 import { lineageRootId } from "../sessions/lineage.js";
 import { runResumeDocCheck, containUnderVault } from "../orchestration/rotation-check.js";
 import { createProjectTaskChecked, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, countProjectTasks, spillableTaskGet, spillableTaskUpdateResult, type TaskWithMerged, type TaskCounts } from "./tasks.js";
-import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
+import { spillTextIfLarge, spillRowsIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { prioritySchema } from "./server.js";
 import { getByIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, pageTranscript, lastNTurns, applyAggregateWalkCap, spillableTurnsResponse } from "../sessions/transcript.js";
@@ -1153,7 +1153,13 @@ export class PlatformMcpRouter {
           "same least-privilege platform/auditor-role guard) — a bad entry (unknown targetProjectId) " +
           "surfaces its own { error } and does NOT block the other targets; nothing is transactional. " +
           "Returns one result per target, in the given order: { targetProjectId, agent } on success or " +
-          "{ targetProjectId, error } on failure.",
+          "{ targetProjectId, error } on failure. SPILL (card eec70b79): each cloned agent's full " +
+          "startupPrompt rides inline in `agent`, so the batch array is bare when it fits but when the " +
+          "AGGREGATE (many targets, each with a sizable prompt) is too large to inline safely, it is " +
+          "proactively rendered as NDJSON (one result per line, real line breaks, UTF-8) and written to " +
+          "your own scratch dir — the response becomes a small { resultsFile, resultsChars, resultsCount, " +
+          "note } pointer instead of the bare array; page the file with Read (offset/limit are LINE-based) " +
+          "or grep it.",
         inputSchema: strictShape({
           sourceAgentId: z.string(),
           targets: z.array(z.object({
@@ -1172,7 +1178,14 @@ export class PlatformMcpRouter {
             ? { targetProjectId: t.targetProjectId, agent: res.promptWarning ? { ...res.agent, promptWarning: res.promptWarning } : res.agent }
             : { targetProjectId: t.targetProjectId, error: res.error };
         });
-        return ok(results);
+        // Card eec70b79: each cloned agent's full startupPrompt rides inline — unlike project_task_get's
+        // batch, there is no per-target cap here at all, so N targets with sizable prompts can overflow
+        // even at a modest N. Spill the whole array as NDJSON, same pattern as the batch reads above.
+        if (!callerSessionId) return ok(results);
+        const spillKey = `agent-clone-batch-${createHash("sha1").update(JSON.stringify({ sourceAgentId, targets })).digest("hex").slice(0, 10)}`;
+        const spill = spillRowsIfLarge(callerSessionId, "agent-clone-batch-spills", spillKey, results, SPILL_INLINE_BUDGET_CHARS);
+        if (spill.inline) return ok(results);
+        return ok({ resultsFile: spill.file, resultsChars: spill.chars, resultsCount: spill.rowCount, note: spill.note });
       },
     );
 
@@ -1435,7 +1448,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "events_search",
       {
-        description: "A BOUNDED, newest-first page of orchestration_events across the platform (or scoped to one project/session/task) — the general sibling of the Gates page's own gate-only history read, for forensics that aren't limited to gate-run kinds (a fleet-down incident may need kill_switch/recycle_begin/merge_rejected/platform_escalate/etc, not just worker_gate/build_gate/deploy). `kind` optionally narrows to specific event kinds — omitted, returns every kind. An UNRECOGNIZED kind is an EXPLICIT error (never a silent `[]`) naming which value(s) were bad, since a caller reaching for this tool is usually investigating precisely BECAUSE they don't know what happened — a wrongly-empty result would misread as \"this never occurred\" rather than \"you asked a question this tool cannot answer\". Valid kind values: " + EVENT_SEARCH_VALID_KINDS_LIST + ". `projectId` accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); unknown/ambiguous is an explicit error. `sessionId` (input filter — the DAEMON's own Loom-namespaced session id, e.g. `loomSessionId` from `my_context`, or the bare `id` `list_all_sessions` returns, never the engine's own id) matches an event where that session is EITHER the manager or the worker. `taskId` matches the event's linked task. Each event returns {id, ts, kind, detail, taskId, taskTitle, loomSessionId, projectId, projectName, agentName, branch} — `loomSessionId` (card 7fcb586a — named to declare its namespace, unlike this tool's own `sessionId` INPUT filter arg above, which keeps its existing name since agents already call it by that name; see `Session`'s session-id naming policy doc in `@loom/shared` for the naming rule) is the SAME Loom session id the input filter matches on. `detail` is the raw kind-specific payload (already-durable operational metadata, not a dump of session transcript content). limit/offset paginate (default " + DEFAULT_EVENTS_SEARCH_CAP + " when omitted, clamped to " + MAX_EVENTS_SEARCH_PAGE + "); the result is ALWAYS the {events, total, returned, offset, nextOffset, limit} envelope (never a bare array) since this read is inherently a forensics page, not a small enumerable set — page deterministically via offset:nextOffset until it is null. `limit` echoes the EFFECTIVE, already-clamped limit actually applied (never the raw request) — if it differs from the `limit` you passed (or from " + DEFAULT_EVENTS_SEARCH_CAP + " when you omitted one), your request was clamped and `returned` rows are NOT the whole matching set even though `total` may say otherwise; page via `offset`/`nextOffset` to see the rest. `fields:[...]` (card 40f4cae9, same contract as `tasks_list`'s own `fields`) projects each returned event down to ONLY the given top-level key names — an un-asked-for field is genuinely ABSENT from every event, not merely a smaller preview, and an unmatched/unknown field name is silently ignored rather than erroring. `id` is NOT auto-added.",
+        description: "A BOUNDED, newest-first page of orchestration_events across the platform (or scoped to one project/session/task) — the general sibling of the Gates page's own gate-only history read, for forensics that aren't limited to gate-run kinds (a fleet-down incident may need kill_switch/recycle_begin/merge_rejected/platform_escalate/etc, not just worker_gate/build_gate/deploy). `kind` optionally narrows to specific event kinds — omitted, returns every kind. An UNRECOGNIZED kind is an EXPLICIT error (never a silent `[]`) naming which value(s) were bad, since a caller reaching for this tool is usually investigating precisely BECAUSE they don't know what happened — a wrongly-empty result would misread as \"this never occurred\" rather than \"you asked a question this tool cannot answer\". Valid kind values: " + EVENT_SEARCH_VALID_KINDS_LIST + ". `projectId` accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); unknown/ambiguous is an explicit error. `sessionId` (input filter — the DAEMON's own Loom-namespaced session id, e.g. `loomSessionId` from `my_context`, or the bare `id` `list_all_sessions` returns, never the engine's own id) matches an event where that session is EITHER the manager or the worker. `taskId` matches the event's linked task. Each event returns {id, ts, kind, detail, taskId, taskTitle, loomSessionId, projectId, projectName, agentName, branch} — `loomSessionId` (card 7fcb586a — named to declare its namespace, unlike this tool's own `sessionId` INPUT filter arg above, which keeps its existing name since agents already call it by that name; see `Session`'s session-id naming policy doc in `@loom/shared` for the naming rule) is the SAME Loom session id the input filter matches on. `detail` is the raw kind-specific payload (already-durable operational metadata, not a dump of session transcript content). limit/offset paginate (default " + DEFAULT_EVENTS_SEARCH_CAP + " when omitted, clamped to " + MAX_EVENTS_SEARCH_PAGE + "); the result is ALWAYS the {events, total, returned, offset, nextOffset, limit} envelope (never a bare array) since this read is inherently a forensics page, not a small enumerable set — page deterministically via offset:nextOffset until it is null. SPILL (card eec70b79): when `events` itself is too large to inline safely, it is proactively rendered as NDJSON (one event per line, real line breaks, UTF-8) and written to your own scratch dir — `events` is then ABSENT and replaced by `eventsFile`/`eventsChars`/`eventsCount`/`note` alongside the same total/returned/offset/nextOffset/limit fields; page the file with Read (offset/limit are LINE-based) or grep it, same as tasks_list's own `rowsFile` spill. `limit` echoes the EFFECTIVE, already-clamped limit actually applied (never the raw request) — if it differs from the `limit` you passed (or from " + DEFAULT_EVENTS_SEARCH_CAP + " when you omitted one), your request was clamped and `returned` rows are NOT the whole matching set even though `total` may say otherwise; page via `offset`/`nextOffset` to see the rest. `fields:[...]` (card 40f4cae9, same contract as `tasks_list`'s own `fields`) projects each returned event down to ONLY the given top-level key names — an un-asked-for field is genuinely ABSENT from every event, not merely a smaller preview, and an unmatched/unknown field name is silently ignored rather than erroring. `id` is NOT auto-added.",
         inputSchema: strictShape({
           kind: z.array(z.string()).optional(),
           projectId: z.string().optional(),
@@ -1453,7 +1466,17 @@ export class PlatformMcpRouter {
           if ("error" in project) return ok(project);
           resolvedProjectId = project.id;
         }
-        return ok(eventsSearchQuery(db, { kind, projectId: resolvedProjectId, sessionId, taskId, limit, offset, fields }));
+        const result = eventsSearchQuery(db, { kind, projectId: resolvedProjectId, sessionId, taskId, limit, offset, fields });
+        if ("error" in result || !callerSessionId) return ok(result);
+        // Card eec70b79: same proactive NDJSON spill as the manager-surface events_search — a
+        // platform-wide (unscoped) page is, if anything, MORE likely to overflow than a project-scoped one.
+        const spillKey = `events-${createHash("sha1")
+          .update(JSON.stringify({ kind: kind ?? null, projectId: resolvedProjectId, sessionId: sessionId ?? null, taskId: taskId ?? null, limit: limit ?? null, offset: offset ?? 0, fields: fields ?? null }))
+          .digest("hex").slice(0, 10)}`;
+        const spill = spillRowsIfLarge(callerSessionId, "events-search-spills", spillKey, result.events, SPILL_INLINE_BUDGET_CHARS);
+        if (spill.inline) return ok(result);
+        const { events, ...rest } = result;
+        return ok({ ...rest, eventsFile: spill.file, eventsChars: spill.chars, eventsCount: spill.rowCount, note: spill.note });
       },
     );
 
@@ -2424,7 +2447,13 @@ export class PlatformMcpRouter {
           "error}` and does NOT block the others; nothing is transactional, and the overall call still " +
           "returns ok even when some entries carry an error. Returns one result per id, in the given " +
           "order: `{taskId, task}` (the full TaskWithRequests row) on success, `{taskId, error}` on " +
-          "failure. The single-`taskId` path is BYTE-IDENTICAL to today — same bare row, not wrapped.",
+          "failure. The single-`taskId` path is BYTE-IDENTICAL to today — same bare row, not wrapped. " +
+          "SPILL (card eec70b79): the batch array itself is bare when it fits, but when the AGGREGATE of " +
+          "many results is too large to inline safely (even if every individual body is under its own " +
+          "cap), it is proactively rendered as NDJSON (one `{taskId,task|error}` result per line, real " +
+          "line breaks, UTF-8) and written to your own scratch dir — the response becomes a small " +
+          "`{resultsFile, resultsChars, resultsCount, note}` pointer instead of the bare array; page the " +
+          "file with Read (offset/limit are LINE-based) or grep it.",
         inputSchema: strictShape({
           projectId: z.string(),
           taskId: z.string().optional(),
@@ -2448,7 +2477,16 @@ export class PlatformMcpRouter {
             const res = spillable(await getProjectTask(db, project.id, id));
             return "error" in res ? { taskId: id, error: res.error } : { taskId: id, task: res };
           }));
-          return ok(results);
+          // Card eec70b79: each individual task body is already spillable above, but the AGGREGATE of
+          // many modest-sized bodies (e.g. 11 tasks well under the per-task cap) can still make
+          // JSON.stringify(results) big enough for the host engine's own opaque single-line overflow-
+          // spill to kick in. Spill the whole array as NDJSON ourselves first, same shape as every other
+          // batch/list read this card touches.
+          if (!callerSessionId) return ok(results);
+          const spillKey = `task-get-batch-${createHash("sha1").update(JSON.stringify({ projectId: project.id, taskIds })).digest("hex").slice(0, 10)}`;
+          const spill = spillRowsIfLarge(callerSessionId, "project-task-get-batch-spills", spillKey, results, SPILL_INLINE_BUDGET_CHARS);
+          if (spill.inline) return ok(results);
+          return ok({ resultsFile: spill.file, resultsChars: spill.chars, resultsCount: spill.rowCount, note: spill.note });
         }
         return ok(spillable(await getProjectTask(db, project.id, taskId!)));
       },
@@ -2501,7 +2539,12 @@ export class PlatformMcpRouter {
           "error}` and does NOT block the other ids; nothing is transactional, and the overall call still " +
           "returns ok even when some entries carry an error. Returns one result per id, in the given order: " +
           "`{taskId, task}` (the ack/full row updateProjectTask would return) on success, `{taskId, error}` " +
-          "on failure. The single-`taskId` path is BYTE-IDENTICAL to today — same bare ack/row, not wrapped.\n" +
+          "on failure. The single-`taskId` path is BYTE-IDENTICAL to today — same bare ack/row, not wrapped. " +
+          "SPILL (card eec70b79): the batch array is bare when it fits, but when the AGGREGATE of many " +
+          "results is too large to inline safely, it is proactively rendered as NDJSON (one " +
+          "`{taskId,task|error}` result per line, real line breaks, UTF-8) and written to your own scratch " +
+          "dir — the response becomes a small `{resultsFile, resultsChars, resultsCount, note}` pointer " +
+          "instead of the bare array; page the file with Read (offset/limit are LINE-based) or grep it.\n" +
           "TERMINAL-LANE PENDING-REQUEST WARNING (card c4355598, surfaced on this router by card cadb38dc): " +
           "reuses the SAME backing path as the in-project tasks_update, so a `columnKey` move into the " +
           "destination board's terminal (done) lane is ADDITIVELY flagged with `pendingRequestWarning: " +
@@ -2633,7 +2676,14 @@ export class PlatformMcpRouter {
             const res = spillable(await updateProjectTask(db, project.id, id, patch, actor, undefined, allowTruncate));
             return "error" in res ? { taskId: id, error: res.error } : { taskId: id, task: res };
           }));
-          return ok(results);
+          // Card eec70b79: same aggregate-spill gap as project_task_get's own taskIds batch — up to 200
+          // small acks can still sum past the inline budget even though title/body/appendBody (the only
+          // large fields) are rejected outright on this path.
+          if (!callerSessionId) return ok(results);
+          const spillKey = `task-update-batch-${createHash("sha1").update(JSON.stringify({ projectId: project.id, taskIds, patch })).digest("hex").slice(0, 10)}`;
+          const spill = spillRowsIfLarge(callerSessionId, "project-task-update-batch-spills", spillKey, results, SPILL_INLINE_BUDGET_CHARS);
+          if (spill.inline) return ok(results);
+          return ok({ resultsFile: spill.file, resultsChars: spill.chars, resultsCount: spill.rowCount, note: spill.note });
         }
         const raw = await updateProjectTask(db, project.id, taskId!, patch, actor, baseVersion, allowTruncate, appendBody);
         // Card de90f22a: only write the link — and only claim escalationLinked:true — once the REST of the

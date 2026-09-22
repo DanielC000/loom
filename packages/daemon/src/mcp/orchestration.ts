@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -23,7 +23,7 @@ import { possibleDuplicateRootLabel } from "../pty/host.js";
 import type { ToolAttributionResult } from "../pty/tool-attribution.js";
 import type { SessionService } from "../sessions/service.js";
 import { readTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap, spillableTurnsResponse } from "../sessions/transcript.js";
-import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
+import { spillTextIfLarge, spillRowsIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { computeGateTimingBand, readFailedNamesForOp } from "../orchestration/gate-timing-band.js";
@@ -4535,6 +4535,12 @@ export class OrchestrationMcpRouter {
           "); the result is ALWAYS the {events, total, returned, offset, nextOffset, limit} envelope (never " +
           "a bare array) since this read is inherently a forensics page, not a small enumerable set — page " +
           "deterministically via offset:nextOffset until it is null, same contract as `gate_history`. " +
+          "SPILL (card eec70b79): when the `events` array itself is too large to inline safely, it is " +
+          "proactively rendered as NDJSON (one event per line, real line breaks, UTF-8) and written to your " +
+          "own scratch dir — `events` is then ABSENT and replaced by `eventsFile`/`eventsChars`/" +
+          "`eventsCount`/`note` alongside the same total/returned/offset/nextOffset/limit fields; page the " +
+          "file with Read (offset/limit are LINE-based) or grep it, same as tasks_list's own `rowsFile` " +
+          "spill — never the host engine's own opaque single-line spill, which `Read`/`Grep` can't page. " +
           "`limit` echoes the EFFECTIVE, already-clamped limit actually applied (never the raw request) — " +
           "if it differs from the `limit` you passed (or from " + DEFAULT_EVENTS_SEARCH_CAP + " when you " +
           "omitted one), your request was clamped and `returned` rows are NOT the whole matching set even " +
@@ -4563,7 +4569,19 @@ export class OrchestrationMcpRouter {
       async ({ kind, sessionId, taskId, limit, offset, fields }) => {
         const projectId = db.getSession(managerSessionId)?.projectId;
         if (!projectId) return ok({ error: "no project for this session" });
-        return ok(eventsSearchQuery(db, { kind, projectId, sessionId, taskId, limit, offset, fields }));
+        const result = eventsSearchQuery(db, { kind, projectId, sessionId, taskId, limit, offset, fields });
+        if ("error" in result) return ok(result);
+        // Card eec70b79: proactively spill the `events` array as NDJSON (same shape tasks_list/
+        // list_all_tasks already spill) instead of letting a wide page fall through to the host
+        // engine's own opaque single-line overflow-spill, which is unpageable. Key hashes the
+        // effective query so two different filters never collide on one scratch file.
+        const spillKey = `events-${createHash("sha1")
+          .update(JSON.stringify({ kind: kind ?? null, sessionId: sessionId ?? null, taskId: taskId ?? null, limit: limit ?? null, offset: offset ?? 0, fields: fields ?? null }))
+          .digest("hex").slice(0, 10)}`;
+        const spill = spillRowsIfLarge(managerSessionId, "events-search-spills", spillKey, result.events, SPILL_INLINE_BUDGET_CHARS);
+        if (spill.inline) return ok(result);
+        const { events, ...rest } = result;
+        return ok({ ...rest, eventsFile: spill.file, eventsChars: spill.chars, eventsCount: spill.rowCount, note: spill.note });
       },
     );
 

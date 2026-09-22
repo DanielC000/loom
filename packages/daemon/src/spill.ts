@@ -71,3 +71,46 @@ export function spillTextIfLarge(sessionId: string, subdir: string, key: string,
   fs.writeFileSync(file, text, "utf8");
   return { inline: false, file, chars: text.length };
 }
+
+/** Below the cap: nothing was written, the caller inlines `rows` as before. */
+export interface SpillRowsInline<T> {
+  inline: true;
+  rows: T[];
+}
+
+/** Above the cap: `rows` was rendered as NDJSON and spilled to `file` — mirrors {@link SpillFile} plus
+ *  `rowCount` and a ready-to-return `note` explaining the pointer. */
+export interface SpillRowsFile {
+  inline: false;
+  file: string;
+  chars: number;
+  rowCount: number;
+  note: string;
+}
+
+export type SpillRowsResult<T> = SpillRowsInline<T> | SpillRowsFile;
+
+/**
+ * The shared NDJSON-list-spill primitive (card eec70b79): renders `rows` as newline-delimited JSON (one
+ * object per line, real line breaks) and spills it via {@link spillTextIfLarge} when it exceeds `capChars`
+ * — the SAME shape `tasks_list`/`task_requests_list` (`mcp/server.ts`'s `okLinesSpillable`) and
+ * `list_all_tasks` (`mcp/platform.ts`) already hand-roll independently. New list-shaped tool results that
+ * can grow large should call this ONE function rather than re-deriving the "JSON.stringify per row, join
+ * on \n, spillTextIfLarge, format a note" pattern a fourth/fifth/sixth time — it existed three times over
+ * before this card, each byte-for-byte the same shape.
+ *
+ * Deliberately does NOT special-case `rows.length === 0` (the callers above return an explicit
+ * `{tasks:[],message:"no matching tasks"}`-shaped payload themselves BEFORE reaching their own spill call)
+ * — an empty array here is `capChars`-cheap and returns `{inline:true, rows:[]}` like any other under-cap
+ * result, so a caller with its own "no matches" wording keeps deciding that itself.
+ */
+export function spillRowsIfLarge<T>(sessionId: string, subdir: string, key: string, rows: T[], capChars: number): SpillRowsResult<T> {
+  const text = rows.map((r) => JSON.stringify(r)).join("\n");
+  const spill = spillTextIfLarge(sessionId, subdir, key, text, capChars);
+  if (spill.inline) return { inline: true, rows };
+  const note =
+    `${rows.length} rows are ${spill.chars} chars — too large to inline safely, so they were written to ` +
+    `${spill.file} as NDJSON (one JSON object per line, real line breaks, UTF-8) — page it with Read ` +
+    "(offset/limit are LINE-based) or grep it for a field/id. Re-call with a narrower filter/limit to inline fewer rows instead.";
+  return { inline: false, file: spill.file, chars: spill.chars, rowCount: rows.length, note };
+}
