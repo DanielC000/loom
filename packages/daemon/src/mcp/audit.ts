@@ -70,6 +70,8 @@ export class AuditMcpRouter {
     const db = this.db;
     const sessions = this.sessions;
     const server = new McpServer({ name: "loom-audit", version: "0.1.0" });
+    // @decision 90dc3c8c — every tool registered on this server is auto-approved under codex
+    // (CODEX_AUTO_APPROVE_MCP_SERVER_IDS, pty/host.ts) the instant it merges — no separate review.
 
     // --- cross-project reads (the audit input). FACTORED into the shared helper so the end-user Auditor's
     // loom-user-audit surface reuses the EXACT same two reads (mcp/transcript-read.ts) — behavior unchanged. ---

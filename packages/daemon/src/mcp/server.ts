@@ -138,6 +138,9 @@ export class TaskMcpRouter {
     const wakes = this.wakes;
     const fetchOverride = this.fetchOverride;
     const server = new McpServer({ name: "loom-tasks", version: "0.1.0" });
+    // @decision 90dc3c8c — every tool registered on this server is auto-approved under codex
+    // (CODEX_AUTO_APPROVE_MCP_SERVER_IDS, pty/host.ts) the instant it merges — no separate review.
+
     // `session` is resolved HERE (not further down, where it used to be computed only for the
     // authenticated_request/vault_write gates) so tasks_create/tasks_update below can also condition on
     // it — SAME conditional-registration pattern as those two tools (an omitted tool never reaches

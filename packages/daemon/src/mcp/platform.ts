@@ -960,6 +960,8 @@ export class PlatformMcpRouter {
     const gitWriteTimeouts = this.gitWriteTimeouts;
     const pty = this.pty;
     const server = new McpServer({ name: "loom-platform", version: "0.1.0" });
+    // @decision 90dc3c8c — every tool registered on this server is auto-approved under codex
+    // (CODEX_AUTO_APPROVE_MCP_SERVER_IDS, pty/host.ts) the instant it merges — no separate review.
 
     server.registerTool(
       "project_create",

@@ -98,6 +98,8 @@ export class OperatorMcpRouter {
     const sessions = this.sessions;
     const gitWriteTimeouts = this.gitWriteTimeouts;
     const server = new McpServer({ name: "loom-operator", version: "0.1.0" });
+    // @decision 90dc3c8c — every tool registered on this server is auto-approved under codex
+    // (CODEX_AUTO_APPROVE_MCP_SERVER_IDS, pty/host.ts) the instant it merges — no separate review.
     const ownProject = () => this.resolveOperatorProject(callerSessionId);
 
     // === git writes (reuse git/writer.ts GitWriter VERBATIM — bounded + non-interactive). NO projectId

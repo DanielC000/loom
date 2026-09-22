@@ -117,6 +117,8 @@ export class SetupMcpRouter {
     const db = this.db;
     const sessions = this.sessions;
     const server = new McpServer({ name: "loom-setup", version: "0.1.0" });
+    // @decision 90dc3c8c — every tool registered on this server is auto-approved under codex
+    // (CODEX_AUTO_APPROVE_MCP_SERVER_IDS, pty/host.ts) the instant it merges — no separate review.
 
     // === structure (create-forward + ONE soft, reversible, reserved-guarded teardown: project_archive).
     // All config goes through the AGENT validator. ===

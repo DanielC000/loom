@@ -36,6 +36,8 @@ export class RunMcpRouter {
   buildServer(runSessionId: string): McpServer {
     const sessions = this.sessions;
     const server = new McpServer({ name: "loom-run", version: "0.1.0" });
+    // @decision 90dc3c8c — every tool registered on this server is auto-approved under codex
+    // (CODEX_AUTO_APPROVE_MCP_SERVER_IDS, pty/host.ts) the instant it merges — no separate review.
 
     server.registerTool(
       "submit_result",
