@@ -1079,10 +1079,26 @@ const TEST_FORCE_WRITE_CHUNK_BYTES = process.env.LOOM_TEST_FORCE_WRITE_CHUNK_BYT
 // unbounded spin against a non-blocking fd whose reader never drains would hang the gate's own FAILURE
 // path forever in a shared lane (commit 53175055's own prior "rare but unbounded wait" hazard here).
 const WRITE_FULLY_SYNC_DEADLINE_MS = 5_000;
+
+// Card e61deaab: a genuine deadline-triggered truncation used to drop its tail SILENTLY — the gate's own
+// FAILURE-reporting path losing evidence with no trace it happened. Pure so the diagnostic's own shape is
+// directly testable against synthetic inputs, independent of ever actually reproducing a real timeout
+// (this project's own gate host doesn't hit this branch — see writeFullySync's own doc). Deliberately
+// reports only what was OBSERVED (bytes written vs intended, elapsed vs deadline, retry count, forced
+// chunk size if any) — never a claimed CAUSE; the standing verification posture forbids asserting a
+// mechanism this function did not itself establish.
+export function describeWriteFullySyncTruncation({ fd, writtenBytes, totalBytes, elapsedMs, deadlineMs, retries, forcedChunkBytes }) {
+  return `[writeFullySync] TRUNCATED: wrote ${writtenBytes}/${totalBytes} bytes to fd ${fd} after ${elapsedMs}ms ` +
+    `(deadline ${deadlineMs}ms), ${retries} EAGAIN/zero-byte retr${retries === 1 ? "y" : "ies"}` +
+    `${forcedChunkBytes ? `, forced write chunk=${forcedChunkBytes}B` : ""}\n`;
+}
+
 function writeFullySync(fd, text) {
   const buf = Buffer.from(text, "utf-8");
-  const deadline = Date.now() + WRITE_FULLY_SYNC_DEADLINE_MS;
+  const startedAt = Date.now();
+  const deadline = startedAt + WRITE_FULLY_SYNC_DEADLINE_MS;
   let offset = 0;
+  let retries = 0;
   while (offset < buf.length) {
     // Give up and keep whatever's already written — partial output is the PRE-EXISTING failure mode this
     // function replaces (a lost tail), strictly better than a hang; a throw here would lose the WHOLE
@@ -1092,11 +1108,27 @@ function writeFullySync(fd, text) {
     const len = TEST_FORCE_WRITE_CHUNK_BYTES ? Math.min(remaining, TEST_FORCE_WRITE_CHUNK_BYTES) : remaining;
     try {
       const written = fs.writeSync(fd, buf, offset, len);
-      if (written === 0) continue; // degenerate zero-byte write — retry, bounded by the SAME deadline above
+      if (written === 0) { retries++; continue; } // degenerate zero-byte write — retry, bounded by the SAME deadline above
       offset += written;
     } catch (err) {
-      if (err.code === "EAGAIN") continue; // fd not ready yet — retry, bounded by the SAME deadline above
+      if (err.code === "EAGAIN") { retries++; continue; } // fd not ready yet — retry, bounded by the SAME deadline above
       throw err;
+    }
+  }
+  if (offset < buf.length) {
+    // Card e61deaab: the diagnostic itself MUST NOT go through console.warn/error — that's exactly the
+    // async-pipe-write-lost-to-process.exit() failure mode card 14e733fb exists to close, and this
+    // truncation is immediately followed by the SAME process.exit(1) at this function's only call site.
+    // A single best-effort synchronous attempt (never the full retry loop) is deliberate: we are already
+    // on the give-up path, so we must not risk spending a second full deadline just to report the first.
+    try {
+      const diag = describeWriteFullySyncTruncation({
+        fd, writtenBytes: offset, totalBytes: buf.length, elapsedMs: Date.now() - startedAt,
+        deadlineMs: WRITE_FULLY_SYNC_DEADLINE_MS, retries, forcedChunkBytes: TEST_FORCE_WRITE_CHUNK_BYTES,
+      });
+      fs.writeSync(2, Buffer.from(diag, "utf-8"));
+    } catch {
+      // best-effort only — a failed diagnostic write must never mask the truncation it was reporting
     }
   }
 }

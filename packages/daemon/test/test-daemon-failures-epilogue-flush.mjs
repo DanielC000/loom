@@ -29,6 +29,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 function runFixture({ marker, lineCount, forceChunkBytes }) {
   return new Promise((resolve) => {
     let stdout = "";
+    let stderr = "";
     const child = spawn(process.execPath, [SCRIPT, "--only=epilogue-flush-fixture"], {
       cwd: DAEMON_ROOT,
       env: {
@@ -39,10 +40,15 @@ function runFixture({ marker, lineCount, forceChunkBytes }) {
       },
     });
     child.stdout.on("data", (d) => { stdout += d; });
+    // Card e61deaab: also captured (not just drained) so a passing block below can assert writeFullySync's
+    // new deadline-truncation diagnostic (see scripts/test-daemon.mjs's describeWriteFullySyncTruncation)
+    // does NOT spuriously fire on a run that completes normally — this file's own runs all complete well
+    // under WRITE_FULLY_SYNC_DEADLINE_MS on this host, so a real "TRUNCATED" line here would itself be a bug.
+    child.stderr.on("data", (d) => { stderr += d; });
     // "close" (not "exit"): waits for this test's OWN stdio pipe to actually finish delivering whatever
     // bytes the child sent — the same sound instrument card 776750ba's test-daemon-stderr-capture-race.mjs
     // already establishes (data/close listeners resolved on "close"), not a second thing under test here.
-    child.on("close", (status) => resolve({ status, stdout }));
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
   });
 }
 
@@ -77,6 +83,10 @@ function expectedLines(marker, lineCount) {
     missing.length === 0,
   );
   check("[THE TEST] LOOM_TEST_FORCE_WRITE_CHUNK_BYTES=1: stderr tail line survives too", r.stdout.includes(`${marker}-STDERR-TAIL`));
+  // [negative control] Card e61deaab: writeFullySync's new deadline-truncation diagnostic (fd 2) must not
+  // fire on a run that completes normally — this run finishes well under WRITE_FULLY_SYNC_DEADLINE_MS, so
+  // any "TRUNCATED" text here would itself be a new bug the diagnostic introduced.
+  check("[negative control] LOOM_TEST_FORCE_WRITE_CHUNK_BYTES=1: no spurious writeFullySync TRUNCATED diagnostic", !r.stderr.includes("[writeFullySync] TRUNCATED"));
 }
 
 // A second, different forced chunk size — rules out an off-by-one that only happens to work at chunk size 1.
@@ -87,6 +97,9 @@ function expectedLines(marker, lineCount) {
   const lines = expectedLines(marker, lineCount);
   const missing = lines.filter((l) => !r.stdout.includes(l));
   check(`[chunk-size robustness] LOOM_TEST_FORCE_WRITE_CHUNK_BYTES=7: all ${lineCount} lines survive, ${missing.length} missing`, missing.length === 0);
+  // [negative control] same as above, for the chunk=7 configuration — this is the exact configuration that
+  // fails on Linux CI (card e61deaab), so on THIS host (where it passes) the diagnostic must stay silent.
+  check("[negative control] LOOM_TEST_FORCE_WRITE_CHUNK_BYTES=7: no spurious writeFullySync TRUNCATED diagnostic", !r.stderr.includes("[writeFullySync] TRUNCATED"));
 }
 
 // [negative control] the marker-matching itself must be able to fail: a marker that was never sent must be
