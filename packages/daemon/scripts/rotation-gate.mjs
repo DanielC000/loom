@@ -165,6 +165,7 @@ USAGE:
   node rotation-gate.mjs --active <path> --archive <path> --rules <path1> --rules <path2> [--rules <path3> ...]
   node rotation-gate.mjs --active <path> --lint [--rules <path> ...]
   node rotation-gate.mjs --active <path> [--archive <path> | --lint] --was <bytes>
+  node rotation-gate.mjs --active <path> [...] --commitments-marker "<!-- loom:live-commitments -->"
   node rotation-gate.mjs --active <path> [...] --audit-vault <path-to-Orchestrator-Rules.md>
   node rotation-gate.mjs --help
 
@@ -181,6 +182,19 @@ Exit 0 = rotation/lint may proceed. Exit 1 = refused (see stderr for every failu
   against --active (and --rules, if given). For running the gate against the LIVE doc any time, not only
   at a rotation. --archive is never read or required in this mode. The rotation path (no --lint) is
   unchanged and still hard-requires a real, non-empty --archive.
+
+--commitments-marker <token> (OPTIONAL, card eba7a6f7): an explicit MACHINE MARKER (e.g. an HTML comment
+  like "<!-- loom:live-commitments -->") that, when given, REPLACES heading-TEXT search as how the LIVE
+  COMMITMENTS section's start is located — check 2 below otherwise matches the first heading line that
+  merely CONTAINS "live commitments", so a heading elsewhere that only CITES that text (and happens to
+  appear earlier) can silently win over the real section. Place the marker on its own line immediately
+  above the section heading, or inline on the heading line itself. Omit it and behavior is byte-identical
+  to a script with no --commitments-marker flag at all. Once given there is NO fallback to heading-text
+  search if the marker is absent from a given text (--active or a --rules file) — that text simply does
+  not satisfy the section for this run. If the marker's literal text occurs more than once in the winning
+  text, the FIRST occurrence anchors the section (never left unresolved) but the script prints a loud
+  "MARKER AMBIGUOUS" notice to stderr, unconditionally — advisory only, never changes the exit code (same
+  posture as the existing "AMBIGUOUS" heading notice, a SEPARATE and distinct case from this one).
 
 --was <bytes> (OPTIONAL, CUT-scoped, NOT rotation-scoped): checks that --active actually SHRANK relative
   to a byte count the caller measured before editing. Fails when byteLength(--active) >= --was; passes
@@ -240,7 +254,7 @@ const HONEST_LIMIT_NOTE =
 // so a repeated flag is unioned rather than silently keeping only the last one (see the file header's
 // --rules paragraph for why a last-wins scalar was a real defect here, not just an inconvenience).
 function parseArgs(argv) {
-  const out = { active: null, archive: null, rules: [], was: null, auditVault: null, lint: false, help: false };
+  const out = { active: null, archive: null, rules: [], was: null, auditVault: null, lint: false, help: false, commitmentsMarker: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "-h" || a === "--help") {
@@ -255,6 +269,8 @@ function parseArgs(argv) {
       out.was = argv[++i];
     } else if (a === "--audit-vault") {
       out.auditVault = argv[++i];
+    } else if (a === "--commitments-marker") {
+      out.commitmentsMarker = argv[++i];
     } else if (a === "--lint") {
       out.lint = true;
     } else if (a.startsWith("--active=")) {
@@ -267,6 +283,8 @@ function parseArgs(argv) {
       out.was = a.slice("--was=".length);
     } else if (a.startsWith("--audit-vault=")) {
       out.auditVault = a.slice("--audit-vault=".length);
+    } else if (a.startsWith("--commitments-marker=")) {
+      out.commitmentsMarker = a.slice("--commitments-marker=".length);
     } else {
       console.error(`[rotation-gate] unrecognized argument: ${a}`);
       process.exit(2);
@@ -380,6 +398,40 @@ function findSectionBoundary(lines, fromIndex, maxLevel) {
   return -1;
 }
 
+// Card eba7a6f7 — every 1-indexed line number in `lines` containing `marker` as a literal (case-SENSITIVE
+// — a machine sigil, not a prose concept) substring.
+function findMarkerOccurrenceLines(lines, marker) {
+  const hits = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].includes(marker)) hits.push(i + 1);
+  }
+  return hits;
+}
+
+// Card eba7a6f7 — locates the LIVE COMMITMENTS heading via an explicit MACHINE MARKER instead of heading
+// TEXT, mirroring rotation-check.ts's `findMarkerAnchoredHeading` (kept as an independent port, same
+// posture as every other function in this file — see the file header). Closes the hazard `findHeadingLine`
+// has by construction: it matches the first heading line that merely CONTAINS the configured heading text,
+// so a heading elsewhere that only CITES/mentions it (and happens to appear earlier) can silently win over
+// the real section.
+//
+// Returns null when `marker` is not found ANYWHERE in `text` — deliberately NOT a fallback to heading-text
+// search (that fallback is exactly the unsafe behavior this exists to replace). Returns
+// `{ headingLine: -1, markerLines }` when the marker IS found but no heading follows it anywhere in the
+// text (a malformed placement). Otherwise returns `{ headingLine, markerLines }`, anchored on the nearest
+// heading AT OR AFTER the marker's own line (this accepts both a marker on its own line immediately above
+// the heading, and a marker placed inline at the end of the heading line itself). `markerLines.length > 1`
+// means the marker occurs more than once — the section is still anchored on the FIRST occurrence
+// deterministically, but the caller must surface this LOUDLY (see the AMBIGUOUS notice in main() below),
+// never as a silent first-match.
+function findMarkerAnchoredHeading(text, marker) {
+  const lines = text.split(/\r\n|\r|\n/);
+  const markerLines = findMarkerOccurrenceLines(lines, marker);
+  if (markerLines.length === 0) return null;
+  const headingLine = findSectionBoundary(lines, markerLines[0] - 1, 6); // level <= 6 matches ANY heading
+  return { lines, headingLine, markerLines };
+}
+
 // @decision 6dd3a17c — strips a rules file's own §ROTATION-GATE section out of the text fed to the
 // MARKER UNION SCAN ONLY (never --active, never countLiveCommitments, never --audit-vault) — that
 // section's marker enumeration was otherwise satisfying every marker by merely existing.
@@ -404,11 +456,36 @@ function stripSection(text, headingToken) {
 // @decision d78a6d5d — the START boundary must anchor on a heading LINE, never a
 // bare substring search — a prose mention of the token elsewhere must stay inert.
 // The END boundary anchors the same way, by heading DEPTH (see a681aed5 above).
-function countLiveCommitmentsIn(text) {
-  const lines = text.split(/\r\n|\r|\n/);
-  const startLine = findHeadingLine(lines, "live commitments", 0);
-  if (startLine === -1) {
-    return { count: null, diagnostic: null };
+//
+// Card eba7a6f7 — `marker`, when non-empty, REPLACES heading-text search with `findMarkerAnchoredHeading`
+// above for locating the section's start in THIS text — no fallback to heading-text search if the marker
+// itself is absent from this text (see that function's own doc). Omitted/empty is byte-identical to
+// before this parameter existed.
+function countLiveCommitmentsIn(text, marker) {
+  let lines;
+  let startLine;
+  let markerAmbiguous = false;
+  let markerLines = null;
+  if (marker) {
+    const anchor = findMarkerAnchoredHeading(text, marker);
+    if (anchor === null) {
+      return { count: null, diagnostic: `marker anchor "${marker}" not found in this text (no heading-text fallback)` };
+    }
+    if (anchor.headingLine === -1) {
+      return { count: null, diagnostic: `marker anchor "${marker}" found (line(s) ${anchor.markerLines.join(", ")}) but no markdown heading follows it anywhere in this text` };
+    }
+    lines = anchor.lines;
+    startLine = anchor.headingLine;
+    if (anchor.markerLines.length > 1) {
+      markerAmbiguous = true;
+      markerLines = anchor.markerLines;
+    }
+  } else {
+    lines = text.split(/\r\n|\r|\n/);
+    startLine = findHeadingLine(lines, "live commitments", 0);
+    if (startLine === -1) {
+      return { count: null, diagnostic: null };
+    }
   }
   const startLevel = headingLevel(lines[startLine]);
   const endLine = findSectionBoundary(lines, startLine + 1, startLevel);
@@ -419,7 +496,12 @@ function countLiveCommitmentsIn(text) {
     endLine === -1
       ? `end of file (no heading at level <= ${startLevel} found after it)`
       : `heading line ${endLine + 1} ("${lines[endLine].trim()}")`;
-  return { count: matches ? matches.length : 0, diagnostic: `measured from ${startDesc} to ${endDesc}` };
+  const anchorDesc = marker ? ` (anchored via marker "${marker}")` : "";
+  return {
+    count: matches ? matches.length : 0,
+    diagnostic: `measured from ${startDesc} to ${endDesc}${anchorDesc}`,
+    ...(markerAmbiguous ? { markerAmbiguous, markerLines } : {}),
+  };
 }
 
 // UNION over --active and every `rulesSources` entry — mirrors `checkMarkers`'s own precedence: --active
@@ -436,36 +518,43 @@ function countLiveCommitmentsIn(text) {
 // @decision e312b207 — fail CLOSED (never a vacuous "0 items" green) when the
 // heading is in none of the sources; surface an ambiguity as a loud non-gating
 // notice, never a hard failure (would reopen a migration red window).
-function countLiveCommitments(activeText, rulesSources) {
-  const inActive = countLiveCommitmentsIn(activeText);
+//
+// Card eba7a6f7 — `marker`, when non-empty, is forwarded unchanged to every `countLiveCommitmentsIn` call
+// below (each source independently marker-anchored — see that function's own doc); a `markerAmbiguous`
+// result from the winning source is carried through into this function's own return.
+function countLiveCommitments(activeText, rulesSources, marker) {
+  const inActive = countLiveCommitmentsIn(activeText, marker);
   const inRules = rulesSources
-    .map((s) => ({ label: s.label, result: countLiveCommitmentsIn(s.text) }))
+    .map((s) => ({ label: s.label, result: countLiveCommitmentsIn(s.text, marker) }))
     .filter((s) => s.result.count !== null);
   const singleRulesFile = rulesSources.length === 1;
+  const markerFields = (r) => (r.markerAmbiguous ? { markerAmbiguous: true, markerLines: r.markerLines } : {});
 
   if (inActive.count !== null) {
     if (inRules.length === 1 && singleRulesFile) {
       // Byte-identical to the pre-115f2ba9 single-file shape.
-      return { count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: true, otherCount: inRules[0].result.count, otherDiagnostic: inRules[0].result.diagnostic };
+      return { count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: true, otherCount: inRules[0].result.count, otherDiagnostic: inRules[0].result.diagnostic, ...markerFields(inActive) };
     }
     if (inRules.length > 0) {
       return {
         count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: true,
         others: inRules.map((s) => ({ source: s.label, count: s.result.count, diagnostic: s.result.diagnostic })),
+        ...markerFields(inActive),
       };
     }
-    return { count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: false, otherCount: null, otherDiagnostic: null };
+    return { count: inActive.count, diagnostic: inActive.diagnostic, source: "active", ambiguous: false, otherCount: null, otherDiagnostic: null, ...markerFields(inActive) };
   }
   if (inRules.length > 0) {
     const [first, ...rest] = inRules;
     if (singleRulesFile) {
       // Byte-identical to the pre-115f2ba9 single-file shape.
-      return { count: first.result.count, diagnostic: `${first.result.diagnostic} (in --rules)`, source: "rules", ambiguous: false, otherCount: null, otherDiagnostic: null };
+      return { count: first.result.count, diagnostic: `${first.result.diagnostic} (in --rules)`, source: "rules", ambiguous: false, otherCount: null, otherDiagnostic: null, ...markerFields(first.result) };
     }
     return {
       count: first.result.count,
       diagnostic: `${first.result.diagnostic} (in ${first.label})`,
       source: first.label,
+      ...markerFields(first.result),
       ...(rest.length > 0
         ? { ambiguous: true, others: rest.map((s) => ({ source: s.label, count: s.result.count, diagnostic: s.result.diagnostic })) }
         : { ambiguous: false, otherCount: null, otherDiagnostic: null }),
@@ -477,8 +566,9 @@ function countLiveCommitments(activeText, rulesSources) {
     ambiguous: false,
     otherCount: null,
     otherDiagnostic: null,
-    diagnostic:
-      rulesSources.length === 0
+    diagnostic: marker
+      ? `marker anchor "${marker}" not found in --active${rulesSources.length > 0 ? " or any supplied --rules file" : ""}`
+      : rulesSources.length === 0
         ? "no heading line matching /^#{1,6}\\s.*live commitments/i found anywhere in --active"
         : singleRulesFile
           ? "no heading line matching /^#{1,6}\\s.*live commitments/i found in --active or --rules"
@@ -628,7 +718,7 @@ function main() {
   // reads the raw, unstripped rulesSources.
   const rulesSourcesForMarkers = rulesSources.map((s) => ({ label: s.label, text: stripSection(s.text, "rotation-gate") }));
   const { missing, satisfiedBy } = checkMarkers(activeText, rulesSourcesForMarkers);
-  const live = countLiveCommitments(activeText, rulesSources);
+  const live = countLiveCommitments(activeText, rulesSources, args.commitmentsMarker);
 
   // AMBIGUITY notice (code review, card e312b207, product ruling (i)+(ii) — NOT (iii), a hard failure is
   // explicitly rejected; generalized to N rules files by card 115f2ba9): printed UNCONDITIONALLY and
@@ -657,6 +747,22 @@ function main() {
           `--active's heading section down to prose), not left standing.`
       );
     }
+  }
+
+  // Card eba7a6f7 — a SEPARATE, unconditional AMBIGUOUS notice from the one above: the --commitments-marker
+  // token's own literal text occurred more than once WITHIN the single winning source (e.g. a second copy
+  // in a doc describing this feature, a test fixture, or another resume doc's own header warning about
+  // self-matching pointers). The section was anchored on the FIRST occurrence deterministically — this
+  // notice is what makes that never a silent first-match. Non-gating, same posture as the notice above.
+  if (live.markerAmbiguous) {
+    const [firstLine, ...restLines] = live.markerLines;
+    console.error(
+      `[rotation-gate] ⚠️ MARKER AMBIGUOUS: --commitments-marker "${args.commitmentsMarker}" occurs ` +
+        `${live.markerLines.length} times in the winning source ("${live.source}") — at line(s) ` +
+        `${live.markerLines.join(", ")}. The section was anchored on the FIRST occurrence (line ${firstLine}) ` +
+        `— this is a deterministic pick, not a verified one. A marker should occur EXACTLY ONCE; the other ` +
+        `occurrence(s) (line ${restLines.join(", ")}) must be resolved, not left standing.`
+    );
   }
 
   // The byte check reads --active's REAL on-disk byte count (fs.statSync, not a decoded-string length)
@@ -762,7 +868,9 @@ function main() {
   // was even consulted. `live.source` is guaranteed non-null on every path that reaches this line (a null
   // source only ever accompanies `live.count === null`, which took the `failures` branch above instead).
   const liveSourceLabel = live.source === "active" ? "--active" : live.source === "rules" ? "--rules" : live.source;
-  const liveSourceSuffix = ` (via ${liveSourceLabel})`;
+  // Card eba7a6f7: name the anchor mode too, same "never unlabelled" reasoning as the source label above —
+  // a reader must be able to tell a marker-anchored green apart from a heading-text one at a glance.
+  const liveSourceSuffix = ` (via ${liveSourceLabel}${args.commitmentsMarker ? ", anchored via marker" : ""})`;
   if (args.lint) {
     console.log(
       `[rotation-gate] LINT OK — ${args.active} carries all ${MARKERS.length} markers and ${live.count} ` +

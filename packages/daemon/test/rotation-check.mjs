@@ -1230,7 +1230,124 @@ function tmpFile(name, content) {
   check("e013b1ca: markersNeedingReview correctly still flags a marker with genuinely multiple real hits", rTwoGenuine.markersNeedingReview.includes("TARGETMARKER"));
 }
 
+// ── MACHINE MARKER ANCHORING (card eba7a6f7) ───────────────────────────────────────────────────────────
+// The hazard this exists to close: countNumberedSection's heading-text search matches the FIRST heading
+// line that merely CONTAINS the configured heading token, so a heading elsewhere in the doc that only
+// CITES that text (and happens to appear earlier) silently wins over the real section. An explicit machine
+// marker, when configured, REPLACES that search — first proving the hazard is real under heading-text
+// mode, then proving marker mode is immune to it.
+{
+  const docWithCitingHeadingAbove = [
+    "## Some earlier section that happens to cite LIVE COMMITMENTS in its own heading",
+    "1. unrelated item that must NOT be counted",
+    "2. another unrelated item",
+    "",
+    "<!-- loom:live-commitments -->",
+    "## ⛔⛔ §LIVE COMMITMENTS — the real section",
+    "1. real item one",
+    "2. real item two",
+    "3. real item three",
+    "## Next section",
+    "4. must not be counted",
+  ].join("\n");
+
+  const rHeadingMode = countNumberedSection(docWithCitingHeadingAbove, "LIVE COMMITMENTS");
+  check("eba7a6f7: WITHOUT a marker, a citing heading above the real section wins (demonstrates the hazard)", rHeadingMode.count === 2);
+
+  const rMarkerMode = countNumberedSection(docWithCitingHeadingAbove, "LIVE COMMITMENTS", "<!-- loom:live-commitments -->");
+  check("eba7a6f7: WITH a marker, the real section is located instead (fixes the hazard)", rMarkerMode.count === 3);
+  check("eba7a6f7: marker-mode diagnostic names the anchor", rMarkerMode.diagnostic.includes('anchored via marker "<!-- loom:live-commitments -->"'));
+  check("eba7a6f7: marker-mode result is not itself ambiguous (only one occurrence)", rMarkerMode.markerAmbiguous === undefined);
+}
+
+// Marker configured but ABSENT from this text: no silent fallback to heading-text search, even though the
+// heading text IS present and would otherwise be found.
+{
+  const activeText = ["## LIVE COMMITMENTS (heading text present, marker is NOT)", "1. x", "2. y"].join("\n");
+  const r = countNumberedSection(activeText, "LIVE COMMITMENTS", "<!-- loom:live-commitments -->");
+  check("eba7a6f7: heading text alone (no marker in this text) does NOT satisfy marker-mode", r.count === null);
+  check("eba7a6f7: diagnostic names the marker, not a heading-text message", r.diagnostic.includes('marker anchor "<!-- loom:live-commitments -->" not found in this text'));
+}
+
+// Marker present but no heading follows it anywhere — a malformed placement, still never a fallback.
+{
+  const doc = ["<!-- loom:live-commitments -->", "just prose, no heading follows anywhere in this doc"].join("\n");
+  const r = countNumberedSection(doc, "whatever", "<!-- loom:live-commitments -->");
+  check("eba7a6f7: marker found but no heading follows it ⇒ count:null", r.count === null);
+  check("eba7a6f7: diagnostic explains no heading follows", r.diagnostic.includes("no markdown heading follows it"));
+}
+
+// Inline placement: the marker at the END of the heading line itself (not on its own preceding line).
+{
+  const doc = [
+    "## ⛔⛔ §LIVE COMMITMENTS <!-- loom:live-commitments -->",
+    "1. one",
+    "2. two",
+    "## Next",
+    "3. not counted",
+  ].join("\n");
+  const r = countNumberedSection(doc, "live commitments", "<!-- loom:live-commitments -->");
+  check("eba7a6f7: inline marker (same line as the heading) anchors correctly", r.count === 2);
+}
+
+// Ambiguity — the marker occurs TWICE, with a decoy heading sitting right after the FIRST occurrence, so
+// the deterministic first-occurrence pick lands on the WRONG section. This proves why the ambiguity must
+// be surfaced LOUDLY: the count silently comes out wrong (2, not 3) unless a reader inspects the flag.
+{
+  const doc = [
+    "<!-- loom:live-commitments -->",
+    "## Decoy heading right after the stray marker occurrence",
+    "1. decoy item one",
+    "2. decoy item two",
+    "",
+    "<!-- loom:live-commitments -->",
+    "## ⛔⛔ §LIVE COMMITMENTS — the real section",
+    "1. real one",
+    "2. real two",
+    "3. real three",
+  ].join("\n");
+  const r = countNumberedSection(doc, "live commitments", "<!-- loom:live-commitments -->");
+  check("eba7a6f7: duplicated marker ⇒ markerAmbiguous:true", r.markerAmbiguous === true);
+  check("eba7a6f7: markerOccurrences names both lines (1 and 6)", Array.isArray(r.markerOccurrences) && r.markerOccurrences.length === 2 && r.markerOccurrences[0] === 1 && r.markerOccurrences[1] === 6);
+  check("eba7a6f7: first occurrence wins deterministically — lands on the DECOY (count=2, not the real 3) — this is WHY it must be loud", r.count === 2);
+
+  // Full checkRotation integration: the ambiguity must reach BOTH liveCommitments.markerAmbiguous AND a
+  // top-level markerAmbiguityWarning (never silent) — mirroring how the existing heading-ambiguity case
+  // surfaces via `ambiguous`/`ambiguityWarning`.
+  const result = checkRotation({
+    activeText: doc, markers: [], commitmentsHeading: "LIVE COMMITMENTS", commitmentsFloor: 2,
+    commitmentsMarker: "<!-- loom:live-commitments -->",
+  });
+  check("eba7a6f7 checkRotation: liveCommitments.markerAmbiguous surfaces", result.liveCommitments.markerAmbiguous === true);
+  check("eba7a6f7 checkRotation: liveCommitments.markerOccurrences carries through", Array.isArray(result.liveCommitments.markerOccurrences) && result.liveCommitments.markerOccurrences.length === 2);
+  check("eba7a6f7 checkRotation: top-level markerAmbiguityWarning is a loud, non-gating notice", typeof result.markerAmbiguityWarning === "string" && result.markerAmbiguityWarning.includes("MARKER AMBIGUOUS") && result.markerAmbiguityWarning.includes("<!-- loom:live-commitments -->"));
+  check("eba7a6f7 checkRotation: ambiguity never gates ok (2 >= floor of 2, still passes)", result.ok === true);
+}
+
+// Union: each text is independently marker-anchored — the section can move OUT of the active doc into a
+// rules file and marker-mode still finds it there, exactly like the existing heading-text union.
+{
+  const activeText = "no marker and no live commitments heading here at all";
+  const rulesText = [
+    "<!-- loom:live-commitments -->",
+    "## LIVE COMMITMENTS",
+    "1. a", "2. b", "3. c",
+  ].join("\n");
+  const section = countNumberedSectionUnion(activeText, rulesText, "LIVE COMMITMENTS", "<!-- loom:live-commitments -->");
+  check("eba7a6f7 union: marker anchored correctly via the rules text when the active text has none", section.count === 3 && section.source === "rules");
+}
+
+// Omitting the marker entirely leaves behavior byte-identical to before this feature existed — every
+// pre-existing test above in this file already proves this implicitly (none of them pass a 3rd argument),
+// but assert it explicitly here too for a reader who only looks at this section.
+{
+  const doc = ["## LIVE COMMITMENTS", "1. a", "2. b"].join("\n");
+  const withoutMarker = countNumberedSection(doc, "LIVE COMMITMENTS");
+  const withEmptyMarker = countNumberedSection(doc, "LIVE COMMITMENTS", "");
+  check("eba7a6f7: an empty-string marker behaves identically to omitting the argument entirely", withoutMarker.count === withEmptyMarker.count && withoutMarker.diagnostic === withEmptyMarker.diagnostic);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — rotation-check's marker/floor/archive/byte checks behave correctly, the two named historical bugs (a681aed5's name-anchor fail-open, 34a6f07e's equality-vs-floor) are proven absent from this port, a mutation test confirms a dropped marker is caught and named, configured:false is distinct from ok:true, the impure fs wrapper never throws on a missing doc, the new multi-rules-file union (card f6985338) is byte-identical for a legacy single-rulesPath caller while correctly unioning/attributing/failing-visibly across N files, (card 6dd3a17c) a rules file's own §ROTATION-GATE section no longer satisfies the marker union scan just by enumerating/discussing every token on both the single-rules and N-file paths while leaving the LIVE COMMITMENTS floor check untouched, and (card e013b1ca) markerHits/markersNeedingReview now agree with what that same exclusion counted — filtering out excluded-section hits while every surviving hit's line number stays true to the real, unstripped file — claude-free."
+  ? "\n✅ ALL PASS — rotation-check's marker/floor/archive/byte checks behave correctly, the two named historical bugs (a681aed5's name-anchor fail-open, 34a6f07e's equality-vs-floor) are proven absent from this port, a mutation test confirms a dropped marker is caught and named, configured:false is distinct from ok:true, the impure fs wrapper never throws on a missing doc, the new multi-rules-file union (card f6985338) is byte-identical for a legacy single-rulesPath caller while correctly unioning/attributing/failing-visibly across N files, (card 6dd3a17c) a rules file's own §ROTATION-GATE section no longer satisfies the marker union scan just by enumerating/discussing every token on both the single-rules and N-file paths while leaving the LIVE COMMITMENTS floor check untouched, (card e013b1ca) markerHits/markersNeedingReview now agree with what that same exclusion counted — filtering out excluded-section hits while every surviving hit's line number stays true to the real, unstripped file, and (card eba7a6f7) an explicit machine marker anchors the LIVE COMMITMENTS section immune to a citing heading above the real block — proven RED under heading-text mode and GREEN under marker mode on the SAME doc, with no silent fallback when the marker is absent from a text and a LOUD (never silent-first-match) surfacing when the marker occurs more than once — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

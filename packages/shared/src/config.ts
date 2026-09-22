@@ -572,6 +572,20 @@ export interface OrchestrationConfig {
    * Resume Doc Rotation (card 2830748c).
    */
   rotationLiveCommitmentsFloor: number;
+  /**
+   * Card eba7a6f7 — an OPTIONAL explicit machine marker (e.g. `<!-- loom:live-commitments -->`) that,
+   * when non-empty, REPLACES heading-TEXT search as how `rotationLiveCommitmentsHeading`'s section start
+   * is located — `findHeadingLine` otherwise matches the first heading CONTAINING that heading text, so
+   * an earlier heading that merely CITES it can silently win over the real section. Place the marker on
+   * its own line immediately above the section heading, or inline on the heading line itself. Empty (the
+   * default) disables marker-anchored mode, leaving heading-text search as the sole locator —
+   * byte-identical to every seat predating this field. Once configured there is NO silent fallback to
+   * heading-text search when the marker is absent from a given text — see `rotation-check.ts`'s own doc
+   * for the full mechanics, the active/rules union, and the loud (never silent-first-match) handling of a
+   * marker that occurs more than once. Guarded the SAME grow-only-from-empty way as
+   * `rotationLiveCommitmentsHeading` by `mergeConfigOverride`'s `additiveOnlyRotationGuard`.
+   */
+  rotationLiveCommitmentsMarker: string;
 }
 
 /**
@@ -1182,7 +1196,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0 },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "" },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -1725,6 +1739,7 @@ export function resolveConfig(
       rotationMarkers: override.orchestration?.rotationMarkers ?? d.orchestration.rotationMarkers,
       rotationLiveCommitmentsHeading: override.orchestration?.rotationLiveCommitmentsHeading ?? d.orchestration.rotationLiveCommitmentsHeading,
       rotationLiveCommitmentsFloor: override.orchestration?.rotationLiveCommitmentsFloor ?? d.orchestration.rotationLiveCommitmentsFloor,
+      rotationLiveCommitmentsMarker: override.orchestration?.rotationLiveCommitmentsMarker ?? d.orchestration.rotationLiveCommitmentsMarker,
     },
     // Daemon-global (no per-project override): platform override (2nd arg) ?? env ?? default, mirroring
     // resolvePlatform's watcher-cadence precedence. `??` (not `||`) so an explicit 0 is preserved (0

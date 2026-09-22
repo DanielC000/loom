@@ -4601,7 +4601,17 @@ export class OrchestrationMcpRouter {
           "(nothing was actually checked), never mistake it for 'checked and passed.' Add markers with " +
           "project_update's orchestration.rotationMarkers — an array of `{token: string, caseSensitive?: " +
           "boolean, note?: string}` objects, NOT bare strings (additive-only from this session — you can " +
-          "add a marker but not remove one; ask a human/Lead to remove one). ⚠️ HONEST LIMIT: every check here is an " +
+          "add a marker but not remove one; ask a human/Lead to remove one). " +
+          "Card eba7a6f7: the LIVE-COMMITMENTS section is normally located by matching " +
+          "`rotationLiveCommitmentsHeading` against the first heading line that CONTAINS it — a heading " +
+          "elsewhere that merely CITES that text (and happens to appear earlier) can silently win over " +
+          "the real section. Set `orchestration.rotationLiveCommitmentsMarker` (e.g. an HTML comment like " +
+          "`<!-- loom:live-commitments -->`, placed on its own line above the section heading or inline " +
+          "on it) to anchor on that explicit token instead — once set, there is NO fallback to " +
+          "heading-text search if the marker is missing from a given text. If the marker's literal text " +
+          "occurs more than once, the response carries `liveCommitments.markerAmbiguous`/" +
+          "`markerOccurrences` plus a top-level `markerAmbiguityWarning` — never a silent first-match. " +
+          "⚠️ HONEST LIMIT: every check here is an " +
           "exact-substring grep — it proves literal text survived, not that no meaning was lost to " +
           "rewording. A green is a candidate set ('nothing was blatantly deleted'), never a verdict that " +
           "no meaning was lost — still read the real diff for a rewrite that changed words but kept (or " +
@@ -4706,6 +4716,7 @@ export class OrchestrationMcpRouter {
             markers: resolved.orchestration.rotationMarkers,
             commitmentsHeading: resolved.orchestration.rotationLiveCommitmentsHeading,
             commitmentsFloor: resolved.orchestration.rotationLiveCommitmentsFloor,
+            commitmentsMarker: resolved.orchestration.rotationLiveCommitmentsMarker,
             archivePath: containedArchivePath,
             rulesPath: containedRulesPath,
             rulesPaths: containedRulesPaths.length > 0 ? containedRulesPaths : null,

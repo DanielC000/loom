@@ -266,6 +266,61 @@ function stripSection(text: string, headingToken: string): SectionStripResult {
 
 const ROTATION_GATE_SECTION_HEADING = "rotation-gate";
 
+/**
+ * Card eba7a6f7 — every 1-indexed line number in `lines` containing `marker` as a literal (case-SENSITIVE)
+ * substring. Case-sensitive deliberately, unlike `RotationMarker` tokens: a machine marker is a code-like
+ * sigil a human/agent types verbatim (e.g. an HTML comment), not a prose concept that must survive
+ * rewording — see `RotationMarker.caseSensitive`'s own doc for that distinction.
+ */
+function findMarkerOccurrenceLines(lines: readonly string[], marker: string): number[] {
+  const hits: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]!.includes(marker)) hits.push(i + 1);
+  }
+  return hits;
+}
+
+export interface MarkerAnchorResult {
+  /** 0-indexed line of the heading this marker anchors to, or -1 if the marker was found but no heading
+   *  follows it anywhere in the text (a malformed placement — never a fallback to heading-text search). */
+  headingLine: number;
+  /** 1-indexed line number(s) where the marker's literal text was found — always non-empty. Length > 1
+   *  means the marker is AMBIGUOUS (see `findMarkerAnchoredHeading`'s own doc); the FIRST entry is the
+   *  one `headingLine` was actually anchored from. */
+  markerLines: number[];
+}
+
+/**
+ * Card eba7a6f7 — locates a section's heading by an explicit MACHINE MARKER instead of heading TEXT,
+ * closing the hazard `findHeadingLine` has by construction: it matches the first heading line that merely
+ * CONTAINS `headingToken`, so a heading elsewhere in the doc that only CITES/mentions the real section's
+ * heading text (and happens to appear earlier) silently wins over the real section — moving the real
+ * section only widens the window of citing headings that can win instead.
+ *
+ * Returns null when `marker`'s literal text is not found ANYWHERE in `text` — deliberately NOT a fallback
+ * to heading-text search: that fallback is exactly the unsafe behavior this function exists to replace,
+ * so a text where the marker was never actually inserted must read as "section not found here," never as
+ * "found via heading text instead" (a caller choosing to union across multiple texts, as
+ * `countNumberedSectionUnion` does, is a different and safe thing — each text is independently
+ * marker-only).
+ *
+ * When the marker occurs MORE THAN ONCE, the section is anchored on the FIRST occurrence deterministically
+ * (never left unresolved), but `markerLines` names every occurrence so a caller can surface this loudly —
+ * see `RotationCheckResult.liveCommitments.markerAmbiguous`/`markerOccurrences` and the top-level
+ * `markerAmbiguityWarning` this builds toward. This is the same "still return a usable answer, but never
+ * silently" posture `countNumberedSectionUnion`'s own heading-found-in-both-texts ambiguity already uses.
+ *
+ * The heading is the nearest one AT OR AFTER the marker's own line — this accepts BOTH placements a marker
+ * can legitimately use: on its own line immediately above the section heading, or inline at the end of the
+ * heading line itself (that line already matches `headingRe`, so searching FROM it finds it immediately).
+ */
+function findMarkerAnchoredHeading(lines: readonly string[], marker: string): MarkerAnchorResult | null {
+  const markerLines = findMarkerOccurrenceLines(lines, marker);
+  if (markerLines.length === 0) return null;
+  const headingLine = findSectionBoundary(lines, markerLines[0]! - 1, 6); // level <= 6 matches ANY heading
+  return { headingLine, markerLines };
+}
+
 export interface NumberedSectionCount {
   /** null only when `headingToken`'s heading line could not be found at all IN THIS TEXT. */
   count: number | null;
@@ -273,6 +328,13 @@ export interface NumberedSectionCount {
    *  self-diagnosable); on a miss (count:null) it still explains what was searched for. Never omitted
    *  either way — unlike `NumberedSectionUnionCount`'s `otherDiagnostic`, which genuinely IS conditional. */
   diagnostic: string;
+  /** Card eba7a6f7: present (true) only when `marker` was supplied to `countNumberedSection` AND its
+   *  literal text occurred more than once in this text — see `findMarkerAnchoredHeading`'s own doc. Never
+   *  gates `count`/`ok` — a loud, non-gating signal, mirroring this surface's own `ambiguous` idiom. */
+  markerAmbiguous?: true;
+  /** Present only alongside `markerAmbiguous` — every 1-indexed line the marker's literal text occurred
+   *  on in this text; the first entry is the one actually used to anchor the section. */
+  markerOccurrences?: number[];
 }
 
 /**
@@ -280,17 +342,42 @@ export interface NumberedSectionCount {
  * section-boundary heading line after it (same level or shallower — see `findSectionBoundary`; or EOF if
  * there is none). Single-text only — see `countNumberedSectionUnion` below for the active/rules union
  * built on top of this (card e312b207).
+ *
+ * Card eba7a6f7 — `marker`, when non-empty, REPLACES `headingToken`-text search with
+ * `findMarkerAnchoredHeading` above for locating the section's start in THIS text. Omitted/empty is
+ * BYTE-IDENTICAL to before this parameter existed (every pre-existing caller).
  */
-export function countNumberedSection(text: string, headingToken: string): NumberedSectionCount {
+export function countNumberedSection(text: string, headingToken: string, marker?: string): NumberedSectionCount {
   const lines = text.split(/\r\n|\r|\n/);
-  const startLine = findHeadingLine(lines, headingToken, 0);
-  if (startLine === -1) {
-    // Code review (card e312b207, item 5a): this text is generic — `countNumberedSectionUnion` calls it
-    // against `rulesText` just as often as `activeText` — so the message must not name a specific caller.
-    // (Today every union caller discards this exact string on the not-found path and builds its own
-    // union-aware message instead, so nothing currently leaks the old "active doc" wording — but a FUTURE
-    // direct caller of this exported function would have, which is the trap this fixes.)
-    return { count: null, diagnostic: `no heading line matching /^#{1,6}\\s.*${headingToken}/i found in this text` };
+  let startLine: number;
+  let markerAmbiguous: true | undefined;
+  let markerOccurrences: number[] | undefined;
+  if (marker) {
+    const anchor = findMarkerAnchoredHeading(lines, marker);
+    if (anchor === null) {
+      return { count: null, diagnostic: `marker anchor "${marker}" not found in this text (no heading-text fallback — see findMarkerAnchoredHeading)` };
+    }
+    if (anchor.headingLine === -1) {
+      return {
+        count: null,
+        diagnostic: `marker anchor "${marker}" found (line(s) ${anchor.markerLines.join(", ")}) but no markdown heading follows it anywhere in this text`,
+      };
+    }
+    startLine = anchor.headingLine;
+    if (anchor.markerLines.length > 1) {
+      markerAmbiguous = true;
+      markerOccurrences = anchor.markerLines;
+    }
+  } else {
+    startLine = findHeadingLine(lines, headingToken, 0);
+    if (startLine === -1) {
+      // Code review (card e312b207, item 5a): this text is generic — `countNumberedSectionUnion` calls it
+      // against `rulesText` just as often as `activeText` — so the message must not name a specific caller.
+      // (Today every union caller discards this exact string on the not-found path and builds its own
+      // union-aware message instead, so nothing currently leaks the old "active doc" wording — but a FUTURE
+      // direct caller of this exported function would have, which is the trap this fixes.)
+      return { count: null, diagnostic: `no heading line matching /^#{1,6}\\s.*${headingToken}/i found in this text` };
+    }
   }
   const startLevel = headingLevel(lines[startLine]!)!;
   const endLine = findSectionBoundary(lines, startLine + 1, startLevel);
@@ -301,7 +388,12 @@ export function countNumberedSection(text: string, headingToken: string): Number
     endLine === -1
       ? `end of file (no heading at level <= ${startLevel} found after it)`
       : `heading line ${endLine + 1} ("${lines[endLine]!.trim()}")`;
-  return { count: matches ? matches.length : 0, diagnostic: `measured from ${startDesc} to ${endDesc}` };
+  const anchorDesc = marker ? ` (anchored via marker "${marker}")` : "";
+  return {
+    count: matches ? matches.length : 0,
+    diagnostic: `measured from ${startDesc} to ${endDesc}${anchorDesc}`,
+    ...(markerAmbiguous ? { markerAmbiguous, markerOccurrences } : {}),
+  };
 }
 
 export interface NumberedSectionUnionCount extends NumberedSectionCount {
@@ -336,10 +428,15 @@ export interface NumberedSectionUnionCount extends NumberedSectionCount {
  * would reopen a red window during the migration, and is a deliberate non-goal here — it only makes the
  * shape VISIBLE via `ambiguous`/`otherCount`/`otherDiagnostic` so a caller (`checkRotation` below) can
  * surface a loud, non-gating warning instead of a silent green.
+ *
+ * Card eba7a6f7 — `marker`, when non-empty, is forwarded to EVERY `countNumberedSection` call below
+ * unchanged: each text is independently marker-anchored (never a heading-text fallback within a text —
+ * see `countNumberedSection`'s own doc), so a `markerAmbiguous`/`markerOccurrences` result on the winning
+ * side survives this function's `{...inActive, ...}`/`{...inRules, ...}` spreads automatically.
  */
-export function countNumberedSectionUnion(activeText: string, rulesText: string | null, headingToken: string): NumberedSectionUnionCount {
-  const inActive = countNumberedSection(activeText, headingToken);
-  const inRules = rulesText !== null ? countNumberedSection(rulesText, headingToken) : null;
+export function countNumberedSectionUnion(activeText: string, rulesText: string | null, headingToken: string, marker?: string): NumberedSectionUnionCount {
+  const inActive = countNumberedSection(activeText, headingToken, marker);
+  const inRules = rulesText !== null ? countNumberedSection(rulesText, headingToken, marker) : null;
   if (inActive.count !== null) {
     if (inRules !== null && inRules.count !== null) {
       return { ...inActive, source: "active", ambiguous: true, otherCount: inRules.count, otherDiagnostic: inRules.diagnostic };
@@ -428,6 +525,10 @@ export interface NumberedSectionUnionCountMulti {
    *  was found, each with its own count/diagnostic, so a caller can report all of them, not just the
    *  winner. Never present alongside `ambiguous` absent. */
   others?: { source: string; count: number; diagnostic: string }[];
+  /** Card eba7a6f7 — mirrors `NumberedSectionCount.markerAmbiguous`/`markerOccurrences` from whichever
+   *  source won (`inActive` or the winning `inSources` entry); see `countNumberedSection`'s own doc. */
+  markerAmbiguous?: true;
+  markerOccurrences?: number[];
 }
 
 /**
@@ -435,15 +536,19 @@ export interface NumberedSectionUnionCountMulti {
  * version: `activeText` tried first, then `sources` IN ORDER — the first source with the heading wins.
  * FAIL-CLOSED exactly like the single-file version: `count: null, source: null` when the heading is in
  * NEITHER `activeText` NOR any source — never a vacuous "0 items, ok:true".
+ *
+ * Card eba7a6f7 — `marker`, when non-empty, is forwarded unchanged to every `countNumberedSection` call
+ * (each source independently marker-anchored, same posture as `countNumberedSectionUnion` above).
  */
 export function countNumberedSectionUnionMulti(
   activeText: string,
   sources: readonly RuleFileSource[],
   headingToken: string,
+  marker?: string,
 ): NumberedSectionUnionCountMulti {
-  const inActive = countNumberedSection(activeText, headingToken);
+  const inActive = countNumberedSection(activeText, headingToken, marker);
   const inSources = sources
-    .map((s) => ({ label: s.label, result: countNumberedSection(s.text, headingToken) }))
+    .map((s) => ({ label: s.label, result: countNumberedSection(s.text, headingToken, marker) }))
     .filter((s): s is { label: string; result: NumberedSectionCount & { count: number } } => s.result.count !== null);
 
   if (inActive.count !== null) {
@@ -456,6 +561,7 @@ export function countNumberedSectionUnionMulti(
       count: first!.result.count,
       diagnostic: `${first!.result.diagnostic} (in ${first!.label})`,
       source: first!.label,
+      ...(first!.result.markerAmbiguous ? { markerAmbiguous: true as const, markerOccurrences: first!.result.markerOccurrences } : {}),
       ...(rest.length > 0
         ? { ambiguous: true as const, others: rest.map((s) => ({ source: s.label, count: s.result.count, diagnostic: s.result.diagnostic })) }
         : {}),
@@ -524,6 +630,11 @@ export interface RotationCheckInput {
   /** "" disables the LIVE-COMMITMENTS-style floor check entirely for this seat. */
   commitmentsHeading: string;
   commitmentsFloor: number;
+  /** Card eba7a6f7 — "" (the default) leaves `commitmentsHeading`'s heading-TEXT search as the sole
+   *  locator, byte-identical to before this field existed. Non-empty REPLACES it with the explicit
+   *  machine-marker locator (`findMarkerAnchoredHeading`, via `countNumberedSection`'s `marker` param) —
+   *  see that function's own doc for the mechanics and the no-silent-fallback/loud-ambiguity posture. */
+  commitmentsMarker?: string;
   /** Rotation-mode archive-existence check (mirrors `--archive`); omit/null for lint-mode (any-time). */
   archive?: ArchiveInfo | null;
   /** Cut-scoped shrinkage check (mirrors `--was`); omit/null to skip it. */
@@ -603,6 +714,15 @@ export interface RotationCheckResult {
      *  own count/diagnostic. Mutually exclusive with `otherCount`/`otherDiagnostic` above (those are the
      *  single-other-file shape from the original path; this is the N-file shape from the new path). */
     otherSources?: { source: string; count: number; diagnostic: string }[];
+    /** Card eba7a6f7: true only when `commitmentsMarker` was configured AND its literal text occurred
+     *  more than once in the winning source — see `findMarkerAnchoredHeading`'s own doc. The section was
+     *  still anchored on the FIRST occurrence (never left unresolved); this is a loud, non-gating signal
+     *  to inspect, mirroring `ambiguous` above but for a DIFFERENT kind of ambiguity (a duplicated marker
+     *  within one text, not the same heading found across multiple texts) — the two can occur together. */
+    markerAmbiguous?: true;
+    /** Present only alongside `markerAmbiguous` — every 1-indexed line the marker occurred on in the
+     *  winning source; the first entry is the one actually used. */
+    markerOccurrences?: number[];
   };
   archiveCheck: { checked: boolean; ok: boolean; reason?: string };
   byteCheck: { checked: boolean; ok: boolean; activeBytes?: number; preEditBytes?: number; reason?: string };
@@ -613,6 +733,10 @@ export interface RotationCheckResult {
   /** Present (and loud) only when `liveCommitments.ambiguous` is true — see that field's own doc and
    *  `countNumberedSectionUnion`'s (card e312b207, code review T3). Never gates `ok`. */
   ambiguityWarning?: string;
+  /** Card eba7a6f7 — present (and loud) only when `liveCommitments.markerAmbiguous` is true; a SEPARATE
+   *  warning from `ambiguityWarning` above (a different kind of ambiguity — see that field's own doc).
+   *  Never gates `ok`. */
+  markerAmbiguityWarning?: string;
   /** Code review N1 (card f6985338): present (and loud) whenever ANY supplied rules source — the legacy
    *  singular `rules` field OR any `rulesFiles` entry — could not be read. `rulesCheck`/`rulesChecks`
    *  already report this per-file, but ONLY nested; DoD-4 asked for "fail visibly," and a field nobody
@@ -760,24 +884,29 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
   const commitmentsEnabled = input.commitmentsHeading !== "";
   const liveCommitments: RotationCheckResult["liveCommitments"] = commitmentsEnabled
     ? (() => {
+        // Card eba7a6f7: "" (unset) leaves this undefined so countNumberedSection's heading-text search
+        // stays the sole locator — byte-identical to before this field existed.
+        const marker = input.commitmentsMarker || undefined;
         if (!hasMultiFiles) {
           // Card e312b207: unioned with `rulesText` — active tried first, rules only when active carries
           // no such heading at all. `section.count === null` (found in neither) is the fail-closed case:
           // `ok` is false, never a vacuous "0 items, nothing to check, pass". See countNumberedSectionUnion.
-          const section = countNumberedSectionUnion(input.activeText, rulesText, input.commitmentsHeading);
+          const section = countNumberedSectionUnion(input.activeText, rulesText, input.commitmentsHeading, marker);
           const ok = section.count !== null && section.count >= input.commitmentsFloor;
           return {
             enabled: true, count: section.count, floor: input.commitmentsFloor, ok, diagnostic: section.diagnostic, source: section.source,
             ...(section.ambiguous ? { ambiguous: section.ambiguous as true, otherCount: section.otherCount, otherDiagnostic: section.otherDiagnostic } : {}),
+            ...(section.markerAmbiguous ? { markerAmbiguous: section.markerAmbiguous as true, markerOccurrences: section.markerOccurrences } : {}),
           };
         }
         // NEW path (card f6985338): same DEDUPED union set as the marker check above.
         const sources = buildRuleSources(input.rules, rulesFiles);
-        const section = countNumberedSectionUnionMulti(input.activeText, sources, input.commitmentsHeading);
+        const section = countNumberedSectionUnionMulti(input.activeText, sources, input.commitmentsHeading, marker);
         const ok = section.count !== null && section.count >= input.commitmentsFloor;
         return {
           enabled: true, count: section.count, floor: input.commitmentsFloor, ok, diagnostic: section.diagnostic, source: section.source,
           ...(section.ambiguous ? { ambiguous: section.ambiguous as true, otherSources: section.others } : {}),
+          ...(section.markerAmbiguous ? { markerAmbiguous: section.markerAmbiguous as true, markerOccurrences: section.markerOccurrences } : {}),
         };
       })()
     : { enabled: false, count: null, floor: input.commitmentsFloor, ok: true, diagnostic: "disabled — no rotationLiveCommitmentsHeading configured for this seat", source: null };
@@ -850,6 +979,20 @@ export function checkRotation(input: RotationCheckInput): RotationCheckResult {
         `mid-migration into the rules file (e.g. a leftover heading where only a plain prose pointer should ` +
         `remain) — it should be resolved (trim the active doc's heading down to prose), not left standing.`;
   }
+  // Card eba7a6f7 — a SEPARATE warning from ambiguityWarning above: the marker's own literal text occurred
+  // more than once WITHIN the single winning source (e.g. a second copy in a doc describing this feature,
+  // a test fixture, or another resume doc's own header warning about self-matching pointers), never a
+  // silent first-match masquerading as an unambiguous pick.
+  if (liveCommitments.markerAmbiguous) {
+    const [firstLine, ...restLines] = liveCommitments.markerOccurrences!;
+    result.markerAmbiguityWarning =
+      `[resume-doc-check] MARKER AMBIGUOUS: the commitments-anchor marker "${input.commitmentsMarker}" ` +
+      `occurs ${liveCommitments.markerOccurrences!.length} times in the winning source ("${liveCommitments.source}") ` +
+      `— at line(s) ${liveCommitments.markerOccurrences!.join(", ")}. The section was anchored on the FIRST ` +
+      `occurrence (line ${firstLine}) — this is a deterministic pick, not a verified one. A marker should ` +
+      `occur EXACTLY ONCE; the other occurrence(s) (line ${restLines.join(", ")}) must be resolved, not left ` +
+      `standing.`;
+  }
   // Code review N1 (card f6985338): a TOP-LEVEL warning whenever ANY supplied rules source failed to
   // read — the legacy singular `rules` field AND every `rulesFiles` entry, so the singular path (the one
   // every existing seat already uses) gets the same visibility as the new plural one. Never drives `ok`.
@@ -892,6 +1035,9 @@ export interface RunResumeDocCheckOptions {
   markers: readonly RotationMarker[];
   commitmentsHeading: string;
   commitmentsFloor: number;
+  /** Card eba7a6f7 — forwarded verbatim to `checkRotation`'s `commitmentsMarker`; "" (default) leaves
+   *  `commitmentsHeading`'s heading-text search as the sole locator. */
+  commitmentsMarker?: string;
   /** Optional union source for markers — a real path a caller resolves and vault-contains before calling
    *  in (card 3c30258f exposed this as MCP-tool input on both `resume_doc_check` surfaces; see
    *  rotation-check.ts's own module doc). A supplied-but-unreadable path degrades the union to
@@ -1040,6 +1186,7 @@ export function runResumeDocCheck(opts: RunResumeDocCheckOptions): RunResumeDocC
   const result = checkRotation({
     activeText, rules, rulesFiles, markers: opts.markers,
     commitmentsHeading: opts.commitmentsHeading, commitmentsFloor: opts.commitmentsFloor,
+    commitmentsMarker: opts.commitmentsMarker,
     archive, byteCheck,
   });
   return { ...result, resumeDocPath: opts.resumeDocPath, docFound: true };

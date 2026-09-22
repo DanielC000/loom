@@ -252,6 +252,10 @@ const orchestrationOverride = z.object({
   rotationMarkers: z.array(rotationMarkerSchema).max(ROTATION_MARKERS_MAX_LEN).optional(),
   rotationLiveCommitmentsHeading: z.string().trim().max(500).optional(),
   rotationLiveCommitmentsFloor: z.number().int().min(0).max(10000).optional(),
+  // Card eba7a6f7 — the FOURTH guarded leg (same additive-only-from-empty treatment as
+  // rotationLiveCommitmentsHeading below in applyAdditiveOnlyRotationGuard): a benign string (no
+  // host-exec/exfil capability), so it stays on the agent path too.
+  rotationLiveCommitmentsMarker: z.string().trim().max(500).optional(),
 }).strict();
 // Obsidian auto-start. `autoStart` (boolean, OS-default install location) is benign and stays on the
 // agent path; `path` is an arbitrary host EXECUTABLE the daemon-spawned preflight launches — host-launch
@@ -484,13 +488,15 @@ function deepMergeRecord(base: Record<string, unknown>, patch: Record<string, un
 }
 export interface MergeConfigOverrideOptions {
   /**
-   * @decision 1069c8e1 — when true, all THREE rotation-protection fields (rotationMarkers,
-   * rotationLiveCommitmentsFloor, rotationLiveCommitmentsHeading) merge ADDITIVE-ONLY:
+   * @decision 1069c8e1 — when true, all FOUR rotation-protection fields (rotationMarkers,
+   * rotationLiveCommitmentsFloor, rotationLiveCommitmentsHeading, rotationLiveCommitmentsMarker) merge
+   * ADDITIVE-ONLY:
    *
-   * a marker can never be REMOVED, the floor never LOWERED, and a configured heading never CLEARED or
-   * RE-POINTED — only the ADD/RAISE/"" -> non-empty directions are allowed. Set true on every AGENT-facing
-   * config-write call site (manager/setup); leave unset (plain replace) on the human-equivalent Lead + human
-   * REST PATCH paths, which stay the deliberate release valve for a legitimate human-initiated retirement.
+   * a marker can never be REMOVED, the floor never LOWERED, and a configured heading/anchor-marker never
+   * CLEARED or RE-POINTED — only the ADD/RAISE/"" -> non-empty directions are allowed. Set true on every
+   * AGENT-facing config-write call site (manager/setup); leave unset (plain replace) on the
+   * human-equivalent Lead + human REST PATCH paths, which stay the deliberate release valve for a
+   * legitimate human-initiated retirement.
    */
   additiveOnlyRotationGuard?: boolean;
 }
@@ -547,6 +553,14 @@ function applyAdditiveOnlyRotationGuard(
   if (patchOrch.rotationLiveCommitmentsHeading !== undefined) {
     const existingHeading = (existingOrch?.rotationLiveCommitmentsHeading as string | undefined) ?? "";
     mergedOrch.rotationLiveCommitmentsHeading = existingHeading === "" ? patchOrch.rotationLiveCommitmentsHeading : existingHeading;
+  }
+
+  // Card eba7a6f7 — rotationLiveCommitmentsMarker is the FOURTH guarded leg, same grow-only-from-empty
+  // treatment as rotationLiveCommitmentsHeading immediately above (never heading/floor's plain
+  // additive-union — there is only ever one marker token, not a set to grow).
+  if (patchOrch.rotationLiveCommitmentsMarker !== undefined) {
+    const existingMarker = (existingOrch?.rotationLiveCommitmentsMarker as string | undefined) ?? "";
+    mergedOrch.rotationLiveCommitmentsMarker = existingMarker === "" ? patchOrch.rotationLiveCommitmentsMarker : existingMarker;
   }
 
   return { ...merged, orchestration: mergedOrch };
@@ -2009,7 +2023,17 @@ export class PlatformMcpRouter {
           "`{token: string, caseSensitive?: boolean, note?: string}` objects, NOT bare strings)/" +
           "rotationLiveCommitmentsHeading/rotationLiveCommitmentsFloor via project_configure on the " +
           "Platform project — unlike a manager's project_update, which can only GROW its own project's " +
-          "set (see project_configure's own note on the asymmetry). ⚠️ HONEST LIMIT: every check here is an " +
+          "set (see project_configure's own note on the asymmetry). " +
+          "Card eba7a6f7: the LIVE-COMMITMENTS section is normally located by matching " +
+          "`rotationLiveCommitmentsHeading` against the first heading line that CONTAINS it — a heading " +
+          "elsewhere that merely CITES that text (and happens to appear earlier) can silently win over " +
+          "the real section. Set `orchestration.rotationLiveCommitmentsMarker` (e.g. an HTML comment like " +
+          "`<!-- loom:live-commitments -->`, placed on its own line above the section heading or inline " +
+          "on it) to anchor on that explicit token instead — once set, there is NO fallback to " +
+          "heading-text search if the marker is missing from a given text. If the marker's literal text " +
+          "occurs more than once, the response carries `liveCommitments.markerAmbiguous`/" +
+          "`markerOccurrences` plus a top-level `markerAmbiguityWarning` — never a silent first-match. " +
+          "⚠️ HONEST LIMIT: every check here is an " +
           "exact-substring grep — it proves literal text survived, not that no meaning was lost to " +
           "rewording. A green is a candidate set ('nothing was blatantly deleted'), never a verdict that " +
           "no meaning was lost — still read the real diff for a rewrite that changed words but kept (or " +
@@ -2127,6 +2151,7 @@ export class PlatformMcpRouter {
             markers: resolved.orchestration.rotationMarkers,
             commitmentsHeading: resolved.orchestration.rotationLiveCommitmentsHeading,
             commitmentsFloor: resolved.orchestration.rotationLiveCommitmentsFloor,
+            commitmentsMarker: resolved.orchestration.rotationLiveCommitmentsMarker,
             archivePath: containedArchivePath,
             rulesPath: containedRulesPath,
             rulesPaths: containedRulesPaths.length > 0 ? containedRulesPaths : null,
