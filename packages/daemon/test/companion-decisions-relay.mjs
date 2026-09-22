@@ -255,6 +255,23 @@ try {
     const freshRow = sixth.decisions.find((d) => d.questionId === "q-dedup-2");
     check("dedup: a brand-new decision is alreadySurfaced:false on its first read", freshRow?.alreadySurfaced === false);
 
+    const seventh = await call(client, "decisions_list", {});
+    check("dedup: a repeat read of q-dedup-2 (still pending, unchanged) comes back alreadySurfaced:true",
+      seventh.decisions.find((d) => d.questionId === "q-dedup-2")?.alreadySurfaced === true);
+
+    // Card 5ea0153c: question_amend updates title/body/options on a still-PENDING row IN PLACE — that
+    // must read as a genuine change here too (docs/decisions/0c1365d0's revised premise), or a companion
+    // that already surfaced the ORIGINAL wording would wrongly suppress the amended one.
+    db.amendQuestion("q-dedup-2", { title: "Second decision, corrected" });
+    const eighth = await call(client, "decisions_list", {});
+    const amendedRow = eighth.decisions.find((d) => d.questionId === "q-dedup-2");
+    check("dedup: amending a still-pending decision's title re-fires — alreadySurfaced:false", amendedRow?.alreadySurfaced === false);
+    check("dedup: the re-fired entry carries the AMENDED title", amendedRow?.title === "Second decision, corrected");
+
+    const ninth = await call(client, "decisions_list", {});
+    check("dedup: a repeat read of the now-amended (still unchanged since) decision is alreadySurfaced:true again",
+      ninth.decisions.find((d) => d.questionId === "q-dedup-2")?.alreadySurfaced === true);
+
     await client.close();
     db.close();
   }

@@ -428,8 +428,13 @@ function provisioningAudit(q: Question): Record<string, unknown> {
  * wanting the filer must use `filedBySessionId` instead.
  * @decision cb7d6998 — a `null` `filedBySessionId` on a pre-field row is genuinely unrecoverable, not
  * merely unmigrated — do not assume it can be backfilled.
+ *
+ * `stale` (card 5ea0153c, joined by `db.listQuestionsForAudit`) is `true` only for a still-`pending`
+ * request whose current routing target isn't live right now — see that method's own doc for the exact
+ * predicate. A soft flag, never an auto-cancel: a moot-LOOKING ask can still be one the owner wants to
+ * answer, so this never suppresses or alters anything else in the row.
  */
-export function auditRequestItem(q: Question & { agentId: string | null }, db: Db): Record<string, unknown> {
+export function auditRequestItem(q: Question & { agentId: string | null; stale: boolean }, db: Db): Record<string, unknown> {
   return {
     id: q.id, projectId: q.projectId, loomSessionId: q.sessionId, filedBySessionId: q.filedBySessionId,
     agentId: q.agentId, taskId: q.taskId,
@@ -439,6 +444,7 @@ export function auditRequestItem(q: Question & { agentId: string | null }, db: D
     provisioning: provisioningAudit(q),
     // question_cancel/dismiss — null unless state:"cancelled". See taskRequestGetItem's twin field.
     cancelledReason: q.cancelledReason, cancelledBy: q.cancelledBy,
+    stale: q.stale,
   };
 }
 
@@ -474,6 +480,55 @@ export function cancelQuestionForAgent(
     const message = (e as Error).message;
     if (message.includes("already answered")) {
       return { error: "cannot cancel — this request was just answered; call question_pull to get the answer instead of discarding it" };
+    }
+    return { error: message };
+  }
+}
+
+/**
+ * `question_amend` (card 5ea0153c) — the shared implementation behind BOTH `question_amend` MCP tool
+ * registrations (mcp/orchestration.ts's manager surface, mcp/platform.ts's Lead surface), mirroring how
+ * `cancelQuestionForAgent` is shared. Updates a still-PENDING request's title/body/options IN PLACE
+ * instead of a cancel-and-refile — a pending request has by definition not been answered, so there is no
+ * answer to invalidate by editing the ask underneath it. Same agent-lineage ownership scope as
+ * `cancelQuestionForAgent`/`question_pull` (a recycle successor can still amend a predecessor's still-
+ * pending ask); same pending-only + observed-not-assumed discipline via `Db.amendQuestion`'s throw.
+ *
+ * `options` may only be amended on a `type:"decision"` request — every other type always carries `options:
+ * null` (see `Question.options`'s own doc), so amending it there would silently manufacture a field the
+ * type doesn't have.
+ */
+export function amendQuestionForAgent(
+  db: Db,
+  askerSessionId: string,
+  questionId: string,
+  patch: { title?: string; body?: string; options?: string[] },
+): { amended: true; questionId: string; title: string } | { error: string } {
+  const asker = db.getSession(askerSessionId);
+  if (!asker) return { error: "session not found" };
+  const question = db.getQuestion(questionId);
+  if (!question) return { error: "question not found" };
+  const askingSession = db.getSession(question.sessionId);
+  if (!askingSession || askingSession.agentId !== asker.agentId) {
+    return { error: "you may only amend a request asked by your own agent lineage — not another agent's" };
+  }
+  if (patch.title === undefined && patch.body === undefined && patch.options === undefined) {
+    return { error: "at least one of title/body/options is required" };
+  }
+  if (patch.options !== undefined && question.type !== "decision") {
+    return { error: `options can only be amended on a "decision" request (this one is type:"${question.type}")` };
+  }
+  try {
+    const amended = db.amendQuestion(questionId, patch);
+    if (!amended) return { error: "question not found" };
+    // The POST-amend title (unchanged if only body/options were amended) — the caller's `question_amended`
+    // event-emit twin (mcp/orchestration.ts, mcp/platform.ts) uses this directly rather than a second
+    // `db.getQuestion` round-trip.
+    return { amended: true, questionId: amended.id, title: amended.title };
+  } catch (e) {
+    const message = (e as Error).message;
+    if (message.includes("already answered")) {
+      return { error: "cannot amend — this request was just answered; call question_pull to get the answer instead of editing a moot ask" };
     }
     return { error: message };
   }

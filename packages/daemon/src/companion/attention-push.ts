@@ -156,6 +156,10 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
       return "worker-crashed";
     case "question_asked":
       return "decision-pending";
+    // Card 5ea0153c: a still-pending ask's content just changed IN PLACE (question_amend) — same class as
+    // the original ask, since the human still owes the SAME decision, just with fresher wording.
+    case "question_amended":
+      return "decision-pending";
     // Card 99d41588: a Request going STALE is still fundamentally "a decision needs the human" — same
     // class as the original ask, not a new one; what differs is the LINE (see alertLine below), which
     // must carry the age so this reads as an escalation, not a duplicate of the original push.
@@ -278,6 +282,19 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       const qRef = typeof detail.questionId === "string" ? ` (question:${detail.questionId})` : "";
       const cutFlag = titleTruncated ? " [title TRUNCATED — fetch full text before answering]" : "";
       line = `${projectName}: decision needed${qRef}${cutFlag} — "${title}" (${m8})`;
+      break;
+    }
+    case "question_amended": {
+      // Card 5ea0153c: same placement/truncation discipline as question_asked above — the resolvable
+      // questionId goes BEFORE the (unbounded, truncatable) title, and a cut title says so explicitly.
+      // Worded "amended", not "needed", so a recipient who already saw the original ask doesn't read this
+      // as a duplicate — it is the SAME decision, updated wording, never a new row.
+      const rawTitle = typeof detail.title === "string" ? detail.title : "untitled";
+      const titleTruncated = rawTitle.length > ALERT_TITLE_MAX_CHARS;
+      const title = truncateText(rawTitle, ALERT_TITLE_MAX_CHARS);
+      const qRef = typeof detail.questionId === "string" ? ` (question:${detail.questionId})` : "";
+      const cutFlag = titleTruncated ? " [title TRUNCATED — fetch full text before answering]" : "";
+      line = `${projectName}: pending decision amended${qRef}${cutFlag} — "${title}" (${m8})`;
       break;
     }
     case "request_escalated": {

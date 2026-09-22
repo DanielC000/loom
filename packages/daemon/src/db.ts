@@ -1503,7 +1503,7 @@ const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<O
   "paste_length_loss", "paste_tripwire_give_up", "prompt_mismatch_unresolved", "repeated_tool_call",
   "codex_submit_unconfirmed", "codex_boot_stuck", "codex_unsupported_capability", "companion_zero_reply_detected",
   // Owner-interaction records (ruled durable — lead gen 345, low volume, provenance IS the value)
-  "question_asked", "request_escalated", "task_held_cleared",
+  "question_asked", "question_amended", "request_escalated", "task_held_cleared",
 ]);
 
 /**
@@ -7416,6 +7416,28 @@ export class Db {
     return this.getQuestion(id);
   }
   /**
+   * `question_amend` (card 5ea0153c) — updates a still-`pending` request's title/body/options IN PLACE
+   * instead of forcing a cancel-and-refile: a pending request has by definition not been answered, so
+   * there is no answer to invalidate by editing the ask underneath it. Each of `title`/`body`/`options` is
+   * OPTIONAL — an omitted field keeps its current value; `options: null` (or `[]`) explicitly clears a
+   * decision's option list back to a pure-blocker ask. Same observed-not-assumed discipline as
+   * `cancelQuestion` above: the UPDATE's own `AND state = 'pending'` guard protects the data, and a 0-row
+   * result throws the row's ACTUAL current state rather than silently reporting success.
+   */
+  amendQuestion(id: string, patch: { title?: string; body?: string; options?: string[] | null }): Question | undefined {
+    const existing = this.getQuestion(id);
+    if (!existing) return undefined;
+    if (existing.state !== "pending") throw new Error(`question is already ${existing.state}`);
+    const title = patch.title ?? existing.title;
+    const body = patch.body ?? existing.body;
+    const options = patch.options !== undefined ? (patch.options && patch.options.length > 0 ? patch.options : null) : existing.options;
+    const result = this.db.prepare(
+      "UPDATE questions SET title = ?, body = ?, options_json = ? WHERE id = ? AND state = 'pending'",
+    ).run(title, body, options ? JSON.stringify(options) : null, id);
+    if (result.changes === 0) throw new Error(`question is already ${this.getQuestion(id)?.state ?? existing.state}`);
+    return this.getQuestion(id);
+  }
+  /**
    * Every 'answered' question stuck (not yet `question_pull`ed) with `answeredAt <= beforeIso` — the
    * answered-stuck watchdog's (IdleWatcher.tickAnsweredStuckQuestions) work set: the human already
    * answered, but the asking manager hasn't pulled it. Oldest-first.
@@ -7601,10 +7623,19 @@ export class Db {
    *
    * Filters are optional/AND'd; omit all (no `projectId`) for the whole platform — the Auditor's use;
    * the manager surface always passes its own `projectId` so it can never read another project's requests.
+   *
+   * `stale` (card 5ea0153c, the auto-reap defect) is `true` only for a still-`pending` row whose CURRENT
+   * routing target (`session_id` — reparented onto a live successor on every manager/Lead recycle, see
+   * `reparentQuestions`) is not live right now (joined `process_state` is neither `'live'` nor
+   * `'starting'`). Deliberately a FLAG, never an auto-cancel — prefer flagging over silent cancellation
+   * (a moot-LOOKING ask can still be one the owner wants to answer; see the card's own DoD). Recomputed
+   * fresh on every read, exactly like `computeFulfillment` — never cached on the row, so a resumed asker
+   * clears its own staleness the moment it comes back live. Always `false` for a non-`'pending'` row: an
+   * answered/consumed/cancelled request is never "moot," it's already resolved one way or another.
    */
   listQuestionsForAudit(filters: {
     projectId?: string; state?: QuestionState; type?: QuestionType; since?: string; excludeConsumed?: boolean; agentId?: string;
-  } = {}): (Question & { agentId: string | null })[] {
+  } = {}): (Question & { agentId: string | null; stale: boolean })[] {
     const clauses: string[] = [];
     const params: unknown[] = [];
     if (filters.projectId) { clauses.push("q.project_id = ?"); params.push(filters.projectId); }
@@ -7617,11 +7648,16 @@ export class Db {
     if (filters.agentId) { clauses.push("s.agent_id = ?"); params.push(filters.agentId); }
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     const rows = this.db.prepare(
-      `SELECT q.*, s.agent_id AS joined_agent_id FROM questions q
+      `SELECT q.*, s.agent_id AS joined_agent_id, s.process_state AS joined_process_state FROM questions q
        LEFT JOIN sessions s ON s.id = q.session_id
        ${where} ORDER BY q.created_at DESC`,
     ).all(...params) as Row[];
-    return rows.map((r) => ({ ...toQuestion(r), agentId: (r.joined_agent_id as string | null) ?? null }));
+    return rows.map((r) => {
+      const q = toQuestion(r);
+      const processState = (r.joined_process_state as string | null) ?? null;
+      const sessionLive = processState === "live" || processState === "starting";
+      return { ...q, agentId: (r.joined_agent_id as string | null) ?? null, stale: q.state === "pending" && !sessionLive };
+    });
   }
   /**
    * The web decision-inbox's GLOBAL "waiting on me" read (card 8701bdbb, child B): every question across

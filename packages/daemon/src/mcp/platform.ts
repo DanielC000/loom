@@ -11,7 +11,7 @@ import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
 import { eventsSearchQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
 import type { SessionService } from "../sessions/service.js";
 import type { PtyHost } from "../pty/host.js";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, cancelQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
@@ -3053,6 +3053,46 @@ export class PlatformMcpRouter {
       async ({ questionId, reason }) => {
         if (!callerSessionId) return ok({ error: "no caller session" });
         return ok(cancelQuestionForAgent(db, callerSessionId, questionId, reason));
+      },
+    );
+
+    // question_amend (card 5ea0153c) — ports the manager surface's tool (mcp/orchestration.ts) so the Lead
+    // can update a still-pending ask IN PLACE instead of cancel-and-refiling; shares amendQuestionForAgent
+    // (mcp/questionTool.ts) verbatim so the ownership check + error shaping can never drift between the
+    // two callers. Fires the same `question_amended` event-emit twin as the manager surface so attention-
+    // push re-notifies with the amended wording.
+    server.registerTool(
+      "question_amend",
+      {
+        description:
+          "Update a request YOU asked via question_ask that's still PENDING — IN PLACE, instead of " +
+          "cancel-and-refiling it as a new row. Use this when you have fresher information for an ask the " +
+          "human hasn't answered yet: a pending request has by definition not been answered, so there is " +
+          "no answer to invalidate. Scoped to YOUR OWN agent lineage — you can never amend a request asked " +
+          "by another agent. Only a still-'pending' request can be amended: an already-'answered'/" +
+          "'consumed'/'cancelled' one is REFUSED (call question_pull instead if it was just answered). " +
+          "`title`/`body`/`options` are each OPTIONAL — an omitted field keeps its current value; at least " +
+          "one must be given. `options` (an array; omit or pass empty to clear it) can only be amended on " +
+          "a type:\"decision\" request — every other type never carries options. The human sees the " +
+          "AMENDMENT, not a new row — it's re-surfaced via the same push nudge a fresh ask gets. Returns " +
+          "{amended:true, questionId} or {error}.",
+        inputSchema: strictShape({
+          questionId: z.string(),
+          title: z.string().optional(),
+          body: z.string().optional(),
+          options: z.array(z.string()).optional(),
+        }),
+      },
+      async ({ questionId, title, body, options }) => {
+        if (!callerSessionId) return ok({ error: "no caller session" });
+        const result = amendQuestionForAgent(db, callerSessionId, questionId, { title, body, options });
+        if ("amended" in result) {
+          db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(), managerSessionId: callerSessionId,
+            kind: "question_amended", detail: { questionId: result.questionId, title: result.title },
+          });
+        }
+        return ok(result);
       },
     );
 

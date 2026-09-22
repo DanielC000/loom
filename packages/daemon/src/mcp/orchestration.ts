@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { contextWindowForModel, contextPercentFor, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn, type Session, type OrchestrationEvent, type GateType } from "@loom/shared";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem, pageRequests, cancelQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem, pageRequests, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
 import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
 // Card 40f4cae9 — the `fields:[...]` projection carried forward from `tasks_list` (card 23fde5f8): reuse
 // the SAME generic `pickFields` (mcp/tasks.ts) rather than writing a second projector — see that
@@ -3803,6 +3803,48 @@ export class OrchestrationMcpRouter {
       async ({ questionId, reason }) => ok(cancelQuestionForAgent(db, managerSessionId, questionId, reason)),
     );
 
+    // question_amend (card 5ea0153c) — update a still-PENDING ask IN PLACE instead of forcing a
+    // cancel-and-refile: a pending request has by definition not been answered, so there is no answer to
+    // invalidate. Agent-lineage-scoped exactly like question_cancel — see questionTool.ts's
+    // amendQuestionForAgent, shared verbatim with the Lead surface (mcp/platform.ts) so the ownership check
+    // + error shaping can never drift between the two callers. Fires a `question_amended` event (mirrors
+    // question_ask's own `question_asked`) so the SAME notification machinery (attention-push) that pushed
+    // the original ask re-notifies with the amended wording, instead of the row updating silently
+    // underneath a stale push — the human sees the AMENDMENT, never a new row.
+    server.registerTool(
+      "question_amend",
+      {
+        description:
+          "Update a request YOU asked via question_ask that's still PENDING — IN PLACE, instead of " +
+          "cancel-and-refiling it as a new row. Use this when you have fresher information for an ask the " +
+          "human hasn't answered yet: a pending request has by definition not been answered, so there is " +
+          "no answer to invalidate. Scoped to YOUR OWN agent lineage — you can never amend a request asked " +
+          "by another agent. Only a still-'pending' request can be amended: an already-'answered'/" +
+          "'consumed'/'cancelled' one is REFUSED (call question_pull instead if it was just answered). " +
+          "`title`/`body`/`options` are each OPTIONAL — an omitted field keeps its current value; at least " +
+          "one must be given. `options` (an array; omit or pass empty to clear it) can only be amended on " +
+          "a type:\"decision\" request — every other type never carries options. The human sees the " +
+          "AMENDMENT, not a new row — it's re-surfaced via the same push nudge a fresh ask gets. Returns " +
+          "{amended:true, questionId} or {error}.",
+        inputSchema: strictShape({
+          questionId: z.string(),
+          title: z.string().optional(),
+          body: z.string().optional(),
+          options: z.array(z.string()).optional(),
+        }),
+      },
+      async ({ questionId, title, body, options }) => {
+        const result = amendQuestionForAgent(db, managerSessionId, questionId, { title, body, options });
+        if ("amended" in result) {
+          db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(), managerSessionId,
+            kind: "question_amended", detail: { questionId: result.questionId, title: result.title },
+          });
+        }
+        return ok(result);
+      },
+    );
+
     // @decision 308259e5 — never resolve a pending request this way with agent-authored text; the note is
     // always server-captured owner text. Never cancel-and-refile a conversationally-answered question_ask.
     //
@@ -3868,7 +3910,10 @@ export class OrchestrationMcpRouter {
           "value). `loomSessionId` is the CURRENT routing target — it MUTATES on a manager/Lead recycle, so " +
           "it does NOT identify who originally filed the request; `filedBySessionId` is the immutable filer " +
           "(set once at ask time, null on a row that predates this field — that history is unrecoverable). " +
-          "`total` is " +
+          "`stale` (card 5ea0153c) is true only for a still-'pending' row whose CURRENT routing target " +
+          "isn't live right now — a SOFT flag, never an auto-cancel: a moot-LOOKING ask can still be one " +
+          "the human wants to answer, so amend it (question_amend) or cancel it (question_cancel) yourself " +
+          "rather than trusting this alone; always false for answered/consumed/cancelled. `total` is " +
           "the FULL matching count and `hasMore` tells you whether `items` was truncated. Filters (all optional, AND'd): state " +
           "(pending|answered|consumed|cancelled — \"cancelled\" is a moot/superseded ask you or a human " +
           "withdrew via question_cancel/dismiss, never an answer), type (decision|input|permission|" +

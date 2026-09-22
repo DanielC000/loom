@@ -114,7 +114,9 @@ export class AuditMcpRouter {
           "value). `loomSessionId` is the CURRENT routing target — it MUTATES on a manager/Lead recycle, so " +
           "it does NOT identify who originally filed the request; `filedBySessionId` is the immutable filer " +
           "(set once at ask time, null on a row that predates this field — that history is unrecoverable). " +
-          "`total` is the FULL matching count and `hasMore` tells you whether `items` was truncated " +
+          "`stale` (card 5ea0153c) is true only for a still-'pending' row whose CURRENT routing target " +
+          "isn't live right now — a SOFT flag, never an auto-cancel (a moot-LOOKING ask can still be one " +
+          "the owner wants to answer); always false for answered/consumed/cancelled. `total` is the FULL matching count and `hasMore` tells you whether `items` was truncated " +
           "— never assume `items` is everything without checking it. Filters (all optional, AND'd): " +
           "projectId (one project), state (pending|answered|consumed|cancelled — \"cancelled\" is a " +
           "moot/superseded ask withdrawn via question_cancel/dismiss, never an answer), type, sinceMinutes (only requests " +

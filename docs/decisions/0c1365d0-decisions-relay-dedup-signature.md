@@ -1,15 +1,18 @@
-# 0c1365d0 — decisions-relay dedup signature only folds in the answer tuple
+# 0c1365d0 — decisions-relay dedup signature folds in title/body/options (REVISED by card 5ea0153c)
 
 ## Narrative
 
 Card `0c1365d0`: `decisionSurfaceSignature` is a deterministic "as of this state" fingerprint used to tell a genuine re-alert (state/answer changed) apart from a repeat read of an unchanged pending decision, for the `decisions-relay` lever.
 
-Only the answer tuple (`state`, `chosenOption`, `answeredAt`, `consumedAt`) is folded into the signature — a question's `title`/`body`/`options`/`recommendation` are set once at `question_ask` and never mutated afterward. This was confirmed by inspection of `db.ts`: its only `UPDATE questions` statements touch `session_id`/`project_id` reparenting, or the `state`/`chosen_option`/`note`/`answered_at`/`consumed_at`/`provision_*` columns — never `title`/`body`/`options_json`/`recommendation`. Folding those immutable fields into the signature would never change it and would just be dead weight.
+Originally only the answer tuple (`state`, `chosenOption`, `answeredAt`, `consumedAt`) was folded into the signature — a question's `title`/`body`/`options`/`recommendation` were set once at `question_ask` and never mutated afterward, confirmed by inspection of `db.ts`'s `UPDATE questions` statements at the time.
+
+**REVISED by card `5ea0153c`:** `question_amend` (`db.ts`'s `amendQuestion`) now updates a still-`pending` row's `title`/`body`/`options` in place, so the immutability premise above no longer holds for those three fields. `decisionSurfaceSignature` now folds them in too, so an amendment reads as a genuine change here and a companion that already surfaced the ORIGINAL wording correctly reports `alreadySurfaced:false` (and re-narrates) for the amended one instead of silently suppressing it. `recommendation` stays OUT of the signature — no write path (question_amend included) ever touches it after `insertQuestion`, so it remains genuinely immutable.
 
 ## Do not
 
-- Do not add `title`/`body`/`options`/`recommendation` to this signature without first re-verifying (against `db.ts`'s `UPDATE questions` statements) that they are still immutable post-creation — if a future change makes any of them mutable, the signature must be extended to include it or a genuine re-alert would be missed.
+- Do not drop `title`/`body`/`options` back out of this signature — `question_amend` makes them mutable post-creation, and omitting them would mask a real amendment as `alreadySurfaced:true`, silently suppressing the re-narration the whole dedup mechanism exists to get right.
+- Do not add `recommendation` without first re-verifying (against `db.ts`'s `UPDATE questions` statements) that it is still immutable post-creation.
 
 ## Source
 
-Inline comment in `packages/daemon/src/companion/capabilities.ts` (`decisionSurfaceSignature`'s top-of-function doc): lines 609-617, as of this tranche's HEAD. Relocated by card `d091d3fa` (tranche on `companion/capabilities.ts`); no wording changed beyond joining wrapped source lines into flowing paragraphs and stripping `*` comment markers.
+Inline comment in `packages/daemon/src/companion/capabilities.ts` (`decisionSurfaceSignature`'s top-of-function doc), immediately above the function. Relocated by card `d091d3fa` (tranche on `companion/capabilities.ts`); revised by card `5ea0153c` (question_amend).

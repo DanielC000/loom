@@ -1285,6 +1285,14 @@ export type OrchestrationEventKind =
   //  manager can never get an `idle_escalated` for this, so this is the only alert path. No
   //  "cleared" event exists — re-check `state = 'pending'` rather than wait for one.
   | "request_escalated"
+  // A still-PENDING `question_ask` Request had its title/body/options updated in place via
+  // `question_amend` (card 5ea0153c) — the durable, event-emit twin of the amend write itself, mirroring
+  // `question_asked`'s own doc above: a tail-poll watcher (attention-push) subscribes to "this decision's
+  // content just changed" without re-deriving it from `listOpenQuestions`, so the owner gets re-notified
+  // with the AMENDED wording instead of the ask sitting silently updated underneath a stale push. Filed
+  // under the amending session (managerSessionId); `detail` carries { questionId, title } — `title` is the
+  // POST-amend title (unchanged if only body/options were amended).
+  | "question_amended"
   // Adds VISIBILITY ONLY at the idle watchdog's existing `nothingElseActionable` skip — no predicate,
   // nudge, or gating decision changes. Filed under the MANAGER/PLATFORM session; `detail` carries
   // { reason, totalNonTerminal, causeCounts: {...}, ownerBlocked, selfParked, classification,
@@ -1580,7 +1588,8 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   set_worker_mode: true,
   flush_worker_composer: true, poll_fired: true, poll_fire_failed: true, poll_baseline_seeded: true,
   poll_id_guard_tripped: true, event_trigger_fired: true, event_trigger_throttled: true,
-  end_me_refused: true, end_me_complete: true, question_asked: true, request_escalated: true, board_quiet_cause: true, task_held_cleared: true,
+  end_me_refused: true, end_me_complete: true, question_asked: true, question_amended: true,
+  request_escalated: true, board_quiet_cause: true, task_held_cleared: true,
   session_rate_limited: true, rate_limit_resumed: true, rate_limit_recovered: true,
   rate_limit_bailed: true, usage_latch_armed: true, usage_latch_cleared: true,
   worker_spawn_usage_blocked: true, companion_alert_pushed: true, companion_alert_deferred: true,
@@ -2880,7 +2889,7 @@ export const EVENT_TRIGGER_EVENT_KINDS = [
   "merge_rejected", "merge_request",
   "worker_stuck", "worktree_vanished", "worker_report", "worker_exited_without_report", "session_recovery_abandoned",
   "fleet_resume_failed", "manager_crash_resume_failed",
-  "question_asked", "request_escalated",
+  "question_asked", "question_amended", "request_escalated",
   "idle_escalated", "idle_report",
   "context_escalated", "context_blind_turn", "context_emergency_interrupt",
   "platform_escalate",

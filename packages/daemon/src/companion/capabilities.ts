@@ -605,13 +605,10 @@ function pendingResolveKey(sessionId: string, route: CompanionRoute | null): str
  * call, in any form — that reopens the hijacked-companion relay attack this hardening closed. Never rely
  * on Primitive B (a verbatim substring check) alone — it doesn't distinguish "approve" from "NOT approve".
  */
-/**
- * @decision 0c1365d0 — this dedup signature folds in ONLY the answer tuple (state/chosenOption/answeredAt/
- * consumedAt); never add title/body/options/recommendation without first re-verifying against `db.ts`'s
- * `UPDATE questions` statements that they're still immutable post-creation.
- */
-function decisionSurfaceSignature(q: Pick<Question, "state" | "chosenOption" | "answeredAt" | "consumedAt">): string {
-  return `${q.state}|${q.chosenOption ?? ""}|${q.answeredAt ?? ""}|${q.consumedAt ?? ""}`;
+// @decision 0c1365d0 — do not drop title/body/options from this signature: question_amend makes them
+// mutable post-creation, so omitting them would mask a real amendment as alreadySurfaced:true.
+function decisionSurfaceSignature(q: Pick<Question, "state" | "chosenOption" | "answeredAt" | "consumedAt" | "title" | "body" | "options">): string {
+  return `${q.state}|${q.chosenOption ?? ""}|${q.answeredAt ?? ""}|${q.consumedAt ?? ""}|${q.title}|${q.body}|${(q.options ?? []).join(",")}`;
 }
 
 const DECISIONS_RELAY: CompanionCapability = {
