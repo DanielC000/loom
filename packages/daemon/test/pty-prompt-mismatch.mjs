@@ -145,6 +145,18 @@ function captureExcessNearMissWarnings(fn) {
   return lines;
 }
 
+// Card dccb6290: captures the pasted-content-wrap ZERO-DELTA (content-substitution) near-miss diagnostic's
+// own [prompt-mismatch-pasted-content-wrap-near-miss-divergence] line — its closing bracket sits after
+// "-divergence", never after "-miss" or "-excess", so this filter never collides with either capture
+// helper above (same discipline as captureExcessNearMissWarnings vs captureNearMissWarnings).
+function captureDivergenceNearMissWarnings(fn) {
+  const lines = [];
+  const orig = console.log;
+  console.log = (msg) => { if (typeof msg === "string" && msg.includes("[prompt-mismatch-pasted-content-wrap-near-miss-divergence]")) lines.push(msg); };
+  try { fn(); } finally { console.log = orig; }
+  return lines;
+}
+
 const SIDS = [];
 
 try {
@@ -611,6 +623,53 @@ try {
       host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
     });
     check("6n: NEGATIVE CONTROL — a clean, exact wrap (zero excess) does NOT fire the small-excess near-miss diagnostic", nearMiss6n.length === 0);
+    // Card dccb6290: the SAME clean-wrap fixture must ALSO not fire the new divergence near-miss —
+    // `isPastedContentWrap` is true here (m[2] === intended exactly), so the divergence detector is gated
+    // off before it ever runs, same posture as the excess/deficit siblings above.
+    const divergence6n = captureDivergenceNearMissWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6n: NEGATIVE CONTROL — a clean, exact wrap also does NOT fire the divergence near-miss diagnostic", divergence6n.length === 0);
+  }
+
+  // ===== 6o. Card dccb6290 — the REAL residual shape this card was filed to discriminate: the wrap
+  // FRAMING matches EXACTLY (same id-backreferenced regex as 6f/6h/6k), and the wrapped body is the SAME
+  // LENGTH as `intended` (zero excess, zero deficit), but the content diverges at one position — a
+  // substitution, invisible to both length-keyed near-miss detectors above. Reuses 6j's own fixture
+  // (same-length one-character substitution), which already proves the DEFICIT detector correctly stays
+  // silent on it — this scenario is the POSITIVE CONTROL for the NEW detector on that exact shape, and
+  // THE SAFETY CASE again: naming the shape must never suppress the notice. =====
+  {
+    const sid = newSession("PastedContentWrapContentDivergence"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "[loom:from-manager]\nPlease re-check card 1234abcd before you report back to me on this generation, thanks.";
+    const divergedIndex = 30;
+    const intendedChar = intended[divergedIndex];
+    const divergedChar = intendedChar === "Q" ? "Z" : "Q";
+    const substituted = intended.slice(0, divergedIndex) + divergedChar + intended.slice(divergedIndex + 1);
+    const reported = `\n\n<pasted_content id="f5c5">\n${substituted}\n</pasted_content id="f5c5">\n`;
+    host.enqueueStdin(sid, intended);
+    const writesBeforeMismatch = fake.writes.length;
+    const nearMiss6o = captureDivergenceNearMissWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6o: POSITIVE CONTROL — a same-length wrap with a one-character substitution fires the divergence near-miss diagnostic exactly once", nearMiss6o.length === 1);
+    check("6o: it names the diverged index", (nearMiss6o[0] ?? "").includes(`divergedIndex=${divergedIndex}`));
+    check("6o: it classifies both sides of the substitution by CLASS, not by character",
+      (nearMiss6o[0] ?? "").includes(`divergedCharClass=${classifyDroppedChar(divergedChar)}`)
+      && (nearMiss6o[0] ?? "").includes(`intendedCharClass=${classifyDroppedChar(intendedChar)}`));
+    // Card 16c93a50/request 0eb43216 (owner ruling): must NEVER quote either raw character — asserts the
+    // ONE combined redactedExcerpt(...) is length-only (2 chars, below the minimum hash length) and that
+    // neither raw character appears anywhere in the log line.
+    check("6o: both characters are logged ONLY through the redactedExcerpt chokepoint (length only — below the minimum hash length), never inline", /divergedVsIntended=<redacted len=2>/.test(nearMiss6o[0] ?? ""));
+    check("6o: the diverged character never appears in the log line at all", !(nearMiss6o[0] ?? "").includes(JSON.stringify(divergedChar)));
+    check("6o: the intended character never appears in the log line at all", !(nearMiss6o[0] ?? "").includes(JSON.stringify(intendedChar)));
+    const noticeLanded6o = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("6o: THE SAFETY CASE — naming this shape never suppresses the session-facing notice (still a real, if one-character, divergence)", noticeLanded6o);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    const noticeWrite6o = fake.writes.slice(writesBeforeMismatch).join("");
+    check("6o: the notice actually reached the pty", noticeWrite6o.includes("[loom:prompt-mismatch]"));
   }
 
   // ===== 7. Card 201d0d95 Q1 — POSITIVE: a mismatch must now SURFACE to the affected session itself, not

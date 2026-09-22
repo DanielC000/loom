@@ -442,6 +442,26 @@ function detectPastedContentWrapSmallExcess(reported: string, intended: string):
   return { excessIndex: i, excessChars: inner.slice(i, i + excessLen) };
 }
 
+/** The ZERO-DELTA sibling to `detectPastedContentWrapSingleCharDeficit`/`detectPastedContentWrapSmallExcess`:
+ *  wrap FRAMING matches byte-for-byte, body is the SAME LENGTH as `intended`, but content diverges at one
+ *  or more positions — invisible to both length-keyed siblings above. Diagnostic only — never suppresses
+ *  the "possible LOSS" notice and must never be used to relax `isRecognizedPastedContentWrap`'s own
+ *  `m[2] === intended` check.
+ *
+ *  @decision dccb6290 — ships as forward-looking instrumentation only, never as evidence a substitution
+ *  bug is live: the specimens that motivated this card were a deployment-lag artifact, not content
+ *  corruption. Do not treat a quiet period here as proof this can never fire. */
+function detectPastedContentWrapContentDivergence(reported: string, intended: string): { divergedIndex: number, divergedChar: string, intendedChar: string } | null {
+  const m = PASTED_CONTENT_WRAP_RE.exec(reported);
+  if (m === null) return null;
+  const inner = m[2]!;
+  if (inner.length !== intended.length) return null;
+  if (inner === intended) return null;
+  let i = 0;
+  while (i < inner.length && inner[i] === intended[i]) i++;
+  return { divergedIndex: i, divergedChar: inner[i]!, intendedChar: intended[i]! };
+}
+
 /** Card b1cc4f01 (owner ruling, card 16c93a50 / request 0eb43216): a coarse, disclosure-safe
  *  classification of a single dropped character — logged UNCONDITIONALLY, alongside (never instead of)
  *  `redactedExcerpt(droppedChar)` through the same chokepoint every content-bearing diagnostic in this
@@ -6462,6 +6482,20 @@ export class PtyHost {
               if (pastedContentWrapSmallExcess) {
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-pasted-content-wrap-near-miss-excess] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} excessIndex=${pastedContentWrapSmallExcess.excessIndex} excessLen=${pastedContentWrapSmallExcess.excessChars.length} excessCharsClass=${classifyExcessChars(pastedContentWrapSmallExcess.excessChars, intended, pastedContentWrapSmallExcess.excessIndex)} excessChars=${redactedExcerpt(pastedContentWrapSmallExcess.excessChars)} — the engine's own pasted-content wrap framing matches EXACTLY (id-backreferenced, byte-for-byte), but the wrapped body is ${pastedContentWrapSmallExcess.excessChars.length} character(s) LONGER than what Loom wrote. Card ff871b77 (measured, n=3): the opposite shape to the single-character-deficit near-miss above — content ADDED, not dropped, by the engine's own paste round-trip. Still a real divergence (the wrapper-reconciliation check above correctly declines it) — this only names the shape, it does not suppress the notice.`);
+              }
+              // Card dccb6290 — the ZERO-DELTA sibling to the deficit/excess near-misses above: the wrap
+              // framing matches byte-for-byte and the body is the SAME LENGTH as `intended`, but content
+              // diverges at one position — a substitution, invisible to both length-keyed detectors above.
+              // Logged unconditionally, diagnostic only — see `detectPastedContentWrapContentDivergence`'s
+              // own doc for why this population is currently believed dormant, not why it's impossible.
+              const pastedContentWrapContentDivergence = isPastedContentWrap ? null : detectPastedContentWrapContentDivergence(reported, intended);
+              if (pastedContentWrapContentDivergence) {
+                // Card 16c93a50/request 0eb43216 (owner ruling): the unconditional disclosure-safe class
+                // labels for BOTH sides of the substitution, plus one combined redactedExcerpt(...) of the
+                // two raw characters together (never the individual characters, never inline) — same
+                // posture as droppedChar=/excessChars= above, one call site instead of two.
+                // eslint-disable-next-line no-console
+                console.log(`[prompt-mismatch-pasted-content-wrap-near-miss-divergence] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} divergedIndex=${pastedContentWrapContentDivergence.divergedIndex} divergedCharClass=${classifyDroppedChar(pastedContentWrapContentDivergence.divergedChar)} intendedCharClass=${classifyDroppedChar(pastedContentWrapContentDivergence.intendedChar)} divergedVsIntended=${redactedExcerpt(pastedContentWrapContentDivergence.divergedChar + pastedContentWrapContentDivergence.intendedChar)} — the engine's own pasted-content wrap framing matches EXACTLY (id-backreferenced, byte-for-byte) and the wrapped body is the SAME LENGTH as what Loom wrote, but the content diverges at this position (a substitution, not a drop or an insertion). Still a real divergence (the wrapper-reconciliation check above correctly declines it) — this only names the shape, it does not suppress the notice.`);
               }
               // @decision 00b5066e — offset-aware reconciliation: INSERTION uses `endsWith` (not `includes`,
               // which false-matched card 68459420's unrelated population), left unbounded; OMISSION is
