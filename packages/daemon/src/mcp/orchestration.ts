@@ -2034,10 +2034,16 @@ export class OrchestrationMcpRouter {
     // existing test double) ⇒ GitWriter's own module-default timeouts.
     (repoPath) => new GitWriter(repoPath, this.gitWriteTimeouts));
 
-    // Companion (epic Phase 1): the long-lived `assistant` role gets a MINIMAL surface — the read-only
-    // my_context PLUS (only when this IS the bound companion session) the chat_reply registered just above.
-    // DELIBERATELY no manager spawn/stop/list surface and no writer (least-privilege — the restricted tool
-    // profile is a later card). Returns before the manager fall-through below.
+    // Companion (epic Phase 1): the long-lived `assistant` role gets a NARROW, capability-gated surface —
+    // NOT just `{my_context, chat_reply}` (a stale undercount that propagated into at least one defect
+    // report, card 4fc458c1). The unconditional base is my_context + notify_lead (registered just below);
+    // layered on top, gated on the companion binding/grants above (registerChatReplyIfCompanion,
+    // registerCompanionSkillTools, registerCompanionMemoryTools, registerCompanionReminderTools,
+    // registerCompanionCapabilities): chat_reply, the skill_*/memory_*/wake_*/reminder_*/board_* tools, and
+    // the whole opt-in capability-lever framework (session-status, media-out, session-steer, session-spawn,
+    // authored-content-grant). DELIBERATELY no manager spawn/stop/list surface and no unconditional writer
+    // (least-privilege — the restricted tool profile is a later card). Returns before the manager
+    // fall-through below.
     if (role === "assistant") {
       this.registerMyContext(server, sessionId);
       // Subordinate→lead relay (card 2db23c4d): the ONE narrow lever an owner-facing non-manager session

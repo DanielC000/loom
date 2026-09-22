@@ -14,8 +14,13 @@ const profileSchema = z
     name: z.string().min(1),
     // "setup" IS a valid profile role (the Setup Assistant rig). (End-User Platform tier B1.)
     // "assistant" (the long-lived Loom Companion) is a valid, low-privilege profile role — profile-spawnable
-    // like manager/worker (its whole surface is my_context + the companion-gated chat_reply). The ungated
-    // Setup operator still can't mint one (setupRoleError's allowlist omits it) — human REST / dev only.
+    // like manager/worker. Its surface is NOT just my_context + chat_reply (a stale undercount that
+    // propagated into at least one defect report, card 4fc458c1): the unconditional base is
+    // my_context + notify_lead, plus (gated on the companion binding/grants) chat_reply, the
+    // skill_*/memory_*/wake_*/reminder_*/board_* tools, and the opt-in capability-lever framework
+    // (session-status, media-out, session-steer, session-spawn, authored-content-grant) — see
+    // mcp/orchestration.ts's buildServer, role === "assistant" branch, for the real registration. The
+    // ungated Setup operator still can't mint one (setupRoleError's allowlist omits it) — human REST / dev only.
     // "operator" (Bucket 2b "Elevated Operator") IS a valid, human-mintable profile role too — but the
     // SESSION role it ends up carrying is ALWAYS locked by the explicit caller role at startOperator
     // (resolveAgentSpawn), never by this profile field alone, and the ungated Setup operator still can't
