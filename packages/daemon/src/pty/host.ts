@@ -3147,8 +3147,9 @@ export interface PtyHostEvents {
   /** @decision 343441bd — onTurnCompleted fires once per turn, excluded from the file's other 5
    *  setBusy(false) sites (never-confirmed-started, redirect settle, 2 usage-cap parks) to avoid a false
    *  staleDirective fire.
-   *  @decision 361a5520 — codex's own turn-completion chokepoint is armCodexBusyStaleTimer's CASE 2, not
-   *  this hook (onTurnCompleted never fires for a codex session — no hook relay). */
+   *  @decision 361a5520 — this callback DOES fire for codex, via armCodexBusyStaleTimer's CASE 2: codex
+   *  has no HOOK RELAY (`CodexLive.hookToken` is permanently ""), so the claude-only `deliverHook`
+   *  Stop/StopFailure call site can never reach it — CASE 2 is codex's ONLY route here, not a "never fires". */
   onTurnCompleted?(sessionId: string): void;
   /** @decision 417cea0a — onGiveUpConfirmed: content-match confirmation only; PtyHost has no DB, so the
    *  implementer (sessions/service.ts) decides "news vs no-op". NEVER fired from the batchIds.size > 1

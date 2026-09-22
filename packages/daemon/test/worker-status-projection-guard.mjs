@@ -73,6 +73,10 @@ const EXPECTED_KEYS = [
   // Card 808ee811: `ctxInputTokens` pre-divided by this worker's own model context window, rounded to a
   // whole percent (number | null — null EXACTLY when ctxInputTokens is null, never a measured 0).
   "ctxPct",
+  // Card 5a8a74e1: mirrors this worker's harness-adapter `HarnessCapabilities.contextTelemetry` flag
+  // (boolean | null) — lets a manager tell "structurally unmeasurable on this harness" (codex today) apart
+  // from "not yet measured" (see neverCompletedTurn) for a null ctxInputTokens/ctxPct/ctxTurns/model.
+  "contextTelemetry",
   "neverCompletedTurn", "lastEngineOutputAt", "composerDirtyLen", "composerDirtyLenBelieved",
   "unconfirmedDeliveryMs",
   // Card d8eaa381: pendingQueueDepth (FIFO send-queue depth) + currentTurnBusyForMs (ms since the
