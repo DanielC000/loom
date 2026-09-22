@@ -32,6 +32,18 @@ protection yet — that's not a pass, it's nothing having been checked at all. A
 narrow one — its own `honestLimitNote` says why: every check is an exact-substring grep, proving a
 token's literal text survived, never that no meaning survived a rewording.
 
+**The LIVE-COMMITMENTS section is normally located by heading-text search — that has a real hazard, and
+a marker closes it.** By default `rotationLiveCommitmentsHeading` is matched against the first heading
+line that CONTAINS it — a heading elsewhere in the doc that merely CITES that text (and happens to
+appear earlier) can silently win over the real section, undercounting it. Set
+`orchestration.rotationLiveCommitmentsMarker` (e.g. an HTML comment like `<!-- loom:live-commitments -->`,
+placed on its own line above the section heading or inline on it) to anchor on that explicit token
+instead. Once a marker is configured, there is **NO fallback to heading-text search** if it's missing
+from a given text — a doc that dropped the marker fails loud rather than silently re-locating the section
+by the fragile heading match. If the marker's literal text occurs more than once, the response carries a
+loud `liveCommitments.markerAmbiguous`/`markerOccurrences` plus a top-level `markerAmbiguityWarning` —
+never a silent first-match.
+
 **Read the per-leg fields too, not just the overall `ok`.** `archiveCheck` and `byteCheck` report on an
 archive path / a pre-edit byte count you optionally supplied, and both DO drive the overall `ok` when
 checked. `rulesCheck` reports whether an optional rules-file union source you supplied was actually read

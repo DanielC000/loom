@@ -210,19 +210,31 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   that same `note` only — `decidedScope`/`decidedExpiresAt` stay null and `lapsed` reads false for a
   chat-answered grant, unlike an inbox answer's structured `{scope, expiresAt, lapsed}`. Read the `note`
   itself for the owner's actual scope/expiry when the answer came through chat rather than the inbox.
-- **A genuinely moot or superseded ask — one nobody answered — doesn't have to sit in the human's
-  inbox forever** — if fresher information means you're re-asking, or the situation resolved on its
-  own, `question_cancel(questionId, reason?)` withdraws your OWN still-pending ask (never another
-  agent's — it's scoped to your own asks only) into a
-  retained, never-hard-deleted history entry carrying your reason. It ONLY ever touches a still-`pending`
-  ask — an already-answered one is refused outright (cancelling can never discard an answer the human
-  already gave); `question_pull` that instead. **If you already know, at the moment you re-ask, exactly
-  which prior pending ask this new one replaces**, skip the separate cancel call: pass
-  `question_ask({..., supersedes: "<questionId>"})` and it atomically cancels that named ask for you (same
-  ownership + pending-only rules as `question_cancel`) while filing the new one — never a guess ("this
-  looks like it replaces that"), only an explicit id you name yourself. The new ask is always filed even
-  if the supersede is refused (already answered/cancelled/not yours) — check the response's `supersede`
-  field for the outcome.
+- **A still-pending ask that needs to change is a THREE-WAY choice — pick by what actually changed, not
+  by habit:**
+  - **The ask is still the right question, but its content needs correcting** (fresher details, a fixed
+    file path, a broadened option list) — `question_amend(questionId, {title?, body?, options?})` updates
+    the row IN PLACE and re-notifies the human with the amendment; it never creates a new row. `title`/
+    `body`/`options` are each optional (an omitted field keeps its current value; give at least one), and
+    `options` can only be set on a `type:"decision"` ask. **This is the default for a still-pending ask
+    whose wording or details just changed** — prefer it over cancel-and-refile, which produces a new row
+    and leaves the still-correct original buried in the human's history for no reason.
+  - **The ask itself is genuinely moot, or replaced by a DIFFERENT question** — one nobody answered, and
+    fresher information means you're asking something else entirely (not just rewording the same ask) —
+    `question_cancel(questionId, reason?)` withdraws your OWN still-pending ask (never another agent's —
+    it's scoped to your own asks only) into a retained, never-hard-deleted history entry carrying your
+    reason. **If you already know, at the moment you re-ask, exactly which prior pending ask this new one
+    replaces**, skip the separate cancel call: pass `question_ask({..., supersedes: "<questionId>"})` and
+    it atomically cancels that named ask for you (same ownership + pending-only rules as
+    `question_cancel`) while filing the new one — never a guess ("this looks like it replaces that"),
+    only an explicit id you name yourself. The new ask is always filed even if the supersede is refused
+    (already answered/cancelled/not yours) — check the response's `supersede` field for the outcome.
+  - **The owner answered live in chat instead of through the inbox** — that's an ANSWER, not a moot ask;
+    see `question_resolve`, above.
+
+  All three are scoped to a still-`pending` ask in your OWN agent lineage — an already-answered/consumed/
+  cancelled one is refused outright by each of them (cancelling or amending can never discard or rewrite
+  an answer the human already gave; call `question_pull` instead).
 - **Pick the right escalation channel by WHO must answer.** An **owner-facing** ask — a decision,
   approval, secret, or input only the human can give — goes to `question_ask` (above). A **platform /
   cross-project** ask — a suspected Loom bug, a missing platform affordance, or something that needs the
