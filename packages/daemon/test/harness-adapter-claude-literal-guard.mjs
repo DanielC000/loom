@@ -36,9 +36,24 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 // `live.kind === "claude"` wherever that discriminator is compared/assigned — today confined to
 // `pty/host.ts`, already exempted there. The moment Phase 1 adds a real multi-harness DISPATCHER (a NEW
 // file that reads/compares a harness id against the literal `"claude"`), that file WILL trip this guard —
-// expected, not a sign the guard broke; it needs its own allowlist entry at that point, same as `host.ts`
-// does today. Documented here so a Phase-1 author reads the failure as "add an allowlist entry" rather than
-// "the guard is wrong."
+// expected, not a sign the guard broke. Documented here so a Phase-1 author reads the failure as "fix the
+// literal" (see the REMEDIATION note just below), not "the guard is wrong."
+//
+// ⭐ REMEDIATION, IN PREFERENCE ORDER (card 3b9e6540 — replaces earlier wording that steered straight to
+// "add an allowlist entry", the WEAKER of the two fixes for the common case):
+//   1. PREFERRED — reference the shared type. If the failing literal respells the `"claude"|"codex"` union
+//      `Session.harness`/`Profile.harness` already carry — a field/param/return-type signature, a type
+//      alias, or an `as "claude" | "codex" | ...` cast — replace it with `Session["harness"]` (or
+//      `Profile["harness"]`, whichever the value actually mirrors) instead of hand-respelling the union.
+//      The literal then lives in packages/shared, outside this guard's `packages/daemon/src` scan
+//      entirely: coverage stays fully intact, nothing to maintain, and it cannot drift when the union
+//      grows. Proven in the tree: commit `5228d27b` (`gateway/server.ts`'s seed-route field).
+//   2. ESCAPE HATCH — an allowlist entry, ONLY when the literal is NOT a type position, i.e. it is a
+//      genuine runtime value with no type to reference instead: a discriminator comparison/assignment
+//      (`kind === "claude"`), a default-value expression (`p.harness ?? "claude"`), the schema source of
+//      truth itself (`z.enum(["claude","codex"])`), a binary-name default, or reader-facing prose (an
+//      error message, an MCP tool description, a SQL/DDL comment) that names the vendor for a human, not
+//      the type checker.
 //
 // COMMENT-VS-CODE CLASSIFICATION: the card's own coupling audit found `git/worktrees.ts` had 24 comment
 // mentions of `.claude/` against 2 real code lines — "a naive grep ranks it near the top of the coupling
