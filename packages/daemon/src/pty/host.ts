@@ -10756,6 +10756,14 @@ export class PtyHost {
    *  `undefined` also covers the ordinary "not live in this process at all" case — a reader can't
    *  distinguish the two from this field alone.
    *
+   *  ⚠️ ON A `busy:true` ROW THIS IS ~NOW BY CONSTRUCTION, AND THEREFORE UNINFORMATIVE THERE: a live
+   *  engine emits output every few seconds regardless of whether the turn is actually converging, so
+   *  "recent" on a busy row is a tautology, not a health signal — do not read it as "healthy/progressing".
+   *  This field's entire discriminating power lives in the IDLE case (a STALE value on a row that is
+   *  NOT busy) — proved directly: five genuinely `busy:true` rows all read the same read-instant
+   *  timestamp, while two `busy:false` rows sat minutes stale, which is exactly what "freezes on an idle
+   *  session, advances on a busy one" predicts (Platform Lead verification, card 0f15b692).
+   *
    * @decision a1916267 — claude-only (never `findAnyLive`); a codex row always projects
    *  `lastEngineOutputAt: null`, an honest "not applicable to this harness" absence.
    */

@@ -732,6 +732,13 @@ export interface Session {
    * callback), never on the other setBusy(false) sites (a stuck/wedged/never-started submit). Distinct
    * from `ctxTurns`, which is a context-WINDOW-occupancy meter, not a turn-sequence counter. Powers the
    * staleDirective projection (card 343441bd) — 0 on every session that predates it.
+   * ⛔ NEVER COMPARE `turnSeq` AGAINST `ctxTurns` — they are different units, not two readings of the
+   * same thing: `ctxTurns` counts assistant lines, including every intra-turn tool round trip, while
+   * `turnSeq` counts only completed turns. A large gap (e.g. `ctxTurns:1535` vs `turnSeq:529`) is the
+   * NORMAL case for one long turn, never a signal on its own — different provenance is what makes the
+   * two non-comparable, never what makes their disagreement meaningful (Platform Lead verification,
+   * card 0f15b692, filed after that exact comparison drove a p1 retraction on card `6198b93e`).
+   * Survives a daemon restart intact — it is not reset to 0 on resume.
    */
   turnSeq?: number;
   ctxUpdatedAt?: string | null;

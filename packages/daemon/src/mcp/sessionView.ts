@@ -20,7 +20,9 @@ import { pickFields } from "./entityRowFields.js";
  * of dozens of enriched session rows was a 300K+ blob, so a default list read here stays bounded.
  * Callers that need a whole record opt in with full:true (or read one transcript via transcript_read).
  * `turnSeq:0` ALONE is not evidence of a wedge — see worker_list's `neverCompletedTurn` doc
- * (orchestration.ts) for why a genuinely long first turn reads identically.
+ * (orchestration.ts) for why a genuinely long first turn reads identically. ⛔ Never compare `turnSeq`
+ * against `ctxTurns` either — different units (see `Session.turnSeq`'s own doc in @loom/shared for the
+ * full reasoning); a large gap between them is the normal case, not a signal.
  */
 export type SessionSummary = Pick<
   SessionListItem,
