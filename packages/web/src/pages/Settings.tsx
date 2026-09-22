@@ -1646,6 +1646,14 @@ function PendingBindingsPanel() {
 // v1 uses USER-supplied client id/secret (the user registers their own Google Cloud OAuth app) — a
 // shared Loom-owned OAuth app is a separate owner-liability decision, not built here.
 type ConnectorMode = "google-analytics" | "sonarqube" | "custom";
+// Card 7fba8d90: the Name each preset pre-fills. "custom" has no product name of its own, so its
+// preset-derived default is the EMPTY string — the field's own placeholder ("e.g. GitHub personal token")
+// is the guidance there, and an empty box is honest where a borrowed product name would be a lie.
+const CONNECTOR_PRESET_NAMES: Record<ConnectorMode, string> = {
+  "google-analytics": "Google Analytics",
+  sonarqube: "SonarQube",
+  custom: "",
+};
 // GA products span several googleapis.com hosts (analyticsdata / searchconsole / adsense); host is
 // metadata-only + unenforced today, so the preset pins the headline GA4 Data API host and hides the field.
 const GA_PRESET_HOST = "analyticsdata.googleapis.com";
@@ -1665,7 +1673,15 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
   onCancel: () => void;
 }) {
   const [mode, setMode] = useState<ConnectorMode>("google-analytics");
-  const [name, setName] = useState("Google Analytics");
+  const [name, setName] = useState(CONNECTOR_PRESET_NAMES["google-analytics"]);
+  // Card 7fba8d90: switching presets used to leave the PREVIOUS preset's Name in place, so a SonarQube
+  // connection saved as "Google Analytics" — disguised by a placeholder that had correctly updated. The
+  // fix must not swing to an unconditional reset: this project has a standing rule never to destroy a
+  // user's unfinished input. `nameTouched` is that discriminator — the field is USER-OWNED the moment it
+  // holds text the user typed, and reverts to preset-derived the moment they clear it back to empty (so
+  // an emptied field still picks up the next preset's default instead of stranding at "").
+  const [nameTouched, setNameTouched] = useState(false);
+  const onNameChange = (v: string) => { setName(v); setNameTouched(v.trim().length > 0); };
   const [host, setHost] = useState("");
   const [authScheme, setAuthScheme] = useState<ConnectionAuthScheme>("api-key");
   // Project scope (card f2abce7e): "" = Global (every profile that allowlists it), else one project's id —
@@ -1749,8 +1765,16 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
     onSubmit({ name: name.trim(), host: host.trim(), authScheme, secret: secret.trim(), projectId: scopeProjectId || null });
   };
 
+  // Card 7fba8d90: re-derive the Name from the newly-picked preset ONLY while it is still preset-derived.
+  const selectMode = (m: ConnectorMode) => {
+    setMode(m);
+    setLocalErr(null);
+    validateSonar.reset();
+    if (!nameTouched) setName(CONNECTOR_PRESET_NAMES[m]);
+  };
+
   const modeBtn = (m: ConnectorMode, label: string) => (
-    <Button variant={mode === m ? "primary" : "ghost"} onClick={() => { setMode(m); setLocalErr(null); validateSonar.reset(); }}>{label}</Button>
+    <Button variant={mode === m ? "primary" : "ghost"} onClick={() => selectMode(m)}>{label}</Button>
   );
 
   return (
@@ -1783,7 +1807,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
           </Hint>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Name</span>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. SonarQube" />
+            <Input value={name} onChange={(e) => onNameChange(e.target.value)} placeholder="e.g. SonarQube" />
           </label>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Host</span>
@@ -1801,7 +1825,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
           <Hint>Read GA4, Search Console &amp; AdSense numbers through one connection. Register your own Google Cloud OAuth app, then paste its client ID/secret below — Loom fills the rest and walks you through one consent.</Hint>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Name</span>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Google Analytics" />
+            <Input value={name} onChange={(e) => onNameChange(e.target.value)} placeholder="e.g. Google Analytics" />
           </label>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             <span style={fieldLabel}>Read scopes</span>
@@ -1835,7 +1859,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
         <>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Name</span>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. GitHub personal token" />
+            <Input value={name} onChange={(e) => onNameChange(e.target.value)} placeholder="e.g. GitHub personal token" />
           </label>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Host</span>
