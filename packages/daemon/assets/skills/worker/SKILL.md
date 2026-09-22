@@ -396,6 +396,13 @@ failures — enable `core.longpaths` if the path is unavoidably deep. A bare POS
 portable on Windows — Git Bash and Node.js resolve it to different real directories — so for any scratch
 file a later Node/Read step will touch, use an absolute path (the session scratch dir), never `/tmp`.
 
+**A shared temp directory is shared with OTHER sessions, not just other platforms.** Write
+verification logs and scratch artifacts under your own session scratch dir (`$LOOM_SCRATCH_DIR` when
+set), never a bare `/tmp` or other host-wide temp path — and never derive a count by globbing one:
+a concurrent session's leftover files silently inflate your population, and the inflated result looks
+identical to a clean one. Same identity discipline as `references/dev-server-verification.md`'s
+port/log rule — scope to a path you own, never a shared one.
+
 **Your worktree is force-removed on merge — nothing durable belongs inside it that isn't committed.**
 Once your work merges, the whole worktree directory is force-deleted, including any gitignored/untracked
 content — build output, caches, and (this is the trap) anything you cloned or created inside it that
