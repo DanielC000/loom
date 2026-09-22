@@ -1661,6 +1661,11 @@ let warnedMissingHasAmbiguousMatch = false;
  */
 const BACKGROUND_PARK_STALE_MINUTES = 20;
 
+/** Card e79e2956: minimum byte length of a sender's OWN prior peer_message text before a literal-prefix
+ *  match against a new send is trusted as a genuine "growing resend" rather than coincidence (e.g. two
+ *  short, unrelated messages that happen to open the same way). */
+const PEER_MESSAGE_DEDUP_MIN_PREFIX_LEN = 200;
+
 /** @decision aa4e24ff — the `worker_redirect` advisory triggers on OBSERVABLE `busyForMs` (5min), never
  *  on the message's own text (a phrase list is lexically unbounded and fires falsely on an immediate
  *  delivery to an idle worker). Do not lower the threshold casually — it avoids "manager tunes it out". */
@@ -8531,7 +8536,13 @@ export class SessionService {
     // or `queued` (busy, held FIFO).
     let deliveryStatus: DeliveryStatus = "boarded";
     let suppressedShas: string[] | undefined;
-    const liveLead = this.db.listAllSessions().find((s) => s.role === "platform" && s.processState === "live");
+    // Card e79e2956 (Defect B): a recycle's predecessor stays `processState:"live"` until its successor
+    // SETTLES (recycleManager/recyclePlatformLead close it only after `settleRecycleHandoff` — an async
+    // step that can take seconds), while `hasSuccessor` flips true SYNCHRONOUSLY at the successor's own
+    // insert. So a bare `role/processState` scan can resolve the about-to-retire predecessor instead of
+    // its already-live successor for that whole window — exactly `redriveQueuedMessage`'s own guard
+    // (`this.db.hasSuccessor(recipientId)`), reused here for the live-lookup path that lacked it.
+    const liveLead = this.db.listAllSessions().find((s) => s.role === "platform" && s.processState === "live" && !this.db.hasSuccessor(s.id));
     if (liveLead) {
       // @decision 5907b71e — a completion escalation naming a SHA the Lead already saw via a recent
       // daemon-restart wake is a duplicate turn; suppress only the LIVE nudge (board task still files).
@@ -8676,6 +8687,29 @@ export class SessionService {
   }
 
   /**
+   * Card e79e2956 (Defect A): the raw (unframed) text + timestamp + RESOLVED recipient of THIS session's
+   * own most recent peer_message send to `targetProjectId` — scoped to the literal session id, never
+   * recycle-lineage-widened, mirroring `lastInboundPeerMessageThisSession`'s own scoping above for the
+   * same reason (a predecessor's send history is invisible to a fresh successor on purpose). Used by
+   * `messagePeerManager` to detect a "growing resend" — a sender re-sending its own prior letter plus new
+   * content, verbatim, because it has no reliable delivery signal — and trim the already-sent prefix
+   * instead of silently re-delivering it whole every time. `targetSessionId` (undefined when that prior
+   * send boarded rather than delivered live) is what lets the caller tell whether the CURRENTLY resolved
+   * recipient is the SAME session that prior text actually went to — trimming/suppressing against a
+   * DIFFERENT recipient than the one who received the original content would silently lose it for the
+   * new recipient, which this primitive alone cannot detect; the caller must check it.
+   */
+  private lastOwnPeerMessageSend(managerSessionId: string, targetProjectId: string): { text: string; sentAt: string; msgId?: string; targetSessionId?: string } | undefined {
+    const e = this.db.listEvents(managerSessionId)
+      .filter((ev) => ev.kind === "cross_project_message" && ev.detail?.targetProjectId === targetProjectId && typeof ev.detail?.text === "string")
+      .pop();
+    if (!e) return undefined;
+    const msgId = typeof e.detail?.msgId === "string" ? e.detail.msgId : undefined;
+    const targetSessionId = typeof e.detail?.targetSessionId === "string" ? e.detail.targetSessionId : undefined;
+    return { text: e.detail!.text as string, sentAt: e.ts, ...(msgId ? { msgId } : {}), ...(targetSessionId ? { targetSessionId } : {}) };
+  }
+
+  /**
    * @decision 2349d90c — owner-gated manager↔manager cross-project channel; enforces a link gate,
    * self/archived-target rejection, manager-only session match, no privilege transfer, a per-origin
    * rate limit, and reply-ability via the stamped origin project/session id.
@@ -8689,7 +8723,7 @@ export class SessionService {
     text: string,
   ): {
     deliveryStatus: DeliveryStatus; position?: number; taskId?: string; targetSessionId?: string;
-    msgId?: string; recycledSincePriorSend?: boolean; advisory?: string;
+    msgId?: string; recycledSincePriorSend?: boolean; advisory?: string; trimmedRedeliveredBytes?: number;
   } {
     this.requireManager(managerSessionId, "peer_message");
     const caller = this.db.getSession(managerSessionId)!;
@@ -8706,24 +8740,70 @@ export class SessionService {
       throw new Error("peer_message: rate limit exceeded — slow down and try again shortly");
     }
 
+    // manager↔manager ONLY: match role==="manager" explicitly — a live worker/platform/auditor session in
+    // the target project must never be matched, even if it's the only live session there. Resolved BEFORE
+    // the redelivery-trim decision below (Defect A CR follow-up): that decision needs to know who the
+    // CURRENT recipient actually is, not just what this sender last wrote.
+    // Card e79e2956: also exclude a session with a live successor — a recycling predecessor stays
+    // "live" until its successor settles (async, seconds later), else this can target the about-to-retire
+    // predecessor instead (mirrors redriveQueuedMessage's own hasSuccessor guard).
+    const targetManager = this.db.listAllSessions().find(
+      (s) => s.projectId === targetProjectId && s.role === "manager" && s.processState === "live" && !this.db.hasSuccessor(s.id),
+    );
+
+    // Card e79e2956 (Defect A): detect a "growing resend" — this SAME session re-sending its own prior
+    // letter to this SAME target verbatim, plus more (observed: turn N carries A+B, a later turn carries
+    // A+B+C+D). A literal byte-prefix match against this session's own last send is the signal.
+    //
+    // Card e79e2956 CR follow-up: trim/suppress ONLY when the CURRENT recipient is confirmed to be the
+    // SAME session the matched prior text actually reached — a recycled or previously-boarded recipient
+    // has no context on it at all, so trimming/suppressing there would silently lose it. This is the
+    // LOAD-BEARING branch, not a rare corner: a sender resending because it's unsure content landed is
+    // often unsure BECAUSE the recipient just recycled. On any doubt, deliver the FULL original text
+    // untrimmed — fail toward a duplicate, never toward silent loss.
+    const priorOwnSend = this.lastOwnPeerMessageSend(managerSessionId, targetProjectId);
+    const recipientConfirmedUnchanged = !!priorOwnSend && !!targetManager && priorOwnSend.targetSessionId === targetManager.id;
+    const isGrowingResend = recipientConfirmedUnchanged
+      && priorOwnSend!.text.length >= PEER_MESSAGE_DEDUP_MIN_PREFIX_LEN
+      && text.startsWith(priorOwnSend!.text);
+    if (isGrowingResend && text.length === priorOwnSend!.text.length) {
+      const checkHint = priorOwnSend!.msgId
+        ? `peer_message_status with msgId ${priorOwnSend!.msgId.slice(0, 8)}`
+        : "the target project's board (that earlier send was boarded, not delivered live)";
+      return {
+        deliveryStatus: "suppressed-duplicate",
+        advisory: `identical to your own last peer_message to this project (sent ${priorOwnSend!.sentAt}), ` +
+          `and the SAME session is still the live recipient — not re-sent; there is nothing new in it for ` +
+          `THAT recipient. Check ${checkHint} if you're unsure whether that earlier send landed, rather ` +
+          "than resending the same content.",
+      };
+    }
+    const deliverText = isGrowingResend ? text.slice(priorOwnSend!.text.length) : text;
+    const trimmedRedeliveredBytes = isGrowingResend ? priorOwnSend!.text.length : undefined;
+    // Did this LOOK like a resend (a literal prefix/exact match against the sender's own last send) but
+    // get delivered in full anyway because the recipient identity could not be confirmed unchanged? Worth
+    // telling the sender, since the response otherwise looks identical to an ordinary fresh send.
+    const deliveredFullDespiteMatch = !!priorOwnSend && !recipientConfirmedUnchanged
+      && priorOwnSend.text.length >= PEER_MESSAGE_DEDUP_MIN_PREFIX_LEN && text.startsWith(priorOwnSend.text);
+
     const originProject = this.db.getProject(originProjectId);
     const originName = originProject?.name ?? originProjectId;
     // @decision 788781da — compute HERE at send time, not compose time: that gap is exactly what
     // this card's staleness stamps measure.
     const lastInboundThisSession = this.lastInboundPeerMessageThisSession(managerSessionId, targetProjectId);
     const lastInboundProject = this.lastInboundPeerMessageProject(originProjectId, targetProjectId);
+    // Card e79e2956: when trimming a growing resend, say so IN the frame — an untagged redelivery is
+    // indistinguishable at the receiver from a dropped-content bug with the opposite remedy, and this one
+    // line is what collapses that whole investigation into a skipped one (see the card's own reasoning).
+    const redeliveryTag = trimmedRedeliveredBytes !== undefined
+      ? ` · loom:redelivery-trimmed(${trimmedRedeliveredBytes}B of your own last send to this project already delivered — showing only what's new below)`
+      : "";
     // Stamp the origin projectId + sending manager sessionId onto the frame: nothing else exposes a
     // linked peer's project id to the recipient, so without this a recipient manager could never reply
     // via peer_message (which requires a targetProjectId) without a full human relay.
     const framed =
       `[loom:from-manager · ${originName} · projectId:${originProjectId} · sessionId:${managerSessionId} · ` +
-      `last-inbound-this-session:${lastInboundThisSession ?? "none"} · last-inbound-project:${lastInboundProject ?? "none"}]\n${text}`;
-
-    // manager↔manager ONLY: match role==="manager" explicitly — a live worker/platform/auditor session in
-    // the target project must never be matched, even if it's the only live session there.
-    const targetManager = this.db.listAllSessions().find(
-      (s) => s.projectId === targetProjectId && s.role === "manager" && s.processState === "live",
-    );
+      `last-inbound-this-session:${lastInboundThisSession ?? "none"} · last-inbound-project:${lastInboundProject ?? "none"}${redeliveryTag}]\n${deliverText}`;
 
     // Card 0f693dea DoD-3: the sender's MOST RECENT prior resolved targetSessionId for THIS
     // targetProjectId, read BEFORE this send's own cross_project_message event is appended below. A bare
@@ -8768,7 +8848,7 @@ export class SessionService {
         "",
         "## Message",
         "",
-        text,
+        redeliveryTag ? `_(${redeliveryTag.replace(/^ · /, "")})_\n\n${deliverText}` : deliverText,
       ].join("\n");
       const task: Task = {
         id: randomUUID(),
@@ -8818,11 +8898,28 @@ export class SessionService {
         "understood cold.",
       );
     }
+    if (trimmedRedeliveredBytes !== undefined) {
+      advisories.push(
+        `the first ${trimmedRedeliveredBytes} byte(s) of this text matched your own last peer_message to this ` +
+        "project verbatim and were NOT re-sent — only the new suffix was delivered. If you're growing a " +
+        "letter across sends because you're unsure earlier parts landed, check peer_message_status instead " +
+        "of re-sending the whole thing each time.",
+      );
+    }
+    if (deliveredFullDespiteMatch) {
+      advisories.push(
+        "this text matched (or extended) your own last peer_message to this project, but the CURRENT " +
+        "recipient is not confirmed to be the same session that earlier text reached (it recycled, or that " +
+        "earlier send only ever boarded) — delivered in FULL rather than trimmed/suppressed, since the " +
+        "current recipient may have no context on the earlier content at all.",
+      );
+    }
 
     return {
       ...result,
       ...(recycledSincePriorSend ? { recycledSincePriorSend: true } : {}),
       ...(advisories.length ? { advisory: advisories.join(" ") } : {}),
+      ...(trimmedRedeliveredBytes !== undefined ? { trimmedRedeliveredBytes } : {}),
     };
   }
 

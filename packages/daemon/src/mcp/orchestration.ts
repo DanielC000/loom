@@ -5499,7 +5499,14 @@ export class OrchestrationMcpRouter {
             "old/new session prefixes, so you don't have to rediscover that the hard way. A `queued` " +
             "(not-yet-delivered) result ALSO carries an `advisory`: the peer project's manager may recycle " +
             "before draining its queue, in which case a SUCCESSOR session reads this, not necessarily the one " +
-            "you've been talking to — write it to be understood cold either way.",
+            "you've been talking to — write it to be understood cold either way. DO NOT re-send your own " +
+            "prior content just because you're unsure it landed — check `peer_message_status` instead. If " +
+            "your new `text` starts with the EXACT text of your own last peer_message to this SAME " +
+            "targetProjectId (a growing, accumulated resend), Loom detects this itself: an identical repeat " +
+            "is NOT re-sent at all (`deliveryStatus:\"suppressed-duplicate\"`, nothing delivered), and a " +
+            "genuine extension has the already-sent prefix trimmed before delivery — only the new suffix " +
+            "goes out, tagged `loom:redelivery-trimmed` so the recipient knows content was cut, and the " +
+            "response carries `trimmedRedeliveredBytes` plus an `advisory` saying so.",
           inputSchema: strictShape({ targetProjectId: z.string(), text: z.string() }),
         },
         async ({ targetProjectId, text }) => {
