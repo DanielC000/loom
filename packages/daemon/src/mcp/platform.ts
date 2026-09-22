@@ -45,7 +45,7 @@ import { resolvePlatformLeadResumeDocPath } from "../sessions/platform-lead-prom
 import { lineageRootId } from "../sessions/lineage.js";
 import { runResumeDocCheck, containUnderVault } from "../orchestration/rotation-check.js";
 import { createProjectTaskChecked, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, countProjectTasks, spillableTaskGet, spillableTaskUpdateResult, type TaskWithMerged, type TaskCounts } from "./tasks.js";
-import { spillTextIfLarge, spillRowsIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
+import { spillTextIfLarge, spillRowsIfLarge, spillableAgentGet, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { prioritySchema } from "./server.js";
 import { getByIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, pageTranscript, lastNTurns, applyAggregateWalkCap, spillableTurnsResponse } from "../sessions/transcript.js";
@@ -1554,7 +1554,12 @@ export class PlatformMcpRouter {
       async ({ agentId }) => {
         const agent = getByIdPrefix(agentId, (id) => db.getAgent(id), () => db.listAllProjects().flatMap((p) => db.listAgents(p.id)), "agent");
         if ("error" in agent) return ok(agent);
-        return ok(agentFields(agent));
+        const fields = agentFields(agent)!;
+        // Card bf0fd0f3: same single-large-value spill as the manager surface's agent_get, below.
+        // No callerSessionId (should not happen on a real request path) falls back to the pre-spill
+        // shape rather than pass an undefined recipient into spillTextIfLarge (mirrors this file's own
+        // !callerSessionId guards elsewhere, e.g. project_task_get).
+        return ok(callerSessionId ? spillableAgentGet(callerSessionId, "agent-get-spills", fields.id, fields) : fields);
       },
     );
 

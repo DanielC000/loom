@@ -114,3 +114,30 @@ export function spillRowsIfLarge<T>(sessionId: string, subdir: string, key: stri
     "(offset/limit are LINE-based) or grep it for a field/id. Re-call with a narrower filter/limit to inline fewer rows instead.";
   return { inline: false, file: spill.file, chars: spill.chars, rowCount: rows.length, note };
 }
+
+/**
+ * {@link spillTextIfLarge}'s sibling for `agent_get`'s `startupPrompt` (card bf0fd0f3) — one large VALUE,
+ * the SAME shape `spillableTaskGet` (`mcp/tasks.ts`) already gives `tasks_get`'s `body`, never the
+ * many-rows NDJSON shape `spillRowsIfLarge` above serves. `agent_get` is registered on three routers
+ * (manager `mcp/orchestration.ts`, platform `mcp/platform.ts`, setup `mcp/setup.ts`), each projecting a
+ * differently-shaped agent record — this is generic over any of them (`T extends { startupPrompt:
+ * string }`) so every caller shares one spill primitive instead of three independently-drifting copies.
+ * `key` should be deterministic per agent (its own resolved id) so repeated reads of the same agent
+ * overwrite rather than accumulate scratch-dir garbage — mirrors `spillTextIfLarge`'s own contract.
+ *
+ * BELOW the cap: returns `agent` untouched — byte-identical to before this existed.
+ * ABOVE the cap: returns `agent` with `startupPrompt` replaced by `startupPromptFile`/`startupPromptChars`
+ * plus a `note`; every other field stays inline since only the prompt is unbounded.
+ */
+export function spillableAgentGet<T extends { startupPrompt: string }>(
+  sessionId: string, subdir: string, key: string, agent: T,
+): T | (Omit<T, "startupPrompt"> & { startupPromptFile: string; startupPromptChars: number; note: string }) {
+  const spill = spillTextIfLarge(sessionId, subdir, key, agent.startupPrompt, SPILL_INLINE_BUDGET_CHARS);
+  if (spill.inline) return agent;
+  const { startupPrompt: _startupPrompt, ...rest } = agent;
+  const note =
+    `startupPrompt is ${spill.chars} chars — too large to inline safely, so the plain text (real line ` +
+    `breaks, UTF-8) was written to ${spill.file}. Read it directly, or grep it for a substring; slice by ` +
+    "character range via Bash if a single line is too long to page.";
+  return { ...rest, startupPromptFile: spill.file, startupPromptChars: spill.chars, note };
+}

@@ -19,6 +19,7 @@ import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { projectFields, agentFields, profileFields } from "./entityRowFields.js";
+import { spillableAgentGet } from "../spill.js";
 import { skillListData, skillWriteData } from "./skillTools.js";
 import { getByIdPrefix } from "../id-prefix.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
@@ -705,7 +706,11 @@ export class SetupMcpRouter {
       async ({ agentId }) => {
         const agent = getByIdPrefix(agentId, (id) => db.getAgent(id), () => db.listAllProjects().flatMap((p) => db.listAgents(p.id)), "agent");
         if ("error" in agent) return ok(agent);
-        return ok(agentFields(agent));
+        const fields = agentFields(agent)!;
+        // Card bf0fd0f3: same single-large-value spill as the manager/platform surfaces' agent_get.
+        // No callerSessionId (should not happen on a real request path) falls back to the pre-spill
+        // shape rather than pass an undefined recipient into spillTextIfLarge.
+        return ok(callerSessionId ? spillableAgentGet(callerSessionId, "agent-get-spills", fields.id, fields) : fields);
       },
     );
 

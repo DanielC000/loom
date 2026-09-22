@@ -23,7 +23,7 @@ import { possibleDuplicateRootLabel } from "../pty/host.js";
 import type { ToolAttributionResult } from "../pty/tool-attribution.js";
 import type { SessionService } from "../sessions/service.js";
 import { readTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap, spillableTurnsResponse } from "../sessions/transcript.js";
-import { spillTextIfLarge, spillRowsIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
+import { spillTextIfLarge, spillRowsIfLarge, spillableAgentGet, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { computeGateTimingBand, readFailedNamesForOp } from "../orchestration/gate-timing-band.js";
@@ -5234,10 +5234,14 @@ export class OrchestrationMcpRouter {
             harness: resolved.harness,
           };
         };
+        // Card bf0fd0f3: startupPrompt gets the same single-large-value spill treatment as tasks_get's
+        // body — never the host engine's own opaque overflow-spill. Below the cap this is a no-op
+        // (byte-identical to before); key is the resolved agent's own id so repeated reads overwrite.
+        const spillable = (a: ReturnType<typeof withResolvedFlags>) => spillableAgentGet(managerSessionId, "agent-get-spills", a.id, a);
         const exact = agents.find((a) => a.id === agentId);
-        if (exact) return ok(withResolvedFlags(exact));
+        if (exact) return ok(spillable(withResolvedFlags(exact)));
         const r = resolveIdPrefix(agents, agentId);
-        if (r.kind === "found") return ok(withResolvedFlags(r.record));
+        if (r.kind === "found") return ok(spillable(withResolvedFlags(r.record)));
         if (r.kind === "ambiguous") {
           return ok({ error: `ambiguous agent id-prefix '${agentId}' — it matches ${r.ids.join(", ")}; pass more characters or the full id` });
         }
