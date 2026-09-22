@@ -69,6 +69,12 @@ try {
   check("(1a) the rejection returns the CURRENT task, not writer 2's guess", w2Stale.current?.body === "writer 1's edit (v2)");
   check("(1a) the rejection's current version is 2 (writer 1's)", w2Stale.current?.version === 2);
   check("(1a) writer 2's clobber never persisted", db.getTask(card.id).body === "writer 1's edit (v2)");
+  // Card fe4a9a17: a REAL stale baseVersion (not omitted) names its own value and the current one — never
+  // the omitted-specific wording, and never claims "you never read it" (there is no read-tracker at all).
+  check("(fe4a9a17) a genuinely stale baseVersion's message names the value that was passed and the current one",
+    w2Stale.error.includes("baseVersion 1 was read") && w2Stale.error.includes("current version is 2"));
+  check("(fe4a9a17) a genuinely stale baseVersion's message is NOT the omitted-baseVersion wording",
+    !w2Stale.error.includes("omitted baseVersion"));
 
   // ===== (1b) a field-only move needs NO baseVersion at all — the common board-repair path is unbroken =====
   const fieldMove = await updateProjectTask(db, "projV", card.id, { columnKey: "review" });
@@ -79,6 +85,14 @@ try {
   const omitted = await updateProjectTask(db, "projV", card.id, { body: "no base supplied at all" });
   check("(2) an omitted baseVersion on an existing task's body write is REJECTED", omitted.conflict === true);
   check("(2) omitted-base rejection also returns the current body", omitted.current?.body === "writer 1's edit (v2)");
+  // Card fe4a9a17 (H2 confirmed — the 409 blames a nonexistent "read-tracker"): the message must name the
+  // ACTUAL cause (baseVersion omitted) rather than the old generic "changed since you last read it (or you
+  // never read it)" wording, which reads as if some stateful read-tracking exists when it's a bare
+  // `version !== baseVersion` comparison.
+  check("(fe4a9a17) an omitted baseVersion gets its OWN distinct message naming the real cause",
+    omitted.error.includes("omitted baseVersion") && omitted.error.includes("no separate read-tracking"));
+  check("(fe4a9a17) the omitted-baseVersion message is distinct from the stale-value message",
+    omitted.error !== w2Stale.error);
 
   // ===== (3) THE CONTENT-ONLY COUNTER: version advanced to 2 by the body write above; the field-only
   // move in (1b) must NOT have advanced it — proving a concurrent unrelated field move never invalidates
@@ -117,6 +131,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — tasks_update's optimistic-concurrency guard (card d0978321) rejects a stale-or-omitted baseVersion on a title/body write and returns the current task to reconcile against, while a field-only move (columnKey/priority/held/deferred) needs no baseVersion and never advances the version counter — so a body-composer's baseVersion survives concurrent unrelated field moves untouched. Backed by a structural source check that the guard compares on the monotonic `.version` INTEGER, never `.updatedAt`."
+  ? "\n✅ ALL PASS — tasks_update's optimistic-concurrency guard (card d0978321) rejects a stale-or-omitted baseVersion on a title/body write and returns the current task to reconcile against, while a field-only move (columnKey/priority/held/deferred) needs no baseVersion and never advances the version counter — so a body-composer's baseVersion survives concurrent unrelated field moves untouched. Card fe4a9a17: the omitted-baseVersion and genuinely-stale-baseVersion cases now get DISTINCT error text naming the real cause instead of one generic message that implied a nonexistent read-tracker. Backed by a structural source check that the guard compares on the monotonic `.version` INTEGER, never `.updatedAt`."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

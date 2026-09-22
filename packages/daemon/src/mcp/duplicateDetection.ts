@@ -90,8 +90,9 @@ export function extractIdentifiers(text: string): Set<string> {
 export interface DuplicateMatch {
   taskId: string;
   title: string;
-  /** The rare identifiers this task shares with the candidate — surfaced in the refusal so the
-   *  caller can see WHY it was flagged, not just that it was. Always includes at least one STRONG
+  /** The rare identifiers this task shares with the candidate — surfaced in the `related` advisory
+   *  (card d6890435, demoted from a block) so the caller can see WHY it was flagged, not just that it
+   *  was. Always includes at least one STRONG
    *  identifier (card b6eab182 — see the module doc's "CARD b6eab182" section: weak evidence alone
    *  can no longer produce a match, so this field can no longer be weak-only either); any WEAK tokens
    *  present are corroborating context, not the reason for the flag. Bounded — see the caller. */
@@ -100,7 +101,8 @@ export interface DuplicateMatch {
 
 /**
  * Finds the existing task (if any) that shares "rare" identifiers with `candidateText` — the
- * detector behind card 5b221bf2's refuse-unless-acknowledged `tasks_create` check.
+ * detector behind card 5b221bf2's `tasks_create` cross-channel duplicate check (card d6890435: an
+ * advisory `related` field on a successful create, never a refusal).
  *
  * A task qualifies as a suspected duplicate ONLY when it shares with the candidate at least one rare
  * STRONG identifier (a session id / task id — both full UUIDs — or a Loom branch name). Rare WEAK

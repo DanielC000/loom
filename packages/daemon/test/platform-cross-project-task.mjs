@@ -150,21 +150,25 @@ try {
   check("(1b) M1 setup: the first card of the pair lands cleanly", !m1First.error && !!m1First.id);
 
   const nBeforeM1 = db.listTasks("pTarget").length;
-  const m1Refused = await call("project_task_create", { projectId: "pTarget", title: M1_B_TITLE, body: M1_B_BODY });
-  check("(1b) M1: project_task_create REFUSES a suspected duplicate, naming the counterpart id",
-    typeof m1Refused.error === "string" && m1Refused.error.includes(m1First.id));
-  check("(1b) M1: the refused create inserted NO card on the target board", db.listTasks("pTarget").length === nBeforeM1);
+  const m1Advised = await call("project_task_create", { projectId: "pTarget", title: M1_B_TITLE, body: M1_B_BODY });
+  check("(1b, d6890435) M1: project_task_create still CREATES a suspected duplicate (never refuses)",
+    !m1Advised.error && !!m1Advised.id);
+  check("(1b, d6890435) M1: the create carries a `related` advisory naming the counterpart id",
+    m1Advised.related?.taskId === m1First.id);
+  check("(1b, d6890435) M1: the advised create actually inserted a NEW card on the target board",
+    db.listTasks("pTarget").length === nBeforeM1 + 1);
 
-  // allowDuplicate:true overrides the refusal, same as the in-project tool.
+  // allowDuplicate:true skips computing the advisory, same as the in-project tool.
   const m1Overridden = await call("project_task_create", { projectId: "pTarget", title: M1_B_TITLE, body: M1_B_BODY, allowDuplicate: true });
   check("(1b) M1: allowDuplicate:true creates it anyway", !m1Overridden.error && !!m1Overridden.id);
-  check("(1b) M1: the board now has both cards", db.listTasks("pTarget").length === nBeforeM1 + 1);
+  check("(1b, d6890435) M1: allowDuplicate:true skips the advisory — no `related` field", m1Overridden.related === undefined);
+  check("(1b) M1: the board now has three cards from this pair", db.listTasks("pTarget").length === nBeforeM1 + 2);
 
-  // m7 (card 0ef0270b): supersedes bypasses the refusal AND back-links BOTH cards, reached via the
-  // Lead's cross-project channel — not just the in-project tasks_create channel (already covered in
+  // m7 (card 0ef0270b): supersedes declares an explicit relation AND back-links BOTH cards, reached via
+  // the Lead's cross-project channel — not just the in-project tasks_create channel (already covered in
   // task-dedupe.mjs).
   const m1Superseded = await call("project_task_create", { projectId: "pTarget", title: M1_B_TITLE, body: M1_B_BODY, supersedes: m1First.id });
-  check("(1b/m7) M1: supersedes:<id> bypasses the refusal via project_task_create", !m1Superseded.error && !!m1Superseded.id);
+  check("(1b/m7) M1: supersedes:<id> creates it via project_task_create, declaring an explicit relation", !m1Superseded.error && !!m1Superseded.id);
   check("(1b/m7) M1: the NEW card's body records the relationship", db.getTask(m1Superseded.id).body.includes(`Supersedes: ${m1First.id}`));
   check("(1b/m7) M1: the SUPERSEDED (loser) card's body is back-noted with a pointer to the new card",
     db.getTask(m1First.id).body.includes(`Superseded by: ${m1Superseded.id}`));
@@ -185,11 +189,12 @@ try {
   check("(1b) cross-project-corpus: a candidate sharing identifiers ONLY with a pHome (not pTarget) card creates CLEANLY on pTarget — proves the check consulted pTarget's board, not pHome's",
     !xprojClean.error && !!xprojClean.id);
   // Now the REAL positive control on the SAME target board: a second candidate sharing those same
-  // identifiers with the one we just landed ON pTarget IS refused — proving the check is live (not a
+  // identifiers with the one we just landed ON pTarget still creates (d6890435: never refused), but
+  // carries a `related` advisory naming the pTarget counterpart — proving the check is live (not a
   // silent no-op) and scoped to the right board.
-  const xprojRefused = await call("project_task_create", { projectId: "pTarget", title: "fix(pty): a fifth phantom-session repro (pTarget)", body: M1_XPROJECT_BODY });
-  check("(1b) cross-project-corpus: a candidate duplicating the pTarget card (not the pHome one) IS refused, naming the pTarget counterpart",
-    typeof xprojRefused.error === "string" && xprojRefused.error.includes(xprojClean.id));
+  const xprojAdvised = await call("project_task_create", { projectId: "pTarget", title: "fix(pty): a fifth phantom-session repro (pTarget)", body: M1_XPROJECT_BODY });
+  check("(1b, d6890435) cross-project-corpus: a candidate duplicating the pTarget card (not the pHome one) still CREATES, advised against the pTarget counterpart",
+    !xprojAdvised.error && !!xprojAdvised.id && xprojAdvised.related?.taskId === xprojClean.id);
 
   // ===================== (2) bad/nonexistent projectId is rejected, nothing created =====================
   const nTargetNow = db.listTasks("pTarget").length;
@@ -603,6 +608,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Lead's cross-project task surface is complete: project_task_create boards a card on a DIFFERENT project's board, and project_task_get/update + list_all_tasks let the Lead read→move→re-prioritize it end-to-end (column-existence guard on move — shared with in-project tasks_update; cross-project + unknown-project guards; done-excluded summary aggregate). project_task_create ALSO runs the SAME cross-channel duplicate check as the in-project tasks_create (M1, card 0ef0270b) — checked against the TARGET project's board (not the Lead's own pHome), overridable via allowDuplicate/supersedes/relatedTo, and a supersedes override back-links the superseded card too (m7). resolvesEscalation (card ba04d607) structurally links a new card to the escalation it fixes (id-prefix accepted, unknown/out-of-scope ids rejected with nothing written) — the write side of escalation_status's derived resolved/triaged. tasks_list / list_all_tasks paginate (limit/offset) and cap the default read. Enumeration is filled (list_all_profiles/list_all_schedules + schedule_get/delete) and project_configure can unset (dot-path) / replace. All new tools are present ONLY on loom-platform — ABSENT from loom-setup, loom-orchestration (manager + worker), and the in-project loom-tasks surface — so no agent surface gains cross-project write."
+  ? "\n✅ ALL PASS — the Lead's cross-project task surface is complete: project_task_create boards a card on a DIFFERENT project's board, and project_task_get/update + list_all_tasks let the Lead read→move→re-prioritize it end-to-end (column-existence guard on move — shared with in-project tasks_update; cross-project + unknown-project guards; done-excluded summary aggregate). project_task_create ALSO runs the SAME cross-channel duplicate ADVISORY as the in-project tasks_create (M1, card 0ef0270b; demoted from a block to advisory-only by card d6890435) — checked against the TARGET project's board (not the Lead's own pHome), never blocking the create, surfacing a `related` field instead, with allowDuplicate/supersedes/relatedTo all skipping computing it, and a supersedes override back-links the superseded card too (m7). resolvesEscalation (card ba04d607) structurally links a new card to the escalation it fixes (id-prefix accepted, unknown/out-of-scope ids rejected with nothing written) — the write side of escalation_status's derived resolved/triaged. tasks_list / list_all_tasks paginate (limit/offset) and cap the default read. Enumeration is filled (list_all_profiles/list_all_schedules + schedule_get/delete) and project_configure can unset (dot-path) / replace. All new tools are present ONLY on loom-platform — ABSENT from loom-setup, loom-orchestration (manager + worker), and the in-project loom-tasks surface — so no agent surface gains cross-project write."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

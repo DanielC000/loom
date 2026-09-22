@@ -301,7 +301,7 @@ try {
   check(`pure-function section threw: ${e.stack}`, false);
 }
 
-// ===================== Integration: the tasks_create MCP tool refuses + is overridable =====================
+// ===================== Integration: the tasks_create MCP tool advises, never refuses (card d6890435) =====================
 try {
   const db = new Db(path.join(tmpHome, "d.db"));
   const now = new Date().toISOString();
@@ -327,21 +327,27 @@ try {
   check("(tool) first card of a real duplicate pair is created normally", !first.error && !!first.id);
 
   const before = db.listTasks(PROJECT_ID).length;
-  const refused = await call("tasks_create", { title: SPEC.p1a.title, body: SPEC.p1a.body });
-  check("(tool) the SECOND card of the pair is REFUSED, naming the counterpart id",
-    typeof refused.error === "string" && refused.error.includes(first.id));
-  check("(tool) the refused create inserted NO card", db.listTasks(PROJECT_ID).length === before);
+  const advised = await call("tasks_create", { title: SPEC.p1a.title, body: SPEC.p1a.body });
+  check("(tool, d6890435) the SECOND card of the pair still CREATES (never refused)", !advised.error && !!advised.id);
+  check("(tool, d6890435) the create carries a `related` advisory naming the counterpart id + shared identifiers",
+    advised.related?.taskId === first.id && Array.isArray(advised.related?.sharedIdentifiers) && advised.related.sharedIdentifiers.length > 0);
+  check("(tool, d6890435) the advised create actually inserted a NEW card (not a silent drop)",
+    db.listTasks(PROJECT_ID).length === before + 1);
 
   const overridden = await call("tasks_create", { title: SPEC.p1a.title, body: SPEC.p1a.body, allowDuplicate: true });
   check("(tool) allowDuplicate:true creates it anyway", !overridden.error && !!overridden.id);
-  check("(tool) the board now has both cards", db.listTasks(PROJECT_ID).length === before + 1);
+  check("(tool, d6890435) allowDuplicate:true skips computing the advisory — no `related` field even though a real duplicate exists",
+    overridden.related === undefined);
+  check("(tool) the board now has three cards from this pair (first, advised, overridden)", db.listTasks(PROJECT_ID).length === before + 2);
 
-  // supersedes bypasses the refusal too, and records the relationship on the new card's body.
+  // supersedes still records the relationship on the new card's body — unaffected by the advisory demotion.
   const p2First = await call("tasks_create", { title: SPEC.p2a.title, body: SPEC.p2a.body });
   check("(tool) p2's first card is created normally", !p2First.error && !!p2First.id);
   const superseded = await call("tasks_create", { title: SPEC.p2b.title, body: SPEC.p2b.body, supersedes: p2First.id });
-  check("(tool) supersedes:<id> bypasses the refusal", !superseded.error && !!superseded.id);
+  check("(tool) supersedes:<id> creates it, declaring an explicit relation", !superseded.error && !!superseded.id);
   check("(tool) the new card's body records the relationship", db.getTask(superseded.id).body.includes(`Supersedes: ${p2First.id}`));
+  check("(tool, d6890435) an explicit supersedes/relatedTo skips the advisory too — no `related` field on the result",
+    superseded.related === undefined);
 
   // m7 (card 0ef0270b): the relationship is discoverable from BOTH directions — the LOSER card (p2First)
   // must also carry a pointer FORWARD to the new card, not just the new card pointing back at it. This is
@@ -354,7 +360,7 @@ try {
   const relBase = await call("tasks_create", { title: "feat(x): related-base card for m7", body: "loom/deadbeefcafe" });
   check("(m7) related-base card created normally", !relBase.error && !!relBase.id);
   const relNew = await call("tasks_create", { title: "feat(x): related-new card for m7", body: "loom/deadbeefcafe", relatedTo: relBase.id });
-  check("(m7) relatedTo:<id> bypasses the refusal", !relNew.error && !!relNew.id);
+  check("(m7) relatedTo:<id> creates it, declaring an explicit relation", !relNew.error && !!relNew.id);
   check("(m7) the NEW card's body records 'Related to' (not 'Supersedes')", db.getTask(relNew.id).body.includes(`Related to: ${relBase.id}`));
   check("(m7) the RELATED (base) card's body is back-noted with 'Related to' pointing at the new card",
     db.getTask(relBase.id).body.includes(`Related to: ${relNew.id}`));
@@ -381,24 +387,26 @@ try {
 
   // ===================== card b6eab182 — DoD-3 positive control / DoD-4 negative control (real tool surface) =====================
   // DoD-3: two genuinely-distinct cards citing the same file:line + naming convention (this exact fixture
-  // was card abdaecda's weak-only-match specimen) now BOTH create cleanly — no refusal at all.
+  // was card abdaecda's weak-only-match specimen) now BOTH create cleanly — no advisory at all (weak-only
+  // evidence never qualifies, per b6eab182, so there's nothing for d6890435's advisory to surface either).
   const weakOnlyFirst = await call("tasks_create", { title: WEAKONLY_A.title, body: WEAKONLY_A.body });
   check("(b6eab182, DoD-3) weak-only fixture's first card creates normally", !weakOnlyFirst.error && !!weakOnlyFirst.id);
   const weakOnlySecond = await call("tasks_create", { title: WEAKONLY_B.title, body: WEAKONLY_B.body });
   check("(b6eab182, DoD-3) the second, genuinely-distinct card sharing only a code landmark + naming " +
-    "convention now creates CLEANLY too (no refusal)", !weakOnlySecond.error && !!weakOnlySecond.id);
+    "convention creates CLEANLY, with NO `related` advisory (weak-only evidence never qualifies)",
+    !weakOnlySecond.error && !!weakOnlySecond.id && weakOnlySecond.related === undefined);
 
-  // DoD-4: a genuine duplicate — same session id (a STRONG identifier) — is still blocked, and the
-  // refusal still names the counterpart plus the allowDuplicate/supersedes/relatedTo escape hatches (DoD-2).
+  // DoD-4 (re-scoped for d6890435): a genuine duplicate — same session id (a STRONG identifier) — still
+  // CREATES (never blocked), but carries a `related` advisory naming the counterpart's id/title/shared ids.
   const strongFirst = await call("tasks_create", { title: STRONG_A.title, body: STRONG_A.body });
   check("(b6eab182, DoD-4) strong fixture's first card creates normally", !strongFirst.error && !!strongFirst.id);
-  const strongRefused = await call("tasks_create", { title: STRONG_B.title, body: STRONG_B.body });
-  check("(b6eab182, DoD-4) a genuine duplicate (shared session id) is still refused, naming both card titles",
-    typeof strongRefused.error === "string"
-      && strongRefused.error.includes(STRONG_B.title) && strongRefused.error.includes(STRONG_A.title));
-  check("(b6eab182, DoD-2) the refusal states the allowDuplicate/supersedes/relatedTo escape hatches",
-    typeof strongRefused.error === "string"
-      && strongRefused.error.includes("allowDuplicate") && strongRefused.error.includes("supersedes/relatedTo"));
+  const strongAdvised = await call("tasks_create", { title: STRONG_B.title, body: STRONG_B.body });
+  check("(b6eab182/d6890435, DoD-4) a genuine duplicate (shared session id) still CREATES", !strongAdvised.error && !!strongAdvised.id);
+  check("(d6890435) the create carries `related` naming the counterpart's id + title",
+    strongAdvised.related?.taskId === strongFirst.id && strongAdvised.related?.title === STRONG_A.title);
+  check("(d6890435) `related.sharedIdentifiers` names the actual shared session id",
+    Array.isArray(strongAdvised.related?.sharedIdentifiers)
+      && strongAdvised.related.sharedIdentifiers.some((s) => s.includes("abcdef12")));
 
   await client.close();
   db.close();
@@ -477,6 +485,6 @@ try {
 cleanupPathSync(tmpHome);
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — findSuspectedDuplicate flags the real 47340c82/dde0ce24 duplicate pair (shared session id + branch, a STRONG match) in BOTH directions and does NOT flag the genuinely distinct negative-control pair (522cf573/66d91a11); card b6eab182's redesign is verified directly — weak evidence (code symbols/file:line/naming conventions), however many distinct categories it spans, NEVER qualifies a match alone (regression-tested against the file:line+error-constant shape and against a strong-less weak match directly), which as an ACCEPTED, explicitly-documented cost also means the module's own founding abcf0eba/bc91e86c pair (caught purely via weak evidence) is no longer auto-flagged; a genuine duplicate sharing a real STRONG identifier (session id) is still blocked, naming the counterpart plus the allowDuplicate/supersedes/relatedTo escape hatches (DoD-2/DoD-4); two genuinely-distinct cards sharing only a code landmark + naming convention now create CLEANLY with no refusal (DoD-1/DoD-3); the three Code-Review-round-2 false-positive mechanisms (ALL-CAPS-as-PascalCase, single-weak-token-sufficient, file:line-single-hit-sufficient) remain regression-tested with a minimal pair (plus one REAL verbatim specimen, aa4e24ff/7acee6d4); ranking (M2) is re-tested among strong-qualifying candidates, the rarity-threshold boundary (m5) and the bounded shared-identifier list (n8) are covered; the tasks_create MCP tool refuses a suspected duplicate naming the counterpart id, is overridable via allowDuplicate/supersedes/relatedTo, and rejects passing both supersedes+relatedTo together (m3); a supersedes/relatedTo override back-links BOTH cards, not just the new one (m7, card 0ef0270b) — the superseded/related (loser) card's own body is back-noted with a pointer to the new card, so either card is discoverable from the other; and every automated boarding path (createProjectTask directly, peer_message boarding, platform-escalation landing) still lands a duplicate card with no refusal — claude-free, network-free."
+  ? "\n✅ ALL PASS — findSuspectedDuplicate flags the real 47340c82/dde0ce24 duplicate pair (shared session id + branch, a STRONG match) in BOTH directions and does NOT flag the genuinely distinct negative-control pair (522cf573/66d91a11); card b6eab182's redesign is verified directly — weak evidence (code symbols/file:line/naming conventions), however many distinct categories it spans, NEVER qualifies a match alone (regression-tested against the file:line+error-constant shape and against a strong-less weak match directly), which as an ACCEPTED, explicitly-documented cost also means the module's own founding abcf0eba/bc91e86c pair (caught purely via weak evidence) is no longer auto-flagged; card d6890435 demotes the duplicate guard from a BLOCK to an ADVISORY — a genuine duplicate sharing a real STRONG identifier (session id) still CREATES, carrying a `related` field naming the counterpart's id/title/shared identifiers (DoD-2/DoD-4), and allowDuplicate/supersedes/relatedTo all skip computing the advisory at all; two genuinely-distinct cards sharing only a code landmark + naming convention create CLEANLY with no advisory either (DoD-1/DoD-3); the three Code-Review-round-2 false-positive mechanisms (ALL-CAPS-as-PascalCase, single-weak-token-sufficient, file:line-single-hit-sufficient) remain regression-tested with a minimal pair (plus one REAL verbatim specimen, aa4e24ff/7acee6d4); ranking (M2) is re-tested among strong-qualifying candidates, the rarity-threshold boundary (m5) and the bounded shared-identifier list (n8) are covered; the tasks_create MCP tool never refuses on a suspected duplicate, and still rejects passing both supersedes+relatedTo together (m3); a supersedes/relatedTo override back-links BOTH cards, not just the new one (m7, card 0ef0270b) — the superseded/related (loser) card's own body is back-noted with a pointer to the new card, so either card is discoverable from the other; and every automated boarding path (createProjectTask directly, peer_message boarding, platform-escalation landing) still lands a duplicate card with no refusal — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

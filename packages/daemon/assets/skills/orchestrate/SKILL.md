@@ -626,7 +626,7 @@ what you checked. Found none? Treat it as live.
      batching large groups habitually. Two things to get right: a batched landing is **not** capped at
      the weakest verification tier — each branch's landed commit carries the same path-set digest a solo
      squash gets, computed over that branch's whole contribution however many commits it had, so a batch
-     normally reads `mergedVerification:"pathset"` (or `"content"` while its branch ref still exists),
+     normally reads `merged.verification:"pathset"` (or `"content"` while its branch ref still exists),
      exactly like a solo merge; that is the expected result, not an anomaly to go hunting a bug for.
      `"trailer-only"` remains the right answer for history that landed before that stamping existed —
      but on a **fresh** batch it now means the stamp itself didn't land (it is best-effort, and its

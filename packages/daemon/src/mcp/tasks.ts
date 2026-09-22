@@ -8,7 +8,7 @@ import { getTaskMergedInfo, type MergedCommitInfo } from "../git/worktrees.js";
 import { resolveRepo, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { resolveRepoKeyOrError } from "../projects/repos.js";
 import { checkTaskRepoKeyRebind } from "../projects/rebind.js";
-import { findSuspectedDuplicate } from "./duplicateDetection.js";
+import { findSuspectedDuplicate, type DuplicateMatch } from "./duplicateDetection.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { checkTitleHtmlEntities, checkTitleConventionalType } from "../tasks/title-guard.js";
 export { checkTitleHtmlEntities, checkTitleConventionalType } from "../tasks/title-guard.js";
@@ -21,8 +21,16 @@ export { checkTitleHtmlEntities, checkTitleConventionalType } from "../tasks/tit
  * merged (never merged, landed outside the scan window, or a git read failure); see
  * {@link getTaskMergedInfo}'s fail-safe contract. Purely a RESPONSE-layer enrichment: not persisted, not
  * part of the `Task` DB row/type, so create/update payloads are unaffected.
+ *
+ * @decision 634edd2b — `mergedVerificationAtMerge` replaces the ambiguous raw `mergedVerification` field
+ * here: it's frozen at merge time and can legitimately disagree with the live `merged.verification` below
+ * once the branch is later deleted — never read the two as interchangeable.
  */
-export type TaskWithMerged = Task & { merged: MergedCommitInfo | null };
+export type TaskWithMerged = Omit<Task, "mergedVerification"> & {
+  merged: MergedCommitInfo | null;
+  /** See this type's own doc above — the persisted, at-merge-time-frozen sibling of `merged.verification`. */
+  mergedVerificationAtMerge: "content" | "pathset" | "trailer-only" | null;
+};
 
 /** The lightweight task row tasks_list returns by default — no body (the unbounded field). Carries
  *  `repoKey` (multi-repo epic 49136451) so a manager triaging the board can see which cards target a
@@ -475,7 +483,14 @@ export async function listProjectTasks(
       // autoCleared also nulls deferredUntilTaskId in the DB (see persistDeferredStateBestEffort) —
       // mirror that in THIS response too, so the read that reports the clear never echoes a stale
       // non-null blocker id alongside deferred:false (card cf62c1ef).
-      return { ...t, deferred, deferredUntilTaskId: autoCleared ? null : t.deferredUntilTaskId, deferredStuck: stuck, merged };
+      // Card 634edd2b: `mergedVerification` destructured OUT of the spread and re-exposed as
+      // `mergedVerificationAtMerge` — see TaskWithMerged's own doc for why the raw name is ambiguous
+      // against the live `merged.verification` sitting right next to it.
+      const { mergedVerification, ...rest } = t;
+      return {
+        ...rest, deferred, deferredUntilTaskId: autoCleared ? null : t.deferredUntilTaskId, deferredStuck: stuck, merged,
+        mergedVerificationAtMerge: mergedVerification ?? null,
+      };
     }),
   );
   return includeBody ? withMerged : withMerged.map(toTaskSummary);
@@ -721,8 +736,11 @@ export async function getProjectTask(
   persistDeferredStateBestEffort(db, found.id, { autoCleared, stuck, stuckChanged });
   // autoCleared also nulls deferredUntilTaskId in the DB (see persistDeferredStateBestEffort) — mirror
   // that here too, so this same read never echoes a stale non-null blocker id alongside deferred:false.
+  // Card 634edd2b: same rename as listProjectTasks — see TaskWithMerged's own doc.
+  const { mergedVerification, ...foundRest } = found;
   return {
-    ...found, deferred, deferredUntilTaskId: autoCleared ? null : found.deferredUntilTaskId, deferredStuck: stuck, merged,
+    ...foundRest, deferred, deferredUntilTaskId: autoCleared ? null : found.deferredUntilTaskId, deferredStuck: stuck, merged,
+    mergedVerificationAtMerge: mergedVerification ?? null,
     requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)),
     incomingDeferredItems: summarizeIncomingDeferredItems(db, projectId, found.id),
     heldRequestState: resolveHeldRequestState(db, found),
@@ -898,12 +916,12 @@ export function createProjectTask(
   return task;
 }
 
-/** {@link createProjectTaskChecked}'s override params — any ONE of these skips the duplicate refusal. */
+/** {@link createProjectTaskChecked}'s override params — any ONE of these skips the duplicate advisory. */
 export interface CreateTaskDedupeOptions {
-  /** Explicit "yes, I know, create it anyway." */
+  /** Explicit "yes, I know, don't bother telling me." */
   allowDuplicate?: boolean;
   /** This new card supersedes an existing one (full id or an unambiguous prefix) — noted on the new
-   *  card's body. Skips the refusal like `allowDuplicate`. */
+   *  card's body. Skips the advisory like `allowDuplicate`. */
   supersedes?: string;
   /** This new card is related to (but not a straight duplicate of) an existing one — same effect as
    *  `supersedes`, different relationship recorded on the body. */
@@ -916,14 +934,14 @@ export interface CreateTaskDedupeOptions {
  * helper on any OTHER path that reaches it (companion `board_create`, and transitively every automated
  * boarding path) — those silently drop a message instead of failing a retryable agent call. Do not
  * "simplify" by moving the duplicate check into `createProjectTask`/`db.insertTask` — that is exactly the
- * regression these cards' DoD guards against. See docs/decisions/5b221bf2-....md for the full path
- * enumeration.
+ * regression these cards' DoD guards against.
  * @decision 5b221bf2
  *
- * Refuses (returns `{error}`, inserts nothing) when {@link findSuspectedDuplicate} flags an existing
- * task as a likely duplicate of `input`, UNLESS `dedupe.allowDuplicate`/`supersedes`/`relatedTo` is
- * given — an explicit assertion the caller had to type, never a silent auto-merge or auto-drop. A
- * `supersedes`/`relatedTo` target is resolved the same way every other task-id param on this surface
+ * @decision d6890435 — ADVISORY ONLY, never a refusal: a suspected duplicate never blocks the create; it
+ * rides along as a `related` field on the successful result instead. Never reintroduce a hard refusal
+ * here — a card that silently never gets filed is worse than a visible advisory that gets ignored.
+ *
+ * A `supersedes`/`relatedTo` target is resolved the same way every other task-id param on this surface
  * is (full id or unambiguous 8-char prefix, against THIS `projectId`'s board — for `project_task_create`
  * that is the DESTINATION project, never the Lead's own) and noted on the new card's body; an
  * unresolvable target is rejected (whole create rejected, nothing written) rather than silently ignored.
@@ -945,7 +963,7 @@ export function createProjectTaskChecked(
    *  separate param, same convention as `allowHtmlEntitiesInTitle`: it skips a THIRD, independent
    *  refusal, not folded into either of the others. */
   allowNonConventionalType?: boolean,
-): Task | { error: string } {
+): (Task & { related?: DuplicateMatch }) | { error: string } {
   const titleGuard = checkTitleHtmlEntities(input.title, allowHtmlEntitiesInTitle);
   if (titleGuard) return titleGuard;
   const typeGuard = checkTitleConventionalType(input.title, allowNonConventionalType);
@@ -965,20 +983,18 @@ export function createProjectTaskChecked(
     relationNote = dedupe.supersedes ? `Supersedes: ${resolved.id}` : `Related to: ${resolved.id}`;
     backlinkTarget = resolved;
   }
+  // Card d6890435: never refuses — a suspect is surfaced as an ADVISORY on the successful create below,
+  // never a block. `bypassed` still skips computing it at all (an explicit relation already says
+  // everything the advisory would, and `allowDuplicate` is the caller's explicit "don't bother" ack).
   const bypassed = !!(dedupe?.allowDuplicate || dedupe?.supersedes || dedupe?.relatedTo);
+  let related: DuplicateMatch | undefined;
   if (!bypassed) {
+    // Card b6eab182: findSuspectedDuplicate requires a STRONG identifier (session/task id, branch
+    // name) for every match — a weak-only match (shared code identifier/naming convention alone) can
+    // no longer occur, so every advisory names a genuinely rare shared identifier, not incidental prose
+    // overlap.
     const candidateText = `${input.title}\n${body}`;
-    const suspect = findSuspectedDuplicate(db.listTasks(projectId), candidateText);
-    if (suspect) {
-      // Card b6eab182: findSuspectedDuplicate now requires a STRONG identifier (session/task id,
-      // branch name) for every match — a weak-only match (the "matched only on a shared code
-      // location/naming convention" shape this refusal used to caveat) can no longer occur, so there
-      // is nothing left here to caveat; every refusal now names a genuinely rare shared identifier.
-      return {
-        error: `"${input.title}" suspected duplicate of task ${suspect.taskId} ("${suspect.title}") — shared: ` +
-          `${suspect.sharedIdentifiers.join(", ")}. Pass allowDuplicate:true, or supersedes/relatedTo:"${suspect.taskId}" to create anyway.`,
-      };
-    }
+    related = findSuspectedDuplicate(db.listTasks(projectId), candidateText) ?? undefined;
   }
   if (relationNote) body = body ? `${body}\n\n${relationNote}` : relationNote;
   const created = createProjectTask(db, projectId, { ...input, body });
@@ -989,7 +1005,8 @@ export function createProjectTaskChecked(
     const targetBody = backlinkTarget.body ? `${backlinkTarget.body}\n\n${backNote}` : backNote;
     db.updateTask(backlinkTarget.id, { body: targetBody });
   }
-  return created;
+  if ("error" in created) return created;
+  return related ? { ...created, related } : created;
 }
 
 /**
@@ -1463,9 +1480,28 @@ export async function updateProjectTask(
           current: result.current,
         };
       }
+      // Card fe4a9a17: this 409 is a bare `baseVersion !== current.version` comparison — there is no
+      // separate "did you read it" tracker to blame, so state which of the two actual causes fired
+      // instead of a generic message that reads as if one exists. `baseVersion === undefined` is by far
+      // the more common real cause (a caller that forgot the param entirely, not a genuine race) and is
+      // mechanically distinguishable from a real stale value — always tell them apart.
+      if (baseVersion === undefined) {
+        return {
+          error: "this write omitted baseVersion, which is REQUIRED on every title/body write — there is " +
+            "no separate read-tracking; this check is a plain comparison against the task's current " +
+            "`version`. Pass the version you last read (tasks_get/tasks_list/a prior tasks_update " +
+            "response) as baseVersion and retry — if it matches `current.version` below, nobody has " +
+            "actually changed this task since you read it; you just omitted the param.",
+          conflict: true,
+          current: result.current,
+        };
+      }
       return {
-        error: "this task's title/body changed since you last read it (or you never read it) — re-read it " +
-          "(tasks_get) and retry with the current version as baseVersion, merging your change into the current body",
+        error: `this task's title/body changed since baseVersion ${baseVersion} was read (current version ` +
+          `is ${result.current.version}) — re-read it (tasks_get) and retry with the current version as ` +
+          "baseVersion, merging your change into the current body. If `current` below is byte-identical to " +
+          "what you already read, nobody actually wrote it in between — you likely retried with a stale " +
+          "baseVersion rather than a freshly re-read one.",
         conflict: true,
         current: result.current,
       };

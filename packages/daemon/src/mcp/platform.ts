@@ -2324,14 +2324,17 @@ export class PlatformMcpRouter {
           "repoKey (multi-repo epic) targets one of the destination project's registered `repos` — omit (or " +
           "pass \"primary\") for its primary repo; an unknown key is rejected with {error}. Reuses the SAME " +
           "create path (createProjectTaskChecked) the in-project loom-tasks tasks_create uses, so " +
-          "columns/priorities AND the cross-channel duplicate check (card 0ef0270b) behave identically — " +
-          "checked against the DESTINATION project's board, not the Lead's own. If this card's title+body " +
-          "shares rare identifiers (a session id, a branch, a named error constant, a file:line, a code " +
-          "symbol — NOT prose/title similarity) with an existing card on the destination board, the create " +
-          "is REFUSED with {error} naming the suspected counterpart — never a silent drop or auto-merge. " +
-          "Pass allowDuplicate:true to create anyway, or supersedes/relatedTo:\"<taskId>\" (full id or " +
-          "unambiguous prefix, resolved on the DESTINATION board) to both bypass the refusal AND note the " +
-          "relationship on the new card's body — the superseded/related card's OWN body is back-noted too " +
+          "columns/priorities AND the cross-channel duplicate ADVISORY (card 5b221bf2, demoted from a " +
+          "block by card d6890435) behave identically — checked against the DESTINATION project's board, " +
+          "not the Lead's own. If this card's title+body shares a RARE STRONG identifier (a session id or " +
+          "a Loom branch name — full UUIDs/`loom/<hex>` only, NOT prose/title similarity, and NOT a bare " +
+          "code symbol/file:line/error constant on its own) with an existing card on the destination " +
+          "board, the create still SUCCEEDS and the result carries a `related: {taskId, title, " +
+          "sharedIdentifiers}` field naming the suspected counterpart — never a block, never a silent " +
+          "drop or auto-merge. Pass allowDuplicate:true to skip computing the advisory (\"I know, don't " +
+          "tell me\"), or supersedes/relatedTo:\"<taskId>\" (full id or unambiguous prefix, resolved on " +
+          "the DESTINATION board) to instead declare an explicit relationship, noted on the new card's " +
+          "body — the superseded/related card's OWN body is back-noted too " +
           "(\"Superseded by: <newId>\" / \"Related to: <newId>\"), so either card is discoverable from the other. " +
           "projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Error if the " +
           "id is unknown or an ambiguous prefix (the error names the candidate ids). Returns the created Task row.\n" +
@@ -2391,11 +2394,18 @@ export class PlatformMcpRouter {
           "Reuses the SAME project-scoped read the in-project loom-tasks tasks_get uses, so a taskId that " +
           "doesn't belong to the named project resolves to not-found. projectId accepts the full id OR an " +
           "unambiguous 8-char id-prefix (mirrors project_get). Also returns `merged` — this card's git-derived " +
-          "ship state ({sha,date} of its squash-merge commit on that project's repo, else null). null means NOT " +
-          "PROVEN merged (never merged, landed outside the scan window, or a git read failure), never an " +
-          "authoritative 'never merged' — verify against this before relaying a predecessor's stale " +
-          "'unbuilt'/'won't-do' claim about this card as fact. Read-only. Error if unknown or an ambiguous " +
-          "prefix (the error names the candidate ids).\n" +
+          "ship state ({sha,date,verification?} of its squash-merge commit on that project's repo, else null). " +
+          "null means NOT PROVEN merged (never merged, landed outside the scan window, or a git read failure), " +
+          "never an authoritative 'never merged' — verify against this before relaying a predecessor's stale " +
+          "'unbuilt'/'won't-do' claim about this card as fact. `merged.verification` (\"content\" strongest, " +
+          "\"pathset\" weaker, \"trailer-only\" weakest — see tasks_list's own description for what each " +
+          "means) is recomputed FRESH on every read; this response ALSO carries `mergedVerificationAtMerge` " +
+          "(card 634edd2b), the verification mode recorded ONCE when this card's merge landed and never " +
+          "re-derived since. The two can legitimately DISAGREE once the branch is later deleted (live " +
+          "content-verification then degrades to pathset/trailer-only, while the frozen at-merge value " +
+          "doesn't move) — never treat a disagreement between them as a bug, and never assume one is simply " +
+          "more current than the other without checking which you actually need. Read-only. Error if unknown " +
+          "or an ambiguous prefix (the error names the candidate ids).\n" +
           "BATCH READ (card 1105c2c8): pass `taskIds` (up to 200) instead of `taskId` to read MANY cards' " +
           "full bodies in one call — the fix for an audit wave's per-card project_task_get round-trips. " +
           "Exactly one of `taskId`/`taskIds` is required; passing both or neither is an error. Mirrors " +
@@ -2502,6 +2512,10 @@ export class PlatformMcpRouter {
           "a prior project_task_update response). A stale-or-omitted `baseVersion` on a title/body write is " +
           "REJECTED with {error, conflict:true, current} instead of overwriting — re-read and retry, merging " +
           "your change into the current body (mirrors the in-project tasks_update / memory_write exactly). " +
+          "This is a PLAIN COMPARISON against the task's current `version`, not a separate read-tracker " +
+          "(card fe4a9a17) — the error text says which of the two actual causes fired: `baseVersion` " +
+          "omitted entirely (the more common real cause), or a genuinely stale value. If `current` is " +
+          "byte-identical to what you already read, nobody wrote it in between. " +
           "Every other field needs no baseVersion. `version` advances ONLY when title/body actually change — " +
           "a field-only move (columnKey/priority/held/deferred/repoKey) leaves it unchanged. `baseVersion` is " +
           "meaningless (and ignored) on the `taskIds` batch path, since that path already refuses title/body outright.\n" +
@@ -2654,6 +2668,11 @@ export class PlatformMcpRouter {
           "landed commit's own ancestry against a persisted path-set trailer — proves the same FILES landed, " +
           "not the same content), or \"trailer-only\" (pre-fix history — trailer PRESENCE alone, the weakest). " +
           "Absent means unknown, not unverified — treat it the same as a confident match, never as a red flag. " +
+          "`merged.verification` is recomputed FRESH on every read — a full row (includeBody:true) ALSO " +
+          "carries `mergedVerificationAtMerge` (card 634edd2b), the verification mode recorded ONCE when " +
+          "that card's merge landed and never re-derived since; the two can legitimately disagree once the " +
+          "branch is later deleted (live content-verification then degrades to pathset/trailer-only, while " +
+          "the frozen at-merge value doesn't move) — never treat a disagreement between them as a bug. " +
           "Reads are capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by " +
           "default. PAGINATION: with NO offset/limit passed and the whole matching set fits in one page, " +
           "returns the bare tasks array (today's shape, unchanged) — otherwise, or whenever you pass " +
