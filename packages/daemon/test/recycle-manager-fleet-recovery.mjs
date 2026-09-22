@@ -219,11 +219,25 @@ try {
     // actually durable, which is exactly the vacuous-check trap that memory note documents. The nudge
     // dispatch is a SEPARATE async step after the event above (enqueueDurableNudge's own MCP-seen wait),
     // so it gets its own terminal-signal poll rather than reusing the event's.
-    const nudged = await waitUntil(() => db.listUnresolvedQueuedMessagesForWorker(m1.id).length > 0);
+    // Card 2790fb60: the wait predicate below targets THIS SPECIFIC nudge's content, not merely "any
+    // unresolved message for m1" — this scenario's own cap-queue entry (seeded on M2 above) reparents
+    // onto M1 and is auto-drained by recoverFleetAfterFailedRecycleSuccessor's fire-and-forget
+    // maybeDrainCapQueue(oldId) BEFORE the recycle-failed nudge is even enqueued; that drain's spawnWorker
+    // genuinely fails here (seedProject's repo dir is never `git init`-ed, so createWorktree's real `git
+    // rev-parse HEAD` subprocess throws), landing an UNRELATED durable `[loom:cap-queue-autofire-failed]`
+    // nudge on M1 too. A loose "length > 0" predicate can be satisfied by THAT nudge before the real
+    // `[loom:recycle-failed]` one lands (it's gated behind enqueueDurableNudge's own fixed MCP-seen wait),
+    // and the single un-polled `durable` read right after can then miss the real one — a genuine test race
+    // (git subprocess spawn latency is real-world OS-timing-sensitive), not a defect in the recovery code
+    // itself. Waiting on the actual content closes the race without weakening what's proven: durability is
+    // still established by polling `listUnresolvedQueuedMessagesForWorker` (a live DB query) rather than
+    // any in-memory/FIFO signal.
+    const isRecycleFailedNudge = (rec) => typeof rec.detail?.text === "string" && rec.detail.text.includes("[loom:recycle-failed]") && rec.detail.text.includes("worker_list");
+    const nudged = await waitUntil(() => db.listUnresolvedQueuedMessagesForWorker(m1.id).some(isRecycleFailedNudge));
     check("(A) settle loop's nudge became durable", nudged);
     const durable = db.listUnresolvedQueuedMessagesForWorker(m1.id);
     check("(A) FIX: the recycle-failed nudge is DURABLE — a real DB row (not just FIFO text)",
-      durable.some((rec) => typeof rec.detail?.text === "string" && rec.detail.text.includes("[loom:recycle-failed]") && rec.detail.text.includes("worker_list")));
+      durable.some(isRecycleFailedNudge));
   }
 
   // ==================== (B) PLATFORM LEAD, RECOVERED ====================
