@@ -42,6 +42,22 @@ async function seedConfig(baseURL: string, projectId: string, config: Record<str
   if (!res.ok) throw new Error(`seedConfig failed (${res.status}): ${await res.text()}`);
 }
 
+/**
+ * Write a project's config override WITHOUT the schema validator, via the test-only
+ * POST /internal/test/seed (`rawProjectConfig`) — reproduces a LEGACY row that predates the write-time
+ * `sessionEnv` dotted-key rejection (card `12400719`). Every real write route, including `seedConfig`
+ * above, now refuses a dotted key outright, so this is the only way an e2e spec can still exercise the
+ * panel's pre-existing-dotted-key handling.
+ */
+async function seedRawProjectConfig(baseURL: string, projectId: string, config: Record<string, unknown>) {
+  const res = await fetch(`${baseURL}/internal/test/seed`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ rawProjectConfig: [{ projectId, config }] }),
+  });
+  if (!res.ok) throw new Error(`seedRawProjectConfig failed (${res.status}): ${await res.text()}`);
+}
+
 // The REAL, unredacted stored config — a test-only daemon route (gated inTestMode()+loopback, card
 // a5ecb6fd), because `GET /api/projects` now masks `sessionEnv` VALUES (same-length filler) and can no
 // longer serve as this suite's oracle for what actually persisted. Every existing read in this file goes
@@ -362,9 +378,12 @@ test("a blanked stored name and an invalid new name both BLOCK Save instead of s
 
 test("a pre-existing DOTTED key can have its value changed but NOT be renamed or removed (no silent orphan)", async ({ page, loomDaemon }) => {
   const project = await loomDaemon.createProject(`settings-senv-dotted-${Date.now()}`);
-  // Reachable today: the config schema accepts any string key, so a dotted name can already be stored
-  // via REST or an elevated MCP write, and this panel is the first thing that offers to manage it.
-  await seedConfig(loomDaemon.baseURL, project.id, { sessionEnv: { "MY.VAR": "dotted-secret" } });
+  // Card `12400719` (2026-09-18, AFTER this test was first written) closed the route that used to make
+  // this reachable: every real write now refuses a dotted `sessionEnv` key outright (validated in
+  // `validateProjectConfigOverride`/`validateAgentProjectConfigOverride`), so `seedConfig` above can no
+  // longer plant one. This panel still has to defend an install that stored a dotted key BEFORE that
+  // validator shipped, so seed the legacy shape directly, bypassing validation (see its own doc).
+  await seedRawProjectConfig(loomDaemon.baseURL, project.id, { sessionEnv: { "MY.VAR": "dotted-secret" } });
   await pinActiveProject(page, project.id);
   await page.goto(`${loomDaemon.baseURL}/settings`);
 
@@ -404,7 +423,9 @@ test("a pre-existing DOTTED key can have its value changed but NOT be renamed or
 // using the exact mechanism the refusal copy describes.
 test("the documented replace:true escape hatch removes a dotted key without orphaning or touching a neighbour (card 4ad33446)", async ({ loomDaemon }) => {
   const project = await loomDaemon.createProject(`settings-senv-escape-${Date.now()}`);
-  await seedConfig(loomDaemon.baseURL, project.id, {
+  // Same `12400719` gap as the test above: a dotted key can no longer be planted via the validated
+  // `seedConfig` write, so seed the legacy (pre-validator) shape directly.
+  await seedRawProjectConfig(loomDaemon.baseURL, project.id, {
     sessionEnv: { "MY.VAR": "dotted-secret", NEIGHBOR: "keep-me" },
   });
 

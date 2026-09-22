@@ -20,6 +20,10 @@
 //   (4) The pre-existing `__proto__` rejection (@decision c9a2f1e0) still fires — proves the two
 //       preprocess layers (dunder-proto + dotted-key) compose without one silently swallowing the other.
 //   (5) An empty/absent sessionEnv is untouched (no false positive on the common no-op case).
+//   (6) Card 5b290c3c refinement — an ALREADY-STORED dotted key's VALUE may still be rotated via
+//       `priorSessionEnvKeys`, while a genuinely NEW dotted key stays rejected (including mixed with an
+//       existing one in the same write), and omitting the option entirely preserves the original
+//       reject-everything default.
 import { validateProjectConfigOverride, validateAgentProjectConfigOverride } from "../dist/mcp/platform.js";
 
 let failures = 0;
@@ -88,7 +92,35 @@ const withEnv = (sessionEnv) => ({ sessionEnv });
   check("(sanity) sessionEnv is not an agent-settable field at all (rejected as unknown key)", bad.ok === false);
 }
 
+// --- (6) card 5b290c3c refinement: an ALREADY-STORED dotted key may have its VALUE rotated -------------
+// The original fix rejected every dotted key unconditionally, which also broke a legitimate in-place
+// value rotation of a pre-existing dotted key (the Settings panel's own documented/tested behavior,
+// packages/web/e2e/settings-session-env.spec.ts's "a pre-existing DOTTED key can have its value changed"
+// case) — caught diagnosing card 5b290c3c. `priorSessionEnvKeys` is how a caller states which keys
+// already exist; only a key NOT in that set is still rejected.
+{
+  const priorSessionEnvKeys = new Set(["MY.VAR"]);
+  const rotated = validateProjectConfigOverride(withEnv({ "MY.VAR": "rotated" }), { priorSessionEnvKeys });
+  check("(6) an EXISTING dotted key's value rotation is accepted when it's named in priorSessionEnvKeys",
+    rotated.ok === true && rotated.value.sessionEnv?.["MY.VAR"] === "rotated");
+
+  const stillNew = validateProjectConfigOverride(withEnv({ "brand.new": "x" }), { priorSessionEnvKeys });
+  check("(6) a GENUINELY NEW dotted key is still rejected even when priorSessionEnvKeys is non-empty",
+    stillNew.ok === false && stillNew.error.includes('"brand.new"'));
+
+  const noContext = validateProjectConfigOverride(withEnv({ "MY.VAR": "rotated" }));
+  check("(6) omitting priorSessionEnvKeys entirely still rejects every dotted key (unchanged default)",
+    noContext.ok === false && noContext.error.includes('"MY.VAR"'));
+
+  const mixed = validateProjectConfigOverride(
+    withEnv({ "MY.VAR": "rotated", "brand.new": "x" }),
+    { priorSessionEnvKeys },
+  );
+  check("(6) one existing + one new dotted key in the same write still rejects the whole write",
+    mixed.ok === false && mixed.error.includes('"brand.new"'));
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the config write validator rejects a dot-bearing sessionEnv key name with a reason naming the offending key and the unset dot-path grammar, accepts plain keys and the empty/absent case unchanged, fails the whole write when a dotted key is mixed with valid ones, and composes correctly alongside the pre-existing __proto__ rejection."
+  ? "\n✅ ALL PASS — the config write validator rejects a dot-bearing sessionEnv key name with a reason naming the offending key and the unset dot-path grammar, accepts plain keys and the empty/absent case unchanged, fails the whole write when a dotted key is mixed with valid ones, composes correctly alongside the pre-existing __proto__ rejection, and (card 5b290c3c) lets an ALREADY-STORED dotted key's value be rotated via priorSessionEnvKeys while a genuinely new dotted key stays rejected."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -2877,6 +2877,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // boots with the ticker OFF (LOOM_SCHEDULER_ENABLED=0). Calls the SAME db.markDeferred the Scheduler
         // itself uses, so the row round-trips through GET /api/schedules exactly as a real deferral would.
         scheduleDeferrals?: { scheduleId: string; reason?: string; at?: string }[];
+        // A project config override written WITHOUT the schema validator (card 12400719 — e.g. its
+        // write-time `sessionEnv` dotted-key rejection) — the ONLY way an e2e spec can now reproduce a
+        // LEGACY row, one that was stored before that validator shipped and would be refused by every
+        // real write route today (PATCH /api/projects/:id/config, project_configure, project_update all
+        // run the same `validateProjectConfigOverride`/`validateAgentProjectConfigOverride`). Deep-merges
+        // `config` onto the project's existing override (mirrors the real PATCH's default merge grammar)
+        // via the SAME `mergeConfigOverride` the route uses, then writes it with `db.setProjectConfig`
+        // directly — deliberately bypassing validation, never routed through `setProjectConfigSafe`'s
+        // kanbanColumns re-keying since this seed never touches that field.
+        rawProjectConfig?: { projectId: string; config: Record<string, unknown> }[];
       };
       const usageSampleIds: string[] = [];
       for (const s of b.usageSamples ?? []) {
@@ -3193,12 +3203,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         deps.db.markDeferred(d.scheduleId, d.at ?? new Date().toISOString(), d.reason ?? "manager cap (3) reached");
         scheduleDeferralIds.push(d.scheduleId);
       }
+      const rawProjectConfigIds: string[] = [];
+      for (const rc of b.rawProjectConfig ?? []) {
+        if (typeof rc.projectId !== "string" || typeof rc.config !== "object" || rc.config === null) {
+          return reply.code(400).send({ error: "rawProjectConfig[].projectId and config are required" });
+        }
+        const project = deps.db.getProject(rc.projectId);
+        if (!project) return reply.code(400).send({ error: `rawProjectConfig[]: no project ${rc.projectId}` });
+        const merged = mergeConfigOverride(project.config, rc.config as ProjectConfigOverride);
+        deps.db.setProjectConfig(rc.projectId, merged);
+        rawProjectConfigIds.push(rc.projectId);
+      }
       return reply.code(201).send({
         ok: true, usageSampleIds, runIds,
         companionSessionIds, companionConfigSessionIds, companionMemoryNames, companionReminderIds, companionTurnsRun,
         companionMessageIds,
         liveSessionIds, wakeIds, enqueued, archivedSessionIds, orchestrationEventIds, questionIds,
-        projectMemoryIds, scheduleDeferralIds,
+        projectMemoryIds, scheduleDeferralIds, rawProjectConfigIds,
       });
     });
 
@@ -4257,7 +4278,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const body = (req.body ?? {}) as { config?: unknown; unset?: unknown; replace?: unknown };
     const rawObj = typeof req.body === "object" && req.body !== null ? (req.body as object) : null;
     const wrapped = rawObj !== null && ("config" in rawObj || "unset" in rawObj || "replace" in rawObj);
-    const v = validateProjectConfigOverride(wrapped ? body.config : req.body);
+    // @decision 12400719 — an already-stored dotted sessionEnv key may still have its VALUE rotated;
+    // only a genuinely NEW dotted key is rejected (mcp/platform.ts's dottedSessionEnvKeyError).
+    const priorSessionEnvKeys = new Set(Object.keys((existing.config.sessionEnv ?? {}) as Record<string, unknown>));
+    const v = validateProjectConfigOverride(wrapped ? body.config : req.body, { priorSessionEnvKeys });
     if (!v.ok) return reply.code(400).send({ error: `invalid config: ${v.error}` });
     const replace = wrapped && body.replace === true;
     const unset = wrapped && Array.isArray(body.unset) ? body.unset.filter((p): p is string => typeof p === "string" && p.length > 0) : [];

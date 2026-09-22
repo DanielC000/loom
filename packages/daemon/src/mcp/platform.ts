@@ -306,30 +306,24 @@ function strictRecord<T extends z.ZodTypeAny>(valueSchema: T) {
   return z.preprocess(rejectDunderProtoKey, z.record(z.string(), valueSchema));
 }
 
-/**
- * @decision 12400719 — a dotted `sessionEnv` key can never be addressed by the config unset dot-path
- * grammar, so reject it at write time. Keep this separate from `rejectDunderProtoKey`/`strictRecord`
- * above, which stay general-purpose for a future field where a dot may be legitimate.
- */
-function rejectDottedKey(raw: unknown, ctx: z.RefinementCtx): unknown {
-  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-    const dotted = Object.keys(raw).find((k) => k.includes("."));
-    if (dotted !== undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `sessionEnv key "${dotted}" contains "." — a dotted name can never be removed via the config unset dot-path syntax; rename it without a "." (e.g. use "_")`,
-      });
-      return z.NEVER;
-    }
-  }
-  return raw;
+// @decision 12400719 — reject a NEW dotted `sessionEnv` key (unaddressable by config `unset`), but not
+// one already present under `priorSessionEnvKeys`: rotating an EXISTING dotted key's value is a legitimate
+// merge write with no unset involved. Omitted `priorSessionEnvKeys` rejects every dotted key (unchanged).
+function dottedSessionEnvKeyError(
+  sessionEnv: Record<string, string> | undefined,
+  priorSessionEnvKeys: ReadonlySet<string> | undefined,
+): string | null {
+  if (!sessionEnv) return null;
+  const dotted = Object.keys(sessionEnv).find((k) => k.includes(".") && !(priorSessionEnvKeys?.has(k) ?? false));
+  if (dotted === undefined) return null;
+  return `sessionEnv key "${dotted}" contains "." — a dotted name can never be removed via the config unset dot-path syntax; rename it without a "." (e.g. use "_")`;
 }
 
 const projectConfigOverrideSchema = z.object({
   kanbanColumns: kanbanColumnsSchema.optional(),
   permission: permissionOverride.optional(),
   pty: ptyOverride.optional(),
-  sessionEnv: z.preprocess(rejectDottedKey, strictRecord(z.string())).optional(),
+  sessionEnv: strictRecord(z.string()).optional(),
   orchestration: orchestrationOverride.optional(),
   docLint: z.boolean().optional(),
   codescape: codescapeOverride.optional(),
@@ -441,10 +435,13 @@ export const AGENT_CONFIG_TOP_LEVEL_KEYS: readonly string[] = Object.keys(agentP
  */
 export function validateProjectConfigOverride(
   raw: unknown,
+  opts?: { priorSessionEnvKeys?: ReadonlySet<string> },
 ): { ok: true; value: ProjectConfigOverride } | { ok: false; error: string } {
   const r = projectConfigOverrideSchema.safeParse(raw ?? {});
   if (!r.success) return { ok: false, error: formatZodIssues(r.error) };
   const value = r.data as ProjectConfigOverride;
+  const dottedSessionEnvError = dottedSessionEnvKeyError(value.sessionEnv, opts?.priorSessionEnvKeys);
+  if (dottedSessionEnvError) return { ok: false, error: dottedSessionEnvError };
   if (value.obsidian?.path !== undefined) value.obsidian.path = expandTilde(value.obsidian.path);
   if (value.python?.interpreterPath !== undefined) value.python.interpreterPath = expandTilde(value.python.interpreterPath);
   return { ok: true, value };

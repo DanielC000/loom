@@ -34,13 +34,32 @@ card `b5faa194`'s open territory — the card explicitly says not to race it. (a
 zero-migration-cost option (see the re-measured 0/43 above) and is reversible: nothing is lost today, and
 (b) can still land later under `b5faa194` to relax this if a genuine need for a dotted name ever surfaces.
 
-Added a dedicated `rejectDottedKey` preprocess (`mcp/platform.ts`), layered around `sessionEnv`'s existing
-`strictRecord(z.string())` rather than folded into `strictRecord`/`rejectDunderProtoKey` themselves —
-those exist for any future record-shaped field, where a dot in a key may be perfectly legitimate; this
-check is specific to `sessionEnv`'s own unset-addressability contract. The rejection message names the
-offending key and states the reason (`sessionEnv key "<k>" contains "." — a dotted name can never be
-removed via the config unset dot-path syntax; rename it without a "." (e.g. use "_")`) rather than
-surfacing a bare zod path/type error.
+Added a dedicated `dottedSessionEnvKeyError` check (`mcp/platform.ts`), run post-parse rather than folded
+into `strictRecord`/`rejectDunderProtoKey` themselves — those exist for any future record-shaped field,
+where a dot in a key may be perfectly legitimate; this check is specific to `sessionEnv`'s own
+unset-addressability contract. The rejection message names the offending key and states the reason
+(`sessionEnv key "<k>" contains "." — a dotted name can never be removed via the config unset dot-path
+syntax; rename it without a "." (e.g. use "_")`) rather than surfacing a bare zod path/type error.
+
+## 2026-09-22 refinement (card `5b290c3c`)
+
+The original fix rejected a dotted `sessionEnv` key UNCONDITIONALLY — any write whose submitted `sessionEnv`
+contained one, whether newly introducing it or not. That is stricter than the narrative above ever argued
+for: it also broke ROTATING an already-stored dotted key's VALUE, a legitimate merge write with no unset
+involved that the Settings panel (card `32b23f0f`, landed the same day but BEFORE this validator) already
+supports and tests specifically because refusing it "would strand the key with no way to rotate it at
+all." `packages/web/e2e/settings-session-env.spec.ts`'s own "value changed in place" case caught this: the
+panel's Save silently 400'd and the value never moved, discovered while diagnosing card `5b290c3c`.
+
+Fix: `dottedSessionEnvKeyError` now takes the caller's prior `sessionEnv` key set (`priorSessionEnvKeys`)
+and only rejects a dotted key that ISN'T already present under that exact name — a genuinely NEW dotted
+key is still foreclosed exactly as before; an EXISTING one may have its value rewritten freely. Only the
+REST/human path (`validateProjectConfigOverride`, `gateway/server.ts`'s `PATCH /api/projects/:id/config`)
+passes this context, sourced from the project's own currently-stored config at the same request. The agent
+path (`validateAgentProjectConfigOverride`) is untouched and needs no such context: `sessionEnv` is omitted
+from `agentProjectConfigOverrideSchema` entirely, so `dottedSessionEnvKeyError` never sees agent-submitted
+data at all — that predates this card and was already the boundary at which "value rotation" has no
+agent-facing analogue to preserve.
 
 ## Do not
 
@@ -53,7 +72,12 @@ surfacing a bare zod path/type error.
   no-op/fail-fast simplification.
 - Do not re-derive "0 dotted keys" from memory at a later date — re-run the scan; DoD-0 explicitly frames
   this as a snapshot that can go stale the moment any project stores one.
+- Do not reject a dotted `sessionEnv` key's value rotation just because the key itself is dotted — check
+  `priorSessionEnvKeys` first; only a key that is genuinely NEW is unaddressable-by-unset and unsafe.
+- Do not thread `priorSessionEnvKeys` into the agent path "for symmetry" — `sessionEnv` never reaches
+  `agentProjectConfigOverrideSchema` at all, so there is no dotted key for it to ever see there.
 
 ## Source
 
-Card `12400719`, opened by lead `gen 346` off card `4ad33446`'s DoD-0 answer, 2026-09-18.
+Card `12400719`, opened by lead `gen 346` off card `4ad33446`'s DoD-0 answer, 2026-09-18. Refined by
+card `5b290c3c`, 2026-09-22, which diagnosed three e2e specs failing at a daemon-side REST 400.

@@ -184,15 +184,24 @@ test.describe("profile harness control", () => {
   // every sibling field by the same mechanism, which is why this test asserts a couple of them alongside
   // harness — a check that only covered `harness` would pass just as happily against a per-field special
   // case that leaves the others exposed.
+  // `restrictedTools:true` can no longer be seeded together with `harness:"codex"` in one call — card
+  // `0770d916` (landed the SAME DAY as this spec, but AFTER it was first written) made that combination a
+  // validator rejection (`codexRestrictedToolsUnsupportedError`, profiles/validate.ts): codex has no
+  // per-tool disallow mechanism, so a stored `restrictedTools:true` would read enforced in the UI while
+  // doing nothing at spawn. So the clobber check below proves `harness`/`model` survive a partial PUT
+  // against a codex profile, and separately proves `restrictedTools` survives one against a claude
+  // profile (the only harness that combination is valid on) — same mechanism, same strength, split across
+  // the one field the codex validator now forecloses.
   test("a partial PUT that omits harness does NOT clear it (nor clobber its siblings)", async ({ loomDaemon }) => {
     const profile = await seedProfile(loomDaemon.baseURL, {
-      name: `Rig Partial ${Date.now()}`, harness: "codex", model: "claude-opus-4-8", restrictedTools: true,
+      name: `Rig Partial ${Date.now()}`, harness: "codex", model: "claude-opus-4-8",
     });
-    // Assert the fixture's identity: seeding itself must have persisted all three, or the clobber check
-    // below would pass vacuously against a row that never held the values in the first place.
+    // Assert the fixture's identity: seeding itself must have persisted both, or the clobber check below
+    // would pass vacuously against a row that never held the values in the first place. `restrictedTools`
+    // normalizes to its stored default (false) — the only value valid alongside harness:"codex".
     expect(profile.harness).toBe("codex");
     expect(profile.model).toBe("claude-opus-4-8");
-    expect(profile.restrictedTools).toBe(true);
+    expect(profile.restrictedTools).toBe(false);
 
     // A minimal, realistic partial save touching ONE unrelated field — the shape any non-UI REST caller
     // (or a future narrower form) would send.
@@ -201,7 +210,6 @@ test.describe("profile harness control", () => {
     });
     expect(after.harness).toBe("codex");
     expect(after.model).toBe("claude-opus-4-8");
-    expect(after.restrictedTools).toBe(true);
 
     // And it survives a re-read, not just the PUT's own echoed response.
     const reread = await getProfile(loomDaemon.baseURL, profile.id);
@@ -213,5 +221,21 @@ test.describe("profile harness control", () => {
       method: "PUT", body: JSON.stringify({ harness: "claude" }),
     });
     expect(reverted.harness).toBe("claude");
+
+    // The `restrictedTools` half of the ORIGINAL clobber check, now on the one harness the value is
+    // valid on: set it to a non-default `true`, then prove an unrelated partial PUT doesn't reset it —
+    // the same structural protection (merge-over-stored, validate-the-result) the harness/model checks
+    // above already exercised.
+    const withRestricted = await apiJson<SeededProfile>(`${loomDaemon.baseURL}/api/profiles/${profile.id}`, {
+      method: "PUT", body: JSON.stringify({ restrictedTools: true }),
+    });
+    expect(withRestricted.restrictedTools).toBe(true);
+    const afterUnrelatedEdit = await apiJson<SeededProfile>(`${loomDaemon.baseURL}/api/profiles/${profile.id}`, {
+      method: "PUT", body: JSON.stringify({ description: "second unrelated edit" }),
+    });
+    expect(afterUnrelatedEdit.restrictedTools).toBe(true);
+    expect(afterUnrelatedEdit.harness).toBe("claude");
+    const rereadRestricted = await getProfile(loomDaemon.baseURL, profile.id);
+    expect(rereadRestricted.restrictedTools).toBe(true);
   });
 });
