@@ -69,6 +69,18 @@ try {
     readP && JSON.stringify(readP.pending) === JSON.stringify(pendingSnap));
   restart.clearRestartIntent();
 
+  // --- (1c) card 3af8674e DoD-4: `deploySha` round-trips, and is ABSENT (never a fabricated fallback)
+  // when the caller never set it (an old on-disk intent, or a deploy whose stamp couldn't be read).
+  restart.writeRestartIntent({ reason: "deploy", managerSessionId: ids.mgrId, requestedAt: now, deploySha: "cafef00dfeed" });
+  const readSha = restart.readRestartIntent();
+  check("(1c) deploySha round-trips byte-for-byte", readSha && readSha.deploySha === "cafef00dfeed");
+  restart.clearRestartIntent();
+  restart.writeRestartIntent({ reason: "deploy", managerSessionId: ids.mgrId, requestedAt: now });
+  const readNoSha = restart.readRestartIntent();
+  check("(1c) an intent written with no deploySha reads back with the field ABSENT (never fabricated)",
+    readNoSha && !("deploySha" in readNoSha));
+  restart.clearRestartIntent();
+
   // --- setup: a real exited worker with a committed-but-unmerged worktree on disk ---
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# ri\n");
@@ -189,6 +201,31 @@ try {
   check("(3d) the pass-then-fail refusal names the second-check reason", typeof passThenFailResult.error === "string" && passThenFailResult.error.includes("TEST: supervisor died during buildDaemon/the merge-danger wait"));
   check("(3d) exit was NEVER called, even though the build succeeded", exitCalledInPassThenFail === false);
   check("(3d) the intent written after the (passing) pre-build check was CLEARED by the failed recheck", restart.readRestartIntent() === null);
+
+  // --- (3e) card 3af8674e DoD-4: a genuinely successful requestDaemonRestart wires buildDaemon's real
+  // captured `deploySha` (read from this checkout's OWN just-built dist/build-info.json — buildDeps here
+  // fakes the STEP RUNNER only, never the root, so the read-back is real) into the WRITTEN intent — proving
+  // the plumbing end to end, not just that the field can round-trip if set by hand (see (1c) above).
+  let exitCalledForSuccess = false;
+  process.env.LOOM_SUPERVISED = "1";
+  let successResult;
+  try {
+    successResult = await sessions.requestDaemonRestart(ids.mgrId, "should build all the way through to a scheduled exit", {
+      buildDeps: { runStep: async (step) => ({ code: 0, out: `${step.label} ok` }) },
+      exit: () => { exitCalledForSuccess = true; },
+      mergeDangerGraceMs: 200,
+      isSupervisorAlive: async () => ({ alive: true }),
+    });
+  } finally {
+    delete process.env.LOOM_SUPERVISED;
+  }
+  check("(3e) a fully green restart returns restarting:true", successResult.restarting === true);
+  const successIntent = restart.readRestartIntent();
+  check("(3e) the written intent carries a real, hex deploySha read from this checkout's OWN dist stamp",
+    successIntent && typeof successIntent.deploySha === "string" && /^[0-9a-f]{7,40}$/i.test(successIntent.deploySha));
+  check("(3e) exit was NOT called synchronously (it's scheduled 300ms out, after this call already returned)",
+    exitCalledForSuccess === false);
+  restart.clearRestartIntent();
 
   // --- (4) boot replay seam: replaying the intent's pending snapshot onto a resumed pty preserves FIFO order ---
   // A minimal stand-in for the PTY host's FIFO seam: a freshly resumed pty is not-ready, so every

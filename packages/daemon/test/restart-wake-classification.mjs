@@ -51,7 +51,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { PLATFORM_PROJECT_NAME } = await import("../dist/platform/seed.js");
-const { isNoOpManagerWake, extractCommitShas } = await import("../dist/orchestration/restart.js");
+const { isNoOpManagerWake, extractCommitShas, announcesDeploy } = await import("../dist/orchestration/restart.js");
 // Card 062fa934, Code Review CRITICAL — resumeFleetOnBoot must never read the real, unmocked
 // currentDeployStaleness() in this test corpus; see _deploy-staleness-fixture.mjs's own doc.
 const { CLEAN_STALENESS } = await import("./_deploy-staleness-fixture.mjs");
@@ -109,6 +109,11 @@ try {
   check("(0) extractCommitShas: pulls a SHA, lower-cased + de-duped, ignores non-hex words",
     JSON.stringify(extractCommitShas("deploy fix ABC1234f for issue ABC1234f — daemon merged")) === JSON.stringify(["abc1234f"]));
   check("(0) extractCommitShas: no SHA in plain prose → []", extractCommitShas("routine version sync, no hash here").length === 0);
+  check("(0) announcesDeploy: 'COMPLETE + DEPLOYED' phrasing → true", announcesDeploy("Bugfix COMPLETE + DEPLOYED (abc1234f)") === true);
+  check("(0) announcesDeploy: 'daemon restarted' phrasing → true", announcesDeploy("restarted the daemon; abc1234f is live") === true);
+  check("(0) announcesDeploy: a green CI run, no deploy language → false (the 2026-08-23 false-positive shape)",
+    announcesDeploy("CI is green for commit abc1234f. Merge is queued; nothing shipped yet.") === false);
+  check("(0) announcesDeploy: bare prose citing a card id with no deploy language → false", announcesDeploy("see card abc1234f for details") === false);
 
   // ============================ (1) CHEAP NO-OP WAKE vs FULL RE-CHECK ============================
   // home = the reserved "Loom Platform" project with a LIVE Lead (platform). projX = a normal project with
@@ -204,7 +209,10 @@ try {
 
   const SHA = "abc1234f";
   const intent = {
-    reason: `deploy fix for escalated issue ${SHA}`, managerSessionId: id.deployer, requestedAt: now,
+    // Card 3af8674e DoD-4: `deploySha` (never `reason`'s free prose) is what actually seeds the
+    // completion-escalation dedup window now — `reason` still carries the SAME token here so the
+    // existing (2a)/(2b) assertions below keep exercising the identical real-world phrasing.
+    reason: `deploy fix for escalated issue ${SHA}`, deploySha: SHA, managerSessionId: id.deployer, requestedAt: now,
     resume: [
       { sessionId: id.lead, role: "platform", parentSessionId: null },
       { sessionId: id.deployer, role: "manager", parentSessionId: null },
@@ -343,11 +351,80 @@ try {
   check("(2b) the response names the matched token so a wrong suppression is recoverable after the fact (DoD-3)",
     Array.isArray(dup.suppressedShas) && dup.suppressedShas.includes(SHA));
 
+  // ============ (3) DoD-3: an escalation must ACTUALLY ANNOUNCE A DEPLOY before it can be suppressed ============
+  // The 2026-08-23 false-positive specimen: an escalation citing the SAME SHA the Lead already saw, but
+  // reporting a green CI run — never actually claiming a deploy — was suppressed anyway on the bare token
+  // match. Guard: citing a delivered SHA with NO deploy-announcing language must still deliver live.
+  const noDeployTurnsBefore = q(id.affLead).length;
+  const noDeployAnnounce = sessions.platformEscalate(id.deployer, {
+    title: `CI green for commit ${SHA}`,
+    detail: `Continuous integration passed for commit ${SHA}. Merge is queued; nothing shipped yet.`,
+    severity: "info",
+  });
+  check("(3) DoD-3: an escalation citing the delivered SHA but announcing NO deploy still nudges live (not suppressed)",
+    q(id.affLead).length === noDeployTurnsBefore + 1 &&
+    q(id.affLead).some((m) => m.includes("[loom:escalation]") && m.includes(noDeployAnnounce.taskId)));
+  check("(3) DoD-3: its deliveryStatus is a genuine live turn, never 'suppressed-duplicate'",
+    noDeployAnnounce.deliveryStatus !== "suppressed-duplicate" && noDeployAnnounce.deliveryStatus !== "boarded");
+  // Positive control: the SAME SHA WITH deploy-announcing language (a different phrasing than (2a)/(2b)'s
+  // literal "COMPLETE + DEPLOYED" string) is still suppressed — proving the gate isn't keyed to one phrase.
+  const genuineDeployTurnsBefore = q(id.affLead).length;
+  const genuineDeploy = sessions.platformEscalate(id.deployer, {
+    title: `Third deploy report (${SHA})`,
+    detail: `Deployed ${SHA} to production; daemon restarted successfully.`,
+    severity: "info",
+  });
+  check("(3) DoD-3 control: a genuine deploy-completion report for the SAME SHA is still suppressed",
+    q(id.affLead).length === genuineDeployTurnsBefore && genuineDeploy.deliveryStatus === "suppressed-duplicate");
+
   // Control: an escalation for a SHA the Lead has NOT seen is delivered LIVE (no regression).
   const fresh = sessions.platformEscalate(id.deployer, { title: "New unrelated regression ff00ee11", detail: "Different issue at ff00ee11.", severity: "high" });
   check("(2) a NEW-SHA escalation IS delivered live to the Lead (legitimate, un-suppressed)",
     q(id.affLead).some((m) => m.includes("[loom:escalation]") && m.includes(fresh.taskId)) &&
     fresh.deliveryStatus !== "boarded" && fresh.deliveryStatus !== "suppressed-duplicate");
+
+  // ============ (4) DoD-4: seeding never regexes intent.reason free prose for a "deploy sha" ============
+  // intent.reason names BOTH the real captured deploySha (SHA2) AND an unrelated hex-looking token
+  // (CARD_ID, the same shape as an 8-hex Loom card id) a manager might type incidentally while explaining
+  // the restart. Only SHA2 (the structurally-captured build sha) may ever seed the dedup window — CARD_ID
+  // must never suppress a later escalation just because it also appears in the reason's prose.
+  db.setProcessState(id.affLead, "exited"); // stop it competing with the fresh platform session below
+  const SHA2 = "d00dfeed12ab";
+  const CARD_ID = "3af8674eaa";
+  const affLead3 = `rwc-affLead3-${sfx}`;
+  mkSession({ id: affLead3, projId: projZ, agentId: zAg, role: "platform" });
+  const intent2 = {
+    reason: `deploy fix for card ${CARD_ID} (build ${SHA2})`,
+    deploySha: SHA2,
+    managerSessionId: affLead3, requestedAt: now,
+    resume: [{ sessionId: affLead3, role: "platform", parentSessionId: null }],
+  };
+  sessions.resumeFleetOnBoot(intent2, { resumeOne: () => true, deployStaleness: CLEAN_STALENESS });
+  await flush();
+  check("(4) the requester (platform Lead) nudge names the raw reason text (both tokens visible to a human)",
+    q(affLead3).length === 1 && q(affLead3)[0].includes(CARD_ID) && q(affLead3)[0].includes(SHA2));
+
+  // A deploy-announcing escalation citing CARD_ID (never structurally delivered) must NOT be suppressed.
+  const cardIdTurnsBefore = q(affLead3).length;
+  const cardIdCollision = sessions.platformEscalate(id.deployer, {
+    title: `Follow-up deploy report citing card ${CARD_ID}`,
+    detail: `Deployed the fix for card ${CARD_ID}; daemon restarted.`,
+    severity: "info",
+  });
+  check("(4) DoD-4: an escalation announcing a deploy but citing only the incidental prose token (CARD_ID) is NOT suppressed",
+    q(affLead3).length === cardIdTurnsBefore + 1 &&
+    q(affLead3).some((m) => m.includes("[loom:escalation]") && m.includes(cardIdCollision.taskId)) &&
+    cardIdCollision.deliveryStatus !== "suppressed-duplicate");
+
+  // Positive control: an escalation citing the REAL captured deploy sha (SHA2) with deploy language IS suppressed.
+  const sha2TurnsBefore = q(affLead3).length;
+  const sha2Dup = sessions.platformEscalate(id.deployer, {
+    title: `Second follow-up deploy report (${SHA2})`,
+    detail: `Deployed ${SHA2}; daemon restarted successfully.`,
+    severity: "info",
+  });
+  check("(4) DoD-4 control: an escalation citing the REAL structurally-captured deploy sha IS still suppressed",
+    q(affLead3).length === sha2TurnsBefore && sha2Dup.deliveryStatus === "suppressed-duplicate");
 } finally {
   db.close();
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });

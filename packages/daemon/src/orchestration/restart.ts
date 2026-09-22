@@ -9,6 +9,7 @@ import { writeJsonAtomic } from "../pty/claude-config.js";
 import { DEPLOY_PACKAGES } from "../deploy-packages.js";
 import type { CapQueuedSpawn } from "./cap-queue.js";
 import { boundedSimpleGit } from "../git/bounded.js";
+import { readBuildInfo } from "../deploy-staleness.js";
 
 const require = createRequire(import.meta.url);
 
@@ -163,6 +164,20 @@ export interface RestartIntent {
    * before: absent/false, never a crash or a misread "unknown".
    */
   supervisorCheckFailed?: boolean;
+  /**
+   * Card 3af8674e DoD-4: the REAL git sha of the code this deploy just built — read structurally from
+   * `dist/build-info.json`'s fresh "stamp" (buildDaemon, right after a green build) — never scraped from
+   * `reason`'s free text. Before this field existed, `resumeFleetOnBoot` derived the completion-escalation
+   * dedup's "delivered SHA" set by regexing ANY 7-40 hex token out of `reason` (a manager-typed string),
+   * which matches an 8-hex Loom card id just as readily as a real commit sha — a reason mentioning a card
+   * id "delivered" that id as if it were a deploy SHA, and a later escalation legitimately citing the SAME
+   * card id (routine, since both texts describe the same piece of work) collided and was wrongly
+   * suppressed (the 2026-08-23 specimen). Absent/undefined on an OLD on-disk intent (pre-this-field) or
+   * when the stamp couldn't be read — resumeFleetOnBoot then seeds an EMPTY delivered-SHA set for this
+   * deploy rather than falling back to the old prose-regex, so a missed dedup is the accepted, harmless
+   * cost (one extra turn), never a resurrected false-positive.
+   */
+  deploySha?: string;
   requestedAt: string;
 }
 
@@ -519,17 +534,35 @@ export function isNoOpManagerWake(impact: RestartWakeImpact): boolean {
 
 /**
  * Extract candidate git commit SHAs (7–40 hex chars on a word boundary) from free text (card 5907b71e
- * part 2). Used to correlate a deploy restart's `reason` (which a manager typically stamps with the
- * deployed SHA) against a later "X COMPLETE + DEPLOYED" completion escalation that names the SAME SHA —
- * so the second turn can be suppressed once the restart wake already delivered that SHA. Lower-cased +
- * de-duped. PURE + exported for the hermetic test. False positives are mild (the de-dup only fires when
- * the SAME token appears in BOTH the deploy reason and the escalation, and the durable board task is
- * always still filed), so a permissive hex match is the right trade.
+ * part 2). Used ONLY on the MATCHING side — a completion escalation's own title/detail — to find which
+ * token(s) it names, for comparison against the delivered-SHA window a restart wake seeded. Lower-cased +
+ * de-duped. PURE + exported for the hermetic test. Card 3af8674e DoD-4: this is deliberately NEVER applied
+ * to a restart's `reason` any more (the SEEDING side) — `reason` is free text a manager types, and any
+ * hex-looking token in it (a Loom card id is 8 hex chars, same shape as a short commit sha) used to be
+ * regexed out and recorded as if it were a delivered deploy SHA; see `RestartIntent.deploySha`'s own doc
+ * for the structural replacement. A permissive match stays fine here because the matching side alone can
+ * only ever produce a MISS (a redundant nudge, the safe direction), never a false suppression on its own —
+ * `announcesDeploy` (below) is the second, independent gate that closes the false-HIT direction.
  */
 export function extractCommitShas(text: string): string[] {
   const out = new Set<string>();
   for (const m of (text ?? "").matchAll(/\b[0-9a-f]{7,40}\b/gi)) out.add(m[0].toLowerCase());
   return [...out];
+}
+
+/**
+ * Whether `text` plausibly ANNOUNCES a deploy having gone live (card 3af8674e DoD-3) — distinct from
+ * merely containing a hex-looking token that happens to match a delivered deploy SHA. The 2026-08-23
+ * specimen: a completion escalation reported a green CI run (naming the SAME Loom card id the restart
+ * `reason` had also happened to name) and was suppressed anyway on that bare token collision — it never
+ * claimed a deploy at all. `platformEscalate` may only suppress a live nudge as a duplicate when the
+ * escalation's OWN text actually says a deploy/restart happened. Permissive by design (a handful of common
+ * phrasings) — a MISS here only costs a redundant nudge (the safe direction; the durable board task is
+ * filed either way), while a false HIT would wrongly swallow a genuine report. PURE + exported for the
+ * hermetic test.
+ */
+export function announcesDeploy(text: string): boolean {
+  return /\b(?:re)?deploy(?:ed|ment|s)?\b|\brestart(?:ed|ing)?\s+the\s+daemon\b|\b(?:is|now|went)\s+live\b/i.test(text ?? "");
 }
 
 export function writeRestartIntent(intent: RestartIntent): void {
@@ -731,8 +764,12 @@ function copyDirAtomic(src: string, dest: string): void {
  *
  * Also snapshots/restores packages/web/dist around the "build" step (card 0eb97fa1) — see
  * {@link snapshotWebDist} — so a failed build leaves the previously-served UI intact instead of wiped.
+ *
+ * On a green build also returns `deploySha` — `dist/build-info.json`'s freshly-written stamp, read the
+ * SAME way `deploy-staleness.ts` reads it for the running process (card 3af8674e DoD-4: a real, structural
+ * sha, never scraped from a manager's free-text restart `reason`). `null` if the stamp can't be read.
  */
-export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail: string }> {
+export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail: string; deploySha?: string | null }> {
   const root = deps.root ?? repoRoot();
   const run = deps.runStep ?? runBuildStep;
   return (async () => {
@@ -764,7 +801,8 @@ export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail:
     }
     try { discardWebDistBackup(); }
     catch (e) { console.log(`[restart] post-deploy snapshot cleanup failed (harmless): ${e instanceof Error ? e.message : String(e)}`); }
-    return { code: 0, tail: lastOut.trim().slice(-1500) };
+    const deploySha = readBuildInfo(path.join(root, "packages", "daemon", "dist")).sha;
+    return { code: 0, tail: lastOut.trim().slice(-1500), deploySha };
   })();
 }
 

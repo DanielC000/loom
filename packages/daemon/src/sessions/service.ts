@@ -47,7 +47,7 @@ import type { CodescapeSupervisor } from "../codescape/supervisor.js";
 import { resolveCodescapeLastIngested } from "../codescape/manifest.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
-import { RESTART_EXIT_CODE, isSupervised, isSupervisorProcessAlive, writeRestartIntent, clearRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, supervisorScriptChangedSince, supervisorCheckResponseFields, type RestartIntent, type RestartResumeEntry, type BuildDeps, type SupervisorLivenessResult } from "../orchestration/restart.js";
+import { RESTART_EXIT_CODE, isSupervised, isSupervisorProcessAlive, writeRestartIntent, clearRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, announcesDeploy, supervisorScriptChangedSince, supervisorCheckResponseFields, type RestartIntent, type RestartResumeEntry, type BuildDeps, type SupervisorLivenessResult } from "../orchestration/restart.js";
 import { currentDeployStaleness } from "../served-status.js";
 import type { DeployStalenessResult } from "../deploy-staleness.js";
 import { computeWakeImpact } from "../orchestration/wake-impact.js";
@@ -3430,6 +3430,8 @@ export class SessionService {
       // Card 2e84a250: the sibling stamp for a FAILED check — see RestartIntent.supervisorCheckFailed's
       // own doc for why this is a separate field rather than folding into `supervisorChanged` above.
       ...(supervisorCheck.status === "could-not-check" ? { supervisorCheckFailed: true } : {}),
+      // Card 3af8674e DoD-4 — see RestartIntent.deploySha's own doc.
+      ...(build.deploySha ? { deploySha: build.deploySha } : {}),
     });
     // Card f05e5a06 — await the merge-danger-window guard BEFORE scheduling the exit-flush timer below,
     // not concurrently with it: the restart-intent (the fleet's resumable state) is already durably
@@ -4700,7 +4702,8 @@ export class SessionService {
 
     // @decision 5907b71e — deploy SHAs named in a restart reason feed the completion-escalation dedup.
     // @decision 066d317c — recorded only for a session whose enqueued text actually named the reason.
-    const reasonShas = extractCommitShas(intent.reason);
+    // Card 3af8674e DoD-4 replaced this with the structurally-captured `intent.deploySha` — see its doc.
+    const reasonShas = intent.deploySha ? [intent.deploySha] : [];
 
     // Card 11b847e1: `intent.reason` is FREE TEXT a manager types when calling `daemon_restart` — unlike
     // RESTART_ORIGIN_AGENT/UNKNOWN (bounded, identity-free by construction), a reason can name a project,
@@ -8509,8 +8512,13 @@ export class SessionService {
       // daemon-restart wake is a duplicate turn; suppress only the LIVE nudge (board task still files).
       // @decision 066d317c — deliveryStatus must say "suppressed-duplicate", never "boarded": a sender
       // reading "boarded" can't tell "nobody is watching" from "someone is, we chose not to interrupt".
-      const escShas = extractCommitShas(`${input.title} ${input.detail}`);
-      const matchedShas = this.deployShasAlreadyDelivered(liveLead.id, escShas);
+
+      // Card 3af8674e DoD-3 — a bare token match is not enough: the escalation's OWN text must actually
+      // announce a deploy, or a report that merely happens to name the same token (e.g. a green CI run
+      // citing the same card id the restart reason also named) gets wrongly suppressed.
+      const escText = `${input.title} ${input.detail}`;
+      const escShas = extractCommitShas(escText);
+      const matchedShas = announcesDeploy(escText) ? this.deployShasAlreadyDelivered(liveLead.id, escShas) : [];
       if (matchedShas.length > 0) {
         deliveryStatus = "suppressed-duplicate";
         suppressedShas = matchedShas;
