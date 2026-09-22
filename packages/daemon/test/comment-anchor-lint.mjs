@@ -1055,6 +1055,59 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   }
 }
 
+// --- collidingRecords.verified — a verified decisions/adr <-> investigations cross-reference is exempted
+// from count/items but still surfaced (card b8ae239e) --------------------------------------------------
+
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-colliding-verified-"));
+  try {
+    fs.mkdirSync(path.join(dir, "docs", "adr"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "docs", "decisions"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "docs", "investigations", "dddddddd-fourth-collider"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "docs", "investigations", "eeeeeeee-fifth-collider"), { recursive: true });
+
+    const ddddddddDarkPath = "docs/investigations/dddddddd-fourth-collider/findings.md";
+    // dddddddd: the winner's OWN text cites its dark investigations sibling's exact repo-relative path —
+    // a DELIBERATE "See also" pointer, not an accidental duplicate. Must be exempted.
+    fs.writeFileSync(path.join(dir, "docs", "decisions", "dddddddd-winner.md"),
+      `# dddddddd\n\nSee also the fuller write-up at \`${ddddddddDarkPath}\`.\n`);
+    fs.writeFileSync(path.join(dir, "docs", "investigations", "dddddddd-fourth-collider", "findings.md"),
+      "# dddddddd (investigations, dark by store precedence)\n");
+
+    // eeeeeeee: SAME shape (decisions winner + investigations dark) but the winner's text does NOT cite
+    // the dark path — an accidental-looking pairing, must stay flagged (the predicate is per-instance
+    // verified citation, never store shape alone).
+    fs.writeFileSync(path.join(dir, "docs", "decisions", "eeeeeeee-winner.md"),
+      "# eeeeeeee\n\nNo mention of its sibling anywhere in this text.\n");
+    fs.writeFileSync(path.join(dir, "docs", "investigations", "eeeeeeee-fifth-collider", "findings.md"),
+      "# eeeeeeee (investigations, dark by store precedence)\n");
+
+    const report = computeReport(dir, { minLines: 15 });
+    const countById = Object.fromEntries(report.collidingRecords.items.map((c) => [c.id, c]));
+    const verifiedById = Object.fromEntries(report.collidingRecords.verified.items.map((c) => [c.id, c]));
+
+    check("collidingRecords.verified: a winner that CITES its dark investigations sibling's path is "
+      + "excluded from count/items",
+      !("dddddddd" in countById));
+    check("collidingRecords.verified: that same verified pairing IS surfaced under .verified, not dropped",
+      verifiedById.dddddddd?.winnerPath === "docs/decisions/dddddddd-winner.md"
+      && verifiedById.dddddddd?.darkPaths.length === 1
+      && verifiedById.dddddddd.darkPaths[0] === ddddddddDarkPath);
+    check("collidingRecords.verified: the SAME store-shape without a citation stays flagged in count/items "
+      + "(the predicate is per-instance verified citation, never store shape alone)",
+      countById.eeeeeeee?.winnerPath === "docs/decisions/eeeeeeee-winner.md"
+      && !("eeeeeeee" in verifiedById));
+    check("collidingRecords: count matches items.length and excludes both verified entries",
+      report.collidingRecords.count === report.collidingRecords.items.length
+      && report.collidingRecords.count === 1); // only eeeeeeee — dddddddd is exempted
+    check("collidingRecords.verified: count matches its own items.length",
+      report.collidingRecords.verified.count === report.collidingRecords.verified.items.length
+      && report.collidingRecords.verified.count === 1); // only dddddddd
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
 // --- bareCommitAnchors (card a2fc4031) -------------------------------------------------------------
 
 {

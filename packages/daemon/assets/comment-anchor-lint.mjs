@@ -1040,6 +1040,17 @@ export function findCollidingRecords(repoRoot) {
   return colliding;
 }
 
+// @decision b8ae239e — do not exempt a decisions/adr + investigations collision by STORE SHAPE alone; the
+// winner must CITE its dark sibling's exact path in its own text, or the collision stays flagged.
+function isVerifiedInvestigationCrossReference(repoRoot, item) {
+  if (!FLAT_STORES.some((store) => item.winnerPath.startsWith(`docs/${store}/`))) return false;
+  if (item.darkPaths.length === 0) return false;
+  if (!item.darkPaths.every((p) => p.startsWith("docs/investigations/"))) return false;
+  let winnerText;
+  try { winnerText = fs.readFileSync(path.join(repoRoot, item.winnerPath), "utf8"); } catch { return false; }
+  return item.darkPaths.every((p) => winnerText.includes(p));
+}
+
 function walkSourceFiles(repoRoot) {
   const files = [];
   const walk = (dir) => {
@@ -1126,7 +1137,9 @@ export function computeReport(repoRoot, opts = {}) {
   const recordIdSet = new Set(records.map((r) => r.id));
   const anchorIdSet = new Set(allAnchors.map((a) => a.id));
   const oversizedRecords = findOversizedRecords(records, PER_RECORD_MAX_BYTES);
-  const collidingRecords = findCollidingRecords(repoRoot);
+  const allCollidingRecords = findCollidingRecords(repoRoot);
+  const verifiedCollidingRecords = allCollidingRecords.filter((item) => isVerifiedInvestigationCrossReference(repoRoot, item));
+  const collidingRecords = allCollidingRecords.filter((item) => !isVerifiedInvestigationCrossReference(repoRoot, item));
   const missingDoNotRecords = findRecordsMissingDoNot(repoRoot, records);
 
   const unanchoredLong = allBlocks.filter((b) => b.length >= minLines && b.anchorIds.length === 0);
@@ -1192,6 +1205,13 @@ export function computeReport(repoRoot, opts = {}) {
     collidingRecords: {
       count: collidingRecords.length,
       items: collidingRecords,
+      // Card b8ae239e: a decisions/adr + investigations collision whose winner explicitly cites its dark
+      // sibling's path is a verified, deliberate pairing — excluded from `count`/`items` above (it is not
+      // the `ccb407eb` harm shape) but still surfaced here, never silently dropped.
+      verified: {
+        count: verifiedCollidingRecords.length,
+        items: verifiedCollidingRecords,
+      },
     },
     missingDoNotRecords: {
       count: missingDoNotRecords.length,
