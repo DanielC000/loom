@@ -102,6 +102,9 @@ const scratchCwd = fs.mkdtempSync(path.join(os.tmpdir(), "loom-codex-mcp-reach-c
 // must carry the SAME override itself, or it wedges on codex's own "Update available!" dialog whenever a
 // newer release is genuinely published, exactly as it did pre-fix (see codex-host.ts's
 // CODEX_UPDATE_CHECK_OVERRIDE_ARGS for the measured evidence this key/value pair suppresses it).
+// Card e6eb2cb9 (TRAP 3): captured here, before spawn, so a failure-only diagnostic dump below can tell
+// which codex session log (if any) was created DURING this run rather than left over from an earlier one.
+const runStartedAt = Date.now();
 const p = pty.spawn(
   codexBin,
   ["-a", "never", "-s", "workspace-write", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", `mcp_servers.loom_reach_probe.url="${url}"`],
@@ -134,10 +137,80 @@ try { p.kill(); } catch { /* already exited */ }
 await app.close();
 db.close();
 
-check("trust dialog was reached and answered", trustAnswered || buf.length === 0 /* already-trusted from a prior run is also fine */);
-check("daemon's own inbound-MCP log recorded a real 'initialize' request", inboundLog.some((l) => l.includes("method=initialize")));
-check("daemon's own inbound-MCP log recorded 'notifications/initialized' (handshake completed)", inboundLog.some((l) => l.includes("method=notifications/initialized")));
-check("daemon's own inbound-MCP log recorded a real 'tools/list' request (tool enumeration attempted)", inboundLog.some((l) => l.includes("method=tools/list")));
+// Card e6eb2cb9 (TRAP 1): "already-trusted from a prior run" is an ACCEPTED pass condition (buf.length ===
+// 0), not just a caveat — so a FAILURE here means BOTH disjuncts failed: trustAnswered is false AND
+// buf.length !== 0, i.e. codex emitted non-empty output that was NOT the trust prompt. That points at a
+// boot error, not trust state — say so explicitly in the failure label so a later reader (or a gate's own
+// "[cleanup] config.toml unchanged" line, which merely restates the OTHER disjunct and is not the cause)
+// can never again be mistaken for the explanation.
+const trustPrecondition = trustAnswered || buf.length === 0;
+check(
+  trustPrecondition
+    ? "trust dialog was reached and answered"
+    : `trust dialog was reached and answered — FAILED: trustAnswered=false AND buf.length=${buf.length} (!== 0), i.e. codex emitted non-empty output that was not the trust prompt (boot error, not unanswered trust state)`,
+  trustPrecondition,
+);
+// Card e6eb2cb9 (TRAP 2): these three are all downstream of codex completing boot (the precondition
+// above) — an assertion downstream of a failed precondition is not independent evidence, so never size a
+// fix from "4 failures". SKIP (not FAIL) them when the precondition itself failed, so the failure count
+// reflects the number of real signals.
+if (trustPrecondition) {
+  check("daemon's own inbound-MCP log recorded a real 'initialize' request", inboundLog.some((l) => l.includes("method=initialize")));
+  check("daemon's own inbound-MCP log recorded 'notifications/initialized' (handshake completed)", inboundLog.some((l) => l.includes("method=notifications/initialized")));
+  check("daemon's own inbound-MCP log recorded a real 'tools/list' request (tool enumeration attempted)", inboundLog.some((l) => l.includes("method=tools/list")));
+} else {
+  console.log("SKIP  (precondition) daemon's own inbound-MCP log recorded a real 'initialize' request — trust-dialog precondition failed above; not independent evidence");
+  console.log("SKIP  (precondition) daemon's own inbound-MCP log recorded 'notifications/initialized' (handshake completed) — trust-dialog precondition failed above; not independent evidence");
+  console.log("SKIP  (precondition) daemon's own inbound-MCP log recorded a real 'tools/list' request (tool enumeration attempted) — trust-dialog precondition failed above; not independent evidence");
+}
+
+// Card e6eb2cb9 (TRAP 3, instrumentation only — not a repro hunt): on a FAILING run, capture what's
+// actually available to diagnose it — this run's own accumulated pty output, plus any codex session log
+// (rollout-*.jsonl under the shared ~/.codex/sessions) created during this run's window. Scoped to the
+// failure path deliberately: a previous worker captured a PASSING standalone run's buf and it was
+// necessarily uninformative (nothing to explain). Zero-cost on a pass; on a fail, this is what lets the
+// next occurrence arrive with the evidence already attached instead of perishing with the process.
+if (failures > 0) {
+  console.log(`\n[diag] FAILURE CAPTURE — this run's raw accumulated pty output (${buf.length} chars):\n${buf}`);
+  const sessionsRoot = path.join(os.homedir(), ".codex", "sessions");
+  const freshRolloutFiles = [];
+  try {
+    for (const year of fs.readdirSync(sessionsRoot)) {
+      const yearDir = path.join(sessionsRoot, year);
+      let months = [];
+      try { months = fs.readdirSync(yearDir); } catch { continue; }
+      for (const month of months) {
+        const monthDir = path.join(yearDir, month);
+        let days = [];
+        try { days = fs.readdirSync(monthDir); } catch { continue; }
+        for (const day of days) {
+          const dayDir = path.join(monthDir, day);
+          let files = [];
+          try { files = fs.readdirSync(dayDir); } catch { continue; }
+          for (const file of files) {
+            if (!file.endsWith(".jsonl")) continue;
+            const filePath = path.join(dayDir, file);
+            let stat;
+            try { stat = fs.statSync(filePath); } catch { continue; }
+            if (stat.mtimeMs >= runStartedAt) freshRolloutFiles.push(filePath);
+          }
+        }
+      }
+    }
+  } catch { /* sessions root missing or unreadable — nothing to scan */ }
+  if (freshRolloutFiles.length === 0) {
+    console.log(`[diag] no codex session log (rollout-*.jsonl under ${sessionsRoot}) was created during this run's window (since ${new Date(runStartedAt).toISOString()}) — codex never reached the point of writing one.`);
+  } else {
+    for (const filePath of freshRolloutFiles) {
+      console.log(`[diag] codex session log created during this run: ${filePath}`);
+      try {
+        console.log(fs.readFileSync(filePath, "utf8"));
+      } catch (e) {
+        console.log(`[diag] could not read ${filePath}: ${e.message}`);
+      }
+    }
+  }
+}
 
 // --- md5-diff-disclose (structural, mirrors the probe's own manual remediation) ------------------------
 const configAfter = (() => { try { return fs.readFileSync(CONFIG_PATH, "utf8"); } catch { return ""; } })();
