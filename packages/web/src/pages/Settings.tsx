@@ -1766,6 +1766,8 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
   };
 
   // Card 7fba8d90: re-derive the Name from the newly-picked preset ONLY while it is still preset-derived.
+  // @decision 2790ce05 — do NOT extend this reset to host/secret/clientId/clientSecret: the Name is the
+  // only field with a preset default to revert to, so a reset there destroys user-typed input outright.
   const selectMode = (m: ConnectorMode) => {
     setMode(m);
     setLocalErr(null);

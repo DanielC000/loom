@@ -106,3 +106,57 @@ test("a preset switch preserves a Name the USER typed, and resumes preset defaul
   await pickPreset(page, "SonarQube");
   await expect(name, "a whitespace-only Name is not user-owned").toHaveValue(PRESET_NAME.SonarQube);
 });
+
+// Card 2790ce05 asked whether `host`, `secret` and `clientId` should ALSO reset on a preset switch, the
+// way the Name now does. The answer is NO for every one of them, and this test pins that decision so the
+// next reader of 7fba8d90 cannot "finish the job" by extending the Name fix across the form.
+//
+// The Name fix keyed on `nameTouched` — preset-DERIVED until the user types, then user-owned. That
+// discriminator cannot be reused here, because it has nothing to revert TO: `setName(CONNECTOR_PRESET_NAMES[m])`
+// is the ONLY programmatic write to any field in this form, so a host or a credential is user-typed 100% of
+// the time. Clearing one would therefore be a pure destruction of the user's unfinished input — the exact
+// thing this project has a standing rule against — to remove a confusion that, unlike the Name bug, was
+// never disguised in the first place. Full per-field reasoning: docs/decisions/2790ce05-*.md.
+//
+// Every assertion below is on `input.value`, for the same reason the Name spec above gives.
+test("host and credentials PERSIST across a preset switch — the decided behaviour of card 2790ce05", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`preset-creds-${Date.now()}`);
+  await openNewConnectionForm(page, loomDaemon.baseURL, project.id);
+
+  // --- clientId / clientSecret: Google Analytics ⇄ Custom+oauth2 ---------------------------------
+  // Both presets mean the same thing by these: one OAuth app the user registered themselves. Carrying
+  // them over is help, not a bug.
+  await field(page, "Client ID").fill("1234.apps.googleusercontent.com");
+  await field(page, "Client secret").fill("GOCSPX-preset-persistence");
+
+  await pickPreset(page, "Custom");
+  // `clientId`/`clientSecret` only render under Custom once the scheme is oauth2.
+  await field(page, "Auth scheme").selectOption("oauth2");
+  await expect(field(page, "Client ID"), "a typed Client ID survives Google Analytics → Custom")
+    .toHaveValue("1234.apps.googleusercontent.com");
+  await expect(field(page, "Client secret"), "a typed Client secret survives Google Analytics → Custom")
+    .toHaveValue("GOCSPX-preset-persistence");
+
+  // --- host + secret: SonarQube ⇄ Custom ---------------------------------------------------------
+  // Both presets mean "a bare hostname" and "an opaque bearer credential for that host" — the same
+  // argument, so the same answer. (Google Analytics never renders Host at all: it submits the fixed
+  // GA_PRESET_HOST literal, so `host` is only ever visible across these two.)
+  await pickPreset(page, "SonarQube");
+  await field(page, "Host").fill("sonarqube.mycompany.com");
+  await field(page, "User token").fill("squ_preset_persistence_token");
+
+  await pickPreset(page, "Custom");
+  await expect(field(page, "Host"), "a typed Host survives SonarQube → Custom")
+    .toHaveValue("sonarqube.mycompany.com");
+  // The scheme is still oauth2 from above; `secret` renders under api-key/bearer, where it is labelled
+  // "Secret" rather than SonarQube's "User token" — one state field behind two labels.
+  await field(page, "Auth scheme").selectOption("api-key");
+  await expect(field(page, "Secret"), "a typed token survives SonarQube → Custom, relabelled 'Secret'")
+    .toHaveValue("squ_preset_persistence_token");
+
+  // And switching back is lossless too — nothing was consumed or cleared on the way out.
+  await pickPreset(page, "SonarQube");
+  await expect(field(page, "Host"), "Host is still intact back on SonarQube").toHaveValue("sonarqube.mycompany.com");
+  await expect(field(page, "User token"), "the token is still intact back on SonarQube")
+    .toHaveValue("squ_preset_persistence_token");
+});
