@@ -84,9 +84,14 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
   output (as before). **`LOOM_LOG_MESSAGE_CONTENT` (default OFF, card `16c93a50`):** this log is shared
   across every tenant on the host, so message CONTENT (a raw excerpt of session/agent text) is redacted to
   a length+hash signature (length only below a minimum excerpt length — see `REDACTED_EXCERPT_MIN_HASH_LEN`,
-  `pty/host.ts`; a 32-bit hash of too short an excerpt is itself brute-forcible) at the handful of
-  diagnostics that would otherwise quote it — length/hash diagnostics themselves (`submit-write`/
-  `prompt-echo`/`prompt-mismatch`) are unaffected either way. Set
+  `pty/host.ts`; a 32-bit hash of too short an excerpt is itself brute-forcible) at every content-bearing
+  diagnostic that routes through the `redactedExcerpt` chokepoint — `submit-write`/`prompt-mismatch`, and
+  (card `374c21b2`) `prompt-echo`'s displayed hash and the GIVE-UP RECOVERY exhausted-budget line; their
+  own underlying signatures used for real cross-generation matching stay full-fidelity, only the DISPLAY
+  is gated. **`[pty-write]`, the byte/call-sequence log at the real `pty.write()` call sites, does NOT
+  route through this chokepoint** — it unconditionally hashes what it writes, including a single chunk
+  that covers an entire write ≤1024 chars (i.e. most real writes); a known, tracked, still-open residual
+  — do not read this note as saying that exposure is closed. Set
   `LOOM_LOG_MESSAGE_CONTENT=1` in the daemon's own env (e.g. `<LOOM_HOME>/.env`) to opt this host back into
   raw content for local debugging — never flip it in code; see `paths.ts`'s `isLogMessageContentEnabled`.
   Tracks its PID (+ port) at `<LOOM_HOME>/daemon-supervisor.pid`, best-effort-removed

@@ -6239,8 +6239,14 @@ export class PtyHost {
             // contradiction against the CONFIRMED line just above it in the log.
             const ambiguousMatch = [...live.ambiguousDispatches.values()].some((e) => e.len === sigReported.len && e.hash === sigReported.hash)
               || [...live.retiredGiveUpSignatures.values()].some((sigs) => sigs.some((e) => e.len === sigReported.len && e.hash === sigReported.hash));
+            // Card 374c21b2: the PRINTED reportedHash/writtenHash used to inline sigReported.hash/
+            // sigWritten.hash directly — an un-gated fnv1a32 of the FULL prompt text, brute-forcible for a
+            // short prompt (card 8b13a61e). Routed the DISPLAY only through the same redactedExcerpt
+            // chokepoint every other content-bearing diagnostic in this file uses; sigReported/sigWritten
+            // themselves are UNCHANGED below (ambiguousMatch, recentReportedTurns, detectComposerAccumulation
+            // all still need the real, full-fidelity hash to keep matching short text correctly).
             // eslint-disable-next-line no-console
-            console.log(`[prompt-echo] ${sessionId} gen=${live.submitGeneration} byteIdentical=${hook.prompt === live.lastPrompt} reportedLen=${hook.prompt.length} writtenLen=${(live.lastPrompt ?? "").length} reportedHash=${sigReported.hash} writtenHash=${sigWritten.hash} ambiguousMatch=${ambiguousMatch}`);
+            console.log(`[prompt-echo] ${sessionId} gen=${live.submitGeneration} byteIdentical=${hook.prompt === live.lastPrompt} reportedLen=${hook.prompt.length} writtenLen=${(live.lastPrompt ?? "").length} reportedHash=${redactedExcerpt(hook.prompt)} writtenHash=${redactedExcerpt(live.lastPrompt ?? "")} ambiguousMatch=${ambiguousMatch}`);
             // @decision d005f55b — DoD-2: snapshot the prior RECORDED reported entry before this
             // generation's own push just below, so "prior" never means the entry this same hook is about
             // to add for itself; pushed unconditionally (match or mismatch alike).
@@ -9084,12 +9090,12 @@ export class PtyHost {
       const requeues = (m.giveUpRequeues ?? 0) + 1;
       if (requeues > GIVE_UP_REQUEUE_LIMIT) {
         // Card d4f60cc1: this line is now durably captured (daemon stdout is teed to a rotated file), so
-        // it can no longer carry message CONTENT the way a console-only line safely could — log a
-        // content-free signature (len+hash, same shape `textSignature` already gives prompt-echo) instead
-        // of a text preview.
-        const sig = textSignature(m.text);
+        // it can no longer carry message CONTENT the way a console-only line safely could. Card 374c21b2:
+        // the original fix here (a bare len+hash via textSignature) was itself brute-forcible for a short
+        // message (card 8b13a61e) — routed through the same redactedExcerpt chokepoint every other
+        // content-bearing diagnostic in this file uses instead of a standalone textSignature call.
         // eslint-disable-next-line no-console
-        console.error(`[submit] ${sessionId} GIVE-UP RECOVERY: message ${m.id} (${sig.len} chars, hash=${sig.hash}) exhausted its requeue budget (${GIVE_UP_REQUEUE_LIMIT}) after repeated give-ups — handing off to onGiveUpExhausted (${m.onGiveUpExhausted ? "wired" : "none — non-durable entry, nothing further to preserve"}) instead of a bare drop`);
+        console.error(`[submit] ${sessionId} GIVE-UP RECOVERY: message ${m.id} (${m.text.length} chars, ${redactedExcerpt(m.text)}) exhausted its requeue budget (${GIVE_UP_REQUEUE_LIMIT}) after repeated give-ups — handing off to onGiveUpExhausted (${m.onGiveUpExhausted ? "wired" : "none — non-durable entry, nothing further to preserve"}) instead of a bare drop`);
         // CR follow-up (card ccb407eb, finding [7]): a give-up-exhausted fault must never break GIVE-UP
         // RECOVERY itself, but swallowing it SILENTLY would also eat a deliberately-loud M1/M2 invariant
         // throw from deep inside handleGiveUpExhausted's re-mint path (enqueueStdin → submit). Log it.
