@@ -351,19 +351,29 @@ function decisionsForPath(repoRoot: string, rel: string): { mode: "path"; error:
  * Card 2b2d9a47: `skippedFiles` names every file this call's own index build could NOT scan
  * (MAX_FILE_BYTES) — a non-empty list means `orphan:true` here is NOT a proven absence, only "not found in
  * what was scanned"; a caller relying on `orphan` should treat it as unverified until it independently
- * confirms (e.g. `git grep`) that none of `skippedFiles` cite this id. */
+ * confirms (e.g. `git grep`) that none of `skippedFiles` cite this id.
+ * Card 2c387896: `orphan:true` here means only "not anchored+recorded in this project's own repoPath" —
+ * `scopeNote` (below) discloses that on every orphan result instead of leaving it implicit. */
 function decisionsForId(repoRoot: string, ns: AnchorNs, id: string) {
   const record = resolveRecordMeta(repoRoot, ns, id);
   const { index, skippedFiles } = buildAnchorIndex(repoRoot);
   const anchoredIn = index.get(`${ns}:${id}`) ?? [];
+  const orphan = !record || anchoredIn.length === 0;
   return {
     mode: "record" as const,
     ns,
     id,
     record: record ? { path: record.rel, title: record.title } : null,
     anchoredIn,
-    orphan: !record || anchoredIn.length === 0,
+    orphan,
     skippedFiles,
+    ...(orphan
+      ? {
+          scopeNote:
+            "searched only THIS project's own repoPath — an id anchored+recorded in a DIFFERENT Loom " +
+            "project would also report orphan:true here; this is not proof the id doesn't exist anywhere",
+        }
+      : {}),
   };
 }
 
@@ -462,11 +472,14 @@ export function registerDecisionTools(server: McpServer, resolveRepoRoot: () => 
         "(e.g. \"sha:c70a5e0e\") -> the SAME reverse lookup on a verified-commit anchor instead (an " +
         "unverifiable sha reports record:null, exactly like a bare id with no card record — it is never " +
         "silently treated as resolved) — either form returns {ns, id, record, anchoredIn: [{file,line}...], " +
-        "orphan, skippedFiles} (orphan:true if nothing cites this id, OR if the id has no resolvable record " +
-        "but IS cited somewhere — check both `record` and `anchoredIn` to tell which; skippedFiles names " +
-        "every file this call could NOT scan for size — card 2b2d9a47 — a non-empty list means `orphan` is " +
-        "NOT a proven absence, only \"not found in what was scanned\": double-check with `git grep` before " +
-        "trusting orphan:true when skippedFiles is non-empty); " +
+        "orphan, skippedFiles, scopeNote?} (orphan:true if nothing cites this id, OR if the id has no " +
+        "resolvable record but IS cited somewhere — check both `record` and `anchoredIn` to tell which; " +
+        "skippedFiles names every file this call could NOT scan for size — card 2b2d9a47 — a non-empty " +
+        "list means `orphan` is NOT a proven absence, only \"not found in what was scanned\": double-check " +
+        "with `git grep` before trusting orphan:true when skippedFiles is non-empty; card 2c387896: this " +
+        "call ONLY ever searches THIS project's own repoPath, never another project's — orphan:true present " +
+        "alongside `scopeNote` means the id is not anchored+recorded HERE, which is not proof it doesn't " +
+        "exist in a different Loom project); " +
         "a path-shaped string (contains \"/\" or \"\\\\\", or ends in a file extension) -> every anchor found " +
         "in that ONE file, each item carrying {ns, id, line, record, orphan}, plus a file-level " +
         "`skippedForSize` (true means the file exceeded the byte cap and was NOT scanned at all — " +
