@@ -262,10 +262,12 @@ export interface Profile {
   /**
    * Opt-in CLI-harness selection (multi-harness epic `df1f94b0`, Phase 1, card `353f6dc4`): which
    * vendor CLI a session under this rig spawns as. Default absent = `"claude"` (today's only harness,
-   * byte-identical spawn) — fully additive, worker-role-only for now (Phase 2, card `5a8236b1`, will add
-   * an AGENT-level override beside `model` that resolves through this same profile field, not a rival
-   * storage site). HUMAN-set only (Profiles UI / REST), like role/browserTesting: selecting which BINARY
-   * gets spawned is the same trust class as `gateCommand` — NEVER exposed via an agent MCP tool.
+   * byte-identical spawn) — fully additive. Lives HERE on the Profile, same tier as `model` (the `Agent`
+   * interface carries neither field — both are reached only via `agent.profileId`). Phase 2 (card
+   * `5a8236b1`) considered and deliberately did NOT add a rival agent-level override: `harness` is
+   * human-REST/UI-only either way, so a second surface for one setting bought little. HUMAN-set only
+   * (Profiles UI / REST), like role/browserTesting: selecting which BINARY gets spawned is the same
+   * trust class as `gateCommand` — NEVER exposed via an agent MCP tool.
    */
   harness?: "claude" | "codex";
 }
