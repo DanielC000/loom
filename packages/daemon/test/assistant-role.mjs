@@ -178,6 +178,18 @@ try {
   const plainMap = buildMcpServers({ sessionId: "s1", port: 4317, role: undefined });
   check("(d) buildMcpServers(plain) is byte-identical (loom-tasks only — no orchestration)", JSON.stringify(plainMap) === JSON.stringify({ "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" } }));
 
+  // Card 9e13ac5d: the companion's loom-orchestration mount sets alwaysLoad:true (Claude Code never defers
+  // its tools behind tool search) — closing the outbound-silence hole, since reply-watch is PULL-only with
+  // no in-turn backstop for a missed pre-warm. Assistant-ONLY: loom-tasks and every other role's
+  // loom-orchestration mount must stay BYTE-IDENTICAL to before this card.
+  check("(d) buildMcpServers(assistant) loom-orchestration mount sets alwaysLoad:true", asstMap["loom-orchestration"]?.alwaysLoad === true);
+  check("(d) buildMcpServers(assistant) loom-tasks mount is UNCHANGED — alwaysLoad never widened beyond loom-orchestration", asstMap["loom-tasks"]?.alwaysLoad === undefined);
+  const mgrMap = buildMcpServers({ sessionId: "s1", port: 4317, role: "manager" });
+  const workerMap = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker" });
+  const expectedOrchMount = { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" }, "loom-orchestration": { type: "http", url: "http://127.0.0.1:4317/mcp-orch/s1" } };
+  check("(d) buildMcpServers(manager) is BYTE-IDENTICAL to before card 9e13ac5d — no alwaysLoad outside assistant", JSON.stringify(mgrMap) === JSON.stringify(expectedOrchMount));
+  check("(d) buildMcpServers(worker) is BYTE-IDENTICAL to before card 9e13ac5d — no alwaysLoad outside assistant", JSON.stringify(workerMap) === JSON.stringify(expectedOrchMount));
+
   // =================== (e) resolveRole admits assistant with a MINIMAL surface ===================
   // Stub db.getSession so resolveRole reads the role; companion hooks bind ONE session id (the Phase-0 gate).
   const stubDb = { getSession: (id) => ({ role: id === "asst-sess" ? "assistant" : id === "mgr-sess" ? "manager" : null }) };

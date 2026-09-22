@@ -1705,7 +1705,14 @@ export function buildMcpServers(o: {
     [LOOM_TASKS_SERVER_ID]: { type: "http", url: `http://127.0.0.1:${o.port}/mcp/${o.sessionId}` },
   };
   if (wantsOrch) {
-    mcpServers[LOOM_ORCHESTRATION_SERVER_ID] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-orch/${o.sessionId}` };
+    mcpServers[LOOM_ORCHESTRATION_SERVER_ID] = {
+      type: "http",
+      url: `http://127.0.0.1:${o.port}/mcp-orch/${o.sessionId}`,
+      // @decision 9e13ac5d — assistant-ONLY, never manager/worker/loom-tasks: unlike a deferred-tool
+      // round-trip elsewhere, a missed pre-warm here is TOTAL outbound silence (reply-watch is PULL-only,
+      // no in-turn backstop) — do not widen without a fresh decision.
+      ...(o.role === "assistant" ? { alwaysLoad: true } : {}),
+    };
   }
   if (wantsPlatform) {
     mcpServers[LOOM_PLATFORM_SERVER_ID] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-platform/${o.sessionId}` };
