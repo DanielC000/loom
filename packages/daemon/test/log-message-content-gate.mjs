@@ -21,7 +21,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     [prompt-echo] reportedHash=/writtenHash= (card 374c21b2 — the DISPLAY only; sigReported/sigWritten
 //     themselves stay full-fidelity for real matching, see host.ts's own comment at the call site),
 //     [submit] GIVE-UP RECOVERY's exhausted-budget line (card 374c21b2 — replaces a standalone
-//     textSignature call that was itself brute-forcible for a short message, per card 8b13a61e).
+//     textSignature call that was itself brute-forcible for a short message, per card 8b13a61e),
+//     [prompt-mismatch-pasted-content-wrap-near-miss-excess] excessChars= (card ff871b77 — the sibling
+//     near-miss to droppedChar= above, opposite direction: 1-2 EXTRA characters, not one dropped; same
+//     disclosure posture, logged alongside the unconditional classifyExcessChars() class label).
 //   sessions/service.ts: [give-up] … PARKED head.
 // Run: 1) build daemon (pnpm build from packages/daemon), 2) node test/log-message-content-gate.mjs
 import fs from "node:fs";
@@ -96,14 +99,19 @@ try {
     const serviceSrc = stripComments(fs.readFileSync(new URL("../src/sessions/service.ts", import.meta.url), "utf8"));
     const hostCalls = (hostSrc.match(/redactedExcerpt\(/g) ?? []).length - 1; // -1 for the function's own declaration line
     const serviceCalls = (serviceSrc.match(/redactedExcerpt\(/g) ?? []).length;
-    // 11 call sites: the shared `around` helper (feeds BOTH reportedAround= and intendedAround=), the shared
+    // 12 call sites: the shared `around` helper (feeds BOTH reportedAround= and intendedAround=), the shared
     // `excerpt` helper (feeds BOTH leadingRemainder= and trailingRemainder=), sanitized-nudge, missing-tag,
     // submit-write head=, stdin-write head=, resume-mode footer= (added after manager review found
     // collapseFooter does not actually isolate a footer region — see done-report), (card b1cc4f01) the
     // pasted-content-wrap near-miss droppedChar=, (card 374c21b2) [prompt-echo]'s reportedHash= AND
-    // writtenHash= (two separate calls on one line), and [submit] GIVE-UP RECOVERY's exhausted-budget
-    // line — see done-report for the enumerating grep + per-site anchors.
-    check("(4) pty/host.ts: exactly 11 redactedExcerpt call sites", hostCalls === 11);
+    // writtenHash= (two separate calls on one line), [submit] GIVE-UP RECOVERY's exhausted-budget
+    // line, and (card ff871b77) the pasted-content-wrap near-miss-EXCESS's excessChars= — the sibling of
+    // droppedChar= above, for the opposite (insertion) shape; legitimate because excessChars is genuinely
+    // content-bearing (1-2 real characters from the session/agent text) and this site logs it alongside
+    // an unconditional, disclosure-safe class label (classifyExcessChars), exactly mirroring how
+    // droppedChar= pairs with classifyDroppedChar — see done-report for the enumerating grep + per-site
+    // anchors.
+    check("(4) pty/host.ts: exactly 12 redactedExcerpt call sites", hostCalls === 12);
     check("(4) sessions/service.ts: exactly 1 redactedExcerpt call site ([give-up] PARKED head)", serviceCalls === 1);
     // Negative control on the census itself: a nonexistent function name must find ZERO call sites, proving
     // this isn't a pattern that matches everything.

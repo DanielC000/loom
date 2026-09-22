@@ -420,6 +420,28 @@ function detectPastedContentWrapSingleCharDeficit(reported: string, intended: st
   return { droppedIndex: i, droppedChar: intended[i]! };
 }
 
+/** Card ff871b77 — sibling near-miss diagnostic to `detectPastedContentWrapSingleCharDeficit`, for the
+ *  OPPOSITE (insertion) direction: the wrap FRAMING matches the SAME id-backreferenced shape byte-for-byte
+ *  (never the frame — verified against 3 real production specimens, all with the same 4-char id shape
+ *  `b1cc4f01` already established), but the wrapped body is exactly ONE OR TWO characters LONGER than
+ *  `intended`. Bounded to 1-2 because that is the full observed population so far (n=3: two +2, one +1,
+ *  all on the gen=1 kickoff `submit()` path) — do NOT widen this to an unbounded excess on the strength of
+ *  this note; a larger excess is a structurally different, unmeasured shape (see `[prompt-mismatch-
+ *  unmatched-longer]`'s own uncharacterized-population tag, card 68459420, for that population instead).
+ *  Diagnostic only, exactly like its sibling — this does NOT suppress the "possible LOSS" notice and must
+ *  never be used to relax `isRecognizedPastedContentWrap`'s own `m[2] === intended` check. */
+function detectPastedContentWrapSmallExcess(reported: string, intended: string): { excessIndex: number, excessChars: string } | null {
+  const m = PASTED_CONTENT_WRAP_RE.exec(reported);
+  if (m === null) return null;
+  const inner = m[2]!;
+  const excessLen = inner.length - intended.length;
+  if (excessLen !== 1 && excessLen !== 2) return null;
+  let i = 0;
+  while (i < intended.length && inner[i] === intended[i]) i++;
+  if (inner.slice(i + excessLen) !== intended.slice(i)) return null;
+  return { excessIndex: i, excessChars: inner.slice(i, i + excessLen) };
+}
+
 /** Card b1cc4f01 (owner ruling, card 16c93a50 / request 0eb43216): a coarse, disclosure-safe
  *  classification of a single dropped character — logged UNCONDITIONALLY, alongside (never instead of)
  *  `redactedExcerpt(droppedChar)` through the same chokepoint every content-bearing diagnostic in this
@@ -438,6 +460,23 @@ export function classifyDroppedChar(ch: string): string {
   if (code < 0x20 || code === 0x7f) return "control";
   if (code > 0x7e) return "non-ascii";
   return "ascii-printable";
+}
+
+/** Card ff871b77 — sibling classifier to `classifyDroppedChar`, for `detectPastedContentWrapSmallExcess`'s
+ *  1-2 EXTRA characters. Same disclosure posture (never the raw excess text itself — logged only through
+ *  `redactedExcerpt`, this classifier carries the actual diagnostic value that check can't). Checks
+ *  LOCAL-DUPLICATE shape FIRST, ahead of the single-char classes below: a small insertion that exactly
+ *  repeats the `intended` text immediately before or after `excessIndex` is a structurally distinct and
+ *  more informative finding (a boundary echo) than "it happened to be whitespace" — this project's three
+ *  measured specimens (n=3) did NOT show this shape, so this arm is unexercised by real data so far, but
+ *  the check costs nothing and the classification would be actionable the first time it does. Falls back
+ *  to `classifyDroppedChar` per character, joined, only when no local-duplicate match is found. */
+export function classifyExcessChars(excessChars: string, intended: string, excessIndex: number): string {
+  const len = excessChars.length;
+  if (excessChars === intended.slice(Math.max(0, excessIndex - len), excessIndex)) return "local-duplicate-preceding";
+  if (excessChars === intended.slice(excessIndex, excessIndex + len)) return "local-duplicate-following";
+  const perChar = [...excessChars].map(classifyDroppedChar);
+  return perChar.every((c) => c === perChar[0]) ? perChar[0]! : "mixed";
 }
 
 /** @decision 4af5aefa — annotates queue age only (never suppresses/gates/reorders); disclosed count is
@@ -6411,6 +6450,18 @@ export class PtyHost {
                 // diagnostic in this file uses, for an audit trail only — never the raw character.
                 // eslint-disable-next-line no-console
                 console.log(`[prompt-mismatch-pasted-content-wrap-near-miss] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} droppedIndex=${pastedContentWrapSingleCharDeficit.droppedIndex} droppedCharClass=${classifyDroppedChar(pastedContentWrapSingleCharDeficit.droppedChar)} droppedChar=${redactedExcerpt(pastedContentWrapSingleCharDeficit.droppedChar)} — the engine's own pasted-content wrap framing matches EXACTLY (id-backreferenced, byte-for-byte), but the wrapped body is missing exactly ONE character relative to what Loom wrote. Card b1cc4f01 (measured, 6/6 specimens): Loom's own write is independently verified byte-exact via the pty-write chunk log — this is the engine's own paste round-trip dropping one character, not a Loom write defect. Still a real divergence (the wrapper-reconciliation check above correctly declines it) — this only names the shape, it does not suppress the notice.`);
+              }
+              // Card ff871b77 — sibling near-miss to the deficit above, opposite direction: the wrap FRAMING
+              // matches byte-for-byte but the body is one or two characters LONGER than what Loom wrote.
+              // Logged unconditionally, diagnostic only — never suppresses anything, never weakens the
+              // safety check above (see `detectPastedContentWrapSmallExcess`'s own doc). n=3 measured so
+              // far (two +2, one +1), all on the gen=1 kickoff path — the realistic deliverable for this
+              // shape is naming it, not fixing it (the cause is almost certainly outside this repo, in the
+              // engine's own composer round-trip, exactly like the deficit shape).
+              const pastedContentWrapSmallExcess = isPastedContentWrap ? null : detectPastedContentWrapSmallExcess(reported, intended);
+              if (pastedContentWrapSmallExcess) {
+                // eslint-disable-next-line no-console
+                console.log(`[prompt-mismatch-pasted-content-wrap-near-miss-excess] ${sessionId} gen=${live.submitGeneration} reportedLen=${reported.length} intendedLen=${intended.length} excessIndex=${pastedContentWrapSmallExcess.excessIndex} excessLen=${pastedContentWrapSmallExcess.excessChars.length} excessCharsClass=${classifyExcessChars(pastedContentWrapSmallExcess.excessChars, intended, pastedContentWrapSmallExcess.excessIndex)} excessChars=${redactedExcerpt(pastedContentWrapSmallExcess.excessChars)} — the engine's own pasted-content wrap framing matches EXACTLY (id-backreferenced, byte-for-byte), but the wrapped body is ${pastedContentWrapSmallExcess.excessChars.length} character(s) LONGER than what Loom wrote. Card ff871b77 (measured, n=3): the opposite shape to the single-character-deficit near-miss above — content ADDED, not dropped, by the engine's own paste round-trip. Still a real divergence (the wrapper-reconciliation check above correctly declines it) — this only names the shape, it does not suppress the notice.`);
               }
               // @decision 00b5066e — offset-aware reconciliation: INSERTION uses `endsWith` (not `includes`,
               // which false-matched card 68459420's unrelated population), left unbounded; OMISSION is

@@ -34,7 +34,7 @@ const tmpHome = path.join(os.tmpdir(), `loom-prompt-mismatch-${Date.now()}-${pro
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
-const { PtyHost, classifyDroppedChar } = await import("../dist/pty/host.js");
+const { PtyHost, classifyDroppedChar, classifyExcessChars } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const fakesById = new Map(); // sessionId -> fake pty ({ writes, ... }) — card 201d0d95's new scenarios need
@@ -129,6 +129,18 @@ function captureNearMissWarnings(fn) {
   const lines = [];
   const orig = console.log;
   console.log = (msg) => { if (typeof msg === "string" && msg.includes("[prompt-mismatch-pasted-content-wrap-near-miss]")) lines.push(msg); };
+  try { fn(); } finally { console.log = orig; }
+  return lines;
+}
+
+// Card ff871b77: captures the pasted-content-wrap SMALL-EXCESS near-miss diagnostic's own
+// [prompt-mismatch-pasted-content-wrap-near-miss-excess] line — its closing bracket sits after "-excess",
+// never after "-miss", so this filter never collides with captureNearMissWarnings' own substring match
+// above (same discipline as captureUnmatchedLongerWarnings vs captureMismatchWarnings, card 68459420).
+function captureExcessNearMissWarnings(fn) {
+  const lines = [];
+  const orig = console.log;
+  console.log = (msg) => { if (typeof msg === "string" && msg.includes("[prompt-mismatch-pasted-content-wrap-near-miss-excess]")) lines.push(msg); };
   try { fn(); } finally { console.log = orig; }
   return lines;
 }
@@ -513,6 +525,92 @@ try {
       host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
     });
     check("6j: NEGATIVE CONTROL — a same-length one-character substitution does NOT fire the deletion-shaped near-miss diagnostic", nearMiss6j.length === 0);
+  }
+
+  // ===== 6k. Card ff871b77 — the REAL residual shape, opposite direction from 6h: the wrap FRAMING
+  // matches EXACTLY (same id-backreferenced regex), but the wrapped body has exactly TWO EXTRA characters
+  // relative to `intended`. Measured directly off 2 of the 3 real production specimens found for this card
+  // (both +2; the third was +1, covered by scenario 6l below). POSITIVE CONTROL for
+  // `detectPastedContentWrapSmallExcess`, and THE SAFETY CASE again: naming the shape must never suppress
+  // the notice — a two-character insertion is still a real divergence. =====
+  {
+    const sid = newSession("PastedContentWrapTwoCharExcess"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "[loom:from-manager]\nPlease re-check card 1234abcd before you report back to me on this generation, thanks.";
+    const excessIndex = 30;
+    const excessChars = "XY"; // arbitrary, not a local duplicate of adjacent intended text
+    const innerWithTwoExtraChars = intended.slice(0, excessIndex) + excessChars + intended.slice(excessIndex);
+    const reported = `\n\n<pasted_content id="f5c5">\n${innerWithTwoExtraChars}\n</pasted_content id="f5c5">\n`;
+    host.enqueueStdin(sid, intended);
+    const writesBeforeMismatch = fake.writes.length;
+    const nearMiss6k = captureExcessNearMissWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6k: POSITIVE CONTROL — a wrap with exactly two extra characters fires the excess near-miss diagnostic exactly once", nearMiss6k.length === 1);
+    check("6k: it names the excess index", (nearMiss6k[0] ?? "").includes(`excessIndex=${excessIndex}`));
+    check("6k: it names the excess length", (nearMiss6k[0] ?? "").includes("excessLen=2"));
+    check("6k: it classifies the excess characters as NEITHER local-duplicate shape (arbitrary, unrelated text)",
+      (nearMiss6k[0] ?? "").includes(`excessCharsClass=${classifyExcessChars(excessChars, intended, excessIndex)}`)
+      && !(nearMiss6k[0] ?? "").includes("excessCharsClass=local-duplicate"));
+    // Card 8b13a61e (same discipline the sibling deficit test 6h relies on): a 2-char excerpt is below
+    // REDACTED_EXCERPT_MIN_HASH_LEN (8), so redactedExcerpt withholds the hash entirely — length-only.
+    check("6k: the excess characters are logged ONLY through the redactedExcerpt chokepoint (length only — below the minimum hash length), never inline", /excessChars=<redacted len=2>/.test(nearMiss6k[0] ?? ""));
+    check("6k: the raw excess characters never appear in the log line at all", !(nearMiss6k[0] ?? "").includes(JSON.stringify(excessChars)));
+    const noticeLanded6k = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("6k: THE SAFETY CASE — naming this shape never suppresses the session-facing notice (still a real, if two-character, divergence)", noticeLanded6k);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    const noticeWrite6k = fake.writes.slice(writesBeforeMismatch).join("");
+    check("6k: the notice actually reached the pty", noticeWrite6k.includes("[loom:prompt-mismatch]"));
+  }
+
+  // ===== 6l. Card ff871b77 — the SAME shape as 6k, but with exactly ONE extra character (the third real
+  // specimen found for this card was +1, not +2) — proves the detector is not hardcoded to exactly two.
+  // Also exercises the LOCAL-DUPLICATE classification arm: the inserted character exactly repeats the
+  // `intended` text immediately preceding it (a boundary-echo shape no real specimen has shown yet, but
+  // the classifier must still name it correctly when it does occur). =====
+  {
+    const sid = newSession("PastedContentWrapOneCharExcess"); SIDS.push(sid);
+    const intended = "[loom:from-manager]\nPlease re-check card 1234abcd before you report back to me on this generation, thanks.";
+    const excessIndex = 21; // intended[20] === "P" (start of "Please") — duplicate it
+    const excessChars = intended[excessIndex - 1];
+    const innerWithOneExtraChar = intended.slice(0, excessIndex) + excessChars + intended.slice(excessIndex);
+    const reported = `\n\n<pasted_content id="f5c5">\n${innerWithOneExtraChar}\n</pasted_content id="f5c5">\n`;
+    host.enqueueStdin(sid, intended);
+    const nearMiss6l = captureExcessNearMissWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6l: POSITIVE CONTROL — a wrap with exactly one extra character fires the excess near-miss diagnostic exactly once", nearMiss6l.length === 1);
+    check("6l: it names excessLen=1", (nearMiss6l[0] ?? "").includes("excessLen=1"));
+    check("6l: it classifies a boundary-echo insertion as local-duplicate-preceding", (nearMiss6l[0] ?? "").includes("excessCharsClass=local-duplicate-preceding"));
+  }
+
+  // ===== 6m. Card ff871b77 — NEGATIVE CONTROL: a wrap-shaped mismatch with THREE extra characters (not one
+  // or two — the full observed population so far) must NOT fire the small-excess near-miss diagnostic. =====
+  {
+    const sid = newSession("PastedContentWrapThreeCharExcess"); SIDS.push(sid);
+    const intended = "[loom:from-manager]\nPlease re-check card 1234abcd before you report back to me on this generation, thanks.";
+    const innerWithThreeExtraChars = intended.slice(0, 30) + "XYZ" + intended.slice(30);
+    const reported = `\n\n<pasted_content id="f5c5">\n${innerWithThreeExtraChars}\n</pasted_content id="f5c5">\n`;
+    host.enqueueStdin(sid, intended);
+    const nearMiss6m = captureExcessNearMissWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6m: NEGATIVE CONTROL — a three-character insertion does NOT fire the 1-2-char small-excess near-miss diagnostic", nearMiss6m.length === 0);
+  }
+
+  // ===== 6n. Card ff871b77 — NEGATIVE CONTROL: a same-length divergence (no excess at all — the ordinary
+  // `isPastedContentWrap` failure-to-reconcile case, e.g. a content substitution) must NOT fire the
+  // small-excess near-miss diagnostic either — it exercises the detector's own length-based gate. =====
+  {
+    const sid = newSession("PastedContentWrapNoExcess"); SIDS.push(sid);
+    const intended = "[loom:from-manager]\nPlease re-check card 1234abcd before you report back to me on this generation, thanks.";
+    const reported = `\n\n<pasted_content id="f5c5">\n${intended}\n</pasted_content id="f5c5">\n`; // clean, exact wrap
+    host.enqueueStdin(sid, intended);
+    const nearMiss6n = captureExcessNearMissWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("6n: NEGATIVE CONTROL — a clean, exact wrap (zero excess) does NOT fire the small-excess near-miss diagnostic", nearMiss6n.length === 0);
   }
 
   // ===== 7. Card 201d0d95 Q1 — POSITIVE: a mismatch must now SURFACE to the affected session itself, not
