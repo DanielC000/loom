@@ -1492,7 +1492,7 @@ const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<O
   "engine_session_rotated", "codex_auto_commit",
   // Cross-board / cross-project escalation trail
   "platform_escalate", "escalation_triaged", "audit_finding", "workspace_audit_suggestion",
-  "cross_project_message", "assistant_relay_message", "session_message",
+  "cross_project_message", "assistant_relay_message", "session_message", "session_steer_dropped",
   // Gate / merge history
   "build_gate", "build_gate_retry_attempt", "build_gate_retry", "build_gate_single_file_retry",
   "merge_request", "merge_done", "merge_rejected", "merge_cancelled", "batch_merge_forfeited", "kill_switch",

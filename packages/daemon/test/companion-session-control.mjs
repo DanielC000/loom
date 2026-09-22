@@ -319,6 +319,84 @@ try {
     // — this bare call previously sat with no finally, so an earlier throw would have skipped it (995be21f).
   }
 
+  // ============ session_steer / session_message: LIVE-but-superseded target (card c965fe76) ============
+  // A recycling predecessor stays processState:"live" until settleRecycleHandoff resolves, seconds later
+  // — so, unlike the "already exited" recycled case above, the predecessor here is STILL live and STILL
+  // busy with a queued direction while a successor already exists. Before card c965fe76, session_steer
+  // would flush that queue, enqueue into the dying predecessor, and interrupt it; this REDS on that old
+  // behavior (the queued entry must SURVIVE, not merely "an error was returned").
+  {
+    const proj = `proj-live-superseded-${randomUUID()}`;
+    const companionSess = `companion-live-superseded-${randomUUID()}`;
+    const predecessor = `target-live-superseded-old-${randomUUID()}`;
+    const successor = `target-live-superseded-new-${randomUUID()}`;
+    const { db, pty, sessions, orch } = setup(companionSess, proj);
+    seedSession(db, predecessor, proj, "worker");
+    pty.setLive(predecessor); pty.setBusy(predecessor); // still live + busy: handoff hasn't settled yet
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "session-steer", projectId: proj, mode: "act" });
+
+    // Pre-load a queued (durable) message the OLD code would have flushed+superseded — BEFORE the
+    // recycle successor is inserted (card fb5e39c3, landed on main during this card's own forward-merge,
+    // makes messageSessionAsCompanion itself refuse a live-but-superseded target, so queuing this AFTER
+    // the successor exists would never even reach the queue in the first place; queuing first mirrors the
+    // real race — the message was queued to an ordinary busy worker, which THEN got recycled underneath it).
+    const pre = sessions.messageSessionAsCompanion(predecessor, "OLD — keep going on the current plan", companionSess);
+    check("(live-superseded setup) old direction is HELD (busy predecessor) + persisted", pre.deliveryStatus === "queued");
+    check("(live-superseded setup) an undelivered durable message exists before the steer", db.listUndeliveredQueuedMessages().some((e) => e.detail.text.includes("OLD")));
+
+    // NOW recycle underneath it: the successor is inserted while the predecessor is still live+busy with
+    // the queued OLD direction — the exact race window this card's fix targets.
+    seedSession(db, successor, proj, "worker", { recycledFrom: predecessor });
+
+    pty.setOwnerText("the owner said: pivot to the hotfix instead");
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    const steerRes = await call(client, "session_steer", { target: predecessor, message: "pivot to the hotfix instead" });
+    check("session_steer (live-superseded): dropped:true, not delivered", steerRes.dropped === true);
+    check("session_steer (live-superseded): replacedBy names the real successor", steerRes.replacedBy === successor);
+    check("session_steer (live-superseded): the predecessor's queue SURVIVES — not flushed", db.listUndeliveredQueuedMessages().some((e) => e.detail.text.includes("OLD")));
+    check("session_steer (live-superseded): still on the live pty queue too, not silently flushed there either", pty.getPending(predecessor).some((t) => t.includes("OLD")));
+    check("session_steer (live-superseded): the predecessor was NOT interrupted", !pty.interrupts.includes(predecessor));
+    check("session_steer (live-superseded): the new instruction was NOT delivered to the dying predecessor", !pty.delivered.some((d) => d.id === predecessor && d.text.includes("pivot to the hotfix")));
+    // A dropped steer audits under its OWN distinct kind, never "redirect_worker" — redirect_worker is
+    // one of REPORT_RESOLVED_EVENT_KINDS, so filing it here (nothing was actually delivered) would falsely
+    // mark the target's still-open report resolved. Also never "session_message" — that's a different
+    // tool's audit trail, and a query for one must not pick up the other's drops as false positives.
+    check("session_steer (live-superseded): audits under session_steer_dropped, with replacedBy",
+      db.listEventsForWorker(predecessor).some((e) => e.kind === "session_steer_dropped" && e.detail?.replacedBy === successor));
+    // session_steer_dropped is a DURABLE_AUDIT_EVENT_KINDS member (same posture as session_message) — this
+    // is the write-time half of that: appendEvent stamps detail.projectId for durable kinds only.
+    check("session_steer (live-superseded): its session_steer_dropped event was write-time stamped with detail.projectId (DURABLE_AUDIT_EVENT_KINDS membership)",
+      db.listEventsForWorker(predecessor).some((e) => e.kind === "session_steer_dropped" && e.detail?.projectId === proj));
+    check("session_steer (live-superseded): does NOT audit under redirect_worker (would falsely resolve an awaiting-review report)",
+      !db.listEventsForWorker(predecessor).some((e) => e.kind === "redirect_worker"));
+    check("session_steer (live-superseded): its OWN drop does NOT audit under session_message either (a session_message event already exists from the setup's own ordinary queued delivery above — this checks no ADDITIONAL one carries the steer's replacedBy)",
+      !db.listEventsForWorker(predecessor).some((e) => e.kind === "session_message" && e.detail?.replacedBy === successor));
+
+    const msgRes = await call(client, "session_message", { target: predecessor, message: "status please" });
+    check("session_message (live-superseded): deliveryStatus is dropped", msgRes.deliveryStatus === "dropped");
+    check("session_message (live-superseded): replacedBy names the real successor", msgRes.replacedBy === successor);
+    check("session_message (live-superseded): still did not touch the predecessor's queue", db.listUndeliveredQueuedMessages().filter((e) => e.detail.text.includes("status please")).length === 0);
+    check("session_message (live-superseded): audits under session_message, with replacedBy",
+      db.listEventsForWorker(predecessor).some((e) => e.kind === "session_message" && e.detail?.replacedBy === successor));
+
+    // session_resume against the SAME live-but-superseded predecessor: NOT a refusal (Code Review round 2
+    // caught that SessionService.resume's hasSuccessor refusal is unreachable here — the already-live
+    // short-circuit fires first) — a structural no-op success instead, returning the existing row unchanged.
+    const resumeRes = await call(client, "session_resume", { target: predecessor });
+    check("session_resume (live-superseded): succeeds as a no-op (NOT an {error})", resumeRes.error === undefined && resumeRes.id === predecessor);
+    check("session_resume (live-superseded): no replacedBy on this success shape (unlike message/steer's decline shape)", resumeRes.replacedBy === undefined);
+    check("session_resume (live-superseded): did NOT respawn anything (pure pass-through, pty was already alive)", !pty.spawns.some((s) => s.sessionId === predecessor));
+
+    // session_stop against the same target: "benign" — proceeds and actually stops it (the accepted
+    // trade-off against the fleet-recovery fallback, not a consequence-free no-op — see the policy doc).
+    const stopRes = await call(client, "session_stop", { target: predecessor });
+    check("session_stop (live-superseded): proceeds and actually stops the predecessor", stopRes.stopped === true && pty.stops.some((s) => s.id === predecessor));
+
+    await client.close();
+    db.close();
+  }
+
   // ============ scope: read-only-granted project rejects, for ALL FOUR tools ============
   {
     const projRead = `proj-scope-ro-${randomUUID()}`;

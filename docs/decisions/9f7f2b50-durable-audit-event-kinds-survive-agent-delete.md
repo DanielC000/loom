@@ -19,7 +19,7 @@ trace"). It is **session-scoped bookkeeping** iff its only real readers are live
 it strictly during the episode (nudge/dedupe/backoff state, poll/schedule/wake mechanics) — once the
 session/agent is gone, nothing of record is lost by its disappearing.
 
-## The classification (46 of 79 `OrchestrationEventKind` members)
+## The classification (48 of 102 `OrchestrationEventKind` members as of card c965fe76 — the "46 of 79" figure this heading originally carried was ALREADY stale before that card touched it; re-measured directly against the live `DURABLE_AUDIT_EVENT_KINDS`/`ORCHESTRATION_EVENT_KIND_MEMBERSHIP` sets rather than incrementing the old number)
 
 Derived by reading every kind's own doc comment in `packages/shared/src/types.ts` plus the four existing
 kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVITY_KINDS`,
@@ -31,7 +31,10 @@ kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVIT
 - **Cross-board / cross-project escalation trail** (the event is the audit LINK to another durable
   record; losing it breaks traceability even though the target task survives): `platform_escalate`,
   `escalation_triaged`, `audit_finding`, `workspace_audit_suggestion`, `cross_project_message`,
-  `assistant_relay_message`, `session_message`.
+  `assistant_relay_message`, `session_message`, `session_steer_dropped` (card c965fe76 — a companion
+  `session_steer` that declined to act on a live-but-superseded target; same evidentiary shape as
+  `session_message`'s own sibling row for the identical condition, and must survive an agent delete for
+  the same reason).
 - **Gate / merge history** (feeds the Gates page; the historical record of what happened to code):
   `build_gate`, `build_gate_retry_attempt`, `build_gate_retry`, `build_gate_single_file_retry`,
   `merge_request`, `merge_done`, `merge_rejected`, `merge_cancelled`, `batch_merge_forfeited`,
@@ -49,9 +52,13 @@ kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVIT
   brake being released; low volume, provenance is the whole value): `question_asked`,
   `request_escalated`, `task_held_cleared`.
 
-Everything else (the remaining 33 kinds — `worker_report` among them, ruled bookkeeping by the manager:
-its content is a worker's *claim*, not a trust-boundary action, and it's the highest-volume kind in the
-whole enum) is session-scoped bookkeeping, cascaded as before.
+Everything else — `worker_report` among them, ruled bookkeeping by the manager: its content is a worker's
+*claim*, not a trust-boundary action, and it's the highest-volume kind in the whole enum — is
+session-scoped bookkeeping, cascaded as before. ⚠️ The exact remaining count is NOT re-derived here (it
+was "33" against the original 79-member baseline, itself already stale — see this record's heading); a
+kind added between this record's writing and any later read may fall into neither this classification nor
+`DURABLE_AUDIT_EVENT_KINDS`, and re-auditing the FULL kind population against "the classification
+principle" above is its own task, out of scope for whichever card last touched this line.
 
 ## The mechanism
 

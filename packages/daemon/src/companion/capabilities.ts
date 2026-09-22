@@ -13,9 +13,10 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionRoute, Project, Question, Session, SessionRole, Task, TaskPriority } from "@loom/shared";
+import type { CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionRoute, OrchestrationEventKind, Project, Question, Session, SessionRole, Task, TaskPriority } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { MIN_ID_PREFIX_LEN } from "../id-prefix.js";
@@ -2029,7 +2030,23 @@ const SESSION_STEER: CompanionCapability = {
     // THE shared enforcement point (see this lever's own doc above) — every tool below resolves its
     // target through this BEFORE touching `ctx.sessions`, exactly once, so a future tool can't accidentally
     // skip a check by hand-rolling its own.
-    function resolveControlTarget(sessionId: string): { session: Session } | { error: string } {
+    //
+    // @decision c965fe76 — `onSuperseded` is REQUIRED, never optional — a 5th tool must name its policy
+    // to compile, so it can't silently inherit an unsafe default.
+    /** What to do when the resolved target is `processState:"live"` but already has a recycle successor
+     *  (the async `settleRecycleHandoff` window — ordinarily seconds, unbounded if the successor never
+     *  settles). "disclose": return `{disclosed, replacedBy}` instead of `{session}` — the caller must not
+     *  act, only report the successor id. "handled-downstream": always return `{session}` unchanged — this
+     *  is honest about NOT being the enforcement point for that tool; the call site's own comment names
+     *  WHY it doesn't need to be (verify, don't assume — see `session_resume`'s call site: an earlier draft
+     *  of this doc claimed a "deeper check downstream" for it that turned out to be unreachable in this
+     *  exact window, card c965fe76 Code Review round 2). "benign": always return `{session}` unchanged —
+     *  acting on a superseded target is an accepted trade-off for this tool, not "downstream-handled" and
+     *  not "nothing to catch" — the call site's own comment states the trade-off. */
+    type SupersededPolicy = "disclose" | "handled-downstream" | "benign";
+    function resolveControlTarget(
+      sessionId: string, onSuperseded: SupersededPolicy,
+    ): { session: Session } | { error: string } | { disclosed: true; session: Session; replacedBy: string } {
       const target = db.getSession(sessionId);
       if (!target) return { error: `no session "${sessionId}"` };
       const projectId = target.projectId;
@@ -2052,7 +2069,33 @@ const SESSION_STEER: CompanionCapability = {
       if (ctx.attest.getActiveTurnOwnerText(ctx.sessionId) === null) {
         return { error: "no owner text this turn — session control can only act on an owner-authored turn" };
       }
+      if (onSuperseded === "disclose" && target.processState === "live") {
+        const successor = db.getSuccessor(target.id);
+        if (successor) return { disclosed: true, session: target, replacedBy: successor.id };
+      }
       return { session: target };
+    }
+
+    /** Companion-layer disclosure for a live-but-superseded target. For `session_message` this mirrors
+     *  the audit shape card fb5e39c3 gave {@link SessionService}'s own `deliverSessionMessage`
+     *  (`kind:"session_message"`, `detail:{replacedBy}`; see docs/decisions/fb5e39c3-*) so the audit trail
+     *  is IDENTICAL regardless of which layer actually catches the supersession: `resolveControlTarget`
+     *  runs BEFORE `ctx.sessions.messageSession` for every companion call, so `deliverSessionMessage`'s own
+     *  downstream check never reaches its session_message branch on this path — composing correctly means
+     *  preserving its side effect here, not just its return shape. `session_steer` does NOT mirror
+     *  `redirect_worker` the same way, even though a genuinely-delivered steer files that kind — a DROPPED
+     *  steer delivered nothing, and `redirect_worker` is one of `REPORT_RESOLVED_EVENT_KINDS`
+     *  (report-resolution.ts): filing it here would falsely mark the target's still-open report as
+     *  resolved. `"session_steer_dropped"` (see its own doc, @loom/shared types.ts) is a dedicated,
+     *  deliberately non-resolving/non-triggering kind for exactly this case — but, like `session_message`
+     *  itself, IS in `DURABLE_AUDIT_EVENT_KINDS` (db.ts), so it survives a `deleteAgent` cascade instead of
+     *  being erased along with the session it's about. */
+    function recordSupersededEvent(sessionId: string, session: Session, replacedBy: string, kind: OrchestrationEventKind): void {
+      db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: ctx.sessionId, workerSessionId: sessionId, taskId: session.taskId ?? null,
+        kind, detail: { replacedBy },
+      });
     }
 
     server.registerTool(
@@ -2063,19 +2106,28 @@ const SESSION_STEER: CompanionCapability = {
           "intent (you are the OPERATOR here, not a verbatim relay). Delivered immediately, framed " +
           "[loom:from-owner-via-companion] so the receiver knows the source. Returns a deliveryStatus: " +
           "delivered-live (submitted as a turn now), queued (the target is busy — held FIFO, delivered on " +
-          "its next turn boundary), or boarded (the target isn't live and has no live successor — filed as " +
-          "a durable board card instead of lost). If the target is still `live` but has ALREADY been " +
-          "replaced by a recycle successor (its predecessor stays live until its successor settles — " +
-          "ordinarily seconds, but longer if the successor is slow to settle), nothing is delivered — " +
-          "deliveryStatus is dropped and replacedBy names the successor (which may itself be dead; " +
-          "re-addressing it then falls through to the boarded path above). Re-address `replacedBy` if the " +
-          "message should still go out. Requires an act-mode grant on the target session's project and an " +
-          "owner-authored turn — a proactive/heartbeat turn is always rejected.",
+          "its next turn boundary), boarded (the target isn't live and has no live successor — filed as " +
+          "a durable board card instead of lost), or dropped (the target is still `live` but has ALREADY " +
+          "been replaced by a recycle successor — its predecessor stays live until its successor settles, " +
+          "ordinarily seconds, but longer if the successor is slow to settle; nothing is delivered). " +
+          "replacedBy names the successor on a dropped result (which may itself be dead; re-addressing it " +
+          "then falls through to the boarded path above) — \"replacedBy\" in the result is a uniform way " +
+          "to detect this outcome, since it appears on exactly the superseded-decline case and never on a " +
+          "delivered/queued/boarded success. Requires an act-mode grant on the target " +
+          "session's project and an owner-authored turn — a proactive/heartbeat turn is always rejected.",
         inputSchema: { target: z.string(), message: z.string() },
       },
       async ({ target, message }) => {
-        const resolved = resolveControlTarget(target);
+        const resolved = resolveControlTarget(target, "disclose");
         if ("error" in resolved) return ok({ error: resolved.error });
+        if ("disclosed" in resolved) {
+          recordSupersededEvent(target, resolved.session, resolved.replacedBy, "session_message");
+          return ok({
+            deliveryStatus: "dropped",
+            replacedBy: resolved.replacedBy,
+            note: `session ${target} has already been replaced by its recycle successor ${resolved.replacedBy} — not delivered; re-target session_message at the successor instead.`,
+          });
+        }
         try {
           return ok(ctx.sessions.messageSession(target, message, ctx.sessionId));
         } catch (e) {
@@ -2092,13 +2144,26 @@ const SESSION_STEER: CompanionCapability = {
           "worker_redirect equivalent: flushes any queued-but-undelivered direction, delivers your " +
           "instruction as the new authoritative direction (framed [loom:from-owner-via-companion:redirect]), " +
           "and interrupts the target's in-flight turn if it was busy (an idle target simply receives it as " +
-          "its next turn — nothing to interrupt). Requires an act-mode grant on the target session's " +
-          "project and an owner-authored turn — a proactive/heartbeat turn is always rejected.",
+          "its next turn — nothing to interrupt). If the target has already been replaced by a recycle " +
+          "successor (still briefly live during handoff), nothing is flushed or interrupted — the call " +
+          "returns {dropped:true, replacedBy} instead; re-target the successor. \"replacedBy\" in the " +
+          "result is a uniform way to detect this outcome, since it appears on exactly the " +
+          "superseded-decline case and never on a delivered success. Requires an act-mode " +
+          "grant on the target session's project and an owner-authored turn — a proactive/heartbeat turn " +
+          "is always rejected.",
         inputSchema: { target: z.string(), message: z.string() },
       },
       async ({ target, message }) => {
-        const resolved = resolveControlTarget(target);
+        const resolved = resolveControlTarget(target, "disclose");
         if ("error" in resolved) return ok({ error: resolved.error });
+        if ("disclosed" in resolved) {
+          recordSupersededEvent(target, resolved.session, resolved.replacedBy, "session_steer_dropped");
+          return ok({
+            dropped: true,
+            replacedBy: resolved.replacedBy,
+            note: `session ${target} has already been replaced by its recycle successor ${resolved.replacedBy} — redirect not delivered (it would otherwise flush its queued direction and interrupt a session about to be retired); re-target session_steer at the successor instead.`,
+          });
+        }
         try {
           return ok(ctx.sessions.redirectSession(target, message, ctx.sessionId));
         } catch (e) {
@@ -2118,7 +2183,15 @@ const SESSION_STEER: CompanionCapability = {
         inputSchema: { target: z.string(), mode: z.enum(["graceful", "hard"]).optional() },
       },
       async ({ target, mode }) => {
-        const resolved = resolveControlTarget(target);
+        // "benign": same policy as a human directly stopping the session — not "harmless either way".
+        // For a MANAGER/PLATFORM predecessor, recoverFleetAfterFailedRecycleSuccessor (service.ts) checks
+        // pty.isAlive(oldId) FIRST when its successor dies before settling; stopping the predecessor in
+        // this exact window can turn a recoverable failure into an unresolved one (recycle_fleet_unresolved)
+        // instead of a fleet handoff back to the predecessor. The handoff already anticipates "a human
+        // stopped the predecessor" as a real case it must survive, and an owner-authored companion stop is
+        // the same act — so this is an accepted trade-off (the recovery fallback pays for it), not a
+        // consequence-free no-op.
+        const resolved = resolveControlTarget(target, "benign");
         if ("error" in resolved) return ok({ error: resolved.error });
         try {
           return ok(ctx.sessions.stopSession(target, mode ?? "graceful"));
@@ -2135,11 +2208,24 @@ const SESSION_STEER: CompanionCapability = {
           "Resume a STOPPED session in your granted scope, on the owner's behalf — no prompt is injected, " +
           "it simply comes back live. Requires an act-mode grant on the target session's project and an " +
           "owner-authored turn — a proactive/heartbeat turn is always rejected. A session that was " +
-          "recycled (a successor exists) or is otherwise unresumable is rejected with an {error}.",
+          "recycled AND has already stopped (its recycle successor is now the live one) is rejected with " +
+          "an {error}. A session that is STILL live but already has a recycle successor (the brief " +
+          "settleRecycleHandoff handoff window) is a no-op instead: there is nothing to resume, so the " +
+          "existing (about-to-be-retired) session is simply returned unchanged — it is not an error, and " +
+          "the response carries no replacedBy field either way.",
         inputSchema: { target: z.string() },
       },
       async ({ target }) => {
-        const resolved = resolveControlTarget(target);
+        // "handled-downstream": NOT because SessionService.resume's hasSuccessor refusal (service.ts) is
+        // reachable here — it isn't: resume()'s own already-live short-circuit fires 21 lines earlier and
+        // DOES trigger in this exact window (the predecessor's pty is alive by definition here), so the
+        // hasSuccessor refusal only ever fires for an ALREADY-EXITED recycled predecessor, a later state
+        // than the one this policy is about. The honest reason: resuming an already-live session (whether
+        // superseded or not) is a structural no-op for THIS tool — there is nothing to spawn and nothing
+        // for this lever to intercept or disclose, so the short-circuit's plain pass-through is correct as
+        // is. (Card c965fe76 Code Review round 2 — an earlier version of this comment, and of the tool
+        // description above, wrongly claimed the deeper refusal covered this window.)
+        const resolved = resolveControlTarget(target, "handled-downstream");
         if ("error" in resolved) return ok({ error: resolved.error });
         try {
           return ok(ctx.sessions.resumeSession(target));

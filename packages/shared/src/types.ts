@@ -1071,6 +1071,20 @@ export type OrchestrationEventKind =
   // Platform Lead cross-project message delivery (loom-platform `session_message`) — UN-scoped, above
   // the manager/worker tree. `workerSessionId` carries the TARGET session id (delivery only, never spawn).
   | "session_message"
+  // Card c965fe76: the companion `session-steer` ACT lever's `session_steer` DECLINED to act because its
+  // addressed target was `processState:"live"` but already superseded by a recycle successor — mirrors
+  // `session_message`'s own `replacedBy`-carrying audit shape (`detail:{replacedBy}`), but under a
+  // DISTINCT kind rather than reusing `redirect_worker`: a companion `session_steer` normally files
+  // `redirect_worker` on a genuine delivery, and `redirect_worker` is a member of
+  // `REPORT_RESOLVED_EVENT_KINDS` (report-resolution.ts) — filing it here, where NOTHING was actually
+  // delivered, would falsely mark a target worker/manager's still-open report as resolved. Deliberately
+  // NOT added to EVENT_TRIGGER_EVENT_KINDS/GATE_HISTORY_KINDS/ORCH_ACTIVITY_KINDS/REPORT_RESOLVED_EVENT_KINDS
+  // — an audit-only marker for a NON-delivery, never a lifecycle signal any of those four track (same
+  // posture as `codex_auto_commit` above). BUT (the OTHER half of that same posture, easy to miss if you
+  // only read the exclusions): IS in `DURABLE_AUDIT_EVENT_KINDS` (db.ts), alongside `session_message` and
+  // `codex_auto_commit` themselves — an audit marker that a routine `deleteAgent` cascade silently erases
+  // is not an audit trail; see `9f7f2b50`'s record for the classification.
+  | "session_steer_dropped"
   // Manager→Platform UPWARD escalation (orchestration `platform_escalate`): a discovered Loom bug/friction
   // filed as a durable TASK on the reserved Platform board (the Lead's inbox). `detail` carries the origin
   // project, severity, and the created Platform task id. The ONLY cross-project write a manager may make
@@ -1578,7 +1592,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   worker_report_rejected: true, wake_scheduled: true, wake_fired: true, wake_dropped: true,
   idle_report: true, idle_escalated: true, context_escalated: true, context_blind_turn: true, context_emergency_interrupt: true, worker_stuck: true,
   worktree_vanished: true,
-  manager_manage: true, session_message: true, platform_escalate: true, escalation_triaged: true,
+  manager_manage: true, session_message: true, session_steer_dropped: true, platform_escalate: true, escalation_triaged: true,
   cross_project_message: true, audit_finding: true, workspace_audit_suggestion: true,
   session_died: true, session_resume_attempt: true, session_recovered: true,
   session_recovery_abandoned: true, worker_report_undelivered: true, worker_exited_without_report: true,
