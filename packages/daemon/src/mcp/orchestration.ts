@@ -894,15 +894,18 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "which undercounted what a foreign entry actually carries — is enough to tell 'someone else " +
         "legitimately holds the slot' apart from 'this looks leaked' without exposing another project's " +
         "task/branch identity, or which of its own batch merges a per-branch fallback row descends from. " +
-        "`repoContended` (bool, every entry) is `true` ONLY for a QUEUED `merge`-kind entry whose target " +
-        "repo is currently held by another RUNNING merge gate (card 92e960d1's per-repo merge-admission " +
-        "guard — at most one merge gate per canonical repo runs at once, so two same-repo merges never " +
-        "race to squash and burn a gate run each) — a queued merge can show this `true` even while `cap` " +
-        "has a free lane, which is expected, not a bug: it's waiting on the REPO, not the cap. `false` " +
+        "`repoContended` (bool, every entry) is `true` ONLY for a QUEUED `merge`- or `worker`-kind entry " +
+        "blocked by the per-repo admission guard (card 92e960d1, widened to `worker` by card e4701333) — " +
+        "ASYMMETRIC: a queued `merge` is contended by ANY other holder of its repo (another `merge` OR a " +
+        "`worker`), so two same-repo merges never race to squash and a same-repo merge/worker pair never " +
+        "races a shared cross-process resource; a queued `worker` is contended ONLY by an active `merge` " +
+        "holder — TWO workers on the same repo never contend each other and both show `false` while " +
+        "running fully concurrently. A queued entry can show this `true` even while `cap` has a free " +
+        "lane, which is expected, not a bug: it's waiting on the REPO, not the cap. `false` " +
         "means this specific guard isn't why it's queued (still possibly `cap`, or the older, separate " +
         "per-worktree guard from card 8d585277, which this field does NOT report on). Always `false` " +
-        "while `running` or for a non-`merge` entry. It's a LIVE read, recomputed on every call — it can " +
-        "flip on a still-queued entry as sibling ops settle. " +
+        "while `running`, or for a `deploy`/other non-guarded entry. It's a LIVE read, recomputed on " +
+        "every call — it can flip on a still-queued entry as sibling ops settle. " +
         "`attempt`/`priorAttemptMs` (card 99a1cf6f, `merge`-kind entries only, `null`/`null` on a first " +
         "admission) tell a genuine first-time queue wait apart from a RE-queue: `confirmWorkerMerge`'s own " +
         "single-file retry (after a genuine failure narrows to a small re-runnable set) and its transient-kill " +

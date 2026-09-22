@@ -27,13 +27,17 @@
  *   invoked); an ALREADY-RUNNING entry can only be ASKED to stop (`cancelRunning`) — never report it
  *   cancelled unless `SessionService`'s own caller VERIFIES the kill; an unverified death stays held.
  *
- * @decision 92e960d1 — PER-REPO MERGE ADMISSION: a second, narrower exclusivity guard on
- *   `descriptor.repoPath` (`merge`-kind only), closing the hazard of two same-repo merges racing to
- *   squash — queues the second rather than letting it burn a full gate run before self-aborting.
+ * @decision 92e960d1 — PER-REPO ADMISSION GUARD: a second, narrower exclusivity guard on
+ *   `descriptor.repoPath`, closing the hazard of two same-repo merges racing to squash — queues the
+ *   second rather than letting it burn a full gate run before self-aborting.
  *
  * @decision 0196ba78 — SCOPE, MADE EXPLICIT: this is an ADMISSION-time mechanism, not a
  *   merge-OPERATION-wide one — a reuse-path or gateless merge never reaches `runExclusive` and is
  *   structurally invisible to it, deliberately: `requireCanonicalHead`'s in-lock re-check protects those.
+ *
+ * @decision e4701333 — WIDENED the 92e960d1 guard to also cover `worker`-kind run_gate self-checks,
+ *   ASYMMETRICALLY (see `mergeRepoFree`'s own doc for the exact rule — a symmetric first draft broke a
+ *   real worker-vs-worker concurrency fixture): `deploy` stays excluded either way.
  */
 
 import type { GateType } from "@loom/shared";
@@ -96,6 +100,8 @@ export interface GateDescriptor {
   /** @decision 92e960d1 — repoPath serializes same-repo merge gates; never assume release() freeing this
    *  guard at gate-settle is sufficient — a queued same-repo sibling must also wait for the holder's own
    *  SQUASH to land (`holdRepoGuardOnExit`/`beginSquash`/`endSquash`, card c24dd48a), or both can race. */
+  // Card e4701333: also serializes a `worker` run_gate self-check against a same-repo `merge`, either
+  // order — the squash-extension above stays merge-only; a worker's hold releases at its own gate settle.
   repoPath?: string | null;
   /** @decision 99a1cf6f — attempt/priorAttemptMs distinguish a retry re-admission from a first wait;
    *  never assume attempt is capped at 2 — a resumed non-final step after a passing single-file retry
@@ -147,9 +153,9 @@ export interface GateSnapshotEntry {
    *  start of every new step in a multi-step `gateCommand`, mirroring `runGateStep`'s own per-step
    *  `extended` flag exactly — this is per-STEP state, not a whole-run total. Always `false` while queued. */
   extended: boolean;
-  /** @decision 92e960d1 — repoContended:true names ONE specific queued cause (a same-repo merge guard);
-   *  never read a queued merge with a free cap slot as a bug without checking this field first — it names
-   *  the deliberate per-repo exclusivity wait, distinct from cap or per-worktree contention. */
+  /** @decision 92e960d1 (widened to `worker` by card e4701333) — repoContended:true names ONE specific
+   *  queued cause (the per-repo guard, now merge-or-worker); never read a queued merge/worker with a
+   *  free cap slot as a bug without checking this field first — distinct from cap or worktree contention. */
   repoContended: boolean;
 }
 
@@ -317,7 +323,20 @@ export class GateSemaphore {
   /** @decision b9e07a4a — activeMergeRepos is IDENTITY-aware (Map<repoPath,holderId>), not a bare Set —
    *  never free an entry here without checking the presented holderId matches what's stored, or an
    *  unconditional release (e.g. after a failed/cancelled op) can delete a live sibling's hold. */
+  // Card e4701333: populated ONLY by `merge`-kind admissions — a `worker`-kind hold lives in
+  // {@link activeWorkerRepos} instead; never add a worker entry here, or `mergeRepoFree`'s asymmetric
+  // check (merge excludes everything, worker excludes only merge) breaks.
   private readonly activeMergeRepos = new Map<string, string>();
+  /** Card e4701333: repoPath -> the SET of `worker`-kind holder ids currently admitted for it — a Map
+   *  (not a count) because {@link mergeRepoFree}'s asymmetric rule means MULTIPLE workers can concurrently
+   *  hold the SAME repoPath (worker-vs-worker is deliberately unguarded — see that method's own doc for
+   *  why), unlike {@link activeMergeRepos}'s single-holder shape. A repoPath key exists here ONLY while
+   *  its Set is non-empty — deleted the instant the last worker releases, mirroring `activeMergeRepos`'s
+   *  own invariant so a `.has(repoPath)` check is always a true presence test, never a stale empty entry.
+   *  Never extended past a worker's own gate settle (workers never call `holdRepoGuardOnExit`), so this
+   *  map needs no squash-hold counterpart — a worker's membership here tracks its OWN admit/release
+   *  lifecycle exactly, nothing else. */
+  private readonly activeWorkerRepos = new Map<string, Set<string>>();
   // Live metadata registry, keyed by a per-run id. Iteration order is enqueue order; the snapshot re-orders
   // queued entries by (priority, enqueuedAt) to match the real admission order below.
   private readonly registry = new Map<string, RegistryEntry>();
@@ -345,18 +364,27 @@ export class GateSemaphore {
     return wt == null || !this.activeWorktrees.has(wt);
   }
 
-  /** Card 92e960d1: true when `entry` is free to be admitted RIGHT NOW with respect to the per-repo
-   *  MERGE-admission guard alone — mirrors {@link worktreeFree}'s shape exactly, one level narrower in
-   *  scope. Returns `true` immediately (never blocking) for anything that isn't itself a `merge`-kind
-   *  descriptor with a `repoPath` — this is the STRUCTURAL half of "worker/deploy gates are out of
-   *  scope" (DoD-2): even a future call site that accidentally sets `repoPath` on a `worker`/`deploy`
-   *  descriptor has zero effect here, because the gateType check runs first. Does not consider
-   *  `cap`/`active`/worktree — callers combine this with those separately, same composition
-   *  {@link acquire}/{@link grantNext} already use for `worktreeFree`. */
+  /** Card 92e960d1, WIDENED by card e4701333: true when `entry` is free to be admitted RIGHT NOW with
+   *  respect to the per-repo gate-admission guard alone — mirrors {@link worktreeFree}'s shape exactly,
+   *  one level narrower in scope. ASYMMETRIC by design (card e4701333 Code Review, closing a real
+   *  regression `gate-history.mjs`'s worker1+worker3-concurrent-admission fixture caught): a `merge`-kind
+   *  descriptor is blocked by ANY active holder of its `repoPath` — another merge ({@link activeMergeRepos})
+   *  OR a worker ({@link activeWorkerRepos}) — but a `worker`-kind descriptor is blocked ONLY by an active
+   *  MERGE holder, never by another worker. Two workers on the SAME repo (e.g. two different workers each
+   *  running their own `run_gate`) stay fully concurrent, exactly as before this card — only a merge↔worker
+   *  pairing (either order) now serializes, closing the gap where that pairing could race a shared
+   *  cross-process resource. Returns `true` immediately (never blocking) for `deploy` or any other
+   *  gateType (deliberately excluded — see `docs/decisions/e4701333-*.md`), or for a merge/worker
+   *  descriptor with no `repoPath` set. Does not consider `cap`/`active`/worktree — callers combine this
+   *  with those separately, same composition {@link acquire}/{@link grantNext} already use for
+   *  {@link worktreeFree}. */
   private mergeRepoFree(entry: RegistryEntry): boolean {
-    if (entry.descriptor.gateType !== "merge") return true;
+    const gt = entry.descriptor.gateType;
+    if (gt !== "merge" && gt !== "worker") return true;
     const rp = entry.descriptor.repoPath;
-    return rp == null || !this.activeMergeRepos.has(rp);
+    if (rp == null) return true;
+    if (gt === "merge") return !this.activeMergeRepos.has(rp) && !this.activeWorkerRepos.has(rp);
+    return !this.activeMergeRepos.has(rp);
   }
 
   /** Card b9e07a4a Code Review: the identity {@link activeMergeRepos} stores for an `admit()`-ed entry —
@@ -373,16 +401,19 @@ export class GateSemaphore {
   }
 
   /** Actually admit `entry`: stamps `startedAt`, bumps `active`, and — for a worktree-bound descriptor
-   *  only — claims its worktree in {@link activeWorktrees}; and — for a `merge`-kind descriptor carrying
-   *  a `repoPath` — claims its repo in {@link activeMergeRepos} (card 92e960d1), keyed by
-   *  {@link repoHolderId}'s identity (card b9e07a4a). The one and only place either mutation happens,
-   *  shared by the immediate fast path and a queued waiter's eventual grant. */
+   *  only — claims its worktree in {@link activeWorktrees}; and, per the ASYMMETRIC rule
+   *  {@link mergeRepoFree} enforces (card 92e960d1, card e4701333) — for a `merge`-kind descriptor
+   *  carrying a `repoPath`, claims its repo in {@link activeMergeRepos}; for a `worker`-kind one, joins
+   *  the repo's holder SET in {@link activeWorkerRepos} instead (never the same map — see that field's
+   *  own doc for why). The one and only place either mutation happens, shared by the immediate fast path
+   *  and a queued waiter's eventual grant. */
   private admit(entry: RegistryEntry): void {
     this.active++;
     entry.startedAt = Date.now();
     const wt = entry.descriptor.worktreePath;
     if (wt != null) this.activeWorktrees.add(wt);
-    if (entry.descriptor.gateType === "merge" && entry.descriptor.repoPath != null) {
+    const rp = entry.descriptor.repoPath;
+    if (entry.descriptor.gateType === "merge" && rp != null) {
       // Card b9e07a4a Code Review: a merge+repoPath descriptor that omits `opId` falls back to `entry.id`
       // (see `repoHolderId`'s own doc) — safe for THIS op's own admit/release cycle (both derive the
       // identical value from the identical `entry`), but UNREACHABLE from outside it: an external
@@ -394,10 +425,18 @@ export class GateSemaphore {
       // loud-but-unreachable in production — surfaced here specifically so a FUTURE call site that omits
       // it fails loud instead of silently wedging a repo weeks later.
       if (entry.descriptor.opId == null) {
-        console.log(`[gate:repo-guard] WARNING merge-descriptor-missing-opid repoPath=${entry.descriptor.repoPath} entryId=${entry.id} - beginSquash/endSquash can NEVER free this hold from outside this call if it survives past release() via holdRepoGuardOnExit (repoHolderId falls back to entry.id, which no external caller can ever present) t=${performance.now().toFixed(3)} iso=${new Date().toISOString()}`);
+        console.log(`[gate:repo-guard] WARNING merge-descriptor-missing-opid repoPath=${rp} entryId=${entry.id} - beginSquash/endSquash can NEVER free this hold from outside this call if it survives past release() via holdRepoGuardOnExit (repoHolderId falls back to entry.id, which no external caller can ever present) t=${performance.now().toFixed(3)} iso=${new Date().toISOString()}`);
       }
-      this.activeMergeRepos.set(entry.descriptor.repoPath, this.repoHolderId(entry));
-      this.logRepoGuardMutation("add", entry.descriptor.repoPath, entry.descriptor.opId, "admit");
+      this.activeMergeRepos.set(rp, this.repoHolderId(entry));
+      this.logRepoGuardMutation("add", rp, entry.descriptor.opId, "admit");
+    } else if (entry.descriptor.gateType === "worker" && rp != null) {
+      // Card e4701333: a worker's own hold never calls `holdRepoGuardOnExit` and never survives past its
+      // own `release()`, so — unlike the merge branch above — there is no external-free hazard here to
+      // warn about; a missing opId just falls back to `entry.id`, safe for this op's own admit/release.
+      let set = this.activeWorkerRepos.get(rp);
+      if (!set) { set = new Set(); this.activeWorkerRepos.set(rp, set); }
+      set.add(this.repoHolderId(entry));
+      this.logRepoGuardMutation("add", rp, entry.descriptor.opId, "admit-worker");
     }
     // Card c6750500: an admission is the ONLY event that can raise `active` — a release only ever lowers
     // it — so it's the only place a running entry's max-over-run can change. Bump EVERY currently-running
@@ -432,32 +471,42 @@ export class GateSemaphore {
   }
 
   /** Release a held slot (identified by the SAME entry `runExclusive` admitted, so its worktree — if any
-   *  — can be freed from {@link activeWorktrees}, and its repo — if any, card 92e960d1 — from
-   *  {@link activeMergeRepos}), then hand the freed slot to the next ELIGIBLE waiter via
-   *  {@link grantNext}. `holdRepoGuard` (card c24dd48a): when `true` — because this run's own `fn` called
-   *  the `holdRepoGuardOnExit` callback {@link runExclusive} handed it — SKIPS freeing
-   *  {@link activeMergeRepos} for a `merge`-kind descriptor's `repoPath`; everything else (the cap slot,
-   *  the worktree, granting other eligible waiters) releases exactly as normal. The caller is then on the
-   *  hook to free the repo guard explicitly, later, via {@link endSquash}/{@link releaseMergeRepoGuard} —
-   *  see `holdRepoGuardOnExit`'s own doc for why this can never be automatic. */
+   *  — can be freed from {@link activeWorktrees}, and its repo hold — if any — freed from whichever of
+   *  {@link activeMergeRepos}/{@link activeWorkerRepos} it actually joined, per {@link admit}'s own
+   *  asymmetric routing), then hand the freed slot to the next ELIGIBLE waiter via {@link grantNext}.
+   *  `holdRepoGuard` (card c24dd48a): when `true` — because this run's own `fn` called the
+   *  `holdRepoGuardOnExit` callback {@link runExclusive} handed it — SKIPS freeing {@link activeMergeRepos}
+   *  for a `merge`-kind descriptor's `repoPath`; everything else (the cap slot, the worktree, granting
+   *  other eligible waiters) releases exactly as normal. The caller is then on the hook to free the repo
+   *  guard explicitly, later, via {@link endSquash}/{@link releaseMergeRepoGuard} — see
+   *  `holdRepoGuardOnExit`'s own doc for why this can never be automatic. Card e4701333: a `worker` entry
+   *  never declares `holdRepoGuardOnExit` (`holdRepoGuard` is always `false` for it) — its repo hold
+   *  always frees below, at its own settle, by leaving the `activeWorkerRepos` set it joined in `admit`. */
   private release(entry: RegistryEntry, holdRepoGuard: boolean): void {
     this.active--;
     const wt = entry.descriptor.worktreePath;
     if (wt != null) this.activeWorktrees.delete(wt);
-    if (entry.descriptor.gateType === "merge" && entry.descriptor.repoPath != null) {
+    const rp = entry.descriptor.repoPath;
+    if (entry.descriptor.gateType === "merge" && rp != null) {
       if (holdRepoGuard) {
         // Card 93b568e6: this op is now mid-squash — registry deletion (this method's own caller,
         // runExclusive's `finally`) is about to make it invisible to `snapshot()`; record it here so
         // `squashOnlySnapshot()` can still report it until `endSquash`/`releaseMergeRepoGuard` frees it.
-        const repoPath = entry.descriptor.repoPath;
-        this.squashHolders.set(repoPath, {
-          repoPath, since: Date.now(), opId: entry.descriptor.opId ?? null,
+        this.squashHolders.set(rp, {
+          repoPath: rp, since: Date.now(), opId: entry.descriptor.opId ?? null,
           projectId: entry.descriptor.projectId, sessionId: entry.descriptor.sessionId,
           taskId: entry.descriptor.taskId ?? null, branch: entry.descriptor.branch ?? null,
         });
       } else {
-        this.freeRepoPath(entry.descriptor.repoPath, this.repoHolderId(entry), entry.descriptor.opId, "release");
+        this.freeRepoPath(rp, this.repoHolderId(entry), entry.descriptor.opId, "release");
       }
+    } else if (entry.descriptor.gateType === "worker" && rp != null) {
+      const set = this.activeWorkerRepos.get(rp);
+      if (set) {
+        set.delete(this.repoHolderId(entry));
+        if (set.size === 0) this.activeWorkerRepos.delete(rp);
+      }
+      this.logRepoGuardMutation("delete", rp, entry.descriptor.opId, "release-worker");
     }
     this.grantNext();
   }

@@ -208,18 +208,43 @@ const worktrees = [];
     check("(repo-mutex, b) both settle", r1 === "ok" && r2 === "ok");
   }
 
-  // (c) worker/deploy gateTypes sharing a repoPath are STRUCTURALLY unaffected (DoD-2) — even with
-  // repoPath deliberately set on a non-merge descriptor here, mergeRepoFree() is gateType-gated FIRST,
-  // so this is belt-and-braces, not merely "no current call site sets it there".
+  // (c) `deploy` gateType sharing a repoPath is STRUCTURALLY unaffected — even with repoPath
+  // deliberately set on a deploy descriptor here, mergeRepoFree() is gateType-gated FIRST, so this is
+  // belt-and-braces, not merely "no current call site sets it there". `worker` USED to be excluded here
+  // too (DoD-2 of card 92e960d1's own implementation) — card e4701333 widened the guard to also cover
+  // `worker`-kind ops (a same-repo merge and a worker run_gate self-check could otherwise both be
+  // admitted concurrently and race a shared cross-process resource, e.g. the codex real-spawn file
+  // lock). See scenario (f) below, which proves that reversal directly.
   {
     const sem = new GateSemaphore();
     let active = 0, maxActive = 0;
     const task = async () => { active++; maxActive = Math.max(maxActive, active); await sleep(60); active--; return "ok"; };
-    const workerDesc = { gateType: "worker", projectId: "p", sessionId: "s1", repoPath: "/repo/shared" };
-    const deployDesc = { gateType: "deploy", projectId: "p", sessionId: "s2", repoPath: "/repo/shared" };
-    const [r1, r2] = await Promise.all([sem.runExclusive(2, workerDesc, task), sem.runExclusive(2, deployDesc, task)]);
-    check("(repo-mutex, c) worker+deploy sharing a repoPath still run concurrently — guard is merge-only", maxActive === 2);
+    const deployDesc1 = { gateType: "deploy", projectId: "p", sessionId: "s1", repoPath: "/repo/shared" };
+    const deployDesc2 = { gateType: "deploy", projectId: "p", sessionId: "s2", repoPath: "/repo/shared" };
+    const [r1, r2] = await Promise.all([sem.runExclusive(2, deployDesc1, task), sem.runExclusive(2, deployDesc2, task)]);
+    check("(repo-mutex, c) two deploys sharing a repoPath run truly concurrently — the guard covers merge+worker only", maxActive === 2);
     check("(repo-mutex, c) both settle", r1 === "ok" && r2 === "ok");
+  }
+
+  // (c2) card e4701333 Code Review: the guard is ASYMMETRIC — two `worker`-kind gates sharing a repoPath
+  // must stay fully concurrent (only merge<->worker pairs serialize, never worker<->worker). Regression
+  // coverage for a REAL incident this exact card caused: the first draft of this fix made `mergeRepoFree`
+  // symmetric (any merge/worker holder blocks any other), which silently broke `gate-history.mjs`'s
+  // worker1+worker3-concurrent-admission fixture — caught only because that gate genuinely failed
+  // (op3 never admitted within its wait budget) when `run_gate` ran this diff for real.
+  {
+    const sem = new GateSemaphore();
+    let active = 0, maxActive = 0;
+    // TIMING-GUARD-SAFE: maxActive===2 is not a timing race — each task's active++ runs SYNCHRONOUSLY,
+    // before its own `await sleep(60)`, and both runExclusive calls admit synchronously (cap headroom,
+    // no guard blocking either) before Promise.all ever yields — so both increments are guaranteed to
+    // have run before this line is reached, deterministically, regardless of the sleep's duration.
+    const task = async () => { active++; maxActive = Math.max(maxActive, active); await sleep(60); active--; return "ok"; };
+    const worker1 = { gateType: "worker", projectId: "p", sessionId: "w1", repoPath: "/repo/two-workers" };
+    const worker2 = { gateType: "worker", projectId: "p", sessionId: "w2", repoPath: "/repo/two-workers" };
+    const [r1, r2] = await Promise.all([sem.runExclusive(2, worker1, task), sem.runExclusive(2, worker2, task)]);
+    check("(repo-mutex, c2) two workers sharing a repoPath run truly concurrently — the guard is merge-facing only", maxActive === 2);
+    check("(repo-mutex, c2) both settle", r1 === "ok" && r2 === "ok");
   }
 
   // (d) RELEASE-PATH EXHAUSTIVENESS — a leaked `activeMergeRepos` entry would PERMANENTLY deadlock every
@@ -345,6 +370,93 @@ const worktrees = [];
     releaseHolder("holder-done");
     const [rHolder, rSibling] = await Promise.all([pHolder, pSibling]);
     check("(repo-mutex, e) once the ACTUAL holder releases, the sibling is admitted and settles", rHolder === "holder-done" && rSibling === "sibling");
+  }
+
+  // (f) card e4701333: THE GAP THIS CARD CLOSES — a `merge` gate and a `worker` run_gate self-check on
+  // the SAME repo used to be able to both be ADMITTED and run CONCURRENTLY (nothing checked
+  // `activeMergeRepos` for a `worker`-kind descriptor at all), which is exactly the shape that let two
+  // gate processes race a cross-process resource they each assumed serialized WITHIN one process (the
+  // codex real-spawn file lock, `_codex-real-spawn-lock.mjs`). The fix widens `mergeRepoFree` to also
+  // gate `worker`-kind descriptors against the SAME `activeMergeRepos` map a same-repo merge already
+  // uses — so this is bidirectional by construction (one shared mutex, not two separate ones): whichever
+  // kind holds the repo first, the OTHER queues behind it, never refused, never concurrent. Both orders
+  // proven, each with the same `assertNeverWithControl` positive-control discipline (a)/(e) above use, so
+  // neither half is a vacuous pass.
+  {
+    // (f1) merge admitted first — a same-repo WORKER self-check must queue behind it.
+    {
+      const sem = new GateSemaphore();
+      let releaseHolder;
+      const holder = () => new Promise((res) => { releaseHolder = res; });
+      const pHolder = sem.runExclusive(2, mergeDesc("f1h", "/repo/cross-kind-f1"), () => holder());
+      check("(repo-mutex, f1) the merge admits immediately", sem.snapshot().active === 1);
+
+      let workerStarted = false;
+      const workerDesc = { gateType: "worker", projectId: "p", sessionId: "worker-f1", repoPath: "/repo/cross-kind-f1" };
+      const pWorker = sem.runExclusive(2, workerDesc, async () => { workerStarted = true; return "worker-done"; });
+      check("(repo-mutex, f1) cap has real headroom (1 active out of cap 2)", sem.snapshot().active === 1);
+      check("(repo-mutex, f1) the worker is genuinely queued, not admitted concurrently", sem.snapshot().queued === 1);
+      const queuedEntry = sem.snapshot().entries.find((e) => e.phase === "queued");
+      check("(repo-mutex, f1) the queued worker is visibly repoContended, not a silent unexplained wait",
+        !!queuedEntry && queuedEntry.repoContended === true && queuedEntry.gateType === "worker");
+
+      const neverStarted = await assertNeverWithControl({
+        label: "(repo-mutex, f1) the same-repo WORKER never starts while the merge holds the repo",
+        check: () => workerStarted,
+        windowMs: 150,
+        positiveControl: async () => {
+          const controlSem = new GateSemaphore();
+          let controlStarted = false;
+          const pControl = controlSem.runExclusive(2, { gateType: "worker", projectId: "ctrl", sessionId: "ctrl-f1", repoPath: "/repo/cross-kind-f1-different" }, async () => { controlStarted = true; return "control"; });
+          const observed = await observeOnce({ check: () => controlStarted, windowMs: 150 });
+          await pControl;
+          return observed;
+        },
+      });
+      check("(repo-mutex, f1) PROVABLY did not start — the SAME window just proved (via the control) capable of catching a real start", neverStarted);
+
+      releaseHolder("merge-done");
+      const [r1, r2] = await Promise.all([pHolder, pWorker]);
+      check("(repo-mutex, f1) both eventually settle once the merge releases", r1 === "merge-done" && r2 === "worker-done");
+    }
+
+    // (f2) worker admitted first — a same-repo MERGE must queue behind it (the reverse order — proves
+    // this is one shared mutex, not a one-directional special case).
+    {
+      const sem = new GateSemaphore();
+      let releaseHolder;
+      const holder = () => new Promise((res) => { releaseHolder = res; });
+      const workerDesc = { gateType: "worker", projectId: "p", sessionId: "worker-f2", repoPath: "/repo/cross-kind-f2" };
+      const pHolder = sem.runExclusive(2, workerDesc, () => holder());
+      check("(repo-mutex, f2) the worker admits immediately", sem.snapshot().active === 1);
+
+      let mergeStarted = false;
+      const pMerge = sem.runExclusive(2, mergeDesc("f2m", "/repo/cross-kind-f2"), async () => { mergeStarted = true; return "merge-done"; });
+      check("(repo-mutex, f2) cap has real headroom (1 active out of cap 2)", sem.snapshot().active === 1);
+      check("(repo-mutex, f2) the merge is genuinely queued, not admitted concurrently", sem.snapshot().queued === 1);
+      const queuedEntry = sem.snapshot().entries.find((e) => e.phase === "queued");
+      check("(repo-mutex, f2) the queued merge is visibly repoContended, not a silent unexplained wait",
+        !!queuedEntry && queuedEntry.repoContended === true && queuedEntry.gateType === "merge");
+
+      const neverStarted = await assertNeverWithControl({
+        label: "(repo-mutex, f2) the same-repo MERGE never starts while the worker holds the repo",
+        check: () => mergeStarted,
+        windowMs: 150,
+        positiveControl: async () => {
+          const controlSem = new GateSemaphore();
+          let controlStarted = false;
+          const pControl = controlSem.runExclusive(2, mergeDesc("ctrl-f2", "/repo/cross-kind-f2-different"), async () => { controlStarted = true; return "control"; });
+          const observed = await observeOnce({ check: () => controlStarted, windowMs: 150 });
+          await pControl;
+          return observed;
+        },
+      });
+      check("(repo-mutex, f2) PROVABLY did not start — the SAME window just proved (via the control) capable of catching a real start", neverStarted);
+
+      releaseHolder("worker-done");
+      const [r1, r2] = await Promise.all([pHolder, pMerge]);
+      check("(repo-mutex, f2) both eventually settle once the worker releases", r1 === "worker-done" && r2 === "merge-done");
+    }
   }
 }
 

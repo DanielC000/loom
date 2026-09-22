@@ -16412,12 +16412,15 @@ export class SessionService {
     // RESOLVE-LIVE (mirrors confirmWorkerMerge): read fresh so a human PATCH to gateCommand/its timeout/
     // maxConcurrentGates takes effect on the very next call with no daemon restart.
     const orchestration = resolveConfig(project.config, this.db.getPlatformConfig()).orchestration;
-    // Multi-repo epic (49136451) phase 2: resolve THIS worker's OWN target repo's gateCommand — anchored
-    // to the SESSION's stamped `repoKey` (see Session.repoKey's doc / confirmWorkerMerge's identical
+    // Multi-repo epic (49136451) phase 2: resolve THIS worker's OWN target repo — anchored to the
+    // SESSION's stamped `repoKey` (see Session.repoKey's doc / confirmWorkerMerge's identical
     // resolution), NOT a fresh task.repoKey read. No fallback to the project-level gateCommand (carried
     // decision, phase 1) — a gateless registry entry means run_gate has nothing to preview, exactly like
-    // a gateless project today.
-    const gate = resolveRepoByKey(project, worker.repoKey).gateCommand;
+    // a gateless project today. Card e4701333: also the source of `repoPath` for the gate descriptor
+    // below, so this worker's own self-check serializes against a same-repo merge on the identical path
+    // confirmWorkerMerge resolves for that repoKey.
+    const targetRepo = resolveRepoByKey(project, worker.repoKey);
+    const gate = targetRepo.gateCommand;
     if (!gate) {
       return {
         settled: true, ok: true,
@@ -16510,8 +16513,10 @@ export class SessionService {
           // queue wait. Set the moment `fn` runs (post-admission), so it's valid even on the throw path below.
           // worktreePath (card 8d585277): feeds the structural per-worktree exclusivity guard AND is what
           // this session's own `merge:${workerSessionId}` op names too — the same physical path, so the
-          // two can never both be admitted concurrently regardless of tier/cap.
-          const gateDescriptor: GateDescriptor = { gateType: "worker", projectId: worker.projectId, sessionId: workerSessionId, taskId: worker.taskId ?? null, branch: worker.branch ?? null, opId, worktreePath };
+          // two can never both be admitted concurrently regardless of tier/cap. repoPath (card e4701333):
+          // feeds the SEPARATE, wider per-repo guard (92e960d1, widened) — so this self-check also queues
+          // behind (or blocks) a DIFFERENT worker's same-repo merge, not just its own.
+          const gateDescriptor: GateDescriptor = { gateType: "worker", projectId: worker.projectId, sessionId: workerSessionId, taskId: worker.taskId ?? null, branch: worker.branch ?? null, opId, worktreePath, repoPath: targetRepo.path };
           let gateStartedAt = 0;
           // CONCURRENCY NEIGHBOURHOOD (card 424ed9a8): see confirmWorkerMerge's identical capture for the
           // full rationale — the semaphore's own active count at admission, carried onto every audit event

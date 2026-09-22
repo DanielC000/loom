@@ -46,13 +46,23 @@ export const CODEX_REAL_SPAWN_SET = new Set(CODEX_REAL_SPAWN_BASENAMES);
 
 const LOCK_PATH = path.join(os.tmpdir(), "loom-codex-real-spawn.lock");
 // Far longer than any file's own worst-case runtime is EVER expected to be, but no longer this lock's
-// PRIMARY defense — see the file header. Only reached if `scripts/test-daemon.mjs`'s own sequential
-// scheduling for CODEX_REAL_SPAWN_BASENAMES above (read the array for current membership — restating it
-// here would drift the moment it changes again) is itself violated (a scheduling bug, or one of these
-// files run ad hoc outside that harness). Because scheduling — not this budget — is what prevents
-// concurrent contention now, this number does NOT need to scale with membership count (it never has to
-// cover N-1 *other* holders finishing first); it only needs to exceed ONE legitimate holder's worst real
-// runtime. Sized from ACTUAL production gate-op `7d31427a`'s surviving log
+// PRIMARY defense WITHIN one gate-executing process — see the file header. `scripts/test-daemon.mjs`'s
+// own sequential scheduling for CODEX_REAL_SPAWN_BASENAMES above (read the array for current membership
+// — restating it here would drift the moment it changes again) is what prevents concurrent contention
+// AMONG this family's own members WITHIN that one process; it says nothing about a SECOND, independent
+// gate-executing process (another merge, another worker `run_gate`, a deploy) also running this family
+// at the same time — each schedules its OWN family sequentially and is blind to the other, so this lock
+// (a single OS-wide file under `os.tmpdir()`, never per-project or per-repo) is the ONLY thing serializing
+// them. CORRECTED by card e4701333 (was: "this number does NOT need to scale with membership count — it
+// never has to cover N-1 *other* holders finishing first"; that claim is TRUE only for contention WITHIN
+// one process's own sequential scheduling, and was FALSE the moment more than one gate-executing process
+// could run this family concurrently — always possible under `maxConcurrentGates > 1` for two DIFFERENT
+// repos, and — before card e4701333's own fix in `gate-semaphore.ts` — possible even for the SAME repo
+// via a merge gate racing a worker's `run_gate`). This budget must still exceed ONE legitimate holder's
+// worst real runtime, but a waiter here CAN genuinely have to wait for another PROCESS's own holder to
+// finish first — a false red under that condition is a CONFIRMED occurrence of the hazard card e4701333
+// investigated, not evidence this budget is mis-sized; see that card if it happens. Sized from ACTUAL
+// production gate-op `7d31427a`'s surviving log
 // (~/.loom/gate-output/7d31427a-824f-495c-8606-c868ae77cfac.log, captured while still present under
 // gate-output/'s count+byte-bounded retention — see gate-spill.ts, never time-based) under REAL 4-way
 // contention (the family's size AT THAT TIME, before this
