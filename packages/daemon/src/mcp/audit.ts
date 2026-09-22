@@ -208,24 +208,29 @@ export class AuditMcpRouter {
     );
 
     // --- the THIRD write: end_me (card 3b015fc7) — SELF-SCOPED terminal exit, so the audit-doctrine
-    // (platform-audit skill) can end a scan pass cleanly. NO target arg: always ends auditorSessionId. ---
+    // (platform-audit skill) can end a scan pass cleanly. NO target arg: always ends auditorSessionId.
+    // @decision 72249ae0 — `scanReport`'s ABSENCE, never a self-declared "complete" flag, is the
+    // coverage-integrity signal (an injected call could assert completion too). Do not make it a
+    // boolean, and do not gate `end_me` on it. ---
     server.registerTool(
       "end_me",
       {
         description:
           "Request graceful termination of YOUR OWN session — a terminal exit, no successor. Call this at " +
-          "the end of a scan pass (the audit doctrine's normal wrap-up). Takes no argument: Loom always " +
-          "ends the session calling this tool, never another. Loom REFUSES (does not stop) if you have " +
-          "unconsumed inbound direction queued (a human composer turn you haven't acted on yet) → " +
-          "{stopped:false, reason:\"queued-inbound\", pending:N} — end this turn so it drains into your " +
-          "next turn, act on it, THEN re-call end_me. On pass: your session gracefully stops (Ctrl-C×2, " +
-          "clean, resumable — the row lands on Archive) and this tool's own reply is delivered before your " +
-          "pty dies.",
-        inputSchema: strictShape({}),
+          "the end of a scan pass (the audit doctrine's normal wrap-up). Pass `scanReport`: a short summary " +
+          "of what this pass covered (which sessions/projects, what you found) — the audit doctrine's " +
+          "normal last step before ending. Loom REFUSES (does not stop) if you have unconsumed inbound " +
+          "direction queued (a human composer turn you haven't acted on yet) → {stopped:false, " +
+          "reason:\"queued-inbound\", pending:N} — end this turn so it drains into your next turn, act on " +
+          "it, THEN re-call end_me. On pass: your session gracefully stops (Ctrl-C×2, clean, resumable — " +
+          "the row lands on Archive) and this tool's own reply is delivered before your pty dies. Calling " +
+          "end_me with NO `scanReport` auto-files a low-severity finding on the Platform backlog flagging " +
+          "this pass as possibly cut short — always include one once you've genuinely finished a pass.",
+        inputSchema: strictShape({ scanReport: z.string().optional() }),
       },
-      async () => {
+      async ({ scanReport }) => {
         try {
-          return ok(sessions.endMe(auditorSessionId));
+          return ok(sessions.endMe(auditorSessionId, { scanReport }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

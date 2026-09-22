@@ -11998,8 +11998,11 @@ export class SessionService {
    *  to the caller's own session id); it REFUSES rather than stops on unconsumed inbound `kind:"agent"`
    *  direction, or on a manager/platform caller with ≥1 live worker/child (never on `kind:"warning"`
    *  nudges, which coalesce and aren't direction).
+   * @decision 72249ae0 — `opts.scanReport`'s ABSENCE (never a self-declared "complete" flag) is the
+   *  auditor coverage-integrity signal; do not add a boolean/self-report field here, and never let this
+   *  gate or weaken the stop itself.
    */
-  endMe(sessionId: string): { stopped: boolean; reason?: "queued-inbound" | "live-workers"; pending?: number; count?: number; message?: string } {
+  endMe(sessionId: string, opts?: { scanReport?: string }): { stopped: boolean; reason?: "queued-inbound" | "live-workers"; pending?: number; count?: number; message?: string } {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
 
@@ -12029,9 +12032,14 @@ export class SessionService {
       }
     }
 
+    const scanReport = opts?.scanReport?.trim() || undefined;
+    if (!scanReport && (session.role === "auditor" || session.role === "workspace-auditor")) {
+      this.fileMissingScanReport(session, sessionId);
+    }
+
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
-      managerSessionId: sessionId, kind: "end_me_complete", detail: {},
+      managerSessionId: sessionId, kind: "end_me_complete", detail: scanReport ? { scanReport } : {},
     });
     // Deferred so THIS tool call's own MCP response flushes before the pty dies — same flush reasoning
     // recycleManager/recyclePlatformLead's own deferred teardowns use, but unlike those two (which settle
@@ -12039,6 +12047,27 @@ export class SessionService {
     // here to wait on, so a bare fixed delay is still correct for this self-stop.
     setTimeout(() => { try { this.pty.stop(sessionId, "graceful"); } catch { /* already gone */ } }, 3000);
     return { stopped: true };
+  }
+
+  /**
+   * @decision 72249ae0 — best-effort ONLY: never throw or block the actual `end_me` stop, and never
+   *  strengthen the filed finding's wording into proof of truncation — a legitimate pass that predates
+   *  or skips the `scanReport` step looks identical to a truncated one.
+   */
+  private fileMissingScanReport(session: Session, sessionId: string): void {
+    const title = `Auditor session ${sessionId.slice(0, 8)} ended without a scan-completion report`;
+    const detail =
+      "This session called `end_me` without a `scanReport` summarizing what its pass covered. Per card " +
+      "72249ae0: absence of a scan-completion report is a signal that a pass MAY have ended early — a " +
+      "transcript-injection-driven `end_me` leaves no other trace — not proof that it did. A legitimate " +
+      "session predating this doctrine step, or one that simply forgot it, looks identical. Check this " +
+      "session's transcript before treating it as a real incident.";
+    try {
+      if (session.role === "auditor") this.auditFileFinding(sessionId, { title, detail, severity: "low" });
+      else if (session.role === "workspace-auditor") this.workspaceAuditSuggest(sessionId, { title, detail, severity: "low" });
+    } catch {
+      // best-effort: never let this block the actual end_me stop.
+    }
   }
 
   /**

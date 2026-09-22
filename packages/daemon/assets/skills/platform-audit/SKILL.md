@@ -255,14 +255,24 @@ a subagent and filing sharp deduped findings, not leaving the richest transcript
 - When a long transcript or a broad code-structure sweep would overrun your context, **fan it to a
   subagent** (see the coverage section) and file from the distilled findings it returns.
 
-## End of a scan pass — call `end_me`
+## End of a scan pass — call `end_me` with `scanReport`
 
 Once every finding for this pass is filed, every preset suggestion emitted, and there is nothing left to
-scan, call `end_me` to end your session. This is the natural last step of the loop: a scheduled auditor
-that stays open after its pass just accumulates idle for no benefit — the next scheduled fire spawns a
-fresh run, so nothing is lost by ending this one now.
+scan, call `end_me` to end your session — and **always pass `scanReport`**: a short summary of what this
+pass actually covered (which sessions/projects you reviewed, roughly how much, what you found). This is
+the natural last step of the loop: a scheduled auditor that stays open after its pass just accumulates
+idle for no benefit — the next scheduled fire spawns a fresh run, so nothing is lost by ending this one
+now.
+
+`scanReport` matters beyond documentation: it is Loom's only signal that a pass reached its own natural
+end rather than being cut short mid-scan by something in a transcript you were reading (prompt injection
+is in scope for this role — you read attacker-influenceable content, unattended). Calling `end_me` with
+**no** `scanReport` auto-files a low-severity finding on the Platform backlog flagging this pass as
+possibly truncated. That isn't a punishment for forgetting it once — it's the whole point: the absence is
+the only thing Loom can observe, since anything you could type in the moment you're being steered off
+course is exactly as unreliable as the steering itself.
 
 `end_me` is safe to call as your final action: it **refuses to stop you while you still have unconsumed
 inbound direction queued**, so it can never cut off a pass that's still mid-instruction. But only call it
-once you are genuinely done — findings filed, suggestions emitted, nothing left to do — not as a reflex at
-the end of every turn.
+once you are genuinely done — findings filed, suggestions emitted, `scanReport` written, nothing left to
+do — not as a reflex at the end of every turn.
