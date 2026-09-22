@@ -384,26 +384,51 @@ function classifyRole(role: unknown): TranscriptTurn["role"] {
   return "user";
 }
 
-/** Parse one rollout JSONL file into ordered, harness-agnostic turns. */
+/**
+ * Parse one rollout JSONL file into ordered, harness-agnostic turns.
+ *
+ * @decision ca9c4e34 — do not remove the `sawAssistantResponseThisTurn` guard below; without it a turn
+ * whose reply is captured by both a real response_item AND task_complete's own echo renders twice.
+ */
 export function parseTranscriptFile(file: string): TranscriptTurn[] {
   let raw: string;
   try { raw = fs.readFileSync(file, "utf8"); } catch { return []; }
   const turns: TranscriptTurn[] = [];
+  let sawAssistantResponseThisTurn = false;
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let o: Record<string, unknown>;
     try { o = JSON.parse(line); } catch { continue; }
     const payload = o.payload as Record<string, unknown> | undefined;
+    if (o.type === "event_msg" && payload?.type === "task_started") {
+      sawAssistantResponseThisTurn = false;
+      continue;
+    }
     if (o.type === "response_item" && payload?.type === "message") {
       const text = extractContentText(payload.content);
-      if (text.trim()) turns.push({ role: classifyRole(payload.role), text });
+      if (text.trim()) {
+        const role = classifyRole(payload.role);
+        if (role === "assistant") sawAssistantResponseThisTurn = true;
+        turns.push({ role, text });
+      }
       continue;
     }
     // Defensive fallback (UNCONFIRMED shape — see this file's header gap note): task_complete's
     // last_agent_message is the one documented-by-naming place an assistant reply could live when it
-    // never appears as its own response_item.
-    if (o.type === "event_msg" && payload?.type === "task_complete" && typeof payload.last_agent_message === "string" && payload.last_agent_message.trim()) {
-      turns.push({ role: "assistant", text: payload.last_agent_message });
+    // never appears as its own response_item. Guarded by sawAssistantResponseThisTurn (card ca9c4e34) so
+    // it never re-renders a reply a response_item already captured for THIS turn.
+    if (o.type === "event_msg" && payload?.type === "task_complete") {
+      if (!sawAssistantResponseThisTurn && typeof payload.last_agent_message === "string" && payload.last_agent_message.trim()) {
+        turns.push({ role: "assistant", text: payload.last_agent_message });
+      }
+      // card ca9c4e34 (manager review): reset HERE too, not only on task_started — task_complete is
+      // itself every turn's real terminal, so closing the window here makes the guard self-limiting and
+      // removes any dependency on task_started being present. Without this, a task_started-only reset
+      // stays `true` past this turn if task_started is ever absent for the next one, and SILENTLY DROPS
+      // that later turn's own fallback-only reply — converting the duplicate this guard fixes into a
+      // loss, which this repo's docs/decisions/88f11385 fail-toward-duplicate principle rules out.
+      sawAssistantResponseThisTurn = false;
+      continue;
     }
   }
   return turns;
