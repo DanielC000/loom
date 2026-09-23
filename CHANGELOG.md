@@ -4,6 +4,10 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+### Changed
+- **README and landing-page copy refreshed** to describe the product as it stands at 0.29.0 — the last full pass was at 0.23.0. Two claims were not merely stale but wrong, and both faced the public: the skills section said Loom's project-local skills *shadow* your personal `~/.claude/skills` when Claude Code's precedence is the opposite (which is why Loom's skill names are chosen not to collide), and "Reach Loom from another device" said a first-class authenticated remote bind was "not offered today" when one had already shipped (gateway tokens, a fail-closed per-route trust tier, mandatory TLS off a tailnet, remote rate limiting). Newly described: batched merges and reduced gates, the Gates page, multi-repo and reference repos, the local access credential, decision records, the opt-in Codex harness, the Elevated Operator, and the companion's git lever and lead mode.
+- **The Remote access page now documents the local access credential.** Its tunnel instructions predated the loopback write guard, so following them from another device produced a cockpit that read fine and failed every write with a 401 — the token only ever arrives via a `?token=` query param and is stored per browser origin, which `loom open` hides on the host. The one-per-device step and the credential's location are now written down in both the page and the README.
+
 ### Removed
 - **`/graphify` bundled skill removed.** The opt-in graphify code-graph orientation skill is gone from Loom's built-in surface — Codescape already covers this repo's own orientation, and Loom never validated or updated the doctrine against the underlying third-party tool after it was first added. graphify itself is unaffected; a user who installs it separately can still use it, just without Loom's own shipped doctrine for it.
 
