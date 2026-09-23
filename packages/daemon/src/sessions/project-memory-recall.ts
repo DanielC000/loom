@@ -205,6 +205,45 @@ export function computeFloorTierStatus(
  *  corpus — it's sized off this project's own average/median unpinned note size, not a universal constant. */
 const RELATED_RESERVE_FRACTION = 0.3;
 
+/** Card 3b4e5dd4 — the pinned-REST sub-tier's own citation-priority reserve: a REST note whose key is
+ *  cited by exact match ({@link isKeyCitedInText}) in the kickoff text gets PRIORITY packing ahead of the
+ *  ordinary LRU rotation ({@link sortPinnedByRecency}), bounded by BOTH of these caps, whichever binds
+ *  first — never one alone. A count-only cap breaks at the platform-default `budgetTokens` (4000): three
+ *  ~1000-token cited notes would already eat most of REST. A fraction-only cap lets a single huge cited
+ *  note take the whole slice. Unlike {@link RELATED_RESERVE_FRACTION}, these two numbers are NOT measured
+ *  against this project's corpus — they are bounds the lead chose when approving card 3b4e5dd4's design,
+ *  deliberately conservative rather than derived. Do not treat 738568b6's measured-corpus derivation as
+ *  precedent for re-deriving these; re-derive only against real data if they're ever revisited. */
+const CITED_REST_RESERVE_MAX_COUNT = 3;
+const CITED_REST_RESERVE_FRACTION = 0.5;
+
+/** Card 3b4e5dd4 — probes how many of `citedRest` (already {@link sortPinnedByRecency}-ordered by the
+ *  caller) fit within the citation-priority reserve: at most {@link CITED_REST_RESERVE_MAX_COUNT} notes,
+ *  and the cumulative size of the notes actually admitted must not exceed `capTokens`. Mirrors
+ *  {@link packRelatedPrefix}'s own probe-then-pack shape (card 738568b6) — a `break` at the first
+ *  overflow, never a skip-and-continue: this IS a priority PREFIX, so a note past the first one that
+ *  doesn't fit gets no special treatment either, and falls back to ordinary REST packing at its normal
+ *  LRU position (the caller's job — see {@link composeProjectMemoryDigest} — not this function's). Returns
+ *  just the included ids: the REAL pack (the single incremental loop in `composeProjectMemoryDigest`) is
+ *  what actually renders and budget-checks these notes for real, against the true, order-sensitive
+ *  combined cap — this probe only decides ORDER, it never fabricates the final yes/no for survival. */
+function packCitedRestPrefix(
+  citedRest: ProjectMemoryEntry[],
+  capTokens: number,
+  annotate: (m: ProjectMemoryEntry) => string[],
+): string[] {
+  const blocks: string[] = [];
+  const includedIds: string[] = [];
+  for (const m of citedRest.slice(0, CITED_REST_RESERVE_MAX_COUNT)) {
+    const block = noteBlock(m, annotate(m));
+    const candidate = [...blocks, block].join(SECTION_SEP);
+    if (estimateTokens(candidate) > capTokens) break;
+    blocks.push(block);
+    includedIds.push(m.id);
+  }
+  return includedIds;
+}
+
 /** Card 6def8bf4 — the pinned tier's delivery-order signal: LEAST-RECENTLY-DELIVERED first
  *  (`lastRetrievedAt` ascending, `null` — never once delivered — sorting AHEAD of every real timestamp),
  *  `updatedAt` descending as a secondary tiebreak, `key` ascending as the final deterministic tiebreak.
@@ -336,6 +375,17 @@ export function computeRestTierStatus(
  * @decision 738568b6 — never apply the RELATED reserve to NEVER_DROP_TAG notes; the floor tier always
  * packs against the full budgetTokens — only REST's own ceiling narrows.
  *
+ * Card 3b4e5dd4 — WITHIN REST, a note whose key the kickoff text cites by exact match
+ * ({@link isKeyCitedInText}) is additionally reordered to the FRONT of the rotation, bounded by
+ * {@link packCitedRestPrefix}'s reserve (see {@link CITED_REST_RESERVE_MAX_COUNT}/
+ * {@link CITED_REST_RESERVE_FRACTION}) so a kickoff citing many keys can't starve every other pinned note.
+ * A cited note that doesn't fit the reserve is NOT penalized — it keeps its ordinary LRU position among
+ * the rest of REST, same as an uncited note. This reverses card `71192d47`'s original DoD-3 scope guard
+ * ("never fed back into selection") for the REST sub-tier specifically — that guard was a scope boundary
+ * to keep card `71192d47` additive, not a considered rejection of ever changing selection; that card carries
+ * no formal decision-anchor record. FLOOR and RELATED stay entirely unaffected by kickoffText-driven
+ * ordering, and `budgetTokens` itself is still never touched.
+ *
  * RELATED tier still `break`s at the first overflow — a rank-ordered PREFIX is the correct truncation
  * there (the top-ranked matches are the ones worth keeping; skipping past a big one to pack a
  * worse-ranked one would invert the ranking).
@@ -354,12 +404,14 @@ export function composeProjectMemoryDigest(
    *  backlinks — card e4e180ad). */
   annotate: (m: ProjectMemoryEntry) => string[] = () => [],
   /** Card 71192d47 — the SAME text driving the RELATED-tier FTS query one level up (see
-   *  {@link retrieveProjectMemoryForKickoff}), threaded down here ONLY to detect "a key this text itself
-   *  cited got dropped" ({@link isKeyCitedInText}) — read-only, never fed back into selection, ranking, or
-   *  the token budget itself (see {@link citedDroppedLine}'s doc comment for why that stays a strict
-   *  separation). Defaults to `""` (⇒ {@link isKeyCitedInText} can never match anything) so every
-   *  pre-existing call site, incl. every hermetic fixture test with no notion of "kickoff text," stays
-   *  byte-identical. */
+   *  {@link retrieveProjectMemoryForKickoff}). Originally threaded down here ONLY to detect "a key this
+   *  text itself cited got dropped" ({@link isKeyCitedInText}) for {@link citedDroppedLine}'s warning line
+   *  — read-only there, never fed into selection. Card 3b4e5dd4 ADDS one narrow, bounded selection use on
+   *  top of that: within the pinned-REST sub-tier only, a note this text cites by key is reordered ahead
+   *  of the ordinary rotation (see {@link packCitedRestPrefix}) — still never touches `budgetTokens`, the
+   *  FLOOR tier, or the RELATED tier's own ranking. Defaults to `""` (⇒ {@link isKeyCitedInText} can never
+   *  match anything, so neither the warning nor the reorder ever fires) so every pre-existing call site,
+   *  incl. every hermetic fixture test with no notion of "kickoff text," stays byte-identical. */
   kickoffText = "",
 ): {
   digest: string | null;
@@ -375,7 +427,6 @@ export function composeProjectMemoryDigest(
 
   const floorSorted = sortPinnedByRecency(pinned.filter(isNeverDrop));
   const restSorted = sortPinnedByRecency(pinned.filter((m) => !isNeverDrop(m)));
-  const pinnedOrdered = [...floorSorted, ...restSorted];
 
   // Card 738568b6 — PROBE, before pinned packs at all: how many tokens would RELATED actually consume if
   // capped at its reserve? Capped at whichever is SMALLER — the nominal reserve, or what related genuinely
@@ -397,6 +448,21 @@ export function composeProjectMemoryDigest(
   // the probe above), never by the raw nominal reserve. FLOOR is untouched and still packs against the
   // full `budgetTokens` (unchanged from before this fix — absolute priority preserved).
   const restCap = Math.max(0, budgetTokens - relatedNeed);
+  // Card 3b4e5dd4 — citation-priority reorder: pull the REST notes THIS kickoff cited by key to the FRONT
+  // of the rotation, bounded by packCitedRestPrefix's reserve so a kickoff citing many keys can't starve
+  // everyone else. `citedRest` is a FILTER of `restSorted` (order-preserving), and the prioritized subset
+  // stays a PREFIX of that filtered order — so every note NOT admitted into the reserve (never cited, or
+  // cited but past the reserve) keeps its EXACT original relative position among the rest of REST, which
+  // is what makes an overflow-cited note "fall back to its normal LRU position" rather than being
+  // penalized for having been tried first.
+  const citedRest = restSorted.filter((m) => isKeyCitedInText(kickoffText, m.key));
+  const citedReserveTokens = Math.floor(restCap * CITED_REST_RESERVE_FRACTION);
+  const prioritizedCitedIds = new Set(packCitedRestPrefix(citedRest, citedReserveTokens, annotate));
+  const restOrdered = [
+    ...restSorted.filter((m) => prioritizedCitedIds.has(m.id)),
+    ...restSorted.filter((m) => !prioritizedCitedIds.has(m.id)),
+  ];
+  const pinnedOrdered = [...floorSorted, ...restOrdered];
   {
     const blocks: string[] = [];
     // Card 91709c32 — every FLOOR note's block, fit or not, so the alarm below can report the tier's true
