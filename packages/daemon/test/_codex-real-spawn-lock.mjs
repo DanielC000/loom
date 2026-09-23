@@ -141,6 +141,20 @@ function waiterName() {
 }
 
 /**
+ * Opts THIS process into raw (unredacted) message-content diagnostics (`LOOM_LOG_MESSAGE_CONTENT=1`, read
+ * per call by `paths.ts` › `isLogMessageContentEnabled`) so an in-gate failure logs codex's actual screen
+ * tail instead of `<redacted len=… hash=…>`. Safe ONLY because every prompt these files drive through their
+ * in-process `PtyHost` is a synthetic fixture (temp-dir paths, "reply pong", a doctrine-id probe) — never
+ * real user content. Called from `acquireCodexRealSpawnLock()` (each family member's own child process
+ * calls it before spawning) and deliberately NOT at module import: `scripts/test-daemon.mjs` imports this
+ * file in the PARENT process, and an import-time set there would leak into every child test's env.
+ * The daemon's own redaction default is untouched.
+ */
+export function enableRawFixtureLogging() {
+  process.env.LOOM_LOG_MESSAGE_CONTENT = "1";
+}
+
+/**
  * Acquire the shared real-codex-spawn lock, polling up to WAIT_TIMEOUT_MS. Registers the lock file for
  * this process's own guaranteed cleanup (`_tmp-fixture.mjs`'s `beforeExit`/`exit` hooks) so a crash
  * mid-run still releases it (SIGKILL excepted — disclosed, unmitigated non-coverage, same as every other
@@ -156,6 +170,7 @@ function waiterName() {
  * @returns {Promise<() => void>} a release function — call it exactly once when finished with codex.
  */
 export async function acquireCodexRealSpawnLock() {
+  enableRawFixtureLogging();
   const deadline = Date.now() + WAIT_TIMEOUT_MS;
   let waitStartedAt = null;
   while (!tryAcquireOnce()) {
