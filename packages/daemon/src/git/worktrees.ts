@@ -3436,6 +3436,7 @@ export const ASSET_READING_TEST_REPO_PATHS = [
   "packages/daemon/test/platform-dev-flag.mjs",
   "packages/daemon/test/platform-home.mjs",
   "packages/daemon/test/redirect-discoverability.mjs",
+  "packages/daemon/test/role-surface-tools-named-in-doctrine.mjs",
   "packages/daemon/test/serve-static.mjs",
   "packages/daemon/test/serve-static-parity-guard.mjs",
   "packages/daemon/test/skills-codescape-reconcile.mjs",
