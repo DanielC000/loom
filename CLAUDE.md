@@ -132,13 +132,16 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
   **To check whether a merged skill change reached the STORE (question 1 only), grep the STORE, never a worktree:**
   `grep -c "<new string>" "$LOOM_HOME/skills/<name>/SKILL.md"` — nonzero means the store has it (not that a
   live session reflects it, and not that any agent has read a `references/**` change). Zero means
-  merged-and-dead. ⛔ Don't grep a dev worktree's own `.claude/skills` as a proxy — `pnpm build` runs the
-  `skills-sync` turbo task (`scripts/sync-claude-skills.mjs`, its own uncached task since card `bce50c22`,
-  same shape as `stamp`), which mirrors `packages/daemon/assets/skills/**` straight into that worktree's
-  `.claude/skills` on **every** `pnpm build` invocation — including one where `@loom/daemon`'s cached
-  `build` task itself hits the turbo cache — independent of the store and independent of any restart; a
-  check against it can read green while the store — what real sessions are actually injected from — is
-  still stale. For full isolation, run the stable daemon from a separate checkout (shares `~/.loom` state;
+  merged-and-dead. ⛔ Don't grep a dev worktree's own `.claude/skills` as a proxy — `scripts/sync-claude-skills.mjs`
+  mirrors `packages/daemon/assets/skills/**` straight into that worktree's `.claude/skills` on **every** build
+  of `@loom/daemon`, by DESIGN two ways at once (card `bce50c22`, belt and braces — see either file's own
+  comment before "deduping" one away): `@loom/daemon`'s own `build` script calls it inline (covers a direct
+  `pnpm --filter @loom/daemon build`, which bypasses turbo entirely), AND `turbo.json` also runs it as its
+  own uncached `skills-sync` task (same shape as `stamp`, covers a turbo-mediated build whose cached `build`
+  task itself hits the turbo cache and would otherwise skip the inline call) — independent of the store and
+  independent of any restart either way; a check against it can read green while the store — what real
+  sessions are actually injected from — is still stale. For full isolation, run the stable daemon from a
+  separate checkout (shares `~/.loom` state;
   override `LOOM_HOME`/`LOOM_PORT` for two daemons side by side).
 - **Caveat (supervisor code is NOT `daemon_restart`-deployable):** `daemon_restart` only rebuilds +
   relaunches the daemon *process*; the **supervisor** (`scripts/daemon-supervisor.mjs`) and anything it loads are NOT re-read across exit `75` (the same running supervisor execs the new `dist/`). A merge that edits the supervisor needs a **human Ctrl-C + re-run of `pnpm daemon:stable`** to go live — a manager must flag that human action in its done-report (mirrors the unsupervised `restarting:false` refusal). If `daemon_restart`'s result (or the post-restart resume nudge) instead carries `supervisorCheckFailed` — the check itself failed, not a confirmed unchanged — flag that supervisor-liveness is **unknown**, not confirmed-fine; the check couldn't tell you either way, so don't assume the human step is unnecessary.

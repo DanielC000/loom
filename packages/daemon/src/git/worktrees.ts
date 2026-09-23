@@ -3354,17 +3354,17 @@ export const STATIC_GUARD_REPO_PATHS = [
  *  `.ts`-edit-only invalidator gets no seat on a conditional list. `working-tree-eol-guard.mjs` is the
  *  identical case (also always-run, also omitted here).
  *
- *  ⚠️ THE BUILD-MIRROR INDIRECTION — name it, don't fall into it: `spawn-command-line-preflight.mjs` and
- *  `kickoff-real-spawn.mjs` read `.claude/skills/worker/SKILL.md`, which `scripts/sync-claude-skills.mjs`
- *  regenerates from `assets/skills/**` on every `pnpm build` — a THIRD route that looks like it should
- *  qualify (an asset edit DOES eventually reach `.claude/skills/**`) but doesn't, because that mirror is
- *  build-time, not diff-time: an assets-only diff with no rebuild in between leaves `.claude/skills/**` still
- *  showing the OLD content, so neither of those two tests is actually sensitive to the changed diff at
- *  classification time. NOT a hole today only because `skills-seed-asset-override-default.mjs` (already
- *  certified, reads the real asset directly) goes red on the same edit FIRST — a future test using
- *  `.claude/skills/**` as its ONLY oracle, with no certified direct-reader alongside it, WOULD be a genuine
- *  miss this criterion cannot see. Do not add either file here to "cover" that gap; the fix, if this ever
- *  stops being covered by a sibling, is a new criterion clause for the build-mirror route itself.
+ *  ⚠️ THE BUILD-MIRROR INDIRECTION, HISTORICAL — name it, don't re-derive a stale version of it: until card
+ *  `bce50c22`, `spawn-command-line-preflight.mjs` and `kickoff-real-spawn.mjs` read `.claude/skills/worker/
+ *  SKILL.md`, a BUILD-TIME (not diff-time) mirror `scripts/sync-claude-skills.mjs` regenerates from
+ *  `assets/skills/**` — an assets-only diff with no rebuild in between left that mirror still showing the
+ *  OLD content, so neither test was actually sensitive to the diff at classification time, and this list
+ *  deliberately excluded both (see the superseded "Do not" bullet on card 3fbd95e0's own record, below).
+ *  Card `bce50c22` removed that indirection: both tests now `readFileSync` `assets/skills/worker/SKILL.md`
+ *  DIRECTLY (the canonical, tracked source — see each file's own comment at its `workerSkill` read), for
+ *  the same reason every other member below is here — the real asset's bytes flow straight into what the
+ *  test asserts, no rebuild required. So both are now INCLUDED, by the ordinary direct-read criterion, not
+ *  as an exception to it.
  *
  *  @decision 3fbd95e0 — DERIVED BY HAND, ONCE (DoD-3), never by a glob — same posture {@link
  *  STATIC_GUARD_REPO_PATHS} documents:
@@ -3384,6 +3384,7 @@ export const ASSET_READING_TEST_REPO_PATHS = [
   "packages/daemon/test/decision-records.mjs",
   "packages/daemon/test/dev-server.mjs",
   "packages/daemon/test/ensure-obsidian.mjs",
+  "packages/daemon/test/kickoff-real-spawn.mjs",
   "packages/daemon/test/manager-context-block.mjs",
   "packages/daemon/test/merge-orphaned-to-main.mjs",
   "packages/daemon/test/platform-dev-flag.mjs",
@@ -3395,6 +3396,7 @@ export const ASSET_READING_TEST_REPO_PATHS = [
   "packages/daemon/test/skills-conditional.mjs",
   "packages/daemon/test/skills-seed-asset-override-default.mjs",
   "packages/daemon/test/skills-store-durability.mjs",
+  "packages/daemon/test/spawn-command-line-preflight.mjs",
   "packages/daemon/test/vault-lint.mjs",
 ];
 

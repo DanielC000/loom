@@ -63,15 +63,25 @@
       "dependsOn": ["build"]
     },
     // Card bce50c22 — same class of bug "stamp" (card 3d7dccb9, above) already closed for build-info.json:
-    // scripts/sync-claude-skills.mjs used to run INSIDE @loom/daemon's cached "build" script, mirroring
-    // packages/daemon/assets/skills/** into the repo's own (gitignored) .claude/skills. `.claude/skills/**`
-    // was never a declared turbo `output` of "build", so nothing about the cache-correctness contract
-    // covered it — a turbo cache HIT restored `dist/**` without ever re-running the script, leaving a fresh
-    // worktree (e.g. a merge-gate/batch worktree) with NO .claude/skills mirror at all, even though the
-    // gate's own replayed log line ("[sync-claude-skills] refreshed N skill(s)") made it look like the sync
-    // had run (reproduced live: merge batch 2508c28a). Split out into its own uncached task, run on every
-    // build invocation regardless of cache state, exactly like "stamp". Only @loom/daemon defines a
-    // "skills-sync" script; every other package is silently skipped by turbo, same as "stamp".
+    // scripts/sync-claude-skills.mjs mirrors packages/daemon/assets/skills/** into the repo's own
+    // (gitignored) .claude/skills, and `.claude/skills/**` was never a declared turbo `output` of "build",
+    // so nothing about the cache-correctness contract covers it — a turbo cache HIT restores `dist/**`
+    // without ever re-running whatever the "build" script does, leaving a fresh worktree (e.g. a
+    // merge-gate/batch worktree) with NO .claude/skills mirror at all, even though the gate's own replayed
+    // log line ("[sync-claude-skills] refreshed N skill(s)") made it look like the sync had run (reproduced
+    // live: merge batch 2508c28a). This uncached task closes THAT path: it runs on every turbo build
+    // invocation regardless of cache state, exactly like "stamp".
+    //
+    // BELT AND BRACES, not a dedupe candidate: @loom/daemon's own "build" script (package.json) ALSO still
+    // calls sync-claude-skills.mjs inline, unlike write-build-info.mjs above which was moved out entirely.
+    // The two cover DIFFERENT entry points that don't overlap: `pnpm --filter @loom/daemon build`
+    // (CONTRIBUTING.md, negative-control.mjs, run-static-guards.mjs, host-quiet-check.mjs,
+    // host-attribution-check.mjs, many test headers) runs that package script DIRECTLY, bypassing turbo
+    // (and therefore this task) entirely — only the inline call syncs there. A turbo-mediated build
+    // (`turbo build` / root `pnpm build`) instead can cache-HIT "build" and skip the inline call — only
+    // THIS uncached task syncs there. The sync itself is idempotent (writes only changed files), so a
+    // double run on a turbo cache MISS costs ~nothing. Only @loom/daemon defines a "skills-sync" script;
+    // every other package is silently skipped by turbo, same as "stamp".
     "skills-sync": {
       "cache": false,
       "dependsOn": ["build"]

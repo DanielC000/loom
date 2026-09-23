@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node ../../scripts/sync-claude-skills.mjs",
     "stamp": "node ../../scripts/write-build-info.mjs packages/daemon/dist",
     "skills-sync": "node ../../scripts/sync-claude-skills.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -104,6 +104,9 @@
   },
   "dependencyNotes": {
     "node-pty": "windowsCommandLine in src/pty/host.ts is a hand-maintained adaptation of this package's internal argsToCommandLine (not imported — that lives under lib/, an unsupported internal surface); a bump can silently change its quoting rules. test/node-pty-quoting-parity.mjs (Windows-only) checks parity against the real function on every build. See card 9fea4196."
+  },
+  "scriptNotes": {
+    "build": "Card bce50c22 — the trailing `sync-claude-skills.mjs` call here is DELIBERATELY duplicated by the separate `skills-sync` turbo task (turbo.json: cache:false, dependsOn:[\"build\"]). Do NOT dedupe one away: `pnpm --filter @loom/daemon build` (CONTRIBUTING.md, negative-control.mjs, run-static-guards.mjs, host-quiet-check.mjs, host-attribution-check.mjs, many test headers) runs THIS script directly, bypassing turbo entirely — only the inline call syncs on that path. `turbo build`/`pnpm build` (root) instead run this script's tsc step through turbo's CACHED `build` task, where a cache HIT replays dist/** without re-running this script at all — only the separate uncached `skills-sync` task syncs on that path. The sync is idempotent (writes only changed files), so running it twice on a turbo cache MISS costs ~nothing."
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
