@@ -28,7 +28,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     [prompt-mismatch-pasted-content-wrap-near-miss-divergence] divergedVsIntended= (card dccb6290 — the
 //     ZERO-DELTA sibling to both near-misses above: a same-length substitution, one combined
 //     redactedExcerpt(...) of the diverged+intended characters together, alongside two unconditional
-//     classifyDroppedChar() class labels).
+//     classifyDroppedChar() class labels),
+//     [codex-engine-id] give-up screen tail= (card 6654a47c — codex's ANSI-stripped on-screen tail, which
+//     includes the echoed prompt; logged alongside allowlisted marker LABELS only, never matched text).
 //   sessions/service.ts: [give-up] … PARKED head.
 // Run: 1) build daemon (pnpm build from packages/daemon), 2) node test/log-message-content-gate.mjs
 import fs from "node:fs";
@@ -117,8 +119,11 @@ try {
     // near-miss-DIVERGENCE's divergedVsIntended= — the ZERO-DELTA sibling of both near-misses above (a
     // same-length substitution), one combined redactedExcerpt(...) of both the diverged and intended
     // characters together (not two separate calls), logged alongside two unconditional class labels
-    // (classifyDroppedChar per side) — see done-report for the enumerating grep + per-site anchors.
-    check("(4) pty/host.ts: exactly 13 redactedExcerpt call sites", hostCalls === 13);
+    // (classifyDroppedChar per side) — and (card 6654a47c) the codex engine-id give-up `screen tail=`: the
+    // ANSI-stripped, 600-char-capped tail of the codex ring (contains the echoed prompt, so it must be
+    // redacted by default), logged next to allowlisted marker labels that never carry matched text —
+    // see done-report for the enumerating grep + per-site anchors.
+    check("(4) pty/host.ts: exactly 14 redactedExcerpt call sites", hostCalls === 14);
     check("(4) sessions/service.ts: exactly 1 redactedExcerpt call site ([give-up] PARKED head)", serviceCalls === 1);
     // Negative control on the census itself: a nonexistent function name must find ZERO call sites, proving
     // this isn't a pattern that matches everything.
