@@ -1519,12 +1519,37 @@ export interface EscalationStatusItem {
   status: "pending" | "in_progress" | "triaged" | "resolved" | "closed";
   columnKey: string | null;
   updatedAt: string;
+  /** How many `platform_escalate` events collapsed into this ONE row (card 797f7811) — a re-escalated
+   *  card files a fresh event per follow-up, but this is always ONE row per DISTINCT taskId, latest
+   *  event wins for the displayed fields. 1 for a card escalated exactly once. */
+  count: number;
   /** Where the Lead's fix work actually went, once linked via `resolvesEscalation` — `project_task_create`'s
    *  param at create time, or `project_task_update`'s SAME-named param after the fact (card de90f22a; the
    *  link isn't create-only) — null until a link is recorded. `merged` is that destination card's OWN
    *  git-derived ship state (the SAME check `project_task_get`/`tasks_get` expose) — see `status`'s doc for
    *  how to read a null here. */
   triagedTo: { projectId: string; projectName: string; taskId: string; taskTitle: string; merged: MergedCommitInfo | null } | null;
+}
+
+/**
+ * Dedupe a project's `platform_escalate` events to ONE candidate per DISTINCT taskId — the LATEST event
+ * (by `ts`) plus the total COUNT of events collapsed into it. Shared by both `escalationStatus` call
+ * shapes: the taskId lookup (a re-escalated card's repeated taskId otherwise makes its own unambiguous
+ * prefix resolve as "ambiguous" — card 9eaae37b) and list mode (which used to map every event, so a
+ * re-escalated card showed once per event instead of once per escalation — card 797f7811). Filters out
+ * any event with no taskId (nullable on the shared OrchestrationEvent type, though platform_escalate
+ * always sets it) so a null/undefined can never coerce into a matchable "" candidate.
+ */
+function dedupeEscalationsByTaskId(events: OrchestrationEvent[]): Map<string, { event: OrchestrationEvent; count: number }> {
+  const byTaskId = new Map<string, { event: OrchestrationEvent; count: number }>();
+  for (const e of events) {
+    if (typeof e.taskId !== "string") continue;
+    const existing = byTaskId.get(e.taskId);
+    if (!existing) { byTaskId.set(e.taskId, { event: e, count: 1 }); continue; }
+    existing.count += 1;
+    if (e.ts > existing.event.ts) existing.event = e;
+  }
+  return byTaskId;
 }
 
 /** Bounded scan window for {@link findShippedCardMatch} — recent mainline history only, not a full-repo
@@ -9076,28 +9101,25 @@ export class SessionService {
     if (!caller || caller.role !== "manager") throw new Error("escalation_status is a manager-only surface");
 
     const events = this.db.listEscalationsForProject(caller.projectId);
+    // @decision 9eaae37b — dedupe to ONE candidate per DISTINCT taskId (latest event + total count,
+    // card 797f7811), shared by the taskId lookup below and list mode — see dedupeEscalationsByTaskId's
+    // own doc for why both need it.
+    const latestByTaskId = dedupeEscalationsByTaskId(events);
     if (input.taskId) {
       const ref = input.taskId;
-      // platform_escalate always sets taskId (service method above), but the field is nullable on the
-      // shared OrchestrationEvent type — filter defensively so resolveIdPrefix's candidates are always
-      // real strings rather than coercing a null/undefined into a matchable "" prefix.
-      const withId = events.filter((e): e is typeof e & { taskId: string } => typeof e.taskId === "string");
-      // @decision 9eaae37b — dedupe to ONE candidate per DISTINCT taskId before resolving, keeping
-      // the LATEST event per taskId; a re-escalated card's repeated taskId otherwise makes an
-      // unambiguous prefix resolve as "ambiguous".
-      const latestByTaskId = new Map<string, (typeof withId)[number]>();
-      for (const e of withId) {
-        const existing = latestByTaskId.get(e.taskId);
-        if (!existing || e.ts > existing.ts) latestByTaskId.set(e.taskId, e);
-      }
-      const r = resolveIdPrefix(Array.from(latestByTaskId.values()).map((e) => ({ id: e.taskId, event: e })), ref);
+      const r = resolveIdPrefix(
+        Array.from(latestByTaskId.entries()).map(([taskId, v]) => ({ id: taskId, event: v.event, count: v.count })),
+        ref,
+      );
       if (r.kind === "ambiguous") {
         return { error: `ambiguous escalation id-prefix '${ref}' — it matches ${r.ids.join(", ")}; pass more characters or the full id` };
       }
       if (r.kind === "none") return { found: false };
-      return { found: true, escalation: await this.describeEscalation(r.record.event) };
+      return { found: true, escalation: await this.describeEscalation(r.record.event, r.record.count) };
     }
-    const all = await Promise.all(events.map((e) => this.describeEscalation(e)));
+    const all = await Promise.all(
+      Array.from(latestByTaskId.values()).map((v) => this.describeEscalation(v.event, v.count)),
+    );
     // @decision ba04d607 — keep `triaged` out of "resolved" here: it only means the Lead acted, and a
     // manager checking in on open work still wants to see it by default.
     const scoped = input.includeResolved ? all : all.filter((it) => it.status !== "resolved" && it.status !== "closed");
@@ -9105,15 +9127,17 @@ export class SessionService {
   }
 
   /** One `platform_escalate` event → its current escalation status, read fresh off the live Platform task
-   *  (its title/column may have moved since filing — a refined title is itself a signal the Lead saw it). */
-  private async describeEscalation(event: OrchestrationEvent): Promise<EscalationStatusItem> {
+   *  (its title/column may have moved since filing — a refined title is itself a signal the Lead saw it).
+   *  `count` (card 797f7811) is the total number of events collapsed into this row — see
+   *  {@link dedupeEscalationsByTaskId}; defaults to 1 for a call site with nothing to dedupe. */
+  private async describeEscalation(event: OrchestrationEvent, count = 1): Promise<EscalationStatusItem> {
     const taskId = event.taskId ?? "";
     const filedTitle = (event.detail?.title as string | undefined) ?? "";
     const platformProjectId = (event.detail?.platformProjectId as string | undefined) ?? "";
     const task = this.db.getTask(taskId);
-    if (!task) return { taskId, title: filedTitle, status: "closed", columnKey: null, updatedAt: event.ts, triagedTo: null };
+    if (!task) return { taskId, title: filedTitle, status: "closed", columnKey: null, updatedAt: event.ts, triagedTo: null, count };
     const { status, triagedTo } = await this.deriveEscalationStatus(platformProjectId, task.columnKey, taskId);
-    return { taskId, title: task.title, status, columnKey: task.columnKey, updatedAt: task.updatedAt, triagedTo };
+    return { taskId, title: task.title, status, columnKey: task.columnKey, updatedAt: task.updatedAt, triagedTo, count };
   }
 
   /**

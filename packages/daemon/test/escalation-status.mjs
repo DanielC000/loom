@@ -306,6 +306,29 @@ try {
   const st3Full = await callAs("MGR_A", "manager", "escalation_status", { taskId: t3 });
   check("(g) the full id for the same re-escalated task also resolves cleanly",
     st3Full.found === true && st3Full.escalation.taskId === t3);
+  check("(g) the direct taskId lookup also reports the real event count (11) for a re-escalated card",
+    st3Full.escalation.count === 11);
+
+  // ===================== (h) LIST MODE must also dedupe by taskId (card 797f7811) =====================
+  // Before this fix, list mode mapped EVERY platform_escalate event with no dedupe at all — a re-escalated
+  // card (T3, 11 events, still `pending`) showed up 11 TIMES in the list instead of once. By this point pA
+  // has filed platform_escalate events for 5 DISTINCT taskIds total: t1 (closed, 1 event), t2 (pending, 1
+  // event), the two synthetic dupId1/dupId2 events from case (e) (closed — no live task — 1 event each),
+  // and t3 (pending, 11 events) — so includeResolved:true is required to see all 5 in one read, and the
+  // TOTAL row count proves events collapsed to distinct taskIds, not the raw 15 events filed.
+  const listAllAfterReescalation = await callAs("MGR_A", "manager", "escalation_status", { includeResolved: true });
+  const t3RowsInList = listAllAfterReescalation.escalations.filter((e) => e.taskId === t3);
+  check("(h) list mode returns EXACTLY ONE row for T3 despite 11 filed events (the defect this card fixes)",
+    t3RowsInList.length === 1);
+  check("(h) that one row's `count` reports all 11 collapsed events",
+    t3RowsInList[0]?.count === 11);
+  check("(h) list mode still returns exactly ONE row each for T1 and T2 (count 1 apiece, never escalated again)",
+    listAllAfterReescalation.escalations.filter((e) => e.taskId === t1).length === 1 &&
+    listAllAfterReescalation.escalations.find((e) => e.taskId === t1)?.count === 1 &&
+    listAllAfterReescalation.escalations.filter((e) => e.taskId === t2).length === 1 &&
+    listAllAfterReescalation.escalations.find((e) => e.taskId === t2)?.count === 1);
+  check("(h) list mode's total row count is 5 DISTINCT taskIds (t1, t2, dupId1, dupId2, t3), not the 15 raw events filed",
+    listAllAfterReescalation.escalations.length === 5);
 
   // Defense in depth: the service method itself rejects a non-manager caller. escalationStatus is now
   // async (card ba04d607 — deriving `resolved` needs an awaited git-derived merged check), so its guard

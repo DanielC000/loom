@@ -5757,6 +5757,10 @@ export class OrchestrationMcpRouter {
           "`{found:false}` uniformly, never an error, so this can't be used to probe another project's " +
           "escalations; an AMBIGUOUS prefix that matches more than one of YOUR OWN escalations returns a " +
           "\"did you mean\" error naming the candidates (pass more characters or the full id).\n" +
+          "The list is DEDUPED to one row per DISTINCT taskId (a card re-escalated via `followUpOn` files a " +
+          "fresh event per follow-up, but shows here only ONCE, keyed on its latest event) — each row's " +
+          "`count` is how many platform_escalate events collapsed into it (1 for a card escalated exactly " +
+          "once).\n" +
           "Each escalation reports its CURRENT title (the Lead may have refined it — itself a sign it was " +
           "seen), a `status` of pending (still in the landing lane — not yet picked up), in_progress (moved " +
           "into a working lane — picked up), triaged (the Lead verified it and filed the fix as a card " +
