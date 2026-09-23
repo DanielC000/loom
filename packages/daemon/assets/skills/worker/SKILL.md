@@ -500,6 +500,12 @@ when your session was provisioned such a connection**; assume it's absent unless
   the project's "**Commit scopes**" list in its `CLAUDE.md` (the subsystem your change lands in);
   scopeless is fine only for a project with no meaningful code subdivisions. (Your branch is
   squash-merged under the card title, but keep your own commits conventional + scoped too.)
+  **If your `done` report comes back naming new long comment block(s) your branch adds with no decision
+  anchor**, that's an advisory nudge, never a refusal — your report still lands. Classify each one:
+  a short standing guard stays inline as-is; genuine decision/incident narrative belongs in a record (see
+  "Extracting a decision record" above) — extract it, then re-report so the nudge clears on your next
+  `done`. It's diff-scoped (only what YOUR branch adds, never a pre-existing block elsewhere in the file),
+  so don't go hunting for unrelated legacy comments to fix.
 - **`blocked`** — with `needs`: the specific decision, access, or information you're waiting on. This
   moves your task to `waiting` on the board, signalling your manager that it's parked on you-can't-proceed
   until the `needs` is resolved.

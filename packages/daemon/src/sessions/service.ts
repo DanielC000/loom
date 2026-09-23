@@ -20,6 +20,7 @@ import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, type BoundedGitDeps, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, type BatchCandidate, type BatchGateResult } from "../git/batch-merge.js";
+import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit } from "../git/bounded.js";
 import { GitReader } from "../git/reader.js";
@@ -10003,6 +10004,21 @@ export class SessionService {
               `If a future done is a legitimate no-op (a review, an investigation with nothing to change, an out-of-repo deliverable), pass noChanges:true to suppress this warning and auto-retire cleanly.`;
           }
         }
+        // UNANCHORED-COMMENT-BLOCK nudge (card 9d0c004e, primary surface — worker_merge's review step
+        // carries the manager-facing backstop). Advisory only; never refuses. The `!precheck.zeroAhead`
+        // half of this guard is load-bearing (0 commits ahead means an empty diff — skip the git
+        // round-trip entirely). The `!report.noChanges` half is BELT-AND-BRACES, not currently
+        // observable as discriminating: the nochanges-with-commits refusal above already makes
+        // `noChanges:true` with a non-empty diff unreachable via this public API, so this can never
+        // actually suppress a real advisory today — kept as explicit intent, and as a real backstop
+        // should that refusal's own guard ever change.
+        if (!report.noChanges && !precheck.zeroAhead) {
+          try {
+            const commentBlocks = await detectUnanchoredAddedCommentBlocks(precheckRepoPath, worker.branch, doneBase, { timeoutMs: this.gitOpMs });
+            const note = formatUnanchoredCommentBlocksAdvisory(commentBlocks, "worker");
+            if (note) warning = warning ? `${warning} ${note}` : note;
+          } catch { /* fail safe: detector failure never blocks or alters the report */ }
+        }
       }
     }
 
@@ -12650,7 +12666,16 @@ export class SessionService {
     const denyGlobWarning = deniedAdds.length > 0
       ? `DENY-GLOB: branch adds ${deniedAdds.length} file(s) under a project-configured deny path (${(project.denyGlobs ?? []).join(", ")}): ${deniedAdds.slice(0, 10).join(", ")}${deniedAdds.length > 10 ? `, +${deniedAdds.length - 10} more` : ""}. This commonly means a mockup or other deliverable landed in the code repo instead of the vault. Not a hard block — confirming will merge it as-is; verify that's intended before proceeding.`
       : undefined;
-    const warning = [strandedWarning, staleWarning, denyGlobWarning, retractedPremiseWarning, entityWarning].filter((w): w is string => !!w).join(" ") || undefined;
+    // UNANCHORED-COMMENT-BLOCK backstop (card 9d0c004e): the manager-facing half of a two-surface
+    // advisory (worker_report is the primary — see workerReport's own DoD block for the worker-facing
+    // wording). Reuses THIS call's own already-fetched `diff.allFiles` as the hint (cost: skips a
+    // redundant diffstat git call) — own try/catch — never let a detector hiccup disturb this review.
+    let commentBlockWarning: string | undefined;
+    try {
+      const commentBlocks = await detectUnanchoredAddedCommentBlocks(repoPath, worker.branch, "HEAD", { timeoutMs: this.gitOpMs }, { allFiles: diff.allFiles });
+      commentBlockWarning = formatUnanchoredCommentBlocksAdvisory(commentBlocks, "manager");
+    } catch { /* fail safe: no warning, no throw */ }
+    const warning = [strandedWarning, staleWarning, denyGlobWarning, retractedPremiseWarning, entityWarning, commentBlockWarning].filter((w): w is string => !!w).join(" ") || undefined;
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "merge_request",
