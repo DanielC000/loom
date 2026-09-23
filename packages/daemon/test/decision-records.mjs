@@ -44,6 +44,18 @@
 // injected — NEVER the narrative around them, whether or not the record needed truncating. A record with
 // no Do-not section injects an explicit, labelled fallback note instead of the old whole-record narrative.
 // The per-record byte cap now bounds this much smaller reduced body (ordinarily never triggered).
+// Plus card a4760fc8 (2026-09-23): markdown anchors (a vault/research project has no `//` comments) —
+// ANCHOR_RE is already comment-syntax-agnostic, so an HTML-comment-wrapped `<!-- @decision <id> -->` in a
+// .md file resolves exactly like a code comment (no parser change); a prose sentence that merely mentions
+// the grammar with a placeholder (`<8hex>`) never matches, proved via a positive control on the SAME line
+// shape with real hex; the `sha:` sigil'd form works in markdown too. Also fixes a real gap this card
+// surfaced: `writeSessionSettings`'s `anyDecisionRecordStoreExists` gate (claude-settings.ts) used to check
+// `docs/<kind>` directly under the passed cwd with NO walk-up, disagreeing with this script's own
+// `findRepoRoot` — a session whose cwd sits BELOW the real git root (several Loom projects sharing one
+// vault, each bound to its own subfolder, with the vault's `.git`+store at the shared root) never got the
+// Read hook wired at all. Covered here: a subfolder-of-a-repo-with-a-root-store wiring case (RED on the
+// pre-fix gate), a subfolder-with-no-store-anywhere negative control, and a worktree-style `.git` FILE
+// (not directory) resolving from one of ITS OWN subfolders.
 //
 // RUN with an isolated LOOM_HOME (writeSessionSettings just needs the settings dir; no daemon needed):
 //   pnpm build (repo root) then `node test/decision-records.mjs` from packages/daemon.
@@ -504,6 +516,90 @@ try {
   check("N4: a single line carrying TWO anchors injects BOTH records (not just the first)",
     !!multiResult && multiResult.hookSpecificOutput.additionalContext.includes("First of two anchors on one line.")
       && multiResult.hookSpecificOutput.additionalContext.includes("Second of two anchors on one line."));
+
+  // --- card a4760fc8: markdown anchors (a vault/research project has no `//` comments) — ANCHOR_RE is
+  // already comment-syntax-agnostic (no code change here), so the convention is purely an AUTHORING form:
+  // wrap the same grammar in an HTML comment, invisible in a rendered Markdown/Obsidian preview. Three
+  // isolated blank-line-delimited blocks in ONE .md file, read individually so block-expansion can never
+  // bleed one block's anchor into another's read range. ---
+  fs.writeFileSync(path.join(REPO, "docs", "decisions", "beefcafe-markdown-anchor-test.md"),
+    "# beefcafe\n\nA markdown-anchor record, resolved from an HTML-comment anchor in a .md file.\n");
+  const NOTE_MD = path.join(REPO, "NOTE.md");
+  const noteLines = [
+    "# Project note", "",
+    "<!-- @decision beefcafe — always X in markdown, never Y -->", "", // line 3: real anchor
+    "Convention: wrap a markdown anchor as `<!-- @decision <8hex> — text -->` (or `sha:<8hex>`).", "", // line 5: prose mention only
+    `<!-- @decision sha:${REAL_SHA} — a genuine verified-commit record, cited from markdown -->`, "", // line 7: sha: form
+  ];
+  fs.writeFileSync(NOTE_MD, noteLines.join("\n") + "\n");
+  const mdAnchorResult = runHookOnFile(NOTE_MD, "s-md-anchor", 3, 1);
+  check("markdown anchor: an HTML-comment-wrapped `<!-- @decision <id> -->` in a .md file resolves exactly "
+    + "like a code comment (this is the POSITIVE control for the prose-mention negative below — same line "
+    + "shape, real hex vs. a placeholder)",
+    !!mdAnchorResult && mdAnchorResult.hookSpecificOutput.additionalContext.includes(
+      "A markdown-anchor record, resolved from an HTML-comment anchor in a .md file."));
+  const mdProseResult = runHookOnFile(NOTE_MD, "s-md-prose", 5, 1);
+  check("markdown anchor: prose that merely MENTIONS the grammar with a placeholder (`<8hex>`) never "
+    + "matches — `<8hex>` cannot satisfy ANCHOR_RE's `[0-9a-f]{8}` requirement (proved structurally: 'h' "
+    + "and 'x' aren't hex digits), so this stays silent exactly like DoD-2/DoD-5's other negative controls",
+    mdProseResult === null);
+  const mdShaResult = runHookOnFile(NOTE_MD, "s-md-sha", 7, 1);
+  check("markdown anchor: the `sha:` sigil'd form also resolves from markdown, unchanged from the code-"
+    + "comment case (reuses the REAL_SHA record already proven to resolve above)",
+    !!mdShaResult && mdShaResult.hookSpecificOutput.additionalContext.includes(
+      "Genuine commit-keyed record, resolved via the sha: sigil."));
+
+  // --- card a4760fc8: the writeSessionSettings store-existence GATE previously checked `docs/<kind>`
+  // directly under the passed cwd with no walk-up, disagreeing with decision-records.mjs's own runtime
+  // `findRepoRoot` walk (see anyDecisionRecordStoreExists's own doc in claude-settings.ts). This is the
+  // shared-vault case: several Loom projects each bound to their OWN subfolder of one larger vault repo,
+  // whose `.git` and `docs/decisions` store both live at the shared ROOT above every project's own cwd. ---
+  ensureDirs();
+  const permA = { mode: "acceptEdits", allow: [], deny: [] };
+
+  // Arm A: cwd is a SUBFOLDER of REPO (a real `.git` DIR + all three stores at REPO's own root, from the
+  // fixtures above) — the hook must still wire, resolved via a walk-up to REPO's root, never the subfolder.
+  const REPO_SUBFOLDER = path.join(REPO, "Projects", "Federalist");
+  fs.mkdirSync(REPO_SUBFOLDER, { recursive: true });
+  const subfolderSettings = JSON.parse(fs.readFileSync(
+    writeSessionSettings("decrec-wiring-subfolder", permA, "test-hook-token", undefined, REPO_SUBFOLDER), "utf8"));
+  const readGroupSubfolder = (subfolderSettings.hooks.PostToolUse || []).find((g) => g.matcher === "Read");
+  check("writeSessionSettings(repoPath = a SUBFOLDER of a repo whose ROOT has a record store): PostToolUse "
+    + "still carries a Read group — walks up to the git root, mirroring decision-records.mjs's own "
+    + "findRepoRoot (the shared-vault case, card a4760fc8)",
+    !!readGroupSubfolder);
+
+  // Arm B (negative control on the walk-up itself): a subfolder of a git repo with NO store ANYWHERE —
+  // proves the walk-up doesn't spuriously wire when genuinely nothing exists at the resolved root either.
+  // NO_STORE_REPO's own `.git` marker is normally created later (the S1 section below) — created here
+  // too (idempotent, mirrors that section) so THIS arm genuinely walks up to a real git root rather than
+  // an as-yet-plain directory, which would pass for the wrong reason (never finding ANY `.git` at all).
+  fs.mkdirSync(NO_STORE_REPO, { recursive: true });
+  fs.mkdirSync(path.join(NO_STORE_REPO, ".git"), { recursive: true });
+  const NO_STORE_SUBFOLDER = path.join(NO_STORE_REPO, "Projects", "Nested");
+  fs.mkdirSync(NO_STORE_SUBFOLDER, { recursive: true });
+  const noStoreSubfolderSettings = JSON.parse(fs.readFileSync(
+    writeSessionSettings("decrec-wiring-subfolder-nostore", permA, "test-hook-token", undefined, NO_STORE_SUBFOLDER), "utf8"));
+  const readGroupNoStoreSubfolder = (noStoreSubfolderSettings.hooks.PostToolUse || []).find((g) => g.matcher === "Read");
+  check("writeSessionSettings(repoPath = a subfolder of a repo with NO store anywhere): PostToolUse carries "
+    + "NO Read group (the walk-up resolves the real git root and correctly finds nothing there either)",
+    !readGroupNoStoreSubfolder);
+
+  // Arm C: a git WORKTREE's `.git` is a FILE, not a directory — decision-records.mjs's own findRepoRoot
+  // already treats either as a valid marker (fs.existsSync doesn't distinguish types); prove the daemon-
+  // side walk-up does too, from a SUBFOLDER of such a worktree.
+  const WORKTREE_REPO = path.join(os.tmpdir(), `loom-decrec-worktree-${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
+  fs.mkdirSync(WORKTREE_REPO, { recursive: true });
+  fs.writeFileSync(path.join(WORKTREE_REPO, ".git"), "gitdir: /some/where/.git/worktrees/decrec\n"); // a real worktree's .git is a FILE, not a dir
+  fs.mkdirSync(path.join(WORKTREE_REPO, "docs", "decisions"), { recursive: true });
+  const WORKTREE_SUBFOLDER = path.join(WORKTREE_REPO, "sub");
+  fs.mkdirSync(WORKTREE_SUBFOLDER, { recursive: true });
+  const worktreeSettings = JSON.parse(fs.readFileSync(
+    writeSessionSettings("decrec-wiring-worktree-file-git", permA, "test-hook-token", undefined, WORKTREE_SUBFOLDER), "utf8"));
+  const readGroupWorktree = (worktreeSettings.hooks.PostToolUse || []).find((g) => g.matcher === "Read");
+  check("writeSessionSettings(repoPath = a subfolder of a worktree whose `.git` is a FILE): PostToolUse "
+    + "still carries a Read group (the walk-up recognizes a `.git` FILE marker, not just a directory)",
+    !!readGroupWorktree);
 
   // --- S4 regression: never resolve records against a repo OTHER than the session's own cwd — a Read of
   // a file that happens to live in a DIFFERENT repo on the same host must not inject THAT tree's records. ---
