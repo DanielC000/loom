@@ -603,7 +603,12 @@ export class SetupMcpRouter {
         inputSchema: strictShape({}),
       },
       async () => {
-        const rows = db.listAllProjects().map(projectFields);
+        // Two-step, deliberately: `rawProjects` is the unmasked read, `rows` is what actually reaches
+        // `ok(...)` (both inline and via the spill file) — keeping the mask visible as its own statement,
+        // never chained directly onto the raw getter, is what keeps this legible to
+        // mcp-project-fields-chokepoint-guard.mjs's static scan (card 91fef05a review).
+        const rawProjects = db.listAllProjects();
+        const rows = rawProjects.map(projectFields);
         if (!callerSessionId) return ok(rows);
         const spill = spillRowsIfLarge(callerSessionId, "list-all-projects-spills", "all", rows, SPILL_INLINE_BUDGET_CHARS);
         if (spill.inline) return ok(rows);
