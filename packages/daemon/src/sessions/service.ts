@@ -15086,8 +15086,13 @@ export class SessionService {
       // ALREADY_MERGED: the branch's work is already in main (a prior squash with its trailer). Finish the
       // bookkeeping idempotently via the SAME helper the early-idempotency check above uses. `merge.sha`
       // rides along free (mergeBranchLocked's own findLandedSquashCommit lookup, widened to return it).
-      return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null });
+      return this.finishAlreadyMerged({ managerSessionId: this.resolveBatchCandidateOwner(managerSessionId, workerSessionId) ?? managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null });
     }
+
+    // @decision 0771da77 — everything below runs AFTER the gate/merge awaits, so the manager captured at confirm
+    //  start may have been recycled; finalize under the worker's CURRENT lineage owner (same resolver as the batch
+    //  path, card 2c16447b), falling back to the captured id — never adopt an unrelated manager.
+    const owner = this.resolveBatchCandidateOwner(managerSessionId, workerSessionId) ?? managerSessionId;
 
     // STALE IDLE-NUDGE PURGE (card 6119778b — same evaluation-vs-delivery gap task 69a128b0 fixed for
     // recycleWorker, applied here): classifyIdleWorker's PENDING-MERGE GUARD reads `pendingMerge.state`
@@ -15099,7 +15104,7 @@ export class SessionService {
     // 187f5b76 — no separate settle nudge is ever coming). Purge it now, BEFORE the hard-stop, so a
     // nudge that was accurate when classified but stale by delivery time never drains into the manager
     // describing a merge that has already settled.
-    try { this.pty.purgeQueuedWorkerIdleNudges(managerSessionId, workerSessionId); } catch { /* manager not live */ }
+    try { this.pty.purgeQueuedWorkerIdleNudges(owner, workerSessionId); } catch { /* manager not live */ }
     // Green: the branch is on the canonical repo. The worker (which reported 'done' but is still
     // alive) holds the worktree as its pty cwd — on Windows `git worktree remove` fails while the
     // dir is a live process's cwd. So hard-stop the worker and wait for the pty to die BEFORE
@@ -15114,7 +15119,7 @@ export class SessionService {
     // paths above return early WITHOUT deleting, so a re-task keeps its retained worktree + branch.
     // `merge.sha` (card 1eebc46a) is the just-created squash commit's sha, free from mergeBranch's own
     // return — persisted onto the task alongside the rest of finalize's bookkeeping.
-    const finalizeResult = await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null });
+    const finalizeResult = await this.finalizeMerge({ managerSessionId: owner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null });
     // SKILL-LIVENESS WARNING (card 64a30c79): a merge that just landed a change under
     // `packages/daemon/assets/skills/<name>/**` reaches ZERO agents right now — `skills/inject.ts` mirrors
     // sessions from the STORE, never `assets/` (see CLAUDE.md's "Caveat" section) — so surface that here,
