@@ -71,14 +71,12 @@ const allow = (surface, tools, reason) => { for (const t of tools) ALLOWLIST[`${
 
 allow("orchestration manager", ["agent_assign_profile", "agent_delete", "profile_delete", "project_archive", "project_update",
   "board_column_create", "board_column_delete", "board_column_rename"], "SELF: admin CRUD; tool description is the contract");
-allow("orchestration manager", ["gate_intent_declare", "gate_intent_withdraw"], "GAP: gate-lane coordination protocol the manager doctrine never teaches");
-allow("orchestration manager", ["gate_history", "events_search", "requests_list", "worker_relink"], "GAP: investigative/recovery read the manager doctrine never points at");
-allow("orchestration manager", ["schedule_create", "schedule_get", "schedule_list", "schedule_update"], "GAP: recurring-schedule tools unnamed in manager doctrine");
+allow("orchestration manager", ["schedule_create", "schedule_get", "schedule_list", "schedule_update"], "SELF: recurring-schedule CRUD; tool description is the contract");
+allow("orchestration manager", ["worker_relink"], "SELF: explicit self-heal backstop every per-worker tool already runs automatically; description is the contract");
 allow("loom-tasks (manager)", ["wake_cancel", "wake_list"], "SELF: siblings of wake_me, which is named; description is the contract");
-allow("loom-tasks (manager)", ["decisions_for", "tasks_defer_item", "tasks_defer_item_ack"], "GAP: defer-item / decision-lookup tools unnamed in manager doctrine");
-allow("orchestration worker", ["directive_status"], "GAP: worker's recipient-side duplicate-directive check unnamed in worker doctrine");
+allow("loom-tasks (manager)", ["tasks_defer_item", "tasks_defer_item_ack"], "SELF: structured defer-item hand-off between cards; description is the contract");
 allow("loom-tasks (worker)", ["memory_forget"], "SELF: rarely-needed inverse of memory_write; description is the contract");
-allow("loom-tasks (worker)", ["decisions_for", "tasks_create", "tasks_update", "tasks_defer_item", "tasks_defer_item_ack"], "GAP: board-write / defer tools on the worker surface unnamed in worker doctrine");
+allow("loom-tasks (worker)", ["tasks_defer_item", "tasks_defer_item_ack"], "SELF: structured defer-item hand-off between cards; description is the contract");
 allow("platform", ["agent_clone", "agent_clone_batch", "agent_create", "agent_delete", "agent_get", "agent_update", "profile_assign",
   "profile_delete", "profile_get", "project_archive", "project_create", "project_get", "project_init", "project_update",
   "schedule_create", "schedule_delete", "schedule_get", "schedule_update", "platform_config_get", "project_memory_search",

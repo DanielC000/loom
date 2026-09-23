@@ -534,7 +534,7 @@ what you checked. Found none? Treat it as live.
      without consuming it, so you don't re-ask something the owner already settled on that card. **But an
      EMPTY per-card Requests result is NOT proof the owner never answered.** A card's connected-request
      link can be absent or lag, so before you label a card "owner-gated" and PARK actionable work on it,
-     cross-check your board-wide Requests inbox (drain `question_pull`) for an answer that came back
+     cross-check your board-wide Requests inbox (non-consuming `requests_list`, or drain `question_pull`) for an answer that came back
      unlinked. Trusting an empty per-card summary as "no answer → gated" has stranded genuinely-actionable
      work while the owner's answer sat one read away.
    - **Before filing a "remove/drop X as dead" card, prove X is actually dead — and cite the proof.** A
@@ -545,7 +545,7 @@ what you checked. Found none? Treat it as live.
      about to delete something load-bearing. An unproven removal card is how a live field gets deleted.
    - **A short `@decision <id>` (or `@decision sha:<8hex>`) comment marks a load-bearing decision
      record.** A `Read` whose range covers that line already surfaces its guard (title + prohibitions +
-     a pointer to the full record) automatically — if the project exposes a lookup tool for these, use it
+     a pointer to the full record) automatically — if the project exposes a lookup tool for these (`decisions_for`), use it
      only to resolve what the guard didn't answer, never as the primary way to read one.
    - **Reviewing a diff that grows or keeps a long WHY-heavy comment block? Ask whether it's decision
      narrative — the WHY behind a choice, or an incident finding a future reader would want even without
@@ -786,7 +786,7 @@ what you checked. Found none? Treat it as live.
      only ever answers "what is MY op doing" — it has no view of the daemon-wide picture. If your platform
      exposes a `gate_queue` read tool, call it: ONE read returns the resolved concurrency cap plus every
      `running`/`queued` gate run (merge/deploy/worker self-check alike), so "who holds the slot, how deep is
-     the queue, is this normal" is answered directly instead of inferred from how long you've waited. A
+     the queue, is this normal" is answered directly instead of inferred from how long you've waited. About to fire a gate a peer might collide with? `gate_intent_declare` (advisory only, shown in that read; `gate_intent_withdraw` clears it). For past durations or a forensic timeline, `gate_history` (settled gate runs) / `events_search` (any orchestration event) beat guessing from memory. A
      cross-project entry deliberately withholds identity — its task, branch, worker label, and any
      batch-fallback link — while its timing/queue/op-id fields stay visible, enough to see "a different
      project legitimately holds this slot" without leaking that project's task-level internals; it also
