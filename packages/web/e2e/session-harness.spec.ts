@@ -112,13 +112,66 @@ test.describe("session harness in the fleet views", () => {
   test("the terminal card's identity line marks a codex session and not a claude one", async ({ page, loomDaemon }) => {
     const { claudeWorker, codexWorker } = await seedTrio(loomDaemon);
 
+    // `tile-identity` is the TILE's own identity node (card ad3157b9). Scoping to it rather than a
+    // page-wide `getByText` matters here: `SessionView.tsx:46` renders the same identity string in the
+    // PAGE header, so a page-wide match could be satisfied without the tile rendering anything.
     await page.goto(`${loomDaemon.baseURL}/session/${codexWorker.sessionId}`);
-    await expect(page.getByText(new RegExp(`· ${CODEX}$`)).first()).toBeVisible();
+    await expect(page.getByTestId("tile-identity")).toContainText(new RegExp(`· ${CODEX}$`));
     await expect(page.getByTestId("harness-tag").first()).toHaveText("codex");
 
     // Same page, same component, same everything except the stored harness.
     await page.goto(`${loomDaemon.baseURL}/session/${claudeWorker.sessionId}`);
-    await expect(page.getByText(new RegExp(`· ${CLAUDE}$`)).first()).toBeVisible();
+    await expect(page.getByTestId("tile-identity")).toContainText(new RegExp(`· ${CLAUDE}$`));
     await expect(page.getByTestId("harness-tag")).toHaveCount(0);
+  });
+
+  // ── The badge's LAYOUT cost (card ad3157b9). The tag is ~55px wide and the grid tile's identity line had
+  // only ~51px of slack at the ~584px tile the Terminals / Overview grids lay out, so a codex tile's header
+  // wrapped to a SECOND line — costing that one tile ~18px of terminal body while its claude siblings kept
+  // one line. TileTitle now splits the identity into an ellipsising prefix + a non-shrinking short id, so
+  // the header is structurally single-line at any tile width.
+  //
+  // THE MEASUREMENT IS THE ASSERTION — the failure was ~4px of slack, so "looks fine" proves nothing. The
+  // un-badged claude sibling in the SAME grid is the single-line REFERENCE the codex row is compared
+  // against; its own height is bounds-checked first so a layout premise that shifted (a wider sidebar, a
+  // bigger type scale) fails loudly here instead of making the comparison vacuously true.
+  test("the codex badge does not push the grid tile's header onto a second line", async ({ page, loomDaemon }) => {
+    // Pinned: a short project name + a long agent name reproduce the card's measured geometry — a claude
+    // tile that fits with a few px to spare and a codex tile that (before the fix) did not.
+    const project = await loomDaemon.createProject("Loom");
+    const common = { project, role: "worker" as const, agentName: "Web Designer (codescape)" };
+    const codexWorker = await loomDaemon.seedLiveSession({ ...common, id: mintId(CODEX), harness: "codex" });
+    const claudeWorker = await loomDaemon.seedLiveSession({ ...common, id: mintId(CLAUDE), harness: "claude" });
+
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${loomDaemon.baseURL}/terminals`);
+    await page.locator("select").filter({ hasText: "All (" }).selectOption({ label: project.name });
+    await expect(page.getByTestId("harness-tag")).toHaveCount(1);
+
+    const header = (shortId: string) =>
+      page.getByTestId("tile-identity").filter({ hasText: shortId }).locator("xpath=..").locator("xpath=..");
+    const codexHeader = header(CODEX), claudeHeader = header(CLAUDE);
+
+    // FIXTURE IDENTITY: both tiles really are laid out at the ~584px grid width this was measured at. A
+    // single-column fallback (a ~1080px tile) has slack to spare and would pass no matter what.
+    for (const h of [codexHeader, claudeHeader]) {
+      const tileWidth = await h.locator("xpath=..").evaluate((el) => Math.round(el.getBoundingClientRect().width));
+      expect(tileWidth).toBeGreaterThanOrEqual(560);
+      expect(tileWidth).toBeLessThan(700);
+    }
+
+    // The reference row must itself be a single line, or the comparison below means nothing.
+    const claudeH = (await claudeHeader.boundingBox())!.height;
+    expect(claudeH).toBeLessThan(28);
+
+    // THE REGRESSION PIN: the badged row costs no extra line. Before the fix this read 36 vs 18.
+    const codexH = (await codexHeader.boundingBox())!.height;
+    expect(codexH).toBeLessThanOrEqual(claudeH + 2);
+
+    // …and the short id — the part that actually tells two tiles apart — survives intact: it is the prefix
+    // that gives up space, and the identity never overflows its header.
+    await expect(page.getByTestId("tile-identity").filter({ hasText: CODEX })).toContainText(`· ${CODEX}`);
+    const clipped = await codexHeader.evaluate((el) => el.scrollWidth > el.clientWidth + 1);
+    expect(clipped).toBe(false);
   });
 });

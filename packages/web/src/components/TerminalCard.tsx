@@ -111,16 +111,35 @@ export function StopButton({ onStop, stopping }: { onStop: () => void; stopping:
 }
 
 export function TileTitle({ s, showProject }: { s: TerminalCardSession; showProject?: boolean }) {
+  // The identity reads `[project · ]agent[ · role] · <short id>`, rendered as TWO nodes rather than one
+  // (card ad3157b9): a SHRINKABLE prefix that ellipsises, and a NON-SHRINKING short id. As one node it
+  // wrapped to a second line in the ~584px grid tile the moment the CODEX badge claimed its ~55px — the
+  // claude row had only ~51px of slack there — costing that tile ~18px of terminal body. Split, the
+  // header is structurally one line at ANY tile width: the prefix gives up space first and the short id
+  // (the part that actually tells two tiles apart) is the last thing to go. The concatenated text is
+  // byte-identical to the old single node, so an `<agent> · <short id>` text matcher still reads one
+  // continuous string off the wrapper.
+  //   • `minWidth: 0` on BOTH this span and the wrapper is load-bearing: a flex item's default
+  //     `min-width: auto` is its min-content width, which for nowrap text is the WHOLE string — the item
+  //     would then refuse to shrink and OVERFLOW the header instead of ellipsising.
+  //   • the id span keeps its leading " · " under `white-space: pre`, because flex items are blockified
+  //     and a block box strips the leading space at the start of its line.
+  const prefix = `${showProject ? `${s.projectName} · ` : ""}${s.agentName}${s.role ? ` · ${s.role}` : ""}`;
+  const shortId = s.id.slice(0, 8);
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
-      <StatusPill tone={s.busy ? "amber" : "phosphor"} glow={s.busy} label={s.busy ? "busy" : "idle"} />
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0, fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
+      <StatusPill tone={s.busy ? "amber" : "phosphor"} glow={s.busy} label={s.busy ? "busy" : "idle"} style={{ flexShrink: 0 }} />
       {/* Same codex-only rule as FleetRow. It sits with the status pill rather than after the identity
           text so a narrow tile can never strand the tag alone on a wrapped second line, and so the two
           badges read as one cluster. A title-override consumer (a raw shell, a companion watch window)
           never reaches this path, and `harness` is optional on TerminalCardSession, so those call sites
           stay byte-identical. */}
       <HarnessTag harness={harnessOf(s.harness)} title="Runs the codex CLI, not claude" />
-      <span>{showProject ? `${s.projectName} · ` : ""}{s.agentName}{s.role ? ` · ${s.role}` : ""} · {s.id.slice(0, 8)}</span>
+      <span data-testid="tile-identity" title={`${prefix} · ${shortId}`}
+        style={{ display: "inline-flex", alignItems: "center", minWidth: 0 }}>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{prefix}</span>
+        <span style={{ flexShrink: 0, whiteSpace: "pre" }}>{` · ${shortId}`}</span>
+      </span>
     </span>
   );
 }
@@ -309,7 +328,8 @@ export function TerminalCard({
   const header = (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
       {title ?? <TileTitle s={session} showProject={showProject} />}
-      <div style={{ display: "flex", gap: 4 }}>
+      {/* Never compresses — the identity prefix beside it is the element that gives up space (ad3157b9). */}
+      <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
         {offerFork && <ForkButton onFork={() => onFork?.()} busy={session.busy ?? false} pending={forkPending} />}
         {lifecycleButton}
         {actionsExtra}

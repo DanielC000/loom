@@ -44,6 +44,26 @@ const shortId = (id: string) => id.slice(0, 8);
 // "All (N)" entry — so scope by that text to target it unambiguously on the shared worker daemon.
 const projectFilter = (page: Page) => page.locator("select").filter({ hasText: "All (" });
 
+// The tile's identity line. As of card ad3157b9 it is TWO nodes — a shrinkable, ellipsising prefix plus a
+// non-shrinking short id — so that the header can never wrap to a second line. The concatenated text is
+// unchanged, so the `<agent> · <short id>` regexes below read exactly the same string off this wrapper as
+// they did off the old single node.
+//
+// SCOPING THIS IS A STRENGTHENING, NOT AN ACCOMMODATION. The assertions below used a page-wide
+// `getByText(...)`, and `SessionView.tsx:46` renders the SAME identity string in the PAGE header above the
+// tile — so on /session/:id a page-wide match (even `.first()`) could be satisfied entirely by the page
+// header while the tile rendered nothing of the sort. Verified, not assumed: with the tile's identity text
+// deliberately broken, `/session/:id`'s old assertion still passed while the two /terminals ones (which
+// have no page-header twin) correctly went red. Addressing the tile's own node closes that hole; the
+// asserted TEXT is byte-identical to before.
+// `text` narrows to ONE tile's identity when a page renders several. It must be the whole identity, not
+// just the short id: the fixture's default mint gives every seeded session the same 8-char short id on
+// screen ("e2e-live"), so a short-id-only filter is ambiguous by construction.
+const tileIdentity = (page: Page, text?: string | RegExp) => {
+  const all = page.getByTestId("tile-identity");
+  return text ? all.filter({ hasText: text }) : all;
+};
+
 // ── TerminalTile — the FULL-feature reference variant (Fork / Stop / maximize / presets / queue / wakes /
 // task + composer). Asserted most exhaustively on /session/:id (a single tile ⇒ fully deterministic). ────
 test.describe("TerminalTile (unified full-feature card)", () => {
@@ -55,9 +75,10 @@ test.describe("TerminalTile (unified full-feature card)", () => {
     });
     await page.goto(`${loomDaemon.baseURL}/session/${seeded.sessionId}`);
 
-    // The single live tile mounts — the identity line appears in BOTH the SessionView header AND the tile
-    // title (showProject on), so match the first.
-    await expect(page.getByText(new RegExp(`${seeded.agentName} · ${shortId(seeded.sessionId)}`)).first()).toBeVisible();
+    // The single live tile mounts. The identity line appears in BOTH the SessionView page header AND the
+    // tile title (showProject on) — scope to the TILE's own node so only the tile can satisfy this.
+    await expect(tileIdentity(page)).toBeVisible();
+    await expect(tileIdentity(page)).toContainText(new RegExp(`${seeded.agentName} · ${shortId(seeded.sessionId)}`));
 
     // The header action cluster: Fork (idle-only) + graceful Stop + Maximize. (Presets moved OFF the header
     // and INTO the composer — the bottom-right sparkle trigger — with the "Spark" presets change 2026-07-07.)
@@ -119,7 +140,9 @@ test.describe("TerminalTile (unified full-feature card)", () => {
     await projectFilter(page).selectOption({ label: seeded.projectName });
 
     // The same TerminalTile chrome the Overview grid renders (shared component ⇒ can't drift).
-    await expect(page.getByText(`${seeded.agentName} · ${shortId(seeded.sessionId)}`, { exact: false })).toBeVisible();
+    const identity = `${seeded.agentName} · ${shortId(seeded.sessionId)}`;
+    await expect(tileIdentity(page, identity)).toHaveCount(1);
+    await expect(tileIdentity(page, identity)).toBeVisible();
     await expect(page.getByRole("button", { name: "Fork" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Preset prompts" }).first()).toBeVisible();
@@ -144,8 +167,10 @@ test.describe("sessions list (role + state)", () => {
     await expect(page.getByText("(1 worker)", { exact: true })).toBeVisible();
 
     // Both tiles render, each TileTitle carrying its role + a live-state pill (manager idle, worker busy).
-    await expect(page.getByText(new RegExp(`Mgr · manager · ${shortId(mgr.sessionId)}`))).toBeVisible();
-    await expect(page.getByText(new RegExp(`Mgr · worker · ${shortId(wkr.sessionId)}`))).toBeVisible();
+    await expect(tileIdentity(page, new RegExp(`Mgr · manager · ${shortId(mgr.sessionId)}`))).toHaveCount(1);
+    await expect(tileIdentity(page, new RegExp(`Mgr · manager · ${shortId(mgr.sessionId)}`))).toBeVisible();
+    await expect(tileIdentity(page, new RegExp(`Mgr · worker · ${shortId(wkr.sessionId)}`))).toHaveCount(1);
+    await expect(tileIdentity(page, new RegExp(`Mgr · worker · ${shortId(wkr.sessionId)}`))).toBeVisible();
     // The worker was seeded busy → its tile wears a "busy" pill (the seeded live STATE is reflected).
     await expect(page.getByText("busy", { exact: true })).toBeVisible();
   });
