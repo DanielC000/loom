@@ -2953,6 +2953,13 @@ export interface CodexLive {
    *  fire a hair before its own nominal delay has fully elapsed by wall-clock time, which made THIS exact
    *  timestamp check misfire against its OWN freshly-armed marker). */
   busyStaleGen: number;
+  /** Codex-only, decision 7c2a6dc0 (amended by card ea97817c): bumped ONLY by the two real cancellers of an
+   *  in-flight submit — `stopCodex` and `interruptForRedirectCodex` — alongside (never instead of) their own
+   *  `busyStaleGen++`. `submitCodex`'s delayed-Enter closure compares THIS, never `busyStaleGen`: that one
+   *  also moves on every ordinary busy-marker re-arm (`armCodexBusyStaleTimer`), and codex animates its
+   *  title spinner while starting MCP servers, so a marker landing in the text->Enter gap used to bump it and
+   *  silently cancel the Enter. */
+  submitCancelGen: number;
   /** Codex-only, Code Review C2/M3 fix: the currently-armed "declare idle if the marker goes unseen this
    *  long" timer (`armCodexBusyStaleTimer`), re-armed on every fresh sighting; `null` when no turn is in
    *  flight. Cleared on exit/stop so a dead session can never fire a stale drain. */
@@ -4971,7 +4978,7 @@ export class PtyHost {
       recentOwnerTurns: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       trustDialogAnswered: false, trustDialogPending: false,
-      lastBusyMarkerAt: 0, enterWrittenAt: 0, enterPending: false, submitConfirmAttempts: 0, busyStaleGen: 0, busyStaleTimer: null, kickoffDelivered: false,
+      lastBusyMarkerAt: 0, enterWrittenAt: 0, enterPending: false, submitConfirmAttempts: 0, busyStaleGen: 0, submitCancelGen: 0, busyStaleTimer: null, kickoffDelivered: false,
       screenScan: "",
       codexBusyTail: "",
       engineSessionIdCaptureAttempted: false,
@@ -5524,21 +5531,23 @@ export class PtyHost {
     // false-positive: a marker sighting with NO submit ever having happened must never count as a
     // completed turn).
     live.submitOutstanding = true;
-    // @decision 7c2a6dc0 — capture busyStaleGen NOW, before the chunked write (card 02e42746 widened this
+    // @decision 7c2a6dc0 — capture submitCancelGen NOW, before the chunked write (card 02e42746 widened this
     // window from near-instant to however long chunking takes): a stop/redirect anywhere in the write-then-
     // wait window has only this bump to leave, stopping a stray "\r" into a stopped/redirected session.
-    const gen = live.busyStaleGen;
+    // Compare submitCancelGen, NEVER busyStaleGen (see the 7c2a6dc0 record): a busy-marker re-arm also bumps
+    // busyStaleGen, and a title-spinner chunk in this gap must not cancel the Enter.
+    const cancelGen = live.submitCancelGen;
     this.writeChunkedCodex(sessionId, live, codexAsciiFold(text), () => {
       setTimeout(() => {
         if (!live.alive || live.killed) return; // the pty died, or was killed, before the delayed Enter — nothing to write or arm
         // Superseded by a stop/redirect during the gap — see this method's own doc. Deliberately does NOT
-        // touch `live.enterPending` here: the caller that bumped `busyStaleGen` (stopCodex, or
+        // touch `live.enterPending` here: the caller that bumped `submitCancelGen` (stopCodex, or
         // interruptForRedirectCodex) already owns any follow-up for THIS turn, and `interruptForRedirectCodex`
         // may already have started a NEXT turn (drainCodexPending -> a fresh submitCodex call) whose OWN
         // `enterPending = true` this stale closure must never clobber if it fires while that next turn's gap
         // is still open — a real, not just theoretical, interleaving since both closures share the same
         // CODEX_SUBMIT_ENTER_DELAY_MS delay and can be scheduled only microseconds apart.
-        if (live.busyStaleGen !== gen) return;
+        if (live.submitCancelGen !== cancelGen) return;
         live.pty.write("\r");
         live.enterWrittenAt = Date.now();
         live.enterPending = false;
@@ -5667,6 +5676,7 @@ export class PtyHost {
     // is the belt-and-suspenders backstop for a FRESH arm from output seen during the graceful window below.
     if (live.busyStaleTimer) { clearTimeout(live.busyStaleTimer); live.busyStaleTimer = null; }
     live.busyStaleGen++;
+    live.submitCancelGen++;
     if (mode === "hard") {
       live.killed = true;
       live.pty.kill();
@@ -5711,7 +5721,7 @@ export class PtyHost {
    * If the interrupt instead lands inside `submitCodex`'s own `CODEX_SUBMIT_ENTER_DELAY_MS` text->\r gap
    * (`live.enterPending`), no busy-marker was EVER seen for this turn — re-arming a timer here would just
    * sit forever (CASE 0 no-ops on `enterPending`, and this turn's own Enter is never coming since
-   * `submitCodex`'s delayed closure independently no-ops its now-stale write via the same `busyStaleGen`
+   * `submitCodex`'s delayed closure independently no-ops its now-stale write via the same `submitCancelGen`
    * bump). Handle that case explicitly instead: declare the turn over and drain right now, mirroring CASE
    * 2's own falling-edge contract.
    *
@@ -5733,6 +5743,7 @@ export class PtyHost {
     }
     if (live.busyStaleTimer) { clearTimeout(live.busyStaleTimer); live.busyStaleTimer = null; }
     live.busyStaleGen++;
+    live.submitCancelGen++;
     live.pty.write("\x03");
     if (live.enterPending) {
       live.enterPending = false;
