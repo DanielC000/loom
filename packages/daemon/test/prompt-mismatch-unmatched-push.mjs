@@ -24,6 +24,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // got its own recipient-facing [loom:prompt-mismatch] notice via a separate code path in pty/host.ts, out
 // of scope here); (c) intendedLen is stated explicitly regardless of the flag, per this card's own DoD-1.
 //
+// Card d1ac9fed (2026-09-23): `info.escalation` now discriminates TWO distinct uses of this method —
+// `"single-event"` (PARTS 1-5, unchanged behavior — a `fallback-unrecognized` ABOVE the small-bucket
+// magnitude bound, or arm-branched wording for the two benign offset arms, which no longer reach this
+// method in PRODUCTION via pty/host.ts's own gating but whose wording is deliberately kept and still
+// tested here since the method itself retains that logic byte-for-byte) and `"rate-exceeded"` (NEW, PART
+// 6 — a small `fallback-unrecognized` that crossed the rate threshold, worded as a RATE, never a single
+// event). See PtyHostEvents.onPromptMismatchUnmatched's own doc (pty/host.ts) for the full contract.
+//
 // Run: 1) build daemon (pnpm build from packages/daemon), 2) node test/prompt-mismatch-unmatched-push.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -74,6 +82,9 @@ const baseInfo = {
   gen: 4, writtenHash: "cafebabe", reportedHash: "12345678", intendedLen: 987,
   intendedText: "[loom:from-manager] the ORIGINAL intended text Loom wrote for this generation, never matched",
   detectedAt: Date.now(),
+  // Card d1ac9fed: PARTS 1-5 exercise the "single-event" branch (the pre-card behavior, unchanged) —
+  // unaccountedIntended is carried by the real contract but unused by this branch's own wording.
+  escalation: "single-event", unaccountedIntended: 900,
 };
 
 try {
@@ -160,12 +171,33 @@ try {
     check("14: NEGATIVE CONTROL — arm=fallback-unrecognized keeps 'a possible LOSS' (card 1a315058 only softens the two benign offset arms)",
       /a possible LOSS/.test(unrecognizedMsg) && !/NOT A LOSS/.test(unrecognizedMsg));
   }
+
+  // ===== PART 6 — Card d1ac9fed: the NEW "rate-exceeded" branch, discriminated by info.escalation. Must
+  // word the message as a RATE (naming count + window), NEVER a single isolated event, and must NOT use
+  // either single-event wording ("a possible LOSS"/"NOT A LOSS"). =====
+  {
+    const wkrRate = `pmu-wkr-${sfx}-rate`;
+    mkSession({ id: wkrRate, role: "worker", parentSessionId: mgr });
+    ptyStub.enqueued.length = 0;
+    const rateInfo = { ...baseInfo, arm: "fallback-unrecognized", escalation: "rate-exceeded", count: 3, windowMs: 30 * 60 * 1000 };
+    delete rateInfo.unaccountedIntended; // not part of the rate-exceeded shape
+    sessions.handlePromptMismatchUnmatched(wkrRate, rateInfo);
+    const rateMsg = ptyStub.enqueued.find((e) => e.sessionId === mgr)?.text ?? "";
+    check("15: exactly one message pushed for the rate escalation", ptyStub.enqueued.filter((e) => e.sessionId === mgr).length === 1);
+    check("15: the message states RATE EXCEEDED and names the count precisely ('had 3 ... event(s)')", /RATE EXCEEDED/.test(rateMsg) && /had 3 \S+ event\(s\)/.test(rateMsg));
+    check("15: the message names the window in minutes (30, from windowMs=1800000)", /30 minute/.test(rateMsg));
+    check("15: NEGATIVE CONTROL — neither single-event wording appears (this is a RATE message, not a per-event one)",
+      !/a possible LOSS of/.test(rateMsg) && !/NOT A LOSS: Loom's own reconciliation/.test(rateMsg));
+    check("15: the notice carries the UNMATCHED tag", rateMsg.startsWith(PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG));
+    check("15: intendedLen and the hash signature are still present (the most-recent-occurrence fields)",
+      rateMsg.includes(`${baseInfo.intendedLen}`) && rateMsg.includes(baseInfo.writtenHash) && rateMsg.includes(baseInfo.reportedHash));
+  }
 } finally {
   delete process.env.LOOM_LOG_MESSAGE_CONTENT;
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card 38d68b8d's push to the sender/parent fires unconditionally (the FACT: gen/intendedLen/writtenHash/reportedHash) while the raw intended TEXT is gated behind LOOM_LOG_MESSAGE_CONTENT (default OFF, opt-in ON), read live within a single process; a session with no parent gets no push at all, and the mismatched session itself is never a recipient of this particular notice."
+  ? "\n✅ ALL PASS — card 38d68b8d's push to the sender/parent fires unconditionally (the FACT: gen/intendedLen/writtenHash/reportedHash) while the raw intended TEXT is gated behind LOOM_LOG_MESSAGE_CONTENT (default OFF, opt-in ON), read live within a single process; a session with no parent gets no push at all, and the mismatched session itself is never a recipient of this particular notice. Card d1ac9fed: info.escalation now discriminates two wordings — 'single-event' (the pre-card behavior, unchanged, including the arm-branched NOT-A-LOSS wording for the two benign offset arms even though they no longer reach this method in production) and 'rate-exceeded' (new — words the message as a RATE, count+window, never a single isolated event)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

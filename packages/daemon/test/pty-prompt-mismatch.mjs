@@ -48,7 +48,15 @@ class TestPtyHost extends createSeamHost(PtyHost) {
     return fake;
   }
 }
-const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
+// Card d1ac9fed — captures every onPromptMismatchUnmatched push (now the RATE-escalation channel, not a
+// per-event one — see RECORD_ONLY_MISMATCH_ARMS' own doc), keyed by sessionId so a scenario can filter to
+// its own session without interference from siblings, same discipline as pty-prompt-mismatch-unresolved.mjs's
+// own unresolvedEvents collector.
+const pushEvents = [];
+const events = {
+  onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {},
+  onPromptMismatchUnmatched(sessionId, info) { pushEvents.push({ sessionId, info }); },
+};
 const host = new TestPtyHost(events);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Card 1addef27 (fixed-wait-negative-guard) / card 201d0d95 manager review: a bounded POLL on the actual
@@ -141,6 +149,32 @@ function captureExcessNearMissWarnings(fn) {
   const lines = [];
   const orig = console.log;
   console.log = (msg) => { if (typeof msg === "string" && msg.includes("[prompt-mismatch-pasted-content-wrap-near-miss-excess]")) lines.push(msg); };
+  try { fn(); } finally { console.log = orig; }
+  return lines;
+}
+
+// Card d1ac9fed: captures MULTIPLE distinct tags from the SAME deliverHook call in one pass, keyed by
+// tag. Needed because nesting two of the single-tag capture helpers above does NOT work — the inner
+// helper's own console.log override REPLACES the outer one entirely rather than chaining through it, so
+// the outer capture silently sees nothing (caught by scenarios 13/22/23 going red under exactly that bug).
+function captureMultiWarnings(tags, fn) {
+  const byTag = Object.fromEntries(tags.map((t) => [t, []]));
+  const orig = console.log;
+  console.log = (msg) => {
+    if (typeof msg !== "string") return;
+    for (const t of tags) if (msg.includes(t)) byTag[t].push(msg);
+  };
+  try { fn(); } finally { console.log = orig; }
+  return byTag;
+}
+
+// Card d1ac9fed: captures the RECORD-ONLY dispatch's own [prompt-mismatch-notice-recorded-only] line —
+// exact-scoped like captureArmWarnings, so a test can assert a record-only arm was actually dispatched
+// through the new branch (not merely that no notice/push happened, which could also mean nothing ran).
+function captureRecordOnlyWarnings(fn) {
+  const lines = [];
+  const orig = console.log;
+  console.log = (msg) => { if (typeof msg === "string" && msg.includes("[prompt-mismatch-notice-recorded-only]")) lines.push(msg); };
   try { fn(); } finally { console.log = orig; }
   return lines;
 }
@@ -1269,15 +1303,23 @@ try {
     check("12: the notice actually reached the pty", noticeWrite.includes("[loom:prompt-mismatch]"));
   }
 
-  // ===== 13. Card 68459420 DoD-3 — CHARACTERIZE (never suppress) the FOURTH population: reported LONGER
-  // than intended AND matching NO recent write of this session (the manager's own gen=12 specimen: wrote
-  // 2985, reported 3829). Distinct from every other shape above — not a benign whitespace re-render, not a
-  // stale-placeholder prefix (doesn't start with the placeholder token), not a recognized replay (doesn't
-  // match anything in recentWrittenTurns). Must: (a) log a DISTINCT, greppable diagnostic tag so this
-  // population can be measured going forward, (b) still fire the ordinary session-facing notice with the
-  // cautious "possible LOSS" framing (never ESTABLISHED — this is NOT a recognized replay), and (c) NOT set
-  // the sender-directed getLastMismatchReplay signal (there's no confirmed prior generation to attribute it
-  // to) — proving DoD-3's own constraint that no rule/suppression was invented for this shape. =====
+  // ===== 13. Card 68459420 DoD-3 — CHARACTERIZE (never suppress the CHARACTERIZATION) the FOURTH
+  // population: reported LONGER than intended AND matching NO recent write of this session (the manager's
+  // own gen=12 specimen: wrote 2985, reported 3829). Distinct from every other shape above — not a benign
+  // whitespace re-render, not a stale-placeholder prefix (doesn't start with the placeholder token), not a
+  // recognized replay (doesn't match anything in recentWrittenTurns). Must still: (a) log a DISTINCT,
+  // greppable diagnostic tag so this population can be measured going forward, and (b) NOT set the
+  // sender-directed getLastMismatchReplay signal (there's no confirmed prior generation to attribute it to)
+  // — DoD-3's own constraint that no rule/suppression was invented for the CHARACTERIZATION itself.
+  // Card d1ac9fed RE-VERIFIED: this specific construction (`reported` = `intended` verbatim, plus an
+  // unexplained trailing suffix — every byte of `intended` recovered whole as a literal PREFIX of
+  // `reported`) measures `unaccountedIntended=0` — the mirror of `fallback-benign-offset-insertion`
+  // (extra content prepended, `intended` recovered whole at the tail) with the extra content appended
+  // instead. All three small-bucket conditions hold, so DELIVERY is now record-only + rate-tracked; the
+  // 68459420 DoD-3 "possible LOSS" wording concern is delivery-superseded (its own wording concern was
+  // already resolved by card 1a315058's UNRECOGNIZED third-state framing, before this card) — what
+  // remains after `unaccountedIntended=0` is only a possible DUPLICATE (the unattributed trailing
+  // content), which the rate escalation exists to catch a BURST of, not a single occurrence. =====
   {
     const sid = newSession("UnmatchedLonger"); SIDS.push(sid);
     const fake = fakesById.get(sid);
@@ -1285,24 +1327,26 @@ try {
     const reported = intended + " — plus unexplained trailing content that came from nowhere this session wrote";
     host.enqueueStdin(sid, intended); // gen=1 — the only entry in recentWrittenTurns, and it does NOT equal `reported`
     const writesBeforeMismatch = fake.writes.length;
-    const unmatchedWarnings = captureUnmatchedLongerWarnings(() => {
+    const captured13 = captureMultiWarnings(["[prompt-mismatch-unmatched-longer]", "[prompt-mismatch-arm]"], () => {
       host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
     });
+    const unmatchedWarnings = captured13["[prompt-mismatch-unmatched-longer]"];
+    const armWarnings13 = captured13["[prompt-mismatch-arm]"];
     check("13: reported is LONGER than intended (the shape this population is defined by)", reported.length > intended.length);
-    check("13: the DISTINCT [prompt-mismatch-unmatched-longer] characterization tag fires exactly once", unmatchedWarnings.length === 1);
+    check("13: the DISTINCT [prompt-mismatch-unmatched-longer] characterization tag fires exactly once (CHARACTERIZATION survives, unaffected by card d1ac9fed)", unmatchedWarnings.length === 1);
     check("13: the tag reports the observed fields (lengths + delta) and names it UNCHARACTERIZED",
       /reportedLen=\d+/.test(unmatchedWarnings[0] ?? "") && /intendedLen=\d+/.test(unmatchedWarnings[0] ?? "") &&
       /lenDelta=\d+/.test(unmatchedWarnings[0] ?? "") && /UNCHARACTERIZED/.test(unmatchedWarnings[0] ?? ""));
-    const enqueued13 = await waitUntil(() => hasPendingMismatchNotice(sid));
-    check("13: the ordinary session-facing notice still fires (characterization is additive, not a suppression)", enqueued13);
+    check("13: the arm-classification instrument confirms arm=fallback-unrecognized",
+      armWarnings13.length === 1 && /arm=fallback-unrecognized/.test(armWarnings13[0]));
+    check("13: card d1ac9fed — RECORD-ONLY (unaccountedIntended=0, lenDelta positive, no control chars: all three small-bucket conditions hold)",
+      !hasPendingMismatchNotice(sid));
     host.deliverHook(sid, { hook_event_name: "Stop" });
-    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
-    // Card 1a315058: this population is NOT a recognized replay AND unrecognized — gets the honest
-    // third-state wording, never "possible LOSS" and never an ESTABLISHED claim either.
-    check("13: the notice keeps the honest UNRECOGNIZED third-state framing (card 1a315058) — this is NOT a recognized replay",
-      /UNRECOGNIZED, NOT AN ESTABLISHED LOSS/.test(noticeWrite) && !/NOT A LOSS —/.test(noticeWrite) && !/nothing was lost/.test(noticeWrite));
+    check("13: no write ever reached the pty for this mismatch", fake.writes.length === writesBeforeMismatch);
     check("13: no rule/suppression was invented for this shape — getLastMismatchReplay stays null",
       host.getLastMismatchReplay(sid) === null);
+    check("13: no per-event parent push for a single occurrence (below the rate threshold)",
+      pushEvents.filter((e) => e.sessionId === sid).length === 0);
   }
 
   // ===== 14. Card c0323f8a — EXACT-REPEAT SUPPRESSION. Real production evidence showed the SAME
@@ -1319,11 +1363,17 @@ try {
   {
     const sid = newSession("ExactRepeat"); SIDS.push(sid);
     const fake = fakesById.get(sid);
-    const stranded = "leftover text from yet another prior turn";
-    const intended = "the message this turn actually intended to submit";
+    // Card d1ac9fed: re-fixtured off a `stranded-prefix + intended` shape (which now classifies
+    // `fallback-benign-offset-insertion`, unconditionally record-only, so no notice would ever fire to
+    // suppress) onto a LARGE, wholly-unrelated `fallback-unrecognized` shape instead — the mechanism under
+    // test here is exact-repeat SUPPRESSION, not any particular arm, and this shape stays loud regardless
+    // of the small-bucket bound (no shared prefix/suffix with `intended` at all, so `unaccountedIntended`
+    // equals the whole of `intended`, safely above 64).
+    const stranded = "completely unrelated content that shares nothing at all with what this turn intended to submit — a wholly different string";
+    const intended = "the message this turn actually intended to submit, long enough to stay clearly above the small-bucket bound";
     host.enqueueStdin(sid, intended); // gen=1, live.lastPrompt = intended, enterConfirmed=false
     const firstWarnings = captureMismatchWarnings(() => {
-      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded + intended });
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded });
     });
     check("14: the first occurrence of this event fires the ordinary diagnostic", firstWarnings.length === 1);
     const enqueued14 = await waitUntil(() => hasPendingMismatchNotice(sid));
@@ -1344,7 +1394,7 @@ try {
       if (typeof msg === "string" && msg.includes("[prompt-mismatch-arm]")) armLines14.push(msg);
     };
     try {
-      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded + intended }); // identical gen=1, identical hashes
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded }); // identical gen=1, identical hashes
     } finally {
       console.log = origLog;
     }
@@ -1365,7 +1415,7 @@ try {
     }
     // A SECOND identical repeat (still gen=1, same content) must accumulate the count rather than reset it.
     host.live.get(sid).enterConfirmed = false;
-    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded + intended });
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded });
     check("14: a further exact repeat of the SAME signature increments count rather than resetting it",
       host.getLastMismatchNoticeSuppressed(sid)?.count === 2);
     // Same shape as scenario 8's own NEGATIVE CONTROL above: a would-be SECOND enqueue is scheduled via the
@@ -1400,11 +1450,13 @@ try {
     check("14b: setup — gen=1's own hedge notice text was actually recovered whole", notice14EndIdx > 6 && notice14Text.length > 0);
     host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: notice14Text }); // byteIdentical=true, gen=2 — the notice's own turn, not itself under test
     host.deliverHook(sid, { hook_event_name: "Stop" }); // advances past the notice's own generation
-    const laterIntended = "a completely different later message";
-    const laterStranded = "unrelated stray content from a different prior turn";
+    // Card d1ac9fed: same re-fixture reasoning as the setup above — wholly unrelated content, no shared
+    // prefix/suffix, so this stays a LARGE fallback-unrecognized (loud) regardless of the small-bucket bound.
+    const laterIntended = "a completely different later message, long enough on its own to stay clearly above the small-bucket bound";
+    const laterStranded = "an entirely separate string sharing nothing at all with the later message this turn actually intended";
     host.enqueueStdin(sid, laterIntended);
     const laterWarnings = captureMismatchWarnings(() => {
-      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: laterStranded + laterIntended });
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: laterStranded });
     });
     check("14b: a genuinely later, different mismatch on a new generation still fires the diagnostic (not over-suppressed)",
       laterWarnings.length === 1);
@@ -1489,7 +1541,11 @@ try {
   {
     const sid = newSession("IdentityPresent"); SIDS.push(sid);
     const fake = fakesById.get(sid);
-    const stranded = "leftover unrelated content from somewhere else entirely";
+    // Card d1ac9fed: `stranded + intended` used to classify `fallback-benign-offset-insertion` (now
+    // unconditionally record-only, so no notice would fire) — re-fixtured onto wholly unrelated content
+    // (no shared prefix/suffix with `intended`), which stays a LARGE `fallback-unrecognized` regardless
+    // of the small-bucket bound. The mechanism under test (identity fields on the notice) is unaffected.
+    const stranded = "leftover unrelated content from somewhere else entirely, sharing nothing with what this turn intended";
     const intended = "[loom:project-memory] the real content this generation actually intended to submit";
     host.enqueueStdin(sid, intended); // gen=1 — mints a real logicalId (randomUUID), synchronously, at submit() time
     // Wait for the REAL Enter-write to actually land (host.ts's own async pacing/timer) before delivering
@@ -1499,7 +1555,7 @@ try {
     // genuinely exists by the time the engine's hook actually arrives.
     await waitUntil(() => host.live.get(sid)?.currentGenFirstWrittenAt != null);
     const writesBeforeMismatch = fake.writes.length;
-    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded + intended }); // unmatched, no prior write on this fresh session — the generic-fallback shape, the third instance's own shape
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded }); // unmatched, no prior write on this fresh session — the generic-fallback shape, the third instance's own shape
     const enqueued17 = await waitUntil(() => hasPendingMismatchNotice(sid));
     check("17: the notice enqueues for this unmatched, generic-fallback mismatch", enqueued17);
     host.deliverHook(sid, { hook_event_name: "Stop" });
@@ -1523,12 +1579,14 @@ try {
   {
     const sid = newSession("IdentityAbsent"); SIDS.push(sid);
     const fake = fakesById.get(sid);
-    const stranded = "some other unrelated stray content";
+    // Card d1ac9fed: same re-fixture reasoning as scenario 17 — wholly unrelated content, no shared
+    // prefix/suffix, so this stays a LARGE fallback-unrecognized (loud) regardless of the small-bucket bound.
+    const stranded = "some other unrelated stray content, sharing nothing at all with the real message below";
     const intended = "[loom:from-manager] a real message, this time with no recorded origin";
     host.enqueueStdin(sid, intended); // gen=1 — mints a real logicalId...
     host.live.get(sid).giveUpOrigin = null; // ...then simulate the one real caller that legitimately has none
     const writesBeforeMismatch = fake.writes.length;
-    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded + intended });
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: stranded });
     const enqueued18 = await waitUntil(() => hasPendingMismatchNotice(sid));
     check("18: the notice still enqueues when no origin was recorded", enqueued18);
     host.deliverHook(sid, { hook_event_name: "Stop" });
@@ -1686,6 +1744,16 @@ try {
   // engine did not echo back. Must be worded as NOT a loss (never "possible LOSS"), and the notice must
   // carry the position fields (divergesAtChar/both tail lengths/lenDelta) so a recipient can see for itself
   // that only 1 char is missing, from the notice text alone — no daemon-output.log lookup needed. =====
+  // Card d1ac9fed: this arm (`fallback-benign-offset-omission`) is unconditionally RECORD-ONLY now — the
+  // subject of this scenario IS the offset-omission path itself, so it stays on that same arm rather than
+  // moving to a different one (unlike 14/14b/17/18 above, whose subject was a different mechanism
+  // entirely). Re-verifies delivery instead of wording: no notice ever reaches the pty, and the arm log
+  // line fires with the right arm. DoD-1's wording assertion is DROPPED, not merely un-asserted — the
+  // `isOffsetOmission`-worded branch of `mismatchText` (host.ts) is now genuinely UNREACHABLE (nothing
+  // ever reads that computed string for a record-only arm) — see docs/decisions/d1ac9fed's own note on
+  // this dead branch (owner: leave it in place, don't delete in this card). DoD-7's position fields DO
+  // still reach a live surface — the UNCONDITIONAL `[prompt-mismatch]` diagnostic line (captureMismatchWarnings,
+  // computed upstream of arm classification/delivery) — so that check is kept, redirected to that line.
   {
     const sid = newSession("StrictPrefixOmission"); SIDS.push(sid);
     const fake = fakesById.get(sid);
@@ -1693,19 +1761,25 @@ try {
     const reported = intended.slice(0, -1); // exactly 1 trailing char (the newline) not echoed back
     host.enqueueStdin(sid, intended); // gen=1
     const writesBeforeMismatch = fake.writes.length;
-    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
-    const enqueued22 = await waitUntil(() => hasPendingMismatchNotice(sid));
-    check("22: the notice still fires for a strict-prefix omission (not suppressed, only reworded)", enqueued22);
+    const captured22 = captureMultiWarnings(["[prompt-mismatch]", "[prompt-mismatch-arm]"], () => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    const diagWarnings22 = captured22["[prompt-mismatch]"];
+    const armWarnings22 = captured22["[prompt-mismatch-arm]"];
+    check("22: the arm-classification instrument confirms arm=fallback-benign-offset-omission",
+      armWarnings22.length === 1 && /arm=fallback-benign-offset-omission/.test(armWarnings22[0]));
+    check("22: RECORD-ONLY (card d1ac9fed) — the offset-omission arm never enqueues a session-facing turn",
+      !hasPendingMismatchNotice(sid));
     host.deliverHook(sid, { hook_event_name: "Stop" });
-    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
-    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
-    check("22: DoD-1 — a strict-prefix, tiny-tail mismatch is worded NOT a loss, never 'possible LOSS'",
-      /NOT a loss/.test(noticeWrite) && !/possible LOSS/.test(noticeWrite));
-    check("22: DoD-7 — the notice carries the exact position fields (divergesAtChar/both tails/lenDelta), letting the recipient self-triage without daemon-output.log",
-      new RegExp(`divergesAtChar=${reported.length}\\b`).test(noticeWrite)
-      && /tailReportedLen=0\b/.test(noticeWrite) && /tailIntendedLen=1\b/.test(noticeWrite) && /lenDelta=-1\b/.test(noticeWrite));
+    check("22: no write ever reached the pty for this mismatch", fake.writes.length === writesBeforeMismatch);
+    check("22: DoD-7 (still live via the unconditional diagnostic line, not the now-unreachable notice text) — the exact position fields (divergesAtChar/both tails/lenDelta)",
+      diagWarnings22.length === 1
+      && new RegExp(`divergesAtChar=${reported.length}\\b`).test(diagWarnings22[0])
+      && /tailReportedLen=0\b/.test(diagWarnings22[0]) && /tailIntendedLen=1\b/.test(diagWarnings22[0]) && /lenDelta=-1\b/.test(diagWarnings22[0]));
     check("22: getLastMismatchReplay stays null — this is not a recognized replay of any prior write",
       host.getLastMismatchReplay(sid) === null);
+    check("22: no per-event parent push for the offset-omission arm (it was never in isUnmatchableMismatch's push condition, unaffected by this card)",
+      pushEvents.filter((e) => e.sessionId === sid).length === 0);
   }
 
   // ===== 23. Card 00b5066e DoD-6/DoD-7 — THE PREFIX-INSERTION SPECIMEN (the card's own gen=3 16:58Z
@@ -1716,6 +1790,10 @@ try {
   // `divergesAtChar=0` + full tails as automatic proof of a splice — but ALSO do not claim the extra
   // prefix's own origin as confirmed benign (the card's own second specimen was left explicitly
   // UNCONFIRMED — "nothing here settles which" of replay-vs-prefix-offset). =====
+  // Card d1ac9fed: same posture as scenario 22 above — `fallback-benign-offset-insertion` is unconditionally
+  // RECORD-ONLY now, this scenario's subject IS that arm so it stays on it, wording assertions are DROPPED
+  // (the `isOffsetInsertion`-worded branch of `mismatchText` is now genuinely unreachable — left in place,
+  // not deleted, per the owner), and DoD-7's position fields move to the still-live unconditional diagnostic.
   {
     const sid = newSession("PrefixInsertion"); SIDS.push(sid);
     const fake = fakesById.get(sid);
@@ -1724,29 +1802,35 @@ try {
     const reported = prefix + intended; // every byte of `intended` recovered whole at the tail
     host.enqueueStdin(sid, intended); // gen=1 — no prior writes, so this can never also be a recognized replay
     const writesBeforeMismatch = fake.writes.length;
-    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
-    const enqueued23 = await waitUntil(() => hasPendingMismatchNotice(sid));
-    check("23: the notice fires for a prefix insertion (mechanism unconfirmed, so not suppressed)", enqueued23);
+    const captured23 = captureMultiWarnings(["[prompt-mismatch]", "[prompt-mismatch-arm]"], () => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    const diagWarnings23 = captured23["[prompt-mismatch]"];
+    const armWarnings23 = captured23["[prompt-mismatch-arm]"];
+    check("23: the arm-classification instrument confirms arm=fallback-benign-offset-insertion",
+      armWarnings23.length === 1 && /arm=fallback-benign-offset-insertion/.test(armWarnings23[0]));
+    check("23: RECORD-ONLY (card d1ac9fed) — the offset-insertion arm never enqueues a session-facing turn",
+      !hasPendingMismatchNotice(sid));
     host.deliverHook(sid, { hook_event_name: "Stop" });
-    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
-    const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
-    check("23: DoD-6 — worded NOT a loss (every byte of this turn's own content is present), never 'possible LOSS'",
-      /NOT a loss/.test(noticeWrite) && !/possible LOSS/.test(noticeWrite));
-    check("23: THE CARD'S OWN TRAP — the extra prefix's own MECHANISM is explicitly NOT claimed as established/confirmed",
-      /NOT established/.test(noticeWrite));
-    check("23: DoD-7 — divergesAtChar=0 and lenDelta's SIGN are both explicit in the notice text",
-      /divergesAtChar=0\b/.test(noticeWrite) && new RegExp(`lenDelta=\\+${prefix.length}\\b`).test(noticeWrite));
-    check("23: DoD-7 — both tails read FULL (the never-re-syncs signature), visible directly in the notice text",
-      new RegExp(`tailReportedLen=${reported.length}\\b`).test(noticeWrite) && new RegExp(`tailIntendedLen=${intended.length}\\b`).test(noticeWrite));
+    check("23: no write ever reached the pty for this mismatch", fake.writes.length === writesBeforeMismatch);
+    // The unconditional diagnostic line prints lenDelta as a bare number (no explicit "+" sign) — unlike
+    // the notice text's own formatting (@decision 3ff61275), which is now unreachable for this arm anyway.
+    check("23: DoD-7 (still live via the unconditional diagnostic line, not the now-unreachable notice text) — divergesAtChar=0 and lenDelta's magnitude",
+      diagWarnings23.length === 1 && /divergesAtChar=0\b/.test(diagWarnings23[0]) && new RegExp(`lenDelta=${prefix.length}\\b`).test(diagWarnings23[0]));
+    check("23: DoD-7 — both tails read FULL (the never-re-syncs signature), visible in the diagnostic line",
+      new RegExp(`tailReportedLen=${reported.length}\\b`).test(diagWarnings23[0]) && new RegExp(`tailIntendedLen=${intended.length}\\b`).test(diagWarnings23[0]));
     check("23: getLastMismatchReplay stays null — this content matches no recognized prior write of this session",
       host.getLastMismatchReplay(sid) === null);
+    check("23: no per-event parent push for the offset-insertion arm (it was never in isUnmatchableMismatch's push condition, unaffected by this card)",
+      pushEvents.filter((e) => e.sessionId === sid).length === 0);
   }
 
-  // ===== 24. Card 00b5066e HARD BOUND (1 of 2) — an OMISSION-shaped mismatch (`reported` a literal prefix
-  // of `intended`) but with a tail LARGER than OFFSET_OMISSION_MAX_TAIL_CHARS must NOT be softened — a large
-  // missing tail is a genuine truncation and must keep crying loud, exactly as before this card. Proves the
-  // bound is real, not merely documented: the SAME strict-prefix RELATIONSHIP as scenario 22, just past the
-  // size the card's own hard bound requires stay loud. =====
+  // ===== 24. Card 00b5066e HARD BOUND (1 of 2), RE-VERIFIED under card d1ac9fed's 3-condition small-bucket
+  // split — an OMISSION-shaped mismatch (`reported` a literal prefix of `intended`) with a tail LARGER than
+  // OFFSET_OMISSION_MAX_TAIL_CHARS classifies UNRECOGNIZED (card 1a315058). REVERTED to its ORIGINAL loud
+  // assertions: `reported` is SHORTER than `intended` here, so `lenDelta=-10` fails the small-bucket's own
+  // positive-lenDelta condition regardless of `unaccountedIntended` (10, itself under the 64 bound) — this
+  // specimen stays in the pre-card loud path, proving the lenDelta condition is genuinely load-bearing. =====
   {
     const sid = newSession("OmissionBoundExceeded"); SIDS.push(sid);
     const fake = fakesById.get(sid);
@@ -1759,18 +1843,18 @@ try {
     check("24: the notice fires", enqueued24);
     host.deliverHook(sid, { hook_event_name: "Stop" });
     const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
-    // Card 1a315058: still HARD BOUND — a tail past the offset-omission bound must NOT be softened to a
-    // confirmed "NOT a loss" claim. It now reads as the honest UNRECOGNIZED third state rather than
-    // "possible LOSS", but the bound itself (never silently upgraded to benign) is unchanged.
     check("24: HARD BOUND — a 10-char omitted tail (past OFFSET_OMISSION_MAX_TAIL_CHARS=2) keeps the honest UNRECOGNIZED framing (card 1a315058), is NOT softened to 'NOT a loss'",
       /UNRECOGNIZED, NOT AN ESTABLISHED LOSS/.test(noticeWrite) && !/NOT a loss/.test(noticeWrite));
+    check("24: card d1ac9fed's lenDelta condition (negative here) correctly keeps this OUT of the small-unrecognized bucket — the original per-event parent push still fires",
+      pushEvents.filter((e) => e.sessionId === sid).length === 1);
   }
 
-  // ===== 25. Card 00b5066e HARD BOUND (2 of 2) — THE REAL GEN=4 LOSS SHAPE this card's own hard-bounds
-  // section cites verbatim (`reportedLen=444` vs `intendedLen=42,082`, unrelated content beyond a short
-  // shared prefix, `divergesAtChar=7`): genuinely unrelated, much-shorter content must keep crying loud, AND
-  // the notice must still carry the position fields (DoD-7) so a recipient can tell — from a LARGE
-  // tailIntendedLen — that this is NOT the benign shape scenarios 22/23 cover. =====
+  // ===== 25. Card 00b5066e HARD BOUND (2 of 2), RE-VERIFIED under card d1ac9fed — THE REAL GEN=4 LOSS SHAPE
+  // this card's own hard-bounds section cites verbatim (`reportedLen=444` vs `intendedLen=42,082`, unrelated
+  // content beyond a short shared prefix, `divergesAtChar=7`): genuinely unrelated, much-shorter content
+  // must keep crying loud, AND the notice must still carry the position fields (DoD-7). REVERTED to its
+  // ORIGINAL loud assertions — `unaccountedIntended=42075` alone already fails condition 1 by a wide margin
+  // (`lenDelta=-41638` also fails condition 2), so this stays loud under card d1ac9fed too. =====
   {
     const sid = newSession("GenuineLargeTailLoss"); SIDS.push(sid);
     const fake = fakesById.get(sid);
@@ -1784,25 +1868,21 @@ try {
     host.deliverHook(sid, { hook_event_name: "Stop" });
     await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
     const noticeWrite = fake.writes.slice(writesBeforeMismatch).join("");
-    // Card 1a315058: still HARD BOUND — a genuine, large-tail, unrelated-content divergence must NEVER be
-    // softened to a confirmed "NOT a loss" claim; it now reads as the honest UNRECOGNIZED third state
-    // rather than "possible LOSS", which is the correct, more honest framing for the SAME never-benign bound.
     check("25: HARD BOUND — a genuine, large-tail, unrelated-content divergence keeps the honest UNRECOGNIZED framing (card 1a315058), is NOT softened to 'NOT a loss'",
       /UNRECOGNIZED, NOT AN ESTABLISHED LOSS/.test(noticeWrite) && !/NOT a loss/.test(noticeWrite));
     check("25: DoD-7 — the notice STILL carries the position fields for a genuine loss too (divergesAtChar=7, a LARGE tailIntendedLen), letting a recipient tell this apart from scenarios 22/23 from the notice text alone",
       /divergesAtChar=7\b/.test(noticeWrite) && /tailIntendedLen=42075\b/.test(noticeWrite) && /tailReportedLen=437\b/.test(noticeWrite));
+    check("25: card d1ac9fed — unaccountedIntended (42075) is nowhere near the 64-char bound, so the original per-event parent push still fires",
+      pushEvents.filter((e) => e.sessionId === sid).length === 1);
   }
 
-  // ===== 26. Card 1a315058 — the `unmatchedRecognized` (partial-substring) shape: the exact population of
-  // the card's own live specimen (a manager session, gen=6, written=3180/reported=74528 — an earlier
-  // generation's own recorded write recognized as a SUBSTRING inside a much larger, otherwise-unrelated
-  // report). No prior test in this file exercised this branch (grepped: zero hits for `unmatchedRecognized`/
-  // `d005f55b`/"partial recognition"). `reported` here embeds gen=1's own full text between unrelated
-  // leading/trailing noise — not an exact replay (findLast finds no EXACT match), not an offset shape
-  // (neither a prefix nor a suffix relationship to THIS turn's own intended text), not an accumulation (no
-  // window of recent writes sums to reported's length) — so it can only resolve via `findRecognizedSubstring`,
-  // proving the new third-state wording also carries the PARTIAL-recognition detail (via `replayNote`,
-  // reused unchanged) rather than reading as a wholly blank "nothing recognized" case. =====
+  // ===== 26. Card 1a315058 the `unmatchedRecognized` (partial-substring) shape, RE-VERIFIED under card
+  // d1ac9fed — the exact population of the card's own live specimen (a manager session, gen=6,
+  // written=3180/reported=74528 — an earlier generation's own recorded write recognized as a SUBSTRING
+  // inside a much larger, otherwise-unrelated report). REVERTED to its ORIGINAL loud assertions —
+  // `unaccountedIntended=95` (genText is nowhere present in `reported`, so none of it is accounted for)
+  // fails condition 1 despite `lenDelta=+160` being positive (condition 2 alone is not sufficient), so this
+  // stays loud under card d1ac9fed too. =====
   {
     const sid = newSession("PartialSubstringRecognized"); SIDS.push(sid);
     const fake = fakesById.get(sid);
@@ -1835,6 +1915,161 @@ try {
       host.getLastMismatchReplay(sid) === null);
     check("26: getLastMismatchFusion also stays null — no confirmed accumulation span",
       host.getLastMismatchFusion(sid) === null);
+    check("26: card d1ac9fed — unaccountedIntended (95, all of genText) fails condition 1 despite lenDelta=+160 being positive; the original per-event parent push still fires",
+      pushEvents.filter((e) => e.sessionId === sid).length === 1);
+  }
+
+  // ===== 27. Card d1ac9fed DoD — replays the 20 measured specimens' exact shapes (the card's own "MEASURED"
+  // section): 4 distinct fallback-unrecognized lenDelta shapes at char 0 (+57/+59/+60/+18) and the
+  // fallback-benign-offset-omission -1-at-the-tail shape (this card's own motivating specimen, session
+  // 13eea58e gen=2). Each on its OWN fresh session (never sharing the rate counter) — every one of these
+  // must produce 0 session notices and 0 per-event parent pushes, per the card's own DoD. =====
+  {
+    const unrecognizedDeltas = [57, 59, 60, 18]; // lenDelta at divergesAtChar=0 — matches the card's own MEASURED population exactly
+    for (const delta of unrecognizedDeltas) {
+      const sid = newSession(`Unrecognized+${delta}`); SIDS.push(sid);
+      const fake = fakesById.get(sid);
+      const intended = "[loom:worker-report] worker QQQQ — a real report body long enough to hold a meaningful divergence point for this specimen";
+      // A prepended, unexplained run PLUS a single mutated leading char in the tail copy — deliberately
+      // breaks `reported.endsWith(intended)` (isOffsetInsertion's own check) so this classifies
+      // fallback-unrecognized, not fallback-benign-offset-insertion; same length delta either way.
+      const mutatedTail = `X${intended.slice(1)}`;
+      const reported = `${"P".repeat(delta)}${mutatedTail}`;
+      host.enqueueStdin(sid, intended); // gen=1
+      const writesBeforeMismatch = fake.writes.length;
+      const armWarnings = captureArmWarnings(() => {
+        host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+      });
+      check(`27 (+${delta}): classifies arm=fallback-unrecognized at divergesAtChar=0, lenDelta=+${delta}`,
+        armWarnings.length === 1 && /arm=fallback-unrecognized/.test(armWarnings[0]) && /reportedLen=\d+ intendedLen=\d+/.test(armWarnings[0]));
+      check(`27 (+${delta}): 0 session notices`, !hasPendingMismatchNotice(sid));
+      host.deliverHook(sid, { hook_event_name: "Stop" });
+      check(`27 (+${delta}): 0 writes reached the pty`, fake.writes.length === writesBeforeMismatch);
+      check(`27 (+${delta}): 0 per-event parent pushes`, pushEvents.filter((e) => e.sessionId === sid).length === 0);
+    }
+
+    // The card's own motivating specimen: a single trailing char trimmed (arm=fallback-benign-offset-omission).
+    const sid = newSession("BenignOffsetOmissionMinusOne"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "[loom:worker-report] worker RRRR — generation 2's own real report, trimmed by exactly one trailing char\n";
+    const reported = intended.slice(0, intended.length - 1); // -1 at the tail — the card's own 13eea58e gen=2 specimen shape
+    host.enqueueStdin(sid, intended); // gen=1
+    const writesBeforeMismatch = fake.writes.length;
+    const armWarnings = captureArmWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("27 (-1 tail): classifies arm=fallback-benign-offset-omission — the card's own motivating specimen",
+      armWarnings.length === 1 && /arm=fallback-benign-offset-omission/.test(armWarnings[0]));
+    check("27 (-1 tail): 0 session notices", !hasPendingMismatchNotice(sid));
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    check("27 (-1 tail): 0 writes reached the pty", fake.writes.length === writesBeforeMismatch);
+    check("27 (-1 tail): 0 per-event parent pushes", pushEvents.filter((e) => e.sessionId === sid).length === 0);
+  }
+
+  // ===== 28. Card d1ac9fed — the fallback-unrecognized RATE escalation. 2 occurrences within the window ⇒
+  // 0 pushes; the 3rd ⇒ exactly 1 push (crossing UNRECOGNIZED_MISMATCH_RATE_THRESHOLD); a 4th, still inside
+  // the cooldown, ⇒ still exactly 1 (no second push even though the rate keeps climbing). One session
+  // throughout — the rate counter is session-scoped. Uses the SAME "+57 at char 0" shape as scenario 27 so
+  // each occurrence independently classifies fallback-unrecognized (a fresh gen each time; the exact-repeat
+  // suppression only matches on an unchanged (gen, writtenHash, reportedHash) triple, so 4 distinct gens
+  // never collide with it). =====
+  {
+    const sid = newSession("UnrecognizedRateEscalation"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const fire = (n) => {
+      const intended = `[loom:worker-report] worker SSSS — occurrence ${n} of this rate-escalation scenario, a real report body`;
+      // Same construction as scenario 27's +57 specimen — a mutated tail char breaks isOffsetInsertion's
+      // own `endsWith` check so this classifies fallback-unrecognized, not a benign offset arm.
+      const mutatedTail = `X${intended.slice(1)}`;
+      const reported = `${"P".repeat(57)}${mutatedTail}`;
+      host.enqueueStdin(sid, intended);
+      const armWarnings = captureArmWarnings(() => {
+        host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+      });
+      host.deliverHook(sid, { hook_event_name: "Stop" });
+      return armWarnings;
+    };
+
+    const arm1 = fire(1);
+    check("28: occurrence 1 classifies fallback-unrecognized", arm1.length === 1 && /arm=fallback-unrecognized/.test(arm1[0]));
+    check("28: after 1 occurrence — 0 pushes (below threshold)", pushEvents.filter((e) => e.sessionId === sid).length === 0);
+
+    const arm2 = fire(2);
+    check("28: occurrence 2 classifies fallback-unrecognized", arm2.length === 1 && /arm=fallback-unrecognized/.test(arm2[0]));
+    check("28: after 2 occurrences — STILL 0 pushes (below UNRECOGNIZED_MISMATCH_RATE_THRESHOLD=3)", pushEvents.filter((e) => e.sessionId === sid).length === 0);
+
+    const arm3 = fire(3);
+    check("28: occurrence 3 classifies fallback-unrecognized", arm3.length === 1 && /arm=fallback-unrecognized/.test(arm3[0]));
+    const afterThird = pushEvents.filter((e) => e.sessionId === sid);
+    check("28: the 3rd occurrence crosses the threshold — EXACTLY 1 push", afterThird.length === 1);
+    check("28: the push carries count=3 and the configured windowMs, naming the RATE not a single event",
+      afterThird[0]?.info.count === 3 && typeof afterThird[0]?.info.windowMs === "number" && afterThird[0].info.windowMs > 0);
+    check("28: the push carries arm=fallback-unrecognized and the MOST RECENT occurrence's own gen",
+      afterThird[0]?.info.arm === "fallback-unrecognized" && afterThird[0]?.info.gen === 3);
+
+    const arm4 = fire(4);
+    check("28: occurrence 4 classifies fallback-unrecognized", arm4.length === 1 && /arm=fallback-unrecognized/.test(arm4[0]));
+    const afterFourth = pushEvents.filter((e) => e.sessionId === sid);
+    check("28: the 4th occurrence, still inside the cooldown — STILL exactly 1 push (no repeat escalation)", afterFourth.length === 1);
+
+    // Every occurrence stays silent to the session itself throughout — the rate escalation is a
+    // PARENT-facing signal only, never a session-facing turn (card d1ac9fed's whole point). NOT a
+    // zero-writes check — each fire() call's own enqueueStdin legitimately writes its own submitted
+    // content to the pty; only the MISMATCH NOTICE text must never appear among those writes.
+    check("28: no [loom:prompt-mismatch] session-facing turn ever fired across any of the 4 occurrences",
+      !fake.writes.join("").includes("[loom:prompt-mismatch]"));
+  }
+
+  // ===== 29. Card d1ac9fed — condition 3 (the C0 control-char disqualifier) is INDEPENDENTLY load-bearing,
+  // not redundant with conditions 1/2: an otherwise-small, POSITIVE-delta `fallback-unrecognized` specimen
+  // (unaccountedIntended=1, lenDelta=+57 — satisfies conditions 1 AND 2) still stays LOUD when a stray form
+  // feed (card 2b57b5a9's own chunk-seam signature) sits inside the REPORTED-side divergent region. =====
+  {
+    const sid = newSession("SmallPositiveDeltaWithControlChar"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "[loom:worker-report] worker TTTT — a real report body long enough to hold a meaningful divergence point";
+    // Same "+57, 1-char-unaccounted" shape as scenario 27's own specimens (a mutated leading char in the
+    // tail copy breaks isOffsetInsertion's endsWith check), but with a form feed inside the prepended run —
+    // still +57 total, still 1 char unaccounted, but now condition 3 alone must keep this loud.
+    const mutatedTail = "X" + intended.slice(1);
+    const reported = "\u000c" + "P".repeat(56) + mutatedTail;
+    host.enqueueStdin(sid, intended); // gen=1
+    const writesBeforeMismatch = fake.writes.length;
+    const armWarnings29 = captureArmWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("29: classifies arm=fallback-unrecognized", armWarnings29.length === 1 && /arm=fallback-unrecognized/.test(armWarnings29[0]));
+    const enqueued29 = await waitUntil(() => hasPendingMismatchNotice(sid));
+    check("29: condition 3 (control char in the divergent region) keeps this LOUD despite satisfying conditions 1+2 — the notice fires", enqueued29);
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    await waitForChunkedWriteDone(fake.writes, writesBeforeMismatch);
+    const noticeWrite29 = fake.writes.slice(writesBeforeMismatch).join("");
+    check("29: the notice actually reached the pty", noticeWrite29.includes("[loom:prompt-mismatch]"));
+    check("29: the original per-event parent push fires too (escalation:\"single-event\", not the rate path)",
+      pushEvents.filter((e) => e.sessionId === sid).length === 1);
+  }
+
+  // ===== 30. Card d1ac9fed — the owner's own shape: a small, POSITIVE-delta divergence with NO control
+  // chars satisfies all three conditions and IS record-only — the sibling positive control to 29, proving
+  // the control-char check is a genuine DISQUALIFIER (present -> loud) and not a REQUIREMENT (absent ->
+  // quiet is the default for this population, matching the card's own 20-specimen measured shape). =====
+  {
+    const sid = newSession("SmallPositiveDeltaNoControlChar"); SIDS.push(sid);
+    const fake = fakesById.get(sid);
+    const intended = "[loom:worker-report] worker UUUU — a real report body long enough to hold a meaningful divergence point";
+    const mutatedTail = "X" + intended.slice(1);
+    const reported = "P".repeat(57) + mutatedTail; // same shape as 29, minus the form feed
+    host.enqueueStdin(sid, intended); // gen=1
+    const writesBeforeMismatch = fake.writes.length;
+    const armWarnings30 = captureArmWarnings(() => {
+      host.deliverHook(sid, { hook_event_name: "UserPromptSubmit", prompt: reported });
+    });
+    check("30: classifies arm=fallback-unrecognized", armWarnings30.length === 1 && /arm=fallback-unrecognized/.test(armWarnings30[0]));
+    check("30: no control char in the divergent region -> all three conditions hold -> RECORD-ONLY, no session notice", !hasPendingMismatchNotice(sid));
+    host.deliverHook(sid, { hook_event_name: "Stop" });
+    check("30: no write ever reached the pty for this mismatch", fake.writes.length === writesBeforeMismatch);
+    check("30: no per-event parent push for a single occurrence (below the rate threshold)",
+      pushEvents.filter((e) => e.sessionId === sid).length === 0);
   }
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
