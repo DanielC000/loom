@@ -1137,6 +1137,225 @@ const worktrees = [];
     defaultOrder.indexOf("dnoarg") < defaultOrder.indexOf("dlow"));
 }
 
+// ── Pure unit check: cross-project gate fairness (card 567b8724 — one project's own queued backlog
+//    must not perpetually win every freed slot ahead of a quiet sibling project). Deterministic:
+//    every task is a controllable promise the test resolves by hand, so grant order is asserted
+//    directly rather than inferred from sleep durations (sleeps below are only settle-margin, never
+//    the correctness mechanism — matches this file's existing "(unit, snapshot)" style). ──────────────
+{
+  const controlled = () => {
+    let release;
+    const p = new Promise((res) => { release = res; });
+    return { fn: () => p, release: () => release() };
+  };
+  const track = (sem, cap, label, desc, c) =>
+    sem.runExclusive(cap, desc, async () => { c.order.push(label); return c.fn(); });
+
+  // (1) THE STARVATION REPRO: cap=2. Project A fast-path-admits BOTH slots (A1, A2) before project B
+  // ever shows up — expected and fine ("no starvation in the other direction": a lone project may use
+  // every slot). A then queues a THIRD request (A3) BEFORE B's own first request (B1) — on a naive,
+  // project-blind FIFO (today's code, pre-fix), A3 (enqueued first) wins the next freed slot over B1,
+  // which is exactly the "one project holds both slots, repeatedly" pattern the Auditor observed. The
+  // fairness guard must invert that: once A already holds its fair share (ceil(2/2)=1) and B has an
+  // admissible waiter, the freed slot goes to B, not to A's own further-queued request — and once B's
+  // need is met, A is NOT left starved either (its own queued A3 is still eventually granted).
+  {
+    const sem = new GateSemaphore();
+    const order = [];
+    const dA = (n) => ({ gateType: "worker", projectId: "proj-567b-A", sessionId: `sA${n}` });
+    const dB = (n) => ({ gateType: "worker", projectId: "proj-567b-B", sessionId: `sB${n}` });
+    const cA1 = controlled(), cA2 = controlled(), cA3 = controlled(), cB1 = controlled();
+    cA1.order = cA2.order = cA3.order = cB1.order = order;
+
+    const pA1 = track(sem, 2, "A1", dA(1), cA1);
+    const pA2 = track(sem, 2, "A2", dA(2), cA2);
+    await sleep(10);
+    check("(fairness) A fast-path-admits both slots uncontested — no starvation in the other direction",
+      sem.snapshot().active === 2 && sem.snapshot().queued === 0);
+    const pA3 = track(sem, 2, "A3", dA(3), cA3); // queues FIRST
+    await sleep(10);
+    const pB1 = track(sem, 2, "B1", dB(1), cB1); // queues SECOND, behind A3 in raw FIFO
+    await sleep(10);
+    check("(fairness) A3 and B1 both queued behind A's two active slots",
+      sem.snapshot().active === 2 && sem.snapshot().queued === 2);
+
+    cA1.release(); // frees one slot — A already holds 1 (A2) of its fair share; B1 must win over A3
+    await sleep(20);
+    check("(fairness) freed slot goes to B1, not to A's own earlier-queued A3 (starvation fix)",
+      order.includes("B1") && !order.includes("A3"));
+
+    cA2.release(); // A2 settles — B1 no longer queued, so no foreign waiter remains for A3
+    await sleep(20);
+    check("(fairness) once no foreign waiter remains, A3 IS granted — A is not starved either",
+      order.includes("A3"));
+
+    cB1.release(); cA3.release();
+    await Promise.all([pA1, pA2, pA3, pB1]);
+    check("(fairness) registry empty after all four settle", sem.snapshot().active === 0 && sem.snapshot().queued === 0);
+  }
+
+  // (2) LONE-PROJECT NON-STARVATION: with no foreign project ever present, a single project must be
+  // able to reclaim every freed slot immediately, cap=2, repeatedly — proves the "no admissible foreign
+  // waiter ⇒ unrestricted" branch actually holds, not just that it's spelled that way in the doc comment.
+  {
+    const sem = new GateSemaphore();
+    const order = [];
+    const d = (n) => ({ gateType: "worker", projectId: "proj-567b-lone", sessionId: `s${n}` });
+    for (let round = 0; round < 3; round++) {
+      const c1 = controlled(), c2 = controlled(), c3 = controlled();
+      [c1, c2, c3].forEach((c) => { c.order = order; });
+      const p1 = track(sem, 2, `r${round}-1`, d(`${round}-1`), c1);
+      const p2 = track(sem, 2, `r${round}-2`, d(`${round}-2`), c2);
+      await sleep(5);
+      const p3 = track(sem, 2, `r${round}-3`, d(`${round}-3`), c3); // queues (cap full), no rival project
+      await sleep(5);
+      c1.release();
+      await sleep(10);
+      check(`(fairness, lone project, round ${round}) freed slot reclaimed immediately, no foreign waiter to defer to`,
+        order.includes(`r${round}-3`));
+      c2.release(); c3.release();
+      await Promise.all([p1, p2, p3]);
+    }
+    check("(fairness, lone project) registry empty after all rounds", sem.snapshot().active === 0 && sem.snapshot().queued === 0);
+  }
+
+  // (3) WORK-CONSERVING REQUIREMENT (manager checkpoint correction): a foreign waiter that is ITSELF
+  // blocked by its own repo guard must NOT count toward the fairness restriction, or a freed slot sits
+  // idle while BOTH projects have real, runnable work. Constructed with a GENUINE repo contention that
+  // OUTLIVES the slot that frees — the manager's own example ("B's previous merge is squashing"): B1
+  // calls `holdRepoGuardOnExit` (same shape as the existing "(cap-on-grantNext)" test above), so its
+  // CAP slot frees at settle while its REPO hold on "repo-567b" survives past that. A1 (project A)
+  // stays running throughout, genuinely AT its fair share (perProjectCap=1 at cap=2) the whole time —
+  // unlike a first draft of this test, which accidentally released A's OWN only active entry and so
+  // never actually exercised the restriction at all. B2 (B's second merge) then queues, blocked by B1's
+  // still-held repo guard; A2 (a second A request) must NOT be blocked by B2's presence, since B2 itself
+  // could never use the freed slot anyway.
+  const buildRepoBlockedScenario = (sem, cap) => {
+    const order = [];
+    const cA1 = controlled(), cB1 = controlled();
+    [cA1, cB1].forEach((c) => { c.order = order; });
+    const dA1 = { gateType: "worker", projectId: "proj-567b-repoA", sessionId: "a1" };
+    const dB1 = { gateType: "merge", projectId: "proj-567b-repoB", sessionId: "b1", repoPath: "repo-567b", opId: "opB1-567b" };
+    const pA1 = track(sem, cap, "A1", dA1, cA1);
+    const pB1 = sem.runExclusive(cap, dB1, async (_s, _c, _h, _g, holdRepoGuardOnExit) => {
+      order.push("B1");
+      holdRepoGuardOnExit(); // "B1 is squashing" (manager's own example) — cap slot frees, repo hold survives
+      return cB1.fn();
+    });
+    return { order, cA1, cB1, pA1, pB1, repoPath: "repo-567b", opId: "opB1-567b" };
+  };
+  // Settles B1 (frees its cap slot while its repo hold survives), then queues B2 (repo-blocked) and
+  // submits A2 (which either fast-path-admits immediately, if work-conserving, or wrongly queues).
+  const driveRepoBlockedScenario = async (sem, cap, scen) => {
+    await sleep(10);
+    check("(fairness, admissibility) A1+B1 both admitted, cap full", sem.snapshot().active === 2);
+    scen.cB1.release(); // B1 "settles" — cap slot frees; repo-567b stays held (holdRepoGuardOnExit)
+    await sleep(10);
+    check("(fairness, admissibility) B1 settled: cap slot free, repo-567b still held (mid-squash)",
+      sem.snapshot().active === 1 && sem.snapshot().queued === 0);
+    const cB2 = controlled(); cB2.order = scen.order;
+    const dB2 = { gateType: "merge", projectId: "proj-567b-repoB", sessionId: "b2", repoPath: scen.repoPath };
+    const pB2 = track(sem, cap, "B2", dB2, cB2); // queues — blocked by B1's still-held repo guard
+    await sleep(10);
+    check("(fairness, admissibility) B2 queues — blocked by ITS OWN (still-held) repo guard, not by cap",
+      sem.snapshot().active === 1 && sem.snapshot().queued === 1);
+    const cA2 = controlled(); cA2.order = scen.order;
+    const dA2 = { gateType: "worker", projectId: "proj-567b-repoA", sessionId: "a2" };
+    const pA2 = track(sem, cap, "A2", dA2, cA2); // fast-path-admits IF work-conserving, else wrongly queues
+    await sleep(10);
+    return { pB2, cB2, pA2, cA2 };
+  };
+
+  // RED: prove the requirement is load-bearing by disabling ONLY the admissibility filter (a naive
+  // "any foreign queued waiter counts, regardless of its own eligibility" rule) and showing A2 is
+  // wrongly queued instead of taking the free slot — exactly the review-caught failure mode.
+  {
+    const realCheck = GateSemaphore.prototype.hasAdmissibleForeignWaiter;
+    GateSemaphore.prototype.hasAdmissibleForeignWaiter = function (projectId) {
+      for (const tier of [this.highWaiters, this.lowWaiters]) {
+        for (const w of tier) { if (w.entry.descriptor.projectId !== projectId) return true; }
+      }
+      return false;
+    };
+    const sem = new GateSemaphore();
+    const scen = buildRepoBlockedScenario(sem, 2);
+    const { pB2, cB2, pA2, cA2 } = await driveRepoBlockedScenario(sem, 2, scen);
+    check("(fairness, admissibility) RED without the fix: A2 wrongly queued instead of taking the free slot",
+      sem.snapshot().active === 1 && sem.snapshot().queued === 2 && !scen.order.includes("A2"));
+    GateSemaphore.prototype.hasAdmissibleForeignWaiter = realCheck;
+    // Recover under the REAL check so nothing leaks past this block: force a re-scan (admits A2), then
+    // release everything and free the repo guard (admits B2) so all four settle cleanly.
+    sem.grantNext();
+    await sleep(10);
+    scen.cA1.release(); cA2.release();
+    await sleep(10);
+    sem.endSquash(scen.repoPath, scen.opId);
+    cB2.release();
+    await Promise.all([scen.pA1, scen.pB1, pB2, pA2]);
+  }
+
+  // GREEN: real code, identical scenario — B2 is repo-blocked and thus inadmissible, so it must NOT
+  // block A2; A2 fast-path-admits into the freed slot instead of ever queuing behind B2.
+  {
+    const sem = new GateSemaphore();
+    const scen = buildRepoBlockedScenario(sem, 2);
+    const { pB2, cB2, pA2, cA2 } = await driveRepoBlockedScenario(sem, 2, scen);
+    check("(fairness, admissibility) GREEN: repo-blocked foreign waiter does NOT block A2 — admitted immediately, slot not left idle",
+      sem.snapshot().active === 2 && sem.snapshot().queued === 1 && scen.order.includes("A2"));
+    scen.cA1.release(); cA2.release();
+    await sleep(10);
+    sem.endSquash(scen.repoPath, scen.opId);
+    cB2.release();
+    await Promise.all([scen.pA1, scen.pB1, pB2, pA2]);
+    check("(fairness, admissibility) registry empty after settle", sem.snapshot().active === 0 && sem.snapshot().queued === 0);
+  }
+
+  // (4) KNOWN LIMITATION, DOCUMENTED (not max-min-fair across 3+ contending projects — see
+  // docs/decisions/567b8724-*.md): cap=4 (perProjectCap=ceil(4/2)=2). Project A fast-path-fills all 4
+  // slots uncontested; projects B (two requests) and C (one request) then queue, B's both BEFORE C's.
+  // The guard correctly stops A from exceeding 2 once contested, but it does NOT round-robin among
+  // multiple foreign contenders: B is allowed to take BOTH of its 2 allowed slots before C — who has
+  // been waiting the whole time — ever gets one. This is accepted, not a bug: the rule's only promise
+  // is "no single project exceeds its fair share while contested," not an even split among 3+ projects.
+  {
+    const sem = new GateSemaphore();
+    const order = [];
+    const controlledFor = () => { const c = controlled(); c.order = order; return c; };
+    const dA = (n) => ({ gateType: "worker", projectId: "proj-567b-3way-A", sessionId: `a${n}` });
+    const dB = (n) => ({ gateType: "worker", projectId: "proj-567b-3way-B", sessionId: `b${n}` });
+    const dC = (n) => ({ gateType: "worker", projectId: "proj-567b-3way-C", sessionId: `c${n}` });
+
+    const cA = [1, 2, 3, 4].map(() => controlledFor());
+    const pA = cA.map((c, i) => track(sem, 4, `A${i + 1}`, dA(i + 1), c));
+    await sleep(10);
+    check("(fairness, 3-way) A fast-path-fills all 4 slots uncontested", sem.snapshot().active === 4);
+
+    const cB1 = controlledFor(), cB2 = controlledFor(), cC1 = controlledFor();
+    const pB1 = track(sem, 4, "B1", dB(1), cB1);
+    await sleep(5);
+    const pB2 = track(sem, 4, "B2", dB(2), cB2);
+    await sleep(5);
+    const pC1 = track(sem, 4, "C1", dC(1), cC1); // arrives LAST but has been waiting just as long as B2 once queued
+    await sleep(10);
+    check("(fairness, 3-way) B1, B2, C1 all queued behind A's 4 active slots", sem.snapshot().queued === 3);
+
+    cA[0].release(); // frees 1st slot -> B1 (project B under its cap)
+    await sleep(20);
+    cA[1].release(); // frees 2nd slot -> B2 (project B now AT its cap of 2)
+    await sleep(20);
+    check("(fairness, 3-way, documented limitation) B takes BOTH of its allowed slots ahead of C, which keeps waiting",
+      order.includes("B1") && order.includes("B2") && !order.includes("C1"));
+
+    cA[2].release(); // frees a 3rd slot -> now only C1 is queued, C1 is finally admitted
+    await sleep(20);
+    check("(fairness, 3-way) C1 is eventually admitted once B is no longer queued", order.includes("C1"));
+
+    cA[3].release(); cB1.release(); cB2.release(); cC1.release();
+    await Promise.all([...pA, pB1, pB2, pC1]);
+    check("(fairness, 3-way) registry empty after settle", sem.snapshot().active === 0 && sem.snapshot().queued === 0);
+  }
+}
+
 function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# gs\n");

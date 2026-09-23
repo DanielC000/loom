@@ -841,9 +841,18 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "activeCount, queuedCount, running: " +
         "GateQueueEntry[], queued: GateQueueEntry[], repoGuardOnly: RepoGuardOnlyQueueEntry[], " +
         "squashing: SquashQueueEntry[], " +
-        "declarations: GateIntentEntry[]} — `queued` is already in real admission order (all " +
+        "declarations: GateIntentEntry[]} — `queued` is ordered by ARRIVAL within its priority tier (all " +
         "high-priority merge/deploy waiters before low-priority worker self-checks, FIFO within each " +
-        "tier), so its array index + 1 IS each entry's queue position (also echoed as `queuePosition`). " +
+        "tier), so its array index + 1 IS `queuePosition` — but that position is a BELIEF about arrival " +
+        "order, NOT a promise of GRANT order: the semaphore skips a head-of-line waiter that isn't " +
+        "admissible right now and grants the next one that is, so a later-positioned entry can be " +
+        "admitted before an earlier one. Three independent reasons a queued entry can be skipped this " +
+        "way: its own worktree is still held by a running entry (card 8d585277); its own repoPath is " +
+        "still guarded (card 92e960d1/e4701333 — see `repoContended` below); or (card 567b8724) its " +
+        "project already holds its fair share of `cap` while a DIFFERENT project has an ADMISSIBLE " +
+        "queued waiter — which can let a foreign LOW-tier (worker self-check) waiter be granted ahead of " +
+        "THIS project's own HIGH-tier (merge/deploy) waiter. Tier priority stays fully preserved WITHIN " +
+        "one project either way — only cross-project ordering bends, deliberately, for fairness. " +
         "Each entry carries {opId, gateType, projectId, projectName, since, elapsedMs, idleMs, extended, " +
         "attempt, priorAttemptMs, queuePosition, repoContended} — " +
         "`since`/`elapsedMs` are PHASE-SCOPED to whichever array the entry is in, not a fixed admission " +

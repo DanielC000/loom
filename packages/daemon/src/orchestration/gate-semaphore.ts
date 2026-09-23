@@ -38,6 +38,10 @@
  * @decision e4701333 — WIDENED the 92e960d1 guard to also cover `worker`-kind run_gate self-checks,
  *   ASYMMETRICALLY (see `mergeRepoFree`'s own doc for the exact rule — a symmetric first draft broke a
  *   real worker-vs-worker concurrency fixture): `deploy` stays excluded either way.
+ *
+ * @decision 567b8724 — cross-project fairness caps a project's held slots (`projectSlotFree`) only
+ *   while a DIFFERENT, ADMISSIBLE project's waiter is queued — never touch an already-RUNNING entry, and
+ *   never let an inadmissible foreign waiter reserve a slot it can't use.
  */
 
 import type { GateType } from "@loom/shared";
@@ -50,7 +54,12 @@ import type { GateLivenessHooks } from "./gate-runner.js";
  *  work it's already done and risks leaking a process tree); a `"high"` caller only jumps ahead of
  *  ALREADY-QUEUED `"low"` waiters, same-tier order stays FIFO. This is what stops a low-priority worker's
  *  timing-out `run_gate` retries from head-of-line-blocking a higher-priority merge that arrives later —
- *  the exact starvation pattern this card was filed against. */
+ *  the exact starvation pattern this card was filed against.
+ *
+ *  ⚠️ Card 567b8724: this tier ordering is WITHIN-project only. `projectSlotFree` is keyed on `projectId`,
+ *  never on this priority — a foreign project's admissible `"low"` waiter CAN be granted ahead of an
+ *  over-quota project's own `"high"` one (deliberate — cross-project fairness IS the point). A project's
+ *  own `"high"` waiter is still always found before its own `"low"` one, unaffected. */
 export type GatePriority = "high" | "low";
 
 /**
@@ -387,6 +396,49 @@ export class GateSemaphore {
     return !this.activeMergeRepos.has(rp);
   }
 
+  /** Card 567b8724: true iff some OTHER project currently has a queued waiter (either tier) that is
+   *  itself ADMISSIBLE right now with respect to {@link worktreeFree}/{@link mergeRepoFree} — i.e. a
+   *  waiter that would actually be capable of running if `projectId`'s own claim stepped aside.
+   *  WORK-CONSERVING BY CONSTRUCTION: a foreign waiter blocked by its OWN worktree/repo guard is
+   *  deliberately NOT counted — reserving a slot for it would leave that slot idle (neither this
+   *  project's candidate NOR the blocked foreign waiter could use it), which is strictly worse than
+   *  today. Deliberately does NOT recurse into a foreign candidate's own {@link projectSlotFree}: two
+   *  projects each holding the other's only queued waiter would each ask "is the other admissible",
+   *  which asks right back — a genuine mutual dependency, not merely deep recursion — so this checks
+   *  only worktree/repo admissibility for the foreign candidate, never its own fairness eligibility. */
+  private hasAdmissibleForeignWaiter(projectId: string): boolean {
+    for (const tier of [this.highWaiters, this.lowWaiters]) {
+      for (const w of tier) {
+        if (w.entry.descriptor.projectId === projectId) continue;
+        if (this.worktreeFree(w.entry) && this.mergeRepoFree(w.entry)) return true;
+      }
+    }
+    return false;
+  }
+
+  /** Card 567b8724: true when `entry` is free to be admitted RIGHT NOW with respect to the cross-project
+   *  fairness guard alone — mirrors {@link worktreeFree}/{@link mergeRepoFree}'s shape, one level wider.
+   *  While {@link hasAdmissibleForeignWaiter} is true for `entry`'s own project, that project may hold at
+   *  most `Math.max(1, Math.ceil(cap / 2))` concurrently-ADMITTED slots (registry entries with
+   *  `startedAt != null`) — closing the gap where one project's own backlog wins every freed slot ahead
+   *  of a quiet sibling's single request, purely by FIFO arrival order. With NO admissible foreign
+   *  waiter, unrestricted — a lone, uncontested project may always use every slot up to `cap`. CROSS-TIER
+   *  by design: keyed on `projectId`, never `priority`/`gateType` — a foreign LOW-tier waiter CAN be
+   *  granted ahead of an over-quota project's own HIGH-tier one while contested; tier order stays
+   *  preserved WITHIN one project, since {@link grantNext} exhausts every `highWaiters` entry (all
+   *  projects) before ever looking at `lowWaiters`. Callers combine this with `cap`/`active`/worktree/repo
+   *  separately, same composition {@link acquire}/{@link grantNext} use for {@link worktreeFree}. */
+  private projectSlotFree(entry: RegistryEntry, cap: number): boolean {
+    const projectId = entry.descriptor.projectId;
+    if (!this.hasAdmissibleForeignWaiter(projectId)) return true;
+    const perProjectCap = Math.max(1, Math.ceil(cap / 2));
+    let activeForProject = 0;
+    for (const e of this.registry.values()) {
+      if (e.startedAt != null && e.descriptor.projectId === projectId) activeForProject++;
+    }
+    return activeForProject < perProjectCap;
+  }
+
   /** Card b9e07a4a Code Review: the identity {@link activeMergeRepos} stores for an `admit()`-ed entry —
    *  `entry.descriptor.opId` when the caller supplied one (every real `confirmWorkerMerge`/`runWorkerGate`
    *  call does — see {@link GateDescriptor.opId}'s own doc), else `entry.id` (the semaphore's own
@@ -449,13 +501,14 @@ export class GateSemaphore {
   }
 
   /** Acquire a slot under `cap`, queueing (awaiting) if it's already saturated OR its worktree is
-   *  currently held by another running entry — onto the `"high"` or `"low"` tier per `priority`. A
-   *  worktree conflict queues the caller even when `cap` has spare headroom (card 8d585277's structural
-   *  guard: same-worktree ops serialize regardless of tier or cap) — see {@link grantNext} for how a
-   *  worktree-blocked waiter is later found and admitted once its worktree frees up, out of arrival
-   *  order if necessary. */
+   *  currently held by another running entry OR its project is over its fair share while a foreign
+   *  project waits (card 567b8724, {@link projectSlotFree}) — onto the `"high"` or `"low"` tier per
+   *  `priority`. A worktree conflict queues the caller even when `cap` has spare headroom (card 8d585277's
+   *  structural guard: same-worktree ops serialize regardless of tier or cap) — see {@link grantNext} for
+   *  how a worktree-blocked (or fairness-blocked) waiter is later found and admitted once eligible, out of
+   *  arrival order if necessary. */
   private acquire(cap: number, priority: GatePriority, entry: RegistryEntry): Promise<AcquireOutcome> {
-    if (this.active < cap && this.worktreeFree(entry) && this.mergeRepoFree(entry)) {
+    if (this.active < cap && this.worktreeFree(entry) && this.mergeRepoFree(entry) && this.projectSlotFree(entry, cap)) {
       this.admit(entry);
       return Promise.resolve({ admitted: true });
     }
@@ -750,8 +803,10 @@ export class GateSemaphore {
   }
 
   /** Grant exactly ONE freed slot to the next eligible waiter — drains `highWaiters` before `lowWaiters`
-   *  (card 8d585277), but WITHIN a tier scans for the first waiter whose worktree/repo (card 92e960d1)
-   *  isn't STILL held elsewhere, skipping a blocked head-of-line waiter rather than deadlocking behind it.
+   *  (card 8d585277), but WITHIN a tier scans for the first waiter whose worktree/repo (card 92e960d1) or
+   *  cross-project fairness share (card 567b8724, {@link projectSlotFree}) isn't STILL blocked, skipping
+   *  an ineligible head-of-line waiter rather than deadlocking behind it — this is what lets a foreign
+   *  project's waiter jump an over-quota project's own earlier-queued one, across tiers if necessary.
    *  @decision d9d5057f — gated on `this.lastKnownCap` before scanning: never assume every caller here is
    *  release-shaped — `releaseMergeRepoGuard`/`endSquash` frees a REPO guard, not a cap slot, so a
    *  cap-blind grant here could over-admit past `cap`. */
@@ -761,6 +816,7 @@ export class GateSemaphore {
       for (let i = 0; i < tier.length; i++) {
         const w = tier[i]!;
         if (!this.worktreeFree(w.entry) || !this.mergeRepoFree(w.entry)) continue;
+        if (this.lastKnownCap !== undefined && !this.projectSlotFree(w.entry, this.lastKnownCap)) continue;
         tier.splice(i, 1);
         w.grant();
         return;
