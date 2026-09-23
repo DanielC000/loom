@@ -6,6 +6,11 @@
 //   // @decision sha:<8hex commit sha> — <the prohibition or consequence>   (card 969b0e1c — a SECOND,
 //      explicitly sigil'd id-space for prose that cites no board card; see ANCHOR_RE's own doc below for
 //      why the sigil is required rather than folding a commit sha into the same bare grammar)
+// ANCHOR_RE matches the literal token regardless of what precedes it — a markdown/vault/research project
+// (no `//` comments) uses the exact same grammar wrapped in an HTML comment instead, e.g.
+// `<!-- @decision <8hex> — <the prohibition or consequence> -->` (or `sha:<8hex>`), invisible in a
+// rendered Markdown/Obsidian preview (card a4760fc8) — no parser change, since the regex never required
+// any particular comment syntax to begin with.
 // and stores the COMPLETE record out of band, keyed by that same 8-hex id (the file-store lookup is
 // namespace-agnostic — see `resolveRecord`'s own doc), in one of three stores (see CLAUDE.md's
 // decision-records convention, card 90b19799): `docs/adr/<id>*.md` (immutable), `docs/decisions/<id>*.md`

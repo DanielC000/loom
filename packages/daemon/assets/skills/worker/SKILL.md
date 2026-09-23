@@ -363,8 +363,11 @@ record creates that folder — no separate setup needed), or, for a rare, cross-
 architecturally-significant decision, `docs/adr/<id>-slug.md` (immutable: amend or supersede an existing
 ADR, never rewrite it in place — `docs/decisions/` stays ordinary mutable doc hygiene). Before writing,
 check whether a record for that id already exists — a second decision under the same id is a new section
-in that file, never a second file. (Code comments only, for now — a note-only project with no source
-files has no anchor form defined for this yet.)
+in that file, never a second file. A note-only project (no source files — the "code" being anchored is
+itself a note) uses the SAME grammar wrapped in an HTML comment instead of a code comment: `<!-- @decision
+<id> — <the prohibition or consequence, not a summary> -->` (or `<!-- @decision sha:<8hex> — ... -->`) —
+invisible in a rendered Markdown preview, resolved by the exact same anchor mechanism and id rules as a
+code comment.
 
 **Learned something durable? Write it to project memory.** When your task surfaces a fact a FUTURE agent
 on this project would want handed to it — a verified invariant, a load-bearing gotcha, a hard-won

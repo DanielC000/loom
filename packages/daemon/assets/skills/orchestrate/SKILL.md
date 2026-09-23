@@ -558,8 +558,10 @@ what you checked. Found none? Treat it as live.
      task id, or `sha:<8hex>` (the introducing commit, from `git blame`) when no task covers it — never
      one invented. Check first whether that id already has a record; a second decision under the same id
      is a new section there, never a second file. The same rule applies when you author a change or a
-     project doc yourself. (Code comments only, for now — no anchor form is defined yet for a note-only
-     project with no source files.)
+     project doc yourself. A note-only project (no source files — the "code" being anchored is itself a
+     note) uses the SAME grammar wrapped in an HTML comment instead of a code comment: `<!-- @decision <id>
+     — ... -->` (or `<!-- @decision sha:<8hex> — ... -->`) — invisible in a rendered Markdown preview,
+     resolved by the exact same anchor mechanism and id rules as a code comment.
 2. **Decompose into delegable tasks**, each with an explicit **definition of done**. A task without a
    DoD/acceptance check can't be delegated — state what *proves* it works (your agent prompt names the
    project's gate command). One task = one focused, independently-mergeable change.
