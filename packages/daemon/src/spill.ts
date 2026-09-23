@@ -45,9 +45,9 @@ function assertPathSegment(paramName: string, value: string): void {
  * caller with a genuinely different budget should define its OWN constant instead of reusing this one by
  * accident; this one is for "the general MCP inline cap," not for any one caller's specific page shape.
  *
- * @decision 26134f1a — MEASURED 2026-09-23 (claude 2.1.280): a real MCP response inlines clean up to
- * 47,995 chars; Bash stdout is a SEPARATE, much lower mechanism (~28-33K). Never size this constant off
- * the Bash number, and re-measure both after a Claude Code upgrade before touching this value.
+ * @decision 26134f1a — MEASURED 2026-09-23 (claude 2.1.280): a real MCP response was observed inline at
+ * 46,502 and 47,995 chars — the largest TESTED, never a proven ceiling. Bash stdout is a SEPARATE, much
+ * lower mechanism (~28-33K) — never size this constant off it; re-measure both after a CLI upgrade.
  */
 export const SPILL_INLINE_BUDGET_CHARS = 48_000;
 
