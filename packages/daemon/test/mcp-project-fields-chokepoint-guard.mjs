@@ -36,6 +36,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 //      references (not immediately followed by `.` or `:` — a field-read or an object-key spelling, not
 //      a whole-value use; not inside a quoted string) one of the unsafe block-local variables from (2).
 //
+//   Chained masker (card 40629178): an assignment RHS / helper return that is a raw getter call followed ONLY by a
+//   terminal `.map(projectFields)` (or `.map((p) => projectFields(p))`) is MASKED, not unsafe — so
+//   `const rows = db.listAllProjects().map(projectFields)` is a legal one-statement shape. The masker must be the LAST
+//   link (TAIL_MASKED_CHAIN_RE): `.concat(x.map(projectFields))` or anything chained after the masker is still flagged.
+//
 // ⚠ HONEST LIMITS (named, not oversold as airtight — same posture the REST guard's own header states):
 //   - Textual, not a type-checker. A project value smuggled through a mechanism this scan doesn't know
 //     the shape of (e.g. field-by-field reconstruction into a fresh untyped object literal) is not caught.
@@ -43,6 +48,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — pur
 //     (`getByIdPrefix` itself, defined in `id-prefix.ts`, is never a "local helper" to any mcp/*.ts file,
 //     so a variable assigned from it is judged ONLY by whether ITS OWN block re-derives/returns it raw,
 //     never by what getByIdPrefix's own callback arguments happen to mention).
+//   - A raw getter NOT at the start of the expression (e.g. `[...db.listAllProjects(), x]`) is never anchored, hence never
+//     flagged — pre-existing, unchanged by the chained-masker card; a mask-tail exemption cannot make that any worse.
 //   - Fixed-point iteration is bounded (10 rounds) — sufficient for every helper chain in this corpus
 //     (measured: the real violation needs exactly 2), not a claim about unbounded depth.
 //
@@ -66,6 +73,13 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const MASKER_RE = /\bprojectFields\b/;
 // Anchored at the START of a (trimmed) expression — deliberately NOT a substring search; see header (1).
 const RAW_GETTER_ANCHOR_RE = /^(?:this\.)?db\.(?:getProject|listAllProjects|listArchivedProjects)\(/;
+// TAIL-masked chain: the WHOLE (trimmed) expression is a raw getter call followed by nothing but a terminal
+// `.map(projectFields)` (or `.map((p) => projectFields(p))`) — the masker must be the LAST link. Deliberately
+// NOT "the expression mentions projectFields anywhere": `db.listAllProjects().concat(x.map(projectFields))` still
+// carries unmasked rows and must stay flagged (card 40629178).
+const TAIL_MASKED_CHAIN_RE = /^(?:this\.)?db\.(?:getProject|listAllProjects|listArchivedProjects)\([^()]*\)\s*\.map\(\s*(?:projectFields|\(?\s*(\w+)\s*\)?\s*=>\s*projectFields\(\s*\1\s*\))\s*\)\s*;?\s*$/;
+/** Raw-getter-anchored AND not a tail-masked chain. The single predicate every "is this expr an unmasked raw project?" site uses. */
+const isRawUnmasked = (expr) => RAW_GETTER_ANCHOR_RE.test(expr.trim()) && !TAIL_MASKED_CHAIN_RE.test(expr.trim());
 const TYPED_LITERAL_RE = /\b(?:const|let)\s+(\w+)\s*:\s*Project\s*=\s*\{/g;
 const REGISTER_RE = /server\.registerTool\(\s*\n?\s*["'](\w+)["']/g;
 
@@ -109,7 +123,8 @@ function extractBraceBody(text, openIdx) {
 /** Does `expr` (trimmed) start with a raw getter call, or is it a bare call to a name in `unsafeNames`? */
 function isUnsafeExpr(expr, unsafeNames) {
   const trimmed = expr.trim();
-  if (RAW_GETTER_ANCHOR_RE.test(trimmed)) return true;
+  if (isRawUnmasked(trimmed)) return true;
+  if (RAW_GETTER_ANCHOR_RE.test(trimmed)) return false; // raw getter, but tail-masked — safe
   const callMatch = /^(?:this\.)?(\w+)\(/.exec(trimmed);
   return !!callMatch && unsafeNames.has(callMatch[1]);
 }
@@ -163,7 +178,7 @@ function resolveUnsafeHelpers(strippedSource) {
   }
 
   const unsafe = new Set();
-  const isDirectlyUnsafe = (name) => (defs.get(name) ?? []).some((expr) => RAW_GETTER_ANCHOR_RE.test(expr.trim()));
+  const isDirectlyUnsafe = (name) => (defs.get(name) ?? []).some((expr) => isRawUnmasked(expr));
   for (const name of defs.keys()) if (isDirectlyUnsafe(name)) unsafe.add(name);
 
   let changed = true;
@@ -202,7 +217,7 @@ function findWholeProjectLeaks(strippedSource) {
     const unsafeVars = new Set();
     TYPED_LITERAL_RE.lastIndex = 0;
     while ((m = TYPED_LITERAL_RE.exec(block)) !== null) unsafeVars.add(m[1]);
-    const ASSIGN_RE = /\b(?:const|let)\s+(\w+)\s*=\s*([^;\n]+)/g;
+    const ASSIGN_RE = /\b(?:const|let)\s+(\w+)\s*=\s*([^;]+)/g;
     let am;
     while ((am = ASSIGN_RE.exec(block)) !== null) {
       if (isUnsafeExpr(am[2], unsafeHelpers)) unsafeVars.add(am[1]);
@@ -386,6 +401,61 @@ class FixtureRouter {
   const { leaks: getByIdPrefixLeaks } = findWholeProjectLeaks(GET_BY_ID_PREFIX_SAFE);
   check("(1e-control) a getByIdPrefix-narrowed error branch (never the whole project) is NOT flagged",
     getByIdPrefixLeaks.length === 0);
+
+  // Chained-masker form (card 40629178): `const rows = db.listAllProjects().map(projectFields)` — the masker is the
+  // TAIL of the chain, so `rows` is already masked. It used to be flagged (RHS starts with the raw getter).
+  const mkChain = (rhs) => `
+class FixtureRouter {
+  buildServer() {
+    const server = new McpServer();
+    server.registerTool(
+      "fixture_chain",
+      { inputSchema: strictShape({}) },
+      async () => {
+        const rows = ${rhs};
+        return ok(rows);
+      },
+    );
+    return server;
+  }
+}
+`;
+  const chainLeaks = (rhs) => findWholeProjectLeaks(mkChain(rhs)).leaks.length;
+  check("(1f) POSITIVE: `const rows = db.listAllProjects().map(projectFields)` then ok(rows) is NOT flagged",
+    chainLeaks("db.listAllProjects().map(projectFields)") === 0);
+  check("(1f) POSITIVE: arrow-wrapped tail masker `.map((p) => projectFields(p))` is NOT flagged",
+    chainLeaks("db.listAllProjects().map((p) => projectFields(p))") === 0);
+  check("(1f) POSITIVE: a multi-line chain (masker on the next line) is NOT flagged",
+    chainLeaks("db.listAllProjects()\n          .map(projectFields)") === 0);
+  check("(1g) NEGATIVE: unmasked `const rows = db.listAllProjects()` then ok(rows) IS still flagged",
+    chainLeaks("db.listAllProjects()") === 1);
+  check("(1g) NEGATIVE: masker elsewhere (`.concat(other.map(projectFields))`) IS still flagged",
+    chainLeaks("db.listAllProjects().concat(other.map(projectFields))") === 1);
+  check("(1g) NEGATIVE: something chained AFTER the masker (`.map(projectFields).concat(db.listAllProjects())`) IS still flagged",
+    chainLeaks("db.listAllProjects().map(projectFields).concat(db.listAllProjects())") === 1);
+  check("(1g) NEGATIVE: a different map callback (`.map((p) => p)`) IS still flagged",
+    chainLeaks("db.listAllProjects().map((p) => p)") === 1);
+  check("(1g) NEGATIVE: an arrow that masks a DIFFERENT var (`.map((p) => projectFields(q))`) IS still flagged",
+    chainLeaks("db.listAllProjects().map((p) => projectFields(q))") === 1);
+  // Helper-return path: a helper whose return is the tail-masked chain is safe; unmasked stays unsafe.
+  const helperLeaks = (ret) => findWholeProjectLeaks(`
+class FixtureRouter {
+  private allFixture() {
+    return ${ret};
+  }
+  buildServer() {
+    const server = new McpServer();
+    server.registerTool("fixture_helper_chain", { inputSchema: strictShape({}) }, async () => {
+      const rows = this.allFixture();
+      return ok(rows);
+    });
+    return server;
+  }
+}
+`).leaks.length;
+  check("(1h) POSITIVE: a helper returning a tail-masked chain is NOT flagged", helperLeaks("this.db.listAllProjects().map(projectFields)") === 0);
+  check("(1h) NEGATIVE: a helper returning the unmasked getter IS still flagged", helperLeaks("this.db.listAllProjects()") === 1);
+  check("(1h) NEGATIVE: a helper returning `.concat(x.map(projectFields))` IS still flagged", helperLeaks("this.db.listAllProjects().concat(x.map(projectFields))") === 1);
 }
 
 // ============================= (2) THE REAL SCAN — mcp/*.ts today =============================
