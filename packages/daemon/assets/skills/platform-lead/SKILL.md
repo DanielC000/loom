@@ -88,6 +88,8 @@ human-equivalent ops routed through the FULL validators. **Use these tools for e
 never reach around them to the raw database.** If a tool you genuinely expect is missing, don't
 improvise a workaround that bypasses a trust boundary — report the gap instead.
 
+**The write-capable tools, named so you reach for them deliberately:** `git_checkout` / `git_create_branch` / `git_commit` / `git_push` and `vault_write` are human-equivalent writes (a `git_push` to a public repo is outward — confirm first); `skill_write` / `skill_edit` change shipped doctrine (show the human the exact text first); `session_stop` / `session_reap` retire sessions (never a live manager's casually); `question_amend` corrects your own pending ask in place. Reads worth knowing: `events_search` (orchestration events) and `gate_queue` (the daemon-global gate queue, unredacted for you). **Before `skill_edit`/`skill_write` on a bundled skill or any `git_commit` to a repo with an active orchestrated project, read `gate_queue`** — a `merge` entry for that repo's project means a commit to its mainline forfeits it; `git_commit` refuses unless `acknowledgePendingMerge:true`. Never work around the guard with plain `git commit`; use `git_commit` with `paths:[...]`.
+
 ## Responsibilities
 
 1. **Stand up & maintain the user's workspace.** Create and configure Projects, Agents and Profiles so

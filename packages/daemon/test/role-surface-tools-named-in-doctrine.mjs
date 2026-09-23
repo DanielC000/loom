@@ -81,9 +81,6 @@ allow("platform", ["agent_clone", "agent_clone_batch", "agent_create", "agent_de
   "profile_delete", "profile_get", "project_archive", "project_create", "project_get", "project_init", "project_update",
   "schedule_create", "schedule_delete", "schedule_get", "schedule_update", "platform_config_get", "project_memory_search",
   "agent_prompt_search", "template_apply", "template_list", "skill_list"], "SELF: admin CRUD/read; tool description is the contract");
-allow("platform", ["git_checkout", "git_commit", "git_create_branch", "git_push", "vault_write"], "GAP: outward/write tools with trust implications, unnamed in platform-lead doctrine");
-allow("platform", ["skill_edit", "skill_write", "session_reap", "session_stop", "question_amend", "events_search", "gate_queue"], "GAP: unnamed in platform-lead doctrine");
-allow("auditor", ["list_sessions", "transcript_read"], "GAP: the auditor's two core read tools are only described generically in platform-audit");
 
 // Surfaces with no shipped doctrine skill — not checked (see header).
 const NO_DOCTRINE_SKILL = {
