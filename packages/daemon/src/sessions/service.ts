@@ -15985,6 +15985,21 @@ export class SessionService {
             batchGateVerdict.payload.batchLanded = result.ok;
           }
 
+          // @decision bc2240d7 — record every candidate drop durably + in the log, keyed by this batch's opId,
+          //  even when the batch never gates; never let a batch-level reason stand in for a candidate's own.
+          for (const d of result.dropped) {
+            // eslint-disable-next-line no-console
+            console.warn(`[merge-batch] op ${opId} dropped ${d.reason.startsWith(d.branch) ? d.reason : `${d.branch}: ${d.reason}`}`);
+            try {
+              this.db.appendEvent({
+                id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "batch_merge_dropped",
+                workerSessionId: d.workerSessionId, taskId: d.taskId,
+                detail: { opId, branch: d.branch, reason: d.reason, conflict: !!d.conflict, branches: branchIdentities },
+              });
+            } catch { /* audit-only — never fail the batch over a failed event write */ }
+          }
+          const ownDropReason = new Map(result.dropped.map((d) => [d.workerSessionId, d.reason]));
+
           if (result.forfeited) {
             // currentMainSha is `string | undefined` on RunBatchedMergeResult (batch-merge.ts) — passed
             // through as-is rather than defaulted to null: appendEvent's JSON.stringify (db.ts) drops an
@@ -15997,7 +16012,7 @@ export class SessionService {
 
           if (!result.ok) {
             const fallback = await runFallback([
-              ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: result.reason ?? "batch failed" })),
+              ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, reason: ownDropReason.get(c.workerSessionId) ?? result.reason ?? "batch failed" })),
               ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
               ...strandedFallback,
             ], opId);
@@ -16122,11 +16137,23 @@ export class SessionService {
         // that case). A caller can compare the two counts directly if it ever needs to notice the divergence
         // itself; this nudge just states the accurate total rather than the possibly-smaller listed one.
         const landedTotal = (v: MergeBatchResult) => v.landedCount ?? v.landed.length;
+        // Card bc2240d7: each candidate's OWN fallback reason, bounded (first N + "+K more", each reason
+        // clipped) so a K-candidate batch can't flood the nudge. Empty string when there is nothing to list.
+        const fallbackList = (v: MergeBatchResult) => {
+          const MAX_LISTED = 4, MAX_REASON = 220;
+          if (v.fallback.length === 0) return "";
+          const shown = v.fallback.slice(0, MAX_LISTED).map((f) => {
+            const r = f.reason.length > MAX_REASON ? `${f.reason.slice(0, MAX_REASON)}…` : f.reason;
+            return `worker ${f.workerSessionId.slice(0, 8)}: ${r}`;
+          });
+          const more = v.fallback.length - shown.length;
+          return ` Per-candidate reasons: ${shown.join("; ")}${more > 0 ? `; +${more} more` : ""}.`;
+        };
         const msg = !outcome.ok
           ? `[loom:merge-batch-unknown] merge_batch [op ${opId}] errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}; canonical repo state UNKNOWN — check 'git --no-pager log' in the repo for a batch fast-forward before assuming nothing landed.`
           : outcome.value.ok
           ? `[loom:merge-batch-done] merge_batch [op ${opId}] landed ${landedTotal(outcome.value)} branch(es) on main: ${landedList(outcome.value.landed)}.` +
-            (outcome.value.fallback.length ? ` ${outcome.value.fallback.length} more fell back to an individual confirm (each already notified separately).` : "") +
+            (outcome.value.fallback.length ? ` ${outcome.value.fallback.length} more fell back to an individual confirm (each already notified separately).${fallbackList(outcome.value)}` : "") +
             // Card 67030bb9: the ONE place an async batch settle is announced (per this callback's own
             // header doc) — a retry-assisted batch landing must carry the SAME weaker-pass note the sync
             // return already surfaces via `MergeBatchResult.retryWarning`, or a manager who missed the sync
@@ -16135,7 +16162,7 @@ export class SessionService {
             // Card d422e279: same reasoning as retryWarning immediately above, for a reduced batch gate's
             // own surfacing obligation (`MergeBatchResult.reducedGateWarning`'s own doc).
             (outcome.value.reducedGateWarning ? ` ${outcome.value.reducedGateWarning}` : "")
-          : `[loom:merge-batch-failed] merge_batch [op ${opId}] landed nothing via the batch path (${outcome.value.reason ?? "see fallback"}) — ${outcome.value.fallback.length} candidate(s) routed to an individual worker_merge_confirm instead (each already notified separately).`;
+          : `[loom:merge-batch-failed] merge_batch [op ${opId}] landed nothing via the batch path (${outcome.value.reason ?? "see fallback"}) — ${outcome.value.fallback.length} candidate(s) routed to an individual worker_merge_confirm instead (each already notified separately).${fallbackList(outcome.value)}`;
         try {
           // Card 791def40: fresh read, mirroring the solo-merge settle nudge (confirmWorkerMergeTracked's
           // onSettledAfterPending) — this settle carries no other staleness-derived claim, and it may be

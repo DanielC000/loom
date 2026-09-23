@@ -17,12 +17,9 @@ import { nonInteractiveEnv, stripClaudeSessionTrailer } from "./writer.js";
  * landed base), never `merge-base(HEAD, branch)` (the pre-landing fork point) nor the tip's own `sha^`
  * once a branch lands more than one commit — both diverge once main has advanced past the fork point.
  *
- * ⚠️ A branch whose own commit range contains a MERGE commit (e.g. a stale-base auto-forward that unioned
- * main into the worker's worktree mid-work — `mergeMainIntoWorktree`) is DROPPED, not cherry-picked:
- * `git cherry-pick` refuses a merge commit outright without an explicit `-m <parent>` this generic landing
- * has no principled way to choose. Detected up front and dropped with a specific reason (see
- * {@link landBranchCommitsIndividually}) — safe, not a data-loss gap: the branch falls back to the
- * ordinary individual `worker_merge_confirm` path, which already handles this case via its own union step.
+ * @decision bc2240d7 — a merge commit in a branch's range is skipped only if it is a pure main-forward
+ * (non-first parents already on the batch HEAD AND empty `diff-tree --cc`); otherwise the branch is
+ * dropped with a reason. Never skip on the subject alone. See {@link landBranchCommitsIndividually}.
  *
  * RED BATCH / CONFLICT POLICY (owner directive — do not "improve" on this without re-reading the card):
  *  - A branch that won't land cleanly into the batch (a conflict on ANY of its own commits, a merge commit
@@ -160,6 +157,48 @@ interface LandResult {
   pathSetStamped?: boolean;
 }
 
+/** Bound on how many merge commits one branch may carry before it is dropped unexamined (each is up to
+ *  three bounded git calls). */
+const MAX_MERGE_COMMITS_CHECKED = 20;
+
+/** `undefined` when merge commit `mergeSha` is a pure main-forward that batch landing may skip; otherwise
+ *  the failing condition, worded for the drop reason. Fails CLOSED: any git error returns a reason.
+ *  (i) every non-first parent must be an ancestor of `batchHead`; (ii) `git diff-tree --cc` must be empty
+ *  (card bc2240d7 — see the file header). */
+async function mergeCommitBlocksLinearization(
+  git: Pick<SimpleGit, "raw">, mergeSha: string, batchHead: string, timeoutMs: number,
+): Promise<string | undefined> {
+  let parents: string[];
+  try {
+    parents = (await withTimeout(
+      git.raw(["rev-list", "--parents", "-n", "1", mergeSha]), timeoutMs, "git rev-list --parents (batch land, merge parents)",
+    )).trim().split(/\s+/).slice(1);
+  } catch (e) {
+    return `could not be inspected (${(e as Error).message})`;
+  }
+  for (const p of parents.slice(1)) {
+    // Compare `merge-base` OUTPUT to the parent's full sha rather than using `--is-ancestor`: simple-git
+    // resolves a non-zero exit with empty stderr as success, so `--is-ancestor`'s exit-1 "no" would read as "yes".
+    let onMain: boolean;
+    try {
+      onMain = (await withTimeout(git.raw(["merge-base", p, batchHead]), timeoutMs, "git merge-base (batch land, parent on main)")).trim() === p;
+    } catch {
+      onMain = false; // no common ancestor (exit 1) or a real error — fail closed
+    }
+    if (!onMain) return `merges ${p.slice(0, 7)}, which is not reachable from main`;
+  }
+  let combined: string;
+  try {
+    combined = await withTimeout(
+      git.raw(["diff-tree", "--cc", "--no-commit-id", "-p", "-r", mergeSha]), timeoutMs, "git diff-tree --cc (batch land, resolution content)",
+    );
+  } catch (e) {
+    return `could not be checked for resolution content (${(e as Error).message})`;
+  }
+  if (combined.trim() !== "") return "carries conflict-resolution content of its own";
+  return undefined;
+}
+
 /**
  * Land ONE candidate branch's own commits, INDIVIDUALLY, onto `batchWorktreePath`'s current HEAD — the
  * per-branch assembly step card 6801c0a1 rewrote (see this file's own header doc for the full rationale).
@@ -246,23 +285,34 @@ async function landBranchCommitsIndividually(
     return { ok: false, reason: "empty commit range — nothing to land" };
   }
 
-  // A worker's own branch can carry a MERGE commit in this range — e.g. a stale-base auto-forward
-  // (`mergeMainIntoWorktree`) that unioned main into the worker's worktree mid-work. `git cherry-pick`
-  // refuses a merge commit outright (needs an explicit `-m <parent>`, which this generic per-branch
-  // landing has no principled way to pick), so check for one UP FRONT and drop with a specific,
-  // diagnosable reason rather than letting the loop below fail on a generic git error a few calls in —
-  // same DROP outcome either way (safe: the branch falls back to the individual worker_merge_confirm
-  // path, which handles this case natively), just a clearer, cheaper failure.
-  let hasMergeCommit: boolean;
+  // @decision bc2240d7 — never relax either skip condition (see the file header): skipping a merge that
+  // carries resolution content silently loses it; dropping every merge broke cancel-then-rebatch.
+  let mergeShas: string[];
   try {
-    hasMergeCommit = (await withTimeout(
+    mergeShas = (await withTimeout(
       git.raw(["rev-list", "--merges", `${mergeBase}..${branchTip}`]), timeoutMs, "git rev-list --merges (batch land, merge-commit probe)",
-    )).trim() !== "";
+    )).split("\n").map((s) => s.trim()).filter(Boolean);
   } catch (e) {
     return { ok: false, reason: `${branch}: failed to probe for merge commits in range: ${(e as Error).message}` };
   }
-  if (hasMergeCommit) {
-    return { ok: false, reason: `${branch}: its own commit range contains a merge commit — individual-commit batch landing doesn't support that; falling back to individual gating` };
+  if (mergeShas.length > MAX_MERGE_COMMITS_CHECKED) {
+    return { ok: false, reason: `${branch}: ${mergeShas.length} merge commits in its own range (more than ${MAX_MERGE_COMMITS_CHECKED} checked) — rebase onto main` };
+  }
+  for (const m of mergeShas) {
+    const why = await mergeCommitBlocksLinearization(git, m, batchHeadBefore, timeoutMs);
+    if (why) return { ok: false, reason: `${branch}: merge commit ${m.slice(0, 7)} ${why} — rebase onto main` };
+  }
+  if (mergeShas.length > 0) {
+    try {
+      commitShas = (await withTimeout(
+        git.raw(["rev-list", "--reverse", "--no-merges", `${mergeBase}..${branchTip}`]), timeoutMs, "git rev-list --no-merges (batch land, commit range)",
+      )).split("\n").map((s) => s.trim()).filter(Boolean);
+    } catch (e) {
+      return { ok: false, reason: `${branch}: failed to enumerate branch's non-merge commits: ${(e as Error).message}` };
+    }
+    if (commitShas.length === 0) {
+      return { ok: false, reason: `${branch}: only main-forward merge commit(s) in its range — no own commits to land` };
+    }
   }
 
   const identityArgs = (await hasConfiguredGitIdentity(git))

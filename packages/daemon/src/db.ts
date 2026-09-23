@@ -1518,7 +1518,7 @@ const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<O
   "cross_project_message", "assistant_relay_message", "session_message", "session_steer_dropped",
   // Gate / merge history
   "build_gate", "build_gate_retry_attempt", "build_gate_retry", "build_gate_single_file_retry",
-  "merge_request", "merge_done", "merge_rejected", "merge_cancelled", "batch_merge_forfeited", "kill_switch",
+  "merge_request", "merge_done", "merge_rejected", "merge_cancelled", "batch_merge_forfeited", "batch_merge_dropped", "kill_switch",
   // Incident / forensic record
   "session_died", "session_recovery_abandoned", "worker_report_undelivered", "worker_exited_without_report",
   "manager_exited_with_live_workers", "fleet_resume_failed", "manager_crash_resume_failed",

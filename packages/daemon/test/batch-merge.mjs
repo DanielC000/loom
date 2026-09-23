@@ -27,8 +27,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       and refused, never landing unverified content; canonical main ends up exactly at the advanced sha.
 //   (5) SHAPE (card 6801c0a1 DoD-4) — K=2, branch A has 3 commits + branch B has 1: main gains 4 commits,
 //       in order, zero merge commits; only A's LAST commit carries A's trailer.
-//   (6) MERGE-COMMIT-IN-RANGE — a branch carrying its own merge commit (a real stale-base auto-forward
-//       shape) is dropped cleanly rather than mis-landed.
+//   (6) MERGE-COMMIT-IN-RANGE — a branch carrying a pure main-forward merge commit (a real stale-base
+//       auto-forward shape, card bc2240d7) lands its OWN commits and never the merge; the non-skippable
+//       shapes (resolved conflict, foreign parent) are in batch-merge-merge-commits.mjs.
 //   (7) Loom-Worker-Base + Loom-Worker-PathSet STAMP (card d62dad73) — every batched branch's tip carries
 //       both trailers, regardless of commit count, verified against an independent digest recomputation,
 //       and recoverable via getTaskMergedInfo post-deletion+gc at the "pathset" tier.
@@ -309,8 +310,8 @@ try {
   }
 
   // ── (6) MERGE-COMMIT-IN-RANGE — a branch carrying its own merge commit (e.g. a real stale-base
-  //     auto-forward, `mergeMainIntoWorktree`, unioning main mid-work) is DROPPED cleanly, not partially
-  //     or incorrectly landed — cherry-pick refuses a merge commit outright, so this must fail closed. ──
+  //     auto-forward, `mergeMainIntoWorktree`, unioning main mid-work) is a pure main-forward (card bc2240d7): its
+  //     own commit lands, the merge commit itself never does. See batch-merge-merge-commits.mjs for the drops. ──
   {
     const repo = path.join(os.tmpdir(), `loom-bm-mergecommit-${sfx}`);
     makeRepo(repo);
@@ -330,9 +331,8 @@ try {
     const { worktreePath: batchWt } = await createWorktree(repo, projId, `bm-batch-mc-${sfx}`);
     const assembled = await assembleBatchBranches(batchWt, [m, other]);
 
-    check("(6) the merge-commit branch is dropped, not landed", assembled.dropped.some((d) => d.branch === brM));
-    check("(6) the drop reason names the merge commit",
-      !!assembled.dropped.find((d) => d.branch === brM)?.reason.includes("merge commit"));
+    check("(6) the pure-main-forward merge-commit branch LANDS, not dropped", assembled.landed.some((l) => l.branch === brM) && !assembled.dropped.some((d) => d.branch === brM));
+    check("(6) no merge commit lands on the batch", git(batchWt, `log --merges ${baseMainSha}..HEAD --format=%H`) === "");
     check("(6) the OTHER branch (no merge commit) still lands cleanly",
       assembled.landed.some((l) => l.branch === other.branch));
     check("(6) canonical main untouched by assembly alone", git(repo, "rev-parse HEAD") === baseMainSha);
@@ -495,6 +495,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a green batch lands each branch's own commits INDIVIDUALLY (never squashed) with no merge commits, each branch's LAST commit carrying its Loom-Worker-Branch trailer; a red batch falls back with canonical main untouched; a conflicting branch (or one carrying its own merge commit) drops out without failing the batch; main advancing mid-gate is caught at the fast-forward and refused rather than landing unverified; and every batched branch's tip carries a verified Loom-Worker-Base/PathSet stamp with the worker's own authorship preserved. See batch-merge-robustness.mjs for the remaining scenarios."
+  ? "\n✅ ALL PASS — a green batch lands each branch's own commits INDIVIDUALLY (never squashed) with no merge commits, each branch's LAST commit carrying its Loom-Worker-Branch trailer; a red batch falls back with canonical main untouched; a conflicting branch drops out (a pure main-forward merge commit is skipped, not dropped — see batch-merge-merge-commits.mjs) without failing the batch; main advancing mid-gate is caught at the fast-forward and refused rather than landing unverified; and every batched branch's tip carries a verified Loom-Worker-Base/PathSet stamp with the worker's own authorship preserved. See batch-merge-robustness.mjs for the remaining scenarios."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

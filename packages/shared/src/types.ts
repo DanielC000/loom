@@ -1547,6 +1547,10 @@ export type OrchestrationEventKind =
   //  it's the ONE failure mode batching makes strictly worse (up to K branches' gates wasted, not
   //  just 1). Never emit `currentMainSha` as null/"undefined" when absent — omit the key.
   | "batch_merge_forfeited"
+  // One candidate DROPPED from a merge_batch (conflict, non-linearizable merge commit, empty diff, ...) —
+  // filed per drop, even when the batch never reaches its gate. `detail` carries { opId, branch, reason,
+  // conflict, branches }; the drop reason is otherwise only in the (bounded) nudge. Card bc2240d7.
+  | "batch_merge_dropped"
   // Card 932f13d4: a genuine engine-session-id ROTATION — the Claude Code CLI fired a SECOND
   // `SessionStart` reporting a DIFFERENT `session_id` for the SAME live pty (no new Loom spawn/resume/
   // fork — see `pty/host.ts`'s SessionStart handler doc / card 7c1fc117). `db.setEngineSessionId`
@@ -1619,7 +1623,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
   manager_crash_resume_failed: true, parked_manager_workers_unresumed: true,
-  repeated_tool_call: true, batch_merge_forfeited: true, engine_session_rotated: true,
+  repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_dropped: true, engine_session_rotated: true,
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, codex_unsupported_capability: true,
   codex_auto_commit: true,
