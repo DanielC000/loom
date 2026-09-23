@@ -4107,11 +4107,14 @@ export async function computeEmitCompareGate(
  *  (measured well under a second); exists only so a hung/looping branch copy can never wedge a merge. */
 export const HARNESS_CONFIG_LOAD_TIMEOUT_MS = 20_000;
 
-/** Evaluated by the child (`node --input-type=module -e`). Imports the worktree's script, prints ONE JSON
+/** argv[1] of the child is deliberately `process.execPath` (a real, resolvable path that is NOT the script):
+ *  test-daemon.mjs's main-module guard realpaths `process.argv[1]` and REFUSES (exit 1) if it can't, so under
+ *  `-e` the first user arg must be a real path or loading the script for its exports would never succeed.
+ *  Evaluated by the child (`node --input-type=module -e`). Imports the worktree's script, prints ONE JSON
  *  line, and force-exits so a stray timer/handle in the branch's module can't keep the child alive. An
  *  import that never settles (top-level await) makes node itself exit non-zero with no output. */
 const HARNESS_EXPORT_PROBE_SOURCE =
-  "const [url,name]=process.argv.slice(1);" +
+  "const [url,name]=process.argv.slice(2);" +
   "import(url).then(m=>{const v=m[name];" +
   "process.stdout.write(JSON.stringify(v instanceof Set?{ok:true,values:[...v].map(String)}:{ok:false})+'\\n');" +
   "process.exit(0)},()=>process.exit(2));";
@@ -4142,7 +4145,7 @@ function loadHarnessSetExport(
     }, timeoutMs);
     try {
       // Windows: import() needs a file:// URL, never a bare drive-letter path (ERR_UNSUPPORTED_ESM_URL_SCHEME).
-      child = spawn(process.execPath, ["--input-type=module", "-e", HARNESS_EXPORT_PROBE_SOURCE, pathToFileURL(scriptPath).href, exportName], {
+      child = spawn(process.execPath, ["--input-type=module", "-e", HARNESS_EXPORT_PROBE_SOURCE, process.execPath, pathToFileURL(scriptPath).href, exportName], {
         cwd: worktreePath, stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
       });
     } catch {

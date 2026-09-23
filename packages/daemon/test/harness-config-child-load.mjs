@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { mkdtempManaged } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
+import { writeRealTestDaemonScript } from "./_emit-compare-fixtures.mjs";
 
 const { loadExcludedTestDirNames, loadNotHermeticNames } = await import("../dist/git/worktrees.js");
 
@@ -44,6 +45,17 @@ try {
     const throwing = mkWorktree(`throw new Error("boom");\n`);
     check("(c) a module that throws at load ⇒ null", (await loadNotHermeticNames(throwing)) === null);
     check("(c) no script at all ⇒ null", (await loadNotHermeticNames(mkdtempManaged("loom-hccl-empty-"))) === null);
+  }
+
+  // The REAL scripts/test-daemon.mjs (main-module guard, static sibling imports) must load in the child —
+  // a synthetic export-only script cannot catch a child whose argv makes the real script refuse to load.
+  {
+    const wt = mkdtempManaged("loom-hccl-real-");
+    writeRealTestDaemonScript(wt);
+    const nh = await loadNotHermeticNames(wt);
+    const ex = await loadExcludedTestDirNames(wt);
+    check("(c) REAL test-daemon.mjs: NOT_HERMETIC resolves (contains board-consistency)", nh instanceof Set && nh.has("board-consistency"));
+    check("(c) REAL test-daemon.mjs: EXCLUDED_DIR_NAMES resolves (contains fixtures)", ex instanceof Set && ex.has("fixtures"));
   }
 
   // ── (b) STALE — same worktree, script edited between calls ────────────────────────────────────────────
