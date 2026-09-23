@@ -106,11 +106,29 @@ db.insertSession({
   resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker",
   parentSessionId: "M", taskId: "tk-small", branch: "loom/w-small",
 });
+// (F) card 91fef05a, reviewer finding 4: session_transcript's finalMessageOnly:true branch returned
+// `[last]` directly — bypassing spillableTurnsResponse entirely — so an oversized FINAL assistant message
+// had no bounding at all. A dedicated oversized-ASSISTANT-turn fixture (finalMessageOnly only ever
+// selects an assistant-role turn — the huge fixture above is a tool_result/"user"-role turn, so it can't
+// exercise this branch).
+db.insertSession({
+  id: "W-HUGE-ASSISTANT", projectId: projId, agentId, engineSessionId: "eng-w-huge-assistant", title: null, cwd, processState: "live",
+  resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker",
+  parentSessionId: "M", taskId: "tk-huge-assistant", branch: "loom/w-huge-assistant",
+});
 
 // --- write the transcripts to disk ---
 const hugeFile = engineTranscriptPath(cwd, "eng-w-huge-turn");
 fs.mkdirSync(path.dirname(hugeFile), { recursive: true });
 fs.writeFileSync(hugeFile, bigMessageLine + "\n"); // a SINGLE turn — the whole transcript is this one oversized turn
+
+const hugeAssistantFile = engineTranscriptPath(cwd, "eng-w-huge-assistant");
+fs.mkdirSync(path.dirname(hugeAssistantFile), { recursive: true });
+const hugeAssistantText = `MARKER-HEAD ${"y".repeat(TRANSCRIPT_PAGE_CHAR_BUDGET)} MARKER-TAIL`;
+fs.writeFileSync(hugeAssistantFile, [
+  JSON.stringify({ type: "user", message: { content: [{ type: "text", text: "prior turn, not the final one" }] } }),
+  JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: hugeAssistantText }] } }),
+].join("\n") + "\n");
 
 const smallFile = engineTranscriptPath(cwd, "eng-w-small");
 fs.mkdirSync(path.dirname(smallFile), { recursive: true });
@@ -187,7 +205,7 @@ await client.close();
 // ═══════════════════ (E) the SAME bounding via transcript_read AND session_transcript — proves this is
 // genuinely a SHARED function (one implementation, three independent call sites), not per-tool patches. ══
 const bareServer = new McpServer({ name: "loom-audit-test", version: "0.1.0" });
-registerTranscriptReadTools(bareServer, db, { callerSessionId: "AUDITOR-1" });
+registerTranscriptReadTools(bareServer, db);
 const [auditClientT, auditServerT] = InMemoryTransport.createLinkedPair();
 await bareServer.connect(auditServerT);
 const auditClient = new Client({ name: "transcript-turns-spill-audit-test", version: "0" });
@@ -211,6 +229,14 @@ check("(E) transcript_read small transcript: unchanged bare-array shape", Array.
 
 await auditClient.close();
 
+// Broader sweep (mirrors (C), not just the "transcript-spills" subdir NAME — nit from card 91fef05a's
+// review): confirm NO new file appeared anywhere under LOOM_HOME/tmp/scratch for the transcript_read
+// calls above, the same full-tree check (C) already applies to worker_transcript.
+{
+  const scratchFilesAfterAudit = fs.existsSync(scratchRoot) ? fs.readdirSync(scratchRoot, { recursive: true }) : [];
+  check("(E) transcript_read: no file was written anywhere under LOOM_HOME/tmp/scratch (not just the transcript-spills subdir name)", scratchFilesAfterAudit.length === 0);
+}
+
 // session_transcript (PlatformMcpRouter) — the Lead's cross-project sibling.
 const platformRouter = new PlatformMcpRouter(db, {});
 const platformServer = platformRouter.buildServer("PLATFORM-1");
@@ -224,6 +250,25 @@ const platHuge = await platCall("session_transcript", { sessionId: "W-HUGE-TURN"
 check("(E) session_transcript: oversized single turn ALSO stays an array with the turn truncated (shared function)",
   Array.isArray(platHuge) && platHuge.length === 1 && platHuge[0].text.includes("[TRUNCATED: showing"));
 check("(E) session_transcript's truncation also writes nothing to disk", !fs.existsSync(path.join(sessionScratchDir("PLATFORM-1"), "transcript-spills")));
+// Broader sweep (mirrors (C) — not just the "transcript-spills" subdir NAME, per card 91fef05a's review):
+// confirm NO new file appeared anywhere under LOOM_HOME/tmp/scratch for the session_transcript call above.
+const scratchFilesAfterPlatform = fs.existsSync(scratchRoot) ? fs.readdirSync(scratchRoot, { recursive: true }) : [];
+check("(E) session_transcript: no file was written anywhere under LOOM_HOME/tmp/scratch (not just the transcript-spills subdir name)", scratchFilesAfterPlatform.length === 0);
+
+// ═══ (F) session_transcript finalMessageOnly:true — card 91fef05a, reviewer finding 4 ═══════════════════
+const platFinal = await platCall("session_transcript", { sessionId: "W-HUGE-ASSISTANT", finalMessageOnly: true });
+check("(F) finalMessageOnly: STILL a bare 1-element turns array (never a spill pointer)", Array.isArray(platFinal) && platFinal.length === 1);
+check("(F) finalMessageOnly: the oversized final assistant message is bounded under the page budget (goes through spillableTurnsResponse)",
+  platFinal[0].text.length <= TRANSCRIPT_PAGE_CHAR_BUDGET);
+check("(F) finalMessageOnly: carries the explicit TRUNCATED marker", platFinal[0].text.includes("[TRUNCATED: showing"));
+check("(F) finalMessageOnly: the HEAD survived", platFinal[0].text.includes("MARKER-HEAD"));
+check("(F) finalMessageOnly: writes nothing to disk", !fs.existsSync(path.join(sessionScratchDir("PLATFORM-1"), "transcript-spills")));
+const scratchFilesAfterFinal = fs.existsSync(scratchRoot) ? fs.readdirSync(scratchRoot, { recursive: true }) : [];
+check("(F) finalMessageOnly: no file was written anywhere under LOOM_HOME/tmp/scratch", scratchFilesAfterFinal.length === 0);
+// A SMALL final message (well under budget) stays byte-identical — no marker, no truncation.
+const platFinalSmall = await platCall("session_transcript", { sessionId: "W-SMALL", finalMessageOnly: true });
+check("(F) finalMessageOnly: below-cap final message is untouched (no marker leaks in)",
+  Array.isArray(platFinalSmall) && platFinalSmall.length === 1 && !platFinalSmall[0].text.includes("TRUNCATED"));
 
 await platClient.close();
 

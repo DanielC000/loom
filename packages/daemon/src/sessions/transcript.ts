@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { LOOM_HOME } from "../paths.js";
-import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
+import { SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import {
   type TranscriptTurn,
   encodeProjectDir,
@@ -154,8 +154,9 @@ export function pageTranscript(
   for (let i = start; i < windowEnd && turns.length < maxTurns; i++) {
     const t = all[i];
     if (!t) break;
-    // Approximate the turn's serialized footprint (text + role + JSON key/quote/brace overhead).
-    const size = t.text.length + t.role.length + 40;
+    // Approximate the turn's serialized footprint (SERIALIZED text — see serializedLen's own doc — plus
+    // role + JSON key/quote/brace overhead).
+    const size = turnCharSize(t);
     if (turns.length > 0 && chars + size > TRANSCRIPT_PAGE_CHAR_BUDGET) break; // always take ≥1 turn
     turns.push(t);
     chars += size;
@@ -164,9 +165,33 @@ export function pageTranscript(
   return { turns, totalTurns: total, offset: start, returned: turns.length, nextOffset: endIdx < windowEnd ? endIdx : null };
 }
 
+/**
+ * `JSON.stringify(text).length` — the SERIALIZED size `ok()` actually emits over the wire, not the raw
+ * char count (card 91fef05a, reviewer finding 2). Escaped newlines/quotes/backslashes/control chars can
+ * grow a turn's real footprint well past its raw length (a JSON-heavy tool_result turn can run ~1.3–2×
+ * its raw size) — every budget check in this module must bound against what actually reaches the
+ * tool-result cap, never an underestimate of it.
+ */
+function serializedLen(text: string): number {
+  return JSON.stringify(text).length;
+}
+
+/**
+ * Nudge `idx` back by one UTF-16 code unit if it falls INSIDE a surrogate pair (e.g. an emoji) — a bare
+ * slice at `idx` would otherwise split the pair, leaving a lone/corrupted code unit at the boundary.
+ */
+function surrogateSafeIndex(text: string, idx: number): number {
+  if (idx > 0 && idx < text.length) {
+    const before = text.charCodeAt(idx - 1);
+    const at = text.charCodeAt(idx);
+    if (before >= 0xd800 && before <= 0xdbff && at >= 0xdc00 && at <= 0xdfff) return idx - 1;
+  }
+  return idx;
+}
+
 /** Approximate a turn's serialized footprint the same way {@link pageTranscript} does. */
 function turnCharSize(t: TranscriptTurn): number {
-  return t.text.length + t.role.length + 40;
+  return serializedLen(t.text) + t.role.length + 40;
 }
 
 /**
@@ -265,17 +290,53 @@ const TRUNCATION_MARKER_HEADROOM = 120;
 /**
  * Truncate `text` to fit within `capChars`, keeping the HEAD and — when `capChars` is comfortably
  * larger than the tail+marker overhead — a short TAIL too, with an explicit marker naming exactly how
- * much survived vs. the original length. Pure, disk-free. Never returns longer than `capChars`.
+ * much survived vs. the original length. Pure, disk-free.
+ *
+ * `capChars` bounds the SERIALIZED size (see {@link serializedLen}'s own doc — card 91fef05a, reviewer
+ * finding 2), not the raw char count: a raw head/tail slice can itself contain chars that expand under
+ * `JSON.stringify` (embedded newlines/quotes/control chars), so a fixed raw-length slice is not
+ * guaranteed to serialize within `capChars` on its own. Binary-searches the largest raw `headChars` whose
+ * SERIALIZED candidate (head + marker + tail) still fits.
+ *
+ * CORRECTION (card 91fef05a): an earlier version of this doc claimed "never returns longer than
+ * capChars" unconditionally — false for a `capChars` smaller than the marker text's own fixed overhead
+ * (~{@link TRUNCATION_MARKER_HEADROOM} chars), where even a zero-head, zero-tail candidate (the marker
+ * alone) can still exceed it. Every REAL caller in this module passes `capChars` derived from {@link
+ * TRANSCRIPT_PAGE_CHAR_BUDGET} (tens of thousands of chars) minus a small per-turn overhead — comfortably
+ * above that floor — so the guarantee holds in practice; it is not a proof for an arbitrary `capChars`.
  */
 function truncateWithMarker(text: string, capChars: number): string {
-  if (text.length <= capChars) return text;
-  const tailChars = capChars > TRUNCATION_TAIL_CHARS * 3 ? TRUNCATION_TAIL_CHARS : 0;
-  const headChars = Math.max(0, capChars - tailChars - TRUNCATION_MARKER_HEADROOM);
-  const kept = headChars + tailChars;
-  const marker = `\n\n[TRUNCATED: showing ${kept} of ${text.length} chars of this turn]\n\n`;
-  const head = text.slice(0, headChars);
-  const tail = tailChars > 0 ? text.slice(text.length - tailChars) : "";
-  return head + marker + tail;
+  if (serializedLen(text) <= capChars) return text;
+  let tailChars = capChars > TRUNCATION_TAIL_CHARS * 3 ? TRUNCATION_TAIL_CHARS : 0;
+  const buildCandidate = (headChars: number, tail: number): string => {
+    // surrogateSafeIndex keeps a UTF-16 surrogate pair (e.g. an emoji) intact at the cut — a bare
+    // `slice` can split one in half, leaving a lone/corrupted code unit at the boundary. The marker's
+    // own "N of M" count is derived from the ACTUAL kept lengths (post-trim), never the requested
+    // headChars/tail, so it stays accurate even when a boundary got nudged.
+    const head = text.slice(0, surrogateSafeIndex(text, headChars));
+    const tailStart = tail > 0 ? surrogateSafeIndex(text, text.length - tail) : text.length;
+    const tailText = tail > 0 ? text.slice(tailStart) : "";
+    const marker = `\n\n[TRUNCATED: showing ${head.length + tailText.length} of ${text.length} chars of this turn]\n\n`;
+    return head + marker + tailText;
+  };
+  // If even a zero-head candidate (marker + full tail alone) overflows capChars, drop the tail — a
+  // head-only shape can always be shrunk down to an empty head to fit, so it's the safe fallback.
+  if (tailChars > 0 && serializedLen(buildCandidate(0, tailChars)) > capChars) tailChars = 0;
+  // Raw length is always <= its own serialized length, so capChars is a safe starting upper bound for
+  // the head-char binary search below.
+  let lo = 0;
+  let hi = Math.max(0, capChars);
+  let headChars = 0;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (serializedLen(buildCandidate(mid, tailChars)) <= capChars) {
+      headChars = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return buildCandidate(headChars, tailChars);
 }
 
 /**
@@ -298,7 +359,7 @@ function truncateWithMarker(text: string, capChars: number): string {
 export function spillableTurnsResponse(turns: TranscriptTurn[], envelope: Record<string, unknown> | null): unknown {
   const bounded = turns.map((t) => {
     const overhead = t.role.length + 40;
-    if (t.text.length + overhead <= TRANSCRIPT_PAGE_CHAR_BUDGET) return t;
+    if (serializedLen(t.text) + overhead <= TRANSCRIPT_PAGE_CHAR_BUDGET) return t;
     return { ...t, text: truncateWithMarker(t.text, Math.max(0, TRANSCRIPT_PAGE_CHAR_BUDGET - overhead)) };
   });
   return envelope ? { ...envelope, turns: bounded } : bounded;
