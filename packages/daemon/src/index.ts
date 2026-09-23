@@ -11,6 +11,7 @@ import { canOpenRemoteListener, isTrustTierHookActive, tlsRequirementSatisfied, 
 import { getOrCreateLoopbackSecret } from "./gateway/loopback-secret.js";
 import { sweepDeadSessions, watchClaudeProjects, watchCodexSessions } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
+import { composePromptStaleBanner } from "./sessions/prompt-stale-banner.js";
 import { runBootRecoveryPrefix } from "./sessions/boot-backstop.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
@@ -586,6 +587,9 @@ async function main(): Promise<void> {
     // reserved Platform/Setup homes are denied too, same inclusive posture as `mcp/tasks.ts`'s own
     // other-projects lookup.
     getOtherProjects: (projectId: string) => db.listAllProjects().filter((p) => p.id !== projectId).map((p) => ({ id: p.id, repoPath: p.repoPath })),
+    // Card c8f855e1: advisory [loom:prompt-stale] banner on a fresh kickoff that claims "new project / empty board".
+    decorateStartupPrompt: ({ projectId, role, prompt }) =>
+      composePromptStaleBanner(prompt, { role, countBoardCards: () => db.countTasks(projectId) }),
     // Card 82b22817: read-and-decrypt access to this project's answered `type:"credential"` secrets,
     // for merging into a spawn's env — read LIVE per-spawn (like every callback above), never boot-bound,
     // so a freshly-answered credential reaches the very next spawn/resume with no daemon restart.

@@ -6392,6 +6392,10 @@ export class Db {
     return this.db.prepare("SELECT * FROM tasks WHERE project_id = ? ORDER BY column_key, position")
       .all(projectId).map(toTask);
   }
+  /** Card c8f855e1: one COUNT for the spawn-time stale-prompt banner — never a full board read. */
+  countTasks(projectId: string): number {
+    return (this.db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE project_id = ?").get(projectId) as { c: number }).c;
+  }
   getTask(id: string): Task | undefined {
     const r = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
     return r ? toTask(r) : undefined;

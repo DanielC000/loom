@@ -4345,6 +4345,8 @@ export class PtyHost {
    * behaves byte-identically: a worker spawn gets no project-scoped deny rules at all.
    */
   private readonly getOtherProjects: (projectId: string) => Array<{ id: string; repoPath: string }>;
+  /** Card c8f855e1: optional advisory transform of a FRESH spawn's kickoff (never resume/fork). Must return the prompt; a throw is swallowed. */
+  private readonly decorateStartupPrompt: ((o: { projectId: string; role?: SessionRole; prompt: string }) => string) | null;
   /**
    * Card 82b22817: read access to every answered, un-provisioned `type:"credential"` secret this
    * project's Requests channel has stored under a declared `credentialEnvVar`, wired in by index.ts at
@@ -4364,6 +4366,7 @@ export class PtyHost {
       getIntegrationPaths?: () => { codescape?: string };
       getCodescapeSupervisorState?: () => { port: number | null; resolveProjectId: (repoPath: string) => string | null };
       getOtherProjects?: (projectId: string) => Array<{ id: string; repoPath: string }>;
+      decorateStartupPrompt?: (o: { projectId: string; role?: SessionRole; prompt: string }) => string;
       resolveCredentialSessionEnv?: (projectId: string) => Record<string, string>;
     },
   ) {
@@ -4374,10 +4377,22 @@ export class PtyHost {
     this.getIntegrationPaths = opts?.getIntegrationPaths ?? (() => ({}));
     this.getCodescapeSupervisorState = opts?.getCodescapeSupervisorState ?? (() => ({ port: null, resolveProjectId: () => null }));
     this.getOtherProjects = opts?.getOtherProjects ?? (() => []);
+    this.decorateStartupPrompt = opts?.decorateStartupPrompt ?? null;
     this.resolveCredentialSessionEnv = opts?.resolveCredentialSessionEnv ?? (() => ({}));
   }
 
   spawn(opts: SpawnOpts): void {
+    // Card c8f855e1: decorate BEFORE the codex dispatch and before `lastPrompt`/`startupPrompt` are seeded, so
+    // both harnesses deliver, and a crash-resume re-submits, the SAME (possibly bannered) text. Advisory: a
+    // failing decorator means no banner, never a failed spawn.
+    if (opts.startupPrompt && !opts.resumeId && !opts.fork && opts.projectId && this.decorateStartupPrompt) {
+      try {
+        const decorated = this.decorateStartupPrompt({ projectId: opts.projectId, role: opts.role, prompt: opts.startupPrompt });
+        if (typeof decorated === "string" && decorated !== opts.startupPrompt) opts = { ...opts, startupPrompt: decorated };
+      } catch (e) {
+        console.warn(`[pty] startup-prompt decorator failed for ${opts.sessionId}; spawning undecorated:`, e);
+      }
+    }
     // Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4 — LEAD RULING #4/#5: dispatch to the codex
     // stateful runtime BEFORE any of the claude-specific machinery below runs. `spawnCodexProcess`
     // constructs its own CodexLive entry in the SEPARATE `liveCodex` map (never `this.live` — see
