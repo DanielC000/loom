@@ -24,6 +24,7 @@ import { AMBIGUOUS_ID_ERROR } from "../mcp/transcript-read.js";
 import { spawnableRoleError } from "../mcp/spawnable-role.js";
 import { createProjectTask, getProjectTask, listProjectTasks, relocateProjectTask, updateProjectTask, type PendingRequestWarning, type TaskSummary, type TaskUpdateAck } from "../mcp/tasks.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, pageTranscript, lastNTurns, applyAggregateWalkCap } from "../sessions/transcript.js";
+import { spillRowsIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { liveLineageSuccessor } from "../sessions/lineage.js";
 import { listVaultTree, readVaultFile, resolveVaultFilePath, statVaultFile } from "../vault/browser.js";
 import type { OwnerAttestation, AuthoredContentGrantScope } from "./attestation.js";
@@ -635,7 +636,10 @@ const DECISIONS_RELAY: CompanionCapability = {
           "alreadySurfaced:true, slimmed:true}` (no `body`/`options`/`recommendation`) instead of its full, " +
           "multi-KB payload — cutting the cost of a repeat poll that finds nothing new. A genuinely new or " +
           "changed entry ALWAYS returns in full regardless of `since`. Omit `since` to always get every " +
-          "field for every entry (today's default behavior).",
+          "field for every entry (today's default behavior). Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars " +
+          "the `decisions` rows spill to a scratch file instead of inlining, and the response becomes a " +
+          "{decisionsFile, decisionsChars, rowCount, note, asOf} pointer at that same NDJSON text (one " +
+          "decision per line) — page it with Read or grep it; re-call with `since`/`project` to narrow instead.",
         inputSchema: { project: z.string().optional(), since: z.string().optional() },
       },
       async ({ project, since }) => {
@@ -678,7 +682,22 @@ const DECISIONS_RELAY: CompanionCapability = {
             alreadySurfaced,
           };
         });
-        return ok({ decisions, asOf: now });
+        // card 26134f1a: this response is otherwise UNBOUNDED (every pending question, across every
+        // granted project, full body/options/recommendation) and had no spill protection at all — a wide
+        // pull landed the engine's OWN native tool-result truncation, which spills to
+        // `~/.claude/projects/**/tool-results/**`, a tree this role is denied from Reading. Route through
+        // the shared NDJSON spill primitive (same convention `tasks_list`/`list_all_tasks` already use) so
+        // an oversized pull lands in the CALLER's OWN Loom scratch dir instead, well before the engine's
+        // own threshold is ever reached.
+        // Deterministic, fixed key (not `now`, which contains ":" — an invalid path segment): each pull
+        // overwrites the SAME file (spillRowsIfLarge's own "repeated pulls overwrite" contract), which is
+        // correct here since a re-pull always supersedes the previous one for this caller.
+        // Deterministic, fixed key (not `now`, which contains ":" — an invalid path segment): each pull
+        // overwrites the SAME file (spillRowsIfLarge's own "repeated pulls overwrite" contract), which is
+        // correct here since a re-pull always supersedes the previous one for this caller.
+        const spill = spillRowsIfLarge(ctx.sessionId, "decisions-list-spills", "decisions", decisions, SPILL_INLINE_BUDGET_CHARS);
+        if (spill.inline) return ok({ decisions, asOf: now });
+        return ok({ decisionsFile: spill.file, decisionsChars: spill.chars, rowCount: spill.rowCount, note: spill.note, asOf: now });
       },
     );
 

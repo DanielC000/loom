@@ -3366,10 +3366,10 @@ export class PlatformMcpRouter {
       "skill_list",
       {
         description:
-          "List the skills in the user's skill store. Each entry has name, description, bundled (a Loom-shipped skill, kept in sync with its asset) and editable (= !bundled). USER (editable) skills ALSO include their full SKILL.md `content` so you can edit them in place; a bundled skill's content is omitted here (use skill_write to edit a bundled skill's source-of-truth asset). Read-only.",
+          "List the skills in the user's skill store. Each entry has name, description, bundled (a Loom-shipped skill, kept in sync with its asset) and editable (= !bundled). USER (editable) skills ALSO include their full SKILL.md `content` so you can edit them in place; a bundled skill's content is omitted here (use skill_write to edit a bundled skill's source-of-truth asset). Read-only. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the skills spill to a scratch file instead of inlining, and the response becomes a `{skillsFile,skillsChars,rowCount,note}` pointer at that same NDJSON text.",
         inputSchema: strictShape({}),
       },
-      async () => ok(skillListData()),
+      async () => ok(skillListData(callerSessionId)),
     );
 
     server.registerTool(

@@ -23,6 +23,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (g) since/delta mode (companion re-delivery card): an optional `since` cursor (the prior call's
 //       `asOf`) SLIMS an entry only when it's BOTH alreadySurfaced AND already existed at `since` — a
 //       genuinely new or changed decision, or one created after the cursor, always returns in full.
+//   (h) card 26134f1a: an oversized pull spills to the caller's own Loom scratch dir (never inlines a
+//       response the engine's own native tool-result truncation might otherwise spill into the
+//       transcript-root-deny tree) — a below-cap pull stays byte-identical {decisions, asOf}.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-decisions-relay.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -47,6 +50,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { SPILL_INLINE_BUDGET_CHARS } = await import("../dist/spill.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 
@@ -361,11 +365,59 @@ try {
     await client.close();
     db.close();
   }
+
+  // ============ (h) card 26134f1a: an oversized pull spills instead of inlining unbounded ============
+  {
+    const db = tmpDb();
+    const proj = "proj-spill";
+    seedProject(db, proj, "Spill");
+    const companionSess = "companion-spill";
+    seedSession(db, companionSess, proj, "assistant");
+    const asker = "asker-spill";
+    seedSession(db, asker, proj, "manager");
+
+    // Enough rows, each carrying a big body, to comfortably clear SPILL_INLINE_BUDGET_CHARS once
+    // rendered as NDJSON — mirrors the shape a real "full decision list" pull looks like.
+    const bigBody = "x".repeat(2000);
+    const rowCount = Math.ceil(SPILL_INLINE_BUDGET_CHARS / 2000) + 5;
+    for (let i = 0; i < rowCount; i++) {
+      seedQuestion(db, `q-spill-${i}`, asker, proj, { title: `Spill test ${i}`, body: bigBody });
+    }
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "decisions-relay", projectId: proj });
+
+    const orch = new OrchestrationMcpRouter(db, {});
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const result = await call(client, "decisions_list", {});
+    check("(h) an oversized pull is NOT inlined (no bare `decisions` array)", result.decisions === undefined);
+    check("(h) an oversized pull returns a spill pointer with rowCount/note/asOf", typeof result.decisionsFile === "string" && result.rowCount === rowCount && typeof result.note === "string" && typeof result.asOf === "string");
+    check("(h) the spill file lives under THIS session's own scratch dir (never the shared/denied transcript tree)", result.decisionsFile.includes(companionSess) && !result.decisionsFile.includes(".claude"));
+    const spilledText = fs.readFileSync(result.decisionsFile, "utf8");
+    const spilledLines = spilledText.trim().split("\n");
+    check("(h) the spill file is NDJSON, one row per line, matching rowCount", spilledLines.length === rowCount);
+    check("(h) the spill file's rows carry the real question ids", spilledLines.some((l) => JSON.parse(l).questionId === "q-spill-0"));
+
+    // Below the cap: byte-identical to the pre-existing shape (no decisionsFile/rowCount/note).
+    const smallDb = tmpDb();
+    seedProject(smallDb, proj, "Small");
+    seedSession(smallDb, companionSess, proj, "assistant");
+    seedSession(smallDb, asker, proj, "manager");
+    seedQuestion(smallDb, "q-small", asker, proj, {});
+    smallDb.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "decisions-relay", projectId: proj });
+    const smallOrch = new OrchestrationMcpRouter(smallDb, {});
+    const smallClient = await connect(smallOrch.buildServer(companionSess, "assistant"));
+    const smallResult = await call(smallClient, "decisions_list", {});
+    check("(h) a below-cap pull stays byte-identical: bare `decisions` array, no spill pointer", Array.isArray(smallResult.decisions) && smallResult.decisionsFile === undefined);
+    await smallClient.close();
+    smallDb.close();
+
+    await client.close();
+    db.close();
+  }
 } finally {
   cleanupPathSync(tmpHome);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — decisions_list registers ONLY behind a decisions-relay grant and reports ONLY that grant's PENDING (pending+answered, never consumed) decisions scoped to the granted project(s); a project selector can never widen scope; an ungranted/non-assistant session gets nothing; decision_resolve is registered ONLY under a mode:'act' grant and stays absent under 'read' (byte-identical). Decisions-relay dedup (card 0c1365d0): a decision's `alreadySurfaced` flag is false on first read, true on an unchanged repeat read, and resets to false the moment its state genuinely changes (answered) or a brand-new decision appears — and a surfaced-marker read/write failure never breaks the read itself (degrades to false, never wrongly suppresses). since/delta mode: an unchanged, pre-cursor decision returns slimmed (no body/options/recommendation); a new, changed, or created-after-cursor one always returns in full."
+  ? "\n✅ ALL PASS — decisions_list registers ONLY behind a decisions-relay grant and reports ONLY that grant's PENDING (pending+answered, never consumed) decisions scoped to the granted project(s); a project selector can never widen scope; an ungranted/non-assistant session gets nothing; decision_resolve is registered ONLY under a mode:'act' grant and stays absent under 'read' (byte-identical). Decisions-relay dedup (card 0c1365d0): a decision's `alreadySurfaced` flag is false on first read, true on an unchanged repeat read, and resets to false the moment its state genuinely changes (answered) or a brand-new decision appears — and a surfaced-marker read/write failure never breaks the read itself (degrades to false, never wrongly suppresses). since/delta mode: an unchanged, pre-cursor decision returns slimmed (no body/options/recommendation); a new, changed, or created-after-cursor one always returns in full. An oversized pull spills to the caller's own scratch dir as an NDJSON pointer instead of inlining unbounded (card 26134f1a); a below-cap pull stays byte-identical."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -9,6 +9,7 @@ import { registerScopedRepoReadTools, type ScopedRootResolution } from "./repo-r
 import { skillListData } from "./skillTools.js";
 import { readSkill, isValidSkillName } from "../skills/store.js";
 import { strictShape } from "./arg-alias.js";
+import { SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -133,11 +134,11 @@ export class WorkspaceAuditMcpRouter {
           "List the skills in the user's skill store (the skills delivered to their sessions) — each entry " +
           "has name, description, bundled (a Loom-shipped skill) and editable (= !bundled). USER (editable) " +
           "skills also include their full SKILL.md `content`; for a BUNDLED skill's full text use skill_read. " +
-          "Read-only — use it to ground a skill critique in what is actually installed.",
+          "Read-only — use it to ground a skill critique in what is actually installed. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the skills spill to a scratch file instead of inlining, and the response becomes a `{skillsFile,skillsChars,rowCount,note}` pointer at that same NDJSON text.",
         inputSchema: strictShape({}),
       },
       async () => {
-        try { return ok(skillListData()); }
+        try { return ok(skillListData(auditorSessionId)); }
         catch (e) { return ok({ error: (e as Error).message }); }
       },
     );

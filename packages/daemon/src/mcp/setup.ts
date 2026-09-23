@@ -19,7 +19,7 @@ import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { projectFields, agentFields, profileFields } from "./entityRowFields.js";
-import { spillableAgentGet } from "../spill.js";
+import { spillableAgentGet, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { skillListData, skillWriteData } from "./skillTools.js";
 import { getByIdPrefix } from "../id-prefix.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
@@ -807,10 +807,10 @@ export class SetupMcpRouter {
       "skill_list",
       {
         description:
-          "List the skills in the user's skill store. Each entry has name, description, bundled (a Loom-shipped skill — read-only on this surface) and editable (= !bundled). USER (editable) skills ALSO include their full SKILL.md `content` so you can edit them in place; a bundled skill's content is omitted here (edit those via the Skills UI). Read-only.",
+          "List the skills in the user's skill store. Each entry has name, description, bundled (a Loom-shipped skill — read-only on this surface) and editable (= !bundled). USER (editable) skills ALSO include their full SKILL.md `content` so you can edit them in place; a bundled skill's content is omitted here (edit those via the Skills UI). Read-only. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the skills spill to a scratch file instead of inlining, and the response becomes a `{skillsFile,skillsChars,rowCount,note}` pointer at that same NDJSON text.",
         inputSchema: strictShape({}),
       },
-      async () => ok(skillListData()),
+      async () => ok(skillListData(callerSessionId)),
     );
 
     server.registerTool(

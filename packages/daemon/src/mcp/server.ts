@@ -578,10 +578,27 @@ export class TaskMcpRouter {
           "`backlinks` — one line per OTHER note whose text `[[wikilinks]]` to this note's key, resolved live " +
           "at THIS read (never stored, never counted against this note's own byte cap); `[]` is a measured " +
           "zero (nothing links here), not an absent field; past 20 inbound links a trailing line reports " +
-          "\"showing 20 of N\" rather than truncating silently.",
+          "\"showing 20 of N\" rather than truncating silently. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars " +
+          "(a per-note write cap bounds one row, but not the ROW COUNT) the notes spill to a scratch file " +
+          "instead of inlining, and the response becomes a `{notesFile,notesChars,rowCount,note}` pointer at " +
+          "that same NDJSON text — page it with Read or grep it.",
         inputSchema: strictShape({}),
       },
-      async () => okLines(listProjectMemoryEntries(db, projectId)),
+      // card 26134f1a: the per-note 4000-byte write cap bounds ONE row, never the row COUNT — a project
+      // with enough notes (this repo's own project memory corpus is a real example) can still overflow
+      // the engine's own native tool-result threshold, which spills into the transcript-root-deny tree
+      // for the roles that read this tool. Route through the same spill primitive tasks_list already uses.
+      async () => {
+        const rows = listProjectMemoryEntries(db, projectId);
+        const text = rows.map((r) => JSON.stringify(r)).join("\n");
+        const spill = spillTextIfLarge(sessionId, "memory-list-spills", "notes", text, SPILL_INLINE_BUDGET_CHARS);
+        if (spill.inline) return okLines(rows);
+        const note =
+          `${rows.length} notes are ${spill.chars} chars — too large to inline safely, so they were ` +
+          `written to ${spill.file} as NDJSON (one note per line, real line breaks, UTF-8) — page it ` +
+          "with Read (offset/limit are LINE-based) or grep it for a key/tag.";
+        return ok({ notesFile: spill.file, notesChars: spill.chars, rowCount: rows.length, note });
+      },
     );
     server.registerTool(
       "memory_read",

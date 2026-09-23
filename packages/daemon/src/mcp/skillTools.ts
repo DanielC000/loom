@@ -7,6 +7,7 @@ import {
   isBundledSkill,
   publishSkillToBundled,
 } from "../skills/store.js";
+import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 
 /**
  * SHARED skill-editing tool handlers for the in-app MCP skill surface — the SINGLE source of the
@@ -50,12 +51,29 @@ export const skillWriteInputSchema = {
  * SKILL.md `content` for in-place editing; a bundled skill's content is omitted (edit via the Skills UI
  * / the Lead's bundled-asset path). Read-only.
  */
-export function skillListData(): { skills: Array<Record<string, unknown>> } {
+/**
+ * `sessionId` (card 26134f1a) enables an oversized-response spill (the shared `spillTextIfLarge`
+ * primitive, same convention `tasks_list` uses) — a user store with enough editable skills' full
+ * SKILL.md content can exceed the engine's own native tool-result threshold, which would otherwise spill
+ * into the transcript-root-deny tree for the platform/setup/user-audit roles that all call this. Optional
+ * (a caller with no live session id falls back to the pre-spill inline shape, mirroring every other
+ * `if (callerSessionId)`-guarded spill site in this codebase — a build-time/REST path with no session
+ * should never throw trying to spill against one).
+ */
+export function skillListData(sessionId?: string): { skills: Array<Record<string, unknown>> } | { skillsFile: string; skillsChars: number; rowCount: number; note: string } {
   const skills = listSkills().map((s) => {
     const editable = !s.bundled;
     return { ...s, editable, ...(editable ? { content: readSkill(s.name)?.content ?? "" } : {}) };
   });
-  return { skills };
+  if (!sessionId) return { skills };
+  const text = skills.map((s) => JSON.stringify(s)).join("\n");
+  const spill = spillTextIfLarge(sessionId, "skill-list-spills", "skills", text, SPILL_INLINE_BUDGET_CHARS);
+  if (spill.inline) return { skills };
+  const note =
+    `${skills.length} skills are ${spill.chars} chars — too large to inline safely, so they were written ` +
+    `to ${spill.file} as NDJSON (one skill per line, real line breaks, UTF-8) — page it with Read or grep ` +
+    "it for a name. skill_read a specific name instead if you only need one.";
+  return { skillsFile: spill.file, skillsChars: spill.chars, rowCount: skills.length, note };
 }
 
 /**
