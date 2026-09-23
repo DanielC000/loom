@@ -274,8 +274,8 @@
                 A lead session plans, delegates to worker sessions on isolated
                 worktree branches, reviews each diff, and merges through a gate.
                 A whole batch of ready branches can land in one gate run, and a
-                docs-only diff takes a reduced gate. Workers report up; the lead
-                holds the whole picture.
+                change that can't affect the build doesn't pay for one. Workers
+                report up; the lead holds the whole picture.
               </p>
             </li>
 
@@ -291,10 +291,10 @@
               </span>
               <h3 class="card-title">Every gate in one place</h3>
               <p class="card-body">
-                Gates run daemon-wide through a single concurrency budget, and
-                the Gates page is the view of all of them: what's running, what's
-                queued behind it, and a filterable history of settled runs with
-                per-step timings, across every project.
+                Merge, deploy, and worker self-check gates all run daemon-wide
+                through a single concurrency budget, and the Gates page is the
+                view of all of them: which lanes are busy, what's queued behind
+                them, and the history of settled runs, filterable per project.
               </p>
             </li>
 
