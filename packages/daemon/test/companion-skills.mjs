@@ -35,6 +35,7 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { SPILL_INLINE_BUDGET_CHARS } = await import("../dist/spill.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 
@@ -223,6 +224,16 @@ try {
     check("wiring: skill_list over MCP returns the compact entry", listed.skills.some((s) => s.name === "chat-etiquette" && s.description === "keep replies short and warm"));
     const readBack = JSON.parse((await c.callTool({ name: "skill_read", arguments: { name: "chat-etiquette" } })).content[0].text);
     check("wiring: skill_read over MCP returns the full content", readBack.name === "chat-etiquette" && readBack.content.includes("Be concise and friendly."));
+
+    // card 26134f1a: an oversized self-authored skill spills instead of inlining unbounded.
+    const bigContent = "---\nname: huge-skill\ndescription: a huge skill\n---\n\n" + "x".repeat(SPILL_INLINE_BUDGET_CHARS + 5000);
+    const authoredBig = JSON.parse((await c.callTool({ name: "skill_author", arguments: { name: "huge-skill", content: bigContent } })).content[0].text);
+    check("spill: an oversized skill authors fine (no write-side cap)", authoredBig.authored === "huge-skill");
+    const readBig = JSON.parse((await c.callTool({ name: "skill_read", arguments: { name: "huge-skill" } })).content[0].text);
+    check("spill: an oversized skill_read is NOT inlined (no `content` field)", readBig.name === "huge-skill" && readBig.content === undefined);
+    check("spill: an oversized skill_read returns contentFile/contentChars/note", typeof readBig.contentFile === "string" && typeof readBig.contentChars === "number" && typeof readBig.note === "string");
+    check("spill: the spill file lives under THIS session's own scratch dir (never the shared/denied transcript tree)", readBig.contentFile.includes(SESS) && !readBig.contentFile.includes(".claude"));
+    check("spill: the spill file contains the real content", fs.readFileSync(readBig.contentFile, "utf8").includes(bigContent));
     await c.close();
     // And that end-to-end author STILL touched only the companion store, not the global one.
     check("wiring: the MCP-authored skill also stayed out of the global SKILLS_DIR", !fs.existsSync(path.join(SKILLS_DIR, "chat-etiquette")));

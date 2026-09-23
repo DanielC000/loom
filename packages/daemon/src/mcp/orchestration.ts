@@ -1772,12 +1772,20 @@ export class OrchestrationMcpRouter {
         description:
           "Read the FULL SKILL.md of one of YOUR OWN personal skills by name — the on-demand full load. Use " +
           "it after skill_list identifies a relevant skill, to load its steps before acting. Returns {name, " +
-          "content}, or {error} if there's no such skill.",
+          "content}, or {error} if there's no such skill. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars " +
+          "content spills to a scratch file instead of inlining, and the response becomes {name, " +
+          "contentFile, contentChars, note}.",
         inputSchema: strictShape({ name: z.string() }),
       },
       async ({ name }) => {
         const content = readCompanionSkill(sessionId, name);
-        return ok(content == null ? { error: `no skill "${name}"` } : { name, content });
+        if (content == null) return ok({ error: `no skill "${name}"` });
+        // card 26134f1a: a self-authored skill's content is free-form and uncapped — the companion
+        // (assistant role, a TRANSCRIPT_ROOT_DENY_ROLES member) could write/accumulate enough of it to
+        // exceed the engine's own native tool-result threshold with no spill protection.
+        const spill = spillTextIfLarge(sessionId, "skill-read-spills", name, content, SPILL_INLINE_BUDGET_CHARS);
+        if (spill.inline) return ok({ name, content });
+        return ok({ name, contentFile: spill.file, contentChars: spill.chars, note: `content is ${spill.chars} chars — too large to inline safely, so it was written to ${spill.file}. Read it directly, or grep it for a substring.` });
       },
     );
 

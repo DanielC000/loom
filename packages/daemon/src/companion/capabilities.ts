@@ -22,7 +22,7 @@ import type { Db } from "../db.js";
 import { MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { AMBIGUOUS_ID_ERROR } from "../mcp/transcript-read.js";
 import { spawnableRoleError } from "../mcp/spawnable-role.js";
-import { createProjectTask, getProjectTask, listProjectTasks, relocateProjectTask, updateProjectTask, type PendingRequestWarning, type TaskSummary, type TaskUpdateAck } from "../mcp/tasks.js";
+import { createProjectTask, getProjectTask, listProjectTasks, relocateProjectTask, updateProjectTask, spillableTaskGet, type PendingRequestWarning, type TaskSummary, type TaskUpdateAck } from "../mcp/tasks.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, pageTranscript, lastNTurns, applyAggregateWalkCap } from "../sessions/transcript.js";
 import { spillRowsIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { liveLineageSuccessor } from "../sessions/lineage.js";
@@ -1084,7 +1084,9 @@ const BOARD_REACH: CompanionCapability = {
           "\"act\") — this is the ONE place to discover a project's id (e.g. to resolve an owner-named " +
           "board to its id, or to find an act-mode project to file to) even when its board is currently " +
           "EMPTY and so contributes no card rows to `cards`; a `mode:\"act\"` entry is one you can pass to " +
-          "board_create/board_update, a `mode:\"read\"` one you can only ever read.",
+          "board_create/board_update, a `mode:\"read\"` one you can only ever read. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars " +
+          "the `cards` rows spill to a scratch file instead of inlining, and the response becomes a " +
+          "`{cardsFile,cardsChars,rowCount,note}` pointer at that same NDJSON text (`projects` stays inline either way).",
         inputSchema: { project: z.string().optional(), includeDone: z.boolean().optional(), columns: z.array(z.string()).optional() },
       },
       async ({ project, includeDone, columns }) => {
@@ -1114,7 +1116,12 @@ const BOARD_REACH: CompanionCapability = {
         const projects = [...targetProjects].map((pid) => ({
           id: pid, name: db.getProject(pid)?.name ?? null, mode: ctx.scope.modeFor(pid) ?? null,
         }));
-        return ok({ cards, projects });
+        // card 26134f1a: `cards` is otherwise UNBOUNDED across every granted project, with no spill
+        // protection at all — the assistant role is a TRANSCRIPT_ROOT_DENY_ROLES member, so an oversized
+        // pull risks the same engine-native-spill-into-the-denied-tree bug this card exists to close.
+        const spill = spillRowsIfLarge(ctx.sessionId, "board-list-spills", "cards", cards, SPILL_INLINE_BUDGET_CHARS);
+        if (spill.inline) return ok({ cards, projects });
+        return ok({ cardsFile: spill.file, cardsChars: spill.chars, rowCount: spill.rowCount, note: spill.note, projects });
       },
     );
 
@@ -1125,7 +1132,10 @@ const BOARD_REACH: CompanionCapability = {
           "Read-only view of ONE full board card (by the exact `id` from board_list), in one of your " +
           "granted project(s) — title, body, and fields (column, priority, position, held, timestamps). " +
           "`project` must be one of your granted projects; passing one you were NOT granted, or a " +
-          "`taskId` that doesn't resolve on that project, is rejected with an {error}.",
+          "`taskId` that doesn't resolve on that project, is rejected with an {error}. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars " +
+          "(a real card body can run this large) `body` spills to a scratch file instead of inlining, and " +
+          "`card` becomes `{...fields, bodyFile, bodyChars, note}` (title+body written to bodyFile; every " +
+          "other field stays inline).",
         inputSchema: { project: z.string(), taskId: z.string() },
       },
       async ({ project, taskId }) => {
@@ -1139,13 +1149,14 @@ const BOARD_REACH: CompanionCapability = {
         const found = await getProjectTask(db, project, taskId, { includeMerged: false });
         if ("error" in found) return ok({ error: found.error });
         const projectName = db.getProject(project)?.name ?? null;
-        return ok({
-          card: {
-            id: found.id, title: found.title, body: found.body, columnKey: found.columnKey,
-            priority: found.priority, position: found.position, held: found.held ?? false,
-            createdAt: found.createdAt, updatedAt: found.updatedAt, projectId: project, projectName,
-          },
-        });
+        const card = {
+          id: found.id, title: found.title, body: found.body, columnKey: found.columnKey,
+          priority: found.priority, position: found.position, held: found.held ?? false,
+          createdAt: found.createdAt, updatedAt: found.updatedAt, projectId: project, projectName,
+        };
+        // card 26134f1a: a real card body can be large (this repo's own board carries multi-KB bodies) and
+        // was returned with no spill protection — same fix as spillableTaskGet already applies to tasks_get.
+        return ok({ card: spillableTaskGet(ctx.sessionId, "board-get-spills", taskId, card) });
       },
     );
 

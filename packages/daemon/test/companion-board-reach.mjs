@@ -51,6 +51,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { SPILL_INLINE_BUDGET_CHARS } = await import("../dist/spill.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 
@@ -291,6 +292,37 @@ try {
     check("(f) board_create is NOT registered under a mode:'read' grant (byte-identical to before card 7975c034)", !tools.includes("board_create"));
     check("(f) board_update is NOT registered under a mode:'read' grant (byte-identical to before card 7975c034)", !tools.includes("board_update"));
     check("(f) NO delete tool is ever registered, even under 'read'", !tools.includes("board_delete"));
+    db.close();
+  }
+
+  // ============ (h) card 26134f1a: an oversized board_list spills instead of inlining unbounded ============
+  {
+    const db = tmpDb();
+    const proj = "proj-spill";
+    seedProject(db, proj, "Spill");
+    const companionSess = "companion-spill";
+    seedSession(db, companionSess, proj, "assistant");
+
+    // board_list's row projection carries `title` but never `body` — so the row must be inflated via
+    // title (the only unbounded field it actually projects), not body.
+    const bigTitle = "Spill test " + "T".repeat(2000);
+    const rowCount = Math.ceil(SPILL_INLINE_BUDGET_CHARS / 2000) + 5;
+    for (let i = 0; i < rowCount; i++) {
+      seedTask(db, `t-spill-${i}`, proj, { title: `${bigTitle}-${i}` });
+    }
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "board-reach", projectId: proj, mode: "read" });
+
+    const orch = new OrchestrationMcpRouter(db, {});
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const result = await call(client, "board_list", {});
+    check("(h) an oversized board_list is NOT inlined (no bare `cards` array)", result.cards === undefined);
+    check("(h) an oversized board_list returns a spill pointer with rowCount/note", typeof result.cardsFile === "string" && result.rowCount === rowCount && typeof result.note === "string");
+    check("(h) `projects` still returns inline either way", Array.isArray(result.projects) && result.projects.some((p) => p.id === proj));
+    check("(h) the spill file lives under THIS session's own scratch dir (never the shared/denied transcript tree)", result.cardsFile.includes(companionSess) && !result.cardsFile.includes(".claude"));
+    const spilledLines = fs.readFileSync(result.cardsFile, "utf8").trim().split("\n");
+    check("(h) the spill file is NDJSON, matching rowCount", spilledLines.length === rowCount);
+
+    await client.close();
     db.close();
   }
 } finally {

@@ -37,6 +37,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { SPILL_INLINE_BUDGET_CHARS } = await import("../dist/spill.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 
@@ -171,6 +172,36 @@ try {
     check("board_list is registered under a read-only grant", tools.includes("board_list"));
     check("board_create is NOT registered under a read-only grant", !tools.includes("board_create"));
     check("board_update is NOT registered under a read-only grant", !tools.includes("board_update"));
+  }
+
+  // ============ card 26134f1a: an oversized board_get body spills instead of inlining unbounded ============
+  {
+    const db = tmpDb();
+    const proj = "proj-spill";
+    seedProject(db, proj, "Spill");
+    const companionSess = "companion-spill";
+    seedSession(db, companionSess, proj, "assistant");
+    const bigBody = "x".repeat(SPILL_INLINE_BUDGET_CHARS + 5000);
+    seedTask(db, "t-spill", proj, { title: "Big card", body: bigBody });
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "board-reach", projectId: proj, mode: "read" });
+
+    const orch = new OrchestrationMcpRouter(db, {});
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const result = await call(client, "board_get", { project: proj, taskId: "t-spill" });
+    check("an oversized board_get body is NOT inlined (no `body` field)", result.card?.body === undefined);
+    check("an oversized board_get returns bodyFile/bodyChars/note", typeof result.card?.bodyFile === "string" && typeof result.card?.bodyChars === "number" && typeof result.card?.note === "string");
+    check("every OTHER field stays inline", result.card?.id === "t-spill" && result.card?.title === "Big card" && result.card?.projectId === proj);
+    check("the spill file lives under THIS session's own scratch dir (never the shared/denied transcript tree)", result.card.bodyFile.includes(companionSess) && !result.card.bodyFile.includes(".claude"));
+    const spilled = fs.readFileSync(result.card.bodyFile, "utf8");
+    check("the spill file contains the real body text", spilled.includes(bigBody));
+
+    // Below cap: byte-identical, body stays inline.
+    seedTask(db, "t-small", proj, { title: "Small card", body: "a small body" });
+    const small = await call(client, "board_get", { project: proj, taskId: "t-small" });
+    check("a below-cap board_get stays byte-identical (body inline, no spill fields)", small.card?.body === "a small body" && small.card?.bodyFile === undefined);
+
+    await client.close();
+    db.close();
   }
 } finally {
   cleanupPathSync(tmpHome);
