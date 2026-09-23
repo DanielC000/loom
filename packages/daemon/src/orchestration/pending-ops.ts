@@ -497,6 +497,22 @@ export class PendingOpRegistry {
       verdictIdentity?: string;
       identityOptional?: boolean;
       isRetainedResultUsable?: (value: T) => boolean;
+      /** Card b1fcb6a7 — gates the TTL'd `retained`-map WRITE (never the read) on an `ok:false` settle
+       *  only: `undefined`/`true` (every existing caller) is byte-identical to before this opt existed —
+       *  a thrown error still gets a brief retained view exactly like a success does (merge/gate legitimately
+       *  want a re-call to see a genuine FAILED verdict too, not just a passed one). `false` skips the
+       *  `retain()` call entirely for an `ok:false` settle, so a later call under the SAME key within the
+       *  window finds no retained entry and mints a genuinely fresh op instead of replaying the error. Exists
+       *  because `isRetainedResultUsable` (card 79b0ee52) is DELIBERATELY never consulted for an `ok:false`
+       *  hit — re-serving a thrown error is the SAFER default when re-running risks compounding a mid-mutation
+       *  state (merge/gate) — but `spawnWorkerTracked`'s own cap-rejection throw is a plain, safe-to-retry
+       *  refusal with no mutation to compound, and the whole point of widening its window (card b1fcb6a7) was
+       *  to let a LATER, now-legitimate re-spawn actually spawn once the cap slot frees — not to keep handing
+       *  back a rejection that stopped being true the moment the slot did. Never touches the SEPARATE
+       *  `untilSupersededVerdicts` write (`opts.retainVerdictUntilSuperseded`) — no current caller combines
+       *  the two, and merge/batch's own `NEVER_CACHED_OUTCOMES` veto already covers their equivalent cases
+       *  there. */
+      retainErrors?: boolean;
       onSurfacedPending?: (op: PendingOpView, opId: string) => void;
       /** Fires SYNCHRONOUSLY, exactly once per genuinely fresh entry — right after it's minted (registered
        *  under `key`, opId assigned), strictly before `run()` is ever invoked. Unlike `onSurfacedPending`
@@ -666,7 +682,7 @@ export class PendingOpRegistry {
           fresh.outcome = opts?.classifyOutcome?.({ ok: false, error: err });
           if (this.entries.get(key) === fresh) {
             this.entries.delete(key);
-            if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: false, error: err }, opts.verdictIdentity);
+            if (opts?.retainMs && (opts.retainErrors ?? true)) this.retain(key, projectView(fresh), opts.retainMs, { ok: false, error: err }, opts.verdictIdentity);
             // UNTIL-SUPERSEDED WRITE — mirrors the `ok:true` branch above, same doc, same
             // `NEVER_CACHED_OUTCOMES` veto — a thrown error CAN classify into a veto'd shape (card
             // 6325bc74: an ownership-refusal throw classifies as "not-your-worker" and is excluded here).

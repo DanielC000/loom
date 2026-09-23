@@ -372,6 +372,44 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   check("(retain dedupe/failed) the completion-nudge callback never fires — a within-window re-confirm on a FAILED op cannot re-emit a duplicate failure nudge", nudges.length === 0);
 }
 
+// opts.retainErrors (card b1fcb6a7 — the cap-rejected-spawn-replayed-forever incident): `false` skips the
+// retained-view WRITE entirely for an `ok:false` settle, so a same-key re-call within the window finds
+// nothing cached and mints a genuinely fresh op instead of replaying a stale error — needed because
+// `isRetainedResultUsable` (card 79b0ee52) is deliberately never consulted for an `ok:false` hit, so
+// there is no read-side lever to make a cached error stop being usable once whatever caused it (e.g. a
+// concurrency cap) is no longer true.
+{
+  // (a) `retainErrors:false`: an ok:false settle is NOT retained — the re-call runs for real.
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const r1 = await reg.attach("re1", "spawn", "mgr1", 200, async () => { calls++; throw new Error("cap full"); }, undefined, { retainMs: 200, retainErrors: false });
+  check("(retainErrors:false) first op ran once and threw", calls === 1 && r1.ok === false);
+  const r2 = await reg.attach("re1", "spawn", "mgr1", 200, async () => { calls++; return { spawned: true }; }, undefined, { retainMs: 200, retainErrors: false });
+  check("(retainErrors:false) re-call WITHIN the window mints a genuinely FRESH op (no cached error replayed)", calls === 2 && r2.settled === true && r2.ok === true && r2.value.spawned === true);
+}
+{
+  // (b) CONTRAST — `retainErrors` omitted (every existing caller: merge/gate/batch): byte-identical to
+  // before this opt existed. An ok:false settle IS retained and replayed to a same-key re-call within the
+  // window; this is the SAME shape as the "(retain dedupe/failed)" m5c case above, restated here so the
+  // (a) result above can't be mistaken for how `attach()` always behaves.
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const r1 = await reg.attach("re2", "merge", "mgr1", 200, async () => { calls++; throw new Error("build gate failed"); }, undefined, { retainMs: 200 });
+  check("(retainErrors omitted) first op ran once and threw", calls === 1 && r1.ok === false);
+  const r2 = await reg.attach("re2", "merge", "mgr1", 200, async () => { calls++; return { merged: true }; }, undefined, { retainMs: 200 });
+  check("(retainErrors omitted) re-call WITHIN the window replays the cached error — unaffected by this opt", calls === 1 && r2.settled === true && r2.ok === false);
+}
+{
+  // (c) `retainErrors:false` only ever gates the ok:false WRITE — a SUCCESSFUL settle is still retained
+  // and replayed exactly as before.
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const r1 = await reg.attach("re3", "spawn", "mgr1", 200, async () => { calls++; return { spawned: true, id: 1 }; }, undefined, { retainMs: 200, retainErrors: false });
+  check("(retainErrors:false, success) first op ran once and succeeded", calls === 1 && r1.ok === true);
+  const r2 = await reg.attach("re3", "spawn", "mgr1", 200, async () => { calls++; return { spawned: true, id: 2 }; }, undefined, { retainMs: 200, retainErrors: false });
+  check("(retainErrors:false, success) a re-call within the window still dedupe-hits the cached SUCCESS", calls === 1 && r2.settled === true && r2.ok === true && r2.value.id === 1);
+}
+
 // AFTER the retention window has expired, a re-call is a GENUINE fresh retry — the dedupe must be strictly
 // bounded by retainMs, not permanently sticky (a real second merge attempt after the window must still work).
 {

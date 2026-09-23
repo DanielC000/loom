@@ -698,6 +698,35 @@ type ConfirmMergeResult = {
  *  tunable independent of the dedupe safety net, deliberately kept short so a stale card doesn't linger. */
 const MERGE_OP_RETAIN_MS = 5_000;
 
+/** How long a settled `spawn` op stays re-callable — closes card b1fcb6a7: `worker_spawn`'s own pending
+ *  note tells a caller to "re-call worker_spawn with the SAME taskId/agentId/kickoffPrompt to fetch the
+ *  result once ready", but `spawnWorkerTracked` used to pass no `retainMs` at all, so a re-call landing
+ *  after settle found nothing tracked, fell through to a genuinely fresh `spawnWorker` call, and hit the
+ *  (correct, load-bearing) one-live-worker-per-task guard instead of handing back the worker that already
+ *  exists.
+ *
+ *  Unlike {@link GATE_OP_RETAIN_MS}/{@link MERGE_OP_RETAIN_MS} (both 5s — a real re-call for either lands
+ *  within a few seconds of settle, since it's a worker checking its own gate or a manager watching a
+ *  merge it's actively waiting on), a `worker_spawn` re-call comes from a manager's NEXT TURN — realistically
+ *  tens of seconds to several minutes after the pending response, not a tight poll loop. A 5s window (the
+ *  first cut of this fix, reverted on manager review — card b1fcb6a7) made the note's promise true in a
+ *  unit test but false for almost every REAL re-call, leaving the user-facing bug mostly unfixed. 10
+ *  minutes comfortably covers a manager's realistic turn latency while still being bounded, not permanent.
+ *
+ *  Also unlike merge, a spawn op passes no `retainVerdictUntilSuperseded`/`verdictIdentity` — this TTL'd
+ *  window is the WHOLE re-call safety story here, not a cosmetic display grace period sitting on top of a
+ *  separate permanent cache. Deliberately bounded, never "until superseded": a cached spawn result has no
+ *  identity signal (unlike a merge verdict's branch HEAD) that could tell "the same request, asked again"
+ *  apart from "a genuinely new dispatch for the same task, long after the first worker's lifecycle ended".
+ *  A LONG window makes that distinction matter more, not less — so `spawnWorkerTracked`'s own
+ *  `isRetainedResultUsable` (see its doc) re-verifies the cached worker is STILL live and still bound to
+ *  the same task at cache-hit time, closing the defunct-id risk by construction rather than by the window
+ *  being short. A re-call landing AFTER this window (or for a genuinely different taskId, which never
+ *  shares this key in the first place — see spawnWorkerTracked's own doc) falls through to a real
+ *  `spawnWorker` call exactly as before this card, which still throws the live-worker guard while a
+ *  worker for that task is live. */
+const SPAWN_OP_RETAIN_MS = 10 * 60_000; // 10 minutes
+
 /** @decision 7f96aa09 — `runWorkerGate` routes the worker DoD self-gate through the daemon
  *  `GateSemaphore`/`maxConcurrentGates` cap, so N parallel workers self-gating can't structurally
  *  exceed the shared lane budget; reuses `gateCommand` rather than a second config field.
@@ -1985,6 +2014,19 @@ export class SessionService {
    *  settle-lineage) no longer has to block on a real ~12-16s wall-clock sleep to cross it — it sets this
    *  small and sleeps just past IT instead, at the same logical outcome. */
   private readonly syncAttachBudgetMs: number;
+  /** Test-only override for {@link SPAWN_OP_RETAIN_MS} (mirrors `gateOpRetainMs` above) — defaults to the
+   *  real production constant. A hermetic test proving a re-call AFTER the window still falls through to
+   *  the real one-live-worker guard sets this small and sleeps just past it, rather than waiting out the
+   *  real production window. */
+  private readonly spawnOpRetainMs: number;
+  /** Public read of {@link spawnOpRetainMs} in whole minutes — lets `worker_spawn`'s own pending-note/
+   *  description text (mcp/orchestration.ts) state the REAL configured window instead of a hardcoded
+   *  copy that could drift from {@link SPAWN_OP_RETAIN_MS} on a future change to either. Rounds to the
+   *  nearest minute (fine for a human-facing "~N min" hint; a test override in raw ms is never meant to
+   *  be read through this — it's for proving the mechanics, not for producing prose). */
+  get spawnOpRetainMinutes(): number {
+    return Math.max(1, Math.round(this.spawnOpRetainMs / 60_000));
+  }
   /**
    * Test-only seam for {@link findNestedGitRepos} (card b6d41db1's follow-up — the shared-chokepoint
    * fix). `undefined` in production ⇒ {@link gcWorktreeDir} falls back to the real scan. Lets a test
@@ -2241,6 +2283,7 @@ export class SessionService {
       gateOpRetainMs?: number;
       gateCancelVerifyMs?: number;
       syncAttachBudgetMs?: number;
+      spawnOpRetainMs?: number;
     },
   ) {
     this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
@@ -2252,6 +2295,7 @@ export class SessionService {
     this.gateOpRetainMs = opts?.gateOpRetainMs ?? GATE_OP_RETAIN_MS;
     this.gateCancelVerifyMs = opts?.gateCancelVerifyMs ?? SessionService.DEFAULT_GATE_CANCEL_VERIFY_MS;
     this.syncAttachBudgetMs = opts?.syncAttachBudgetMs ?? SYNC_ATTACH_BUDGET_MS;
+    this.spawnOpRetainMs = opts?.spawnOpRetainMs ?? SPAWN_OP_RETAIN_MS;
     this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
     this.wedgeGiveUpAttempts = opts?.wedgeGiveUpAttempts ?? SessionService.DEFAULT_WEDGE_GIVE_UP_ATTEMPTS;
     this.wedgeGiveUpMs = opts?.wedgeGiveUpMs ?? SessionService.DEFAULT_WEDGE_GIVE_UP_MS;
@@ -6676,6 +6720,33 @@ export class SessionService {
     return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; capacity: WorkerCapacity }>(
       key, "spawn", managerSessionId, this.syncAttachBudgetMs,
       () => this.spawnWorker(managerSessionId, opts),
+      undefined,
+      {
+        // Card b1fcb6a7 — see SPAWN_OP_RETAIN_MS's own doc: a re-call landing within this window after
+        // settle gets the same settled worker back instead of falling through to a fresh spawnWorker call
+        // (which would hit the live-worker guard). A taskless spawn's key is unique per call, so this
+        // never produces a hit for it — harmless, self-evicting.
+        retainMs: this.spawnOpRetainMs,
+        // LIVENESS + BINDING RE-CHECK (manager review, card b1fcb6a7): a 10-minute window is long enough
+        // that the cached worker may have exited (merged, stopped, recycled away) by the time a re-call
+        // lands. Re-derive the CURRENT live-worker-for-this-task from the db (the SAME query
+        // spawnWorker's own guard uses) rather than trusting the cached value's own frozen fields — a
+        // mismatch (worker no longer live, or the task got reassigned) is treated as a MISS, falling
+        // through to a real spawnWorker call exactly as if nothing were cached: still the live-worker
+        // guard if some OTHER worker now holds the task, or a genuine fresh spawn if none does. This is
+        // what lets the window be long without ever risking handing back a defunct session id.
+        isRetainedResultUsable: (value) => value.taskId != null && this.db.liveSessionIdForTask(value.taskId) === value.id,
+        // Card b1fcb6a7 (manager review, real gate failure): a cap-rejected spawn THROWS
+        // (CapQueueRejectedError) — without this, that throw got the SAME retained-view treatment as a
+        // success, so a re-spawn landing within the (now 10-minute) window after a concurrency slot freed
+        // replayed the stale rejection instead of ever attempting for real, even though the whole reason
+        // for widening the window was to let exactly that later, now-legitimate re-spawn succeed. Never
+        // consulted by `isRetainedResultUsable` (card 79b0ee52 — that predicate is deliberately never
+        // gated for an `ok:false` hit), so this is the only lever that stops an error from being cached at
+        // all: skip retaining ANY failed spawn (cap-rejected or otherwise), so a same-key re-call within
+        // the window with nothing usable cached always mints a genuinely fresh attempt.
+        retainErrors: false,
+      },
     );
   }
 

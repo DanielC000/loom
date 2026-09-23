@@ -10,11 +10,30 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (1) fast path: Tracked returns the SAME shape as the untracked method, just wrapped {settled,ok,value}.
 //   (2) TWO concurrent (unawaited) Tracked calls on the SAME key attach to ONE real invocation — exactly
 //       one live worker / one squash commit results, not two, and the gate runs exactly once (marker file).
-//   (3) a call with NO tracked entry present (the shape a post-eviction stale retry sees — the same
-//       "nothing tracked" state, whether because it settled+was consumed, or evicted by TTL) safely
-//       re-invokes the real method — which falls through to ITS OWN pre-existing idempotency: spawn hits
-//       `liveSessionIdForTask` (no double-spawn) when a live worker already holds the task; merge hits
-//       ALREADY_MERGED (no double-squash) when the branch's work already landed in main by any path.
+//   (3) a call with NO tracked entry present AND no live retained view either (the shape a re-call sees
+//       once the settle-grace window has fully expired) safely re-invokes the real method — which falls
+//       through to ITS OWN pre-existing idempotency: spawn hits `liveSessionIdForTask` (no double-spawn)
+//       when a live worker already holds the task; merge hits ALREADY_MERGED (no double-squash) when the
+//       branch's work already landed in main by any path.
+//   (3a) card b1fcb6a7: a spawn re-call landing WITHIN the retention window (SPAWN_OP_RETAIN_MS, 10min in
+//        production) — genuinely AFTER the first Tracked call settled, not concurrent with it, and after a
+//        SIMULATED multi-minute delay (a tiny spawnOpRetainMs override + a real sleep comfortably inside
+//        it, proportionally mirroring the production window) — dedupe-attaches to the cached settled
+//        worker instead of falling through to a fresh spawnWorker call (which would have hit the
+//        live-worker guard and thrown, the exact defect this card fixes: `worker_spawn`'s own pending note
+//        promises this re-call "fetches the result once ready", and a manager's real re-call typically
+//        lands minutes later, on its next turn — not within seconds).
+//   (3b) card b1fcb6a7: a spawn re-call landing AFTER SPAWN_OP_RETAIN_MS has expired still falls through
+//        to a genuinely fresh spawnWorker call and hits the (correct, load-bearing) live-worker guard —
+//        proves the retention window is bounded, not a permanent cache (uses a SECOND SessionService
+//        instance with a tiny spawnOpRetainMs override so this doesn't need a real 10min wall-clock wait).
+//   (3c) card b1fcb6a7 (manager review): a re-call landing WITHIN the retention window whose cached
+//        worker has since EXITED must NOT return the stale dead session — `isRetainedResultUsable`
+//        re-derives liveness+task-binding fresh from the db at cache-hit time (mirrors spawnWorker's own
+//        `liveSessionIdForTask` guard) rather than trusting the cached value's frozen fields, so a long
+//        window can never hand back a defunct session id. The re-call instead falls through to a
+//        genuinely fresh spawnWorker call, which spawns a NEW worker for the task (no live worker holds
+//        it any more, so the guard does not fire either).
 //   (4) card 33172f01: a merge re-confirm landing WITHIN the retention window (MERGE_OP_RETAIN_MS, 5s) —
 //       genuinely AFTER the first Tracked call settled, not concurrent with it — dedupe-attaches to the
 //       cached settled result (SAME opId) instead of re-invoking confirmWorkerMerge a second time at all;
@@ -57,6 +76,7 @@ const { createWorktree, mergeBranch, removeWorktree } = await import("../dist/gi
 const GIT_ID = "-c user.email=mst@loom -c user.name=mst";
 const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 const now = new Date().toISOString();
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 class SeamHost extends createSeamHost(PtyHost) {}
 const events = {
@@ -166,26 +186,101 @@ try {
     if (bothOk) { worktrees.push([repo, r1.value.worktreePath]); stopSeamPty(r1.value.id); }
   }
 
-  // ============================ SPAWN (3): post-eviction stale retry → falls through to live-guard ============================
+  // ============================ SPAWN (3a): re-call after a SIMULATED multi-minute delay → returns the settled worker ============================
+  {
+    const P = "mst-spawn-retain", repo = makeRepo();
+    seedProject(P, repo);
+    const taskId = randomUUID();
+    db.insertTask({ id: taskId, projectId: P, title: "t3a", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
+
+    // A SEPARATE SessionService instance with a small spawnOpRetainMs — lets this scenario prove a
+    // REALISTIC re-call delay (a manager's next turn, not an instant re-call) without a real 10min
+    // wall-clock wait: sleeping to a comfortable fraction of a small window is the same proof as sleeping
+    // to that same fraction of the real production window (mirrors pending-ops-registry.mjs's own "m6"
+    // partway-through-the-window scenario). Shares the SAME db/host as `svc` — only the window differs.
+    const svcRetain = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS, spawnOpRetainMs: 500 });
+
+    const first = await svcRetain.spawnWorkerTracked(`${P}-mgr1`, { taskId, agentId: `${P}-dev`, kickoffPrompt: "GO" });
+    check("(spawn retain) first call settles + creates the live worker", first.settled && first.ok);
+    worktrees.push([repo, first.value.worktreePath]);
+
+    await sleep(300); // 60% of the 500ms window — a comfortable margin simulating a real delayed re-call
+
+    // Card b1fcb6a7: the registry entry was CONSUMED by the first call's settle (delete-on-settle), but
+    // SPAWN_OP_RETAIN_MS keeps a RETAINED view alive under this same key for a window sized to cover a
+    // manager's realistic re-call latency (production: 10min, not the 5s a first cut of this fix used —
+    // reverted on manager review because a manager's real re-call lands on its NEXT TURN, typically tens
+    // of seconds to minutes later, not within seconds of settle). This re-call, landing well into that
+    // delay, must dedupe-hit the cached settled worker instead of re-invoking spawnWorker (which would
+    // have hit the live-worker guard and thrown — the exact defect this card fixes: `worker_spawn`'s own
+    // pending note promises a same-args re-call "fetches the result once ready").
+    const recall = await svcRetain.spawnWorkerTracked(`${P}-mgr1`, { taskId, agentId: `${P}-dev`, kickoffPrompt: "GO" });
+    check("(spawn retain) re-call settles (not left hanging)", recall.settled === true);
+    check("(spawn retain) re-call returns the SAME settled worker, ok:true — NOT the live-worker guard", recall.ok === true && recall.value.id === first.value.id);
+    check("(spawn retain) re-call is a genuine CACHE HIT — spawnWorker was never invoked a second time", recall.cacheHit !== undefined);
+    const rowsForTask = db.listAllSessions().filter((s) => s.taskId === taskId);
+    check("(spawn retain) still exactly ONE session row for the task", rowsForTask.length === 1);
+    stopSeamPty(first.value.id);
+  }
+
+  // ============================ SPAWN (3b): re-call AFTER the retention window → still falls through to live-guard ============================
   {
     const P = "mst-spawn-stale", repo = makeRepo();
     seedProject(P, repo);
     const taskId = randomUUID();
-    db.insertTask({ id: taskId, projectId: P, title: "t3", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
+    db.insertTask({ id: taskId, projectId: P, title: "t3b", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
 
-    const first = await svc.spawnWorkerTracked(`${P}-mgr1`, { taskId, agentId: `${P}-dev`, kickoffPrompt: "GO" });
+    // A SEPARATE SessionService instance with a tiny spawnOpRetainMs — proving the window is bounded, not
+    // a permanent cache, without a real 10min wall-clock wait (mirrors pending-ops-registry.mjs's own "past
+    // retainMs" scenarios). Shares the SAME db/host as `svc` — only the retention window differs.
+    const svcShortRetain = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS, spawnOpRetainMs: 30 });
+
+    const first = await svcShortRetain.spawnWorkerTracked(`${P}-mgr1`, { taskId, agentId: `${P}-dev`, kickoffPrompt: "GO" });
     check("(spawn stale) first call settles + creates the live worker", first.settled && first.ok);
     worktrees.push([repo, first.value.worktreePath]);
 
-    // The registry entry was CONSUMED by the first call (delete-on-settle) — this second call is
-    // therefore a fresh op that genuinely re-invokes spawnWorker, exactly like a client that missed the
-    // first response and retried after the fact would. It must NOT double-spawn.
-    const stale = await svc.spawnWorkerTracked(`${P}-mgr1`, { taskId, agentId: `${P}-dev`, kickoffPrompt: "GO" });
-    check("(spawn stale) a post-eviction retry settles (not left hanging)", stale.settled === true);
+    await sleep(80); // WELL past the 30ms retention window — the retained view has self-evicted
+
+    // The retained view is gone — this call is therefore a fresh op that genuinely re-invokes spawnWorker,
+    // exactly like a client that missed the first response and retried after the retention window closed
+    // would. It must NOT double-spawn: the guard still fires.
+    const stale = await svcShortRetain.spawnWorkerTracked(`${P}-mgr1`, { taskId, agentId: `${P}-dev`, kickoffPrompt: "GO" });
+    check("(spawn stale) a post-window retry settles (not left hanging)", stale.settled === true);
     check("(spawn stale) falls through to the live-worker guard, NOT a silent double-spawn", stale.ok === false && /already has a live worker/.test(stale.error?.message ?? ""));
     const rowsForTask = db.listAllSessions().filter((s) => s.taskId === taskId);
     check("(spawn stale) still exactly ONE session row for the task", rowsForTask.length === 1);
     stopSeamPty(first.value.id); // stopped only NOW — the stale re-spawn above needs it to still read as live
+  }
+
+  // ============================ SPAWN (3c): cached worker has EXITED → re-call does NOT return the stale dead worker ============================
+  {
+    const P = "mst-spawn-exited", repo = makeRepo();
+    seedProject(P, repo);
+    const taskId = randomUUID();
+    db.insertTask({ id: taskId, projectId: P, title: "t3c", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
+
+    const first = await svc.spawnWorkerTracked(`${P}-mgr1`, { taskId, agentId: `${P}-dev`, kickoffPrompt: "GO" });
+    check("(spawn exited) first call settles + creates the live worker", first.settled && first.ok);
+    worktrees.push([repo, first.value.worktreePath]);
+
+    // Manager review (card b1fcb6a7): the FIRST worker exits (merged/stopped/recycled away) WHILE still
+    // well inside the (10min) retention window — stopSeamPty's kill() runs synchronously, so the db's
+    // process_state flips to 'exited' before the re-call below.
+    stopSeamPty(first.value.id);
+    check("(spawn exited) precondition: the first worker now reads as exited, not live", !db.listLiveWorkers().some((w) => w.id === first.value.id));
+
+    // `isRetainedResultUsable` re-derives liveness+task-binding FRESH from the db at cache-hit time
+    // (mirrors spawnWorker's own `liveSessionIdForTask` guard) rather than trusting the cached value's
+    // frozen fields — so this must be treated as a MISS despite landing well within the retention window,
+    // and fall through to a genuinely fresh spawnWorker call. No live worker holds the task any more, so
+    // that fresh call does NOT hit the live-worker guard either — it spawns a brand-new worker.
+    const recall = await svc.spawnWorkerTracked(`${P}-mgr1`, { taskId, agentId: `${P}-dev`, kickoffPrompt: "GO" });
+    check("(spawn exited) re-call settles (not left hanging)", recall.settled === true);
+    check("(spawn exited) re-call succeeds with a GENUINELY NEW worker, not the stale exited one", recall.ok === true && recall.value.id !== first.value.id);
+    check("(spawn exited) re-call was NOT served from cache — spawnWorker genuinely ran again", recall.cacheHit === undefined);
+    const liveForTask = db.listLiveWorkers().filter((w) => w.taskId === taskId);
+    check("(spawn exited) exactly ONE live worker holds the task afterward (the new one)", liveForTask.length === 1 && liveForTask[0].id === recall.value.id);
+    if (recall.ok) { worktrees.push([repo, recall.value.worktreePath]); stopSeamPty(recall.value.id); }
   }
 
   // ============================ MERGE (4): fast path — SAME shape as untracked confirmWorkerMerge ============================
