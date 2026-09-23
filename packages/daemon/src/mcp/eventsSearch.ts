@@ -1,4 +1,4 @@
-import type { Db, EventForensicsRow } from "../db.js";
+import type { Db, EventForensicsRow, OrchestrationEventCounts } from "../db.js";
 import { ALL_ORCHESTRATION_EVENT_KINDS } from "@loom/shared";
 // Card 40f4cae9: the `fields:[...]` projection carried forward from `tasks_list` (card 23fde5f8) — reuse
 // the SAME generic `pickFields` rather than a second projector. Applied HERE (the one query path every
@@ -65,4 +65,28 @@ export function eventsSearchQuery(
   // own clamp-and-report-effective-limit contract (db.ts's `listOrchestrationEventsBounded` doc), which
   // this envelope previously failed to honor even though the underlying query already computed it.
   return { events, total: page.total, returned: page.items.length, offset: off, nextOffset, limit: page.limit };
+}
+
+/** The `countsOnly:true` sibling of {@link eventsSearchQuery} (card eb62d585) — same `kind` validation,
+ *  same `projectId`/`sessionId`/`taskId` filters, but calls {@link Db.countOrchestrationEventsBounded}
+ *  instead of the row-fetching query: {total, byKind}, never a page, a spill file, or a `detail` payload.
+ *  Shared by both `events_search` registrations (manager + platform) exactly like `eventsSearchQuery`
+ *  itself, so the two surfaces' `countsOnly` behavior can never drift apart either. */
+export function eventsCountQuery(
+  db: Db,
+  args: {
+    kind?: string[];
+    projectId: string | null;
+    sessionId?: string | null;
+    taskId?: string | null;
+  },
+): { error: string } | OrchestrationEventCounts {
+  const { kind, projectId, sessionId, taskId } = args;
+  if (kind && kind.length > 0) {
+    const unrecognized = kind.filter((k) => !EVENT_SEARCH_VALID_KINDS_SET.has(k));
+    if (unrecognized.length > 0) {
+      return { error: `unrecognized kind(s): ${unrecognized.join(", ")} — valid kinds are: ${EVENT_SEARCH_VALID_KINDS_LIST}` };
+    }
+  }
+  return db.countOrchestrationEventsBounded({ kind, projectId, sessionId: sessionId ?? null, taskId: taskId ?? null });
 }

@@ -17,7 +17,7 @@ import { resolveAlias, strictShape } from "./arg-alias.js";
 import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
 import type { Db } from "../db.js";
 import { MAX_GATE_HISTORY_PAGE, DEFAULT_GATE_HISTORY_PAGE, MAX_EVENTS_SEARCH_PAGE } from "../db.js";
-import { eventsSearchQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
+import { eventsSearchQuery, eventsCountQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_SEARCH_VALID_KINDS_LIST } from "./eventsSearch.js";
 import type { PtyHost } from "../pty/host.js";
 import { possibleDuplicateRootLabel } from "../pty/host.js";
 import type { ToolAttributionResult } from "../pty/tool-attribution.js";
@@ -4485,16 +4485,26 @@ export class OrchestrationMcpRouter {
           "fields:[\"outcome\",\"durationMs\",\"endedAt\"] for a duration trend read that doesn't need the " +
           "full diagnostic set — an un-asked-for field is genuinely ABSENT from every row, not merely a " +
           "smaller preview, and an unmatched/unknown field name is silently ignored rather than erroring. " +
-          "`id` is NOT auto-added.",
+          "`id` is NOT auto-added. " +
+          "`countsOnly:true` (card eb62d585, same contract as `tasks_list`'s own `countsOnly`) SHORT-" +
+          "CIRCUITS before any row fetch, JOIN-enrichment, or `fields` projection and returns " +
+          "{total, byGateType, byOutcome} instead of {items,...} — `byGateType` breaks down by " +
+          "\"merge\"|\"worker\"|\"deploy\", `byOutcome` by \"pass\"|\"reject\"|\"timeout\"|\"kill\"|" +
+          "\"cancelled\"|\"skipped\" (see the outcome caveats above — a rejection-rate reader must still " +
+          "pair a \"reject\" with an immediately-following cancelled retry, same rule as scanning `items` " +
+          "directly). `limit`/`offset`/`fields` are ignored when `countsOnly` is set — this is the WHOLE " +
+          "project-scoped matching set, not one page of it.",
         inputSchema: strictShape({
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
           fields: z.array(z.string()).optional(),
+          countsOnly: z.boolean().optional(),
         }),
       },
-      async ({ limit, offset, fields }) => {
+      async ({ limit, offset, fields, countsOnly }) => {
         const projectId = db.getSession(managerSessionId)?.projectId;
         if (!projectId) return ok({ error: "no project for this session" });
+        if (countsOnly) return ok(db.countGateEvents({ projectId }));
         const off = offset ?? 0;
         const page = db.listGateEvents({ projectId, limit: limit ?? DEFAULT_GATE_HISTORY_PAGE, offset: off });
         // Card 40f4cae9: nextOffset is derived from page.items.length/page.total BEFORE projection — fields
@@ -4560,7 +4570,12 @@ export class OrchestrationMcpRouter {
           "contract as `tasks_list`'s own `fields`) projects each returned event down to ONLY the given " +
           "top-level key names, e.g. fields:[\"ts\",\"kind\",\"taskId\"] for a lightweight timeline scan — " +
           "an un-asked-for field is genuinely ABSENT from every event, not merely a smaller preview, and " +
-          "an unmatched/unknown field name is silently ignored rather than erroring. `id` is NOT auto-added.",
+          "an unmatched/unknown field name is silently ignored rather than erroring. `id` is NOT auto-added. " +
+          "`countsOnly:true` (card eb62d585, same contract as `tasks_list`'s own `countsOnly`) SHORT-" +
+          "CIRCUITS before any row fetch, JOIN-enrichment, or spill and returns {total, byKind} instead of " +
+          "{events,...} — `byKind` breaks down the (already `kind`-filtered, if you passed one) matching " +
+          "set by event kind. `limit`/`offset`/`fields` are ignored when `countsOnly` is set — this is the " +
+          "WHOLE matching set, not one page of it.",
         inputSchema: strictShape({
           kind: z.array(z.string()).optional(),
           sessionId: z.string().optional(),
@@ -4568,11 +4583,13 @@ export class OrchestrationMcpRouter {
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
           fields: z.array(z.string()).optional(),
+          countsOnly: z.boolean().optional(),
         }),
       },
-      async ({ kind, sessionId, taskId, limit, offset, fields }) => {
+      async ({ kind, sessionId, taskId, limit, offset, fields, countsOnly }) => {
         const projectId = db.getSession(managerSessionId)?.projectId;
         if (!projectId) return ok({ error: "no project for this session" });
+        if (countsOnly) return ok(eventsCountQuery(db, { kind, projectId, sessionId, taskId }));
         const result = eventsSearchQuery(db, { kind, projectId, sessionId, taskId, limit, offset, fields });
         if ("error" in result) return ok(result);
         // Card eec70b79: proactively spill the `events` array as NDJSON (same shape tasks_list/

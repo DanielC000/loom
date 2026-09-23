@@ -5972,6 +5972,40 @@ export class Db {
     ).all(...filterParams, limit, offset) as GateEventJoinRow[];
     return { items: rows.map(toGateHistoryRow), total, limit };
   }
+  /** Counts-only sibling of {@link listGateEvents} (card eb62d585) — the SAME `GATE_HISTORY_KINDS`/
+   *  project-scope filter, but short-circuits BEFORE the enrichment JOINs (`pending_gate_ops`/`agents`/
+   *  `projects`/the `batch_merge_forfeited` correlated subquery), pagination, and the
+   *  {@link toGateHistoryRow} mapping — {total, byGateType, byOutcome} for "how many, and how did they
+   *  settle" without paying for any of that. `byOutcome` still needs each row's own `kind` + `detail_json`
+   *  (outcome is derived from the JSON payload via {@link gateOutcomeFromDetail}, not a column — unlike
+   *  {@link countOrchestrationEventsBounded}'s `byKind`, this is not a bare `COUNT(*) GROUP BY`), so this
+   *  reads the filtered rows once and tallies in JS — the same minimal shape {@link countProjectTasks}
+   *  uses (mcp/tasks.ts): fetch what the tally genuinely needs, skip everything the DISPLAY-only JOINs
+   *  above exist for. */
+  countGateEvents(opts: { projectId?: string | null }): GateHistoryCounts {
+    const kindPlaceholders = GATE_HISTORY_KINDS.map(() => "?").join(",");
+    const projFilter = opts.projectId ? " AND COALESCE(s.project_id, t.project_id, json_extract(oe.detail_json, '$.projectId')) = ?" : "";
+    const from =
+      `FROM orchestration_events oe
+       LEFT JOIN sessions s ON s.id = COALESCE(oe.worker_session_id, oe.manager_session_id)
+       LEFT JOIN tasks t ON t.id = oe.task_id
+       WHERE oe.kind IN (${kindPlaceholders})${projFilter}`;
+    const filterParams: unknown[] = opts.projectId ? [...GATE_HISTORY_KINDS, opts.projectId] : [...GATE_HISTORY_KINDS];
+    const rows = this.db.prepare(`SELECT oe.kind AS kind, oe.detail_json AS detailJson ${from}`).all(...filterParams) as { kind: string; detailJson: string | null }[];
+    const byGateType: Record<string, number> = {};
+    const byOutcome: Record<string, number> = {};
+    for (const r of rows) {
+      const gateType = gateTypeForKind(r.kind);
+      byGateType[gateType] = (byGateType[gateType] ?? 0) + 1;
+      let detail: Record<string, unknown> = {};
+      if (r.detailJson) {
+        try { detail = JSON.parse(r.detailJson) as Record<string, unknown>; } catch { /* tolerate a bad blob */ }
+      }
+      const outcome = gateOutcomeFromDetail(detail);
+      byOutcome[outcome] = (byOutcome[outcome] ?? 0) + 1;
+    }
+    return { total: rows.length, byGateType, byOutcome };
+  }
   /** Generalizes `listGateEvents`' bounded/paginated/JOIN-enriched shape to an ARBITRARY caller-supplied
    *  `kind` set.
    *
@@ -5979,12 +6013,13 @@ export class Db {
    *
    *  ⛔ `kind` is caller-supplied: every value is bound as a query
    *  PARAMETER, never interpolated into SQL text — it can never reach the query as raw text. */
-  listOrchestrationEventsBounded(opts: {
+  /** WHERE-condition + params shared by {@link listOrchestrationEventsBounded} and
+   *  {@link countOrchestrationEventsBounded} — extracted so a counts-only read can never silently diverge
+   *  on which rows match (same split, same reason, as {@link filterProjectTasks}/{@link countProjectTasks}
+   *  in mcp/tasks.ts, card 9798200c). */
+  private eventsFilterConditions(opts: {
     kind?: string[]; projectId?: string | null; sessionId?: string | null; taskId?: string | null;
-    limit: number; offset: number;
-  }): { items: EventForensicsRow[]; total: number; limit: number } {
-    const limit = Math.max(1, Math.min(opts.limit, MAX_EVENTS_SEARCH_PAGE));
-    const offset = Math.max(0, opts.offset);
+  }): { where: string; params: unknown[] } {
     const conditions: string[] = [];
     const params: unknown[] = [];
     if (opts.kind && opts.kind.length > 0) {
@@ -6003,7 +6038,15 @@ export class Db {
       conditions.push("oe.task_id = ?");
       params.push(opts.taskId);
     }
-    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    return { where: conditions.length ? `WHERE ${conditions.join(" AND ")}` : "", params };
+  }
+  listOrchestrationEventsBounded(opts: {
+    kind?: string[]; projectId?: string | null; sessionId?: string | null; taskId?: string | null;
+    limit: number; offset: number;
+  }): { items: EventForensicsRow[]; total: number; limit: number } {
+    const limit = Math.max(1, Math.min(opts.limit, MAX_EVENTS_SEARCH_PAGE));
+    const offset = Math.max(0, opts.offset);
+    const { where, params } = this.eventsFilterConditions(opts);
     // An empty-string session-id sentinel must be NULLIF-normalized before COALESCE, or it wins wrongly
     // over a real id in the other field.
     //
@@ -6037,6 +6080,29 @@ export class Db {
        LIMIT ? OFFSET ?`,
     ).all(...params, limit, offset) as GateEventJoinRow[];
     return { items: rows.map(toEventForensicsRow), total, limit };
+  }
+  /** Counts-only sibling of {@link listOrchestrationEventsBounded} (card eb62d585) — the SAME
+   *  `kind`/`projectId`/`sessionId`/`taskId` filters (via {@link eventsFilterConditions}, never
+   *  re-derived), but short-circuits BEFORE row materialisation: a bare `GROUP BY oe.kind` COUNT, no
+   *  ORDER BY, no LIMIT/OFFSET, no `detail_json` fetch, no {@link toEventForensicsRow} mapping, and never
+   *  routed through the NDJSON spill path — `kind` is a plain indexed column, so unlike
+   *  {@link countGateEvents} (whose `byOutcome` needs each row's own detail) this never touches a row's
+   *  payload at all. `total` is summed from the same grouped rows rather than a second `COUNT(*)` query —
+   *  identical filter, so summing can never disagree with a separate count. */
+  countOrchestrationEventsBounded(opts: {
+    kind?: string[]; projectId?: string | null; sessionId?: string | null; taskId?: string | null;
+  }): OrchestrationEventCounts {
+    const { where, params } = this.eventsFilterConditions(opts);
+    const from =
+      `FROM orchestration_events oe
+       LEFT JOIN sessions s ON s.id = COALESCE(NULLIF(oe.worker_session_id, ''), NULLIF(oe.manager_session_id, ''))
+       LEFT JOIN tasks t ON t.id = oe.task_id
+       ${where}`;
+    const byKindRows = this.db.prepare(`SELECT oe.kind AS kind, COUNT(*) AS c ${from} GROUP BY oe.kind`).all(...params) as { kind: string; c: number }[];
+    const byKind: Record<string, number> = {};
+    let total = 0;
+    for (const r of byKindRows) { byKind[r.kind] = r.c; total += r.c; }
+    return { total, byKind };
   }
   /**
    * Every `platform_escalate` event whose `detail.originProjectId` matches the given project — the
@@ -8308,6 +8374,21 @@ function toScheduleHistoryEntry(r0: unknown): ScheduleHistoryEntry {
     error: (detail.error as string | undefined) ?? null,
     dueAt: (detail.dueAt as string | undefined) ?? null,
   };
+}
+/** {@link Db.countGateEvents}'s return shape (card eb62d585) — mirrors {@link TaskCounts}'s
+ *  total/by-dimension split (mcp/tasks.ts), one dimension per breakdown {@link Db.listGateEvents}'s own
+ *  filter set already supports: `gateType` (derived from `kind`) and `outcome` (derived from `detail`). */
+export interface GateHistoryCounts {
+  total: number;
+  byGateType: Record<string, number>;
+  byOutcome: Record<string, number>;
+}
+/** {@link Db.countOrchestrationEventsBounded}'s return shape (card eb62d585) — the `events_search`
+ *  counterpart to {@link GateHistoryCounts} above, broken down by the one dimension that's a plain column
+ *  on every row regardless of `kind` filter: `kind` itself. */
+export interface OrchestrationEventCounts {
+  total: number;
+  byKind: Record<string, number>;
 }
 /** The JOINed row shape {@link Db.listGateEvents} selects — the raw event columns plus the enrichment
  *  the LEFT JOINs resolve. `agentName`/`taskTitle` compose the worker label; `detailJson` is parsed for
