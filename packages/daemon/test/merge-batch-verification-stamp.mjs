@@ -92,8 +92,24 @@ try {
   const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
   const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
 
-  const r = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
-  check("(setup) settles within the sync-wait budget", r.settled === true && r.ok === true);
+  // Card 54de31b5: under full-suite host contention, this batch's own worktree cut + fake-gate spawn can
+  // outrun `SessionService`'s default `syncAttachBudgetMs` (12s — SYNC_ATTACH_BUDGET_MS), so the FIRST
+  // call can legitimately degrade to `{settled:false}` while the op keeps running in the background.
+  // Same shape as card dd961cf9's own finding (op b2f5c2cc) in batch-merge-endsquash-guard.mjs — re-calling
+  // `mergeBatchTracked` with the SAME worker set re-attaches to the identical running op via
+  // `PendingOpRegistry.attach`'s dedupe key rather than starting a second batch (see `mergeBatchTracked`'s
+  // own `@decision f944d4e4` doc), exactly mirroring the re-poll a real caller facing this contract
+  // already relies on (`confirmWorkerMergeUntilSettled`'s own loop, this file, sessions/service.ts). Each
+  // call blocks on the real op's own progress (up to `syncAttachBudgetMs` per attempt), so this is a
+  // condition wait on genuine settlement, not a guessed sleep — bounded overall so a genuine hang still
+  // fails this test loudly rather than silently reporting a false pass/fail.
+  const settleDeadline = Date.now() + 60_000;
+  let r = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
+  while (!r.settled) {
+    if (Date.now() > settleDeadline) throw new Error(`mergeBatchTracked did not settle within 60s (last op state: ${JSON.stringify(r.op)})`);
+    r = await sessions.mergeBatchTracked(mgrId, [wA, wB]);
+  }
+  check("(setup) settles within the load-tolerant wait budget (re-attaches to the same op under contention, card 54de31b5)", r.settled === true && r.ok === true);
   check("(setup) the batch landed both branches", r.settled && r.ok && r.value.ok === true && r.value.landed.length === 2);
 
   for (const [wId, w, label] of [[wA, a, "a"], [wB, b, "b"]]) {
