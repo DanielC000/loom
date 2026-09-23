@@ -2400,6 +2400,29 @@ export interface DiffstatFile {
   status?: "A" | "M" | "D" | "T" | "U" | "X" | "B";
 }
 
+/**
+ * `git diff --stat`'s summary rendering collapses a rename into `{old => new}` (common-prefix form) or
+ * `old => new` (whole-path form) — neither is a valid git pathspec, and neither matches the REAL
+ * post-rename path the unified patch's own `+++ b/<path>` line carries. Recovers the real destination
+ * path so a diffstat-derived candidate list stays usable as BOTH a scope check and a pathspec, instead of
+ * silently excluding every renamed file (the defect this exists to prevent — a rename plus a genuinely
+ * new block used to yield nothing; `diffBranch`'s own `files:` filter had the same hole).
+ */
+export function normalizeDiffstatPath(raw: string): string {
+  const openIdx = raw.indexOf("{");
+  const closeIdx = openIdx === -1 ? -1 : raw.indexOf("}", openIdx + 1);
+  if (openIdx !== -1 && closeIdx !== -1) {
+    const prefix = raw.slice(0, openIdx);
+    const suffix = raw.slice(closeIdx + 1);
+    const inner = raw.slice(openIdx + 1, closeIdx); // "old.ts => new.ts"
+    const arrowIdx = inner.indexOf(" => ");
+    const dest = arrowIdx === -1 ? inner : inner.slice(arrowIdx + 4);
+    return `${prefix}${dest}${suffix}`.replace(/\/{2,}/g, "/"); // `{ => sub}` / `{sub => }` leave a doubled slash
+  }
+  const arrowIdx = raw.indexOf(" => ");
+  return arrowIdx === -1 ? raw : raw.slice(arrowIdx + 4).trim();
+}
+
 /** @decision 91d847db — a bare leading `*` with no `/` anywhere (e.g. `*service.ts`) is auto-prefixed with
  *  `**​/` before translation — `*` alone stays within one segment and would silently match 0 files,
  *  indistinguishable from "no changes"; never widen this to a pattern already containing `/` or `**`. */
@@ -2506,7 +2529,11 @@ export async function diffBranch(
   const globRe = opts.pathGlob ? pathGlobToRegExp(opts.pathGlob) : undefined;
   const filtering = needles.length > 0 || globRe !== undefined;
   const files = filtering
-    ? allFiles.filter((f) => needles.some((n) => f.file.includes(n)) || (globRe?.test(f.file) ?? false))
+    ? allFiles.filter((f) => {
+        // Match the REAL post-rename path too: `f.file` may be `--stat`'s `{old => new}` display form.
+        const real = normalizeDiffstatPath(f.file);
+        return needles.some((n) => f.file.includes(n) || real.includes(n)) || (globRe ? globRe.test(f.file) || globRe.test(real) : false);
+      })
     : allFiles;
 
   const filesChanged = filtering ? files.length : summary.files.length;
@@ -2515,7 +2542,7 @@ export async function diffBranch(
 
   const patch = includePatch
     ? filtering
-      ? (files.length > 0 ? await withTimeout(git.diff([range, "--", ...files.map((f) => f.file)]), timeoutMs, "git diff (diffBranch patch, filtered)") : "")
+      ? (files.length > 0 ? await withTimeout(git.diff([range, "--", ...files.map((f) => normalizeDiffstatPath(f.file))]), timeoutMs, "git diff (diffBranch patch, filtered)") : "")
       : await withTimeout(git.diff([range]), timeoutMs, "git diff (diffBranch patch)")
     : "";
 

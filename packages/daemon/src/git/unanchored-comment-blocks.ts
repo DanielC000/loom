@@ -1,6 +1,6 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { diffBranch, type DiffBranchDeps, type DiffstatFile } from "./worktrees.js";
+import { diffBranch, normalizeDiffstatPath, type DiffBranchDeps, type DiffstatFile } from "./worktrees.js";
 import { boundedSimpleGit, withTimeout } from "./bounded.js";
 import { COMMENT_ANCHOR_LINT_SCRIPT } from "../paths.js";
 
@@ -87,29 +87,6 @@ function loadCommentAnchorLintModule(): Promise<WellFormedCommentAnchorLintModul
     })();
   }
   return modulePromise;
-}
-
-/**
- * `git diff --stat`'s summary rendering collapses a rename into `{old => new}` (common-prefix form) or
- * `old => new` (whole-path form) — neither is a valid git pathspec, and neither matches the REAL
- * post-rename path the unified patch's own `+++ b/<path>` line carries. Recovers the real destination
- * path so a diffstat-derived candidate list stays usable as BOTH a scope check and a pathspec, instead of
- * silently excluding every renamed file (the defect this exists to prevent — a rename plus a genuinely
- * new block used to yield nothing).
- */
-export function normalizeDiffstatPath(raw: string): string {
-  const openIdx = raw.indexOf("{");
-  const closeIdx = openIdx === -1 ? -1 : raw.indexOf("}", openIdx + 1);
-  if (openIdx !== -1 && closeIdx !== -1) {
-    const prefix = raw.slice(0, openIdx);
-    const suffix = raw.slice(closeIdx + 1);
-    const inner = raw.slice(openIdx + 1, closeIdx); // "old.ts => new.ts"
-    const arrowIdx = inner.indexOf(" => ");
-    const dest = arrowIdx === -1 ? inner : inner.slice(arrowIdx + 4);
-    return `${prefix}${dest}${suffix}`;
-  }
-  const arrowIdx = raw.indexOf(" => ");
-  return arrowIdx === -1 ? raw : raw.slice(arrowIdx + 4).trim();
 }
 
 /**
