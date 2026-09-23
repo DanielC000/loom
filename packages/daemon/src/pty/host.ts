@@ -226,7 +226,7 @@ const OFFSET_OMISSION_MAX_TAIL_CHARS = 2;
 /** @decision d1ac9fed — a POSITIVE allow-list: a new/unlisted arm defaults to LOUD. Never add
  *  `fallback-replay-awaiting-resolution`, a duplicate-check-asking `confirmed-*` arm, or
  *  `fallback-unrecognized` (its own narrower split lives in `UNRECOGNIZED_UNACCOUNTED_MAX_CHARS`'s doc). */
-const RECORD_ONLY_MISMATCH_ARMS: ReadonlySet<string> = new Set([
+export const RECORD_ONLY_MISMATCH_ARMS: ReadonlySet<string> = new Set([
   "confirmed-ansi-strip",
   "fallback-benign-offset-insertion",
   "fallback-benign-offset-omission",
@@ -247,6 +247,11 @@ const UNRECOGNIZED_MISMATCH_RATE_COOLDOWN_MS = 30 * 60 * 1000;
  *  bound is wrong here (a same-length full substitution has lenDelta≈0 and IS a real loss shape) — see
  *  `computeUnaccountedIntended`'s own doc for the real measure. A first sizing, not a measured bound. */
 const UNRECOGNIZED_UNACCOUNTED_MAX_CHARS = 64;
+
+/** @decision d1ac9fed — `unaccountedIntended` alone only bounds the INTENDED side (a diverged-prior
+ *  accumulation can have `unaccountedIntended=0` with a huge REPORTED-side excess — a duplicate-action
+ *  risk). Caps `lenDelta` too, grounded in the max measured owner specimen (+60) plus headroom. */
+const UNRECOGNIZED_EXTRA_MAX_CHARS = 96;
 
 /** @decision d1ac9fed — count of `intended` chars unaccounted for in `reported` (common PREFIX+SUFFIX,
  *  clamped, subtracted from `intended.length`), PLUS the suffix length itself — a caller needs it to slice
@@ -682,8 +687,12 @@ export const PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG = "[loom:prompt-mismatch-unre
 /**
  * Card 38d68b8d — the literal, stable prefix of the THIRD notice family this mechanism can mint:
  * `SessionService.handlePromptMismatchUnmatched`'s own sender/parent message (sessions/service.ts), fired
- * from the `onPromptMismatchUnmatched` event above whenever an UNMATCHABLE mismatch (`isUnmatchableMismatch`
- * at this file's own `UserPromptSubmit` detector) is genuinely reported, not suppressed as an exact repeat.
+ * from the `onPromptMismatchUnmatched` event above.
+ *
+ * @decision d1ac9fed — TWO distinct uses now: `fallback-unrecognized` outside the small-bucket split
+ * (`escalation:"single-event"`) or a small one whose RATE crossed threshold (`escalation:"rate-exceeded"`).
+ * The two offset arms never reach this tag at all anymore.
+ *
  * Same reachability question as `PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG` above, same answer: this notice is
  * itself a pty submission to a real session (the sender/parent), so ITS OWN delivery can mismatch too, and
  * without recognizing it here that mismatch would (if unmatchable in turn) mint ANOTHER push, forever.
@@ -6568,7 +6577,10 @@ export class PtyHost {
               }
               // @decision 00b5066e — offset-aware reconciliation: INSERTION uses `endsWith` (not `includes`,
               // which false-matched card 68459420's unrelated population), left unbounded; OMISSION is
-              // bounded to OFFSET_OMISSION_MAX_TAIL_CHARS. Neither suppresses the notice, only its wording.
+              // bounded to OFFSET_OMISSION_MAX_TAIL_CHARS.
+              //
+              // @decision d1ac9fed — superseded the "neither suppresses" half of 00b5066e's own note above:
+              // both arms are now unconditionally record-only. Only the CLASSIFICATION bounds are unchanged.
               const isOffsetInsertion = reported.length > intended.length && reported.endsWith(intended);
               const isOffsetOmission = !isOffsetInsertion && reported.length < intended.length &&
                 (intended.length - reported.length) <= OFFSET_OMISSION_MAX_TAIL_CHARS && intended.startsWith(reported);
@@ -6967,8 +6979,10 @@ export class PtyHost {
                   && live.lastMismatchNoticeSignature.writtenHash === noticeSignature.writtenHash
                   && live.lastMismatchNoticeSignature.reportedHash === noticeSignature.reportedHash;
                 // @decision 1a315058 — DoD-1: the arm-classification instrument, mirroring `mismatchText`'s
-                // own real branch precedence exactly. Logged UNCONDITIONALLY (before the suppress/deliver
-                // branch below) so a suppressed exact-repeat is still counted, not just a delivered notice.
+                // own real branch precedence exactly.
+                // @decision d1ac9fed — the offset branches are now EXPLICIT about `!unmatchedRecognized`
+                // (was implicit-by-construction), terminating in `"unclassified"` — never in the allow-list,
+                // so an invariant break here fails LOUD by default, never silent.
                 const mismatchArm = confirmedFusion ? "confirmed-fusion"
                   : confirmedDivergedPrior ? "confirmed-diverged-prior"
                   : confirmedWrapperDeficit ? "confirmed-wrapper-deficit"
@@ -6976,13 +6990,12 @@ export class PtyHost {
                   : confirmedWrapperAwareFusion ? "confirmed-wrapper-aware-fusion"
                   : isTrulyUnrecognizedDivergence ? "fallback-unrecognized"
                   : isRecognizedReplayAwaitingResolution ? "fallback-replay-awaiting-resolution"
-                  : isOffsetInsertion ? "fallback-benign-offset-insertion"
-                  : "fallback-benign-offset-omission";
-                // eslint-disable-next-line no-console
-                console.log(`[prompt-mismatch-arm] ${sessionId} gen=${noticeSignature.gen} arm=${mismatchArm} delivered=${!isExactRepeatNotice} writtenHash=${noticeSignature.writtenHash} reportedHash=${noticeSignature.reportedHash} reportedLen=${reported.length} intendedLen=${intended.length}`);
-                // @decision d1ac9fed — `fallback-unrecognized`'s three-condition small-bucket split (see
-                // UNRECOGNIZED_UNACCOUNTED_MAX_CHARS/UNRECOGNIZED_DISQUALIFYING_CONTROL_CHAR_RE's own
-                // docs): ALL THREE must hold — any one failing routes to the unchanged pre-card behaviour.
+                  : (isOffsetInsertion && !unmatchedRecognized) ? "fallback-benign-offset-insertion"
+                  : (isOffsetOmission && !unmatchedRecognized) ? "fallback-benign-offset-omission"
+                  : "unclassified";
+                // @decision d1ac9fed — `fallback-unrecognized`'s small-bucket split, now FIVE conditions
+                // (see UNRECOGNIZED_EXTRA_MAX_CHARS' own doc). ALL must hold; computed BEFORE the arm log
+                // line below so `disposition`/`delivered` are true.
                 const unaccountedResult = mismatchArm === "fallback-unrecognized" ? computeUnaccountedIntended(reported, intended, i) : null;
                 const unaccountedIntended = unaccountedResult?.unaccountedIntended ?? null;
                 const reportedDivergentRegion = unaccountedResult !== null ? reported.slice(i, reported.length - unaccountedResult.suffixLen) : "";
@@ -6990,10 +7003,24 @@ export class PtyHost {
                 const isSmallUnrecognized = unaccountedIntended !== null
                   && unaccountedIntended <= UNRECOGNIZED_UNACCOUNTED_MAX_CHARS
                   && lenDelta >= 1
-                  && !hasDisqualifyingControlChar;
+                  && lenDelta <= UNRECOGNIZED_EXTRA_MAX_CHARS
+                  && !hasDisqualifyingControlChar
+                  && !unmatchedRecognized
+                  && reported.length > 0;
+                // @decision d1ac9fed — a trivially-empty `reported` satisfies `startsWith("")` for any short
+                // `intended`, classifying offset-omission — a genuinely lost 1-2 char message must not go
+                // record-only just because the bound happens to be met that way.
+                const isEmptyReportedOffsetOmission = mismatchArm === "fallback-benign-offset-omission" && reported.length === 0;
+                const isRecordOnlyEligible = (RECORD_ONLY_MISMATCH_ARMS.has(mismatchArm) && !isEmptyReportedOffsetOmission) || isSmallUnrecognized;
+                // @decision d1ac9fed — `delivered=` used to log true for a record-only arm too; `disposition`
+                // is the new unambiguous field, `delivered` is kept for existing consumers but now true iff
+                // a session turn actually enqueues.
+                const disposition = isExactRepeatNotice ? "exact-repeat-suppressed" : isRecordOnlyEligible ? "recorded-only" : "delivered";
+                // eslint-disable-next-line no-console
+                console.log(`[prompt-mismatch-arm] ${sessionId} gen=${noticeSignature.gen} arm=${mismatchArm} disposition=${disposition} delivered=${disposition === "delivered"} writtenHash=${noticeSignature.writtenHash} reportedHash=${noticeSignature.reportedHash} reportedLen=${reported.length} intendedLen=${intended.length}`);
                 if (mismatchArm === "fallback-unrecognized") {
                   // eslint-disable-next-line no-console
-                  console.log(`[prompt-mismatch-unaccounted] ${sessionId} gen=${noticeSignature.gen} unaccountedIntended=${unaccountedIntended} bound=${UNRECOGNIZED_UNACCOUNTED_MAX_CHARS} lenDelta=${lenDelta > 0 ? `+${lenDelta}` : lenDelta} controlCharInRegion=${hasDisqualifyingControlChar} small=${isSmallUnrecognized}`);
+                  console.log(`[prompt-mismatch-unaccounted] ${sessionId} gen=${noticeSignature.gen} unaccountedIntended=${unaccountedIntended} bound=${UNRECOGNIZED_UNACCOUNTED_MAX_CHARS} lenDelta=${lenDelta > 0 ? `+${lenDelta}` : lenDelta} extraMax=${UNRECOGNIZED_EXTRA_MAX_CHARS} controlCharInRegion=${hasDisqualifyingControlChar} unmatchedRecognized=${!!unmatchedRecognized} small=${isSmallUnrecognized}`);
                 }
                 if (isExactRepeatNotice) {
                   // eslint-disable-next-line no-console
@@ -7005,10 +7032,10 @@ export class PtyHost {
                   const sameAsPrior = prior !== null && prior.gen === noticeSignature.gen
                     && prior.writtenHash === noticeSignature.writtenHash && prior.reportedHash === noticeSignature.reportedHash;
                   live.lastMismatchNoticeSuppressed = { ...noticeSignature, count: (sameAsPrior ? prior.count : 0) + 1, detectedAt: Date.now() };
-                } else if (RECORD_ONLY_MISMATCH_ARMS.has(mismatchArm) || isSmallUnrecognized) {
-                  // @decision d1ac9fed — RECORD-ONLY: detection is already fully recorded above (the arm
-                  // log line, the unaccounted-magnitude line, the pull-surface writes) — no session turn,
-                  // no per-event push. Reached via the allow-list, or a small `fallback-unrecognized`.
+                } else if (isRecordOnlyEligible) {
+                  // @decision d1ac9fed — RECORD-ONLY: detection already fully recorded above — no session
+                  // turn, no per-event push. Reached via `isRecordOnlyEligible` (the allow-list minus the
+                  // empty-reported carve-out, or a small `fallback-unrecognized`).
                   live.lastMismatchNoticeSignature = noticeSignature;
                   // eslint-disable-next-line no-console
                   console.log(`[prompt-mismatch-notice-recorded-only] ${sessionId} gen=${noticeSignature.gen} arm=${mismatchArm}${isSmallUnrecognized ? ` unaccountedIntended=${unaccountedIntended}` : ""} writtenHash=${noticeSignature.writtenHash} reportedHash=${noticeSignature.reportedHash} — record-only arm (card d1ac9fed): no session turn, no per-event parent push.`);
