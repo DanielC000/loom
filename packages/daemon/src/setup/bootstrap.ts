@@ -27,6 +27,48 @@ const GIT_INIT_TIMEOUT_MS = 15_000;
 export type BootstrapResult = { ok: true; dir: string } | { ok: false; error: string };
 
 /**
+ * Card 097902b9 (child F of epic f69cabc7 "all projects, from now on"): a code project created via
+ * `project_init` gets its decision-record store from birth, so its very first spawn already wires the
+ * `pty/claude-settings.ts` Read hook (gated on `anyDecisionRecordStoreExists` finding one of three
+ * stores under `docs/`) instead of waiting for someone to create `docs/decisions/` by hand. Deliberately
+ * GENERIC — this text ships to end users' own project repos, so it names no Loom-specific path or card.
+ *
+ * `docs/decisions/` alone (an empty directory) would satisfy `anyDecisionRecordStoreExists`'s
+ * `fs.existsSync` check on THIS directory (the project's own primary checkout) the instant it's created —
+ * but git does not track empty directories, so an empty dir here would vanish the moment anything ever
+ * needed it to survive a commit/checkout round-trip (e.g. a worker's own worktree, cut from a commit, only
+ * ever reflects committed files). Writing a real file into it is what makes the store durable, not just
+ * momentarily present on disk.
+ */
+const DECISION_RECORD_README = `# Decision records
+
+This folder holds durable decision records: the WHY behind a load-bearing choice made somewhere in this
+project, kept out of the code itself so a long comment does not have to grow inline forever.
+
+A record lives here as \`<id>-slug.md\`. The choice it explains is marked at its point of use with a short
+anchor comment: \`@decision <id> — <the prohibition or consequence>\`. A future reader who lands on that
+anchor gets the record's title and its guidance surfaced automatically, without needing to open this file.
+
+The full rules for writing and anchoring a record — when to extract one, the anchor grammar, and the split
+between a mutable record here and an immutable architecture decision under \`docs/adr/\` — live in the
+shipped \`/worker\` doctrine ("Extracting a decision record"), not here. This file exists only so the store
+itself is present from the start.
+`;
+
+/** Best-effort seed of the decision-record store — never fails project creation over it (mirrors the
+ *  git-init rollback above: a write hiccup here is not a reason to strand or reject an otherwise-good
+ *  project directory). See {@link DECISION_RECORD_README}'s own doc for why a file, not a bare directory. */
+function seedDecisionRecordStore(dir: string): void {
+  try {
+    const storeDir = path.join(dir, "docs", "decisions");
+    fs.mkdirSync(storeDir, { recursive: true });
+    fs.writeFileSync(path.join(storeDir, "README.md"), DECISION_RECORD_README);
+  } catch {
+    // best-effort — a fresh project without a seeded store just behaves as it did before this card.
+  }
+}
+
+/**
  * Derive a filesystem-safe leaf directory name from a project name: lowercase, non-alphanumerics collapsed
  * to single dashes, trimmed, capped. Returns null when nothing usable remains (e.g. an all-symbol name) —
  * the caller then asks for an explicit `dirName`.
@@ -101,6 +143,11 @@ export async function bootstrapProjectDir(opts: {
       try { fs.rmSync(target, { recursive: true, force: true }); } catch { /* best-effort */ }
       return { ok: false, error: `git init failed: ${(e as Error).message}` };
     }
+    // Card 097902b9: code projects only, gated on `opts.git`. A `kind:"vault"` project (opts.git false)
+    // is deliberately left unseeded here, pending child C (`a4760fc8`)'s ruling on where a vault
+    // project's store lives and what a markdown anchor form looks like — see that card before seeding
+    // one for vault.
+    seedDecisionRecordStore(target);
   }
   return { ok: true, dir: target };
 }
