@@ -3364,6 +3364,15 @@ export const STATIC_GUARD_REPO_PATHS = [
   // path cannot reason about (it changes zero compiled/runtime behavior on its own), so it could otherwise
   // take the reduced path and never trip a single check.
   "packages/daemon/test/waituntil-message-regex-guard.mjs",
+  // Card f103dd2d: a corpus-wide source-text scan asserting every test file that calls the real
+  // `createWorktree(` sets a temp LOOM_HOME (`useOwnLoomHome(`/`process.env.LOOM_HOME =`) before its first
+  // `../dist/` import, or `requireHermeticEnv()`s before the call — WORKTREES_DIR is a sibling of
+  // LOOM_HOME, so a bare run of a file that sets nothing leaks real worktrees into the owner's real
+  // `~/.loom-worktrees` (card aac489a2's two files). Belongs here on the same ground as its siblings: a NEW
+  // test .mjs reintroducing that changes zero `.ts` source, so neither the transpile-identity path nor any
+  // `.ts`-keyed scanner list would ever see it. See the guard's header for why harness-provided-only is NOT
+  // a pass, and for its named gaps.
+  "packages/daemon/test/createworktree-loom-home-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run
