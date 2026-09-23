@@ -10,7 +10,7 @@ import {
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
   type GatesActive, type GateRun, type GateType, type CompanionRoute, type ProjectMemoryEntry,
 } from "@loom/shared";
-import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, MergeReconcileWedgeEntry } from "../db.js";
+import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, PendingGateOp, MergeReconcileWedgeEntry } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG, READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS } from "../pty/host.js";
@@ -63,7 +63,7 @@ import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE, buildBlockedResumeNudgeBody, RESTAR
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, remainingGateSteps, mergeResumedGateResult, formatWeakerPassWarning, formatRetryAlsoFailedWarning, formatRetryRescuedButGateRejectedWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
-import { gateSpillPath, pruneGateSpills } from "../orchestration/gate-spill.js";
+import { gateSpillPath, pruneGateSpills, listGateSpillOpIds, GATE_SPILL_DIR, GATE_SPILL_RETAIN_COUNT, GATE_SPILL_MAX_TOTAL_BYTES, GATE_SPILL_PROTECTED_RETAIN_COUNT } from "../orchestration/gate-spill.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
@@ -971,6 +971,54 @@ function deriveBatchGateVerdict(
       } }),
     },
   };
+}
+
+/**
+ * Card f55b64af: classifies one settled op as PROTECTED (kept out of the ordinary
+ * `GATE_SPILL_RETAIN_COUNT` count prune, counted against the smaller `GATE_SPILL_PROTECTED_RETAIN_COUNT`
+ * instead — see `orchestration/gate-spill.ts`'s own "two-pool policy" doc) or ORDINARY. "Non-clean", per
+ * the card's own scope, manager-confirmed: a genuine FAIL, or an ERROR (the anomaly a manager most needs
+ * the retained log for — in scope, not creep), or a PASS that only landed after a retry ("weaker pass" —
+ * `retriedFile` non-null on the merge/batch path, or `transientRetried` true on the solo-merge path; see
+ * `PendingGateOpVerdict`'s own docs). `cancelled`/`skipped` verdicts stay ORDINARY — neither ran a real
+ * diagnosable gate worth protecting (manager-confirmed).
+ *
+ * KNOWN GAP, out of scope for this card, filed separately as card 3e7378d0: `deriveBatchGateVerdict`
+ * never writes `transientRetried` (only the solo-merge path does), so a BATCH pass rescued by the
+ * whole-suite transient auto-retry is indistinguishable from a clean pass here today — this classifier
+ * cannot see that one sub-case until card 3e7378d0 closes it.
+ */
+function isProtectedGateSpillVerdict(op: Pick<PendingGateOp, "verdict" | "verdictPayload">): boolean {
+  if (op.verdict === "fail" || op.verdict === "error") return true;
+  if (op.verdict === "pass") {
+    const payload = op.verdictPayload;
+    return Boolean(payload && (payload.retriedFile != null || payload.transientRetried === true));
+  }
+  return false; // "cancelled" | "skipped" | null (no verdict recorded) — ordinary.
+}
+
+/**
+ * Card f55b64af: the classified wrapper every `pruneGateSpills()` call site now uses instead of calling it
+ * bare. Lists every `.log` file's opId (pure fs, `listGateSpillOpIds`), batches ONE `Db` lookup for all of
+ * them (`listPendingGateOpsByOpIds` — never one query per file), and classifies each looked-up row via
+ * {@link isProtectedGateSpillVerdict}. An opId with no matching row (a cascade-deleted project/agent, or a
+ * spill older than verdict-writing) is simply absent from the lookup result and never added to the
+ * protected set — unknown fails toward evictable, never toward protected, same discipline as the classifier
+ * itself. A DB lookup failure (should not happen in practice — better-sqlite3 is synchronous/local, but a
+ * corrupt row or a locked file are real possibilities) degrades to an EMPTY protected set — today's
+ * behavior, unchanged — rather than letting a lookup bug block the prune (a spill directory that's never
+ * swept is a real, worse failure mode than one sweep classifying everything as ordinary for a turn).
+ */
+function pruneGateSpillsClassified(db: Db): void {
+  let protectedOpIds: ReadonlySet<string> = new Set();
+  try {
+    const opIds = listGateSpillOpIds(GATE_SPILL_DIR);
+    const rows = db.listPendingGateOpsByOpIds(opIds);
+    protectedOpIds = new Set(rows.filter(isProtectedGateSpillVerdict).map((r) => r.opId));
+  } catch (err) {
+    console.warn(`[gate-spill] classification lookup failed (degrading to all-ordinary, continuing): ${(err as Error).message}`);
+  }
+  pruneGateSpills(GATE_SPILL_DIR, GATE_SPILL_RETAIN_COUNT, GATE_SPILL_MAX_TOTAL_BYTES, protectedOpIds, GATE_SPILL_PROTECTED_RETAIN_COUNT);
 }
 
 /** @decision 7d492f8b — recovers a settled gate/merge op's verdict from durable audit events when its
@@ -3647,7 +3695,7 @@ export class SessionService {
     // Settle the tombstone minted above — see that insert's own comment for why this fires unconditionally,
     // back-to-back with the mint, rather than via a separate onSettle callback the way merge/worker do.
     this.db.settlePendingGateOp(opId, deriveDeployGateVerdict(result, deployStartedAt));
-    pruneGateSpills();
+    pruneGateSpillsClassified(this.db);
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "deploy",
       detail: {
@@ -15661,7 +15709,7 @@ export class SessionService {
             // `gate_status(opId)` can't read "settled" until the WHOLE batch (fast-forward + per-branch
             // finalize, still to come after this closure returns) is done.
             batchGateVerdict = deriveBatchGateVerdict(r, batchGateAttempt1DurationMs, opMintedAtMs, nowMs, orchestration.maxConcurrentGates, concurrentAtStart, concurrentGatesMax, landedCount, { retriedFile, retryPassed });
-            pruneGateSpills();
+            pruneGateSpillsClassified(this.db);
             // Card 3d2afb53: this batch gate always genuinely ran (a `!gate` project short-circuits to the
             // per-branch fallback well before this closure is ever reached — see the `if (!gate)` guard above),
             // so `emitCompareReduced` is DECIDABLE here whenever `computeEmitCompareGate`'s predicate applies at
@@ -16479,7 +16527,7 @@ export class SessionService {
         // extended/duration/outcome at all.
         onSettle: (outcome, opId) => {
           this.db.settlePendingGateOp(opId, deriveMergeGateVerdict(outcome, opStartedAt));
-          pruneGateSpills();
+          pruneGateSpillsClassified(this.db);
         },
       },
     );
@@ -17194,7 +17242,7 @@ export class SessionService {
         // `deriveWorkerGateVerdict`'s own doc for the four outcome shapes and what each one records.
         onSettle: (outcome, opId) => {
           this.db.settlePendingGateOp(opId, deriveWorkerGateVerdict(outcome));
-          pruneGateSpills();
+          pruneGateSpillsClassified(this.db);
         },
       },
     );

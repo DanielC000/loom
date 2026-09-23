@@ -66,21 +66,72 @@ export const GATE_SPILL_MAX_TOTAL_BYTES = 200 * 1024 * 1024;
  *  oldest by mtime evicted first — the same `rotateBackups` (orchestration/db-backup.ts) shape this mirrors.
  *  A silent overwrite-in-place (reusing the newest N paths) was rejected: it would recreate the exact "which
  *  op's diagnostic survives" gap this card exists to close, just at a different N.
+ *
+ *  Card f55b64af: this is now the ORDINARY pool's own count cap — see {@link GATE_SPILL_PROTECTED_RETAIN_COUNT}
+ *  for the smaller, independent cap a PROTECTED (non-clean) spill is counted against instead.
  */
 export const GATE_SPILL_RETAIN_COUNT = 100;
 
 /**
- * Keep the newest spill files under `dir` — oldest by mtime evicted first — until BOTH the file-count
- * (`keep`) and total-bytes (`maxTotalBytes`) budgets are satisfied; whichever bound is hit FIRST determines
- * how many survive. ONLY ever touches `*.log` files directly in `dir` — mirrors `rotateBackups`'s own
- * scoping discipline (never touches an unrelated file that happens to live alongside). Best-effort: a prune
- * failure is logged and swallowed — losing an old diagnostic to a failed prune is acceptable; losing gate
- * execution to a prune bug is not.
+ * Card f55b64af: the PROTECTED pool's own, smaller count cap — a FAIL, an ERROR, or a "weaker pass" (a
+ * PASS that only landed after a retry) spill is counted against THIS cap, never {@link GATE_SPILL_RETAIN_COUNT},
+ * so a run of ordinary clean passes can never evict an older non-clean diagnostic a manager may still be
+ * hand-rescuing (the defect this card's own DoD names). A first sizing, not a measured bound — 25 is a
+ * quarter of the ordinary pool's cap, judged generous enough for the non-clean spills a project normally
+ * accumulates between reviews without letting the protected pool itself become an unbounded liability;
+ * revisit if real usage shows otherwise. Count-only, deliberately no separate age limit — one axis, mirroring
+ * the ordinary pool's own count-based design, rather than introducing a second, independently-tunable knob
+ * for a bound nothing has yet shown is needed.
+ */
+export const GATE_SPILL_PROTECTED_RETAIN_COUNT = 25;
+
+/**
+ * Card f55b64af: every `.log` file directly under `dir`, as its opId (the filename stem — see
+ * `gateSpillPath`'s own "filename IS the opId" convention). Pure `fs` listing, no classification — a
+ * caller (`sessions/service.ts`, which alone holds a `Db` handle) uses this to know WHICH opIds to look
+ * up in `pending_gate_ops` before classifying each as protected/ordinary; classification itself
+ * deliberately stays OUT of this file (see `pruneGateSpills`'s own "two-pool" doc for why). Best-effort:
+ * a missing/unreadable `dir` is an empty list, never a throw.
+ */
+export function listGateSpillOpIds(dir: string = GATE_SPILL_DIR): string[] {
+  try {
+    if (!fs.existsSync(dir)) return [];
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isFile() && e.name.endsWith(".log"))
+      .map((e) => e.name.slice(0, -".log".length));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Keep the newest spill files under `dir` — oldest by mtime evicted first. ONLY ever touches `*.log` files
+ * directly in `dir` — mirrors `rotateBackups`'s own scoping discipline (never touches an unrelated file
+ * that happens to live alongside). Best-effort: a prune failure is logged and swallowed — losing an old
+ * diagnostic to a failed prune is acceptable; losing gate execution to a prune bug is not.
+ *
+ * Card f55b64af — TWO-POOL POLICY, replacing the old single-pool "no gaps" rule:
+ *   1. COUNT trim runs PER POOL, independently. Every `.log` file whose opId is in `protectedOpIds` is the
+ *      PROTECTED pool, trimmed to `protectedKeep`; every other file is the ORDINARY pool, trimmed to `keep`
+ *      — an ordinary clean pass can never evict a protected FAIL/ERROR/weaker-pass spill just by being
+ *      newer, and vice versa. Within EACH pool this trim is still the old monotonic newest-first cutoff (no
+ *      gaps WITHIN a pool).
+ *   2. BYTE trim runs SECOND, GLOBALLY, across the UNION of both pools' count-trim survivors, newest-first,
+ *      ignoring which pool an entry belongs to — the byte ceiling stays absolute across everything (the
+ *      card's own requirement), so a protected spill is exempt ONLY from step 1's count trim, never from
+ *      this step; a tight byte budget can still evict a protected file, and correctly so.
+ *   `protectedOpIds` defaults to empty, so every existing caller (and every pre-card test) is byte-identical
+ *   to the old single-pool behavior — with no protected entries, step 1 degrades to exactly the old
+ *   newest-first count cutoff, and step 2 degrades to exactly the old newest-first byte cutoff over what's
+ *   left, in the same order.
  */
 export function pruneGateSpills(
   dir: string = GATE_SPILL_DIR,
   keep: number = GATE_SPILL_RETAIN_COUNT,
   maxTotalBytes: number = GATE_SPILL_MAX_TOTAL_BYTES,
+  protectedOpIds: ReadonlySet<string> = EMPTY_PROTECTED_OP_IDS,
+  protectedKeep: number = GATE_SPILL_PROTECTED_RETAIN_COUNT,
 ): void {
   try {
     if (keep <= 0) return;
@@ -97,21 +148,37 @@ export function pruneGateSpills(
           mtime = st.mtimeMs;
           size = st.size;
         } catch { /* unreadable → sorts oldest, pruned first; size 0 never falsely trips the byte cap for it */ }
-        return { full, mtime, size };
+        const opId = e.name.slice(0, -".log".length);
+        return { full, mtime, size, protected: protectedOpIds.has(opId) };
       })
       .sort((a, b) => b.mtime - a.mtime); // newest first
-    // Once EITHER bound trips, every OLDER entry from that point on is pruned too — never selectively kept
-    // because an individual older file happens to be small enough to "fit" a remaining byte budget. Newest-
-    // first eviction must stay monotonic (no gaps), matching `rotateBackups`'s own `entries.slice(keep)`
-    // shape; a "best fit" policy would let an older file outlive a newer one, which is never the intent.
+
+    // STEP 1 — per-pool COUNT trim (see this function's own "TWO-POOL POLICY" doc above). An opId with no
+    // matching pending_gate_ops row was never added to `protectedOpIds` by the caller, so it lands in the
+    // ORDINARY pool here — unknown/unclassifiable fails toward evictable, never toward protected.
+    const ordinary = entries.filter((e) => !e.protected);
+    const protectedEntries = entries.filter((e) => e.protected);
+    const countSurvivors = new Set<string>();
+    ordinary.slice(0, keep).forEach((e) => countSurvivors.add(e.full));
+    protectedEntries.slice(0, protectedKeep).forEach((e) => countSurvivors.add(e.full));
+
+    // STEP 2 — global BYTE trim across the union of step 1's survivors, newest-first, pool-blind. Iterating
+    // `entries` (still newest-first) in original order: every survivor of step 1 appears before every entry
+    // step 1 already evicted (each pool's own slice keeps a newest-first prefix), so this single pass both
+    // (a) deletes step 1's losers outright and (b) applies the SAME monotonic newest-first byte cutoff to
+    // step 1's survivors the old single-pool code applied to everyone — once the running total would exceed
+    // `maxTotalBytes`, that entry and every remaining (older) survivor are evicted too, no gaps within the
+    // surviving set.
     let runningBytes = 0;
     let cutoffReached = false;
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i]!;
+    for (const entry of entries) {
+      if (!countSurvivors.has(entry.full)) {
+        try { fs.rmSync(entry.full, { force: true }); } catch { /* best-effort */ }
+        continue;
+      }
       if (!cutoffReached) {
-        const wouldExceedCount = i >= keep;
         const wouldExceedBytes = maxTotalBytes > 0 && runningBytes + entry.size > maxTotalBytes;
-        if (wouldExceedCount || wouldExceedBytes) cutoffReached = true;
+        if (wouldExceedBytes) cutoffReached = true;
       }
       if (cutoffReached) {
         try { fs.rmSync(entry.full, { force: true }); } catch { /* best-effort */ }
@@ -123,3 +190,7 @@ export function pruneGateSpills(
     console.warn(`[gate-spill] rotation failed (continuing): ${(err as Error).message}`);
   }
 }
+
+/** Shared empty-set default for `pruneGateSpills`'s `protectedOpIds` param — one frozen instance rather
+ *  than allocating a fresh `new Set()` on every no-protected-ids call. */
+const EMPTY_PROTECTED_OP_IDS: ReadonlySet<string> = new Set();

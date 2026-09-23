@@ -6966,6 +6966,26 @@ export class Db {
   listPendingGateOps(): PendingGateOp[] {
     return (this.db.prepare("SELECT * FROM pending_gate_ops").all() as PendingGateOpRow[]).map(toPendingGateOp);
   }
+  /** Card f55b64af: batched id lookup — the classification half of the gate-output spill retention sweep
+   *  (see `orchestration/gate-spill.ts`'s own doc). A caller holding a list of `.log` filename stems
+   *  (opIds, per `gateSpillPath`'s "filename IS the opId" convention) gets back only the rows that exist,
+   *  in ONE query per chunk — never one query per file. An id with no matching row is simply absent from
+   *  the result; a caller must treat "no row" as unknown/unclassifiable, never as any particular verdict.
+   *  Empty `opIds` is a fast no-op (never sends `WHERE op_id IN ()`, invalid SQL). Chunked defensively at
+   *  300 ids per query — well under SQLite's default host-parameter ceiling (999), which this daemon's own
+   *  retention caps never approach today, but chunking costs nothing and never depends on that staying true. */
+  listPendingGateOpsByOpIds(opIds: string[]): PendingGateOp[] {
+    if (opIds.length === 0) return [];
+    const CHUNK = 300;
+    const out: PendingGateOp[] = [];
+    for (let i = 0; i < opIds.length; i += CHUNK) {
+      const chunk = opIds.slice(i, i + CHUNK);
+      const placeholders = chunk.map(() => "?").join(",");
+      const rows = this.db.prepare(`SELECT * FROM pending_gate_ops WHERE op_id IN (${placeholders})`).all(...chunk) as PendingGateOpRow[];
+      out.push(...rows.map(toPendingGateOp));
+    }
+    return out;
+  }
   /** Boot-time read of every row still owed a reconciliation pass — see SessionService.reconcileOrphanedGateOps
    *  and the schema doc for why this is `surfaced_pending=1 AND state='pending'`, NOT every surviving row:
    *  a fast op that settled cleanly before a crash is `state:'settled'` and must never resurface a synthetic
