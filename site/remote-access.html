@@ -173,6 +173,29 @@
           </div>
 
           <div class="callout reveal">
+            <p class="callout-title"><span class="dot dot-amber"></span> One extra step on each new device</p>
+            <p>
+              Loom's loopback API requires a <strong>local access credential</strong>
+              on every write, even over a tunnel. On the host, <code>loom open</code>
+              appends it for you; a tunnelled browser has never seen it, so the
+              cockpit loads and reads fine but every write fails with a 401. Fix it
+              once per device by opening the URL with the token appended — the
+              browser stores it and strips it from the address bar:
+            </p>
+            <p>
+              <code>https://your-machine.your-tailnet.ts.net/?token=&lt;credential&gt;</code>
+            </p>
+            <p>
+              The credential is the contents of
+              <code>~/.loom/gateway-loopback.key</code> (under
+              <code>LOOM_HOME</code>) on the host running Loom. It's stored per
+              browser origin, so the tailnet URL and
+              <code>http://127.0.0.1:4317</code> each need it once. Treat it like a
+              password: anything holding it can drive the full loopback API.
+            </p>
+          </div>
+
+          <div class="callout reveal">
             <p class="callout-title"><span class="dot dot-phosphor"></span> Why this is the default recommendation</p>
             <p>
               With Serve or SSH, the daemon's listening surface never changes — it

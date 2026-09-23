@@ -163,6 +163,8 @@ Put a tunnel in front that carries the authentication and encryption, and let it
 
 In both cases the tunnel owns auth + transport security and the daemon still only ever sees loopback traffic. (Use the daemon port — `4317` by default, or whatever you set with `--port` / `LOOM_PORT`.)
 
+One step catches people out here: the **local access credential** is required on every write even over a tunnel, and a tunnelled browser has never been handed it — so the cockpit loads and reads fine while every write returns 401. On the host `loom open` appends it for you; on another device, open the URL once with `?token=<credential>` appended (the browser stores it and strips it from the address bar). The credential is the contents of `~/.loom/gateway-loopback.key` under `LOOM_HOME`, it's stored per browser origin, and anything holding it can drive the full loopback API — so treat it like a password.
+
 ### Option B — a direct authenticated bind
 
 If you'd rather not run a tunnel, Loom can bind a non-loopback interface itself. It is **off by default** and stays off until you configure it deliberately:
