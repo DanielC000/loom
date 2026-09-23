@@ -729,6 +729,79 @@ const dir = mkdtempManaged("loom-gr-trunc-");
     }
   }
 
+  // ── (L) Card c1840ffd / docs/decisions/6ffee3e2 (Decision B): THE ANSI CLOSURE. FAIL_NOT_OK_TIER_RE
+  //     (and every other anchored pattern scanLine checks — PASS_LINE_RE, HARNESS_FAIL_WRAPPER_RE,
+  //     HARNESS_NOT_EXECUTED_RE) is anchored at the start of the line, so a leading ANSI/SGR colour escape
+  //     (the shape a real colourised test runner emits, e.g. `\x1b[31mFAIL widget.spec.js\x1b[0m`) used to
+  //     defeat it outright — the decision record's own cited regression scenario. Fixed by stripping ANSI
+  //     once in scanLine before any pattern check. ─────────────────────────────────────────────────────
+  {
+    const RAW_ANSI_FAIL = "\x1b[31mFAIL colored-widget.spec.js > renders correctly\x1b[0m";
+    const CLEAN_FAIL = "FAIL colored-widget.spec.js > renders correctly";
+
+    // (L1) THE FIX ITSELF, hermetic: an ANSI-wrapped FAIL line, fed alone, is recognized by the tier scan
+    // with colour codes stripped from the stored/reported match.
+    {
+      const tracker = createFailingTestTracker();
+      tracker.feed(Buffer.from(`${RAW_ANSI_FAIL}\n`, "utf-8"));
+      check("(L1) THE FIX: an ANSI-coloured FAIL line is recognized by the tier scan, colour codes stripped from the stored match",
+        tracker.result() === CLEAN_FAIL);
+      check("(L1) matchCount() reports exactly 1 for the single ANSI-wrapped FAIL line",
+        tracker.matchCount() === 1);
+    }
+
+    // (L1-neg) NEGATIVE CONTROL: proves ANSI-stripping isn't a vacuous always-match — colour-wrapped prose
+    // matching no tier at all still reports undefined.
+    {
+      const tracker = createFailingTestTracker();
+      tracker.feed(Buffer.from("\x1b[32meverything is green and fine\x1b[0m\n", "utf-8"));
+      check("(L1-neg) negative control: ANSI-wrapped non-failure prose still reports undefined",
+        tracker.result() === undefined);
+    }
+
+    // (L2) DoD-3 — the PASS-line exclusion (card 2f0b2e57) still holds under colour: a coloured PASS line
+    // must be excluded by PASS_LINE_RE (once its own colour codes are stripped), never fall through and
+    // become a FAIL-tier match.
+    {
+      const tracker = createFailingTestTracker();
+      tracker.feed(Buffer.from("\x1b[32mPASS  colored-widget.spec.js > renders correctly\x1b[0m\n", "utf-8"));
+      check("(L2) DoD-3: a coloured PASS line is still excluded (never becomes a match) once ANSI is stripped",
+        tracker.result() === undefined);
+    }
+
+    // (L3) THE ACCEPTANCE BAR, end-to-end through a REAL spawn: a short (well under OUTPUT_TAIL_BYTES) gate
+    // command whose only failure marker is ANSI-wrapped — the decision record's own cited regression
+    // scenario — must report the coloured line as failingTest, while outputTail (nothing was evicted here)
+    // keeps the RAW bytes, colour codes intact: stripping is scan-only, never applied to stored/displayed
+    // raw output.
+    {
+      fs.writeFileSync(path.join(dir, "fail-ansi-short.mjs"),
+        `console.error(${JSON.stringify(RAW_ANSI_FAIL)});\nprocess.exitCode = 1;\n`);
+      const res = await runGateStep("node fail-ansi-short.mjs", dir, 15_000);
+      check("(L3) THE ACCEPTANCE BAR: a coloured FAIL line is reported as failingTest, not lost to the leading escape sequence",
+        res.status === 1 && res.failingTest === CLEAN_FAIL);
+      check("(L3) outputTail keeps the ORIGINAL bytes (colour codes intact) — ANSI-stripping is scan-only, never applied to raw stored/displayed output",
+        res.outputTail === RAW_ANSI_FAIL);
+    }
+
+    // (L4) DoD-3, the CARD'S OWN SPECIFIC DEFECT, end-to-end: the same coloured FAIL line, but with enough
+    // trailing flood to genuinely exceed OUTPUT_TAIL_BYTES — this is exactly "output over 4,096 bytes ...
+    // becomes the literal 'no failure line matched'" from the card body. Content-selection must now recover
+    // the coloured line via the live tracker, never fall through to the honest-miss string.
+    {
+      fs.writeFileSync(path.join(dir, "fail-ansi-flood.mjs"), [
+        `console.error(${JSON.stringify(RAW_ANSI_FAIL)});`,
+        "for (let i = 0; i < 2000; i++) console.log('epilogue noise line ' + i + ' padding padding padding');",
+        "process.exitCode = 1;",
+      ].join("\n"));
+      const res = await runGateStep("node fail-ansi-flood.mjs", dir, 15_000);
+      check("(L4) the flood genuinely exceeds the 4096-byte budget (proves this exercises the lossy-tail/content-selected branch, not (L3)'s untouched-raw-tail one)",
+        res.status === 1);
+      check("(L4) THE CARD'S OWN ACCEPTANCE BAR: outputTail recovers the coloured FAIL line via content-selection, never the honest-miss string",
+        res.outputTail === CLEAN_FAIL);
+    }
+  }
+
   // Card 11737292 — LIVE specimen (op `321a5e6b`'s `[loom:merge-rejected]` nudge): `gate-status.mjs`'s own
   // mocked gate verdict (`outputTail: "FAIL  some_test.mjs"`) leaked, VERBATIM and unindented, into a real
   // gate run's captured stream (via sessions/service.ts's own `[gate opId=…] … passed=false …` diagnostic

@@ -63,6 +63,21 @@ const FAILING_TEST_PATTERNS: RegExp[] = [
   /error TS\d+:.*/,
 ];
 
+/** Strips ANSI/VT100 CSI escape sequences (SGR colour codes — `\x1b[31m`, `\x1b[0m`, `\x1b[1;31m`, etc.)
+ *  from a line before it reaches any of `scanLine`'s anchored patterns below. `FAIL_NOT_OK_TIER_RE`,
+ *  {@link HARNESS_FAIL_WRAPPER_RE}, {@link HARNESS_NOT_EXECUTED_RE}, and {@link PASS_LINE_RE} are all
+ *  anchored at the start of the line (`^\s*...`) — a leading escape sequence (a coloured `FAIL`/`PASS`
+ *  line, the common case for a colourised test runner) defeats every one of them, and `AssertionError.*`/
+ *  `error TS\d+:.*`/`\bUNCAUGHT\b.*`, though unanchored, still lose a colour code embedded mid-line from
+ *  the STORED match text. Only strips CSI sequences (the shape every mainstream colouriser emits); never
+ *  touches the raw captured bytes `outputTail`/`outputFile` retain for display.
+ *  @decision 6ffee3e2 — strip ANSI in `scanLine` BEFORE every anchored/unanchored pattern check, PASS
+ *  included — a coloured PASS line must still hit `PASS_LINE_RE` first, never fall through to a FAIL tier. */
+const ANSI_ESCAPE_RE = /\x1b\[[0-9;]*[a-zA-Z]/g;
+function stripAnsi(line: string): string {
+  return line.includes("\x1b") ? line.replace(ANSI_ESCAPE_RE, "") : line;
+}
+
 /** Discards a bare `FAIL <token>` line (nothing else on it) whose token isn't a real file under
  *  `packages/daemon/test/` — catches a mocked gate verdict's `outputTail` leaking into the real stream via
  *  `test-daemon.mjs`'s own `FAILURES:` epilogue re-echo. A genuine per-file marker never has this bare shape.
@@ -176,24 +191,30 @@ export function createFailingTestTracker(cwd?: string): {
   // both, and re-scanning the same carry line twice would silently inflate its tier's count.
   let carryFlushed = false;
   const scanLine = (line: string): void => {
+    // Card 6ffee3e2 (ANSI closure): strip colour codes ONCE, before every check below — a leading escape
+    // sequence otherwise defeats every anchored pattern (PASS_LINE_RE, HARNESS_FAIL_WRAPPER_RE,
+    // HARNESS_NOT_EXECUTED_RE, FAIL_NOT_OK_TIER_RE) and can shift an unanchored one's match text. Stored
+    // values (lastByPattern/lastHarnessWrapper/etc.) are the STRIPPED text — see stripAnsi's own doc for
+    // why (the raw bytes live on in outputTail/outputFile untouched).
+    const clean = stripAnsi(line);
     // Card 2f0b2e57: a recorded PASS is never a failure, whatever its label says — see PASS_LINE_RE's own
     // doc. Checked before any tier so no tier, anchored or not, can ever win against a PASS line.
-    if (PASS_LINE_RE.test(line)) return;
+    if (PASS_LINE_RE.test(clean)) return;
     // Card 6c84b87b: checked independently of (not instead of) the FAILING_TEST_PATTERNS loop below — a
     // harness wrapper line already also satisfies FAILING_TEST_PATTERNS' own FAIL tier (used for `result()`/
     // `matchCount()` diagnostics), and both trackings must see it.
-    if (HARNESS_FAIL_WRAPPER_RE.test(line)) { lastHarnessWrapper = line.trim(); harnessWrapperCount++; allHarnessWrapperLines.push(lastHarnessWrapper); }
-    if (HARNESS_NOT_EXECUTED_RE.test(line)) notExecutedSeen = true;
+    if (HARNESS_FAIL_WRAPPER_RE.test(clean)) { lastHarnessWrapper = clean.trim(); harnessWrapperCount++; allHarnessWrapperLines.push(lastHarnessWrapper); }
+    if (HARNESS_NOT_EXECUTED_RE.test(clean)) notExecutedSeen = true;
     for (let i = 0; i < FAILING_TEST_PATTERNS.length; i++) {
       const pattern = FAILING_TEST_PATTERNS[i]!;
-      if (pattern.test(line)) {
+      if (pattern.test(clean)) {
         // Card 11737292: a bare `FAIL  <token>` line (nothing else on it) whose token doesn't correspond to
         // a real test file is exactly the shape a test's own mocked/dumped gate verdict produces when it
         // leaks into real stdout — see isUnverifiableBareFailToken's own doc. Discard rather than record: a
         // real per-file marker or check() line never has this shape, so this can never suppress a genuine
         // match, and letting this line match NO tier lets a genuine failure elsewhere still win.
-        if (pattern === FAIL_NOT_OK_TIER_RE && cwd && isUnverifiableBareFailToken(line, cwd)) return;
-        lastByPattern[i] = line.trim(); countByPattern[i] = (countByPattern[i] ?? 0) + 1; return;
+        if (pattern === FAIL_NOT_OK_TIER_RE && cwd && isUnverifiableBareFailToken(clean, cwd)) return;
+        lastByPattern[i] = clean.trim(); countByPattern[i] = (countByPattern[i] ?? 0) + 1; return;
       }
     }
   };
@@ -1063,7 +1084,10 @@ export function classifyGatePhase(step: string | undefined): "typecheck" | "test
  * line's own label text must never win against the PASS check.
  */
 export function extractFailingTest(outputTail: string): string | undefined {
-  const lines = outputTail.split(/\r?\n/).filter((l) => !PASS_LINE_RE.test(l));
+  // Card 6ffee3e2 (ANSI closure): strip colour codes the same way scanLine (createFailingTestTracker)
+  // does — this shares the exact same anchored patterns, so a caller passing a raw ANSI-coloured tail
+  // (the same shape the live scan was fixed for) hits the identical defeat otherwise.
+  const lines = outputTail.split(/\r?\n/).map(stripAnsi).filter((l) => !PASS_LINE_RE.test(l));
   const patterns = FAILING_TEST_PATTERNS;
   for (const pattern of patterns) {
     const hit = lines.find((l) => pattern.test(l));

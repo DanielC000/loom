@@ -23,6 +23,17 @@ Priority once content-selection DOES apply: (1) the front-anchored `FAILURES:` b
 - Do not read a ~16KB tail as evidence something is broken — it means content-selection recovered a real per-file `FAILURES:` block, not that the cap silently grew.
 - Do not apply the ~16KB `FAILURE_BLOCK_CAP_BYTES` bound on a `"pass"` row — a passing step stays capped at the plain ~4KB `OUTPUT_TAIL_BYTES` trailing tail; content-selection is fail-only.
 
+## Decision C: the ANSI gap itself is now CLOSED — `scanLine` strips colour codes before every pattern check (card c1840ffd)
+
+### Narrative
+
+Decision B (above) identified the ANSI gap but deliberately declined to close it — bounding content-selection to the genuinely-lossy case stopped it from making the gap WORSE, but a short gate command's ANSI-wrapped `FAIL` line still lost its test name to a lower-priority tier (or to the honest-miss string, once the run was also large enough to be lossy). Card c1840ffd closes the gap itself: `createFailingTestTracker`'s `scanLine` (`gate-runner.ts`) now strips ANSI/SGR colour escape sequences (`\x1b[...m`) from each line ONCE, before checking `PASS_LINE_RE`, `HARNESS_FAIL_WRAPPER_RE`, `HARNESS_NOT_EXECUTED_RE`, and every `FAILING_TEST_PATTERNS` tier (including `FAIL_NOT_OK_TIER_RE`) — so a leading colour escape no longer defeats any of them. The post-hoc `extractFailingTest` fallback (for a caller holding only a raw string) received the identical fix, since it shares the same pattern set. Stripping applies only to the SCAN and the text `scanLine` stores as a match (`failingTest`/`failTierTest`/etc.) — `outputTail`/`outputFile`, the raw captured bytes a caller/human actually sees, are untouched, so a coloured line is still displayed with its colour codes intact.
+
+### Do not
+
+- Do not strip ANSI from `outputTail`/`outputFile` — only from the text `scanLine` matches/stores; the raw captured output stays byte-identical to what the child actually printed.
+- Do not skip stripping before `PASS_LINE_RE` — a coloured PASS line must still be excluded before it can ever reach a FAIL tier, or the PASS-line exclusion (card 2f0b2e57) silently regresses under colour.
+
 ## Source
 
 Inline comment in `packages/daemon/src/db.ts` (`PendingGateOpVerdict`'s top-of-interface doc, and `gateDetail.stderrTail`'s own field doc): lines 2018-2056 and 2086-2102, as of this tranche's HEAD. Decision B above was originally the JSDoc for `resolveOutputTail` in `packages/daemon/src/orchestration/gate-runner.ts`, lines 625-652 as of tranche 1's HEAD (commit `18bb69e3`); extracted here (same card id) by tranche 2, no wording changed beyond joining wrapped lines and stripping `*` markers.
