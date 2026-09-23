@@ -6,6 +6,7 @@ import type { Db } from "../db.js";
 import { resolveAlias } from "./arg-alias.js";
 import { PROFILE_FIELD_NAMES } from "../profiles/validate.js";
 import { isValidCredentialEnvVarName } from "../keys/credentialSessionEnv.js";
+import { SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 
 /** Roles allowed to set `provisionTo` on a `type:"credential"` ask (card 193de09e Q1) — manager and
  *  platform (the Lead) only. Enforced in `buildQuestionAsk` below so both `question_ask` registrations
@@ -337,6 +338,43 @@ export function questionPullItem(q: Question, db: Db): Record<string, unknown> {
     };
   }
   return { questionId: q.id, title: q.title, type: q.type, chosenOption: q.chosenOption, note: q.note };
+}
+
+/**
+ * Per-pull char budget for {@link pullQuestionsForAgent} (card 91fef05a) — reuses
+ * {@link SPILL_INLINE_BUDGET_CHARS} DIRECTLY (not a fraction of it), the same choice every other
+ * list-shaped tool response in this codebase already makes for its own row-accumulation budget (e.g.
+ * `spillRowsIfLarge`'s callers) — it's already sized with headroom for the surrounding envelope/JSON-
+ * quoting overhead, and a `question_pull` payload's per-row shape is no larger than theirs.
+ */
+export const QUESTION_PULL_BUDGET_CHARS = SPILL_INLINE_BUDGET_CHARS;
+
+/**
+ * `question_pull`'s core: agent-lineage-scoped, BOUNDED, NO-LOSS pull-and-consume (card 91fef05a — see
+ * {@link Db.pullAnsweredQuestionsForAgentBounded}'s own doc for why this can't just spill an overflow to
+ * a scratch file like every other unbounded-response fix in that card). Shared by BOTH `question_pull`
+ * registrations (`mcp/orchestration.ts`'s manager surface, `mcp/platform.ts`'s Lead surface) so the
+ * budgeting logic can never drift between them — mirrors how `buildQuestionAsk`/`cancelQuestionForAgent`
+ * are already shared.
+ *
+ * `sizeOf` is `questionPullItem`'s own SERIALIZED size per row (`JSON.stringify(questionPullItem(q, db)).
+ * length` — consistent with the transcript truncation fix's `serializedLen`, card 91fef05a reviewer
+ * finding 2) — the real cost of what actually reaches the tool-result cap, not an underestimate of it.
+ *
+ * Returns `items` (the projected, consumed rows — what the caller inlines as `questions`) and
+ * `remaining` (answered rows left untouched, still `answered`, for a follow-up pull). `consumedIds` is
+ * for the caller's own nudge-purge (`purgeAnsweredQuestionNudges`) — ONLY the ids actually consumed this
+ * call, never the full answered set, since an un-consumed row's push-nudge is still live and must not be
+ * purged out from under it.
+ */
+export function pullQuestionsForAgent(
+  db: Db, agentId: string, consumedAt: string,
+): { items: Record<string, unknown>[]; consumedIds: string[]; remaining: number } {
+  const { consumed, remaining } = db.pullAnsweredQuestionsForAgentBounded(
+    agentId, consumedAt, QUESTION_PULL_BUDGET_CHARS,
+    (q) => JSON.stringify(questionPullItem(q, db)).length,
+  );
+  return { items: consumed.map((q) => questionPullItem(q, db)), consumedIds: consumed.map((q) => q.id), remaining };
 }
 
 /**

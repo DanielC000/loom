@@ -42,6 +42,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
+const { QUESTION_PULL_BUDGET_CHARS } = await import("../dist/mcp/questionTool.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -116,6 +117,28 @@ try {
   check("(T) the multi-consume pull purged stale nudges for BOTH questions (parity with the manager path)",
     purgeCalls.length === 1 && purgeCalls[0].sessionId === "PL" &&
     purgeCalls[0].ids.includes(askResult.questionId) && purgeCalls[0].ids.includes(second.questionId));
+
+  // ===================== (T2) card 91fef05a: the Lead's question_pull is ALSO bounded/no-loss =====================
+  // Proves the WIRING on this surface too (not just that the shared function exists) — a spilled/removed
+  // budget check here would leave this section red even though the manager surface stayed green.
+  {
+    purgeCalls.length = 0;
+    const bigNote = "P".repeat(2000);
+    const wantCount = Math.ceil(QUESTION_PULL_BUDGET_CHARS / 2000) + 5;
+    const now2 = new Date().toISOString();
+    for (let i = 0; i < wantCount; i++) {
+      db.insertQuestion({
+        id: `q-plat-many-${i}`, sessionId: "PL", projectId: "pHome", title: `plat-${i}`, body: "b",
+        options: null, recommendation: null, state: "answered", chosenOption: null, note: bigNote,
+        createdAt: now2, answeredAt: now2, consumedAt: null,
+      });
+    }
+    const firstBig = await call("question_pull");
+    check("(T2) the Lead's question_pull also returns a SUBSET when the batch is too large", firstBig.questions.length > 0 && firstBig.questions.length < wantCount);
+    check("(T2) remaining > 0 and a note is present", firstBig.remaining === wantCount - firstBig.questions.length && typeof firstBig.note === "string");
+    const secondBig = await call("question_pull");
+    check("(T2) a follow-up pull returns the rest, remaining:0", secondBig.questions.length === firstBig.remaining && secondBig.remaining === 0 && secondBig.note === undefined);
+  }
 
   await client.close();
 

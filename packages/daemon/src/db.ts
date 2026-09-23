@@ -7724,6 +7724,45 @@ export class Db {
     })();
   }
   /**
+   * Bounded, NO-LOSS sibling of {@link pullAnsweredQuestionsForAgent} (card 91fef05a): `question_pull`'s
+   * old unbounded shape could hand back an arbitrarily large `{questions:[...]}` payload — the same
+   * structurally-unbounded-response bug class this card fixed elsewhere — but this tool can't just spill
+   * an overflow to a scratch file like the others, because a row is CONSUMED (flipped, never re-pullable)
+   * the instant it's read here: a spilled pointer the caller's own note-reading misses could silently
+   * drop a live decision (a `type:"permission"` approval, a `type:"credential"` delivery ack) with no way
+   * to ever re-pull it. So this flips to 'consumed' ONLY the oldest-first PREFIX of answered rows whose
+   * caller-supplied `sizeOf` total stays within `budgetChars` — ALWAYS at least one row, even if it alone
+   * exceeds the budget (an oversized single answer is delivered inline, never withheld forever) — and
+   * leaves every other row exactly as 'answered', untouched, for a follow-up pull to see. `sizeOf` lets
+   * the caller (the MCP layer, which alone knows the real `questionPullItem` projection shape) supply the
+   * TRUE serialized per-row cost without this generic DB layer importing anything from mcp/ — the select,
+   * size-based cutoff decision, AND the flip all happen inside ONE transaction, so a row is either fully
+   * consumed-and-returned or left observably 'answered' — never in between, and never racing a concurrent
+   * pull of the SAME agent lineage.
+   */
+  pullAnsweredQuestionsForAgentBounded(
+    agentId: string, consumedAt: string, budgetChars: number, sizeOf: (q: Question) => number,
+  ): { consumed: Question[]; remaining: number } {
+    return this.db.transaction((): { consumed: Question[]; remaining: number } => {
+      const rows = (this.db.prepare(
+        `SELECT q.* FROM questions q JOIN sessions s ON s.id = q.session_id
+         WHERE s.agent_id = ? AND q.state = 'answered' ORDER BY q.answered_at`,
+      ).all(agentId) as Row[]).map(toQuestion);
+      if (rows.length === 0) return { consumed: rows, remaining: 0 };
+      const consumed: Question[] = [];
+      let used = 0;
+      for (const r of rows) {
+        const size = sizeOf(r);
+        if (consumed.length > 0 && used + size > budgetChars) break; // always take >=1
+        consumed.push(r);
+        used += size;
+      }
+      const flip = this.db.prepare("UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ?");
+      for (const r of consumed) flip.run(consumedAt, r.id);
+      return { consumed, remaining: rows.length - consumed.length };
+    })();
+  }
+  /**
    * Whether SESSION `sessionId` itself has ANY still-`pending` question_ask outstanding — the
    * idle-watcher's session-level suppression predicate.
    *

@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { contextWindowForModel, contextPercentFor, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn, type Session, type OrchestrationEvent, type GateType } from "@loom/shared";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem, pageRequests, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, pullQuestionsForAgent, auditRequestItem, pageRequests, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
 import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
 // Card 40f4cae9 — the `fields:[...]` projection carried forward from `tasks_list` (card 23fde5f8): reuse
 // the SAME generic `pickFields` (mcp/tasks.ts) rather than writing a second projector — see that
@@ -3853,10 +3853,15 @@ export class OrchestrationMcpRouter {
           "profile; `detail` names which), \"not_yet_done\" (a target was declared and checked, but the " +
           "live value doesn't match yet — a MEASURED false, never to be confused with \"unknown\"), or " +
           "\"fulfilled\" (it matches). See question_ask's `fulfillmentTarget` param for how to opt in; a \"credential\" entry has {ack} — NEVER " +
-          "the secret itself. Pulling consumes them in one shot (flips them to 'consumed') so they won't " +
-          "be returned again — call this when you reach the point the request was blocking, or after the " +
-          "push nudge tells you one was answered. Returns {questions: [...]} (empty if none are answered " +
-          "yet — a still-'pending' request is NOT returned; keep orchestrating and check back later).",
+          "the secret itself. Pulling CONSUMES an entry (flips it to 'consumed') so it won't be returned " +
+          "again — call this when you reach the point the request was blocking, or after the push nudge " +
+          "tells you one was answered. Returns {questions: [...], remaining}: `remaining` is a count of " +
+          "OTHER answered-but-not-yet-fetched requests — NEVER lost, NEVER consumed, still 'answered' " +
+          "and still re-nudged. This happens ONLY when a single pull's answers would together be too " +
+          "large to return safely; ordinary pulls always return everything in one call (remaining:0). " +
+          "When remaining>0 a `note` also tells you to call question_pull again to fetch the rest — do " +
+          "so; a still-'answered' request is not returned yet, but a still-'pending' one (never answered) " +
+          "never will be — keep orchestrating and check back later for that case instead.",
         inputSchema: strictShape({}),
       },
       async () => {
@@ -3865,15 +3870,21 @@ export class OrchestrationMcpRouter {
         // recycle successor (which reparentQuestions already handles as a fast path).
         const asker = db.getSession(managerSessionId);
         if (!asker) return ok({ error: "session not found" });
-        const answered = db.pullAnsweredQuestionsForAgent(asker.agentId, new Date().toISOString());
+        // card 91fef05a: BOUNDED, NO-LOSS pull — see pullQuestionsForAgent's own doc. `remaining` rows
+        // stay exactly 'answered' (never touched here), so their push-nudges stay live too.
+        const { items, consumedIds, remaining } = pullQuestionsForAgent(db, asker.agentId, new Date().toISOString());
         // Purge any OTHER still-queued answer-nudge for a question this same pull just consumed — a
         // multi-answer batch enqueues one nudge per answer, but this pull drains them all atomically, so
         // every nudge past the first is now stale (card bbc46336 follow-up). Does not touch the nudge for
-        // whichever question drained AS this turn (it already delivered — never queued).
-        if (answered.length > 0) {
-          sessions.purgeAnsweredQuestionNudges(managerSessionId, answered.map((q) => q.id));
+        // whichever question drained AS this turn (it already delivered — never queued), NOR any nudge
+        // for a `remaining` row this pull deliberately left 'answered'.
+        if (consumedIds.length > 0) {
+          sessions.purgeAnsweredQuestionNudges(managerSessionId, consumedIds);
         }
-        return ok({ questions: answered.map((q) => questionPullItem(q, db)) });
+        const note = remaining > 0
+          ? `${remaining} more answered request(s) exist but didn't fit this pull's inline budget — they stay 'answered' (not lost, not re-nudged); call question_pull again to fetch them.`
+          : undefined;
+        return ok(note !== undefined ? { questions: items, remaining, note } : { questions: items, remaining });
       },
     );
 
