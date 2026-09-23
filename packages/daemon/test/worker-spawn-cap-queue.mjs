@@ -422,6 +422,56 @@ try {
     listC = await callC("worker_list");
     check("(12) freeing the slot afterward never resurrects the cancelled entry", !listC.some((w) => w.taskId === taskC[8]));
 
+    // ===================== card 7878e45a: worker_stop({opId}) resolves a real id-PREFIX end-to-end, =====================
+    // ===================== through the ACTUAL manager-facing MCP tool — the exact scenario the card reported =====================
+    // (a manager passes the short id Loom shows everywhere else and used to get a false {cancelled:false}).
+    // Taskless spawns throughout, so this block never touches the taskC[1..14] map the surrounding tests use.
+    const fillerX = await callC("worker_spawn", { agentId: "agentDevC", kickoffPrompt: "GO fillerX — fills the cap for the id-prefix tests below" });
+    check("(prefix setup) fillerX fills the cap (cap=1)", !!fillerX.workerSessionId);
+    worktreesC.push(fillerX.worktreePath);
+
+    const rejPrefix = await callC("worker_spawn", { agentId: "agentDevC", kickoffPrompt: "GO taskless — will be cancelled by an 8-char PREFIX" });
+    check("(prefix setup) a taskless spawn is cap-queued", !!rejPrefix.capQueued);
+    const prefixOpId = rejPrefix.capQueued.opId.slice(0, 8);
+    const prefixCancelResult = await callC("worker_stop", { opId: prefixOpId });
+    check("(33-mcp) worker_stop({opId: <8-char prefix>}) cancels the queued intent — the exact card 7878e45a bug",
+      prefixCancelResult.cancelled === true);
+    listC = await callC("worker_list");
+    check("(33-mcp) the prefix-cancelled entry is gone from worker_list",
+      !listC.some((w) => w.processState === "cap-queued" && w.capQueued?.opId === rejPrefix.capQueued.opId));
+
+    // (34-mcp) an ambiguous prefix, at the SAME real MCP surface — errors naming both candidates, never a
+    // silent pick and never a false "already gone". White-box (same `svc.capQueue` access this file
+    // already uses for the TTL test below): force two queued entries to share an 8-char prefix, since
+    // record() mints a real randomUUID() and two of those colliding is not otherwise constructible.
+    const rejAmbA = await callC("worker_spawn", { agentId: "agentDevC", kickoffPrompt: "GO taskless AMB A" });
+    const rejAmbB = await callC("worker_spawn", { agentId: "agentDevC", kickoffPrompt: "GO taskless AMB B" });
+    check("(34-mcp setup) both AMB entries are cap-queued", !!rejAmbA.capQueued && !!rejAmbB.capQueued);
+    const AMB_A = "feedface-0000-4000-8000-00000000000a", AMB_B = "feedface-0000-4000-8000-00000000000b";
+    let mutatedA = false, mutatedB = false;
+    for (const [, e] of svc.capQueue.entries) {
+      if (e.opId === rejAmbA.capQueued.opId) { e.opId = AMB_A; mutatedA = true; }
+      else if (e.opId === rejAmbB.capQueued.opId) { e.opId = AMB_B; mutatedB = true; }
+    }
+    check("(34-mcp setup) both queued entries were found + mutated to share prefix 'feedface'", mutatedA && mutatedB);
+
+    const ambResult = await callC("worker_stop", { opId: "feedface" });
+    check("(34-mcp) an ambiguous 8-char prefix errors naming BOTH candidate ids, never a silent pick",
+      typeof ambResult.error === "string" && ambResult.error.includes("ambiguous") && ambResult.error.includes(AMB_A) && ambResult.error.includes(AMB_B));
+    listC = await callC("worker_list");
+    check("(34-mcp) the ambiguous cancel touched NEITHER candidate — both still cap-queued",
+      listC.filter((w) => w.processState === "cap-queued").length === 2);
+
+    // Clean up (by FULL crafted id, proving full-id resolution still works even while its own prefix is
+    // ambiguous among siblings — mirrors Section B's (35)) so nothing lingers into (13) below.
+    const cleanA = await callC("worker_stop", { opId: AMB_A });
+    const cleanB = await callC("worker_stop", { opId: AMB_B });
+    check("(prefix cleanup) both crafted entries cancel cleanly by their FULL id", cleanA.cancelled === true && cleanB.cancelled === true);
+    await retireAndDrain(fillerX.workerSessionId);
+    listC = await callC("worker_list");
+    check("(prefix cleanup) the cap-queue is empty and the cap is free again before (13)",
+      !listC.some((w) => w.processState === "cap-queued") && !listC.some((w) => w.processState === "live"));
+
     // ===================== (13) a PAUSED manager's cap-queue is left untouched by a drain (not dropped, not fired) =====================
     const spawnC10 = await callC("worker_spawn", { taskId: taskC[10], agentId: "agentDevC", kickoffPrompt: "GO C10, refills the cap" });
     check("(13 setup) taskC10 fills the cap again", !!spawnC10.workerSessionId);
@@ -734,10 +784,82 @@ try {
     reg3.takeOldest("mgrZ")?.opId === eZ3.opId);
 
   const eZ5 = reg3.record("mgrZ", "agentZ", "tZ5", "kickoff Z5");
-  check("(16) cancel() refuses a DIFFERENT manager's opId (ownership-scoped)", reg3.cancel("someOtherMgr", eZ5.opId) === false);
+  check("(16) cancel() refuses a DIFFERENT manager's opId (ownership-scoped)", reg3.cancel("someOtherMgr", eZ5.opId).outcome === "not-cancelled");
   check("(16) the wrongly-scoped cancel left the entry in place", reg3.listByManager("mgrZ").some((e) => e.opId === eZ5.opId));
-  check("(16) cancel() by the OWNING manager removes it", reg3.cancel("mgrZ", eZ5.opId) === true);
-  check("(16) a repeat cancel of an already-gone opId is a safe no-op (false, not a throw)", reg3.cancel("mgrZ", eZ5.opId) === false);
+  check("(16) cancel() by the OWNING manager removes it", reg3.cancel("mgrZ", eZ5.opId).outcome === "cancelled");
+  const recancelZ5 = reg3.cancel("mgrZ", eZ5.opId);
+  check("(16) a repeat cancel of an already-gone opId is a safe no-op (not-cancelled, not a throw)", recancelZ5.outcome === "not-cancelled");
+  check("(16) a repeat cancel by FULL id (already-cancelled, not popped/reaped) reports reason 'not-found'", recancelZ5.reason === "not-found");
+
+  // ===================== card 7878e45a: cancel() resolves an id-PREFIX, distinguishes ambiguous, and =====================
+  // ===================== reports WHY a gone opId is gone when the registry can tell (already-fired/reaped) =====================
+  const reg6 = new CapQueueRegistry(() => fakeNow);
+  const eV1 = reg6.record("mgrV", "agentV", "tV1", "kickoff V1");
+
+  // (33) an unambiguous PREFIX of a real opId cancels the queued intent (the exact bug card 7878e45a
+  // reported: worker_stop({opId: <8-char prefix>}) used to fall through to a false {cancelled:false}).
+  const prefixV1 = eV1.opId.slice(0, 8);
+  const prefixCancel = reg6.cancel("mgrV", prefixV1);
+  check("(33) an unambiguous 8-char PREFIX cancels the queued entry (outcome:'cancelled')", prefixCancel.outcome === "cancelled");
+  check("(33) the entry is actually gone from the queue", !reg6.listByManager("mgrV").some((e) => e.opId === eV1.opId));
+
+  // (34) an AMBIGUOUS prefix — two of this manager's own queued entries share one — errors naming both
+  // candidate ids, rather than silently picking one or falling through to a false not-found.
+  const eV2 = reg6.record("mgrV", "agentV", "tV2", "kickoff V2");
+  const eV3 = reg6.record("mgrV", "agentV", "tV3", "kickoff V3");
+  // White-box (TS `private` erased at runtime — same pattern this file already uses for `entries`):
+  // force a shared 8-char prefix, since record() mints a real randomUUID() and two of those colliding on
+  // their first 8 chars is not something a test can reliably construct any other way.
+  const rawV2 = reg6.entries.get("tV2");
+  const rawV3 = reg6.entries.get("tV3");
+  rawV2.opId = "feedface-0000-4000-8000-00000000000a";
+  rawV3.opId = "feedface-0000-4000-8000-00000000000b";
+  const ambiguousCancel = reg6.cancel("mgrV", "feedface");
+  check("(34) an ambiguous 8-char prefix returns outcome:'ambiguous'", ambiguousCancel.outcome === "ambiguous");
+  check("(34) the ambiguous result names BOTH candidate ids",
+    ambiguousCancel.ids?.includes(rawV2.opId) && ambiguousCancel.ids?.includes(rawV3.opId));
+  check("(34) an ambiguous cancel touches NEITHER candidate — both still queued",
+    reg6.listByManager("mgrV").some((e) => e.opId === rawV2.opId) && reg6.listByManager("mgrV").some((e) => e.opId === rawV3.opId));
+
+  // (35) full id still works (regression) — unambiguous even though it happens to share the same
+  // 8-char prefix as another live entry, since resolveIdPrefix's exact-match check always wins first.
+  const fullIdCancel = reg6.cancel("mgrV", rawV2.opId);
+  check("(35) the FULL id still resolves even while its own 8-char prefix is ambiguous among siblings", fullIdCancel.outcome === "cancelled");
+  check("(35) only V2 was removed — V3 (the OTHER ambiguous sibling) is untouched", reg6.listByManager("mgrV").some((e) => e.opId === rawV3.opId));
+
+  // (36) reason:"already-fired" — popped via takeOldestOrReaped (what maybeDrainCapQueue's auto-fire uses).
+  // NOTE: reg6.cancel() below must use rawV3.opId (the internal entry's CURRENT opId, post-mutation), not
+  // eV3.opId — record()'s returned projection is a snapshot taken BEFORE the (34)/(35) white-box mutation
+  // above, so eV3.opId still holds the entry's ORIGINAL (pre-mutation) randomUUID.
+  const eV4 = reg6.record("mgrV", "agentV", "tV4", "kickoff V4");
+  const poppedV3 = reg6.takeOldestOrReaped("mgrV").entry; // pops V3 (still the oldest live entry) — simulates an auto-fire attempt
+  check("(36 setup) V3 (the mutated-opId entry) is what actually got popped", poppedV3?.opId === rawV3.opId);
+  const firedCancel = reg6.cancel("mgrV", rawV3.opId);
+  check("(36) cancelling an opId already popped for auto-fire reports reason:'already-fired'",
+    firedCancel.outcome === "not-cancelled" && firedCancel.reason === "already-fired");
+
+  // (37) reason:"reaped" — aged out past the TTL via prune() (never popped for a fire attempt at all).
+  const staleAt = new Date(fakeNow - CAP_QUEUE_TTL_MS - 1000).toISOString();
+  reg6.entries.get("tV4").queuedAt = staleAt; // white-box: simulate TTL lapse without a real 30-min wait
+  reg6.listByManager("mgrV"); // any read path prunes — this is what actually reaps V4
+  const reapedCancel = reg6.cancel("mgrV", eV4.opId);
+  check("(37) cancelling a TTL-reaped opId reports reason:'reaped'",
+    reapedCancel.outcome === "not-cancelled" && reapedCancel.reason === "reaped");
+
+  // (38) a genuinely unknown opId (never existed) reports reason:'not-found', not a fabricated distinction.
+  const unknownCancel = reg6.cancel("mgrV", "00000000-0000-4000-8000-000000000000");
+  check("(38) a genuinely unknown opId reports reason:'not-found'",
+    unknownCancel.outcome === "not-cancelled" && unknownCancel.reason === "not-found");
+
+  // requeueFront undoes an "already-fired" marking — a transient drain failure puts the entry BACK on the
+  // queue, so it's no longer "gone" and a subsequent cancel must resolve it live again, not report a stale reason.
+  const eV5 = reg6.record("mgrV", "agentV", "tV5", "kickoff V5");
+  const takenV5 = reg6.takeOldestOrReaped("mgrV").entry;
+  check("(requeueFront setup) V5 was actually popped", takenV5?.opId === eV5.opId);
+  reg6.requeueFront(takenV5);
+  const requeuedCancel = reg6.cancel("mgrV", eV5.opId);
+  check("(requeueFront) after being requeued, the SAME opId cancels live again — not a stale 'already-fired'",
+    requeuedCancel.outcome === "cancelled");
 
   // (27)-(29): takeOldestOrReaped — the primitive maybeDrainCapQueue's TTL-reap notice (card 5ab3c664 Part 2) is built on.
   const reg4 = new CapQueueRegistry(() => fakeNow);

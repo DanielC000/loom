@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { resolveIdPrefix } from "../id-prefix.js";
 
 /**
  * Externally-visible projection of a cap-rejected worker_spawn intent — surfaced read-only via
@@ -22,6 +23,21 @@ export interface CapQueuedSpawn {
 export const CAP_QUEUE_TTL_MS = 30 * 60_000;
 /** Hard bound — oldest entry evicted on overflow, so a runaway retry loop can't grow this unboundedly. Exported for tests. */
 export const CAP_QUEUE_MAX = 200;
+
+/**
+ * Outcome of {@link CapQueueRegistry.cancel} (card 7878e45a) — mirrors `gate_cancel`/`gate_status`'s own
+ * found/ambiguous/none shape (both built on the SAME {@link resolveIdPrefix}), plus a THIRD
+ * not-cancelled reason this registry — unlike a merge/worker gate op, which always leaves a durable
+ * `pending_gate_ops` tombstone behind — can SOMETIMES tell apart from a bare "never existed": whether the
+ * opId popped for an auto-fire attempt (`"already-fired"`) or aged out past the TTL (`"reaped"`),
+ * recovered from the bounded {@link CapQueueRegistry.removedReasons} record. Collapses to `"not-found"`
+ * for anything genuinely unknown, or aged out of THAT bounded record too — never inventing a
+ * distinction the registry can't actually make.
+ */
+export type CapQueueCancelResult =
+  | { outcome: "cancelled" }
+  | { outcome: "ambiguous"; ids: string[] }
+  | { outcome: "not-cancelled"; reason: "not-found" | "already-fired" | "reaped" };
 const KICKOFF_LABEL_MAX = 120;
 
 /**
@@ -71,10 +87,26 @@ function toPublic(e: CapQueueEntry): CapQueuedSpawn {
 export class CapQueueRegistry {
   private readonly entries = new Map<string, CapQueueEntry>();
 
+  /** Bounded record of WHY a no-longer-live opId is gone — {@link cancel}'s only source for telling
+   *  `"already-fired"`/`"reaped"` apart from a genuinely unknown opId (see {@link CapQueueCancelResult}'s
+   *  own doc). Keyed by full opId, scoped by `managerSessionId` so one manager can never learn about
+   *  another's removed entries. Sized to {@link CAP_QUEUE_MAX} (oldest evicted first) so it can never
+   *  grow past the live registry's own bound. {@link requeueFront} deletes an entry's record back out the
+   *  moment it goes back onto the queue (a transient drain failure) — it's no longer "gone" at that point. */
+  private readonly removedReasons = new Map<string, { managerSessionId: string; reason: "already-fired" | "reaped" }>();
+
   /** `now` is injectable — real `Date.now` in prod, a fake clock in tests (so TTL reap is testable
    *  without a real 30-minute wait). Defaults to `Date.now`, so every existing/production construction
    *  (`new CapQueueRegistry()`) is byte-identical. */
   constructor(private readonly now: () => number = Date.now) {}
+
+  private markRemoved(e: CapQueueEntry, reason: "already-fired" | "reaped"): void {
+    if (this.removedReasons.size >= CAP_QUEUE_MAX) {
+      const oldestKey = this.removedReasons.keys().next().value;
+      if (oldestKey !== undefined) this.removedReasons.delete(oldestKey);
+    }
+    this.removedReasons.set(e.opId, { managerSessionId: e.managerSessionId, reason });
+  }
 
   /** Returns whatever this call actually reaped (across every manager) — {@link takeOldestOrReaped} uses
    *  this to notice an entry that aged out for ITS OWN manager before ever being drained (card 5ab3c664
@@ -85,6 +117,7 @@ export class CapQueueRegistry {
     for (const [key, e] of this.entries) {
       if (nowMs - Date.parse(e.queuedAt) >= CAP_QUEUE_TTL_MS) {
         this.entries.delete(key);
+        this.markRemoved(e, "reaped");
         reaped.push(e);
       }
     }
@@ -162,6 +195,7 @@ export class CapQueueRegistry {
     for (const [key, e] of this.entries) {
       if (e.managerSessionId === managerSessionId) {
         this.entries.delete(key);
+        this.markRemoved(e, "already-fired");
         return e;
       }
     }
@@ -182,6 +216,7 @@ export class CapQueueRegistry {
     for (const [key, e] of this.entries) {
       if (e.managerSessionId === managerSessionId) {
         this.entries.delete(key);
+        this.markRemoved(e, "already-fired");
         return { entry: e, reapedForManager };
       }
     }
@@ -196,6 +231,9 @@ export class CapQueueRegistry {
    * "reinsert at front" primitive. Keyed the same way `record()` would key it.
    */
   requeueFront(entry: CapQueueEntry): void {
+    // It's back on the queue — no longer "gone", so undo the `takeOldest`/`takeOldestOrReaped` marking
+    // above, or a cancel() against its opId right after would wrongly report "already-fired".
+    this.removedReasons.delete(entry.opId);
     const key = entry.taskId ?? `taskless:${entry.agentId}:${entry.queuedAt}:${randomUUID()}`;
     const rest = [...this.entries];
     this.entries.clear();
@@ -223,16 +261,33 @@ export class CapQueueRegistry {
     return count;
   }
 
-  /** Cancel one queued entry by opId, scoped to the calling manager (never lets a manager cancel another
-   *  manager's queued spawn). Returns whether an entry was actually found+removed. */
-  cancel(managerSessionId: string, opId: string): boolean {
-    for (const [key, e] of this.entries) {
-      if (e.opId === opId && e.managerSessionId === managerSessionId) {
-        this.entries.delete(key);
-        return true;
-      }
+  /**
+   * Cancel one queued entry, scoped to the calling manager (never lets a manager cancel — or learn
+   * anything about — another manager's queued spawn or removed-entry history). `opId` accepts the FULL id
+   * OR an unambiguous id-PREFIX among THIS manager's own still-LIVE entries — mirrors `gate_cancel`/
+   * `gate_status`'s shared {@link resolveIdPrefix} (card 7878e45a: before this, only an exact full id ever
+   * matched here, so the short 8-char id Loom displays everywhere else — `gate_status`, `gate_cancel`,
+   * `tasks_get`, `worker_spawn`'s own `taskId` — silently fell through to a false "already gone" read on
+   * this ONE tool). A live match is cancelled outright, no `removedReasons` bookkeeping needed (it was
+   * never "gone"). Otherwise, since a gone entry has nothing left to prefix-resolve against, this falls
+   * back to an EXACT-opId lookup in the bounded {@link removedReasons} record for why — `"already-fired"`
+   * or `"reaped"` — collapsing to `"not-found"` for a wrong owner, a genuinely unknown opId, or one aged
+   * out of that bounded record too.
+   */
+  cancel(managerSessionId: string, opId: string): CapQueueCancelResult {
+    this.prune(this.now());
+    const candidates = [...this.entries.entries()]
+      .filter(([, e]) => e.managerSessionId === managerSessionId)
+      .map(([key, e]) => ({ id: e.opId, key }));
+    const r = resolveIdPrefix(candidates, opId);
+    if (r.kind === "found") {
+      this.entries.delete(r.record.key);
+      return { outcome: "cancelled" };
     }
-    return false;
+    if (r.kind === "ambiguous") return { outcome: "ambiguous", ids: r.ids };
+    const removed = this.removedReasons.get(opId);
+    if (removed && removed.managerSessionId === managerSessionId) return { outcome: "not-cancelled", reason: removed.reason };
+    return { outcome: "not-cancelled", reason: "not-found" };
   }
 }
 

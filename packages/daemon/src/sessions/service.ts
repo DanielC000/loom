@@ -68,7 +68,7 @@ import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapsh
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
-import { CapQueueRegistry, CapQueueRejectedError, CAP_QUEUE_TTL_MS, type CapQueuedSpawn } from "../orchestration/cap-queue.js";
+import { CapQueueRegistry, CapQueueRejectedError, CAP_QUEUE_TTL_MS, type CapQueuedSpawn, type CapQueueCancelResult } from "../orchestration/cap-queue.js";
 import { readFailedNamesForOp } from "../orchestration/gate-timing-band.js";
 import { deferredTriggerNotice } from "../orchestration/deferred-trigger-notice.js";
 import { mergeConfigOverride, validateAgentProjectConfigOverride } from "../mcp/platform.js";
@@ -7032,11 +7032,14 @@ export class SessionService {
    * {@link stopWorker} for an intent that never got a real session/pty at all (a queued entry's
    * `sessionId` is null, so `stopWorker` has nothing to stop). Ownership-scoped exactly like every other
    * worker_* write (a manager can only cancel its OWN queued entries — enforced inside
-   * {@link CapQueueRegistry.cancel}). Returns whether an entry was actually found+removed; false is not an
-   * error — the entry may already have auto-fired or TTL-reaped, which the caller should treat as "nothing
-   * left to cancel," not a failure.
+   * {@link CapQueueRegistry.cancel}). `opId` accepts the FULL id OR an unambiguous id-prefix (card
+   * 7878e45a — see {@link CapQueueRegistry.cancel}'s own doc). Returns a {@link CapQueueCancelResult}:
+   * `"cancelled"` on success; `"ambiguous"` (naming the candidates) for a prefix matching more than one of
+   * this manager's own queued entries; `"not-cancelled"` is not an error — the entry may already have
+   * auto-fired or TTL-reaped (named in `reason` when the registry can tell), or the opId may simply be
+   * wrong — the caller should treat any of these as "nothing left to cancel," not a failure.
    */
-  cancelCapQueuedSpawn(managerSessionId: string, opId: string): boolean {
+  cancelCapQueuedSpawn(managerSessionId: string, opId: string): CapQueueCancelResult {
     return this.capQueue.cancel(managerSessionId, opId);
   }
 
