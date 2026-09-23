@@ -988,7 +988,7 @@ function deriveBatchGateVerdict(
  * whole-suite transient auto-retry is indistinguishable from a clean pass here today — this classifier
  * cannot see that one sub-case until card 3e7378d0 closes it.
  */
-function isProtectedGateSpillVerdict(op: Pick<PendingGateOp, "verdict" | "verdictPayload">): boolean {
+export function isProtectedGateSpillVerdict(op: Pick<PendingGateOp, "verdict" | "verdictPayload">): boolean {
   if (op.verdict === "fail" || op.verdict === "error") return true;
   if (op.verdict === "pass") {
     const payload = op.verdictPayload;
@@ -1008,17 +1008,23 @@ function isProtectedGateSpillVerdict(op: Pick<PendingGateOp, "verdict" | "verdic
  * corrupt row or a locked file are real possibilities) degrades to an EMPTY protected set — today's
  * behavior, unchanged — rather than letting a lookup bug block the prune (a spill directory that's never
  * swept is a real, worse failure mode than one sweep classifying everything as ordinary for a turn).
+ * `dir`/`keep`/`protectedKeep` all default to the real production constants (every production call site
+ * passes none of them), overridable so a test can point this at a throwaway directory with a small cap
+ * instead of the real LOOM_HOME/gate-output at the real 100/25 caps — mirrors `pruneGateSpills`'s own
+ * injectable params exactly.
  */
-function pruneGateSpillsClassified(db: Db): void {
+export function pruneGateSpillsClassified(
+  db: Db, dir: string = GATE_SPILL_DIR, keep: number = GATE_SPILL_RETAIN_COUNT, protectedKeep: number = GATE_SPILL_PROTECTED_RETAIN_COUNT,
+): void {
   let protectedOpIds: ReadonlySet<string> = new Set();
   try {
-    const opIds = listGateSpillOpIds(GATE_SPILL_DIR);
+    const opIds = listGateSpillOpIds(dir);
     const rows = db.listPendingGateOpsByOpIds(opIds);
     protectedOpIds = new Set(rows.filter(isProtectedGateSpillVerdict).map((r) => r.opId));
   } catch (err) {
     console.warn(`[gate-spill] classification lookup failed (degrading to all-ordinary, continuing): ${(err as Error).message}`);
   }
-  pruneGateSpills(GATE_SPILL_DIR, GATE_SPILL_RETAIN_COUNT, GATE_SPILL_MAX_TOTAL_BYTES, protectedOpIds, GATE_SPILL_PROTECTED_RETAIN_COUNT);
+  pruneGateSpills(dir, keep, GATE_SPILL_MAX_TOTAL_BYTES, protectedOpIds, protectedKeep);
 }
 
 /** @decision 7d492f8b — recovers a settled gate/merge op's verdict from durable audit events when its
