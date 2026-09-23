@@ -8,7 +8,7 @@ import {
   type Session, type StopMode, type OrchestrationEvent, type Task, type Project,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
-  type GatesActive, type GateRun, type GateType, type CompanionRoute,
+  type GatesActive, type GateRun, type GateType, type CompanionRoute, type ProjectMemoryEntry,
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict, MergeReconcileWedgeEntry } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
@@ -41,7 +41,7 @@ import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from
 import { listCompanionMemories, readCompanionMemory } from "../skills/companion-memory-store.js";
 import { listSkills as listSkillStore } from "../skills/store.js";
 import { buildFramedMemoryRecall } from "../companion/memory-recall.js";
-import { retrieveProjectMemoryForKickoff } from "./project-memory-recall.js";
+import { retrieveProjectMemoryForKickoff, pinnedPoolIdentityInput } from "./project-memory-recall.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { CodescapeSupervisor } from "../codescape/supervisor.js";
 import { resolveCodescapeLastIngested } from "../codescape/manifest.js";
@@ -2046,11 +2046,14 @@ export class SessionService {
    */
   private readonly platformMessageDedupe = new Map<string, { result: { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string; replacedBy?: string }; atMs: number }>();
   private static readonly PLATFORM_MESSAGE_DEDUP_TTL_MS = 5 * 60_000;
-  // @decision ea648f89 — resume-half memory-recall dedup gate; hash the framed block and compare against
-  // the digest persisted on the session row — never an in-memory cache, since self-hosting restarts on
-  // every merge touching packages/daemon/src/**, which is routine, not rare.
-  private stampProjectMemoryDigest(sessionId: string, framed: string | null): void {
-    this.db.setLastProjectMemoryDigest(sessionId, framed ? createHash("sha256").update(framed).digest("hex") : null);
+  // @decision ea648f89 — resume-half memory-recall dedup gate; compare against a digest persisted on the
+  // session row — never an in-memory cache, since self-hosting restarts on every merge touching
+  // packages/daemon/src/**, which is routine, not rare.
+  // Card e1864a31 — hash the PINNED POOL's id+version identity (pinnedPoolIdentityInput), never the
+  // rendered text — see that function's own doc for why a rendered-text key self-perpetuates a resend
+  // loop once card 6def8bf4's fairness rotation kicks in.
+  private stampProjectMemoryDigest(sessionId: string, allPinned: ProjectMemoryEntry[]): void {
+    this.db.setLastProjectMemoryDigest(sessionId, createHash("sha256").update(pinnedPoolIdentityInput(allPinned)).digest("hex"));
   }
   /** Companion-memory sibling of {@link stampProjectMemoryDigest} — see the gate's doc comment above. */
   private stampCompanionMemoryDigest(sessionId: string, framed: string | null): void {
@@ -2486,7 +2489,8 @@ export class SessionService {
         : composedStartupPrompt;
       // Card ea648f89: stamp the dedup map so this session's FIRST resume compares against what this fresh
       // spawn just showed it, instead of treating "no prior digest" as license to redundantly re-inject.
-      this.stampProjectMemoryDigest(session.id, projectMemoryFramed);
+      // Card e1864a31: stamped from the pinned POOL, not projectMemoryFramed — see stampProjectMemoryDigest.
+      this.stampProjectMemoryDigest(session.id, this.db.listPinnedProjectMemory(project.id));
       // Card f9b47cd1: a profile can confer role "worker" here too (PROFILE_SPAWNABLE_ROLES) — this path
       // never runs in a worktree/has a task, so it names as a TASKLESS worker ("adhoc" segment); every
       // other role (incl. undefined ⇒ "Plain/run") uses the fixed per-role tag.
@@ -2612,8 +2616,9 @@ export class SessionService {
           );
           const projectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, prompt ?? startupPrompt ?? "");
           // Card ea648f89: stamp the dedup map so this manager's FIRST resume compares against what this
-          // fresh spawn just showed it (see stampProjectMemoryDigest's own doc).
-          this.stampProjectMemoryDigest(session.id, projectMemoryFramed);
+          // fresh spawn just showed it (see stampProjectMemoryDigest's own doc). Card e1864a31: stamped
+          // from the pinned POOL, not projectMemoryFramed.
+          this.stampProjectMemoryDigest(session.id, this.db.listPinnedProjectMemory(project.id));
           return projectMemoryFramed ? appendMemoryRecallToStartupPrompt(scheduled ?? "", projectMemoryFramed) : scheduled;
         })(),
         role,
@@ -3176,14 +3181,20 @@ export class SessionService {
     }
     // @decision ea648f89 — companion-recall sibling above: same dedup gate for project-memory notes —
     // compare the digest against the one persisted on the session row and skip when unchanged.
+
+    // Card e1864a31: the comparison itself is CHEAP and non-mutating — pinnedPoolIdentityInput reads only
+    // the pinned pool's id+version identity, never rendering or touching retrieval stats. Only on a
+    // genuine pool change do we fall through to retrieveProjectMemoryForKickoff (which renders, touches
+    // lastRetrievedAt, and logs) — a skip therefore touches nothing, closing the self-perpetuating resend
+    // loop a rendered-text/included-set key produced once card 6def8bf4's rotation fired on every check.
     {
-      const boundTask = session.taskId ? this.db.getTask(session.taskId) : undefined;
-      const kickoffText = boundTask ? `${boundTask.title}\n${boundTask.body}` : (agent?.startupPrompt ?? "");
-      const projectRecall = retrieveProjectMemoryForKickoff(this.db, session.projectId, kickoffText);
-      const digest = projectRecall ? createHash("sha256").update(projectRecall).digest("hex") : null;
-      if (digest !== this.db.getLastProjectMemoryDigest(session.id)) {
+      const poolIdentity = createHash("sha256").update(pinnedPoolIdentityInput(this.db.listPinnedProjectMemory(session.projectId))).digest("hex");
+      if (poolIdentity !== this.db.getLastProjectMemoryDigest(session.id)) {
+        const boundTask = session.taskId ? this.db.getTask(session.taskId) : undefined;
+        const kickoffText = boundTask ? `${boundTask.title}\n${boundTask.body}` : (agent?.startupPrompt ?? "");
+        const projectRecall = retrieveProjectMemoryForKickoff(this.db, session.projectId, kickoffText);
         if (projectRecall) this.pty.enqueueStdin(session.id, projectRecall, "system");
-        this.db.setLastProjectMemoryDigest(session.id, digest);
+        this.db.setLastProjectMemoryDigest(session.id, poolIdentity);
       }
     }
     // Live-flip re-drive (card 225559e5): this recipient just transitioned to live, so re-drive any durable
@@ -5696,7 +5707,8 @@ export class SessionService {
     const forkKickoffText = forkBoundTask ? `${forkBoundTask.title}\n${forkBoundTask.body}` : (agent?.startupPrompt ?? "");
     const forkProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, forkKickoffText);
     if (forkProjectMemoryFramed) this.pty.enqueueStdin(session.id, forkProjectMemoryFramed, "system");
-    this.stampProjectMemoryDigest(session.id, forkProjectMemoryFramed);
+    // Card e1864a31: stamped from the pinned POOL, not forkProjectMemoryFramed.
+    this.stampProjectMemoryDigest(session.id, this.db.listPinnedProjectMemory(project.id));
     return { ...session, processState: "live" };
   }
 
@@ -6461,7 +6473,8 @@ export class SessionService {
         // spawn path); null (no notes) ⇒ byte-identical to today. Card ea648f89: stamp the dedup map so this
         // worker's FIRST resume compares against what this fresh spawn just showed it.
         workerProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, opts.kickoffPrompt);
-        this.stampProjectMemoryDigest(worker.id, workerProjectMemoryFramed);
+        // Card e1864a31: stamped from the pinned POOL, not workerProjectMemoryFramed.
+        this.stampProjectMemoryDigest(worker.id, this.db.listPinnedProjectMemory(project.id));
         // Card badba5a8: computed ONCE, before the spawn call, so both the composition inside it and the
         // observability event after it (only fired on a SUCCESSFUL spawn — see the catch below) read the
         // SAME result. Card bed49000: `taskTitle` (captured above, tasked spawns only — null for a taskless
@@ -10562,7 +10575,8 @@ export class SessionService {
           console.warn(`[sessions] recycled worker ${old.id} has a stale repoKey (${e.repoKey}) not in project ${project.id}'s registry — omitting the repo block from its successor's prompt`);
         }
         const recycleProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, framed);
-        this.stampProjectMemoryDigest(fresh.id, recycleProjectMemoryFramed);
+        // Card e1864a31: stamped from the pinned POOL, not recycleProjectMemoryFramed.
+        this.stampProjectMemoryDigest(fresh.id, this.db.listPinnedProjectMemory(project.id));
         // CR blocking fix (card 088afc94): same reasoning as resume() — a recycle reuses the OLD worker's
         // worktree, so its codescape registration is exactly as stale/lost across a serve restart as a plain
         // resume's would be. Fire-and-forget + idempotent; see resume()'s identical call for the full doc.
@@ -11275,7 +11289,8 @@ export class SessionService {
       // today. Stamp the dedup map (card ea648f89) so this recycled manager's FIRST resume compares against
       // what this fresh spawn just showed it.
       const recycleManagerProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, continuationPrompt);
-      this.stampProjectMemoryDigest(fresh.id, recycleManagerProjectMemoryFramed);
+      // Card e1864a31: stamped from the pinned POOL, not recycleManagerProjectMemoryFramed.
+      this.stampProjectMemoryDigest(fresh.id, this.db.listPinnedProjectMemory(project.id));
       this.pty.spawn({
         sessionId: fresh.id,
         cwd: fresh.cwd,

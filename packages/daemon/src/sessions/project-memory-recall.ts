@@ -225,6 +225,22 @@ function sortPinnedByRecency(entries: ProjectMemoryEntry[]): ProjectMemoryEntry[
   });
 }
 
+/** Card e1864a31 — the resume-time dedup gate's identity input: the PINNED POOL's own id+version pairs,
+ *  order-independent (sorted). {@link sortPinnedByRecency}'s own fairness rotation reorders/truncates this
+ *  SAME pool after every real delivery, so a key built from rendered text or from the post-truncation
+ *  included set changes on every render once anything has ever been delivered once, even with zero further
+ *  writes (an unbounded resend loop, not a one-off) — a key over the pool's members alone is invariant
+ *  under rotation/truncation and changes only when a pinned note is added/removed/edited.
+ *
+ *  Deliberately excludes the related (FTS) tier: its query text differs between a fresh spawn (kickoff
+ *  prompt) and a resume (bound task / agent.startupPrompt), so folding it in would make the very first
+ *  resume after every spawn mismatch spuriously with zero real changes. Accepted cost: a project with NO
+ *  pinned notes gets no resume-time re-injection when only its related matches change — it still gets the
+ *  related tier at every fresh spawn/fork/recycle, which stamp unconditionally and never consult this key. */
+export function pinnedPoolIdentityInput(allPinned: ProjectMemoryEntry[]): string {
+  return JSON.stringify(allPinned.map((m) => `${m.id}@v${m.version}`).sort());
+}
+
 /** Card 738568b6 — greedy PREFIX pack of the RELATED tier (rank order, `break`s at the first overflow)
  *  against an arbitrary cap. Factored out so the SAME packing logic runs TWICE: once as a PROBE (capped at
  *  the reserve, see {@link RELATED_RESERVE_FRACTION}) purely to discover how many tokens related would
