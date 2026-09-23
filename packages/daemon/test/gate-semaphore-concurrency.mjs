@@ -26,6 +26,7 @@ import { execSync } from "node:child_process";
 import { assertNeverWithControl, observeOnce } from "./_timing-guard.mjs";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { waitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gs-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -1138,10 +1139,14 @@ const worktrees = [];
 }
 
 // ── Pure unit check: cross-project gate fairness (card 567b8724 — one project's own queued backlog
-//    must not perpetually win every freed slot ahead of a quiet sibling project). Deterministic:
-//    every task is a controllable promise the test resolves by hand, so grant order is asserted
-//    directly rather than inferred from sleep durations (sleeps below are only settle-margin, never
-//    the correctness mechanism — matches this file's existing "(unit, snapshot)" style). ──────────────
+//    must not perpetually win every freed slot ahead of a quiet sibling project). Deterministic: every
+//    task is a controllable promise the test resolves by hand. `track()`'s own admission/queueing
+//    decision happens SYNCHRONOUSLY inside `runExclusive`'s call (acquire()'s fast-path `admit()` call,
+//    or its slow-path `tier.push()`, both run before the first internal `await`) — so ORDER between
+//    consecutive `track()` calls needs no wait at all, only the state change TRIGGERED BY a `.release()`
+//    (which resolves a promise, deferring its continuation to a microtask chain) needs one, via
+//    `waitUntil` polling a DEFINITIVE one-shot signal (never a fixed sleep guarding a "did NOT happen"
+//    claim — see this project's own fixed-wait-witness-guard.mjs). ─────────────────────────────────────
 {
   const controlled = () => {
     let release;
@@ -1150,6 +1155,7 @@ const worktrees = [];
   };
   const track = (sem, cap, label, desc, c) =>
     sem.runExclusive(cap, desc, async () => { c.order.push(label); return c.fn(); });
+  const untilIncludes = (order, label) => waitUntil(() => order.includes(label), { label: `order includes "${label}"` });
 
   // (1) THE STARVATION REPRO: cap=2. Project A fast-path-admits BOTH slots (A1, A2) before project B
   // ever shows up — expected and fine ("no starvation in the other direction": a lone project may use
@@ -1169,23 +1175,23 @@ const worktrees = [];
 
     const pA1 = track(sem, 2, "A1", dA(1), cA1);
     const pA2 = track(sem, 2, "A2", dA(2), cA2);
-    await sleep(10);
     check("(fairness) A fast-path-admits both slots uncontested — no starvation in the other direction",
       sem.snapshot().active === 2 && sem.snapshot().queued === 0);
-    const pA3 = track(sem, 2, "A3", dA(3), cA3); // queues FIRST
-    await sleep(10);
+    const pA3 = track(sem, 2, "A3", dA(3), cA3); // queues FIRST (synchronous push — no wait needed)
     const pB1 = track(sem, 2, "B1", dB(1), cB1); // queues SECOND, behind A3 in raw FIFO
-    await sleep(10);
     check("(fairness) A3 and B1 both queued behind A's two active slots",
       sem.snapshot().active === 2 && sem.snapshot().queued === 2);
 
     cA1.release(); // frees one slot — A already holds 1 (A2) of its fair share; B1 must win over A3
-    await sleep(20);
+    // grantNext() makes exactly ONE grant decision per release — the instant B1 appears in `order`, that
+    // decision (skip A3, admit B1) has already been made and cannot retroactively change, so asserting
+    // the negative half (`!order.includes("A3")`) in the SAME check right after is not a race.
+    await untilIncludes(order, "B1");
     check("(fairness) freed slot goes to B1, not to A's own earlier-queued A3 (starvation fix)",
       order.includes("B1") && !order.includes("A3"));
 
     cA2.release(); // A2 settles — B1 no longer queued, so no foreign waiter remains for A3
-    await sleep(20);
+    await untilIncludes(order, "A3");
     check("(fairness) once no foreign waiter remains, A3 IS granted — A is not starved either",
       order.includes("A3"));
 
@@ -1206,11 +1212,9 @@ const worktrees = [];
       [c1, c2, c3].forEach((c) => { c.order = order; });
       const p1 = track(sem, 2, `r${round}-1`, d(`${round}-1`), c1);
       const p2 = track(sem, 2, `r${round}-2`, d(`${round}-2`), c2);
-      await sleep(5);
       const p3 = track(sem, 2, `r${round}-3`, d(`${round}-3`), c3); // queues (cap full), no rival project
-      await sleep(5);
       c1.release();
-      await sleep(10);
+      await untilIncludes(order, `r${round}-3`);
       check(`(fairness, lone project, round ${round}) freed slot reclaimed immediately, no foreign waiter to defer to`,
         order.includes(`r${round}-3`));
       c2.release(); c3.release();
@@ -1245,24 +1249,25 @@ const worktrees = [];
     return { order, cA1, cB1, pA1, pB1, repoPath: "repo-567b", opId: "opB1-567b" };
   };
   // Settles B1 (frees its cap slot while its repo hold survives), then queues B2 (repo-blocked) and
-  // submits A2 (which either fast-path-admits immediately, if work-conserving, or wrongly queues).
+  // submits A2 (which either fast-path-admits immediately, if work-conserving, or wrongly queues). Every
+  // step here except the one genuine release-triggered settle is synchronous (see this section's own
+  // header) — that one settle is witnessed by polling `active === 1` (`waitUntil`), a DEFINITIVE signal
+  // that B1's finally block (registry delete + release + grantNext) has already fully run.
   const driveRepoBlockedScenario = async (sem, cap, scen) => {
-    await sleep(10);
     check("(fairness, admissibility) A1+B1 both admitted, cap full", sem.snapshot().active === 2);
     scen.cB1.release(); // B1 "settles" — cap slot frees; repo-567b stays held (holdRepoGuardOnExit)
-    await sleep(10);
+    await waitUntil(() => sem.snapshot().active === 1, { label: "B1's cap slot freed (repo hold survives)" });
     check("(fairness, admissibility) B1 settled: cap slot free, repo-567b still held (mid-squash)",
       sem.snapshot().active === 1 && sem.snapshot().queued === 0);
     const cB2 = controlled(); cB2.order = scen.order;
     const dB2 = { gateType: "merge", projectId: "proj-567b-repoB", sessionId: "b2", repoPath: scen.repoPath };
-    const pB2 = track(sem, cap, "B2", dB2, cB2); // queues — blocked by B1's still-held repo guard
-    await sleep(10);
+    const pB2 = track(sem, cap, "B2", dB2, cB2); // queues — blocked by B1's still-held repo guard (synchronous)
     check("(fairness, admissibility) B2 queues — blocked by ITS OWN (still-held) repo guard, not by cap",
       sem.snapshot().active === 1 && sem.snapshot().queued === 1);
     const cA2 = controlled(); cA2.order = scen.order;
     const dA2 = { gateType: "worker", projectId: "proj-567b-repoA", sessionId: "a2" };
-    const pA2 = track(sem, cap, "A2", dA2, cA2); // fast-path-admits IF work-conserving, else wrongly queues
-    await sleep(10);
+    // fast-path-admits IF work-conserving, else wrongly queues — decided synchronously inside track() itself
+    const pA2 = track(sem, cap, "A2", dA2, cA2);
     return { pB2, cB2, pA2, cA2 };
   };
 
@@ -1286,9 +1291,7 @@ const worktrees = [];
     // Recover under the REAL check so nothing leaks past this block: force a re-scan (admits A2), then
     // release everything and free the repo guard (admits B2) so all four settle cleanly.
     sem.grantNext();
-    await sleep(10);
     scen.cA1.release(); cA2.release();
-    await sleep(10);
     sem.endSquash(scen.repoPath, scen.opId);
     cB2.release();
     await Promise.all([scen.pA1, scen.pB1, pB2, pA2]);
@@ -1303,7 +1306,6 @@ const worktrees = [];
     check("(fairness, admissibility) GREEN: repo-blocked foreign waiter does NOT block A2 — admitted immediately, slot not left idle",
       sem.snapshot().active === 2 && sem.snapshot().queued === 1 && scen.order.includes("A2"));
     scen.cA1.release(); cA2.release();
-    await sleep(10);
     sem.endSquash(scen.repoPath, scen.opId);
     cB2.release();
     await Promise.all([scen.pA1, scen.pB1, pB2, pA2]);
@@ -1327,27 +1329,25 @@ const worktrees = [];
 
     const cA = [1, 2, 3, 4].map(() => controlledFor());
     const pA = cA.map((c, i) => track(sem, 4, `A${i + 1}`, dA(i + 1), c));
-    await sleep(10);
     check("(fairness, 3-way) A fast-path-fills all 4 slots uncontested", sem.snapshot().active === 4);
 
     const cB1 = controlledFor(), cB2 = controlledFor(), cC1 = controlledFor();
     const pB1 = track(sem, 4, "B1", dB(1), cB1);
-    await sleep(5);
     const pB2 = track(sem, 4, "B2", dB(2), cB2);
-    await sleep(5);
-    const pC1 = track(sem, 4, "C1", dC(1), cC1); // arrives LAST but has been waiting just as long as B2 once queued
-    await sleep(10);
+    const pC1 = track(sem, 4, "C1", dC(1), cC1); // arrives LAST but has been waiting just as long as B2 once queued (all pushes are synchronous)
     check("(fairness, 3-way) B1, B2, C1 all queued behind A's 4 active slots", sem.snapshot().queued === 3);
 
     cA[0].release(); // frees 1st slot -> B1 (project B under its cap)
-    await sleep(20);
+    await untilIncludes(order, "B1");
     cA[1].release(); // frees 2nd slot -> B2 (project B now AT its cap of 2)
-    await sleep(20);
+    // Each grantNext() call makes exactly one grant decision — the instant B2 appears, that decision
+    // (skip C1, admit B2) has already been made, so the negative half is safe to assert right after.
+    await untilIncludes(order, "B2");
     check("(fairness, 3-way, documented limitation) B takes BOTH of its allowed slots ahead of C, which keeps waiting",
       order.includes("B1") && order.includes("B2") && !order.includes("C1"));
 
     cA[2].release(); // frees a 3rd slot -> now only C1 is queued, C1 is finally admitted
-    await sleep(20);
+    await untilIncludes(order, "C1");
     check("(fairness, 3-way) C1 is eventually admitted once B is no longer queued", order.includes("C1"));
 
     cA[3].release(); cB1.release(); cB2.release(); cC1.release();
