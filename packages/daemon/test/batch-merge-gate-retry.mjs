@@ -225,6 +225,10 @@ try {
       typeof st?.totalDurationMs === "number" && typeof row?.durationMs === "number" && (st.totalDurationMs - row.durationMs) >= 150);
     check("(ii) gate_status's own retryWarning ALSO carries the batch clause (finding [5]: batchBranchCount now persists on the verdict payload, not just the live nudge)", typeof st?.retryWarning === "string" && st.retryWarning.includes("BATCH of 2 branch(es)"));
     check("(ii) gate_status surfaces batchBranchCount:2 directly", st?.batchBranchCount === 2);
+    // Card 3e7378d0: a batch has NO whole-suite transient-kill auto-retry (only the solo path does), so its
+    // payload records the MEASURED NEGATIVE `transientRetried:false` — parallel to a solo verdict — rather
+    // than an absent key. Distinct from the single-file retry that DID rescue this pass (retriedFile above).
+    check("(ii) card 3e7378d0: gate_status surfaces transientRetried as a present `false` on a batch pass (single-file-rescued), with no transientRetryWarning", st?.transientRetried === false && !("transientRetryWarning" in (st ?? {})));
   }
 
   // ── (iv) FAIL AFTER RETRY — the retry ALSO fails ───────────────────────────────────────────────────────

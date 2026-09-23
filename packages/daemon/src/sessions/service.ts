@@ -977,6 +977,10 @@ function deriveBatchGateVerdict(
       outputTail: result.outputTail,
       ...(result.outputFile ? { outputFile: result.outputFile } : {}),
       gateCap, concurrentGates, concurrentGatesMax, batchBranchCount,
+      // Card 3e7378d0: a batch has NO whole-suite transient-kill auto-retry (mergeBatchTracked's `runGate`
+      // never calls the solo path's `build_gate_retry` mechanism), so this is always the MEASURED NEGATIVE
+      // `false`, never absent — keeps a batch payload key-parallel with `deriveMergeGateVerdict`'s.
+      transientRetried: false,
       ...(retryInfo ? {
         retriedFile: retryInfo.retriedFile ?? null,
         retryPassed: retryInfo.retryPassed ?? null,
@@ -1000,10 +1004,9 @@ function deriveBatchGateVerdict(
  * `PendingGateOpVerdict`'s own docs). `cancelled`/`skipped` verdicts stay ORDINARY — neither ran a real
  * diagnosable gate worth protecting (manager-confirmed).
  *
- * KNOWN GAP, out of scope for this card, filed separately as card 3e7378d0: `deriveBatchGateVerdict`
- * never writes `transientRetried` (only the solo-merge path does), so a BATCH pass rescued by the
- * whole-suite transient auto-retry is indistinguishable from a clean pass here today — this classifier
- * cannot see that one sub-case until card 3e7378d0 closes it.
+ * A batch never has the whole-suite transient auto-retry (only the solo path does), so
+ * `deriveBatchGateVerdict` writes `transientRetried:false` (card 3e7378d0) — there is no batch sub-case
+ * this classifier is blind to; a batch's only "weaker pass" is the single-file `retriedFile` rescue.
  */
 export function isProtectedGateSpillVerdict(op: Pick<PendingGateOp, "verdict" | "verdictPayload">): boolean {
   if (op.verdict === "fail" || op.verdict === "error") return true;
