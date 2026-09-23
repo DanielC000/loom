@@ -37,6 +37,27 @@ to come back as `{turnsFile, turnsChars, note}` now comes back as a normal `turn
 protection at all before this card) was converged onto the same shared `spillableTurnsResponse` path
 rather than growing a fifth ad hoc pattern.
 
+## `SPILL_INLINE_BUDGET_CHARS` stays at 48,000 — the measurement that settled it
+
+The card's original hypothesis (from a Bash-only measurement) was that Loom's own inline budget
+(`SPILL_INLINE_BUDGET_CHARS`, `spill.ts`) needed lowering because it sat ABOVE the engine's own native
+tool-result truncation threshold — meaning a response Loom judged "safe to inline" could still get
+natively spilled by the engine into the denied `tool-results/` tree. That threshold really is real for
+**Bash** stdout: measured live on this host, a repeated-character Bash output spills natively somewhere
+in the ~28,000-33,000 char range (28,000 stayed inline; 33,000+ spilled every time tested).
+
+But the SAME mechanism does NOT apply to real MCP tool responses. Measured 2026-09-23, `claude --version`
+2.1.280, this host: real `tasks_list` MCP calls (dense JSON + prose task bodies, not synthetic padding)
+returned FULLY INLINE at 46,502 chars and again at 47,995 chars — 99.99% of Loom's own 48,000-char
+ceiling — with no native truncation notice at all. The two mechanisms are evidently separate (plausibly
+because MCP tool_result content is token-counted differently, or handled by an entirely different code
+path than raw Bash stdout) — sizing `SPILL_INLINE_BUDGET_CHARS` off the Bash number would have been
+wrong. **Decision: leave `SPILL_INLINE_BUDGET_CHARS` at 48,000.** The real MCP ceiling was not found (the
+measurement only confirms safety up to 47,995) and finding it exactly was ruled out of scope — nothing in
+this repo depends on knowing it precisely, only on knowing that 48,000 is safely under it, which this
+measurement establishes with a comfortable margin. Also recorded as project memory key
+`cli-native-tool-result-spill-thresholds` so a future reader without this file in hand still has it.
+
 ## Do not
 
 - Do not reintroduce a file-spill (Loom scratch or otherwise) fallback inside `spillableTurnsResponse` or
@@ -52,6 +73,9 @@ rather than growing a fifth ad hoc pattern.
   because the recipient already has access to its own files. The distinction is whether the content
   being bounded belongs to the CALLING session (fine to spill) or was read ON BEHALF of a gate the
   filesystem itself doesn't enforce (transcript content — never spill).
+- Do not size `SPILL_INLINE_BUDGET_CHARS` (or any MCP inline-response budget) off a Bash-measured
+  threshold. Bash stdout and MCP tool_result content are measurably separate mechanisms with different
+  native-truncation thresholds — re-measure the MCP one directly before changing this constant.
 
 ## Source
 
