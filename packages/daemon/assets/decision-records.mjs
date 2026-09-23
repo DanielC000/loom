@@ -290,6 +290,49 @@ function relPath(repoRoot, p) {
   return path.relative(repoRoot, p).replace(/\\/g, "/");
 }
 
+// Injection counter (card b625a6ed): one JSONL line per record actually injected, appended next to the
+// per-session dedupe files (`<dedupeDir>/injections.jsonl`; `mcp/decisions.ts` reads it — `paths.ts`'
+// DECISION_RECORD_INJECTION_LOG names the same file, pinned by test/decision-record-injection-stats.mjs).
+// A plain local append, not a POST through hook-relay: no network/timeout to fail, no daemon dependency
+// (the hook runs fine with the daemon down), zero added latency beyond one sub-ms append.
+//
+// @decision b625a6ed — a line carries metadata only, never a record's title/text/path (shared-host log:
+// the LOOM_LOG_MESSAGE_CONTENT posture); every failure is swallowed so the counter never alters, delays
+// or blocks the Read's output.
+const INJECTION_LOG_NAME = "injections.jsonl";
+const INJECTION_LOG_MAX_BYTES = 5 * 1024 * 1024; // past this the log rotates to `.1` (one generation), bounding disk use.
+
+/** The repo identity a line is keyed by: a linked worktree (`.git` is a FILE `gitdir: <main>/.git/worktrees/x`)
+ * resolves to its MAIN checkout, so a worker's injections count against the project's repoPath, not a
+ * throwaway worktree path. Pure fs (no git spawn). Falls back to `repoRoot` itself on any surprise. */
+function canonicalRepoRoot(repoRoot) {
+  let root = repoRoot;
+  try {
+    const dotGit = path.join(repoRoot, ".git");
+    if (fs.statSync(dotGit).isFile()) {
+      const m = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dotGit, "utf8"));
+      const wt = m && /^(.*)[\\/]\.git[\\/]worktrees[\\/][^\\/]+$/.exec(path.resolve(repoRoot, m[1]));
+      if (wt) root = wt[1];
+    }
+  } catch { /* keep repoRoot */ }
+  try { return fs.realpathSync(root); } catch { return root; }
+}
+
+function recordInjections(dedupeDir, lines) {
+  try {
+    const file = path.join(dedupeDir, INJECTION_LOG_NAME);
+    fs.mkdirSync(dedupeDir, { recursive: true });
+    try { if (fs.statSync(file).size > INJECTION_LOG_MAX_BYTES) fs.renameSync(file, `${file}.1`); } catch { /* absent — fine */ }
+    fs.appendFileSync(file, lines.map((l) => JSON.stringify(l) + "\n").join(""));
+  } catch { /* fail-open: a lost counter line never affects the Read */ }
+}
+
+/** Which of the three record stores `recordPath` lives in (a fixed 3-value enum, never a path). */
+function storeOf(repoRoot, recordPath) {
+  const seg = relPath(repoRoot, recordPath).split("/")[1];
+  return seg === "adr" || seg === "decisions" || seg === "investigations" ? seg : "unknown";
+}
+
 /**
  * Render a bounded list of omitted records' paths for an omission note — the SAME helper for every
  * omission reason (record-count trim below, and the pre-existing byte-budget drop), so a future bound
@@ -518,6 +561,7 @@ async function main() {
   const sections = [];
   const omitted = [];
   const newlyDelivered = [];
+  const injected = []; // counter lines (card b625a6ed) — metadata only, see recordInjections
   for (const { key, ns, id, recordPath, text } of capped) {
     const rel = relPath(repoRoot, recordPath);
     // Card abd049da: inject ONLY the title + Do-not section(s) (never the narrative around them) — see
@@ -556,6 +600,7 @@ async function main() {
     sections.push(rendered);
     budget -= renderedBytes;
     newlyDelivered.push(key);
+    injected.push({ anchorId: label, store: storeOf(repoRoot, recordPath), truncated: overCap, bytes: renderedBytes });
   }
 
   if (sections.length === 0) {
@@ -602,6 +647,10 @@ async function main() {
   await emit({
     hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: msg },
   });
+  // AFTER the emit has flushed, so the counter can never precede or delay the injected output.
+  const ts = new Date().toISOString();
+  const repo = canonicalRepoRoot(repoRoot);
+  recordInjections(dedupeDir, injected.map((i) => ({ ts, session: sessionId, repo, ...i })));
 }
 
 // Only run as the hook entrypoint when invoked directly (`node decision-records.mjs <dedupeDir>`) — an

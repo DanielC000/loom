@@ -204,6 +204,9 @@ export const DECISION_RECORDS_SCRIPT = path.join(__dirname, "..", "assets", "dec
  * own per-session dirs above), so a daemon that never injects a record never creates this directory.
  */
 export const DECISION_RECORDS_DEDUPE_DIR = path.join(LOOM_HOME, "tmp", "decision-records");
+/** Injection counter log (card b625a6ed): the hook appends one metadata-only JSONL line per injection here
+ *  (`decision-records.mjs`'s `INJECTION_LOG_NAME` — a test pins the two names equal); `decisions_for` reads it. */
+export const DECISION_RECORD_INJECTION_LOG = path.join(DECISION_RECORDS_DEDUPE_DIR, "injections.jsonl");
 /**
  * comment-anchor-lint.mjs (card 5329a9af's report tool, wired as a hook by card 67621894) — invoked here
  * in its PER-FILE `--hook <repoRoot>` mode (matcher Write|Edit), never its whole-repo CLI scan mode (that

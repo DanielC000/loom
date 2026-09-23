@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { strictShape } from "./arg-alias.js";
+import { DECISION_RECORD_INJECTION_LOG } from "../paths.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -68,7 +69,8 @@ const SKIP_DIRS = new Set([
   ".git", "node_modules", "dist", "build", ".turbo", ".next", "coverage", ".cache", ".loom", "worktrees",
 ]);
 
-type RecordMeta = { id: string; rel: string; title: string };
+type RecordStore = "adr" | "decisions" | "investigations";
+type RecordMeta = { id: string; rel: string; title: string; store: RecordStore };
 type AnchorSite = { file: string; line: number };
 
 function containsNul(s: string): boolean {
@@ -115,7 +117,7 @@ function resolveRecordMeta(repoRoot: string, ns: AnchorNs, id: string): RecordMe
       const full = path.join(dir, hit);
       try {
         const text = fs.readFileSync(full, "utf8");
-        return { id, rel: relPosix(repoRoot, full), title: extractTitle(text, hit) };
+        return { id, rel: relPosix(repoRoot, full), title: extractTitle(text, hit), store };
       } catch { /* fall through to next store */ }
     }
   }
@@ -129,7 +131,7 @@ function resolveRecordMeta(repoRoot: string, ns: AnchorNs, id: string): RecordMe
     const full = path.join(invDir, hitDir.name, "findings.md");
     try {
       const text = fs.readFileSync(full, "utf8");
-      return { id, rel: relPosix(repoRoot, full), title: extractTitle(text, hitDir.name) };
+      return { id, rel: relPosix(repoRoot, full), title: extractTitle(text, hitDir.name), store: "investigations" };
     } catch { /* no findings.md at that dir — no record */ }
   }
   return null;
@@ -152,7 +154,7 @@ function listAllRecords(repoRoot: string): RecordMeta[] {
       const full = path.join(dir, name);
       let title = name;
       try { title = extractTitle(fs.readFileSync(full, "utf8"), name); } catch { /* keep filename fallback */ }
-      records.push({ id: m[1]!, rel: relPosix(repoRoot, full), title });
+      records.push({ id: m[1]!, rel: relPosix(repoRoot, full), title, store });
     }
   }
   const invDir = path.join(repoRoot, "docs", "investigations");
@@ -167,7 +169,7 @@ function listAllRecords(repoRoot: string): RecordMeta[] {
     if (!fs.existsSync(full)) continue;
     let title = e.name;
     try { title = extractTitle(fs.readFileSync(full, "utf8"), e.name); } catch { /* keep fallback */ }
-    records.push({ id: m[1]!, rel: relPosix(repoRoot, full), title });
+    records.push({ id: m[1]!, rel: relPosix(repoRoot, full), title, store: "investigations" });
   }
   return records;
 }
@@ -404,6 +406,41 @@ function decisionsForSymbol(repoRoot: string, symbol: string) {
  * (MAX_FILE_BYTES) — any record whose ONLY anchor lives in one of these can be wrongly reported as an
  * orphan RECORD here (the anchor was never indexed), so both `orphanAnchors`/`orphanRecords` are only as
  * complete as `skippedFiles` is empty. */
+/** Card b625a6ed: aggregate the hook's injection counter (`assets/decision-records.mjs`) for ONE repo. Reads
+ * the log (+ its one rotated generation) and counts only lines whose `repo` is this repo's main checkout —
+ * a worker's worktree injections are already keyed to it by the hook. Counts are METADATA only (the log holds
+ * no record content); an absent/unreadable log is `{total:0}`, never an error. `scope` states what this is
+ * a count OF: hook-delivered injections on this host since the log began, not reads. */
+export function readInjectionStats(repoRoot: string, logFile: string = DECISION_RECORD_INJECTION_LOG) {
+  const norm = (p: string) => { let r = p; try { r = fs.realpathSync(p); } catch { r = path.resolve(p); } return process.platform === "win32" ? r.toLowerCase() : r; };
+  const want = norm(repoRoot);
+  const stats = { total: 0, truncated: 0, bytes: 0, sessions: 0, byStore: {} as Record<string, number>, first: null as string | null, last: null as string | null, scope: "hook-delivered record injections for this repo on this host (one per record; log rotates at 5MB, keeping one prior generation)" };
+  const sessions = new Set<string>();
+  const seenRepo = new Map<string, boolean>();
+  for (const file of [`${logFile}.1`, logFile]) {
+    let text: string;
+    try { text = fs.readFileSync(file, "utf8"); } catch { continue; }
+    for (const line of text.split(/\r?\n/)) {
+      if (!line) continue;
+      let row: { ts?: unknown; session?: unknown; repo?: unknown; store?: unknown; truncated?: unknown; bytes?: unknown };
+      try { row = JSON.parse(line); } catch { continue; }
+      if (typeof row.repo !== "string") continue;
+      let match = seenRepo.get(row.repo);
+      if (match === undefined) { match = norm(row.repo) === want; seenRepo.set(row.repo, match); }
+      if (!match) continue;
+      stats.total++;
+      if (row.truncated === true) stats.truncated++;
+      if (typeof row.bytes === "number") stats.bytes += row.bytes;
+      if (typeof row.session === "string") sessions.add(row.session);
+      const st = typeof row.store === "string" ? row.store : "unknown";
+      stats.byStore[st] = (stats.byStore[st] ?? 0) + 1;
+      if (typeof row.ts === "string") { if (!stats.first || row.ts < stats.first) stats.first = row.ts; if (!stats.last || row.ts > stats.last) stats.last = row.ts; }
+    }
+  }
+  stats.sessions = sessions.size;
+  return stats;
+}
+
 function decisionsForAll(repoRoot: string) {
   const { index: idx, skippedFiles } = buildAnchorIndex(repoRoot);
   const records = listAllRecords(repoRoot);
@@ -429,6 +466,8 @@ function decisionsForAll(repoRoot: string) {
     uniqueAnchorIds: idx.size,
     totalAnchorSites: [...idx.values()].reduce((n, l) => n + l.length, 0),
     recordCount: records.length,
+    recordsByStore: { adr: records.filter((r) => r.store === "adr").length, decisions: records.filter((r) => r.store === "decisions").length, investigations: records.filter((r) => r.store === "investigations").length },
+    injections: readInjectionStats(repoRoot),
     orphanAnchors: { count: orphanAnchors.length, items: orphanAnchors },
     orphanRecords: { count: orphanRecords.length, advisory: true, items: orphanRecords },
     skippedFiles,
@@ -497,7 +536,10 @@ export function registerDecisionTools(server: McpServer, resolveRepoRoot: () => 
         "it can never go stale. Record bodies are NOT inlined here (only {path,title}) — Read the returned " +
         "record path directly for the full text; the on-Read hook is the place that delivers that same " +
         "title + Do-not-section guard automatically (still not the full narrative — read the record path " +
-        "directly for that).",
+        "directly for that). The no-query index also carries the usage numbers: `recordCount` + " +
+        "`recordsByStore` {adr,decisions,investigations} (records in THIS project's repo) and `injections` " +
+        "{total,truncated,bytes,sessions,byStore,first,last,scope} — how many records the on-Read hook has " +
+        "injected for this repo on this host (a metadata-only counter, never record content).",
       inputSchema: strictShape({ query: z.string().optional() }),
     },
     async ({ query }) => {
