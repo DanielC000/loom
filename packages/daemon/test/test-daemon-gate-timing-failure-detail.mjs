@@ -167,5 +167,34 @@ function writeFixture(name, source) {
   check("[the control that actually matters] the tail is NOT the last stdout line (a naive implementation returns this instead)", !tail.includes("(E3) another later passing check"));
 }
 
+// ── Scenario F (card 49bb1e7f) — SEVERAL CASCADING FAIL lines within one file: the headline must name the
+//    FIRST (usually the root cause), plus a count, never the LAST (usually a downstream consequence of the
+//    first). Unlike Scenario E (a single real failure followed by passes), every assertion here genuinely
+//    FAILS — this is the shape a naive "last FAIL line" implementation gets wrong and Scenario E cannot
+//    show (E has only one FAIL line, so first and last coincide). ─────────────────────────────────────────
+{
+  const fixture = writeFixture(
+    "cascading-fail-lines",
+    [
+      "let failures = 0;",
+      'const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };',
+      'check("(F1) the real ROOT CAUSE failure", 1 === 2);',
+      'check("(F2) a real cascading consequence of F1", 1 === 2);',
+      'check("(F3) another real cascading consequence of F1", 1 === 2);',
+      "process.exit(failures === 0 ? 0 : 1);",
+      "",
+    ].join("\n"),
+  );
+
+  const r = await spawnWithTimeout(process.execPath, [fixture], { timeoutMs: 15_000 });
+  check("[precondition] the fixture actually failed (nonzero exit, not a timeout)", r.ok === false && r.status === 1);
+  check("[precondition] the fixture produced 3 real, distinct FAIL lines", (r.stdout.match(/^FAIL\s\s/gm) ?? []).length === 3);
+
+  const tail = computeFailureTail(r.stdout, r.stderr);
+  check("[THE TEST] the tail names the FIRST failing assertion (the root cause)", tail.includes("(F1) the real ROOT CAUSE failure"));
+  check("[the control that actually matters] the tail is NOT the last FAIL line (a last-line implementation returns this instead)", !tail.includes("(F3) another real cascading consequence of F1"));
+  check("[THE DoD] the headline carries a count of the additional FAIL lines it isn't showing", tail.includes("+2 more"));
+}
+
 console.log(`\n${failures === 0 ? "✅" : "❌"} test-daemon-gate-timing-failure-detail: ${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

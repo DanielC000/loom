@@ -1182,13 +1182,19 @@ export function classifyFailureDetail({ status, stdout, stderr }) {
 // renderer below that consumes its output — directly against a REAL `spawnWithTimeout` result, without
 // re-deriving this formula a second time and risking the two copies drifting apart.
 //
-// Card 3a9e5a18: prefers the LAST `FAIL  <label>` line over a blind last line of stdout — `check()` doesn't
-// throw on failure, so a run failing an early assertion can still print later PASSING ones. Falls back to
-// the previous blind-last-line behaviour only when stdout carries no FAIL line at all.
+// Card 3a9e5a18: prefers a FAIL line over a blind last line of stdout — `check()` doesn't throw on
+// failure, so a run failing an early assertion can still print later PASSING ones. Falls back to the
+// previous blind-last-line behaviour only when stdout carries no FAIL line at all.
+//
+// @decision 49bb1e7f — within ONE file's stream, headline the FIRST FAIL line (root cause), never the
+// last (cascade symptom); does NOT revisit done card 52bc5d52's cross-file "first is arbitrary" finding.
 export function computeFailureTail(stdout, stderr) {
   const stdoutLines = stdout.split("\n").filter(Boolean);
   const failLines = stdoutLines.filter((l) => FAIL_LINE_RE.test(l));
-  if (failLines.length) return failLines[failLines.length - 1];
+  if (failLines.length) {
+    const first = failLines[0];
+    return failLines.length > 1 ? `${first} (+${failLines.length - 1} more)` : first;
+  }
   return stdoutLines.slice(-1)[0] || stderr.split("\n").filter(Boolean).slice(-1)[0];
 }
 
