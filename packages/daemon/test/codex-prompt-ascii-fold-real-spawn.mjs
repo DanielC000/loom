@@ -64,6 +64,9 @@ const TMP = mkdtempManaged("loom-codex-ascii-fold-real-");
 process.env.LOOM_HOME = TMP;
 
 const { PtyHost } = await import("../dist/pty/host.js");
+// Creates LOOM_HOME's logs dir — without it every run logs a misleading `log stream error … ENOENT` (card a1ad730a).
+const { ensureDirs } = await import("../dist/paths.js");
+ensureDirs();
 const { codexAsciiFold } = await import("../dist/pty/codex-host.js");
 
 const SESSION_ID = "codex-ascii-fold-real-test";

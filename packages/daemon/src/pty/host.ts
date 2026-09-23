@@ -27,7 +27,7 @@ import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } fr
 import { resolveCapabilityServer, RESERVED_CAPABILITY_SLUGS, type CapabilityDefRow } from "../capabilities/registry.js";
 import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDiffAfterSpawn, CODEX_TRUST_DIFF_POLL_DEADLINE_MS, removeAddedTrustBlocks, injectCodexDoctrine } from "./codex-doctrine.js";
 import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS } from "./codex-host.js";
-import { findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } from "./codex-transcript.js";
+import { describeRolloutCandidatesForDiagnostic, findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn } from "./codex-transcript.js";
 
 /** @decision 702f2197 — the ONLY server ids passed as `mcpServersToCodexArgs`'s `autoApproveServerIds` at
  *  `createCodexPty`'s call site: Loom's own first-party, daemon-local, role-gated surfaces. Never widen
@@ -5291,6 +5291,12 @@ export class PtyHost {
     live.engineSessionIdCaptureEndReason = "exhausted";
     // eslint-disable-next-line no-console
     console.warn(`[codex-engine-id] ${sessionId} engine-session id never discovered after ${CODEX_ENGINE_ID_MAX_ATTEMPTS} attempts (~${CODEX_ENGINE_ID_MAX_ATTEMPTS * CODEX_ENGINE_ID_RETRY_MS}ms) — pty still alive; rollout file was never found for this spawn.`);
+    // Card a1ad730a: one bounded best-effort line so the next real failure says "created but unmatched"
+    // vs "never created" (the helper never throws; the try is belt-and-braces).
+    try {
+      // eslint-disable-next-line no-console
+      console.warn(`[codex-engine-id] ${sessionId} give-up rollout diagnostic: ${describeRolloutCandidatesForDiagnostic(cwd, live.startedAt, live.excludeEngineSessionIds ?? undefined)}`);
+    } catch { /* diagnostic only */ }
   }
 
   /** Codex counterpart of `setBusy` — idempotent (fires `events.onBusy`/`broadcastControl` only on a

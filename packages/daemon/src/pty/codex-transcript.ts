@@ -252,20 +252,101 @@ export function findConversationIdForSpawn(cwd: string, sinceMs: number, exclude
             const full = path.join(dayDir, f);
             let mtimeMs: number;
             try { mtimeMs = fs.statSync(full).mtimeMs; } catch { continue; }
-            // Card 49d43ef9: tolerate mtime/wall-clock skew (see MTIME_SKEW_TOLERANCE_MS's own doc) —
-            // never reads a file that predates this spawn by more than that tolerance.
+            // Cheap stat-only pre-filter (same predicate as candidateVerdict's first rung) so a stale file
+            // is never content-read; the newest-wins skip below likewise precedes the content read.
             if (mtimeMs < sinceMs - MTIME_SKEW_TOLERANCE_MS) continue;
             if (best && mtimeMs <= best.mtimeMs) continue; // already have a newer-or-equal match
-            const meta = readSessionMeta(full);
-            if (!meta || meta.cwd !== resolvedCwd) continue;
-            if (excludeSessionIds?.has(meta.sessionId)) continue; // card cbae4520: never adopt a known predecessor id
-            best = { sessionId: meta.sessionId, mtimeMs };
+            const v = candidateVerdict(full, mtimeMs, resolvedCwd, sinceMs, excludeSessionIds);
+            if (v.verdict !== "match") continue;
+            best = { sessionId: v.sessionId, mtimeMs };
           }
         }
       }
     }
   } catch { /* sessions root missing — nothing to find yet */ }
   return best?.sessionId ?? null;
+}
+
+type CandidateVerdict =
+  | { verdict: "match"; sessionId: string }
+  | { verdict: "stale-mtime" | "no-session-meta" | "cwd-mismatch" | "excluded-predecessor"; sessionId?: string; metaCwd?: string };
+
+/**
+ * The single per-candidate match predicate, shared by {@link findConversationIdForSpawn} (acts on `match`)
+ * and {@link describeRolloutCandidatesForDiagnostic} (reports why a candidate did not match), so the
+ * give-up diagnostic can never disagree with the matcher (card a1ad730a). Rungs, in order: mtime
+ * freshness (card 49d43ef9) → readable `session_meta` → cwd equality → not a known predecessor id (card
+ * cbae4520: never adopt one).
+ */
+function candidateVerdict(
+  full: string,
+  mtimeMs: number,
+  resolvedCwd: string,
+  sinceMs: number,
+  excludeSessionIds: ReadonlySet<string> | undefined,
+): CandidateVerdict {
+  if (mtimeMs < sinceMs - MTIME_SKEW_TOLERANCE_MS) return { verdict: "stale-mtime" };
+  const meta = readSessionMeta(full);
+  if (!meta) return { verdict: "no-session-meta" };
+  if (meta.cwd !== resolvedCwd) return { verdict: "cwd-mismatch", sessionId: meta.sessionId, metaCwd: meta.cwd };
+  if (excludeSessionIds?.has(meta.sessionId)) return { verdict: "excluded-predecessor", sessionId: meta.sessionId, metaCwd: meta.cwd };
+  return { verdict: "match", sessionId: meta.sessionId };
+}
+
+/** Bounds for {@link describeRolloutCandidatesForDiagnostic}. */
+export const ROLLOUT_DIAG_MAX_CANDIDATES = 10;
+export const ROLLOUT_DIAG_MAX_CHARS = 2000;
+const DIAG_WINDOW_LEAD_MS = 36 * 60 * 60 * 1000;
+
+/**
+ * Card a1ad730a: ONE bounded, best-effort line for `captureCodexEngineSessionId`'s give-up log — the
+ * sessions root searched, the spawn's cwd/startedAt, and the newest rollout files with the matcher's own
+ * verdict for each — so a failure reads "created but unmatched" (candidates with a reason) vs "never
+ * created" (none present / none fresh). Never throws; capped at {@link ROLLOUT_DIAG_MAX_CHARS}. Stats the
+ * whole corpus once, acceptable at a single give-up.
+ */
+export function describeRolloutCandidatesForDiagnostic(cwd: string, sinceMs: number, excludeSessionIds?: ReadonlySet<string>): string {
+  let root = "?";
+  try {
+    root = codexSessionsRoot();
+    const resolvedCwd = path.resolve(cwd);
+    const all: { name: string; full: string; mtimeMs: number }[] = [];
+    const ls = (d: string): string[] => { try { return fs.readdirSync(d); } catch { return []; } };
+    // Event-loop discipline: this runs synchronously in the daemon, so walk ONLY the day dirs a rollout
+    // created at/after this spawn can live in — never the whole multi-month corpus. A day dir is in-window
+    // iff its YYYY-MM-DD >= the UTC date of (sinceMs - DIAG_WINDOW_LEAD_MS); the lead absorbs codex naming
+    // its day dir by local date while this compares UTC. (The matcher itself has no day-dir window: it
+    // walks every dir and stats every file — see findConversationIdForSpawn.)
+    const lo = new Date(sinceMs - DIAG_WINDOW_LEAD_MS).toISOString().slice(0, 10);
+    const days: string[] = [];
+    for (const y of ls(root)) for (const m of ls(path.join(root, y))) for (const d of ls(path.join(root, y, m))) {
+      if (`${y}-${m}-${d}` < lo) continue;
+      days.push(`${y}/${m}/${d}`);
+      for (const f of ls(path.join(root, y, m, d))) {
+        if (!f.endsWith(".jsonl")) continue;
+        const full = path.join(root, y, m, d, f);
+        try { all.push({ name: f, full, mtimeMs: fs.statSync(full).mtimeMs }); } catch { /* vanished */ }
+      }
+    }
+    const shownDays = days.length > 5 ? [...days.slice(0, 5), `+${days.length - 5} more`] : days;
+    const head = `searched=${root} searchedDays=${shownDays.join(",") || `none (on/after ${lo})`} spawnCwd=${resolvedCwd} startedAt=${new Date(sinceMs).toISOString()} rolloutsInWindow=${all.length}`;
+    if (all.length === 0) return clampDiag(`${head} candidates=none present in window`);
+    all.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const parts = all.slice(0, ROLLOUT_DIAG_MAX_CANDIDATES).map((c) => {
+      const v = candidateVerdict(c.full, c.mtimeMs, resolvedCwd, sinceMs, excludeSessionIds);
+      const detail = v.verdict === "cwd-mismatch" ? ` metaCwd=${v.metaCwd}` : v.verdict === "match" ? ` id=${v.sessionId}` : "";
+      const skew = Math.round(c.mtimeMs - sinceMs);
+      return `${c.name} mtime=${new Date(c.mtimeMs).toISOString()} (${skew >= 0 ? "+" : ""}${skew}ms vs start) verdict=${v.verdict}${detail}`;
+    });
+    return clampDiag(`${head} candidates(newest ${parts.length}): ${parts.join(" | ")}`);
+  } catch (err) {
+    return clampDiag(`searched=${root} diagnostic-failed: ${(err as Error)?.message ?? String(err)}`);
+  }
+}
+
+function clampDiag(s: string): string {
+  const one = s.replace(/[\r\n]+/g, " ");
+  return one.length > ROLLOUT_DIAG_MAX_CHARS ? `${one.slice(0, ROLLOUT_DIAG_MAX_CHARS)}…[truncated]` : one;
 }
 
 /**

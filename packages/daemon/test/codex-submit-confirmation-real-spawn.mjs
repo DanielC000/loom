@@ -70,6 +70,9 @@ const TMP = mkdtempManaged("loom-codex-submit-real-");
 process.env.LOOM_HOME = TMP;
 
 const { PtyHost } = await import("../dist/pty/host.js");
+// Creates LOOM_HOME's logs dir — without it every run logs a misleading `log stream error … ENOENT` (card a1ad730a).
+const { ensureDirs } = await import("../dist/paths.js");
+ensureDirs();
 
 const SESSION_ID = "codex-submit-real-test";
 const scratchCwd = fs.mkdtempSync(path.join(os.tmpdir(), "loom-codex-submit-real-cwd-"));
