@@ -8093,7 +8093,15 @@ export class SessionService {
     | { escalation: "rate-exceeded"; count: number; windowMs: number }
   )): void {
     const s = this.db.getSession(sessionId);
-    if (!s?.parentSessionId) return; // no sender/parent to push to — the pull surface still stands
+    if (!s?.parentSessionId) {
+      // @decision d1ac9fed — intended (a top-level session has no parent to notify), but NOT silent about
+      // the rate-exceeded case specifically — a distinct, greppable line.
+      if (info.escalation === "rate-exceeded") {
+        // eslint-disable-next-line no-console
+        console.error(`[prompt-mismatch-rate-exceeded-no-parent] ${sessionId} count=${info.count} windowMs=${info.windowMs} — the fallback-unrecognized rate threshold tripped but this session has no parent to notify; the pull surface (getLastMismatchUnmatched) still stands, but nothing pushes proactively.`);
+      }
+      return;
+    }
     const contentClause = isLogMessageContentEnabled()
       ? ` Intended text: ${JSON.stringify(info.intendedText)}.`
       : ` Content is not included by default (set LOOM_LOG_MESSAGE_CONTENT=1 to include it) — the length and hash above already let you confirm a match against what you actually sent.`;
