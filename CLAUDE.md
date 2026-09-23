@@ -272,7 +272,12 @@ without one), plus a pointer to the full file — the narrative around them is d
 this file's own "point at a source of truth" rule) — an over-cap extract still injects, but head+tail-
 truncated with an explicit marker rather than complete. Follow the pointer and `Read` the record file
 directly for the narrative. Keep a record under the cap, or expect truncation and don't be surprised by
-it (card `da723d41`).
+it (card `da723d41`). **A single `Read` call is also capped in how many DISTINCT records it injects**
+(`MAX_RECORDS_PER_CALL` in that same script — read it there, not here) — independent of the byte cap
+above, since a byte budget alone doesn't bound record COUNT when many small records compete at one
+anchor-dense site. Records beyond the cap, and any that still lose the shared byte budget, are omitted
+whole and named explicitly in a bounded omission note (`OMISSION_NOTE_MAX_LISTED` — never one line per
+omission) rather than silently dropped (card `65dddbe9`).
 
 `comment-anchor-lint.mjs`'s `collidingRecords` check (CLI-scan only — see that script's own header) flags
 a same-id-two-files violation after the fact, but it is a backstop, not the fix: by the time it fires, the

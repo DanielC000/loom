@@ -131,8 +131,23 @@ const FLAT_STORES = ["adr", "decisions"];
 // the hook's stdin-reading entrypoint as a side effect.
 export const PER_RECORD_MAX_BYTES = 6000;
 const TOTAL_MAX_BYTES = 12000; // once the total for this call would exceed this, further WHOLE records are dropped (never partially).
+//
+// @decision 65dddbe9 — left at 40, deliberately not narrowed: no measured scenario shows a win, and
+// narrowing risks silently missing a legitimate anchor-to-code catch. Do not narrow without a fresh
+// measurement showing a real scenario it would help.
 const BLOCK_EXPAND_MAX = 40; // bounds the blank-line-delimited "enclosing block" upward lookback below.
 const DEFAULT_READ_LIMIT = 2000; // the real Read tool's own default line cap when offset/limit are omitted.
+// Bounds the NUMBER of records one call injects, independent of TOTAL_MAX_BYTES (a byte budget alone
+// doesn't bound record COUNT when many small records compete). First sizing: 10.
+//
+// @decision 65dddbe9 — do not raise TOTAL_MAX_BYTES/PER_RECORD_MAX_BYTES to compensate for this cap, and
+// do not assume this constant must stay equal to OMISSION_NOTE_MAX_LISTED below — they answer different
+// questions and are sized independently.
+const MAX_RECORDS_PER_CALL = 10;
+// Bounds an omission note's own listed ids/paths (a different question from MAX_RECORDS_PER_CALL above:
+// how many omitted ids to NAME, not how many records to inject). Lists the first this-many, then "+K
+// more", and always states the total omitted count.
+const OMISSION_NOTE_MAX_LISTED = 10;
 
 /** Walk up from `startDir` looking for a `.git` entry (dir or file — worktrees use a file). */
 function findRepoRoot(startDir) {
@@ -268,6 +283,20 @@ function saveDelivered(dedupeFile, ids) {
 
 function relPath(repoRoot, p) {
   return path.relative(repoRoot, p).replace(/\\/g, "/");
+}
+
+/**
+ * Render a bounded list of omitted records' paths for an omission note — the SAME helper for every
+ * omission reason (record-count trim below, and the pre-existing byte-budget drop), so a future bound
+ * change can't quietly diverge between them (card 65dddbe9, per the "do not fork" record at
+ * `MAX_RECORDS_PER_CALL` above). Lists the first `OMISSION_NOTE_MAX_LISTED` paths, then `+K more` — never the
+ * full list unbounded, which a whole-file read of an anchor-dense file (30+ omitted records) would turn
+ * into a multi-kilobyte note, defeating the point of any cap.
+ */
+function buildOmissionNote(omittedList, repoRoot) {
+  const listed = omittedList.slice(0, OMISSION_NOTE_MAX_LISTED).map((o) => relPath(repoRoot, o.recordPath));
+  const more = omittedList.length - listed.length;
+  return listed.join(", ") + (more > 0 ? `, +${more} more` : "");
 }
 
 /** True iff byte `b` is a UTF-8 CONTINUATION byte (`10xxxxxx`) — i.e. the middle/tail of a multi-byte
@@ -472,11 +501,19 @@ async function main() {
   }
   if (candidates.length === 0) return; // every anchor already delivered this session, or its store entry is missing (DoD-5)
 
+  // Lever #3 (card 65dddbe9): trim to MAX_RECORDS_PER_CALL BEFORE the budget loop, same scan order the
+  // budget loop itself already used (candidates is ordered by anchor line position). Bounds record COUNT
+  // independent of TOTAL_MAX_BYTES — a byte budget alone doesn't stop many small records from competing.
+  // Deliberately NOT marked delivered below (like the byte-budget omission case) — a later call with a
+  // smaller candidate set may still have room for one of these.
+  const capped = candidates.slice(0, MAX_RECORDS_PER_CALL);
+  const omittedForCount = candidates.slice(MAX_RECORDS_PER_CALL).map(({ key, recordPath }) => ({ key, recordPath }));
+
   let budget = TOTAL_MAX_BYTES;
   const sections = [];
   const omitted = [];
   const newlyDelivered = [];
-  for (const { key, ns, id, recordPath, text } of candidates) {
+  for (const { key, ns, id, recordPath, text } of capped) {
     const rel = relPath(repoRoot, recordPath);
     // Card abd049da: inject ONLY the title + Do-not section(s) (never the narrative around them) — see
     // this file's header. `extractDoNotOnly` already returns just that protected content, so — unlike the
@@ -517,26 +554,43 @@ async function main() {
   }
 
   if (sections.length === 0) {
-    // Every candidate was too large to fit even alone — now unreachable in ordinary operation since a
-    // single record's reduced (Do-not-only) rendered size is always well under TOTAL_MAX_BYTES, kept as a
+    // Every CAPPED candidate was too large to fit even alone — now unreachable in ordinary operation since
+    // a single record's reduced (Do-not-only) rendered size is always well under TOTAL_MAX_BYTES, kept as a
     // defensive branch. Say so explicitly (never silent: DoD-4's whole point is that a
     // silently-dropped record is exactly the failure mode this card exists to prevent) — AND mark these
     // delivered (card-review N1: an un-marked, permanently-too-large candidate would otherwise re-emit
-    // this identical note on every future read of the same region, forever, in this session).
-    const note = `${omitted.length} decision record(s) governing this range were too large to inject (byte budget ${TOTAL_MAX_BYTES}) — read directly: `
-      + omitted.map((o) => relPath(repoRoot, o.recordPath)).join(", ");
+    // this identical note on every future read of the same region, forever, in this session). Also name
+    // any count-capped omissions here (never marked delivered — see the note at their computation above).
+    const noteParts = [];
+    if (omitted.length) {
+      noteParts.push(`${omitted.length} decision record(s) governing this range were too large to inject `
+        + `(byte budget ${TOTAL_MAX_BYTES}) — read directly: ${buildOmissionNote(omitted, repoRoot)}`);
+    }
+    if (omittedForCount.length) {
+      noteParts.push(`${omittedForCount.length} further record(s) omitted for record count `
+        + `(max ${MAX_RECORDS_PER_CALL} per call) — read directly: ${buildOmissionNote(omittedForCount, repoRoot)}`);
+    }
     for (const { key } of omitted) delivered.add(key);
     saveDelivered(dedupeFile, delivered);
-    await emit({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: note } });
+    await emit({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: noteParts.join(" ") } });
     return;
   }
 
   for (const key of newlyDelivered) delivered.add(key);
   saveDelivered(dedupeFile, delivered);
 
-  const omittedNote = omitted.length
-    ? `\n\n(${omitted.length} further record(s) omitted for byte budget — read directly: ${omitted.map((o) => relPath(repoRoot, o.recordPath)).join(", ")})`
-    : "";
+  // Both omission reasons render through the SAME bounded helper (never forked — card 65dddbe9's own
+  // "Do not" record) — record-count first (the earlier trim), then byte-budget (the later drop), matching
+  // the order each one is actually applied in.
+  const omittedNoteParts = [];
+  if (omittedForCount.length) {
+    omittedNoteParts.push(`${omittedForCount.length} further record(s) omitted for record count `
+      + `(max ${MAX_RECORDS_PER_CALL} per call) — read directly: ${buildOmissionNote(omittedForCount, repoRoot)}`);
+  }
+  if (omitted.length) {
+    omittedNoteParts.push(`${omitted.length} further record(s) omitted for byte budget — read directly: ${buildOmissionNote(omitted, repoRoot)}`);
+  }
+  const omittedNote = omittedNoteParts.length ? `\n\n(${omittedNoteParts.join("; ")})` : "";
   const msg = `Decision-record guard(s) governing this range (title + 'Do not' section, or an explicit `
     + `no-Do-not note, plus a pointer to the full record — never the whole narrative):\n\n${sections.join("\n\n---\n\n")}${omittedNote}`;
 

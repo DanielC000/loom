@@ -279,6 +279,61 @@ try {
   check("DoD-4b: at least one record is explicitly named as omitted for shared budget, not silently dropped",
     !!a6 && /omitted for byte budget/.test(a6.hookSpecificOutput.additionalContext) && /e000000\d-budget\.md/.test(a6.hookSpecificOutput.additionalContext));
 
+  // --- lever #3 (card 65dddbe9): a per-call record COUNT cap (MAX_RECORDS_PER_CALL), independent of the
+  // byte budget — a byte budget alone doesn't bound record COUNT when many small records compete. ---
+  {
+    const idFor = (n) => `c0${n.toString(16).padStart(6, "0")}`; // 8-hex ids, e.g. n=1 -> "c0000001"
+
+    // (a) 15 anchors, each backed by a TINY record — combined well under TOTAL_MAX_BYTES, so the COUNT
+    // cap is the ONLY binding constraint here, isolated from the byte-budget case (DoD-4b, above).
+    const N_SMALL = 15;
+    const smallLines = [];
+    for (let n = 1; n <= N_SMALL; n++) {
+      const id = idFor(n);
+      smallLines.push(`// @decision ${id} — count-cap fixture record ${n}`);
+      fs.writeFileSync(path.join(REPO, "docs", "decisions", `${id}-count-small.md`), `# ${id}\n\nTiny record ${n}.\n`);
+    }
+    const SMALL_SRC = path.join(REPO, "count-small.ts");
+    fs.writeFileSync(SMALL_SRC, smallLines.join("\n") + "\n");
+    const smallResult = runHookOnFile(SMALL_SRC, "s-count-small", 1, N_SMALL);
+    const smallCtx = smallResult ? smallResult.hookSpecificOutput.additionalContext : "";
+    const injectedSmallCount = (smallCtx.match(/^### decision /gm) || []).length;
+    check("lever #3 (a): exactly 10 records injected when 15 are in range and all individually tiny "
+      + "(the count cap binds, not the byte budget)", injectedSmallCount === 10);
+    check("lever #3 (a): none of the 10 injected were truncated (proves the byte budget was NOT the "
+      + "binding constraint here)", !!smallResult && !smallCtx.includes("[TRUNCATED"));
+    check("lever #3 (a): the omission note explicitly names the omitted COUNT (5 = 15 - 10)",
+      /5 further record\(s\) omitted for record count \(max 10 per call\)/.test(smallCtx));
+    check("lever #3 (a): the omission note lists the omitted ids/paths, not just a bare count",
+      /count-small\.md/.test(smallCtx));
+
+    // (b) 60 anchors — 50 omitted for count. The omission note must stay BOUNDED (lists only the first
+    // OMISSION_NOTE_MAX_LISTED ids, then "+K more"), never one line per omitted record — a whole-file
+    // read of a real hot file (sessions/service.ts, 32-44 omitted today) would otherwise turn the note
+    // itself into a multi-kilobyte injection, defeating the point of any cap.
+    const N_MANY = 60;
+    const manyLines = [];
+    for (let n = 1; n <= N_MANY; n++) {
+      const id = idFor(1000 + n); // distinct id range from fixture (a) above — no collision
+      manyLines.push(`// @decision ${id} — many-anchor fixture record ${n}`);
+      fs.writeFileSync(path.join(REPO, "docs", "decisions", `${id}-count-many.md`), `# ${id}\n\nTiny record ${n}.\n`);
+    }
+    const MANY_SRC = path.join(REPO, "count-many.ts");
+    fs.writeFileSync(MANY_SRC, manyLines.join("\n") + "\n");
+    const manyResult = runHookOnFile(MANY_SRC, "s-count-many", 1, N_MANY);
+    const manyCtx = manyResult ? manyResult.hookSpecificOutput.additionalContext : "";
+    const injectedManyCount = (manyCtx.match(/^### decision /gm) || []).length;
+    check("lever #3 (b): exactly 10 records injected out of 60 in range", injectedManyCount === 10);
+    const omittedLine = (manyCtx.match(/^\(50 further record\(s\) omitted for record count.*\)$/m) || [])[0];
+    check("lever #3 (b): the omission note names the full omitted count (50), even though its listed ids are bounded",
+      !!omittedLine);
+    check("lever #3 (b): the note lists only the first OMISSION_NOTE_MAX_LISTED (10) ids, then a '+K more' tally (40 = 50 - 10)",
+      !!omittedLine && omittedLine.includes("+40 more"));
+    check("lever #3 (b): the omission note itself stays well under a byte ceiling — not one line per omitted "
+      + "record (an unbounded note over 50 omissions would run well past this)",
+      !!omittedLine && Buffer.byteLength(omittedLine, "utf8") < 1200);
+  }
+
   // --- card abd049da: only a record's title + 'Do not' section(s) are injected — the NARRATIVE around
   // them is excluded ENTIRELY now, never merely truncated-with-signal (the old card 8449a258 behavior this
   // supersedes for the injection path — 8449a258's own protected-content definition, title + every 'Do
