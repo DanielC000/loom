@@ -108,6 +108,7 @@ Because `curl … | sh` and `irm … | iex` have no interactive prompt, drive op
 | Behaviour                  | sh flag / env                         | PowerShell flag / env                       |
 | -------------------------- | ------------------------------------- | ------------------------------------------- |
 | Register autostart         | `--service` / `LOOM_INSTALL_SERVICE=1`| `-Service` / `$env:LOOM_INSTALL_SERVICE='1'`|
+| Skip autostart (no prompt) | `--no-service` / `LOOM_INSTALL_SERVICE=0` | `-NoService` / `$env:LOOM_INSTALL_SERVICE='0'` |
 | Don't launch the daemon    | `--no-start` / `LOOM_INSTALL_START=0` | `-NoStart` / `$env:LOOM_INSTALL_START='0'`  |
 | Install a specific source  | `--source <spec>` / `LOOM_INSTALL_SOURCE` | `-Source <spec>` / `$env:LOOM_INSTALL_SOURCE` |
 | Port                       | `--port <n>` / `LOOM_PORT`            | `-Port <n>` / `$env:LOOM_PORT`              |
@@ -167,7 +168,7 @@ In both cases the tunnel owns auth + transport security and the daemon still onl
 If you'd rather not run a tunnel, Loom can bind a non-loopback interface itself. It is **off by default** and stays off until you configure it deliberately:
 
 - **A gateway token authenticates every remote caller.** Mint one over the loopback API
-  (`POST /api/gateway-tokens`); the plaintext is returned exactly once and only the hash is stored. Tokens can be rotated, paused, or revoked — but only from the loopback UI, never over the remote bind itself, so a remote caller can never mint or revoke its own access.
+  (`POST /api/gateway-tokens`); the plaintext is returned exactly once and only the hash is stored. Tokens can be rotated, paused, or revoked — but only over that same loopback API, never over the remote bind itself, so a remote caller can never mint or revoke its own access. There's no UI for this yet; today it's a loopback REST call.
 - **TLS is mandatory** for any non-loopback bind that isn't a Tailscale `.ts.net` address (a tailnet link
   is already encrypted). Point `remoteAccess.tls` at a cert and key; without readable material the daemon **refuses to open the remote listener and stays on loopback** rather than serving plaintext.
 - **Routes are allowlisted, fail-closed.** Only an explicitly listed set — reads, plus the surfaces you
@@ -181,7 +182,7 @@ Step-by-step instructions for both options live on the landing site's **Remote a
 
 ## How it works
 
-A single local **daemon** owns everything durable — the sessions, the PTY host that drives `claude`, the Fastify HTTP/WS gateway, an SQLite store, read-only git, and the vault auto-committer. The **web viewport** is stateless: it attaches to a session over a WebSocket and detaches freely, while the session keeps running on the daemon whether or not anyone is watching.
+A single local **daemon** owns everything durable — the sessions, the PTY host that drives `claude`, the Fastify HTTP/WS gateway, an SQLite store, git, and the vault auto-committer. Git is **read-only to an ordinary project agent**: the log and branch views it can see have no write counterpart on its tool surface, and checkout/commit/push live behind a human-only route (or one of the deliberate, opt-in grants above — the Elevated Operator, the companion's git lever). The **web viewport** is stateless: it attaches to a session over a WebSocket and detaches freely, while the session keeps running on the daemon whether or not anyone is watching.
 
 Give a **lead** agent a goal and it decomposes the goal into tasks, spawns **workers** — each on its own worktree branch, each driving a real Claude Code session — then reviews each diff, merges what passes, and keeps the vault and board versioned alongside the code. Plan, delegate, review, merge.
 
@@ -203,7 +204,7 @@ The monorepo (pnpm + Turbo) is three packages:
 - **`packages/shared`** — the contract: types (Project / Topic / Session / Task + the session FSM),
   one config-resolution mechanism, and the ws/REST protocol.
 - **`packages/daemon`** — owns everything durable: SQLite, the PTY host, the gateway, the
-  project-scoped task MCP server, read-only git, and the vault auto-committer.
+  project-scoped task MCP server, git, and the vault auto-committer.
 - **`packages/web`** — the stateless React/Vite viewport.
 
 ## Your companion
