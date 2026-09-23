@@ -1,19 +1,23 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card 097902b9 (child F of epic f69cabc7 "all projects, from now on"): `project_init` (the setup
-// operator's only host-write — see setup/bootstrap.ts) now seeds a fresh CODE project's decision-record
-// store (`docs/decisions/README.md`) from birth, via `bootstrapProjectDir`'s own `seedDecisionRecordStore`
-// step — the single chokepoint shared by every `project_init`-equivalent caller (mcp/setup.ts,
-// mcp/platform.ts, the human REST route in gateway/server.ts). This proves:
+// operator's only host-write — see setup/bootstrap.ts) now seeds a fresh project's decision-record store
+// (`docs/decisions/README.md`) from birth, for BOTH `kind:"git"` and `kind:"vault"`, via
+// `bootstrapProjectDir`'s own `seedDecisionRecordStore` step — the single chokepoint shared by every
+// `project_init`-equivalent caller (mcp/setup.ts, mcp/platform.ts, the human REST route in
+// gateway/server.ts). This proves:
 //   (1) a `kind:"git"` project gets a REAL `docs/decisions/README.md` file (not just a bare directory —
 //       git does not track an empty one, so a file is what makes the store durable across a commit/
 //       checkout round-trip), and `writeSessionSettings` — the exact daemon-side gate `pty/host.ts`'s
 //       `createPty` calls at spawn — WIRES the decision-records Read hook for that repo (card 5244adc2's
 //       gate: `anyDecisionRecordStoreExists`).
-//   (2) a `kind:"vault"` project is deliberately LEFT UNSEEDED (child C, card a4760fc8, has not yet ruled
-//       on where a vault project's store lives) — no `docs/decisions` at all, and `writeSessionSettings`
-//       correspondingly wires NO Read hook for it, same as before this card.
+//   (2) a `kind:"vault"` project gets the SAME seed and hook-wiring (card `097902b9`'s @decision anchor
+//       — a freshly `project_init`-created vault folder has no pre-existing repo above it, so
+//       `vault/versioner.ts`'s `resolveVaultRepoContext` resolves it to itself and lazily `git init`s it
+//       later; the created folder is already its own eventual git root, so it needs no different
+//       treatment than the code-kind case, and does not wait on child C's separate ruling on an EXISTING
+//       shared-root vault project, card a4760fc8).
 //   (3) the seeded README stays GENERIC — no Loom-specific card id or internal path, since it ships into
-//       an end user's own project repo.
+//       an end user's own project repo — for both kinds (same shared content).
 // HERMETIC + CLAUDE-FREE + NETWORK-FREE — a real (but tiny, local) `git init`, no daemon, no network.
 // Run: 1) build (turbo builds shared first), 2) node test/project-init-decision-record-store.mjs
 import fs from "node:fs";
@@ -47,6 +51,8 @@ function hasReadHookGroup(groups) {
   return groups.some((g) => g.matcher === "Read" && g.hooks?.some((h) => /decision-records\.mjs/.test(h.command)));
 }
 
+let codeReadme; // captured in (1), compared against in (2) — avoids reconstructing (1)'s derived path
+
 // ===================== (1) kind:"git" (default) — seeded, and the hook wires =====================
 {
   const boot = await bootstrapProjectDir({ name: "Fresh Code Project", git: true });
@@ -62,10 +68,10 @@ function hasReadHookGroup(groups) {
     check("(1) docs/decisions/README.md is a REAL FILE, not just an empty dir "
       + "(git does not track an empty directory — a bare mkdir would not survive a commit/checkout round-trip)",
       fs.existsSync(readmePath) && fs.statSync(readmePath).isFile());
-    const readme = fs.readFileSync(readmePath, "utf8");
-    check("(1) README is non-trivial content", readme.length > 40);
-    check("(1) README stays GENERIC — no Loom-specific product name", !/\bLoom\b/.test(readme));
-    check("(1) README points at the shipped /worker doctrine for the writing rules", /\/worker\b/.test(readme));
+    codeReadme = fs.readFileSync(readmePath, "utf8");
+    check("(1) README is non-trivial content", codeReadme.length > 40);
+    check("(1) README stays GENERIC — no Loom-specific product name", !/\bLoom\b/.test(codeReadme));
+    check("(1) README points at the shipped /worker doctrine for the writing rules", /\/worker\b/.test(codeReadme));
 
     const groups = hookGroupsFor(dir);
     check("(1) writeSessionSettings(repoPath = the fresh project dir): a spawn's settings WIRE the "
@@ -74,20 +80,30 @@ function hasReadHookGroup(groups) {
   }
 }
 
-// ===================== (2) kind:"vault" — deliberately left unseeded (child C not yet ruled) =====================
+// ===================== (2) kind:"vault" — seeded too, same as kind:"git" =====================
 {
   const boot = await bootstrapProjectDir({ name: "My Research Notes", git: false });
   check("(2) bootstrapProjectDir(vault) ok", boot.ok === true);
   if (boot.ok) {
     const dir = boot.dir;
-    check("(2) NOT git-initialized (no .git)", !fs.existsSync(path.join(dir, ".git")));
-    check("(2) docs/decisions is NOT created for a vault project (deferred to card a4760fc8)",
-      !fs.existsSync(path.join(dir, "docs", "decisions")));
+    check("(2) NOT git-initialized at creation (no .git yet — the vault versioner git-inits it lazily "
+      + "on its own first start, not project_init)", !fs.existsSync(path.join(dir, ".git")));
+
+    const storeDir = path.join(dir, "docs", "decisions");
+    check("(2) docs/decisions directory exists for a vault project too", fs.existsSync(storeDir));
+    const readmePath = path.join(storeDir, "README.md");
+    check("(2) docs/decisions/README.md is a REAL FILE, not just an empty dir",
+      fs.existsSync(readmePath) && fs.statSync(readmePath).isFile());
+    const readme = fs.readFileSync(readmePath, "utf8");
+    check("(2) README stays GENERIC — no Loom-specific product name", !/\bLoom\b/.test(readme));
+    check("(2) README points at the shipped /worker doctrine for the writing rules", /\/worker\b/.test(readme));
+    check("(2) the vault README is BYTE-IDENTICAL to the code-kind README (one shared generic text)",
+      !!codeReadme && readme === codeReadme);
 
     const groups = hookGroupsFor(dir);
-    check("(2) writeSessionSettings(repoPath = the vault project dir): NO Read hook is wired "
-      + "(no store exists there — same as before this card)",
-      !hasReadHookGroup(groups));
+    check("(2) writeSessionSettings(repoPath = the vault project dir): a spawn's settings WIRE the "
+      + "decision-records Read hook, same as the code-kind case",
+      hasReadHookGroup(groups));
   }
 }
 
