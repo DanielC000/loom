@@ -511,7 +511,11 @@ type MergeBatchResult = {
   /** @decision 553ea58c — use `landedCount`, the real git-verified total, never `landed.length` — that
    *  array under-reports if a worker session row was hard-deleted between selection and finalize. */
   landedCount?: number;
-  fallback: { workerSessionId: string; reason: string }[];
+  /** `started` (card 2c16447b): `true` = the per-branch `worker_merge_confirm` was actually kicked off (running,
+   *  settled, or attached to an in-flight op); `false` = it was NOT started (`reason` then says why — e.g. the
+   *  worker is no longer this manager's lineage, or the confirm threw before admission). Absent only on the
+   *  pre-batch early returns, where no fallback is attempted. */
+  fallback: { workerSessionId: string; reason: string; started?: boolean }[];
   reason?: string;
   /** Card 6cc803b2 — phase instrumentation: the two phases (of the five this card measures) that are
    *  only ever known inside {@link SessionService.mergeBatchTracked}'s own `run` closure, once
@@ -6905,6 +6909,24 @@ export class SessionService {
       const raw = op.key.slice("spawn:".length);
       return { ...op, taskId: raw.startsWith("taskless:") ? null : raw };
     });
+  }
+
+  /** @decision 2c16447b — the manager id to hand an ownership-checked call for a batch candidate that was
+   *  selected under `originalManagerId` and is acted on after a long await: the worker's CURRENT parent, but
+   *  ONLY when that parent is `originalManagerId` itself or a `recycled_from` descendant of it. Any other
+   *  parent (or a vanished worker) yields null — never adopt an unrelated manager's worker. */
+  private resolveBatchCandidateOwner(originalManagerId: string, workerSessionId: string): string | null {
+    const parent = this.db.getSession(workerSessionId)?.parentSessionId ?? null;
+    if (!parent) return null;
+    if (parent === originalManagerId) return parent;
+    const seen = new Set<string>([originalManagerId]);
+    let cur = this.db.getSuccessor(originalManagerId);
+    while (cur && !seen.has(cur.id)) {
+      if (cur.id === parent) return parent;
+      seen.add(cur.id);
+      cur = this.db.getSuccessor(cur.id);
+    }
+    return null;
   }
 
   /** @decision 27ea069e — a lineage is "dead" only when NO link anywhere in the recycle chain is live
@@ -15439,12 +15461,37 @@ export class SessionService {
     // (`chosen.length < 2`, no `gateCommand`) never reach that closure at all, so they call this with no
     // second argument and every resulting fallback stays untagged, correctly: no batch op ever ran for
     // them to point back to.
-    const runFallback = async (list: { workerSessionId: string; reason: string }[], batchOpId?: string): Promise<{ workerSessionId: string; reason: string }[]> => {
+    // @decision 2c16447b — `managerSessionId` is captured at call time but a fallback runs after the gate
+    //  (~25 min), so the owner may have recycled meanwhile; resolve each candidate's CURRENT owner (strictly:
+    //  the original manager or a `recycled_from` descendant of it) instead of passing the captured id to the
+    //  ownership-checked confirm, and report a candidate that could not be started as `started:false`.
+    const runFallback = async (list: { workerSessionId: string; reason: string }[], batchOpId?: string): Promise<{ workerSessionId: string; reason: string; started?: boolean }[]> => {
+      const out: { workerSessionId: string; reason: string; started?: boolean }[] = [];
       for (const f of list) {
-        try { await this.confirmWorkerMergeTracked(managerSessionId, f.workerSessionId, undefined, batchOpId ? { fallbackOfBatchOpId: batchOpId } : undefined); }
-        catch { /* best-effort — the manager still sees this worker in `fallback` and can re-confirm by hand */ }
+        const owner = this.resolveBatchCandidateOwner(managerSessionId, f.workerSessionId);
+        if (!owner) {
+          const why = `fallback NOT started: worker is not a child of this manager or its recycle lineage`;
+          console.warn(`[merge-batch] ${why} (worker ${f.workerSessionId}; batch reason: ${f.reason})`);
+          out.push({ workerSessionId: f.workerSessionId, reason: `${f.reason} — ${why}`, started: false });
+          continue;
+        }
+        try {
+          const r = await this.confirmWorkerMergeTracked(owner, f.workerSessionId, undefined, batchOpId ? { fallbackOfBatchOpId: batchOpId } : undefined);
+          if (r.settled && !r.ok) {
+            const msg = r.error instanceof Error ? r.error.message : String(r.error);
+            console.warn(`[merge-batch] fallback confirm for worker ${f.workerSessionId} errored before/while running: ${msg}`);
+            out.push({ workerSessionId: f.workerSessionId, reason: `${f.reason} — fallback NOT started: ${msg}`, started: false });
+            continue;
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[merge-batch] fallback confirm for worker ${f.workerSessionId} threw: ${msg}`);
+          out.push({ workerSessionId: f.workerSessionId, reason: `${f.reason} — fallback NOT started: ${msg}`, started: false });
+          continue;
+        }
+        out.push({ workerSessionId: f.workerSessionId, reason: f.reason, started: true });
       }
-      return list;
+      return out;
     };
 
     if (chosen.length < 2) {
@@ -16069,7 +16116,9 @@ export class SessionService {
             const mergedVerification: "pathset" | "trailer-only" | null =
               lb.noop ? null : lb.pathSetStamped === false ? "trailer-only" : "pathset";
             await this.finishAlreadyMerged({
-              managerSessionId, workerSessionId: lb.workerSessionId, taskId: lb.taskId,
+              // @decision 2c16447b — the worker's CURRENT lineage owner, so the post-merge purge/cap-drain
+              // reach a recycled successor instead of a dead predecessor (falls back to the captured id).
+              managerSessionId: this.resolveBatchCandidateOwner(managerSessionId, lb.workerSessionId) ?? managerSessionId, workerSessionId: lb.workerSessionId, taskId: lb.taskId,
               worktreePath: worker.worktreePath ?? worker.cwd, branch: lb.branch, repoPath: finalRepoPath,
               projectId: finalProjectId, opId: randomUUID(), mergedSha: lb.sha, repoKey: c?.repoKey ?? null,
               mergedVerification, suppressNotify: true,
@@ -16139,6 +16188,13 @@ export class SessionService {
         const landedTotal = (v: MergeBatchResult) => v.landedCount ?? v.landed.length;
         // Card bc2240d7: each candidate's OWN fallback reason, bounded (first N + "+K more", each reason
         // clipped) so a K-candidate batch can't flood the nudge. Empty string when there is nothing to list.
+        // @decision 2c16447b — never claim routing that didn't happen: count only `started` fallbacks as routed.
+        const fallbackSummary = (v: MergeBatchResult) => {
+          const notStarted = v.fallback.filter((f) => f.started === false).length;
+          const started = v.fallback.length - notStarted;
+          return `${started} candidate(s) routed to an individual worker_merge_confirm instead (each already notified separately)` +
+            (notStarted > 0 ? `; ${notStarted} candidate(s) NOT started — re-run worker_merge_confirm on them by hand (see per-candidate reasons)` : "") + ".";
+        };
         const fallbackList = (v: MergeBatchResult) => {
           const MAX_LISTED = 4, MAX_REASON = 220;
           if (v.fallback.length === 0) return "";
@@ -16153,7 +16209,7 @@ export class SessionService {
           ? `[loom:merge-batch-unknown] merge_batch [op ${opId}] errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}; canonical repo state UNKNOWN — check 'git --no-pager log' in the repo for a batch fast-forward before assuming nothing landed.`
           : outcome.value.ok
           ? `[loom:merge-batch-done] merge_batch [op ${opId}] landed ${landedTotal(outcome.value)} branch(es) on main: ${landedList(outcome.value.landed)}.` +
-            (outcome.value.fallback.length ? ` ${outcome.value.fallback.length} more fell back to an individual confirm (each already notified separately).${fallbackList(outcome.value)}` : "") +
+            (outcome.value.fallback.length ? ` ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}` : "") +
             // Card 67030bb9: the ONE place an async batch settle is announced (per this callback's own
             // header doc) — a retry-assisted batch landing must carry the SAME weaker-pass note the sync
             // return already surfaces via `MergeBatchResult.retryWarning`, or a manager who missed the sync
@@ -16162,7 +16218,7 @@ export class SessionService {
             // Card d422e279: same reasoning as retryWarning immediately above, for a reduced batch gate's
             // own surfacing obligation (`MergeBatchResult.reducedGateWarning`'s own doc).
             (outcome.value.reducedGateWarning ? ` ${outcome.value.reducedGateWarning}` : "")
-          : `[loom:merge-batch-failed] merge_batch [op ${opId}] landed nothing via the batch path (${outcome.value.reason ?? "see fallback"}) — ${outcome.value.fallback.length} candidate(s) routed to an individual worker_merge_confirm instead (each already notified separately).${fallbackList(outcome.value)}`;
+          : `[loom:merge-batch-failed] merge_batch [op ${opId}] landed nothing via the batch path (${outcome.value.reason ?? "see fallback"}) — ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`;
         try {
           // Card 791def40: fresh read, mirroring the solo-merge settle nudge (confirmWorkerMergeTracked's
           // onSettledAfterPending) — this settle carries no other staleness-derived claim, and it may be
